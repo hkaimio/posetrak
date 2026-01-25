@@ -43,6 +43,9 @@ test_results/
 *.gcda
 *.gcno
 coverage/
+coverage.info
+coverage.filtered.info
+coverage_html/
 
 # Valgrind
 *.valgrind

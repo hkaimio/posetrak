@@ -143,6 +143,26 @@ meson test -C builddir test_name
 meson test -C builddir --wrap='valgrind --leak-check=full'
 ```
 
+### Test Coverage
+
+```bash
+# Generate coverage report (requires lcov/genhtml)
+./scripts/run_coverage.sh
+
+# View HTML report
+xdg-open builddir/coverage_html/index.html
+
+# Or manually:
+meson configure builddir -Db_coverage=true
+meson compile -C builddir
+./run_tests.sh
+lcov --capture --directory builddir/src --directory builddir/tests --output-file builddir/coverage.info
+lcov --remove builddir/coverage.info '/usr/*' '*/miniconda3/*' '*/subprojects/*' '*/tests/*' --output-file builddir/coverage.filtered.info
+genhtml builddir/coverage.filtered.info --output-directory builddir/coverage_html
+```
+
+**Current Coverage**: ~88.5% line coverage, 97.4% function coverage
+
 ## Contributing
 
 This is currently a focused implementation project. Contributions will be welcome once core functionality is stable (Phase 10+).

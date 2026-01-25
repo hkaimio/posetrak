@@ -1,0 +1,4 @@
+joints:
+  - name: root
+    type: revolute
+    offset: [0, 0, 0]

@@ -1,0 +1,4 @@
+joints:
+  - name: root
+    type: root
+    offset: [0, 0, 0]

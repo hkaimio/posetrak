@@ -12,7 +12,7 @@ test_sources = files(
   'test_observation.cpp',
 
   # Phase 2: I/O
-  # 'test_skeleton_loader.cpp',
+  'test_skeleton_loader.cpp',
   # 'test_camera_loader.cpp',
   # 'test_observation_loader.cpp',
 
@@ -33,4 +33,6 @@ test_exe = executable('test_posetrak',
   dependencies: [posetrak_dep, test_dep],
 )
 
-test('posetrak_tests', test_exe)
+test('posetrak_tests', test_exe,
+  workdir: meson.project_source_root(),
+)

@@ -1,0 +1,183 @@
+# Simple Humanoid Skeleton for Joint-Space Tracking
+# 23 DOF: 1 root (6 DOF) + 4 spine (12 DOF) + 4 shoulders (12 DOF) + 2 elbows (2 DOF) + 2 wrists (6 DOF)
+# Total: 6 + 12 + 12 + 2 + 6 = 38... wait, let me recalculate
+# Actually: 1 root (6) + 3 spine balls (9) + 2 shoulder balls (6) + 2 elbows (2) + 2 wrist balls (6) = 29 DOF
+# Let's simplify: core (1 root + 3 spine = 15 DOF) + arms (2 shoulders + 2 elbows = 8 DOF) = 23 DOF
+
+name: "simple_humanoid"
+units: "meters"  # All lengths in meters, angles in radians
+
+# Joint hierarchy
+joints:
+  # Root joint (6-DOF free joint)
+  - name: "pelvis"
+    type: "root"
+    parent: null
+    offset: [0.0, 0.0, 0.0]
+
+  # Spine (ball joints)
+  - name: "spine_lower"
+    type: "ball"
+    parent: "pelvis"
+    offset: [0.0, 0.1, 0.0]
+    bone_tip_offset: [0.0, 0.15, 0.0]
+    limits:
+      x: [-0.5, 0.5]
+      y: [-0.3, 0.3]
+      z: [-0.2, 0.2]
+
+  - name: "spine_mid"
+    type: "ball"
+    parent: "spine_lower"
+    offset: [0.0, 0.15, 0.0]
+    bone_tip_offset: [0.0, 0.15, 0.0]
+    limits:
+      x: [-0.5, 0.5]
+      y: [-0.3, 0.3]
+      z: [-0.2, 0.2]
+
+  - name: "spine_upper"
+    type: "ball"
+    parent: "spine_mid"
+    offset: [0.0, 0.15, 0.0]
+    bone_tip_offset: [0.0, 0.15, 0.0]
+    limits:
+      x: [-0.5, 0.5]
+      y: [-0.3, 0.3]
+      z: [-0.2, 0.2]
+
+  # Right arm
+  - name: "r_shoulder"
+    type: "ball"
+    parent: "spine_upper"
+    offset: [0.15, 0.05, 0.0]
+    bone_tip_offset: [0.3, 0.0, 0.0]
+    limits:
+      x: [-3.0, 3.0]
+      y: [-1.5, 1.5]
+      z: [-1.0, 1.0]
+
+  - name: "r_elbow"
+    type: "revolute"
+    parent: "r_shoulder"
+    offset: [0.3, 0.0, 0.0]
+    bone_tip_offset: [0.25, 0.0, 0.0]
+    axis: [0.0, 1.0, 0.0]
+    limits: [0.0, 2.8]
+
+  - name: "r_wrist"
+    type: "ball"
+    parent: "r_elbow"
+    offset: [0.25, 0.0, 0.0]
+    bone_tip_offset: [0.08, 0.0, 0.0]
+    limits:
+      x: [-0.8, 0.8]
+      y: [-0.3, 0.3]
+      z: [-0.5, 0.5]
+
+  # Left arm (symmetric)
+  - name: "l_shoulder"
+    type: "ball"
+    parent: "spine_upper"
+    offset: [-0.15, 0.05, 0.0]
+    bone_tip_offset: [-0.3, 0.0, 0.0]
+    limits:
+      x: [-3.0, 3.0]
+      y: [-1.5, 1.5]
+      z: [-1.0, 1.0]
+
+  - name: "l_elbow"
+    type: "revolute"
+    parent: "l_shoulder"
+    offset: [-0.3, 0.0, 0.0]
+    bone_tip_offset: [-0.25, 0.0, 0.0]
+    axis: [0.0, 1.0, 0.0]
+    limits: [0.0, 2.8]
+
+  - name: "l_wrist"
+    type: "ball"
+    parent: "l_elbow"
+    offset: [-0.25, 0.0, 0.0]
+    bone_tip_offset: [-0.08, 0.0, 0.0]
+    limits:
+      x: [-0.8, 0.8]
+      y: [-0.3, 0.3]
+      z: [-0.5, 0.5]
+
+# Marker definitions
+markers:
+  - name: "pelvis_center"
+    parent: "pelvis"
+    offset: [0.0, 0.0, 0.0]
+    openpose_keypoint: 8
+    openpose_name: "MidHip"
+    confidence_threshold: 0.3
+
+  - name: "spine_base"
+    parent: "spine_lower"
+    offset: [0.0, 0.05, 0.0]
+    openpose_keypoint: 1
+    openpose_name: "Neck"
+    confidence_threshold: 0.3
+
+  - name: "r_shoulder_marker"
+    parent: "r_shoulder"
+    offset: [0.05, 0.0, 0.0]
+    openpose_keypoint: 2
+    openpose_name: "RShoulder"
+    confidence_threshold: 0.3
+
+  - name: "r_elbow_marker"
+    parent: "r_elbow"
+    offset: [0.0, 0.0, 0.0]
+    openpose_keypoint: 3
+    openpose_name: "RElbow"
+    confidence_threshold: 0.3
+
+  - name: "r_wrist_marker"
+    parent: "r_wrist"
+    offset: [0.0, 0.0, 0.0]
+    openpose_keypoint: 4
+    openpose_name: "RWrist"
+    confidence_threshold: 0.3
+
+  - name: "l_shoulder_marker"
+    parent: "l_shoulder"
+    offset: [-0.05, 0.0, 0.0]
+    openpose_keypoint: 5
+    openpose_name: "LShoulder"
+    confidence_threshold: 0.3
+
+  - name: "l_elbow_marker"
+    parent: "l_elbow"
+    offset: [0.0, 0.0, 0.0]
+    openpose_keypoint: 6
+    openpose_name: "LElbow"
+    confidence_threshold: 0.3
+
+  - name: "l_wrist_marker"
+    parent: "l_wrist"
+    offset: [0.0, 0.0, 0.0]
+    openpose_keypoint: 7
+    openpose_name: "LWrist"
+    confidence_threshold: 0.3
+
+# Joint groups for hierarchical tracking
+groups:
+  - name: "core"
+    joints: ["pelvis", "spine_lower", "spine_mid", "spine_upper"]
+    markers: ["pelvis_center", "spine_base"]
+
+  - name: "right_arm"
+    joints: ["r_shoulder", "r_elbow", "r_wrist"]
+    markers: ["r_shoulder_marker", "r_elbow_marker", "r_wrist_marker"]
+    depends_on: ["core"]
+
+  - name: "left_arm"
+    joints: ["l_shoulder", "l_elbow", "l_wrist"]
+    markers: ["l_shoulder_marker", "l_elbow_marker", "l_wrist_marker"]
+    depends_on: ["core"]
+
+# Tracking configuration
+tracking:
+  active_groups: ["core", "right_arm", "left_arm"]

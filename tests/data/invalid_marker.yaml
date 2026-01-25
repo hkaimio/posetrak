@@ -1,0 +1,8 @@
+joints:
+  - name: root
+    type: root
+    offset: [0, 0, 0]
+markers:
+  - name: test_marker
+    parent: nonexistent_joint
+    offset: [0, 0, 0]

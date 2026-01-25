@@ -1,0 +1,11 @@
+joints:
+  - name: root
+    type: root
+    offset: [0, 0, 0]
+  - name: shoulder
+    type: ball
+    parent: root
+    offset: [0.15, 0, 0]
+    limits:
+      x: [-3, 3]
+      y: [-1.5, 1.5]

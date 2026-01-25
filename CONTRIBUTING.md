@@ -63,14 +63,14 @@ namespace posetrak {
 class MyClass {
 public:
     explicit MyClass(int value) : value_(value) {}
-    
+
     int get_value() const { return value_; }
     void set_value(int value) { value_ = value; }
-    
+
     // Right const examples:
     void process(Eigen::VectorXd const& input);  // const reference
     double const* get_data() const;              // const pointer
-    
+
 private:
     int value_;
 };

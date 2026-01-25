@@ -86,7 +86,7 @@ endif
 
 # Will add these as we progress:
 # pinocchio_dep = dependency('pinocchio', version: '>=3.9', required: false)
-# opencv_dep = dependency('opencv4', version: '>=4.5', 
+# opencv_dep = dependency('opencv4', version: '>=4.5',
 #                        modules: ['core', 'imgproc', 'videoio', 'calib3d'],
 #                        required: false)
 # archive_dep = dependency('libarchive', required: false)

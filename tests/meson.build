@@ -13,7 +13,7 @@ test_sources = files(
 
   # Phase 2: I/O
   'test_skeleton_loader.cpp',
-  # 'test_camera_loader.cpp',
+  'test_camera_loader.cpp',
   # 'test_observation_loader.cpp',
 
   # Phase 3: Kinematics

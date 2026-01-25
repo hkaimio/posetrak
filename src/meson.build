@@ -7,6 +7,7 @@ posetrak_sources = files(
   'core/observation.cpp',
 
   # Kinematics (Phase 3)
+  'kinematics/pinocchio_model_builder.cpp',
   # 'kinematics/forward_kinematics.cpp',
   # 'kinematics/inverse_kinematics.cpp',
   # 'kinematics/triangulation.cpp',
@@ -39,6 +40,7 @@ libposetrak = library('posetrak',
     nlohmann_json_dep,
     yaml_cpp_dep,
     toml_dep,
+    pinocchio_dep,
   ],
   install: true,
   version: meson.project_version(),

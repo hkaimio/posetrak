@@ -6,73 +6,154 @@
 #include <nlohmann/json.hpp>
 
 #include <string>
+#include <vector>
 
 namespace posetrak {
 
+/// @brief Camera intrinsic parameters
+struct Intrinsics {
+    double fx;  ///< Focal length in x (pixels)
+    double fy;  ///< Focal length in y (pixels)
+    double cx;  ///< Principal point x (pixels)
+    double cy;  ///< Principal point y (pixels)
+
+    int width;   ///< Image width (pixels)
+    int height;  ///< Image height (pixels)
+
+    /// @brief Distortion model type
+    enum class DistortionModel {
+        BrownConrady,  ///< Radial + tangential (k1, k2, k3, p1, p2)
+        Fisheye        ///< OpenCV fisheye model (k1, k2, k3, k4)
+    };
+
+    DistortionModel model;                  ///< Distortion model type
+    std::vector<double> distortion_coeffs;  ///< Distortion coefficients
+
+    /// @brief Serialize to JSON
+    nlohmann::json to_json() const;
+
+    /// @brief Deserialize from JSON
+    static Intrinsics from_json(nlohmann::json const& j);
+};
+
+/// @brief Camera extrinsic parameters (world to camera transform)
+struct Extrinsics {
+    Eigen::Vector3d position;        ///< Camera position in world frame
+    Eigen::Quaterniond orientation;  ///< World to camera rotation
+
+    /// @brief Get world to camera transform
+    /// @return Affine transform matrix
+    Eigen::Affine3d get_transform() const {
+        Eigen::Affine3d T = Eigen::Affine3d::Identity();
+        T.linear() = orientation.toRotationMatrix();
+        T.translation() = position;
+        return T;
+    }
+
+    /// @brief Serialize to JSON
+    nlohmann::json to_json() const;
+
+    /// @brief Deserialize from JSON
+    static Extrinsics from_json(nlohmann::json const& j);
+};
+
+/// @brief Frame synchronization point for timestamp mapping
+struct SyncPoint {
+    int frame_idx;         ///< Frame index
+    double timestamp_sec;  ///< Timestamp in seconds
+
+    /// @brief Serialize to JSON
+    nlohmann::json to_json() const;
+
+    /// @brief Deserialize from JSON
+    static SyncPoint from_json(nlohmann::json const& j);
+};
+
 /// @brief Camera model with intrinsics, distortion, and extrinsics
 ///
-/// Supports pinhole camera model with radial and tangential distortion.
-/// Distortion model follows OpenCV convention:
-/// - k1, k2, k3: radial distortion coefficients
-/// - p1, p2: tangential distortion coefficients
+/// Supports multiple distortion models and frame-to-timestamp conversion.
 class Camera {
    public:
-    /// @brief Construct camera with intrinsics and optional distortion
-    /// @param fx Focal length in x (pixels)
-    /// @param fy Focal length in y (pixels)
-    /// @param cx Principal point x (pixels)
-    /// @param cy Principal point y (pixels)
-    /// @param width Image width (pixels)
-    /// @param height Image height (pixels)
-    /// @param k1 Radial distortion coefficient k1
-    /// @param k2 Radial distortion coefficient k2
-    /// @param k3 Radial distortion coefficient k3
-    /// @param p1 Tangential distortion coefficient p1
-    /// @param p2 Tangential distortion coefficient p2
-    Camera(double fx, double fy, double cx, double cy, int width, int height, double k1 = 0.0,
-           double k2 = 0.0, double k3 = 0.0, double p1 = 0.0, double p2 = 0.0);
+    /// @brief Construct camera with name, intrinsics, and extrinsics
+    /// @param name Camera name/identifier
+    /// @param intrinsics Camera intrinsic parameters
+    /// @param extrinsics Camera extrinsic parameters
+    /// @param fps Frame rate (frames per second), used when no sync points available
+    /// @param start_frame Starting frame index offset
+    Camera(std::string name, Intrinsics const& intrinsics, Extrinsics const& extrinsics,
+           double fps = 30.0, int start_frame = 0);
 
-    /// @brief Set camera extrinsics (world to camera transform)
-    /// @param position Camera position in world frame
-    /// @param orientation Camera orientation (quaternion, world to camera)
-    void set_extrinsics(Eigen::Vector3d const& position, Eigen::Quaterniond const& orientation);
+    // --- Accessors ---
+
+    /// @brief Get camera name
+    /// @return Camera name
+    std::string const& name() const { return name_; }
+
+    /// @brief Get camera intrinsics
+    /// @return Intrinsics
+    Intrinsics const& intrinsics() const { return intrinsics_; }
+
+    /// @brief Get camera extrinsics
+    /// @return Extrinsics
+    Extrinsics const& extrinsics() const { return extrinsics_; }
+
+    /// @brief Get frame rate
+    /// @return FPS
+    double fps() const { return fps_; }
+
+    /// @brief Get start frame offset
+    /// @return Start frame index
+    int start_frame() const { return start_frame_; }
 
     /// @brief Get camera position in world frame
     /// @return Camera position
-    Eigen::Vector3d position() const { return position_; }
+    Eigen::Vector3d position() const { return extrinsics_.position; }
 
     /// @brief Get camera orientation (world to camera)
     /// @return Orientation quaternion
-    Eigen::Quaterniond orientation() const { return orientation_; }
+    Eigen::Quaterniond orientation() const { return extrinsics_.orientation; }
 
-    /// @brief Get focal length x
-    /// @return fx in pixels
-    double fx() const { return fx_; }
+    // --- Temporal Synchronization ---
 
-    /// @brief Get focal length y
-    /// @return fy in pixels
-    double fy() const { return fy_; }
+    /// @brief Set synchronization points for frame-to-timestamp conversion
+    /// @param points Synchronization points (frame_idx → timestamp)
+    void set_sync_points(std::vector<SyncPoint> const& points);
 
-    /// @brief Get principal point x
-    /// @return cx in pixels
-    double cx() const { return cx_; }
+    /// @brief Get timestamp for frame index
+    /// @param frame_idx Frame index
+    /// @return Timestamp in seconds
+    /// @note Uses sync points if available, otherwise falls back to uniform FPS
+    double get_timestamp(int frame_idx) const;
 
-    /// @brief Get principal point y
-    /// @return cy in pixels
-    double cy() const { return cy_; }
+    /// @brief Get frame index at given timestamp (inverse lookup)
+    /// @param timestamp Timestamp in seconds
+    /// @return Frame index (rounded)
+    int get_frame_at_time(double timestamp) const;
 
-    /// @brief Get image width
-    /// @return Width in pixels
-    int width() const { return width_; }
+    // --- Projection API ---
 
-    /// @brief Get image height
-    /// @return Height in pixels
-    int height() const { return height_; }
+    // --- Projection API ---
 
-    /// @brief Project 3D point in world frame to 2D pixel coordinates
+    /// @brief Project 3D point in world frame to 2D pixel coordinates (with distortion)
     /// @param point_world 3D point in world frame
     /// @return 2D pixel coordinates [u, v]
     Eigen::Vector2d project(Eigen::Vector3d const& point_world) const;
+
+    /// @brief Project 3D point to undistorted pixel coordinates (for UKF)
+    /// @param point_world 3D point in world frame
+    /// @return Undistorted 2D pixel coordinates
+    Eigen::Vector2d project_undistorted(Eigen::Vector3d const& point_world) const;
+
+    /// @brief Project multiple points efficiently (with distortion)
+    /// @param points 3D points in world frame
+    /// @return 2D pixel coordinates
+    std::vector<Eigen::Vector2d> project_batch(std::vector<Eigen::Vector3d> const& points) const;
+
+    /// @brief Project multiple points efficiently (undistorted)
+    /// @param points 3D points in world frame
+    /// @return Undistorted 2D pixel coordinates
+    std::vector<Eigen::Vector2d>
+    project_batch_undistorted(std::vector<Eigen::Vector3d> const& points) const;
 
     /// @brief Unproject 2D pixel to 3D ray in world frame
     /// @param pixel 2D pixel coordinates [u, v]
@@ -90,11 +171,11 @@ class Camera {
     /// @return Distorted normalized coordinates
     Eigen::Vector2d distort(Eigen::Vector2d const& point_norm) const;
 
-    /// @brief Remove distortion from normalized image coordinates
-    /// @param point_distorted Distorted normalized coordinates
-    /// @return Undistorted normalized coordinates
+    /// @brief Remove distortion from pixel coordinates (OpenPose → UKF input)
+    /// @param pixel Distorted pixel coordinates
+    /// @return Undistorted pixel coordinates
     /// @note Uses iterative method (Gauss-Newton)
-    Eigen::Vector2d undistort(Eigen::Vector2d const& point_distorted) const;
+    Eigen::Vector2d undistort(Eigen::Vector2d const& pixel) const;
 
     /// @brief Check if pixel is within image bounds
     /// @param pixel 2D pixel coordinates
@@ -118,24 +199,22 @@ class Camera {
     /// @return 3D point in world frame
     Eigen::Vector3d camera_to_world(Eigen::Vector3d const& point_camera) const;
 
-    // Intrinsics
-    double fx_;   ///< Focal length x (pixels)
-    double fy_;   ///< Focal length y (pixels)
-    double cx_;   ///< Principal point x (pixels)
-    double cy_;   ///< Principal point y (pixels)
-    int width_;   ///< Image width (pixels)
-    int height_;  ///< Image height (pixels)
+    /// @brief Apply distortion based on model type
+    /// @param point_norm Normalized coordinates
+    /// @return Distorted normalized coordinates
+    Eigen::Vector2d apply_distortion(Eigen::Vector2d const& point_norm) const;
 
-    // Distortion (OpenCV convention)
-    double k1_;  ///< Radial distortion k1
-    double k2_;  ///< Radial distortion k2
-    double k3_;  ///< Radial distortion k3
-    double p1_;  ///< Tangential distortion p1
-    double p2_;  ///< Tangential distortion p2
+    /// @brief Remove distortion based on model type
+    /// @param point_norm Distorted normalized coordinates
+    /// @return Undistorted normalized coordinates
+    Eigen::Vector2d remove_distortion(Eigen::Vector2d const& point_norm) const;
 
-    // Extrinsics
-    Eigen::Vector3d position_;        ///< Camera position in world frame
-    Eigen::Quaterniond orientation_;  ///< World to camera rotation
+    std::string name_;                    ///< Camera name/identifier
+    Intrinsics intrinsics_;               ///< Intrinsic parameters
+    Extrinsics extrinsics_;               ///< Extrinsic parameters
+    double fps_;                          ///< Frame rate (fallback when no sync points)
+    int start_frame_;                     ///< Starting frame offset
+    std::vector<SyncPoint> sync_points_;  ///< Synchronization points for timestamp conversion
 };
 
 }  // namespace posetrak

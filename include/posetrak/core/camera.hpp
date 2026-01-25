@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -59,9 +60,8 @@ struct Extrinsics {
 
 /// @brief Frame synchronization point for timestamp mapping
 struct SyncPoint {
-    int frame_idx;         ///< Frame index
+    uint32_t frame_idx;    ///< Frame index (0-based)
     double timestamp_sec;  ///< Timestamp in seconds
-
     /// @brief Serialize to JSON
     nlohmann::json to_json() const;
 
@@ -79,9 +79,9 @@ class Camera {
     /// @param intrinsics Camera intrinsic parameters
     /// @param extrinsics Camera extrinsic parameters
     /// @param fps Frame rate (frames per second), used when no sync points available
-    /// @param start_frame Starting frame index offset
+    /// @param start_frame Starting frame index offset (0-based)
     Camera(std::string name, Intrinsics const& intrinsics, Extrinsics const& extrinsics,
-           double fps = 30.0, int start_frame = 0);
+           double fps = 30.0, uint32_t start_frame = 0);
 
     // --- Accessors ---
 
@@ -103,7 +103,7 @@ class Camera {
 
     /// @brief Get start frame offset
     /// @return Start frame index
-    int start_frame() const { return start_frame_; }
+    uint32_t start_frame() const { return start_frame_; }
 
     /// @brief Get camera position in world frame
     /// @return Camera position
@@ -120,15 +120,21 @@ class Camera {
     void set_sync_points(std::vector<SyncPoint> const& points);
 
     /// @brief Get timestamp for frame index
-    /// @param frame_idx Frame index
+    /// @param frame_idx Frame index (0-based)
     /// @return Timestamp in seconds
     /// @note Uses sync points if available, otherwise falls back to uniform FPS
-    double get_timestamp(int frame_idx) const;
+    double get_timestamp(uint32_t frame_idx) const;
 
     /// @brief Get frame index at given timestamp (inverse lookup)
     /// @param timestamp Timestamp in seconds
-    /// @return Frame index (rounded)
-    int get_frame_at_time(double timestamp) const;
+    /// @return Last frame index at or before the given timestamp, or std::nullopt if extrapolation
+    ///         backward would result in a negative frame index
+    /// @note Uses floor semantics: returns the last frame that starts at or before timestamp.
+    ///       With sync points: interpolates between points, extrapolates beyond first/last point
+    ///       using the rate from the nearest two sync points (or FPS if only one sync point).
+    ///       Without sync points: uses uniform FPS from start_frame.
+    ///       Returns std::nullopt only if backward extrapolation would result in frame < 0.
+    std::optional<uint32_t> get_frame_at_time(double timestamp) const;
 
     // --- Projection API ---
 

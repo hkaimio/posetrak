@@ -75,7 +75,7 @@ nlohmann::json SyncPoint::to_json() const {
 
 SyncPoint SyncPoint::from_json(nlohmann::json const& j) {
     SyncPoint sp;
-    sp.frame_idx = j.at("frame_idx").get<int>();
+    sp.frame_idx = j.at("frame_idx").get<uint32_t>();
     sp.timestamp_sec = j.at("timestamp_sec").get<double>();
     return sp;
 }
@@ -83,7 +83,7 @@ SyncPoint SyncPoint::from_json(nlohmann::json const& j) {
 // Camera implementation
 
 Camera::Camera(std::string name, Intrinsics const& intrinsics, Extrinsics const& extrinsics,
-               double fps, int start_frame)
+               double fps, uint32_t start_frame)
     : name_(std::move(name)),
       intrinsics_(intrinsics),
       extrinsics_(extrinsics),
@@ -97,26 +97,27 @@ void Camera::set_sync_points(std::vector<SyncPoint> const& points) {
               [](SyncPoint const& a, SyncPoint const& b) { return a.frame_idx < b.frame_idx; });
 }
 
-double Camera::get_timestamp(int frame_idx) const {
+double Camera::get_timestamp(uint32_t frame_idx) const {
     if (sync_points_.empty()) {
         // Fallback: uniform frame rate
-        return (frame_idx - start_frame_) / fps_;
+        return static_cast<double>(frame_idx - start_frame_) / fps_;
     }
 
     // Find bracketing sync points
-    auto it = std::lower_bound(sync_points_.begin(), sync_points_.end(), frame_idx,
-                               [](SyncPoint const& sp, int idx) { return sp.frame_idx < idx; });
+    auto it =
+        std::lower_bound(sync_points_.begin(), sync_points_.end(), frame_idx,
+                         [](SyncPoint const& sp, uint32_t idx) { return sp.frame_idx < idx; });
 
     if (it == sync_points_.begin()) {
         // Before first sync point: extrapolate backward
-        double const dt = (frame_idx - it->frame_idx) / fps_;
+        double const dt = static_cast<double>(frame_idx - it->frame_idx) / fps_;
         return it->timestamp_sec + dt;
     }
 
     if (it == sync_points_.end()) {
         // After last sync point: extrapolate forward
         auto const& last = sync_points_.back();
-        double const dt = (frame_idx - last.frame_idx) / fps_;
+        double const dt = static_cast<double>(frame_idx - last.frame_idx) / fps_;
         return last.timestamp_sec + dt;
     }
 
@@ -124,17 +125,23 @@ double Camera::get_timestamp(int frame_idx) const {
     auto const& prev = *(it - 1);
     double const t0 = prev.timestamp_sec;
     double const t1 = it->timestamp_sec;
-    int const f0 = prev.frame_idx;
-    int const f1 = it->frame_idx;
+    uint32_t const f0 = prev.frame_idx;
+    uint32_t const f1 = it->frame_idx;
 
-    double const alpha = static_cast<double>(frame_idx - f0) / (f1 - f0);
+    double const alpha = static_cast<double>(frame_idx - f0) / static_cast<double>(f1 - f0);
     return t0 + alpha * (t1 - t0);
 }
 
-int Camera::get_frame_at_time(double timestamp) const {
+std::optional<uint32_t> Camera::get_frame_at_time(double timestamp) const {
     if (sync_points_.empty()) {
         // Fallback: uniform frame rate
-        return static_cast<int>(std::round(timestamp * fps_)) + start_frame_;
+        double const t_start = get_timestamp(start_frame_);
+        if (timestamp < t_start) {
+            return std::nullopt;  // Before first frame
+        }
+        // Floor: last frame at or before timestamp
+        double const frame_offset = (timestamp - t_start) * fps_;
+        return start_frame_ + static_cast<uint32_t>(std::floor(frame_offset));
     }
 
     // Find bracketing sync points
@@ -142,27 +149,60 @@ int Camera::get_frame_at_time(double timestamp) const {
                                [](SyncPoint const& sp, double t) { return sp.timestamp_sec < t; });
 
     if (it == sync_points_.begin()) {
-        // Before first sync point: extrapolate backward
-        double const dt = timestamp - it->timestamp_sec;
-        return it->frame_idx + static_cast<int>(std::round(dt * fps_));
+        // Before or at first sync point - extrapolate backward
+        if (sync_points_.size() < 2) {
+            // Only one sync point: use FPS for extrapolation
+            double const dt = timestamp - it->timestamp_sec;
+            double const frame_offset = dt * fps_;
+            int64_t const frame_int64 = static_cast<int64_t>(it->frame_idx) +
+                                        static_cast<int64_t>(std::floor(frame_offset));
+            if (frame_int64 < 0) {
+                return std::nullopt;  // Before frame 0
+            }
+            return static_cast<uint32_t>(frame_int64);
+        }
+        // Multiple sync points: use rate from first two points
+        auto const& sp0 = sync_points_[0];
+        auto const& sp1 = sync_points_[1];
+        double const rate = static_cast<double>(sp1.frame_idx - sp0.frame_idx) /
+                            (sp1.timestamp_sec - sp0.timestamp_sec);
+        double const frame_offset = (timestamp - sp0.timestamp_sec) * rate;
+        int64_t const frame_int64 =
+            static_cast<int64_t>(sp0.frame_idx) + static_cast<int64_t>(std::floor(frame_offset));
+        if (frame_int64 < 0) {
+            return std::nullopt;  // Before frame 0
+        }
+        return static_cast<uint32_t>(frame_int64);
     }
 
     if (it == sync_points_.end()) {
-        // After last sync point: extrapolate forward
-        auto const& last = sync_points_.back();
-        double const dt = timestamp - last.timestamp_sec;
-        return last.frame_idx + static_cast<int>(std::round(dt * fps_));
+        // After last sync point - extrapolate forward
+        if (sync_points_.size() < 2) {
+            // Only one sync point: use FPS for extrapolation
+            auto const& last = sync_points_.back();
+            double const dt = timestamp - last.timestamp_sec;
+            double const frame_offset = dt * fps_;
+            return last.frame_idx + static_cast<uint32_t>(std::floor(frame_offset));
+        }
+        // Multiple sync points: use rate from last two points
+        auto const& sp_prev = sync_points_[sync_points_.size() - 2];
+        auto const& sp_last = sync_points_.back();
+        double const rate = static_cast<double>(sp_last.frame_idx - sp_prev.frame_idx) /
+                            (sp_last.timestamp_sec - sp_prev.timestamp_sec);
+        double const frame_offset = (timestamp - sp_last.timestamp_sec) * rate;
+        return sp_last.frame_idx + static_cast<uint32_t>(std::floor(frame_offset));
     }
 
-    // Linear interpolation
+    // Linear interpolation between two sync points
     auto const& prev = *(it - 1);
     double const t0 = prev.timestamp_sec;
     double const t1 = it->timestamp_sec;
-    int const f0 = prev.frame_idx;
-    int const f1 = it->frame_idx;
+    uint32_t const f0 = prev.frame_idx;
+    uint32_t const f1 = it->frame_idx;
 
     double const alpha = (timestamp - t0) / (t1 - t0);
-    return static_cast<int>(std::round(f0 + alpha * (f1 - f0)));
+    double const frame_float = f0 + alpha * static_cast<double>(f1 - f0);
+    return static_cast<uint32_t>(std::floor(frame_float));
 }
 
 Eigen::Vector2d Camera::project(Eigen::Vector3d const& point_world) const {
@@ -308,11 +348,10 @@ Camera Camera::from_json(nlohmann::json const& j) {
     Intrinsics const intrinsics = Intrinsics::from_json(j.at("intrinsics"));
     Extrinsics const extrinsics = Extrinsics::from_json(j.at("extrinsics"));
     double const fps = j.value("fps", 30.0);
-    int const start_frame = j.value("start_frame", 0);
+    uint32_t const start_frame = j.value("start_frame", 0u);
 
     Camera cam(name, intrinsics, extrinsics, fps, start_frame);
 
-    // Load sync points if available
     if (j.contains("sync_points")) {
         std::vector<SyncPoint> sync_points;
         for (auto const& sp_json : j.at("sync_points")) {

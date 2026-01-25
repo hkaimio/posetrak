@@ -1,0 +1,8 @@
+option('enable_tests', type: 'boolean', value: true,
+       description: 'Build tests')
+
+option('test_framework', type: 'combo', choices: ['catch2', 'gtest'], value: 'catch2',
+       description: 'Testing framework to use (catch2 or gtest)')
+
+option('enable_python', type: 'boolean', value: false,
+       description: 'Build Python bindings (future)')

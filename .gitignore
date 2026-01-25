@@ -1,0 +1,68 @@
+# Build directories
+builddir/
+build/
+_build/
+
+# Meson subprojects (downloaded dependencies)
+subprojects/*/
+subprojects/packagecache/
+# But keep the wrap files
+!subprojects/*.wrap
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Compiled
+*.o
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.exe
+
+# Test outputs
+test_results/
+*.log
+
+# Coverage
+*.gcov
+*.gcda
+*.gcno
+coverage/
+
+# Valgrind
+*.valgrind
+
+# Profiling
+*.prof
+callgrind.out.*
+perf.data*
+
+# Documentation
+docs/_build/
+docs/.doctrees/
+
+# Data (large files)
+*.h5
+*.hdf5
+*.mp4
+*.avi
+
+# Temporary
+*.tmp
+*.bak
+*.backup

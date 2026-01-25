@@ -25,8 +25,7 @@ posetrak_sources = files(
   'io/skeleton_loader.cpp',
   'io/camera_loader.cpp',
   'io/sync_loader.cpp',
-  # 'io/observation_loader.cpp',
-  # 'io/sync_loader.cpp',
+  'io/observation_loader.cpp',
   # 'io/exporters.cpp',
 )
 

@@ -15,7 +15,7 @@ test_sources = files(
   'test_skeleton_loader.cpp',
   'test_camera_loader.cpp',
   'test_sync_loader.cpp',
-  # 'test_observation_loader.cpp',
+  'test_observation_loader.cpp',
 
   # Phase 3: Kinematics
   # 'test_forward_kinematics.cpp',

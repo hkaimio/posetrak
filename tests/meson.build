@@ -9,7 +9,7 @@ test_sources = files(
   'test_state.cpp',
   'test_skeleton.cpp',
   'test_camera.cpp',
-  # 'test_observation.cpp',
+  'test_observation.cpp',
 
   # Phase 2: I/O
   # 'test_skeleton_loader.cpp',

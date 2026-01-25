@@ -4,7 +4,7 @@ posetrak_sources = files(
   'core/state.cpp',
   'core/skeleton.cpp',
   'core/camera.cpp',
-  # 'core/observation.cpp',
+  'core/observation.cpp',
 
   # Kinematics (Phase 3)
   # 'kinematics/forward_kinematics.cpp',

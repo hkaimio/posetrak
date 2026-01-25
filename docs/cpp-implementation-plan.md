@@ -21,7 +21,7 @@ This document provides a phased implementation plan for the C++ motion capture t
 
 #### 0.1: Create Project Structure
 ```
-cpp-tracker-test/
+posetrak
 ├── meson.build
 ├── include/posetrak/
 │   ├── core/

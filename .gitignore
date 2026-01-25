@@ -10,7 +10,7 @@ subprojects/packagecache/
 !subprojects/*.wrap
 
 # IDE files
-.vscode/
+#.vscode/
 .idea/
 *.swp
 *.swo

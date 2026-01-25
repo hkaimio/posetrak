@@ -8,7 +8,7 @@ test_sources = files(
   # Phase 1: Core models
   'test_state.cpp',
   'test_skeleton.cpp',
-  # 'test_camera.cpp',
+  'test_camera.cpp',
   # 'test_observation.cpp',
 
   # Phase 2: I/O

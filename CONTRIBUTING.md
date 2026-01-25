@@ -30,7 +30,7 @@
   - **Use right const (east const)**: `uint32_t const&` not `const uint32_t&`
   - Consistently place `const` after the type for better readability
 - **Error handling**: Use exceptions for errors, std::optional for missing data
-- **Documentation**: 
+- **Documentation**:
   - **Required for ALL functions**: Public, private, and implementation functions
   - Use Doxygen-style comments (`///` or `/** */`)
   - Document parameters with `@param`, return values with `@return`

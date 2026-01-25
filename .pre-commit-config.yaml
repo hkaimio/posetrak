@@ -9,3 +9,4 @@ repos:
     rev: ''  # Use the sha / tag you want to point at
     hooks:
     -   id: clang-format
+        exclude: '\.(json)$'

@@ -1,0 +1,13 @@
+{
+  "cam1": [
+    {"frame": 0, "timestamp": 0.0},
+    {"frame": 150, "timestamp": 5.0},
+    {"frame": 300, "timestamp": 10.0}
+  ],
+  "cam2": [
+    {"frame": 0, "timestamp": 0.083},
+    {"frame": 150, "timestamp": 5.083},
+    {"frame": 300, "timestamp": 10.083}
+  ],
+  "cam3": []
+}

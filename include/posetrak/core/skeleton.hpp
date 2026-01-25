@@ -4,6 +4,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -20,13 +21,14 @@ enum class JointType {
 
 /// @brief Joint definition in skeleton hierarchy
 struct Joint {
-    std::string name;        ///< Unique joint name
-    std::string parent;      ///< Parent joint name (empty for root)
-    JointType type;          ///< Joint type
-    int dof;                 ///< Degrees of freedom (1 for revolute, 3 for spherical, 0 for fixed)
-    Eigen::Vector2d limits;  ///< Joint limits [min, max] in radians (per DOF)
-    std::string group;       ///< Joint group for filtering (e.g., "legs", "arms")
-    Eigen::Vector3d offset;  ///< Translation from parent in parent's frame
+    std::string name;    ///< Unique joint name
+    std::string parent;  ///< Parent joint name (empty for root)
+    JointType type;      ///< Joint type
+    int dof;             ///< Degrees of freedom (1 for revolute, 3 for spherical, 0 for fixed)
+    std::array<Eigen::Vector2d, 3> limits;  ///< Joint limits [min, max] per DOF (max 3)
+    size_t num_limits;                      ///< Number of active limit pairs (0-3)
+    std::string group;                      ///< Joint group for filtering (e.g., "legs", "arms")
+    Eigen::Vector3d offset;                 ///< Translation from parent in parent's frame
 
     /// @brief Construct joint with defaults
     Joint(std::string const& name_, std::string const& parent_,

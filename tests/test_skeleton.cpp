@@ -30,7 +30,7 @@ TEST_CASE("Joint construction and properties", "[skeleton]") {
 
 TEST_CASE("Joint JSON serialization", "[skeleton]") {
     Joint j("hip", "pelvis", JointType::REVOLUTE, Eigen::Vector3d(0.1, 0, 0), "legs");
-    j.limits << -1.5, 1.5;
+    j.limits = {Eigen::Vector2d(-1.5, 1.5)};
 
     nlohmann::json const json = j.to_json();
     Joint const j2 = Joint::from_json(json);
@@ -41,7 +41,35 @@ TEST_CASE("Joint JSON serialization", "[skeleton]") {
     REQUIRE(j2.dof == j.dof);
     REQUIRE(j2.group == j.group);
     REQUIRE(j2.offset.isApprox(j.offset));
-    REQUIRE(j2.limits.isApprox(j.limits));
+    REQUIRE(j2.num_limits == j.num_limits);
+    for (size_t i = 0; i < j.num_limits; ++i) {
+        REQUIRE(j2.limits[i].isApprox(j.limits[i]));
+    }
+}
+
+TEST_CASE("Spherical joint with 3D limits", "[skeleton]") {
+    Joint j("shoulder", "spine", JointType::SPHERICAL, Eigen::Vector3d(0.15, 0.05, 0), "arms");
+    j.limits[0] = Eigen::Vector2d(-3.0, 3.0);  // X-axis rotation
+    j.limits[1] = Eigen::Vector2d(-1.5, 1.5);  // Y-axis rotation
+    j.limits[2] = Eigen::Vector2d(-1.0, 1.0);  // Z-axis rotation
+    j.num_limits = 3;
+
+    REQUIRE(j.dof == 3);
+    REQUIRE(j.num_limits == 3);
+    REQUIRE(j.limits[0].isApprox(Eigen::Vector2d(-3.0, 3.0)));
+    REQUIRE(j.limits[1].isApprox(Eigen::Vector2d(-1.5, 1.5)));
+    REQUIRE(j.limits[2].isApprox(Eigen::Vector2d(-1.0, 1.0)));
+
+    // Test JSON round-trip
+    nlohmann::json const json = j.to_json();
+    Joint const j2 = Joint::from_json(json);
+
+    REQUIRE(j2.name == j.name);
+    REQUIRE(j2.dof == 3);
+    REQUIRE(j2.limits.size() == 3);
+    for (size_t i = 0; i < 3; ++i) {
+        REQUIRE(j2.limits[i].isApprox(j.limits[i]));
+    }
 }
 
 TEST_CASE("Marker construction and JSON", "[skeleton]") {

@@ -16,10 +16,21 @@ Joint::Joint(std::string const& name_, std::string const& parent_, JointType typ
       parent(parent_),
       type(type_),
       dof(type_ == JointType::FIXED ? 0 : (type_ == JointType::SPHERICAL ? 3 : 1)),
-      limits(type_ == JointType::REVOLUTE ? Eigen::Vector2d(-M_PI, M_PI)
-                                          : Eigen::Vector2d(-M_PI, M_PI)),
+      num_limits(0),
       group(group_),
-      offset(offset_) {}
+      offset(offset_) {
+    // Initialize default limits based on joint type
+    if (type_ == JointType::REVOLUTE) {
+        limits[0] = Eigen::Vector2d(-M_PI, M_PI);
+        num_limits = 1;
+    } else if (type_ == JointType::SPHERICAL) {
+        limits[0] = Eigen::Vector2d(-M_PI, M_PI);
+        limits[1] = Eigen::Vector2d(-M_PI, M_PI);
+        limits[2] = Eigen::Vector2d(-M_PI, M_PI);
+        num_limits = 3;
+    }
+    // FIXED joints have no limits (num_limits = 0)
+}
 
 nlohmann::json Joint::to_json() const {
     nlohmann::json j;
@@ -29,7 +40,14 @@ nlohmann::json Joint::to_json() const {
                  : type == JointType::SPHERICAL ? "spherical"
                                                 : "fixed");
     j["dof"] = dof;
-    j["limits"] = {limits[0], limits[1]};
+
+    // Serialize limits
+    nlohmann::json limits_json = nlohmann::json::array();
+    for (size_t i = 0; i < num_limits; ++i) {
+        limits_json.push_back({limits[i][0], limits[i][1]});
+    }
+    j["limits"] = limits_json;
+
     j["group"] = group;
     j["offset"] = {offset[0], offset[1], offset[2]};
     return j;
@@ -55,9 +73,14 @@ Joint Joint::from_json(nlohmann::json const& j) {
     Joint joint(j.at("name").get<std::string>(), j.at("parent").get<std::string>(), type, offset,
                 j.value("group", std::string{}));
 
+    // Parse limits array
     if (j.contains("limits")) {
         auto const& limits_arr = j.at("limits");
-        joint.limits << limits_arr[0].get<double>(), limits_arr[1].get<double>();
+        joint.num_limits = std::min(limits_arr.size(), size_t(3));
+        for (size_t i = 0; i < joint.num_limits; ++i) {
+            joint.limits[i] =
+                Eigen::Vector2d(limits_arr[i][0].get<double>(), limits_arr[i][1].get<double>());
+        }
     }
 
     return joint;

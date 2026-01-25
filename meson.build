@@ -84,8 +84,20 @@ if not cli11_dep.found()
   cli11_dep = dependency('CLI11', required: true)
 endif
 
+# Pinocchio - manually construct dependency to avoid pkg-config issues
+# Installed via robotpkg at /opt/openrobots, but pkg-config may conflict with wrapped Eigen
+pinocchio_inc = include_directories('/opt/openrobots/include', is_system: true)
+pinocchio_dep = declare_dependency(
+  include_directories: pinocchio_inc,
+  dependencies: [
+    cpp.find_library('pinocchio_default', dirs: ['/opt/openrobots/lib'], required: true),
+    cpp.find_library('pinocchio_parsers', dirs: ['/opt/openrobots/lib'], required: false),
+  ],
+  link_args: ['-L/opt/openrobots/lib', '-Wl,-rpath,/opt/openrobots/lib'],
+  compile_args: ['-DPINOCCHIO_WITH_URDFDOM', '-DPINOCCHIO_ENABLE_TEMPLATE_INSTANTIATION']
+)
+
 # Will add these as we progress:
-# pinocchio_dep = dependency('pinocchio', version: '>=3.9', required: false)
 # opencv_dep = dependency('opencv4', version: '>=4.5',
 #                        modules: ['core', 'imgproc', 'videoio', 'calib3d'],
 #                        required: false)
@@ -145,4 +157,5 @@ summary({
   'yaml-cpp': yaml_cpp_dep.found(),
   'tomlplusplus': toml_dep.found(),
   'CLI11': cli11_dep.found(),
+  'pinocchio': pinocchio_dep.found(),
 }, section: 'Dependencies')

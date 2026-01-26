@@ -8,7 +8,7 @@ posetrak_sources = files(
 
   # Kinematics (Phase 3)
   'kinematics/pinocchio_model_builder.cpp',
-  # 'kinematics/forward_kinematics.cpp',
+  'kinematics/forward_kinematics.cpp',
   # 'kinematics/inverse_kinematics.cpp',
   # 'kinematics/triangulation.cpp',
 

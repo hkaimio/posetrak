@@ -18,7 +18,7 @@ test_sources = files(
   'test_observation_loader.cpp',
 
   # Phase 3: Kinematics
-  # 'test_forward_kinematics.cpp',
+  'test_pinocchio_integration.cpp',
   # 'test_triangulation.cpp',
   # 'test_inverse_kinematics.cpp',
 
@@ -31,7 +31,7 @@ test_sources = files(
 test_exe = executable('test_posetrak',
   test_sources,
   include_directories: posetrak_inc,
-  dependencies: [posetrak_dep, test_dep],
+  dependencies: [posetrak_dep, test_dep, pinocchio_dep],
 )
 
 test('posetrak_tests', test_exe,

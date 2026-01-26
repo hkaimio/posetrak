@@ -18,7 +18,9 @@ Joint::Joint(std::string const& name_, std::string const& parent_, JointType typ
       dof(type_ == JointType::FIXED ? 0 : (type_ == JointType::SPHERICAL ? 3 : 1)),
       num_limits(0),
       group(group_),
-      offset(offset_) {
+      offset(offset_),
+      rest_orientation(Eigen::Vector3d::Zero()),
+      has_rest_orientation(false) {
     // Initialize default limits based on joint type
     if (type_ == JointType::REVOLUTE) {
         limits[0] = Eigen::Vector2d(-M_PI, M_PI);
@@ -50,6 +52,9 @@ nlohmann::json Joint::to_json() const {
 
     j["group"] = group;
     j["offset"] = {offset[0], offset[1], offset[2]};
+    if (has_rest_orientation) {
+        j["rest_orientation"] = {rest_orientation[0], rest_orientation[1], rest_orientation[2]};
+    }
     return j;
 }
 
@@ -81,6 +86,14 @@ Joint Joint::from_json(nlohmann::json const& j) {
             joint.limits[i] =
                 Eigen::Vector2d(limits_arr[i][0].get<double>(), limits_arr[i][1].get<double>());
         }
+    }
+
+    // Parse rest orientation
+    if (j.contains("rest_orientation")) {
+        auto const& orient_arr = j.at("rest_orientation");
+        joint.rest_orientation << orient_arr[0].get<double>(), orient_arr[1].get<double>(),
+            orient_arr[2].get<double>();
+        joint.has_rest_orientation = true;
     }
 
     return joint;

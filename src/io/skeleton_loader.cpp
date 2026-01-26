@@ -80,6 +80,14 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
         // Create joint with default limits
         Joint joint(joint_name, parent_name, type, offset, group);
 
+        // Parse rest orientation (ZYX Euler angles in radians)
+        if (joint_node["orientation"]) {
+            joint.rest_orientation = parse_vec3(joint_node["orientation"]);
+            joint.has_rest_orientation = true;
+        } else {
+            joint.has_rest_orientation = false;
+        }
+
         // Parse limits if present
         if (joint_node["limits"]) {
             if (type == JointType::REVOLUTE) {

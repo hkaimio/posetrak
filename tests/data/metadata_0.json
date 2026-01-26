@@ -1,0 +1,39 @@
+{
+  "session_info": {
+    "session_id": "b1879e1c",
+    "created_at": "2026-01-20T07:27:03.758081+00:00",
+    "created_by": "ginny",
+    "tracker_version": "0.1.0",
+    "tracker_git_commit": "912249fe70ac06fe3e858e8a8ba43d3d6b587906",
+    "python_version": "3.12.8",
+    "numpy_version": "2.3.3",
+    "pandas_version": "2.3.3",
+    "calibration_file": null,
+    "base_directory": null,
+    "person_ids": [
+      0
+    ],
+    "num_persons": 1,
+    "persons": {
+      "0": {
+        "skeleton_file": "D:\\mocap\\2026-01-11-kotegaesh-joint-space-test\\Harri_skeleton-shouldery-rot.yaml",
+        "skeleton_name": "unknown",
+        "active_skeleton_groups": [
+          "main"
+        ],
+        "total_frames_tracked": 999,
+        "tracker_frame_range": [
+          0,
+          998
+        ]
+      }
+    },
+    "fps": 120.0,
+    "command_line": null,
+    "config_file": null,
+    "diagnostics_schema_version": "1.0.0",
+    "notes": null
+  },
+  "num_frames": 6,
+  "person_id": 0
+}

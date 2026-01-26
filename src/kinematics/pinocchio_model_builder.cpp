@@ -72,6 +72,22 @@ void PinocchioModelBuilder::add_joint_recursive(
     bool is_root = joint.parent.empty();
     if (!is_root) {
         placement.translation() = joint.offset;
+
+        // Apply rest orientation if specified (ZYX Euler angles)
+        if (joint.has_rest_orientation) {
+            // Convert ZYX intrinsic Euler angles to rotation matrix
+            // ZYX intrinsic means: rotate about Z, then about the new Y, then about the new X
+            // This is equivalent to: R = Rx * Ry * Rz in extrinsic (fixed-frame) order
+            double z = joint.rest_orientation[0];
+            double y = joint.rest_orientation[1];
+            double x = joint.rest_orientation[2];
+
+            Eigen::Matrix3d R = Eigen::AngleAxisd(x, Eigen::Vector3d::UnitX()).toRotationMatrix() *
+                                Eigen::AngleAxisd(y, Eigen::Vector3d::UnitY()).toRotationMatrix() *
+                                Eigen::AngleAxisd(z, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+
+            placement.rotation() = R;
+        }
     }
 
     pinocchio::JointIndex joint_id;

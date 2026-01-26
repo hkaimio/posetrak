@@ -29,6 +29,8 @@ struct Joint {
     size_t num_limits;                      ///< Number of active limit pairs (0-3)
     std::string group;                      ///< Joint group for filtering (e.g., "legs", "arms")
     Eigen::Vector3d offset;                 ///< Translation from parent in parent's frame
+    Eigen::Vector3d rest_orientation;       ///< Rest orientation as ZYX Euler angles (radians)
+    bool has_rest_orientation;              ///< Whether rest orientation is specified
 
     /// @brief Construct joint with defaults
     Joint(std::string const& name_, std::string const& parent_,

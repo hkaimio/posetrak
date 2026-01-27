@@ -23,6 +23,8 @@ enum class JointType {
 struct Joint {
     std::string name;    ///< Unique joint name
     std::string parent;  ///< Parent joint name (empty for root)
+    int parent_index;    ///< Parent joint index in skeleton (-1 for root)
+    int skeleton_index;  ///< Index in skeleton's joints vector (-1 if not in skeleton)
     JointType type;      ///< Joint type
     int dof;             ///< Degrees of freedom (1 for revolute, 3 for spherical, 0 for fixed)
     std::array<Eigen::Vector2d, 3> limits;  ///< Joint limits [min, max] per DOF (max 3)
@@ -48,6 +50,7 @@ struct Joint {
 struct Marker {
     std::string name;            ///< Unique marker name
     std::string joint;           ///< Attached joint name
+    int joint_index;             ///< Attached joint index in skeleton (-1 if not set)
     Eigen::Vector3d local_pos;   ///< Position in joint's local frame
     std::optional<int> coco_id;  ///< Optional COCO keypoint ID for compatibility
 
@@ -74,12 +77,12 @@ class Skeleton {
     /// @brief Add joint to skeleton
     /// @param joint Joint to add
     /// @throws std::invalid_argument if joint name already exists
-    void add_joint(Joint const& joint);
+    void add_joint(Joint&& joint);
 
     /// @brief Add marker to skeleton
     /// @param marker Marker to add
     /// @throws std::invalid_argument if marker name already exists or joint not found
-    void add_marker(Marker const& marker);
+    void add_marker(Marker&& marker);
 
     /// @brief Validate skeleton structure
     ///
@@ -130,11 +133,11 @@ class Skeleton {
     /// @return True if joint is active
     bool is_joint_active(std::string const& name) const;
 
-    /// @brief Get all joints in insertion order (preserves YAML order)
+    /// @brief Get all joints in state vector order
     /// @return Vector of joints
     std::vector<Joint> const& joints() const { return joints_; }
 
-    /// @brief Get all markers in insertion order (preserves YAML order)
+    /// @brief Get all markers in state vector order
     /// @return Vector of markers
     std::vector<Marker> const& markers() const { return markers_; }
 
@@ -156,16 +159,10 @@ class Skeleton {
     bool detect_cycle(std::string const& joint_name,
                       std::unordered_map<std::string, bool>& visited) const;
 
-    std::vector<Joint> joints_;    ///< Joint definitions (in YAML order)
-    std::vector<Marker> markers_;  ///< Marker definitions (in YAML order)
-    mutable std::unordered_map<std::string, size_t> joint_name_to_index_;   ///< Fast lookup cache
-    mutable std::unordered_map<std::string, size_t> marker_name_to_index_;  ///< Fast lookup cache
-    mutable bool indices_built_ = false;                   ///< Whether lookup indices are built
+    std::vector<Joint> joints_;    ///< Joint definitions (in state vector order)
+    std::vector<Marker> markers_;  ///< Marker definitions (in state vector order)
     std::unordered_map<std::string, bool> active_joints_;  ///< Active joint filter
     bool filter_active_ = false;                           ///< Whether active filter is enabled
-
-    /// @brief Build name-to-index lookup maps (called lazily on first lookup)
-    void build_indices() const;
 };
 
 }  // namespace posetrak

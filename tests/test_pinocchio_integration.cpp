@@ -20,15 +20,15 @@ TEST_CASE("PinocchioModelBuilder builds model from skeleton", "[pinocchio]") {
 
     // Root joint (pelvis)
     Joint root("pelvis", "", JointType::REVOLUTE, Eigen::Vector3d::Zero());
-    skeleton.add_joint(root);
+    skeleton.add_joint(std::move(root));
 
     // Child joint (spine)
     Joint spine("spine", "pelvis", JointType::REVOLUTE, Eigen::Vector3d(0, 0, 0.1));
-    skeleton.add_joint(spine);
+    skeleton.add_joint(std::move(spine));
 
     // Marker on spine
     Marker marker("head_marker", "spine", Eigen::Vector3d(0, 0, 0.2));
-    skeleton.add_marker(marker);
+    skeleton.add_marker(std::move(marker));
 
     SECTION("Model builds successfully") {
         pinocchio::Model model;
@@ -70,13 +70,13 @@ TEST_CASE("ForwardKinematics computes marker positions", "[forward_kinematics]")
     // Create a simple skeleton
     Skeleton skeleton;
     Joint root("pelvis", "", JointType::REVOLUTE, Eigen::Vector3d::Zero());
-    skeleton.add_joint(root);
+    skeleton.add_joint(std::move(root));
 
     Joint spine("spine", "pelvis", JointType::REVOLUTE, Eigen::Vector3d(0, 0, 0.1));
-    skeleton.add_joint(spine);
+    skeleton.add_joint(std::move(spine));
 
     Marker marker("head_marker", "spine", Eigen::Vector3d(0, 0, 0.2));
-    skeleton.add_marker(marker);
+    skeleton.add_marker(std::move(marker));
 
     // Build Pinocchio model
     pinocchio::Model model;
@@ -144,13 +144,13 @@ TEST_CASE("ForwardKinematics handles spherical joints", "[forward_kinematics]") 
     // Create skeleton with spherical joint
     Skeleton skeleton;
     Joint root("pelvis", "", JointType::REVOLUTE, Eigen::Vector3d::Zero());
-    skeleton.add_joint(root);
+    skeleton.add_joint(std::move(root));
 
     Joint shoulder("shoulder", "pelvis", JointType::SPHERICAL, Eigen::Vector3d(0.2, 0, 0));
-    skeleton.add_joint(shoulder);
+    skeleton.add_joint(std::move(shoulder));
 
     Marker marker("hand", "shoulder", Eigen::Vector3d(0.3, 0, 0));
-    skeleton.add_marker(marker);
+    skeleton.add_marker(std::move(marker));
 
     // Build model
     pinocchio::Model model;

@@ -14,6 +14,8 @@ Joint::Joint(std::string const& name_, std::string const& parent_, JointType typ
              Eigen::Vector3d const& offset_, std::string const& group_)
     : name(name_),
       parent(parent_),
+      parent_index(-1),
+      skeleton_index(-1),
       type(type_),
       dof(type_ == JointType::FIXED ? 0 : (type_ == JointType::SPHERICAL ? 3 : 1)),
       num_limits(0),
@@ -103,7 +105,7 @@ Joint Joint::from_json(nlohmann::json const& j) {
 
 Marker::Marker(std::string const& name_, std::string const& joint_,
                Eigen::Vector3d const& local_pos_, std::optional<int> coco_id_)
-    : name(name_), joint(joint_), local_pos(local_pos_), coco_id(coco_id_) {}
+    : name(name_), joint(joint_), joint_index(-1), local_pos(local_pos_), coco_id(coco_id_) {}
 
 nlohmann::json Marker::to_json() const {
     nlohmann::json j;
@@ -132,18 +134,33 @@ Marker Marker::from_json(nlohmann::json const& j) {
 
 // Skeleton implementation
 
-void Skeleton::add_joint(Joint const& joint) {
+void Skeleton::add_joint(Joint&& joint) {
     // Check for duplicates
     for (auto const& existing : joints_) {
         if (existing.name == joint.name) {
             throw std::invalid_argument(fmt::format("Joint '{}' already exists", joint.name));
         }
     }
-    joints_.push_back(joint);
-    indices_built_ = false;  // Invalidate indices
+
+    // Set skeleton index
+    joint.skeleton_index = static_cast<int>(joints_.size());
+
+    // Find parent index (if parent exists)
+    // Don't throw if parent doesn't exist - validate() will catch it
+    joint.parent_index = -1;
+    if (!joint.parent.empty()) {
+        for (size_t i = 0; i < joints_.size(); ++i) {
+            if (joints_[i].name == joint.parent) {
+                joint.parent_index = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+
+    joints_.push_back(std::move(joint));
 }
 
-void Skeleton::add_marker(Marker const& marker) {
+void Skeleton::add_marker(Marker&& marker) {
     // Check for duplicate markers
     for (auto const& existing : markers_) {
         if (existing.name == marker.name) {
@@ -151,10 +168,11 @@ void Skeleton::add_marker(Marker const& marker) {
         }
     }
 
-    // Check that the joint exists
+    // Find and set joint index
     bool joint_found = false;
-    for (auto const& joint : joints_) {
-        if (joint.name == marker.joint) {
+    for (size_t i = 0; i < joints_.size(); ++i) {
+        if (joints_[i].name == marker.joint) {
+            marker.joint_index = static_cast<int>(i);
             joint_found = true;
             break;
         }
@@ -164,27 +182,7 @@ void Skeleton::add_marker(Marker const& marker) {
             fmt::format("Joint '{}' not found for marker '{}'", marker.joint, marker.name));
     }
 
-    markers_.push_back(marker);
-    indices_built_ = false;  // Invalidate indices
-}
-
-void Skeleton::build_indices() const {
-    if (indices_built_) {
-        return;
-    }
-
-    joint_name_to_index_.clear();
-    marker_name_to_index_.clear();
-
-    for (size_t i = 0; i < joints_.size(); ++i) {
-        joint_name_to_index_[joints_[i].name] = i;
-    }
-
-    for (size_t i = 0; i < markers_.size(); ++i) {
-        marker_name_to_index_[markers_[i].name] = i;
-    }
-
-    indices_built_ = true;
+    markers_.push_back(std::move(marker));
 }
 
 std::optional<std::string> Skeleton::validate() const {
@@ -291,15 +289,21 @@ void Skeleton::clear_active_filter() {
 }
 
 Joint const* Skeleton::get_joint(std::string const& name) const {
-    build_indices();
-    auto it = joint_name_to_index_.find(name);
-    return it != joint_name_to_index_.end() ? &joints_[it->second] : nullptr;
+    for (auto const& joint : joints_) {
+        if (joint.name == name) {
+            return &joint;
+        }
+    }
+    return nullptr;
 }
 
 Marker const* Skeleton::get_marker(std::string const& name) const {
-    build_indices();
-    auto it = marker_name_to_index_.find(name);
-    return it != marker_name_to_index_.end() ? &markers_[it->second] : nullptr;
+    for (auto const& marker : markers_) {
+        if (marker.name == name) {
+            return &marker;
+        }
+    }
+    return nullptr;
 }
 
 std::vector<Joint> Skeleton::get_joints_ordered() const {

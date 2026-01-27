@@ -124,7 +124,7 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
         }
 
         // Add joint to skeleton
-        skeleton.add_joint(joint);
+        skeleton.add_joint(std::move(joint));
         joint_name_to_idx[joint_name] = joint_name_to_idx.size();
     }
 

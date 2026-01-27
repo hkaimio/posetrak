@@ -133,21 +133,58 @@ Marker Marker::from_json(nlohmann::json const& j) {
 // Skeleton implementation
 
 void Skeleton::add_joint(Joint const& joint) {
-    if (joints_.find(joint.name) != joints_.end()) {
-        throw std::invalid_argument(fmt::format("Joint '{}' already exists", joint.name));
+    // Check for duplicates
+    for (auto const& existing : joints_) {
+        if (existing.name == joint.name) {
+            throw std::invalid_argument(fmt::format("Joint '{}' already exists", joint.name));
+        }
     }
-    joints_.emplace(joint.name, joint);
+    joints_.push_back(joint);
+    indices_built_ = false;  // Invalidate indices
 }
 
 void Skeleton::add_marker(Marker const& marker) {
-    if (markers_.find(marker.name) != markers_.end()) {
-        throw std::invalid_argument(fmt::format("Marker '{}' already exists", marker.name));
+    // Check for duplicate markers
+    for (auto const& existing : markers_) {
+        if (existing.name == marker.name) {
+            throw std::invalid_argument(fmt::format("Marker '{}' already exists", marker.name));
+        }
     }
-    if (joints_.find(marker.joint) == joints_.end()) {
+
+    // Check that the joint exists
+    bool joint_found = false;
+    for (auto const& joint : joints_) {
+        if (joint.name == marker.joint) {
+            joint_found = true;
+            break;
+        }
+    }
+    if (!joint_found) {
         throw std::invalid_argument(
             fmt::format("Joint '{}' not found for marker '{}'", marker.joint, marker.name));
     }
-    markers_.emplace(marker.name, marker);
+
+    markers_.push_back(marker);
+    indices_built_ = false;  // Invalidate indices
+}
+
+void Skeleton::build_indices() const {
+    if (indices_built_) {
+        return;
+    }
+
+    joint_name_to_index_.clear();
+    marker_name_to_index_.clear();
+
+    for (size_t i = 0; i < joints_.size(); ++i) {
+        joint_name_to_index_[joints_[i].name] = i;
+    }
+
+    for (size_t i = 0; i < markers_.size(); ++i) {
+        marker_name_to_index_[markers_[i].name] = i;
+    }
+
+    indices_built_ = true;
 }
 
 std::optional<std::string> Skeleton::validate() const {
@@ -156,21 +193,30 @@ std::optional<std::string> Skeleton::validate() const {
     }
 
     // Check all parents exist first
-    for (auto const& [name, joint] : joints_) {
-        if (!joint.parent.empty() && joints_.find(joint.parent) == joints_.end()) {
-            return fmt::format("Parent '{}' of joint '{}' not found", joint.parent, name);
+    for (auto const& joint : joints_) {
+        if (!joint.parent.empty()) {
+            bool parent_found = false;
+            for (auto const& candidate : joints_) {
+                if (candidate.name == joint.parent) {
+                    parent_found = true;
+                    break;
+                }
+            }
+            if (!parent_found) {
+                return fmt::format("Parent '{}' of joint '{}' not found", joint.parent, joint.name);
+            }
         }
     }
 
     // Check for cycles (before checking for root, since a cycle means no root)
     std::unordered_map<std::string, bool> visited;
-    for (auto const& [name, _] : joints_) {
-        visited[name] = false;
+    for (auto const& joint : joints_) {
+        visited[joint.name] = false;
     }
 
-    for (auto const& [name, _] : joints_) {
-        if (detect_cycle(name, visited)) {
-            return fmt::format("Cycle detected in hierarchy at joint '{}'", name);
+    for (auto const& joint : joints_) {
+        if (detect_cycle(joint.name, visited)) {
+            return fmt::format("Cycle detected in hierarchy at joint '{}'", joint.name);
         }
     }
 
@@ -181,9 +227,16 @@ std::optional<std::string> Skeleton::validate() const {
     }
 
     // Check all marker joints exist
-    for (auto const& [name, marker] : markers_) {
-        if (joints_.find(marker.joint) == joints_.end()) {
-            return fmt::format("Joint '{}' not found for marker '{}'", marker.joint, name);
+    for (auto const& marker : markers_) {
+        bool joint_found = false;
+        for (auto const& joint : joints_) {
+            if (joint.name == marker.joint) {
+                joint_found = true;
+                break;
+            }
+        }
+        if (!joint_found) {
+            return fmt::format("Joint '{}' not found for marker '{}'", marker.joint, marker.name);
         }
     }
 
@@ -192,7 +245,7 @@ std::optional<std::string> Skeleton::validate() const {
 
 int Skeleton::total_dof() const {
     int total = 0;
-    for (auto const& [_, joint] : joints_) {
+    for (auto const& joint : joints_) {
         total += joint.dof;
     }
     return total;
@@ -204,8 +257,8 @@ int Skeleton::active_dof() const {
     }
 
     int total = 0;
-    for (auto const& [name, joint] : joints_) {
-        if (active_joints_.contains(name) && active_joints_.at(name)) {
+    for (auto const& joint : joints_) {
+        if (active_joints_.contains(joint.name) && active_joints_.at(joint.name)) {
             total += joint.dof;
         }
     }
@@ -216,8 +269,8 @@ void Skeleton::set_active_groups(std::vector<std::string> const& groups) {
     active_joints_.clear();
     std::unordered_set<std::string> group_set(groups.begin(), groups.end());
 
-    for (auto const& [name, joint] : joints_) {
-        active_joints_[name] = (group_set.find(joint.group) != group_set.end());
+    for (auto const& joint : joints_) {
+        active_joints_[joint.name] = (group_set.find(joint.group) != group_set.end());
     }
     filter_active_ = true;
 }
@@ -226,8 +279,8 @@ void Skeleton::set_active_joints(std::vector<std::string> const& joint_names) {
     active_joints_.clear();
     std::unordered_set<std::string> joint_set(joint_names.begin(), joint_names.end());
 
-    for (auto const& [name, _] : joints_) {
-        active_joints_[name] = (joint_set.find(name) != joint_set.end());
+    for (auto const& joint : joints_) {
+        active_joints_[joint.name] = (joint_set.find(joint.name) != joint_set.end());
     }
     filter_active_ = true;
 }
@@ -238,51 +291,20 @@ void Skeleton::clear_active_filter() {
 }
 
 Joint const* Skeleton::get_joint(std::string const& name) const {
-    auto it = joints_.find(name);
-    return it != joints_.end() ? &it->second : nullptr;
+    build_indices();
+    auto it = joint_name_to_index_.find(name);
+    return it != joint_name_to_index_.end() ? &joints_[it->second] : nullptr;
 }
 
 Marker const* Skeleton::get_marker(std::string const& name) const {
-    auto it = markers_.find(name);
-    return it != markers_.end() ? &it->second : nullptr;
+    build_indices();
+    auto it = marker_name_to_index_.find(name);
+    return it != marker_name_to_index_.end() ? &markers_[it->second] : nullptr;
 }
 
 std::vector<Joint> Skeleton::get_joints_ordered() const {
-    std::vector<Joint> ordered;
-    ordered.reserve(joints_.size());
-
-    // Find root and do depth-first traversal
-    std::string const root = find_root();
-    if (root.empty()) {
-        return ordered;  // Invalid skeleton
-    }
-
-    std::vector<std::string> stack = {root};
-    std::unordered_set<std::string> visited;
-
-    while (!stack.empty()) {
-        std::string const current = stack.back();
-        stack.pop_back();
-
-        if (visited.find(current) != visited.end()) {
-            continue;
-        }
-        visited.insert(current);
-
-        auto it = joints_.find(current);
-        if (it != joints_.end()) {
-            ordered.push_back(it->second);
-
-            // Add children to stack
-            for (auto const& [name, joint] : joints_) {
-                if (joint.parent == current) {
-                    stack.push_back(name);
-                }
-            }
-        }
-    }
-
-    return ordered;
+    // Now just return a copy since vector already preserves insertion order
+    return joints_;
 }
 
 bool Skeleton::is_joint_active(std::string const& name) const {
@@ -296,17 +318,16 @@ bool Skeleton::is_joint_active(std::string const& name) const {
 nlohmann::json Skeleton::to_json() const {
     nlohmann::json j;
 
-    // Serialize joints in depth-first order
-    std::vector<Joint> const ordered = get_joints_ordered();
+    // Serialize joints in their stored order (which is insertion order)
     nlohmann::json joints_arr = nlohmann::json::array();
-    for (auto const& joint : ordered) {
+    for (auto const& joint : joints_) {
         joints_arr.push_back(joint.to_json());
     }
     j["joints"] = joints_arr;
 
     // Serialize markers
     nlohmann::json markers_arr = nlohmann::json::array();
-    for (auto const& [_, marker] : markers_) {
+    for (auto const& marker : markers_) {
         markers_arr.push_back(marker.to_json());
     }
     j["markers"] = markers_arr;
@@ -334,12 +355,12 @@ Skeleton Skeleton::from_json(nlohmann::json const& j) {
 
 std::string Skeleton::find_root() const {
     std::string root;
-    for (auto const& [name, joint] : joints_) {
+    for (auto const& joint : joints_) {
         if (joint.parent.empty()) {
             if (!root.empty()) {
                 return "";  // Multiple roots
             }
-            root = name;
+            root = joint.name;
         }
     }
     return root;
@@ -354,10 +375,10 @@ bool Skeleton::detect_cycle(std::string const& joint_name,
 
     visited[joint_name] = true;
 
-    // Check parent
-    auto it = joints_.find(joint_name);
-    if (it != joints_.end() && !it->second.parent.empty()) {
-        if (detect_cycle(it->second.parent, visited)) {
+    // Check parent - find the joint by name
+    Joint const* joint = get_joint(joint_name);
+    if (joint != nullptr && !joint->parent.empty()) {
+        if (detect_cycle(joint->parent, visited)) {
             return true;
         }
     }

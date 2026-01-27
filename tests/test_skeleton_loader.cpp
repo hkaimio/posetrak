@@ -35,92 +35,89 @@ TEST_CASE("Load simple humanoid skeleton", "[skeleton_loader]") {
         auto const& joints = skeleton.joints();
 
         // Find pelvis (root)
-        auto pelvis_it = std::find_if(joints.begin(), joints.end(), [](auto const& pair) {
-            return pair.second.name == "pelvis";
-        });
+        auto pelvis_it = std::find_if(joints.begin(), joints.end(),
+                                      [](auto const& joint) { return joint.name == "pelvis"; });
         REQUIRE(pelvis_it != joints.end());
-        REQUIRE(pelvis_it->second.parent.empty());  // Root has no parent
-        REQUIRE(pelvis_it->second.type == JointType::FIXED);
+        REQUIRE(pelvis_it->parent.empty());  // Root has no parent
+        REQUIRE(pelvis_it->type == JointType::FIXED);
 
         // Find spine joints (ball/spherical)
-        auto spine_lower_it = std::find_if(joints.begin(), joints.end(), [](auto const& pair) {
-            return pair.second.name == "spine_lower";
+        auto spine_lower_it = std::find_if(joints.begin(), joints.end(), [](auto const& joint) {
+            return joint.name == "spine_lower";
         });
         REQUIRE(spine_lower_it != joints.end());
-        REQUIRE(spine_lower_it->second.parent == "pelvis");
-        REQUIRE(spine_lower_it->second.type == JointType::SPHERICAL);
-        REQUIRE(spine_lower_it->second.dof == 3);
+        REQUIRE(spine_lower_it->parent == "pelvis");
+        REQUIRE(spine_lower_it->type == JointType::SPHERICAL);
+        REQUIRE(spine_lower_it->dof == 3);
 
         // Find elbow (revolute)
-        auto r_elbow_it = std::find_if(joints.begin(), joints.end(), [](auto const& pair) {
-            return pair.second.name == "r_elbow";
-        });
+        auto r_elbow_it = std::find_if(joints.begin(), joints.end(),
+                                       [](auto const& joint) { return joint.name == "r_elbow"; });
         REQUIRE(r_elbow_it != joints.end());
-        REQUIRE(r_elbow_it->second.parent == "r_shoulder");
-        REQUIRE(r_elbow_it->second.type == JointType::REVOLUTE);
-        REQUIRE(r_elbow_it->second.dof == 1);
+        REQUIRE(r_elbow_it->parent == "r_shoulder");
+        REQUIRE(r_elbow_it->type == JointType::REVOLUTE);
+        REQUIRE(r_elbow_it->dof == 1);
     }
 
     SECTION("Joint limits") {
         auto const& joints = skeleton.joints();
 
         // Check revolute joint limits
-        auto r_elbow_it = std::find_if(joints.begin(), joints.end(), [](auto const& pair) {
-            return pair.second.name == "r_elbow";
-        });
+        auto r_elbow_it = std::find_if(joints.begin(), joints.end(),
+                                       [](auto const& joint) { return joint.name == "r_elbow"; });
         REQUIRE(r_elbow_it != joints.end());
-        REQUIRE(r_elbow_it->second.num_limits == 1);
-        REQUIRE_THAT(r_elbow_it->second.limits[0][0], Catch::Matchers::WithinRel(0.0, 1e-6));
-        REQUIRE_THAT(r_elbow_it->second.limits[0][1], Catch::Matchers::WithinRel(2.8, 1e-6));
+        REQUIRE(r_elbow_it->num_limits == 1);
+        REQUIRE_THAT(r_elbow_it->limits[0][0], Catch::Matchers::WithinRel(0.0, 1e-6));
+        REQUIRE_THAT(r_elbow_it->limits[0][1], Catch::Matchers::WithinRel(2.8, 1e-6));
 
         // Check spherical joint limits (3 axes)
-        auto r_shoulder_it = std::find_if(joints.begin(), joints.end(), [](auto const& pair) {
-            return pair.second.name == "r_shoulder";
+        auto r_shoulder_it = std::find_if(joints.begin(), joints.end(), [](auto const& joint) {
+            return joint.name == "r_shoulder";
         });
         REQUIRE(r_shoulder_it != joints.end());
-        REQUIRE(r_shoulder_it->second.num_limits == 3);
-        REQUIRE_THAT(r_shoulder_it->second.limits[0][0], Catch::Matchers::WithinRel(-3.0, 1e-6));
-        REQUIRE_THAT(r_shoulder_it->second.limits[0][1], Catch::Matchers::WithinRel(3.0, 1e-6));
-        REQUIRE_THAT(r_shoulder_it->second.limits[1][0], Catch::Matchers::WithinRel(-1.5, 1e-6));
-        REQUIRE_THAT(r_shoulder_it->second.limits[1][1], Catch::Matchers::WithinRel(1.5, 1e-6));
-        REQUIRE_THAT(r_shoulder_it->second.limits[2][0], Catch::Matchers::WithinRel(-1.0, 1e-6));
-        REQUIRE_THAT(r_shoulder_it->second.limits[2][1], Catch::Matchers::WithinRel(1.0, 1e-6));
+        REQUIRE(r_shoulder_it->num_limits == 3);
+        REQUIRE_THAT(r_shoulder_it->limits[0][0], Catch::Matchers::WithinRel(-3.0, 1e-6));
+        REQUIRE_THAT(r_shoulder_it->limits[0][1], Catch::Matchers::WithinRel(3.0, 1e-6));
+        REQUIRE_THAT(r_shoulder_it->limits[1][0], Catch::Matchers::WithinRel(-1.5, 1e-6));
+        REQUIRE_THAT(r_shoulder_it->limits[1][1], Catch::Matchers::WithinRel(1.5, 1e-6));
+        REQUIRE_THAT(r_shoulder_it->limits[2][0], Catch::Matchers::WithinRel(-1.0, 1e-6));
+        REQUIRE_THAT(r_shoulder_it->limits[2][1], Catch::Matchers::WithinRel(1.0, 1e-6));
     }
 
     SECTION("Joint offsets") {
         auto const& joints = skeleton.joints();
 
-        auto r_shoulder_it = std::find_if(joints.begin(), joints.end(), [](auto const& pair) {
-            return pair.second.name == "r_shoulder";
+        auto r_shoulder_it = std::find_if(joints.begin(), joints.end(), [](auto const& joint) {
+            return joint.name == "r_shoulder";
         });
         REQUIRE(r_shoulder_it != joints.end());
 
         // Right shoulder offset from spine_upper
-        REQUIRE_THAT(r_shoulder_it->second.offset[0], Catch::Matchers::WithinRel(0.15, 1e-6));
-        REQUIRE_THAT(r_shoulder_it->second.offset[1], Catch::Matchers::WithinRel(0.05, 1e-6));
-        REQUIRE_THAT(r_shoulder_it->second.offset[2], Catch::Matchers::WithinRel(0.0, 1e-6));
+        REQUIRE_THAT(r_shoulder_it->offset[0], Catch::Matchers::WithinRel(0.15, 1e-6));
+        REQUIRE_THAT(r_shoulder_it->offset[1], Catch::Matchers::WithinRel(0.05, 1e-6));
+        REQUIRE_THAT(r_shoulder_it->offset[2], Catch::Matchers::WithinRel(0.0, 1e-6));
     }
 
     SECTION("Markers") {
         auto const& markers = skeleton.markers();
 
         // Find pelvis marker
-        auto pelvis_marker_it = std::find_if(markers.begin(), markers.end(), [](auto const& pair) {
-            return pair.second.name == "pelvis_center";
-        });
+        auto pelvis_marker_it =
+            std::find_if(markers.begin(), markers.end(),
+                         [](auto const& marker) { return marker.name == "pelvis_center"; });
         REQUIRE(pelvis_marker_it != markers.end());
-        REQUIRE(pelvis_marker_it->second.joint == "pelvis");
-        REQUIRE(pelvis_marker_it->second.coco_id.has_value());
-        REQUIRE(*pelvis_marker_it->second.coco_id == 8);
+        REQUIRE(pelvis_marker_it->joint == "pelvis");
+        REQUIRE(pelvis_marker_it->coco_id.has_value());
+        REQUIRE(*pelvis_marker_it->coco_id == 8);
 
         // Find shoulder marker
         auto r_shoulder_marker_it =
             std::find_if(markers.begin(), markers.end(),
-                         [](auto const& pair) { return pair.second.name == "r_shoulder_marker"; });
+                         [](auto const& marker) { return marker.name == "r_shoulder_marker"; });
         REQUIRE(r_shoulder_marker_it != markers.end());
-        REQUIRE(r_shoulder_marker_it->second.joint == "r_shoulder");
-        REQUIRE(r_shoulder_marker_it->second.coco_id.has_value());
-        REQUIRE(*r_shoulder_marker_it->second.coco_id == 2);
+        REQUIRE(r_shoulder_marker_it->joint == "r_shoulder");
+        REQUIRE(r_shoulder_marker_it->coco_id.has_value());
+        REQUIRE(*r_shoulder_marker_it->coco_id == 2);
     }
 
     SECTION("Active joints from groups") {
@@ -128,8 +125,8 @@ TEST_CASE("Load simple humanoid skeleton", "[skeleton_loader]") {
         // Simple humanoid has groups: core, right_arm, left_arm - all 10 joints should be active
         auto const& joints = skeleton.joints();
         int active_count = 0;
-        for (auto const& [name, joint] : joints) {
-            if (skeleton.is_joint_active(name)) {
+        for (auto const& joint : joints) {
+            if (skeleton.is_joint_active(joint.name)) {
                 active_count++;
             }
         }
@@ -152,7 +149,7 @@ TEST_CASE("Load production Harri skeleton", "[skeleton_loader]") {
     SECTION("Hierarchy is valid") {
         // Find the root joint(s) - should have exactly one
         int root_count = 0;
-        for (auto const& [name, joint] : joints) {
+        for (auto const& joint : joints) {
             if (joint.parent.empty()) {
                 root_count++;
             }
@@ -160,21 +157,21 @@ TEST_CASE("Load production Harri skeleton", "[skeleton_loader]") {
         REQUIRE(root_count == 1);
 
         // All non-root joints should have valid parents
-        for (auto const& [name, joint] : joints) {
+        for (auto const& joint : joints) {
             if (!joint.parent.empty()) {
-                REQUIRE(joints.find(joint.parent) != joints.end());
+                REQUIRE(skeleton.get_joint(joint.parent) != nullptr);
             }
         }
     }
 
     SECTION("Markers reference valid joints") {
-        for (auto const& [name, marker] : markers) {
-            REQUIRE(joints.find(marker.joint) != joints.end());
+        for (auto const& marker : markers) {
+            REQUIRE(skeleton.get_joint(marker.joint) != nullptr);
         }
     }
 
     SECTION("Spherical joints have 3D limits") {
-        for (auto const& [name, joint] : joints) {
+        for (auto const& joint : joints) {
             if (joint.type == JointType::SPHERICAL) {
                 REQUIRE(joint.num_limits == 3);
                 REQUIRE(joint.dof == 3);
@@ -187,7 +184,7 @@ TEST_CASE("Load production Harri skeleton", "[skeleton_loader]") {
     }
 
     SECTION("Revolute joints have 1D limits") {
-        for (auto const& [name, joint] : joints) {
+        for (auto const& joint : joints) {
             if (joint.type == JointType::REVOLUTE) {
                 REQUIRE(joint.num_limits == 1);
                 REQUIRE(joint.dof == 1);
@@ -280,10 +277,11 @@ TEST_CASE("Skeleton loader handles optional fields", "[skeleton_loader]") {
         f.close();
 
         Skeleton skeleton = load_skeleton_from_yaml(test_file.string());
-        auto const& joint = skeleton.joints().at("root");
-        REQUIRE(joint.num_limits == 1);
-        REQUIRE_THAT(joint.limits[0][0], Catch::Matchers::WithinRel(-M_PI, 1e-6));
-        REQUIRE_THAT(joint.limits[0][1], Catch::Matchers::WithinRel(M_PI, 1e-6));
+        Joint const* joint = skeleton.get_joint("root");
+        REQUIRE(joint != nullptr);
+        REQUIRE(joint->num_limits == 1);
+        REQUIRE_THAT(joint->limits[0][0], Catch::Matchers::WithinRel(-M_PI, 1e-6));
+        REQUIRE_THAT(joint->limits[0][1], Catch::Matchers::WithinRel(M_PI, 1e-6));
     }
 
     SECTION("Joint without group field has empty string") {
@@ -296,7 +294,9 @@ TEST_CASE("Skeleton loader handles optional fields", "[skeleton_loader]") {
         f.close();
 
         Skeleton skeleton = load_skeleton_from_yaml(test_file.string());
-        REQUIRE(skeleton.joints().at("root").group.empty());
+        Joint const* joint = skeleton.get_joint("root");
+        REQUIRE(joint != nullptr);
+        REQUIRE(joint->group.empty());
     }
 
     SECTION("Marker without COCO ID has nullopt") {
@@ -313,7 +313,9 @@ TEST_CASE("Skeleton loader handles optional fields", "[skeleton_loader]") {
         f.close();
 
         Skeleton skeleton = load_skeleton_from_yaml(test_file.string());
-        REQUIRE(!skeleton.markers().at("test_marker").coco_id.has_value());
+        Marker const* marker = skeleton.get_marker("test_marker");
+        REQUIRE(marker != nullptr);
+        REQUIRE(!marker->coco_id.has_value());
     }
 
     SECTION("Skeleton without tracking section loads") {

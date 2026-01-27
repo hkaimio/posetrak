@@ -37,7 +37,7 @@ void PinocchioModelBuilder::build_model(Skeleton const& skeleton, pinocchio::Mod
 
     // Find the root joint (empty parent string)
     Joint const* root_joint = nullptr;
-    for (auto const& [name, joint] : skeleton.joints()) {
+    for (auto const& joint : skeleton.joints()) {
         if (joint.parent.empty()) {
             root_joint = &joint;
             break;
@@ -87,6 +87,14 @@ void PinocchioModelBuilder::add_joint_recursive(
                                 Eigen::AngleAxisd(z, Eigen::Vector3d::UnitZ()).toRotationMatrix();
 
             placement.rotation() = R;
+
+            // Debug output for arm joints
+            if (joint.name.find("forearm") != std::string::npos ||
+                joint.name.find("upper_arm") != std::string::npos) {
+                std::cout << "Joint " << joint.name << " rest orientation (ZYX): [" << z << ", "
+                          << y << ", " << x << "]\n";
+                std::cout << "Rotation matrix:\n" << R << std::endl;
+            }
         }
     }
 
@@ -129,7 +137,7 @@ void PinocchioModelBuilder::add_joint_recursive(
     joint_to_id[joint.name] = joint_id;
 
     // Recursively add child joints
-    for (auto const& [child_name, child_joint] : skeleton.joints()) {
+    for (auto const& child_joint : skeleton.joints()) {
         if (child_joint.parent == joint.name) {
             add_joint_recursive(model, skeleton, child_joint, joint_id, joint_to_id);
         }
@@ -139,7 +147,7 @@ void PinocchioModelBuilder::add_joint_recursive(
 void PinocchioModelBuilder::add_marker_frames(
     pinocchio::Model& model, Skeleton const& skeleton,
     std::map<std::string, pinocchio::JointIndex> const& joint_to_id) {
-    for (auto const& [marker_name, marker] : skeleton.markers()) {
+    for (auto const& marker : skeleton.markers()) {
         // Find parent joint ID
         auto it = joint_to_id.find(marker.joint);
         if (it == joint_to_id.end()) {
@@ -209,7 +217,7 @@ PinocchioModelBuilder::build_marker_frame_map(pinocchio::Model const& model,
                                               Skeleton const& skeleton) {
     std::map<std::string, pinocchio::FrameIndex> marker_map;
 
-    for (auto const& [marker_name, marker] : skeleton.markers()) {
+    for (auto const& marker : skeleton.markers()) {
         if (model.existFrame(marker.name)) {
             marker_map[marker.name] = model.getFrameId(marker.name);
         } else {

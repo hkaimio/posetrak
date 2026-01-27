@@ -208,26 +208,13 @@ TEST_CASE("Skeleton joint ordering", "[skeleton]") {
     skel.add_joint(Joint("right_hip", "pelvis", JointType::SPHERICAL));
     skel.add_joint(Joint("left_knee", "left_hip", JointType::REVOLUTE));
 
+    // With vector storage, get_joints_ordered() returns joints in insertion order
     std::vector<Joint> const ordered = skel.get_joints_ordered();
     REQUIRE(ordered.size() == 4);
-    REQUIRE(ordered[0].name == "pelvis");  // Root first
-
-    // Parent must come before children
-    size_t pelvis_idx = 0;
-    size_t left_hip_idx = 0;
-    size_t left_knee_idx = 0;
-
-    for (size_t i = 0; i < ordered.size(); ++i) {
-        if (ordered[i].name == "pelvis")
-            pelvis_idx = i;
-        if (ordered[i].name == "left_hip")
-            left_hip_idx = i;
-        if (ordered[i].name == "left_knee")
-            left_knee_idx = i;
-    }
-
-    REQUIRE(pelvis_idx < left_hip_idx);
-    REQUIRE(left_hip_idx < left_knee_idx);
+    REQUIRE(ordered[0].name == "pelvis");
+    REQUIRE(ordered[1].name == "left_hip");
+    REQUIRE(ordered[2].name == "right_hip");
+    REQUIRE(ordered[3].name == "left_knee");
 }
 
 TEST_CASE("Skeleton JSON serialization", "[skeleton]") {

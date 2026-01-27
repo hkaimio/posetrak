@@ -208,6 +208,17 @@ TEST_CASE("ForwardKinematics validates against Python ground truth",
     auto marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
     ForwardKinematics fk(model, data, marker_map);
 
+    std::cout << "\n=== Pinocchio Model Joint Order ===" << std::endl;
+    for (size_t i = 1; i < model.names.size(); ++i) {  // Skip universe (index 0)
+        std::cout << "  " << i << ": " << model.names[i] << " (nq=" << model.nqs[i]
+                  << ", nv=" << model.nvs[i] << ")" << std::endl;
+        if (i >= 35) {
+            std::cout << "  ... (showing first 35 joints)" << std::endl;
+            break;
+        }
+    }
+    std::cout << std::endl;
+
     INFO("Built model: nq=" << model.nq << ", nv=" << model.nv);
 
     // Load states from JSON
@@ -249,8 +260,8 @@ TEST_CASE("ForwardKinematics validates against Python ground truth",
         // Extract joint angles from state
         auto const& joint_angles_map = frame["joint_angles"];
 
-        // Build configuration vector directly from JSON (like cpp-tracker-test does)
-        // This avoids the joint ordering issue with get_joints_ordered()
+        // Build configuration vector directly from JSON
+        // Now that we use vector storage, joints are in YAML file order
         Eigen::VectorXd q = Eigen::VectorXd::Zero(model.nq);
         int idx = 0;
 
@@ -264,9 +275,7 @@ TEST_CASE("ForwardKinematics validates against Python ground truth",
         q[idx++] = joint_angles_map["root_quaternion_w"].get<double>();
 
         // Other joints - iterate through skeleton in YAML file order
-        // Since we have unordered_map, we use get_joints_ordered() but look up angles by name
-        auto ordered_joints = skeleton.get_joints_ordered();
-        for (auto const& joint : ordered_joints) {
+        for (auto const& joint : skeleton.joints()) {
             if (joint.parent.empty())
                 continue;  // Skip root
 
@@ -288,6 +297,14 @@ TEST_CASE("ForwardKinematics validates against Python ground truth",
                 } else {
                     Eigen::Vector3d axis = v / angle;
                     quat = Eigen::Quaterniond(Eigen::AngleAxisd(angle, axis));
+                }
+
+                // Debug output for forearm joints
+                if (i == 0 && joint.name.find("forearm") != std::string::npos) {
+                    std::cout << "Joint " << joint.name << " axis-angle: [" << rx << ", " << ry
+                              << ", " << rz << "]" << std::endl;
+                    std::cout << "  -> quaternion: [" << quat.x() << ", " << quat.y() << ", "
+                              << quat.z() << ", " << quat.w() << "]" << std::endl;
                 }
 
                 q[idx++] = quat.x();

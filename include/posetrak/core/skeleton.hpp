@@ -130,13 +130,13 @@ class Skeleton {
     /// @return True if joint is active
     bool is_joint_active(std::string const& name) const;
 
-    /// @brief Get all joints
-    /// @return Map of joint name to joint
-    std::unordered_map<std::string, Joint> const& joints() const { return joints_; }
+    /// @brief Get all joints in insertion order (preserves YAML order)
+    /// @return Vector of joints
+    std::vector<Joint> const& joints() const { return joints_; }
 
-    /// @brief Get all markers
-    /// @return Map of marker name to marker
-    std::unordered_map<std::string, Marker> const& markers() const { return markers_; }
+    /// @brief Get all markers in insertion order (preserves YAML order)
+    /// @return Vector of markers
+    std::vector<Marker> const& markers() const { return markers_; }
 
     /// @brief Serialize to JSON
     nlohmann::json to_json() const;
@@ -156,10 +156,16 @@ class Skeleton {
     bool detect_cycle(std::string const& joint_name,
                       std::unordered_map<std::string, bool>& visited) const;
 
-    std::unordered_map<std::string, Joint> joints_;        ///< Joint definitions
-    std::unordered_map<std::string, Marker> markers_;      ///< Marker definitions
+    std::vector<Joint> joints_;    ///< Joint definitions (in YAML order)
+    std::vector<Marker> markers_;  ///< Marker definitions (in YAML order)
+    mutable std::unordered_map<std::string, size_t> joint_name_to_index_;   ///< Fast lookup cache
+    mutable std::unordered_map<std::string, size_t> marker_name_to_index_;  ///< Fast lookup cache
+    mutable bool indices_built_ = false;                   ///< Whether lookup indices are built
     std::unordered_map<std::string, bool> active_joints_;  ///< Active joint filter
     bool filter_active_ = false;                           ///< Whether active filter is enabled
+
+    /// @brief Build name-to-index lookup maps (called lazily on first lookup)
+    void build_indices() const;
 };
 
 }  // namespace posetrak

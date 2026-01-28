@@ -88,6 +88,7 @@ std::unordered_map<std::string, Camera> load_cameras_from_toml(std::string const
     }
 
     std::unordered_map<std::string, Camera> cameras;
+    int camera_id = 0;  // Assign sequential IDs
 
     // Iterate over all tables (cameras)
     for (auto const& [key, value] : config) {
@@ -146,7 +147,7 @@ std::unordered_map<std::string, Camera> load_cameras_from_toml(std::string const
             Extrinsics extrinsics{tvec, orientation};
 
             // Create camera (default FPS=30.0, start_frame=0)
-            Camera camera(cam_name, intrinsics, extrinsics);
+            Camera camera(camera_id++, cam_name, intrinsics, extrinsics);
 
             // Use section name as map key (cam1, cam2, etc.)
             cameras.emplace(section_name, std::move(camera));

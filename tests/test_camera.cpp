@@ -33,7 +33,7 @@ Camera make_test_camera(std::string const& name = "test_camera",
                         Intrinsics const& intr = make_test_intrinsics(),
                         Extrinsics const& extr = make_test_extrinsics(), double fps = 30.0,
                         uint32_t start_frame = 0) {
-    return Camera(name, intr, extr, fps, start_frame);
+    return Camera(0, name, intr, extr, fps, start_frame);  // Use default ID of 0
 }
 
 TEST_CASE("Camera construction and accessors", "[camera]") {

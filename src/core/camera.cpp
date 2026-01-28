@@ -82,9 +82,10 @@ SyncPoint SyncPoint::from_json(nlohmann::json const& j) {
 
 // Camera implementation
 
-Camera::Camera(std::string name, Intrinsics const& intrinsics, Extrinsics const& extrinsics,
+Camera::Camera(int id, std::string name, Intrinsics const& intrinsics, Extrinsics const& extrinsics,
                double fps, uint32_t start_frame)
-    : name_(std::move(name)),
+    : id_(id),
+      name_(std::move(name)),
       intrinsics_(intrinsics),
       extrinsics_(extrinsics),
       fps_(fps),
@@ -325,8 +326,31 @@ bool Camera::is_in_bounds(Eigen::Vector2d const& pixel) const {
            pixel.y() >= 0.0 && pixel.y() < static_cast<double>(intrinsics_.height);
 }
 
+Eigen::Matrix<double, 3, 4> Camera::get_projection_matrix() const {
+    // Build intrinsic matrix K
+    Eigen::Matrix3d K = Eigen::Matrix3d::Zero();
+    K(0, 0) = intrinsics_.fx;
+    K(1, 1) = intrinsics_.fy;
+    K(0, 2) = intrinsics_.cx;
+    K(1, 2) = intrinsics_.cy;
+    K(2, 2) = 1.0;
+
+    // Get world-to-camera rotation and translation
+    Eigen::Matrix3d R = extrinsics_.orientation.toRotationMatrix();
+    Eigen::Vector3d t = -R * extrinsics_.position;  // t = -R * C where C is camera center
+
+    // Build [R | t] matrix
+    Eigen::Matrix<double, 3, 4> RT;
+    RT.block<3, 3>(0, 0) = R;
+    RT.col(3) = t;
+
+    // P = K * [R | t]
+    return K * RT;
+}
+
 nlohmann::json Camera::to_json() const {
     nlohmann::json j;
+    j["id"] = id_;
     j["name"] = name_;
     j["intrinsics"] = intrinsics_.to_json();
     j["extrinsics"] = extrinsics_.to_json();
@@ -344,13 +368,14 @@ nlohmann::json Camera::to_json() const {
 }
 
 Camera Camera::from_json(nlohmann::json const& j) {
+    int const id = j.value("id", 0);  // Default to 0 for backward compatibility
     std::string const name = j.at("name").get<std::string>();
     Intrinsics const intrinsics = Intrinsics::from_json(j.at("intrinsics"));
     Extrinsics const extrinsics = Extrinsics::from_json(j.at("extrinsics"));
     double const fps = j.value("fps", 30.0);
     uint32_t const start_frame = j.value("start_frame", 0u);
 
-    Camera cam(name, intrinsics, extrinsics, fps, start_frame);
+    Camera cam(id, name, intrinsics, extrinsics, fps, start_frame);
 
     if (j.contains("sync_points")) {
         std::vector<SyncPoint> sync_points;

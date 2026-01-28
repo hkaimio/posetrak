@@ -75,15 +75,20 @@ struct SyncPoint {
 class Camera {
    public:
     /// @brief Construct camera with name, intrinsics, and extrinsics
+    /// @param id Camera numeric identifier
     /// @param name Camera name/identifier
     /// @param intrinsics Camera intrinsic parameters
     /// @param extrinsics Camera extrinsic parameters
     /// @param fps Frame rate (frames per second), used when no sync points available
     /// @param start_frame Starting frame index offset (0-based)
-    Camera(std::string name, Intrinsics const& intrinsics, Extrinsics const& extrinsics,
+    Camera(int id, std::string name, Intrinsics const& intrinsics, Extrinsics const& extrinsics,
            double fps = 30.0, uint32_t start_frame = 0);
 
     // --- Accessors ---
+
+    /// @brief Get camera ID
+    /// @return Camera ID
+    int id() const { return id_; }
 
     /// @brief Get camera name
     /// @return Camera name
@@ -188,6 +193,10 @@ class Camera {
     /// @return True if pixel is within [0, width) x [0, height)
     bool is_in_bounds(Eigen::Vector2d const& pixel) const;
 
+    /// @brief Get 3x4 projection matrix (world to pixel)
+    /// @return P = K * [R | t] where K is intrinsics, [R|t] is world-to-camera transform
+    Eigen::Matrix<double, 3, 4> get_projection_matrix() const;
+
     /// @brief Serialize to JSON
     nlohmann::json to_json() const;
 
@@ -215,6 +224,7 @@ class Camera {
     /// @return Undistorted normalized coordinates
     Eigen::Vector2d remove_distortion(Eigen::Vector2d const& point_norm) const;
 
+    int id_;                              ///< Camera numeric identifier
     std::string name_;                    ///< Camera name/identifier
     Intrinsics intrinsics_;               ///< Intrinsic parameters
     Extrinsics extrinsics_;               ///< Extrinsic parameters

@@ -19,16 +19,16 @@ TEST_CASE("PinocchioModelBuilder builds model from skeleton", "[pinocchio]") {
     Skeleton skeleton;
 
     // Root joint (pelvis)
-    Joint root("pelvis", "", JointType::REVOLUTE, Eigen::Vector3d::Zero());
-    skeleton.add_joint(std::move(root));
+    uint32_t pelvis_idx = skeleton.add_joint("pelvis", std::nullopt, JointType::REVOLUTE,
+                                             Eigen::Vector3d::Zero(), "", Eigen::Vector3d::Zero());
 
     // Child joint (spine)
-    Joint spine("spine", "pelvis", JointType::REVOLUTE, Eigen::Vector3d(0, 0, 0.1));
-    skeleton.add_joint(std::move(spine));
+    uint32_t spine_idx =
+        skeleton.add_joint("spine", pelvis_idx, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 0.1), "",
+                           Eigen::Vector3d::Zero());
 
     // Marker on spine
-    Marker marker("head_marker", "spine", Eigen::Vector3d(0, 0, 0.2));
-    skeleton.add_marker(std::move(marker));
+    skeleton.add_marker("head_marker", spine_idx, Eigen::Vector3d(0, 0, 0.2), std::nullopt);
 
     SECTION("Model builds successfully") {
         pinocchio::Model model;
@@ -69,14 +69,14 @@ TEST_CASE("PinocchioModelBuilder builds model from skeleton", "[pinocchio]") {
 TEST_CASE("ForwardKinematics computes marker positions", "[forward_kinematics]") {
     // Create a simple skeleton
     Skeleton skeleton;
-    Joint root("pelvis", "", JointType::REVOLUTE, Eigen::Vector3d::Zero());
-    skeleton.add_joint(std::move(root));
+    uint32_t pelvis_idx = skeleton.add_joint("pelvis", std::nullopt, JointType::REVOLUTE,
+                                             Eigen::Vector3d::Zero(), "", Eigen::Vector3d::Zero());
 
-    Joint spine("spine", "pelvis", JointType::REVOLUTE, Eigen::Vector3d(0, 0, 0.1));
-    skeleton.add_joint(std::move(spine));
+    uint32_t spine_idx =
+        skeleton.add_joint("spine", pelvis_idx, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 0.1), "",
+                           Eigen::Vector3d::Zero());
 
-    Marker marker("head_marker", "spine", Eigen::Vector3d(0, 0, 0.2));
-    skeleton.add_marker(std::move(marker));
+    skeleton.add_marker("head_marker", spine_idx, Eigen::Vector3d(0, 0, 0.2), std::nullopt);
 
     // Build Pinocchio model
     pinocchio::Model model;
@@ -143,14 +143,15 @@ TEST_CASE("ForwardKinematics computes marker positions", "[forward_kinematics]")
 TEST_CASE("ForwardKinematics handles spherical joints", "[forward_kinematics]") {
     // Create skeleton with spherical joint
     Skeleton skeleton;
-    Joint root("pelvis", "", JointType::REVOLUTE, Eigen::Vector3d::Zero());
-    skeleton.add_joint(std::move(root));
+    uint32_t pelvis_idx = skeleton.add_joint("pelvis", std::nullopt, JointType::REVOLUTE,
+                                             Eigen::Vector3d::Zero(), "", Eigen::Vector3d::Zero());
 
-    Joint shoulder("shoulder", "pelvis", JointType::SPHERICAL, Eigen::Vector3d(0.2, 0, 0));
-    skeleton.add_joint(std::move(shoulder));
+    uint32_t shoulder_idx =
+        skeleton.add_joint("shoulder", pelvis_idx, JointType::SPHERICAL, Eigen::Vector3d(0.2, 0, 0),
+                           "", Eigen::Vector3d::Zero());
 
-    Marker marker("hand", "shoulder", Eigen::Vector3d(0.3, 0, 0));
-    skeleton.add_marker(std::move(marker));
+    skeleton.add_marker("hand", shoulder_idx, Eigen::Vector3d(0.3, 0, 0), std::nullopt);
+    skeleton.add_marker("shoulder_marker", shoulder_idx, Eigen::Vector3d(0, 0, 0.1), std::nullopt);
 
     // Build model
     pinocchio::Model model;
@@ -276,7 +277,7 @@ TEST_CASE("ForwardKinematics validates against Python ground truth",
 
         // Other joints - iterate through skeleton in YAML file order
         for (auto const& joint : skeleton.joints()) {
-            if (joint.parent.empty())
+            if (!joint.parent_index.has_value())
                 continue;  // Skip root
 
             if (joint.type == JointType::SPHERICAL) {

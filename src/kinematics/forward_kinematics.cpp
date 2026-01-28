@@ -66,7 +66,7 @@ Eigen::VectorXd ForwardKinematics::state_to_config(State const& state, Skeleton 
     // Root joint (if exists): 7 DOF (3 position + 4 quaternion)
     bool has_root = false;
     for (auto const& joint : joints_ordered) {
-        if (joint.parent.empty()) {
+        if (!joint.parent_index.has_value()) {
             has_root = true;
             nq += 7;  // position (3) + quaternion (4)
             break;
@@ -75,7 +75,7 @@ Eigen::VectorXd ForwardKinematics::state_to_config(State const& state, Skeleton 
 
     // Count DOF for other joints
     for (auto const& joint : joints_ordered) {
-        if (!joint.parent.empty()) {  // Skip root (already counted)
+        if (joint.parent_index.has_value()) {  // Skip root (already counted)
             if (joint.type == JointType::SPHERICAL) {
                 nq += 4;  // quaternion
             } else if (joint.type == JointType::REVOLUTE) {
@@ -105,7 +105,7 @@ Eigen::VectorXd ForwardKinematics::state_to_config(State const& state, Skeleton 
     // Process other joints in order
     int joint_angle_idx = 0;
     for (auto const& joint : joints_ordered) {
-        if (joint.parent.empty()) {
+        if (!joint.parent_index.has_value()) {
             // Skip root (already processed)
             continue;
         }

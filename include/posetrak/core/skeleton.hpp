@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace posetrak {
@@ -21,48 +22,23 @@ enum class JointType {
 
 /// @brief Joint definition in skeleton hierarchy
 struct Joint {
-    std::string name;    ///< Unique joint name
-    std::string parent;  ///< Parent joint name (empty for root)
-    int parent_index;    ///< Parent joint index in skeleton (-1 for root)
-    int skeleton_index;  ///< Index in skeleton's joints vector (-1 if not in skeleton)
-    JointType type;      ///< Joint type
-    int dof;             ///< Degrees of freedom (1 for revolute, 3 for spherical, 0 for fixed)
+    std::string name;                      ///< Unique joint name
+    std::optional<uint32_t> parent_index;  ///< Parent joint index (nullopt for root)
+    JointType type;                        ///< Joint type
+    int dof;  ///< Degrees of freedom (1 for revolute, 3 for spherical, 0 for fixed)
     std::array<Eigen::Vector2d, 3> limits;  ///< Joint limits [min, max] per DOF (max 3)
     size_t num_limits;                      ///< Number of active limit pairs (0-3)
     std::string group;                      ///< Joint group for filtering (e.g., "legs", "arms")
     Eigen::Vector3d offset;                 ///< Translation from parent in parent's frame
     Eigen::Vector3d rest_orientation;       ///< Rest orientation as ZYX Euler angles (radians)
-    bool has_rest_orientation;              ///< Whether rest orientation is specified
-
-    /// @brief Construct joint with defaults
-    Joint(std::string const& name_, std::string const& parent_,
-          JointType type_ = JointType::REVOLUTE,
-          Eigen::Vector3d const& offset_ = Eigen::Vector3d::Zero(), std::string const& group_ = "");
-
-    /// @brief Serialize to JSON
-    nlohmann::json to_json() const;
-
-    /// @brief Deserialize from JSON
-    static Joint from_json(nlohmann::json const& j);
 };
 
 /// @brief Marker attached to skeleton for observations
 struct Marker {
     std::string name;            ///< Unique marker name
-    std::string joint;           ///< Attached joint name
-    int joint_index;             ///< Attached joint index in skeleton (-1 if not set)
+    uint32_t joint_index;        ///< Attached joint index in skeleton
     Eigen::Vector3d local_pos;   ///< Position in joint's local frame
     std::optional<int> coco_id;  ///< Optional COCO keypoint ID for compatibility
-
-    /// @brief Construct marker
-    Marker(std::string const& name_, std::string const& joint_, Eigen::Vector3d const& local_pos_,
-           std::optional<int> coco_id_ = std::nullopt);
-
-    /// @brief Serialize to JSON
-    nlohmann::json to_json() const;
-
-    /// @brief Deserialize from JSON
-    static Marker from_json(nlohmann::json const& j);
 };
 
 /// @brief Skeleton hierarchy with joints and markers
@@ -75,14 +51,37 @@ class Skeleton {
     Skeleton() = default;
 
     /// @brief Add joint to skeleton
-    /// @param joint Joint to add
-    /// @throws std::invalid_argument if joint name already exists
-    void add_joint(Joint&& joint);
+    /// @param name Unique joint name
+    /// @param parent_index Parent joint index (nullopt for root)
+    /// @param type Joint type
+    /// @param offset Translation from parent in parent's frame
+    /// @param group Joint group for filtering
+    /// @param rest_orientation Rest orientation as ZYX Euler angles
+    /// @return Index of the added joint
+    /// @throws std::invalid_argument if joint name already exists or parent index invalid
+    uint32_t add_joint(std::string const& name, std::optional<uint32_t> parent_index,
+                       JointType type, Eigen::Vector3d const& offset = Eigen::Vector3d::Zero(),
+                       std::string const& group = "",
+                       Eigen::Vector3d const& rest_orientation = Eigen::Vector3d::Zero());
 
     /// @brief Add marker to skeleton
-    /// @param marker Marker to add
-    /// @throws std::invalid_argument if marker name already exists or joint not found
-    void add_marker(Marker&& marker);
+    /// @param name Unique marker name
+    /// @param joint_index Attached joint index
+    /// @param local_pos Position in joint's local frame
+    /// @param coco_id Optional COCO keypoint ID
+    /// @return Index of the added marker
+    /// @throws std::invalid_argument if marker name already exists or joint index invalid
+    uint32_t add_marker(std::string const& name, uint32_t joint_index,
+                        Eigen::Vector3d const& local_pos,
+                        std::optional<int> coco_id = std::nullopt);
+
+    /// @brief Set joint limits
+    /// @param joint_index Index of the joint
+    /// @param limits Array of limit pairs [min, max] for each DOF
+    /// @param num_limits Number of limit pairs (1 for REVOLUTE, 3 for SPHERICAL)
+    /// @throws std::invalid_argument if joint index invalid
+    void set_joint_limits(uint32_t joint_index, std::array<Eigen::Vector2d, 3> const& limits,
+                          size_t num_limits);
 
     /// @brief Validate skeleton structure
     ///
@@ -148,16 +147,15 @@ class Skeleton {
     static Skeleton from_json(nlohmann::json const& j);
 
    private:
-    /// @brief Find root joint (joint with no parent)
-    /// @return Root joint name or empty string if not found/multiple roots
-    std::string find_root() const;
+    /// @brief Find root joint index (joint with no parent)
+    /// @return Root joint index or nullopt if not found/multiple roots
+    std::optional<uint32_t> find_root() const;
 
     /// @brief Detect cycles in hierarchy starting from joint
-    /// @param joint_name Starting joint
-    /// @param visited Set of visited joints
+    /// @param joint_index Starting joint index
+    /// @param visited Set of visited joint indices
     /// @return True if cycle detected
-    bool detect_cycle(std::string const& joint_name,
-                      std::unordered_map<std::string, bool>& visited) const;
+    bool detect_cycle(uint32_t joint_index, std::unordered_set<uint32_t>& visited) const;
 
     std::vector<Joint> joints_;    ///< Joint definitions (in state vector order)
     std::vector<Marker> markers_;  ///< Marker definitions (in state vector order)

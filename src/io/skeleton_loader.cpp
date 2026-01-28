@@ -52,7 +52,7 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
         throw std::runtime_error("YAML file missing 'joints' section");
     }
 
-    std::unordered_map<std::string, size_t> joint_name_to_idx;
+    std::unordered_map<std::string, uint32_t> joint_name_to_idx;
 
     for (auto const& joint_node : root["joints"]) {
         std::string joint_name = joint_node["name"].as<std::string>();
@@ -60,9 +60,15 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
         JointType type = parse_joint_type(type_str);
 
         // Parse parent
-        std::string parent_name = "";
+        std::optional<uint32_t> parent_index;
         if (joint_node["parent"] && !joint_node["parent"].IsNull()) {
-            parent_name = joint_node["parent"].as<std::string>();
+            std::string parent_name = joint_node["parent"].as<std::string>();
+            auto it = joint_name_to_idx.find(parent_name);
+            if (it == joint_name_to_idx.end()) {
+                throw std::runtime_error("Parent joint '" + parent_name +
+                                         "' not found for joint '" + joint_name + "'");
+            }
+            parent_index = it->second;
         }
 
         // Parse offset
@@ -77,26 +83,29 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
             group = joint_node["group"].as<std::string>();
         }
 
-        // Create joint with default limits
-        Joint joint(joint_name, parent_name, type, offset, group);
-
         // Parse rest orientation (ZYX Euler angles in radians)
+        Eigen::Vector3d rest_orientation = Eigen::Vector3d::Zero();
         if (joint_node["orientation"]) {
-            joint.rest_orientation = parse_vec3(joint_node["orientation"]);
-            joint.has_rest_orientation = true;
-        } else {
-            joint.has_rest_orientation = false;
+            rest_orientation = parse_vec3(joint_node["orientation"]);
         }
 
-        // Parse limits if present
+        // Add joint to skeleton
+        uint32_t joint_idx =
+            skeleton.add_joint(joint_name, parent_index, type, offset, group, rest_orientation);
+        joint_name_to_idx[joint_name] = joint_idx;
+
+        // Parse and set limits if present
         if (joint_node["limits"]) {
+            std::array<Eigen::Vector2d, 3> limits;
+            size_t num_limits = 0;
+
             if (type == JointType::REVOLUTE) {
                 // Revolute: [min, max] array
                 auto const& limits_node = joint_node["limits"];
                 if (limits_node.IsSequence() && limits_node.size() == 2) {
-                    joint.limits[0] =
+                    limits[0] =
                         Eigen::Vector2d(limits_node[0].as<double>(), limits_node[1].as<double>());
-                    joint.num_limits = 1;
+                    num_limits = 1;
                 }
             } else if (type == JointType::SPHERICAL) {
                 // Spherical: {x: [min, max], y: [min, max], z: [min, max]}
@@ -107,34 +116,33 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
                         if (limits_node[axis]) {
                             auto const& axis_limits = limits_node[axis];
                             if (axis_limits.IsSequence() && axis_limits.size() == 2) {
-                                joint.limits[axis_idx] = Eigen::Vector2d(
-                                    axis_limits[0].as<double>(), axis_limits[1].as<double>());
+                                limits[axis_idx] = Eigen::Vector2d(axis_limits[0].as<double>(),
+                                                                   axis_limits[1].as<double>());
                                 ++axis_idx;
                             }
                         }
                     }
-                    joint.num_limits = axis_idx;
+                    num_limits = axis_idx;
                     // Ensure we have exactly 3 limits for spherical joints
-                    if (joint.num_limits != 3) {
+                    if (num_limits != 3) {
                         throw std::runtime_error("Spherical joint '" + joint_name +
                                                  "' must have limits for all 3 axes (x, y, z)");
                     }
                 }
             }
+
+            if (num_limits > 0) {
+                skeleton.set_joint_limits(joint_idx, limits, num_limits);
+            }
         }
-
-        // Add joint to skeleton
-        skeleton.add_joint(std::move(joint));
-        joint_name_to_idx[joint_name] = joint_name_to_idx.size();
     }
-
     // Parse markers
     if (root["markers"]) {
         for (auto const& marker_node : root["markers"]) {
             std::string marker_name = marker_node["name"].as<std::string>();
             std::string parent_name = marker_node["parent"].as<std::string>();
 
-            // Verify joint exists
+            // Find joint index
             auto it = joint_name_to_idx.find(parent_name);
             if (it == joint_name_to_idx.end()) {
                 throw std::runtime_error("Marker '" + marker_name + "' references unknown joint '" +
@@ -151,7 +159,7 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
                 coco_id = static_cast<int>(marker_node["openpose_keypoint"].as<size_t>());
             }
 
-            skeleton.add_marker(Marker(marker_name, parent_name, offset, coco_id));
+            skeleton.add_marker(marker_name, it->second, offset, coco_id);
         }
     }
 

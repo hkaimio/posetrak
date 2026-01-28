@@ -35,19 +35,18 @@ void PinocchioModelBuilder::build_model(Skeleton const& skeleton, pinocchio::Mod
     // Map to track joint name → Pinocchio joint index
     std::map<std::string, pinocchio::JointIndex> joint_to_id;
 
-    // Find the root joint (empty parent string)
+    // Find the root joint (no parent)
     Joint const* root_joint = nullptr;
     for (auto const& joint : skeleton.joints()) {
-        if (joint.parent.empty()) {
+        if (!joint.parent_index.has_value()) {
             root_joint = &joint;
             break;
         }
     }
 
     if (!root_joint) {
-        throw std::runtime_error("Skeleton has no root joint (joint with empty parent)");
+        throw std::runtime_error("Skeleton has no root joint (joint with no parent)");
     }
-
     // Add root joint recursively (starts from universe = 0)
     add_joint_recursive(model, skeleton, *root_joint, 0, joint_to_id);
 
@@ -69,12 +68,13 @@ void PinocchioModelBuilder::add_joint_recursive(
 
     // CRITICAL: Root joint should be at origin, ignore its offset
     // Only non-root joints use offset in SE3 placement
-    bool is_root = joint.parent.empty();
+    bool is_root = !joint.parent_index.has_value();
     if (!is_root) {
         placement.translation() = joint.offset;
 
         // Apply rest orientation if specified (ZYX Euler angles)
-        if (joint.has_rest_orientation) {
+        // Check if rest_orientation has non-zero components
+        if (joint.rest_orientation.norm() > 0) {
             // Convert ZYX intrinsic Euler angles to rotation matrix
             // ZYX intrinsic means: rotate about Z, then about the new Y, then about the new X
             // This is equivalent to: R = Rx * Ry * Rz in extrinsic (fixed-frame) order
@@ -137,9 +137,21 @@ void PinocchioModelBuilder::add_joint_recursive(
     joint_to_id[joint.name] = joint_id;
 
     // Recursively add child joints
-    for (auto const& child_joint : skeleton.joints()) {
-        if (child_joint.parent == joint.name) {
-            add_joint_recursive(model, skeleton, child_joint, joint_id, joint_to_id);
+    // Find the index of the current joint
+    uint32_t current_joint_idx = UINT32_MAX;
+    for (uint32_t i = 0; i < skeleton.joints().size(); ++i) {
+        if (&skeleton.joints()[i] == &joint) {
+            current_joint_idx = i;
+            break;
+        }
+    }
+
+    if (current_joint_idx != UINT32_MAX) {
+        for (auto const& child_joint : skeleton.joints()) {
+            if (child_joint.parent_index.has_value() &&
+                child_joint.parent_index.value() == current_joint_idx) {
+                add_joint_recursive(model, skeleton, child_joint, joint_id, joint_to_id);
+            }
         }
     }
 }
@@ -148,11 +160,12 @@ void PinocchioModelBuilder::add_marker_frames(
     pinocchio::Model& model, Skeleton const& skeleton,
     std::map<std::string, pinocchio::JointIndex> const& joint_to_id) {
     for (auto const& marker : skeleton.markers()) {
-        // Find parent joint ID
-        auto it = joint_to_id.find(marker.joint);
+        // Find parent joint ID using joint index
+        std::string const& joint_name = skeleton.joints()[marker.joint_index].name;
+        auto it = joint_to_id.find(joint_name);
         if (it == joint_to_id.end()) {
             std::cerr << "Warning: Marker '" << marker.name << "' references unknown joint '"
-                      << marker.joint << "', skipping" << std::endl;
+                      << joint_name << "', skipping" << std::endl;
             continue;
         }
 

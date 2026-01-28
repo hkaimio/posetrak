@@ -38,7 +38,7 @@ TEST_CASE("Load simple humanoid skeleton", "[skeleton_loader]") {
         auto pelvis_it = std::find_if(joints.begin(), joints.end(),
                                       [](auto const& joint) { return joint.name == "pelvis"; });
         REQUIRE(pelvis_it != joints.end());
-        REQUIRE(pelvis_it->parent.empty());  // Root has no parent
+        REQUIRE(!pelvis_it->parent_index.has_value());  // Root has no parent
         REQUIRE(pelvis_it->type == JointType::FIXED);
 
         // Find spine joints (ball/spherical)
@@ -46,7 +46,9 @@ TEST_CASE("Load simple humanoid skeleton", "[skeleton_loader]") {
             return joint.name == "spine_lower";
         });
         REQUIRE(spine_lower_it != joints.end());
-        REQUIRE(spine_lower_it->parent == "pelvis");
+        auto pelvis_idx = std::distance(joints.begin(), pelvis_it);
+        REQUIRE(spine_lower_it->parent_index.has_value());
+        REQUIRE(*spine_lower_it->parent_index == static_cast<uint32_t>(pelvis_idx));
         REQUIRE(spine_lower_it->type == JointType::SPHERICAL);
         REQUIRE(spine_lower_it->dof == 3);
 
@@ -54,7 +56,12 @@ TEST_CASE("Load simple humanoid skeleton", "[skeleton_loader]") {
         auto r_elbow_it = std::find_if(joints.begin(), joints.end(),
                                        [](auto const& joint) { return joint.name == "r_elbow"; });
         REQUIRE(r_elbow_it != joints.end());
-        REQUIRE(r_elbow_it->parent == "r_shoulder");
+        auto r_shoulder_it = std::find_if(joints.begin(), joints.end(), [](auto const& joint) {
+            return joint.name == "r_shoulder";
+        });
+        auto r_shoulder_idx = std::distance(joints.begin(), r_shoulder_it);
+        REQUIRE(r_elbow_it->parent_index.has_value());
+        REQUIRE(*r_elbow_it->parent_index == static_cast<uint32_t>(r_shoulder_idx));
         REQUIRE(r_elbow_it->type == JointType::REVOLUTE);
         REQUIRE(r_elbow_it->dof == 1);
     }
@@ -99,6 +106,7 @@ TEST_CASE("Load simple humanoid skeleton", "[skeleton_loader]") {
     }
 
     SECTION("Markers") {
+        auto const& joints = skeleton.joints();
         auto const& markers = skeleton.markers();
 
         // Find pelvis marker
@@ -106,7 +114,10 @@ TEST_CASE("Load simple humanoid skeleton", "[skeleton_loader]") {
             std::find_if(markers.begin(), markers.end(),
                          [](auto const& marker) { return marker.name == "pelvis_center"; });
         REQUIRE(pelvis_marker_it != markers.end());
-        REQUIRE(pelvis_marker_it->joint == "pelvis");
+        auto pelvis_it = std::find_if(joints.begin(), joints.end(),
+                                      [](auto const& joint) { return joint.name == "pelvis"; });
+        auto pelvis_idx = std::distance(joints.begin(), pelvis_it);
+        REQUIRE(pelvis_marker_it->joint_index == static_cast<uint32_t>(pelvis_idx));
         REQUIRE(pelvis_marker_it->coco_id.has_value());
         REQUIRE(*pelvis_marker_it->coco_id == 8);
 
@@ -115,7 +126,11 @@ TEST_CASE("Load simple humanoid skeleton", "[skeleton_loader]") {
             std::find_if(markers.begin(), markers.end(),
                          [](auto const& marker) { return marker.name == "r_shoulder_marker"; });
         REQUIRE(r_shoulder_marker_it != markers.end());
-        REQUIRE(r_shoulder_marker_it->joint == "r_shoulder");
+        auto r_shoulder_it = std::find_if(joints.begin(), joints.end(), [](auto const& joint) {
+            return joint.name == "r_shoulder";
+        });
+        auto r_shoulder_idx = std::distance(joints.begin(), r_shoulder_it);
+        REQUIRE(r_shoulder_marker_it->joint_index == static_cast<uint32_t>(r_shoulder_idx));
         REQUIRE(r_shoulder_marker_it->coco_id.has_value());
         REQUIRE(*r_shoulder_marker_it->coco_id == 2);
     }
@@ -150,7 +165,7 @@ TEST_CASE("Load production Harri skeleton", "[skeleton_loader]") {
         // Find the root joint(s) - should have exactly one
         int root_count = 0;
         for (auto const& joint : joints) {
-            if (joint.parent.empty()) {
+            if (!joint.parent_index.has_value()) {
                 root_count++;
             }
         }
@@ -158,15 +173,15 @@ TEST_CASE("Load production Harri skeleton", "[skeleton_loader]") {
 
         // All non-root joints should have valid parents
         for (auto const& joint : joints) {
-            if (!joint.parent.empty()) {
-                REQUIRE(skeleton.get_joint(joint.parent) != nullptr);
+            if (joint.parent_index.has_value()) {
+                REQUIRE(*joint.parent_index < joints.size());
             }
         }
     }
 
     SECTION("Markers reference valid joints") {
         for (auto const& marker : markers) {
-            REQUIRE(skeleton.get_joint(marker.joint) != nullptr);
+            REQUIRE(marker.joint_index < joints.size());
         }
     }
 

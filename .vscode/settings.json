@@ -1,0 +1,5 @@
+{
+    "testMate.cpp.test.executables": "builddir/tests/test_posetrak",
+    "testMate.cpp.debug.configTemplate": "test_posetrack",
+    "testMate.cpp.test.workingDirectory": "."
+}

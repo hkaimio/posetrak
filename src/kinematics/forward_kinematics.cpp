@@ -30,7 +30,7 @@ std::unordered_map<std::string, Eigen::Vector3d> ForwardKinematics::compute(Stat
 }
 
 std::unordered_map<std::string, Eigen::Vector3d>
-ForwardKinematics::compute(Eigen::VectorXd const& q) {
+ForwardKinematics::compute(Eigen::VectorXd const& q) const {
     // Ensure configuration has correct dimensions
     if (q.size() != model_.nq) {
         throw std::runtime_error("Configuration vector size mismatch: expected " +

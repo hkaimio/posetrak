@@ -54,7 +54,7 @@ class ForwardKinematics {
      * @param q Configuration vector (nq-dimensional)
      * @return Map of marker name → 3D position in world frame
      */
-    std::unordered_map<std::string, Eigen::Vector3d> compute(Eigen::VectorXd const& q);
+    std::unordered_map<std::string, Eigen::Vector3d> compute(Eigen::VectorXd const& q) const;
 
     /**
      * @brief Convert State to Pinocchio configuration vector

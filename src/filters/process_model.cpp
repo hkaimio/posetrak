@@ -28,8 +28,56 @@ State ConstantVelocityModel::propagate(State const& state, double dt) const {
     Eigen::Quaterniond new_orientation = (state.root_orientation() * delta_q).normalized();
     next_state.set_root_orientation(new_orientation);
 
-    // 3. Joint angles: θ' = θ + ω * dt
-    Eigen::VectorXd new_angles = state.joint_angles() + state.joint_velocities() * dt;
+    // 3. Joint angles: propagate based on joint type
+    // - Revolute: simple addition θ' = θ + ω * dt
+    // - Spherical: manifold composition using rotation matrices
+    Eigen::VectorXd new_angles = state.joint_angles();
+    auto joints_ordered = skeleton_.get_joints_ordered();
+
+    int angle_idx = 0;  // Index in joint_angles vector
+    int vel_idx = 0;    // Index in joint_velocities vector
+
+    for (auto const& joint : joints_ordered) {
+        // Skip root joint (handled above)
+        if (!joint.parent_index.has_value()) {
+            continue;
+        }
+
+        if (joint.type == JointType::REVOLUTE) {
+            // Simple integration for revolute joints
+            new_angles[angle_idx] += state.joint_velocities()[vel_idx] * dt;
+            angle_idx++;
+            vel_idx++;
+
+        } else if (joint.type == JointType::SPHERICAL) {
+            // Manifold integration for spherical joints (SO(3))
+            // Current axis-angle representation
+            Eigen::Vector3d current_axis_angle = state.joint_angles().segment<3>(angle_idx);
+            Eigen::Vector3d angular_velocity = state.joint_velocities().segment<3>(vel_idx);
+
+            // Convert current state to rotation matrix
+            Eigen::Quaterniond current_q = State::axis_angle_to_quaternion(current_axis_angle);
+            Eigen::Matrix3d R_current = current_q.toRotationMatrix();
+
+            // Compute delta rotation from angular velocity
+            Eigen::Vector3d delta_axis_angle = angular_velocity * dt;
+            Eigen::Quaterniond delta_q_joint = State::axis_angle_to_quaternion(delta_axis_angle);
+            Eigen::Matrix3d R_delta = delta_q_joint.toRotationMatrix();
+
+            // Compose: R_new = R_current * R_delta
+            Eigen::Matrix3d R_new = R_current * R_delta;
+
+            // Convert back to axis-angle
+            Eigen::Quaterniond new_q(R_new);
+            Eigen::Vector3d new_axis_angle = State::quaternion_to_axis_angle(new_q);
+
+            new_angles.segment<3>(angle_idx) = new_axis_angle;
+            angle_idx += 3;
+            vel_idx += 3;
+        }
+        // FIXED joints have 0 DOF, nothing to update
+    }
+
     next_state.set_joint_angles(new_angles);
 
     // 4. Velocities remain constant (process noise added by UKF)

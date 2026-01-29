@@ -132,13 +132,18 @@ int Skeleton::total_dof() const {
 
 int Skeleton::active_dof() const {
     if (!filter_active_) {
-        return total_dof();
+        // Count active DOFs considering locked axes
+        int total = 0;
+        for (auto const& joint : joints_) {
+            total += joint.active_dof();
+        }
+        return total;
     }
 
     int total = 0;
     for (auto const& joint : joints_) {
         if (active_joints_.contains(joint.name) && active_joints_.at(joint.name)) {
-            total += joint.dof;
+            total += joint.active_dof();
         }
     }
     return total;

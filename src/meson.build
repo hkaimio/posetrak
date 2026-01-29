@@ -14,7 +14,7 @@ posetrak_sources = files(
 
   # Filters (Phase 4)
   'filters/process_model.cpp',
-  # 'filters/sigma_points.cpp',
+  'filters/sigma_points.cpp',
   # 'filters/ukf.cpp',
   # 'filters/outlier_rejection.cpp',
 

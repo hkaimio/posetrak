@@ -24,7 +24,7 @@ test_sources = files(
 
   # Phase 4: UKF
   'test_process_model.cpp',
-  # 'test_sigma_points.cpp',
+  'test_sigma_points.cpp',
   # 'test_ukf.cpp',
 )
 

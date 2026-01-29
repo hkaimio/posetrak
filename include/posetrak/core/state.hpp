@@ -25,11 +25,12 @@ class State {
     /// @param root_orientation Root orientation as unit quaternion (wxyz)
     /// @param joint_angles Joint angles in radians
     /// @param root_velocity Root linear velocity (m/s)
+    /// @param root_angular_velocity Root angular velocity (rad/s)
     /// @param joint_velocities Joint angular velocities (rad/s)
     /// @throws std::invalid_argument if sizes are inconsistent
     State(Eigen::Vector3d const& root_position, Eigen::Quaterniond const& root_orientation,
-          Eigen::VectorXd const& joint_angles, Eigen::VectorXd const& root_velocity,
-          Eigen::VectorXd const& joint_velocities);
+          Eigen::VectorXd const& joint_angles, Eigen::Vector3d const& root_velocity,
+          Eigen::Vector3d const& root_angular_velocity, Eigen::VectorXd const& joint_velocities);
 
     // Accessors
 
@@ -47,7 +48,11 @@ class State {
 
     /// @brief Get root linear velocity
     /// @return 3D velocity vector (m/s)
-    Eigen::VectorXd const& root_velocity() const { return root_velocity_; }
+    Eigen::Vector3d const& root_velocity() const { return root_velocity_; }
+
+    /// @brief Get root angular velocity
+    /// @return 3D angular velocity vector (rad/s)
+    Eigen::Vector3d const& root_angular_velocity() const { return root_angular_velocity_; }
 
     /// @brief Get joint angular velocities
     /// @return Vector of joint velocities (rad/s)
@@ -69,15 +74,20 @@ class State {
 
     /// @brief Set root velocity
     /// @param vel New root velocity
-    void set_root_velocity(Eigen::VectorXd const& vel) { root_velocity_ = vel; }
+    void set_root_velocity(Eigen::Vector3d const& vel) { root_velocity_ = vel; }
+
+    /// @brief Set root angular velocity
+    /// @param vel New root angular velocity
+    void set_root_angular_velocity(Eigen::Vector3d const& vel) { root_angular_velocity_ = vel; }
 
     /// @brief Set joint velocities
     /// @param vel New joint velocities
     void set_joint_velocities(Eigen::VectorXd const& vel) { joint_velocities_ = vel; }
 
     /// @brief Get total error-state dimension
-    /// @return Dimension of error-state vector (3 position + 3 orientation + n_dof joints)
-    int error_state_dim() const { return 3 + 3 + joint_angles_.size(); }
+    /// @return Dimension of error-state vector including velocities
+    ///         (3 pos + 3 ori + n joints) + (3 vel + 3 angvel + n joint_vels)
+    int error_state_dim() const { return 2 * (3 + 3 + joint_angles_.size()); }
 
     /// @brief Get number of degrees of freedom
     /// @return Number of joint angles
@@ -130,11 +140,12 @@ class State {
     static State from_json(nlohmann::json const& j);
 
    private:
-    Eigen::Vector3d root_position_;        ///< Root position in world frame
-    Eigen::Quaterniond root_orientation_;  ///< Root orientation (wxyz convention)
-    Eigen::VectorXd joint_angles_;         ///< Joint angles (radians)
-    Eigen::VectorXd root_velocity_;        ///< Root linear velocity
-    Eigen::VectorXd joint_velocities_;     ///< Joint angular velocities
+    Eigen::Vector3d root_position_;          ///< Root position in world frame
+    Eigen::Quaterniond root_orientation_;    ///< Root orientation (wxyz convention)
+    Eigen::VectorXd joint_angles_;           ///< Joint angles (radians)
+    Eigen::Vector3d root_velocity_;          ///< Root linear velocity
+    Eigen::Vector3d root_angular_velocity_;  ///< Root angular velocity
+    Eigen::VectorXd joint_velocities_;       ///< Joint angular velocities
 };
 
 }  // namespace posetrak

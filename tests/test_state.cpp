@@ -13,7 +13,8 @@ TEST_CASE("State construction", "[state]") {
         State state(5);
 
         REQUIRE(state.num_dof() == 5);
-        REQUIRE(state.error_state_dim() == 3 + 3 + 5);
+        // 2 * (3 pos + 3 ori + 5 dof) = 22
+        REQUIRE(state.error_state_dim() == 2 * (3 + 3 + 5));
         REQUIRE(state.root_position().isZero());
         REQUIRE(state.root_orientation().isApprox(Eigen::Quaterniond::Identity()));
         REQUIRE(state.joint_angles().isZero());
@@ -26,17 +27,18 @@ TEST_CASE("State construction", "[state]") {
         Eigen::Quaterniond quat(1.0, 0.0, 0.0, 0.0);  // Identity (w, x, y, z)
         Eigen::VectorXd angles(3);
         angles << 0.1, 0.2, 0.3;
-        Eigen::VectorXd root_vel(3);
-        root_vel << 0.5, 0.6, 0.7;
+        Eigen::Vector3d root_vel(0.5, 0.6, 0.7);
+        Eigen::Vector3d root_angvel(0.01, 0.02, 0.03);
         Eigen::VectorXd joint_vel(3);
-        joint_vel << 0.01, 0.02, 0.03;
+        joint_vel << 0.1, 0.2, 0.3;
 
-        State state(pos, quat, angles, root_vel, joint_vel);
+        State state(pos, quat, angles, root_vel, root_angvel, joint_vel);
 
         REQUIRE(state.root_position().isApprox(pos));
         REQUIRE(state.root_orientation().isApprox(quat));
         REQUIRE(state.joint_angles().isApprox(angles));
         REQUIRE(state.root_velocity().isApprox(root_vel));
+        REQUIRE(state.root_angular_velocity().isApprox(root_angvel));
         REQUIRE(state.joint_velocities().isApprox(joint_vel));
     }
 
@@ -49,12 +51,13 @@ TEST_CASE("State construction", "[state]") {
         Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
         Eigen::VectorXd angles(3);
         angles.setZero();
-        Eigen::VectorXd root_vel(3);
-        root_vel.setZero();
+        Eigen::Vector3d root_vel = Eigen::Vector3d::Zero();
+        Eigen::Vector3d root_angvel = Eigen::Vector3d::Zero();
         Eigen::VectorXd joint_vel(2);  // Wrong size!
         joint_vel.setZero();
 
-        REQUIRE_THROWS_AS(State(pos, quat, angles, root_vel, joint_vel), std::invalid_argument);
+        REQUIRE_THROWS_AS(State(pos, quat, angles, root_vel, root_angvel, joint_vel),
+                          std::invalid_argument);
     }
 }
 
@@ -125,7 +128,8 @@ TEST_CASE("Error-state conversion", "[state]") {
         State state(3);
         Eigen::VectorXd error = state.to_error_vector();
 
-        REQUIRE(error.size() == 9);  // 3 pos + 3 orient + 3 joints
+        // 2 * (3 pos + 3 orient + 3 joints) = 18
+        REQUIRE(error.size() == 18);
         REQUIRE(error.isZero());
     }
 
@@ -134,23 +138,30 @@ TEST_CASE("Error-state conversion", "[state]") {
         Eigen::Quaterniond quat(Eigen::AngleAxisd(0.5, Eigen::Vector3d(0, 0, 1)));
         Eigen::VectorXd angles(2);
         angles << 0.1, 0.2;
-        Eigen::VectorXd root_vel = Eigen::Vector3d::Zero();
+        Eigen::Vector3d root_vel = Eigen::Vector3d::Zero();
+        Eigen::Vector3d root_angvel = Eigen::Vector3d::Zero();
         Eigen::VectorXd joint_vel = Eigen::VectorXd::Zero(2);
 
-        State state(pos, quat, angles, root_vel, joint_vel);
+        State state(pos, quat, angles, root_vel, root_angvel, joint_vel);
         Eigen::VectorXd error = state.to_error_vector();
 
-        REQUIRE(error.size() == 8);  // 3 + 3 + 2
+        // 2 * (3 + 3 + 2) = 16
+        REQUIRE(error.size() == 16);
         REQUIRE(error.segment<3>(0).isApprox(pos));
         REQUIRE_THAT(error.segment<3>(3).norm(), WithinAbs(0.5, 1e-6));
         REQUIRE(error.segment<2>(6).isApprox(angles));
+        // Velocities should be zero
+        REQUIRE(error.segment<3>(8).isZero());   // root_vel
+        REQUIRE(error.segment<3>(11).isZero());  // root_angvel
+        REQUIRE(error.segment<2>(14).isZero());  // joint_vel
     }
 }
 
 TEST_CASE("Error-state update", "[state]") {
     SECTION("Position update") {
         State state(2);
-        Eigen::VectorXd delta = Eigen::VectorXd::Zero(8);
+        // 2 * (3 + 3 + 2) = 16
+        Eigen::VectorXd delta = Eigen::VectorXd::Zero(16);
         delta.segment<3>(0) << 1.0, 2.0, 3.0;  // Position delta
 
         state.apply_error_update(delta);
@@ -161,7 +172,7 @@ TEST_CASE("Error-state update", "[state]") {
 
     SECTION("Orientation update") {
         State state(2);
-        Eigen::VectorXd delta = Eigen::VectorXd::Zero(8);
+        Eigen::VectorXd delta = Eigen::VectorXd::Zero(16);
         delta.segment<3>(3) << 0.0, 0.0, M_PI / 2.0;  // 90 deg rotation around Z
 
         state.apply_error_update(delta);
@@ -172,7 +183,8 @@ TEST_CASE("Error-state update", "[state]") {
 
     SECTION("Joint angle update") {
         State state(3);
-        Eigen::VectorXd delta = Eigen::VectorXd::Zero(9);
+        // 2 * (3 + 3 + 3) = 18
+        Eigen::VectorXd delta = Eigen::VectorXd::Zero(18);
         delta.segment<3>(6) << 0.1, 0.2, 0.3;
 
         state.apply_error_update(delta);
@@ -187,14 +199,16 @@ TEST_CASE("Error-state update", "[state]") {
         Eigen::Quaterniond quat(Eigen::AngleAxisd(0.3, Eigen::Vector3d(1, 1, 0).normalized()));
         Eigen::VectorXd angles(2);
         angles << 0.5, -0.3;
-        Eigen::VectorXd root_vel = Eigen::Vector3d::Zero();
+        Eigen::Vector3d root_vel = Eigen::Vector3d::Zero();
+        Eigen::Vector3d root_angvel = Eigen::Vector3d::Zero();
         Eigen::VectorXd joint_vel = Eigen::VectorXd::Zero(2);
 
-        State state(pos, quat, angles, root_vel, joint_vel);
+        State state(pos, quat, angles, root_vel, root_angvel, joint_vel);
 
-        // Small perturbation
-        Eigen::VectorXd delta = Eigen::VectorXd::Zero(8);
-        delta << 0.01, 0.02, 0.03, 0.001, 0.002, 0.003, 0.05, -0.05;
+        // Small perturbation: 2 * (3 + 3 + 2) = 16
+        Eigen::VectorXd delta = Eigen::VectorXd::Zero(16);
+        delta << 0.01, 0.02, 0.03, 0.001, 0.002, 0.003, 0.05, -0.05,  // pos, ori, joints
+            0.1, 0.2, 0.3, 0.01, 0.02, 0.03, 0.05, 0.06;              // velocities
 
         state.apply_error_update(delta);
 
@@ -217,12 +231,12 @@ TEST_CASE("JSON serialization", "[state]") {
         Eigen::Quaterniond quat(Eigen::AngleAxisd(0.8, Eigen::Vector3d(1, 0, 1).normalized()));
         Eigen::VectorXd angles(4);
         angles << 0.1, -0.5, 1.2, -0.3;
-        Eigen::VectorXd root_vel(3);
-        root_vel << 0.5, 0.6, 0.7;
+        Eigen::Vector3d root_vel(0.5, 0.6, 0.7);
+        Eigen::Vector3d root_angvel(0.01, 0.02, 0.03);
         Eigen::VectorXd joint_vel(4);
-        joint_vel << 0.01, 0.02, -0.01, 0.03;
+        joint_vel << 0.1, 0.2, -0.1, 0.3;
 
-        State original(pos, quat, angles, root_vel, joint_vel);
+        State original(pos, quat, angles, root_vel, root_angvel, joint_vel);
 
         nlohmann::json j = original.to_json();
         State recovered = State::from_json(j);
@@ -248,13 +262,15 @@ TEST_CASE("Different DOF counts", "[state]") {
     SECTION("Zero DOF") {
         State state(0);
         REQUIRE(state.num_dof() == 0);
-        REQUIRE(state.error_state_dim() == 6);  // Only position and orientation
+        // 2 * (3 pos + 3 ori + 0 dof) = 12
+        REQUIRE(state.error_state_dim() == 2 * (3 + 3 + 0));
     }
 
     SECTION("Large DOF") {
         State state(120);  // Typical for full body
         REQUIRE(state.num_dof() == 120);
-        REQUIRE(state.error_state_dim() == 126);
+        // 2 * (3 pos + 3 ori + 120 dof) = 252
+        REQUIRE(state.error_state_dim() == 2 * (3 + 3 + 120));
         REQUIRE(state.joint_angles().size() == 120);
     }
 }

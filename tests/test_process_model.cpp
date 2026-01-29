@@ -27,9 +27,10 @@ TEST_CASE("ConstantVelocityModel propagates state correctly", "[process_model]")
         Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
         Eigen::VectorXd joint_angles = Eigen::VectorXd::Zero(1);
         Eigen::Vector3d velocity(0.5, 0.0, -0.2);
+        Eigen::Vector3d angular_velocity = Eigen::Vector3d::Zero();
         Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(1);
 
-        State state(pos, quat, joint_angles, velocity, joint_vels);
+        State state(pos, quat, joint_angles, velocity, angular_velocity, joint_vels);
 
         double dt = 0.1;
         State next_state = model.propagate(state, dt);
@@ -46,14 +47,15 @@ TEST_CASE("ConstantVelocityModel propagates state correctly", "[process_model]")
         REQUIRE_THAT(next_state.root_velocity().z(), WithinAbs(velocity.z(), 1e-6));
     }
 
-    SECTION("Root orientation remains constant (no angular velocity in State yet)") {
+    SECTION("Root orientation with zero angular velocity") {
         Eigen::Vector3d pos = Eigen::Vector3d::Zero();
         Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
         Eigen::VectorXd joint_angles = Eigen::VectorXd::Zero(1);
         Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
+        Eigen::Vector3d angular_velocity = Eigen::Vector3d::Zero();
         Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(1);
 
-        State state(pos, quat, joint_angles, velocity, joint_vels);
+        State state(pos, quat, joint_angles, velocity, angular_velocity, joint_vels);
 
         double dt = 1.0;
         State next_state = model.propagate(state, dt);
@@ -65,16 +67,40 @@ TEST_CASE("ConstantVelocityModel propagates state correctly", "[process_model]")
         REQUIRE_THAT(next_state.root_orientation().z(), WithinAbs(0.0, 1e-6));
     }
 
+    SECTION("Root orientation integrates angular velocity") {
+        // Test rotation around z-axis
+        Eigen::Vector3d pos = Eigen::Vector3d::Zero();
+        Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
+        Eigen::VectorXd joint_angles = Eigen::VectorXd::Zero(1);
+        Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
+        Eigen::Vector3d angular_velocity(0.0, 0.0, M_PI);  // π rad/s around z
+        Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(1);
+
+        State state(pos, quat, joint_angles, velocity, angular_velocity, joint_vels);
+
+        double dt = 0.5;  // 0.5 seconds -> π/2 rad rotation
+        State next_state = model.propagate(state, dt);
+
+        // Should rotate by π/2 around z: q = [cos(π/4), 0, 0, sin(π/4)]
+        double expected_w = std::cos(M_PI / 4);
+        double expected_z = std::sin(M_PI / 4);
+        REQUIRE_THAT(next_state.root_orientation().w(), WithinAbs(expected_w, 1e-6));
+        REQUIRE_THAT(next_state.root_orientation().x(), WithinAbs(0.0, 1e-6));
+        REQUIRE_THAT(next_state.root_orientation().y(), WithinAbs(0.0, 1e-6));
+        REQUIRE_THAT(next_state.root_orientation().z(), WithinAbs(expected_z, 1e-6));
+    }
+
     SECTION("Propagates joint angles linearly") {
         Eigen::Vector3d pos = Eigen::Vector3d::Zero();
         Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
         Eigen::VectorXd joint_angles(1);
         joint_angles[0] = 0.5;  // 0.5 rad
         Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
+        Eigen::Vector3d angular_velocity = Eigen::Vector3d::Zero();
         Eigen::VectorXd joint_vels(1);
         joint_vels[0] = 0.2;  // 0.2 rad/s
 
-        State state(pos, quat, joint_angles, velocity, joint_vels);
+        State state(pos, quat, joint_angles, velocity, angular_velocity, joint_vels);
 
         double dt = 0.5;
         State next_state = model.propagate(state, dt);
@@ -110,10 +136,11 @@ TEST_CASE("ConstantVelocityModel propagates state correctly", "[process_model]")
         Eigen::VectorXd angles(1);
         angles[0] = 0.5;
         Eigen::Vector3d vel = Eigen::Vector3d::Zero();
+        Eigen::Vector3d angular_velocity = Eigen::Vector3d::Zero();
         Eigen::VectorXd joint_vels(1);
         joint_vels[0] = 0.1;
 
-        State state(pos, quat, angles, vel, joint_vels);
+        State state(pos, quat, angles, vel, angular_velocity, joint_vels);
 
         double dt = 1.0;
         State next_state = model_limited.propagate(state, dt);
@@ -188,9 +215,10 @@ TEST_CASE("ConstantVelocityModel handles zero velocities", "[process_model]") {
     Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
     Eigen::VectorXd joint_angles = Eigen::VectorXd::Zero(0);
     Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
+    Eigen::Vector3d angular_velocity = Eigen::Vector3d::Zero();
     Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(0);
 
-    State state(pos, quat, joint_angles, velocity, joint_vels);
+    State state(pos, quat, joint_angles, velocity, angular_velocity, joint_vels);
 
     double dt = 1.0;
     State next_state = model.propagate(state, dt);

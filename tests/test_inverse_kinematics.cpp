@@ -43,9 +43,10 @@ TEST_CASE("InverseKinematics solves simple 2-joint problem", "[ik][inverse_kinem
         Eigen::Quaterniond root_quat = Eigen::Quaterniond::Identity();
         Eigen::VectorXd joint_angles(1);
         joint_angles[0] = 0.1;  // 0.1 rad off
-        Eigen::VectorXd root_vel = Eigen::VectorXd::Zero(3);
+        Eigen::Vector3d root_vel = Eigen::Vector3d::Zero();
+        Eigen::Vector3d root_angvel = Eigen::Vector3d::Zero();
         Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(1);
-        State initial(root_pos, root_quat, joint_angles, root_vel, joint_vels);
+        State initial(root_pos, root_quat, joint_angles, root_vel, root_angvel, joint_vels);
 
         auto result = ik.solve(targets, skeleton, initial, 50, 0.001);
 
@@ -72,9 +73,10 @@ TEST_CASE("InverseKinematics solves simple 2-joint problem", "[ik][inverse_kinem
         Eigen::Vector3d root_pos(0, 0, 0);
         Eigen::Quaterniond root_quat = Eigen::Quaterniond::Identity();
         Eigen::VectorXd joint_angles = Eigen::VectorXd::Zero(1);
-        Eigen::VectorXd root_vel = Eigen::VectorXd::Zero(3);
+        Eigen::Vector3d root_vel = Eigen::Vector3d::Zero();
+        Eigen::Vector3d root_angvel = Eigen::Vector3d::Zero();
         Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(1);
-        State initial(root_pos, root_quat, joint_angles, root_vel, joint_vels);
+        State initial(root_pos, root_quat, joint_angles, root_vel, root_angvel, joint_vels);
 
         std::map<std::string, Eigen::Vector3d> targets;
         targets["head"] = target_pos;
@@ -122,9 +124,10 @@ TEST_CASE("InverseKinematics handles multiple markers", "[ik][inverse_kinematics
     Eigen::Vector3d root_pos(0, 0, 0);
     Eigen::Quaterniond root_quat = Eigen::Quaterniond::Identity();
     Eigen::VectorXd joint_angles = Eigen::VectorXd::Constant(1, 0.2);  // Start with offset
-    Eigen::VectorXd root_vel = Eigen::VectorXd::Zero(3);
+    Eigen::Vector3d root_vel = Eigen::Vector3d::Zero();
+    Eigen::Vector3d root_angvel = Eigen::Vector3d::Zero();
     Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(1);
-    State initial(root_pos, root_quat, joint_angles, root_vel, joint_vels);
+    State initial(root_pos, root_quat, joint_angles, root_vel, root_angvel, joint_vels);
 
     auto result = ik.solve(targets, skeleton, initial, 50, 0.01);
 

@@ -12,31 +12,30 @@ State::State(int num_dof)
         throw std::invalid_argument("Number of DOF must be non-negative");
     }
     joint_angles_ = Eigen::VectorXd::Zero(num_dof);
-    root_velocity_ = Eigen::VectorXd::Zero(3);
+    root_velocity_ = Eigen::Vector3d::Zero();
+    root_angular_velocity_ = Eigen::Vector3d::Zero();
     joint_velocities_ = Eigen::VectorXd::Zero(num_dof);
 }
 
 /// @brief Construct state from individual components with validation
 State::State(Eigen::Vector3d const& root_position, Eigen::Quaterniond const& root_orientation,
-             Eigen::VectorXd const& joint_angles, Eigen::VectorXd const& root_velocity,
-             Eigen::VectorXd const& joint_velocities)
+             Eigen::VectorXd const& joint_angles, Eigen::Vector3d const& root_velocity,
+             Eigen::Vector3d const& root_angular_velocity, Eigen::VectorXd const& joint_velocities)
     : root_position_(root_position),
       root_orientation_(root_orientation.normalized()),
       joint_angles_(joint_angles),
       root_velocity_(root_velocity),
+      root_angular_velocity_(root_angular_velocity),
       joint_velocities_(joint_velocities) {
     if (joint_angles.size() != joint_velocities.size()) {
         throw std::invalid_argument("Joint angles and velocities must have same size");
-    }
-    if (root_velocity.size() != 3) {
-        throw std::invalid_argument("Root velocity must be 3D");
     }
 }
 
 /// @brief Convert state to error-state representation for filtering
 Eigen::VectorXd State::to_error_vector() const {
     int const n_dof = num_dof();
-    Eigen::VectorXd error(3 + 3 + n_dof);
+    Eigen::VectorXd error(2 * (3 + 3 + n_dof));
 
     // Position (direct)
     error.segment<3>(0) = root_position_;
@@ -47,13 +46,22 @@ Eigen::VectorXd State::to_error_vector() const {
     // Joint angles (direct)
     error.segment(6, n_dof) = joint_angles_;
 
+    // Root velocity (direct)
+    error.segment<3>(6 + n_dof) = root_velocity_;
+
+    // Root angular velocity (direct)
+    error.segment<3>(9 + n_dof) = root_angular_velocity_;
+
+    // Joint velocities (direct)
+    error.segment(12 + n_dof, n_dof) = joint_velocities_;
+
     return error;
 }
 
 /// @brief Apply additive and manifold updates to state components
 void State::apply_error_update(Eigen::VectorXd const& error_delta) {
     int const n_dof = num_dof();
-    if (error_delta.size() != 3 + 3 + n_dof) {
+    if (error_delta.size() != 2 * (3 + 3 + n_dof)) {
         throw std::invalid_argument("Error delta size mismatch");
     }
 
@@ -67,6 +75,15 @@ void State::apply_error_update(Eigen::VectorXd const& error_delta) {
 
     // Update joint angles (additive)
     joint_angles_ += error_delta.segment(6, n_dof);
+
+    // Update root velocity (additive)
+    root_velocity_ += error_delta.segment<3>(6 + n_dof);
+
+    // Update root angular velocity (additive)
+    root_angular_velocity_ += error_delta.segment<3>(9 + n_dof);
+
+    // Update joint velocities (additive)
+    joint_velocities_ += error_delta.segment(12 + n_dof, n_dof);
 }
 
 /// @brief Extract axis and angle from quaternion using logarithmic map
@@ -127,7 +144,9 @@ nlohmann::json State::to_json() const {
         std::vector<double>(joint_angles_.data(), joint_angles_.data() + joint_angles_.size());
 
     // Velocities
-    j["root_velocity"] = {root_velocity_(0), root_velocity_(1), root_velocity_(2)};
+    j["root_velocity"] = {root_velocity_.x(), root_velocity_.y(), root_velocity_.z()};
+    j["root_angular_velocity"] = {root_angular_velocity_.x(), root_angular_velocity_.y(),
+                                  root_angular_velocity_.z()};
     j["joint_velocities"] = std::vector<double>(
         joint_velocities_.data(), joint_velocities_.data() + joint_velocities_.size());
 
@@ -153,8 +172,10 @@ State State::from_json(nlohmann::json const& j) {
 
     // Parse velocities
     auto const& vel_arr = j.at("root_velocity");
-    Eigen::VectorXd root_velocity(3);
-    root_velocity << vel_arr[0], vel_arr[1], vel_arr[2];
+    Eigen::Vector3d root_velocity(vel_arr[0], vel_arr[1], vel_arr[2]);
+
+    auto const& angvel_arr = j.at("root_angular_velocity");
+    Eigen::Vector3d root_angular_velocity(angvel_arr[0], angvel_arr[1], angvel_arr[2]);
 
     auto const& jvel_arr = j.at("joint_velocities");
     Eigen::VectorXd joint_velocities(jvel_arr.size());
@@ -162,7 +183,8 @@ State State::from_json(nlohmann::json const& j) {
         joint_velocities(i) = jvel_arr[i];
     }
 
-    return State(root_position, root_orientation, joint_angles, root_velocity, joint_velocities);
+    return State(root_position, root_orientation, joint_angles, root_velocity,
+                 root_angular_velocity, joint_velocities);
 }
 
 }  // namespace posetrak

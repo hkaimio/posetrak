@@ -114,11 +114,12 @@ TEST_CASE("ForwardKinematics computes marker positions", "[forward_kinematics]")
         Eigen::Vector3d root_pos(1.0, 2.0, 3.0);
         Eigen::Quaterniond root_quat = Eigen::Quaterniond::Identity();
         Eigen::VectorXd joint_angles(1);
-        joint_angles << 0.5;                                  // spine angle
-        Eigen::VectorXd root_vel = Eigen::VectorXd::Zero(3);  // 3D linear velocity
+        joint_angles << 0.5;  // spine angle
+        Eigen::Vector3d root_vel = Eigen::Vector3d::Zero();
+        Eigen::Vector3d root_angvel = Eigen::Vector3d::Zero();
         Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(1);
 
-        State state(root_pos, root_quat, joint_angles, root_vel, joint_vels);
+        State state(root_pos, root_quat, joint_angles, root_vel, root_angvel, joint_vels);
 
         auto q = ForwardKinematics::state_to_config(state, skeleton);
 
@@ -168,10 +169,11 @@ TEST_CASE("ForwardKinematics handles spherical joints", "[forward_kinematics]") 
         Eigen::VectorXd joint_angles(3);  // 3 DOF for spherical
         joint_angles << 0.1, 0.2, 0.3;    // rotation angles
 
-        Eigen::VectorXd root_vel = Eigen::VectorXd::Zero(3);  // 3D linear velocity
+        Eigen::Vector3d root_vel = Eigen::Vector3d::Zero();
+        Eigen::Vector3d root_angvel = Eigen::Vector3d::Zero();
         Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(3);
 
-        State state(root_pos, root_quat, joint_angles, root_vel, joint_vels);
+        State state(root_pos, root_quat, joint_angles, root_vel, root_angvel, joint_vels);
 
         auto q = ForwardKinematics::state_to_config(state, skeleton);
 

@@ -20,10 +20,13 @@ State ConstantVelocityModel::propagate(State const& state, double dt) const {
     Eigen::Vector3d new_pos = state.root_position() + state.root_velocity() * dt;
     next_state.set_root_position(new_pos);
 
-    // 2. Root orientation: For now, keep constant (no angular velocity in State)
-    // TODO: When State includes root angular velocity, implement:
-    // q' = q ⊗ exp(ω * dt / 2)
-    // For now, orientation remains unchanged
+    // 2. Root orientation: q' = q ⊗ exp(ω * dt / 2)
+    // Use exponential map to integrate angular velocity
+    Eigen::Vector3d const& angular_vel = state.root_angular_velocity();
+    Eigen::Vector3d axis_angle = angular_vel * dt;
+    Eigen::Quaterniond delta_q = State::axis_angle_to_quaternion(axis_angle);
+    Eigen::Quaterniond new_orientation = (state.root_orientation() * delta_q).normalized();
+    next_state.set_root_orientation(new_orientation);
 
     // 3. Joint angles: θ' = θ + ω * dt
     Eigen::VectorXd new_angles = state.joint_angles() + state.joint_velocities() * dt;

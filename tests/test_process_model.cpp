@@ -124,17 +124,19 @@ TEST_CASE("ConstantVelocityModel propagates state correctly", "[process_model]")
         uint32_t joint =
             skeleton_limited.add_joint("limited", root, JointType::REVOLUTE,
                                        Eigen::Vector3d(0, 0, 1), "", Eigen::Vector3d::Zero());
-        // Note: limits array is const, so we need to create joint properly
-        // For now, skip this test as we can't modify limits after creation
-        // TODO: Add proper limit setting in Skeleton API
 
-        // Alternative: test that propagation doesn't crash with limits
+        // Set limits
+        std::array<Eigen::Vector2d, 3> limits;
+        limits[0] = Eigen::Vector2d(-1.0, 1.0);
+        skeleton_limited.set_joint_limits(joint, limits, 1);
+
         ConstantVelocityModel model_limited(skeleton_limited, 0.1);
 
+        // Test 1: Angle within limits - should propagate normally
         Eigen::Vector3d pos = Eigen::Vector3d::Zero();
         Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
         Eigen::VectorXd angles(1);
-        angles[0] = 0.5;
+        angles[0] = 0.5;  // Within [-1.0, 1.0]
         Eigen::Vector3d vel = Eigen::Vector3d::Zero();
         Eigen::Vector3d angular_velocity = Eigen::Vector3d::Zero();
         Eigen::VectorXd joint_vels(1);
@@ -145,8 +147,24 @@ TEST_CASE("ConstantVelocityModel propagates state correctly", "[process_model]")
         double dt = 1.0;
         State next_state = model_limited.propagate(state, dt);
 
-        // Should propagate without crashing
-        REQUIRE(next_state.joint_angles()[0] > 0.0);
+        // Should propagate: 0.5 + 0.1 * 1.0 = 0.6
+        REQUIRE_THAT(next_state.joint_angles()[0], WithinAbs(0.6, 1e-6));
+
+        // Test 2: Angle would exceed upper limit - should be clamped
+        angles[0] = 0.95;
+        joint_vels[0] = 0.1;  // Would reach 1.05, should clamp to 1.0
+        State state2(pos, quat, angles, vel, angular_velocity, joint_vels);
+        State next_state2 = model_limited.propagate(state2, dt);
+
+        REQUIRE_THAT(next_state2.joint_angles()[0], WithinAbs(1.0, 1e-6));
+
+        // Test 3: Angle would go below lower limit - should be clamped
+        angles[0] = -0.95;
+        joint_vels[0] = -0.1;  // Would reach -1.05, should clamp to -1.0
+        State state3(pos, quat, angles, vel, angular_velocity, joint_vels);
+        State next_state3 = model_limited.propagate(state3, dt);
+
+        REQUIRE_THAT(next_state3.joint_angles()[0], WithinAbs(-1.0, 1e-6));
     }
 }
 
@@ -233,4 +251,45 @@ TEST_CASE("ConstantVelocityModel handles zero velocities", "[process_model]") {
     REQUIRE_THAT(next_state.root_orientation().x(), WithinAbs(0.0, 1e-9));
     REQUIRE_THAT(next_state.root_orientation().y(), WithinAbs(0.0, 1e-9));
     REQUIRE_THAT(next_state.root_orientation().z(), WithinAbs(0.0, 1e-9));
+}
+
+TEST_CASE("ConstantVelocityModel handles locked DOFs in spherical joints", "[process_model]") {
+    Skeleton skeleton;
+    skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+
+    // Add a spherical joint with 2 DOFs locked (only Z rotation active)
+    uint32_t shoulder_idx =
+        skeleton.add_joint("shoulder", 0, JointType::SPHERICAL, Eigen::Vector3d(0, 0, 0.1));
+
+    // Set limits: X and Y locked at 0, Z can rotate
+    std::array<Eigen::Vector2d, 3> limits;
+    limits[0] = Eigen::Vector2d(0.0, 0.0);     // X locked at 0
+    limits[1] = Eigen::Vector2d(0.0, 0.0);     // Y locked at 0
+    limits[2] = Eigen::Vector2d(-M_PI, M_PI);  // Z can rotate
+    skeleton.set_joint_limits(shoulder_idx, limits, 3);
+
+    ConstantVelocityModel model(skeleton, 0.1);
+
+    // Create state with shoulder joint having axis-angle [0.1, 0.2, 0.3]
+    // and angular velocities [1.0, 2.0, 3.0]
+    Eigen::Vector3d pos = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
+    Eigen::VectorXd joint_angles(3);
+    joint_angles << 0.1, 0.2, 0.3;
+    Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
+    Eigen::Vector3d angular_velocity = Eigen::Vector3d::Zero();
+    Eigen::VectorXd joint_vels(3);
+    joint_vels << 1.0, 2.0, 3.0;  // Velocities for X, Y, Z axes
+
+    State state(pos, quat, joint_angles, velocity, angular_velocity, joint_vels);
+
+    double dt = 0.1;
+    State next_state = model.propagate(state, dt);
+
+    // X and Y should be reset to 0 (locked)
+    REQUIRE_THAT(next_state.joint_angles()[0], WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(next_state.joint_angles()[1], WithinAbs(0.0, 1e-9));
+
+    // Z should be integrated: 0.3 + 3.0 * 0.1 = 0.6
+    REQUIRE_THAT(next_state.joint_angles()[2], WithinAbs(0.6, 1e-6));
 }

@@ -31,6 +31,37 @@ struct Joint {
     std::string group;                      ///< Joint group for filtering (e.g., "legs", "arms")
     Eigen::Vector3d offset;                 ///< Translation from parent in parent's frame
     Eigen::Vector3d rest_orientation;       ///< Rest orientation as ZYX Euler angles (radians)
+
+    /// @brief Get mask of active (non-locked) DOFs
+    /// @return Array indicating which DOFs are active (true) or locked (false)
+    /// A DOF is considered locked if its min and max limits are equal (within tolerance)
+    std::array<bool, 3> get_active_dof_mask() const {
+        std::array<bool, 3> mask = {false, false, false};
+
+        if (type == JointType::REVOLUTE) {
+            mask[0] = true;
+        } else if (type == JointType::SPHERICAL) {
+            for (size_t i = 0; i < num_limits && i < 3; ++i) {
+                double const min_limit = limits[i].x();
+                double const max_limit = limits[i].y();
+                // DOF is active if limits differ by more than tolerance
+                mask[i] = std::abs(max_limit - min_limit) > 1e-9;
+            }
+            // If no limits set, all DOFs are active
+            if (num_limits == 0) {
+                mask[0] = mask[1] = mask[2] = true;
+            }
+        }
+        // FIXED joints have all false (no active DOFs)
+        return mask;
+    }
+
+    /// @brief Get number of active (non-locked) DOFs
+    /// @return Count of active DOFs
+    int active_dof() const {
+        auto mask = get_active_dof_mask();
+        return static_cast<int>(mask[0]) + static_cast<int>(mask[1]) + static_cast<int>(mask[2]);
+    }
 };
 
 /// @brief Marker attached to skeleton for observations

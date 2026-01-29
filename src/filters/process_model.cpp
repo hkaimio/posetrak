@@ -51,27 +51,53 @@ State ConstantVelocityModel::propagate(State const& state, double dt) const {
 
         } else if (joint.type == JointType::SPHERICAL) {
             // Manifold integration for spherical joints (SO(3))
-            // Current axis-angle representation
-            Eigen::Vector3d current_axis_angle = state.joint_angles().segment<3>(angle_idx);
-            Eigen::Vector3d angular_velocity = state.joint_velocities().segment<3>(vel_idx);
+            // Check for locked DOFs
+            auto active_mask = joint.get_active_dof_mask();
+            int num_active = joint.active_dof();
 
-            // Convert current state to rotation matrix
-            Eigen::Quaterniond current_q = State::axis_angle_to_quaternion(current_axis_angle);
-            Eigen::Matrix3d R_current = current_q.toRotationMatrix();
+            if (num_active == 3) {
+                // All DOFs active - use full rotation composition
+                // Current axis-angle representation
+                Eigen::Vector3d current_axis_angle = state.joint_angles().segment<3>(angle_idx);
+                Eigen::Vector3d angular_velocity = state.joint_velocities().segment<3>(vel_idx);
 
-            // Compute delta rotation from angular velocity
-            Eigen::Vector3d delta_axis_angle = angular_velocity * dt;
-            Eigen::Quaterniond delta_q_joint = State::axis_angle_to_quaternion(delta_axis_angle);
-            Eigen::Matrix3d R_delta = delta_q_joint.toRotationMatrix();
+                // Convert current state to rotation matrix
+                Eigen::Quaterniond current_q = State::axis_angle_to_quaternion(current_axis_angle);
+                Eigen::Matrix3d R_current = current_q.toRotationMatrix();
 
-            // Compose: R_new = R_current * R_delta
-            Eigen::Matrix3d R_new = R_current * R_delta;
+                // Compute delta rotation from angular velocity
+                Eigen::Vector3d delta_axis_angle = angular_velocity * dt;
+                Eigen::Quaterniond delta_q_joint =
+                    State::axis_angle_to_quaternion(delta_axis_angle);
+                Eigen::Matrix3d R_delta = delta_q_joint.toRotationMatrix();
 
-            // Convert back to axis-angle
-            Eigen::Quaterniond new_q(R_new);
-            Eigen::Vector3d new_axis_angle = State::quaternion_to_axis_angle(new_q);
+                // Compose: R_new = R_current * R_delta
+                Eigen::Matrix3d R_new = R_current * R_delta;
 
-            new_angles.segment<3>(angle_idx) = new_axis_angle;
+                // Convert back to axis-angle
+                Eigen::Quaterniond new_q(R_new);
+                Eigen::Vector3d new_axis_angle = State::quaternion_to_axis_angle(new_q);
+
+                new_angles.segment<3>(angle_idx) = new_axis_angle;
+            } else {
+                // Some DOFs locked - only propagate active ones using simple integration
+                Eigen::Vector3d current_axis_angle = state.joint_angles().segment<3>(angle_idx);
+                Eigen::Vector3d angular_velocity = state.joint_velocities().segment<3>(vel_idx);
+
+                for (int i = 0; i < 3; ++i) {
+                    if (active_mask[i]) {
+                        // Active DOF: integrate
+                        new_angles[angle_idx + i] =
+                            current_axis_angle[i] + angular_velocity[i] * dt;
+                    } else {
+                        // Locked DOF: reset to fixed value (min limit)
+                        if (joint.num_limits > static_cast<size_t>(i)) {
+                            new_angles[angle_idx + i] = joint.limits[i].x();
+                        }
+                    }
+                }
+            }
+
             angle_idx += 3;
             vel_idx += 3;
         }

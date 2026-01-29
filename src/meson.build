@@ -13,7 +13,7 @@ posetrak_sources = files(
   'kinematics/inverse_kinematics.cpp',
 
   # Filters (Phase 4)
-  # 'filters/process_model.cpp',
+  'filters/process_model.cpp',
   # 'filters/sigma_points.cpp',
   # 'filters/ukf.cpp',
   # 'filters/outlier_rejection.cpp',

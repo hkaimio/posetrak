@@ -456,6 +456,8 @@ posetrak
 - ✅ All tests pass
 - ✅ Performance is significantly better than Python
 
+**Note**: Full integration testing of triangulation & IK with real-world skeleton and data is deferred to Phase 4 integration testing, when all components (including UKF) are available for end-to-end validation.
+
 **Estimated Time**: 7-10 days
 
 ---

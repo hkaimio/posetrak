@@ -51,52 +51,31 @@ State ConstantVelocityModel::propagate(State const& state, double dt) const {
 
         } else if (joint.type == JointType::SPHERICAL) {
             // Manifold integration for spherical joints (SO(3))
-            // Check for locked DOFs
-            auto active_mask = joint.get_active_dof_mask();
-            int num_active = joint.active_dof();
+            // Always use 3 DOFs in state storage (locked DOFs enforced in limits)
 
-            if (num_active == 3) {
-                // All DOFs active - use full rotation composition
-                // Current axis-angle representation
-                Eigen::Vector3d current_axis_angle = state.joint_angles().segment<3>(angle_idx);
-                Eigen::Vector3d angular_velocity = state.joint_velocities().segment<3>(vel_idx);
+            // Current axis-angle representation
+            Eigen::Vector3d current_axis_angle = state.joint_angles().segment<3>(angle_idx);
+            Eigen::Vector3d angular_velocity = state.joint_velocities().segment<3>(vel_idx);
 
-                // Convert current state to rotation matrix
-                Eigen::Quaterniond current_q = State::axis_angle_to_quaternion(current_axis_angle);
-                Eigen::Matrix3d R_current = current_q.toRotationMatrix();
+            // Convert current state to rotation matrix
+            Eigen::Quaterniond current_q = State::axis_angle_to_quaternion(current_axis_angle);
+            Eigen::Matrix3d R_current = current_q.toRotationMatrix();
 
-                // Compute delta rotation from angular velocity
-                Eigen::Vector3d delta_axis_angle = angular_velocity * dt;
-                Eigen::Quaterniond delta_q_joint =
-                    State::axis_angle_to_quaternion(delta_axis_angle);
-                Eigen::Matrix3d R_delta = delta_q_joint.toRotationMatrix();
+            // Compute delta rotation from angular velocity
+            Eigen::Vector3d delta_axis_angle = angular_velocity * dt;
+            Eigen::Quaterniond delta_q_joint = State::axis_angle_to_quaternion(delta_axis_angle);
+            Eigen::Matrix3d R_delta = delta_q_joint.toRotationMatrix();
 
-                // Compose: R_new = R_current * R_delta
-                Eigen::Matrix3d R_new = R_current * R_delta;
+            // Compose: R_new = R_current * R_delta
+            Eigen::Matrix3d R_new = R_current * R_delta;
 
-                // Convert back to axis-angle
-                Eigen::Quaterniond new_q(R_new);
-                Eigen::Vector3d new_axis_angle = State::quaternion_to_axis_angle(new_q);
+            // Convert back to axis-angle
+            Eigen::Quaterniond new_q(R_new);
+            Eigen::Vector3d new_axis_angle = State::quaternion_to_axis_angle(new_q);
 
-                new_angles.segment<3>(angle_idx) = new_axis_angle;
-            } else {
-                // Some DOFs locked - only propagate active ones using simple integration
-                Eigen::Vector3d current_axis_angle = state.joint_angles().segment<3>(angle_idx);
-                Eigen::Vector3d angular_velocity = state.joint_velocities().segment<3>(vel_idx);
+            new_angles.segment<3>(angle_idx) = new_axis_angle;
 
-                for (int i = 0; i < 3; ++i) {
-                    if (active_mask[i]) {
-                        // Active DOF: integrate
-                        new_angles[angle_idx + i] =
-                            current_axis_angle[i] + angular_velocity[i] * dt;
-                    } else {
-                        // Locked DOF: reset to fixed value (min limit)
-                        if (joint.num_limits > static_cast<size_t>(i)) {
-                            new_angles[angle_idx + i] = joint.limits[i].x();
-                        }
-                    }
-                }
-            }
+            // Note: Locked DOFs will be enforced by enforce_joint_limits()
 
             angle_idx += 3;
             vel_idx += 3;
@@ -156,9 +135,28 @@ void ConstantVelocityModel::enforce_joint_limits(State& state) const {
             joint_angle_idx++;
 
         } else if (joint.type == JointType::SPHERICAL) {
-            // Spherical joint: 3 DOF in error space
-            // Limits are harder to enforce for spherical joints
-            // For now, just skip (quaternion normalization is done elsewhere)
+            // Spherical joint: always 3 DOFs in storage
+            // Check for locked DOFs and enforce them
+            auto active_mask = joint.get_active_dof_mask();
+
+            if (joint_angle_idx + 2 < angles.size()) {
+                for (int i = 0; i < 3; ++i) {
+                    if (!active_mask[i]) {
+                        // Locked DOF: set to limit value (which should be min == max)
+                        if (joint.num_limits > static_cast<size_t>(i)) {
+                            angles[joint_angle_idx + i] = joint.limits[i].x();
+                        } else {
+                            angles[joint_angle_idx + i] = 0.0;
+                        }
+                    } else if (joint.num_limits > static_cast<size_t>(i)) {
+                        // Active DOF with limits: clamp to range
+                        double min_limit = joint.limits[i].x();
+                        double max_limit = joint.limits[i].y();
+                        angles[joint_angle_idx + i] =
+                            std::clamp(angles[joint_angle_idx + i], min_limit, max_limit);
+                    }
+                }
+            }
             joint_angle_idx += 3;
         }
         // FIXED joints have 0 DOF, no angles to enforce

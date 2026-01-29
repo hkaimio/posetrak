@@ -274,9 +274,8 @@ TEST_CASE("UKF prediction with spherical joint", "[ukf]") {
     REQUIRE(ukf.covariance().rows() == 18);
 }
 
-TEST_CASE("UKF prediction with locked DOFs", "[ukf][!mayfail]") {
-    // TODO: Fix locked DOF handling - State stores only active DOFs but
-    // process model expects all 3 DOFs for spherical joints
+TEST_CASE("UKF prediction with locked DOFs", "[ukf]") {
+    // Test with locked DOFs - state always stores 3 DOFs for spherical joints
     Skeleton skeleton;
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     uint32_t shoulder =
@@ -291,29 +290,33 @@ TEST_CASE("UKF prediction with locked DOFs", "[ukf][!mayfail]") {
 
     UnscentedKalmanFilter ukf(skeleton, 0.01);
 
-    // Set initial state - note only 1 active DOF
+    // Set initial state - now always 3 DOFs for spherical joint
     Eigen::Vector3d pos = Eigen::Vector3d::Zero();
     Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
-    Eigen::VectorXd angles(1);  // Only 1 active DOF
-    angles << 0.5;
+    Eigen::VectorXd angles(3);  // Always 3 DOFs for spherical
+    angles << 0.0, 0.0, 0.5;    // X, Y locked at 0, Z active at 0.5
     Eigen::Vector3d vel = Eigen::Vector3d::Zero();
     Eigen::Vector3d angvel = Eigen::Vector3d::Zero();
-    Eigen::VectorXd joint_vels(1);
-    joint_vels << 0.1;
+    Eigen::VectorXd joint_vels(3);
+    joint_vels << 0.0, 0.0, 0.1;  // Only Z has velocity
 
     State initial_state(pos, quat, angles, vel, angvel, joint_vels);
     ukf.set_state(initial_state);
 
-    // Error dimension: 2*(6 + 1) = 14
-    REQUIRE(ukf.error_dim() == 14);
+    // Error dimension: 2*(6 + 3) = 18
+    REQUIRE(ukf.error_dim() == 18);
 
     // Predict
     double dt = 0.1;
     ukf.predict(dt);
 
     // Check dimensions maintained
-    REQUIRE(ukf.state().joint_angles().size() == 1);
-    REQUIRE(ukf.state().joint_velocities().size() == 1);
+    REQUIRE(ukf.state().joint_angles().size() == 3);
+    REQUIRE(ukf.state().joint_velocities().size() == 3);
+
+    // Check locked DOFs remain at 0
+    REQUIRE_THAT(ukf.state().joint_angles()(0), WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(ukf.state().joint_angles()(1), WithinAbs(0.0, 1e-6));
 }
 
 TEST_CASE("UKF multiple prediction steps", "[ukf]") {

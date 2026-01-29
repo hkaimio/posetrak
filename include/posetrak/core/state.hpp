@@ -13,10 +13,15 @@ namespace posetrak {
 /// Uses quaternions for orientation and error-state formulation for filtering.
 /// The error-state formulation uses axis-angle representation for orientation
 /// updates to handle the quaternion manifold properly.
+///
+/// @note Storage invariant: SPHERICAL joints always occupy 3 elements in
+///       joint_angles vector, regardless of locked DOFs. Locked DOFs are
+///       stored as values (typically 0.0) and enforced through constraints.
 class State {
    public:
     /// @brief Construct state with specified DOF count
-    /// @param num_dof Number of degrees of freedom (joint angles)
+    /// @param num_dof Total storage DOFs (use Skeleton::total_dof_count())
+    /// @note For SPHERICAL joints, this should be 3 per joint regardless of locked DOFs
     /// @throws std::invalid_argument if num_dof is negative
     explicit State(int num_dof);
 
@@ -90,7 +95,9 @@ class State {
     int error_state_dim() const { return 2 * (3 + 3 + joint_angles_.size()); }
 
     /// @brief Get number of degrees of freedom
-    /// @return Number of joint angles
+    /// @return Total storage DOFs (size of joint_angles vector)
+    /// @note This is the storage size, not active DOF count.
+    ///       SPHERICAL joints contribute 3 elements each.
     int num_dof() const { return static_cast<int>(joint_angles_.size()); }
 
     /// @brief Convert to error-state vector

@@ -130,6 +130,20 @@ int Skeleton::total_dof() const {
     return total;
 }
 
+int Skeleton::total_dof_count() const {
+    // For state storage: always 3 DOFs for SPHERICAL joints regardless of locked DOFs
+    int total = 0;
+    for (auto const& joint : joints_) {
+        if (joint.type == JointType::REVOLUTE) {
+            total += 1;
+        } else if (joint.type == JointType::SPHERICAL) {
+            total += 3;  // Always 3, regardless of locked DOFs
+        }
+        // FIXED has 0 DOF
+    }
+    return total;
+}
+
 int Skeleton::active_dof() const {
     if (!filter_active_) {
         // Count active DOFs considering locked axes

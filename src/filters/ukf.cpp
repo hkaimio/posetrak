@@ -13,11 +13,11 @@ namespace posetrak {
 UnscentedKalmanFilter::UnscentedKalmanFilter(Skeleton const& skeleton, double process_noise_std,
                                              double alpha, double beta, double kappa)
     : skeleton_(skeleton),
-      state_(skeleton.active_dof()),
-      covariance_(Eigen::MatrixXd::Identity(2 * (6 + skeleton.active_dof()),
-                                            2 * (6 + skeleton.active_dof()))),
-      process_noise_(Eigen::MatrixXd::Identity(2 * (6 + skeleton.active_dof()),
-                                               2 * (6 + skeleton.active_dof()))),
+      state_(skeleton.total_dof_count()),
+      covariance_(Eigen::MatrixXd::Identity(2 * (6 + skeleton.total_dof_count()),
+                                            2 * (6 + skeleton.total_dof_count()))),
+      process_noise_(Eigen::MatrixXd::Identity(2 * (6 + skeleton.total_dof_count()),
+                                               2 * (6 + skeleton.total_dof_count()))),
       sigma_gen_(skeleton, alpha, beta, kappa),
       process_model_(skeleton) {
     // Initialize process noise with given standard deviation
@@ -59,7 +59,7 @@ void UnscentedKalmanFilter::predict(double dt) {
 State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states,
                                                 Eigen::VectorXd const& weights) const {
     // Create mean state
-    State mean_state(skeleton_.active_dof());
+    State mean_state(skeleton_.total_dof_count());
 
     // Mean position (simple weighted average)
     Eigen::Vector3d pos_mean = Eigen::Vector3d::Zero();
@@ -108,8 +108,8 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
 
     // Mean joint angles and velocities
     auto const joints_ordered = skeleton_.get_joints_ordered();
-    Eigen::VectorXd angles_mean = Eigen::VectorXd::Zero(skeleton_.active_dof());
-    Eigen::VectorXd velocities_mean = Eigen::VectorXd::Zero(skeleton_.active_dof());
+    Eigen::VectorXd angles_mean = Eigen::VectorXd::Zero(skeleton_.total_dof_count());
+    Eigen::VectorXd velocities_mean = Eigen::VectorXd::Zero(skeleton_.total_dof_count());
 
     int dof_idx = 0;
     for (auto const& joint : joints_ordered) {
@@ -126,66 +126,47 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
             dof_idx += 1;
 
         } else if (joint.type == JointType::SPHERICAL) {
-            auto const active_mask = joint.get_active_dof_mask();
-            int const num_active = joint.active_dof();
+            // Always 3 DOFs: iterative mean on SO(3) manifold
+            Eigen::Vector3d const initial_aa = states[0].joint_angles().segment<3>(dof_idx);
+            Eigen::Matrix3d R_mean = State::axis_angle_to_quaternion(initial_aa).toRotationMatrix();
 
-            if (num_active == 3) {
-                // Full 3-DOF: iterative mean on SO(3)
-                Eigen::Vector3d const initial_aa = states[0].joint_angles().segment<3>(dof_idx);
-                Eigen::Matrix3d R_mean =
-                    State::axis_angle_to_quaternion(initial_aa).toRotationMatrix();
+            for (int iter = 0; iter < 10; ++iter) {
+                Eigen::Vector3d error_sum = Eigen::Vector3d::Zero();
 
-                for (int iter = 0; iter < 10; ++iter) {
-                    Eigen::Vector3d error_sum = Eigen::Vector3d::Zero();
-
-                    for (size_t i = 0; i < states.size(); ++i) {
-                        Eigen::Vector3d const aa_i = states[i].joint_angles().segment<3>(dof_idx);
-                        Eigen::Matrix3d const R_i =
-                            State::axis_angle_to_quaternion(aa_i).toRotationMatrix();
-
-                        // Relative rotation: R_mean^T * R_i
-                        Eigen::Matrix3d const R_rel = R_mean.transpose() * R_i;
-                        Eigen::Quaterniond const q_rel(R_rel);
-                        Eigen::Vector3d const error_i = State::quaternion_to_axis_angle(q_rel);
-
-                        error_sum += weights(i) * error_i;
-                    }
-
-                    // Update mean
-                    Eigen::Matrix3d const R_delta =
-                        State::axis_angle_to_quaternion(error_sum).toRotationMatrix();
-                    R_mean = R_mean * R_delta;
-
-                    if (error_sum.norm() < 1e-6) {
-                        break;
-                    }
-                }
-
-                // Convert back to axis-angle
-                Eigen::Quaterniond const q_mean(R_mean);
-                angles_mean.segment<3>(dof_idx) = State::quaternion_to_axis_angle(q_mean);
-
-                // Velocities: simple weighted average
                 for (size_t i = 0; i < states.size(); ++i) {
-                    velocities_mean.segment<3>(dof_idx) +=
-                        weights(i) * states[i].joint_velocities().segment<3>(dof_idx);
+                    Eigen::Vector3d const aa_i = states[i].joint_angles().segment<3>(dof_idx);
+                    Eigen::Matrix3d const R_i =
+                        State::axis_angle_to_quaternion(aa_i).toRotationMatrix();
+
+                    // Relative rotation: R_mean^T * R_i
+                    Eigen::Matrix3d const R_rel = R_mean.transpose() * R_i;
+                    Eigen::Quaterniond const q_rel(R_rel);
+                    Eigen::Vector3d const error_i = State::quaternion_to_axis_angle(q_rel);
+
+                    error_sum += weights(i) * error_i;
                 }
 
-                dof_idx += 3;
+                // Update mean
+                Eigen::Matrix3d const R_delta =
+                    State::axis_angle_to_quaternion(error_sum).toRotationMatrix();
+                R_mean = R_mean * R_delta;
 
-            } else {
-                // Locked DOFs: simple weighted average for active DOFs
-                for (int axis = 0; axis < 3; ++axis) {
-                    if (active_mask[axis]) {
-                        for (size_t i = 0; i < states.size(); ++i) {
-                            angles_mean(dof_idx) += weights(i) * states[i].joint_angles()(dof_idx);
-                            velocities_mean(dof_idx) +=
-                                weights(i) * states[i].joint_velocities()(dof_idx);
-                        }
-                        dof_idx++;
-                    }
+                if (error_sum.norm() < 1e-6) {
+                    break;
                 }
             }
+
+            // Convert back to axis-angle
+            Eigen::Quaterniond const q_mean(R_mean);
+            angles_mean.segment<3>(dof_idx) = State::quaternion_to_axis_angle(q_mean);
+
+            // Velocities: simple weighted average
+            for (size_t i = 0; i < states.size(); ++i) {
+                velocities_mean.segment<3>(dof_idx) +=
+                    weights(i) * states[i].joint_velocities().segment<3>(dof_idx);
+            }
+
+            dof_idx += 3;
         }
     }
 
@@ -219,7 +200,7 @@ UnscentedKalmanFilter::compute_state_covariance(std::vector<State> const& states
 
 Eigen::VectorXd UnscentedKalmanFilter::compute_state_error(State const& state,
                                                            State const& reference) const {
-    int const dof = skeleton_.active_dof();
+    int const dof = skeleton_.total_dof_count();
     Eigen::VectorXd error = Eigen::VectorXd::Zero(error_dim());
 
     // Position error
@@ -264,47 +245,27 @@ Eigen::VectorXd UnscentedKalmanFilter::compute_state_error(State const& state,
             joint_angles_idx += 1;
 
         } else if (joint.type == JointType::SPHERICAL) {
-            auto const active_mask = joint.get_active_dof_mask();
-            int const num_active = joint.active_dof();
+            // Always 3 DOFs: error on SO(3) manifold
+            Eigen::Vector3d const aa_ref = reference.joint_angles().segment<3>(joint_angles_idx);
+            Eigen::Vector3d const aa_state = state.joint_angles().segment<3>(joint_angles_idx);
 
-            if (num_active == 3) {
-                // Full 3-DOF: error on SO(3) manifold
-                Eigen::Vector3d const aa_ref =
-                    reference.joint_angles().segment<3>(joint_angles_idx);
-                Eigen::Vector3d const aa_state = state.joint_angles().segment<3>(joint_angles_idx);
+            Eigen::Matrix3d const R_ref =
+                State::axis_angle_to_quaternion(aa_ref).toRotationMatrix();
+            Eigen::Matrix3d const R_state =
+                State::axis_angle_to_quaternion(aa_state).toRotationMatrix();
 
-                Eigen::Matrix3d const R_ref =
-                    State::axis_angle_to_quaternion(aa_ref).toRotationMatrix();
-                Eigen::Matrix3d const R_state =
-                    State::axis_angle_to_quaternion(aa_state).toRotationMatrix();
+            // Relative rotation: R_ref^T * R_state
+            Eigen::Matrix3d const R_rel = R_ref.transpose() * R_state;
+            Eigen::Quaterniond const q_rel(R_rel);
+            error.segment<3>(error_pos_idx) = State::quaternion_to_axis_angle(q_rel);
 
-                // Relative rotation: R_ref^T * R_state
-                Eigen::Matrix3d const R_rel = R_ref.transpose() * R_state;
-                Eigen::Quaterniond const q_rel(R_rel);
-                error.segment<3>(error_pos_idx) = State::quaternion_to_axis_angle(q_rel);
+            // Velocity error
+            error.segment<3>(6 + dof + joint_angles_idx) =
+                state.joint_velocities().segment<3>(joint_angles_idx) -
+                reference.joint_velocities().segment<3>(joint_angles_idx);
 
-                // Velocity error
-                error.segment<3>(6 + dof + joint_angles_idx) =
-                    state.joint_velocities().segment<3>(joint_angles_idx) -
-                    reference.joint_velocities().segment<3>(joint_angles_idx);
-
-                error_pos_idx += 3;
-                joint_angles_idx += 3;
-
-            } else {
-                // Locked DOFs: simple difference for active axes
-                for (int axis = 0; axis < 3; ++axis) {
-                    if (active_mask[axis]) {
-                        error(error_pos_idx) = state.joint_angles()(joint_angles_idx) -
-                                               reference.joint_angles()(joint_angles_idx);
-                        error(6 + dof + joint_angles_idx) =
-                            state.joint_velocities()(joint_angles_idx) -
-                            reference.joint_velocities()(joint_angles_idx);
-                        error_pos_idx++;
-                        joint_angles_idx++;
-                    }
-                }
-            }
+            error_pos_idx += 3;
+            joint_angles_idx += 3;
         }
     }
 

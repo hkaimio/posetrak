@@ -129,6 +129,12 @@ class Skeleton {
     /// @return Total degrees of freedom
     int total_dof() const;
 
+    /// @brief Get total DOF count for state storage (always 3 for SPHERICAL joints)
+    /// @return Total storage DOFs needed for state vector
+    /// @note This returns the size needed for State::joint_angles vector.
+    ///       For SPHERICAL joints, always counts 3 DOFs even if some are locked.
+    int total_dof_count() const;
+
     /// @brief Get active DOF count based on filter
     /// @return Active degrees of freedom
     int active_dof() const;

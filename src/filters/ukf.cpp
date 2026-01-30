@@ -272,11 +272,14 @@ Eigen::VectorXd UnscentedKalmanFilter::compute_state_error(State const& state,
     return error;
 }
 
-void UnscentedKalmanFilter::update(std::vector<Observation> const& observations,
-                                   std::unordered_map<int, Camera> const& cameras,
-                                   ForwardKinematics& fk, double measurement_noise_std) {
+UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& observations,
+                                           std::unordered_map<int, Camera> const& cameras,
+                                           ForwardKinematics& fk, double measurement_noise_std,
+                                           double outlier_threshold_mahalanobis) {
+    UpdateResult result;
+
     if (observations.empty()) {
-        return;  // No observations to process
+        return result;  // No observations to process
     }
 
     int const n_obs = static_cast<int>(observations.size());
@@ -317,20 +320,93 @@ void UnscentedKalmanFilter::update(std::vector<Observation> const& observations,
         innovation_cov(2 * i + 1, 2 * i + 1) += variance;  // y coordinate
     }
 
-    // Step 5: Compute cross-covariance Pxy
-    Eigen::MatrixXd cross_cov = Eigen::MatrixXd::Zero(error_dim(), measurement_dim);
+    // Step 4.5: Perform outlier rejection if enabled
+    std::vector<Observation> inlier_observations;
+    std::vector<ObservationResult> observation_results;
+    Eigen::MatrixXd cross_cov;
+    Eigen::VectorXd observed;
 
-    for (int i = 0; i < n_sigma; ++i) {
-        Eigen::VectorXd state_error = compute_state_error(sigma_points[i], state_);
-        Eigen::VectorXd measurement_error = predicted_measurements.col(i) - measurement_mean;
-        cross_cov += weights_cov(i) * (state_error * measurement_error.transpose());
+    if (outlier_threshold_mahalanobis > 0.0) {
+        // Perform outlier rejection
+        auto [inliers, results] =
+            reject_outliers(observations, predicted_measurements, measurement_mean, innovation_cov,
+                            outlier_threshold_mahalanobis);
+        inlier_observations = inliers;
+        observation_results = results;
+
+        // If all observations rejected, return early
+        if (inlier_observations.empty()) {
+            result.num_observations = static_cast<int>(observations.size());
+            result.num_outliers = static_cast<int>(observations.size());
+            result.num_inliers = 0;
+            result.observations = observation_results;
+            return result;
+        }
+
+        // Recompute predictions with only inliers
+        int const n_inliers = static_cast<int>(inlier_observations.size());
+        int const inlier_dim = 2 * n_inliers;
+
+        Eigen::MatrixXd inlier_predictions(inlier_dim, n_sigma);
+        for (int i = 0; i < n_sigma; ++i) {
+            inlier_predictions.col(i) =
+                predict_measurements(sigma_points[i], inlier_observations, cameras, fk);
+        }
+
+        // Recompute mean predicted measurement for inliers
+        measurement_mean = Eigen::VectorXd::Zero(inlier_dim);
+        for (int i = 0; i < n_sigma; ++i) {
+            measurement_mean += weights_mean(i) * inlier_predictions.col(i);
+        }
+
+        // Recompute innovation covariance for inliers
+        innovation_cov = Eigen::MatrixXd::Zero(inlier_dim, inlier_dim);
+        for (int i = 0; i < n_sigma; ++i) {
+            Eigen::VectorXd innovation = inlier_predictions.col(i) - measurement_mean;
+            innovation_cov += weights_cov(i) * (innovation * innovation.transpose());
+        }
+
+        // Add measurement noise for inliers
+        for (int i = 0; i < n_inliers; ++i) {
+            double noise_std = inlier_observations[i].measurement_noise_std(measurement_noise_std);
+            double variance = noise_std * noise_std;
+            innovation_cov(2 * i, 2 * i) += variance;
+            innovation_cov(2 * i + 1, 2 * i + 1) += variance;
+        }
+
+        // Recompute cross-covariance with inliers
+        cross_cov = Eigen::MatrixXd::Zero(error_dim(), inlier_dim);
+        for (int i = 0; i < n_sigma; ++i) {
+            Eigen::VectorXd state_error = compute_state_error(sigma_points[i], state_);
+            Eigen::VectorXd measurement_error = inlier_predictions.col(i) - measurement_mean;
+            cross_cov += weights_cov(i) * (state_error * measurement_error.transpose());
+        }
+
+        // Update observed vector to use inliers
+        observed = observations_to_vector(inlier_observations);
+    } else {
+        // No outlier rejection - compute diagnostics for all observations
+        observation_results =
+            compute_observation_diagnostics(observations, measurement_mean, innovation_cov);
+        inlier_observations = observations;
+        observed = observations_to_vector(observations);
+    }
+
+    // Step 5: Compute cross-covariance Pxy (already computed if outlier rejection enabled)
+    if (outlier_threshold_mahalanobis <= 0.0) {
+        // Cross-covariance not yet computed (no outlier rejection)
+        cross_cov = Eigen::MatrixXd::Zero(error_dim(), measurement_dim);
+        for (int i = 0; i < n_sigma; ++i) {
+            Eigen::VectorXd state_error = compute_state_error(sigma_points[i], state_);
+            Eigen::VectorXd measurement_error = predicted_measurements.col(i) - measurement_mean;
+            cross_cov += weights_cov(i) * (state_error * measurement_error.transpose());
+        }
     }
 
     // Step 6: Compute Kalman gain K = Pxy * S^-1
     Eigen::MatrixXd kalman_gain = cross_cov * innovation_cov.inverse();
 
     // Step 7: Compute innovation (observed - predicted)
-    Eigen::VectorXd observed = observations_to_vector(observations);
     Eigen::VectorXd innovation = observed - measurement_mean;
 
     // Step 8: Update state in error space
@@ -379,6 +455,29 @@ void UnscentedKalmanFilter::update(std::vector<Observation> const& observations,
         double epsilon = std::abs(min_eigenvalue) + 1e-6;
         covariance_ += epsilon * Eigen::MatrixXd::Identity(error_dim(), error_dim());
     }
+
+    // Step 11: Compute Normalized Innovation Squared (NIS) for filter validation
+    // NIS = innovation^T * S^-1 * innovation (should follow chi-squared distribution)
+    double nis = 0.0;
+    try {
+        Eigen::MatrixXd innovation_cov_inv = innovation_cov.inverse();
+        nis = innovation.transpose() * innovation_cov_inv * innovation;
+    } catch (...) {
+        // If inversion fails, use pseudo-inverse
+        Eigen::MatrixXd innovation_cov_pinv =
+            innovation_cov.completeOrthogonalDecomposition().pseudoInverse();
+        nis = innovation.transpose() * innovation_cov_pinv * innovation;
+    }
+
+    // Fill in result
+    result.num_observations = static_cast<int>(observations.size());
+    result.num_inliers = static_cast<int>(inlier_observations.size());
+    result.num_outliers = result.num_observations - result.num_inliers;
+    result.observations = observation_results;
+    result.nis = nis;
+    result.nis_dof = static_cast<int>(innovation.size());
+
+    return result;
 }
 
 Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
@@ -438,6 +537,132 @@ UnscentedKalmanFilter::observations_to_vector(std::vector<Observation> const& ob
     }
 
     return measurements;
+}
+
+double
+UnscentedKalmanFilter::compute_mahalanobis_distance(Eigen::Vector2d const& innovation,
+                                                    Eigen::Matrix2d const& covariance) const {
+    // Mahalanobis distance: sqrt(innovation^T * cov^-1 * innovation)
+    Eigen::Matrix2d cov_inv = covariance.inverse();
+    double distance_squared = innovation.transpose() * cov_inv * innovation;
+    return std::sqrt(distance_squared);
+}
+
+std::pair<std::vector<Observation>, std::vector<ObservationResult>>
+UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observations,
+                                       Eigen::MatrixXd const& predicted_measurements,
+                                       Eigen::VectorXd const& measurement_mean,
+                                       Eigen::MatrixXd const& innovation_cov,
+                                       double threshold) const {
+    std::vector<Observation> inliers;
+    std::vector<ObservationResult> results;
+
+    Eigen::VectorXd observed = observations_to_vector(observations);
+
+    for (size_t i = 0; i < observations.size(); ++i) {
+        Observation const& obs = observations[i];
+
+        // Extract predicted and actual measurements for this observation
+        Eigen::Vector2d predicted = measurement_mean.segment<2>(2 * i);
+        Eigen::Vector2d actual = observed.segment<2>(2 * i);
+
+        // Check for NaN in predicted (failed projection)
+        if (!std::isfinite(predicted.x()) || !std::isfinite(predicted.y())) {
+            // Projection failed - reject as outlier
+            ObservationResult obs_result;
+            obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
+            obs_result.camera_id = obs.camera_id;
+            obs_result.is_outlier = true;
+            obs_result.mahalanobis_distance = 0.0;
+            obs_result.innovation = Eigen::Vector2d::Zero();
+            obs_result.predicted = predicted;
+            obs_result.actual = actual;
+            results.push_back(obs_result);
+            continue;
+        }
+
+        // Extract 2x2 covariance for this observation
+        Eigen::Matrix2d cov_2x2 = innovation_cov.block<2, 2>(2 * i, 2 * i);
+
+        // Compute innovation
+        Eigen::Vector2d innovation = actual - predicted;
+
+        // Compute Mahalanobis distance
+        double mahal_dist = compute_mahalanobis_distance(innovation, cov_2x2);
+
+        // Check if outlier
+        bool is_outlier = mahal_dist > threshold;
+
+        // Create result
+        ObservationResult obs_result;
+        obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
+        obs_result.camera_id = obs.camera_id;
+        obs_result.is_outlier = is_outlier;
+        obs_result.mahalanobis_distance = mahal_dist;
+        obs_result.innovation = innovation;
+        obs_result.predicted = predicted;
+        obs_result.actual = actual;
+        results.push_back(obs_result);
+
+        // Keep observation if inlier
+        if (!is_outlier) {
+            inliers.push_back(obs);
+        }
+    }
+
+    return {inliers, results};
+}
+
+std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagnostics(
+    std::vector<Observation> const& observations, Eigen::VectorXd const& measurement_mean,
+    Eigen::MatrixXd const& innovation_cov) const {
+    std::vector<ObservationResult> results;
+
+    Eigen::VectorXd observed = observations_to_vector(observations);
+
+    for (size_t i = 0; i < observations.size(); ++i) {
+        Observation const& obs = observations[i];
+
+        // Extract predicted and actual measurements
+        Eigen::Vector2d predicted = measurement_mean.segment<2>(2 * i);
+        Eigen::Vector2d actual = observed.segment<2>(2 * i);
+
+        // Check for NaN in predicted (failed projection)
+        if (!std::isfinite(predicted.x()) || !std::isfinite(predicted.y())) {
+            ObservationResult obs_result;
+            obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
+            obs_result.camera_id = obs.camera_id;
+            obs_result.is_outlier = true;  // Mark as outlier for diagnostics
+            obs_result.mahalanobis_distance = 0.0;
+            obs_result.innovation = Eigen::Vector2d::Zero();
+            obs_result.predicted = predicted;
+            obs_result.actual = actual;
+            results.push_back(obs_result);
+            continue;
+        }
+
+        // Extract 2x2 covariance for this observation
+        Eigen::Matrix2d cov_2x2 = innovation_cov.block<2, 2>(2 * i, 2 * i);
+
+        // Compute innovation
+        Eigen::Vector2d innovation = actual - predicted;
+
+        // Compute Mahalanobis distance
+        double mahal_dist = compute_mahalanobis_distance(innovation, cov_2x2);
+
+        // Create result (not an outlier - just diagnostics)
+        ObservationResult obs_result;
+        obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
+        obs_result.camera_id = obs.camera_id;
+        obs_result.is_outlier = false;
+        obs_result.mahalanobis_distance = mahal_dist;
+        obs_result.innovation = innovation;
+        obs_result.predicted = predicted;
+        obs_result.actual = actual;
+        results.push_back(obs_result);
+    }
+
+    return results;
 }
 
 }  // namespace posetrak

@@ -13,6 +13,7 @@
 #include "posetrak/core/state.hpp"
 #include "posetrak/filters/process_model.hpp"
 #include "posetrak/filters/sigma_points.hpp"
+#include "posetrak/filters/update_result.hpp"
 #include "posetrak/kinematics/forward_kinematics.hpp"
 #include <memory>
 #include <optional>
@@ -60,16 +61,22 @@ class UnscentedKalmanFilter {
      * @param cameras Map of camera_id -> Camera
      * @param fk Forward kinematics computer
      * @param measurement_noise_std Measurement noise standard deviation (pixels)
+     * @param outlier_threshold_mahalanobis Mahalanobis distance threshold for outlier rejection
+     *        (0.0 = disabled). Recommended: 5.991 (95% confidence, 2-DOF chi-squared)
      *
      * Updates state and covariance using unscented transform:
      * 1. For each sigma point: FK → camera projection
      * 2. Compute predicted measurements and innovation covariance
-     * 3. Compute Kalman gain
-     * 4. Update state and covariance (Joseph form)
+     * 3. Perform outlier rejection (if threshold > 0)
+     * 4. Compute Kalman gain
+     * 5. Update state and covariance
+     *
+     * @return UpdateResult with diagnostics (inliers, outliers, Mahalanobis distances)
      */
-    void update(std::vector<Observation> const& observations,
-                std::unordered_map<int, Camera> const& cameras, ForwardKinematics& fk,
-                double measurement_noise_std = 5.0);
+    UpdateResult update(std::vector<Observation> const& observations,
+                        std::unordered_map<int, Camera> const& cameras, ForwardKinematics& fk,
+                        double measurement_noise_std = 5.0,
+                        double outlier_threshold_mahalanobis = 0.0);
 
     /**
      * @brief Get current state estimate
@@ -143,6 +150,42 @@ class UnscentedKalmanFilter {
                                          std::vector<Observation> const& observations,
                                          std::unordered_map<int, Camera> const& cameras,
                                          ForwardKinematics& fk) const;
+
+    /**
+     * @brief Compute Mahalanobis distance for a 2D innovation
+     * @param innovation Innovation vector [u_err, v_err]
+     * @param covariance 2x2 covariance matrix
+     * @return Mahalanobis distance
+     */
+    double compute_mahalanobis_distance(Eigen::Vector2d const& innovation,
+                                        Eigen::Matrix2d const& covariance) const;
+
+    /**
+     * @brief Perform outlier rejection on observations
+     * @param observations All observations
+     * @param predicted_measurements Predicted measurements from sigma points (dim x n_sigma)
+     * @param measurement_mean Mean predicted measurement
+     * @param innovation_cov Innovation covariance matrix
+     * @param threshold Mahalanobis distance threshold
+     * @return Tuple of (inlier observations, all observation results)
+     */
+    std::pair<std::vector<Observation>, std::vector<ObservationResult>>
+    reject_outliers(std::vector<Observation> const& observations,
+                    Eigen::MatrixXd const& predicted_measurements,
+                    Eigen::VectorXd const& measurement_mean, Eigen::MatrixXd const& innovation_cov,
+                    double threshold) const;
+
+    /**
+     * @brief Compute observation diagnostics without rejection
+     * @param observations All observations
+     * @param measurement_mean Mean predicted measurement
+     * @param innovation_cov Innovation covariance matrix
+     * @return Vector of observation results with Mahalanobis distances
+     */
+    std::vector<ObservationResult>
+    compute_observation_diagnostics(std::vector<Observation> const& observations,
+                                    Eigen::VectorXd const& measurement_mean,
+                                    Eigen::MatrixXd const& innovation_cov) const;
 
     /**
      * @brief Convert observations to measurement vector

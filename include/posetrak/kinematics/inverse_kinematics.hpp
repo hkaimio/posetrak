@@ -101,6 +101,14 @@ class InverseKinematics {
      */
     void enforce_joint_limits(Eigen::VectorXd& q, Skeleton const& skeleton);
 
+    /**
+     * @brief Convert Pinocchio configuration to State
+     * @param q Configuration vector
+     * @param skeleton Skeleton structure
+     * @return State with root pose and joint angles
+     */
+    State config_to_state(Eigen::VectorXd const& q, Skeleton const& skeleton);
+
     pinocchio::Model const& model_;
     pinocchio::Data& data_;
     ForwardKinematics const& fk_;

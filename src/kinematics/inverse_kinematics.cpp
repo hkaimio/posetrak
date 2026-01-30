@@ -58,11 +58,8 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
 
         // Check convergence
         if (rms_error < tolerance) {
-            // Convert back to State
-            // TODO: Implement config_to_state properly
-            // For now, create minimal state
-            int num_joints = skeleton.joints().size() - 1;  // Exclude root
-            State final_state(num_joints > 0 ? num_joints : 0);
+            // Convert configuration back to State
+            State final_state = config_to_state(q, skeleton);
             return IKResult{final_state, rms_error, iter + 1, true};
         }
 
@@ -122,11 +119,59 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
             q[6] = q_new.w();
         }
 
-        // Update other DOFs (revolute joints)
-        // Velocity space for free-flyer is 6 DOF, so joint velocities start at index 6
+        // Update joint configurations from velocity-space delta_q
+        // Need to map from velocity space (nv) to configuration space (nq)
         if (model_.nv > 6 && model_.nq > 7) {
-            int joint_dof = model_.nv - 6;
-            q.tail(model_.nq - 7) += delta_q.tail(joint_dof);
+            int v_idx = 6;  // Start after root in velocity space
+            int q_idx = 7;  // Start after root in config space
+
+            for (auto const& joint : skeleton.joints()) {
+                if (joint.parent_index == std::nullopt) {
+                    continue;  // Skip root
+                }
+
+                if (joint.type == JointType::REVOLUTE) {
+                    // 1 DOF in both spaces
+                    if (v_idx < model_.nv && q_idx < model_.nq) {
+                        q[q_idx] += delta_q[v_idx];
+                        v_idx++;
+                        q_idx++;
+                    }
+                } else if (joint.type == JointType::SPHERICAL) {
+                    // 3 DOF in velocity space, 4 DOF in config space (quaternion)
+                    if (v_idx + 2 < model_.nv && q_idx + 3 < model_.nq) {
+                        // Extract angular velocity delta
+                        Eigen::Vector3d omega = delta_q.segment<3>(v_idx);
+
+                        // Current joint quaternion [x, y, z, w]
+                        Eigen::Quaterniond q_joint(q[q_idx + 3], q[q_idx], q[q_idx + 1],
+                                                   q[q_idx + 2]);
+
+                        // Convert angular velocity to quaternion update
+                        Eigen::Quaterniond q_delta;
+                        double angle = omega.norm();
+                        if (angle > 1e-8) {
+                            Eigen::AngleAxisd aa(angle, omega.normalized());
+                            q_delta = Eigen::Quaterniond(aa);
+                        } else {
+                            q_delta = Eigen::Quaterniond::Identity();
+                        }
+
+                        // Apply update
+                        Eigen::Quaterniond q_new = q_delta * q_joint;
+                        q_new.normalize();
+
+                        // Store back
+                        q[q_idx] = q_new.x();
+                        q[q_idx + 1] = q_new.y();
+                        q[q_idx + 2] = q_new.z();
+                        q[q_idx + 3] = q_new.w();
+
+                        v_idx += 3;
+                        q_idx += 4;
+                    }
+                }
+            }
         }
 
         // Enforce joint limits
@@ -137,8 +182,8 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
     Eigen::VectorXd final_error = compute_error(q, target_markers);
     double rms_error = final_error.norm() / std::sqrt(marker_names.size());
 
-    int num_joints = skeleton.joints().size() - 1;  // Exclude root
-    State final_state(num_joints > 0 ? num_joints : 0);
+    // Convert configuration back to State even if not converged
+    State final_state = config_to_state(q, skeleton);
     return IKResult{final_state, rms_error, iter, false};
 }
 
@@ -242,6 +287,76 @@ void InverseKinematics::enforce_joint_limits(Eigen::VectorXd& q, Skeleton const&
             q_idx += 4;
         }
     }
+}
+
+State InverseKinematics::config_to_state(Eigen::VectorXd const& q, Skeleton const& skeleton) {
+    // Extract root position and orientation
+    Eigen::Vector3d root_position = q.head<3>();
+    Eigen::Quaterniond root_orientation(q[6], q[3], q[4], q[5]);  // [w, x, y, z]
+    root_orientation.normalize();
+
+    // Count joint DOFs (storage DOFs)
+    int joint_dof = 0;
+    for (auto const& joint : skeleton.joints()) {
+        if (joint.parent_index == std::nullopt) {
+            continue;  // Skip root
+        }
+        if (joint.type == JointType::REVOLUTE) {
+            joint_dof += 1;
+        } else if (joint.type == JointType::SPHERICAL) {
+            joint_dof += 3;  // Euler angles storage
+        }
+    }
+
+    // Extract joint angles
+    Eigen::VectorXd joint_angles = Eigen::VectorXd::Zero(joint_dof);
+
+    if (model_.nq > 7 && joint_dof > 0) {
+        int q_idx = 7;      // Start after root in config space
+        int angle_idx = 0;  // Index in joint_angles
+
+        for (auto const& joint : skeleton.joints()) {
+            if (joint.parent_index == std::nullopt) {
+                continue;  // Skip root
+            }
+
+            if (joint.type == JointType::REVOLUTE) {
+                // Single DOF - copy directly
+                if (q_idx < model_.nq && angle_idx < joint_dof) {
+                    joint_angles[angle_idx] = q[q_idx];
+                    q_idx++;
+                    angle_idx++;
+                }
+            } else if (joint.type == JointType::SPHERICAL) {
+                // 4 DOF quaternion in config space -> 3 DOF Euler angles in State
+                if (q_idx + 3 < model_.nq && angle_idx + 2 < joint_dof) {
+                    // Extract quaternion [x, y, z, w]
+                    Eigen::Quaterniond joint_quat(q[q_idx + 3], q[q_idx], q[q_idx + 1],
+                                                  q[q_idx + 2]);
+                    joint_quat.normalize();
+
+                    // Convert to Euler angles (simple extraction for now)
+                    // TODO: Proper quaternion to Euler conversion
+                    Eigen::Vector3d euler(joint_quat.x(), joint_quat.y(), joint_quat.z());
+
+                    joint_angles[angle_idx] = euler[0];
+                    joint_angles[angle_idx + 1] = euler[1];
+                    joint_angles[angle_idx + 2] = euler[2];
+
+                    q_idx += 4;
+                    angle_idx += 3;
+                }
+            }
+        }
+    }
+
+    // Zero velocities (IK doesn't estimate velocities)
+    Eigen::Vector3d root_velocity = Eigen::Vector3d::Zero();
+    Eigen::Vector3d root_angular_velocity = Eigen::Vector3d::Zero();
+    Eigen::VectorXd joint_velocities = Eigen::VectorXd::Zero(joint_dof);
+
+    return State(root_position, root_orientation, joint_angles, root_velocity,
+                 root_angular_velocity, joint_velocities);
 }
 
 }  // namespace posetrak

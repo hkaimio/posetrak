@@ -1,0 +1,209 @@
+/**
+ * @file tracker.hpp
+ * @brief Main tracking interface orchestrating UKF-based pose tracking
+ *
+ * The Tracker class provides a high-level interface for markerless motion capture:
+ * 1. Initialize from first frame (triangulation + IK)
+ * 2. Track through sequence (predict + update cycle)
+ * 3. Report results via callbacks
+ */
+
+#pragma once
+
+#include "posetrak/core/camera.hpp"
+#include "posetrak/core/observation.hpp"
+#include "posetrak/core/skeleton.hpp"
+#include "posetrak/core/state.hpp"
+#include "posetrak/filters/ukf.hpp"
+#include "posetrak/filters/update_result.hpp"
+#include "posetrak/kinematics/forward_kinematics.hpp"
+#include "posetrak/kinematics/inverse_kinematics.hpp"
+#include "posetrak/kinematics/triangulation.hpp"
+#include <functional>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace posetrak {
+
+/**
+ * @brief Configuration parameters for Tracker
+ */
+struct TrackerConfig {
+    // UKF parameters
+    double process_noise_std = 0.1;      ///< Process noise std deviation
+    double measurement_noise_std = 5.0;  ///< Measurement noise std (pixels)
+    double outlier_threshold = 5.991;    ///< Chi-squared threshold (95% for 2-DOF)
+
+    // Initialization parameters
+    double init_position_std = 0.5;     ///< Initial position uncertainty (meters)
+    double init_orientation_std = 0.5;  ///< Initial orientation uncertainty (radians)
+    double init_joint_std = 0.3;        ///< Initial joint angle uncertainty (radians)
+    double init_velocity_std = 0.1;     ///< Initial velocity uncertainty (m/s or rad/s)
+
+    int ik_max_iterations = 50;    ///< Max IK iterations for initialization
+    double ik_tolerance = 0.01;    ///< IK convergence tolerance (meters)
+    int min_cameras_for_init = 2;  ///< Minimum cameras required for triangulation
+};
+
+/**
+ * @brief Tracking result for a single frame
+ */
+struct TrackingResult {
+    double timestamp;            ///< Frame timestamp
+    State state;                 ///< Estimated state
+    Eigen::MatrixXd covariance;  ///< State covariance
+    UpdateResult update_info;    ///< Update diagnostics (outliers, NIS, etc.)
+    int num_observations_used;   ///< Number of observations that passed filtering
+    bool tracking_lost;          ///< True if tracking failed (no observations, etc.)
+    std::string failure_reason;  ///< Reason for failure if tracking_lost=true
+};
+
+/**
+ * @brief Callback function types for progress reporting
+ */
+using FrameCallback = std::function<void(TrackingResult const&)>;
+using ProgressCallback = std::function<void(int frame_idx, int total_frames)>;
+
+/**
+ * @brief Main tracking class orchestrating UKF-based pose estimation
+ *
+ * Workflow:
+ * 1. initialize(): Triangulate first frame, solve IK for initial pose
+ * 2. track_frame(): Predict forward, update with observations
+ * 3. Callbacks report progress and per-frame results
+ *
+ * Example:
+ * @code
+ * Tracker tracker(skeleton, cameras, config);
+ * tracker.set_frame_callback([](auto const& result) {
+ *     std::cout << "Frame " << result.timestamp << ": "
+ *               << result.num_observations_used << " obs\n";
+ * });
+ *
+ * if (tracker.initialize(initial_observations, 0.0)) {
+ *     for (auto const& [timestamp, obs_set] : observation_sequence) {
+ *         tracker.track_frame(obs_set, timestamp);
+ *     }
+ * }
+ * @endcode
+ */
+class Tracker {
+   public:
+    /**
+     * @brief Construct tracker for given skeleton and camera setup
+     *
+     * @param skeleton Skeleton model with joint hierarchy and markers
+     * @param cameras Map of camera_id → Camera
+     * @param config Tracking configuration parameters
+     */
+    Tracker(Skeleton const& skeleton, std::unordered_map<int, Camera> const& cameras,
+            TrackerConfig const& config = TrackerConfig{});
+
+    /**
+     * @brief Initialize tracker from first frame observations
+     *
+     * Steps:
+     * 1. Triangulate visible markers from 2D observations
+     * 2. Solve IK to find joint configuration matching marker positions
+     * 3. Initialize UKF state and covariance
+     *
+     * @param observations Initial frame observations
+     * @param timestamp Initial timestamp
+     * @return True if initialization succeeded, false otherwise
+     *
+     * @note Requires sufficient markers visible in min_cameras_for_init cameras
+     * @note Sets is_initialized() to true on success
+     */
+    bool initialize(std::vector<Observation> const& observations, double timestamp);
+
+    /**
+     * @brief Track a single frame
+     *
+     * Performs predict-update cycle:
+     * 1. Predict state forward by dt = timestamp - last_timestamp
+     * 2. Update with observations (with outlier rejection)
+     * 3. Report result via callback
+     *
+     * @param observations Frame observations
+     * @param timestamp Frame timestamp
+     * @return Tracking result for this frame
+     *
+     * @note Requires is_initialized() == true
+     * @throws std::runtime_error if not initialized
+     */
+    TrackingResult track_frame(std::vector<Observation> const& observations, double timestamp);
+
+    /**
+     * @brief Check if tracker is initialized and ready
+     */
+    bool is_initialized() const { return initialized_; }
+
+    /**
+     * @brief Get current state estimate
+     * @note Only valid if is_initialized() == true
+     */
+    State const& state() const { return ukf_->state(); }
+
+    /**
+     * @brief Get current covariance estimate
+     * @note Only valid if is_initialized() == true
+     */
+    Eigen::MatrixXd const& covariance() const { return ukf_->covariance(); }
+
+    /**
+     * @brief Set callback for per-frame results
+     */
+    void set_frame_callback(FrameCallback callback) { frame_callback_ = std::move(callback); }
+
+    /**
+     * @brief Set callback for progress updates
+     */
+    void set_progress_callback(ProgressCallback callback) {
+        progress_callback_ = std::move(callback);
+    }
+
+    /**
+     * @brief Reset tracker to uninitialized state
+     */
+    void reset();
+
+   private:
+    /**
+     * @brief Initialize UKF with given state and initial covariance
+     */
+    void initialize_ukf(State const& initial_state, double timestamp);
+
+    /**
+     * @brief Check if we have sufficient observations for tracking
+     */
+    bool has_sufficient_observations(std::vector<Observation> const& observations) const;
+
+    Skeleton const& skeleton_;
+    std::unordered_map<int, Camera> const& cameras_;
+    TrackerConfig config_;
+
+    // Components
+    std::unique_ptr<UnscentedKalmanFilter> ukf_;
+    std::unique_ptr<Triangulator> triangulator_;
+    std::unique_ptr<InverseKinematics> ik_solver_;
+    std::unique_ptr<ForwardKinematics> fk_;
+
+    // Pinocchio structures (owned by Tracker)
+    std::unique_ptr<pinocchio::Model> model_;
+    std::unique_ptr<pinocchio::Data> data_;
+    std::map<std::string, pinocchio::FrameIndex> marker_frame_map_;
+
+    // State
+    bool initialized_ = false;
+    double last_timestamp_ = 0.0;
+
+    // Callbacks
+    FrameCallback frame_callback_;
+    ProgressCallback progress_callback_;
+};
+
+}  // namespace posetrak

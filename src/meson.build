@@ -16,11 +16,9 @@ posetrak_sources = files(
   'filters/process_model.cpp',
   'filters/sigma_points.cpp',
   'filters/ukf.cpp',
-  # 'filters/outlier_rejection.cpp',
 
   # Tracking (Phase 4)
-  # 'tracking/tracker.cpp',
-  # 'tracking/tracker_diagnostics.cpp',
+  'tracking/tracker.cpp',
 
   # I/O (Phase 2)
   'io/skeleton_loader.cpp',

@@ -5,12 +5,14 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "test_posetrack",
-            "type": "lldb",
-            "request": "launch",
-            "program": "${workspaceRoot}/builddir/tests/test_posetrak",
-            "args": [],
-            "cwd": "${workspaceRoot}"
-        }
-    ]
+        "name": "test_posetrak",
+        "miDebuggerPath": "/usr/bin/gdb",
+        "type": "cppdbg",
+        "request": "launch",
+        "program": "${workspaceRoot}/builddir/tests/test_posetrak",
+        "args": [],
+        "cwd": "${workspaceRoot}"
+    }
+
+    ],
 }

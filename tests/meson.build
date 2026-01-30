@@ -27,6 +27,9 @@ test_sources = files(
   'test_sigma_points.cpp',
   'test_ukf.cpp',
   'test_ukf_update.cpp',
+
+  # Phase 4.6: Integration tests
+  'test_tracker_integration.cpp',
 )
 
 test_exe = executable('test_posetrak',

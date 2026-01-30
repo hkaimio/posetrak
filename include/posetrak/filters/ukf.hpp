@@ -195,15 +195,24 @@ class UnscentedKalmanFilter {
     Eigen::VectorXd observations_to_vector(std::vector<Observation> const& observations) const;
 
     /**
-     * @brief Damp velocity covariance for joints near or at limits
-     * @param damping_factor Factor to multiply velocity covariance by (default 0.01)
-     * @param limit_margin Distance from limit to trigger damping (radians, default 0.1)
+     * @brief Enforce joint limits on current state
      *
-     * This prevents the filter from increasing velocity estimates when joints
-     * are constrained by their limits, reducing oscillation.
+     * Clamps joint angles to their valid ranges and zeros out velocities
+     * for joints that hit limits. Modifies state_ in place.
      */
-    void damp_velocity_covariance_at_limits(double damping_factor = 0.01,
-                                            double limit_margin = 0.1);
+    void enforce_joint_limits();
+
+    /**
+     * @brief Damp velocity covariance for joints that were modified by limit enforcement
+     * @param prev_state State before limit enforcement
+     * @param current_state State after limit enforcement
+     * @param damping_factor Factor to multiply velocity covariance by (default 0.01)
+     *
+     * Compares the two states and damps velocity covariance for any velocities
+     * that were changed by limit enforcement, preventing oscillation.
+     */
+    void damp_velocity_covariance_at_limits(State const& prev_state, State const& current_state,
+                                            double damping_factor = 0.01);
 
     Skeleton const& skeleton_;             ///< Skeleton structure
     State state_;                          ///< Current state estimate

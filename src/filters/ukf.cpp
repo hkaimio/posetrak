@@ -421,6 +421,10 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     Eigen::VectorXd state_correction = kalman_gain * innovation;
     state_.apply_error_update(state_correction);
 
+    // Step 8b: Enforce joint limits and zero velocities for constrained joints
+    State prev_state = state_;  // Save state before limit enforcement
+    enforce_joint_limits();
+
     // Step 9: Update covariance using Joseph form for numerical stability
     // P' = (I - K*H)*P*(I - K*H)^T + K*R*K^T
     // In UKF, we compute H implicitly through the unscented transform
@@ -464,8 +468,8 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         covariance_ += epsilon * Eigen::MatrixXd::Identity(error_dim(), error_dim());
     }
 
-    // Step 11: Damp velocity covariance for joints near limits
-    damp_velocity_covariance_at_limits();
+    // Step 11: Damp velocity covariance for joints that hit limits
+    damp_velocity_covariance_at_limits(prev_state, state_);
 
     // Step 12: Compute Normalized Innovation Squared (NIS) for filter validation
     // NIS = innovation^T * S^-1 * innovation (should follow chi-squared distribution)
@@ -676,76 +680,152 @@ std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagno
     return results;
 }
 
-void UnscentedKalmanFilter::damp_velocity_covariance_at_limits(double damping_factor,
-                                                               double limit_margin) {
-    // Check each joint to see if it's near its limits
-    // We damp the velocity covariance for joints that are close to their limits
-    // to prevent the filter from trying to push through the limit.
-
-    int const error_pos_dim = error_dim() / 2;  // Position error dimension
-    int pos_idx = 3;                            // Start after root position (3 DOF)
-
-    // Get joint angles from state
-    Eigen::VectorXd const& joint_angles = state_.joint_angles();
-
-    // Iterate through joints (skip root which has no limits)
+void UnscentedKalmanFilter::enforce_joint_limits() {
+    // Clamp joint angles to their limits
     auto const& joints = skeleton_.joints();
-    int joint_angle_offset = 0;  // Offset into joint_angles vector
+    Eigen::VectorXd angles = state_.joint_angles();
+
+    int joint_angle_idx = 0;
 
     for (size_t joint_idx = 1; joint_idx < joints.size(); ++joint_idx) {
         Joint const& joint = joints[joint_idx];
 
-        // Only process joints with limits
-        if (joint.num_limits == 0 || joint.type == JointType::FIXED) {
-            pos_idx += joint.active_dof();
-            joint_angle_offset += joint.dof;
+        if (joint.type == JointType::FIXED) {
             continue;
         }
 
-        // Check each DOF of this joint
-        auto active_mask = joint.get_active_dof_mask();
-        int error_dof_idx = 0;  // Index within the active DOFs of this joint
-
-        for (size_t dof = 0; dof < joint.num_limits && dof < 3; ++dof) {
-            // Skip if this DOF is locked
-            if (!active_mask[dof]) {
-                continue;
+        if (joint.type == JointType::REVOLUTE) {
+            if (joint.num_limits > 0 && joint_angle_idx < angles.size()) {
+                double min_limit = joint.limits[0].x();
+                double max_limit = joint.limits[0].y();
+                angles[joint_angle_idx] = std::clamp(angles[joint_angle_idx], min_limit, max_limit);
             }
+            joint_angle_idx++;
 
-            // Get current angle and limits
-            int angle_idx = joint_angle_offset + static_cast<int>(dof);
-            if (angle_idx >= joint_angles.size()) {
-                error_dof_idx++;
-                continue;
-            }
-
-            double angle = joint_angles(angle_idx);
-            double min_limit = joint.limits[dof].x();
-            double max_limit = joint.limits[dof].y();
-
-            // Check if near limit
-            bool near_limit =
-                (angle < min_limit + limit_margin) || (angle > max_limit - limit_margin);
-
-            if (near_limit) {
-                // Damp velocity covariance for this DOF
-                int vel_idx = error_pos_dim + pos_idx + error_dof_idx;
-
-                if (vel_idx < error_dim()) {
-                    // Damp row and column
-                    covariance_.row(vel_idx) *= damping_factor;
-                    covariance_.col(vel_idx) *= damping_factor;
-
-                    // Ensure minimum diagonal value for numerical stability
-                    covariance_(vel_idx, vel_idx) = std::max(covariance_(vel_idx, vel_idx), 1e-8);
+        } else if (joint.type == JointType::SPHERICAL) {
+            auto active_mask = joint.get_active_dof_mask();
+            if (joint_angle_idx + 2 < angles.size()) {
+                for (int i = 0; i < 3; ++i) {
+                    if (!active_mask[i]) {
+                        // Locked DOF
+                        if (joint.num_limits > static_cast<size_t>(i)) {
+                            angles[joint_angle_idx + i] = joint.limits[i].x();
+                        } else {
+                            angles[joint_angle_idx + i] = 0.0;
+                        }
+                    } else if (joint.num_limits > static_cast<size_t>(i)) {
+                        // Active DOF with limits
+                        double min_limit = joint.limits[i].x();
+                        double max_limit = joint.limits[i].y();
+                        angles[joint_angle_idx + i] =
+                            std::clamp(angles[joint_angle_idx + i], min_limit, max_limit);
+                    }
                 }
             }
+            joint_angle_idx += 3;
+        }
+    }
 
-            error_dof_idx++;
+    state_.set_joint_angles(angles);
+
+    // Zero out velocities for joints at limits
+    Eigen::VectorXd velocities = state_.joint_velocities();
+
+    int joint_vel_idx = 0;
+    joint_angle_idx = 0;  // Reset for velocity processing
+
+    for (size_t joint_idx = 1; joint_idx < joints.size(); ++joint_idx) {
+        Joint const& joint = joints[joint_idx];
+
+        if (joint.type == JointType::FIXED) {
+            continue;
         }
 
-        pos_idx += joint.active_dof();
-        joint_angle_offset += joint.dof;
+        if (joint.type == JointType::REVOLUTE) {
+            // Check if at limit
+            if (joint.num_limits > 0 && joint_angle_idx < angles.size()) {
+                double angle = angles(joint_angle_idx);
+                double min_limit = joint.limits[0].x();
+                double max_limit = joint.limits[0].y();
+
+                // If at limit (within tolerance), zero velocity
+                if (std::abs(angle - min_limit) < 1e-6 || std::abs(angle - max_limit) < 1e-6) {
+                    velocities(joint_vel_idx) = 0.0;
+                }
+            }
+            joint_vel_idx++;
+            joint_angle_idx++;
+
+        } else if (joint.type == JointType::SPHERICAL) {
+            // Check each DOF
+            for (int i = 0; i < 3; ++i) {
+                if (joint.num_limits > static_cast<size_t>(i) &&
+                    joint_angle_idx + i < angles.size()) {
+                    double angle = angles(joint_angle_idx + i);
+                    double min_limit = joint.limits[i].x();
+                    double max_limit = joint.limits[i].y();
+
+                    // If at limit, zero velocity
+                    if (std::abs(angle - min_limit) < 1e-6 || std::abs(angle - max_limit) < 1e-6) {
+                        velocities(joint_vel_idx + i) = 0.0;
+                    }
+                }
+            }
+            joint_vel_idx += 3;
+            joint_angle_idx += 3;
+        }
+    }
+
+    state_.set_joint_velocities(velocities);
+}
+
+void UnscentedKalmanFilter::damp_velocity_covariance_at_limits(State const& prev_state,
+                                                               State const& current_state,
+                                                               double damping_factor) {
+    // Compare velocities before and after limit enforcement
+    // Damp covariance for velocities that changed
+
+    Eigen::VectorXd const& prev_velocities = prev_state.joint_velocities();
+    Eigen::VectorXd const& curr_velocities = current_state.joint_velocities();
+
+    if (prev_velocities.size() != curr_velocities.size()) {
+        return;
+    }
+
+    // Find velocity indices that were modified
+    int const error_pos_dim = error_dim() / 2;
+
+    // Check root velocities (always first 6 in velocity state)
+    Eigen::Vector3d prev_root_vel = prev_state.root_velocity();
+    Eigen::Vector3d curr_root_vel = current_state.root_velocity();
+    Eigen::Vector3d prev_root_angvel = prev_state.root_angular_velocity();
+    Eigen::Vector3d curr_root_angvel = current_state.root_angular_velocity();
+
+    for (int i = 0; i < 3; ++i) {
+        if (std::abs(prev_root_vel(i) - curr_root_vel(i)) > 1e-9) {
+            int vel_idx = error_pos_dim + i;
+            covariance_.row(vel_idx) *= damping_factor;
+            covariance_.col(vel_idx) *= damping_factor;
+            covariance_(vel_idx, vel_idx) = std::max(covariance_(vel_idx, vel_idx), 1e-8);
+        }
+        if (std::abs(prev_root_angvel(i) - curr_root_angvel(i)) > 1e-9) {
+            int vel_idx = error_pos_dim + 3 + i;
+            covariance_.row(vel_idx) *= damping_factor;
+            covariance_.col(vel_idx) *= damping_factor;
+            covariance_(vel_idx, vel_idx) = std::max(covariance_(vel_idx, vel_idx), 1e-8);
+        }
+    }
+
+    // Check joint velocities
+    for (int i = 0; i < prev_velocities.size(); ++i) {
+        if (std::abs(prev_velocities(i) - curr_velocities(i)) > 1e-9) {
+            int vel_idx = error_pos_dim + 6 + i;
+            if (vel_idx < error_dim()) {
+                covariance_.row(vel_idx) *= damping_factor;
+                covariance_.col(vel_idx) *= damping_factor;
+                covariance_(vel_idx, vel_idx) = std::max(covariance_(vel_idx, vel_idx), 1e-8);
+            }
+        }
     }
 }
 

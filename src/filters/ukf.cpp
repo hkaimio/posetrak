@@ -464,7 +464,10 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         covariance_ += epsilon * Eigen::MatrixXd::Identity(error_dim(), error_dim());
     }
 
-    // Step 11: Compute Normalized Innovation Squared (NIS) for filter validation
+    // Step 11: Damp velocity covariance for joints near limits
+    damp_velocity_covariance_at_limits();
+
+    // Step 12: Compute Normalized Innovation Squared (NIS) for filter validation
     // NIS = innovation^T * S^-1 * innovation (should follow chi-squared distribution)
     double nis = 0.0;
     try {
@@ -671,6 +674,79 @@ std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagno
     }
 
     return results;
+}
+
+void UnscentedKalmanFilter::damp_velocity_covariance_at_limits(double damping_factor,
+                                                               double limit_margin) {
+    // Check each joint to see if it's near its limits
+    // We damp the velocity covariance for joints that are close to their limits
+    // to prevent the filter from trying to push through the limit.
+
+    int const error_pos_dim = error_dim() / 2;  // Position error dimension
+    int pos_idx = 3;                            // Start after root position (3 DOF)
+
+    // Get joint angles from state
+    Eigen::VectorXd const& joint_angles = state_.joint_angles();
+
+    // Iterate through joints (skip root which has no limits)
+    auto const& joints = skeleton_.joints();
+    int joint_angle_offset = 0;  // Offset into joint_angles vector
+
+    for (size_t joint_idx = 1; joint_idx < joints.size(); ++joint_idx) {
+        Joint const& joint = joints[joint_idx];
+
+        // Only process joints with limits
+        if (joint.num_limits == 0 || joint.type == JointType::FIXED) {
+            pos_idx += joint.active_dof();
+            joint_angle_offset += joint.dof;
+            continue;
+        }
+
+        // Check each DOF of this joint
+        auto active_mask = joint.get_active_dof_mask();
+        int error_dof_idx = 0;  // Index within the active DOFs of this joint
+
+        for (size_t dof = 0; dof < joint.num_limits && dof < 3; ++dof) {
+            // Skip if this DOF is locked
+            if (!active_mask[dof]) {
+                continue;
+            }
+
+            // Get current angle and limits
+            int angle_idx = joint_angle_offset + static_cast<int>(dof);
+            if (angle_idx >= joint_angles.size()) {
+                error_dof_idx++;
+                continue;
+            }
+
+            double angle = joint_angles(angle_idx);
+            double min_limit = joint.limits[dof].x();
+            double max_limit = joint.limits[dof].y();
+
+            // Check if near limit
+            bool near_limit =
+                (angle < min_limit + limit_margin) || (angle > max_limit - limit_margin);
+
+            if (near_limit) {
+                // Damp velocity covariance for this DOF
+                int vel_idx = error_pos_dim + pos_idx + error_dof_idx;
+
+                if (vel_idx < error_dim()) {
+                    // Damp row and column
+                    covariance_.row(vel_idx) *= damping_factor;
+                    covariance_.col(vel_idx) *= damping_factor;
+
+                    // Ensure minimum diagonal value for numerical stability
+                    covariance_(vel_idx, vel_idx) = std::max(covariance_(vel_idx, vel_idx), 1e-8);
+                }
+            }
+
+            error_dof_idx++;
+        }
+
+        pos_idx += joint.active_dof();
+        joint_angle_offset += joint.dof;
+    }
 }
 
 }  // namespace posetrak

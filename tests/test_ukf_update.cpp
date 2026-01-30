@@ -527,3 +527,88 @@ TEST_CASE("UKF update with outlier rejection", "[ukf][update][outlier]") {
     REQUIRE(std::isfinite(final_state.root_position().y()));
     REQUIRE(std::isfinite(final_state.root_position().z()));
 }
+
+TEST_CASE("UKF velocity damping at joint limits", "[ukf][update][damping]") {
+    // Create skeleton with revolute joint that has limits
+    Skeleton skeleton;
+    skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    uint32_t elbow_idx =
+        skeleton.add_joint("elbow", 0, JointType::REVOLUTE, Eigen::Vector3d(0.3, 0, 0));
+    uint32_t marker_idx = skeleton.add_marker("elbow_marker", elbow_idx, Eigen::Vector3d::Zero());
+
+    // Set joint limits for elbow (0 to PI radians)
+    auto& joints = const_cast<std::vector<Joint>&>(skeleton.joints());
+    joints[elbow_idx].num_limits = 1;
+    joints[elbow_idx].limits[0] = Eigen::Vector2d(0.0, M_PI);
+
+    // Build Pinocchio model for FK
+    pinocchio::Model model;
+    pinocchio::Data data;
+    PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
+    auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
+    ForwardKinematics fk(model, data, marker_frame_map, skeleton);
+
+    // Setup camera
+    Intrinsics intrinsics;
+    intrinsics.fx = 500.0;
+    intrinsics.fy = 500.0;
+    intrinsics.cx = 320.0;
+    intrinsics.cy = 240.0;
+    intrinsics.width = 640;
+    intrinsics.height = 480;
+    intrinsics.model = Intrinsics::DistortionModel::BrownConrady;
+    intrinsics.distortion_coeffs = {0.0, 0.0, 0.0, 0.0, 0.0};
+
+    Extrinsics extrinsics;
+    extrinsics.position = Eigen::Vector3d(0, 0, -2.0);
+    extrinsics.orientation = Eigen::Quaterniond::Identity();
+
+    Camera camera(0, "cam0", intrinsics, extrinsics);
+    std::unordered_map<int, Camera> cameras;
+    cameras.emplace(0, camera);
+
+    // Create UKF with joint angle near upper limit
+    UnscentedKalmanFilter ukf(skeleton, 0.01);
+
+    Eigen::Vector3d pos = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
+    Eigen::VectorXd angles(1);
+    angles(0) = M_PI - 0.05;  // Very close to upper limit
+    Eigen::Vector3d vel = Eigen::Vector3d::Zero();
+    Eigen::Vector3d angvel = Eigen::Vector3d::Zero();
+    Eigen::VectorXd joint_vels(1);
+    joint_vels(0) = 0.0;
+
+    State initial_state(pos, quat, angles, vel, angvel, joint_vels);
+    ukf.set_state(initial_state);
+
+    // Set covariance with significant velocity uncertainty
+    Eigen::MatrixXd cov = Eigen::MatrixXd::Identity(14, 14) * 0.01;
+    cov(10, 10) = 1.0;  // Large uncertainty in joint velocity
+    ukf.set_covariance(cov);
+
+    // Store velocity covariance before update
+    double vel_cov_before = ukf.covariance()(10, 10);
+
+    // Create observation
+    Observation obs;
+    obs.camera_id = 0;
+    obs.marker_id = marker_idx;
+    obs.position = Eigen::Vector2d(320.0, 240.0);
+    obs.confidence = 0.9;
+
+    std::vector<Observation> observations = {obs};
+
+    // Update (velocity damping should be applied automatically)
+    ukf.update(observations, cameras, fk);
+
+    // Check that velocity covariance was damped
+    double vel_cov_after = ukf.covariance()(10, 10);
+    REQUIRE(vel_cov_after < vel_cov_before);
+    REQUIRE(vel_cov_after < 0.1);  // Should be significantly reduced
+
+    // State should still be finite
+    State const& final_state = ukf.state();
+    REQUIRE(std::isfinite(final_state.joint_angles()(0)));
+    REQUIRE(std::isfinite(final_state.joint_velocities()(0)));
+}

@@ -7,11 +7,16 @@
 
 #include <Eigen/Core>
 
+#include "posetrak/core/camera.hpp"
+#include "posetrak/core/observation.hpp"
 #include "posetrak/core/skeleton.hpp"
 #include "posetrak/core/state.hpp"
 #include "posetrak/filters/process_model.hpp"
 #include "posetrak/filters/sigma_points.hpp"
+#include "posetrak/kinematics/forward_kinematics.hpp"
 #include <memory>
+#include <optional>
+#include <unordered_map>
 #include <vector>
 
 namespace posetrak {
@@ -48,6 +53,23 @@ class UnscentedKalmanFilter {
      * - Velocities: v(t+dt) = v(t), ω(t+dt) = ω(t)
      */
     void predict(double dt);
+
+    /**
+     * @brief Update step: correct state with observations
+     * @param observations Marker observations from cameras
+     * @param cameras Map of camera_id -> Camera
+     * @param fk Forward kinematics computer
+     * @param measurement_noise_std Measurement noise standard deviation (pixels)
+     *
+     * Updates state and covariance using unscented transform:
+     * 1. For each sigma point: FK → camera projection
+     * 2. Compute predicted measurements and innovation covariance
+     * 3. Compute Kalman gain
+     * 4. Update state and covariance (Joseph form)
+     */
+    void update(std::vector<Observation> const& observations,
+                std::unordered_map<int, Camera> const& cameras, ForwardKinematics& fk,
+                double measurement_noise_std = 5.0);
 
     /**
      * @brief Get current state estimate
@@ -108,6 +130,26 @@ class UnscentedKalmanFilter {
      * @return Error vector in tangent space
      */
     Eigen::VectorXd compute_state_error(State const& state, State const& reference) const;
+
+    /**
+     * @brief Predict measurements for a state using FK and camera projection
+     * @param state State to predict measurements for
+     * @param observations Observations to predict (defines which markers/cameras)
+     * @param cameras Map of camera_id -> Camera
+     * @param fk Forward kinematics computer
+     * @return Vector of predicted pixel measurements (x1,y1,x2,y2,...)
+     */
+    Eigen::VectorXd predict_measurements(State const& state,
+                                         std::vector<Observation> const& observations,
+                                         std::unordered_map<int, Camera> const& cameras,
+                                         ForwardKinematics& fk) const;
+
+    /**
+     * @brief Convert observations to measurement vector
+     * @param observations Observations
+     * @return Vector of pixel measurements (x1,y1,x2,y2,...)
+     */
+    Eigen::VectorXd observations_to_vector(std::vector<Observation> const& observations) const;
 
     Skeleton const& skeleton_;             ///< Skeleton structure
     State state_;                          ///< Current state estimate

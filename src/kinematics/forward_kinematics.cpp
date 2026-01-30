@@ -18,15 +18,15 @@ namespace posetrak {
 
 ForwardKinematics::ForwardKinematics(
     pinocchio::Model const& model, pinocchio::Data& data,
-    std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map)
-    : model_(model), data_(data), marker_frame_map_(marker_frame_map) {}
+    std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map, Skeleton const& skeleton)
+    : model_(model), data_(data), marker_frame_map_(marker_frame_map), skeleton_(skeleton) {}
 
 std::unordered_map<std::string, Eigen::Vector3d> ForwardKinematics::compute(State const& state) {
-    // For now, we'll need the skeleton to convert state to config
-    // This is a limitation - we'll improve this later
-    throw std::runtime_error(
-        "ForwardKinematics::compute(State) not yet implemented - use compute(q) with "
-        "state_to_config()");
+    // Convert state to configuration vector
+    Eigen::VectorXd q = state_to_config(state, skeleton_);
+
+    // Use the existing compute(q) method
+    return compute(q);
 }
 
 std::unordered_map<std::string, Eigen::Vector3d>

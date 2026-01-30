@@ -26,6 +26,7 @@ test_sources = files(
   'test_process_model.cpp',
   'test_sigma_points.cpp',
   'test_ukf.cpp',
+  'test_ukf_update.cpp',
 )
 
 test_exe = executable('test_posetrak',

@@ -30,7 +30,7 @@ TEST_CASE("InverseKinematics solves simple 2-joint problem", "[ik][inverse_kinem
     auto marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
 
     // Create FK and IK
-    ForwardKinematics fk(model, data, marker_map);
+    ForwardKinematics fk(model, data, marker_map, skeleton);
     InverseKinematics ik(model, data, fk, marker_map);
 
     SECTION("IK finds zero configuration") {
@@ -113,7 +113,7 @@ TEST_CASE("InverseKinematics handles multiple markers", "[ik][inverse_kinematics
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
     auto marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
 
-    ForwardKinematics fk(model, data, marker_map);
+    ForwardKinematics fk(model, data, marker_map, skeleton);
     InverseKinematics ik(model, data, fk, marker_map);
 
     // Target positions (zero config)

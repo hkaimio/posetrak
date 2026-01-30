@@ -38,9 +38,11 @@ class ForwardKinematics {
      * @param model Pinocchio model (built from skeleton)
      * @param data Pinocchio data structure
      * @param marker_frame_map Map from marker name to frame index
+     * @param skeleton Skeleton structure (needed for State→config conversion)
      */
     ForwardKinematics(pinocchio::Model const& model, pinocchio::Data& data,
-                      std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map);
+                      std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map,
+                      Skeleton const& skeleton);
 
     /**
      * @brief Compute forward kinematics from State
@@ -74,6 +76,7 @@ class ForwardKinematics {
     pinocchio::Model const& model_;
     pinocchio::Data& data_;
     std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map_;
+    Skeleton const& skeleton_;
 };
 
 }  // namespace posetrak

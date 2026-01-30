@@ -86,7 +86,7 @@ TEST_CASE("ForwardKinematics computes marker positions", "[forward_kinematics]")
     auto marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
 
     // Create FK computer
-    ForwardKinematics fk(model, data, marker_map);
+    ForwardKinematics fk(model, data, marker_map, skeleton);
 
     SECTION("FK with zero configuration") {
         // Configuration: root at origin, no rotation, spine at 0
@@ -160,7 +160,7 @@ TEST_CASE("ForwardKinematics handles spherical joints", "[forward_kinematics]") 
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
 
     auto marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
-    ForwardKinematics fk(model, data, marker_map);
+    ForwardKinematics fk(model, data, marker_map, skeleton);
 
     SECTION("state_to_config converts spherical joint correctly") {
         // State with spherical joint angles
@@ -209,7 +209,7 @@ TEST_CASE("ForwardKinematics validates against Python ground truth",
     pinocchio::Data data;
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
     auto marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
-    ForwardKinematics fk(model, data, marker_map);
+    ForwardKinematics fk(model, data, marker_map, skeleton);
 
     std::cout << "\n=== Pinocchio Model Joint Order ===" << std::endl;
     for (size_t i = 1; i < model.names.size(); ++i) {  // Skip universe (index 0)

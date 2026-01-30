@@ -127,7 +127,7 @@ class TriangulationTestFixture {
         Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(joint_angles.size());
 
         State state(root_pos, root_quat, joint_angles, root_vel, root_angvel, joint_vels);
-        ForwardKinematics fk(model, data, marker_map);
+        ForwardKinematics fk(model, data, marker_map, skeleton);
         Eigen::VectorXd q = ForwardKinematics::state_to_config(state, skeleton);
         auto marker_positions = fk.compute(q);
 

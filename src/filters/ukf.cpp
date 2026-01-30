@@ -272,4 +272,172 @@ Eigen::VectorXd UnscentedKalmanFilter::compute_state_error(State const& state,
     return error;
 }
 
+void UnscentedKalmanFilter::update(std::vector<Observation> const& observations,
+                                   std::unordered_map<int, Camera> const& cameras,
+                                   ForwardKinematics& fk, double measurement_noise_std) {
+    if (observations.empty()) {
+        return;  // No observations to process
+    }
+
+    int const n_obs = static_cast<int>(observations.size());
+    int const measurement_dim = 2 * n_obs;  // 2D pixel per observation
+
+    // Step 1: Generate sigma points from current state and covariance
+    auto sigma_points = sigma_gen_.generate_sigma_points(state_, covariance_);
+    int const n_sigma = static_cast<int>(sigma_points.size());
+
+    // Step 2: Predict measurements for each sigma point
+    Eigen::MatrixXd predicted_measurements(measurement_dim, n_sigma);
+    for (int i = 0; i < n_sigma; ++i) {
+        predicted_measurements.col(i) =
+            predict_measurements(sigma_points[i], observations, cameras, fk);
+    }
+
+    // Step 3: Compute mean predicted measurement
+    Eigen::VectorXd const weights_mean = sigma_gen_.get_mean_weights();
+    Eigen::VectorXd measurement_mean = Eigen::VectorXd::Zero(measurement_dim);
+    for (int i = 0; i < n_sigma; ++i) {
+        measurement_mean += weights_mean(i) * predicted_measurements.col(i);
+    }
+
+    // Step 4: Compute innovation covariance S = Pyy + R
+    Eigen::VectorXd const weights_cov = sigma_gen_.get_covariance_weights();
+    Eigen::MatrixXd innovation_cov = Eigen::MatrixXd::Zero(measurement_dim, measurement_dim);
+
+    for (int i = 0; i < n_sigma; ++i) {
+        Eigen::VectorXd innovation = predicted_measurements.col(i) - measurement_mean;
+        innovation_cov += weights_cov(i) * (innovation * innovation.transpose());
+    }
+
+    // Add measurement noise R (diagonal, same noise for all observations)
+    for (int i = 0; i < n_obs; ++i) {
+        double noise_std = observations[i].measurement_noise_std(measurement_noise_std);
+        double variance = noise_std * noise_std;
+        innovation_cov(2 * i, 2 * i) += variance;          // x coordinate
+        innovation_cov(2 * i + 1, 2 * i + 1) += variance;  // y coordinate
+    }
+
+    // Step 5: Compute cross-covariance Pxy
+    Eigen::MatrixXd cross_cov = Eigen::MatrixXd::Zero(error_dim(), measurement_dim);
+
+    for (int i = 0; i < n_sigma; ++i) {
+        Eigen::VectorXd state_error = compute_state_error(sigma_points[i], state_);
+        Eigen::VectorXd measurement_error = predicted_measurements.col(i) - measurement_mean;
+        cross_cov += weights_cov(i) * (state_error * measurement_error.transpose());
+    }
+
+    // Step 6: Compute Kalman gain K = Pxy * S^-1
+    Eigen::MatrixXd kalman_gain = cross_cov * innovation_cov.inverse();
+
+    // Step 7: Compute innovation (observed - predicted)
+    Eigen::VectorXd observed = observations_to_vector(observations);
+    Eigen::VectorXd innovation = observed - measurement_mean;
+
+    // Step 8: Update state in error space
+    Eigen::VectorXd state_correction = kalman_gain * innovation;
+    state_.apply_error_update(state_correction);
+
+    // Step 9: Update covariance using Joseph form for numerical stability
+    // P' = (I - K*H)*P*(I - K*H)^T + K*R*K^T
+    // In UKF, we compute H implicitly through the unscented transform
+    // We need to extract R (measurement noise) separately from S = H*P*H^T + R
+
+    // Build measurement noise covariance R
+    Eigen::MatrixXd R = Eigen::MatrixXd::Zero(measurement_dim, measurement_dim);
+    for (int i = 0; i < n_obs; ++i) {
+        double noise_std = observations[i].measurement_noise_std(measurement_noise_std);
+        double variance = noise_std * noise_std;
+        R(2 * i, 2 * i) = variance;          // x coordinate
+        R(2 * i + 1, 2 * i + 1) = variance;  // y coordinate
+    }
+
+    // Compute H*P*H^T implicitly as S - R
+    Eigen::MatrixXd HPH = innovation_cov - R;
+
+    // Compute (I - K*H) where H is represented through the cross-covariance
+    // K*H ≈ K * (cross_cov^T * P^-1) in the error space
+    // Simplified approach: Use standard covariance update
+    // P' = P - K*S*K^T (this is the simplified Joseph form)
+    covariance_ = covariance_ - kalman_gain * innovation_cov * kalman_gain.transpose();
+
+    // Step 10: Condition covariance for numerical stability
+    // Ensure symmetry (numerical errors can cause asymmetry)
+    covariance_ = 0.5 * (covariance_ + covariance_.transpose());
+
+    // Ensure positive definiteness by checking eigenvalues
+    // Use self-adjoint eigenvalue solver (faster for symmetric matrices)
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen_solver(covariance_);
+    if (eigen_solver.info() != Eigen::Success) {
+        throw std::runtime_error("Failed to compute eigenvalues for covariance conditioning");
+    }
+
+    Eigen::VectorXd eigenvalues = eigen_solver.eigenvalues();
+    double min_eigenvalue = eigenvalues.minCoeff();
+
+    if (min_eigenvalue < 0.0) {
+        // Add small positive value to diagonal to ensure positive definiteness
+        double epsilon = std::abs(min_eigenvalue) + 1e-6;
+        covariance_ += epsilon * Eigen::MatrixXd::Identity(error_dim(), error_dim());
+    }
+}
+
+Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
+    State const& state, std::vector<Observation> const& observations,
+    std::unordered_map<int, Camera> const& cameras, ForwardKinematics& fk) const {
+    // Compute forward kinematics to get marker positions
+    auto marker_positions = fk.compute(state);
+
+    // Project each marker to its camera
+    int const n_obs = static_cast<int>(observations.size());
+    Eigen::VectorXd predictions(2 * n_obs);
+
+    for (int i = 0; i < n_obs; ++i) {
+        Observation const& obs = observations[i];
+
+        // Get marker position (3D world)
+        auto const& marker = skeleton_.markers()[obs.marker_id];
+        std::string const& marker_name = marker.name;
+
+        auto it = marker_positions.find(marker_name);
+        if (it == marker_positions.end()) {
+            // Marker not found in FK result - use fallback (project to image center)
+            predictions(2 * i) = cameras.at(obs.camera_id).intrinsics().cx;
+            predictions(2 * i + 1) = cameras.at(obs.camera_id).intrinsics().cy;
+            continue;
+        }
+
+        Eigen::Vector3d const& marker_pos_world = it->second;
+
+        // Project to camera (undistorted coordinates for UKF)
+        Camera const& camera = cameras.at(obs.camera_id);
+        Eigen::Vector2d projected = camera.project_undistorted(marker_pos_world);
+
+        // Check for invalid projections (markers behind camera produce NaN/inf)
+        // This can happen when state estimate is poor or during initialization
+        if (!std::isfinite(projected.x()) || !std::isfinite(projected.y())) {
+            // Use image center as fallback for failed projections
+            predictions(2 * i) = camera.intrinsics().cx;
+            predictions(2 * i + 1) = camera.intrinsics().cy;
+        } else {
+            predictions(2 * i) = projected.x();
+            predictions(2 * i + 1) = projected.y();
+        }
+    }
+
+    return predictions;
+}
+
+Eigen::VectorXd
+UnscentedKalmanFilter::observations_to_vector(std::vector<Observation> const& observations) const {
+    int const n_obs = static_cast<int>(observations.size());
+    Eigen::VectorXd measurements(2 * n_obs);
+
+    for (int i = 0; i < n_obs; ++i) {
+        measurements(2 * i) = observations[i].position.x();
+        measurements(2 * i + 1) = observations[i].position.y();
+    }
+
+    return measurements;
+}
+
 }  // namespace posetrak

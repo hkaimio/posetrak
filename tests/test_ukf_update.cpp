@@ -425,8 +425,6 @@ TEST_CASE("UKF update handles markers behind camera gracefully", "[ukf][update][
     }
 }
 
-/*
-// TODO: Fix dimension mismatch bug in outlier rejection - will be addressed in separate PR
 TEST_CASE("UKF update with outlier rejection", "[ukf][update][outlier]") {
     // Create simple skeleton: root + 2 markers
     Skeleton skeleton;
@@ -441,7 +439,91 @@ TEST_CASE("UKF update with outlier rejection", "[ukf][update][outlier]") {
     auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
     ForwardKinematics fk(model, data, marker_frame_map, skeleton);
 
-    // Camera, UKF, observations...
-    // Test outlier rejection with threshold...
+    // Setup camera
+    Intrinsics intrinsics;
+    intrinsics.fx = 500.0;
+    intrinsics.fy = 500.0;
+    intrinsics.cx = 320.0;
+    intrinsics.cy = 240.0;
+    intrinsics.width = 640;
+    intrinsics.height = 480;
+    intrinsics.model = Intrinsics::DistortionModel::BrownConrady;
+    intrinsics.distortion_coeffs = {0.0, 0.0, 0.0, 0.0, 0.0};
+
+    Extrinsics extrinsics;
+    extrinsics.position = Eigen::Vector3d(0, 0, -2.0);
+    extrinsics.orientation = Eigen::Quaterniond::Identity();
+
+    Camera camera(0, "cam0", intrinsics, extrinsics);
+    std::unordered_map<int, Camera> cameras;
+    cameras.emplace(0, camera);
+
+    // Create UKF with state at origin
+    UnscentedKalmanFilter ukf(skeleton, 0.01);
+
+    Eigen::Vector3d pos = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
+    Eigen::VectorXd angles = Eigen::VectorXd::Zero(0);
+    Eigen::Vector3d vel = Eigen::Vector3d::Zero();
+    Eigen::Vector3d angvel = Eigen::Vector3d::Zero();
+    Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(0);
+
+    State initial_state(pos, quat, angles, vel, angvel, joint_vels);
+    ukf.set_state(initial_state);
+
+    Eigen::MatrixXd cov = Eigen::MatrixXd::Identity(12, 12) * 0.1;
+    ukf.set_covariance(cov);
+
+    // Create observations:
+    // marker1 at correct position (inlier)
+    // marker2 at very wrong position (outlier)
+    Observation obs1;
+    obs1.camera_id = 0;
+    obs1.marker_id = marker1_idx;
+    obs1.position =
+        Eigen::Vector2d(195.0, 240.0);  // Close to expected (-0.5, 0, 0) projects to ~195
+    obs1.confidence = 0.9;
+
+    Observation obs2;
+    obs2.camera_id = 0;
+    obs2.marker_id = marker2_idx;
+    obs2.position =
+        Eigen::Vector2d(100.0, 100.0);  // Very far from expected (0.5, 0, 0) projects to ~445, 240
+    obs2.confidence = 0.9;
+
+    std::vector<Observation> observations = {obs1, obs2};
+
+    // Update with outlier rejection (chi-squared threshold for 2-DOF at 95% confidence is 5.991)
+    double threshold = 4.0;  // Lower threshold to reject the outlier
+    UpdateResult result = ukf.update(observations, cameras, fk, 5.0, threshold);
+
+    // Check that outlier was detected
+    REQUIRE(result.num_observations == 2);
+    REQUIRE(result.num_outliers == 1);
+    REQUIRE(result.num_inliers == 1);
+    REQUIRE(result.observations.size() == 2);
+
+    // Marker1 should be inlier, marker2 should be outlier
+    bool marker1_is_inlier = false;
+    bool marker2_is_outlier = false;
+
+    for (auto const& obs_result : result.observations) {
+        if (obs_result.marker_name == "marker1" && !obs_result.is_outlier) {
+            marker1_is_inlier = true;
+            REQUIRE(obs_result.mahalanobis_distance < threshold);
+        }
+        if (obs_result.marker_name == "marker2" && obs_result.is_outlier) {
+            marker2_is_outlier = true;
+            REQUIRE(obs_result.mahalanobis_distance > threshold);
+        }
+    }
+
+    REQUIRE(marker1_is_inlier);
+    REQUIRE(marker2_is_outlier);
+
+    // State should still be finite
+    State const& final_state = ukf.state();
+    REQUIRE(std::isfinite(final_state.root_position().x()));
+    REQUIRE(std::isfinite(final_state.root_position().y()));
+    REQUIRE(std::isfinite(final_state.root_position().z()));
 }
-*/

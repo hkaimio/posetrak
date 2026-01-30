@@ -285,6 +285,10 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     int const n_obs = static_cast<int>(observations.size());
     int const measurement_dim = 2 * n_obs;  // 2D pixel per observation
 
+    // These will be updated after outlier rejection
+    int effective_n_obs = n_obs;
+    int effective_measurement_dim = measurement_dim;
+
     // Step 1: Generate sigma points from current state and covariance
     auto sigma_points = sigma_gen_.generate_sigma_points(state_, covariance_);
     int const n_sigma = static_cast<int>(sigma_points.size());
@@ -384,6 +388,10 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
 
         // Update observed vector to use inliers
         observed = observations_to_vector(inlier_observations);
+
+        // Update effective dimensions for inliers
+        effective_n_obs = n_inliers;
+        effective_measurement_dim = inlier_dim;
     } else {
         // No outlier rejection - compute diagnostics for all observations
         observation_results =
@@ -418,10 +426,10 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     // In UKF, we compute H implicitly through the unscented transform
     // We need to extract R (measurement noise) separately from S = H*P*H^T + R
 
-    // Build measurement noise covariance R
-    Eigen::MatrixXd R = Eigen::MatrixXd::Zero(measurement_dim, measurement_dim);
-    for (int i = 0; i < n_obs; ++i) {
-        double noise_std = observations[i].measurement_noise_std(measurement_noise_std);
+    // Build measurement noise covariance R (use inlier observations if outlier rejection was done)
+    Eigen::MatrixXd R = Eigen::MatrixXd::Zero(effective_measurement_dim, effective_measurement_dim);
+    for (int i = 0; i < effective_n_obs; ++i) {
+        double noise_std = inlier_observations[i].measurement_noise_std(measurement_noise_std);
         double variance = noise_std * noise_std;
         R(2 * i, 2 * i) = variance;          // x coordinate
         R(2 * i + 1, 2 * i + 1) = variance;  // y coordinate

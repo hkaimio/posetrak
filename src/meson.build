@@ -26,6 +26,7 @@ posetrak_sources = files(
   'io/sync_loader.cpp',
   'io/observation_loader.cpp',
   'io/tracking_export.cpp',
+  'io/statistics_tracker.cpp',
 )
 
 # Build core library

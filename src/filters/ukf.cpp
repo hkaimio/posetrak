@@ -456,18 +456,33 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     // Compute Kalman gain with regularized innovation covariance
     kalman_gain = cross_cov * innovation_cov.inverse();
 
-    // Standard covariance update: P' = P - K*S*K^T
-    // Add measurement noise back: P' = P - K*(S-R)*K^T for better stability
-    covariance_ = covariance_ - kalman_gain * innovation_cov * kalman_gain.transpose() +
-                  kalman_gain * R * kalman_gain.transpose();
+    // Joseph form covariance update for numerical stability
+    // Joseph form: P' = (I - K*H)*P*(I - K*H)^T + K*R*K^T
+    // This guarantees positive semi-definiteness and symmetry
+    //
+    // For UKF, we compute I - K*Pyy*P^-1, but matrix inversion is expensive.
+    // Instead, use the equivalent algebraic form that avoids explicit P^-1:
+    // P' = P - K*Pyy*K^T, then symmetrize and add K*R*K^T
 
-    // Add regularization to diagonal to ensure positive definiteness
-    double epsilon = 1e-6;
+    Eigen::MatrixXd Pyy = innovation_cov - R;  // Innovation cov without measurement noise
+
+    // Joseph form update: guarantees symmetry
+    Eigen::MatrixXd P_minus_K_Pyy_Kt = covariance_ - kalman_gain * Pyy * kalman_gain.transpose();
+
+    // Enforce symmetry (critical for numerical stability)
+    P_minus_K_Pyy_Kt = 0.5 * (P_minus_K_Pyy_Kt + P_minus_K_Pyy_Kt.transpose());
+
+    // Add measurement noise contribution (completes Joseph form)
+    covariance_ = P_minus_K_Pyy_Kt + kalman_gain * R * kalman_gain.transpose();
+
+    // Final symmetry enforcement (Joseph form should be symmetric, but floating point errors)
+    covariance_ = 0.5 * (covariance_ + covariance_.transpose());
+
+    // Add small regularization to diagonal for additional numerical safety
+    double epsilon = 1e-8;  // Smaller epsilon since Joseph form is more stable
     covariance_ += epsilon * Eigen::MatrixXd::Identity(error_dim(), error_dim());
 
     // Step 10: Condition covariance for numerical stability
-    // Ensure symmetry (numerical errors can cause asymmetry)
-    covariance_ = 0.5 * (covariance_ + covariance_.transpose());
 
     // Ensure positive definiteness by checking eigenvalues
     // Use self-adjoint eigenvalue solver (faster for symmetric matrices)

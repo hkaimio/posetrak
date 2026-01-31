@@ -69,3 +69,7 @@ docs/.doctrees/
 *.tmp
 *.bak
 *.backup
+# Debug CSV files from tests
+ik_iterations.csv
+ik_root_updates.csv
+tracker_markers.csv

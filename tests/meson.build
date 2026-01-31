@@ -30,6 +30,9 @@ test_sources = files(
 
   # Phase 4.6: Integration tests
   'test_tracker_integration.cpp',
+
+  # Phase 7: Export
+  'test_tracking_export.cpp',
 )
 
 test_exe = executable('test_posetrak',

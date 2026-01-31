@@ -25,7 +25,7 @@ posetrak_sources = files(
   'io/camera_loader.cpp',
   'io/sync_loader.cpp',
   'io/observation_loader.cpp',
-  # 'io/exporters.cpp',
+  'io/tracking_export.cpp',
 )
 
 # Build core library

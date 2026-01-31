@@ -87,7 +87,14 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
                                        config_.ik_max_iterations, config_.ik_tolerance);
 
     if (!ik_result.converged) {
-        return false;  // IK failed
+        // Accept non-converged solution if error is reasonable (< 50cm RMS)
+        // The UKF may be able to refine it over subsequent frames
+        if (ik_result.residual > 0.5) {
+            fmt::print("IK failed badly (RMS: {:.3f}m) - cannot initialize\n", ik_result.residual);
+            return false;
+        }
+        fmt::print("IK didn't fully converge (RMS: {:.3f}m), but proceeding with initialization\n",
+                   ik_result.residual);
     }
 
     // Step 3: Initialize UKF
@@ -100,8 +107,15 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
 }
 
 void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
-    // Create UKF
-    ukf_ = std::make_unique<UnscentedKalmanFilter>(skeleton_, config_.process_noise_std);
+    // Create UKF with proper alpha parameter
+    // Alpha controls sigma point spread. Too small (0.001) causes negative covariance weights.
+    // For n~58 dimensions, alpha should be at least 0.5 to ensure positive definiteness.
+    double alpha = 0.5;  // Spread parameter (was 0.001 - caused negative weights!)
+    double beta = 2.0;   // Gaussian distribution parameter
+    double kappa = 0.0;  // Secondary scaling
+
+    ukf_ = std::make_unique<UnscentedKalmanFilter>(skeleton_, config_.process_noise_std, alpha,
+                                                   beta, kappa);
 
     // Set initial state
     ukf_->set_state(initial_state);
@@ -146,8 +160,13 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
     double dt = timestamp - last_timestamp_;
     if (dt < 0.0) {
         // Return failure result
-        TrackingResult result(timestamp, ukf_->state(), ukf_->covariance(), {}, true,
-                              "Negative dt: timestamps out of order");
+        TrackingResult result{timestamp,
+                              ukf_->state(),
+                              ukf_->covariance(),
+                              {},
+                              0,
+                              true,
+                              "Negative dt: timestamps out of order"};
         return result;
     }
 
@@ -156,8 +175,8 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
 
     // Step 2: Check if we have observations
     if (!has_sufficient_observations(observations)) {
-        TrackingResult result(timestamp, ukf_->state(), ukf_->covariance(), {}, true,
-                              "Insufficient observations");
+        TrackingResult result{timestamp, ukf_->state(), ukf_->covariance(),         {},
+                              0,         true,          "Insufficient observations"};
         return result;
     }
 
@@ -166,8 +185,12 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
                                     config_.outlier_threshold);
 
     // Step 4: Create result
-    TrackingResult result(timestamp, ukf_->state(), ukf_->covariance(), update_info, false, "");
-    result.num_observations_used = update_info.num_inliers;
+    TrackingResult result{timestamp,   ukf_->state(),           ukf_->covariance(),
+                          update_info, update_info.num_inliers, false,
+                          ""};
+
+    fmt::print("Creating result: tracking_lost={}, num_inliers={}\n", result.tracking_lost,
+               update_info.num_inliers);
 
     // Update last timestamp
     last_timestamp_ = timestamp;

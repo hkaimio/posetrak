@@ -5,6 +5,17 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Custom launch",
+            "targetCreateCommands": [
+                "target create ${workspaceFolder}/builddir/tests/test_posetrak"
+            ],
+            "processCreateCommands": [
+                "process launch"
+            ]
+        },
+        {
         "name": "test_posetrak",
         "miDebuggerPath": "/usr/bin/gdb",
         "type": "cppdbg",
@@ -12,7 +23,7 @@
         "program": "${workspaceRoot}/builddir/tests/test_posetrak",
         "args": [],
         "cwd": "${workspaceRoot}"
-    }
+    },
 
     ],
 }

@@ -9,6 +9,9 @@
 #include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
 
+#include <fmt/core.h>
+
+#include <fstream>
 #include <iostream>
 
 namespace posetrak {
@@ -47,27 +50,77 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
         return IKResult::failure();
     }
 
-    // Damped least squares iteration
+    // Open CSV file for iteration tracking
+    std::ofstream csv_file("/tmp/ik_iterations.csv");
+    csv_file << "iteration,marker_name,target_x,target_y,target_z,current_x,current_y,current_z,"
+                "error_x,error_y,error_z\n";
+
+    // Open separate CSV for root updates
+    std::ofstream root_csv("/tmp/ik_root_updates.csv");
+    root_csv << "iteration,delta_x,delta_y,delta_z,omega_x,omega_y,omega_z,damping\n";
+
+    // Damped least squares iteration with adaptive damping
     double prev_error = std::numeric_limits<double>::infinity();
+    double current_damping = damping;
     int iter = 0;
+    int stall_count = 0;
 
     for (; iter < max_iterations; ++iter) {
         // Compute current error
         Eigen::VectorXd error = compute_error(q, target_markers);
         double rms_error = error.norm() / std::sqrt(marker_names.size());
 
+        // Log to CSV
+        auto current_markers = fk_.compute(q);
+        for (auto const& [name, target_pos] : target_markers) {
+            auto it = current_markers.find(name);
+            if (it != current_markers.end()) {
+                Eigen::Vector3d const& current_pos = it->second;
+                Eigen::Vector3d err = target_pos - current_pos;
+                csv_file << iter << "," << name << "," << target_pos.x() << "," << target_pos.y()
+                         << "," << target_pos.z() << "," << current_pos.x() << ","
+                         << current_pos.y() << "," << current_pos.z() << "," << err.x() << ","
+                         << err.y() << "," << err.z() << "\n";
+            }
+        }
+
         // Check convergence
         if (rms_error < tolerance) {
+            csv_file.close();
+            root_csv.close();
+            fmt::print(
+                "IK converged after {} iterations. Final RMS error: {:.4f} m. CSV: "
+                "/tmp/ik_iterations.csv, /tmp/ik_root_updates.csv\n",
+                iter + 1, rms_error);
             // Convert configuration back to State
             State final_state = config_to_state(q, skeleton);
             return IKResult{final_state, rms_error, iter + 1, true};
         }
 
-        // Check for divergence (but allow first few iterations to have high error)
-        if (iter > 3 && rms_error > prev_error * 1.5) {
-            // Diverging - stop
-            break;
+        // Adaptive damping: reduce as we get closer to solution
+        if (iter > 0) {
+            double error_reduction = prev_error - rms_error;
+            if (error_reduction > 1e-6) {
+                // Making progress - reduce damping for faster convergence
+                current_damping *= 0.8;
+                stall_count = 0;
+            } else {
+                // Stalled - try different strategies
+                stall_count++;
+
+                if (stall_count > 5) {
+                    // Been stalled for a while - reduce damping aggressively to take bigger steps
+                    current_damping *= 0.5;
+                    stall_count = 0;  // Reset to try again
+                } else {
+                    // Just started stalling - increase damping slightly
+                    current_damping *= 1.2;
+                }
+            }
+            // Keep damping in reasonable range - don't let it get too small!
+            current_damping = std::clamp(current_damping, 1e-5, 1e-1);
         }
+
         prev_error = rms_error;
 
         // Compute Jacobian
@@ -75,20 +128,42 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
 
         // Damped least squares: Δq = J^T(JJ^T + λI)^(-1) * error
         Eigen::MatrixXd JJT = J * J.transpose();
-        Eigen::MatrixXd damped = JJT + damping * Eigen::MatrixXd::Identity(JJT.rows(), JJT.cols());
+        Eigen::MatrixXd damped =
+            JJT + current_damping * Eigen::MatrixXd::Identity(JJT.rows(), JJT.cols());
 
         // Solve: damped * y = error, then Δq = J^T * y
         Eigen::VectorXd y = damped.ldlt().solve(error);
         Eigen::VectorXd delta_q = J.transpose() * y;
 
         // Scale step to avoid too large updates
-        double max_step = 0.3;  // Max 0.3 rad or 0.3m per iteration
+        double max_step = 0.5;  // Max 0.5 rad or 0.5m per iteration (conservative)
+
+        // If stalled for many iterations, try a larger step to escape local minimum
+        if (stall_count > 3) {
+            max_step = 1.0;  // Allow larger steps when stalled
+        }
+
         double delta_norm = delta_q.norm();
         if (delta_norm > max_step) {
             delta_q *= max_step / delta_norm;
         }
 
-        // Update configuration
+        // If step is extremely small, we're truly stuck - boost damping down aggressively
+        if (delta_norm < 1e-6) {
+            current_damping *= 0.1;  // Make much smaller to allow larger steps
+            if (current_damping < 1e-5) {
+                current_damping = 1e-4;  // Reset to reasonable value
+            }
+        }
+
+        // Log root updates
+        if (model_.nv >= 6) {
+            root_csv << iter << "," << delta_q[0] << "," << delta_q[1] << "," << delta_q[2] << ","
+                     << delta_q[3] << "," << delta_q[4] << "," << delta_q[5] << ","
+                     << current_damping << "\n";
+        }
+
+        // Update configuration with delta
         // Root position (indices 0-2)
         q.head(3) += delta_q.head(3);
 
@@ -97,6 +172,18 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
             // Extract quaternion update from delta_q (which is in velocity space, nv)
             // For free-flyer, the velocity has 6 DOF: 3 linear + 3 angular
             Eigen::Vector3d omega = delta_q.segment<3>(3);  // Angular velocity
+
+            // Scale up root rotation if it's too small (damping might be killing it)
+            if (stall_count > 3 && omega.norm() < 0.01) {
+                omega *= 5.0;  // Boost small rotation updates when stalled
+            }
+
+            // If truly stuck (omega extremely small), try random perturbation
+            if (iter > 50 && iter % 50 == 0 && omega.norm() < 1e-5) {
+                // Every 50 iterations when stuck, add a random rotation
+                omega =
+                    Eigen::Vector3d(0, 0.1 * (rand() % 100 - 50) / 50.0, 0);  // Random Y rotation
+            }
 
             // Convert angular velocity to quaternion update (small angle approximation)
             Eigen::Quaterniond q_current(q[6], q[3], q[4], q[5]);  // [w, x, y, z]
@@ -179,12 +266,19 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
     }
 
     // Failed to converge
+    csv_file.close();
+    root_csv.close();
     Eigen::VectorXd final_error = compute_error(q, target_markers);
-    double rms_error = final_error.norm() / std::sqrt(marker_names.size());
+    double final_rms = final_error.norm() / std::sqrt(marker_names.size());
+
+    fmt::print(
+        "IK failed to converge after {} iterations. Final RMS error: {:.4f} m (tolerance: {:.4f} "
+        "m). CSV: /tmp/ik_iterations.csv, /tmp/ik_root_updates.csv\n",
+        iter, final_rms, tolerance);
 
     // Convert configuration back to State even if not converged
     State final_state = config_to_state(q, skeleton);
-    return IKResult{final_state, rms_error, iter, false};
+    return IKResult{final_state, final_rms, iter, false};
 }
 
 Eigen::VectorXd

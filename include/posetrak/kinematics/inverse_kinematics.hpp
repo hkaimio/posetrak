@@ -73,7 +73,7 @@ class InverseKinematics {
     IKResult solve(std::map<std::string, Eigen::Vector3d> const& target_markers,
                    Skeleton const& skeleton,
                    std::optional<State> const& initial_guess = std::nullopt,
-                   int max_iterations = 20, double tolerance = 0.01, double damping = 1e-6);
+                   int max_iterations = 20, double tolerance = 0.01, double damping = 1e-4);
 
    private:
     /**

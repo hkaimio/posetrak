@@ -6,6 +6,7 @@
 #include "posetrak/filters/ukf.hpp"
 
 #include <cmath>
+#include <iostream>
 #include <stdexcept>
 
 namespace posetrak {
@@ -426,9 +427,9 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     enforce_joint_limits();
 
     // Step 9: Update covariance using Joseph form for numerical stability
-    // P' = (I - K*H)*P*(I - K*H)^T + K*R*K^T
-    // In UKF, we compute H implicitly through the unscented transform
-    // We need to extract R (measurement noise) separately from S = H*P*H^T + R
+    // Joseph form: P' = (I - K)*P*(I - K)^T + K*R*K^T
+    // For UKF, a simpler stable form is: P' = P - K*S*K^T + K*R*K^T
+    // Which simplifies to: P' = P - K*(S - R)*K^T
 
     // Build measurement noise covariance R (use inlier observations if outlier rejection was done)
     Eigen::MatrixXd R = Eigen::MatrixXd::Zero(effective_measurement_dim, effective_measurement_dim);
@@ -439,14 +440,30 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         R(2 * i + 1, 2 * i + 1) = variance;  // y coordinate
     }
 
-    // Compute H*P*H^T implicitly as S - R
-    Eigen::MatrixXd HPH = innovation_cov - R;
+    // Check innovation covariance before inversion
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> s_solver(innovation_cov);
+    double min_s_eigenvalue = s_solver.eigenvalues().minCoeff();
+    std::cout << "Innovation cov min eigenvalue (before update): " << min_s_eigenvalue << std::endl;
 
-    // Compute (I - K*H) where H is represented through the cross-covariance
-    // K*H ≈ K * (cross_cov^T * P^-1) in the error space
-    // Simplified approach: Use standard covariance update
-    // P' = P - K*S*K^T (this is the simplified Joseph form)
-    covariance_ = covariance_ - kalman_gain * innovation_cov * kalman_gain.transpose();
+    if (min_s_eigenvalue < 1e-9) {
+        // Innovation covariance is nearly singular - add regularization
+        double reg = 1e-6;
+        innovation_cov +=
+            reg * Eigen::MatrixXd::Identity(effective_measurement_dim, effective_measurement_dim);
+        std::cout << "  Added regularization " << reg << " to innovation covariance\n";
+    }
+
+    // Compute Kalman gain with regularized innovation covariance
+    kalman_gain = cross_cov * innovation_cov.inverse();
+
+    // Standard covariance update: P' = P - K*S*K^T
+    // Add measurement noise back: P' = P - K*(S-R)*K^T for better stability
+    covariance_ = covariance_ - kalman_gain * innovation_cov * kalman_gain.transpose() +
+                  kalman_gain * R * kalman_gain.transpose();
+
+    // Add regularization to diagonal to ensure positive definiteness
+    double epsilon = 1e-6;
+    covariance_ += epsilon * Eigen::MatrixXd::Identity(error_dim(), error_dim());
 
     // Step 10: Condition covariance for numerical stability
     // Ensure symmetry (numerical errors can cause asymmetry)
@@ -461,11 +478,18 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
 
     Eigen::VectorXd eigenvalues = eigen_solver.eigenvalues();
     double min_eigenvalue = eigenvalues.minCoeff();
+    std::cout << "Min covariance eigenvalue: " << min_eigenvalue << std::endl;
 
-    if (min_eigenvalue < 0.0) {
-        // Add small positive value to diagonal to ensure positive definiteness
-        double epsilon = std::abs(min_eigenvalue) + 1e-6;
-        covariance_ += epsilon * Eigen::MatrixXd::Identity(error_dim(), error_dim());
+    if (min_eigenvalue < 1e-6) {
+        // Add enough to make minimum eigenvalue at least 1e-6
+        double epsilon_fix = 1e-6 - min_eigenvalue + 1e-7;
+        covariance_ += epsilon_fix * Eigen::MatrixXd::Identity(error_dim(), error_dim());
+        std::cout << "  Fixed covariance with epsilon=" << epsilon_fix << std::endl;
+
+        // Recompute eigenvalues to verify
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> verify_solver(covariance_);
+        double new_min = verify_solver.eigenvalues().minCoeff();
+        std::cout << "  New min eigenvalue: " << new_min << std::endl;
     }
 
     // Step 11: Damp velocity covariance for joints that hit limits

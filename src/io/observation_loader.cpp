@@ -13,8 +13,11 @@ namespace {
 
 // Parse OpenPose "pose_keypoints_2d" array for one person
 // Returns vector of Observation structs (one per keypoint)
-std::vector<Observation> parse_openpose_person(nlohmann::json const& person, Camera const& camera,
-                                               uint32_t frame_idx, double min_confidence) {
+// coco_to_marker_idx maps OpenPose/COCO keypoint IDs to skeleton marker indices
+std::vector<Observation>
+parse_openpose_person(nlohmann::json const& person, Camera const& camera, uint32_t frame_idx,
+                      double min_confidence,
+                      std::unordered_map<int, int> const& coco_to_marker_idx) {
     if (!person.contains("pose_keypoints_2d")) {
         return {};
     }
@@ -36,9 +39,17 @@ std::vector<Observation> parse_openpose_person(nlohmann::json const& person, Cam
         double conf = keypoints_flat[i * 3 + 2].get<double>();
 
         if (conf >= min_confidence) {
+            // Map COCO ID to marker index
+            int coco_id = static_cast<int>(i);
+            auto it = coco_to_marker_idx.find(coco_id);
+            if (it == coco_to_marker_idx.end()) {
+                // This COCO keypoint doesn't have a corresponding marker in skeleton - skip
+                continue;
+            }
+
             Observation obs;
-            obs.camera_id = 0;  // Will be set by caller if needed
-            obs.marker_id = static_cast<int>(i);
+            obs.camera_id = 0;           // Will be set by caller if needed
+            obs.marker_id = it->second;  // Use skeleton marker index, not COCO ID
             obs.frame_idx = static_cast<int>(frame_idx);
             obs.timestamp = timestamp;
             obs.position_distorted = Eigen::Vector2d(x, y);
@@ -55,8 +66,17 @@ std::vector<Observation> parse_openpose_person(nlohmann::json const& person, Cam
 }  // namespace
 
 ObservationSequence load_openpose_frame(std::string const& filepath, Camera const& camera,
-                                        std::string const& camera_name, uint32_t frame_idx,
-                                        double min_confidence, int person_id) {
+                                        std::string const& camera_name, Skeleton const& skeleton,
+                                        uint32_t frame_idx, double min_confidence, int person_id) {
+    // Build COCO ID -> marker index map
+    std::unordered_map<int, int> coco_to_marker_idx;
+    auto const& markers = skeleton.markers();
+    for (size_t i = 0; i < markers.size(); ++i) {
+        if (markers[i].coco_id.has_value()) {
+            coco_to_marker_idx[markers[i].coco_id.value()] = static_cast<int>(i);
+        }
+    }
+
     std::ifstream file(filepath);
     if (!file.is_open()) {
         throw std::runtime_error("Failed to open OpenPose file: " + filepath);
@@ -91,7 +111,8 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
         return seq;
     }
 
-    auto observations = parse_openpose_person(people[person_id], camera, frame_idx, min_confidence);
+    auto observations = parse_openpose_person(people[person_id], camera, frame_idx, min_confidence,
+                                              coco_to_marker_idx);
 
     ObservationSequence seq;
     seq.camera_id = 0;
@@ -103,6 +124,7 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
 
 ObservationSet load_openpose_sequence(std::string const& base_dir,
                                       std::unordered_map<std::string, Camera> const& cameras,
+                                      Skeleton const& skeleton,
                                       std::pair<uint32_t, uint32_t> frame_range,
                                       double min_confidence, int person_id) {
     namespace fs = std::filesystem;
@@ -148,8 +170,8 @@ ObservationSet load_openpose_sequence(std::string const& base_dir,
         full_seq.camera_name = cam_name;
 
         for (auto const& [frame_num, filepath] : frame_files) {
-            auto frame_seq = load_openpose_frame(filepath.string(), camera, cam_name, frame_num,
-                                                 min_confidence, person_id);
+            auto frame_seq = load_openpose_frame(filepath.string(), camera, cam_name, skeleton,
+                                                 frame_num, min_confidence, person_id);
 
             // Append all observations from this frame to the full sequence
             full_seq.observations.insert(full_seq.observations.end(),

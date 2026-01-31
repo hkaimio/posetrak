@@ -9,6 +9,7 @@
  */
 
 #pragma once
+#define POSETRAK_TRACKER_HPP_INCLUDED
 
 #include "posetrak/core/camera.hpp"
 #include "posetrak/core/observation.hpp"
@@ -119,6 +120,18 @@ class Tracker {
      * @note Sets is_initialized() to true on success
      */
     bool initialize(std::vector<Observation> const& observations, double timestamp);
+
+    /**
+     * @brief Initialize tracker from skeleton rest pose (bypass IK)
+     *
+     * Initializes UKF with skeleton in rest configuration (zero joint angles).
+     * Useful when IK initialization fails or for quick testing.
+     *
+     * @param timestamp Initial timestamp
+     *
+     * @note Sets is_initialized() to true
+     */
+    void initialize_from_rest_pose(double timestamp);
 
     /**
      * @brief Track a single frame

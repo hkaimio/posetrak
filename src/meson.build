@@ -5,6 +5,7 @@ posetrak_sources = files(
   'core/skeleton.cpp',
   'core/camera.cpp',
   'core/observation.cpp',
+  'core/config.cpp',
 
   # Kinematics (Phase 3)
   'kinematics/pinocchio_model_builder.cpp',

@@ -106,6 +106,29 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
     return true;
 }
 
+void Tracker::initialize_from_rest_pose(double timestamp) {
+    // Create state with all zeros (rest pose)
+    int num_dof = skeleton_.total_dof_count();
+
+    Eigen::Vector3d root_position = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond root_orientation = Eigen::Quaterniond::Identity();
+    Eigen::VectorXd joint_angles = Eigen::VectorXd::Zero(num_dof);
+    Eigen::Vector3d root_velocity = Eigen::Vector3d::Zero();
+    Eigen::Vector3d root_angular_velocity = Eigen::Vector3d::Zero();
+    Eigen::VectorXd joint_velocities = Eigen::VectorXd::Zero(num_dof);
+
+    State rest_state(root_position, root_orientation, joint_angles, root_velocity,
+                     root_angular_velocity, joint_velocities);
+
+    // Initialize UKF with rest pose
+    initialize_ukf(rest_state, timestamp);
+
+    initialized_ = true;
+    last_timestamp_ = timestamp;
+
+    fmt::print("Initialized from rest pose (all zeros, bypassing IK)\n");
+}
+
 void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
     // Create UKF with proper alpha parameter
     // Alpha controls sigma point spread. Too small (0.001) causes negative covariance weights.

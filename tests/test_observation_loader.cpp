@@ -1,13 +1,32 @@
+#include <posetrak/core/observation.hpp>
+#include <posetrak/core/skeleton.hpp>
 #include <posetrak/io/camera_loader.hpp>
 #include <posetrak/io/observation_loader.hpp>
+#include <posetrak/io/skeleton_loader.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <filesystem>
 #include <fstream>
+#include <vector>
 
 using namespace posetrak;
+
+// Helper to create a minimal test skeleton with COCO markers
+static Skeleton create_test_skeleton() {
+    Skeleton skeleton;
+
+    // Add a root joint
+    skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+
+    // Add markers with COCO IDs (0-24 for COCO body25 format)
+    for (int i = 0; i < 25; ++i) {
+        skeleton.add_marker("marker_" + std::to_string(i), 0, Eigen::Vector3d::Zero(), i);
+    }
+
+    return skeleton;
+}
 
 TEST_CASE("Load single OpenPose frame", "[observation_loader]") {
     // Load camera for undistortion
@@ -15,7 +34,10 @@ TEST_CASE("Load single OpenPose frame", "[observation_loader]") {
     REQUIRE(cameras.count("cam1") > 0);
     auto const& camera = cameras.at("cam1");
 
-    auto seq = load_openpose_frame("tests/data/openpose/cam1/cam1_000001.json", camera, "cam1", 1);
+    auto skeleton = create_test_skeleton();
+
+    auto seq = load_openpose_frame("tests/data/openpose/cam1/cam1_000001.json", camera, "cam1",
+                                   skeleton, 1);
 
     SECTION("Sequence has observations") {
         REQUIRE(!seq.observations.empty());
@@ -46,8 +68,9 @@ TEST_CASE("Load single OpenPose frame", "[observation_loader]") {
     }
 
     SECTION("Low confidence keypoints are filtered") {
-        auto seq_low = load_openpose_frame("tests/data/openpose/cam1/cam1_000001.json", camera,
-                                           "cam1", 1, 5.0);  // High threshold
+        auto seq_low =
+            load_openpose_frame("tests/data/openpose/cam1/cam1_000001.json", camera, "cam1",
+                                create_test_skeleton(), 1, 5.0);  // High threshold
 
         // Should have fewer observations with higher threshold
         REQUIRE(seq_low.observations.size() < seq.observations.size());
@@ -55,9 +78,9 @@ TEST_CASE("Load single OpenPose frame", "[observation_loader]") {
 
     SECTION("Can extract specific person") {
         auto seq_p0 = load_openpose_frame("tests/data/openpose/cam1/cam1_000001.json", camera,
-                                          "cam1", 1, 0.1, 0);
+                                          "cam1", create_test_skeleton(), 1, 0.1, 0);
         auto seq_p1 = load_openpose_frame("tests/data/openpose/cam1/cam1_000001.json", camera,
-                                          "cam1", 1, 0.1, 1);
+                                          "cam1", create_test_skeleton(), 1, 0.1, 1);
 
         REQUIRE(!seq_p0.observations.empty());
         REQUIRE(!seq_p1.observations.empty());
@@ -73,7 +96,8 @@ TEST_CASE("Load OpenPose sequence", "[observation_loader]") {
     openpose_cameras.emplace("cam1", cameras.at("cam1"));
     openpose_cameras.emplace("cam2", cameras.at("cam2"));
 
-    auto obs_set = load_openpose_sequence("tests/data/openpose", openpose_cameras, {1, 10}, 0.1, 0);
+    auto obs_set = load_openpose_sequence("tests/data/openpose", openpose_cameras,
+                                          create_test_skeleton(), {1, 10}, 0.1, 0);
 
     SECTION("Loads sequences for all cameras") {
         auto const* seq1 = obs_set.get_sequence("cam1");
@@ -93,8 +117,8 @@ TEST_CASE("Load OpenPose sequence", "[observation_loader]") {
     }
 
     SECTION("Can load subset of frames") {
-        auto obs_set_subset =
-            load_openpose_sequence("tests/data/openpose", openpose_cameras, {1, 5}, 0.1, 0);
+        auto obs_set_subset = load_openpose_sequence("tests/data/openpose", openpose_cameras,
+                                                     create_test_skeleton(), {1, 5}, 0.1, 0);
 
         auto const* seq_full = obs_set.get_sequence("cam1");
         auto const* seq_subset = obs_set_subset.get_sequence("cam1");
@@ -119,9 +143,9 @@ TEST_CASE("Observation loader error handling", "[observation_loader][errors]") {
     auto const& camera = cameras.at("cam1");
 
     SECTION("Non-existent file throws") {
-        REQUIRE_THROWS_AS(
-            load_openpose_frame("tests/data/openpose/nonexistent.json", camera, "cam1", 0),
-            std::runtime_error);
+        REQUIRE_THROWS_AS(load_openpose_frame("tests/data/openpose/nonexistent.json", camera,
+                                              "cam1", create_test_skeleton(), 0),
+                          std::runtime_error);
     }
 
     SECTION("Invalid JSON throws") {
@@ -136,8 +160,9 @@ TEST_CASE("Observation loader error handling", "[observation_loader][errors]") {
         f << R"({"broken json)";
         f.close();
 
-        REQUIRE_THROWS_AS(load_openpose_frame(test_file.string(), camera, "cam1", 0),
-                          std::runtime_error);
+        REQUIRE_THROWS_AS(
+            load_openpose_frame(test_file.string(), camera, "cam1", create_test_skeleton(), 0),
+            std::runtime_error);
     }
 
     SECTION("Missing 'people' array throws") {
@@ -152,8 +177,9 @@ TEST_CASE("Observation loader error handling", "[observation_loader][errors]") {
         f << R"({"version": 1.3})";
         f.close();
 
-        REQUIRE_THROWS_AS(load_openpose_frame(test_file.string(), camera, "cam1", 0),
-                          std::runtime_error);
+        REQUIRE_THROWS_AS(
+            load_openpose_frame(test_file.string(), camera, "cam1", create_test_skeleton(), 0),
+            std::runtime_error);
     }
 
     SECTION("Empty people array returns empty sequence") {
@@ -168,7 +194,8 @@ TEST_CASE("Observation loader error handling", "[observation_loader][errors]") {
         f << R"({"version": 1.3, "people": []})";
         f.close();
 
-        auto result = load_openpose_frame(test_file.string(), camera, "cam1", 0);
+        auto result =
+            load_openpose_frame(test_file.string(), camera, "cam1", create_test_skeleton(), 0);
         REQUIRE(result.observations.empty());
     }
 
@@ -176,7 +203,8 @@ TEST_CASE("Observation loader error handling", "[observation_loader][errors]") {
         std::unordered_map<std::string, Camera> test_cameras;
         test_cameras.emplace("cam1", cameras.at("cam1"));
 
-        REQUIRE_THROWS_AS(load_openpose_sequence("tests/data/nonexistent_dir", test_cameras),
+        REQUIRE_THROWS_AS(load_openpose_sequence("tests/data/nonexistent_dir", test_cameras,
+                                                 create_test_skeleton()),
                           std::runtime_error);
     }
 
@@ -184,8 +212,9 @@ TEST_CASE("Observation loader error handling", "[observation_loader][errors]") {
         std::unordered_map<std::string, Camera> test_cameras;
         test_cameras.emplace("nonexistent_cam", cameras.at("cam1"));
 
-        REQUIRE_THROWS_AS(load_openpose_sequence("tests/data/openpose", test_cameras),
-                          std::runtime_error);
+        REQUIRE_THROWS_AS(
+            load_openpose_sequence("tests/data/openpose", test_cameras, create_test_skeleton()),
+            std::runtime_error);
     }
 }
 
@@ -205,22 +234,24 @@ TEST_CASE("Observation loader handles edge cases", "[observation_loader]") {
         f << R"({"version": 1.3, "people": [{"person_id": [0]}]})";
         f.close();
 
-        auto result = load_openpose_frame(test_file.string(), camera, "cam1", 0);
+        auto result =
+            load_openpose_frame(test_file.string(), camera, "cam1", create_test_skeleton(), 0);
         // Should return empty sequence (person has no keypoints)
         REQUIRE(result.observations.empty());
     }
 
     SECTION("Person ID out of range returns empty sequence") {
-        auto result = load_openpose_frame("tests/data/openpose/cam1/cam1_000001.json", camera,
-                                          "cam1", 1, 0.1, 999);  // Only 2 people exist
+        auto result =
+            load_openpose_frame("tests/data/openpose/cam1/cam1_000001.json", camera, "cam1",
+                                create_test_skeleton(), 1, 0.1, 999);  // Only 2 people exist
         REQUIRE(result.observations.empty());
     }
 
     SECTION("Zero confidence threshold includes more keypoints") {
         auto seq_zero = load_openpose_frame("tests/data/openpose/cam1/cam1_000001.json", camera,
-                                            "cam1", 1, 0.0);
+                                            "cam1", create_test_skeleton(), 1, 0.0);
         auto seq_default = load_openpose_frame("tests/data/openpose/cam1/cam1_000001.json", camera,
-                                               "cam1", 1, 0.1);
+                                               "cam1", create_test_skeleton(), 1, 0.1);
 
         // With 0.0 threshold, should have at least as many observations
         REQUIRE(seq_zero.observations.size() >= seq_default.observations.size());

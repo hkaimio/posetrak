@@ -144,7 +144,14 @@ std::unordered_map<std::string, Camera> load_cameras_from_toml(std::string const
             // Convert Rodrigues rotation vector to quaternion
             Eigen::Quaterniond orientation = rodrigues_to_quaternion(rvec);
 
-            Extrinsics extrinsics{tvec, orientation};
+            // Convert OpenCV convention to our convention
+            // OpenCV: point_cam = R @ point_world + t
+            // Our convention: point_cam = R @ (point_world - camera_position)
+            // Therefore: camera_position = -R^T @ t
+            Eigen::Matrix3d R_matrix = orientation.toRotationMatrix();
+            Eigen::Vector3d camera_position = -R_matrix.transpose() * tvec;
+
+            Extrinsics extrinsics{camera_position, orientation};
 
             // Create camera (default FPS=30.0, start_frame=0)
             Camera camera(camera_id++, cam_name, intrinsics, extrinsics);

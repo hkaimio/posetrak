@@ -134,6 +134,19 @@ class Tracker {
     void initialize_from_rest_pose(double timestamp);
 
     /**
+     * @brief Initialize tracker from a given state (e.g., from Python tracker)
+     *
+     * Initializes UKF with the provided state. Useful for validation by
+     * initializing from a known-good external tracker.
+     *
+     * @param initial_state State to initialize with
+     * @param timestamp Initial timestamp
+     *
+     * @note Sets is_initialized() to true
+     */
+    void initialize_from_state(State const& initial_state, double timestamp);
+
+    /**
      * @brief Track a single frame
      *
      * Performs predict-update cycle:

@@ -129,6 +129,16 @@ void Tracker::initialize_from_rest_pose(double timestamp) {
     fmt::print("Initialized from rest pose (all zeros, bypassing IK)\n");
 }
 
+void Tracker::initialize_from_state(State const& initial_state, double timestamp) {
+    // Initialize UKF with provided state
+    initialize_ukf(initial_state, timestamp);
+
+    initialized_ = true;
+    last_timestamp_ = timestamp;
+
+    fmt::print("Initialized from provided state\n");
+}
+
 void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
     // Create UKF with proper alpha parameter
     // Alpha controls sigma point spread. Too small (0.001) causes negative covariance weights.

@@ -123,6 +123,15 @@ class UnscentedKalmanFilter {
      */
     void set_frame_number(int frame_num) { frame_number_ = frame_num; }
 
+    // Testing-only accessors (for unit test verification)
+    /**
+     * @brief Generate sigma points from current state (for testing)
+     * @return Vector of sigma point states
+     */
+    std::vector<State> generate_sigma_points_for_testing() const {
+        return sigma_gen_.generate_sigma_points(state_, covariance_);
+    }
+
    private:
     /**
      * @brief Compute weighted mean of states (manifold-aware)

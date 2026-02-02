@@ -31,6 +31,10 @@ test_sources = files(
   # Phase 4.6: Integration tests
   'test_tracker_integration.cpp',
 
+  # Phase 4.7: Python comparison tests
+  'test_ukf_frame0_comparison.cpp',
+  'test_helpers/python_data_loader.cpp',
+
   # Phase 7: Export
   'test_tracking_export.cpp',
   'test_statistics_tracker.cpp',

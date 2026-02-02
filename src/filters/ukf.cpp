@@ -6,6 +6,9 @@
 #include "posetrak/filters/ukf.hpp"
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 
@@ -38,6 +41,47 @@ void UnscentedKalmanFilter::predict(double dt) {
     // Generate sigma points
     auto sigma_points = sigma_gen_.generate_sigma_points(state_, covariance_);
 
+    // Debug: Export sigma points before propagation (frame 1 only)
+    if (debug_enabled_ && frame_number_ == 1) {
+        std::filesystem::create_directories(debug_dir_ + "/frame_0001");
+        std::ofstream f(debug_dir_ + "/frame_0001/sigma_points_before.csv");
+        f << std::setprecision(15);
+
+        // Write header
+        f << "sigma_idx,root_x,root_y,root_z,root_qw,root_qx,root_qy,root_qz";
+        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+            f << ",joint_" << i;
+        }
+        f << ",root_vx,root_vy,root_vz,root_wx,root_wy,root_wz";
+        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+            f << ",joint_vel_" << i;
+        }
+        f << "\n";
+
+        // Write sigma points
+        for (size_t i = 0; i < sigma_points.size(); ++i) {
+            auto const& s = sigma_points[i];
+            f << i;
+            f << "," << s.root_position().x() << "," << s.root_position().y() << ","
+              << s.root_position().z();
+            f << "," << s.root_orientation().w() << "," << s.root_orientation().x() << ","
+              << s.root_orientation().y() << "," << s.root_orientation().z();
+            for (int j = 0; j < s.num_dof(); ++j) {
+                f << "," << s.joint_angles()(j);
+            }
+            f << "," << s.root_velocity().x() << "," << s.root_velocity().y() << ","
+              << s.root_velocity().z();
+            f << "," << s.root_angular_velocity().x() << "," << s.root_angular_velocity().y() << ","
+              << s.root_angular_velocity().z();
+            for (int j = 0; j < s.num_dof(); ++j) {
+                f << "," << s.joint_velocities()(j);
+            }
+            f << "\n";
+        }
+        std::cout << "DEBUG: Exported sigma points before propagation to " << debug_dir_
+                  << "/frame_0001/sigma_points_before.csv\n";
+    }
+
     // Propagate sigma points through process model
     std::vector<State> propagated_points;
     propagated_points.reserve(sigma_points.size());
@@ -46,8 +90,86 @@ void UnscentedKalmanFilter::predict(double dt) {
         propagated_points.push_back(process_model_.propagate(sigma_state, dt));
     }
 
+    // Debug: Export sigma points after propagation (frame 1 only)
+    if (debug_enabled_ && frame_number_ == 1) {
+        std::ofstream f(debug_dir_ + "/frame_0001/sigma_points_after.csv");
+        f << std::setprecision(15);
+
+        // Write header
+        f << "sigma_idx,root_x,root_y,root_z,root_qw,root_qx,root_qy,root_qz";
+        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+            f << ",joint_" << i;
+        }
+        f << ",root_vx,root_vy,root_vz,root_wx,root_wy,root_wz";
+        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+            f << ",joint_vel_" << i;
+        }
+        f << "\n";
+
+        // Write propagated sigma points
+        for (size_t i = 0; i < propagated_points.size(); ++i) {
+            auto const& s = propagated_points[i];
+            f << i;
+            f << "," << s.root_position().x() << "," << s.root_position().y() << ","
+              << s.root_position().z();
+            f << "," << s.root_orientation().w() << "," << s.root_orientation().x() << ","
+              << s.root_orientation().y() << "," << s.root_orientation().z();
+            for (int j = 0; j < s.num_dof(); ++j) {
+                f << "," << s.joint_angles()(j);
+            }
+            f << "," << s.root_velocity().x() << "," << s.root_velocity().y() << ","
+              << s.root_velocity().z();
+            f << "," << s.root_angular_velocity().x() << "," << s.root_angular_velocity().y() << ","
+              << s.root_angular_velocity().z();
+            for (int j = 0; j < s.num_dof(); ++j) {
+                f << "," << s.joint_velocities()(j);
+            }
+            f << "\n";
+        }
+        std::cout << "DEBUG: Exported sigma points after propagation to " << debug_dir_
+                  << "/frame_0001/sigma_points_after.csv\n";
+    }
+
     // Compute predicted mean
     state_ = compute_state_mean(propagated_points, sigma_gen_.get_mean_weights());
+
+    // Debug: Export predicted mean state (prior state for frame 1)
+    if (debug_enabled_ && frame_number_ == 1) {
+        std::ofstream f(debug_dir_ + "/frame_0001/prior_state_computed.csv");
+        f << std::setprecision(15);
+        f << "root_x,root_y,root_z,root_qw,root_qx,root_qy,root_qz";
+        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+            f << ",joint_" << i;
+        }
+        f << ",root_vx,root_vy,root_vz,root_wx,root_wy,root_wz";
+        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+            f << ",joint_vel_" << i;
+        }
+        f << "\n";
+
+        f << state_.root_position().x() << "," << state_.root_position().y() << ","
+          << state_.root_position().z();
+        f << "," << state_.root_orientation().w() << "," << state_.root_orientation().x() << ","
+          << state_.root_orientation().y() << "," << state_.root_orientation().z();
+        for (int j = 0; j < state_.num_dof(); ++j) {
+            f << "," << state_.joint_angles()(j);
+        }
+        f << "," << state_.root_velocity().x() << "," << state_.root_velocity().y() << ","
+          << state_.root_velocity().z();
+        f << "," << state_.root_angular_velocity().x() << "," << state_.root_angular_velocity().y()
+          << "," << state_.root_angular_velocity().z();
+        for (int j = 0; j < state_.num_dof(); ++j) {
+            f << "," << state_.joint_velocities()(j);
+        }
+        f << "\n";
+        std::cout << "DEBUG: Exported computed prior state to " << debug_dir_
+                  << "/frame_0001/prior_state_computed.csv\n";
+        std::cout << "DEBUG: Prior state position: (" << state_.root_position().x() << ", "
+                  << state_.root_position().y() << ", " << state_.root_position().z() << ")\n";
+        std::cout << "DEBUG: Prior state quaternion: (" << state_.root_orientation().w() << ", "
+                  << state_.root_orientation().x() << ", " << state_.root_orientation().y() << ", "
+                  << state_.root_orientation().z() << ")\n";
+    }
 
     // Compute predicted covariance
     covariance_ =
@@ -301,19 +423,56 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
             predict_measurements(sigma_points[i], observations, cameras, fk);
     }
 
-    // Step 3: Compute mean predicted measurement
+    // Step 3: Compute mean predicted measurement (using nanmean to ignore NaN)
+    // For each measurement dimension, compute weighted mean of non-NaN values
     Eigen::VectorXd const weights_mean = sigma_gen_.get_mean_weights();
     Eigen::VectorXd measurement_mean = Eigen::VectorXd::Zero(measurement_dim);
-    for (int i = 0; i < n_sigma; ++i) {
-        measurement_mean += weights_mean(i) * predicted_measurements.col(i);
+
+    for (int dim = 0; dim < measurement_dim; ++dim) {
+        double sum = 0.0;
+        double weight_sum = 0.0;
+
+        for (int i = 0; i < n_sigma; ++i) {
+            double val = predicted_measurements(dim, i);
+            if (std::isfinite(val)) {
+                sum += weights_mean(i) * val;
+                weight_sum += weights_mean(i);
+            }
+        }
+
+        if (weight_sum > 0.0) {
+            measurement_mean(dim) = sum / weight_sum;
+        } else {
+            // All sigma points have NaN for this dimension
+            measurement_mean(dim) = std::numeric_limits<double>::quiet_NaN();
+        }
     }
 
     // Step 4: Compute innovation covariance S = Pyy + R
+    // Handle NaN: skip dimensions where measurement_mean is NaN (all sigma points failed)
     Eigen::VectorXd const weights_cov = sigma_gen_.get_covariance_weights();
     Eigen::MatrixXd innovation_cov = Eigen::MatrixXd::Zero(measurement_dim, measurement_dim);
 
     for (int i = 0; i < n_sigma; ++i) {
-        Eigen::VectorXd innovation = predicted_measurements.col(i) - measurement_mean;
+        Eigen::VectorXd pred_safe = predicted_measurements.col(i);
+
+        // Replace NaN with mean (contributes zero to innovation covariance)
+        // But if mean itself is NaN, skip that dimension entirely
+        for (int dim = 0; dim < measurement_dim; ++dim) {
+            if (!std::isfinite(pred_safe(dim))) {
+                pred_safe(dim) = measurement_mean(dim);
+            }
+        }
+
+        Eigen::VectorXd innovation = pred_safe - measurement_mean;
+
+        // Zero out NaN innovations (where mean was NaN)
+        for (int dim = 0; dim < measurement_dim; ++dim) {
+            if (!std::isfinite(innovation(dim))) {
+                innovation(dim) = 0.0;
+            }
+        }
+
         innovation_cov += weights_cov(i) * (innovation * innovation.transpose());
     }
 
@@ -339,6 +498,25 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         inlier_observations = inliers;
         observation_results = results;
 
+        // Debug: log outlier counts
+        if (debug_enabled_ && frame_number_ == 0) {
+            size_t nan_count = 0;
+            size_t mahal_count = 0;
+            for (auto const& r : results) {
+                if (r.is_outlier) {
+                    if (r.mahalanobis_distance == 0.0) {
+                        nan_count++;
+                    } else {
+                        mahal_count++;
+                    }
+                }
+            }
+            std::cout << "  [DEBUG] Frame " << frame_number_ << ": " << observations.size()
+                      << " total obs, " << inliers.size() << " inliers, "
+                      << (results.size() - inliers.size()) << " outliers (" << nan_count
+                      << " NaN proj, " << mahal_count << " Mahalanobis)\n";
+        }
+
         // If all observations rejected, return early
         if (inlier_observations.empty()) {
             result.num_observations = static_cast<int>(observations.size());
@@ -358,16 +536,49 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
                 predict_measurements(sigma_points[i], inlier_observations, cameras, fk);
         }
 
-        // Recompute mean predicted measurement for inliers
+        // Recompute mean predicted measurement for inliers (NaN-safe)
         measurement_mean = Eigen::VectorXd::Zero(inlier_dim);
-        for (int i = 0; i < n_sigma; ++i) {
-            measurement_mean += weights_mean(i) * inlier_predictions.col(i);
+        for (int dim = 0; dim < inlier_dim; ++dim) {
+            double sum = 0.0;
+            double weight_sum = 0.0;
+
+            for (int i = 0; i < n_sigma; ++i) {
+                double val = inlier_predictions(dim, i);
+                if (std::isfinite(val)) {
+                    sum += weights_mean(i) * val;
+                    weight_sum += weights_mean(i);
+                }
+            }
+
+            if (weight_sum > 0.0) {
+                measurement_mean(dim) = sum / weight_sum;
+            } else {
+                // All sigma points have NaN - should not happen for inliers
+                measurement_mean(dim) = std::numeric_limits<double>::quiet_NaN();
+            }
         }
 
-        // Recompute innovation covariance for inliers
+        // Recompute innovation covariance for inliers (NaN-safe)
         innovation_cov = Eigen::MatrixXd::Zero(inlier_dim, inlier_dim);
         for (int i = 0; i < n_sigma; ++i) {
-            Eigen::VectorXd innovation = inlier_predictions.col(i) - measurement_mean;
+            Eigen::VectorXd pred_safe = inlier_predictions.col(i);
+
+            // Replace NaN with mean
+            for (int dim = 0; dim < inlier_dim; ++dim) {
+                if (!std::isfinite(pred_safe(dim))) {
+                    pred_safe(dim) = measurement_mean(dim);
+                }
+            }
+
+            Eigen::VectorXd innovation = pred_safe - measurement_mean;
+
+            // Zero out any remaining NaN innovations
+            for (int dim = 0; dim < inlier_dim; ++dim) {
+                if (!std::isfinite(innovation(dim))) {
+                    innovation(dim) = 0.0;
+                }
+            }
+
             innovation_cov += weights_cov(i) * (innovation * innovation.transpose());
         }
 
@@ -383,7 +594,16 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         cross_cov = Eigen::MatrixXd::Zero(error_dim(), inlier_dim);
         for (int i = 0; i < n_sigma; ++i) {
             Eigen::VectorXd state_error = compute_state_error(sigma_points[i], state_);
-            Eigen::VectorXd measurement_error = inlier_predictions.col(i) - measurement_mean;
+
+            // Handle NaN in predicted measurements
+            Eigen::VectorXd pred_safe = inlier_predictions.col(i);
+            for (int dim = 0; dim < inlier_dim; ++dim) {
+                if (!std::isfinite(pred_safe(dim))) {
+                    pred_safe(dim) = measurement_mean(dim);
+                }
+            }
+
+            Eigen::VectorXd measurement_error = pred_safe - measurement_mean;
             cross_cov += weights_cov(i) * (state_error * measurement_error.transpose());
         }
 
@@ -407,7 +627,16 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         cross_cov = Eigen::MatrixXd::Zero(error_dim(), measurement_dim);
         for (int i = 0; i < n_sigma; ++i) {
             Eigen::VectorXd state_error = compute_state_error(sigma_points[i], state_);
-            Eigen::VectorXd measurement_error = predicted_measurements.col(i) - measurement_mean;
+
+            // Handle NaN in predicted measurements (replace with mean for zero innovation)
+            Eigen::VectorXd pred_safe = predicted_measurements.col(i);
+            for (int dim = 0; dim < measurement_dim; ++dim) {
+                if (!std::isfinite(pred_safe(dim))) {
+                    pred_safe(dim) = measurement_mean(dim);
+                }
+            }
+
+            Eigen::VectorXd measurement_error = pred_safe - measurement_mean;
             cross_cov += weights_cov(i) * (state_error * measurement_error.transpose());
         }
     }
@@ -544,6 +773,8 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
     int const n_obs = static_cast<int>(observations.size());
     Eigen::VectorXd predictions(2 * n_obs);
 
+    int nan_count = 0;  // Debug: count NaN projections
+
     for (int i = 0; i < n_obs; ++i) {
         Observation const& obs = observations[i];
 
@@ -553,9 +784,10 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
 
         auto it = marker_positions.find(marker_name);
         if (it == marker_positions.end()) {
-            // Marker not found in FK result - use fallback (project to image center)
-            predictions(2 * i) = cameras.at(obs.camera_id).intrinsics().cx;
-            predictions(2 * i + 1) = cameras.at(obs.camera_id).intrinsics().cy;
+            // Marker not found in FK result (FK failed) - use NaN to mark as failed
+            predictions(2 * i) = std::numeric_limits<double>::quiet_NaN();
+            predictions(2 * i + 1) = std::numeric_limits<double>::quiet_NaN();
+            nan_count++;
             continue;
         }
 
@@ -563,19 +795,28 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
 
         // Project to camera (undistorted coordinates for UKF)
         Camera const& camera = cameras.at(obs.camera_id);
-        Eigen::Vector2d projected = camera.project_undistorted(marker_pos_world);
+        auto projected_opt = camera.project_undistorted(marker_pos_world);
 
-        // Check for invalid projections (markers behind camera produce NaN/inf)
-        // This can happen when state estimate is poor or during initialization
-        if (!std::isfinite(projected.x()) || !std::isfinite(projected.y())) {
-            // Use image center as fallback for failed projections
-            predictions(2 * i) = camera.intrinsics().cx;
-            predictions(2 * i + 1) = camera.intrinsics().cy;
+        // Check if projection succeeded
+        if (!projected_opt.has_value()) {
+            // Projection failed (behind camera or out of bounds) - use NaN to mark as failed
+            predictions(2 * i) = std::numeric_limits<double>::quiet_NaN();
+            predictions(2 * i + 1) = std::numeric_limits<double>::quiet_NaN();
+            nan_count++;
         } else {
+            Eigen::Vector2d const& projected = *projected_opt;
             predictions(2 * i) = projected.x();
             predictions(2 * i + 1) = projected.y();
         }
     }
+
+    // Debug: log NaN count for first sigma point (mean state)
+    static int call_count = 0;
+    if (debug_enabled_ && frame_number_ == 0 && call_count == 0) {
+        std::cout << "  [DEBUG] predict_measurements: " << nan_count << " NaN projections out of "
+                  << n_obs << "\n";
+    }
+    call_count++;
 
     return predictions;
 }
@@ -620,9 +861,33 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
         Eigen::Vector2d predicted = measurement_mean.segment<2>(2 * i);
         Eigen::Vector2d actual = observed.segment<2>(2 * i);
 
-        // Check for NaN in predicted (failed projection)
+        // First check: if mean prediction is NaN (all sigma points failed), reject immediately
         if (!std::isfinite(predicted.x()) || !std::isfinite(predicted.y())) {
-            // Projection failed - reject as outlier
+            ObservationResult obs_result;
+            obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
+            obs_result.camera_id = obs.camera_id;
+            obs_result.is_outlier = true;
+            obs_result.mahalanobis_distance = 0.0;
+            obs_result.innovation = Eigen::Vector2d::Zero();
+            obs_result.predicted = predicted;
+            obs_result.actual = actual;
+            results.push_back(obs_result);
+            continue;
+        }
+
+        // Check if ALL sigma points failed projection (like Python does)
+        bool all_sigma_points_nan = true;
+        for (int sigma_idx = 0; sigma_idx < predicted_measurements.cols(); ++sigma_idx) {
+            double u = predicted_measurements(2 * i, sigma_idx);
+            double v = predicted_measurements(2 * i + 1, sigma_idx);
+            if (std::isfinite(u) && std::isfinite(v)) {
+                all_sigma_points_nan = false;
+                break;
+            }
+        }
+
+        if (all_sigma_points_nan) {
+            // All sigma points failed projection - reject as outlier
             ObservationResult obs_result;
             obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
             obs_result.camera_id = obs.camera_id;
@@ -865,6 +1130,15 @@ void UnscentedKalmanFilter::damp_velocity_covariance_at_limits(State const& prev
                 covariance_(vel_idx, vel_idx) = std::max(covariance_(vel_idx, vel_idx), 1e-8);
             }
         }
+    }
+}
+
+void UnscentedKalmanFilter::enable_debug(bool enable, std::string const& debug_dir) {
+    debug_enabled_ = enable;
+    debug_dir_ = debug_dir;
+    if (enable) {
+        std::filesystem::create_directories(debug_dir);
+        std::cout << "DEBUG: UKF debug mode enabled, writing to " << debug_dir << "\n";
     }
 }
 

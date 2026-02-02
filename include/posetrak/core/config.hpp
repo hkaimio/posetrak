@@ -29,6 +29,7 @@ struct TrackerAppConfig {
     double outlier_threshold = 4.0;
 
     // === Initialization ===
+    std::optional<std::filesystem::path> python_state_path;  // Optional: use Python state for init
     int ik_max_iterations = 1000;
     double ik_tolerance = 0.02;
     double init_position_std = 0.1;

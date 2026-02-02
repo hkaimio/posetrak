@@ -147,13 +147,15 @@ class Camera {
 
     /// @brief Project 3D point in world frame to 2D pixel coordinates (with distortion)
     /// @param point_world 3D point in world frame
-    /// @return 2D pixel coordinates [u, v]
-    Eigen::Vector2d project(Eigen::Vector3d const& point_world) const;
+    /// @return 2D pixel coordinates [u, v], or std::nullopt if projection fails (behind camera or
+    /// out of bounds)
+    std::optional<Eigen::Vector2d> project(Eigen::Vector3d const& point_world) const;
 
     /// @brief Project 3D point to undistorted pixel coordinates (for UKF)
     /// @param point_world 3D point in world frame
-    /// @return Undistorted 2D pixel coordinates
-    Eigen::Vector2d project_undistorted(Eigen::Vector3d const& point_world) const;
+    /// @return Undistorted 2D pixel coordinates, or std::nullopt if projection fails (behind camera
+    /// or out of bounds)
+    std::optional<Eigen::Vector2d> project_undistorted(Eigen::Vector3d const& point_world) const;
 
     /// @brief Project multiple points efficiently (with distortion)
     /// @param points 3D points in world frame

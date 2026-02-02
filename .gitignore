@@ -36,6 +36,8 @@ __pycache__/
 
 # Test outputs
 test_results/
+tracking_tests/
+tracking_output/
 *.log
 
 # Coverage

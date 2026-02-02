@@ -210,13 +210,13 @@ TEST_CASE("UKF update with multiple observations", "[ukf][update]") {
     Observation obs1;
     obs1.camera_id = 0;
     obs1.marker_id = marker1;
-    obs1.position = camera.project_undistorted(Eigen::Vector3d(-0.1, 0, 0));
+    obs1.position = *camera.project_undistorted(Eigen::Vector3d(-0.1, 0, 0));
     obs1.confidence = 1.0;
 
     Observation obs2;
     obs2.camera_id = 0;
     obs2.marker_id = marker2;
-    obs2.position = camera.project_undistorted(Eigen::Vector3d(0.1, 0, 0));
+    obs2.position = *camera.project_undistorted(Eigen::Vector3d(0.1, 0, 0));
     obs2.confidence = 1.0;
 
     std::vector<Observation> observations = {obs1, obs2};

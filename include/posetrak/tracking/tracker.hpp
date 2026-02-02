@@ -197,6 +197,12 @@ class Tracker {
      */
     void reset();
 
+    /**
+     * @brief Get UKF for debug configuration
+     * @return Pointer to UKF (or nullptr if not initialized)
+     */
+    UnscentedKalmanFilter* get_ukf() { return ukf_.get(); }
+
    private:
     /**
      * @brief Initialize UKF with given state and initial covariance

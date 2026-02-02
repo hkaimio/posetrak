@@ -211,7 +211,12 @@ double Triangulator::compute_reprojection_error(Eigen::Vector3d const& point_3d,
 
     for (size_t i = 0; i < observations.size(); ++i) {
         // Project 3D point to camera
-        Eigen::Vector2d projected = cameras[i]->project(point_3d);
+        auto projected_opt = cameras[i]->project(point_3d);
+        if (!projected_opt.has_value()) {
+            // Projection failed - skip this observation
+            continue;
+        }
+        Eigen::Vector2d projected = *projected_opt;
 
         // Compute error
         Eigen::Vector2d error = projected - observations[i];

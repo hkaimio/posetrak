@@ -109,6 +109,20 @@ class UnscentedKalmanFilter {
      */
     int error_dim() const { return sigma_gen_.error_dim(); }
 
+    // Debug instrumentation
+    /**
+     * @brief Enable debug mode to export UKF internals
+     * @param enable True to enable debug exports
+     * @param debug_dir Directory to write debug files
+     */
+    void enable_debug(bool enable, std::string const& debug_dir = "cpp_results/debug");
+
+    /**
+     * @brief Set current frame number for debug exports
+     * @param frame_num Frame number
+     */
+    void set_frame_number(int frame_num) { frame_number_ = frame_num; }
+
    private:
     /**
      * @brief Compute weighted mean of states (manifold-aware)
@@ -220,6 +234,11 @@ class UnscentedKalmanFilter {
     Eigen::MatrixXd process_noise_;        ///< Process noise covariance
     SigmaPointGenerator sigma_gen_;        ///< Sigma point generator
     ConstantVelocityModel process_model_;  ///< Process model
+
+    // Debug state
+    bool debug_enabled_ = false;  ///< Debug mode flag
+    std::string debug_dir_;       ///< Debug output directory
+    int frame_number_ = 0;        ///< Current frame number
 };
 
 }  // namespace posetrak

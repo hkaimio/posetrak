@@ -56,6 +56,9 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
 
         // Initialization sub-section
         if (auto init = tracking["initialization"]) {
+            if (auto state_path = init["python_state_path"].value<std::string>()) {
+                result.python_state_path = *state_path;
+            }
             result.ik_max_iterations = init["ik_max_iterations"].value_or(1000);
             result.ik_tolerance = init["ik_tolerance"].value_or(0.02);
             result.init_position_std = init["init_position_std"].value_or(0.1);

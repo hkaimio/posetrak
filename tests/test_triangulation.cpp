@@ -80,11 +80,11 @@ class TriangulationTestFixture {
 
         for (size_t i = 0; i < cameras.size(); ++i) {
             auto const& cam = cameras[i];
-            Eigen::Vector2d pixel = cam.project_undistorted(point_3d);
+            auto pixel_opt = cam.project_undistorted(point_3d);
 
-            // Only include if in bounds
-            if (cam.is_in_bounds(pixel)) {
-                observations.push_back(pixel);
+            // Only include if projection succeeded (in bounds and in front of camera)
+            if (pixel_opt.has_value()) {
+                observations.push_back(*pixel_opt);
                 if (confidences) {
                     confidences->push_back(1.0);  // Perfect confidence
                 }
@@ -146,9 +146,11 @@ class TriangulationTestFixture {
                 }
 
                 Eigen::Vector3d const& pos_3d = pos_it->second;
-                Eigen::Vector2d pixel = cameras[cam_idx].project_undistorted(pos_3d);
+                auto pixel_opt = cameras[cam_idx].project_undistorted(pos_3d);
 
-                if (cameras[cam_idx].is_in_bounds(pixel)) {
+                if (pixel_opt.has_value()) {
+                    Eigen::Vector2d pixel = *pixel_opt;
+
                     Observation obs;
                     obs.camera_id = cameras[cam_idx].id();
                     obs.marker_id = static_cast<int>(
@@ -370,10 +372,12 @@ TEST_CASE("Triangulate full frame with multiple markers", "[triangulation]") {
         seq.camera_name = fixture.cameras[cam_idx].name();
 
         for (size_t marker_idx = 0; marker_idx < marker_positions.size(); ++marker_idx) {
-            Eigen::Vector2d pixel =
+            auto pixel_opt =
                 fixture.cameras[cam_idx].project_undistorted(marker_positions[marker_idx]);
 
-            if (fixture.cameras[cam_idx].is_in_bounds(pixel)) {
+            if (pixel_opt.has_value()) {
+                Eigen::Vector2d pixel = *pixel_opt;
+
                 Observation obs;
                 obs.camera_id = fixture.cameras[cam_idx].id();
                 obs.marker_id = static_cast<int>(marker_idx);

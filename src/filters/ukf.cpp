@@ -621,6 +621,37 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         observed = observations_to_vector(observations);
     }
 
+    // Debug: Export observation results (all frames)
+    if (debug_enabled_) {
+        std::string frame_dir =
+            debug_dir_ + "/frame_" +
+            std::string(4 - std::min(4, static_cast<int>(std::to_string(frame_number_).length())),
+                        '0') +
+            std::to_string(frame_number_);
+        std::filesystem::create_directories(frame_dir);
+        std::ofstream f(frame_dir + "/all_observations.csv");
+        f << std::setprecision(15);
+
+        // Write header matching Python format (simplified)
+        f << "marker_name,camera_id,frame_idx,observed_u,observed_v,predicted_u,predicted_v,"
+          << "residual_u,residual_v,residual_norm,mahalanobis_distance,is_outlier\n";
+
+        // Write each observation result
+        for (auto const& obs_result : observation_results) {
+            f << obs_result.marker_name << "," << obs_result.camera_id << ","
+              << obs_result.camera_frame_idx << "," << obs_result.actual.x() << ","
+              << obs_result.actual.y() << "," << obs_result.predicted.x() << ","
+              << obs_result.predicted.y() << "," << obs_result.innovation.x() << ","
+              << obs_result.innovation.y() << "," << obs_result.innovation.norm() << ","
+              << obs_result.mahalanobis_distance << ","
+              << (obs_result.is_outlier ? "True" : "False") << "\n";
+        }
+
+        std::cout << "DEBUG: Exported observation results to " << frame_dir
+                  << "/all_observations.csv (" << observation_results.size() << " observations, "
+                  << result.num_inliers << " inliers, " << result.num_outliers << " outliers)\n";
+    }
+
     // Step 5: Compute cross-covariance Pxy (already computed if outlier rejection enabled)
     if (outlier_threshold_mahalanobis <= 0.0) {
         // Cross-covariance not yet computed (no outlier rejection)
@@ -866,6 +897,7 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
             ObservationResult obs_result;
             obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
             obs_result.camera_id = obs.camera_id;
+            obs_result.camera_frame_idx = obs.frame_idx;
             obs_result.is_outlier = true;
             obs_result.mahalanobis_distance = 0.0;
             obs_result.innovation = Eigen::Vector2d::Zero();

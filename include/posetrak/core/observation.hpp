@@ -25,7 +25,8 @@ struct Observation {
     /// @param base_noise Base noise in pixels
     /// @return Adjusted noise std (higher for low confidence)
     double measurement_noise_std(double base_noise = 5.0) const {
-        return base_noise / std::max(confidence, 0.1);
+        return base_noise;
+        //        return base_noise / std::max(confidence, 0.1);
     }
 
     /// @brief Serialize to JSON

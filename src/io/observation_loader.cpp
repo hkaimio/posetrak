@@ -1,5 +1,6 @@
 #include <posetrak/io/observation_loader.hpp>
 
+#include <fmt/core.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -81,6 +82,8 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
     if (!file.is_open()) {
         throw std::runtime_error("Failed to open OpenPose file: " + filepath);
     }
+
+    fmt::print("Loading OpenPose frame {} camera {} from: {}\n", frame_idx, camera.id(), filepath);
 
     nlohmann::json root;
     try {

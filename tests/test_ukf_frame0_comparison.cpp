@@ -69,8 +69,8 @@ struct Frame0TestFixture {
     std::string debug_dir;
 
     Skeleton skeleton;
-    std::unordered_map<std::string, Camera> cameras_by_name;  // Original from loader
-    std::unordered_map<int, Camera> cameras;                  // Keyed by camera ID for UKF
+    std::map<std::string, Camera> cameras_by_name;  // Original from loader (now ordered)
+    std::unordered_map<int, Camera> cameras;        // Keyed by camera ID for UKF
     std::unordered_map<std::string, int> camera_name_to_id;
 
     std::unique_ptr<pinocchio::Model> model;

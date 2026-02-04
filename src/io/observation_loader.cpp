@@ -49,8 +49,8 @@ parse_openpose_person(nlohmann::json const& person, Camera const& camera, uint32
             }
 
             Observation obs;
-            obs.camera_id = 0;           // Will be set by caller if needed
-            obs.marker_id = it->second;  // Use skeleton marker index, not COCO ID
+            obs.camera_id = camera.id();  // Use camera's assigned ID
+            obs.marker_id = it->second;   // Use skeleton marker index, not COCO ID
             obs.frame_idx = static_cast<int>(frame_idx);
             obs.timestamp = timestamp;
             obs.position_distorted = Eigen::Vector2d(x, y);
@@ -100,7 +100,7 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
     if (people.empty()) {
         // No people detected - return empty sequence
         ObservationSequence seq;
-        seq.camera_id = 0;
+        seq.camera_id = camera.id();
         seq.camera_name = camera_name;
         return seq;
     }
@@ -109,7 +109,7 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
     if (person_id < 0 || person_id >= static_cast<int>(people.size())) {
         // Person ID out of range - return empty
         ObservationSequence seq;
-        seq.camera_id = 0;
+        seq.camera_id = camera.id();
         seq.camera_name = camera_name;
         return seq;
     }
@@ -118,7 +118,7 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
                                               coco_to_marker_idx);
 
     ObservationSequence seq;
-    seq.camera_id = 0;
+    seq.camera_id = camera.id();
     seq.camera_name = camera_name;
     seq.observations = std::move(observations);
 
@@ -126,7 +126,7 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
 }
 
 ObservationSet load_openpose_sequence(std::string const& base_dir,
-                                      std::unordered_map<std::string, Camera> const& cameras,
+                                      std::map<std::string, Camera> const& cameras,
                                       Skeleton const& skeleton,
                                       std::pair<uint32_t, uint32_t> frame_range,
                                       double min_confidence, int person_id) {
@@ -138,6 +138,7 @@ ObservationSet load_openpose_sequence(std::string const& base_dir,
 
     ObservationSet obs_set(person_id);
 
+    // Iterate cameras in deterministic order (std::map is ordered)
     for (auto const& [cam_name, camera] : cameras) {
         fs::path cam_dir = fs::path(base_dir) / cam_name;
         if (!fs::exists(cam_dir) || !fs::is_directory(cam_dir)) {
@@ -169,7 +170,7 @@ ObservationSet load_openpose_sequence(std::string const& base_dir,
 
         // Load observations for each frame and build a sequence
         ObservationSequence full_seq;
-        full_seq.camera_id = 0;
+        full_seq.camera_id = camera.id();
         full_seq.camera_name = cam_name;
 
         for (auto const& [frame_num, filepath] : frame_files) {

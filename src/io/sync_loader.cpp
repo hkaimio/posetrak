@@ -101,7 +101,7 @@ load_sync_metadata(std::string const& filepath) {
     return sync_data;
 }
 
-void apply_sync_metadata(std::unordered_map<std::string, Camera>& cameras,
+void apply_sync_metadata(std::map<std::string, Camera>& cameras,
                          std::unordered_map<std::string, std::vector<SyncPoint>> const& sync_data,
                          bool strict) {
     for (auto const& [cam_name, points] : sync_data) {

@@ -94,7 +94,7 @@ TEST_CASE("Apply sync metadata to cameras", "[sync_loader]") {
         REQUIRE_NOTHROW(apply_sync_metadata(cameras, sync_data, false));
 
         // But strict mode should throw
-        std::unordered_map<std::string, Camera> empty_cameras;
+        std::map<std::string, Camera> empty_cameras;
         REQUIRE_THROWS_AS(apply_sync_metadata(empty_cameras, sync_data, true), std::runtime_error);
     }
 }

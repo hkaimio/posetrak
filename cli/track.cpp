@@ -352,35 +352,6 @@ void validate_camera_model(std::vector<Observation> const& observations,
     fmt::print("==============================\n\n");
 }
 
-// Helper: Convert camera map with string keys to int keys
-std::unordered_map<int, Camera>
-convert_camera_map(std::unordered_map<std::string, Camera> const& cameras_by_name,
-                   std::unordered_map<std::string, int>& name_to_id) {
-    std::unordered_map<int, Camera> cameras_by_id;
-    int next_id = 0;
-    for (auto const& [name, cam] : cameras_by_name) {
-        name_to_id[name] = next_id;
-        cameras_by_id.emplace(next_id, cam);
-        next_id++;
-    }
-    return cameras_by_id;
-}
-
-// Helper: Update observation camera IDs from names
-void update_observation_camera_ids(ObservationSet& obs_set,
-                                   std::unordered_map<std::string, int> const& name_to_id) {
-    for (auto& [cam_name, sequence] :
-         const_cast<std::map<std::string, ObservationSequence>&>(obs_set.sequences())) {
-        auto it = name_to_id.find(cam_name);
-        if (it != name_to_id.end()) {
-            sequence.camera_id = it->second;
-            for (auto& obs : sequence.observations) {
-                obs.camera_id = it->second;
-            }
-        }
-    }
-}
-
 int main(int argc, char* argv[]) {
     CLI::App app{"Posetrak - Motion Capture Tracker"};
 
@@ -423,10 +394,6 @@ int main(int argc, char* argv[]) {
             fmt::print("  Loaded {} cameras\n", cameras_by_name.size());
         }
 
-        // Convert camera map to use integer IDs
-        std::unordered_map<std::string, int> camera_name_to_id;
-        auto cameras = convert_camera_map(cameras_by_name, camera_name_to_id);
-
         // Load sync (optional)
         if (config.sync_path) {
             if (!quiet) {
@@ -435,11 +402,9 @@ int main(int argc, char* argv[]) {
             auto sync_data = load_sync_metadata(config.sync_path->string());
             // Apply sync to cameras (modifies cameras_by_name in-place)
             apply_sync_metadata(cameras_by_name, sync_data, false);
-            // Re-convert to int keys
-            cameras = convert_camera_map(cameras_by_name, camera_name_to_id);
         }
 
-        // Load observations
+        // Load observations (camera IDs will be correct from the start)
         if (!quiet) {
             fmt::print("Loading observations: {}\n", config.observations_dir.string());
         }
@@ -449,9 +414,6 @@ int main(int argc, char* argv[]) {
         auto observations_set =
             load_openpose_sequence(config.observations_dir.string(), cameras_by_name, skeleton,
                                    {config.start_frame, end_frame}, 0.1, config.person_id);
-
-        // Update observation camera IDs to match the integer IDs
-        update_observation_camera_ids(observations_set, camera_name_to_id);
 
         // Determine frame range from observations
         int start_frame = config.start_frame;
@@ -477,6 +439,12 @@ int main(int argc, char* argv[]) {
         // Create tracker
         if (!quiet) {
             fmt::print("\nInitializing tracker...\n");
+        }
+
+        // Convert cameras to ID-keyed map for Tracker
+        std::unordered_map<int, Camera> cameras;
+        for (auto const& [name, cam] : cameras_by_name) {
+            cameras.emplace(cam.id(), cam);
         }
 
         auto tracker_config = config.to_tracker_config();

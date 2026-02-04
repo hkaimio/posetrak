@@ -37,8 +37,9 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
 /// @param person_id Which person to extract (0-based index, default 0 for first person)
 /// @return ObservationSet containing sequences from all cameras for the specified person
 /// @throws std::runtime_error if directories don't exist or files malformed
+/// @note Camera IDs in observations will match the Camera::id() of corresponding cameras
 ObservationSet load_openpose_sequence(std::string const& base_dir,
-                                      std::unordered_map<std::string, Camera> const& cameras,
+                                      std::map<std::string, Camera> const& cameras,
                                       Skeleton const& skeleton,
                                       std::pair<uint32_t, uint32_t> frame_range = {0, UINT32_MAX},
                                       double min_confidence = 0.1, int person_id = 0);

@@ -92,7 +92,7 @@ TEST_CASE("Load OpenPose sequence", "[observation_loader]") {
     auto cameras = load_cameras_from_toml("tests/data/pose2sim_camera_calib.toml");
 
     // Extract just cam1 and cam2 (the ones that have OpenPose data)
-    std::unordered_map<std::string, Camera> openpose_cameras;
+    std::map<std::string, Camera> openpose_cameras;
     openpose_cameras.emplace("cam1", cameras.at("cam1"));
     openpose_cameras.emplace("cam2", cameras.at("cam2"));
 
@@ -200,7 +200,7 @@ TEST_CASE("Observation loader error handling", "[observation_loader][errors]") {
     }
 
     SECTION("Non-existent base directory throws") {
-        std::unordered_map<std::string, Camera> test_cameras;
+        std::map<std::string, Camera> test_cameras;
         test_cameras.emplace("cam1", cameras.at("cam1"));
 
         REQUIRE_THROWS_AS(load_openpose_sequence("tests/data/nonexistent_dir", test_cameras,
@@ -209,7 +209,7 @@ TEST_CASE("Observation loader error handling", "[observation_loader][errors]") {
     }
 
     SECTION("Missing camera directory throws") {
-        std::unordered_map<std::string, Camera> test_cameras;
+        std::map<std::string, Camera> test_cameras;
         test_cameras.emplace("nonexistent_cam", cameras.at("cam1"));
 
         REQUIRE_THROWS_AS(

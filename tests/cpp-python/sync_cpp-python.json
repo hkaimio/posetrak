@@ -1,0 +1,26 @@
+{
+  "cam1": [
+    {"frame": 273, "timestamp": 0.0},
+    {"frame": 393, "timestamp": 1.0}
+  ],
+  "cam2": [
+    {"frame": 273, "timestamp": 0.0},
+    {"frame": 393, "timestamp": 1.0}
+  ],
+  "cam3": [
+    {"frame": 273, "timestamp": 0.0},
+    {"frame": 393, "timestamp": 1.0}
+  ],
+  "cam4": [
+    {"frame": 279, "timestamp": 0.0},
+    {"frame": 499, "timestamp": 1.0}
+  ],
+  "cam5": [
+    {"frame": 271, "timestamp": 0.0},
+    {"frame": 391, "timestamp": 1.0}
+  ],
+  "cam6": [
+    {"frame": 271, "timestamp": 0.0},
+    {"frame": 391, "timestamp": 1.0}
+  ]
+}

@@ -285,6 +285,28 @@ TEST_CASE("Camera frame-to-timestamp conversion", "[camera]") {
         double expected = 7.0 + (250 - 200) / 30.0;
         REQUIRE_THAT(cam.get_timestamp(250), Catch::Matchers::WithinAbs(expected, 1e-9));
     }
+
+    SECTION("Sync points starting after frame 0 - wraparound bug test") {
+        // Test case for bug: first sync point is at frame 100, but we request frame 50
+        // This previously caused wraparound: (50 - 100) as uint32_t wraps to huge number
+        Camera cam =
+            make_test_camera("cam1", make_test_intrinsics(), make_test_extrinsics(), 30.0, 0);
+
+        std::vector<SyncPoint> sync_points;
+        sync_points.push_back({100, 0.0});  // First sync point at frame 100, time 0.0
+        sync_points.push_back({200, 3.0});  // Second at frame 200, time 3.0
+        cam.set_sync_points(sync_points);
+
+        // Request timestamp for frame BEFORE first sync point
+        // Should extrapolate backward: frame 50 is 50 frames before frame 100
+        // At 30 fps, that's 50/30 = -1.667 seconds
+        double expected = 0.0 - (100 - 50) / 30.0;  // -1.6667 seconds
+        REQUIRE_THAT(cam.get_timestamp(50), Catch::Matchers::WithinAbs(expected, 1e-6));
+
+        // Another test: frame 0 should be 100 frames before first sync point
+        double expected_frame0 = 0.0 - 100 / 30.0;  // -3.333 seconds
+        REQUIRE_THAT(cam.get_timestamp(0), Catch::Matchers::WithinAbs(expected_frame0, 1e-6));
+    }
 }
 
 TEST_CASE("Camera timestamp-to-frame conversion", "[camera]") {

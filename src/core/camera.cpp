@@ -117,7 +117,10 @@ double Camera::get_timestamp(uint32_t frame_idx) const {
 
     if (it == sync_points_.begin()) {
         // Before first sync point: extrapolate backward
-        double const dt = static_cast<double>(frame_idx - it->frame_idx) / fps_;
+        // Use signed arithmetic to avoid wraparound when frame_idx < it->frame_idx
+        int64_t const frame_diff =
+            static_cast<int64_t>(frame_idx) - static_cast<int64_t>(it->frame_idx);
+        double const dt = static_cast<double>(frame_diff) / fps_;
         return it->timestamp_sec + dt;
     }
 

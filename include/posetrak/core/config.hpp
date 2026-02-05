@@ -6,8 +6,25 @@
 
 namespace posetrak {
 
-// Forward declaration - full definition in tracker.hpp
-struct TrackerConfig;
+/**
+ * @brief Configuration parameters for Tracker
+ */
+struct TrackerConfig {
+    // UKF parameters
+    double process_noise_std = 0.1;      ///< Process noise std deviation
+    double measurement_noise_std = 5.0;  ///< Measurement noise std (pixels)
+    double outlier_threshold = 5.991;    ///< Chi-squared threshold (95% for 2-DOF)
+
+    // Initialization parameters
+    double init_position_std = 0.5;     ///< Initial position uncertainty (meters)
+    double init_orientation_std = 0.5;  ///< Initial orientation uncertainty (radians)
+    double init_joint_std = 0.3;        ///< Initial joint angle uncertainty (radians)
+    double init_velocity_std = 0.1;     ///< Initial velocity uncertainty (m/s or rad/s)
+
+    int ik_max_iterations = 50;    ///< Max IK iterations for initialization
+    double ik_tolerance = 0.01;    ///< IK convergence tolerance (meters)
+    int min_cameras_for_init = 2;  ///< Minimum cameras required for triangulation
+};
 
 /**
  * @brief Application configuration for tracker command-line tool
@@ -79,13 +96,11 @@ struct TrackerAppConfig {
      * @brief Convert to TrackerConfig for the Tracker class
      *
      * Extracts just the tracking parameters needed by Tracker constructor.
-     * Requires inclusion of tracker.hpp to use.
      */
     TrackerConfig to_tracker_config() const;
 };
 
-// Inline implementation (requires tracker.hpp to be included first)
-#ifdef POSETRAK_TRACKER_HPP_INCLUDED
+// Inline implementation
 inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     TrackerConfig tc;
     tc.process_noise_std = process_noise_std;
@@ -100,6 +115,5 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.min_cameras_for_init = min_cameras_for_init;
     return tc;
 }
-#endif
 
 }  // namespace posetrak

@@ -11,7 +11,7 @@
 #include "posetrak/kinematics/forward_kinematics.hpp"
 #include "posetrak/kinematics/pinocchio_model_builder.hpp"
 #include "posetrak/kinematics/triangulation.hpp"
-#include "posetrak/tracking/tracker.hpp"  // Must be before config.hpp for inline function
+#include "posetrak/tracking/tracker.hpp"
 #include <chrono>
 #include <fstream>
 #include <iostream>

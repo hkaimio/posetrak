@@ -31,8 +31,8 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
 /// @param base_dir Base directory containing camera subdirectories
 /// @param cameras Map of camera name to Camera object
 /// @param skeleton Skeleton with marker definitions (for COCO ID mapping)
-/// @param frame_range Pair of (start_frame, end_frame) inclusive. Use {0, UINT32_MAX} for all
-/// frames
+/// @param start_time Start time in seconds (inclusive)
+/// @param end_time End time in seconds (exclusive, -1.0 = load all)
 /// @param min_confidence Minimum confidence threshold for keypoints
 /// @param person_id Which person to extract (0-based index, default 0 for first person)
 /// @return ObservationSet containing sequences from all cameras for the specified person
@@ -40,8 +40,8 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
 /// @note Camera IDs in observations will match the Camera::id() of corresponding cameras
 ObservationSet load_openpose_sequence(std::string const& base_dir,
                                       std::map<std::string, Camera> const& cameras,
-                                      Skeleton const& skeleton,
-                                      std::pair<uint32_t, uint32_t> frame_range = {0, UINT32_MAX},
-                                      double min_confidence = 0.1, int person_id = 0);
+                                      Skeleton const& skeleton, double start_time = 0.0,
+                                      double end_time = -1.0, double min_confidence = 0.1,
+                                      int person_id = 0);
 
 }  // namespace posetrak

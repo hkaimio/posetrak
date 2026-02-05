@@ -923,6 +923,7 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
             ObservationResult obs_result;
             obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
             obs_result.camera_id = obs.camera_id;
+            obs_result.camera_frame_idx = obs.frame_idx;
             obs_result.is_outlier = true;
             obs_result.mahalanobis_distance = 0.0;
             obs_result.innovation = Eigen::Vector2d::Zero();
@@ -948,7 +949,7 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
         ObservationResult obs_result;
         obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
         obs_result.camera_id = obs.camera_id;
-        obs_result.is_outlier = is_outlier;
+        obs_result.camera_frame_idx = obs.frame_idx;
         obs_result.mahalanobis_distance = mahal_dist;
         obs_result.innovation = innovation;
         obs_result.predicted = predicted;
@@ -983,6 +984,7 @@ std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagno
             ObservationResult obs_result;
             obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
             obs_result.camera_id = obs.camera_id;
+            obs_result.camera_frame_idx = obs.frame_idx;
             obs_result.is_outlier = true;  // Mark as outlier for diagnostics
             obs_result.mahalanobis_distance = 0.0;
             obs_result.innovation = Eigen::Vector2d::Zero();
@@ -1005,6 +1007,7 @@ std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagno
         ObservationResult obs_result;
         obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
         obs_result.camera_id = obs.camera_id;
+        obs_result.camera_frame_idx = obs.frame_idx;
         obs_result.is_outlier = false;
         obs_result.mahalanobis_distance = mahal_dist;
         obs_result.innovation = innovation;

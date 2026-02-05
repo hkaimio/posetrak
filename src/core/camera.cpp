@@ -1,5 +1,7 @@
 #include "posetrak/core/camera.hpp"
 
+#include <fmt/core.h>
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -93,9 +95,13 @@ Camera::Camera(int id, std::string name, Intrinsics const& intrinsics, Extrinsic
 
 void Camera::set_sync_points(std::vector<SyncPoint> const& points) {
     sync_points_ = points;
+    fmt::print("  Camera {}: Loaded {} sync points\n", name_.c_str(), points.size());
     // Sort by frame index for binary search
     std::sort(sync_points_.begin(), sync_points_.end(),
               [](SyncPoint const& a, SyncPoint const& b) { return a.frame_idx < b.frame_idx; });
+    for (auto const& sp : sync_points_) {
+        fmt::print("    Frame {} -> Time {:.6f} sec\n", sp.frame_idx, sp.timestamp_sec);
+    }
 }
 
 double Camera::get_timestamp(uint32_t frame_idx) const {

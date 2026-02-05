@@ -232,8 +232,9 @@ Triangulator::triangulate_frame(double timestamp, ObservationSet const& observat
                                 std::vector<Camera> const& cameras, double tolerance) const {
     std::map<int, TriangulationResult> results;
 
-    // Get all observations at this timestamp
-    std::vector<Observation> frame_obs = observations.get_all_at_time(timestamp, tolerance);
+    // Get all observations in time window [timestamp - tolerance, timestamp + tolerance]
+    std::vector<Observation> frame_obs =
+        observations.get_all_in_range(timestamp - tolerance, timestamp + tolerance);
 
     if (frame_obs.empty()) {
         return results;  // No observations at this time

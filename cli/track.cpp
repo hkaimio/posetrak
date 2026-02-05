@@ -409,31 +409,40 @@ int main(int argc, char* argv[]) {
             fmt::print("Loading observations: {}\n", config.observations_dir.string());
         }
 
-        uint32_t end_frame =
-            config.max_frames < 0 ? UINT32_MAX : config.start_frame + config.max_frames;
-        auto observations_set =
-            load_openpose_sequence(config.observations_dir.string(), cameras_by_name, skeleton,
-                                   {config.start_frame, end_frame}, 0.1, config.person_id);
-
-        // Determine frame range from observations
-        int start_frame = config.start_frame;
-        int num_frames_to_process = 0;
-
-        // Get unique timestamps
-        auto timestamps = observations_set.get_unique_timestamps();
-        if (timestamps.empty()) {
-            throw std::runtime_error("No observations found");
+        // Determine end time
+        double end_time = config.end_time;
+        if (end_time < 0.0) {
+            // Load all available data - we'll determine end_time after loading
+            end_time = std::numeric_limits<double>::max();
         }
 
-        num_frames_to_process = static_cast<int>(timestamps.size());
-        if (config.max_frames > 0) {
-            num_frames_to_process = std::min(num_frames_to_process, config.max_frames);
+        auto observations_set =
+            load_openpose_sequence(config.observations_dir.string(), cameras_by_name, skeleton,
+                                   config.start_time, end_time, 0.1, config.person_id);
+
+        if (observations_set.empty()) {
+            throw std::runtime_error("No observations found in time range");
+        }
+
+        // Auto-detect end time if not specified
+        if (config.end_time < 0.0) {
+            end_time = observations_set.max_time();
+        }
+
+        // Calculate number of tracker steps
+        double dt = 1.0 / config.tracker_fps;
+        int num_steps = static_cast<int>((end_time - config.start_time) / dt);
+
+        if (num_steps <= 0) {
+            throw std::runtime_error(
+                "No time steps to process - check start_time, end_time, and tracker_fps");
         }
 
         if (!quiet) {
-            fmt::print("  Found {} timesteps\n", timestamps.size());
-            fmt::print("  Will process {} frames starting at frame {}\n", num_frames_to_process,
-                       start_frame);
+            fmt::print("  Time range: [{:.3f}, {:.3f}) seconds\n", config.start_time, end_time);
+            fmt::print("  Tracker sample rate: {:.1f} Hz (dt = {:.6f} s)\n", config.tracker_fps,
+                       dt);
+            fmt::print("  Will process {} time steps\n", num_steps);
         }
 
         // Create tracker
@@ -451,7 +460,8 @@ int main(int argc, char* argv[]) {
         Tracker tracker(skeleton, cameras, tracker_config);
 
         // Validate camera model by triangulating first frame
-        auto first_frame_obs = observations_set.get_all_at_time(timestamps[0]);
+        double t_first_window = config.start_time + dt;
+        auto first_frame_obs = observations_set.get_all_in_range(config.start_time, t_first_window);
         std::string python_markers_csv =
             "tracking_tests/kotegaeshi/makers_person0_python_tracker.csv";
         validate_camera_model(first_frame_obs, cameras, skeleton, python_markers_csv);
@@ -471,13 +481,13 @@ int main(int argc, char* argv[]) {
                            s.root_orientation().w(), s.root_orientation().x(),
                            s.root_orientation().y(), s.root_orientation().z());
             }
-            tracker.initialize_from_state(python_state.value(), timestamps[0]);
+            tracker.initialize_from_state(python_state.value(), config.start_time);
         } else {
             // Fall back to rest pose if Python state not available
             if (!quiet) {
                 fmt::print("  Python state not available, initializing from rest pose\n");
             }
-            tracker.initialize_from_rest_pose(timestamps[0]);
+            tracker.initialize_from_rest_pose(config.start_time);
         }
 
         if (!quiet) {
@@ -529,14 +539,14 @@ int main(int argc, char* argv[]) {
         int frames_tracked = 0;
         int frames_lost = 0;
 
-        // Export initialization state as frame 0 at t=0.0
+        // Export initialization state as step 0
         if (state_vec_file.is_open()) {
-            export_state_vector(state_vec_file, 0, 0.0, tracker.state(), skeleton);
+            export_state_vector(state_vec_file, 0, config.start_time, tracker.state(), skeleton);
         }
 
         // Process first update (correct the initialization with first observations)
         {
-            auto frame_0_obs = observations_set.get_all_at_time(timestamps[0]);
+            auto frame_0_obs = observations_set.get_all_in_range(config.start_time, t_first_window);
             if (!frame_0_obs.empty()) {
                 if (auto* ukf = tracker.get_ukf()) {
                     ukf->set_frame_number(0);
@@ -552,9 +562,9 @@ int main(int argc, char* argv[]) {
 
                 if (!quiet) {
                     fmt::print(
-                        "  Frame 0: Updating initialization with {} observations ({} unique "
-                        "marker-camera pairs) at t={:.6f}\n",
-                        frame_0_obs.size(), unique_pairs.size(), timestamps[0]);
+                        "  Step 0: Updating initialization with {} observations ({} unique "
+                        "marker-camera pairs) in time [{:.6f}, {:.6f})\n",
+                        frame_0_obs.size(), unique_pairs.size(), config.start_time, t_first_window);
                     fmt::print("    Camera distribution:");
                     for (const auto& [cam_id, count] : camera_counts) {
                         fmt::print(" cam{}={}", cam_id, count);
@@ -562,12 +572,13 @@ int main(int argc, char* argv[]) {
                     fmt::print("\n");
                 }
 
-                auto result = tracker.track_frame(frame_0_obs, timestamps[0]);
+                // Use window midpoint as effective timestamp
+                double t_effective = config.start_time + dt / 2.0;
+                auto result = tracker.track_frame(frame_0_obs, t_effective);
 
-                // Export posterior as frame 1
+                // Export posterior as step 1
                 if (state_vec_file.is_open()) {
-                    export_state_vector(state_vec_file, 1, timestamps[0], tracker.state(),
-                                        skeleton);
+                    export_state_vector(state_vec_file, 1, t_effective, tracker.state(), skeleton);
                 }
 
                 if (result.tracking_lost) {
@@ -577,75 +588,83 @@ int main(int argc, char* argv[]) {
                 }
             } else {
                 if (!quiet) {
-                    fmt::print("  No observations at t={:.6f}, skipping first update\n",
-                               timestamps[0]);
+                    fmt::print(
+                        "  No observations in time [{:.6f}, {:.6f}), skipping first update\n",
+                        config.start_time, t_first_window);
                 }
             }
         }
 
-        for (int i = 1; i < num_frames_to_process; ++i) {
-            double frame_timestamp = timestamps[i];
+        // Main tracking loop - process remaining time steps
+        for (int step = 1; step < num_steps; ++step) {
+            double t_start = config.start_time + step * dt;
+            double t_end = t_start + dt;
 
             // Set frame number for UKF debug
             if (auto* ukf = tracker.get_ukf()) {
-                ukf->set_frame_number(i);
+                ukf->set_frame_number(step);
             }
 
-            // Get observations at this time
-            auto frame_obs = observations_set.get_all_at_time(frame_timestamp);
+            // Get all observations in this time window
+            auto frame_obs = observations_set.get_all_in_range(t_start, t_end);
 
             if (frame_obs.empty()) {
                 if (verbose) {
-                    fmt::print("  t={:.3f}: No observations, skipping\n", frame_timestamp);
+                    fmt::print("  Step {}: t=[{:.3f}, {:.3f}): No observations, skipping\n", step,
+                               t_start, t_end);
                 }
                 continue;
             }
 
+            // Use window midpoint as effective timestamp
+            double t_effective = t_start + dt / 2.0;
+
             // Export predicted observations BEFORE tracking update (uses prior state)
             if (pred_obs_file.is_open()) {
-                export_predicted_observations(pred_obs_file, i + 1, frame_timestamp, frame_obs,
+                export_predicted_observations(pred_obs_file, step + 1, t_effective, frame_obs,
                                               tracker.state(), fk, cameras, skeleton);
             }
 
-            // DEBUG: Export frame 2 prior state for comparison with Python frame 1
-            if (i == 1) {
+            // DEBUG: Export step 1 prior state for comparison with Python frame 1
+            if (step == 1) {
                 auto debug_dir = config.output_dir / "debug";
                 std::filesystem::create_directories(debug_dir);
-                auto prior_state_path = debug_dir / "frame_0001_prior_state.csv";
+                auto prior_state_path = debug_dir / "step_0001_prior_state.csv";
                 std::ofstream prior_file(prior_state_path);
                 if (prior_file.is_open()) {
                     // Write header (same as state_vectors.csv)
                     prior_file << generate_state_header(skeleton) << "\n";
-                    // Write prior state (before update) as frame 2 (Python frame 1)
-                    export_state_vector(prior_file, 2, frame_timestamp, tracker.state(), skeleton);
+                    // Write prior state (before update)
+                    export_state_vector(prior_file, 2, t_effective, tracker.state(), skeleton);
                     prior_file.close();
                     if (!quiet) {
-                        fmt::print("  [DEBUG] Exported frame 2 prior state to {}\n",
+                        fmt::print("  [DEBUG] Exported step 1 prior state to {}\n",
                                    prior_state_path.string());
                     }
                 }
             }
 
-            // Track
-            auto result = tracker.track_frame(frame_obs, frame_timestamp);
+            // Track using observations in window
+            auto result = tracker.track_frame(frame_obs, t_effective);
 
             if (result.tracking_lost) {
                 frames_lost++;
                 if (verbose) {
-                    fmt::print("  t={:.3f}: Tracking LOST ({} obs)\n", frame_timestamp,
-                               result.update_info.num_observations);
+                    fmt::print("  Step {}: t=[{:.3f}, {:.3f}): Tracking LOST ({} obs)\n", step,
+                               t_start, t_end, result.update_info.num_observations);
                 }
             } else {
                 frames_tracked++;
                 if (verbose) {
-                    fmt::print("  t={:.3f}: {} inliers, {} outliers\n", frame_timestamp,
-                               result.update_info.num_inliers, result.update_info.num_outliers);
+                    fmt::print("  Step {}: t=[{:.3f}, {:.3f}): {} inliers, {} outliers\n", step,
+                               t_start, t_end, result.update_info.num_inliers,
+                               result.update_info.num_outliers);
                 }
             }
 
-            // Export state vector AFTER tracking update (posterior state) as frame i+1
+            // Export state vector AFTER tracking update (posterior state)
             if (state_vec_file.is_open()) {
-                export_state_vector(state_vec_file, i + 1, frame_timestamp, result.state, skeleton);
+                export_state_vector(state_vec_file, step + 1, t_effective, result.state, skeleton);
             }
 
             // Export
@@ -657,26 +676,26 @@ int main(int argc, char* argv[]) {
                 std::map<std::string, Eigen::Vector3d> marker_positions_3d(
                     marker_positions_3d_map.begin(), marker_positions_3d_map.end());
 
-                exporter->write_frame(start_frame + i, frame_timestamp, result.state,
-                                      marker_positions_3d, frame_obs, result.update_info);
+                exporter->write_frame(step, t_effective, result.state, marker_positions_3d,
+                                      frame_obs, result.update_info);
             }
 
             if (stats_tracker) {
-                stats_tracker->add_frame_stats(start_frame + i, frame_timestamp, result.update_info,
+                stats_tracker->add_frame_stats(step, t_effective, result.update_info,
                                                result.covariance, result.tracking_lost);
             }
 
             // Progress indicator
-            if (!quiet && !verbose && i % 10 == 0) {
-                double percent = 100.0 * i / num_frames_to_process;
+            if (!quiet && !verbose && step % 10 == 0) {
+                double percent = 100.0 * step / num_steps;
                 auto elapsed = std::chrono::steady_clock::now() - start_time;
                 double elapsed_sec =
                     std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() / 1000.0;
-                double fps = i / elapsed_sec;
-                int eta_sec = static_cast<int>((num_frames_to_process - i) / fps);
+                double steps_per_sec = step / elapsed_sec;
+                int eta_sec = static_cast<int>((num_steps - step) / steps_per_sec);
 
-                fmt::print("  Progress: {}/{} ({:.1f}%) | {:.1f} fps | ETA: {}s\r", i,
-                           num_frames_to_process, percent, fps, eta_sec);
+                fmt::print("  Progress: {}/{} ({:.1f}%) | {:.1f} steps/s | ETA: {}s\r", step,
+                           num_steps, percent, steps_per_sec, eta_sec);
                 std::cout.flush();
             }
         }
@@ -707,8 +726,10 @@ int main(int argc, char* argv[]) {
             metadata["skeleton_file"] = config.skeleton_path.filename().string();
             metadata["num_cameras"] = cameras.size();
             metadata["num_markers"] = skeleton.markers().size();
-            metadata["start_frame"] = start_frame;
-            metadata["num_frames"] = num_frames_to_process;
+            metadata["start_time"] = config.start_time;
+            metadata["end_time"] = end_time;
+            metadata["num_steps"] = num_steps;
+            metadata["tracker_fps"] = config.tracker_fps;
             metadata["config"] = {
                 {"process_noise_std", config.process_noise_std},
                 {"measurement_noise_std", config.measurement_noise_std},
@@ -720,18 +741,18 @@ int main(int argc, char* argv[]) {
         }
 
         // Final summary
-        auto end_time = std::chrono::steady_clock::now();
-        auto total_elapsed = end_time - start_time;
+        auto tracking_end_time = std::chrono::steady_clock::now();
+        auto total_elapsed = tracking_end_time - start_time;
         double total_sec =
             std::chrono::duration_cast<std::chrono::milliseconds>(total_elapsed).count() / 1000.0;
-        double avg_fps = frames_tracked / total_sec;
+        double avg_steps_per_sec = frames_tracked / total_sec;
 
         if (!quiet) {
             fmt::print("\nTracking complete!\n");
-            fmt::print("  Tracked: {}/{} frames ({:.1f}%)\n", frames_tracked, num_frames_to_process,
-                       100.0 * frames_tracked / num_frames_to_process);
-            fmt::print("  Lost: {} frames\n", frames_lost);
-            fmt::print("  Average FPS: {:.1f}\n", avg_fps);
+            fmt::print("  Tracked: {}/{} steps ({:.1f}%)\n", frames_tracked, num_steps,
+                       100.0 * frames_tracked / num_steps);
+            fmt::print("  Lost: {} steps\n", frames_lost);
+            fmt::print("  Average rate: {:.1f} steps/s\n", avg_steps_per_sec);
             fmt::print("  Total time: {:.1f}s\n", total_sec);
 
             if (stats_tracker) {

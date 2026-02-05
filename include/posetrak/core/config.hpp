@@ -50,8 +50,9 @@ struct TrackerAppConfig {
     bool export_debug = false;
 
     // === Processing ===
-    int start_frame = 0;
-    int max_frames = -1;  // -1 = all frames
+    double start_time = 0.0;     // Start time in seconds
+    double end_time = -1.0;      // End time in seconds (-1 = use all data)
+    double tracker_fps = 100.0;  // Tracker sample rate (Hz)
 
     /**
      * @brief Load configuration from TOML file

@@ -109,11 +109,12 @@ TEST_CASE("ObservationSequence time queries", "[observation]") {
         seq.observations.push_back(obs);
     }
 
-    SECTION("Get at exact time") {
-        auto obs = seq.get_at_time(0.2);
-        REQUIRE(obs.size() == 1);
-        REQUIRE(obs[0].marker_id == 2);
-    }
+    // NOTE: get_at_time() removed - use get_in_range() instead
+    // SECTION("Get at exact time") {
+    //     auto obs = seq.get_at_time(0.2);
+    //     REQUIRE(obs.size() == 1);
+    //     REQUIRE(obs[0].marker_id == 2);
+    // }
 
     SECTION("Get in range") {
         auto obs = seq.get_in_range(0.1, 0.3);
@@ -219,40 +220,42 @@ TEST_CASE("ObservationSet multi-camera queries", "[observation]") {
     obs_set.add_sequence(seq1);
     obs_set.add_sequence(seq2);
 
-    SECTION("Get all at time") {
-        auto obs = obs_set.get_all_at_time(0.1);
-        REQUIRE(obs.size() == 2);  // One from each camera
-        REQUIRE(obs[0].camera_id != obs[1].camera_id);
-    }
+    // NOTE: get_all_at_time() removed - use get_all_in_range() instead
+    // SECTION("Get all at time") {
+    //     auto obs = obs_set.get_all_at_time(0.1);
+    //     REQUIRE(obs.size() == 2);  // One from each camera
+    //     REQUIRE(obs[0].camera_id != obs[1].camera_id);
+    // }
 
     SECTION("Get all in range") {
         auto obs = obs_set.get_all_in_range(0.05, 0.15);
         REQUIRE(obs.size() == 2);
     }
 
-    SECTION("Get all at frames") {
-        std::map<std::string, int> frames;
-        frames["camera_1"] = 1;
-        frames["camera_2"] = 2;
-
-        auto obs = obs_set.get_all_at_frames(frames);
-        REQUIRE(obs.size() == 2);
-        REQUIRE(obs[0].frame_idx == 1);
-        REQUIRE(obs[1].frame_idx == 2);
-    }
+    // NOTE: get_all_at_frames() removed - frame-based queries are obsolete
+    // SECTION("Get all at frames") {
+    //     std::map<std::string, int> frames;
+    //     frames["camera_1"] = 1;
+    //     frames["camera_2"] = 2;
+    //     auto obs = obs_set.get_all_at_frames(frames);
+    //     REQUIRE(obs.size() == 2);
+    //     REQUIRE(obs[0].frame_idx == 1);
+    //     REQUIRE(obs[1].frame_idx == 2);
+    // }
 
     SECTION("Min and max time") {
         REQUIRE_THAT(obs_set.min_time(), Catch::Matchers::WithinAbs(0.0, 1e-10));
         REQUIRE_THAT(obs_set.max_time(), Catch::Matchers::WithinAbs(0.2, 1e-10));
     }
 
-    SECTION("Unique timestamps") {
-        auto times = obs_set.get_unique_timestamps();
-        REQUIRE(times.size() == 3);
-        REQUIRE_THAT(times[0], Catch::Matchers::WithinAbs(0.0, 1e-10));
-        REQUIRE_THAT(times[1], Catch::Matchers::WithinAbs(0.1, 1e-10));
-        REQUIRE_THAT(times[2], Catch::Matchers::WithinAbs(0.2, 1e-10));
-    }
+    // NOTE: get_unique_timestamps() removed - not needed for time-range based tracking
+    // SECTION("Unique timestamps") {
+    //     auto times = obs_set.get_unique_timestamps();
+    //     REQUIRE(times.size() == 3);
+    //     REQUIRE_THAT(times[0], Catch::Matchers::WithinAbs(0.0, 1e-10));
+    //     REQUIRE_THAT(times[1], Catch::Matchers::WithinAbs(0.1, 1e-10));
+    //     REQUIRE_THAT(times[2], Catch::Matchers::WithinAbs(0.2, 1e-10));
+    // }
 
     SECTION("Total observations") {
         REQUIRE(obs_set.total_observations() == 6);
@@ -335,8 +338,9 @@ TEST_CASE("ObservationSequence edge cases", "[observation]") {
     }
 
     SECTION("Empty sequence queries") {
-        auto obs1 = seq.get_at_time(0.0);
-        REQUIRE(obs1.empty());
+        // NOTE: get_at_time() removed - use get_in_range() instead
+        // auto obs1 = seq.get_at_time(0.0);
+        // REQUIRE(obs1.empty());
 
         auto obs2 = seq.get_in_range(0.0, 1.0);
         REQUIRE(obs2.empty());
@@ -347,14 +351,16 @@ TEST_CASE("ObservationSet edge cases", "[observation]") {
     ObservationSet obs_set(0);
 
     SECTION("Empty set queries") {
-        auto obs1 = obs_set.get_all_at_time(0.0);
-        REQUIRE(obs1.empty());
+        // NOTE: get_all_at_time() removed
+        // auto obs1 = obs_set.get_all_at_time(0.0);
+        // REQUIRE(obs1.empty());
 
         auto obs2 = obs_set.get_all_in_range(0.0, 1.0);
         REQUIRE(obs2.empty());
 
-        auto times = obs_set.get_unique_timestamps();
-        REQUIRE(times.empty());
+        // NOTE: get_unique_timestamps() removed
+        // auto times = obs_set.get_unique_timestamps();
+        // REQUIRE(times.empty());
     }
 
     SECTION("Empty set min/max time") {

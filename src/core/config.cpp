@@ -86,8 +86,9 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
 
     // === Processing ===
     if (auto processing = config["processing"]) {
-        result.start_frame = processing["start_frame"].value_or(0);
-        result.max_frames = processing["max_frames"].value_or(-1);
+        result.start_time = processing["start_time"].value_or(0.0);
+        result.end_time = processing["end_time"].value_or(-1.0);
+        result.tracker_fps = processing["tracker_fps"].value_or(100.0);
     }
 
     return result;
@@ -169,9 +170,17 @@ void TrackerAppConfig::validate() const {
                         min_cameras_for_init));
     }
 
-    if (start_frame < 0) {
+    if (start_time < 0.0) {
+        throw std::runtime_error(fmt::format("Invalid start_time: {} (must be >= 0)", start_time));
+    }
+
+    if (tracker_fps <= 0.0) {
+        throw std::runtime_error(fmt::format("Invalid tracker_fps: {} (must be > 0)", tracker_fps));
+    }
+
+    if (end_time >= 0.0 && end_time <= start_time) {
         throw std::runtime_error(
-            fmt::format("Invalid start_frame: {} (must be >= 0)", start_frame));
+            fmt::format("Invalid end_time: {} (must be > start_time or -1)", end_time));
     }
 
     // Check output directory can be created

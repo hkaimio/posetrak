@@ -46,10 +46,12 @@ export_statistics = true        # tracking_stats.csv and overall_stats.json
 export_debug = false
 
 [processing]
-# Frame range - MATCH PYTHON TEST DATA
+# Frame range - TIME-BASED (NEW)
 # Python test: tracker frames 0-129 (130 frames), camera frames ~270-400
-start_frame = 275
-max_frames = 130
+
+start_time = 0.0         # Start at synchronized time 0
+end_time = 1.0           # 120 frames at 120 Hz
+tracker_fps = 120.0      # 120 Hz sample rate
 
 # ============================================================================
 # COMPARISON NOTES:

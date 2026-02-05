@@ -96,8 +96,9 @@ TEST_CASE("Load OpenPose sequence", "[observation_loader]") {
     openpose_cameras.emplace("cam1", cameras.at("cam1"));
     openpose_cameras.emplace("cam2", cameras.at("cam2"));
 
+    // Load observations by time range (all data, filter by time)
     auto obs_set = load_openpose_sequence("tests/data/openpose", openpose_cameras,
-                                          create_test_skeleton(), {1, 10}, 0.1, 0);
+                                          create_test_skeleton(), 0.0, -1.0, 0.1, 0);
 
     SECTION("Loads sequences for all cameras") {
         auto const* seq1 = obs_set.get_sequence("cam1");
@@ -112,13 +113,14 @@ TEST_CASE("Load OpenPose sequence", "[observation_loader]") {
         REQUIRE(seq != nullptr);
         REQUIRE(!seq->observations.empty());
 
-        // With 10 frames and ~133 keypoints per frame, should have many observations
+        // With ~10 frames and ~133 keypoints per frame, should have many observations
         REQUIRE(seq->observations.size() > 100);
     }
 
-    SECTION("Can load subset of frames") {
+    SECTION("Can load subset by time range") {
+        // Load only observations with timestamps < 0.05 seconds
         auto obs_set_subset = load_openpose_sequence("tests/data/openpose", openpose_cameras,
-                                                     create_test_skeleton(), {1, 5}, 0.1, 0);
+                                                     create_test_skeleton(), 0.0, 0.05, 0.1, 0);
 
         auto const* seq_full = obs_set.get_sequence("cam1");
         auto const* seq_subset = obs_set_subset.get_sequence("cam1");

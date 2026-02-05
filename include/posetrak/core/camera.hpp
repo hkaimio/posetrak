@@ -120,6 +120,10 @@ class Camera {
 
     // --- Temporal Synchronization ---
 
+    /// @brief Set frame rate
+    /// @param fps Frame rate in frames per second
+    void set_fps(double fps);
+
     /// @brief Set synchronization points for frame-to-timestamp conversion
     /// @param points Synchronization points (frame_idx → timestamp)
     void set_sync_points(std::vector<SyncPoint> const& points);

@@ -93,6 +93,13 @@ Camera::Camera(int id, std::string name, Intrinsics const& intrinsics, Extrinsic
       fps_(fps),
       start_frame_(start_frame) {}
 
+void Camera::set_fps(double fps) {
+    if (fps <= 0.0) {
+        throw std::invalid_argument("FPS must be positive");
+    }
+    fps_ = fps;
+}
+
 void Camera::set_sync_points(std::vector<SyncPoint> const& points) {
     sync_points_ = points;
     fmt::print("  Camera {}: Loaded {} sync points\n", name_.c_str(), points.size());

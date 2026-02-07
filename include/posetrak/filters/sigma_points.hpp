@@ -76,7 +76,6 @@ class SigmaPointGenerator {
      */
     int error_dim() const { return error_dim_; }
 
-   private:
     /**
      * @brief Apply error-state vector to nominal state
      * @param nominal_state Nominal state
@@ -85,9 +84,12 @@ class SigmaPointGenerator {
      *
      * For quaternion: q_new = q_nominal ⊗ exp(error_rotation)
      * For other states: x_new = x_nominal + error
+     *
+     * Handles locked DOFs and joint group filtering correctly.
      */
     State apply_error_to_state(State const& nominal_state, Eigen::VectorXd const& error_vec) const;
 
+   private:
     Skeleton const& skeleton_;  ///< Reference to skeleton
     int error_dim_;             ///< Error-state dimension (2 * active_dof)
     double alpha_;              ///< Spread parameter

@@ -158,8 +158,29 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
     ukf_->set_state(initial_state);
 
     // Set initial covariance
-    int const error_dim = initial_state.error_state_dim();
-    int const pos_dim = error_dim / 2;
+    // Use active DOFs (now includes root's 6 DOFs: 3 position + 3 orientation)
+    int const active_dof = skeleton_.active_dof();
+    int const total_dof = skeleton_.total_dof_count();
+    int const error_dim = 2 * active_dof;  // active_dof now includes root
+    int const pos_dim = active_dof;        // position dimension
+
+    fmt::print("\n=== TRACKER INITIALIZATION DEBUG ===\n");
+    fmt::print("total_dof (storage)={}, active_dof (error-state)={}, error_dim={}\n", total_dof,
+               active_dof, error_dim);
+    fmt::print(
+        "Expected: error_dim should be 210 for Python compatibility (active_dof=105 + 6 root = "
+        "111)\n");
+    fmt::print(
+        "Correction: active_dof should BE 111 (includes root), so error_dim = 2*111 = 222\n");
+    fmt::print(
+        "Actually: Python has active_dof=105, error_dim=210, so we expect active_dof={}, "
+        "error_dim={}\n",
+        active_dof, error_dim);
+    fmt::print("Covariance will be {}x{}\n", error_dim, error_dim);
+    fmt::print(
+        "init_position_std={}, init_orientation_std={}, init_joint_std={}, init_velocity_std={}\n",
+        config_.init_position_std, config_.init_orientation_std, config_.init_joint_std,
+        config_.init_velocity_std);
 
     Eigen::MatrixXd initial_cov = Eigen::MatrixXd::Zero(error_dim, error_dim);
 
@@ -181,6 +202,20 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
     initial_cov.block(pos_dim, pos_dim, pos_dim, pos_dim) =
         Eigen::MatrixXd::Identity(pos_dim, pos_dim) *
         (config_.init_velocity_std * config_.init_velocity_std);
+
+    fmt::print("Initial covariance diagonal values:\n");
+    fmt::print("  Position (0:3): {}, {}, {}\n", initial_cov(0, 0), initial_cov(1, 1),
+               initial_cov(2, 2));
+    fmt::print("  Orientation (3:6): {}, {}, {}\n", initial_cov(3, 3), initial_cov(4, 4),
+               initial_cov(5, 5));
+    fmt::print("  Joint[0] (6): {}\n", initial_cov(6, 6));
+    fmt::print("  Velocity pos ({}:{}): {}, {}, {}\n", pos_dim, pos_dim + 3,
+               initial_cov(pos_dim, pos_dim), initial_cov(pos_dim + 1, pos_dim + 1),
+               initial_cov(pos_dim + 2, pos_dim + 2));
+    fmt::print("  Velocity orient ({}:{}): {}, {}, {}\n", pos_dim + 3, pos_dim + 6,
+               initial_cov(pos_dim + 3, pos_dim + 3), initial_cov(pos_dim + 4, pos_dim + 4),
+               initial_cov(pos_dim + 5, pos_dim + 5));
+    fmt::print("===================================\n\n");
 
     ukf_->set_covariance(initial_cov);
 

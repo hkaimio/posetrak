@@ -48,6 +48,15 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
 
     result.person_id = data["person_id"].value_or(0);
 
+    // Load active joint groups (optional)
+    if (auto groups_array = data["active_joint_groups"].as_array()) {
+        for (auto&& elem : *groups_array) {
+            if (auto str = elem.value<std::string>()) {
+                result.active_joint_groups.push_back(*str);
+            }
+        }
+    }
+
     // === Tracking parameters ===
     if (auto tracking = config["tracking"]) {
         result.process_noise_std = tracking["process_noise_std"].value_or(0.5);

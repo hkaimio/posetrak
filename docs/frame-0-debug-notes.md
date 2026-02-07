@@ -25,6 +25,74 @@ Status: verified
 
 - Verified
 
+### Error state dimension
+
+Python error state has 210 dimensions, C++ has currently 222
+
+Active DOFs in Python:
+
+Joint spine1 active DOF mask: [ True  True  True], total active DOF: 3
+Joint spine2 active DOF mask: [ True  True  True], total active DOF: 3
+Joint neck1 active DOF mask: [ True  True  True], total active DOF: 3
+Joint neck2 active DOF mask: [ True  True  True], total active DOF: 3
+Joint head active DOF mask: [ True  True  True], total active DOF: 3
+Joint shoulder.L active DOF mask: [ True  True  True], total active DOF: 3
+Joint upper_arm.L active DOF mask: [ True  True  True], total active DOF: 3
+Joint forearm.L active DOF mask: [ True  True False], total active DOF: 2
+Joint hand.L active DOF mask: [ True False  True], total active DOF: 2
+Joint palm.01.L active DOF mask: [ True], total active DOF: 1
+Joint f_index.01.L active DOF mask: [ True False  True], total active DOF: 2
+Joint f_index.02.L active DOF mask: [ True], total active DOF: 1
+Joint f_index.03.L active DOF mask: [ True], total active DOF: 1
+Joint thumb.01.L active DOF mask: [False  True  True], total active DOF: 2
+Joint thumb.02.L active DOF mask: [ True], total active DOF: 1
+Joint thumb.03.L active DOF mask: [ True], total active DOF: 1
+Joint palm.02.L active DOF mask: [ True], total active DOF: 1
+Joint f_middle.01.L active DOF mask: [ True False  True], total active DOF: 2
+Joint f_middle.02.L active DOF mask: [ True], total active DOF: 1
+Joint f_middle.03.L active DOF mask: [ True], total active DOF: 1
+Joint palm.03.L active DOF mask: [ True], total active DOF: 1
+Joint f_ring.01.L active DOF mask: [ True False  True], total active DOF: 2
+Joint f_ring.02.L active DOF mask: [ True], total active DOF: 1
+Joint f_ring.03.L active DOF mask: [ True], total active DOF: 1
+Joint palm.04.L active DOF mask: [ True], total active DOF: 1
+Joint f_pinky.01.L active DOF mask: [ True False  True], total active DOF: 2
+Joint f_pinky.02.L active DOF mask: [ True], total active DOF: 1
+Joint f_pinky.03.L active DOF mask: [ True], total active DOF: 1
+Joint shoulder.R active DOF mask: [ True  True  True], total active DOF: 3
+Joint upper_arm.R active DOF mask: [ True  True  True], total active DOF: 3
+Joint forearm.R active DOF mask: [ True  True False], total active DOF: 2
+Joint hand.R active DOF mask: [ True False  True], total active DOF: 2
+Joint palm.01.R active DOF mask: [ True], total active DOF: 1
+Joint f_index.01.R active DOF mask: [ True False  True], total active DOF: 2
+Joint f_index.02.R active DOF mask: [ True], total active DOF: 1
+Joint f_index.03.R active DOF mask: [ True], total active DOF: 1
+Joint thumb.01.R active DOF mask: [False  True  True], total active DOF: 2
+Joint thumb.02.R active DOF mask: [ True], total active DOF: 1
+Joint thumb.03.R active DOF mask: [ True], total active DOF: 1
+Joint palm.02.R active DOF mask: [ True], total active DOF: 1
+Joint f_middle.01.R active DOF mask: [ True False  True], total active DOF: 2
+Joint f_middle.02.R active DOF mask: [ True], total active DOF: 1
+Joint f_middle.03.R active DOF mask: [ True], total active DOF: 1
+Joint palm.03.R active DOF mask: [ True], total active DOF: 1
+Joint f_ring.01.R active DOF mask: [ True False  True], total active DOF: 2
+Joint f_ring.02.R active DOF mask: [ True], total active DOF: 1
+Joint f_ring.03.R active DOF mask: [ True], total active DOF: 1
+Joint palm.04.R active DOF mask: [ True], total active DOF: 1
+Joint f_pinky.01.R active DOF mask: [ True False  True], total active DOF: 2
+Joint f_pinky.02.R active DOF mask: [ True], total active DOF: 1
+Joint f_pinky.03.R active DOF mask: [ True], total active DOF: 1
+Joint thigh.L active DOF mask: [ True  True  True], total active DOF: 3
+Joint shin.L active DOF mask: [ True], total active DOF: 1
+Joint foot.L active DOF mask: [ True  True  True], total active DOF: 3
+Joint toe.L active DOF mask: [ True], total active DOF: 1
+Joint thigh.R active DOF mask: [ True  True  True], total active DOF: 3
+Joint shin.R active DOF mask: [ True], total active DOF: 1
+Joint foot.R active DOF mask: [ True  True  True], total active DOF: 3
+Joint toe.R active DOF mask: [ True], total active DOF: 1
+Joint hips active DOF mask: [ True  True  True  True  True  True], total active DOF: 6
+Error dim 210
+
 ### Update
 
 Use same set of observations
@@ -39,5 +107,5 @@ Use same set of observations
 Marker positioopn  predictions
 - Python predictions: tracking_tests/cpp-python-comparison/python_results/forward_kinematics/markers_3d/table.csv
 - C++ predictions: tracking_tests/cpp-python-comparison/cpp_results/tracking_results.csv
-- TIme stamps differ, C++ timestomans weird (first frame 0.0125)
+- TIme stamps differ, C++ timestamps weird (first frame 0.0125)
 -

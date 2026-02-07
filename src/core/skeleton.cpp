@@ -147,15 +147,23 @@ int Skeleton::total_dof_count() const {
 int Skeleton::active_dof() const {
     if (!filter_active_) {
         // Count active DOFs considering locked axes
-        int total = 0;
+        // Python convention: active_dof INCLUDES root's 6 DOFs (3 pos + 3 rot)
+        // With 99 body joint DOFs + 6 root = 105 total, error_dim = 2*105 = 210
+        int total = 6;  // Root always contributes 6 DOFs (3 pos + 3 rot)
         for (auto const& joint : joints_) {
+            if (!joint.parent_index.has_value()) {
+                continue;  // Skip root in iteration (already counted above)
+            }
             total += joint.active_dof();
         }
         return total;
     }
 
-    int total = 0;
+    int total = 6;  // Include root
     for (auto const& joint : joints_) {
+        if (!joint.parent_index.has_value()) {
+            continue;  // Skip root (already counted)
+        }
         if (active_joints_.contains(joint.name) && active_joints_.at(joint.name)) {
             total += joint.active_dof();
         }

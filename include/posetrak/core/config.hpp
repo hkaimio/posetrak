@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace posetrak {
 
@@ -39,6 +40,7 @@ struct TrackerAppConfig {
     std::optional<std::filesystem::path> sync_path;
     std::filesystem::path observations_dir;
     int person_id = 0;
+    std::vector<std::string> active_joint_groups;  ///< Joint groups to track (empty = all)
 
     // === Tracking parameters ===
     double process_noise_std = 0.5;

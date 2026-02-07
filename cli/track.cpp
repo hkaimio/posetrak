@@ -385,6 +385,21 @@ int main(int argc, char* argv[]) {
             fmt::print("  Loaded {} joints\n", skeleton.joints().size());
         }
 
+        // Apply active joint groups filter (if specified)
+        if (!config.active_joint_groups.empty()) {
+            skeleton.set_active_groups(config.active_joint_groups);
+            if (!quiet) {
+                std::string groups_str;
+                for (size_t i = 0; i < config.active_joint_groups.size(); ++i) {
+                    if (i > 0)
+                        groups_str += ", ";
+                    groups_str += config.active_joint_groups[i];
+                }
+                fmt::print("  Active joint groups: {}\n", groups_str);
+                fmt::print("  Active DOFs: {}\n", skeleton.active_dof());
+            }
+        }
+
         // Load cameras
         if (!quiet) {
             fmt::print("Loading cameras: {}\n", config.cameras_path.string());

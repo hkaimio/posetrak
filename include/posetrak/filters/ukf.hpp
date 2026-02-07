@@ -180,6 +180,14 @@ class UnscentedKalmanFilter {
     Eigen::VectorXd compute_state_error(State const& state, State const& reference) const;
 
     /**
+     * @brief Apply error to state (retraction from tangent space to manifold)
+     * @param nominal_state Nominal state (on manifold)
+     * @param error Error vector in tangent space (active DOFs only)
+     * @return New state with error applied
+     */
+    State apply_error_to_state(State const& nominal_state, Eigen::VectorXd const& error) const;
+
+    /**
      * @brief Predict measurements for a state using FK and camera projection
      * @param state State to predict measurements for
      * @param observations Observations to predict (defines which markers/cameras)

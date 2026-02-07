@@ -5,11 +5,11 @@
 The C++ UKF implementation uses **all DOFs** (including locked ones) in the error-state space, while the Python implementation correctly uses only **active DOFs** (excluding locked ball joint axes). This causes:
 
 - Different sigma point counts: C++ 501 vs Python 421
-- Different covariance matrix sizes: 250×250 vs 210×210  
+- Different covariance matrix sizes: 250×250 vs 210×210
 - Different sigma point spreads and covariance scaling
 - Incompatible results between implementations
 
-**Root Cause**: 
+**Root Cause**:
 - **C++**: `error_dim = 2 * (6 + skeleton.total_dof_count())` ← includes locked DOFs
 - **Python**: `error_dim = 2 * skeleton.get_total_active_dof()` ← only active DOFs
 
@@ -70,7 +70,7 @@ int const joint_active_dof = active_dof_count - 6;
 
 **Current Logic**: Always includes all 3 DOFs for SPHERICAL joints using full SO(3) error
 
-**New Logic**: 
+**New Logic**:
 - Check `joint.active_dof()` and `joint.get_active_dof_mask()`
 - If `num_active == 3`: Use full SO(3) error (current code)
 - If `num_active < 3`: Use simple angle differences for active DOFs only
@@ -82,7 +82,7 @@ int const joint_active_dof = active_dof_count - 6;
 else if (joint.type == JointType::SPHERICAL) {
     auto active_mask = joint.get_active_dof_mask();
     int num_active = joint.active_dof();
-    
+
     if (num_active == 3) {
         // All DOFs active - use full SO(3) error
         // ... existing rotation matrix logic ...
@@ -93,7 +93,7 @@ else if (joint.type == JointType::SPHERICAL) {
         Eigen::Vector3d const aa_ref = reference.joint_angles().segment<3>(joint_angles_idx);
         Eigen::Vector3d const aa_state = state.joint_angles().segment<3>(joint_angles_idx);
         Eigen::Vector3d angle_error = aa_state - aa_ref;
-        
+
         int active_idx = 0;
         for (int i = 0; i < 3; ++i) {
             if (active_mask[i]) {
@@ -225,6 +225,6 @@ After refactoring:
 
 ## References
 
-- Python implementation: `kalman_tracker/joint_space/filter_base.py`
+- Python implementation: `/mnt/c/Users/HarriKaimio/projects/posing-notebooks/kalman_tracker/joint_space/filter_base.py`
 - Error-state formulation: Quaternion kinematics for error-state Kalman filter (Sola, 2017)
 - Ball joint DOF locking: Implemented via joint limits in skeleton YAML

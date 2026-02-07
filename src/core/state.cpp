@@ -69,9 +69,10 @@ void State::apply_error_update(Eigen::VectorXd const& error_delta) {
     root_position_ += error_delta.segment<3>(0);
 
     // Update orientation (multiplicative on manifold)
+    // Use RIGHT multiplication for body-frame errors: q_new = q_nominal * q_error
     Eigen::Vector3d const delta_axis_angle = error_delta.segment<3>(3);
     Eigen::Quaterniond const delta_q = axis_angle_to_quaternion(delta_axis_angle);
-    root_orientation_ = (delta_q * root_orientation_).normalized();
+    root_orientation_ = (root_orientation_ * delta_q).normalized();
 
     // Update joint angles (additive)
     joint_angles_ += error_delta.segment(6, n_dof);

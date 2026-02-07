@@ -45,7 +45,8 @@ struct Joint {
                 double const min_limit = limits[i].x();
                 double const max_limit = limits[i].y();
                 // DOF is active if limits differ by more than tolerance
-                mask[i] = std::abs(max_limit - min_limit) > 1e-9;
+                // Using 1e-4 tolerance to match Python's locked DOF detection
+                mask[i] = std::abs(max_limit - min_limit) > 1e-4;
             }
             // If no limits set, all DOFs are active
             if (num_limits == 0) {

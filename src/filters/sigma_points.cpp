@@ -8,6 +8,8 @@
 #include <Eigen/Cholesky>
 #include <Eigen/Eigenvalues>
 
+#include <fmt/core.h>
+
 #include <cmath>
 #include <stdexcept>
 
@@ -16,10 +18,16 @@ namespace posetrak {
 SigmaPointGenerator::SigmaPointGenerator(Skeleton const& skeleton, double alpha, double beta,
                                          double kappa)
     : skeleton_(skeleton),
-      error_dim_(2 * (6 + skeleton.total_dof_count())),  // 2*(3 pos + 3 rot + ndof)
+      error_dim_(2 * skeleton.active_dof()),  // active_dof now includes root's 6 DOFs
       alpha_(alpha),
       beta_(beta),
       kappa_(kappa) {
+    fmt::print("\n=== SIGMA POINT GENERATOR INIT ===\n");
+    fmt::print("active_dof={}, error_dim={}, n_sigma={}\n", skeleton.active_dof(), error_dim_,
+               2 * error_dim_ + 1);
+    fmt::print("alpha={}, beta={}, kappa={}\n", alpha, beta, kappa);
+    fmt::print("==================================\n\n");
+
     // Compute lambda parameter
     int const n = error_dim_;
     double const lambda = alpha * alpha * (n + kappa) - n;
@@ -103,35 +111,38 @@ State SigmaPointGenerator::apply_error_to_state(State const& nominal_state,
     // Start with a copy of nominal state
     State new_state = nominal_state;
 
-    int const dof = skeleton_.total_dof_count();
+    int const active_dof = skeleton_.active_dof();  // Includes root's 6 DOFs
 
-    // Apply position error (additive)
+    // Error vector structure (Python convention):
+    // error[0:active_dof] = rotation/position errors (root 6 + body joints)
+    // error[active_dof:2*active_dof] = velocity errors (root 6 + body joints)
+
+    // Apply root position error (first 3 elements)
     Eigen::Vector3d new_pos = nominal_state.root_position() + error_vec.segment<3>(0);
     new_state.set_root_position(new_pos);
 
-    // Apply rotation error (multiplicative on manifold)
-    // q_new = q_nominal ⊗ exp(error_rotation)
+    // Apply root rotation error (next 3 elements, multiplicative on manifold)
     Eigen::Vector3d rot_error = error_vec.segment<3>(3);
     Eigen::Quaterniond q_error = State::axis_angle_to_quaternion(rot_error);
     Eigen::Quaterniond q_nominal = nominal_state.root_orientation();
     Eigen::Quaterniond q_new = (q_nominal * q_error).normalized();
     new_state.set_root_orientation(q_new);
 
-    // Apply velocity errors (additive)
-    Eigen::Vector3d new_vel = nominal_state.root_velocity() + error_vec.segment<3>(6 + dof);
+    // Apply root velocity errors (first 6 elements of velocity section)
+    Eigen::Vector3d new_vel = nominal_state.root_velocity() + error_vec.segment<3>(active_dof);
     Eigen::Vector3d new_angvel =
-        nominal_state.root_angular_velocity() + error_vec.segment<3>(9 + dof);
+        nominal_state.root_angular_velocity() + error_vec.segment<3>(active_dof + 3);
     new_state.set_root_velocity(new_vel);
     new_state.set_root_angular_velocity(new_angvel);
 
-    // Apply joint angle errors
+    // Apply joint angle errors (handle locked DOFs)
     auto joints_ordered = skeleton_.get_joints_ordered();
     Eigen::VectorXd new_angles = nominal_state.joint_angles();
     Eigen::VectorXd new_joint_vels = nominal_state.joint_velocities();
 
-    int error_pos_idx = 6;  // Start after root position/rotation in error vector
-    int angle_idx = 0;      // Index in joint_angles
-    int vel_idx = 0;        // Index in joint_velocities
+    int error_pos_idx = 6;               // Start after root's 6 DOFs in rotation section
+    int error_vel_idx = active_dof + 6;  // Start after root's 6 DOFs in velocity section
+    int joint_angles_idx = 0;            // Index in full joint_angles storage
 
     for (auto const& joint : joints_ordered) {
         // Skip root joint
@@ -140,39 +151,55 @@ State SigmaPointGenerator::apply_error_to_state(State const& nominal_state,
         }
 
         if (joint.type == JointType::REVOLUTE) {
-            // Apply joint angle error
-            new_angles(angle_idx) += error_vec(error_pos_idx);
-            // Apply joint velocity error (offset by 6+dof from position error)
-            new_joint_vels(vel_idx) += error_vec(error_pos_idx + 6 + dof);
+            // REVOLUTE: always 1 active DOF
+            new_angles(joint_angles_idx) += error_vec(error_pos_idx);
+            new_joint_vels(joint_angles_idx) += error_vec(error_vel_idx);
 
             error_pos_idx += 1;
-            angle_idx += 1;
-            vel_idx += 1;
+            error_vel_idx += 1;
+            joint_angles_idx += 1;
 
         } else if (joint.type == JointType::SPHERICAL) {
-            // Always 3 DOFs - use manifold composition
-            Eigen::Vector3d nominal_axis_angle = nominal_state.joint_angles().segment<3>(angle_idx);
-            Eigen::Matrix3d R_nominal =
-                State::axis_angle_to_quaternion(nominal_axis_angle).toRotationMatrix();
+            // SPHERICAL: check how many DOFs are active
+            std::array<bool, 3> const active_mask = joint.get_active_dof_mask();
+            int const num_active = joint.active_dof();
 
-            // Error in tangent space
-            Eigen::Vector3d error_axis_angle = error_vec.segment<3>(error_pos_idx);
-            Eigen::Matrix3d R_error =
-                State::axis_angle_to_quaternion(error_axis_angle).toRotationMatrix();
+            if (num_active == 3) {
+                // All 3 DOFs active: use full SO(3) manifold composition
+                Eigen::Vector3d nominal_axis_angle =
+                    nominal_state.joint_angles().segment<3>(joint_angles_idx);
+                Eigen::Matrix3d R_nominal =
+                    State::axis_angle_to_quaternion(nominal_axis_angle).toRotationMatrix();
 
-            // Compose: R_new = R_nominal * R_error
-            Eigen::Matrix3d R_new = R_nominal * R_error;
-            Eigen::Quaterniond q_new_joint(R_new);
-            Eigen::Vector3d new_axis_angle = State::quaternion_to_axis_angle(q_new_joint);
+                // Error in tangent space
+                Eigen::Vector3d error_axis_angle = error_vec.segment<3>(error_pos_idx);
+                Eigen::Matrix3d R_error =
+                    State::axis_angle_to_quaternion(error_axis_angle).toRotationMatrix();
 
-            new_angles.segment<3>(angle_idx) = new_axis_angle;
+                // Compose: R_new = R_nominal * R_error (right multiplication for body frame)
+                Eigen::Matrix3d R_new = R_nominal * R_error;
+                Eigen::Quaterniond q_new_joint(R_new);
+                Eigen::Vector3d new_axis_angle = State::quaternion_to_axis_angle(q_new_joint);
 
-            // Apply velocity error (offset by 6+dof from position error)
-            new_joint_vels.segment<3>(vel_idx) += error_vec.segment<3>(error_pos_idx + 6 + dof);
+                new_angles.segment<3>(joint_angles_idx) = new_axis_angle;
+                new_joint_vels.segment<3>(joint_angles_idx) += error_vec.segment<3>(error_vel_idx);
 
-            error_pos_idx += 3;
-            angle_idx += 3;
-            vel_idx += 3;
+                error_pos_idx += 3;
+                error_vel_idx += 3;
+            } else {
+                // Some DOFs locked: only apply error to active axes
+                for (int axis = 0; axis < 3; ++axis) {
+                    if (active_mask[axis]) {
+                        new_angles(joint_angles_idx + axis) += error_vec(error_pos_idx);
+                        new_joint_vels(joint_angles_idx + axis) += error_vec(error_vel_idx);
+
+                        error_pos_idx += 1;
+                        error_vel_idx += 1;
+                    }
+                }
+            }
+
+            joint_angles_idx += 3;  // Always 3 in storage
         }
         // FIXED joints have 0 DOF, nothing to update
     }

@@ -22,7 +22,7 @@
             "targetCreateCommands": [
                 "target create ${workspaceFolder}/builddir/cli/posetrak"
             ],
-            "args": [" ${workspaceFolder}/tests/cpp-python/cpp_test_config.toml"],
+            "args": ["${workspaceFolder}/tests/cpp-python/cpp_test_config.toml"],
             "processCreateCommands": [
                 "process launch"
             ]
@@ -34,6 +34,15 @@
         "request": "launch",
         "program": "${workspaceRoot}/builddir/tests/test_posetrak",
         "args": [],
+        "cwd": "${workspaceRoot}"
+    },
+        {
+        "name": "Posetrack gdb",
+        "miDebuggerPath": "/usr/bin/gdb",
+        "type": "cppdbg",
+        "request": "launch",
+        "program": "${workspaceFolder}/builddir/cli/posetrak",
+        "args": ["${workspaceFolder}/tests/cpp-python/cpp_test_config.toml"],
         "cwd": "${workspaceRoot}"
     },
 

@@ -35,6 +35,13 @@ void UnscentedKalmanFilter::set_covariance(Eigen::MatrixXd const& covariance) {
         throw std::invalid_argument("Covariance size must match error dimension");
     }
     covariance_ = covariance;
+    std::cout << "UKF: Set covariance matrix (size " << covariance.rows() << "x"
+              << covariance.cols() << ")\n";
+    std::cout << "diagonal: ";
+    for (int i = 0; i < covariance_.rows(); ++i) {
+        std::cout << covariance_(i, i) << " ";
+    }
+    std::cout << "\n";
 }
 
 void UnscentedKalmanFilter::predict(double dt) {
@@ -177,6 +184,11 @@ void UnscentedKalmanFilter::predict(double dt) {
 
     // Add process noise
     covariance_ += process_noise_ * dt;
+
+    // Debug: Export prior covariance if debug mode enabled
+    if (debug_enabled_) {
+        write_matrix_csv(covariance_, "prior_covariance.csv");
+    }
 }
 
 State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states,
@@ -416,6 +428,11 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     auto sigma_points = sigma_gen_.generate_sigma_points(state_, covariance_);
     int const n_sigma = static_cast<int>(sigma_points.size());
 
+    // Debug: Export sigma points if debug mode enabled
+    if (debug_enabled_) {
+        write_sigma_points_csv(sigma_points);
+    }
+
     // Step 2: Predict measurements for each sigma point
     Eigen::MatrixXd predicted_measurements(measurement_dim, n_sigma);
     for (int i = 0; i < n_sigma; ++i) {
@@ -621,36 +638,8 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         observed = observations_to_vector(observations);
     }
 
-    // Debug: Export observation results (all frames)
-    if (debug_enabled_) {
-        std::string frame_dir =
-            debug_dir_ + "/frame_" +
-            std::string(4 - std::min(4, static_cast<int>(std::to_string(frame_number_).length())),
-                        '0') +
-            std::to_string(frame_number_);
-        std::filesystem::create_directories(frame_dir);
-        std::ofstream f(frame_dir + "/all_observations.csv");
-        f << std::setprecision(15);
-
-        // Write header matching Python format (simplified)
-        f << "marker_name,camera_id,frame_idx,observed_u,observed_v,predicted_u,predicted_v,"
-          << "residual_u,residual_v,residual_norm,mahalanobis_distance,is_outlier\n";
-
-        // Write each observation result
-        for (auto const& obs_result : observation_results) {
-            f << obs_result.marker_name << "," << obs_result.camera_id << ","
-              << obs_result.camera_frame_idx << "," << obs_result.actual.x() << ","
-              << obs_result.actual.y() << "," << obs_result.predicted.x() << ","
-              << obs_result.predicted.y() << "," << obs_result.innovation.x() << ","
-              << obs_result.innovation.y() << "," << obs_result.innovation.norm() << ","
-              << obs_result.mahalanobis_distance << ","
-              << (obs_result.is_outlier ? "True" : "False") << "\n";
-        }
-
-        std::cout << "DEBUG: Exported observation results to " << frame_dir
-                  << "/all_observations.csv (" << observation_results.size() << " observations, "
-                  << result.num_inliers << " inliers, " << result.num_outliers << " outliers)\n";
-    }
+    // Debug export moved to Tracker::track_frame to ensure it runs even when all observations are
+    // outliers
 
     // Step 5: Compute cross-covariance Pxy (already computed if outlier rejection enabled)
     if (outlier_threshold_mahalanobis <= 0.0) {
@@ -791,6 +780,11 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     result.nis = nis;
     result.nis_dof = static_cast<int>(innovation.size());
 
+    // Debug: Export posterior covariance if debug mode enabled
+    if (debug_enabled_) {
+        write_matrix_csv(covariance_, "posterior_covariance.csv");
+    }
+
     return result;
 }
 
@@ -827,6 +821,19 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
         // Project to camera (undistorted coordinates for UKF)
         Camera const& camera = cameras.at(obs.camera_id);
         auto projected_opt = camera.project_undistorted(marker_pos_world);
+
+        // if (marker.name == "MRK-hip.R" && debug_enabled_) {
+        //     std::cout << "  [DEBUG] predict_measurements for marker '" << marker.name
+        //               << " on camera " << camera.name() << " world pos (" << marker_pos_world.x()
+        //               << ", " << marker_pos_world.y() << ", " << marker_pos_world.z()
+        //               << ") projected to (";
+        //     if (projected_opt.has_value()) {
+        //         std::cout << projected_opt->x() << ", " << projected_opt->y();
+        //     } else {
+        //         std::cout << "NaN";
+        //     }
+        //     std::cout << ")\n";
+        // }
 
         // Check if projection succeeded
         if (!projected_opt.has_value()) {
@@ -1175,6 +1182,169 @@ void UnscentedKalmanFilter::enable_debug(bool enable, std::string const& debug_d
         std::filesystem::create_directories(debug_dir);
         std::cout << "DEBUG: UKF debug mode enabled, writing to " << debug_dir << "\n";
     }
+}
+
+void UnscentedKalmanFilter::write_matrix_csv(Eigen::MatrixXd const& matrix,
+                                             std::string const& filename) const {
+    // Create frame directory
+    std::string frame_dir =
+        debug_dir_ + "/frame_" +
+        std::string(4 - std::min(4, static_cast<int>(std::to_string(frame_number_).length())),
+                    '0') +
+        std::to_string(frame_number_);
+    std::filesystem::create_directories(frame_dir);
+
+    std::string filepath = frame_dir + "/" + filename;
+    std::ofstream f(filepath);
+    if (!f.is_open()) {
+        std::cerr << "Failed to open " << filepath << " for writing\n";
+        return;
+    }
+
+    f << std::setprecision(15);
+
+    // Write matrix rows
+    for (int row = 0; row < matrix.rows(); ++row) {
+        for (int col = 0; col < matrix.cols(); ++col) {
+            if (col > 0) {
+                f << ",";
+            }
+            f << matrix(row, col);
+        }
+        f << "\n";
+    }
+
+    std::cout << "DEBUG: Exported matrix (" << matrix.rows() << "x" << matrix.cols() << ") to "
+              << filepath << "\n";
+}
+
+void UnscentedKalmanFilter::write_sigma_points_csv(std::vector<State> const& sigma_points) const {
+    // Create frame directory
+    std::string frame_dir =
+        debug_dir_ + "/frame_" +
+        std::string(4 - std::min(4, static_cast<int>(std::to_string(frame_number_).length())),
+                    '0') +
+        std::to_string(frame_number_);
+    std::filesystem::create_directories(frame_dir);
+
+    std::string filepath = frame_dir + "/sigma_points.csv";
+    std::ofstream f(filepath);
+    if (!f.is_open()) {
+        std::cerr << "Failed to open " << filepath << " for writing\n";
+        return;
+    }
+
+    f << std::setprecision(15);
+
+    // Write header
+    f << "sigma_idx,root_pos_x,root_pos_y,root_pos_z,"
+      << "root_quat_w,root_quat_x,root_quat_y,root_quat_z,"
+      << "root_vel_x,root_vel_y,root_vel_z,"
+      << "root_angvel_x,root_angvel_y,root_angvel_z";
+
+    // Add joint angle columns (in skeleton order)
+    auto const joints_ordered = skeleton_.get_joints_ordered();
+    for (auto const& joint : joints_ordered) {
+        if (!joint.parent_index.has_value()) {
+            continue;  // Skip root
+        }
+
+        int dof = 0;
+        if (joint.type == JointType::REVOLUTE) {
+            dof = 1;
+        } else if (joint.type == JointType::SPHERICAL) {
+            dof = 3;
+        }
+
+        for (int i = 0; i < dof; ++i) {
+            f << "," << joint.name << "_angle_" << i;
+        }
+    }
+
+    // Add joint velocity columns (in skeleton order)
+    for (auto const& joint : joints_ordered) {
+        if (!joint.parent_index.has_value()) {
+            continue;  // Skip root
+        }
+
+        int dof = 0;
+        if (joint.type == JointType::REVOLUTE) {
+            dof = 1;
+        } else if (joint.type == JointType::SPHERICAL) {
+            dof = 3;
+        }
+
+        for (int i = 0; i < dof; ++i) {
+            f << "," << joint.name << "_vel_" << i;
+        }
+    }
+    f << "\n";
+
+    // Write sigma point data
+    for (size_t sigma_idx = 0; sigma_idx < sigma_points.size(); ++sigma_idx) {
+        State const& state = sigma_points[sigma_idx];
+
+        // Sigma index
+        f << sigma_idx;
+
+        // Root position
+        f << "," << state.root_position().x() << "," << state.root_position().y() << ","
+          << state.root_position().z();
+
+        // Root quaternion (w,x,y,z)
+        f << "," << state.root_orientation().w() << "," << state.root_orientation().x() << ","
+          << state.root_orientation().y() << "," << state.root_orientation().z();
+
+        // Root velocity
+        f << "," << state.root_velocity().x() << "," << state.root_velocity().y() << ","
+          << state.root_velocity().z();
+
+        // Root angular velocity
+        f << "," << state.root_angular_velocity().x() << "," << state.root_angular_velocity().y()
+          << "," << state.root_angular_velocity().z();
+
+        // Joint angles (in skeleton order)
+        int joint_angle_idx = 0;
+        for (auto const& joint : joints_ordered) {
+            if (!joint.parent_index.has_value()) {
+                continue;  // Skip root
+            }
+
+            if (joint.type == JointType::REVOLUTE) {
+                f << "," << state.joint_angles()(joint_angle_idx);
+                joint_angle_idx += 1;
+            } else if (joint.type == JointType::SPHERICAL) {
+                // Ball joint: 3 DOF (axis-angle representation in joint_angles)
+                f << "," << state.joint_angles()(joint_angle_idx) << ","
+                  << state.joint_angles()(joint_angle_idx + 1) << ","
+                  << state.joint_angles()(joint_angle_idx + 2);
+                joint_angle_idx += 3;
+            }
+        }
+
+        // Joint velocities (in skeleton order)
+        int joint_vel_idx = 0;
+        for (auto const& joint : joints_ordered) {
+            if (!joint.parent_index.has_value()) {
+                continue;  // Skip root
+            }
+
+            if (joint.type == JointType::REVOLUTE) {
+                f << "," << state.joint_velocities()(joint_vel_idx);
+                joint_vel_idx += 1;
+            } else if (joint.type == JointType::SPHERICAL) {
+                // Ball joint: 3 DOF velocities
+                f << "," << state.joint_velocities()(joint_vel_idx) << ","
+                  << state.joint_velocities()(joint_vel_idx + 1) << ","
+                  << state.joint_velocities()(joint_vel_idx + 2);
+                joint_vel_idx += 3;
+            }
+        }
+
+        f << "\n";
+    }
+
+    std::cout << "DEBUG: Exported sigma points to " << filepath << "\n";
 }
 
 }  // namespace posetrak

@@ -123,6 +123,24 @@ class UnscentedKalmanFilter {
      */
     void set_frame_number(int frame_num) { frame_number_ = frame_num; }
 
+    /**
+     * @brief Check if debug mode is enabled
+     * @return True if debug is enabled
+     */
+    bool is_debug_enabled() const { return debug_enabled_; }
+
+    /**
+     * @brief Get debug output directory
+     * @return Debug directory path
+     */
+    std::string const& get_debug_dir() const { return debug_dir_; }
+
+    /**
+     * @brief Get current frame number
+     * @return Frame number
+     */
+    int get_frame_number() const { return frame_number_; }
+
     // Testing-only accessors (for unit test verification)
     /**
      * @brief Generate sigma points from current state (for testing)
@@ -236,6 +254,25 @@ class UnscentedKalmanFilter {
      */
     void damp_velocity_covariance_at_limits(State const& prev_state, State const& current_state,
                                             double damping_factor = 0.01);
+
+    /**
+     * @brief Write sigma points to CSV file for debugging
+     * @param sigma_points Vector of sigma point states
+     *
+     * Writes sigma points in the same format as Python implementation for comparison.
+     * CSV format: sigma_idx, root_pos (x,y,z), root_quat (w,x,y,z), root_vel (x,y,z),
+     * root_angvel (x,y,z), joint angles (in skeleton order), joint velocities (in skeleton order)
+     */
+    void write_sigma_points_csv(std::vector<State> const& sigma_points) const;
+
+    /**
+     * @brief Write matrix to CSV file for debugging
+     * @param matrix Matrix to write
+     * @param filename Filename (without path, e.g., "prior_covariance.csv")
+     *
+     * Writes matrix to debug_dir/frame_XXXX/filename
+     */
+    void write_matrix_csv(Eigen::MatrixXd const& matrix, std::string const& filename) const;
 
     Skeleton const& skeleton_;             ///< Skeleton structure
     State state_;                          ///< Current state estimate

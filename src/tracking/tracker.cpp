@@ -8,6 +8,10 @@
 #include <fmt/core.h>
 
 #include "posetrak/kinematics/pinocchio_model_builder.hpp"
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
 
 namespace posetrak {
 
@@ -228,6 +232,41 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
     // Step 3: Update
     auto update_info = ukf_->update(observations, cameras_, *fk_, config_.measurement_noise_std,
                                     config_.outlier_threshold);
+
+    // Debug: Export observation results (all frames) - moved here to ensure it runs even when all
+    // observations are outliers
+    if (ukf_->is_debug_enabled()) {
+        std::string const& debug_dir = ukf_->get_debug_dir();
+        int frame_number = ukf_->get_frame_number();
+        std::string frame_dir =
+            debug_dir + "/frame_" +
+            std::string(4 - std::min(4, static_cast<int>(std::to_string(frame_number).length())),
+                        '0') +
+            std::to_string(frame_number);
+        std::filesystem::create_directories(frame_dir);
+        std::ofstream f(frame_dir + "/all_observations.csv");
+        f << std::setprecision(15);
+
+        // Write header matching Python format (simplified)
+        f << "marker_name,camera_id,frame_idx,observed_u,observed_v,predicted_u,predicted_v,"
+          << "residual_u,residual_v,residual_norm,mahalanobis_distance,is_outlier\n";
+
+        // Write each observation result
+        for (auto const& obs_result : update_info.observations) {
+            f << obs_result.marker_name << "," << obs_result.camera_id << ","
+              << obs_result.camera_frame_idx << "," << obs_result.actual.x() << ","
+              << obs_result.actual.y() << "," << obs_result.predicted.x() << ","
+              << obs_result.predicted.y() << "," << obs_result.innovation.x() << ","
+              << obs_result.innovation.y() << "," << obs_result.innovation.norm() << ","
+              << obs_result.mahalanobis_distance << ","
+              << (obs_result.is_outlier ? "True" : "False") << "\n";
+        }
+
+        std::cout << "DEBUG: Exported observation results to " << frame_dir
+                  << "/all_observations.csv (" << update_info.observations.size()
+                  << " observations, " << update_info.num_inliers << " inliers, "
+                  << update_info.num_outliers << " outliers)\n";
+    }
 
     fmt::print("Done update:\n");
     auto post_root_pos = ukf_->state().root_position();

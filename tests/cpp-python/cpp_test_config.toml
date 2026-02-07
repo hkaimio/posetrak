@@ -29,7 +29,7 @@ ik_tolerance = 0.02
 init_position_std = 1.0      # Match Python: std=1.0, variance=1.0
 init_orientation_std = 1.0   # Match Python
 init_joint_std = 1.0         # Match Python
-init_velocity_std = 0.1
+init_velocity_std = 1.0
 min_cameras_for_init = 2
 
 [tracking.ukf]

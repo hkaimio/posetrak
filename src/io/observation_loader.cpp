@@ -78,6 +78,11 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
         }
     }
 
+    if (frame_idx == 1) {
+        fmt::print("Loading OpenPose frame: {} (camera '{}', frame {})\n", filepath, camera_name,
+                   frame_idx);
+    }
+
     std::ifstream file(filepath);
     if (!file.is_open()) {
         throw std::runtime_error("Failed to open OpenPose file: " + filepath);
@@ -114,7 +119,9 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
 
     auto observations = parse_openpose_person(people[person_id], camera, frame_idx, min_confidence,
                                               coco_to_marker_idx);
-
+    if (frame_idx == 1 and camera.id() == 3) {
+        fmt::print("here\n");
+    }
     ObservationSequence seq;
     seq.camera_id = camera.id();
     seq.camera_name = camera_name;

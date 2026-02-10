@@ -48,6 +48,15 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
 
     result.person_id = data["person_id"].value_or(0);
 
+    // Load active joint groups (optional)
+    if (auto groups_array = data["active_joint_groups"].as_array()) {
+        for (auto&& elem : *groups_array) {
+            if (auto str = elem.value<std::string>()) {
+                result.active_joint_groups.push_back(*str);
+            }
+        }
+    }
+
     // === Tracking parameters ===
     if (auto tracking = config["tracking"]) {
         result.process_noise_std = tracking["process_noise_std"].value_or(0.5);
@@ -56,6 +65,9 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
 
         // Initialization sub-section
         if (auto init = tracking["initialization"]) {
+            if (auto state_path = init["python_state_path"].value<std::string>()) {
+                result.python_state_path = *state_path;
+            }
             result.ik_max_iterations = init["ik_max_iterations"].value_or(1000);
             result.ik_tolerance = init["ik_tolerance"].value_or(0.02);
             result.init_position_std = init["init_position_std"].value_or(0.1);
@@ -83,8 +95,9 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
 
     // === Processing ===
     if (auto processing = config["processing"]) {
-        result.start_frame = processing["start_frame"].value_or(0);
-        result.max_frames = processing["max_frames"].value_or(-1);
+        result.start_time = processing["start_time"].value_or(0.0);
+        result.end_time = processing["end_time"].value_or(-1.0);
+        result.tracker_fps = processing["tracker_fps"].value_or(100.0);
     }
 
     return result;
@@ -166,9 +179,17 @@ void TrackerAppConfig::validate() const {
                         min_cameras_for_init));
     }
 
-    if (start_frame < 0) {
+    if (start_time < 0.0) {
+        throw std::runtime_error(fmt::format("Invalid start_time: {} (must be >= 0)", start_time));
+    }
+
+    if (tracker_fps <= 0.0) {
+        throw std::runtime_error(fmt::format("Invalid tracker_fps: {} (must be > 0)", tracker_fps));
+    }
+
+    if (end_time >= 0.0 && end_time <= start_time) {
         throw std::runtime_error(
-            fmt::format("Invalid start_frame: {} (must be >= 0)", start_frame));
+            fmt::format("Invalid end_time: {} (must be > start_time or -1)", end_time));
     }
 
     // Check output directory can be created

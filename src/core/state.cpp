@@ -69,9 +69,10 @@ void State::apply_error_update(Eigen::VectorXd const& error_delta) {
     root_position_ += error_delta.segment<3>(0);
 
     // Update orientation (multiplicative on manifold)
+    // Use RIGHT multiplication for body-frame errors: q_new = q_nominal * q_error
     Eigen::Vector3d const delta_axis_angle = error_delta.segment<3>(3);
     Eigen::Quaterniond const delta_q = axis_angle_to_quaternion(delta_axis_angle);
-    root_orientation_ = (delta_q * root_orientation_).normalized();
+    root_orientation_ = (root_orientation_ * delta_q).normalized();
 
     // Update joint angles (additive)
     joint_angles_ += error_delta.segment(6, n_dof);
@@ -91,7 +92,16 @@ Eigen::Vector3d State::quaternion_to_axis_angle(Eigen::Quaterniond const& q) {
     // Ensure quaternion is normalized
     Eigen::Quaterniond qn = q.normalized();
 
-    // Extract angle
+    // Ensure shortest rotation representation: quaternions q and -q represent the same rotation,
+    // but we want angle in [0, π] range. If w < 0, flip sign to ensure w >= 0.
+    if (qn.w() < 0.0) {
+        qn.w() = -qn.w();
+        qn.x() = -qn.x();
+        qn.y() = -qn.y();
+        qn.z() = -qn.z();
+    }
+
+    // Extract angle (now guaranteed to be in [0, π] range)
     double const angle = 2.0 * std::acos(std::clamp(qn.w(), -1.0, 1.0));
 
     // Handle small angles (near identity)

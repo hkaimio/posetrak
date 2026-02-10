@@ -1,0 +1,95 @@
+# C++ Tracker Configuration - Python Comparison Test
+# ====================================================
+# This config matches the Python test run exactly:
+# - Python test: tracker frames 0-129 (130 frames)
+# - Camera frames: ~270-400
+# - Skeleton: Harri_skeleton-shouldery-rot.yaml
+# - UKF parameters: alpha=0.001, process_noise=0.5, measurement_noise=20.0
+
+[data]
+# Input data paths - MATCH PYTHON TEST
+skeleton = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/Harri_skeleton-shouldery-rot.yaml"
+cameras = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/Calib_scene.toml"
+observations_dir = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/pose"
+sync = "tests/cpp-python/sync_cpp-python.json"  # Optional: camera-specific frame offsets
+person_id = 0
+active_joint_groups = ["main", "HandL", "HandR"]
+
+[tracking]
+# UKF tracking parameters - MATCH PYTHON EXACTLY
+process_noise_std = 0.5
+measurement_noise_std = 20.0
+outlier_threshold = 4.0
+
+[tracking.initialization]
+# Initialize from Python tracker's frame 0 state for exact comparison
+# python_state_path = "/home/harri/projects/posetrak/tracking_tests/cpp-python-comparison/python_results/state/person_0/frames.csv"
+python_state_path = "/home/harri/projects/posetrak/tests/cpp-python/initial_state.csv"
+# IK and initialization parameters
+ik_max_iterations = 1000
+ik_tolerance = 0.02
+init_position_std = 1.0      # Match Python: std=1.0, variance=1.0
+init_orientation_std = 1.0   # Match Python
+init_joint_std = 1.0         # Match Python
+init_velocity_std = 1.0
+min_cameras_for_init = 2
+
+[tracking.ukf]
+# UKF sigma point parameters - CRITICAL: MATCH PYTHON EXACTLY
+alpha = 0.001  # Python uses 0.001 (NOT 0.5!)
+beta = 2.0
+kappa = 0.0
+
+[output]
+# Export to comparison directory (must be absolute path)
+directory = "/home/harri/projects/posetrak/tracking_tests/cpp-python-comparison/cpp_results"
+export_tracking_results = true  # CSV files with tracking data
+export_statistics = true        # tracking_stats.csv and overall_stats.json
+export_debug = true
+
+[processing]
+# Frame range - TIME-BASED (NEW)
+# Python test: tracker frames 0-129 (130 frames), camera frames ~270-400
+
+start_time = 0.0         # Start at synchronized time 0
+end_time = 3.0           # 120 frames at 120 Hz
+tracker_fps = 120.0      # 120 Hz sample rate
+
+# ============================================================================
+# COMPARISON NOTES:
+# ============================================================================
+#
+# Python test parameters (from ukf_parameters.json):
+#   - process_noise_std: 0.5
+#   - measurement_noise_std: 20.0
+#   - outlier_threshold_mahalanobis: 4.0
+#   - alpha: 0.001
+#   - beta: 2.0
+#   - kappa: 0.0
+#
+# Python test ran 130 frames (tracker frames 0-129)
+#   - Camera frames vary by camera start offset (typically ~270-400)
+#
+# Python reference data location:
+#   - Observations: tracking_tests/cpp-python-comparison/python_results/observations/
+#   - State vectors: tracking_tests/cpp-python-comparison/python_results/state/person_0/frames.csv
+#   - 3D markers: tracking_tests/cpp-python-comparison/python_results/forward_kinematics/markers_3d/
+#   - UKF params: tracking_tests/cpp-python-comparison/python_results/metadata/ukf_parameters.json
+#
+# To run this test:
+#   cd /home/harri/projects/posetrak
+#   ./builddir/cli/posetrak tracking_tests/cpp-python-comparison/cpp_test_config.toml
+#
+# Expected output files:
+#   - tracking_tests/cpp-python-comparison/cpp_results/predicted_observations.csv
+#   - tracking_tests/cpp-python-comparison/cpp_results/state_vectors.csv
+#   - tracking_tests/cpp-python-comparison/cpp_results/tracking_results.csv
+#   - tracking_tests/cpp-python-comparison/cpp_results/tracking_stats.csv
+#   - tracking_tests/cpp-python-comparison/cpp_results/overall_stats.json
+#
+# Next steps:
+#   1. Run tracker: ./builddir/cli/posetrak tracking_tests/cpp-python-comparison/cpp_test_config.toml
+#   2. Compare predicted observations with Python reference
+#   3. Compare state vectors frame-by-frame
+#   4. Identify and fix any discrepancies
+#

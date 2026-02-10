@@ -1,0 +1,67 @@
+{
+  "_comment": "Camera synchronization metadata",
+  "_info": {
+    "description": "Maps camera frame indices to global timestamps",
+    "fps": 120,
+    "frame_rate_hz": 120.0,
+    "common_start_frame": 150,
+    "camera_offsets": [3, 3, 3, 9, 1, 1],
+    "actual_start_frames": [153, 153, 153, 159, 151, 151],
+    "global_start_frame": 151,
+    "note": "Camera frame 0 corresponds to the camera's start frame. Timestamps are relative to global frame 151."
+  },
+  "cam_01": [
+    {"frame": 0, "timestamp": 0.0166667},
+    {"frame": 1, "timestamp": 0.0250000},
+    {"frame": 2, "timestamp": 0.0333333},
+    {"frame": 3, "timestamp": 0.0416667},
+    {"frame": 4, "timestamp": 0.0500000}
+  ],
+  "cam_02": [
+    {"frame": 0, "timestamp": 0.0166667},
+    {"frame": 1, "timestamp": 0.0250000},
+    {"frame": 2, "timestamp": 0.0333333},
+    {"frame": 3, "timestamp": 0.0416667},
+    {"frame": 4, "timestamp": 0.0500000}
+  ],
+  "cam_03": [
+    {"frame": 0, "timestamp": 0.0166667},
+    {"frame": 1, "timestamp": 0.0250000},
+    {"frame": 2, "timestamp": 0.0333333},
+    {"frame": 3, "timestamp": 0.0416667},
+    {"frame": 4, "timestamp": 0.0500000}
+  ],
+  "cam_04": [
+    {"frame": 0, "timestamp": 0.0666667},
+    {"frame": 1, "timestamp": 0.0750000},
+    {"frame": 2, "timestamp": 0.0833333},
+    {"frame": 3, "timestamp": 0.0916667},
+    {"frame": 4, "timestamp": 0.1000000}
+  ],
+  "cam_05": [
+    {"frame": 0, "timestamp": 0.0000000},
+    {"frame": 1, "timestamp": 0.0083333},
+    {"frame": 2, "timestamp": 0.0166667},
+    {"frame": 3, "timestamp": 0.0250000},
+    {"frame": 4, "timestamp": 0.0333333}
+  ],
+  "cam_06": [
+    {"frame": 0, "timestamp": 0.0000000},
+    {"frame": 1, "timestamp": 0.0083333},
+    {"frame": 2, "timestamp": 0.0166667},
+    {"frame": 3, "timestamp": 0.0250000},
+    {"frame": 4, "timestamp": 0.0333333}
+  ],
+  "_usage": {
+    "description": "This sync file encodes camera-specific start frame offsets",
+    "camera_starts": {
+      "cam_01": "Frame 0 = absolute frame 153 = time 0.0167s (offset +2 frames from global start 151)",
+      "cam_02": "Frame 0 = absolute frame 153 = time 0.0167s (offset +2 frames)",
+      "cam_03": "Frame 0 = absolute frame 153 = time 0.0167s (offset +2 frames)",
+      "cam_04": "Frame 0 = absolute frame 159 = time 0.0667s (offset +8 frames)",
+      "cam_05": "Frame 0 = absolute frame 151 = time 0.0000s (offset 0 frames - earliest)",
+      "cam_06": "Frame 0 = absolute frame 151 = time 0.0000s (offset 0 frames - earliest)"
+    },
+    "note": "Adjust camera names (cam_01, cam_02, etc.) to match your Calib_scene.toml camera names"
+  }
+}

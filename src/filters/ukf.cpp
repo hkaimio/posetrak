@@ -5,25 +5,74 @@
 
 #include "posetrak/filters/ukf.hpp"
 
+#include <fmt/core.h>
+
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <ostream>
 #include <stdexcept>
+#include <string>
 
 namespace posetrak {
+
+// static void debug_print_state(std::ostream& os, State const& s,
+//                               Skeleton const& skeleton, std::string const& line_prefix = "") {
+//     // Write propagated sigma points (active joints only)
+//     os << line_prefix << "Root pos:" << s.root_position().x() << "," << s.root_position().y() <<
+//     ","
+//        << s.root_position().z() << std::endl;
+//     os << line_prefix << "Root orientation:" << s.root_orientation().w() << ","
+//        << s.root_orientation().x() << "," << s.root_orientation().y() << ","
+//        << s.root_orientation().z() << std::endl;
+//     os << line_prefix << "Root velocity:" << s.root_velocity().x() << "," <<
+//     s.root_velocity().y()
+//        << "," << s.root_velocity().z() << std::endl;
+//     os << line_prefix << "Root angular velocity:" << s.root_angular_velocity().x() << ","
+//        << s.root_angular_velocity().y() << "," << s.root_angular_velocity().z() << std::endl;
+//     int idx = 0;
+//     for (auto& joint : skeleton.joints()) {
+//         if (!joint.parent_index.has_value()) {
+//             continue;  // Skip root (handled separately)
+//         }
+//         bool is_active = skeleton.is_joint_active(joint.name);
+//         if (is_active) {
+//             os << line_prefix << joint.name << ":";
+//             if (joint.type == JointType::REVOLUTE) {
+//                 os << s.joint_angles()(idx)
+//                    << " (vel: " << s.joint_velocities()(idx) << ")";
+//             } else if (joint.type == JointType::SPHERICAL) {
+//                 os << s.joint_angles().segment<3>(idx).transpose()
+//                    << " (vel: " << s.joint_velocities().segment<3>(idx).transpose()
+//                    << ")";
+//             }
+//         }
+//         os << std::endl;
+//         int const dof_count =
+//             (joint.type == JointType::SPHERICAL) ? 3 : (joint.type == JointType::REVOLUTE ? 1 :
+//             0);
+//         idx += dof_count;
+//     }
+// }
 
 UnscentedKalmanFilter::UnscentedKalmanFilter(Skeleton const& skeleton, double process_noise_std,
                                              double alpha, double beta, double kappa)
     : skeleton_(skeleton),
       state_(skeleton.total_dof_count()),
-      covariance_(Eigen::MatrixXd::Identity(2 * (6 + skeleton.total_dof_count()),
-                                            2 * (6 + skeleton.total_dof_count()))),
-      process_noise_(Eigen::MatrixXd::Identity(2 * (6 + skeleton.total_dof_count()),
-                                               2 * (6 + skeleton.total_dof_count()))),
+      covariance_(Eigen::MatrixXd::Identity(2 * skeleton.active_dof(), 2 * skeleton.active_dof())),
+      process_noise_(
+          Eigen::MatrixXd::Identity(2 * skeleton.active_dof(), 2 * skeleton.active_dof())),
       sigma_gen_(skeleton, alpha, beta, kappa),
       process_model_(skeleton) {
     // Initialize process noise with given standard deviation
     double const variance = process_noise_std * process_noise_std;
     process_noise_ *= variance;
+
+    // Debug: Print DOF counts
+    fmt::print("UKF initialized: total_dof={}, active_dof={}, error_dim={}\n",
+               skeleton.total_dof_count(), skeleton.active_dof(), 2 * skeleton.active_dof());
 }
 
 void UnscentedKalmanFilter::set_covariance(Eigen::MatrixXd const& covariance) {
@@ -38,6 +87,127 @@ void UnscentedKalmanFilter::predict(double dt) {
     // Generate sigma points
     auto sigma_points = sigma_gen_.generate_sigma_points(state_, covariance_);
 
+    // Debug: Export generated sigma points (frame 0 - Python matching format)
+    if (debug_enabled_ && frame_number_ == 0) {
+        std::filesystem::create_directories(debug_dir_ + "/frame_0000");
+        std::ofstream f(debug_dir_ + "/frame_0000/predict_sigma_points_generated.csv");
+        f << std::setprecision(15);
+
+        // Build list of active joints with their DOF indices in State vector
+        std::vector<std::pair<std::string, int>> active_joint_info;  // (joint_name, dof_start_idx)
+        int dof_offset = 0;
+        for (auto const& joint : skeleton_.joints()) {
+            if (!joint.parent_index.has_value()) {
+                continue;  // Skip root (handled separately)
+            }
+            bool is_active = skeleton_.is_joint_active(joint.name);
+            if (is_active) {
+                // Store joint name and its starting DOF index
+                active_joint_info.push_back({joint.name, dof_offset});
+            }
+            // Advance DOF offset regardless (State stores all joints)
+            dof_offset += (joint.type == JointType::SPHERICAL)
+                              ? 3
+                              : (joint.type == JointType::REVOLUTE ? 1 : 0);
+        }
+
+        // Write header matching Python format (named joints, active only)
+        f << "sigma_idx,root_pos_x,root_pos_y,root_pos_z,"
+          << "root_quat_w,root_quat_x,root_quat_y,root_quat_z,"
+          << "root_vel_x,root_vel_y,root_vel_z,"
+          << "root_angvel_x,root_angvel_y,root_angvel_z";
+        for (auto const& [joint_name, dof_idx] : active_joint_info) {
+            // Determine DOF count for this joint
+            auto const* joint = skeleton_.get_joint(joint_name);
+            int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
+            for (int i = 0; i < num_dof; ++i) {
+                f << "," << joint_name << "_angle_" << i;
+            }
+        }
+        for (auto const& [joint_name, dof_idx] : active_joint_info) {
+            auto const* joint = skeleton_.get_joint(joint_name);
+            int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
+            for (int i = 0; i < num_dof; ++i) {
+                f << "," << joint_name << "_vel_" << i;
+            }
+        }
+        f << "\n";
+
+        // Write sigma points (active joints only)
+        for (size_t i = 0; i < sigma_points.size(); ++i) {
+            auto const& s = sigma_points[i];
+            f << i;
+            f << "," << s.root_position().x() << "," << s.root_position().y() << ","
+              << s.root_position().z();
+            f << "," << s.root_orientation().w() << "," << s.root_orientation().x() << ","
+              << s.root_orientation().y() << "," << s.root_orientation().z();
+            f << "," << s.root_velocity().x() << "," << s.root_velocity().y() << ","
+              << s.root_velocity().z();
+            f << "," << s.root_angular_velocity().x() << "," << s.root_angular_velocity().y() << ","
+              << s.root_angular_velocity().z();
+            // Write only active joint angles
+            for (auto const& [joint_name, dof_idx] : active_joint_info) {
+                auto const* joint = skeleton_.get_joint(joint_name);
+                int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
+                for (int j = 0; j < num_dof; ++j) {
+                    f << "," << s.joint_angles()(dof_idx + j);
+                }
+            }
+            // Write only active joint velocities
+            for (auto const& [joint_name, dof_idx] : active_joint_info) {
+                auto const* joint = skeleton_.get_joint(joint_name);
+                int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
+                for (int j = 0; j < num_dof; ++j) {
+                    f << "," << s.joint_velocities()(dof_idx + j);
+                }
+            }
+            f << "\n";
+        }
+        std::cout << "DEBUG: Exported generated sigma points (" << active_joint_info.size()
+                  << " active joints)\n";
+    }
+
+    // Debug: Export sigma points before propagation (frame 1 only)
+    if (debug_enabled_ && frame_number_ == 1) {
+        std::filesystem::create_directories(debug_dir_ + "/frame_0001");
+        std::ofstream f(debug_dir_ + "/frame_0001/sigma_points_before.csv");
+        f << std::setprecision(15);
+
+        // Write header
+        f << "sigma_idx,root_x,root_y,root_z,root_qw,root_qx,root_qy,root_qz";
+        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+            f << ",joint_" << i;
+        }
+        f << ",root_vx,root_vy,root_vz,root_wx,root_wy,root_wz";
+        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+            f << ",joint_vel_" << i;
+        }
+        f << "\n";
+
+        // Write sigma points
+        for (size_t i = 0; i < sigma_points.size(); ++i) {
+            auto const& s = sigma_points[i];
+            f << i;
+            f << "," << s.root_position().x() << "," << s.root_position().y() << ","
+              << s.root_position().z();
+            f << "," << s.root_orientation().w() << "," << s.root_orientation().x() << ","
+              << s.root_orientation().y() << "," << s.root_orientation().z();
+            for (int j = 0; j < s.num_dof(); ++j) {
+                f << "," << s.joint_angles()(j);
+            }
+            f << "," << s.root_velocity().x() << "," << s.root_velocity().y() << ","
+              << s.root_velocity().z();
+            f << "," << s.root_angular_velocity().x() << "," << s.root_angular_velocity().y() << ","
+              << s.root_angular_velocity().z();
+            for (int j = 0; j < s.num_dof(); ++j) {
+                f << "," << s.joint_velocities()(j);
+            }
+            f << "\n";
+        }
+        std::cout << "DEBUG: Exported sigma points before propagation to " << debug_dir_
+                  << "/frame_0001/sigma_points_before.csv\n";
+    }
+
     // Propagate sigma points through process model
     std::vector<State> propagated_points;
     propagated_points.reserve(sigma_points.size());
@@ -46,15 +216,241 @@ void UnscentedKalmanFilter::predict(double dt) {
         propagated_points.push_back(process_model_.propagate(sigma_state, dt));
     }
 
+    // Debug: Export propagated sigma points (frame 0 - Python matching format)
+    if (debug_enabled_ && frame_number_ == 0) {
+        std::ofstream f(debug_dir_ + "/frame_0000/predict_sigma_points_propagated.csv");
+        f << std::setprecision(15);
+
+        // Build list of active joints with their DOF indices in State vector
+        std::vector<std::pair<std::string, int>> active_joint_info;
+        int dof_offset = 0;
+        for (auto const& joint : skeleton_.joints()) {
+            if (!joint.parent_index.has_value()) {
+                continue;  // Skip root
+            }
+            bool is_active = skeleton_.is_joint_active(joint.name);
+            if (is_active) {
+                active_joint_info.push_back({joint.name, dof_offset});
+            }
+            dof_offset += (joint.type == JointType::SPHERICAL)
+                              ? 3
+                              : (joint.type == JointType::REVOLUTE ? 1 : 0);
+        }
+
+        // Write header matching Python format (named joints, active only)
+        f << "sigma_idx,root_pos_x,root_pos_y,root_pos_z,"
+          << "root_quat_w,root_quat_x,root_quat_y,root_quat_z,"
+          << "root_vel_x,root_vel_y,root_vel_z,"
+          << "root_angvel_x,root_angvel_y,root_angvel_z";
+        for (auto const& [joint_name, dof_idx] : active_joint_info) {
+            auto const* joint = skeleton_.get_joint(joint_name);
+            int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
+            for (int i = 0; i < num_dof; ++i) {
+                f << "," << joint_name << "_angle_" << i;
+            }
+        }
+        for (auto const& [joint_name, dof_idx] : active_joint_info) {
+            auto const* joint = skeleton_.get_joint(joint_name);
+            int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
+            for (int i = 0; i < num_dof; ++i) {
+                f << "," << joint_name << "_vel_" << i;
+            }
+        }
+        f << "\n";
+
+        // Write propagated sigma points (active joints only)
+        for (size_t i = 0; i < propagated_points.size(); ++i) {
+            auto const& s = propagated_points[i];
+            f << i;
+            f << "," << s.root_position().x() << "," << s.root_position().y() << ","
+              << s.root_position().z();
+            f << "," << s.root_orientation().w() << "," << s.root_orientation().x() << ","
+              << s.root_orientation().y() << "," << s.root_orientation().z();
+            f << "," << s.root_velocity().x() << "," << s.root_velocity().y() << ","
+              << s.root_velocity().z();
+            f << "," << s.root_angular_velocity().x() << "," << s.root_angular_velocity().y() << ","
+              << s.root_angular_velocity().z();
+            // Write only active joint angles
+            for (auto const& [joint_name, dof_idx] : active_joint_info) {
+                auto const* joint = skeleton_.get_joint(joint_name);
+                int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
+                for (int j = 0; j < num_dof; ++j) {
+                    f << "," << s.joint_angles()(dof_idx + j);
+                }
+            }
+            // Write only active joint velocities
+            for (auto const& [joint_name, dof_idx] : active_joint_info) {
+                auto const* joint = skeleton_.get_joint(joint_name);
+                int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
+                for (int j = 0; j < num_dof; ++j) {
+                    f << "," << s.joint_velocities()(dof_idx + j);
+                }
+            }
+            f << "\n";
+        }
+        std::cout << "DEBUG: Exported propagated sigma points (" << active_joint_info.size()
+                  << " active joints)\n";
+    }
+
+    // Debug: Export sigma points after propagation (frame 1 only)
+    if (debug_enabled_ && frame_number_ == 1) {
+        std::ofstream f(debug_dir_ + "/frame_0001/sigma_points_after.csv");
+        f << std::setprecision(15);
+
+        // Write header
+        f << "sigma_idx,root_x,root_y,root_z,root_qw,root_qx,root_qy,root_qz";
+        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+            f << ",joint_" << i;
+        }
+        f << ",root_vx,root_vy,root_vz,root_wx,root_wy,root_wz";
+        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+            f << ",joint_vel_" << i;
+        }
+        f << "\n";
+
+        // Write propagated sigma points
+        for (size_t i = 0; i < propagated_points.size(); ++i) {
+            auto const& s = propagated_points[i];
+            f << i;
+            f << "," << s.root_position().x() << "," << s.root_position().y() << ","
+              << s.root_position().z();
+            f << "," << s.root_orientation().w() << "," << s.root_orientation().x() << ","
+              << s.root_orientation().y() << "," << s.root_orientation().z();
+            for (int j = 0; j < s.num_dof(); ++j) {
+                f << "," << s.joint_angles()(j);
+            }
+            f << "," << s.root_velocity().x() << "," << s.root_velocity().y() << ","
+              << s.root_velocity().z();
+            f << "," << s.root_angular_velocity().x() << "," << s.root_angular_velocity().y() << ","
+              << s.root_angular_velocity().z();
+            for (int j = 0; j < s.num_dof(); ++j) {
+                f << "," << s.joint_velocities()(j);
+            }
+            f << "\n";
+        }
+        std::cout << "DEBUG: Exported sigma points after propagation to " << debug_dir_
+                  << "/frame_0001/sigma_points_after.csv\n";
+    }
+
     // Compute predicted mean
     state_ = compute_state_mean(propagated_points, sigma_gen_.get_mean_weights());
+
+    // Enforce joint limits on mean state (CRITICAL: must be done before computing covariance!)
+    // This resets locked DOFs to their fixed values, ensuring error vectors are near-zero
+    // for those dimensions. Without this, locked DOF errors can be huge (~157) and corrupt
+    // covariance when weighted by large negative weight wc[0].
+    enforce_joint_limits();
+
+    // Debug: Export predicted mean state (frame 0 - JSON format)
+    if (debug_enabled_ && frame_number_ == 0) {
+        std::ofstream f(debug_dir_ + "/frame_0000/predict_state_mean.json");
+        f << std::setprecision(15);
+        f << "{\n";
+        f << "  \"root_position\": [" << state_.root_position().x() << ", "
+          << state_.root_position().y() << ", " << state_.root_position().z() << "],\n";
+        f << "  \"root_quaternion\": [" << state_.root_orientation().w() << ", "
+          << state_.root_orientation().x() << ", " << state_.root_orientation().y() << ", "
+          << state_.root_orientation().z() << "],\n";
+        f << "  \"root_velocity\": [" << state_.root_velocity().x() << ", "
+          << state_.root_velocity().y() << ", " << state_.root_velocity().z() << "],\n";
+        f << "  \"root_angular_velocity\": [" << state_.root_angular_velocity().x() << ", "
+          << state_.root_angular_velocity().y() << ", " << state_.root_angular_velocity().z()
+          << "],\n";
+        f << "  \"joint_angles\": [";
+        for (int i = 0; i < state_.num_dof(); ++i) {
+            if (i > 0)
+                f << ", ";
+            f << state_.joint_angles()(i);
+        }
+        f << "],\n";
+        f << "  \"joint_velocities\": [";
+        for (int i = 0; i < state_.num_dof(); ++i) {
+            if (i > 0)
+                f << ", ";
+            f << state_.joint_velocities()(i);
+        }
+        f << "]\n}\n";
+        std::cout << "DEBUG: Exported predicted mean state\n";
+    }
+
+    // Debug: Export predicted mean state (prior state for frame 1)
+    if (debug_enabled_ && frame_number_ == 1) {
+        std::ofstream f(debug_dir_ + "/frame_0001/prior_state_computed.csv");
+        f << std::setprecision(15);
+        f << "root_x,root_y,root_z,root_qw,root_qx,root_qy,root_qz";
+        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+            f << ",joint_" << i;
+        }
+        f << ",root_vx,root_vy,root_vz,root_wx,root_wy,root_wz";
+        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+            f << ",joint_vel_" << i;
+        }
+        f << "\n";
+
+        f << state_.root_position().x() << "," << state_.root_position().y() << ","
+          << state_.root_position().z();
+        f << "," << state_.root_orientation().w() << "," << state_.root_orientation().x() << ","
+          << state_.root_orientation().y() << "," << state_.root_orientation().z();
+        for (int j = 0; j < state_.num_dof(); ++j) {
+            f << "," << state_.joint_angles()(j);
+        }
+        f << "," << state_.root_velocity().x() << "," << state_.root_velocity().y() << ","
+          << state_.root_velocity().z();
+        f << "," << state_.root_angular_velocity().x() << "," << state_.root_angular_velocity().y()
+          << "," << state_.root_angular_velocity().z();
+        for (int j = 0; j < state_.num_dof(); ++j) {
+            f << "," << state_.joint_velocities()(j);
+        }
+        f << "\n";
+        std::cout << "DEBUG: Exported computed prior state to " << debug_dir_
+                  << "/frame_0001/prior_state_computed.csv\n";
+    }
 
     // Compute predicted covariance
     covariance_ =
         compute_state_covariance(propagated_points, state_, sigma_gen_.get_covariance_weights());
 
+    // Debug: Export covariance before process noise (frame 0 - Python matching format)
+    if (debug_enabled_ && frame_number_ == 0) {
+        std::ofstream f(debug_dir_ + "/frame_0000/predict_covariance_before_process_noise.csv");
+        f << std::setprecision(15);
+
+        // No header, just data (matching Python format)
+        for (int i = 0; i < covariance_.rows(); ++i) {
+            for (int j = 0; j < covariance_.cols(); ++j) {
+                if (j > 0)
+                    f << ",";
+                f << covariance_(i, j);
+            }
+            f << "\n";
+        }
+        std::cout << "DEBUG: Exported covariance before process noise\n";
+    }
+
     // Add process noise
     covariance_ += process_noise_ * dt;
+
+    // Debug: Export covariance after process noise (frame 0 - Python matching format)
+    if (debug_enabled_ && frame_number_ == 0) {
+        std::ofstream f(debug_dir_ + "/frame_0000/predict_covariance_after_process_noise.csv");
+        f << std::setprecision(15);
+
+        // No header, just data (matching Python format)
+        for (int i = 0; i < covariance_.rows(); ++i) {
+            for (int j = 0; j < covariance_.cols(); ++j) {
+                if (j > 0)
+                    f << ",";
+                f << covariance_(i, j);
+            }
+            f << "\n";
+        }
+        std::cout << "DEBUG: Exported covariance after process noise\n";
+    }
+
+    // Debug: Export prior covariance if debug mode enabled
+    if (debug_enabled_) {
+        write_matrix_csv(covariance_, "prior_covariance.csv");
+    }
 }
 
 State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states,
@@ -78,6 +474,14 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
             Eigen::Quaterniond const& q_i = states[i].root_orientation();
             // Compute quaternion difference: q_mean^-1 * q_i
             Eigen::Quaterniond q_diff = q_mean.conjugate() * q_i;
+
+            // Ensure shortest rotation (w >= 0)
+            if (q_diff.w() < 0.0) {
+                q_diff.w() = -q_diff.w();
+                q_diff.x() = -q_diff.x();
+                q_diff.y() = -q_diff.y();
+                q_diff.z() = -q_diff.z();
+            }
 
             // Convert to axis-angle (error space)
             double const angle = 2.0 * std::atan2(q_diff.vec().norm(), q_diff.w());
@@ -117,7 +521,6 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
         if (!joint.parent_index.has_value()) {
             continue;  // Skip root
         }
-
         if (joint.type == JointType::REVOLUTE) {
             // Simple weighted average
             for (size_t i = 0; i < states.size(); ++i) {
@@ -141,7 +544,16 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
 
                     // Relative rotation: R_mean^T * R_i
                     Eigen::Matrix3d const R_rel = R_mean.transpose() * R_i;
-                    Eigen::Quaterniond const q_rel(R_rel);
+                    Eigen::Quaterniond q_rel(R_rel);
+
+                    // Ensure quaternion uses shortest rotation (w >= 0)
+                    if (q_rel.w() < 0.0) {
+                        q_rel.w() = -q_rel.w();
+                        q_rel.x() = -q_rel.x();
+                        q_rel.y() = -q_rel.y();
+                        q_rel.z() = -q_rel.z();
+                    }
+
                     Eigen::Vector3d const error_i = State::quaternion_to_axis_angle(q_rel);
 
                     error_sum += weights(i) * error_i;
@@ -190,6 +602,23 @@ UnscentedKalmanFilter::compute_state_covariance(std::vector<State> const& states
         error_vectors.row(i) = compute_state_error(states[i], mean_state);
     }
 
+    // Debug: Export error vectors (frame 0 - Python matching format)
+    if (debug_enabled_ && frame_number_ == 0) {
+        std::ofstream f(debug_dir_ + "/frame_0000/predict_error_vectors.csv");
+        f << std::setprecision(15);
+
+        // No header, just data (matching Python format)
+        for (int i = 0; i < n_sigma; ++i) {
+            for (int j = 0; j < n; ++j) {
+                if (j > 0)
+                    f << ",";
+                f << error_vectors(i, j);
+            }
+            f << "\n";
+        }
+        std::cout << "DEBUG: Exported error vectors\n";
+    }
+
     // Compute weighted covariance: Σ wc[i] * error[i] * error[i]^T
     Eigen::MatrixXd cov = Eigen::MatrixXd::Zero(n, n);
     for (int i = 0; i < n_sigma; ++i) {
@@ -201,7 +630,7 @@ UnscentedKalmanFilter::compute_state_covariance(std::vector<State> const& states
 
 Eigen::VectorXd UnscentedKalmanFilter::compute_state_error(State const& state,
                                                            State const& reference) const {
-    int const dof = skeleton_.total_dof_count();
+    int const active_dof = skeleton_.active_dof();  // Includes root's 6 DOFs
     Eigen::VectorXd error = Eigen::VectorXd::Zero(error_dim());
 
     // Position error
@@ -219,18 +648,32 @@ Eigen::VectorXd UnscentedKalmanFilter::compute_state_error(State const& state,
         error.segment<3>(3) = angle * axis;
     }
 
-    // Velocity errors
-    error.segment<3>(6 + dof) = state.root_velocity() - reference.root_velocity();
-    error.segment<3>(9 + dof) = state.root_angular_velocity() - reference.root_angular_velocity();
+    // Root velocity errors (in velocity section of error vector)
+    error.segment<3>(active_dof) = state.root_velocity() - reference.root_velocity();
+    error.segment<3>(active_dof + 3) =
+        state.root_angular_velocity() - reference.root_angular_velocity();
 
     // Joint angle and velocity errors
     auto const joints_ordered = skeleton_.get_joints_ordered();
-    int error_pos_idx = 6;     // Start after root position/rotation in error vector
-    int joint_angles_idx = 0;  // Index in joint_angles/joint_velocities vectors
+    int error_pos_idx = 6;               // Start after root's 6 DOFs in rotation section
+    int error_vel_idx = active_dof + 6;  // Start after root's 6 DOFs in velocity section
+    int joint_angles_idx = 0;            // Index in joint_angles/joint_velocities storage
 
     for (auto const& joint : joints_ordered) {
+        // Skip root joint
         if (!joint.parent_index.has_value()) {
-            continue;  // Skip root
+            continue;
+        }
+
+        // Skip inactive joints (if group filtering is enabled)
+        if (!skeleton_.is_joint_active(joint.name)) {
+            // Still advance the storage index for revolute/spherical joints
+            if (joint.type == JointType::REVOLUTE) {
+                joint_angles_idx += 1;
+            } else if (joint.type == JointType::SPHERICAL) {
+                joint_angles_idx += 3;
+            }
+            continue;
         }
 
         if (joint.type == JointType::REVOLUTE) {
@@ -239,35 +682,62 @@ Eigen::VectorXd UnscentedKalmanFilter::compute_state_error(State const& state,
                 state.joint_angles()(joint_angles_idx) - reference.joint_angles()(joint_angles_idx);
 
             // Velocity error
-            error(6 + dof + joint_angles_idx) = state.joint_velocities()(joint_angles_idx) -
-                                                reference.joint_velocities()(joint_angles_idx);
+            error(error_vel_idx) = state.joint_velocities()(joint_angles_idx) -
+                                   reference.joint_velocities()(joint_angles_idx);
 
             error_pos_idx += 1;
+            error_vel_idx += 1;
             joint_angles_idx += 1;
 
         } else if (joint.type == JointType::SPHERICAL) {
-            // Always 3 DOFs: error on SO(3) manifold
-            Eigen::Vector3d const aa_ref = reference.joint_angles().segment<3>(joint_angles_idx);
-            Eigen::Vector3d const aa_state = state.joint_angles().segment<3>(joint_angles_idx);
+            // Check how many DOFs are active (may be locked on some axes)
+            std::array<bool, 3> const active_mask = joint.get_active_dof_mask();
+            int const num_active = joint.active_dof();
 
-            Eigen::Matrix3d const R_ref =
-                State::axis_angle_to_quaternion(aa_ref).toRotationMatrix();
-            Eigen::Matrix3d const R_state =
-                State::axis_angle_to_quaternion(aa_state).toRotationMatrix();
+            if (num_active == 3) {
+                // All 3 DOFs active: use SO(3) manifold error
+                Eigen::Vector3d const aa_ref =
+                    reference.joint_angles().segment<3>(joint_angles_idx);
+                Eigen::Vector3d const aa_state = state.joint_angles().segment<3>(joint_angles_idx);
 
-            // Relative rotation: R_ref^T * R_state
-            Eigen::Matrix3d const R_rel = R_ref.transpose() * R_state;
-            Eigen::Quaterniond const q_rel(R_rel);
-            error.segment<3>(error_pos_idx) = State::quaternion_to_axis_angle(q_rel);
+                Eigen::Matrix3d const R_ref =
+                    State::axis_angle_to_quaternion(aa_ref).toRotationMatrix();
+                Eigen::Matrix3d const R_state =
+                    State::axis_angle_to_quaternion(aa_state).toRotationMatrix();
 
-            // Velocity error
-            error.segment<3>(6 + dof + joint_angles_idx) =
-                state.joint_velocities().segment<3>(joint_angles_idx) -
-                reference.joint_velocities().segment<3>(joint_angles_idx);
+                // Relative rotation: R_ref^T * R_state
+                Eigen::Matrix3d const R_rel = R_ref.transpose() * R_state;
+                Eigen::Quaterniond const q_rel(R_rel);
+                error.segment<3>(error_pos_idx) = State::quaternion_to_axis_angle(q_rel);
 
-            error_pos_idx += 3;
-            joint_angles_idx += 3;
+                // Velocity error
+                error.segment<3>(error_vel_idx) =
+                    state.joint_velocities().segment<3>(joint_angles_idx) -
+                    reference.joint_velocities().segment<3>(joint_angles_idx);
+
+                error_pos_idx += 3;
+                error_vel_idx += 3;
+            } else {
+                // Some DOFs locked: compute error only for active DOFs (Euclidean difference)
+                // After enforce_joint_limits(), locked DOFs in reference are at fixed values,
+                // so simple subtraction gives near-zero errors for locked axes
+                for (int axis = 0; axis < 3; ++axis) {
+                    if (active_mask[axis]) {
+                        error(error_pos_idx) = state.joint_angles()(joint_angles_idx + axis) -
+                                               reference.joint_angles()(joint_angles_idx + axis);
+                        error(error_vel_idx) =
+                            state.joint_velocities()(joint_angles_idx + axis) -
+                            reference.joint_velocities()(joint_angles_idx + axis);
+
+                        error_pos_idx += 1;
+                        error_vel_idx += 1;
+                    }
+                }
+            }
+
+            joint_angles_idx += 3;  // Always 3 in storage
         }
+        // FIXED joints have 0 DOF, nothing to compute
     }
 
     return error;
@@ -294,6 +764,11 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     auto sigma_points = sigma_gen_.generate_sigma_points(state_, covariance_);
     int const n_sigma = static_cast<int>(sigma_points.size());
 
+    // Debug: Export sigma points if debug mode enabled
+    if (debug_enabled_) {
+        write_sigma_points_csv(sigma_points);
+    }
+
     // Step 2: Predict measurements for each sigma point
     Eigen::MatrixXd predicted_measurements(measurement_dim, n_sigma);
     for (int i = 0; i < n_sigma; ++i) {
@@ -301,19 +776,56 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
             predict_measurements(sigma_points[i], observations, cameras, fk);
     }
 
-    // Step 3: Compute mean predicted measurement
+    // Step 3: Compute mean predicted measurement (using nanmean to ignore NaN)
+    // For each measurement dimension, compute weighted mean of non-NaN values
     Eigen::VectorXd const weights_mean = sigma_gen_.get_mean_weights();
     Eigen::VectorXd measurement_mean = Eigen::VectorXd::Zero(measurement_dim);
-    for (int i = 0; i < n_sigma; ++i) {
-        measurement_mean += weights_mean(i) * predicted_measurements.col(i);
+
+    for (int dim = 0; dim < measurement_dim; ++dim) {
+        double sum = 0.0;
+        double weight_sum = 0.0;
+
+        for (int i = 0; i < n_sigma; ++i) {
+            double val = predicted_measurements(dim, i);
+            if (std::isfinite(val)) {
+                sum += weights_mean(i) * val;
+                weight_sum += weights_mean(i);
+            }
+        }
+
+        if (weight_sum > 0.0) {
+            measurement_mean(dim) = sum / weight_sum;
+        } else {
+            // All sigma points have NaN for this dimension
+            measurement_mean(dim) = std::numeric_limits<double>::quiet_NaN();
+        }
     }
 
     // Step 4: Compute innovation covariance S = Pyy + R
+    // Handle NaN: skip dimensions where measurement_mean is NaN (all sigma points failed)
     Eigen::VectorXd const weights_cov = sigma_gen_.get_covariance_weights();
     Eigen::MatrixXd innovation_cov = Eigen::MatrixXd::Zero(measurement_dim, measurement_dim);
 
     for (int i = 0; i < n_sigma; ++i) {
-        Eigen::VectorXd innovation = predicted_measurements.col(i) - measurement_mean;
+        Eigen::VectorXd pred_safe = predicted_measurements.col(i);
+
+        // Replace NaN with mean (contributes zero to innovation covariance)
+        // But if mean itself is NaN, skip that dimension entirely
+        for (int dim = 0; dim < measurement_dim; ++dim) {
+            if (!std::isfinite(pred_safe(dim))) {
+                pred_safe(dim) = measurement_mean(dim);
+            }
+        }
+
+        Eigen::VectorXd innovation = pred_safe - measurement_mean;
+
+        // Zero out NaN innovations (where mean was NaN)
+        for (int dim = 0; dim < measurement_dim; ++dim) {
+            if (!std::isfinite(innovation(dim))) {
+                innovation(dim) = 0.0;
+            }
+        }
+
         innovation_cov += weights_cov(i) * (innovation * innovation.transpose());
     }
 
@@ -339,6 +851,25 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         inlier_observations = inliers;
         observation_results = results;
 
+        // Debug: log outlier counts
+        if (debug_enabled_ && frame_number_ == 0) {
+            size_t nan_count = 0;
+            size_t mahal_count = 0;
+            for (auto const& r : results) {
+                if (r.is_outlier) {
+                    if (r.mahalanobis_distance == 0.0) {
+                        nan_count++;
+                    } else {
+                        mahal_count++;
+                    }
+                }
+            }
+            std::cout << "  [DEBUG] Frame " << frame_number_ << ": " << observations.size()
+                      << " total obs, " << inliers.size() << " inliers, "
+                      << (results.size() - inliers.size()) << " outliers (" << nan_count
+                      << " NaN proj, " << mahal_count << " Mahalanobis)\n";
+        }
+
         // If all observations rejected, return early
         if (inlier_observations.empty()) {
             result.num_observations = static_cast<int>(observations.size());
@@ -358,16 +889,49 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
                 predict_measurements(sigma_points[i], inlier_observations, cameras, fk);
         }
 
-        // Recompute mean predicted measurement for inliers
+        // Recompute mean predicted measurement for inliers (NaN-safe)
         measurement_mean = Eigen::VectorXd::Zero(inlier_dim);
-        for (int i = 0; i < n_sigma; ++i) {
-            measurement_mean += weights_mean(i) * inlier_predictions.col(i);
+        for (int dim = 0; dim < inlier_dim; ++dim) {
+            double sum = 0.0;
+            double weight_sum = 0.0;
+
+            for (int i = 0; i < n_sigma; ++i) {
+                double val = inlier_predictions(dim, i);
+                if (std::isfinite(val)) {
+                    sum += weights_mean(i) * val;
+                    weight_sum += weights_mean(i);
+                }
+            }
+
+            if (weight_sum > 0.0) {
+                measurement_mean(dim) = sum / weight_sum;
+            } else {
+                // All sigma points have NaN - should not happen for inliers
+                measurement_mean(dim) = std::numeric_limits<double>::quiet_NaN();
+            }
         }
 
-        // Recompute innovation covariance for inliers
+        // Recompute innovation covariance for inliers (NaN-safe)
         innovation_cov = Eigen::MatrixXd::Zero(inlier_dim, inlier_dim);
         for (int i = 0; i < n_sigma; ++i) {
-            Eigen::VectorXd innovation = inlier_predictions.col(i) - measurement_mean;
+            Eigen::VectorXd pred_safe = inlier_predictions.col(i);
+
+            // Replace NaN with mean
+            for (int dim = 0; dim < inlier_dim; ++dim) {
+                if (!std::isfinite(pred_safe(dim))) {
+                    pred_safe(dim) = measurement_mean(dim);
+                }
+            }
+
+            Eigen::VectorXd innovation = pred_safe - measurement_mean;
+
+            // Zero out any remaining NaN innovations
+            for (int dim = 0; dim < inlier_dim; ++dim) {
+                if (!std::isfinite(innovation(dim))) {
+                    innovation(dim) = 0.0;
+                }
+            }
+
             innovation_cov += weights_cov(i) * (innovation * innovation.transpose());
         }
 
@@ -383,7 +947,16 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         cross_cov = Eigen::MatrixXd::Zero(error_dim(), inlier_dim);
         for (int i = 0; i < n_sigma; ++i) {
             Eigen::VectorXd state_error = compute_state_error(sigma_points[i], state_);
-            Eigen::VectorXd measurement_error = inlier_predictions.col(i) - measurement_mean;
+
+            // Handle NaN in predicted measurements
+            Eigen::VectorXd pred_safe = inlier_predictions.col(i);
+            for (int dim = 0; dim < inlier_dim; ++dim) {
+                if (!std::isfinite(pred_safe(dim))) {
+                    pred_safe(dim) = measurement_mean(dim);
+                }
+            }
+
+            Eigen::VectorXd measurement_error = pred_safe - measurement_mean;
             cross_cov += weights_cov(i) * (state_error * measurement_error.transpose());
         }
 
@@ -401,13 +974,25 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         observed = observations_to_vector(observations);
     }
 
+    // Debug export moved to Tracker::track_frame to ensure it runs even when all observations are
+    // outliers
+
     // Step 5: Compute cross-covariance Pxy (already computed if outlier rejection enabled)
     if (outlier_threshold_mahalanobis <= 0.0) {
         // Cross-covariance not yet computed (no outlier rejection)
         cross_cov = Eigen::MatrixXd::Zero(error_dim(), measurement_dim);
         for (int i = 0; i < n_sigma; ++i) {
             Eigen::VectorXd state_error = compute_state_error(sigma_points[i], state_);
-            Eigen::VectorXd measurement_error = predicted_measurements.col(i) - measurement_mean;
+
+            // Handle NaN in predicted measurements (replace with mean for zero innovation)
+            Eigen::VectorXd pred_safe = predicted_measurements.col(i);
+            for (int dim = 0; dim < measurement_dim; ++dim) {
+                if (!std::isfinite(pred_safe(dim))) {
+                    pred_safe(dim) = measurement_mean(dim);
+                }
+            }
+
+            Eigen::VectorXd measurement_error = pred_safe - measurement_mean;
             cross_cov += weights_cov(i) * (state_error * measurement_error.transpose());
         }
     }
@@ -420,7 +1005,9 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
 
     // Step 8: Update state in error space
     Eigen::VectorXd state_correction = kalman_gain * innovation;
-    state_.apply_error_update(state_correction);
+
+    // Apply error correction using sigma point generator (handles active DOFs correctly)
+    state_ = sigma_gen_.apply_error_to_state(state_, state_correction);
 
     // Step 8b: Enforce joint limits and zero velocities for constrained joints
     State prev_state = state_;  // Save state before limit enforcement
@@ -531,6 +1118,11 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     result.nis = nis;
     result.nis_dof = static_cast<int>(innovation.size());
 
+    // Debug: Export posterior covariance if debug mode enabled
+    if (debug_enabled_) {
+        write_matrix_csv(covariance_, "posterior_covariance.csv");
+    }
+
     return result;
 }
 
@@ -544,6 +1136,8 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
     int const n_obs = static_cast<int>(observations.size());
     Eigen::VectorXd predictions(2 * n_obs);
 
+    int nan_count = 0;  // Debug: count NaN projections
+
     for (int i = 0; i < n_obs; ++i) {
         Observation const& obs = observations[i];
 
@@ -553,9 +1147,10 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
 
         auto it = marker_positions.find(marker_name);
         if (it == marker_positions.end()) {
-            // Marker not found in FK result - use fallback (project to image center)
-            predictions(2 * i) = cameras.at(obs.camera_id).intrinsics().cx;
-            predictions(2 * i + 1) = cameras.at(obs.camera_id).intrinsics().cy;
+            // Marker not found in FK result (FK failed) - use NaN to mark as failed
+            predictions(2 * i) = std::numeric_limits<double>::quiet_NaN();
+            predictions(2 * i + 1) = std::numeric_limits<double>::quiet_NaN();
+            nan_count++;
             continue;
         }
 
@@ -563,19 +1158,41 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
 
         // Project to camera (undistorted coordinates for UKF)
         Camera const& camera = cameras.at(obs.camera_id);
-        Eigen::Vector2d projected = camera.project_undistorted(marker_pos_world);
+        auto projected_opt = camera.project_undistorted(marker_pos_world);
 
-        // Check for invalid projections (markers behind camera produce NaN/inf)
-        // This can happen when state estimate is poor or during initialization
-        if (!std::isfinite(projected.x()) || !std::isfinite(projected.y())) {
-            // Use image center as fallback for failed projections
-            predictions(2 * i) = camera.intrinsics().cx;
-            predictions(2 * i + 1) = camera.intrinsics().cy;
+        // if (marker.name == "MRK-hip.R" && debug_enabled_) {
+        //     std::cout << "  [DEBUG] predict_measurements for marker '" << marker.name
+        //               << " on camera " << camera.name() << " world pos (" << marker_pos_world.x()
+        //               << ", " << marker_pos_world.y() << ", " << marker_pos_world.z()
+        //               << ") projected to (";
+        //     if (projected_opt.has_value()) {
+        //         std::cout << projected_opt->x() << ", " << projected_opt->y();
+        //     } else {
+        //         std::cout << "NaN";
+        //     }
+        //     std::cout << ")\n";
+        // }
+
+        // Check if projection succeeded
+        if (!projected_opt.has_value()) {
+            // Projection failed (behind camera or out of bounds) - use NaN to mark as failed
+            predictions(2 * i) = std::numeric_limits<double>::quiet_NaN();
+            predictions(2 * i + 1) = std::numeric_limits<double>::quiet_NaN();
+            nan_count++;
         } else {
+            Eigen::Vector2d const& projected = *projected_opt;
             predictions(2 * i) = projected.x();
             predictions(2 * i + 1) = projected.y();
         }
     }
+
+    // Debug: log NaN count for first sigma point (mean state)
+    static int call_count = 0;
+    if (debug_enabled_ && frame_number_ == 0 && call_count == 0) {
+        std::cout << "  [DEBUG] predict_measurements: " << nan_count << " NaN projections out of "
+                  << n_obs << "\n";
+    }
+    call_count++;
 
     return predictions;
 }
@@ -620,12 +1237,38 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
         Eigen::Vector2d predicted = measurement_mean.segment<2>(2 * i);
         Eigen::Vector2d actual = observed.segment<2>(2 * i);
 
-        // Check for NaN in predicted (failed projection)
+        // First check: if mean prediction is NaN (all sigma points failed), reject immediately
         if (!std::isfinite(predicted.x()) || !std::isfinite(predicted.y())) {
-            // Projection failed - reject as outlier
             ObservationResult obs_result;
             obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
             obs_result.camera_id = obs.camera_id;
+            obs_result.camera_frame_idx = obs.frame_idx;
+            obs_result.is_outlier = true;
+            obs_result.mahalanobis_distance = 0.0;
+            obs_result.innovation = Eigen::Vector2d::Zero();
+            obs_result.predicted = predicted;
+            obs_result.actual = actual;
+            results.push_back(obs_result);
+            continue;
+        }
+
+        // Check if ALL sigma points failed projection (like Python does)
+        bool all_sigma_points_nan = true;
+        for (int sigma_idx = 0; sigma_idx < predicted_measurements.cols(); ++sigma_idx) {
+            double u = predicted_measurements(2 * i, sigma_idx);
+            double v = predicted_measurements(2 * i + 1, sigma_idx);
+            if (std::isfinite(u) && std::isfinite(v)) {
+                all_sigma_points_nan = false;
+                break;
+            }
+        }
+
+        if (all_sigma_points_nan) {
+            // All sigma points failed projection - reject as outlier
+            ObservationResult obs_result;
+            obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
+            obs_result.camera_id = obs.camera_id;
+            obs_result.camera_frame_idx = obs.frame_idx;
             obs_result.is_outlier = true;
             obs_result.mahalanobis_distance = 0.0;
             obs_result.innovation = Eigen::Vector2d::Zero();
@@ -651,7 +1294,7 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
         ObservationResult obs_result;
         obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
         obs_result.camera_id = obs.camera_id;
-        obs_result.is_outlier = is_outlier;
+        obs_result.camera_frame_idx = obs.frame_idx;
         obs_result.mahalanobis_distance = mahal_dist;
         obs_result.innovation = innovation;
         obs_result.predicted = predicted;
@@ -686,6 +1329,7 @@ std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagno
             ObservationResult obs_result;
             obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
             obs_result.camera_id = obs.camera_id;
+            obs_result.camera_frame_idx = obs.frame_idx;
             obs_result.is_outlier = true;  // Mark as outlier for diagnostics
             obs_result.mahalanobis_distance = 0.0;
             obs_result.innovation = Eigen::Vector2d::Zero();
@@ -708,6 +1352,7 @@ std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagno
         ObservationResult obs_result;
         obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
         obs_result.camera_id = obs.camera_id;
+        obs_result.camera_frame_idx = obs.frame_idx;
         obs_result.is_outlier = false;
         obs_result.mahalanobis_distance = mahal_dist;
         obs_result.innovation = innovation;
@@ -865,6 +1510,173 @@ void UnscentedKalmanFilter::damp_velocity_covariance_at_limits(State const& prev
                 covariance_(vel_idx, vel_idx) = std::max(covariance_(vel_idx, vel_idx), 1e-8);
             }
         }
+    }
+}
+
+void UnscentedKalmanFilter::enable_debug(bool enable, std::string const& debug_dir) {
+    debug_enabled_ = enable;
+    debug_dir_ = debug_dir;
+    if (enable) {
+        std::filesystem::create_directories(debug_dir);
+        std::cout << "DEBUG: UKF debug mode enabled, writing to " << debug_dir << "\n";
+    }
+}
+
+void UnscentedKalmanFilter::write_matrix_csv(Eigen::MatrixXd const& matrix,
+                                             std::string const& filename) const {
+    // Create frame directory
+    std::string frame_dir =
+        debug_dir_ + "/frame_" +
+        std::string(4 - std::min(4, static_cast<int>(std::to_string(frame_number_).length())),
+                    '0') +
+        std::to_string(frame_number_);
+    std::filesystem::create_directories(frame_dir);
+
+    std::string filepath = frame_dir + "/" + filename;
+    std::ofstream f(filepath);
+    if (!f.is_open()) {
+        std::cerr << "Failed to open " << filepath << " for writing\n";
+        return;
+    }
+
+    f << std::setprecision(15);
+
+    // Write matrix rows
+    for (int row = 0; row < matrix.rows(); ++row) {
+        for (int col = 0; col < matrix.cols(); ++col) {
+            if (col > 0) {
+                f << ",";
+            }
+            f << matrix(row, col);
+        }
+        f << "\n";
+    }
+}
+
+void UnscentedKalmanFilter::write_sigma_points_csv(std::vector<State> const& sigma_points) const {
+    // Create frame directory
+    std::string frame_dir =
+        debug_dir_ + "/frame_" +
+        std::string(4 - std::min(4, static_cast<int>(std::to_string(frame_number_).length())),
+                    '0') +
+        std::to_string(frame_number_);
+    std::filesystem::create_directories(frame_dir);
+
+    std::string filepath = frame_dir + "/sigma_points.csv";
+    std::ofstream f(filepath);
+    if (!f.is_open()) {
+        std::cerr << "Failed to open " << filepath << " for writing\n";
+        return;
+    }
+
+    f << std::setprecision(15);
+
+    // Write header
+    f << "sigma_idx,root_pos_x,root_pos_y,root_pos_z,"
+      << "root_quat_w,root_quat_x,root_quat_y,root_quat_z,"
+      << "root_vel_x,root_vel_y,root_vel_z,"
+      << "root_angvel_x,root_angvel_y,root_angvel_z";
+
+    // Add joint angle columns (in skeleton order)
+    auto const joints_ordered = skeleton_.get_joints_ordered();
+    for (auto const& joint : joints_ordered) {
+        if (!joint.parent_index.has_value()) {
+            continue;  // Skip root
+        }
+
+        int dof = 0;
+        if (joint.type == JointType::REVOLUTE) {
+            dof = 1;
+        } else if (joint.type == JointType::SPHERICAL) {
+            dof = 3;
+        }
+
+        for (int i = 0; i < dof; ++i) {
+            f << "," << joint.name << "_angle_" << i;
+        }
+    }
+
+    // Add joint velocity columns (in skeleton order)
+    for (auto const& joint : joints_ordered) {
+        if (!joint.parent_index.has_value()) {
+            continue;  // Skip root
+        }
+
+        int dof = 0;
+        if (joint.type == JointType::REVOLUTE) {
+            dof = 1;
+        } else if (joint.type == JointType::SPHERICAL) {
+            dof = 3;
+        }
+
+        for (int i = 0; i < dof; ++i) {
+            f << "," << joint.name << "_vel_" << i;
+        }
+    }
+    f << "\n";
+
+    // Write sigma point data
+    for (size_t sigma_idx = 0; sigma_idx < sigma_points.size(); ++sigma_idx) {
+        State const& state = sigma_points[sigma_idx];
+
+        // Sigma index
+        f << sigma_idx;
+
+        // Root position
+        f << "," << state.root_position().x() << "," << state.root_position().y() << ","
+          << state.root_position().z();
+
+        // Root quaternion (w,x,y,z)
+        f << "," << state.root_orientation().w() << "," << state.root_orientation().x() << ","
+          << state.root_orientation().y() << "," << state.root_orientation().z();
+
+        // Root velocity
+        f << "," << state.root_velocity().x() << "," << state.root_velocity().y() << ","
+          << state.root_velocity().z();
+
+        // Root angular velocity
+        f << "," << state.root_angular_velocity().x() << "," << state.root_angular_velocity().y()
+          << "," << state.root_angular_velocity().z();
+
+        // Joint angles (in skeleton order)
+        int joint_angle_idx = 0;
+        for (auto const& joint : joints_ordered) {
+            if (!joint.parent_index.has_value()) {
+                continue;  // Skip root
+            }
+
+            if (joint.type == JointType::REVOLUTE) {
+                f << "," << state.joint_angles()(joint_angle_idx);
+                joint_angle_idx += 1;
+            } else if (joint.type == JointType::SPHERICAL) {
+                // Ball joint: 3 DOF (axis-angle representation in joint_angles)
+                f << "," << state.joint_angles()(joint_angle_idx) << ","
+                  << state.joint_angles()(joint_angle_idx + 1) << ","
+                  << state.joint_angles()(joint_angle_idx + 2);
+                joint_angle_idx += 3;
+            }
+        }
+
+        // Joint velocities (in skeleton order)
+        int joint_vel_idx = 0;
+        for (auto const& joint : joints_ordered) {
+            if (!joint.parent_index.has_value()) {
+                continue;  // Skip root
+            }
+
+            if (joint.type == JointType::REVOLUTE) {
+                f << "," << state.joint_velocities()(joint_vel_idx);
+                joint_vel_idx += 1;
+            } else if (joint.type == JointType::SPHERICAL) {
+                // Ball joint: 3 DOF velocities
+                f << "," << state.joint_velocities()(joint_vel_idx) << ","
+                  << state.joint_velocities()(joint_vel_idx + 1) << ","
+                  << state.joint_velocities()(joint_vel_idx + 2);
+                joint_vel_idx += 3;
+            }
+        }
+
+        f << "\n";
     }
 }
 

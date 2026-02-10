@@ -1,5 +1,7 @@
 #include "posetrak/core/camera.hpp"
 
+#include <fmt/core.h>
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -91,11 +93,22 @@ Camera::Camera(int id, std::string name, Intrinsics const& intrinsics, Extrinsic
       fps_(fps),
       start_frame_(start_frame) {}
 
+void Camera::set_fps(double fps) {
+    if (fps <= 0.0) {
+        throw std::invalid_argument("FPS must be positive");
+    }
+    fps_ = fps;
+}
+
 void Camera::set_sync_points(std::vector<SyncPoint> const& points) {
     sync_points_ = points;
+    fmt::print("  Camera {}: Loaded {} sync points\n", name_.c_str(), points.size());
     // Sort by frame index for binary search
     std::sort(sync_points_.begin(), sync_points_.end(),
               [](SyncPoint const& a, SyncPoint const& b) { return a.frame_idx < b.frame_idx; });
+    for (auto const& sp : sync_points_) {
+        fmt::print("    Frame {} -> Time {:.6f} sec\n", sp.frame_idx, sp.timestamp_sec);
+    }
 }
 
 double Camera::get_timestamp(uint32_t frame_idx) const {
@@ -111,7 +124,10 @@ double Camera::get_timestamp(uint32_t frame_idx) const {
 
     if (it == sync_points_.begin()) {
         // Before first sync point: extrapolate backward
-        double const dt = static_cast<double>(frame_idx - it->frame_idx) / fps_;
+        // Use signed arithmetic to avoid wraparound when frame_idx < it->frame_idx
+        int64_t const frame_diff =
+            static_cast<int64_t>(frame_idx) - static_cast<int64_t>(it->frame_idx);
+        double const dt = static_cast<double>(frame_diff) / fps_;
         return it->timestamp_sec + dt;
     }
 
@@ -206,13 +222,13 @@ std::optional<uint32_t> Camera::get_frame_at_time(double timestamp) const {
     return static_cast<uint32_t>(std::floor(frame_float));
 }
 
-Eigen::Vector2d Camera::project(Eigen::Vector3d const& point_world) const {
+std::optional<Eigen::Vector2d> Camera::project(Eigen::Vector3d const& point_world) const {
     // Transform to camera frame
     Eigen::Vector3d const point_cam = world_to_camera(point_world);
 
     // Check if point is behind camera
     if (point_cam.z() <= 0.0) {
-        return Eigen::Vector2d(-1.0, -1.0);  // Invalid projection
+        return std::nullopt;  // Behind camera
     }
 
     // Normalize to image plane
@@ -225,16 +241,22 @@ Eigen::Vector2d Camera::project(Eigen::Vector3d const& point_world) const {
     double const u = intrinsics_.fx * point_dist.x() + intrinsics_.cx;
     double const v = intrinsics_.fy * point_dist.y() + intrinsics_.cy;
 
+    // Check image bounds
+    if (u < 0.0 || u >= intrinsics_.width || v < 0.0 || v >= intrinsics_.height) {
+        return std::nullopt;  // Out of bounds
+    }
+
     return Eigen::Vector2d(u, v);
 }
 
-Eigen::Vector2d Camera::project_undistorted(Eigen::Vector3d const& point_world) const {
+std::optional<Eigen::Vector2d>
+Camera::project_undistorted(Eigen::Vector3d const& point_world) const {
     // Transform to camera frame
     Eigen::Vector3d const point_cam = world_to_camera(point_world);
 
     // Check if point is behind camera
     if (point_cam.z() <= 0.0) {
-        return Eigen::Vector2d(-1.0, -1.0);  // Invalid projection
+        return std::nullopt;  // Behind camera
     }
 
     // Normalize to image plane (no distortion)
@@ -243,6 +265,11 @@ Eigen::Vector2d Camera::project_undistorted(Eigen::Vector3d const& point_world) 
     // Apply intrinsics only (skip distortion)
     double const u = intrinsics_.fx * point_norm.x() + intrinsics_.cx;
     double const v = intrinsics_.fy * point_norm.y() + intrinsics_.cy;
+
+    // Check if projection is within image bounds (match Python behavior)
+    if (u < 0.0 || u >= intrinsics_.width || v < 0.0 || v >= intrinsics_.height) {
+        return std::nullopt;  // Out of bounds
+    }
 
     return Eigen::Vector2d(u, v);
 }
@@ -253,7 +280,13 @@ Camera::project_batch(std::vector<Eigen::Vector3d> const& points) const {
     result.reserve(points.size());
 
     for (auto const& p : points) {
-        result.push_back(project(p));
+        auto proj = project(p);
+        if (proj) {
+            result.push_back(*proj);
+        } else {
+            // For backward compatibility, push invalid marker
+            result.push_back(Eigen::Vector2d(-1.0, -1.0));
+        }
     }
 
     return result;
@@ -265,7 +298,13 @@ Camera::project_batch_undistorted(std::vector<Eigen::Vector3d> const& points) co
     result.reserve(points.size());
 
     for (auto const& p : points) {
-        result.push_back(project_undistorted(p));
+        auto proj = project_undistorted(p);
+        if (proj) {
+            result.push_back(*proj);
+        } else {
+            // For backward compatibility, push invalid marker
+            result.push_back(Eigen::Vector2d(-1.0, -1.0));
+        }
     }
 
     return result;

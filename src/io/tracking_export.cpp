@@ -234,7 +234,8 @@ void TrackingExporter::write_frame(
                 auto const& obs = obs_map.at(obs_key);
 
                 // Project marker to camera
-                Eigen::Vector2d projection = camera.project(position_3d);
+                auto projection_opt = camera.project(position_3d);
+                Eigen::Vector2d projection = projection_opt.value_or(Eigen::Vector2d(-1.0, -1.0));
                 bool is_outlier = !used_observations.count(obs_key);
 
                 write_marker_projection_row(frame_number, timestamp, static_cast<int>(marker_idx),

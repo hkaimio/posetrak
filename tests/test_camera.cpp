@@ -77,7 +77,9 @@ TEST_CASE("Camera projection without distortion", "[camera]") {
         cam = make_test_camera("cam1", make_test_intrinsics(), extr);
 
         Eigen::Vector3d const point(0.0, 0.0, 0.0);
-        Eigen::Vector2d const pixel = cam.project(point);
+        auto pixel_opt = cam.project(point);
+        REQUIRE(pixel_opt.has_value());
+        Eigen::Vector2d const pixel = *pixel_opt;
 
         // Should project to principal point
         REQUIRE_THAT(pixel.x(), Catch::Matchers::WithinAbs(320.0, 1e-6));
@@ -86,7 +88,9 @@ TEST_CASE("Camera projection without distortion", "[camera]") {
 
     SECTION("Point offset from center") {
         Eigen::Vector3d const point(1.0, 0.5, 2.0);
-        Eigen::Vector2d const pixel = cam.project(point);
+        auto pixel_opt = cam.project(point);
+        REQUIRE(pixel_opt.has_value());
+        Eigen::Vector2d const pixel = *pixel_opt;
 
         // x_pixel = fx * (x/z) + cx = 800 * (1/2) + 320 = 720
         // y_pixel = fy * (y/z) + cy = 800 * (0.5/2) + 240 = 440
@@ -96,10 +100,9 @@ TEST_CASE("Camera projection without distortion", "[camera]") {
 
     SECTION("Point behind camera returns invalid") {
         Eigen::Vector3d const point(0.0, 0.0, -1.0);
-        Eigen::Vector2d const pixel = cam.project(point);
+        auto pixel_opt = cam.project(point);
 
-        REQUIRE(pixel.x() < 0.0);
-        REQUIRE(pixel.y() < 0.0);
+        REQUIRE(!pixel_opt.has_value());
     }
 }
 
@@ -131,7 +134,9 @@ TEST_CASE("Camera unprojection without distortion", "[camera]") {
 
     SECTION("Project-unproject roundtrip") {
         Eigen::Vector3d const original(1.0, 0.5, 2.0);
-        Eigen::Vector2d const pixel = cam.project(original);
+        auto pixel_opt = cam.project(original);
+        REQUIRE(pixel_opt.has_value());
+        Eigen::Vector2d const pixel = *pixel_opt;
         Eigen::Vector3d const unprojected = cam.unproject(pixel, original.z());
 
         REQUIRE(unprojected.isApprox(original, 1e-6));
@@ -219,8 +224,12 @@ TEST_CASE("Camera projection with distortion", "[camera]") {
     Camera const cam = make_test_camera("cam1", intr);
 
     Eigen::Vector3d const point(1.0, 0.5, 2.0);
-    Eigen::Vector2d const pixel_distorted = cam.project(point);
-    Eigen::Vector2d const pixel_undistorted = cam.project_undistorted(point);
+    auto pixel_distorted_opt = cam.project(point);
+    auto pixel_undistorted_opt = cam.project_undistorted(point);
+    REQUIRE(pixel_distorted_opt.has_value());
+    REQUIRE(pixel_undistorted_opt.has_value());
+    Eigen::Vector2d const pixel_distorted = *pixel_distorted_opt;
+    Eigen::Vector2d const pixel_undistorted = *pixel_undistorted_opt;
 
     // Distorted and undistorted should be different
     REQUIRE((pixel_distorted - pixel_undistorted).norm() > 0.1);
@@ -275,6 +284,28 @@ TEST_CASE("Camera frame-to-timestamp conversion", "[camera]") {
         // Extrapolate beyond last sync point using FPS
         double expected = 7.0 + (250 - 200) / 30.0;
         REQUIRE_THAT(cam.get_timestamp(250), Catch::Matchers::WithinAbs(expected, 1e-9));
+    }
+
+    SECTION("Sync points starting after frame 0 - wraparound bug test") {
+        // Test case for bug: first sync point is at frame 100, but we request frame 50
+        // This previously caused wraparound: (50 - 100) as uint32_t wraps to huge number
+        Camera cam =
+            make_test_camera("cam1", make_test_intrinsics(), make_test_extrinsics(), 30.0, 0);
+
+        std::vector<SyncPoint> sync_points;
+        sync_points.push_back({100, 0.0});  // First sync point at frame 100, time 0.0
+        sync_points.push_back({200, 3.0});  // Second at frame 200, time 3.0
+        cam.set_sync_points(sync_points);
+
+        // Request timestamp for frame BEFORE first sync point
+        // Should extrapolate backward: frame 50 is 50 frames before frame 100
+        // At 30 fps, that's 50/30 = -1.667 seconds
+        double expected = 0.0 - (100 - 50) / 30.0;  // -1.6667 seconds
+        REQUIRE_THAT(cam.get_timestamp(50), Catch::Matchers::WithinAbs(expected, 1e-6));
+
+        // Another test: frame 0 should be 100 frames before first sync point
+        double expected_frame0 = 0.0 - 100 / 30.0;  // -3.333 seconds
+        REQUIRE_THAT(cam.get_timestamp(0), Catch::Matchers::WithinAbs(expected_frame0, 1e-6));
     }
 }
 

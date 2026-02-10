@@ -53,19 +53,6 @@ std::vector<Observation> ObservationSequence::get_in_range(double t_start, doubl
     return result;
 }
 
-std::vector<Observation> ObservationSequence::get_at_time(double timestamp,
-                                                          double tolerance) const {
-    std::vector<Observation> result;
-
-    for (auto const& obs : observations) {
-        if (std::abs(obs.timestamp - timestamp) <= tolerance) {
-            result.push_back(obs);
-        }
-    }
-
-    return result;
-}
-
 double ObservationSequence::min_time() const {
     if (observations.empty()) {
         return std::numeric_limits<double>::infinity();
@@ -129,37 +116,6 @@ ObservationSequence const* ObservationSet::get_sequence(std::string const& camer
     return (it != sequences_.end()) ? &it->second : nullptr;
 }
 
-std::vector<Observation> ObservationSet::get_all_at_time(double timestamp, double tolerance) const {
-    std::vector<Observation> result;
-
-    for (auto const& [_, seq] : sequences_) {
-        auto obs = seq.get_at_time(timestamp, tolerance);
-        result.insert(result.end(), obs.begin(), obs.end());
-    }
-
-    return result;
-}
-
-std::vector<Observation>
-ObservationSet::get_all_at_frames(std::map<std::string, int> const& frame_indices) const {
-    std::vector<Observation> result;
-
-    for (auto const& [camera_name, frame_idx] : frame_indices) {
-        auto const* seq = get_sequence(camera_name);
-        if (!seq) {
-            continue;
-        }
-
-        for (auto const& obs : seq->observations) {
-            if (obs.frame_idx == frame_idx) {
-                result.push_back(obs);
-            }
-        }
-    }
-
-    return result;
-}
-
 std::vector<Observation> ObservationSet::get_all_in_range(double t_start, double t_end) const {
     std::vector<Observation> result;
 
@@ -189,18 +145,6 @@ double ObservationSet::max_time() const {
     }
 
     return max_t;
-}
-
-std::vector<double> ObservationSet::get_unique_timestamps() const {
-    std::set<double> unique_times;
-
-    for (auto const& [_, seq] : sequences_) {
-        for (auto const& obs : seq.observations) {
-            unique_times.insert(obs.timestamp);
-        }
-    }
-
-    return std::vector<double>(unique_times.begin(), unique_times.end());
 }
 
 size_t ObservationSet::total_observations() const {

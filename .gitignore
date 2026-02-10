@@ -36,6 +36,8 @@ __pycache__/
 
 # Test outputs
 test_results/
+tracking_tests/
+tracking_output/
 *.log
 
 # Coverage
@@ -73,3 +75,4 @@ docs/.doctrees/
 ik_iterations.csv
 ik_root_updates.csv
 tracker_markers.csv
+__marimo__/

@@ -76,7 +76,7 @@ Eigen::Vector3d parse_vector3(toml::array const& arr) {
 
 }  // namespace
 
-std::unordered_map<std::string, Camera> load_cameras_from_toml(std::string const& filepath) {
+std::map<std::string, Camera> load_cameras_from_toml(std::string const& filepath) {
     // Parse TOML file
     toml::table config;
     try {
@@ -87,10 +87,10 @@ std::unordered_map<std::string, Camera> load_cameras_from_toml(std::string const
         throw std::runtime_error(oss.str());
     }
 
-    std::unordered_map<std::string, Camera> cameras;
-    int camera_id = 0;  // Assign sequential IDs
+    std::map<std::string, Camera> cameras;  // Use ordered map to preserve TOML order
+    int camera_id = 0;                      // Assign sequential IDs based on TOML order
 
-    // Iterate over all tables (cameras)
+    // Iterate over all tables (cameras) - toml::table iteration is ordered
     for (auto const& [key, value] : config) {
         std::string section_name(key.str());
 

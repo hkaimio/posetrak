@@ -109,6 +109,47 @@ class UnscentedKalmanFilter {
      */
     int error_dim() const { return sigma_gen_.error_dim(); }
 
+    // Debug instrumentation
+    /**
+     * @brief Enable debug mode to export UKF internals
+     * @param enable True to enable debug exports
+     * @param debug_dir Directory to write debug files
+     */
+    void enable_debug(bool enable, std::string const& debug_dir = "cpp_results/debug");
+
+    /**
+     * @brief Set current frame number for debug exports
+     * @param frame_num Frame number
+     */
+    void set_frame_number(int frame_num) { frame_number_ = frame_num; }
+
+    /**
+     * @brief Check if debug mode is enabled
+     * @return True if debug is enabled
+     */
+    bool is_debug_enabled() const { return debug_enabled_; }
+
+    /**
+     * @brief Get debug output directory
+     * @return Debug directory path
+     */
+    std::string const& get_debug_dir() const { return debug_dir_; }
+
+    /**
+     * @brief Get current frame number
+     * @return Frame number
+     */
+    int get_frame_number() const { return frame_number_; }
+
+    // Testing-only accessors (for unit test verification)
+    /**
+     * @brief Generate sigma points from current state (for testing)
+     * @return Vector of sigma point states
+     */
+    std::vector<State> generate_sigma_points_for_testing() const {
+        return sigma_gen_.generate_sigma_points(state_, covariance_);
+    }
+
    private:
     /**
      * @brief Compute weighted mean of states (manifold-aware)
@@ -137,6 +178,14 @@ class UnscentedKalmanFilter {
      * @return Error vector in tangent space
      */
     Eigen::VectorXd compute_state_error(State const& state, State const& reference) const;
+
+    /**
+     * @brief Apply error to state (retraction from tangent space to manifold)
+     * @param nominal_state Nominal state (on manifold)
+     * @param error Error vector in tangent space (active DOFs only)
+     * @return New state with error applied
+     */
+    State apply_error_to_state(State const& nominal_state, Eigen::VectorXd const& error) const;
 
     /**
      * @brief Predict measurements for a state using FK and camera projection
@@ -214,12 +263,36 @@ class UnscentedKalmanFilter {
     void damp_velocity_covariance_at_limits(State const& prev_state, State const& current_state,
                                             double damping_factor = 0.01);
 
+    /**
+     * @brief Write sigma points to CSV file for debugging
+     * @param sigma_points Vector of sigma point states
+     *
+     * Writes sigma points in the same format as Python implementation for comparison.
+     * CSV format: sigma_idx, root_pos (x,y,z), root_quat (w,x,y,z), root_vel (x,y,z),
+     * root_angvel (x,y,z), joint angles (in skeleton order), joint velocities (in skeleton order)
+     */
+    void write_sigma_points_csv(std::vector<State> const& sigma_points) const;
+
+    /**
+     * @brief Write matrix to CSV file for debugging
+     * @param matrix Matrix to write
+     * @param filename Filename (without path, e.g., "prior_covariance.csv")
+     *
+     * Writes matrix to debug_dir/frame_XXXX/filename
+     */
+    void write_matrix_csv(Eigen::MatrixXd const& matrix, std::string const& filename) const;
+
     Skeleton const& skeleton_;             ///< Skeleton structure
     State state_;                          ///< Current state estimate
     Eigen::MatrixXd covariance_;           ///< Covariance in error space
     Eigen::MatrixXd process_noise_;        ///< Process noise covariance
     SigmaPointGenerator sigma_gen_;        ///< Sigma point generator
     ConstantVelocityModel process_model_;  ///< Process model
+
+    // Debug state
+    bool debug_enabled_ = false;  ///< Debug mode flag
+    std::string debug_dir_;       ///< Debug output directory
+    int frame_number_ = 0;        ///< Current frame number
 };
 
 }  // namespace posetrak

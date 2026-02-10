@@ -25,7 +25,8 @@ struct Observation {
     /// @param base_noise Base noise in pixels
     /// @return Adjusted noise std (higher for low confidence)
     double measurement_noise_std(double base_noise = 5.0) const {
-        return base_noise / std::max(confidence, 0.1);
+        return base_noise;
+        //        return base_noise / std::max(confidence, 0.1);
     }
 
     /// @brief Serialize to JSON
@@ -46,12 +47,6 @@ struct ObservationSequence {
     /// @param t_end End time (exclusive)
     /// @return Observations within time range
     std::vector<Observation> get_in_range(double t_start, double t_end) const;
-
-    /// @brief Get observations at specific timestamp
-    /// @param timestamp Target time
-    /// @param tolerance Time tolerance for matching
-    /// @return Observations at timestamp
-    std::vector<Observation> get_at_time(double timestamp, double tolerance = 1e-6) const;
 
     /// @brief Get minimum timestamp in sequence
     /// @return Minimum time or infinity if empty
@@ -92,18 +87,6 @@ class ObservationSet {
     /// @return Pointer to sequence or nullptr if not found
     ObservationSequence const* get_sequence(std::string const& camera_name) const;
 
-    /// @brief Get all observations at specific timestamp across all cameras
-    /// @param timestamp Target time
-    /// @param tolerance Time tolerance for matching
-    /// @return Observations from all cameras at timestamp
-    std::vector<Observation> get_all_at_time(double timestamp, double tolerance = 1e-6) const;
-
-    /// @brief Get all observations at specific frame indices per camera
-    /// @param frame_indices Map of camera_name -> frame_idx
-    /// @return Observations at specified frames
-    std::vector<Observation>
-    get_all_at_frames(std::map<std::string, int> const& frame_indices) const;
-
     /// @brief Get all observations in time range across all cameras
     /// @param t_start Start time (inclusive)
     /// @param t_end End time (exclusive)
@@ -117,10 +100,6 @@ class ObservationSet {
     /// @brief Get maximum timestamp across all cameras
     /// @return Maximum time or -infinity if empty
     double max_time() const;
-
-    /// @brief Get all unique timestamps across all cameras (sorted)
-    /// @return Sorted unique timestamps
-    std::vector<double> get_unique_timestamps() const;
 
     /// @brief Get person identifier
     /// @return Person ID

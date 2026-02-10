@@ -9,9 +9,9 @@
  */
 
 #pragma once
-#define POSETRAK_TRACKER_HPP_INCLUDED
 
 #include "posetrak/core/camera.hpp"
+#include "posetrak/core/config.hpp"
 #include "posetrak/core/observation.hpp"
 #include "posetrak/core/skeleton.hpp"
 #include "posetrak/core/state.hpp"
@@ -30,25 +30,7 @@
 
 namespace posetrak {
 
-/**
- * @brief Configuration parameters for Tracker
- */
-struct TrackerConfig {
-    // UKF parameters
-    double process_noise_std = 0.1;      ///< Process noise std deviation
-    double measurement_noise_std = 5.0;  ///< Measurement noise std (pixels)
-    double outlier_threshold = 5.991;    ///< Chi-squared threshold (95% for 2-DOF)
-
-    // Initialization parameters
-    double init_position_std = 0.5;     ///< Initial position uncertainty (meters)
-    double init_orientation_std = 0.5;  ///< Initial orientation uncertainty (radians)
-    double init_joint_std = 0.3;        ///< Initial joint angle uncertainty (radians)
-    double init_velocity_std = 0.1;     ///< Initial velocity uncertainty (m/s or rad/s)
-
-    int ik_max_iterations = 50;    ///< Max IK iterations for initialization
-    double ik_tolerance = 0.01;    ///< IK convergence tolerance (meters)
-    int min_cameras_for_init = 2;  ///< Minimum cameras required for triangulation
-};
+// TrackerConfig is defined in config.hpp
 
 /**
  * @brief Tracking result for a single frame
@@ -196,6 +178,12 @@ class Tracker {
      * @brief Reset tracker to uninitialized state
      */
     void reset();
+
+    /**
+     * @brief Get UKF for debug configuration
+     * @return Pointer to UKF (or nullptr if not initialized)
+     */
+    UnscentedKalmanFilter* get_ukf() { return ukf_.get(); }
 
    private:
     /**

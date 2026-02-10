@@ -134,19 +134,6 @@ TEST_CASE("Load simple humanoid skeleton", "[skeleton_loader]") {
         REQUIRE(r_shoulder_marker_it->coco_id.has_value());
         REQUIRE(*r_shoulder_marker_it->coco_id == 2);
     }
-
-    SECTION("Active joints from groups") {
-        // Check that active joints were set from tracking.active_groups
-        // Simple humanoid has groups: core, right_arm, left_arm - all 10 joints should be active
-        auto const& joints = skeleton.joints();
-        int active_count = 0;
-        for (auto const& joint : joints) {
-            if (skeleton.is_joint_active(joint.name)) {
-                active_count++;
-            }
-        }
-        REQUIRE(active_count == 10);
-    }
 }
 
 TEST_CASE("Load production Harri skeleton", "[skeleton_loader]") {

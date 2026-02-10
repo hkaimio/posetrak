@@ -154,10 +154,12 @@ class TrackerIntegrationFixture {
                     auto const& camera = cameras_[cam_idx];
 
                     // Project to 2D (undistorted for this test)
-                    Eigen::Vector2d pos_2d = camera.project_undistorted(pos_3d);
+                    auto pos_2d_opt = camera.project_undistorted(pos_3d);
 
-                    // Check if in front of camera (negative coordinates indicate behind camera)
-                    if (pos_2d.x() >= 0 && pos_2d.y() >= 0) {
+                    // Check if projection succeeded (in front of camera and in bounds)
+                    if (pos_2d_opt.has_value()) {
+                        Eigen::Vector2d pos_2d = *pos_2d_opt;
+
                         // Add noise
                         pos_2d.x() += noise_dist(rng_);
                         pos_2d.y() += noise_dist(rng_);

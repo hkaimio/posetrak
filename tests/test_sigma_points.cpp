@@ -175,8 +175,9 @@ TEST_CASE("Sigma points handle locked DOFs in spherical joints", "[sigma_points]
 
     SigmaPointGenerator gen(skeleton);
 
-    // Error dim: 2 * (6 root + 3 storage DOF) = 18
-    REQUIRE(gen.error_dim() == 18);
+    // Error dim: 2 * (6 root + 1 active DOF) = 14
+    // Only Z axis is active (not locked), so 1 active DOF not 3 storage DOFs
+    REQUIRE(gen.error_dim() == 14);
 
     // Create state
     Eigen::Vector3d pos = Eigen::Vector3d::Zero();
@@ -190,13 +191,13 @@ TEST_CASE("Sigma points handle locked DOFs in spherical joints", "[sigma_points]
 
     State nominal(pos, quat, angles, vel, angvel, joint_vels);
 
-    Eigen::MatrixXd cov = Eigen::MatrixXd::Identity(18, 18) * 0.01;
+    Eigen::MatrixXd cov = Eigen::MatrixXd::Identity(14, 14) * 0.01;
     auto sigma_points = gen.generate_sigma_points(nominal, cov);
 
-    REQUIRE(sigma_points.size() == 2 * 18 + 1);
+    REQUIRE(sigma_points.size() == 2 * 14 + 1);
 
-    // Note: With full 3-DOF storage, sigma points explore all dimensions
-    // Locked DOFs will be enforced by process model after propagation
+    // Note: Only 1 active (non-locked) DOF, so error_dim=14 not 18
+    // Locked DOFs are not explored in sigma point generation
     //  (no check for locked DOFs here - that's correct behavior)
 }
 

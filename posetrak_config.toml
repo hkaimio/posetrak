@@ -1,0 +1,101 @@
+# Posetrak Configuration
+# Converted from PowerShell run_tracker.ps1
+# ===========================================
+
+[data]
+# Input data paths (WSL mount syntax)
+skeleton = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/2026-01-11-scaled_Harri_skeleton.yaml"
+cameras = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/Calib_scene.toml"
+observations_dir = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/pose"  # Base directory with OpenPose detections
+sync_path = "examples/sync_example.json"  # Camera-specific frame offsets
+person_id = 0
+
+[tracking]
+# UKF tracking parameters (matching Python tracker)
+process_noise_std = 0.5
+measurement_noise_std = 20.0  # Converted from Python's 20 pixels
+outlier_threshold = 4.0
+
+[initialization]
+# IK and initialization parameters
+ik_max_iterations = 1000
+ik_tolerance = 0.02  # 2cm tolerance
+init_position_std = 0.1
+init_orientation_std = 0.1
+init_joint_std = 0.1
+init_velocity_std = 0.1
+min_cameras_for_init = 2
+
+[ukf]
+# UKF sigma point parameters
+# CRITICAL: Must match Python exactly!
+# Python uses alpha=0.001 (small spread for high-dimensional state)
+alpha = 0.001  # Changed from 0.5 to match Python
+beta = 2.0
+kappa = 0.0
+
+[output]
+# Export settings
+output_dir = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/posetrak_output"
+export_tracking_results = true  # Creates 5 CSV files with tracking data
+export_statistics = true        # Creates tracking_stats.csv and overall_stats.json
+export_debug = false            # Set true for additional debug info
+
+[processing]
+# Frame range - MUST MATCH PYTHON TEST DATA
+# Python test run: tracker frames 0-129 (130 frames)
+# Camera frames: ~270-400 (varies by camera start offsets)
+start_frame = 270  # Match Python test data
+max_frames = 130    # Match Python: 130 frames (tracker frames 0-129)
+
+# ============================================================================
+# DIFFERENCES FROM PYTHON TRACKER:
+# ============================================================================
+#
+# 1. CAMERA-SPECIFIC START FRAMES:
+#    - Python: Each camera can start at different frame (via --start-frame array)
+#    - C++: Single global start_frame applies to all cameras
+#    - Solution: Use sync metadata file or align frames during preprocessing
+#
+# 2. SIGMA POINTS:
+#    - Python: --use-simplex-sigma-points flag for simplex sampling
+#    - C++: Currently uses standard Unscented Transform (UT) sigma points
+#    - Impact: Slightly different UKF behavior, but both should work
+#
+# 3. ACTIVE GROUPS:
+#    - Python: --active-groups to select marker subsets (main, HandR, HandL)
+#    - C++: Uses all markers from skeleton definition
+#    - Solution: Modify skeleton YAML to only include desired markers
+#
+# 4. VIDEO OUTPUTS:
+#    - Python: --create-grid-video, --create-bvh, --save-hdf5 flags
+#    - C++: Exports CSV/JSON data; use Python post-processing for visualization
+#    - Workflow: Run C++ tracker → Load CSV in Python → Create videos/BVH
+#
+# 5. PARALLEL PROCESSING:
+#    - Python: --n-jobs for parallel frame processing
+#    - C++: Single-threaded tracking (inherently sequential for UKF)
+#
+# ============================================================================
+# RECOMMENDED WORKFLOW:
+# ============================================================================
+#
+# Option 1: Direct C++ tracking (fastest)
+# ----------------------------------------
+# posetrak posetrak_config.toml
+#
+# Then visualize in Python:
+# python scripts/visualize_tracking_results.py tracking_output/
+#
+# Option 2: Use sync metadata for camera offsets
+# -----------------------------------------------
+# 1. Create sync.json with camera-specific frame offsets:
+#    {
+#      "cam1": [{"frame": 0, "timestamp": 0.0}, {"frame": 1, "timestamp": 0.00833}, ...],
+#      "cam2": [{"frame": 0, "timestamp": 0.0}, {"frame": 1, "timestamp": 0.00833}, ...],
+#      ...
+#    }
+# 2. Set sync_path in [data] section
+# 3. Run posetrak
+#
+# ============================================================================

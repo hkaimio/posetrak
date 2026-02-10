@@ -47,6 +47,49 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
     // Create skeleton
     Skeleton skeleton;
 
+    // Parse groups section first to build joint-to-group and marker-to-group mappings
+    std::unordered_map<std::string, std::string> joint_to_group_map;
+    std::unordered_map<std::string, std::string> marker_to_group_map;
+    std::unordered_map<std::string, std::string> group_dependencies;  // group -> depends_on
+    std::unordered_set<std::string> optional_groups;
+
+    if (root["groups"]) {
+        for (auto const& group_node : root["groups"]) {
+            std::string group_name = group_node["name"].as<std::string>();
+
+            // Parse optional attribute (defaults to true if not specified)
+            bool is_optional = true;
+            if (group_node["optional"]) {
+                is_optional = group_node["optional"].as<bool>();
+            }
+            if (is_optional) {
+                optional_groups.insert(group_name);
+            }
+
+            // Parse depends_on attribute
+            if (group_node["depends_on"]) {
+                std::string depends_on = group_node["depends_on"].as<std::string>();
+                group_dependencies[group_name] = depends_on;
+            }
+
+            // Map all joints in this group to the group name
+            if (group_node["joints"]) {
+                for (auto const& joint_name_node : group_node["joints"]) {
+                    std::string joint_name = joint_name_node.as<std::string>();
+                    joint_to_group_map[joint_name] = group_name;
+                }
+            }
+
+            // Map all markers in this group to the group name
+            if (group_node["markers"]) {
+                for (auto const& marker_name_node : group_node["markers"]) {
+                    std::string marker_name = marker_name_node.as<std::string>();
+                    marker_to_group_map[marker_name] = group_name;
+                }
+            }
+        }
+    }
+
     // Parse joints
     if (!root["joints"]) {
         throw std::runtime_error("YAML file missing 'joints' section");
@@ -77,10 +120,12 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
             offset = parse_vec3(joint_node["offset"]);
         }
 
-        // Parse group if present
+        // Parse group if present (from individual joint or from groups section)
         std::string group = "";
         if (joint_node["group"]) {
             group = joint_node["group"].as<std::string>();
+        } else if (joint_to_group_map.count(joint_name) > 0) {
+            group = joint_to_group_map[joint_name];
         }
 
         // Parse rest orientation (ZYX Euler angles in radians)
@@ -159,48 +204,12 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
                 coco_id = static_cast<int>(marker_node["openpose_keypoint"].as<size_t>());
             }
 
-            skeleton.add_marker(marker_name, it->second, offset, coco_id);
-        }
-    }
+            uint32_t marker_idx = skeleton.add_marker(marker_name, it->second, offset, coco_id);
 
-    // Parse groups and apply active joints
-    if (root["tracking"] && root["tracking"]["active_groups"]) {
-        std::unordered_set<std::string> active_joint_names;
-
-        for (auto const& group_name_node : root["tracking"]["active_groups"]) {
-            std::string group_name = group_name_node.as<std::string>();
-
-            // Find the group definition
-            if (!root["groups"]) {
-                throw std::runtime_error(
-                    "tracking.active_groups references groups but no 'groups' section exists");
+            // Assign group from groups section if defined
+            if (marker_to_group_map.count(marker_name) > 0) {
+                skeleton.markers()[marker_idx].group = marker_to_group_map[marker_name];
             }
-
-            bool found = false;
-            for (auto const& group_node : root["groups"]) {
-                if (group_node["name"].as<std::string>() == group_name) {
-                    found = true;
-                    if (group_node["joints"]) {
-                        for (auto const& joint_name_node : group_node["joints"]) {
-                            active_joint_names.insert(joint_name_node.as<std::string>());
-                        }
-                    }
-                    break;
-                }
-            }
-
-            if (!found) {
-                throw std::runtime_error("Active group '" + group_name +
-                                         "' not found in groups section");
-            }
-        }
-
-        // Convert names to joint names vector
-        std::vector<std::string> active_joint_names_vec(active_joint_names.begin(),
-                                                        active_joint_names.end());
-
-        if (!active_joint_names_vec.empty()) {
-            skeleton.set_active_joints(active_joint_names_vec);
         }
     }
 

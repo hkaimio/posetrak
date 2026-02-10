@@ -1,5 +1,6 @@
 #include <posetrak/io/observation_loader.hpp>
 
+#include <fmt/core.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -48,8 +49,8 @@ parse_openpose_person(nlohmann::json const& person, Camera const& camera, uint32
             }
 
             Observation obs;
-            obs.camera_id = 0;           // Will be set by caller if needed
-            obs.marker_id = it->second;  // Use skeleton marker index, not COCO ID
+            obs.camera_id = camera.id();  // Use camera's assigned ID
+            obs.marker_id = it->second;   // Use skeleton marker index, not COCO ID
             obs.frame_idx = static_cast<int>(frame_idx);
             obs.timestamp = timestamp;
             obs.position_distorted = Eigen::Vector2d(x, y);
@@ -97,7 +98,7 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
     if (people.empty()) {
         // No people detected - return empty sequence
         ObservationSequence seq;
-        seq.camera_id = 0;
+        seq.camera_id = camera.id();
         seq.camera_name = camera_name;
         return seq;
     }
@@ -106,16 +107,15 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
     if (person_id < 0 || person_id >= static_cast<int>(people.size())) {
         // Person ID out of range - return empty
         ObservationSequence seq;
-        seq.camera_id = 0;
+        seq.camera_id = camera.id();
         seq.camera_name = camera_name;
         return seq;
     }
 
     auto observations = parse_openpose_person(people[person_id], camera, frame_idx, min_confidence,
                                               coco_to_marker_idx);
-
     ObservationSequence seq;
-    seq.camera_id = 0;
+    seq.camera_id = camera.id();
     seq.camera_name = camera_name;
     seq.observations = std::move(observations);
 
@@ -123,9 +123,8 @@ ObservationSequence load_openpose_frame(std::string const& filepath, Camera cons
 }
 
 ObservationSet load_openpose_sequence(std::string const& base_dir,
-                                      std::unordered_map<std::string, Camera> const& cameras,
-                                      Skeleton const& skeleton,
-                                      std::pair<uint32_t, uint32_t> frame_range,
+                                      std::map<std::string, Camera> const& cameras,
+                                      Skeleton const& skeleton, double start_time, double end_time,
                                       double min_confidence, int person_id) {
     namespace fs = std::filesystem;
 
@@ -135,6 +134,7 @@ ObservationSet load_openpose_sequence(std::string const& base_dir,
 
     ObservationSet obs_set(person_id);
 
+    // Iterate cameras in deterministic order (std::map is ordered)
     for (auto const& [cam_name, camera] : cameras) {
         fs::path cam_dir = fs::path(base_dir) / cam_name;
         if (!fs::exists(cam_dir) || !fs::is_directory(cam_dir)) {
@@ -154,9 +154,7 @@ ObservationSet load_openpose_sequence(std::string const& base_dir,
             std::string filename = entry.path().filename().string();
             if (std::regex_match(filename, match, frame_pattern)) {
                 uint32_t frame_num = std::stoul(match[1].str());
-                if (frame_num >= frame_range.first && frame_num <= frame_range.second) {
-                    frame_files.emplace_back(frame_num, entry.path());
-                }
+                frame_files.emplace_back(frame_num, entry.path());
             }
         }
 
@@ -166,17 +164,25 @@ ObservationSet load_openpose_sequence(std::string const& base_dir,
 
         // Load observations for each frame and build a sequence
         ObservationSequence full_seq;
-        full_seq.camera_id = 0;
+        full_seq.camera_id = camera.id();
         full_seq.camera_name = cam_name;
 
         for (auto const& [frame_num, filepath] : frame_files) {
             auto frame_seq = load_openpose_frame(filepath.string(), camera, cam_name, skeleton,
                                                  frame_num, min_confidence, person_id);
 
-            // Append all observations from this frame to the full sequence
-            full_seq.observations.insert(full_seq.observations.end(),
-                                         frame_seq.observations.begin(),
-                                         frame_seq.observations.end());
+            // Filter observations by timestamp
+            for (auto const& obs : frame_seq.observations) {
+                // Skip observations before start_time
+                if (obs.timestamp < start_time) {
+                    continue;
+                }
+                // Skip observations at or after end_time (if specified)
+                if (end_time >= 0.0 && obs.timestamp >= end_time) {
+                    continue;
+                }
+                full_seq.observations.push_back(obs);
+            }
         }
 
         // Add the sequence to the observation set

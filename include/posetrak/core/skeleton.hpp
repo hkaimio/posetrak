@@ -45,7 +45,8 @@ struct Joint {
                 double const min_limit = limits[i].x();
                 double const max_limit = limits[i].y();
                 // DOF is active if limits differ by more than tolerance
-                mask[i] = std::abs(max_limit - min_limit) > 1e-9;
+                // Using 1e-4 tolerance to match Python's locked DOF detection
+                mask[i] = std::abs(max_limit - min_limit) > 1e-4;
             }
             // If no limits set, all DOFs are active
             if (num_limits == 0) {
@@ -70,6 +71,7 @@ struct Marker {
     uint32_t joint_index;        ///< Attached joint index in skeleton
     Eigen::Vector3d local_pos;   ///< Position in joint's local frame
     std::optional<int> coco_id;  ///< Optional COCO keypoint ID for compatibility
+    std::string group;           ///< Marker group for filtering (e.g., "main", "HandL")
 };
 
 /// @brief Skeleton hierarchy with joints and markers
@@ -173,9 +175,13 @@ class Skeleton {
     /// @return Vector of joints
     std::vector<Joint> const& joints() const { return joints_; }
 
-    /// @brief Get all markers in state vector order
+    /// @brief Get all markers in state vector order (const)
     /// @return Vector of markers
     std::vector<Marker> const& markers() const { return markers_; }
+
+    /// @brief Get all markers in state vector order (mutable)
+    /// @return Vector of markers
+    std::vector<Marker>& markers() { return markers_; }
 
     /// @brief Serialize to JSON
     nlohmann::json to_json() const;

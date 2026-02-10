@@ -1,5 +1,6 @@
 {
     "testMate.cpp.test.executables": "builddir/tests/test_posetrak",
     "testMate.cpp.test.workingDirectory": ".",
-    "C_Cpp.intelliSenseEngine": "disabled"
+    "C_Cpp.intelliSenseEngine": "disabled",
+
 }

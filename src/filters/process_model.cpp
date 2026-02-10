@@ -85,12 +85,6 @@ State ConstantVelocityModel::propagate(State const& state, double dt) const {
 
     next_state.set_joint_angles(new_angles);
 
-    // 4. Velocities remain constant (process noise added by UKF)
-    // (already copied in next_state)
-
-    // 5. Enforce joint limits
-    enforce_joint_limits(next_state);
-
     return next_state;
 }
 

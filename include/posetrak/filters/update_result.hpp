@@ -7,6 +7,7 @@
 
 #include <Eigen/Core>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,7 @@ namespace posetrak {
 struct ObservationResult {
     std::string marker_name;      ///< Name of the marker
     int camera_id;                ///< Camera ID
+    uint32_t camera_frame_idx;    ///< Camera frame index
     bool is_outlier;              ///< Whether observation was rejected as outlier
     double mahalanobis_distance;  ///< Computed Mahalanobis distance
     Eigen::Vector2d innovation;   ///< Innovation vector [u_err, v_err] in pixels

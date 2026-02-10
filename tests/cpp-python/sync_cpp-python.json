@@ -1,0 +1,44 @@
+{
+  "cam1": {
+    "fps": 120.0,
+    "sync_points": [
+      {"frame": 275, "timestamp": 0.0},
+      {"frame": 395, "timestamp": 1.0}
+    ]
+  },
+  "cam2": {
+    "fps": 120.0,
+    "sync_points": [
+      {"frame": 275, "timestamp": 0.0},
+      {"frame": 395, "timestamp": 1.0}
+    ]
+  },
+  "cam3": {
+    "fps": 120.0,
+    "sync_points": [
+      {"frame": 275, "timestamp": 0.0},
+      {"frame": 395, "timestamp": 1.0}
+    ]
+  },
+  "cam4": {
+    "fps": 120.0,
+    "sync_points": [
+      {"frame": 281, "timestamp": 0.0},
+      {"frame": 401, "timestamp": 1.0}
+    ]
+  },
+  "cam5": {
+    "fps": 120.0,
+    "sync_points": [
+      {"frame": 273, "timestamp": 0.0},
+      {"frame": 393, "timestamp": 1.0}
+    ]
+  },
+  "cam6": {
+    "fps": 120.0,
+    "sync_points": [
+      {"frame": 273, "timestamp": 0.0},
+      {"frame": 393, "timestamp": 1.0}
+    ]
+  }
+}

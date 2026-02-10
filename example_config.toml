@@ -1,0 +1,37 @@
+# Example Posetrak Configuration File
+
+[data]
+skeleton_path = "tests/data/skeleton_simple.yaml"
+cameras_path = "tests/data/cameras_3cam.toml"
+# sync_path = "tests/data/sync.json"  # Optional
+observations_dir = "tests/data/openpose_detections"
+person_id = 0
+
+[tracking]
+process_noise_std = 0.5
+measurement_noise_std = 2.0
+outlier_threshold = 4.0
+
+[initialization]
+ik_max_iterations = 1000
+ik_tolerance = 0.02
+init_position_std = 0.1
+init_orientation_std = 0.1
+init_joint_std = 0.1
+init_velocity_std = 0.1
+min_cameras_for_init = 2
+
+[ukf]
+alpha = 0.5
+beta = 2.0
+kappa = 0.0
+
+[output]
+output_dir = "tracking_output"
+export_tracking_results = true
+export_statistics = true
+export_debug = false
+
+[processing]
+start_frame = 0
+max_frames = -1  # -1 means all frames

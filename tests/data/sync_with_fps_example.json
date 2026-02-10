@@ -1,0 +1,19 @@
+{
+  "cam1": {
+    "fps": 120.0,
+    "sync_points": [
+      {"frame": 273, "timestamp": 0.0},
+      {"frame": 393, "timestamp": 1.0}
+    ]
+  },
+  "cam2": {
+    "fps": 60.0,
+    "sync_points": [
+      {"frame": 136, "timestamp": 0.0},
+      {"frame": 196, "timestamp": 1.0}
+    ]
+  },
+  "cam3": {
+    "fps": 90.0
+  }
+}

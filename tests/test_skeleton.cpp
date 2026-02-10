@@ -73,7 +73,7 @@ TEST_CASE("Skeleton construction and validation", "[skeleton]") {
         Skeleton skel;
         uint32_t a = skel.add_joint("a", std::nullopt, JointType::REVOLUTE);
         uint32_t b = skel.add_joint("b", a, JointType::REVOLUTE);
-        uint32_t c = skel.add_joint("c", b, JointType::REVOLUTE);
+        skel.add_joint("c", b, JointType::REVOLUTE);
         // Manually create a cycle by modifying parent_index (normally not possible through API)
         // Skip this test as cycles are now prevented at construction time
         // Just verify normal validation passes

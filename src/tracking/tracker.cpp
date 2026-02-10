@@ -8,6 +8,10 @@
 #include <fmt/core.h>
 
 #include "posetrak/kinematics/pinocchio_model_builder.hpp"
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
 
 namespace posetrak {
 
@@ -140,12 +144,11 @@ void Tracker::initialize_from_state(State const& initial_state, double timestamp
 }
 
 void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
-    // Create UKF with proper alpha parameter
-    // Alpha controls sigma point spread. Too small (0.001) causes negative covariance weights.
-    // For n~58 dimensions, alpha should be at least 0.5 to ensure positive definiteness.
-    double alpha = 0.5;  // Spread parameter (was 0.001 - caused negative weights!)
-    double beta = 2.0;   // Gaussian distribution parameter
-    double kappa = 0.0;  // Secondary scaling
+    // Create UKF using config parameters (must match Python exactly)
+    // Note: Small alpha (0.001) can cause numerical issues but is what Python uses
+    double alpha = config_.ukf_alpha;  // Use config value (typically 0.001 for Python comparison)
+    double beta = config_.ukf_beta;    // Gaussian distribution parameter
+    double kappa = config_.ukf_kappa;  // Secondary scaling
 
     ukf_ = std::make_unique<UnscentedKalmanFilter>(skeleton_, config_.process_noise_std, alpha,
                                                    beta, kappa);
@@ -154,8 +157,29 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
     ukf_->set_state(initial_state);
 
     // Set initial covariance
-    int const error_dim = initial_state.error_state_dim();
-    int const pos_dim = error_dim / 2;
+    // Use active DOFs (now includes root's 6 DOFs: 3 position + 3 orientation)
+    int const active_dof = skeleton_.active_dof();
+    int const total_dof = skeleton_.total_dof_count();
+    int const error_dim = 2 * active_dof;  // active_dof now includes root
+    int const pos_dim = active_dof;        // position dimension
+
+    fmt::print("\n=== TRACKER INITIALIZATION DEBUG ===\n");
+    fmt::print("total_dof (storage)={}, active_dof (error-state)={}, error_dim={}\n", total_dof,
+               active_dof, error_dim);
+    fmt::print(
+        "Expected: error_dim should be 210 for Python compatibility (active_dof=105 + 6 root = "
+        "111)\n");
+    fmt::print(
+        "Correction: active_dof should BE 111 (includes root), so error_dim = 2*111 = 222\n");
+    fmt::print(
+        "Actually: Python has active_dof=105, error_dim=210, so we expect active_dof={}, "
+        "error_dim={}\n",
+        active_dof, error_dim);
+    fmt::print("Covariance will be {}x{}\n", error_dim, error_dim);
+    fmt::print(
+        "init_position_std={}, init_orientation_std={}, init_joint_std={}, init_velocity_std={}\n",
+        config_.init_position_std, config_.init_orientation_std, config_.init_joint_std,
+        config_.init_velocity_std);
 
     Eigen::MatrixXd initial_cov = Eigen::MatrixXd::Zero(error_dim, error_dim);
 
@@ -178,6 +202,20 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
         Eigen::MatrixXd::Identity(pos_dim, pos_dim) *
         (config_.init_velocity_std * config_.init_velocity_std);
 
+    fmt::print("Initial covariance diagonal values:\n");
+    fmt::print("  Position (0:3): {}, {}, {}\n", initial_cov(0, 0), initial_cov(1, 1),
+               initial_cov(2, 2));
+    fmt::print("  Orientation (3:6): {}, {}, {}\n", initial_cov(3, 3), initial_cov(4, 4),
+               initial_cov(5, 5));
+    fmt::print("  Joint[0] (6): {}\n", initial_cov(6, 6));
+    fmt::print("  Velocity pos ({}:{}): {}, {}, {}\n", pos_dim, pos_dim + 3,
+               initial_cov(pos_dim, pos_dim), initial_cov(pos_dim + 1, pos_dim + 1),
+               initial_cov(pos_dim + 2, pos_dim + 2));
+    fmt::print("  Velocity orient ({}:{}): {}, {}, {}\n", pos_dim + 3, pos_dim + 6,
+               initial_cov(pos_dim + 3, pos_dim + 3), initial_cov(pos_dim + 4, pos_dim + 4),
+               initial_cov(pos_dim + 5, pos_dim + 5));
+    fmt::print("===================================\n\n");
+
     ukf_->set_covariance(initial_cov);
 
     last_timestamp_ = timestamp;
@@ -188,6 +226,14 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
     if (!initialized_) {
         throw std::runtime_error("Tracker::track_frame() called before initialization");
     }
+
+    fmt::print("\n=== Tracking frame at timestamp {:.6f} ===\n", timestamp);
+    auto joint_angles = ukf_->state().joint_angles();
+    fmt::print("Current state joint angles (first 5):");
+    for (int i = 0; i < 5 && i < joint_angles.size(); ++i) {
+        fmt::print(" {:.4f}", joint_angles[i]);
+    }
+    fmt::print("\n");
 
     // Compute dt
     double dt = timestamp - last_timestamp_;
@@ -204,7 +250,18 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
     }
 
     // Step 1: Predict
+    fmt::print("Tracker::track_frame(): Predicting with dt = {:.6f}s\n", dt);
     ukf_->predict(dt);
+    fmt::print("Done prediction:\n", dt);
+    auto pred_root_pos = ukf_->state().root_position();
+    fmt::print("  Predicted root position: [{:.4f}, {:.4f}, {:.4f}]\n", pred_root_pos.x(),
+               pred_root_pos.y(), pred_root_pos.z());
+    auto pred_joint_angles = ukf_->state().joint_angles();
+    fmt::print("  Predicted joint angles (first 5):");
+    for (int i = 0; i < 5; ++i) {
+        fmt::print(" {:.4f}", pred_joint_angles[i]);
+    }
+    fmt::print("\n");
 
     // Step 2: Check if we have observations
     if (!has_sufficient_observations(observations)) {
@@ -213,17 +270,48 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
         return result;
     }
 
+    fmt::print("Tracker::track_frame(): Updating with {} observations\n", observations.size());
     // Step 3: Update
     auto update_info = ukf_->update(observations, cameras_, *fk_, config_.measurement_noise_std,
                                     config_.outlier_threshold);
+
+    // Debug: Export observation results (all frames) - moved here to ensure it runs even when all
+    // observations are outliers
+    if (ukf_->is_debug_enabled()) {
+        std::string const& debug_dir = ukf_->get_debug_dir();
+        int frame_number = ukf_->get_frame_number();
+        std::string frame_dir =
+            debug_dir + "/frame_" +
+            std::string(4 - std::min(4, static_cast<int>(std::to_string(frame_number).length())),
+                        '0') +
+            std::to_string(frame_number);
+        std::filesystem::create_directories(frame_dir);
+        std::ofstream f(frame_dir + "/all_observations.csv");
+        f << std::setprecision(15);
+
+        // Write header matching Python format (simplified)
+        f << "marker_name,camera_id,frame_idx,observed_u,observed_v,predicted_u,predicted_v,"
+          << "residual_u,residual_v,residual_norm,mahalanobis_distance,is_outlier\n";
+
+        // Write each observation result
+        for (auto const& obs_result : update_info.observations) {
+            f << obs_result.marker_name << "," << obs_result.camera_id << ","
+              << obs_result.camera_frame_idx << "," << obs_result.actual.x() << ","
+              << obs_result.actual.y() << "," << obs_result.predicted.x() << ","
+              << obs_result.predicted.y() << "," << obs_result.innovation.x() << ","
+              << obs_result.innovation.y() << "," << obs_result.innovation.norm() << ","
+              << obs_result.mahalanobis_distance << ","
+              << (obs_result.is_outlier ? "True" : "False") << "\n";
+        }
+    }
+
+    auto post_root_pos = ukf_->state().root_position();
+    auto post_joint_angles = ukf_->state().joint_angles();
 
     // Step 4: Create result
     TrackingResult result{timestamp,   ukf_->state(),           ukf_->covariance(),
                           update_info, update_info.num_inliers, false,
                           ""};
-
-    fmt::print("Creating result: tracking_lost={}, num_inliers={}\n", result.tracking_lost,
-               update_info.num_inliers);
 
     // Update last timestamp
     last_timestamp_ = timestamp;

@@ -638,7 +638,7 @@ int main(int argc, char* argv[]) {
 
                 // Use window midpoint as effective timestamp
                 // double t_effective = config.start_time + dt / 2.0;
-                double t_effective = config.start_time;
+                double t_effective = config.start_time - dt * 0.5;
                 auto result = tracker.track_frame(frame_0_obs, t_effective);
 
                 // Export posterior as step 1
@@ -662,7 +662,8 @@ int main(int argc, char* argv[]) {
 
         // Main tracking loop - process remaining time steps
         for (int step = 1; step < num_steps; ++step) {
-            double t_start = config.start_time + step * dt;
+            double t_start =
+                config.start_time + step * dt - dt / 2.0;  // Center the window around the step time
             double t_end = t_start + dt;
 
             // Set frame number for UKF debug

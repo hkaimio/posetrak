@@ -1,5 +1,13 @@
 # C++ Motion Capture Tracker - Requirements Document
 
+**Status as of 2026-02-11**: ~70% complete
+- ✅ Phases 0-4: Complete (core tracking functional)
+- 🟨 Phases 5+: Partial (outlier rejection, I/O, CLI)
+- ❌ Critical Issue: Tracking diverges on real data (frames 272+)
+- 📊 See [implementation-status.md](implementation-status.md) for detailed progress
+
+---
+
 ## 1. Executive Summary
 
 This document defines requirements for a production C++ implementation of the UKF-based joint-space motion capture tracker. The system tracks skeletal motion from multi-camera 2D pose detections using forward kinematics and Unscented Kalman Filtering.

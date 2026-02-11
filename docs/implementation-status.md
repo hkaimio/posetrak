@@ -1,7 +1,8 @@
 # Implementation Status - Posetrak C++ Tracker
 
-**Last Updated**: January 31, 2026
-**Current Phase**: Phase 4 Complete ✅, Phase 5+ Partial
+**Last Updated**: February 11, 2026
+**Current Phase**: Phase 4 Complete ✅, Phase 5+ Partial (~70% Complete)
+**Status**: Core tracking functional, needs debugging for real data and productionization
 
 ---
 
@@ -89,38 +90,41 @@
 
 ### Phase 6: OpenCV Integration & Video Export
 **Why needed**:
-- Currently no distortion handling (assumes undistorted coordinates)
-- No fisheye camera support
+- Currently manual distortion implementation (not using OpenCV)
+- No fisheye camera support via OpenCV
 - No video overlay generation
 
 **Impact**:
-- Can track with calibrated cameras in undistorted space
-- Cannot handle raw video with lens distortion
-- Cannot produce visual validation output
+- Manual Brown-Conrady distortion works but not validated against OpenCV
+- Cannot produce video outputs for visual validation
+- Limited to CSV/JSON exports
 
-**Priority**: Medium (depends on camera calibration workflow)
+**Priority**: Medium (needed for production use, especially video validation)
 
 ### Phase 7: Full I/O & Export
-**Needed for production use**:
-- [ ] TRC export (marker trajectories)
-- [ ] JSON state export
-- [ ] ZIP diagnostics archive
-- [ ] Statistics CSV
+**Partially complete**:
+- ✅ CSV export (8 files: tracking_results, joint_angles, root_pose, marker_projections, observations, tracking_stats, predicted_observations, state_vectors)
+- ✅ StatisticsTracker class for metrics
+- ✅ TrackingExporter class
+- [ ] TRC export (OpenSim marker trajectories) ⚠️ **CRITICAL for biomechanics workflows**
+- [ ] ZIP diagnostics archive (with JSON)
+- [ ] overall_stats.json summary
 - [ ] BVH export (via Python wrapper)
 
-**Current state**: Can track, but cannot export results in standard formats
+**Current state**: CSV exports work (129 frames tracked successfully), but missing standard biomechanics formats
 
 ### Phase 8: CLI & User Experience
-**Current state**: No command-line interface
+**Partially complete**:
+- ✅ CLI tool exists (cli/track.cpp, 852 lines)
+- ✅ TOML configuration file support (TrackerConfig, TrackerAppConfig)
+- ✅ Example configs (example_config.toml, posetrak_config.toml)
+- ✅ Basic progress reporting (per-frame statistics)
+- ⚠️ CLI executable not currently compiled (build issue)
+- [ ] Progress bar with ETA
+- [ ] --help documentation
+- [ ] User-friendly error recovery
 
-**Needed**:
-- [ ] CLI tool matching Python interface
-- [ ] Progress reporting
-- [ ] User-friendly error messages
-- [ ] Configuration file support
-- [ ] Help documentation
-
-**Workaround**: Tests demonstrate functionality, but not user-accessible
+**Current state**: CLI implemented but not accessible; tracked 129 frames via test code
 
 ### Phase 9: Optimization & Performance
 **Not yet profiled or optimized**
@@ -177,49 +181,75 @@
 
 ## 🚀 Recommended Next Steps
 
+### CRITICAL (Fix Tracker Divergence) - HIGHEST PRIORITY
+**Goal**: Debug why tracking fails on real data
+
+1. **Investigate Real Data Tracking Failure** (2-3 days)
+   - Frame 271: 58 inliers, 283 outliers, 9027px mean error
+   - Frames 272+: 0 inliers, 341 outliers (tracking lost)
+   - **Potential causes**:
+     - Camera calibration accuracy issues
+     - Observation undistortion errors
+     - Measurement noise too low (20px may be insufficient)
+     - Process model mismatch (real motion not constant velocity)
+     - Initialization error accumulation
+   - **Actions**:
+     - Validate camera projections against Python
+     - Check undistortion accuracy
+     - Tune measurement noise (try 50-100px)
+     - Compare with Python tracker on same sequence
+     - Add covariance inflation if needed
+
+2. **Fix Index Mapping Inconsistencies** (1-2 days)
+   - Create `StateIndexMapper` class
+   - Centralize joint ↔ state vector ↔ error state mappings
+   - Eliminate recurring bug source
+   - Fix inactive joints in state vector issue
+
+**Estimated time**: 3-5 days
+**Output**: Tracker that works reliably on real data
+
 ### Option A: Production Readiness (High Priority)
-**Goal**: Make tracker usable for real data
+**Goal**: Make tracker usable for users (after fixing tracking)
 
-1. **Phase 7: Export Formats** (3-5 days)
-   - JSON state export
-   - TRC marker trajectories
-   - Statistics CSV
-   - Enables integration with existing pipelines
+1. **Complete CLI Tool** (1-2 days)
+   - Fix compilation/linking issue
+   - Add --help documentation
+   - Progress bar with ETA
+   - User-friendly error messages
 
-2. **Phase 8: CLI Tool** (3-5 days)
-   - Command-line interface
-   - Configuration file support
-   - Progress reporting
-   - Makes tracker accessible to non-developers
+2. **TRC Export** (2-3 days)
+   - Implement OpenSim marker trajectory export
+   - Critical for biomechanics workflows
 
-3. **Real Data Testing** (2-3 days)
-   - Test with actual OpenPose data
-   - Validate against Python results
-   - Identify any missing edge cases
+3. **Long Sequence Testing** (2-3 days)
+   - Test 1000+ frame sequences
+   - Validate outlier rejection at scale
+   - Compare with Python tracker
 
-**Estimated time**: 8-13 days
-**Output**: Production-ready tracker for use cases without video output
+**Estimated time**: 5-8 days (after fixing tracking)
+**Output**: Production-ready tracker
 
 ### Option B: Complete Feature Parity (Medium Priority)
-**Goal**: Match all Python capabilities
+**Goal**: Match all Python capabilities (after fixing tracking)
 
 1. **Phase 6: OpenCV Integration** (5-7 days)
    - Distortion/undistortion using OpenCV
    - Fisheye camera support
    - Video overlay generation
 
-2. **Phase 7 & 8**: (as above)
+2. **Phase 7 & 8**: Complete export formats and CLI
 
 3. **Phase 10: Validation** (5-7 days)
    - Regression tests vs Python
    - Cross-platform testing
    - Documentation
 
-**Estimated time**: 15-21 days
+**Estimated time**: 15-21 days (after fixing tracking)
 **Output**: Full Python feature parity
 
 ### Option C: Performance Optimization (Advanced)
-**Goal**: Maximize speed before deployment
+**Goal**: Maximize speed (only after tracking works)
 
 1. **Profiling** (1-2 days)
    - Profile current implementation
@@ -236,7 +266,7 @@
    - Compare with Python
    - Document speedups
 
-**Estimated time**: 7-11 days
+**Estimated time**: 7-11 days (after fixing tracking)
 **Output**: Highly optimized tracker
 
 ---
@@ -245,9 +275,10 @@
 
 | Priority | Scenario | Recommended Path |
 |----------|----------|-----------------|
-| **Immediate use** | Need to track data now | **Option A** (Production Readiness) |
-| **Python replacement** | Deprecating Python version | **Option B** (Feature Parity) |
-| **Real-time tracking** | Need maximum speed | **Option C** (Optimization) |
+| **Critical** | Tracking fails on real data | **FIX TRACKING FIRST** ⚠️ |
+| **Immediate use** | Need to track data now | Fix tracking, then **Option A** |
+| **Python replacement** | Deprecating Python version | Fix tracking, then **Option B** |
+| **Real-time tracking** | Need maximum speed | Fix tracking, then **Option C** |
 | **Research** | Experimenting with algorithms | Continue with current state |
 
 ---
@@ -321,19 +352,60 @@
 
 ---
 
+## 🐛 Critical Issues Discovered
+
+### Real Data Tracking Failure ❌ **BLOCKING**
+**Evidence**:
+- Tracked 129 frames from kotegaeshi sequence
+- Frame 271: 58 inliers, 283 outliers, 9027px mean reprojection error
+- Frames 272-274: 0 inliers, 341 outliers (complete tracking loss)
+
+**Hypothesis**:
+1. **Calibration accuracy**: Large errors suggest camera calibration issues
+2. **Measurement noise too low**: 20px may be insufficient for real OpenPose detections
+3. **Process model mismatch**: Constant velocity inadequate for real human motion
+4. **Undistortion errors**: Manual distortion implementation may differ from Python/OpenCV
+5. **Initialization error**: IK may have converged to poor local minimum
+
+**Impact**: Tracker works on synthetic data but fails on real sequences
+
+### Index Mapping Inconsistencies ⚠️ **TECHNICAL DEBT**
+**Issues**:
+- Joint ↔ state vector ↔ error state index mapping done inconsistently across codebase
+- Multiple bugs have occurred from this (noted in open-issues.md)
+- Inactive joints stored in state vector but not used (memory waste)
+- No single source of truth for index calculations
+
+**Impact**: Recurring bugs, difficult maintenance
+
+---
+
 ## Conclusion
 
-**Current Status**: Phase 4 complete ✅ with excellent results
+**Current Status**: Phase 4 complete ✅ (~70% overall) - Core tracking works on synthetic data, **fails on real data** ❌
 
-**Recommendation**: **Option A (Production Readiness)**
-- Focus on Phase 7 (Export) + Phase 8 (CLI)
-- This makes the tracker immediately usable
-- Defer OpenCV and optimization until after validation with real data
-- Total estimated time: 8-13 days to production-ready tracker
+**Critical Blocker**: Must debug and fix real data tracking divergence before production use
 
-**Next immediate steps**:
-1. Design JSON export format for tracking results
-2. Implement TRC marker trajectory export
-3. Create basic CLI tool with configuration file support
-4. Test with real OpenPose data
-5. Document usage and examples
+**Recommendation**: **Fix Tracking First, Then Production Readiness**
+1. **Week 1**: Debug tracking divergence (3-5 days) ⚠️ **CRITICAL**
+   - Investigate outlier rejection failure
+   - Validate camera calibration
+   - Tune measurement noise
+   - Compare with Python tracker
+2. **Week 2**: Complete CLI + TRC export (5-8 days)
+   - Fix CLI compilation
+   - Implement TRC format
+   - Long sequence testing
+3. **Week 3**: OpenCV integration + benchmarking (5-7 days)
+   - Use OpenCV for distortion
+   - Video overlay generation
+   - Performance profiling
+
+**Total estimated time to production**: 2-3 weeks
+
+**Next immediate steps** (in priority order):
+1. ⚠️ **Debug real data tracking failure** (frames 272+)
+2. Compare camera projections with Python tracker
+3. Validate observation undistortion accuracy
+4. Tune measurement noise (try 50-100px)
+5. Create StateIndexMapper class to fix technical debt

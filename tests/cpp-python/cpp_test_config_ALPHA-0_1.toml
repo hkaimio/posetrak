@@ -11,7 +11,7 @@
 skeleton = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/Harri_skeleton-shouldery-rot.yaml"
 cameras = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/Calib_scene.toml"
 observations_dir = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/pose"
-sync = "tests/cpp-python/sync_cpp-python.json"  # Optional: camera-specific frame offsets
+sync = "tests/cpp-python/sync_cpp-python-full.json"  # Optional: camera-specific frame offsets
 person_id = 0
 active_joint_groups = ["main", "HandL", "HandR"]
 
@@ -36,23 +36,24 @@ min_cameras_for_init = 2
 
 [tracking.ukf]
 # UKF sigma point parameters - CRITICAL: MATCH PYTHON EXACTLY
-alpha = 0.001  # Python uses 0.001 (NOT 0.5!)
+alpha = 0.1  # Python uses 0.001 (NOT 0.5!)
 beta = 2.0
 kappa = 0.0
 
 [output]
 # Export to comparison directory (must be absolute path)
-directory = "/home/harri/projects/posetrak/tracking_tests/cpp-python-comparison/cpp_results"
+directory = "/home/harri/projects/posetrak/tracking_tests/full-alpha-0_1"
 export_tracking_results = true  # CSV files with tracking data
 export_statistics = true        # tracking_stats.csv and overall_stats.json
-export_debug = true
+export_debug = false
 
 [processing]
 # Frame range - TIME-BASED (NEW)
 # Python test: tracker frames 0-129 (130 frames), camera frames ~270-400
 
 start_time = 0.0         # Start at synchronized time 0
-end_time = 0.5           # 120 frames at 120 Hz
+#end_time = 1.0           # 120 frames at 120 Hz
+end_time = 8           # 120 frames at 120 Hz
 tracker_fps = 120.0      # 120 Hz sample rate
 
 # ============================================================================

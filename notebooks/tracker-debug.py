@@ -15,8 +15,9 @@ def _():
 
 @app.cell
 def _(Path):
-    #result_dir = Path("/home/harri/projects/posetrak/tracking_tests/alpha_0_1")
-    result_dir = Path("/home/harri/projects/posetrak/tracking_tests/cpp-python-comparison/cpp_results")
+    result_dir = Path("/home/harri/projects/posetrak/tracking_tests/full-alpha-0_1")
+    # CPP-python comparison results
+    #result_dir = Path("/home/harri/projects/posetrak/tracking_tests/cpp-python-comparison/cpp_results")
     return (result_dir,)
 
 

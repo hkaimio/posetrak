@@ -966,6 +966,51 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         // Update effective dimensions for inliers
         effective_n_obs = n_inliers;
         effective_measurement_dim = inlier_dim;
+
+        // ===============================================================================
+        // CRITICAL FIX FOR REPROJECTION ERROR REPORTING BUG
+        // ===============================================================================
+        // Problem: The observation_results computed by reject_outliers() contain
+        // innovation values based on the OLD measurement_mean (computed with ALL
+        // observations including outliers). After outlier rejection, we recomputed
+        // measurement_mean using ONLY inliers. The innovations in observation_results
+        // are now stale and don't match the actual innovations used in the filter update.
+        //
+        // Impact: StatisticsTracker computes reprojection errors from these stale
+        // innovations, resulting in ZERO or incorrect error values being exported.
+        //
+        // Solution: Recompute the innovation field in observation_results to use the
+        // updated measurement_mean. This ensures the reported reprojection errors
+        // match what's actually happening in the filter.
+        // ===============================================================================
+        for (size_t i = 0; i < observations.size(); ++i) {
+            auto& obs_result = observation_results[i];
+
+            // Skip outliers - their innovations are not used in the update
+            if (obs_result.is_outlier) {
+                continue;
+            }
+
+            // Find this observation in the inlier list to get its index in measurement_mean
+            int inlier_idx = -1;
+            for (size_t j = 0; j < inlier_observations.size(); ++j) {
+                // Match by marker_id, camera_id, and frame_idx (uniquely identifies obs)
+                if (inlier_observations[j].marker_id == observations[i].marker_id &&
+                    inlier_observations[j].camera_id == observations[i].camera_id &&
+                    inlier_observations[j].frame_idx == observations[i].frame_idx) {
+                    inlier_idx = static_cast<int>(j);
+                    break;
+                }
+            }
+
+            if (inlier_idx >= 0) {
+                // Recompute innovation using the updated measurement_mean for inliers
+                Eigen::Vector2d updated_predicted = measurement_mean.segment<2>(2 * inlier_idx);
+                Eigen::Vector2d actual = observed.segment<2>(2 * inlier_idx);
+                obs_result.innovation = actual - updated_predicted;
+                obs_result.predicted = updated_predicted;
+            }
+        }
     } else {
         // No outlier rejection - compute diagnostics for all observations
         observation_results =
@@ -1298,6 +1343,7 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
         obs_result.mahalanobis_distance = mahal_dist;
         obs_result.innovation = innovation;
         obs_result.predicted = predicted;
+        obs_result.is_outlier = is_outlier;
         obs_result.actual = actual;
         results.push_back(obs_result);
 

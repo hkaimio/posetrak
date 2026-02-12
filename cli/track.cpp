@@ -721,10 +721,25 @@ int main(int argc, char* argv[]) {
                 }
             } else {
                 frames_tracked++;
-                if (verbose) {
-                    fmt::print("  Step {}: t=[{:.3f}, {:.3f}): {} inliers, {} outliers\n", step,
-                               t_start, t_end, result.update_info.num_inliers,
-                               result.update_info.num_outliers);
+                if (true) {
+                    double sum_error = 0.0;
+                    double max_error = 0.0;
+                    uint32_t count = 0;
+                    for (auto const& obs_result : result.update_info.observations) {
+                        if (!obs_result.is_outlier) {
+                            double error = obs_result.innovation.norm();
+                            sum_error += error;
+                            max_error = std::max(max_error, error);
+                            count++;
+                        }
+                    }
+
+                    fmt::print(
+                        "  Step {}: t=[{:.3f}, {:.3f}): {} inliers, {} outliers mean reproj error "
+                        "{:.4f} max {:.4f}\n",
+                        step, t_start, t_end, result.update_info.num_inliers,
+                        result.update_info.num_outliers, count > 0 ? sum_error / count : 0.0,
+                        max_error);
                 }
             }
 

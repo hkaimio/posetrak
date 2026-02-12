@@ -228,12 +228,6 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
     }
 
     fmt::print("\n=== Tracking frame at timestamp {:.6f} ===\n", timestamp);
-    auto joint_angles = ukf_->state().joint_angles();
-    fmt::print("Current state joint angles (first 5):");
-    for (int i = 0; i < 5 && i < joint_angles.size(); ++i) {
-        fmt::print(" {:.4f}", joint_angles[i]);
-    }
-    fmt::print("\n");
 
     // Compute dt
     double dt = timestamp - last_timestamp_;
@@ -250,18 +244,7 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
     }
 
     // Step 1: Predict
-    fmt::print("Tracker::track_frame(): Predicting with dt = {:.6f}s\n", dt);
     ukf_->predict(dt);
-    fmt::print("Done prediction:\n", dt);
-    auto pred_root_pos = ukf_->state().root_position();
-    fmt::print("  Predicted root position: [{:.4f}, {:.4f}, {:.4f}]\n", pred_root_pos.x(),
-               pred_root_pos.y(), pred_root_pos.z());
-    auto pred_joint_angles = ukf_->state().joint_angles();
-    fmt::print("  Predicted joint angles (first 5):");
-    for (int i = 0; i < 5; ++i) {
-        fmt::print(" {:.4f}", pred_joint_angles[i]);
-    }
-    fmt::print("\n");
 
     // Step 2: Check if we have observations
     if (!has_sufficient_observations(observations)) {
@@ -270,7 +253,6 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
         return result;
     }
 
-    fmt::print("Tracker::track_frame(): Updating with {} observations\n", observations.size());
     // Step 3: Update
     auto update_info = ukf_->update(observations, cameras_, *fk_, config_.measurement_noise_std,
                                     config_.outlier_threshold);
@@ -305,7 +287,6 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
         }
     }
 
-    auto post_root_pos = ukf_->state().root_position();
     auto post_joint_angles = ukf_->state().joint_angles();
 
     // Step 4: Create result

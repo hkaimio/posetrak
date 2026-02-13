@@ -1,850 +1,693 @@
 # Rerun Visualization Design for Posetrak
 
 **Created**: 2026-02-12
-**Status**: Design Phase
-**Target**: Comprehensive 3D/2D visualization of tracking results
-
----
+**Updated**: 2026-02-13
+**Status**: Implementation Phase
 
 ## Overview
 
-This document defines the design for integrating Rerun (https://rerun.io) into Posetrak for real-time and post-hoc visualization of motion capture tracking. The system will log multi-modal data (3D skeleton, 2D observations, metrics) in a hierarchical structure for interactive exploration.
+Comprehensive design for integrating Rerun visualization into Posetrak, featuring:
+- **Multi-person support**: Track N people simultaneously
+- **Transform hierarchy**: Skeleton as Transform3D tree for proper rotation visualization
+- **Unified observations**: Single Points2D with per-point properties
+- **Per-observation statistics**: Innovations, Mahalanobis distances for debugging
+- **Dual timelines**: Frame-based and time-based scrubbing
 
 ---
 
-## Architecture
-
-### High-Level Design
+## Entity Hierarchy
 
 ```
-┌─────────────────┐
-│  Tracker        │
-│  (orchestrator) │
-└────────┬────────┘
-         │
-         ├───────► RerunLogger::log_frame_start()
-         │
-         ├───────► UKF::predict() ──► RerunLogger::log_prediction()
-         │
-         ├───────► UKF::update()  ──► RerunLogger::log_update()
-         │
-         └───────► RerunLogger::log_frame_end()
-                           │
-                           ▼
-                   ┌──────────────┐
-                   │ Rerun C++ SDK│
-                   └──────┬───────┘
-                          │
-                          ▼
-                   output.rrd (file)
-                   or
-                   tcp://localhost:9876 (live)
+world/
+├── cameras/
+│   ├── cam_0/
+│   │   ├── image                        [Image] Camera frame (optional, future)
+│   │   ├── image/observations/person_0  [Points2D] Observations in image coords
+│   │   │                                - Color: green (inlier) or red (outlier)
+│   │   │                                - Radii: scaled by confidence
+│   │   │                                - Labels: marker names
+│   │   │                                - Class IDs: marker IDs
+│   │   │                                - KeypointIds: for annotation
+│   │   ├── image/observations/person_1  [Points2D]
+│   │   ├── image/predictions/person_0   [Points2D] UKF predictions (blue)
+│   │   ├── image/predictions/person_1   [Points2D]
+│   │   ├── image/reprojection_errors/person_0  [LineStrips2D] predicted→actual
+│   │   ├── image/reprojection_errors/person_1  [LineStrips2D]
+│   │   ├── pinhole                      [Pinhole] Camera intrinsics
+│   │   └── transform                    [Transform3D] Camera extrinsics (world pose)
+│   ├── cam_1/
+│   │   └── ... (same structure)
+│   └── cam_{2,3,...N}/
+│
+├── person_0/
+│   ├── skeleton/
+│   │   ├── rest_pose/                   *** Transform hierarchy (logged once) ***
+│   │   │   ├── root                     [Transform3D] Root frame
+│   │   │   ├── root/pelvis              [Transform3D] Pelvis relative to root
+│   │   │   ├── root/pelvis/spine_01     [Transform3D] Spine_01 relative to pelvis
+│   │   │   ├── root/pelvis/spine_01/spine_02  [Transform3D]
+│   │   │   ├── root/pelvis/left_hip     [Transform3D] Left leg chain...
+│   │   │   ├── root/pelvis/left_hip/left_knee   [Transform3D]
+│   │   │   ├── root/pelvis/right_hip    [Transform3D] Right leg chain...
+│   │   │   └── ... (full kinematic tree)
+│   │   │
+│   │   ├── predicted/                   *** After UKF predict step ***
+│   │   │   ├── root                     [Transform3D] Predicted transforms
+│   │   │   ├── root/pelvis              [Transform3D] (with predicted rotations)
+│   │   │   └── ... (same tree structure, updated poses)
+│   │   │
+│   │   └── posterior/                   *** After UKF update step ***
+│   │       ├── root                     [Transform3D] Updated transforms
+│   │       ├── root/pelvis              [Transform3D] (with posterior rotations)
+│   │       └── ... (same tree structure, final poses)
+│   │
+│   ├── markers/
+│   │   ├── triangulated                 [Points3D] Initial 3D (from multi-view)
+│   │   ├── predicted                    [Points3D] From FK (predicted state)
+│   │   ├── posterior                    [Points3D] From FK (posterior state) ***NEW***
+│   │   └── labels                       [TextLog] Marker names
+│   │
+│   ├── trajectory/
+│   │   └── root                         [LineStrips3D] Root path over time (trail)
+│   │
+│   ├── tracking_quality/                *** Aggregate metrics per person ***
+│   │   ├── reprojection_error_mean      [Scalar] Mean reprojection error (pixels)
+│   │   ├── reprojection_error_max       [Scalar] Max reprojection error (pixels)
+│   │   ├── num_observations             [Scalar] Total observations used
+│   │   ├── num_inliers                  [Scalar] Inlier count
+│   │   ├── num_outliers                 [Scalar] Outlier count
+│   │   ├── outlier_rate                 [Scalar] Percentage (0-100)
+│   │   ├── nis                          [Scalar] Normalized Innovation Squared
+│   │   ├── covariance_condition_number  [Scalar] Condition number
+│   │   └── covariance_min_eigenvalue    [Scalar] Min eigenvalue (stability)
+│   │
+│   ├── state/                           *** State vectors ***
+│   │   ├── joint_angles                 [Tensor] (DOF,) vector
+│   │   ├── joint_velocities             [Tensor] (DOF,) vector
+│   │   ├── root_position                [Vec3D] Position
+│   │   └── root_orientation             [Quaternion] Orientation
+│   │
+│   ├── observation_stats/               *** Per-observation diagnostics (CRITICAL) ***
+│   │   │                                All as (N_obs,) tensors or BarChart
+│   │   ├── innovation_norms             [Tensor] Innovation magnitude per obs
+│   │   ├── innovation_x                 [Tensor] Innovation x component (pixels)
+│   │   ├── innovation_y                 [Tensor] Innovation y component (pixels)
+│   │   ├── mahalanobis_distances        [Tensor] Mahalanobis distance per obs
+│   │   ├── outlier_flags                [Tensor] Boolean outlier status (0/1)
+│   │   ├── camera_ids                   [Tensor] Which camera per obs
+│   │   ├── marker_ids                   [Tensor] Which marker per obs
+│   │   ├── confidences                  [Tensor] OpenPose confidence per obs
+│   │   └── predicted_vs_actual          [Tensor] (N_obs, 4) [pred_u, pred_v, act_u, act_v]
+│   │
+│   └── diagnostics/                     *** Advanced (optional) ***
+│       ├── sigma_points                 [Points3D] UKF sigma points (3D cloud)
+│       ├── covariance_ellipsoid         [Ellipsoids3D] 3D uncertainty visualization
+│       └── joint_limit_violations       [Tensor] Per-joint flags (0=ok, 1=at limit)
+│
+├── person_1/                            *** Additional tracked people ***
+│   └── ... (exact same structure as person_0)
+│
+├── person_2/
+│   └── ...
+│
+└── scene/                               *** Scene-level metadata ***
+    ├── floor_plane                      [Plane3D] Ground plane (if known)
+    └── coordinate_axes                  [Arrows3D] World XYZ axes
 ```
-
-### Component Responsibilities
-
-| Component | Responsibility |
-|-----------|----------------|
-| **Tracker** | Orchestrates tracking, calls RerunLogger at key points |
-| **RerunLogger** | Encapsulates all Rerun API calls, maintains entity hierarchy |
-| **UKF** | Provides diagnostics data to RerunLogger |
-| **ForwardKinematics** | No changes (RerunLogger queries it) |
-| **TrackerConfig** | Adds rerun-specific configuration options |
 
 ---
 
-## Class Interface
+## Timelines
 
-### RerunLogger Class
+### Dual Timeline System
 
-**File**: `include/posetrak/visualization/rerun_logger.hpp`
+Rerun supports multiple timelines. We use **two** for flexibility:
 
 ```cpp
-#pragma once
+// Frame-based timeline (integer sequence)
+rec.set_time_sequence("frame", frame_number);
 
-#include <rerun.hpp>
-#include <optional>
-#include <memory>
-#include <filesystem>
+// Time-based timeline (float seconds)
+rec.set_time_seconds("timestamp", timestamp);
+```
 
-#include "posetrak/core/camera.hpp"
-#include "posetrak/core/observation.hpp"
-#include "posetrak/core/skeleton.hpp"
-#include "posetrak/core/state.hpp"
-#include "posetrak/filters/update_result.hpp"
-#include "posetrak/kinematics/forward_kinematics.hpp"
+**Why both?**
+- **`frame`**: Easy scrubbing (frame 0, 1, 2, ...), aligns with test data indices
+- **`timestamp`**: Actual time for synchronization, analysis of temporal dynamics
 
-namespace posetrak {
+**User experience**:
+- Scrub by frame in Rerun UI: "Show me frame 272 where tracking fails"
+- Or scrub by time: "Show me what happens at t=9.0 seconds"
+- Plot metrics over time (seconds) or frames (count)
 
-/**
- * @brief Configuration for Rerun logging
- */
-struct RerunConfig {
-    bool enabled = false;                              ///< Enable Rerun logging
-    std::optional<std::filesystem::path> output_path;  ///< Save to .rrd file
-    bool live_streaming = false;                       ///< Stream to Rerun viewer
-    std::string live_address = "127.0.0.1:9876";       ///< Viewer TCP address
+---
 
-    // Visualization options
-    bool log_camera_images = false;                    ///< Log camera images (if available)
-    bool log_sigma_points = false;                     ///< Log UKF sigma points (expensive)
-    bool log_covariance_ellipsoids = false;            ///< Log 3D uncertainty ellipsoids
-    bool log_reprojection_vectors = true;              ///< Log 2D error vectors
-    bool log_joint_frames = false;                     ///< Log coordinate frame at each joint
+## Key Design Decisions
 
-    // Performance
-    int log_every_n_frames = 1;                        ///< Subsample logging (1=every frame)
+### 1. Multi-Person Support
 
-    // Recording metadata
-    std::string application_id = "posetrak";
-    std::string recording_id;                          ///< Auto-generated if empty
-};
+**Problem**: Need to track multiple people simultaneously.
 
-/**
- * @brief Rerun visualization logger for motion capture tracking
- *
- * Logs tracking data to Rerun for interactive 3D/2D visualization and debugging.
- * Maintains a hierarchical entity structure under world/ namespace.
- *
- * Lifecycle:
- * 1. Construct with config and metadata (skeleton, cameras)
- * 2. Call log_initialization() once after tracker init
- * 3. For each frame:
- *    - log_frame_start()
- *    - log_observations() (raw OpenPose data)
- *    - log_prediction() (after UKF predict)
- *    - log_update() (after UKF update)
- *    - log_frame_end() (metrics, state)
- * 4. Destructor auto-flushes and closes recording
- */
+**Solution**: Each person gets independent entity subtree under `world/person_{id}/`.
+
+**Benefits**:
+- Clean separation (no name conflicts)
+- Can toggle visibility per person
+- Easy to compare multiple people
+- Scalable to N people
+
+**Example**:
+```cpp
+// Person 0
+rec.log("world/person_0/skeleton/posterior/root", ...);
+rec.log("world/person_0/markers/posterior", ...);
+
+// Person 1
+rec.log("world/person_1/skeleton/posterior/root", ...);
+rec.log("world/person_1/markers/posterior", ...);
+```
+
+### 2. Transform Hierarchy (not Points + Lines)
+
+**Problem**: Points + lines don't show rotation, hard to add geometry, not semantically correct.
+
+**Solution**: Log skeleton as **Transform3D hierarchy** matching kinematic chain.
+
+**Benefits**:
+- **Proper rotation visualization**: Can see ball joints rotating, not just positions
+- **Add geometry later**: Attach capsules, meshes to transforms
+- **Semantic structure**: Rerun understands parent-child relationships
+- **Future-proof**: Can add IK visualizations, collision shapes, etc.
+
+**Example**:
+```cpp
+// Rest pose (logged once at initialization)
+rec.log("world/person_0/skeleton/rest_pose/root",
+        Transform3D::from_translation_rotation(root_pos, root_quat));
+
+rec.log("world/person_0/skeleton/rest_pose/root/pelvis",
+        Transform3D::from_translation_rotation(pelvis_local_pos, pelvis_local_quat));
+
+rec.log("world/person_0/skeleton/rest_pose/root/pelvis/spine_01",
+        Transform3D::from_translation_rotation(spine01_local_pos, spine01_local_quat));
+
+// Predicted pose (after predict step)
+rec.log("world/person_0/skeleton/predicted/root",
+        Transform3D::from_translation_rotation(predicted_root_pos, predicted_root_quat));
+// ... etc for all joints
+
+// Posterior pose (after update step)
+rec.log("world/person_0/skeleton/posterior/root",
+        Transform3D::from_translation_rotation(posterior_root_pos, posterior_root_quat));
+// ... etc for all joints
+```
+
+**Note**: Can still overlay points/lines if desired for debugging, but hierarchy is primary.
+
+### 3. Unified Observations (not separate series)
+
+**Problem**: v1 had separate `raw/`, `inliers/`, `outliers/` which is redundant.
+
+**Solution**: Single `Points2D` with per-point properties:
+- **Color**: Green (inlier), red (outlier)
+- **Radius**: Scaled by confidence (larger = more confident)
+- **Labels**: Marker names
+- **Class IDs**: Marker IDs (for filtering/selection)
+
+**Benefits**:
+- Less cluttered entity tree
+- Easier to toggle all obs on/off
+- Per-point data attached (innovation, Mahalanobis)
+- Natural Rerun pattern
+
+**Example**:
+```cpp
+std::vector<rerun::Position2D> positions;
+std::vector<rerun::Color> colors;
+std::vector<float> radii;
+std::vector<std::string> labels;
+std::vector<uint16_t> class_ids;
+
+for (auto const& obs_result : update_result.observations) {
+    positions.push_back({obs_result.actual.x(), obs_result.actual.y()});
+
+    // Color by outlier status
+    if (obs_result.is_outlier) {
+        colors.push_back({255, 0, 0});  // Red
+    } else {
+        colors.push_back({0, 255, 0});  // Green
+    }
+
+    // Radius by confidence
+    radii.push_back(2.0f + 3.0f * obs_result.confidence);  // 2-5 pixels
+
+    labels.push_back(obs_result.marker_name);
+    class_ids.push_back(obs_result.marker_id);
+}
+
+rec.log("world/cameras/cam_0/image/observations/person_0",
+        rerun::Points2D(positions)
+            .with_colors(colors)
+            .with_radii(radii)
+            .with_labels(labels)
+            .with_class_ids(class_ids));
+```
+
+### 4. Per-Observation Statistics
+
+**Problem**: Need granular data to debug outlier rejection and tune thresholds.
+
+**Solution**: Log per-observation diagnostics as tensors:
+- Innovation (x, y components and norm)
+- Mahalanobis distance
+- Outlier flag
+- Camera/marker IDs
+- Confidence
+
+**Benefits**:
+- **Histogram analysis**: "What's the distribution of Mahalanobis distances?"
+- **Identify problematic markers**: "Which markers are consistently outliers?"
+- **Correlation analysis**: "Do high innovation_x correspond to specific cameras?"
+- **Threshold tuning**: "If I set threshold to 3.0, how many outliers?"
+
+**Example**:
+```cpp
+// Collect per-observation stats
+std::vector<float> innovation_norms;
+std::vector<float> mahalanobis_dists;
+std::vector<uint8_t> outlier_flags;
+// ... etc
+
+for (auto const& obs_result : update_result.observations) {
+    innovation_norms.push_back(obs_result.innovation.norm());
+    mahalanobis_dists.push_back(obs_result.mahalanobis_distance);
+    outlier_flags.push_back(obs_result.is_outlier ? 1 : 0);
+}
+
+// Log as tensors
+rec.log("world/person_0/observation_stats/innovation_norms",
+        rerun::Tensor::from_shape_and_data(
+            {static_cast<size_t>(innovation_norms.size())},
+            innovation_norms
+        ));
+
+rec.log("world/person_0/observation_stats/mahalanobis_distances",
+        rerun::Tensor::from_shape_and_data(
+            {static_cast<size_t>(mahalanobis_dists.size())},
+            mahalanobis_dists
+        ));
+```
+
+**Analysis in Rerun**:
+- Select tensor, view as plot/histogram
+- Identify outliers visually
+- Correlate with other metrics
+
+### 5. Image Coordinate System
+
+**Problem**: 2D observations need to align with camera images.
+
+**Solution**: Log observations as **children of image entity**.
+
+**Rerun behavior**:
+- When logging `image` archetype, Rerun sets up 2D coordinate system
+- Child entities (e.g., `image/observations/person_0`) are automatically in pixel coordinates
+- 2D and 3D views are synchronized
+
+**Example**:
+```cpp
+// Log image (optional, future)
+rec.log("world/cameras/cam_0/image",
+        rerun::Image::from_rgb24(image_data, width, height));
+
+// Log camera intrinsics (required for 2D→3D mapping)
+rec.log("world/cameras/cam_0/pinhole",
+        rerun::Pinhole::from_focal_length_and_resolution(
+            {fx, fy}, {width, height}
+        ));
+
+// Log observations as child of image → automatically in pixel coords
+rec.log("world/cameras/cam_0/image/observations/person_0",
+        rerun::Points2D(positions)...);
+```
+
+### 6. Predicted vs Posterior Markers
+
+**Clarification of marker series**:
+
+| Series | When | Purpose |
+|--------|------|---------|
+| `triangulated` | Initialization only | 3D positions from multi-view triangulation (ground truth-ish) |
+| `predicted` | After UKF predict step | FK from predicted state (prior) |
+| `posterior` | After UKF update step | FK from updated state (final result) |
+
+**Why separate?**
+- Compare prediction (blue) vs posterior (green) → see effect of measurements
+- Check if update is correcting in right direction
+- Validate FK consistency
+
+---
+
+## Class Interface Updates
+
+### RerunLogger Constructor
+
+```cpp
 class RerunLogger {
 public:
     /**
-     * @brief Construct logger with configuration
+     * @brief Construct logger for multiple people
      *
-     * @param config Rerun-specific configuration
-     * @param skeleton Skeleton model (for marker/joint info)
-     * @param cameras Map of camera_id -> Camera (for extrinsics)
+     * @param config Rerun configuration
+     * @param skeleton Skeleton model (shared by all people)
+     * @param cameras Map of camera_id → Camera
+     * @param person_ids List of person IDs to track
      */
     RerunLogger(RerunConfig const& config,
                 Skeleton const& skeleton,
-                std::unordered_map<int, Camera> const& cameras);
+                std::unordered_map<int, Camera> const& cameras,
+                std::vector<int> const& person_ids = {0});  // Default: single person
 
-    /**
-     * @brief Destructor - flushes and closes recording
-     */
-    ~RerunLogger();
-
-    // ========================================================================
-    // Initialization (call once)
-    // ========================================================================
-
-    /**
-     * @brief Log static metadata and scene setup
-     *
-     * Logs:
-     * - Camera extrinsics and pinhole models
-     * - Skeleton rest pose
-     * - Marker definitions
-     * - Time series blueprint
-     */
-    void log_initialization();
-
-    /**
-     * @brief Log initial state after tracker initialization
-     *
-     * @param initial_state State from triangulation + IK
-     * @param marker_positions_3d Initial marker positions
-     */
-    void log_initial_state(State const& initial_state,
-                           std::map<std::string, Eigen::Vector3d> const& marker_positions_3d);
-
-    // ========================================================================
-    // Per-Frame Logging
-    // ========================================================================
-
-    /**
-     * @brief Mark start of new frame
-     *
-     * Sets Rerun timeline to current frame/timestamp.
-     *
-     * @param frame Frame number (0-indexed)
-     * @param timestamp Timestamp in seconds
-     */
-    void log_frame_start(int frame, double timestamp);
-
-    /**
-     * @brief Log raw observations from all cameras
-     *
-     * Logs to world/cameras/cam_X/observations/{raw,labels}
-     *
-     * @param observations All observations for this frame
-     */
-    void log_observations(std::vector<Observation> const& observations);
-
-    /**
-     * @brief Log predicted state after UKF predict step
-     *
-     * Logs:
-     * - Predicted skeleton pose (3D)
-     * - Predicted marker positions (3D)
-     *
-     * @param predicted_state State after predict()
-     * @param predicted_markers Marker positions from FK
-     */
-    void log_prediction(State const& predicted_state,
-                       std::map<std::string, Eigen::Vector3d> const& predicted_markers);
-
-    /**
-     * @brief Log UKF update diagnostics
-     *
-     * Logs:
-     * - Inlier/outlier observations (color-coded)
-     * - Predicted 2D projections
-     * - Reprojection error vectors
-     * - Mahalanobis distances
-     *
-     * @param observations All observations
-     * @param update_result Update diagnostics from UKF
-     * @param fk Forward kinematics (for projections)
-     */
-    void log_update(std::vector<Observation> const& observations,
-                   UpdateResult const& update_result,
-                   ForwardKinematics& fk);
-
-    /**
-     * @brief Log final posterior state and metrics
-     *
-     * Logs:
-     * - Posterior skeleton pose (3D)
-     * - Joint angles/velocities (tensor)
-     * - Tracking quality metrics (scalars)
-     * - Covariance diagnostics
-     *
-     * @param posterior_state Final state after update
-     * @param covariance State covariance matrix
-     * @param update_result Update diagnostics
-     * @param marker_positions_3d Final marker positions
-     */
-    void log_frame_end(State const& posterior_state,
-                      Eigen::MatrixXd const& covariance,
-                      UpdateResult const& update_result,
-                      std::map<std::string, Eigen::Vector3d> const& marker_positions_3d);
-
-    // ========================================================================
-    // Optional: Advanced Diagnostics
-    // ========================================================================
-
-    /**
-     * @brief Log UKF sigma points (3D cloud)
-     *
-     * Only if config.log_sigma_points = true (expensive)
-     *
-     * @param sigma_point_states List of sigma point states
-     */
-    void log_sigma_points(std::vector<State> const& sigma_point_states);
-
-    /**
-     * @brief Log camera images with overlays
-     *
-     * Only if config.log_camera_images = true
-     *
-     * @param camera_id Camera ID
-     * @param image Image data (RGB or grayscale)
-     */
-    void log_camera_image(int camera_id,
-                         cv::Mat const& image);  // Requires OpenCV
-
-    /**
-     * @brief Check if logging is enabled
-     */
-    bool enabled() const { return config_.enabled; }
-
-    /**
-     * @brief Manually flush recording (normally automatic)
-     */
-    void flush();
-
-private:
-    RerunConfig config_;
-    Skeleton const& skeleton_;
-    std::unordered_map<int, Camera> const& cameras_;
-
-    std::unique_ptr<rerun::RecordingStream> rec_;
-
-    int current_frame_ = -1;
-    double current_timestamp_ = 0.0;
-    int frames_logged_ = 0;
-
-    // Cached data for trajectory visualization
-    std::vector<Eigen::Vector3d> root_trajectory_;
-
-    // Helper methods
-    void setup_recording();
-    void setup_timelines();
-
-    void log_skeleton_3d(std::string const& entity_path,
-                        State const& state,
-                        std::map<std::string, Eigen::Vector3d> const& marker_positions);
-
-    void log_observations_2d(int camera_id,
-                            std::vector<Observation> const& camera_obs,
-                            UpdateResult const* update_result = nullptr);
-
-    void log_metrics(UpdateResult const& update_result,
-                    Eigen::MatrixXd const& covariance);
-
-    void log_reprojection_errors_2d(int camera_id,
-                                   std::vector<Observation> const& observations,
-                                   UpdateResult const& update_result,
-                                   State const& state,
-                                   ForwardKinematics& fk);
-
-    Eigen::Vector3d get_joint_position_3d(State const& state,
-                                         std::string const& joint_name);
-
-    std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>>
-        get_bone_segments(State const& state);
+    // ... rest of interface ...
 };
+```
 
-}  // namespace posetrak
+### Log Frame Methods (Multi-Person)
+
+```cpp
+/**
+ * @brief Log observations for all people
+ *
+ * @param observations_by_person Map of person_id → observations
+ */
+void log_observations(
+    std::unordered_map<int, std::vector<Observation>> const& observations_by_person);
+
+/**
+ * @brief Log prediction for specific person
+ */
+void log_prediction(int person_id,
+                   State const& predicted_state,
+                   std::map<std::string, Eigen::Vector3d> const& predicted_markers);
+
+/**
+ * @brief Log update for specific person with detailed diagnostics
+ */
+void log_update(int person_id,
+               std::vector<Observation> const& observations,
+               UpdateResult const& update_result,
+               State const& predicted_state,  // For comparison
+               State const& posterior_state,  // Final result
+               ForwardKinematics& fk);
+```
+
+### Transform Hierarchy Logging
+
+```cpp
+private:
+    /**
+     * @brief Log skeleton as Transform3D hierarchy
+     *
+     * Recursively logs all joints as transforms in parent-child relationships.
+     *
+     * @param entity_prefix Base path (e.g., "world/person_0/skeleton/posterior")
+     * @param state State to extract transforms from
+     */
+    void log_skeleton_hierarchy(std::string const& entity_prefix,
+                               State const& state);
+
+    /**
+     * @brief Recursively log joint transform and children
+     */
+    void log_joint_recursive(std::string const& entity_path,
+                            Joint const& joint,
+                            State const& state,
+                            Eigen::Isometry3d const& parent_transform);
 ```
 
 ---
 
-## Integration Points
-
-### 1. TrackerConfig Extension
-
-**File**: `include/posetrak/core/config.hpp`
-
-```cpp
-struct TrackerConfig {
-    // ... existing fields ...
-
-    // Visualization
-    RerunConfig rerun;  ///< Rerun visualization configuration
-};
-
-struct TrackerAppConfig {
-    // ... existing fields ...
-
-    // Add [rerun] section parsing in load()
-};
-```
-
-### 2. Tracker Class Integration
-
-**File**: `include/posetrak/tracking/tracker.hpp`
-
-```cpp
-class Tracker {
-public:
-    // ... existing methods ...
-
-    /**
-     * @brief Set Rerun logger (optional)
-     */
-    void set_rerun_logger(std::shared_ptr<RerunLogger> logger);
-
-private:
-    std::shared_ptr<RerunLogger> rerun_logger_;
-};
-```
-
-**File**: `src/tracking/tracker.cpp`
-
-```cpp
-bool Tracker::initialize(/* ... */) {
-    // ... existing initialization ...
-
-    // Log initialization
-    if (rerun_logger_ && rerun_logger_->enabled()) {
-        rerun_logger_->log_initialization();
-        rerun_logger_->log_initial_state(state_, initial_marker_positions);
-    }
-
-    return true;
-}
-
-TrackingResult Tracker::track_frame(/* ... */) {
-    // Frame start
-    if (rerun_logger_ && rerun_logger_->enabled()) {
-        rerun_logger_->log_frame_start(current_frame_, timestamp);
-        rerun_logger_->log_observations(observations);
-    }
-
-    // Predict
-    ukf_->predict(dt);
-
-    if (rerun_logger_ && rerun_logger_->enabled()) {
-        auto predicted_markers = fk_->compute(ukf_->state());
-        rerun_logger_->log_prediction(ukf_->state(), predicted_markers);
-    }
-
-    // Update
-    auto update_result = ukf_->update(observations, cameras_, *fk_);
-
-    if (rerun_logger_ && rerun_logger_->enabled()) {
-        rerun_logger_->log_update(observations, update_result, *fk_);
-    }
-
-    // Frame end
-    if (rerun_logger_ && rerun_logger_->enabled()) {
-        auto marker_positions = fk_->compute(ukf_->state());
-        rerun_logger_->log_frame_end(ukf_->state(), ukf_->covariance(),
-                                     update_result, marker_positions);
-    }
-
-    // ... rest of existing code ...
-}
-```
-
-### 3. CLI Application Integration
-
-**File**: `cli/track.cpp`
-
-```cpp
-int main(int argc, char* argv[]) {
-    // ... parse config ...
-
-    // Create Rerun logger if enabled
-    std::shared_ptr<RerunLogger> rerun_logger;
-    if (config.rerun.enabled) {
-        rerun_logger = std::make_shared<RerunLogger>(
-            config.rerun, skeleton, cameras
-        );
-        tracker.set_rerun_logger(rerun_logger);
-    }
-
-    // ... run tracking ...
-}
-```
-
----
-
-## Configuration File Format
-
-**File**: `example_config.toml`
+## Configuration Updates
 
 ```toml
 [rerun]
 enabled = true
 output_path = "tracking_output/tracking.rrd"
 live_streaming = false
-live_address = "127.0.0.1:9876"
 
-# Visualization options
-log_camera_images = false          # Requires image loading
-log_sigma_points = false           # Expensive (117 points per frame)
-log_covariance_ellipsoids = false  # Requires eigendecomposition
-log_reprojection_vectors = true    # Show prediction errors
-log_joint_frames = false           # Show coordinate frames
+# Multi-person
+person_ids = [0, 1]  # Track person 0 and person 1
+
+# Visualization detail
+log_camera_images = false
+log_sigma_points = false
+log_transform_hierarchy = true      # Use transforms (recommended)
+log_skeleton_lines = false          # Also log lines for debugging (optional)
+log_reprojection_vectors = true
+log_observation_stats = true        # Per-obs diagnostics (IMPORTANT)
 
 # Performance
-log_every_n_frames = 1             # Log every frame (1) or subsample (>1)
+log_every_n_frames = 1
 
-# Metadata
-application_id = "posetrak"
-recording_id = "kotegaeshi_run_001"
+# Timelines
+use_frame_timeline = true           # Integer frame numbers
+use_timestamp_timeline = true       # Float seconds
 ```
 
 ---
 
-## Data Flow Example
-
-### Tracking a Single Frame
+## Data Flow (Multi-Person Example)
 
 ```
-Frame 42, t=1.400s
-─────────────────────────────────────────────────────────────
+Frame 42, t=1.400s, Person 0 and Person 1
+──────────────────────────────────────────────────────────────
 
-1. tracker.track_frame(obs, 1.400)
-   │
-   ├─► rerun_logger.log_frame_start(42, 1.400)
-   │     • Sets timeline: frame=42, timestamp=1.400
-   │
-   ├─► rerun_logger.log_observations(obs)
-   │     • world/cameras/cam_0/observations/raw ← gray points
-   │     • world/cameras/cam_1/observations/raw ← gray points
-   │     • world/cameras/cam_2/observations/raw ← gray points
-   │     • world/cameras/cam_3/observations/raw ← gray points
-   │
-   ├─► ukf.predict(dt)
-   │
-   ├─► rerun_logger.log_prediction(predicted_state, predicted_markers)
-   │     • world/skeleton/predicted/joints ← yellow points
-   │     • world/skeleton/predicted/bones ← orange lines
-   │     • world/markers/fk_predicted ← purple points
-   │
-   ├─► ukf.update(obs, cameras, fk)
-   │
-   ├─► rerun_logger.log_update(obs, update_result, fk)
-   │     • world/cameras/cam_0/observations/inliers ← green points
-   │     • world/cameras/cam_0/observations/outliers ← red points
-   │     • world/cameras/cam_0/observations/predicted ← blue points
-   │     • world/cameras/cam_0/reprojection_vectors ← blue lines
-   │     • (repeat for cam_1, cam_2, cam_3)
-   │
-   └─► rerun_logger.log_frame_end(state, cov, update_result, markers)
-         • world/skeleton/current/joints ← yellow points
-         • world/skeleton/current/bones ← orange lines
-         • world/markers/fk_predicted ← purple points
-         • world/tracking_quality/reprojection_error ← scalar(2.5)
-         • world/tracking_quality/num_inliers ← scalar(285)
-         • world/tracking_quality/num_outliers ← scalar(20)
-         • world/tracking_quality/nis ← scalar(450.3)
-         • world/state/joint_angles ← tensor([...])
-```
+1. rerun_logger.log_frame_start(42, 1.400)
+   • rec.set_time_sequence("frame", 42)
+   • rec.set_time_seconds("timestamp", 1.400)
 
----
+2. rerun_logger.log_observations(obs_by_person)
+   for person_id in [0, 1]:
+     for camera_id in [0, 1, 2, 3]:
+       • world/cameras/cam_X/image/observations/person_Y
+         (unified Points2D with colors/radii/labels)
 
-## Entity Paths Detail
+3. Predict step (person 0)
+   rerun_logger.log_prediction(0, predicted_state_0, predicted_markers_0)
+   • world/person_0/skeleton/predicted/root/... (transform hierarchy)
+   • world/person_0/markers/predicted (Points3D)
 
-### Camera Observations (2D)
+4. Predict step (person 1)
+   rerun_logger.log_prediction(1, predicted_state_1, predicted_markers_1)
+   • world/person_1/skeleton/predicted/root/... (transform hierarchy)
+   • world/person_1/markers/predicted (Points3D)
 
-```
-world/cameras/cam_0/
-├── pinhole                         [Pinhole] Camera intrinsics (logged once)
-├── transform                       [Transform3D] Camera pose (logged once)
-├── observations/
-│   ├── raw                         [Points2D] All detections (gray, radius=3px)
-│   ├── inliers                     [Points2D] Accepted by UKF (green, radius=4px)
-│   ├── outliers                    [Points2D] Rejected (red, radius=4px)
-│   ├── predicted                   [Points2D] UKF prediction (blue, radius=3px)
-│   └── labels                      [TextEntry] Marker names
-└── reprojection_vectors            [LineStrips2D] actual→predicted (blue)
-```
+5. Update step (person 0)
+   rerun_logger.log_update(0, obs_0, update_result_0, pred_state_0, post_state_0, fk)
+   • world/cameras/cam_X/image/predictions/person_0 (blue points)
+   • world/cameras/cam_X/image/reprojection_errors/person_0 (lines)
+   • world/person_0/observation_stats/* (tensors)
 
-### Skeleton (3D)
+6. Update step (person 1)
+   rerun_logger.log_update(1, obs_1, update_result_1, pred_state_1, post_state_1, fk)
+   • world/cameras/cam_X/image/predictions/person_1 (blue points)
+   • world/cameras/cam_X/image/reprojection_errors/person_1 (lines)
+   • world/person_1/observation_stats/* (tensors)
 
-```
-world/skeleton/
-├── rest_pose/                      (logged once at initialization)
-│   ├── joints                      [Points3D] Joint positions (gray, radius=0.02m)
-│   ├── bones                       [LineStrips3D] Bone connections (gray)
-│   └── labels                      [TextEntry] Joint names
-├── predicted/                      (after predict step)
-│   ├── joints                      [Points3D] Predicted joints (yellow, radius=0.02m)
-│   └── bones                       [LineStrips3D] Predicted bones (orange)
-├── current/                        (after update step)
-│   ├── joints                      [Points3D] Posterior joints (green, radius=0.02m)
-│   ├── bones                       [LineStrips3D] Posterior bones (green)
-│   ├── root_frame                  [Transform3D] Root coordinate frame
-│   └── joint_frames/               [Transform3D] Per-joint frames (optional)
-│       ├── pelvis
-│       ├── spine
-│       └── ...
-└── history/
-    └── root_trajectory             [LineStrips3D] Root path (blue trail)
-```
+7. rerun_logger.log_frame_end(person_id=0, posterior_state_0, ...)
+   • world/person_0/skeleton/posterior/root/... (transform hierarchy)
+   • world/person_0/markers/posterior (Points3D)
+   • world/person_0/tracking_quality/* (scalars)
+   • world/person_0/state/* (tensors)
 
-### Markers (3D)
-
-```
-world/markers/
-├── fk_predicted                    [Points3D] From FK (purple, radius=0.015m)
-├── triangulated                    [Points3D] From multi-view (cyan, optional)
-├── labels                          [TextEntry] Marker names
-└── errors                          [LineStrips3D] predicted→triangulated (optional)
-```
-
-### Tracking Quality Metrics (Time Series)
-
-```
-world/tracking_quality/
-├── reprojection_error              [Scalar] Mean error (pixels)
-├── max_reprojection_error          [Scalar] Max error (pixels)
-├── num_inliers                     [Scalar] Inlier count
-├── num_outliers                    [Scalar] Outlier count
-├── outlier_rate                    [Scalar] Percentage (0-100)
-├── nis                             [Scalar] Normalized Innovation Squared
-├── covariance_condition            [Scalar] Condition number (log scale)
-└── covariance_min_eigenvalue       [Scalar] Min eigenvalue
-```
-
-### State (Time Series)
-
-```
-world/state/
-├── joint_angles                    [Tensor] All angles (DOF-dimensional)
-├── joint_velocities                [Tensor] All velocities
-├── root_position                   [Vec3D] Root position
-└── root_orientation                [Quaternion] Root orientation
+8. rerun_logger.log_frame_end(person_id=1, posterior_state_1, ...)
+   • world/person_1/skeleton/posterior/root/... (transform hierarchy)
+   • world/person_1/markers/posterior (Points3D)
+   • world/person_1/tracking_quality/* (scalars)
+   • world/person_1/state/* (tensors)
 ```
 
 ---
 
-## Color Scheme
+## Debugging Workflow Example
 
-| Entity | Color | Rationale |
-|--------|-------|-----------|
-| Raw observations | Gray (200,200,200) | Neutral, background |
-| Inlier observations | Green (0,255,0) | Good/accepted |
-| Outlier observations | Red (255,0,0) | Bad/rejected |
-| Predicted projections | Blue (0,0,255) | Prediction |
-| Reprojection vectors | Blue (0,0,255) | Error direction |
-| Skeleton joints (predicted) | Yellow (255,255,0) | Prior state |
-| Skeleton bones (predicted) | Orange (255,165,0) | Prior state |
-| Skeleton joints (posterior) | Green (0,255,0) | Updated state |
-| Skeleton bones (posterior) | Green (0,200,0) | Updated state |
-| Markers (FK) | Purple (200,0,200) | Derived from state |
-| Root trajectory | Blue (0,100,255) | Motion history |
-| Camera frustums | Cyan (0,255,255) | Scene context |
+### Scenario: Frame 272 Tracking Divergence
+
+**Question**: Why does tracking fail at frame 272?
+
+**Workflow**:
+
+1. **Load recording**: `rerun tracking.rrd`
+
+2. **Scrub to frame 272** using frame timeline
+
+3. **Check 3D view**:
+   - Is skeleton still reasonable?
+   - Are markers drifting from skeleton?
+   - Are predicted vs posterior very different? (prediction bad or update bad?)
+
+4. **Check 2D camera views**:
+   - Which cameras have red (outlier) observations?
+   - Are reprojection vectors large?
+   - Are outliers random or systematic? (e.g., all in one camera → calibration issue)
+
+5. **Check metrics** (time series plots):
+   - `outlier_rate`: Does it spike before frame 272?
+   - `reprojection_error_mean`: Does it grow over time?
+   - `covariance_condition_number`: Does it explode? (filter instability)
+   - `nis`: Is innovation too large? (model mismatch)
+
+6. **Check per-observation stats** (frame 272 specifically):
+   - Select `world/person_0/observation_stats/mahalanobis_distances`
+   - View as histogram: Are distances concentrated near threshold?
+   - Select `world/person_0/observation_stats/innovation_norms`
+   - Are innovations asymmetric (x vs y)?
+   - Correlate with `camera_ids`: Is one camera pathological?
+
+7. **Hypothesis**: "Camera 2 has systematic error causing many outliers"
+   - Filter view to show only camera 2 observations
+   - Check if predicted projections are systematically off
+   - → Action: Re-calibrate camera 2
+
+8. **Hypothesis**: "Outlier threshold too aggressive"
+   - Check distribution of `mahalanobis_distances` for inliers
+   - Are many distances near threshold (e.g., 3.5 when threshold is 4.0)?
+   - → Action: Increase threshold to 5.0 and re-test
 
 ---
 
-## Performance Considerations
+## Implementation Priority
 
-### Overhead Estimates
+### Phase 1: Core Infrastructure & 3D Markers (2-3 days)
 
-| Operation | Cost | Frequency | Impact |
-|-----------|------|-----------|--------|
-| log_frame_start() | ~0.1ms | Per frame | Negligible |
-| log_observations() | ~1-2ms | Per frame | Low |
-| log_prediction() | ~3-5ms | Per frame | Low |
-| log_update() | ~5-10ms | Per frame | Medium |
-| log_frame_end() | ~5-10ms | Per frame | Medium |
-| log_sigma_points() | ~50-100ms | Per frame (opt) | High |
-| log_camera_image() | ~10-50ms | Per frame (opt) | High |
-| **Total (basic)** | ~15-30ms | Per frame | ~5-10% @ 30Hz |
-| **Total (full)** | ~75-180ms | Per frame | ~30-50% @ 30Hz |
+**Priority**: Start with easiest visualization first (3D markers), build up to full skeleton.
 
-### Optimization Strategies
+- [ ] **Step 1.1**: Basic RerunLogger class setup (0.5 days)
+  - Constructor, destructor, timeline management
+  - Configuration parsing (TOML)
+  - Recording stream initialization (file or live)
 
-1. **Subsampling**: `log_every_n_frames = 10` → visualize every 10th frame
-2. **Conditional features**: Disable expensive options by default
-3. **Async logging**: Rerun SDK supports background flushing
-4. **Data reduction**:
-   - Log 3D skeleton but skip 2D overlays (much faster)
-   - Log metrics but skip spatial data
-5. **Recording sessions**: Log full detail for 100 frames, then sparse for rest
+- [ ] **Step 1.2**: 3D Marker Logging (1 day) ⭐ **START HERE**
+  - `log_markers_3d()`: Log marker positions as Points3D
+  - Support triangulated, predicted, posterior marker sets
+  - Color-coded (cyan=triangulated, purple=predicted, green=posterior)
+  - Labels with marker names
+  - Test with static frame (frame 0, rest pose)
 
----
+- [ ] **Step 1.3**: Camera Setup (0.5 days)
+  - Log camera pinhole intrinsics (once at init)
+  - Log camera transforms (world pose, once at init)
+  - Verify camera frustums visible in 3D view
 
-## Implementation Phases
+- [ ] **Step 1.4**: Timeline & Frame Management (0.5 days)
+  - Dual timelines (frame + timestamp)
+  - `log_frame_start()`, `log_frame_end()`
+  - Multi-person entity structure (world/person_0/, world/person_1/)
 
-### Phase 1: Core Infrastructure (2-3 days)
-- [ ] Add Rerun C++ SDK dependency to meson.build
-- [ ] Create `RerunLogger` class skeleton
-- [ ] Implement `log_initialization()` (cameras, skeleton)
-- [ ] Implement `log_frame_start()` and timeline management
-- [ ] Basic 3D skeleton logging (`log_skeleton_3d`)
-- [ ] Test with simple synthetic sequence
+**Postponed to Phase 1b**: Transform hierarchy logging (full skeleton)
 
-**Deliverable**: Can view 3D skeleton animation in Rerun viewer
+**Deliverable**: View 3D markers animating over time, see cameras in 3D space
 
-### Phase 2: 2D Observations (2-3 days)
-- [ ] Implement `log_observations()` (raw 2D points)
-- [ ] Implement `log_update()` (inliers/outliers color-coded)
-- [ ] Add reprojection error vectors
-- [ ] Multi-camera view synchronization
+### Phase 1b: Skeleton Transform Hierarchy (2-3 days)
 
-**Deliverable**: Can see 2D observations per camera, color-coded by outlier status
+**After Phase 1 validates basic visualization is working**
 
-### Phase 3: Metrics & Diagnostics (1-2 days)
-- [ ] Implement `log_frame_end()` (metrics)
-- [ ] Time series plots (reprojection error, NIS, etc.)
-- [ ] Covariance diagnostics
-- [ ] Joint angle tensor logging
+- [ ] **Transform Hierarchy Design**
+  - Recursive joint logging (parent-child relationships)
+  - Local vs world transforms
+  - FK integration (compute transforms from joint angles)
 
-**Deliverable**: Interactive time series plots alongside 3D view
+- [ ] **Implementation**
+  - `log_skeleton_hierarchy()`: Recursively log all joints
+  - Three hierarchies: rest_pose, predicted, posterior
+  - Each joint as Transform3D (position + rotation)
+  - Test with static pose, then animated
 
-### Phase 4: Integration & Testing (1-2 days)
-- [ ] Integrate into Tracker class
-- [ ] Add CLI flag `--rerun output.rrd`
-- [ ] Configuration file parsing
-- [ ] Test with real data (kotegaeshi sequence)
-- [ ] Documentation and examples
+- [ ] **Optional: Skeleton Lines**
+  - Also log bones as LineStrips3D (familiarity)
+  - Points3D for joint positions (for debugging)
+  - Configurable via TOML (can disable for cleaner view)
 
-**Deliverable**: Full working integration with CLI tool
+**Deliverable**: View animated skeleton with proper rotations, toggle between predicted/posterior
 
-### Phase 5: Advanced Features (Optional, 3-5 days)
-- [ ] Camera image loading and overlay
-- [ ] Sigma point visualization
+### Phase 2: 2D Observations & Diagnostics (3 days)
+- [ ] Image coordinate system (observations as children of image)
+- [ ] Prediction projections (blue points)
+- [ ] Reprojection error vectors (lines)
+- [ ] **Per-observation statistics** (tensors) - CRITICAL
+
+**Deliverable**: See 2D/3D synchronized, analyze per-obs stats to debug outliers
+
+### Phase 3: Metrics & Integration (2 days)
+- [ ] Aggregate tracking quality metrics (scalars)
+- [ ] State logging (joint angles, velocities)
+- [ ] Root trajectory (3D trail)
+- [ ] CLI integration (`--rerun output.rrd`)
+
+**Deliverable**: Full working system ready for real data debugging
+
+### Phase 4: Advanced (Optional, 2-3 days)
+- [ ] Sigma points visualization
 - [ ] Covariance ellipsoids
-- [ ] Comparison mode (Python vs C++ side-by-side)
-- [ ] Export high-res images/videos
+- [ ] Camera image loading
+- [ ] Comparison mode (Python vs C++)
 
-**Total estimated effort**: 8-15 days (depending on feature scope)
+**Total Estimate**:
+- Essential (Phases 1-3): 7-8 days
+- With skeleton hierarchy (Phase 1b): 9-11 days
+- With advanced features (Phase 4): 11-14 days
 
----
-
-## Testing Strategy
-
-### Unit Tests
-
-```cpp
-// tests/test_rerun_logger.cpp
-
-TEST_CASE("RerunLogger initialization") {
-    RerunConfig config;
-    config.enabled = true;
-    config.output_path = "/tmp/test.rrd";
-
-    RerunLogger logger(config, skeleton, cameras);
-    logger.log_initialization();
-
-    // Verify recording file created
-    REQUIRE(std::filesystem::exists("/tmp/test.rrd"));
-}
-
-TEST_CASE("RerunLogger frame logging") {
-    // ... setup ...
-
-    logger.log_frame_start(0, 0.0);
-    logger.log_observations(observations);
-    logger.log_frame_end(state, covariance, update_result, markers);
-
-    logger.flush();
-
-    // Verify data logged (check file size > 0, etc.)
-}
-```
-
-### Integration Tests
-
-1. **Small sequence test** (10 frames)
-   - Verify all entities logged
-   - Check timeline consistency
-   - Validate data types
-
-2. **Real sequence test** (kotegaeshi, 500 frames)
-   - Performance check (overhead < 10%)
-   - File size reasonable (< 100MB for 500 frames)
-   - No crashes or memory leaks
-
-3. **Comparison test**
-   - Run Python and C++ on same data
-   - Log both to separate recordings
-   - Load both in Rerun, compare visually
+**Recommended**: Start with Phase 1 (markers only), then Phase 2 (observations), validate with real data, then add Phase 1b (skeleton) if needed.
 
 ---
 
-## Usage Examples
+## Key Features
 
-### Minimal Usage (CLI)
-
-```bash
-# Track with Rerun logging to file
-./posetrak track config.toml --rerun output.rrd
-
-# View results
-rerun output.rrd
-```
-
-### Live Streaming
-
-```bash
-# Terminal 1: Start Rerun viewer
-rerun
-
-# Terminal 2: Track with live streaming
-./posetrak track config.toml --rerun-live
-```
-
-### Programmatic Usage (C++)
-
-```cpp
-// Create config
-RerunConfig rerun_config;
-rerun_config.enabled = true;
-rerun_config.output_path = "results.rrd";
-rerun_config.log_reprojection_vectors = true;
-
-// Create logger
-auto logger = std::make_shared<RerunLogger>(
-    rerun_config, skeleton, cameras
-);
-
-// Attach to tracker
-tracker.set_rerun_logger(logger);
-
-// Run tracking (logger is automatically called)
-tracker.initialize(initial_observations, 0.0);
-for (auto const& [timestamp, obs] : observation_sequence) {
-    tracker.track_frame(obs, timestamp);
-}
-
-// Logger flushes on destruction
-```
-
-### Python Analysis with Rerun
-
-```python
-import rerun as rr
-import numpy as np
-
-# Load C++ tracking results
-rr.init("posetrak_analysis", recording_id="analysis_001")
-rr.connect()  # Or rr.save("analysis.rrd")
-
-# Load C++ recording
-cpp_data = load_cpp_tracking_results("cpp_output.rrd")
-
-# Add Python-side analysis
-for frame in range(len(cpp_data)):
-    rr.set_time_sequence("frame", frame)
-
-    # Log additional analysis results
-    rr.log("analysis/joint_angle_errors",
-           rr.Scalar(compute_error(cpp_data[frame])))
-
-    # Log comparison markers
-    python_markers = compute_python_markers(frame)
-    rr.log("comparison/python_markers",
-           rr.Points3D(python_markers, colors=(255, 0, 255)))
-```
-
----
-
-## Dependencies
-
-### Required
-
-- **Rerun C++ SDK** (v0.20+)
-  - Add to `meson.build` via wrap or system package
-  - Headers: `<rerun.hpp>`
-  - Link: `-lrerun_sdk`
-
-### Optional
-
-- **OpenCV** (for camera image logging)
-  - Already planned for Phase 6
-  - Used in `log_camera_image()`
+| Feature | Status | Benefit |
+|---------|--------|---------|
+| **Multi-person** | ✅ Designed | Track N people simultaneously |
+| **3D Markers** | 🟡 Phase 1 | Simple, immediate visualization |
+| **Transform hierarchy** | 🟡 Phase 1b | Proper rotation viz, add geometry later |
+| **Unified observations** | 🟡 Phase 2 | Cleaner, per-point data (color, radius) |
+| **Posterior markers** | 🟡 Phase 1 | See before/after update |
+| **Per-obs stats** | 🟡 Phase 2 | Debug outlier rejection (CRITICAL) |
+| **Image coordinates** | 🟡 Phase 2 | Proper alignment with images |
+| **Dual timelines** | 🟡 Phase 1 | Flexible scrubbing (frame + time) |
+| **Quality metrics** | 🟡 Phase 3 | Track reprojection errors over time |
 
 ---
 
 ## Open Questions
 
-1. **Rerun SDK version**: Use latest (0.20+) or pin to stable version?
-2. **Live streaming default**: Enable by default or opt-in?
-3. **Recording size limits**: Implement auto-subsampling for long sequences (>1000 frames)?
-4. **Multi-person support**: How to structure entities for multiple tracked people?
-5. **Memory management**: Buffer frames before flushing or flush immediately?
+1. **Skeleton transform hierarchy**:
+   - Should we log both transforms AND points+lines?
+   - Or just transforms (cleaner but less familiar)?
+   - **Suggestion**: Transforms only, add optional lines via config flag
+
+2. **Per-observation stats granularity**:
+   - Log every frame or only "interesting" frames (high outlier rate)?
+   - **Suggestion**: Every frame (tensors are compact), use subsampling if needed
+
+3. **Multi-person observation assignment**:
+   - How do we know which observations belong to which person?
+   - **Assumption**: Tracker already does assignment (person_id in observations)
+
+4. **Image loading**:
+   - Where do camera images come from? (not part of current pipeline)
+   - **Suggestion**: Phase 4 feature, requires adding video loading to tracker
+
+5. **Comparison mode**:
+   - Load Python and C++ recordings separately or combined?
+   - **Suggestion**: Separate recordings, load both in Rerun viewer, compare visually
 
 ---
 
-## Future Enhancements
+## Next Steps
 
-### Phase 6+: Advanced Visualization
+1. **Review this design** with stakeholders
+2. **Prototype Phase 1** (transform hierarchy logging) to validate Rerun API usage
+3. **Test with synthetic data** (10 frames) before real data
+4. **Implement Phase 2** (per-obs stats) - this is critical for debugging
+5. **Deploy on real data** (kotegaeshi sequence) and analyze divergence
 
-- **Temporal analysis**: Heatmaps of error distribution over time
-- **Marker-specific views**: Focus on individual markers with history
-- **Joint angle plots**: 1D time series per joint DOF
-- **Covariance animation**: Ellipsoid growing/shrinking over time
-- **Camera coverage**: Visualize which cameras can see which markers
-
-### Integration with Other Tools
-
-- **OpenSim export**: Click marker in Rerun → export to OpenSim format
-- **Blender export**: Export skeleton animation for rendering
-- **Paper figures**: Screenshot tool with publication-quality settings
-
----
-
-## Conclusion
-
-This design provides a comprehensive visualization system that will greatly improve debugging, validation, and presentation of tracking results. The modular design allows incremental implementation, starting with core 3D skeleton visualization and gradually adding 2D overlays and metrics.
-
-**Recommended priority**: Implement Phase 1-4 first (essential features), defer Phase 5 (nice-to-have) until after tracking divergence is resolved and basic validation is complete.
+Ready to proceed with implementation?

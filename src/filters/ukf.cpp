@@ -1275,29 +1275,34 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
 
     Eigen::VectorXd observed = observations_to_vector(observations);
 
+    // First pass: compute Mahalanobis distances and validity for all observations
+    struct ObsData {
+        bool is_valid;
+        double mahalanobis_distance;
+        Eigen::Vector2d innovation;
+        Eigen::Vector2d predicted;
+        Eigen::Vector2d actual;
+    };
+
+    std::vector<ObsData> obs_data(observations.size());
+
     for (size_t i = 0; i < observations.size(); ++i) {
         Observation const& obs = observations[i];
+        ObsData& data = obs_data[i];
 
         // Extract predicted and actual measurements for this observation
-        Eigen::Vector2d predicted = measurement_mean.segment<2>(2 * i);
-        Eigen::Vector2d actual = observed.segment<2>(2 * i);
+        data.predicted = measurement_mean.segment<2>(2 * i);
+        data.actual = observed.segment<2>(2 * i);
 
-        // First check: if mean prediction is NaN (all sigma points failed), reject immediately
-        if (!std::isfinite(predicted.x()) || !std::isfinite(predicted.y())) {
-            ObservationResult obs_result;
-            obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
-            obs_result.camera_id = obs.camera_id;
-            obs_result.camera_frame_idx = obs.frame_idx;
-            obs_result.is_outlier = true;
-            obs_result.mahalanobis_distance = 0.0;
-            obs_result.innovation = Eigen::Vector2d::Zero();
-            obs_result.predicted = predicted;
-            obs_result.actual = actual;
-            results.push_back(obs_result);
+        // Check: if mean prediction is NaN (all sigma points failed), mark as invalid
+        if (!std::isfinite(data.predicted.x()) || !std::isfinite(data.predicted.y())) {
+            data.is_valid = false;
+            data.mahalanobis_distance = 0.0;
+            data.innovation = Eigen::Vector2d::Zero();
             continue;
         }
 
-        // Check if ALL sigma points failed projection (like Python does)
+        // Check if ALL sigma points failed projection
         bool all_sigma_points_nan = true;
         for (int sigma_idx = 0; sigma_idx < predicted_measurements.cols(); ++sigma_idx) {
             double u = predicted_measurements(2 * i, sigma_idx);
@@ -1309,17 +1314,9 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
         }
 
         if (all_sigma_points_nan) {
-            // All sigma points failed projection - reject as outlier
-            ObservationResult obs_result;
-            obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
-            obs_result.camera_id = obs.camera_id;
-            obs_result.camera_frame_idx = obs.frame_idx;
-            obs_result.is_outlier = true;
-            obs_result.mahalanobis_distance = 0.0;
-            obs_result.innovation = Eigen::Vector2d::Zero();
-            obs_result.predicted = predicted;
-            obs_result.actual = actual;
-            results.push_back(obs_result);
+            data.is_valid = false;
+            data.mahalanobis_distance = 0.0;
+            data.innovation = Eigen::Vector2d::Zero();
             continue;
         }
 
@@ -1327,30 +1324,94 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
         Eigen::Matrix2d cov_2x2 = innovation_cov.block<2, 2>(2 * i, 2 * i);
 
         // Compute innovation
-        Eigen::Vector2d innovation = actual - predicted;
+        data.innovation = data.actual - data.predicted;
 
         // Compute Mahalanobis distance
-        double mahal_dist = compute_mahalanobis_distance(innovation, cov_2x2);
+        data.mahalanobis_distance = compute_mahalanobis_distance(data.innovation, cov_2x2);
+        data.is_valid = true;
+    }
 
-        // Check if outlier
-        bool is_outlier = mahal_dist > threshold;
+    // Second pass: cross-camera outlier detection
+    // Group valid observations by marker_id
+    std::map<int, std::vector<size_t>> marker_to_obs_indices;
+    for (size_t i = 0; i < observations.size(); ++i) {
+        if (obs_data[i].is_valid) {
+            marker_to_obs_indices[observations[i].marker_id].push_back(i);
+        }
+    }
 
-        // Create result
+    // For each marker with multiple valid observations, apply cross-camera consistency check
+    std::vector<bool> is_cross_camera_outlier(observations.size(), false);
+    double const cross_camera_multiplier = 3.0;  // Tunable: reject if distance > k * median
+    double const min_median_threshold = 0.5;     // Skip cross-camera check if median is too small
+
+    for (auto const& [marker_id, obs_indices] : marker_to_obs_indices) {
+        if (obs_indices.size() < 2) {
+            continue;  // Need at least 2 cameras to compare
+        }
+
+        // Collect Mahalanobis distances for this marker across cameras
+        std::vector<double> distances;
+        for (size_t idx : obs_indices) {
+            distances.push_back(obs_data[idx].mahalanobis_distance);
+        }
+
+        // Compute median distance
+        std::vector<double> sorted_distances = distances;
+        std::sort(sorted_distances.begin(), sorted_distances.end());
+        double median;
+        size_t n = sorted_distances.size();
+        if (n % 2 == 0) {
+            median = (sorted_distances[n / 2 - 1] + sorted_distances[n / 2]) / 2.0;
+        } else {
+            median = sorted_distances[n / 2];
+        }
+
+        // Apply cross-camera threshold: reject if distance > multiplier * median
+        // Only apply if median is above minimum threshold (avoids rejecting everything when all are
+        // good)
+        if (median > min_median_threshold) {
+            double cross_camera_threshold = cross_camera_multiplier * median;
+
+            for (size_t idx : obs_indices) {
+                if (obs_data[idx].mahalanobis_distance > cross_camera_threshold) {
+                    is_cross_camera_outlier[idx] = true;
+                }
+            }
+        }
+    }
+
+    // Third pass: combine standard threshold and cross-camera check to generate final results
+    for (size_t i = 0; i < observations.size(); ++i) {
+        Observation const& obs = observations[i];
+        ObsData const& data = obs_data[i];
+
         ObservationResult obs_result;
         obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
         obs_result.camera_id = obs.camera_id;
         obs_result.camera_frame_idx = obs.frame_idx;
-        obs_result.mahalanobis_distance = mahal_dist;
-        obs_result.innovation = innovation;
-        obs_result.predicted = predicted;
-        obs_result.is_outlier = is_outlier;
-        obs_result.actual = actual;
-        results.push_back(obs_result);
+        obs_result.predicted = data.predicted;
+        obs_result.actual = data.actual;
+        obs_result.innovation = data.innovation;
+        obs_result.mahalanobis_distance = data.mahalanobis_distance;
 
-        // Keep observation if inlier
-        if (!is_outlier) {
-            inliers.push_back(obs);
+        if (!data.is_valid) {
+            // Invalid observation (NaN projection)
+            obs_result.is_outlier = true;
+        } else {
+            // Valid observation - check both standard and cross-camera thresholds
+            bool standard_outlier = data.mahalanobis_distance > threshold;
+            bool cross_camera_outlier = is_cross_camera_outlier[i];
+
+            obs_result.is_outlier = standard_outlier || cross_camera_outlier;
+
+            // Keep observation only if it passes both checks
+            if (!obs_result.is_outlier) {
+                inliers.push_back(obs);
+            }
         }
+
+        results.push_back(obs_result);
     }
 
     return {inliers, results};

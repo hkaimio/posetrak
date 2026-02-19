@@ -603,10 +603,8 @@ int main(int argc, char* argv[]) {
         int frames_tracked = 0;
         int frames_lost = 0;
 
-        // Export initialization state as step 0
-        if (state_vec_file.is_open()) {
-            export_state_vector(state_vec_file, 0, config.start_time, tracker.state(), skeleton);
-        }
+        // Note: State vectors will start at frame 1 (step 1 posterior) to align with
+        // tracking_results.csv Initialization state (frame 0) is not exported to maintain alignment
 
         // Process first update (correct the initialization with first observations)
         {
@@ -641,10 +639,7 @@ int main(int argc, char* argv[]) {
                 double t_effective = config.start_time - dt * 0.5;
                 auto result = tracker.track_frame(frame_0_obs, t_effective);
 
-                // Export posterior as step 1
-                if (state_vec_file.is_open()) {
-                    export_state_vector(state_vec_file, 1, t_effective, tracker.state(), skeleton);
-                }
+                // Note: Step 0 posterior not exported - tracking_results starts at frame 1 (step 1)
 
                 if (result.tracking_lost) {
                     fmt::print(stderr, "Warning: Tracking lost on first update\n");
@@ -744,8 +739,9 @@ int main(int argc, char* argv[]) {
             }
 
             // Export state vector AFTER tracking update (posterior state)
+            // CRITICAL: Use same frame index as tracking_results to keep them synchronized
             if (state_vec_file.is_open()) {
-                export_state_vector(state_vec_file, step + 1, t_effective, result.state, skeleton);
+                export_state_vector(state_vec_file, step, t_effective, result.state, skeleton);
             }
 
             // Export

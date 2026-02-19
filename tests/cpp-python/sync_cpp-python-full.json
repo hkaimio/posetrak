@@ -23,7 +23,7 @@
   "cam4": {
     "fps": 120.0,
     "sync_points": [
-      {"frame": 111, "timestamp": 0.0},
+      {"frame": 11, "timestamp": 0.0},
       {"frame": 131, "timestamp": 1.0}
     ]
   },

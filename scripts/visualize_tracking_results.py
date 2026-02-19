@@ -1052,7 +1052,7 @@ def visualize_tracking_results(csv_path: Path, skeleton_path: Path | None = None
                 label=f"person_{person_id}",
             ),
             keypoint_annotations=keypoint_annotations,
-            keypoint_connections=keypoint_connections,
+            # keypoint_connections=keypoint_connections,
         )
     ]
 

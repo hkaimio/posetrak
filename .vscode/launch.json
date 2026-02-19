@@ -5,6 +5,22 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name":"Rerun import",
+            "type":"debugpy",
+            "request":"launch",
+            "program":"${workspaceFolder}/scripts/visualize_tracking_results.py",
+            "console":"integratedTerminal",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "args":[
+                "${workspaceFolder}/tracking_tests/cross-cam-outlier-reject_proc_noise_0_2/tracking_results.csv",
+                "-o", "${workspaceFolder}/tracking_viz_cameras.rrd",
+                "--cameras", "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/Calib_scene.toml",
+                "--video-dir", "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/videos",
+                "--skeleton", "${workspaceFolder}/tests/data/Harri_skeleton-shouldery-rot.yaml",
+                "--sync", "${workspaceFolder}/tests/cpp-python/sync_cpp-python-full.json"
+            ]
+        },
+            {
             "type": "lldb",
             "request": "launch",
             "name": "Custom launch",
@@ -45,6 +61,7 @@
         "args": ["${workspaceFolder}/tests/cpp-python/cpp_test_config.toml"],
         "cwd": "${workspaceRoot}"
     },
+
 
     ],
 }

@@ -22,9 +22,9 @@ from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional
 
 
-def setup_rerun(recording_path: Path | None = None, live: bool = False):
+def setup_rerun(recording_path: Path | None = None, live: bool = False, app_id: str = "posetrak"):
     """Initialize Rerun recording."""
-    rr.init("posetrak")
+    rr.init(app_id)
 
     if live:
         # Stream to viewer
@@ -285,12 +285,211 @@ def log_camera_3d(camera_name: str, camera_data: Dict, entity_path_prefix: str =
     )
 
 
+def log_camera_images_only(video_cap: cv2.VideoCapture, camera_name: str,
+                          tracking_csv: Path, sync_points: Dict):
+    """
+    Log ONLY camera images without any marker observations (for base layer).
+
+    Args:
+        video_cap: OpenCV VideoCapture object for reading frames
+        camera_name: Camera name (e.g., 'cam1')
+        tracking_csv: Path to tracking_results.csv (for frame/timestamp info)
+        sync_points: Sync metadata dict with sync_points list and fps
+    """
+    print(f"📹 Loading camera frames from video...")
+
+    # Load tracking results to get frame/timestamp info
+    tracking_df = pd.read_csv(tracking_csv)
+    unique_frames = tracking_df[['frame', 'timestamp']].drop_duplicates().sort_values('frame')
+
+    entity_base = f"camera/{camera_name}"
+
+    print(f"🎬 Logging {len(unique_frames)} camera frames (images only, no markers)...")
+
+    prev_frame_idx = None
+    for _, row in unique_frames.iterrows():
+        frame_num = row['frame']
+        timestamp = row['timestamp']
+
+        # Map tracking frame to video frame using sync metadata
+        video_frame_idx = get_video_frame_for_tracking_frame(
+            frame_num, timestamp,
+            sync_points.get("sync_points", []),
+            sync_points.get("fps", 120.0)
+        )
+
+        if video_frame_idx != prev_frame_idx:
+            # Read frame directly from video
+            frame_img_rgb = read_video_frame(video_cap, video_frame_idx)
+            if frame_img_rgb is None:
+                continue
+
+            prev_frame_idx = video_frame_idx
+
+            # Set timelines
+            rr.set_time("frame", sequence=int(frame_num))
+            rr.set_time("timestamp", timestamp=float(timestamp))
+
+            # Log the video frame as background image
+            rr.log(
+                f"{entity_base}/image",
+                rr.Image(frame_img_rgb).compress(jpeg_quality=75),
+            )
+
+            # Progress indicator
+            if frame_num % 30 == 0:
+                print(f"  Frame {frame_num}")
+
+    print(f"✅ Logged camera images for {camera_name}")
+
+
+def log_camera_observations(observations_csv: Path, camera_name: str,
+                           camera_id: int, marker_ids_map: Dict[str, int],
+                           debug_dir: Optional[Path] = None):
+    """
+    Log ONLY 2D marker observations without camera images (for tracking overlay).
+
+    Args:
+        observations_csv: Path to observations.csv with 2D marker positions
+        camera_name: Camera name (e.g., 'cam1')
+        camera_id: Camera ID in observations CSV (e.g., 0 for cam1)
+        marker_ids_map: Map from marker name to marker ID
+        debug_dir: Optional path to debug directory with all_observations.csv files
+    """
+    print(f"📹 Loading camera observations from {observations_csv}...")
+    obs_df = pd.read_csv(observations_csv)
+
+    # Filter for this camera
+    cam_obs = obs_df[obs_df['camera_id'] == camera_id].copy()
+    print(f"📊 Loaded {len(cam_obs)} observations for camera {camera_id}")
+
+    # Group by frame
+    frames = cam_obs.groupby('frame')
+
+    # Use structure_from_motion hierarchy: camera/{name}/image for 2D view
+    entity_base = f"camera/{camera_name}"
+
+    print(f"🎬 Logging 2D marker observations...")
+
+    processed_frames = 0
+    for frame_num, frame_data in frames:
+        # Get timestamp for this tracking frame
+        timestamp = frame_data['timestamp'].iloc[0]
+
+        # Set timelines
+        rr.set_time("frame", sequence=int(frame_num))
+        rr.set_time("timestamp", timestamp=float(timestamp))
+
+        # Extract 2D marker positions
+        positions_2d = frame_data[['pixel_x', 'pixel_y']].values
+        marker_ids = frame_data['marker_id'].values
+        confidences = frame_data['confidence'].values
+
+        # Load debug data to get outlier status and metrics
+        is_outlier = np.zeros(len(frame_data), dtype=bool)
+        mahalanobis_dist = np.zeros(len(frame_data))
+        residual_norms = np.zeros(len(frame_data))
+        has_predicted = np.zeros(len(frame_data), dtype=bool)
+        predicted_positions = np.zeros_like(positions_2d)
+
+        if debug_dir:
+            debug_frame_dir = debug_dir / f"frame_{frame_num:04d}"
+            debug_csv = debug_frame_dir / "all_observations.csv"
+
+            if debug_csv.exists():
+                debug_df = pd.read_csv(debug_csv)
+                cam_debug = debug_df[debug_df['camera_id'] == camera_id].copy()
+
+                # Match debug data to observations by marker_name
+                for idx, row in frame_data.iterrows():
+                    marker_name = row['marker_name']
+                    debug_row = cam_debug[cam_debug['marker_name'] == marker_name]
+                    if len(debug_row) > 0:
+                        debug_row = debug_row.iloc[0]
+                        local_idx = list(frame_data.index).index(idx)
+                        is_outlier[local_idx] = debug_row['is_outlier']
+                        mahalanobis_dist[local_idx] = debug_row['mahalanobis_distance']
+                        residual_norms[local_idx] = debug_row['residual_norm']
+                        if not pd.isna(debug_row['predicted_u']):
+                            has_predicted[local_idx] = True
+                            predicted_positions[local_idx] = [debug_row['predicted_u'], debug_row['predicted_v']]
+
+        # Color markers by confidence and outlier status
+        colors = []
+        for i, conf in enumerate(confidences):
+            if conf > 5.0:
+                marker_color = [0, 255, 0]  # Green for high confidence
+            elif conf > 3.0:
+                marker_color = [255, 255, 0]  # Yellow for medium
+            else:
+                marker_color = [255, 100, 0]  # Orange for low confidence
+            if is_outlier[i]:
+                for j in range(3):
+                    marker_color[j] = int(marker_color[j] * 0.5 + 128 * 0.5)
+            colors.append(marker_color)
+
+        # Log all 2D observed points with scalar attributes
+        # Use class_ids for annotation context labels
+        rr.log(
+            f"{entity_base}/image/keypoints",
+            rr.Points2D(
+                positions=positions_2d,
+                colors=colors,
+                radii=np.where(is_outlier, 3.0, 6.0),  # Larger radius for outliers
+                class_ids=marker_ids.astype(np.uint16),
+            ),
+            rr.AnyValues(
+                mahalanobis_distance=mahalanobis_dist,
+                residual_norm=residual_norms,
+                confidence=confidences,
+            )
+        )
+
+        # Log scalar timeseries for metrics (visible in plot view)
+        for i, (marker_id, marker_name) in enumerate(zip(marker_ids, frame_data['marker_name'])):
+            if mahalanobis_dist[i] > 0:  # Only log if we have debug data
+                rr.log(
+                    f"{entity_base}//metrics/{marker_name}/mahalanobis",
+                    rr.Scalars(float(mahalanobis_dist[i])),
+                )
+                rr.log(
+                    f"{entity_base}/metrics/{marker_name}/residual",
+                    rr.Scalars(float(residual_norms[i])),
+                )
+                rr.log(
+                    f"{entity_base}/metrics/{marker_name}/confidence",
+                    rr.Scalars(float(confidences[i])),
+                )
+
+        # Log predicted points where available (separate series)
+        if has_predicted.any():
+            pred_pos = predicted_positions[has_predicted]
+            pred_ids = marker_ids[has_predicted]
+            rr.log(
+                f"{entity_base}/image/predictions",
+                rr.Points2D(
+                    positions=pred_pos,
+                    colors=[100, 150, 255],  # Light blue
+                    radii=4.0,
+                    class_ids=pred_ids.astype(np.uint16),
+                ),
+            )
+
+        processed_frames += 1
+        # Progress indicator
+        if frame_num % 30 == 0:
+            print(f"  Frame {frame_num}: {len(frame_data)} markers")
+
+    print(f"✅ Processed {processed_frames} frames for {camera_name}")
+
+
 def visualize_camera_view(observations_csv: Path, video_cap: cv2.VideoCapture,
                          camera_name: str, camera_id: int, sync_points: List[Dict],
                          marker_ids_map: Dict[str, int],
                          debug_dir: Optional[Path] = None):
     """
     Visualize camera view with 2D marker observations overlaid.
+    This is kept for backwards compatibility - it combines both image and observation logging.
 
     Args:
         observations_csv: Path to observations.csv with 2D marker positions
@@ -614,6 +813,22 @@ def main():
         type=Path,
         help="Path to sync metadata JSON file (for camera frame timing)",
     )
+    parser.add_argument(
+        "--app-id",
+        type=str,
+        default="posetrak",
+        help="Rerun application ID (use same ID to overlay multiple recordings)",
+    )
+    parser.add_argument(
+        "--only-cameras",
+        action="store_true",
+        help="Only export camera images and 2D observations (for base layer)",
+    )
+    parser.add_argument(
+        "--only-tracking",
+        action="store_true",
+        help="Only export 3D tracking data (for overlay on camera base layer)",
+    )
 
     args = parser.parse_args()
 
@@ -625,16 +840,38 @@ def main():
         print(f"❌ Error: {args.skeleton} not found")
         return 1
 
-    # Setup Rerun
-    setup_rerun(recording_path=args.output, live=args.live)
+    # Validate flags
+    if args.only_cameras and args.only_tracking:
+        print("❌ Error: Cannot use both --only-cameras and --only-tracking")
+        return 1
+
+    # Setup Rerun with custom app ID
+    setup_rerun(recording_path=args.output, live=args.live, app_id=args.app_id)
+
+    # Determine what to log
+    log_tracking = not args.only_cameras
+    log_cameras = not args.only_tracking
 
     # Visualize 3D tracking results and get marker IDs map
-    marker_ids_map = visualize_tracking_results(args.csv_path, skeleton_path=args.skeleton)
+    marker_ids_map = None
+    if log_tracking:
+        marker_ids_map = visualize_tracking_results(args.csv_path, skeleton_path=args.skeleton)
+    else:
+        print("ℹ️  Skipping 3D tracking data (--only-cameras mode)")
+        # Still need to load marker IDs for camera view annotations
+        tracking_df = pd.read_csv(args.csv_path)
+        marker_ids_map = {row['marker_name']: int(row['marker_id'])
+                         for _, row in tracking_df[['marker_id', 'marker_name']].drop_duplicates().iterrows()}
 
     # Camera visualization
     if args.cameras and args.video_dir:
         print(f"\n{'='*60}")
-        print(f"📹 Adding camera visualizations")
+        if log_cameras and not log_tracking:
+            print(f"📹 Adding camera base layer (images only, no markers)")
+        elif log_tracking and not log_cameras:
+            print(f"📊 Adding tracking observations to camera views")
+        else:
+            print(f"📹 Adding full camera visualizations")
         print(f"{'='*60}\n")
 
         # Load camera config
@@ -657,68 +894,80 @@ def main():
             debug_dir = None
             print("ℹ️  No debug data available")
 
-        if not observations_csv.exists():
-            print(f"⚠️  Observations not found: {observations_csv}")
-        else:
-            # Create annotation context for camera views (for marker labels)
-            # Load unique markers from tracking results
-            tracking_df = pd.read_csv(args.csv_path)
-            unique_markers = tracking_df[['marker_id', 'marker_name']].drop_duplicates().sort_values('marker_id')
+        # Log 3D camera positions and frustums (for both modes)
+        for camera_name, camera_data in camera_config.items():
+            if camera_name == 'metadata':
+                continue
+            print(f"📷 Setting up {camera_name} in 3D space...")
+            log_camera_3d(camera_name, camera_data)
 
-            # Create class descriptions for each marker (for camera 2D views)
-            marker_class_descriptions = [
-                rr.ClassDescription(
-                    info=rr.AnnotationInfo(
-                        id=int(row['marker_id']),
-                        label=str(row['marker_name']),
-                    ),
-                )
-                for _, row in unique_markers.iterrows()
-            ]
-
-            # Log 3D camera positions and frustums
-            for camera_name, camera_data in camera_config.items():
-                if camera_name == 'metadata':
-                    continue
-                print(f"📷 Setting up {camera_name} in 3D space...")
-                log_camera_3d(camera_name, camera_data)
-
-                # Log annotation context for this camera's 2D view
-                rr.log(
-                    f"camera/{camera_name}/image",
-                    rr.AnnotationContext(marker_class_descriptions),
-                    static=True,
-                )
-
-            # Process each camera's video and observations
-            print(f"\n🎥 Processing camera videos...")
+        # Handle camera images (base layer)
+        if log_cameras:
+            print(f"\n🎥 Processing camera videos (base layer - images only)...")
 
             for camera_name, camera_data in camera_config.items():
                 if camera_name == 'metadata':
                     continue
 
-                # Extract camera ID from name (cam1->0, cam2->1, etc.)
-                camera_id = int(camera_name.replace('cam', '')) - 1
                 video_path = args.video_dir / f"{camera_name}.mp4"
-
-                # Get sync points for this camera (adjust naming: cam1 vs cam_01)
                 sync_key = camera_name
-                sync_points = sync_data.get(sync_key, [])
+                sync_points = sync_data.get(sync_key, {})
 
                 if video_path.exists():
-                    print(f"\n📹 Processing {camera_name} (camera_id={camera_id}, sync points: {len(sync_points)})...")
-
-                    # Open video for reading frames on-demand
+                    print(f"\n📹 Processing {camera_name} video...")
                     video_cap = open_video_capture(video_path)
 
                     try:
-                        # Visualize camera with 2D observations
-                        visualize_camera_view(observations_csv, video_cap, camera_name, camera_id,
-                                            sync_points, marker_ids_map, debug_dir=debug_dir)
+                        log_camera_images_only(video_cap, camera_name,
+                                             args.csv_path, sync_points)
                     finally:
                         video_cap.release()
                 else:
                     print(f"⚠️  Video not found for {camera_name}: {video_path}")
+
+        # Handle tracking observations (overlay layer)
+        if log_tracking:
+            if not observations_csv.exists():
+                print(f"⚠️  Observations not found: {observations_csv}")
+            else:
+                print(f"\n📊 Processing camera observations (tracking overlay)...")
+
+                # Create annotation context for camera views (for marker labels)
+                tracking_df = pd.read_csv(args.csv_path)
+                unique_markers = tracking_df[['marker_id', 'marker_name']].drop_duplicates().sort_values('marker_id')
+
+                # Create class descriptions for each marker (for camera 2D views)
+                marker_class_descriptions = [
+                    rr.ClassDescription(
+                        info=rr.AnnotationInfo(
+                            id=int(row['marker_id']),
+                            label=str(row['marker_name']),
+                        ),
+                    )
+                    for _, row in unique_markers.iterrows()
+                ]
+
+                # Log annotation context for each camera's 2D view
+                for camera_name, camera_data in camera_config.items():
+                    if camera_name == 'metadata':
+                        continue
+                    rr.log(
+                        f"camera/{camera_name}/image",
+                        rr.AnnotationContext(marker_class_descriptions),
+                        static=True,
+                    )
+
+                # Process each camera's observations
+                for camera_name, camera_data in camera_config.items():
+                    if camera_name == 'metadata':
+                        continue
+
+                    # Extract camera ID from name (cam1->0, cam2->1, etc.)
+                    camera_id = int(camera_name.replace('cam', '')) - 1
+
+                    print(f"\n📹 Processing {camera_name} observations (camera_id={camera_id})...")
+                    log_camera_observations(observations_csv, camera_name, camera_id,
+                                          marker_ids_map, debug_dir=debug_dir)
     elif args.cameras or args.video_dir:
         print(f"\n⚠️  Skipping camera visualization: need both --cameras and --video-dir")
 

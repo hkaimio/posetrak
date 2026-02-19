@@ -115,6 +115,341 @@ def compute_marker_connections(marker_parent_map: Dict[str, str],
     return list(connections)
 
 
+class SkeletonJoint:
+    """Represents a joint in the skeleton hierarchy."""
+    def __init__(self, name: str, parent: Optional[str], joint_type: str,
+                 offset: np.ndarray, rest_orientation: np.ndarray,
+                 bone_tip_offset: np.ndarray, axis: Optional[np.ndarray] = None):
+        self.name = name
+        self.parent = parent
+        self.joint_type = joint_type
+        self.offset = offset  # Translation from parent
+        self.rest_orientation = rest_orientation  # ZYX Euler angles
+        self.bone_tip_offset = bone_tip_offset  # Bone visual end point
+        self.axis = axis if axis is not None else np.array([1.0, 0.0, 0.0])  # For revolute joints
+
+
+def load_skeleton_structure(skeleton_path: Path) -> Dict[str, SkeletonJoint]:
+    """
+    Load full skeleton structure from YAML file.
+
+    Returns:
+        Dictionary mapping joint names to SkeletonJoint objects
+    """
+    with open(skeleton_path, 'r') as f:
+        skeleton = yaml.safe_load(f)
+
+    joints = {}
+    for joint_data in skeleton.get('joints', []):
+        name = joint_data['name']
+        parent = joint_data.get('parent')
+        joint_type = joint_data.get('type', 'fixed')
+
+        # Parse vectors with defaults
+        offset = np.array(joint_data.get('offset', [0.0, 0.0, 0.0]))
+        rest_orientation = np.array(joint_data.get('orientation', [0.0, 0.0, 0.0]))
+        bone_tip_offset = np.array(joint_data.get('bone_tip_offset', [0.0, 0.0, 0.0]))
+        axis = np.array(joint_data.get('axis', [1.0, 0.0, 0.0]))
+
+        joints[name] = SkeletonJoint(
+            name=name,
+            parent=parent,
+            joint_type=joint_type,
+            offset=offset,
+            rest_orientation=rest_orientation,
+            bone_tip_offset=bone_tip_offset,
+            axis=axis
+        )
+
+    return joints
+
+
+def load_state_vectors(state_csv_path: Path) -> pd.DataFrame:
+    """
+    Load state vectors CSV file with joint angles.
+
+    Returns:
+        DataFrame indexed by tracker_frame_idx with columns for each joint's angles
+    """
+    if not state_csv_path.exists():
+        print(f"⚠️  State vectors file not found: {state_csv_path}")
+        return None
+
+    df = pd.read_csv(state_csv_path)
+    return df
+
+
+def euler_zyx_to_matrix(euler_zyx: np.ndarray) -> np.ndarray:
+    """
+    Convert ZYX Euler angles to rotation matrix.
+
+    CRITICAL: Matches pinocchio_model_builder.cpp exactly:
+    - Array stores [z, y, x] in that order
+    - Computes R = Rx(x) * Ry(y) * Rz(z) (extrinsic XYZ order)
+
+    Args:
+        euler_zyx: [z, y, x] Euler angles in radians
+
+    Returns:
+        3x3 rotation matrix
+    """
+    z, y, x = euler_zyx
+
+    # Individual rotation matrices
+    cx, sx = np.cos(x), np.sin(x)
+    cy, sy = np.cos(y), np.sin(y)
+    cz, sz = np.cos(z), np.sin(z)
+
+    # R = Rx(x) * Ry(y) * Rz(z) as per C++ implementation
+    return np.array([
+        [cy*cz, -cy*sz, sy],
+        [sx*sy*cz + cx*sz, -sx*sy*sz + cx*cz, -sx*cy],
+        [-cx*sy*cz + sx*sz, cx*sy*sz + sx*cz, cx*cy]
+    ])
+
+
+def axis_angle_to_matrix(axis_angle: np.ndarray) -> np.ndarray:
+    """
+    Convert axis-angle representation to rotation matrix using Rodrigues' formula.
+
+    Matches the C++ implementation in forward_kinematics.cpp.
+
+    Args:
+        axis_angle: 3D vector where direction is axis and magnitude is angle in radians
+
+    Returns:
+        3x3 rotation matrix
+    """
+    angle = np.linalg.norm(axis_angle)
+    if angle < 1e-10:
+        return np.eye(3)
+
+    # Normalize to get unit axis
+    axis = axis_angle / angle
+
+    # Rodrigues' formula: R = I + sin(θ)K + (1-cos(θ))K²
+    # where K is the skew-symmetric matrix of the axis
+    K = np.array([
+        [0, -axis[2], axis[1]],
+        [axis[2], 0, -axis[0]],
+        [-axis[1], axis[0], 0]
+    ])
+
+    return np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+
+
+def quaternion_to_matrix(quat: np.ndarray) -> np.ndarray:
+    """
+    Convert quaternion to rotation matrix.
+
+    Args:
+        quat: [w, x, y, z] quaternion
+
+    Returns:
+        3x3 rotation matrix
+    """
+    w, x, y, z = quat
+
+    # Normalize quaternion
+    norm = np.sqrt(w*w + x*x + y*y + z*z)
+    if norm < 1e-10:
+        return np.eye(3)
+
+    w, x, y, z = w/norm, x/norm, y/norm, z/norm
+
+    return np.array([
+        [1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y)],
+        [2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x)],
+        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y)]
+    ])
+
+
+def compute_joint_transforms(skeleton: Dict[str, SkeletonJoint],
+                            state_vector: pd.Series,
+                            rest_pose_only: bool = False) -> Dict[str, np.ndarray]:
+    """
+    Compute world transforms for all joints using forward kinematics.
+
+    Args:
+        skeleton: Dictionary of SkeletonJoint objects
+        state_vector: Single row from state_vectors.csv with joint angles
+        rest_pose_only: If True, ignore animation angles and show only rest pose
+
+    Returns:
+        Dictionary mapping joint names to 4x4 transformation matrices
+    """
+    transforms = {}
+
+    # Process joints in hierarchy order (parents before children)
+    def process_joint(joint_name: str):
+        if joint_name in transforms:
+            return transforms[joint_name]
+
+        joint = skeleton[joint_name]
+
+        # Build local transform
+        T_local = np.eye(4)
+
+        if joint.joint_type == 'root':
+            # Root joint: use absolute position and orientation from state vector
+            # The state position IS the world position, don't add offset
+            root_pos = np.array([
+                state_vector.get('root_position_x', 0.0),
+                state_vector.get('root_position_y', 0.0),
+                state_vector.get('root_position_z', 0.0)
+            ])
+            T_local[:3, 3] = root_pos
+
+            # Root orientation from quaternion
+            qw = state_vector.get('root_quaternion_w', 1.0)
+            qx = state_vector.get('root_quaternion_x', 0.0)
+            qy = state_vector.get('root_quaternion_y', 0.0)
+            qz = state_vector.get('root_quaternion_z', 0.0)
+            R_quat = quaternion_to_matrix(np.array([qw, qx, qy, qz]))
+
+            # Apply rest orientation in the root's frame
+            R_rest = euler_zyx_to_matrix(joint.rest_orientation)
+            T_local[:3, :3] = R_quat @ R_rest
+
+            # Root has no parent, so T_world = T_local
+            transforms[joint_name] = T_local
+            return T_local
+
+        # Get parent transform for non-root joints
+        if joint.parent is None:
+            raise ValueError(f"Non-root joint {joint_name} has no parent")
+
+        T_parent = process_joint(joint.parent)
+
+        # Translation from parent
+        T_local[:3, 3] = joint.offset
+
+        # Rest orientation (defines joint's local frame in parent's coordinate system)
+        R_rest = euler_zyx_to_matrix(joint.rest_orientation)
+
+        # Animation rotation from state vector (deviation from rest pose)
+        R_anim = np.eye(3)
+
+        # Skip animation if showing rest pose only
+        if not rest_pose_only:
+            if joint.joint_type == 'revolute':
+                # Single angle around axis
+                angle_key = f'joint_{joint.name}_angle_0'
+                if angle_key in state_vector and not pd.isna(state_vector[angle_key]):
+                    angle = state_vector[angle_key]
+                    axis_angle = joint.axis * angle
+                    R_anim = axis_angle_to_matrix(axis_angle)
+
+            elif joint.joint_type in ['ball', 'spherical']:
+                # Axis-angle representation (3 components)
+                angle_keys = [f'joint_{joint.name}_angle_{i}' for i in range(3)]
+                if all(k in state_vector for k in angle_keys):
+                    axis_angle = np.array([
+                        state_vector.get(angle_keys[0], 0.0),
+                        state_vector.get(angle_keys[1], 0.0),
+                        state_vector.get(angle_keys[2], 0.0)
+                    ])
+                    if not all(pd.isna(state_vector[k]) for k in angle_keys):
+                        R_anim = axis_angle_to_matrix(axis_angle)
+
+        # Combine: first establish rest frame, then apply animation in that frame
+        # This matches Pinocchio's behavior
+        T_local[:3, :3] = R_rest @ R_anim
+
+        # Compute world transform
+        transforms[joint_name] = T_parent @ T_local
+        return transforms[joint_name]
+
+    # Process all joints
+    for joint_name in skeleton.keys():
+        process_joint(joint_name)
+
+    return transforms
+
+
+def compute_bone_radius(bone_length: float) -> float:
+    """
+    Scale bone visual thickness based on bone length.
+
+    Args:
+        bone_length: Length of bone in meters
+
+    Returns:
+        Radius for bone visualization in meters
+    """
+    # Fingers (2-5cm) -> thin (2-3mm radius)
+    # Arms/legs (20-50cm) -> thick (10-15mm radius)
+    if bone_length > 0.05:  # Longer than 5cm
+        return 0.015
+
+    return 0.005
+
+
+def log_skeleton_bones(skeleton: Dict[str, SkeletonJoint],
+                       transforms: Dict[str, np.ndarray],
+                       person_id: int = 0,
+                       rest_pose: bool = False):
+    """
+    Log animated skeleton bones for one frame.
+
+    Draws bones from joint origin to bone_tip_offset (defining bone geometry).
+
+    Args:
+        skeleton: Dictionary of SkeletonJoint objects
+        transforms: Joint world transforms from forward kinematics
+        person_id: Person identifier for entity path
+        rest_pose: If True, logs to separate entity path for rest pose visualization
+    """
+    bone_starts = []
+    bone_ends = []
+    bone_radii = []
+
+    for joint_name, joint in skeleton.items():
+        # Get joint world transform
+        T_world = transforms[joint_name]
+        joint_pos = T_world[:3, 3]
+
+        # Compute bone tip in world frame (bone_tip_offset is in joint's local frame)
+        bone_tip_local = np.array([*joint.bone_tip_offset, 1.0])
+        bone_tip_world = T_world @ bone_tip_local
+        bone_tip_pos = bone_tip_world[:3]
+
+        # Compute bone length and radius
+        bone_vector = bone_tip_pos - joint_pos
+        bone_length = np.linalg.norm(bone_vector)
+
+        if bone_length < 0.001:  # Skip very short bones (< 1mm)
+            continue
+
+        bone_starts.append(joint_pos)
+        bone_ends.append(bone_tip_pos)
+        bone_radii.append(compute_bone_radius(bone_length))
+
+    if len(bone_starts) == 0:
+        return
+
+    # Create line segments for all bones
+    segments = [[start, end] for start, end in zip(bone_starts, bone_ends)]
+
+    # Choose entity path and color based on whether this is rest pose
+    if rest_pose:
+        entity_path = f"points/person_{person_id}/skeleton/rest_pose"
+        color = [255, 128, 0]  # Orange for rest pose
+    else:
+        entity_path = f"points/person_{person_id}/skeleton/bones"
+        color = [0, 255, 0]
+
+    # Log as LineStrips3D with varying radii
+    rr.log(
+        entity_path,
+        rr.LineStrips3D(
+            segments,
+            radii=bone_radii,
+            colors=color
+        )
+    )
+
+
 def log_world_setup():
     """Log static world setup: coordinate axes."""
     # Root coordinate system (structure_from_motion pattern)
@@ -645,13 +980,15 @@ def visualize_camera_view(observations_csv: Path, video_cap: cv2.VideoCapture,
     print(f"✅ Processed {processed_frames} frames for {camera_name}")
 
 
-def visualize_tracking_results(csv_path: Path, skeleton_path: Path | None = None) -> Dict[str, int]:
+def visualize_tracking_results(csv_path: Path, skeleton_path: Path | None = None,
+                              show_skeleton_bones: bool = False) -> Dict[str, int]:
     """
     Load and visualize tracking results.
 
     Args:
         csv_path: Path to tracking_results.csv
         skeleton_path: Optional path to skeleton YAML for marker connections
+        show_skeleton_bones: If True, render animated skeleton bones
 
     Returns:
         Dictionary mapping marker names to marker IDs
@@ -679,6 +1016,9 @@ def visualize_tracking_results(csv_path: Path, skeleton_path: Path | None = None
 
     # Load skeleton hierarchy if provided
     keypoint_connections = None
+    skeleton_structure = None
+    state_vectors_df = None
+
     if skeleton_path:
         print(f"📐 Loading skeleton hierarchy from {skeleton_path}...")
         joint_parent_map, marker_parent_map = load_skeleton_hierarchy(skeleton_path)
@@ -686,7 +1026,17 @@ def visualize_tracking_results(csv_path: Path, skeleton_path: Path | None = None
             marker_parent_map, joint_parent_map, marker_ids_map
         )
         print(f"🔗 Computed {len(keypoint_connections)} marker connections")
-        print(keypoint_connections)
+
+        # Load full skeleton structure for bone visualization
+        if show_skeleton_bones:
+            skeleton_structure = load_skeleton_structure(skeleton_path)
+            print(f"🦴 Loaded skeleton with {len(skeleton_structure)} joints")
+
+            # Load state vectors for animation
+            state_csv_path = csv_path.parent / "state_vectors.csv"
+            state_vectors_df = load_state_vectors(state_csv_path)
+            if state_vectors_df is not None:
+                print(f"📊 Loaded {len(state_vectors_df)} state vector frames")
 
     # Create annotation context with single class for skeleton
     # All markers are keypoints within this class (Rerun face_tracking pattern)
@@ -726,6 +1076,24 @@ def visualize_tracking_results(csv_path: Path, skeleton_path: Path | None = None
         # Set dual timelines as per design doc (using keyword arguments)
         rr.set_time("frame", sequence=int(frame_num))
         rr.set_time("timestamp", timestamp=float(timestamp))
+
+        # Visualize skeleton bones if enabled
+        if show_skeleton_bones and skeleton_structure is not None and state_vectors_df is not None:
+            # Find matching state vector for this frame
+            state_row = state_vectors_df[state_vectors_df['tracker_frame_idx'] == frame_num]
+            if len(state_row) > 0:
+                state_vector = state_row.iloc[0]
+
+                # For frame 0, also log rest pose for validation
+                if frame_num == 1:
+                    rest_transforms = compute_joint_transforms(skeleton_structure, state_vector, rest_pose_only=True)
+                    log_skeleton_bones(skeleton_structure, rest_transforms, person_id, rest_pose=True)
+
+                # Compute forward kinematics with animation
+                transforms = compute_joint_transforms(skeleton_structure, state_vector, rest_pose_only=False)
+
+                # Log animated skeleton bones
+                log_skeleton_bones(skeleton_structure, transforms, person_id, rest_pose=False)
 
         # Filter visible markers
         visible_markers = frame_data[frame_data['is_visible'] == True].copy()
@@ -829,6 +1197,11 @@ def main():
         action="store_true",
         help="Only export 3D tracking data (for overlay on camera base layer)",
     )
+    parser.add_argument(
+        "--skeleton-bones",
+        action="store_true",
+        help="Show animated skeleton bones (requires --skeleton and state_vectors.csv)",
+    )
 
     args = parser.parse_args()
 
@@ -855,7 +1228,11 @@ def main():
     # Visualize 3D tracking results and get marker IDs map
     marker_ids_map = None
     if log_tracking:
-        marker_ids_map = visualize_tracking_results(args.csv_path, skeleton_path=args.skeleton)
+        marker_ids_map = visualize_tracking_results(
+            args.csv_path,
+            skeleton_path=args.skeleton,
+            show_skeleton_bones=args.skeleton_bones
+        )
     else:
         print("ℹ️  Skipping 3D tracking data (--only-cameras mode)")
         # Still need to load marker IDs for camera view annotations

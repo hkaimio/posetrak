@@ -100,6 +100,54 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
         result.tracker_fps = processing["tracker_fps"].value_or(100.0);
     }
 
+    // === Hierarchical tracking ===
+    if (auto hier = config["hierarchical"]) {
+        result.hierarchical.enabled = hier["enabled"].value_or(false);
+        result.hierarchical.enable_sync = hier["enable_sync"].value_or(true);
+        result.hierarchical.sync_covariance = hier["sync_covariance"].value_or(false);
+
+        auto load_string_array = [](auto node, std::vector<std::string>& out) {
+            if (auto arr = node.as_array()) {
+                for (auto const& elem : *arr) {
+                    if (auto s = elem.template value<std::string>())
+                        out.push_back(*s);
+                }
+            }
+        };
+
+        load_string_array(hier["parent_joint_groups"], result.hierarchical.parent_joint_groups);
+        load_string_array(hier["parent_observation_groups"],
+                          result.hierarchical.parent_observation_groups);
+
+        result.hierarchical.parent_process_noise_std =
+            hier["parent_process_noise_std"].value_or(0.5);
+        result.hierarchical.parent_measurement_noise_std =
+            hier["parent_measurement_noise_std"].value_or(2.0);
+        result.hierarchical.parent_outlier_threshold =
+            hier["parent_outlier_threshold"].value_or(4.0);
+
+        if (auto children_arr = hier["children"].as_array()) {
+            for (auto&& elem : *children_arr) {
+                auto* tbl = elem.as_table();
+                if (!tbl)
+                    continue;
+                toml::node_view<const toml::node> child_view(*tbl);
+
+                ChildFilterConfig child;
+                child.name = child_view["name"].value_or(std::string{});
+                load_string_array(child_view["joint_groups"], child.joint_groups);
+                load_string_array(child_view["observation_groups"], child.observation_groups);
+                child.process_noise_std = child_view["process_noise_std"].value_or(0.3);
+                child.measurement_noise_std = child_view["measurement_noise_std"].value_or(2.0);
+                child.outlier_threshold = child_view["outlier_threshold"].value_or(4.0);
+                child.min_inliers_ratio = child_view["min_inliers_ratio"].value_or(0.3);
+                child.max_innovation_norm = child_view["max_innovation_norm"].value_or(200.0);
+
+                result.hierarchical.children.push_back(std::move(child));
+            }
+        }
+    }
+
     return result;
 }
 
@@ -198,6 +246,47 @@ void TrackerAppConfig::validate() const {
     } catch (std::exception const& e) {
         throw std::runtime_error(
             fmt::format("Cannot create output directory {}: {}", output_dir.string(), e.what()));
+    }
+
+    // === Hierarchical config ===
+    if (hierarchical.enabled) {
+        if (hierarchical.parent_joint_groups.empty()) {
+            throw std::runtime_error(
+                "hierarchical.parent_joint_groups must not be empty when hierarchical "
+                "tracking is enabled");
+        }
+        if (hierarchical.parent_observation_groups.empty()) {
+            throw std::runtime_error(
+                "hierarchical.parent_observation_groups must not be empty when hierarchical "
+                "tracking is enabled");
+        }
+        if (hierarchical.parent_process_noise_std <= 0.0) {
+            throw std::runtime_error(
+                fmt::format("Invalid hierarchical.parent_process_noise_std: {} (must be > 0)",
+                            hierarchical.parent_process_noise_std));
+        }
+        for (auto const& child : hierarchical.children) {
+            if (child.name.empty()) {
+                throw std::runtime_error(
+                    "Each hierarchical child filter must have a non-empty name");
+            }
+            if (child.joint_groups.empty()) {
+                throw std::runtime_error(
+                    fmt::format("Child filter '{}' has empty joint_groups", child.name));
+            }
+            if (child.observation_groups.empty()) {
+                throw std::runtime_error(
+                    fmt::format("Child filter '{}' has empty observation_groups", child.name));
+            }
+            if (child.process_noise_std <= 0.0) {
+                throw std::runtime_error(
+                    fmt::format("Child filter '{}': process_noise_std must be > 0", child.name));
+            }
+            if (child.min_inliers_ratio < 0.0 || child.min_inliers_ratio > 1.0) {
+                throw std::runtime_error(fmt::format(
+                    "Child filter '{}': min_inliers_ratio must be in [0, 1]", child.name));
+            }
+        }
     }
 }
 

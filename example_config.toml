@@ -35,3 +35,46 @@ export_debug = false
 [processing]
 start_frame = 0
 max_frames = -1  # -1 means all frames
+
+# ---------------------------------------------------------------------------
+# Hierarchical tracking (optional)
+#
+# When enabled, a parent filter tracks the main body skeleton and one child
+# filter per entry in [[hierarchical.children]] tracks a named joint subset
+# (e.g. each hand) independently.  Child filters are initialised from the
+# parent's pose estimate each frame.
+#
+# When disabled (the default), a single monolithic filter is used and the
+# [[hierarchical.children]] entries are ignored.
+# ---------------------------------------------------------------------------
+
+[hierarchical]
+enabled = false
+enable_sync = true         # Sync child root pose from parent each frame
+sync_covariance = false    # Write child covariance back into parent after update
+
+parent_joint_groups = ["main"]
+parent_observation_groups = ["main"]
+parent_process_noise_std = 0.5
+parent_measurement_noise_std = 2.0
+parent_outlier_threshold = 4.0
+
+[[hierarchical.children]]
+name = "HandR"
+joint_groups = ["HandR"]
+observation_groups = ["HandR"]
+process_noise_std = 0.1
+measurement_noise_std = 2.0
+outlier_threshold = 4.0
+min_inliers_ratio = 0.3      # Reject update if fewer than this fraction are inliers
+max_innovation_norm = 200.0  # Reject observation if innovation norm exceeds this (pixels)
+
+[[hierarchical.children]]
+name = "HandL"
+joint_groups = ["HandL"]
+observation_groups = ["HandL"]
+process_noise_std = 0.1
+measurement_noise_std = 2.0
+outlier_threshold = 4.0
+min_inliers_ratio = 0.3
+max_innovation_norm = 200.0

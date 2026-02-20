@@ -47,7 +47,8 @@ TEST_CASE("UKF update with single observation", "[ukf][update]") {
     cameras.emplace(0, camera);
 
     // Create UKF
-    UnscentedKalmanFilter ukf(skeleton, 0.01);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.01);
 
     // Set initial state at origin
     Eigen::Vector3d pos = Eigen::Vector3d::Zero();
@@ -121,7 +122,8 @@ TEST_CASE("UKF update corrects position error", "[ukf][update]") {
     cameras.emplace(0, camera);
 
     // Create UKF
-    UnscentedKalmanFilter ukf(skeleton, 0.01);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.01);
 
     // Set WRONG initial state (shifted right by 0.2m)
     Eigen::Vector3d pos(0.2, 0.0, 0.0);
@@ -190,7 +192,8 @@ TEST_CASE("UKF update with multiple observations", "[ukf][update]") {
     cameras.emplace(0, camera);
 
     // Create UKF
-    UnscentedKalmanFilter ukf(skeleton, 0.01);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.01);
 
     // Set initial state
     Eigen::Vector3d pos = Eigen::Vector3d::Zero();
@@ -244,7 +247,8 @@ TEST_CASE("UKF update with missing observations", "[ukf][update]") {
     std::unordered_map<int, Camera> cameras;
 
     // Create UKF
-    UnscentedKalmanFilter ukf(skeleton, 0.01);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.01);
 
     Eigen::Vector3d pos = Eigen::Vector3d::Zero();
     Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
@@ -307,7 +311,8 @@ TEST_CASE("UKF update maintains positive definite covariance", "[ukf][update]") 
     cameras.emplace(0, camera);
 
     // Create UKF
-    UnscentedKalmanFilter ukf(skeleton, 0.01);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.01);
 
     Eigen::Vector3d pos = Eigen::Vector3d::Zero();
     Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
@@ -380,7 +385,8 @@ TEST_CASE("UKF update handles markers behind camera gracefully", "[ukf][update][
     cameras.emplace(0, camera);
 
     // Create UKF
-    UnscentedKalmanFilter ukf(skeleton, 0.01);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.01);
 
     // Place marker BEHIND camera (at z = -3, while camera is at z = -2)
     // This will cause projection to fail (produce NaN/inf)
@@ -459,7 +465,8 @@ TEST_CASE("UKF update with outlier rejection", "[ukf][update][outlier]") {
     cameras.emplace(0, camera);
 
     // Create UKF with state at origin
-    UnscentedKalmanFilter ukf(skeleton, 0.01);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.01);
 
     Eigen::Vector3d pos = Eigen::Vector3d::Zero();
     Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
@@ -568,7 +575,8 @@ TEST_CASE("UKF velocity damping at joint limits", "[ukf][update][damping]") {
     cameras.emplace(0, camera);
 
     // Create UKF with joint angle near upper limit and positive velocity
-    UnscentedKalmanFilter ukf(skeleton, 0.01);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.01);
 
     Eigen::Vector3d pos = Eigen::Vector3d::Zero();
     Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();

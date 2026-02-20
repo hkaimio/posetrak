@@ -110,8 +110,8 @@ TEST_CASE("from_full_skeleton: state_index correct for all joints", "[skeleton_l
 
     struct Expected {
         std::string name;
-        uint32_t state_index;
-        uint32_t storage;
+        int state_index;
+        int storage;
     };
     std::vector<Expected> expected = {
         {"spine", 0, 3},      {"shoulder.L", 3, 3}, {"elbow.L", 6, 1},     {"wrist.L", 7, 3},
@@ -181,7 +181,7 @@ TEST_CASE("from_groups main: state_index is layout-relative from 0", "[skeleton_
     // Layout-relative indices: fingers excluded, indices are 0-based within this layout
     struct Expected {
         std::string name;
-        uint32_t state_index;
+        int state_index;
     };
     std::vector<Expected> expected = {
         {"spine", 0},       {"shoulder.L", 3}, {"elbow.L", 6},  {"wrist.L", 7},
@@ -296,7 +296,7 @@ TEST_CASE("build_index_map_from: main subset into full layout", "[skeleton_layou
     //   shoulder.R(10,11,12) -> full 12,13,14
     //   elbow.R(13) -> full 15
     //   wrist.R(14,15,16) -> full 16,17,18
-    std::vector<uint32_t> expected = {
+    std::vector<int> expected = {
         0,  1,  2,   // spine
         3,  4,  5,   // shoulder.L
         6,           // elbow.L
@@ -315,7 +315,7 @@ TEST_CASE("build_index_map_from: reflexive — full into full yields identity", 
     auto map = full->build_index_map_from(*full);
 
     REQUIRE(map.size() == 21u);
-    for (uint32_t i = 0; i < 21u; ++i) {
+    for (int i = 0; i < 21; ++i) {
         REQUIRE(map[i] == i);
     }
 }

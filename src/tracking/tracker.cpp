@@ -150,31 +150,19 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
     double beta = config_.ukf_beta;    // Gaussian distribution parameter
     double kappa = config_.ukf_kappa;  // Secondary scaling
 
-    ukf_ = std::make_unique<UnscentedKalmanFilter>(skeleton_, config_.process_noise_std, alpha,
-                                                   beta, kappa);
+    auto layout = SkeletonLayout::from_active_skeleton(skeleton_);
+    ukf_ = std::make_unique<UnscentedKalmanFilter>(skeleton_, layout, config_.process_noise_std,
+                                                   alpha, beta, kappa);
 
     // Set initial state
     ukf_->set_state(initial_state);
 
-    // Set initial covariance
-    // Use active DOFs (now includes root's 6 DOFs: 3 position + 3 orientation)
-    int const active_dof = skeleton_.active_dof();
-    int const total_dof = skeleton_.total_dof_count();
-    int const error_dim = 2 * active_dof;  // active_dof now includes root
-    int const pos_dim = active_dof;        // position dimension
+    // Set initial covariance — size from the UKF (driven by the layout, not skeleton.active_dof())
+    int const error_dim = ukf_->error_dim();
+    int const pos_dim = error_dim / 2;  // position/orientation half
 
     fmt::print("\n=== TRACKER INITIALIZATION DEBUG ===\n");
-    fmt::print("total_dof (storage)={}, active_dof (error-state)={}, error_dim={}\n", total_dof,
-               active_dof, error_dim);
-    fmt::print(
-        "Expected: error_dim should be 210 for Python compatibility (active_dof=105 + 6 root = "
-        "111)\n");
-    fmt::print(
-        "Correction: active_dof should BE 111 (includes root), so error_dim = 2*111 = 222\n");
-    fmt::print(
-        "Actually: Python has active_dof=105, error_dim=210, so we expect active_dof={}, "
-        "error_dim={}\n",
-        active_dof, error_dim);
+    fmt::print("total_dof (storage)={}, error_dim={}\n", skeleton_.total_dof_count(), error_dim);
     fmt::print("Covariance will be {}x{}\n", error_dim, error_dim);
     fmt::print(
         "init_position_std={}, init_orientation_std={}, init_joint_std={}, init_velocity_std={}\n",

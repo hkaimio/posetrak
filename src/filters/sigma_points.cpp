@@ -10,21 +10,23 @@
 
 #include <fmt/core.h>
 
+#include "posetrak/core/skeleton_layout.hpp"
 #include <cmath>
 #include <stdexcept>
 
 namespace posetrak {
 
-SigmaPointGenerator::SigmaPointGenerator(Skeleton const& skeleton, double alpha, double beta,
-                                         double kappa)
+SigmaPointGenerator::SigmaPointGenerator(Skeleton const& skeleton,
+                                         std::shared_ptr<const SkeletonLayout> layout, double alpha,
+                                         double beta, double kappa)
     : skeleton_(skeleton),
-      error_dim_(2 * skeleton.active_dof()),  // active_dof now includes root's 6 DOFs
+      layout_(std::move(layout)),
+      error_dim_(layout_->error_state_dim()),
       alpha_(alpha),
       beta_(beta),
       kappa_(kappa) {
     fmt::print("\n=== SIGMA POINT GENERATOR INIT ===\n");
-    fmt::print("active_dof={}, error_dim={}, n_sigma={}\n", skeleton.active_dof(), error_dim_,
-               2 * error_dim_ + 1);
+    fmt::print("error_state_dim={}, n_sigma={}\n", error_dim_, 2 * error_dim_ + 1);
     fmt::print("alpha={}, beta={}, kappa={}\n", alpha, beta, kappa);
     fmt::print("==================================\n\n");
 
@@ -111,11 +113,15 @@ State SigmaPointGenerator::apply_error_to_state(State const& nominal_state,
     // Start with a copy of nominal state
     State new_state = nominal_state;
 
-    int const active_dof = skeleton_.active_dof();  // Includes root's 6 DOFs
+    int const root_n = layout_->root_error_dof_count();  // 6 for floating root
+    int const jac = layout_->joint_active_dof_count();
+    int const active_dof = root_n + jac;  // == error_dim_ / 2
 
-    // Error vector structure (Python convention):
-    // error[0:active_dof] = rotation/position errors (root 6 + body joints)
-    // error[active_dof:2*active_dof] = velocity errors (root 6 + body joints)
+    // Error vector structure:
+    //   [0..root_n-1]               = root position (3) + orientation (3)
+    //   [root_n..root_n+jac-1]      = joint position/rotation errors
+    //   [active_dof..active_dof+root_n-1] = root velocity (3) + angular velocity (3)
+    //   [active_dof+root_n..]       = joint velocity errors
 
     // Apply root position error (first 3 elements)
     Eigen::Vector3d new_pos = nominal_state.root_position() + error_vec.segment<3>(0);
@@ -135,81 +141,29 @@ State SigmaPointGenerator::apply_error_to_state(State const& nominal_state,
     new_state.set_root_velocity(new_vel);
     new_state.set_root_angular_velocity(new_angvel);
 
-    // Apply joint angle errors (handle locked DOFs)
-    // Filter to only active joints to avoid processing inactive groups
-    auto all_joints = skeleton_.get_joints_ordered();
-    std::vector<Joint> active_joints;
-    active_joints.reserve(all_joints.size());
-
-    // Build list of active joints and compute their storage indices
-    std::vector<int> storage_indices;  // Index in joint_angles storage for each active joint
-    storage_indices.reserve(all_joints.size());
-
-    int storage_idx = 0;
-    for (auto const& joint : all_joints) {
-        // Skip root joint
-        if (!joint.parent_index.has_value()) {
-            continue;
-        }
-
-        if (skeleton_.is_joint_active(joint.name)) {
-            active_joints.push_back(joint);
-            storage_indices.push_back(storage_idx);
-        }
-
-        // Advance storage index for all joints (active or not)
-        if (joint.type == JointType::SPHERICAL) {
-            storage_idx += 3;
-        } else if (joint.type == JointType::REVOLUTE) {
-            storage_idx += 1;
-        }
-    }
-
+    // Apply joint angle and velocity errors using precomputed layout indices
     Eigen::VectorXd new_angles = nominal_state.joint_angles();
     Eigen::VectorXd new_joint_vels = nominal_state.joint_velocities();
 
-    int error_pos_idx = 6;               // Start after root's 6 DOFs in rotation section
-    int error_vel_idx = active_dof + 6;  // Start after root's 6 DOFs in velocity section
+    for (JointDesc const& j : layout_->joints()) {
+        int const si = j.state_index;
+        int const pos_base = root_n + j.error_index;
+        int const vel_base = active_dof + root_n + j.error_index;
 
-    // Process only active joints
-    for (size_t i = 0; i < active_joints.size(); ++i) {
-        auto const& joint = active_joints[i];
-        int const joint_angles_idx = storage_indices[i];  // Index in full storage
-
-        if (joint.type == JointType::REVOLUTE) {
+        if (j.type == JointType::REVOLUTE) {
             // REVOLUTE: always 1 active DOF
-            if (error_pos_idx >= active_dof || error_vel_idx >= 2 * active_dof) {
-                throw std::runtime_error(
-                    fmt::format("Error index out of bounds for joint '{}': pos_idx={}, vel_idx={}, "
-                                "active_dof={}",
-                                joint.name, error_pos_idx, error_vel_idx, active_dof));
-            }
-            new_angles(joint_angles_idx) += error_vec(error_pos_idx);
-            new_joint_vels(joint_angles_idx) += error_vec(error_vel_idx);
+            new_angles(si) += error_vec(pos_base);
+            new_joint_vels(si) += error_vec(vel_base);
 
-            error_pos_idx += 1;
-            error_vel_idx += 1;
-
-        } else if (joint.type == JointType::SPHERICAL) {
-            // SPHERICAL: check how many DOFs are active
-            std::array<bool, 3> const active_mask = joint.get_active_dof_mask();
-            int const num_active = joint.active_dof();
-
-            if (num_active == 3) {
+        } else if (j.type == JointType::SPHERICAL) {
+            if (j.active_dof_count == 3) {
                 // All 3 DOFs active: use full SO(3) manifold composition
-                if (error_pos_idx + 2 >= active_dof || error_vel_idx + 2 >= 2 * active_dof) {
-                    throw std::runtime_error(
-                        fmt::format("Error index out of bounds for joint '{}': pos_idx={}, "
-                                    "vel_idx={}, active_dof={}",
-                                    joint.name, error_pos_idx, error_vel_idx, active_dof));
-                }
-                Eigen::Vector3d nominal_axis_angle =
-                    nominal_state.joint_angles().segment<3>(joint_angles_idx);
+                Eigen::Vector3d nominal_axis_angle = nominal_state.joint_angles().segment<3>(si);
                 Eigen::Matrix3d R_nominal =
                     State::axis_angle_to_quaternion(nominal_axis_angle).toRotationMatrix();
 
                 // Error in tangent space
-                Eigen::Vector3d error_axis_angle = error_vec.segment<3>(error_pos_idx);
+                Eigen::Vector3d error_axis_angle = error_vec.segment<3>(pos_base);
                 Eigen::Matrix3d R_error =
                     State::axis_angle_to_quaternion(error_axis_angle).toRotationMatrix();
 
@@ -218,26 +172,17 @@ State SigmaPointGenerator::apply_error_to_state(State const& nominal_state,
                 Eigen::Quaterniond q_new_joint(R_new);
                 Eigen::Vector3d new_axis_angle = State::quaternion_to_axis_angle(q_new_joint);
 
-                new_angles.segment<3>(joint_angles_idx) = new_axis_angle;
-                new_joint_vels.segment<3>(joint_angles_idx) += error_vec.segment<3>(error_vel_idx);
+                new_angles.segment<3>(si) = new_axis_angle;
+                new_joint_vels.segment<3>(si) += error_vec.segment<3>(vel_base);
 
-                error_pos_idx += 3;
-                error_vel_idx += 3;
             } else {
                 // Some DOFs locked: only apply error to active axes
+                int partial = 0;
                 for (int axis = 0; axis < 3; ++axis) {
-                    if (active_mask[axis]) {
-                        if (error_pos_idx >= active_dof || error_vel_idx >= 2 * active_dof) {
-                            throw std::runtime_error(fmt::format(
-                                "Error index out of bounds for joint '{}' axis {}: pos_idx={}, "
-                                "vel_idx={}, active_dof={}",
-                                joint.name, axis, error_pos_idx, error_vel_idx, active_dof));
-                        }
-                        new_angles(joint_angles_idx + axis) += error_vec(error_pos_idx);
-                        new_joint_vels(joint_angles_idx + axis) += error_vec(error_vel_idx);
-
-                        error_pos_idx += 1;
-                        error_vel_idx += 1;
+                    if (j.active_dof_mask[axis]) {
+                        new_angles(si + axis) += error_vec(pos_base + partial);
+                        new_joint_vels(si + axis) += error_vec(vel_base + partial);
+                        partial++;
                     }
                 }
             }

@@ -20,7 +20,8 @@ TEST_CASE("UKF construction and initialization", "[ukf]") {
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     skeleton.add_joint("joint1", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1));
 
-    UnscentedKalmanFilter ukf(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout);
 
     // Check initial state
     REQUIRE(ukf.state().joint_angles().size() == 1);
@@ -37,7 +38,8 @@ TEST_CASE("UKF set and get state", "[ukf]") {
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     skeleton.add_joint("joint1", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1));
 
-    UnscentedKalmanFilter ukf(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout);
 
     // Create a test state
     Eigen::Vector3d pos(1.0, 2.0, 3.0);
@@ -63,7 +65,8 @@ TEST_CASE("UKF set covariance with validation", "[ukf]") {
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     skeleton.add_joint("joint1", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1));
 
-    UnscentedKalmanFilter ukf(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout);
 
     // Valid covariance
     Eigen::MatrixXd cov = Eigen::MatrixXd::Identity(14, 14) * 0.5;
@@ -80,7 +83,8 @@ TEST_CASE("UKF prediction maintains state structure", "[ukf]") {
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     skeleton.add_joint("joint1", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1));
 
-    UnscentedKalmanFilter ukf(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout);
 
     // Set initial state with non-zero values
     Eigen::Vector3d pos(1.0, 2.0, 3.0);
@@ -112,7 +116,8 @@ TEST_CASE("UKF prediction with zero velocity", "[ukf]") {
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     skeleton.add_joint("joint1", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1));
 
-    UnscentedKalmanFilter ukf(skeleton, 0.01);  // Small process noise
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.01);  // Small process noise
 
     // Set initial state with zero velocities
     Eigen::Vector3d pos(1.0, 2.0, 3.0);
@@ -141,7 +146,8 @@ TEST_CASE("UKF prediction with constant velocity", "[ukf]") {
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     skeleton.add_joint("joint1", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1));
 
-    UnscentedKalmanFilter ukf(skeleton, 0.001);  // Very small process noise
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.001);  // Very small process noise
 
     // Set initial state with constant velocity
     Eigen::Vector3d pos(1.0, 2.0, 3.0);
@@ -179,7 +185,8 @@ TEST_CASE("UKF prediction with rotation", "[ukf]") {
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     skeleton.add_joint("joint1", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1));
 
-    UnscentedKalmanFilter ukf(skeleton, 0.001);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.001);
 
     // Set initial state with angular velocity
     Eigen::Vector3d pos = Eigen::Vector3d::Zero();
@@ -217,7 +224,8 @@ TEST_CASE("UKF prediction increases covariance", "[ukf]") {
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     skeleton.add_joint("joint1", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1));
 
-    UnscentedKalmanFilter ukf(skeleton, 0.1);  // Process noise
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.1);  // Process noise
 
     // Set tight initial covariance
     Eigen::MatrixXd initial_cov = Eigen::MatrixXd::Identity(14, 14) * 0.01;
@@ -246,7 +254,8 @@ TEST_CASE("UKF prediction with spherical joint", "[ukf]") {
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     skeleton.add_joint("shoulder", 0, JointType::SPHERICAL, Eigen::Vector3d(0, 0, 0.1));
 
-    UnscentedKalmanFilter ukf(skeleton, 0.01);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.01);
 
     // Set initial state
     Eigen::Vector3d pos(1.0, 2.0, 3.0);
@@ -288,7 +297,8 @@ TEST_CASE("UKF prediction with locked DOFs", "[ukf]") {
     limits[2] = Eigen::Vector2d(-M_PI, M_PI);  // Z active
     skeleton.set_joint_limits(shoulder, limits, 3);
 
-    UnscentedKalmanFilter ukf(skeleton, 0.01);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.01);
 
     // Set initial state - now always 3 DOFs for spherical joint
     Eigen::Vector3d pos = Eigen::Vector3d::Zero();
@@ -324,7 +334,8 @@ TEST_CASE("UKF multiple prediction steps", "[ukf]") {
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     skeleton.add_joint("joint1", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1));
 
-    UnscentedKalmanFilter ukf(skeleton, 0.01);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    UnscentedKalmanFilter ukf(skeleton, layout, 0.01);
 
     // Set initial state with velocity
     Eigen::Vector3d pos(0.0, 0.0, 0.0);

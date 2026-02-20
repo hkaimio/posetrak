@@ -57,7 +57,7 @@ struct JointDesc {
     bool is_floating_root;  ///< Always false in joints() list (root not included here)
 
     std::array<Eigen::Vector2d, 3> limits;  ///< Joint limits [min, max] per DOF
-    uint32_t limit_count;                   ///< Number of active limit pairs (0-3)
+    int limit_count;                        ///< Number of active limit pairs (0-3)
     std::array<bool, 3> active_dof_mask;    ///< Which axes are free (SPHERICAL)
 };
 
@@ -92,6 +92,13 @@ class SkeletonLayout {
     static std::shared_ptr<const SkeletonLayout>
     from_groups(Skeleton const& skeleton, std::vector<std::string> const& group_names);
 
+    /// @brief Build layout respecting the skeleton's current active-group filter.
+    ///
+    /// Uses Skeleton::is_joint_active() as the inclusion predicate. When no
+    /// active filter has been set on the skeleton, this is identical to
+    /// from_full_skeleton().
+    static std::shared_ptr<const SkeletonLayout> from_active_skeleton(Skeleton const& skeleton);
+
     // -------------------------------------------------------------------------
     // O(1) accessors (all values precomputed at construction)
     // -------------------------------------------------------------------------
@@ -106,15 +113,15 @@ class SkeletonLayout {
 
     /// @brief Size of State::joint_angles / State::joint_velocities for this layout.
     /// Sum of storage_dof_count across all joints (1 per REVOLUTE, 3 per SPHERICAL).
-    uint32_t total_storage_dof_count() const { return total_storage_dof_count_; }
+    int total_storage_dof_count() const { return total_storage_dof_count_; }
 
     /// @brief Number of free (active) joint DOFs, excluding root's 6.
     /// Used to compute error_state_dim().
-    uint32_t joint_active_dof_count() const { return joint_active_dof_count_; }
+    int joint_active_dof_count() const { return joint_active_dof_count_; }
 
     /// @brief Contribution of the root to the error-state vector.
     /// Returns 6 if has_floating_root(), else 0.
-    uint32_t root_error_dof_count() const { return has_floating_root_ ? 6u : 0u; }
+    int root_error_dof_count() const { return has_floating_root_ ? 6 : 0; }
 
     /// @brief Total error-state dimension used by UKF / sigma points.
     /// = 2 * (root_error_dof_count() + joint_active_dof_count())
@@ -150,7 +157,7 @@ class SkeletonLayout {
     ///       only; it cannot detect that two layouts came from structurally
     ///       similar but distinct skeletons.
     /// @throws std::invalid_argument if any joint in subset is not present in this layout.
-    std::vector<uint32_t> build_index_map_from(SkeletonLayout const& subset) const;
+    std::vector<int> build_index_map_from(SkeletonLayout const& subset) const;
 
    private:
     SkeletonLayout() = default;  // Only factory functions construct
@@ -162,10 +169,10 @@ class SkeletonLayout {
     static std::shared_ptr<const SkeletonLayout> build(Skeleton const& skeleton, bool include_all,
                                                        std::vector<std::string> const& group_names);
 
-    std::vector<JointDesc> joints_;                          ///< Non-root joints in order
-    std::unordered_map<std::string, uint32_t> name_to_idx_;  ///< name → index in joints_
-    uint32_t total_storage_dof_count_ = 0;
-    uint32_t joint_active_dof_count_ = 0;
+    std::vector<JointDesc> joints_;                     ///< Non-root joints in order
+    std::unordered_map<std::string, int> name_to_idx_;  ///< name → index in joints_
+    int total_storage_dof_count_ = 0;
+    int joint_active_dof_count_ = 0;
     bool has_floating_root_ = false;
 };
 

@@ -40,7 +40,8 @@ TEST_CASE("Sigma points with filtered joints", "[sigma_points][filtering]") {
         state.set_joint_angles(Eigen::VectorXd::Zero(skeleton.total_dof_count()));
         state.set_joint_velocities(Eigen::VectorXd::Zero(skeleton.total_dof_count()));
 
-        SigmaPointGenerator gen(skeleton, 0.1, 2.0, 0.0);
+        auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+        SigmaPointGenerator gen(skeleton, layout, 0.1, 2.0, 0.0);
         Eigen::MatrixXd cov = Eigen::MatrixXd::Identity(22, 22) * 0.01;  // 2 * 11 = 22
 
         // Should succeed with all joints
@@ -61,7 +62,8 @@ TEST_CASE("Sigma points with filtered joints", "[sigma_points][filtering]") {
         state.set_joint_angles(Eigen::VectorXd::Zero(skeleton.total_dof_count()));
         state.set_joint_velocities(Eigen::VectorXd::Zero(skeleton.total_dof_count()));
 
-        SigmaPointGenerator gen(skeleton, 0.1, 2.0, 0.0);
+        auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+        SigmaPointGenerator gen(skeleton, layout, 0.1, 2.0, 0.0);
         Eigen::MatrixXd cov = Eigen::MatrixXd::Identity(14, 14) * 0.01;  // 2 * 7 = 14
 
         // Should succeed with filtered joints
@@ -90,7 +92,8 @@ TEST_CASE("Sigma points with filtered joints", "[sigma_points][filtering]") {
         state.set_joint_angles(Eigen::VectorXd::Zero(skeleton.total_dof_count()));
         state.set_joint_velocities(Eigen::VectorXd::Zero(skeleton.total_dof_count()));
 
-        SigmaPointGenerator gen(skeleton, 0.1, 2.0, 0.0);
+        auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+        SigmaPointGenerator gen(skeleton, layout, 0.1, 2.0, 0.0);
 
         // Error dimension should be 2 * active_dof = 14
         Eigen::MatrixXd cov = Eigen::MatrixXd::Identity(14, 14) * 0.01;
@@ -111,7 +114,8 @@ TEST_CASE("Sigma points with filtered joints", "[sigma_points][filtering]") {
         state.set_joint_angles(Eigen::VectorXd::Zero(skeleton.total_dof_count()));
         state.set_joint_velocities(Eigen::VectorXd::Zero(skeleton.total_dof_count()));
 
-        SigmaPointGenerator gen(skeleton, 0.1, 2.0, 0.0);
+        auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+        SigmaPointGenerator gen(skeleton, layout, 0.1, 2.0, 0.0);
 
         // Wrong dimension - should be 14, but use 22 (all joints)
         Eigen::MatrixXd cov = Eigen::MatrixXd::Identity(22, 22) * 0.01;
@@ -134,7 +138,8 @@ TEST_CASE("Sigma points with filtered joints", "[sigma_points][filtering]") {
         state.set_joint_angles(angles);
         state.set_joint_velocities(Eigen::VectorXd::Zero(skeleton.total_dof_count()));
 
-        SigmaPointGenerator gen(skeleton, 0.1, 2.0, 0.0);
+        auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+        SigmaPointGenerator gen(skeleton, layout, 0.1, 2.0, 0.0);
         Eigen::MatrixXd cov = Eigen::MatrixXd::Identity(14, 14) * 0.01;
 
         auto sigma_states = gen.generate_sigma_points(state, cov);
@@ -204,7 +209,8 @@ TEST_CASE("Sigma point error vector bounds checking", "[sigma_points][bounds]") 
     // error_dim = 2 * 4 = 8
     REQUIRE(skeleton.active_dof() == 4);
 
-    SigmaPointGenerator gen(skeleton, 0.1, 2.0, 0.0);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    SigmaPointGenerator gen(skeleton, layout, 0.1, 2.0, 0.0);
     Eigen::MatrixXd cov = Eigen::MatrixXd::Identity(8, 8) * 0.01;
 
     // Should complete without bounds violations

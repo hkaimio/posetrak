@@ -50,14 +50,14 @@ SkeletonLayout::build(Skeleton const& skeleton, bool include_all,
     //         We store these in a temporary map; the layout itself only stores
     //         layout-relative indices.
     // ------------------------------------------------------------------
-    std::unordered_map<std::string, uint32_t> full_state_idx;
+    std::unordered_map<std::string, int> full_state_idx;
     {
-        uint32_t fs_idx = 0;
+        int fs_idx = 0;
         for (auto const& joint : skeleton.get_joints_ordered()) {
             if (is_root(joint) || is_fixed(joint))
                 continue;
             full_state_idx[joint.name] = fs_idx;
-            fs_idx += static_cast<uint32_t>(joint.dof);
+            fs_idx += static_cast<int>(joint.dof);
         }
     }
 
@@ -65,8 +65,8 @@ SkeletonLayout::build(Skeleton const& skeleton, bool include_all,
     // Pass 2: filter joints to the requested groups and build layout-relative
     //         JointDesc entries.
     // ------------------------------------------------------------------
-    uint32_t layout_state_idx = 0;  // layout-relative position in joint_angles
-    uint32_t layout_error_idx = 0;  // layout-relative position in error-state joint block
+    int layout_state_idx = 0;  // layout-relative position in joint_angles
+    int layout_error_idx = 0;  // layout-relative position in error-state joint block
 
     for (auto const& joint : skeleton.get_joints_ordered()) {
         bool const in_layout = include_all || (group_set.count(joint.group) > 0);
@@ -88,22 +88,22 @@ SkeletonLayout::build(Skeleton const& skeleton, bool include_all,
         JointDesc desc;
         desc.name = joint.name;
         desc.type = joint.type;
-        desc.storage_dof_count = static_cast<uint32_t>(joint.dof);
-        desc.active_dof_count = static_cast<uint32_t>(joint.active_dof());
+        desc.storage_dof_count = static_cast<int>(joint.dof);
+        desc.active_dof_count = static_cast<int>(joint.active_dof());
         desc.state_index = layout_state_idx;
         desc.error_index = layout_error_idx;
         desc.is_floating_root = false;
         desc.limits = joint.limits;
-        desc.limit_count = static_cast<uint32_t>(joint.num_limits);
+        desc.limit_count = static_cast<int>(joint.num_limits);
         desc.active_dof_mask = joint.get_active_dof_mask();
 
-        layout->name_to_idx_[desc.name] = static_cast<uint32_t>(layout->joints_.size());
+        layout->name_to_idx_[desc.name] = static_cast<int>(layout->joints_.size());
         layout->joints_.push_back(std::move(desc));
 
-        layout_state_idx += static_cast<uint32_t>(joint.dof);
-        layout_error_idx += static_cast<uint32_t>(joint.active_dof());
-        layout->total_storage_dof_count_ += static_cast<uint32_t>(joint.dof);
-        layout->joint_active_dof_count_ += static_cast<uint32_t>(joint.active_dof());
+        layout_state_idx += static_cast<int>(joint.dof);
+        layout_error_idx += static_cast<int>(joint.active_dof());
+        layout->total_storage_dof_count_ += static_cast<int>(joint.dof);
+        layout->joint_active_dof_count_ += static_cast<int>(joint.active_dof());
     }
 
     if (!include_all && layout->joints_.empty() && !layout->has_floating_root_) {
@@ -127,6 +127,60 @@ SkeletonLayout::from_groups(Skeleton const& skeleton, std::vector<std::string> c
     return build(skeleton, /*include_all=*/false, group_names);
 }
 
+std::shared_ptr<const SkeletonLayout>
+SkeletonLayout::from_active_skeleton(Skeleton const& skeleton) {
+    // Builds a layout respecting skeleton.is_joint_active().
+    // IMPORTANT: state_index uses the full-skeleton State vector offset
+    // (advances over ALL non-fixed non-root joints, including inactive ones),
+    // because the UKF State is always total_dof_count()-sized.
+    // error_index is layout-relative (only active joints contribute).
+    auto layout = std::shared_ptr<SkeletonLayout>(new SkeletonLayout());
+
+    int full_state_idx = 0;    // position in State::joint_angles (all joints)
+    int layout_error_idx = 0;  // position in error-state joint block (active only)
+
+    for (auto const& joint : skeleton.get_joints_ordered()) {
+        bool const active = skeleton.is_joint_active(joint.name);
+
+        if (is_root(joint)) {
+            if (active) {
+                layout->has_floating_root_ = true;
+            }
+            continue;
+        }
+
+        if (is_fixed(joint)) {
+            continue;
+        }
+
+        if (active) {
+            JointDesc desc;
+            desc.name = joint.name;
+            desc.type = joint.type;
+            desc.storage_dof_count = static_cast<int>(joint.dof);
+            desc.active_dof_count = static_cast<int>(joint.active_dof());
+            desc.state_index = full_state_idx;    // full-skeleton offset
+            desc.error_index = layout_error_idx;  // layout-relative
+            desc.is_floating_root = false;
+            desc.limits = joint.limits;
+            desc.limit_count = static_cast<int>(joint.num_limits);
+            desc.active_dof_mask = joint.get_active_dof_mask();
+
+            layout->name_to_idx_[desc.name] = static_cast<int>(layout->joints_.size());
+            layout->joints_.push_back(std::move(desc));
+
+            layout_error_idx += static_cast<int>(joint.active_dof());
+            layout->total_storage_dof_count_ += static_cast<int>(joint.dof);
+            layout->joint_active_dof_count_ += static_cast<int>(joint.active_dof());
+        }
+
+        // Always advance full-skeleton offset, regardless of active status
+        full_state_idx += static_cast<int>(joint.dof);
+    }
+
+    return layout;
+}
+
 // ---------------------------------------------------------------------------
 // Lookup
 // ---------------------------------------------------------------------------
@@ -142,11 +196,11 @@ JointDesc const* SkeletonLayout::get_joint(std::string const& name) const {
 // Index mapping
 // ---------------------------------------------------------------------------
 
-std::vector<uint32_t> SkeletonLayout::build_index_map_from(SkeletonLayout const& subset) const {
+std::vector<int> SkeletonLayout::build_index_map_from(SkeletonLayout const& subset) const {
     // Joints are matched by name only. Caller must ensure both layouts were
     // derived from the same Skeleton — this function cannot verify that.
-    std::vector<uint32_t> map;
-    map.reserve(subset.total_storage_dof_count_);
+    std::vector<int> map;
+    map.reserve(static_cast<size_t>(subset.total_storage_dof_count_));
 
     for (auto const& subdesc : subset.joints_) {
         JointDesc const* desc = get_joint(subdesc.name);
@@ -157,7 +211,7 @@ std::vector<uint32_t> SkeletonLayout::build_index_map_from(SkeletonLayout const&
                             subdesc.name));
         }
         // One entry per storage DOF of this joint
-        for (uint32_t i = 0; i < subdesc.storage_dof_count; ++i) {
+        for (int i = 0; i < subdesc.storage_dof_count; ++i) {
             map.push_back(desc->state_index + i);
         }
     }

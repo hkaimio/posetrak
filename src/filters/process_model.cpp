@@ -5,12 +5,15 @@
 
 #include "posetrak/filters/process_model.hpp"
 
+#include "posetrak/core/skeleton_layout.hpp"
 #include <cmath>
 
 namespace posetrak {
 
-ConstantVelocityModel::ConstantVelocityModel(Skeleton const& skeleton, double process_noise_std)
-    : skeleton_(skeleton), process_noise_std_(process_noise_std) {}
+ConstantVelocityModel::ConstantVelocityModel(Skeleton const& skeleton,
+                                             std::shared_ptr<const SkeletonLayout> layout,
+                                             double process_noise_std)
+    : skeleton_(skeleton), layout_(std::move(layout)), process_noise_std_(process_noise_std) {}
 
 State ConstantVelocityModel::propagate(State const& state, double dt) const {
     // Create a mutable copy to modify
@@ -32,30 +35,19 @@ State ConstantVelocityModel::propagate(State const& state, double dt) const {
     // - Revolute: simple addition θ' = θ + ω * dt
     // - Spherical: manifold composition using rotation matrices
     Eigen::VectorXd new_angles = state.joint_angles();
-    auto joints_ordered = skeleton_.get_joints_ordered();
 
-    int angle_idx = 0;  // Index in joint_angles vector
-    int vel_idx = 0;    // Index in joint_velocities vector
-
-    for (auto const& joint : joints_ordered) {
-        // Skip root joint (handled above)
-        if (!joint.parent_index.has_value()) {
-            continue;
-        }
-
-        if (joint.type == JointType::REVOLUTE) {
+    for (JointDesc const& j : layout_->joints()) {
+        if (j.type == JointType::REVOLUTE) {
             // Simple integration for revolute joints
-            new_angles[angle_idx] += state.joint_velocities()[vel_idx] * dt;
-            angle_idx++;
-            vel_idx++;
+            new_angles[j.state_index] += state.joint_velocities()[j.state_index] * dt;
 
-        } else if (joint.type == JointType::SPHERICAL) {
+        } else if (j.type == JointType::SPHERICAL) {
             // Manifold integration for spherical joints (SO(3))
             // Always use 3 DOFs in state storage (locked DOFs enforced in limits)
 
             // Current axis-angle representation
-            Eigen::Vector3d current_axis_angle = state.joint_angles().segment<3>(angle_idx);
-            Eigen::Vector3d angular_velocity = state.joint_velocities().segment<3>(vel_idx);
+            Eigen::Vector3d current_axis_angle = state.joint_angles().segment<3>(j.state_index);
+            Eigen::Vector3d angular_velocity = state.joint_velocities().segment<3>(j.state_index);
 
             // Convert current state to rotation matrix
             Eigen::Quaterniond current_q = State::axis_angle_to_quaternion(current_axis_angle);
@@ -73,12 +65,7 @@ State ConstantVelocityModel::propagate(State const& state, double dt) const {
             Eigen::Quaterniond new_q(R_new);
             Eigen::Vector3d new_axis_angle = State::quaternion_to_axis_angle(new_q);
 
-            new_angles.segment<3>(angle_idx) = new_axis_angle;
-
-            // Note: Locked DOFs will be enforced by enforce_joint_limits()
-
-            angle_idx += 3;
-            vel_idx += 3;
+            new_angles.segment<3>(j.state_index) = new_axis_angle;
         }
         // FIXED joints have 0 DOF, nothing to update
     }
@@ -106,52 +93,28 @@ void ConstantVelocityModel::set_process_noise_std(double std_dev) {
 }
 
 void ConstantVelocityModel::enforce_joint_limits(State& state) const {
-    auto joints_ordered = skeleton_.get_joints_ordered();
-
-    int joint_angle_idx = 0;
     Eigen::VectorXd angles = state.joint_angles();  // Get mutable copy
 
-    for (auto const& joint : joints_ordered) {
-        // Skip root joint (no limits on root)
-        if (!joint.parent_index.has_value()) {
-            continue;
-        }
-
-        if (joint.type == JointType::REVOLUTE) {
-            // Single DOF - enforce limits
-            if (joint.num_limits > 0 && joint_angle_idx < angles.size()) {
-                double min_limit = joint.limits[0].x();
-                double max_limit = joint.limits[0].y();
-
-                // Clamp angle to limits
-                angles[joint_angle_idx] = std::clamp(angles[joint_angle_idx], min_limit, max_limit);
+    for (JointDesc const& j : layout_->joints()) {
+        if (j.type == JointType::REVOLUTE) {
+            // Single DOF — enforce limit if present
+            if (j.limit_count > 0) {
+                angles[j.state_index] =
+                    std::clamp(angles[j.state_index], j.limits[0].x(), j.limits[0].y());
             }
-            joint_angle_idx++;
 
-        } else if (joint.type == JointType::SPHERICAL) {
+        } else if (j.type == JointType::SPHERICAL) {
             // Spherical joint: always 3 DOFs in storage
-            // Check for locked DOFs and enforce them
-            auto active_mask = joint.get_active_dof_mask();
-
-            if (joint_angle_idx + 2 < angles.size()) {
-                for (int i = 0; i < 3; ++i) {
-                    if (!active_mask[i]) {
-                        // Locked DOF: set to limit value (which should be min == max)
-                        if (joint.num_limits > static_cast<size_t>(i)) {
-                            angles[joint_angle_idx + i] = joint.limits[i].x();
-                        } else {
-                            angles[joint_angle_idx + i] = 0.0;
-                        }
-                    } else if (joint.num_limits > static_cast<size_t>(i)) {
-                        // Active DOF with limits: clamp to range
-                        double min_limit = joint.limits[i].x();
-                        double max_limit = joint.limits[i].y();
-                        angles[joint_angle_idx + i] =
-                            std::clamp(angles[joint_angle_idx + i], min_limit, max_limit);
-                    }
+            for (int i = 0; i < 3; ++i) {
+                if (!j.active_dof_mask[i]) {
+                    // Locked DOF: set to limit value (min == max)
+                    angles[j.state_index + i] = (j.limit_count > i) ? j.limits[i].x() : 0.0;
+                } else if (j.limit_count > i) {
+                    // Active DOF with limits: clamp to range
+                    angles[j.state_index + i] =
+                        std::clamp(angles[j.state_index + i], j.limits[i].x(), j.limits[i].y());
                 }
             }
-            joint_angle_idx += 3;
         }
         // FIXED joints have 0 DOF, no angles to enforce
     }

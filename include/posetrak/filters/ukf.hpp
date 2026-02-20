@@ -10,6 +10,7 @@
 #include "posetrak/core/camera.hpp"
 #include "posetrak/core/observation.hpp"
 #include "posetrak/core/skeleton.hpp"
+#include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/core/state.hpp"
 #include "posetrak/filters/process_model.hpp"
 #include "posetrak/filters/sigma_points.hpp"
@@ -41,8 +42,9 @@ class UnscentedKalmanFilter {
      * @param beta UKF distribution parameter (default: 2.0 for Gaussian)
      * @param kappa UKF secondary scaling (default: 0.0)
      */
-    UnscentedKalmanFilter(Skeleton const& skeleton, double process_noise_std = 0.1,
-                          double alpha = 0.001, double beta = 2.0, double kappa = 0.0);
+    UnscentedKalmanFilter(Skeleton const& skeleton, std::shared_ptr<const SkeletonLayout> layout,
+                          double process_noise_std = 0.1, double alpha = 0.001, double beta = 2.0,
+                          double kappa = 0.0);
 
     /**
      * @brief Prediction step: propagate state and covariance forward in time
@@ -282,12 +284,13 @@ class UnscentedKalmanFilter {
      */
     void write_matrix_csv(Eigen::MatrixXd const& matrix, std::string const& filename) const;
 
-    Skeleton const& skeleton_;             ///< Skeleton structure
-    State state_;                          ///< Current state estimate
-    Eigen::MatrixXd covariance_;           ///< Covariance in error space
-    Eigen::MatrixXd process_noise_;        ///< Process noise covariance
-    SigmaPointGenerator sigma_gen_;        ///< Sigma point generator
-    ConstantVelocityModel process_model_;  ///< Process model
+    Skeleton const& skeleton_;                      ///< Skeleton structure
+    std::shared_ptr<const SkeletonLayout> layout_;  ///< Precomputed DOF index table
+    State state_;                                   ///< Current state estimate
+    Eigen::MatrixXd covariance_;                    ///< Covariance in error space
+    Eigen::MatrixXd process_noise_;                 ///< Process noise covariance
+    SigmaPointGenerator sigma_gen_;                 ///< Sigma point generator
+    ConstantVelocityModel process_model_;           ///< Process model
 
     // Debug state
     bool debug_enabled_ = false;  ///< Debug mode flag

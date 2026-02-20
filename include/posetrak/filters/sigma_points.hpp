@@ -6,6 +6,7 @@
 #pragma once
 
 #include <posetrak/core/skeleton.hpp>
+#include <posetrak/core/skeleton_layout.hpp>
 #include <posetrak/core/state.hpp>
 
 #include <Eigen/Core>
@@ -35,8 +36,8 @@ class SigmaPointGenerator {
      * @param beta Distribution parameter (default: 2.0)
      * @param kappa Secondary scaling parameter (default: 0.0)
      */
-    SigmaPointGenerator(Skeleton const& skeleton, double alpha = 0.001, double beta = 2.0,
-                        double kappa = 0.0);
+    SigmaPointGenerator(Skeleton const& skeleton, std::shared_ptr<const SkeletonLayout> layout,
+                        double alpha = 0.001, double beta = 2.0, double kappa = 0.0);
 
     /**
      * @brief Generate sigma points in error-state space
@@ -90,14 +91,15 @@ class SigmaPointGenerator {
     State apply_error_to_state(State const& nominal_state, Eigen::VectorXd const& error_vec) const;
 
    private:
-    Skeleton const& skeleton_;  ///< Reference to skeleton
-    int error_dim_;             ///< Error-state dimension (2 * active_dof)
-    double alpha_;              ///< Spread parameter
-    double beta_;               ///< Distribution parameter
-    double kappa_;              ///< Secondary scaling
-    double gamma_;              ///< Sigma point scaling factor
-    Eigen::VectorXd wm_;        ///< Weights for mean
-    Eigen::VectorXd wc_;        ///< Weights for covariance
+    Skeleton const& skeleton_;                      ///< Reference to skeleton
+    std::shared_ptr<const SkeletonLayout> layout_;  ///< Precomputed DOF index table
+    int error_dim_;                                 ///< Error-state dimension (2 * active_dof)
+    double alpha_;                                  ///< Spread parameter
+    double beta_;                                   ///< Distribution parameter
+    double kappa_;                                  ///< Secondary scaling
+    double gamma_;                                  ///< Sigma point scaling factor
+    Eigen::VectorXd wm_;                            ///< Weights for mean
+    Eigen::VectorXd wc_;                            ///< Weights for covariance
 };
 
 }  // namespace posetrak

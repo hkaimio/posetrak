@@ -7,6 +7,7 @@
 
 #include <fmt/core.h>
 
+#include "posetrak/core/skeleton_layout.hpp"
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -57,22 +58,25 @@ namespace posetrak {
 //     }
 // }
 
-UnscentedKalmanFilter::UnscentedKalmanFilter(Skeleton const& skeleton, double process_noise_std,
-                                             double alpha, double beta, double kappa)
+UnscentedKalmanFilter::UnscentedKalmanFilter(Skeleton const& skeleton,
+                                             std::shared_ptr<const SkeletonLayout> layout,
+                                             double process_noise_std, double alpha, double beta,
+                                             double kappa)
     : skeleton_(skeleton),
+      layout_(layout),
       state_(skeleton.total_dof_count()),
-      covariance_(Eigen::MatrixXd::Identity(2 * skeleton.active_dof(), 2 * skeleton.active_dof())),
+      covariance_(Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim())),
       process_noise_(
-          Eigen::MatrixXd::Identity(2 * skeleton.active_dof(), 2 * skeleton.active_dof())),
-      sigma_gen_(skeleton, alpha, beta, kappa),
-      process_model_(skeleton) {
+          Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim())),
+      sigma_gen_(skeleton, layout, alpha, beta, kappa),
+      process_model_(skeleton, layout) {
     // Initialize process noise with given standard deviation
     double const variance = process_noise_std * process_noise_std;
     process_noise_ *= variance;
 
     // Debug: Print DOF counts
-    fmt::print("UKF initialized: total_dof={}, active_dof={}, error_dim={}\n",
-               skeleton.total_dof_count(), skeleton.active_dof(), 2 * skeleton.active_dof());
+    fmt::print("UKF initialized: total_dof={}, error_dim={}\n", skeleton.total_dof_count(),
+               layout->error_state_dim());
 }
 
 void UnscentedKalmanFilter::set_covariance(Eigen::MatrixXd const& covariance) {
@@ -512,33 +516,29 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
     mean_state.set_root_angular_velocity(angvel_mean);
 
     // Mean joint angles and velocities
-    auto const joints_ordered = skeleton_.get_joints_ordered();
     Eigen::VectorXd angles_mean = Eigen::VectorXd::Zero(skeleton_.total_dof_count());
     Eigen::VectorXd velocities_mean = Eigen::VectorXd::Zero(skeleton_.total_dof_count());
 
-    int dof_idx = 0;
-    for (auto const& joint : joints_ordered) {
-        if (!joint.parent_index.has_value()) {
-            continue;  // Skip root
-        }
-        if (joint.type == JointType::REVOLUTE) {
+    for (JointDesc const& j : layout_->joints()) {
+        int const si = j.state_index;
+
+        if (j.type == JointType::REVOLUTE) {
             // Simple weighted average
             for (size_t i = 0; i < states.size(); ++i) {
-                angles_mean(dof_idx) += weights(i) * states[i].joint_angles()(dof_idx);
-                velocities_mean(dof_idx) += weights(i) * states[i].joint_velocities()(dof_idx);
+                angles_mean(si) += weights(i) * states[i].joint_angles()(si);
+                velocities_mean(si) += weights(i) * states[i].joint_velocities()(si);
             }
-            dof_idx += 1;
 
-        } else if (joint.type == JointType::SPHERICAL) {
+        } else if (j.type == JointType::SPHERICAL) {
             // Always 3 DOFs: iterative mean on SO(3) manifold
-            Eigen::Vector3d const initial_aa = states[0].joint_angles().segment<3>(dof_idx);
+            Eigen::Vector3d const initial_aa = states[0].joint_angles().segment<3>(si);
             Eigen::Matrix3d R_mean = State::axis_angle_to_quaternion(initial_aa).toRotationMatrix();
 
             for (int iter = 0; iter < 10; ++iter) {
                 Eigen::Vector3d error_sum = Eigen::Vector3d::Zero();
 
                 for (size_t i = 0; i < states.size(); ++i) {
-                    Eigen::Vector3d const aa_i = states[i].joint_angles().segment<3>(dof_idx);
+                    Eigen::Vector3d const aa_i = states[i].joint_angles().segment<3>(si);
                     Eigen::Matrix3d const R_i =
                         State::axis_angle_to_quaternion(aa_i).toRotationMatrix();
 
@@ -571,18 +571,16 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
 
             // Convert back to axis-angle
             Eigen::Quaterniond const q_mean(R_mean);
-            angles_mean.segment<3>(dof_idx) = State::quaternion_to_axis_angle(q_mean);
+            angles_mean.segment<3>(si) = State::quaternion_to_axis_angle(q_mean);
 
             // Velocities: simple weighted average
             for (size_t i = 0; i < states.size(); ++i) {
-                velocities_mean.segment<3>(dof_idx) +=
-                    weights(i) * states[i].joint_velocities().segment<3>(dof_idx);
+                velocities_mean.segment<3>(si) +=
+                    weights(i) * states[i].joint_velocities().segment<3>(si);
             }
-
-            dof_idx += 3;
         }
     }
-
+    Eigen::Index i;
     mean_state.set_joint_angles(angles_mean);
     mean_state.set_joint_velocities(velocities_mean);
 
@@ -630,7 +628,9 @@ UnscentedKalmanFilter::compute_state_covariance(std::vector<State> const& states
 
 Eigen::VectorXd UnscentedKalmanFilter::compute_state_error(State const& state,
                                                            State const& reference) const {
-    int const active_dof = skeleton_.active_dof();  // Includes root's 6 DOFs
+    int const root_n = layout_->root_error_dof_count();  // 6
+    int const jac = layout_->joint_active_dof_count();
+    int const active_dof = root_n + jac;  // == error_dim() / 2
     Eigen::VectorXd error = Eigen::VectorXd::Zero(error_dim());
 
     // Position error
@@ -654,51 +654,21 @@ Eigen::VectorXd UnscentedKalmanFilter::compute_state_error(State const& state,
         state.root_angular_velocity() - reference.root_angular_velocity();
 
     // Joint angle and velocity errors
-    auto const joints_ordered = skeleton_.get_joints_ordered();
-    int error_pos_idx = 6;               // Start after root's 6 DOFs in rotation section
-    int error_vel_idx = active_dof + 6;  // Start after root's 6 DOFs in velocity section
-    int joint_angles_idx = 0;            // Index in joint_angles/joint_velocities storage
 
-    for (auto const& joint : joints_ordered) {
-        // Skip root joint
-        if (!joint.parent_index.has_value()) {
-            continue;
-        }
+    for (JointDesc const& j : layout_->joints()) {
+        int const si = j.state_index;
+        int const pos_base = root_n + j.error_index;
+        int const vel_base = active_dof + root_n + j.error_index;
 
-        // Skip inactive joints (if group filtering is enabled)
-        if (!skeleton_.is_joint_active(joint.name)) {
-            // Still advance the storage index for revolute/spherical joints
-            if (joint.type == JointType::REVOLUTE) {
-                joint_angles_idx += 1;
-            } else if (joint.type == JointType::SPHERICAL) {
-                joint_angles_idx += 3;
-            }
-            continue;
-        }
+        if (j.type == JointType::REVOLUTE) {
+            error(pos_base) = state.joint_angles()(si) - reference.joint_angles()(si);
+            error(vel_base) = state.joint_velocities()(si) - reference.joint_velocities()(si);
 
-        if (joint.type == JointType::REVOLUTE) {
-            // Position (angle) error
-            error(error_pos_idx) =
-                state.joint_angles()(joint_angles_idx) - reference.joint_angles()(joint_angles_idx);
-
-            // Velocity error
-            error(error_vel_idx) = state.joint_velocities()(joint_angles_idx) -
-                                   reference.joint_velocities()(joint_angles_idx);
-
-            error_pos_idx += 1;
-            error_vel_idx += 1;
-            joint_angles_idx += 1;
-
-        } else if (joint.type == JointType::SPHERICAL) {
-            // Check how many DOFs are active (may be locked on some axes)
-            std::array<bool, 3> const active_mask = joint.get_active_dof_mask();
-            int const num_active = joint.active_dof();
-
-            if (num_active == 3) {
+        } else if (j.type == JointType::SPHERICAL) {
+            if (j.active_dof_count == 3) {
                 // All 3 DOFs active: use SO(3) manifold error
-                Eigen::Vector3d const aa_ref =
-                    reference.joint_angles().segment<3>(joint_angles_idx);
-                Eigen::Vector3d const aa_state = state.joint_angles().segment<3>(joint_angles_idx);
+                Eigen::Vector3d const aa_ref = reference.joint_angles().segment<3>(si);
+                Eigen::Vector3d const aa_state = state.joint_angles().segment<3>(si);
 
                 Eigen::Matrix3d const R_ref =
                     State::axis_angle_to_quaternion(aa_ref).toRotationMatrix();
@@ -708,36 +678,27 @@ Eigen::VectorXd UnscentedKalmanFilter::compute_state_error(State const& state,
                 // Relative rotation: R_ref^T * R_state
                 Eigen::Matrix3d const R_rel = R_ref.transpose() * R_state;
                 Eigen::Quaterniond const q_rel(R_rel);
-                error.segment<3>(error_pos_idx) = State::quaternion_to_axis_angle(q_rel);
+                error.segment<3>(pos_base) = State::quaternion_to_axis_angle(q_rel);
 
                 // Velocity error
-                error.segment<3>(error_vel_idx) =
-                    state.joint_velocities().segment<3>(joint_angles_idx) -
-                    reference.joint_velocities().segment<3>(joint_angles_idx);
+                error.segment<3>(vel_base) = state.joint_velocities().segment<3>(si) -
+                                             reference.joint_velocities().segment<3>(si);
 
-                error_pos_idx += 3;
-                error_vel_idx += 3;
             } else {
-                // Some DOFs locked: compute error only for active DOFs (Euclidean difference)
-                // After enforce_joint_limits(), locked DOFs in reference are at fixed values,
-                // so simple subtraction gives near-zero errors for locked axes
+                // Some DOFs locked: Euclidean error only for active DOFs
+                int partial = 0;
                 for (int axis = 0; axis < 3; ++axis) {
-                    if (active_mask[axis]) {
-                        error(error_pos_idx) = state.joint_angles()(joint_angles_idx + axis) -
-                                               reference.joint_angles()(joint_angles_idx + axis);
-                        error(error_vel_idx) =
-                            state.joint_velocities()(joint_angles_idx + axis) -
-                            reference.joint_velocities()(joint_angles_idx + axis);
-
-                        error_pos_idx += 1;
-                        error_vel_idx += 1;
+                    if (j.active_dof_mask[axis]) {
+                        error(pos_base + partial) =
+                            state.joint_angles()(si + axis) - reference.joint_angles()(si + axis);
+                        error(vel_base + partial) = state.joint_velocities()(si + axis) -
+                                                    reference.joint_velocities()(si + axis);
+                        partial++;
                     }
                 }
             }
-
-            joint_angles_idx += 3;  // Always 3 in storage
         }
-        // FIXED joints have 0 DOF, nothing to compute
+        // FIXED joints have 0 DOF
     }
 
     return error;

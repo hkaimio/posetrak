@@ -20,7 +20,8 @@ TEST_CASE("ConstantVelocityModel propagates state correctly", "[process_model]")
     skeleton.add_joint("joint1", root_idx, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1), "",
                        Eigen::Vector3d::Zero());
 
-    ConstantVelocityModel model(skeleton, 0.1);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    ConstantVelocityModel model(skeleton, layout, 0.1);
 
     SECTION("Propagates root position linearly") {
         Eigen::Vector3d pos(1.0, 2.0, 3.0);
@@ -130,7 +131,8 @@ TEST_CASE("ConstantVelocityModel propagates state correctly", "[process_model]")
         limits[0] = Eigen::Vector2d(-1.0, 1.0);
         skeleton_limited.set_joint_limits(joint, limits, 1);
 
-        ConstantVelocityModel model_limited(skeleton_limited, 0.1);
+        auto layout = SkeletonLayout::from_full_skeleton(skeleton_limited);
+        ConstantVelocityModel model_limited(skeleton_limited, layout, 0.1);
 
         // Test 1: Angle within limits - should propagate normally
         Eigen::Vector3d pos = Eigen::Vector3d::Zero();
@@ -174,7 +176,8 @@ TEST_CASE("ConstantVelocityModel generates process noise", "[process_model]") {
                        Eigen::Vector3d::Zero());
 
     double noise_std = 0.5;
-    ConstantVelocityModel model(skeleton, noise_std);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    ConstantVelocityModel model(skeleton, layout, noise_std);
 
     SECTION("Process noise scales with time step") {
         int state_dim = 12;  // Example dimension
@@ -227,7 +230,8 @@ TEST_CASE("ConstantVelocityModel handles zero velocities", "[process_model]") {
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero(), "",
                        Eigen::Vector3d::Zero());
 
-    ConstantVelocityModel model(skeleton, 0.1);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    ConstantVelocityModel model(skeleton, layout, 0.1);
 
     Eigen::Vector3d pos(1.0, 2.0, 3.0);
     Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
@@ -268,7 +272,8 @@ TEST_CASE("ConstantVelocityModel handles locked DOFs in spherical joints", "[pro
     limits[2] = Eigen::Vector2d(-M_PI, M_PI);  // Z can rotate
     skeleton.set_joint_limits(shoulder_idx, limits, 3);
 
-    ConstantVelocityModel model(skeleton, 0.1);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    ConstantVelocityModel model(skeleton, layout, 0.1);
 
     // Create state with shoulder joint having axis-angle [0.1, 0.2, 0.3]
     // and angular velocities [1.0, 2.0, 3.0]

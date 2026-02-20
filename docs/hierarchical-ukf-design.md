@@ -414,74 +414,319 @@ for (dof in skeleton.dofs) {
 
 **Verdict**: Middle ground between monolithic and hierarchical. Worth considering if Split-UKF too complex.
 
-## Recommended Path Forward
+## Implementation Plan
 
-### Phase 1: Implement Split-UKF (2-3 days)
+### Existing Infrastructure (Already Available!)
+
+The codebase **already has** most of the skeleton group infrastructure:
+
+- **Skeleton groups schema**: `groups:` section in YAML lists joints/markers per group (see `Harri_skeleton-finger-group.yaml` lines 1947-2100)
+- **Group parsing**: `skeleton_loader.cpp` reads `groups:` section and assigns each `joint.group` field
+- **Group filtering**: `Skeleton::set_active_groups(groups)` activates joints by group names
+- **Existing UKF**: `UnscentedKalmanFilter` class is complete and tested (predict/update/state access)
+
+This means **Phase 0 is much simpler** than originally planned!
+
+---
+
+### Phase 0: DOF Extraction Utilities (1 day)
+
+**Goal**: Create utilities to extract/merge DOF subsets for hierarchical filtering.
+
+**Note**: The skeleton group filtering (`set_active_groups()`) already exists. We just need DOF-level extraction/merging.
 
 **Tasks:**
-1. Refactor `UKF::predict()` and `UKF::update()` to support DOF masking
-   - Extract body/hand state subsets from full state vector
-   - Generate sigma points for active DOFs only
-   - Propagate with masked covariance matrices
-2. Implement hierarchical `UKF::step()` function:
-   - Pass 1: Full body UKF cycle (predict + update)
-   - Pass 2: Full hand UKF cycles (predict + update, per hand)
-   - Body state fixed during hand passes
-3. Create marker grouping configuration (body vs hands)
-4. Add configuration parameters for per-pass settings
-5. Implement state/covariance extraction and merging utilities
+1. **Create DOF index extraction utility**
+   ```cpp
+   namespace posetrak {
 
-**Testing:**
-- Frame 685 single-frame test: Check elbow covariance stays <200° AND finger predictions reasonable
-- Frame 600-700 sequence: Verify no runaway growth in either body or hand covariances
-- Frame 915-920 divergence region: Verify stability through challenging period
-- Full dataset: Compare tracking quality and divergence frequency
+   // Get DOF indices for joints in active skeleton
+   // (after set_active_groups() has been called)
+   std::vector<int> get_active_dof_indices(Skeleton const& skeleton);
 
-**Success Metrics:**
-- Elbow covariance: <150° throughout sequence
-- Finger tracking RMS error: Similar or better than current
-- Divergence events: Zero (vs current occasional events)
-- Computational overhead: <2× current runtime
+   }  // namespace posetrak
+   ```
 
-### Phase 2: Parameter Tuning (1-2 days)
+2. **Create state extraction/merging utilities**
+   ```cpp
+   namespace posetrak {
 
-**Body Pass Parameters:**
-- process_noise_std: Start with 0.15 (current tuned value)
-- measurement_noise_std: 20.0 (current)
-- outlier_threshold: 4.0 (current)
-- alpha: 0.1 (current sigma point spread)
+   // Extract subset of state (positions + velocities)
+   State extract_subset_state(State const& full_state,
+                             std::vector<int> const& dof_indices);
 
-**Hand Pass Parameters:**
-- process_noise_std: 0.25-0.30 (higher for agile fingers)
-- measurement_noise_std: 10.0-15.0 (lower for dense markers, high confidence)
-- outlier_threshold: 3.0-3.5 (stricter rejection, tolerate losing some fingers)
-- alpha: 0.1 (keep same)
+   // Merge subset state back into full state
+   // (overwrites DOFs at dof_indices)
+   void merge_subset_state(State& full_state,
+                          State const& subset_state,
+                          std::vector<int> const& dof_indices);
 
-**Tuning Strategy:**
-1. Start conservative (closer to current values)
-2. Gradually increase finger process noise if hand motion too sluggish
-3. Gradually decrease finger measurement noise if tracking seems too cautious
-4. Adjust outlier threshold if too many false positives/negatives
+   // Extract subset of covariance matrix
+   Eigen::MatrixXd extract_subset_covariance(
+       Eigen::MatrixXd const& full_cov,
+       std::vector<int> const& dof_indices);
 
-### Phase 3: Validation & Analysis (1 day)
+   }  // namespace posetrak
+   ```
 
-**Quantitative Metrics:**
-- Covariance trajectories: Plot elbow, wrist, finger covariances over time
-- Tracking RMS error: Per-marker, per-frame, compare to baseline
-- Outlier rejection rates: Per-pass, ensure not over-rejecting
-- Computation time: Compare to baseline
+**Verification:**
+- [ ] Unit test: Load skeleton, call `set_active_groups({"main"})`, verify `get_active_dof_indices()` returns body/arm indices
+- [ ] Unit test: Extract state subset, verify joint angles match
+- [ ] Unit test: Extract/merge round-trip preserves values
+- [ ] Unit test: Covariance extraction maintains symmetry
 
-**Qualitative Checks:**
-- Rerun visualization: Check for artifacts, unnatural motion
-- Divergence events: Manual inspection of challenging frames
-- Finger dexterity: Verify fine finger tracking maintained
-- Edge cases: Occlusions, rapid motion, self-similarity
+**Success Criteria**: Can extract and merge DOF subsets without corruption, leveraging existing `set_active_groups()` API
 
-**Fallback Plan:**
-If Split-UKF shows issues:
-1. Try Option 4 (Sequential grouping) as simpler alternative
-2. Combine with adaptive covariance inflation (Option 3)
-3. As last resort, use per-joint noise scaling (Option 2) as temporary fix
+---
+
+### Phase 1: Configuration System (1 day)
+
+**Goal**: Load hierarchical tracking configuration from TOML file.
+
+**Tasks:**
+1. **Define configuration structures**
+   ```cpp
+   struct ChildFilterConfig {
+       std::string name;
+       std::vector<std::string> joint_groups;
+       std::vector<std::string> observation_groups;
+       std::vector<std::string> shared_dofs;
+       double process_noise_std, measurement_noise_std, outlier_threshold;
+       double min_inliers_ratio, max_innovation_norm;
+   };
+
+   struct HierarchicalConfig {
+       bool enabled = false;
+       bool enable_sync = true;
+       bool sync_covariance = true;
+       std::vector<std::string> parent_joint_groups;
+       std::vector<std::string> parent_observation_groups;
+       // Parent UKF parameters...
+       std::vector<ChildFilterConfig> children;
+   };
+   ```
+
+2. **TOML parser integration**
+3. **Create test configuration** `cpp_test_config_hierarchical.toml`
+
+**Verification:**
+- [ ] Unit test: Parse sample TOML, verify all fields loaded
+- [ ] Config validation catches invalid group names
+
+**Success Criteria**: Configuration loads without errors, validation works
+
+---
+
+### Phase 2: SubsetUKF Wrapper Class (2-3 days)
+
+**Goal**: Create wrapper around existing `UnscentedKalmanFilter` that operates on subset of DOFs.
+
+**Design Decision**: Use **composition** (wrap existing UKF) rather than inheritance. The existing `UnscentedKalmanFilter` class is complete and tested - we'll reuse it with subset skeleton.
+
+**Tasks:**
+1. **Create `SubsetUKF` class** (wraps `UnscentedKalmanFilter`)
+   ```cpp
+   namespace posetrak {
+
+   class SubsetUKF {
+   public:
+       // Constructor creates cloned skeleton with set_active_groups()
+       SubsetUKF(Skeleton const& full_skeleton,
+                 std::vector<std::string> const& active_groups,
+                 double process_noise_std,
+                 double alpha = 0.001, double beta = 2.0, double kappa = 0.0);
+
+       // Forward to wrapped UKF
+       void predict(double dt);
+       UpdateResult update(std::vector<Observation> const& observations,
+                          std::unordered_map<int, Camera> const& cameras,
+                          ForwardKinematics& fk,
+                          double measurement_noise_std,
+                          double outlier_threshold);
+
+       // Access wrapped UKF state
+       State const& state() const { return ukf_.state(); }
+       Eigen::MatrixXd const& covariance() const { return ukf_.covariance(); }
+
+       // Extraction/merging (uses Phase 0 utilities)
+       State extract_from_full_state(State const& full_state) const;
+       void merge_into_full_state(State& full_state) const;
+
+   private:
+       Skeleton const& full_skeleton_;      // Reference to full skeleton
+       Skeleton active_skeleton_;           // Cloned with set_active_groups()
+       UnscentedKalmanFilter ukf_;          // Wrapped existing UKF
+       std::vector<int> dof_indices_;       // Maps active→full DOF indices
+       std::vector<std::string> active_groups_;  // Stored for reference
+   };
+
+   }  // namespace posetrak
+   ```
+
+2. **Constructor implementation:**
+   - Clone `full_skeleton` → `active_skeleton_`
+   - Call `active_skeleton_.set_active_groups(active_groups)`
+   - Create `ukf_` with `active_skeleton_`
+   - Compute `dof_indices_` via `get_active_dof_indices(active_skeleton_)`
+
+3. **Observation filtering** by marker groups (filter observations to active markers)
+
+**Verification:**
+- [ ] Unit test: `SubsetUKF({"main"}, ...)` with body-only markers matches monolithic UKF
+- [ ] Unit test: Hand filter with all groups matches monolithic
+- [ ] Unit test: Extract/merge round-trip preserves state
+- [ ] Frame-by-frame comparison on tracking_tests sequence
+
+**Success Criteria**: SubsetUKF produces identical results to monolithic UKF when using all groups
+
+---
+
+### Phase 3: Hierarchical Execution & Merging (2 days)
+
+**Goal**: Orchestrate parent and child filters, merge results.
+
+**Tasks:**
+1. **Create `HierarchicalUKF` class**
+   ```cpp
+   class HierarchicalUKF {
+   public:
+       void step(const std::vector<Observation>& observations, double dt);
+       const VectorXd& output_state() const;
+
+   private:
+       void run_parent_filter(const std::vector<Observation>& obs, double dt);
+       void run_child_filters(const std::vector<Observation>& obs, double dt);
+       void merge_results();  // Child overwrites shared DOFs
+
+       SubsetUKF parent_;
+       std::vector<SubsetUKF> children_;
+       VectorXd output_state_;
+   };
+   ```
+
+2. **Implement merge logic** - Child overwrites shared DOFs in output
+3. **Integrate with existing tracker** - Switch based on config flag
+
+**Verification:**
+- [ ] Frame 685 test: Elbow covariance < 200° (vs 626° baseline)
+- [ ] Frame 685 test: Finger predictions reasonable (< 100 pixels)
+- [ ] Visualization in Rerun
+
+**Success Criteria**: Hierarchical produces valid output, elbow covariance significantly reduced
+
+---
+
+### Phase 4: Synchronization & Robustness (1-2 days)
+
+**Goal**: Implement temporal consistency and fallback strategies.
+
+**Tasks:**
+1. **Implement synchronization**
+   ```cpp
+   void synchronize_shared_dofs() {
+       if (!converged) return;  // Check child convergence
+       parent_.state()[shared] = child.state()[shared];
+       if (sync_covariance)
+           parent_.covariance()[shared] = max(parent_cov, child_cov);
+   }
+   ```
+
+2. **Add convergence metrics tracking** - Log inlier ratios, innovation norms
+3. **Fallback for child failure** - Keep parent estimate if child diverges
+
+**Verification:**
+- [ ] Test: Enable sync, verify parent/child stay consistent
+- [ ] Occlusion test: Remove all hand markers, verify parent-only fallback
+- [ ] Frames 915-920: Verify convergence checks work
+
+**Success Criteria**: Synchronization prevents divergence, occlusion handled gracefully
+
+---
+
+### Phase 5: Full Sequence Validation (2-3 days)
+
+**Goal**: Validate on complete 959-frame dataset, compare to baseline.
+
+**Tasks:**
+1. **Run full sequence** with debug output enabled
+2. **Quantitative comparison**:
+   - Covariance trajectories (elbow, wrist, fingers)
+   - Per-marker RMSE
+   - Outlier rejection rates
+   - Divergence events
+   - Runtime
+
+3. **Qualitative checks in Rerun**:
+   - Frame 685: Finger spread eliminated?
+   - Frames 915-920: Stable through divergence?
+   - Random sampling: Natural motion?
+
+**Verification:**
+- [ ] Elbow covariance stays < 150° throughout (vs 626° peak)
+- [ ] Zero divergence events
+- [ ] Tracking RMSE similar or better
+- [ ] Runtime < 2× baseline
+
+**Success Criteria**: Elbow bounded, no divergence, quality maintained, overhead acceptable
+
+---
+
+### Phase 6: Parameter Tuning (1-2 days)
+
+**Goal**: Optimize UKF parameters separately for parent and child.
+
+**Tasks:**
+1. **Body/parent parameters** - Try slight process noise increase (0.18?)
+2. **Hand/child parameters**:
+   - process_noise: 0.25-0.30 (agile)
+   - measurement_noise: 12.0-15.0 (dense markers)
+   - outlier: 3.5 (stricter)
+3. **Convergence thresholds** - Tune min_inliers_ratio, max_innovation_norm
+4. **Grid search or manual tuning** on problematic frames
+
+**Verification:**
+- [ ] Ablation study: parameter sensitivity
+- [ ] Document final choices with rationale
+
+**Success Criteria**: Parameters documented and justified, tracking optimized
+
+---
+
+### Phase 7: Smoothing Integration (Future Work)
+
+**Goal**: Extend to hierarchical RTS smoothing.
+
+**Tasks:**
+1. Independent smoothers for body and hands
+2. Storage management for trajectories
+3. Validation against monolithic smoothing
+
+**Note**: Lower priority, focus on filtering first.
+
+---
+
+## Success Metrics Summary
+
+**Phase Gates:**
+- ✅ Phase 0: Utilities work, tests pass
+- ✅ Phase 1: Config loads correctly
+- ✅ Phase 2: SubsetUKF matches monolithic
+- ✅ Phase 3: Elbow covariance < 200° at frame 685
+- ✅ Phase 4: Synchronization prevents divergence
+- ✅ Phase 5: Full sequence clean, zero divergence
+- ✅ Phase 6: Parameters tuned
+
+**Primary Goals:**
+1. Elbow covariance < 150° throughout (vs 626°)
+2. No finger prediction spread (< 100 pixel residuals)
+3. Zero divergence events in full sequence
+
+**Secondary Goals:**
+4. Tracking quality maintained (similar RMSE)
+5. Acceptable overhead (< 2× runtime)
+6. Extensible design (easy to add feet, etc.)
+
+**Total Estimate**: 10-14 days (2-3 weeks) excluding smoothing
 
 ## Implementation Notes
 
@@ -941,6 +1186,8 @@ if (child.num_inliers() > min_inliers && child.innovation_norm() < max_innov) {
 
 **Design goal**: Simple configuration in tracking TOML, referencing skeleton groups, no hard-coding.
 
+**Note**: Group names reference the `groups:` section in skeleton YAML (e.g., `Harri_skeleton-finger-group.yaml` lines 1947-2100), which lists joints and markers per group.
+
 **Configuration in tracking TOML file:**
 
 ```toml
@@ -958,11 +1205,17 @@ sync_covariance = true  # Also sync covariance (conservative inflation)
 
 # Parent filter definition
 [tracking.hierarchical.parent]
-# Reference groups defined in skeleton YAML
-joint_groups = ["main", "HandR", "HandL"]  # Includes hand.* + selected palm joints
+# Reference groups defined in skeleton YAML's groups: section
+# Example from Harri_skeleton-finger-group.yaml:
+#   groups:
+#     - name: "main"
+#       joints: [hips, spine1, ..., palm.01.L, palm.04.L, ...]
+#     - name: "HandL"
+#       joints: [palm.01.L, palm.02.L, ..., f_pinky.03.L]
+joint_groups = ["main"]  # Uses joints from "main" group
 
-# Which groups to use for observations
-observation_groups = ["body", "arms", "HandR", "HandL"]  # Uses markers from these groups
+# Which marker groups to use for observations
+observation_groups = ["main"]  # Uses markers from "main" group
 
 # Optional: Override UKF parameters for parent
 process_noise_std = 0.15
@@ -970,106 +1223,6 @@ measurement_noise_std = 20.0
 outlier_threshold = 4.0
 
 # Child filters (one per limb/appendage)
-[[tracking.hierarchical.children]]
-name = "hand_right"
-
-# Joint groups for this child's state
-joint_groups = ["HandR"]  # Full right hand (hand.R + palm.* + fingers.*)
-
-# Observation groups
-observation_groups = ["HandR"]  # All right hand markers
-
-# DOFs shared with parent (child will overwrite these in output)
-shared_dofs = ["hand.R", "palm.01.R", "palm.04.R"]
-
-# DOFs from parent that are fixed (used in FK, not estimated)
-# Can use wildcards: all joints not in joint_groups or shared_dofs
-fixed_parent_dofs = "auto"  # or explicit: ["root", "spine.*", "shoulder.R", ...]
-
-# Child-specific UKF parameters
-process_noise_std = 0.25  # Higher for agile fingers
-measurement_noise_std = 12.0  # Lower for dense markers
-outlier_threshold = 3.5  # Stricter
-
-# Convergence check for sync fallback
-min_inliers_ratio = 0.3
-max_innovation_norm = 500.0
-
-[[tracking.hierarchical.children]]
-name = "hand_left"
-joint_groups = ["HandL"]
-observation_groups = ["HandL"]
-shared_dofs = ["hand.L", "palm.01.L", "palm.04.L"]
-fixed_parent_dofs = "auto"
-process_noise_std = 0.25
-measurement_noise_std = 12.0
-outlier_threshold = 3.5
-min_inliers_ratio = 0.3
-max_innovation_norm = 500.0
-```
-
-**Skeleton YAML structure (existing, no changes needed):**
-
-```yaml
-joints:
-  - name: forearm.R
-    parent: upper_arm.R
-    group: main  # Body/arm group
-
-  - name: hand.R
-    parent: forearm.R
-    group: HandR  # Right hand group (shared with parent!)
-
-  - name: palm.01.R
-    parent: hand.R
-    group: HandR
-
-  - name: f_index.01.R
-    parent: palm.01.R
-    group: HandR
-
-markers:
-  - name: RWrist1
-    parent: hand.R
-    group: HandR  # Inherits from parent joint
-```
-
-**Why this is simple:**
-
-1. **References existing skeleton groups**: No duplication, just point to groups
-2. **Parent = superset**: Parent's joint_groups can include child groups (natural for overlap)
-3. **Explicit shared DOFs**: Clear declaration of what's shared
-4. **Auto fixed DOFs**: Don't need to list every body joint
-5. **Per-child parameters**: Easy to tune each limb independently
-6. **Enable/disable sync**: Experiment with temporal consistency easily
-
-**Alternative hierarchy example (body + feet):**
-
-```toml
-[tracking.hierarchical.parent]
-joint_groups = ["main", "FootR", "FootL"]  # Include ankle + base toe joints
-observation_groups = ["body", "legs"]
-
-[[tracking.hierarchical.children]]
-name = "foot_right"
-joint_groups = ["FootR"]
-shared_dofs = ["foot.R", "toes.01.R"]
-# ... parameters ...
-```
-
-**No code changes needed** - just configuration!
-## Open Questions
-
-1. **Covariance initialization for child levels:**
-   - Start with zero covariance (overconfident)?
-   - Or use inflated initial covariance (conservative)?
-   - Or propagate from parent (subset extraction)?
-
-2. **Shared DOF covariance:**
-   - When child overwrites shared DOFs, should covariance reflect:
-     - Only child's local uncertainty (current approach)?
-     - Combination of parent + child uncertainty?
-     - Parent uncertainty propagated through child estimate?
 
 3. **Temporal consistency:**
    - Should child covariance persist across frames?

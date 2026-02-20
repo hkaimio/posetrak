@@ -14,11 +14,13 @@ posetrak_sources = files(
   'kinematics/triangulation.cpp',
   'kinematics/inverse_kinematics.cpp',
 
+  # Core models (Phase 0c)
+  'core/skeleton_state.cpp',
+
   # Filters (Phase 4)
   'filters/process_model.cpp',
   'filters/sigma_points.cpp',
   'filters/ukf.cpp',
-  'filters/subset_utils.cpp',
 
   # Tracking (Phase 4)
   'tracking/tracker.cpp',

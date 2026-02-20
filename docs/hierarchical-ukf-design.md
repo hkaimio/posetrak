@@ -470,8 +470,9 @@ public:
     JointDesc const* get_joint(std::string const& name) const;  // O(1) via unordered_map
 
     uint32_t total_storage_dof_count() const;   // Size of State::joint_angles
-    uint32_t joint_active_dof_count() const;    // Sum of active_dof_count, excluding root 6
-    int      error_state_dim() const;           // 2 * (6 + joint_active_dof_count())
+    uint32_t joint_active_dof_count() const;    // Sum of active_dof_count across non-root joints
+    uint32_t root_error_dof_count() const;      // 6 if has_floating_root(), else 0
+    int      error_state_dim() const;           // 2 * (root_error_dof_count() + joint_active_dof_count())
     bool     has_floating_root() const;         // False for child filters (e.g. hand)
 
     // Build a merge index map: for each DOF in `subset`, the corresponding index

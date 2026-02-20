@@ -418,64 +418,171 @@ for (dof in skeleton.dofs) {
 
 ### Existing Infrastructure (Already Available!)
 
-The codebase **already has** most of the skeleton group infrastructure:
+The codebase **already has** skeleton group infrastructure:
 
 - **Skeleton groups schema**: `groups:` section in YAML lists joints/markers per group (see `Harri_skeleton-finger-group.yaml` lines 1947-2100)
 - **Group parsing**: `skeleton_loader.cpp` reads `groups:` section and assigns each `joint.group` field
 - **Group filtering**: `Skeleton::set_active_groups(groups)` activates joints by group names
-- **Existing UKF**: `UnscentedKalmanFilter` class is complete and tested (predict/update/state access)
 
-This means **Phase 0 is much simpler** than originally planned!
+However, analysis of `ukf.cpp`, `process_model.cpp`, and `sigma_points.cpp` reveals that DOF index arithmetic is **duplicated in at least 5 places** and all components hard-code the assumption that the root joint is always floating. This must be fixed before hierarchical tracking is possible.
 
 ---
 
-### Phase 0: DOF Extraction Utilities (1 day)
+### Phase 0a: `SkeletonLayout` — Single Source of DOF Arithmetic (2 days)
 
-**Goal**: Create utilities to extract/merge DOF subsets for hierarchical filtering.
+**Goal**: Create one canonical, precomputed, immutable description of how a set of joints maps to state vector indices. Eliminate all ad-hoc joint iteration loops.
 
-**Note**: The skeleton group filtering (`set_active_groups()`) already exists. We just need DOF-level extraction/merging.
+**Core type: `JointDesc`** — all information a hot loop needs, computed once:
+
+```cpp
+struct JointDesc {
+    std::string name;
+    JointType   type;
+
+    uint32_t storage_dof_count; // Elements in State::joint_angles (1/3/0)
+    uint32_t active_dof_count;  // Free DOFs after accounting for locked axes
+    uint32_t state_index;       // Start index in State::joint_angles / velocities
+    uint32_t error_index;       // Start index in the joint portion of error-state
+                                // (after root's 6: pos+ori, or vel+angvel)
+
+    bool is_floating_root;      // True only for the kinematic root of a free body
+
+    std::array<Eigen::Vector2d, 3> limits;
+    uint32_t limit_count;
+    std::array<bool, 3> active_dof_mask; // Which axes are free (SPHERICAL)
+};
+```
+
+**`SkeletonLayout` class:**
+
+```cpp
+class SkeletonLayout {
+public:
+    // Pure query — does NOT mutate skeleton. Builds from group membership.
+    static std::shared_ptr<const SkeletonLayout>
+    from_groups(Skeleton const& skeleton, std::vector<std::string> const& group_names);
+
+    static std::shared_ptr<const SkeletonLayout>
+    from_full_skeleton(Skeleton const& skeleton);
+
+    // O(1) accessors — all values precomputed at construction
+    std::vector<JointDesc> const& joints() const;  // In state-vector order
+    JointDesc const* get_joint(std::string const& name) const;  // O(1) via unordered_map
+
+    uint32_t total_storage_dof_count() const;   // Size of State::joint_angles
+    uint32_t joint_active_dof_count() const;    // Sum of active_dof_count, excluding root 6
+    int      error_state_dim() const;           // 2 * (6 + joint_active_dof_count())
+    bool     has_floating_root() const;         // False for child filters (e.g. hand)
+
+    // Build a merge index map: for each DOF in `subset`, the corresponding index
+    // in THIS layout's state vector. Called ONCE at SubsetUKF construction, cached.
+    // Throws if subset contains joints not present in this layout.
+    std::vector<uint32_t> build_index_map_from(SkeletonLayout const& subset) const;
+
+private:
+    std::vector<JointDesc> joints_;
+    std::unordered_map<std::string, uint32_t> name_to_idx_;  // For O(1) get_joint()
+    uint32_t total_storage_dof_count_ = 0;
+    uint32_t joint_active_dof_count_  = 0;
+    bool has_floating_root_ = false;
+};
+```
 
 **Tasks:**
-1. **Create DOF index extraction utility**
-   ```cpp
-   namespace posetrak {
-
-   // Get DOF indices for joints in active skeleton
-   // (after set_active_groups() has been called)
-   std::vector<int> get_active_dof_indices(Skeleton const& skeleton);
-
-   }  // namespace posetrak
-   ```
-
-2. **Create state extraction/merging utilities**
-   ```cpp
-   namespace posetrak {
-
-   // Extract subset of state (positions + velocities)
-   State extract_subset_state(State const& full_state,
-                             std::vector<int> const& dof_indices);
-
-   // Merge subset state back into full state
-   // (overwrites DOFs at dof_indices)
-   void merge_subset_state(State& full_state,
-                          State const& subset_state,
-                          std::vector<int> const& dof_indices);
-
-   // Extract subset of covariance matrix
-   Eigen::MatrixXd extract_subset_covariance(
-       Eigen::MatrixXd const& full_cov,
-       std::vector<int> const& dof_indices);
-
-   }  // namespace posetrak
-   ```
+1. Implement `JointDesc` and `SkeletonLayout` in `include/posetrak/core/skeleton_layout.hpp` and `src/core/skeleton_layout.cpp`
+2. `from_groups()`: iterates skeleton joints, filters by group name, computes all indices in one pass
+3. `from_full_skeleton()`: same as `from_groups()` but with no filter
+4. `build_index_map_from()`: one-time O(N) name-matching, returns cached `vector<uint32_t>`
 
 **Verification:**
-- [ ] Unit test: Load skeleton, call `set_active_groups({"main"})`, verify `get_active_dof_indices()` returns body/arm indices
-- [ ] Unit test: Extract state subset, verify joint angles match
-- [ ] Unit test: Extract/merge round-trip preserves values
-- [ ] Unit test: Covariance extraction maintains symmetry
+- [ ] Unit test: `from_full_skeleton()` — total DOF matches `skeleton.total_dof_count()`
+- [ ] Unit test: `from_groups({"main"})` — DOF count and `state_index` fields correct
+- [ ] Unit test: `from_groups({"HandR"})` — indices start where "main" ends
+- [ ] Unit test: `build_index_map_from()` — correct indices, throws on unknown joints
+- [ ] Unit test: `has_floating_root()` — true for full skeleton, false for hands-only
 
-**Success Criteria**: Can extract and merge DOF subsets without corruption, leveraging existing `set_active_groups()` API
+**Success Criteria**: All DOF index arithmetic lives here; no other file computes joint→index mapping
+
+---
+
+### Phase 0b: Migrate `UnscentedKalmanFilter`, `ConstantVelocityModel`, `SigmaPointGenerator` (2-3 days)
+
+**Goal**: Replace all ad-hoc joint iteration loops with `SkeletonLayout::joints()` iteration.
+
+**Pattern**: every loop of the form `for (auto const& joint : skeleton_.get_joints_ordered())` with manual `angle_idx` tracking becomes:
+
+```cpp
+for (JointDesc const& j : layout_->joints()) {
+    if (j.is_floating_root) { /* handle root */ continue; }
+    if (j.type == JointType::REVOLUTE) {
+        // j.state_index is the exact index — no arithmetic
+        new_angles[j.state_index] += velocities[j.state_index] * dt;
+    } else if (j.type == JointType::SPHERICAL) {
+        auto aa = angles.segment<3>(j.state_index);  // j.state_index precomputed
+        // ... SO(3) integration ...
+    }
+}
+```
+
+**Child filter root handling**: `is_floating_root = false` → process model skips free body integration. Orchestrator sets root pose externally before predict:
+
+```cpp
+// In HierarchicalUKF::step():
+auto wrist_pose = parent_fk.get_joint_world_pose("wrist.R");
+hand_filter.set_root_pose(wrist_pose);  // New SubsetUKF method
+hand_filter.predict(dt);               // Root velocity ignored; only finger DOFs integrated
+```
+
+**Files to modify:**
+- `include/posetrak/filters/ukf.hpp` / `src/filters/ukf.cpp` — replace `Skeleton const&` with `shared_ptr<const SkeletonLayout>`, replace all joint loops
+- `include/posetrak/filters/process_model.hpp` / `src/filters/process_model.cpp` — same
+- `include/posetrak/filters/sigma_points.hpp` / `src/filters/sigma_points.cpp` — same
+
+**Verification:**
+- [ ] All existing UKF tests pass unchanged (full skeleton = identical behaviour)
+- [ ] All existing process model tests pass
+- [ ] Frame-by-frame numerical comparison: monolithic result identical before/after
+
+**Success Criteria**: Zero behaviour change for existing code; DOF index arithmetic eliminated from these files
+
+---
+
+### Phase 0c: `SkeletonState` — State with Context (1 day)
+
+**Goal**: Replace anonymous `State + vector<int>` with a self-describing type. Enables type-safe merge.
+
+```cpp
+class SkeletonState {
+public:
+    static SkeletonState create(std::shared_ptr<const SkeletonLayout> layout, State state);
+
+    std::shared_ptr<const SkeletonLayout> const& layout() const;
+    State const& state() const;
+    State&       state();
+
+    // Merge this state's DOFs into target using a precomputed index map.
+    // merge_map built once via target.layout()->build_index_map_from(*this->layout())
+    void merge_into(SkeletonState& target, std::vector<uint32_t> const& merge_map) const;
+
+    // Extract subset covariance (for synchronization step)
+    Eigen::MatrixXd extract_covariance_subset(
+        Eigen::MatrixXd const& full_cov,
+        std::vector<uint32_t> const& index_map) const;
+
+private:
+    std::shared_ptr<const SkeletonLayout> layout_;
+    State state_;
+};
+```
+
+**Delete** `include/posetrak/filters/subset_utils.hpp` and `src/filters/subset_utils.cpp` — functionality absorbed into `SkeletonState` and `SkeletonLayout`.
+
+**Verification:**
+- [ ] Unit test: round-trip extract/merge via `merge_into()` preserves all DOF values
+- [ ] Unit test: merge of `{"HandR"}` subset into full skeleton overwrites correct indices only
+- [ ] Unit test: covariance extraction symmetric
+
+**Success Criteria**: No raw `vector<int>` index maps visible outside of `SkeletonLayout`/`SkeletonState`
 
 ---
 
@@ -490,7 +597,6 @@ This means **Phase 0 is much simpler** than originally planned!
        std::string name;
        std::vector<std::string> joint_groups;
        std::vector<std::string> observation_groups;
-       std::vector<std::string> shared_dofs;
        double process_noise_std, measurement_noise_std, outlier_threshold;
        double min_inliers_ratio, max_innovation_norm;
    };
@@ -517,95 +623,69 @@ This means **Phase 0 is much simpler** than originally planned!
 
 ---
 
-### Phase 2: SubsetUKF Wrapper Class (2-3 days)
+### Phase 2: `SubsetUKF` (2 days)
 
-**Goal**: Create wrapper around existing `UnscentedKalmanFilter` that operates on subset of DOFs.
+**Goal**: A filter operating on a named subset of DOFs, using the foundation from Phase 0.
 
-**Design Decision**: Use **composition** (wrap existing UKF) rather than inheritance. The existing `UnscentedKalmanFilter` class is complete and tested - we'll reuse it with subset skeleton.
+```cpp
+class SubsetUKF {
+public:
+    SubsetUKF(Skeleton const& skeleton,
+              std::vector<std::string> const& active_groups,
+              double process_noise_std,
+              double alpha = 0.001, double beta = 2.0, double kappa = 0.0);
 
-**Tasks:**
-1. **Create `SubsetUKF` class** (wraps `UnscentedKalmanFilter`)
-   ```cpp
-   namespace posetrak {
+    void predict(double dt);
+    UpdateResult update(std::vector<Observation> const& observations,
+                       std::unordered_map<int, Camera> const& cameras,
+                       ForwardKinematics& fk,
+                       double measurement_noise_std,
+                       double outlier_threshold);
 
-   class SubsetUKF {
-   public:
-       // Constructor creates cloned skeleton with set_active_groups()
-       SubsetUKF(Skeleton const& full_skeleton,
-                 std::vector<std::string> const& active_groups,
-                 double process_noise_std,
-                 double alpha = 0.001, double beta = 2.0, double kappa = 0.0);
+    // Set world-space root pose (for child filters where root is not floating)
+    void set_root_pose(Eigen::Vector3d const& pos, Eigen::Quaterniond const& ori);
 
-       // Forward to wrapped UKF
-       void predict(double dt);
-       UpdateResult update(std::vector<Observation> const& observations,
-                          std::unordered_map<int, Camera> const& cameras,
-                          ForwardKinematics& fk,
-                          double measurement_noise_std,
-                          double outlier_threshold);
+    SkeletonState skeleton_state() const;
 
-       // Access wrapped UKF state
-       State const& state() const { return ukf_.state(); }
-       Eigen::MatrixXd const& covariance() const { return ukf_.covariance(); }
+private:
+    std::shared_ptr<const SkeletonLayout> layout_;
+    UnscentedKalmanFilter ukf_;          // Now takes SkeletonLayout
+    std::vector<uint32_t> merge_map_;    // Cached: maps subset DOFs → full skeleton DOFs
+};
+```
 
-       // Extraction/merging (uses Phase 0 utilities)
-       State extract_from_full_state(State const& full_state) const;
-       void merge_into_full_state(State& full_state) const;
-
-   private:
-       Skeleton const& full_skeleton_;      // Reference to full skeleton
-       Skeleton active_skeleton_;           // Cloned with set_active_groups()
-       UnscentedKalmanFilter ukf_;          // Wrapped existing UKF
-       std::vector<int> dof_indices_;       // Maps active→full DOF indices
-       std::vector<std::string> active_groups_;  // Stored for reference
-   };
-
-   }  // namespace posetrak
-   ```
-
-2. **Constructor implementation:**
-   - Clone `full_skeleton` → `active_skeleton_`
-   - Call `active_skeleton_.set_active_groups(active_groups)`
-   - Create `ukf_` with `active_skeleton_`
-   - Compute `dof_indices_` via `get_active_dof_indices(active_skeleton_)`
-
-3. **Observation filtering** by marker groups (filter observations to active markers)
+**Observation filtering**: pass only observations whose marker's `group` field is in `active_groups`.
 
 **Verification:**
-- [ ] Unit test: `SubsetUKF({"main"}, ...)` with body-only markers matches monolithic UKF
-- [ ] Unit test: Hand filter with all groups matches monolithic
-- [ ] Unit test: Extract/merge round-trip preserves state
+- [ ] Unit test: `SubsetUKF({"main"})` + body markers → matches monolithic UKF numerically
+- [ ] Unit test: `SubsetUKF({"HandR"})` + hand markers → valid finger angle output
 - [ ] Frame-by-frame comparison on tracking_tests sequence
 
-**Success Criteria**: SubsetUKF produces identical results to monolithic UKF when using all groups
+**Success Criteria**: SubsetUKF produces identical results to monolithic when using all groups
 
 ---
 
 ### Phase 3: Hierarchical Execution & Merging (2 days)
 
-**Goal**: Orchestrate parent and child filters, merge results.
+**Goal**: Orchestrate parent and child filters, merge results via `SkeletonState::merge_into()`.
 
-**Tasks:**
-1. **Create `HierarchicalUKF` class**
-   ```cpp
-   class HierarchicalUKF {
-   public:
-       void step(const std::vector<Observation>& observations, double dt);
-       const VectorXd& output_state() const;
+```cpp
+class HierarchicalUKF {
+public:
+    void step(std::vector<Observation> const& observations, double dt);
+    SkeletonState const& output() const;
 
-   private:
-       void run_parent_filter(const std::vector<Observation>& obs, double dt);
-       void run_child_filters(const std::vector<Observation>& obs, double dt);
-       void merge_results();  // Child overwrites shared DOFs
+private:
+    void run_parent(std::vector<Observation> const& obs, double dt);
+    void run_children(std::vector<Observation> const& obs, double dt);
+    void merge_results();  // Child overwrites shared DOFs via precomputed merge_map_
 
-       SubsetUKF parent_;
-       std::vector<SubsetUKF> children_;
-       VectorXd output_state_;
-   };
-   ```
-
-2. **Implement merge logic** - Child overwrites shared DOFs in output
-3. **Integrate with existing tracker** - Switch based on config flag
+    SubsetUKF parent_;
+    std::vector<SubsetUKF> children_;
+    SkeletonState output_;
+    std::vector<std::vector<uint32_t>> child_merge_maps_;  // Built once at construction
+};
+```
 
 **Verification:**
 - [ ] Frame 685 test: Elbow covariance < 200° (vs 626° baseline)
@@ -621,18 +701,9 @@ This means **Phase 0 is much simpler** than originally planned!
 **Goal**: Implement temporal consistency and fallback strategies.
 
 **Tasks:**
-1. **Implement synchronization**
-   ```cpp
-   void synchronize_shared_dofs() {
-       if (!converged) return;  // Check child convergence
-       parent_.state()[shared] = child.state()[shared];
-       if (sync_covariance)
-           parent_.covariance()[shared] = max(parent_cov, child_cov);
-   }
-   ```
-
-2. **Add convergence metrics tracking** - Log inlier ratios, innovation norms
-3. **Fallback for child failure** - Keep parent estimate if child diverges
+1. Post-merge: sync parent shared DOFs from child result (optional, config-controlled)
+2. Convergence guard: skip sync if child has low inlier ratio or high innovation norm
+3. Fallback: if child diverges, keep parent estimate for shared DOFs
 
 **Verification:**
 - [ ] Test: Enable sync, verify parent/child stay consistent
@@ -647,27 +718,15 @@ This means **Phase 0 is much simpler** than originally planned!
 
 **Goal**: Validate on complete 959-frame dataset, compare to baseline.
 
-**Tasks:**
-1. **Run full sequence** with debug output enabled
-2. **Quantitative comparison**:
-   - Covariance trajectories (elbow, wrist, fingers)
-   - Per-marker RMSE
-   - Outlier rejection rates
-   - Divergence events
-   - Runtime
+**Quantitative targets:**
+- Elbow covariance < 150° throughout (vs 626° peak)
+- Zero divergence events
+- Tracking RMSE similar or better to monolithic
+- Runtime < 2× baseline
 
-3. **Qualitative checks in Rerun**:
-   - Frame 685: Finger spread eliminated?
-   - Frames 915-920: Stable through divergence?
-   - Random sampling: Natural motion?
-
-**Verification:**
-- [ ] Elbow covariance stays < 150° throughout (vs 626° peak)
-- [ ] Zero divergence events
-- [ ] Tracking RMSE similar or better
-- [ ] Runtime < 2× baseline
-
-**Success Criteria**: Elbow bounded, no divergence, quality maintained, overhead acceptable
+**Qualitative checks in Rerun:**
+- Frame 685: Finger spread eliminated?
+- Frames 915-920: Stable through divergence?
 
 ---
 
@@ -676,19 +735,9 @@ This means **Phase 0 is much simpler** than originally planned!
 **Goal**: Optimize UKF parameters separately for parent and child.
 
 **Tasks:**
-1. **Body/parent parameters** - Try slight process noise increase (0.18?)
-2. **Hand/child parameters**:
-   - process_noise: 0.25-0.30 (agile)
-   - measurement_noise: 12.0-15.0 (dense markers)
-   - outlier: 3.5 (stricter)
-3. **Convergence thresholds** - Tune min_inliers_ratio, max_innovation_norm
-4. **Grid search or manual tuning** on problematic frames
-
-**Verification:**
-- [ ] Ablation study: parameter sensitivity
-- [ ] Document final choices with rationale
-
-**Success Criteria**: Parameters documented and justified, tracking optimized
+1. Body/parent: process_noise ~0.15 (current), measurement_noise ~20.0
+2. Hand/child: process_noise ~0.25-0.30 (more agile), measurement_noise ~12.0-15.0 (denser markers)
+3. Document final choices with ablation rationale
 
 ---
 
@@ -696,11 +745,7 @@ This means **Phase 0 is much simpler** than originally planned!
 
 **Goal**: Extend to hierarchical RTS smoothing.
 
-**Tasks:**
-1. Independent smoothers for body and hands
-2. Storage management for trajectories
-3. Validation against monolithic smoothing
-
+Independent smoothers for body and hands, storage management for trajectories.
 **Note**: Lower priority, focus on filtering first.
 
 ---
@@ -708,9 +753,11 @@ This means **Phase 0 is much simpler** than originally planned!
 ## Success Metrics Summary
 
 **Phase Gates:**
-- ✅ Phase 0: Utilities work, tests pass
+- ✅ Phase 0a: `SkeletonLayout` built, all DOF arithmetic centralised, tests pass
+- ✅ Phase 0b: `UnscentedKalmanFilter`, `ConstantVelocityModel`, `SigmaPointGenerator` migrated — existing tests pass unchanged
+- ✅ Phase 0c: `SkeletonState` merge/extract correct, `subset_utils` deleted
 - ✅ Phase 1: Config loads correctly
-- ✅ Phase 2: SubsetUKF matches monolithic
+- ✅ Phase 2: `SubsetUKF` matches monolithic
 - ✅ Phase 3: Elbow covariance < 200° at frame 685
 - ✅ Phase 4: Synchronization prevents divergence
 - ✅ Phase 5: Full sequence clean, zero divergence
@@ -726,7 +773,7 @@ This means **Phase 0 is much simpler** than originally planned!
 5. Acceptable overhead (< 2× runtime)
 6. Extensible design (easy to add feet, etc.)
 
-**Total Estimate**: 10-14 days (2-3 weeks) excluding smoothing
+**Total Estimate**: 13-18 days (3-4 weeks) excluding smoothing
 
 ## Implementation Notes
 

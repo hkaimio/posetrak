@@ -525,14 +525,18 @@ for (JointDesc const& j : layout_->joints()) {
 }
 ```
 
-**Child filter root handling**: `is_floating_root = false` → process model skips free body integration. Orchestrator sets root pose externally before predict:
+**Child filter root handling**: `has_floating_root() = false` → process model skips free body integration. Before each frame, the caller sets the full parent state:
 
 ```cpp
 // In HierarchicalUKF::step():
-auto wrist_pose = parent_fk.get_joint_world_pose("wrist.R");
-hand_filter.set_root_pose(wrist_pose);  // New SubsetUKF method
-hand_filter.predict(dt);               // Root velocity ignored; only finger DOFs integrated
+hand_filter.set_parent_state(parent_.skeleton_state().state());
+hand_filter.predict(dt);  // Root not integrated; only finger DOFs propagated
 ```
+
+`set_parent_state` stores a full-skeleton-sized `State`. Each sigma point is expanded
+by copying this background state and overwriting the child DOF positions (via merge_map_)
+before calling FK. This gives FK the correct world-space joint chain even though the
+child UKF only optimizes the finger DOFs.
 
 **Files to modify:**
 - `include/posetrak/filters/ukf.hpp` / `src/filters/ukf.cpp` — replace `Skeleton const&` with `shared_ptr<const SkeletonLayout>`, replace all joint loops
@@ -632,7 +636,8 @@ private:
 class SubsetUKF {
 public:
     SubsetUKF(Skeleton const& skeleton,
-              std::vector<std::string> const& active_groups,
+              std::shared_ptr<const SkeletonLayout> layout,  // from from_groups()
+              std::vector<int> const& merge_map,            // full_layout->build_index_map_from(*layout)
               double process_noise_std,
               double alpha = 0.001, double beta = 2.0, double kappa = 0.0);
 
@@ -643,15 +648,24 @@ public:
                        double measurement_noise_std,
                        double outlier_threshold);
 
-    // Set world-space root pose (for child filters where root is not floating)
-    void set_root_pose(Eigen::Vector3d const& pos, Eigen::Quaterniond const& ori);
+    // Provide the full-skeleton state from the parent filter.
+    // Must be called each frame before predict()/update().
+    // During update, each sigma point is expanded from compact to full-skeleton
+    // size by overwriting child DOFs in this background state before calling FK.
+    // Child filters that are not floating-root use the background root pose too.
+    void set_parent_state(State const& full_parent_state);
 
     SkeletonState skeleton_state() const;
 
 private:
+    // Expand compact child state into a full-skeleton State for FK.
+    // Writes compact DOFs into background_state_ at merge_map_ positions.
+    State expand_state(State const& compact) const;
+
     std::shared_ptr<const SkeletonLayout> layout_;
-    UnscentedKalmanFilter ukf_;          // Now takes SkeletonLayout
-    std::vector<uint32_t> merge_map_;    // Cached: maps subset DOFs → full skeleton DOFs
+    std::vector<int> merge_map_;  // compact DOF i → index in full-skeleton State
+    State compact_state_;         // layout-relative, compact-sized
+    State background_state_;      // full-skeleton-sized, set by set_parent_state()
 };
 ```
 

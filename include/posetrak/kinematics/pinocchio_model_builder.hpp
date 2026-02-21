@@ -13,6 +13,8 @@
 #include "posetrak/core/skeleton.hpp"
 #include <map>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace posetrak {
 
@@ -73,6 +75,49 @@ class PinocchioModelBuilder {
     build_marker_frame_map(pinocchio::Model const& model, Skeleton const& skeleton);
 
     /**
+     * @brief Build a Pinocchio model for a subtree of the skeleton.
+     *
+     * The resulting model has freeflyer_joint_name as its free-flyer root (placed at
+     * SE3::Identity). The child joints — those in group_names and descendants of
+     * freeflyer_joint_name — are added in skeleton insertion order. FIXED joints are
+     * mapped to their parent pinocchio id (markers still attach correctly) but do not
+     * contribute any pinocchio joint or DOF.
+     *
+     * @param skeleton            Full skeleton (read-only).
+     * @param freeflyer_joint_name  Skeleton joint that becomes the Pinocchio free-flyer.
+     *                              Its world transform is set externally each frame by
+     *                              the coordinator; it contributes no DOFs to child state.
+     * @param group_names         Groups whose joints form the child subtree. Every
+     *                            non-fixed joint in these groups must be a descendant of
+     *                            freeflyer_joint_name.
+     * @param[out] model          Cleared and rebuilt by this call.
+     * @throws std::invalid_argument if freeflyer_joint_name is not in the skeleton, or
+     *         if any in-group non-fixed joint is not a descendant of freeflyer_joint_name.
+     */
+    static void build_subtree_model(Skeleton const& skeleton,
+                                    std::string const& freeflyer_joint_name,
+                                    std::vector<std::string> const& group_names,
+                                    pinocchio::Model& model);
+
+    /**
+     * @brief Build marker frame map for a subtree model.
+     *
+     * Only markers whose parent joint (or ancestor chain via FIXED joints) is included
+     * in the subtree (i.e. parent joint's group ∈ group_names, or parent is the
+     * freeflyer joint itself) are returned.
+     *
+     * @param model               Subtree model built by build_subtree_model().
+     * @param skeleton            Full skeleton.
+     * @param freeflyer_joint_name  Same value passed to build_subtree_model().
+     * @param group_names         Same value passed to build_subtree_model().
+     * @return Map of marker_name → frame_id (only for markers in the subtree).
+     */
+    static std::map<std::string, pinocchio::FrameIndex>
+    build_subtree_marker_frame_map(pinocchio::Model const& model, Skeleton const& skeleton,
+                                   std::string const& freeflyer_joint_name,
+                                   std::vector<std::string> const& group_names);
+
+    /**
      * @brief Print model structure for debugging
      *
      * @param model The Pinocchio model
@@ -103,6 +148,21 @@ class PinocchioModelBuilder {
      */
     static void add_marker_frames(pinocchio::Model& model, Skeleton const& skeleton,
                                   std::map<std::string, pinocchio::JointIndex> const& joint_to_id);
+
+    /**
+     * @brief Recursively add subtree joints to model for build_subtree_model().
+     *
+     * Walks skeleton children of parent_skel_idx. For each child whose group is in
+     * group_set (and is non-FIXED), a Pinocchio joint is added. FIXED joints in the
+     * subtree are mapped to their parent's Pinocchio id. Non-group, non-FIXED joints
+     * that are children of the freeflyer anchor stop the traversal (they are outside
+     * the requested subtree).
+     */
+    static void
+    add_subtree_joints_recursive(pinocchio::Model& model, Skeleton const& skeleton,
+                                 uint32_t parent_skel_idx, pinocchio::JointIndex parent_pin_id,
+                                 std::unordered_set<std::string> const& group_set,
+                                 std::map<std::string, pinocchio::JointIndex>& joint_to_id);
 
     /**
      * @brief Determine rotation axis for revolute joint

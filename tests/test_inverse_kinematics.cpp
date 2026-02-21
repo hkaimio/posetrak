@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/io/skeleton_loader.hpp"
 #include "posetrak/kinematics/forward_kinematics.hpp"
 #include "posetrak/kinematics/inverse_kinematics.hpp"
@@ -30,7 +31,9 @@ TEST_CASE("InverseKinematics solves simple 2-joint problem", "[ik][inverse_kinem
     auto marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
 
     // Create FK and IK
-    ForwardKinematics fk(model, data, marker_map, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+    ForwardKinematics fk(model, data, marker_map, fk_layout);
     InverseKinematics ik(model, data, fk, marker_map);
 
     SECTION("IK finds zero configuration") {
@@ -113,7 +116,9 @@ TEST_CASE("InverseKinematics handles multiple markers", "[ik][inverse_kinematics
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
     auto marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
 
-    ForwardKinematics fk(model, data, marker_map, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+    ForwardKinematics fk(model, data, marker_map, fk_layout);
     InverseKinematics ik(model, data, fk, marker_map);
 
     // Target positions (zero config)

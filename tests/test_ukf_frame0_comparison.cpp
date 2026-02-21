@@ -9,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/io/camera_loader.hpp"
 #include "posetrak/io/skeleton_loader.hpp"
 #include "test_helpers/matrix_comparison.hpp"
@@ -61,7 +62,9 @@ struct Frame0TestFixture {
         marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(*model, skeleton);
 
         // Create FK computer
-        fk = std::make_unique<ForwardKinematics>(*model, *data, marker_frame_map, skeleton);
+        auto fk_layout =
+            SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+        fk = std::make_unique<ForwardKinematics>(*model, *data, marker_frame_map, fk_layout);
     }
 
     std::string skeleton_path;

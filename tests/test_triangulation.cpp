@@ -8,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "posetrak/core/skeleton_layout.hpp"
 #include <random>
 
 using namespace posetrak;
@@ -127,7 +128,10 @@ class TriangulationTestFixture {
         Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(joint_angles.size());
 
         State state(root_pos, root_quat, joint_angles, root_vel, root_angvel, joint_vels);
-        ForwardKinematics fk(model, data, marker_map, skeleton);
+        auto fk_layout =
+            SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+        ForwardKinematics fk(model, data, marker_map, fk_layout);
         Eigen::VectorXd q = ForwardKinematics::state_to_config(state, skeleton);
         auto marker_positions = fk.compute(q);
 

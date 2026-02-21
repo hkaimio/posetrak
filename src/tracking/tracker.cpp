@@ -7,6 +7,7 @@
 
 #include <fmt/core.h>
 
+#include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/kinematics/pinocchio_model_builder.hpp"
 #include <filesystem>
 #include <fstream>
@@ -24,8 +25,9 @@ Tracker::Tracker(std::shared_ptr<const Skeleton> skeleton,
     PinocchioModelBuilder::build_model_and_data(*skeleton_, *model_, *data_);
     marker_frame_map_ = PinocchioModelBuilder::build_marker_frame_map(*model_, *skeleton_);
 
-    // Create FK computer
-    fk_ = std::make_unique<ForwardKinematics>(*model_, *data_, marker_frame_map_, *skeleton_);
+    // Create FK computer (full-skeleton layout; UKF may use a subset layout from initialize_ukf)
+    fk_ = std::make_unique<ForwardKinematics>(*model_, *data_, marker_frame_map_,
+                                              SkeletonLayout::from_full_skeleton(skeleton_));
 
     // Create triangulator
     triangulator_ = std::make_unique<Triangulator>(Triangulator::Method::DLT);

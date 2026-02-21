@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/filters/ukf.hpp"
 #include "posetrak/kinematics/forward_kinematics.hpp"
 #include "posetrak/kinematics/pinocchio_model_builder.hpp"
@@ -25,7 +26,9 @@ TEST_CASE("UKF update with single observation", "[ukf][update]") {
     pinocchio::Data data;
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
     auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
-    ForwardKinematics fk(model, data, marker_frame_map, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+    ForwardKinematics fk(model, data, marker_frame_map, fk_layout);
 
     // Create simple camera looking at origin
     Intrinsics intrinsics;
@@ -100,7 +103,9 @@ TEST_CASE("UKF update corrects position error", "[ukf][update]") {
     pinocchio::Data data;
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
     auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
-    ForwardKinematics fk(model, data, marker_frame_map, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+    ForwardKinematics fk(model, data, marker_frame_map, fk_layout);
 
     // Create camera
     Intrinsics intrinsics;
@@ -170,7 +175,9 @@ TEST_CASE("UKF update with multiple observations", "[ukf][update]") {
     pinocchio::Data data;
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
     auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
-    ForwardKinematics fk(model, data, marker_frame_map, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+    ForwardKinematics fk(model, data, marker_frame_map, fk_layout);
 
     // Create camera
     Intrinsics intrinsics;
@@ -242,7 +249,9 @@ TEST_CASE("UKF update with missing observations", "[ukf][update]") {
     pinocchio::Data data;
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
     auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
-    ForwardKinematics fk(model, data, marker_frame_map, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+    ForwardKinematics fk(model, data, marker_frame_map, fk_layout);
 
     std::unordered_map<int, Camera> cameras;
 
@@ -289,7 +298,9 @@ TEST_CASE("UKF update maintains positive definite covariance", "[ukf][update]") 
     pinocchio::Data data;
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
     auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
-    ForwardKinematics fk(model, data, marker_frame_map, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+    ForwardKinematics fk(model, data, marker_frame_map, fk_layout);
 
     // Create camera
     Intrinsics intrinsics;
@@ -363,7 +374,9 @@ TEST_CASE("UKF update handles markers behind camera gracefully", "[ukf][update][
     pinocchio::Data data;
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
     auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
-    ForwardKinematics fk(model, data, marker_frame_map, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+    ForwardKinematics fk(model, data, marker_frame_map, fk_layout);
 
     // Create camera
     Intrinsics intrinsics;
@@ -443,7 +456,9 @@ TEST_CASE("UKF update with outlier rejection", "[ukf][update][outlier]") {
     pinocchio::Data data;
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
     auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
-    ForwardKinematics fk(model, data, marker_frame_map, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+    ForwardKinematics fk(model, data, marker_frame_map, fk_layout);
 
     // Setup camera
     Intrinsics intrinsics;
@@ -553,7 +568,9 @@ TEST_CASE("UKF velocity damping at joint limits", "[ukf][update][damping]") {
     pinocchio::Data data;
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
     auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
-    ForwardKinematics fk(model, data, marker_frame_map, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+    ForwardKinematics fk(model, data, marker_frame_map, fk_layout);
 
     // Setup camera
     Intrinsics intrinsics;

@@ -9,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "posetrak/core/skeleton_layout.hpp"
 #include <cmath>
 #include <random>
 
@@ -233,7 +234,9 @@ TEST_CASE("End-to-end tracking of synthetic sequence", "[tracker][integration]")
     auto marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
 
     // Create forward kinematics
-    ForwardKinematics fk(model, data, marker_map, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+    ForwardKinematics fk(model, data, marker_map, fk_layout);
 
     // Generate ground truth trajectory (50 frames, 30 Hz)
     int num_frames = 50;

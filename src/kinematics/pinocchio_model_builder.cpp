@@ -13,11 +13,14 @@
 #include <pinocchio/multibody/joint/joint-revolute.hpp>
 #include <pinocchio/multibody/joint/joint-spherical.hpp>
 
+#include <fmt/core.h>
+
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace posetrak {
 
@@ -240,6 +243,211 @@ PinocchioModelBuilder::build_marker_frame_map(pinocchio::Model const& model,
 
     return marker_map;
 }
+
+// ---------------------------------------------------------------------------
+// Subtree model building
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Return true if ancestor_idx appears anywhere in the ancestor chain of joint_idx.
+bool is_descendant_of(Skeleton const& skeleton, uint32_t joint_idx, uint32_t ancestor_idx) {
+    auto const& joints = skeleton.joints();
+    std::optional<uint32_t> cur = joints[joint_idx].parent_index;
+    while (cur.has_value()) {
+        if (cur.value() == ancestor_idx)
+            return true;
+        cur = joints[cur.value()].parent_index;
+    }
+    return false;
+}
+
+}  // anonymous namespace
+
+void PinocchioModelBuilder::add_subtree_joints_recursive(
+    pinocchio::Model& model, Skeleton const& skeleton, uint32_t parent_skel_idx,
+    pinocchio::JointIndex parent_pin_id, std::unordered_set<std::string> const& group_set,
+    std::map<std::string, pinocchio::JointIndex>& joint_to_id) {
+    auto const& joints = skeleton.joints();
+
+    for (uint32_t i = 0; i < static_cast<uint32_t>(joints.size()); ++i) {
+        auto const& child = joints[i];
+        if (!child.parent_index.has_value() || child.parent_index.value() != parent_skel_idx) {
+            continue;
+        }
+
+        bool const in_group = group_set.count(child.group) > 0;
+
+        if (child.type == JointType::FIXED) {
+            // Fixed joints contribute no pinocchio joint. Map them to parent so
+            // that any markers attached here resolve to the correct pinocchio joint.
+            joint_to_id[child.name] = parent_pin_id;
+            // Still recurse — descendants might be in-group.
+            add_subtree_joints_recursive(model, skeleton, i, parent_pin_id, group_set, joint_to_id);
+            continue;
+        }
+
+        if (!in_group) {
+            // Non-group, non-fixed joint — outside requested subtree, stop recursion here.
+            continue;
+        }
+
+        // Build placement (offset + rest orientation), same as add_joint_recursive().
+        pinocchio::SE3 placement = pinocchio::SE3::Identity();
+        placement.translation() = child.offset;
+        if (child.rest_orientation.norm() > 0) {
+            double z = child.rest_orientation[0];
+            double y = child.rest_orientation[1];
+            double x = child.rest_orientation[2];
+            placement.rotation() =
+                Eigen::AngleAxisd(x, Eigen::Vector3d::UnitX()).toRotationMatrix() *
+                Eigen::AngleAxisd(y, Eigen::Vector3d::UnitY()).toRotationMatrix() *
+                Eigen::AngleAxisd(z, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+        }
+
+        pinocchio::JointIndex pin_id;
+        if (child.type == JointType::SPHERICAL) {
+            pin_id = model.addJoint(parent_pin_id, pinocchio::JointModelSpherical(), placement,
+                                    child.name);
+        } else {  // REVOLUTE
+            char axis = get_revolute_axis(child);
+            if (axis == 'X')
+                pin_id =
+                    model.addJoint(parent_pin_id, pinocchio::JointModelRX(), placement, child.name);
+            else if (axis == 'Y')
+                pin_id =
+                    model.addJoint(parent_pin_id, pinocchio::JointModelRY(), placement, child.name);
+            else
+                pin_id =
+                    model.addJoint(parent_pin_id, pinocchio::JointModelRZ(), placement, child.name);
+        }
+
+        model.appendBodyToJoint(pin_id, pinocchio::Inertia::Identity());
+        joint_to_id[child.name] = pin_id;
+
+        add_subtree_joints_recursive(model, skeleton, i, pin_id, group_set, joint_to_id);
+    }
+}
+
+void PinocchioModelBuilder::build_subtree_model(Skeleton const& skeleton,
+                                                std::string const& freeflyer_joint_name,
+                                                std::vector<std::string> const& group_names,
+                                                pinocchio::Model& model) {
+    // --- 1. Find freeflyer joint index ---
+    uint32_t ff_idx = UINT32_MAX;
+    auto const& joints = skeleton.joints();
+    for (uint32_t i = 0; i < static_cast<uint32_t>(joints.size()); ++i) {
+        if (joints[i].name == freeflyer_joint_name) {
+            ff_idx = i;
+            break;
+        }
+    }
+    if (ff_idx == UINT32_MAX) {
+        throw std::invalid_argument(
+            fmt::format("build_subtree_model: freeflyer joint '{}' not found in skeleton",
+                        freeflyer_joint_name));
+    }
+
+    // --- 2. Build group set ---
+    std::unordered_set<std::string> group_set(group_names.begin(), group_names.end());
+
+    // --- 3. Connectivity assertion ---
+    // Every non-fixed in-group joint must be a descendant of freeflyer_joint_name.
+    for (uint32_t i = 0; i < static_cast<uint32_t>(joints.size()); ++i) {
+        auto const& j = joints[i];
+        if (group_set.count(j.group) == 0)
+            continue;
+        if (j.type == JointType::FIXED)
+            continue;
+        if (!is_descendant_of(skeleton, i, ff_idx)) {
+            throw std::invalid_argument(fmt::format(
+                "build_subtree_model: joint '{}' in group '{}' is not a descendant of '{}'", j.name,
+                j.group, freeflyer_joint_name));
+        }
+    }
+
+    // --- 4. Build pinocchio model ---
+    model = pinocchio::Model{};
+    model.name = fmt::format("subtree_{}", freeflyer_joint_name);
+
+    std::map<std::string, pinocchio::JointIndex> joint_to_id;
+
+    // Add freeflyer at universe (placement = Identity; world transform injected each frame)
+    pinocchio::JointIndex ff_pin_id = model.addJoint(
+        0, pinocchio::JointModelFreeFlyer(), pinocchio::SE3::Identity(), freeflyer_joint_name);
+    model.appendBodyToJoint(ff_pin_id, pinocchio::Inertia::Identity());
+    joint_to_id[freeflyer_joint_name] = ff_pin_id;
+
+    // Recursively add in-group joints rooted at the freeflyer.
+    add_subtree_joints_recursive(model, skeleton, ff_idx, ff_pin_id, group_set, joint_to_id);
+
+    // --- 5. Add marker frames for the subtree ---
+    // Reuse add_marker_frames — it attaches every skeleton marker whose parent joint
+    // is present in joint_to_id.  Markers outside the subtree are warned and skipped.
+    // Override: only attach markers on joints in group_set or the freeflyer itself.
+    for (auto const& marker : skeleton.markers()) {
+        std::string const& parent_joint_name = joints[marker.joint_index].name;
+        auto it = joint_to_id.find(parent_joint_name);
+        if (it == joint_to_id.end())
+            continue;  // marker is outside the subtree — skip silently
+
+        pinocchio::JointIndex parent_joint_id = it->second;
+        pinocchio::SE3 frame_placement = pinocchio::SE3::Identity();
+        frame_placement.translation() = marker.local_pos;
+        pinocchio::FrameIndex parent_frame_id = model.getBodyId(model.names[parent_joint_id]);
+        model.addFrame(pinocchio::Frame(marker.name, parent_joint_id, parent_frame_id,
+                                        frame_placement, pinocchio::OP_FRAME));
+    }
+}
+
+std::map<std::string, pinocchio::FrameIndex> PinocchioModelBuilder::build_subtree_marker_frame_map(
+    pinocchio::Model const& model, Skeleton const& skeleton,
+    std::string const& freeflyer_joint_name, std::vector<std::string> const& group_names) {
+    std::unordered_set<std::string> group_set(group_names.begin(), group_names.end());
+
+    // Find freeflyer index in skeleton to use as boundary
+    uint32_t ff_idx = UINT32_MAX;
+    auto const& joints = skeleton.joints();
+    for (uint32_t i = 0; i < static_cast<uint32_t>(joints.size()); ++i) {
+        if (joints[i].name == freeflyer_joint_name) {
+            ff_idx = i;
+            break;
+        }
+    }
+
+    std::map<std::string, pinocchio::FrameIndex> marker_map;
+    for (auto const& marker : skeleton.markers()) {
+        if (!model.existFrame(marker.name))
+            continue;
+
+        // Include only markers whose parent joint group is in the subtree, or whose
+        // parent is the freeflyer joint itself.
+        uint32_t parent_idx = marker.joint_index;
+        bool const on_freeflyer = (parent_idx == ff_idx);
+        bool const in_group = (group_set.count(joints[parent_idx].group) > 0);
+        // Also walk up through FIXED ancestors to see if the effective joint is in subtree.
+        bool const fixed_ancestor_in_group = [&]() -> bool {
+            uint32_t cur = parent_idx;
+            while (joints[cur].type == JointType::FIXED) {
+                if (!joints[cur].parent_index.has_value())
+                    return false;
+                cur = joints[cur].parent_index.value();
+                if (cur == ff_idx)
+                    return true;
+                if (group_set.count(joints[cur].group) > 0)
+                    return true;
+            }
+            return false;
+        }();
+
+        if (on_freeflyer || in_group || fixed_ancestor_in_group) {
+            marker_map[marker.name] = model.getFrameId(marker.name);
+        }
+    }
+    return marker_map;
+}
+
+// ---------------------------------------------------------------------------
 
 void PinocchioModelBuilder::print_model_info(pinocchio::Model const& model,
                                              Skeleton const& skeleton) {

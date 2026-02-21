@@ -18,14 +18,12 @@ namespace posetrak {
 
 ForwardKinematics::ForwardKinematics(
     pinocchio::Model const& model, pinocchio::Data& data,
-    std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map, Skeleton const& skeleton)
-    : model_(model), data_(data), marker_frame_map_(marker_frame_map), skeleton_(skeleton) {}
+    std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map,
+    std::shared_ptr<const SkeletonLayout> layout)
+    : model_(model), data_(data), marker_frame_map_(marker_frame_map), layout_(std::move(layout)) {}
 
 std::unordered_map<std::string, Eigen::Vector3d> ForwardKinematics::compute(State const& state) {
-    // Convert state to configuration vector
-    Eigen::VectorXd q = state_to_config(state, skeleton_);
-
-    // Use the existing compute(q) method
+    Eigen::VectorXd q = state_to_config(state, *layout_);
     return compute(q);
 }
 
@@ -54,6 +52,50 @@ ForwardKinematics::compute(Eigen::VectorXd const& q) const {
     }
 
     return marker_positions;
+}
+
+Eigen::VectorXd ForwardKinematics::state_to_config(State const& state,
+                                                   SkeletonLayout const& layout) {
+    // Both full-skeleton and child-subtree pinocchio models open with a 7-DOF freeflyer
+    // (pos(3) + quat_xyzw(4)), followed by layout joints in skeleton insertion order.
+    int nq = 7;
+    for (auto const& desc : layout.joints()) {
+        nq += (desc.type == JointType::SPHERICAL) ? 4 : 1;
+    }
+
+    Eigen::VectorXd q(nq);
+
+    // Root freeflyer: pos + quaternion.
+    // For the full-skeleton path these are the root body's pose.
+    // For the child path the coordinator injects the freeflyer world transform here.
+    q.segment<3>(0) = state.root_position();
+    Eigen::Quaterniond const& ori = state.root_orientation();
+    q[3] = ori.x();
+    q[4] = ori.y();
+    q[5] = ori.z();
+    q[6] = ori.w();
+
+    int idx = 7;
+    for (auto const& desc : layout.joints()) {
+        if (desc.type == JointType::SPHERICAL) {
+            Eigen::Vector3d angles =
+                state.joint_angles().segment<3>(static_cast<int>(desc.state_index));
+            double const angle = angles.norm();
+            Eigen::Quaterniond quat;
+            if (angle == 0.0) {
+                quat = Eigen::Quaterniond::Identity();
+            } else {
+                quat = Eigen::Quaterniond(Eigen::AngleAxisd(angle, angles / angle));
+            }
+            q[idx++] = quat.x();
+            q[idx++] = quat.y();
+            q[idx++] = quat.z();
+            q[idx++] = quat.w();
+        } else {  // REVOLUTE
+            q[idx++] = state.joint_angles()[static_cast<int>(desc.state_index)];
+        }
+    }
+    return q;
 }
 
 Eigen::VectorXd ForwardKinematics::state_to_config(State const& state, Skeleton const& skeleton) {

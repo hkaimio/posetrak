@@ -3,6 +3,7 @@
 
 #include "fmt/base.h"
 #include "posetrak/core/config.hpp"
+#include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/io/camera_loader.hpp"
 #include "posetrak/io/observation_loader.hpp"
 #include "posetrak/io/skeleton_loader.hpp"
@@ -546,7 +547,10 @@ int main(int argc, char* argv[]) {
         pinocchio::Data data;
         PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
         auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
-        ForwardKinematics fk(model, data, marker_frame_map, skeleton);
+        auto fk_layout =
+            SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+        ForwardKinematics fk(model, data, marker_frame_map, fk_layout);
 
         // Create exporters
         std::unique_ptr<TrackingExporter> exporter;

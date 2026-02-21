@@ -38,7 +38,7 @@
             "targetCreateCommands": [
                 "target create ${workspaceFolder}/builddir/cli/posetrak"
             ],
-            "args": ["${workspaceFolder}/tests/cpp-python/cpp_test_config.toml"],
+            "args": ["${workspaceFolder}/tests/harri-no-palms.toml"],
             "processCreateCommands": [
                 "process launch"
             ]
@@ -58,7 +58,7 @@
         "type": "cppdbg",
         "request": "launch",
         "program": "${workspaceFolder}/builddir/cli/posetrak",
-        "args": ["${workspaceFolder}/tests/cpp-python/cpp_test_config.toml"],
+        "args": ["${workspaceFolder}/tests/harri-no-palms.toml"],
         "cwd": "${workspaceRoot}"
     },
 

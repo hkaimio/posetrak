@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/io/skeleton_loader.hpp"
 #include "posetrak/kinematics/forward_kinematics.hpp"
 #include "posetrak/kinematics/pinocchio_model_builder.hpp"
@@ -86,7 +87,8 @@ TEST_CASE("ForwardKinematics computes marker positions", "[forward_kinematics]")
     auto marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
 
     // Create FK computer
-    ForwardKinematics fk(model, data, marker_map, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+    ForwardKinematics fk(model, data, marker_map, fk_layout);
 
     SECTION("FK with zero configuration") {
         // Configuration: root at origin, no rotation, spine at 0
@@ -160,7 +162,9 @@ TEST_CASE("ForwardKinematics handles spherical joints", "[forward_kinematics]") 
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
 
     auto marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
-    ForwardKinematics fk(model, data, marker_map, skeleton);
+    auto fk_layout2 =
+        SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+    ForwardKinematics fk(model, data, marker_map, fk_layout2);
 
     SECTION("state_to_config converts spherical joint correctly") {
         // State with spherical joint angles
@@ -209,7 +213,9 @@ TEST_CASE("ForwardKinematics validates against Python ground truth",
     pinocchio::Data data;
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
     auto marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
-    ForwardKinematics fk(model, data, marker_map, skeleton);
+    auto fk_layout_gt =
+        SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+    ForwardKinematics fk(model, data, marker_map, fk_layout_gt);
 
     std::cout << "\n=== Pinocchio Model Joint Order ===" << std::endl;
     for (size_t i = 1; i < model.names.size(); ++i) {  // Skip universe (index 0)
@@ -403,4 +409,226 @@ TEST_CASE("ForwardKinematics validates against Python ground truth",
     double overall_rmse = std::sqrt(total_rmse / total_markers);
     INFO("Overall RMSE across " << num_frames << " frames: " << overall_rmse << " m");
     REQUIRE(overall_rmse < 0.005);  // Less than 5mm overall RMSE
+}
+
+// ===========================================================================
+// Phase 3d: Subtree Model Tests
+// ===========================================================================
+
+/// Build the shared hand skeleton fixture:
+///
+///   pelvis (SPHERICAL, group="main")    ← root (no parent)
+///     └── upper_arm.R (SPHERICAL, group="main")
+///          └── forearm.R (REVOLUTE, group="main")
+///               └── wrist.R (FIXED, group="main")   ← freeflyer anchor for HandR
+///                    └── palm.R (SPHERICAL, group="HandR")
+///                         ├── finger1.R (REVOLUTE, group="HandR")
+///                         └── finger2.R (REVOLUTE, group="HandR")
+///
+/// Markers:
+///   MRK-body   on pelvis    (group main)
+///   MRK-palm   on palm.R    (group HandR)
+///   MRK-tip1   on finger1.R (group HandR)
+static Skeleton make_hand_skeleton() {
+    Skeleton skel;
+
+    uint32_t pelvis = skel.add_joint("pelvis", std::nullopt, JointType::SPHERICAL,
+                                     Eigen::Vector3d::Zero(), "main");
+    uint32_t upper_arm = skel.add_joint("upper_arm.R", pelvis, JointType::SPHERICAL,
+                                        Eigen::Vector3d(0.2, 0, 0), "main");
+    uint32_t forearm = skel.add_joint("forearm.R", upper_arm, JointType::REVOLUTE,
+                                      Eigen::Vector3d(0.3, 0, 0), "main");
+    uint32_t wrist =
+        skel.add_joint("wrist.R", forearm, JointType::FIXED, Eigen::Vector3d(0.25, 0, 0), "main");
+    uint32_t palm =
+        skel.add_joint("palm.R", wrist, JointType::SPHERICAL, Eigen::Vector3d(0.05, 0, 0), "HandR");
+    uint32_t f1 = skel.add_joint("finger1.R", palm, JointType::REVOLUTE,
+                                 Eigen::Vector3d(0.04, 0.01, 0), "HandR");
+    skel.add_joint("finger2.R", palm, JointType::REVOLUTE, Eigen::Vector3d(0.04, -0.01, 0),
+                   "HandR");
+
+    skel.add_marker("MRK-body", pelvis, Eigen::Vector3d(0, 0, 0.1));
+    skel.add_marker("MRK-palm", palm, Eigen::Vector3d(0, 0, 0.01));
+    skel.add_marker("MRK-tip1", f1, Eigen::Vector3d(0.03, 0, 0));
+
+    return skel;
+}
+
+TEST_CASE("Subtree model: joint count and velocity DOF", "[subtree_model]") {
+    Skeleton skel = make_hand_skeleton();
+    pinocchio::Model model;
+
+    REQUIRE_NOTHROW(PinocchioModelBuilder::build_subtree_model(skel, "wrist.R", {"HandR"}, model));
+
+    // Universe (0) + wrist.R freeflyer (1) + palm.R (2) + finger1.R (3) + finger2.R (4)
+    REQUIRE(model.njoints == 5);
+    // nv: 6 (freeflyer) + 3 (palm spherical) + 1 (finger1) + 1 (finger2) = 11
+    REQUIRE(model.nv == 11);
+    // nq: 7 (freeflyer) + 4 (palm spherical) + 1 + 1 = 13
+    REQUIRE(model.nq == 13);
+}
+
+TEST_CASE("Subtree model: freeflyer placed at identity", "[subtree_model]") {
+    Skeleton skel = make_hand_skeleton();
+    pinocchio::Model model;
+    PinocchioModelBuilder::build_subtree_model(skel, "wrist.R", {"HandR"}, model);
+
+    // Joint index 1 = wrist.R (first after universe)
+    // jointPlacements[1] is the placement of the joint relative to its parent (universe)
+    auto const& placement = model.jointPlacements[1];
+    REQUIRE(placement.translation().isZero(1e-10));
+    REQUIRE(placement.rotation().isApprox(Eigen::Matrix3d::Identity(), 1e-10));
+}
+
+TEST_CASE("Subtree model: child joint offsets preserved", "[subtree_model]") {
+    Skeleton skel = make_hand_skeleton();
+    pinocchio::Model model;
+    PinocchioModelBuilder::build_subtree_model(skel, "wrist.R", {"HandR"}, model);
+
+    // palm.R should be joint index 2; its offset in skeleton is (0.05, 0, 0)
+    // In the subtree model palm.R is a direct child of the wrist.R freeflyer,
+    // but wrist.R is FIXED so palm.R's placement carries wrist.R's offset (0.25, 0, 0)
+    // plus palm.R's own offset (0.05, 0, 0) = (0.30, 0, 0) -- wait,
+    // actually FIXED wrist.R maps to freeflyer (parent_pin_id), and palm.R's placement
+    // is palm.R's own offset (0.05, 0, 0) relative to wrist.R (the pinocchio freeflyer).
+    // palm.R is added with parent = freeflyer pin id (wrist.R) and placement = palm.R.offset
+    REQUIRE((model.existFrame("wrist.R") || model.names[1] == "wrist.R"));
+    pinocchio::JointIndex palm_id = model.getJointId("palm.R");
+    auto const& palm_placement = model.jointPlacements[palm_id];
+    // palm.R.offset = (0.05, 0, 0)
+    CHECK_THAT(palm_placement.translation()[0], Catch::Matchers::WithinAbs(0.05, 1e-10));
+    CHECK_THAT(palm_placement.translation()[1], Catch::Matchers::WithinAbs(0.0, 1e-10));
+    CHECK_THAT(palm_placement.translation()[2], Catch::Matchers::WithinAbs(0.0, 1e-10));
+}
+
+TEST_CASE("Subtree model: only subtree markers included", "[subtree_model]") {
+    Skeleton skel = make_hand_skeleton();
+    pinocchio::Model model;
+    PinocchioModelBuilder::build_subtree_model(skel, "wrist.R", {"HandR"}, model);
+
+    auto marker_map =
+        PinocchioModelBuilder::build_subtree_marker_frame_map(model, skel, "wrist.R", {"HandR"});
+
+    // MRK-palm and MRK-tip1 are in HandR group; MRK-body is in main group → excluded
+    REQUIRE(marker_map.size() == 2);
+    REQUIRE(marker_map.count("MRK-palm") > 0);
+    REQUIRE(marker_map.count("MRK-tip1") > 0);
+    REQUIRE(marker_map.count("MRK-body") == 0);
+}
+
+TEST_CASE("Subtree model: FK at identity state gives correct marker position", "[subtree_model]") {
+    Skeleton skel = make_hand_skeleton();
+    pinocchio::Model model;
+    pinocchio::Data data;
+    PinocchioModelBuilder::build_subtree_model(skel, "wrist.R", {"HandR"}, model);
+    data = pinocchio::Data(model);
+
+    auto marker_map =
+        PinocchioModelBuilder::build_subtree_marker_frame_map(model, skel, "wrist.R", {"HandR"});
+    auto layout = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"HandR"});
+
+    // Identity state: root at origin, all joint angles zero
+    int n_angles = static_cast<int>(layout->total_storage_dof_count());
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(),
+                Eigen::VectorXd::Zero(n_angles), Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                Eigen::VectorXd::Zero(n_angles));
+
+    ForwardKinematics fk(model, data, marker_map, layout);
+    auto positions = fk.compute(state);
+
+    REQUIRE(positions.count("MRK-palm") > 0);
+    REQUIRE(positions.count("MRK-tip1") > 0);
+
+    // At identity (root at origin, zero angles):
+    // palm.R is at offset (0.05, 0, 0) from wrist.R, plus marker local_pos (0,0,0.01)
+    // wrist.R is the freeflyer at origin → palm.R world pos = (0.05, 0, 0)
+    // MRK-palm = (0.05, 0, 0) + (0, 0, 0.01) = (0.05, 0, 0.01)
+    auto const& palm_pos = positions.at("MRK-palm");
+    CHECK_THAT(palm_pos[0], Catch::Matchers::WithinAbs(0.05, 1e-6));
+    CHECK_THAT(palm_pos[1], Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(palm_pos[2], Catch::Matchers::WithinAbs(0.01, 1e-6));
+}
+
+TEST_CASE("Subtree model: FK with injected root transform", "[subtree_model]") {
+    Skeleton skel = make_hand_skeleton();
+    pinocchio::Model model;
+    pinocchio::Data data;
+    PinocchioModelBuilder::build_subtree_model(skel, "wrist.R", {"HandR"}, model);
+    data = pinocchio::Data(model);
+
+    auto marker_map =
+        PinocchioModelBuilder::build_subtree_marker_frame_map(model, skel, "wrist.R", {"HandR"});
+    auto layout = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"HandR"});
+
+    // Inject root offset: wrist.R world position = (1, 2, 3), identity orientation
+    Eigen::Vector3d root_pos(1.0, 2.0, 3.0);
+    Eigen::Quaterniond root_ori = Eigen::Quaterniond::Identity();
+    int n_angles = static_cast<int>(layout->total_storage_dof_count());
+    State state(root_pos, root_ori, Eigen::VectorXd::Zero(n_angles), Eigen::Vector3d::Zero(),
+                Eigen::Vector3d::Zero(), Eigen::VectorXd::Zero(n_angles));
+
+    ForwardKinematics fk(model, data, marker_map, layout);
+    auto positions = fk.compute(state);
+    auto const& palm_pos = positions.at("MRK-palm");
+    CHECK_THAT(palm_pos[0], Catch::Matchers::WithinAbs(1.05, 1e-6));
+    CHECK_THAT(palm_pos[1], Catch::Matchers::WithinAbs(2.0, 1e-6));
+    CHECK_THAT(palm_pos[2], Catch::Matchers::WithinAbs(3.01, 1e-6));
+}
+
+TEST_CASE("Subtree model: connectivity assertion throws for non-descendant group",
+          "[subtree_model]") {
+    Skeleton skel = make_hand_skeleton();
+    pinocchio::Model model;
+
+    // "upper_arm.R" is not a descendant of "wrist.R" — should throw
+    REQUIRE_THROWS_AS(PinocchioModelBuilder::build_subtree_model(skel, "wrist.R", {"main"}, model),
+                      std::invalid_argument);
+}
+
+TEST_CASE("Subtree model: freeflyer not in skeleton throws", "[subtree_model]") {
+    Skeleton skel = make_hand_skeleton();
+    pinocchio::Model model;
+    REQUIRE_THROWS_AS(
+        PinocchioModelBuilder::build_subtree_model(skel, "nonexistent_joint", {"HandR"}, model),
+        std::invalid_argument);
+}
+
+TEST_CASE("Subtree model: state_to_config layout overload", "[subtree_model]") {
+    Skeleton skel = make_hand_skeleton();
+    auto layout = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"HandR"});
+
+    // palm.R(3) + finger1.R(1) + finger2.R(1) = 5 storage DOFs
+    REQUIRE(layout->total_storage_dof_count() == 5);
+
+    Eigen::Vector3d root_pos(1.0, 0.0, 0.0);
+    Eigen::Quaterniond root_ori = Eigen::Quaterniond::Identity();
+    Eigen::VectorXd angles = Eigen::VectorXd::Zero(5);
+    angles[3] = 0.5;  // finger1.R angle
+
+    State state(root_pos, root_ori, angles, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                Eigen::VectorXd::Zero(5));
+
+    Eigen::VectorXd q = ForwardKinematics::state_to_config(state, *layout);
+
+    // nq: 7 (freeflyer) + 4 (palm spherical) + 1 (finger1) + 1 (finger2) = 13
+    REQUIRE(q.size() == 13);
+
+    // Root position
+    CHECK_THAT(q[0], Catch::Matchers::WithinAbs(1.0, 1e-10));
+    CHECK_THAT(q[1], Catch::Matchers::WithinAbs(0.0, 1e-10));
+    CHECK_THAT(q[2], Catch::Matchers::WithinAbs(0.0, 1e-10));
+    // Root quaternion (identity → x=0, y=0, z=0, w=1)
+    CHECK_THAT(q[3], Catch::Matchers::WithinAbs(0.0, 1e-10));
+    CHECK_THAT(q[4], Catch::Matchers::WithinAbs(0.0, 1e-10));
+    CHECK_THAT(q[5], Catch::Matchers::WithinAbs(0.0, 1e-10));
+    CHECK_THAT(q[6], Catch::Matchers::WithinAbs(1.0, 1e-10));
+    // palm.R zero angles → identity quaternion (q[7..10])
+    CHECK_THAT(q[7], Catch::Matchers::WithinAbs(0.0, 1e-10));   // x
+    CHECK_THAT(q[8], Catch::Matchers::WithinAbs(0.0, 1e-10));   // y
+    CHECK_THAT(q[9], Catch::Matchers::WithinAbs(0.0, 1e-10));   // z
+    CHECK_THAT(q[10], Catch::Matchers::WithinAbs(1.0, 1e-10));  // w
+    // finger1.R angle
+    CHECK_THAT(q[11], Catch::Matchers::WithinAbs(0.5, 1e-10));
+    // finger2.R angle = 0
+    CHECK_THAT(q[12], Catch::Matchers::WithinAbs(0.0, 1e-10));
 }

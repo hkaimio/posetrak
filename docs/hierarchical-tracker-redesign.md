@@ -586,15 +586,10 @@ Eigen::VectorXd ForwardKinematics::state_to_config(
 }
 ```
 
-> **Note:** The existing `ForwardKinematics` stores `Skeleton const&`. For child FK constructed
-> from the subtree model, we still pass the **full** skeleton (it is never mutated and is
-> `const`). Only the layout changes. The ForwardKinematics constructor signature does not
-> need to change; the new `state_to_config` overload takes the layout explicitly.
->
-> To use the new overload inside `ForwardKinematics::compute(State const& state)`, the
-> FK class will need to optionally hold a `SkeletonLayout const*` alongside the existing
-> `Skeleton const&`. If layout is provided, use the layout-aware overload; otherwise fall
-> back to the existing skeleton-only path. The parent filter path is entirely unchanged.
+> **Implemented:** `ForwardKinematics` now takes a single `shared_ptr<const SkeletonLayout>`
+> constructor argument. The skeleton is accessed via `layout->skeleton()`. The unified
+> `state_to_config(State, SkeletonLayout)` handles both full-skeleton and child-subtree
+> models — see §9.5.
 
 ---
 
@@ -662,33 +657,32 @@ markers: MRK-palm (on palm.R), MRK-tip1 (on finger1.R), MRK-body (on spine)
 
 ---
 
-### 9.5 Open Points for Phase 3d
+### 9.5 Implementation Notes (Phase 3d — completed)
 
-**P1: `ForwardKinematics` layout member ownership**
+**P1: `ForwardKinematics` layout member ownership — RESOLVED**
 
-The existing `ForwardKinematics` holds `Skeleton const&` (a reference, not owned). To
-optionally hold a layout, the cleanest approach is `SkeletonLayout const* layout_ = nullptr`
-(nullable pointer, not owned). If `layout_` is set, `compute(State const&)` uses the
-layout-aware `state_to_config`. If null, it falls back to the existing skeleton-path.
-
-A cleaner alternative is to overload the constructor:
+The final design went further than either option considered here. `ForwardKinematics` now has
+a **single constructor** taking `shared_ptr<const SkeletonLayout>`. The skeleton is obtained
+via `layout->skeleton()`; no separate `Skeleton const&` parameter exists. The `layout_` member
+is always non-null.
 
 ```cpp
-// Full-skeleton FK (existing path, unchanged)
+// Single constructor — works for both full-skeleton and child-subtree FK
 ForwardKinematics(pinocchio::Model const& model, pinocchio::Data& data,
                   std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map,
-                  Skeleton const& skeleton);
-
-// Child FK (new path)
-ForwardKinematics(pinocchio::Model const& model, pinocchio::Data& data,
-                  std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map,
-                  Skeleton const& skeleton,
-                  SkeletonLayout const& layout);  // layout-aware state_to_config
+                  std::shared_ptr<const SkeletonLayout> layout);
 ```
 
-The second constructor sets `layout_` to `&layout`. Both constructors store `skeleton_` for
-joint-type lookups in `state_to_config`. The `Tracker` construction path is unchanged (uses
-first constructor).
+Callers that previously passed a bare `Skeleton const&` now build a layout first:
+```cpp
+auto layout = SkeletonLayout::from_full_skeleton(skeleton_ptr);
+ForwardKinematics fk(model, data, marker_map, layout);
+```
+
+The unified `state_to_config(State const&, SkeletonLayout const&)` works for both full-skeleton
+and child-subtree models without any branching — both pinocchio models start with a 7-DOF
+freeflyer followed by layout joints in insertion order. The legacy
+`state_to_config(State const&, Skeleton const&)` is kept for test call sites that use it directly.
 
 **P2: FIXED joints in group with non-FIXED parent in group**
 
@@ -714,8 +708,8 @@ Approximate ordering (each independently committable):
 | 3a | ✅ done | Remove `Skeleton` arg from `UKF`/`ProcessModel`/`SigmaPointGenerator`; read from layout |
 | 3b | ✅ done | `SkeletonLayout` factory functions take `shared_ptr<const Skeleton>` |
 | 3c | ✅ done | Remove `set_active_groups()` from `Skeleton`; pass groups to layout factory |
-| 3d | next | `PinocchioModelBuilder::build_subtree_model()` + layout-aware `ForwardKinematics::state_to_config()` + tests (see §9) |
-| 3e | | `UnscentedKalmanFilter::set_root_transform()` + fixed-root sigma point path |
+| 3d | ✅ done | `PinocchioModelBuilder::build_subtree_model()` + unified `ForwardKinematics` API (`shared_ptr<const SkeletonLayout>` constructor + `state_to_config(State, SkeletonLayout)`) + 9 passing `[subtree_model]` tests |
+| 3e | **next** | `UnscentedKalmanFilter::set_root_transform()` + fixed-root sigma point path |
 | 3f | | `ForwardKinematics::world_transform(joint_name)` |
 | 3g | | Rename `Tracker` → `HierarchicalTracker`; add empty `children_`; zero-children test |
 | 3h | | Child filter construction, per-frame sequencing, state merge |

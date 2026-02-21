@@ -113,8 +113,12 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
 }
 
 void Tracker::initialize_from_rest_pose(double timestamp) {
-    // Create state with all zeros (rest pose)
-    int num_dof = skeleton_->total_dof_count();
+    // Build the same layout initialize_ukf will use, so we get the correct
+    // joint_angles size (excludes root floating body DOFs).
+    auto const& groups = config_.active_joint_groups;
+    auto layout = groups.empty() ? SkeletonLayout::from_full_skeleton(skeleton_)
+                                 : SkeletonLayout::from_groups(skeleton_, groups);
+    int num_dof = layout->total_storage_dof_count();
 
     Eigen::Vector3d root_position = Eigen::Vector3d::Zero();
     Eigen::Quaterniond root_orientation = Eigen::Quaterniond::Identity();
@@ -217,6 +221,7 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
 }
 
 void Tracker::build_children(State const& global_initial_state) {
+    children_.clear();  // reset in case of re-initialization
     if (config_.child_filters.empty()) {
         return;
     }
@@ -260,6 +265,24 @@ void Tracker::build_children(State const& global_initial_state) {
 
         // 6. Build merge map: child DOF i → state_index in full-skeleton layout
         child.merge_map = full_layout->build_index_map_from(*child.layout);
+
+        // 7. Build marker_id remap: full-skeleton marker index → child-skeleton marker index.
+        //    The child UKF indexes markers() by obs.marker_id; observations use full-skeleton IDs.
+        {
+            auto const& full_markers = skeleton_->markers();
+            auto const& child_markers = child.layout->skeleton()->markers();
+            for (int child_mid = 0; child_mid < static_cast<int>(child_markers.size());
+                 ++child_mid) {
+                std::string const& child_name = child_markers[child_mid].name;
+                for (int full_mid = 0; full_mid < static_cast<int>(full_markers.size());
+                     ++full_mid) {
+                    if (full_markers[full_mid].name == child_name) {
+                        child.marker_id_remap[full_mid] = child_mid;
+                        break;
+                    }
+                }
+            }
+        }
 
         fmt::print("Built child filter '{}': {} joints, {} child markers, merge_map size {}\n",
                    ccfg.name, child.layout->joints().size(), child.marker_frame_map.size(),
@@ -381,14 +404,27 @@ void Tracker::run_child_step(ChildFilter& child, std::vector<Observation> const&
     // 2. Predict (root stays fixed; process model integration is discarded for root)
     child.ukf->predict(dt);
 
-    // 3. Update — child FK silently ignores markers it doesn't know
-    child.ukf->update(obs, cameras_, *child.fk, child.measurement_noise_std,
+    // 3. Remap observation marker_ids from full-skeleton to child-skeleton indexing,
+    //    dropping any observations not relevant to this child filter.
+    std::vector<Observation> child_obs;
+    child_obs.reserve(obs.size());
+    for (Observation const& o : obs) {
+        auto it = child.marker_id_remap.find(o.marker_id);
+        if (it != child.marker_id_remap.end()) {
+            Observation remapped = o;
+            remapped.marker_id = it->second;
+            child_obs.push_back(remapped);
+        }
+    }
+
+    // 4. Update — child FK silently ignores markers it doesn't know
+    child.ukf->update(child_obs, cameras_, *child.fk, child.measurement_noise_std,
                       child.outlier_threshold);
 
-    // 4. FK refresh (enables grandchild support in the future)
+    // 5. FK refresh (enables grandchild support in the future)
     child.fk->compute(child.ukf->state());
 
-    // 5. Merge child joint angles back into parent UKF state
+    // 6. Merge child joint angles back into parent UKF state
     State parent_state = ukf_->state();
     auto parent_angles = parent_state.joint_angles();
     auto const& child_angles = child.ukf->state().joint_angles();

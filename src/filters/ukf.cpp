@@ -62,7 +62,7 @@ UnscentedKalmanFilter::UnscentedKalmanFilter(std::shared_ptr<const SkeletonLayou
                                              double process_noise_std, double alpha, double beta,
                                              double kappa)
     : layout_(layout),
-      state_(layout->skeleton()->total_dof_count()),
+      state_(layout->total_storage_dof_count()),  // excludes floating-root DOFs
       covariance_(Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim())),
       process_noise_(
           Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim())),
@@ -73,8 +73,8 @@ UnscentedKalmanFilter::UnscentedKalmanFilter(std::shared_ptr<const SkeletonLayou
     process_noise_ *= variance;
 
     // Debug: Print DOF counts
-    fmt::print("UKF initialized: total_dof={}, error_dim={}\n",
-               layout->skeleton()->total_dof_count(), layout->error_state_dim());
+    fmt::print("UKF initialized: total_dof={}, error_dim={}\n", layout->total_storage_dof_count(),
+               layout->error_state_dim());
 }
 
 void UnscentedKalmanFilter::set_covariance(Eigen::MatrixXd const& covariance) {
@@ -459,8 +459,8 @@ void UnscentedKalmanFilter::predict(double dt) {
 
 State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states,
                                                 Eigen::VectorXd const& weights) const {
-    // Create mean state
-    State mean_state(layout_->skeleton()->total_dof_count());
+    // Create mean state (size = layout storage DOFs, excludes floating-root DOFs)
+    State mean_state(layout_->total_storage_dof_count());
 
     // Mean position (simple weighted average)
     Eigen::Vector3d pos_mean = Eigen::Vector3d::Zero();
@@ -516,8 +516,8 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
     mean_state.set_root_angular_velocity(angvel_mean);
 
     // Mean joint angles and velocities
-    Eigen::VectorXd angles_mean = Eigen::VectorXd::Zero(layout_->skeleton()->total_dof_count());
-    Eigen::VectorXd velocities_mean = Eigen::VectorXd::Zero(layout_->skeleton()->total_dof_count());
+    Eigen::VectorXd angles_mean = Eigen::VectorXd::Zero(layout_->total_storage_dof_count());
+    Eigen::VectorXd velocities_mean = Eigen::VectorXd::Zero(layout_->total_storage_dof_count());
 
     for (JointDesc const& j : layout_->joints()) {
         int const si = j.state_index;

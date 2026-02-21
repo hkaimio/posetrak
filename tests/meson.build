@@ -34,6 +34,9 @@ test_sources = files(
   # Phase 4.6: Integration tests
   'test_tracker_integration.cpp',
 
+  # Phase 3h: Child filter
+  'test_tracker_child_filter.cpp',
+
   # Phase 4.7: Python comparison tests
   'test_ukf_frame0_comparison.cpp',
   'test_helpers/python_data_loader.cpp',

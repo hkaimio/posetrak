@@ -186,6 +186,12 @@ class Tracker {
      */
     UnscentedKalmanFilter* get_ukf() { return ukf_.get(); }
 
+    /**
+     * @brief Number of active child filters (0 in monolithic mode).
+     * @note Only valid after initialization.
+     */
+    size_t num_children() const { return children_.size(); }
+
    private:
     /**
      * @brief Child filter — a self-contained subtree UKF.
@@ -209,6 +215,12 @@ class Tracker {
         /// merge_map[i] = state_index in the full-skeleton layout for child DOF i.
         /// Used to write child joint angles back into the parent UKF state.
         std::vector<int> merge_map;
+
+        /// Maps full-skeleton marker index → child-skeleton marker index.
+        /// Only entries for markers that exist in this child filter are populated.
+        /// Used in run_child_step to remap observation marker_ids before passing
+        /// to the child UKF (which indexes its own subtree skeleton's markers()).
+        std::unordered_map<int, int> marker_id_remap;
 
         double measurement_noise_std = 2.0;
         double outlier_threshold = 4.0;

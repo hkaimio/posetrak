@@ -130,8 +130,8 @@ class ForwardKinematics {
    private:
     pinocchio::Model const& model_;
     pinocchio::Data& data_;
-    std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map_;
-    std::shared_ptr<const SkeletonLayout> layout_;                         ///< Always non-null
+    std::map<std::string, pinocchio::FrameIndex> marker_frame_map_;  ///< owned copy, not a ref
+    std::shared_ptr<const SkeletonLayout> layout_;                   ///< Always non-null
     std::unordered_map<std::string, pinocchio::JointIndex> joint_id_map_;  ///< name → oMi index
 };
 

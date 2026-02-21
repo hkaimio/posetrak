@@ -408,23 +408,320 @@ ever needed, the type can be generalised.
 
 ---
 
-## 9. Implementation Phases
+## 9. Phase 3d — Detailed Design and Changes
+
+Phase 3d establishes the building blocks needed by child filters: a subtree Pinocchio model,
+a layout-aware config converter, and the first end-to-end child FK test. No runtime behaviour
+changes; only new code with new tests.
+
+### 9.1 `PinocchioModelBuilder::build_subtree_model()`
+
+#### What it does
+
+Builds a self-contained Pinocchio model for a subtree of the skeleton, suitable for a child
+filter whose root pose is externally supplied each frame.
+
+```cpp
+// NEW declaration in pinocchio_model_builder.hpp
+
+/// @brief Build a Pinocchio model for a subtree rooted at @p freeflyer_joint_name.
+///
+/// @param skeleton  Full skeleton (read-only; not mutated).
+/// @param freeflyer_joint_name  Skeleton joint that becomes the Pinocchio free-flyer.
+///        This joint itself contributes NO DOFs to the child state — only its world
+///        transform is ever set on the child UKF.  The joint must exist in skeleton.
+/// @param group_names  Groups whose joints form the child subtree.  Every joint in these
+///        groups must be a descendant of freeflyer_joint_name (connectivity assertion).
+///        FIXED joints in these groups are silently skipped (no pinocchio joint added).
+/// @param[out] model  Cleared and rebuilt by this call.
+///
+/// Pinocchio joint order in the resulting model:
+///   universe → freeflyer_joint_name (FreeFlyer) → child joints in skeleton insertion order
+///
+/// @throws std::invalid_argument if freeflyer_joint_name not in skeleton, or if any
+///         joint in group_names is not a descendant of freeflyer_joint_name.
+static void build_subtree_model(Skeleton const& skeleton,
+                                std::string const& freeflyer_joint_name,
+                                std::vector<std::string> const& group_names,
+                                pinocchio::Model& model);
+
+/// @brief Build marker frame map for a subtree model.
+/// Only markers whose parent joint is included in the subtree are returned.
+static std::map<std::string, pinocchio::FrameIndex>
+build_subtree_marker_frame_map(pinocchio::Model const& model,
+                               Skeleton const& skeleton,
+                               std::string const& freeflyer_joint_name,
+                               std::vector<std::string> const& group_names);
+```
+
+#### Algorithm
+
+```
+build_subtree_model(skeleton, freeflyer_joint_name, group_names, model):
+
+  1. Validate: freeflyer_joint_name exists in skeleton.
+  2. Build group_set = {group_names}.
+  3. Find freeflyer_idx = index of freeflyer_joint_name in skeleton.joints().
+  4. Connectivity assertion:
+       For every joint j in skeleton whose group ∈ group_set:
+           walk j's ancestor chain upward until hitting freeflyer_idx or the root.
+           If freeflyer_idx is not encountered → throw (disconnected group).
+  5. Add freeflyer_joint_name as FreeFlyer at universe (pinocchio parent = 0,
+     placement = SE3::Identity()).  Call it freeflyer_pin_id.
+  6. add_subtree_joints_recursive(model, skeleton, freeflyer_idx,
+                                  freeflyer_pin_id, group_set, joint_to_id)
+  7. add_marker_frames_for_groups(model, skeleton, group_set, joint_to_id)
+```
+
+`add_subtree_joints_recursive(model, skel, parent_skel_idx, parent_pin_id, group_set, joint_to_id)`:
+
+```
+  for each child_joint in skel.joints() where child_joint.parent_index == parent_skel_idx:
+    child_skel_idx = index of child_joint
+    in_group = (group_set.count(child_joint.group) > 0)
+
+    if child_joint.type == FIXED:
+      // Map to parent so markers can attach
+      joint_to_id[child_joint.name] = parent_pin_id
+      // Still recurse — a descendant might be in-group
+      add_subtree_joints_recursive(model, skel, child_skel_idx, parent_pin_id, group_set, joint_to_id)
+
+    else if in_group:
+      // Add as normal joint (using same logic as add_joint_recursive, but always using offset)
+      pin_id = model.addJoint(parent_pin_id, joint_type, SE3(offset, rest_rotation), child_joint.name)
+      model.appendBodyToJoint(pin_id, Inertia::Identity())
+      joint_to_id[child_joint.name] = pin_id
+      add_subtree_joints_recursive(model, skel, child_skel_idx, pin_id, group_set, joint_to_id)
+
+    else:
+      // Joint is a non-group non-fixed joint in the subtree — should not happen if
+      // connectivity assertion passes, because all descendants of freeflyer must be
+      // in-group or fixed.  Log a warning and skip (do NOT recurse).
+      // (The connectivity assertion in step 4 already prevents in-group joints being
+      // children of skipped non-group joints.)
+```
+
+#### Key difference from `build_model()`
+
+| | `build_model()` | `build_subtree_model()` |
+|---|---|---|
+| Free-flyer joint | Skeleton root (no parent) | Named interior joint |
+| Root offset | Ignored (placed at SE3::Identity) | Named joint also placed at Identity |
+| Joints added | All non-fixed joints | Only joints whose group ∈ group_names |
+| Marker frames | All markers | Only markers on included joints |
+
+The root-offset-ignored rule carries over unchanged: the freeflyer joint in the subtree model
+is placed at identity, because its actual world transform is set externally on the child UKF
+every frame (it is the "wrist.R world transform" injected by the coordinator).
+
+---
+
+### 9.2 `ForwardKinematics::state_to_config()` — layout-aware overload
+
+The existing `state_to_config(State const& state, Skeleton const& skeleton)` iterates over
+`skeleton.joints()` and maps each non-root, non-fixed joint in skeleton order to the pinocchio
+`q` vector. This relies on the pinocchio joint ordering matching the skeleton joint ordering,
+which holds for the full-skeleton case.
+
+For the child FK, the pinocchio model only contains the subtree joints in skeleton insertion
+order. The child `State` stores joint angles in layout order (same as skeleton insertion order
+filtered to the group). A layout-aware overload can build `q` directly from the layout without
+iterating the full skeleton:
+
+```cpp
+// NEW static method in forward_kinematics.hpp / forward_kinematics.cpp
+
+/// @brief Convert a compact child-filter State to a Pinocchio config vector.
+///
+/// For child filters (has_floating_root == false in theory, but here the config vector
+/// still starts with [pos(3), quat_xyzw(4)] because the pinocchio model has a free-flyer;
+/// those 7 values come from state.root_position() / state.root_orientation()).
+///
+/// @param state Compact state — root_position/orientation = injected freeflyer transform;
+///              joint_angles = child joints in layout order.
+/// @param layout Layout that was used to build the child pinocchio model.  Its joints()
+///               must be in the same order as the pinocchio model joints (after the
+///               free-flyer), which is guaranteed when both are built from the same
+///               skeleton in insertion order.
+/// @param skeleton Full skeleton — needed to look up joint types (REVOLUTE/SPHERICAL)
+///                 and compute quaternion representation for spherical joints.
+static Eigen::VectorXd state_to_config(State const& state,
+                                       SkeletonLayout const& layout,
+                                       Skeleton const& skeleton);
+```
+
+Implementation sketch:
+```cpp
+Eigen::VectorXd ForwardKinematics::state_to_config(
+    State const& state, SkeletonLayout const& layout, Skeleton const& skeleton) {
+
+    // Child pinocchio model nq = 7 (freeflyer) + sum of config DOFs per layout joint
+    // Compute nq from layout
+    int nq = 7;  // root: pos(3) + quat(4)
+    for (auto const& desc : layout.joints()) {
+        nq += (desc.type == JointType::SPHERICAL ? 4 : 1);
+    }
+
+    Eigen::VectorXd q(nq);
+
+    // Root: position + quaternion (xyzw) — injected freeflyer world transform
+    q.segment<3>(0) = state.root_position();
+    Eigen::Quaterniond const& ori = state.root_orientation();
+    q[3] = ori.x(); q[4] = ori.y(); q[5] = ori.z(); q[6] = ori.w();
+
+    int q_offset = 7;
+    for (auto const& desc : layout.joints()) {
+        if (desc.type == JointType::SPHERICAL) {
+            // Convert 3-axis angles from state to quaternion for pinocchio
+            // (same logic as existing state_to_config for spherical joints)
+            Joint const* j = skeleton.get_joint(desc.name);
+            // ... build quaternion from state.joint_angles().segment<3>(desc.state_index)
+            q.segment<4>(q_offset) = /* quaternion xyzw */;
+            q_offset += 4;
+        } else {  // REVOLUTE
+            q[q_offset++] = state.joint_angles()[desc.state_index];
+        }
+    }
+    return q;
+}
+```
+
+> **Note:** The existing `ForwardKinematics` stores `Skeleton const&`. For child FK constructed
+> from the subtree model, we still pass the **full** skeleton (it is never mutated and is
+> `const`). Only the layout changes. The ForwardKinematics constructor signature does not
+> need to change; the new `state_to_config` overload takes the layout explicitly.
+>
+> To use the new overload inside `ForwardKinematics::compute(State const& state)`, the
+> FK class will need to optionally hold a `SkeletonLayout const*` alongside the existing
+> `Skeleton const&`. If layout is provided, use the layout-aware overload; otherwise fall
+> back to the existing skeleton-only path. The parent filter path is entirely unchanged.
+
+---
+
+### 9.3 Files Changed in Phase 3d
+
+| File | Change |
+|------|--------|
+| `include/posetrak/kinematics/pinocchio_model_builder.hpp` | Declare `build_subtree_model()`, `build_subtree_marker_frame_map()` |
+| `src/kinematics/pinocchio_model_builder.cpp` | Implement both; extract `add_subtree_joints_recursive()` and `add_marker_frames_for_groups()` as private helpers |
+| `include/posetrak/kinematics/forward_kinematics.hpp` | Declare `state_to_config(State, SkeletonLayout, Skeleton)` overload; add optional `layout_` member |
+| `src/kinematics/forward_kinematics.cpp` | Implement the overload; branch in `compute(State const&)` |
+| `tests/test_pinocchio_integration.cpp` | Add subtree model tests (see §9.4) |
+
+No other files change. In particular, `SkeletonLayout`, `UKF`, `Tracker`, and CLI are
+untouched — Phase 3d is purely additive.
+
+---
+
+### 9.4 Tests for Phase 3d
+
+All in `tests/test_pinocchio_integration.cpp` (extend existing file) under `[subtree_model]` tag.
+
+**Skeleton fixture** (shared):
+```
+pelvis (root, FIXED offset=(0,0,0))
+  └── spine (SPHERICAL, group="main")
+  └── upper_arm.R (SPHERICAL, group="main")
+       └── forearm.R (REVOLUTE, group="main")
+            └── wrist.R (FIXED, group="main")   ← freeflyer for HandR
+                 └── palm.R (SPHERICAL, group="HandR")
+                      └── finger1.R (REVOLUTE, group="HandR")
+                      └── finger2.R (REVOLUTE, group="HandR")
+markers: MRK-palm (on palm.R), MRK-tip1 (on finger1.R), MRK-body (on spine)
+```
+
+**Test cases:**
+
+1. **Subtree joint count**: `build_subtree_model(skel, "wrist.R", {"HandR"}, model)` →
+   `model.njoints == 4` (universe + wrist.R freeflyer + palm.R + finger1.R + finger2.R = 5, but universe is 0 so njoints=5) and `model.nv == 6 + 3 + 1 + 1 = 11`.
+
+2. **Freeflyer at origin**: `model.jointPlacements[1]` (wrist.R in pinocchio) == SE3::Identity().
+
+3. **Child joint offsets preserved**: palm.R's placement in model has the offset from skeleton.
+
+4. **Only child markers included**: `build_subtree_marker_frame_map(...)` returns
+   {MRK-palm, MRK-tip1} — MRK-body (on spine, group="main") is absent.
+
+5. **FK gives correct marker positions at identity state**:
+   Construct a `State` with root at origin and zero angles. Compute FK with subtree model.
+   Compare MRK-palm position to expected offset (palm.R offset relative to wrist.R world origin).
+
+6. **FK with injected root transform**:
+   Give state a non-zero root position/orientation. Verify MRK-palm moves accordingly.
+
+7. **Connectivity assertion fails**: `build_subtree_model(skel, "forearm.R", {"HandR"}, model)`
+   should throw (palm.R is a descendant of wrist.R, not forearm.R directly — actually it is
+   a descendant of forearm.R, so this should NOT throw; revisit with a genuinely disconnected
+   case: `build_subtree_model(skel, "upper_arm.R", {"HandR"}, model)` where HandR is not
+   directly under upper_arm.R's subtree children... wait, it IS under there. Use group="main"
+   joints — those are not descendants of wrist.R → should throw).
+   `build_subtree_model(skel, "wrist.R", {"main"}, model)` → throws (spine is not under wrist.R).
+
+8. **`state_to_config` layout-aware overload**: build layout with `from_groups(skel_ptr, {"HandR"})`,
+   check q-vector length == 11, root portion matches state.root_*, joint portion matches angles.
+
+---
+
+### 9.5 Open Points for Phase 3d
+
+**P1: `ForwardKinematics` layout member ownership**
+
+The existing `ForwardKinematics` holds `Skeleton const&` (a reference, not owned). To
+optionally hold a layout, the cleanest approach is `SkeletonLayout const* layout_ = nullptr`
+(nullable pointer, not owned). If `layout_` is set, `compute(State const&)` uses the
+layout-aware `state_to_config`. If null, it falls back to the existing skeleton-path.
+
+A cleaner alternative is to overload the constructor:
+
+```cpp
+// Full-skeleton FK (existing path, unchanged)
+ForwardKinematics(pinocchio::Model const& model, pinocchio::Data& data,
+                  std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map,
+                  Skeleton const& skeleton);
+
+// Child FK (new path)
+ForwardKinematics(pinocchio::Model const& model, pinocchio::Data& data,
+                  std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map,
+                  Skeleton const& skeleton,
+                  SkeletonLayout const& layout);  // layout-aware state_to_config
+```
+
+The second constructor sets `layout_` to `&layout`. Both constructors store `skeleton_` for
+joint-type lookups in `state_to_config`. The `Tracker` construction path is unchanged (uses
+first constructor).
+
+**P2: FIXED joints in group with non-FIXED parent in group**
+
+The connectivity check in step 4 walks ancestor chains. If a joint in the group has an
+ancestor that is also in the group (but a different group string — e.g., a fixed connector
+joint), the traversal is still correct because fixed joints are mapped to their parent's
+pinocchio id in `add_subtree_joints_recursive`. Marker attachment to FIXED joints naturally
+goes to the parent pinocchio joint frame, matching the existing `build_model()` behaviour.
+
+**P3: Revolute axis determination for subtree joints**
+
+`get_revolute_axis()` is a private static method already shared by `build_model()`. It is
+reused unchanged by `add_subtree_joints_recursive()`.
+
+---
+
+## 10. Implementation Phases
 
 Approximate ordering (each independently committable):
 
-| Phase | Work |
-|-------|------|
-| 3a | Remove `Skeleton` arg from `UKF`/`ProcessModel`/`SigmaPointGenerator`; read from layout |
-| 3b | `SkeletonLayout` factory functions take `shared_ptr<const Skeleton>` |
-| 3c | Remove `set_active_groups()` from `Skeleton`; pass groups to layout factory |
-| 3d | `PinocchioModelBuilder::build_subtree_model()` + tests |
-| 3e | `UnscentedKalmanFilter::set_root_transform()` + fixed-root sigma point path |
-| 3f | `ForwardKinematics::world_transform(joint_name)` |
-| 3g | Rename `Tracker` → `HierarchicalTracker`; add empty `children_`; zero-children test |
-| 3h | Child filter construction, per-frame sequencing, state merge |
-| 3i | Debug dir scoping, stats aggregation, statistics tracker wiring |
-| 3j | CLI / config plumbing; `HierarchicalConfig` drives child construction |
-| 3k | Integration test: parent+child on recorded data, compare to single-filter baseline |
+| Phase | Status | Work |
+|-------|--------|------|
+| 3a | ✅ done | Remove `Skeleton` arg from `UKF`/`ProcessModel`/`SigmaPointGenerator`; read from layout |
+| 3b | ✅ done | `SkeletonLayout` factory functions take `shared_ptr<const Skeleton>` |
+| 3c | ✅ done | Remove `set_active_groups()` from `Skeleton`; pass groups to layout factory |
+| 3d | next | `PinocchioModelBuilder::build_subtree_model()` + layout-aware `ForwardKinematics::state_to_config()` + tests (see §9) |
+| 3e | | `UnscentedKalmanFilter::set_root_transform()` + fixed-root sigma point path |
+| 3f | | `ForwardKinematics::world_transform(joint_name)` |
+| 3g | | Rename `Tracker` → `HierarchicalTracker`; add empty `children_`; zero-children test |
+| 3h | | Child filter construction, per-frame sequencing, state merge |
+| 3i | | Debug dir scoping, stats aggregation, statistics tracker wiring |
+| 3j | | CLI / config plumbing; `HierarchicalConfig` drives child construction |
+| 3k | | Integration test: parent+child on recorded data, compare to single-filter baseline |
 
 Phases 3a–3c are pure refactors with no behaviour change; existing tests must stay green.
 Phases 3d–3f add new functionality with new tests.
@@ -432,7 +729,7 @@ Phase 3g is the first end-to-end hierarchical run.
 
 ---
 
-## 10. What Gets Deleted
+## 11. What Gets Deleted
 
 - `SubsetUKF` (header + implementation + tests) — replaced by the coordinator pattern.
 - `sync_from_background()` — the concept disappears.

@@ -75,7 +75,7 @@ static Skeleton create_test_skeleton() {
 
 TEST_CASE("from_full_skeleton: covers all 21 storage DOFs", "[skeleton_layout]") {
     Skeleton skel = create_test_skeleton();
-    auto layout = SkeletonLayout::from_full_skeleton(skel);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
 
     REQUIRE(layout->total_storage_dof_count() == 21u);
     REQUIRE(layout->joint_active_dof_count() == 21u);
@@ -83,20 +83,23 @@ TEST_CASE("from_full_skeleton: covers all 21 storage DOFs", "[skeleton_layout]")
 }
 
 TEST_CASE("from_full_skeleton: has_floating_root is true", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_full_skeleton(create_test_skeleton());
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(create_test_skeleton()));
     REQUIRE(layout->has_floating_root() == true);
     REQUIRE(layout->root_error_dof_count() == 6u);
 }
 
 TEST_CASE("from_full_skeleton: error_state_dim includes root", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_full_skeleton(create_test_skeleton());
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(create_test_skeleton()));
     // error_state_dim = 2 * (6 + 21) = 54
     REQUIRE(layout->error_state_dim() == 54);
 }
 
 TEST_CASE("from_full_skeleton: state_index is layout-relative and starts at 0",
           "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_full_skeleton(create_test_skeleton());
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(create_test_skeleton()));
     auto const& joints = layout->joints();
 
     // spine is first non-root joint, so state_index == 0
@@ -106,7 +109,8 @@ TEST_CASE("from_full_skeleton: state_index is layout-relative and starts at 0",
 }
 
 TEST_CASE("from_full_skeleton: state_index correct for all joints", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_full_skeleton(create_test_skeleton());
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(create_test_skeleton()));
 
     struct Expected {
         std::string name;
@@ -128,7 +132,8 @@ TEST_CASE("from_full_skeleton: state_index correct for all joints", "[skeleton_l
 }
 
 TEST_CASE("from_full_skeleton: error_index is cumulative active_dof_count", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_full_skeleton(create_test_skeleton());
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(create_test_skeleton()));
 
     // All joints here are either SPHERICAL (active=3) or REVOLUTE (active=1)
     // and no limits are configured, so active_dof_mask should be all-true.
@@ -147,7 +152,8 @@ TEST_CASE("from_full_skeleton: error_index is cumulative active_dof_count", "[sk
 }
 
 TEST_CASE("from_full_skeleton: get_joint returns nullptr for unknown name", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_full_skeleton(create_test_skeleton());
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(create_test_skeleton()));
     REQUIRE(layout->get_joint("nonexistent") == nullptr);
     REQUIRE(layout->get_joint("hips") == nullptr);  // root is NOT in joints_ list
 }
@@ -157,7 +163,8 @@ TEST_CASE("from_full_skeleton: get_joint returns nullptr for unknown name", "[sk
 // ---------------------------------------------------------------------------
 
 TEST_CASE("from_groups main: 17 storage DOFs (fingers excluded)", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_groups(create_test_skeleton(), {"main"});
+    auto layout = SkeletonLayout::from_groups(
+        std::make_shared<const Skeleton>(create_test_skeleton()), {"main"});
 
     REQUIRE(layout->total_storage_dof_count() == 17u);
     REQUIRE(layout->joint_active_dof_count() == 17u);
@@ -165,18 +172,21 @@ TEST_CASE("from_groups main: 17 storage DOFs (fingers excluded)", "[skeleton_lay
 }
 
 TEST_CASE("from_groups main: has_floating_root because hips is in main", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_groups(create_test_skeleton(), {"main"});
+    auto layout = SkeletonLayout::from_groups(
+        std::make_shared<const Skeleton>(create_test_skeleton()), {"main"});
     REQUIRE(layout->has_floating_root() == true);
     REQUIRE(layout->root_error_dof_count() == 6u);
 }
 
 TEST_CASE("from_groups main: error_state_dim = 2*(6+17) = 46", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_groups(create_test_skeleton(), {"main"});
+    auto layout = SkeletonLayout::from_groups(
+        std::make_shared<const Skeleton>(create_test_skeleton()), {"main"});
     REQUIRE(layout->error_state_dim() == 46);
 }
 
 TEST_CASE("from_groups main: state_index is layout-relative from 0", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_groups(create_test_skeleton(), {"main"});
+    auto layout = SkeletonLayout::from_groups(
+        std::make_shared<const Skeleton>(create_test_skeleton()), {"main"});
 
     // Layout-relative indices: fingers excluded, indices are 0-based within this layout
     struct Expected {
@@ -196,7 +206,8 @@ TEST_CASE("from_groups main: state_index is layout-relative from 0", "[skeleton_
 }
 
 TEST_CASE("from_groups main: finger joints not present in main layout", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_groups(create_test_skeleton(), {"main"});
+    auto layout = SkeletonLayout::from_groups(
+        std::make_shared<const Skeleton>(create_test_skeleton()), {"main"});
     REQUIRE(layout->get_joint("finger1.L") == nullptr);
     REQUIRE(layout->get_joint("finger2.L") == nullptr);
     REQUIRE(layout->get_joint("finger1.R") == nullptr);
@@ -208,7 +219,8 @@ TEST_CASE("from_groups main: finger joints not present in main layout", "[skelet
 // ---------------------------------------------------------------------------
 
 TEST_CASE("from_groups HandL: 2 DOFs, no floating root", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_groups(create_test_skeleton(), {"HandL"});
+    auto layout = SkeletonLayout::from_groups(
+        std::make_shared<const Skeleton>(create_test_skeleton()), {"HandL"});
 
     REQUIRE(layout->total_storage_dof_count() == 2u);
     REQUIRE(layout->joint_active_dof_count() == 2u);
@@ -217,12 +229,14 @@ TEST_CASE("from_groups HandL: 2 DOFs, no floating root", "[skeleton_layout]") {
 }
 
 TEST_CASE("from_groups HandL: error_state_dim = 2*(0+2) = 4", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_groups(create_test_skeleton(), {"HandL"});
+    auto layout = SkeletonLayout::from_groups(
+        std::make_shared<const Skeleton>(create_test_skeleton()), {"HandL"});
     REQUIRE(layout->error_state_dim() == 4);
 }
 
 TEST_CASE("from_groups HandL: finger state_index starts at 0", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_groups(create_test_skeleton(), {"HandL"});
+    auto layout = SkeletonLayout::from_groups(
+        std::make_shared<const Skeleton>(create_test_skeleton()), {"HandL"});
 
     auto const* f1 = layout->get_joint("finger1.L");
     auto const* f2 = layout->get_joint("finger2.L");
@@ -235,7 +249,8 @@ TEST_CASE("from_groups HandL: finger state_index starts at 0", "[skeleton_layout
 }
 
 TEST_CASE("from_groups HandR: symmetric with HandL", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_groups(create_test_skeleton(), {"HandR"});
+    auto layout = SkeletonLayout::from_groups(
+        std::make_shared<const Skeleton>(create_test_skeleton()), {"HandR"});
 
     REQUIRE(layout->total_storage_dof_count() == 2u);
     REQUIRE(layout->has_floating_root() == false);
@@ -255,8 +270,8 @@ TEST_CASE("from_groups HandR: symmetric with HandL", "[skeleton_layout]") {
 
 TEST_CASE("build_index_map_from: HandL subset into full layout", "[skeleton_layout]") {
     Skeleton skel = create_test_skeleton();
-    auto full = SkeletonLayout::from_full_skeleton(skel);
-    auto hand_l = SkeletonLayout::from_groups(skel, {"HandL"});
+    auto full = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    auto hand_l = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"HandL"});
 
     auto map = full->build_index_map_from(*hand_l);
 
@@ -269,8 +284,8 @@ TEST_CASE("build_index_map_from: HandL subset into full layout", "[skeleton_layo
 
 TEST_CASE("build_index_map_from: HandR subset into full layout", "[skeleton_layout]") {
     Skeleton skel = create_test_skeleton();
-    auto full = SkeletonLayout::from_full_skeleton(skel);
-    auto hand_r = SkeletonLayout::from_groups(skel, {"HandR"});
+    auto full = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    auto hand_r = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"HandR"});
 
     auto map = full->build_index_map_from(*hand_r);
 
@@ -283,8 +298,8 @@ TEST_CASE("build_index_map_from: HandR subset into full layout", "[skeleton_layo
 
 TEST_CASE("build_index_map_from: main subset into full layout", "[skeleton_layout]") {
     Skeleton skel = create_test_skeleton();
-    auto full = SkeletonLayout::from_full_skeleton(skel);
-    auto main = SkeletonLayout::from_groups(skel, {"main"});
+    auto full = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    auto main = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"main"});
 
     auto map = full->build_index_map_from(*main);
 
@@ -310,7 +325,7 @@ TEST_CASE("build_index_map_from: main subset into full layout", "[skeleton_layou
 
 TEST_CASE("build_index_map_from: reflexive — full into full yields identity", "[skeleton_layout]") {
     Skeleton skel = create_test_skeleton();
-    auto full = SkeletonLayout::from_full_skeleton(skel);
+    auto full = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
 
     auto map = full->build_index_map_from(*full);
 
@@ -323,8 +338,8 @@ TEST_CASE("build_index_map_from: reflexive — full into full yields identity", 
 TEST_CASE("build_index_map_from: throws when subset joint not in this layout",
           "[skeleton_layout]") {
     Skeleton skel = create_test_skeleton();
-    auto main = SkeletonLayout::from_groups(skel, {"main"});
-    auto hand_l = SkeletonLayout::from_groups(skel, {"HandL"});
+    auto main = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"main"});
+    auto hand_l = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"HandL"});
 
     // HandL's fingers are not in "main" layout — should throw
     REQUIRE_THROWS_AS(main->build_index_map_from(*hand_l), std::invalid_argument);
@@ -335,13 +350,16 @@ TEST_CASE("build_index_map_from: throws when subset joint not in this layout",
 // ---------------------------------------------------------------------------
 
 TEST_CASE("from_groups: throws on empty group list", "[skeleton_layout]") {
-    REQUIRE_THROWS_AS(SkeletonLayout::from_groups(create_test_skeleton(), {}),
-                      std::invalid_argument);
+    REQUIRE_THROWS_AS(
+        SkeletonLayout::from_groups(std::make_shared<const Skeleton>(create_test_skeleton()), {}),
+        std::invalid_argument);
 }
 
 TEST_CASE("from_groups: throws when no joints match group", "[skeleton_layout]") {
-    REQUIRE_THROWS_AS(SkeletonLayout::from_groups(create_test_skeleton(), {"nonexistent_group"}),
-                      std::invalid_argument);
+    REQUIRE_THROWS_AS(
+        SkeletonLayout::from_groups(std::make_shared<const Skeleton>(create_test_skeleton()),
+                                    {"nonexistent_group"}),
+        std::invalid_argument);
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +367,8 @@ TEST_CASE("from_groups: throws when no joints match group", "[skeleton_layout]")
 // ---------------------------------------------------------------------------
 
 TEST_CASE("JointDesc type field is set correctly", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_full_skeleton(create_test_skeleton());
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(create_test_skeleton()));
 
     auto const* spine = layout->get_joint("spine");
     REQUIRE(spine != nullptr);
@@ -361,7 +380,8 @@ TEST_CASE("JointDesc type field is set correctly", "[skeleton_layout]") {
 }
 
 TEST_CASE("JointDesc active_dof_mask is all-true for unconstrained joints", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_full_skeleton(create_test_skeleton());
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(create_test_skeleton()));
 
     // spine is SPHERICAL with no limits set → all 3 axes active
     auto const* spine = layout->get_joint("spine");
@@ -381,7 +401,8 @@ TEST_CASE("JointDesc active_dof_mask is all-true for unconstrained joints", "[sk
 }
 
 TEST_CASE("JointDesc is_floating_root is always false in joints() list", "[skeleton_layout]") {
-    auto layout = SkeletonLayout::from_full_skeleton(create_test_skeleton());
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(create_test_skeleton()));
     for (auto const& desc : layout->joints()) {
         REQUIRE(desc.is_floating_root == false);
     }

@@ -273,7 +273,7 @@ TEST_CASE("End-to-end tracking of synthetic sequence", "[tracker][integration]")
     }
 
     // Create tracker
-    Tracker tracker(skeleton, camera_map, config);
+    Tracker tracker(std::make_shared<const Skeleton>(skeleton), camera_map, config);
 
     SECTION("Initialization succeeds") {
         fmt::print("Attempting to initialize tracker...\n");

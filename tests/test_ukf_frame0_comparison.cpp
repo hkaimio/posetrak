@@ -154,7 +154,8 @@ TEST_CASE("Frame 0: Initialize C++ UKF with Python prior state", "[ukf][frame0][
         double kappa = 0.0;  // Secondary scaling
         double process_noise_std = 0.01;
 
-        auto layout = SkeletonLayout::from_full_skeleton(fixture.skeleton);
+        auto layout =
+            SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(fixture.skeleton));
         UnscentedKalmanFilter ukf(layout, process_noise_std, alpha, beta, kappa);
 
         // Set state and covariance from Python
@@ -196,7 +197,8 @@ TEST_CASE("Frame 0: Compare sigma point generation", "[ukf][frame0][sigma_points
         double kappa = 0.0;
         double process_noise_std = 0.01;
 
-        auto layout = SkeletonLayout::from_full_skeleton(fixture.skeleton);
+        auto layout =
+            SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(fixture.skeleton));
         UnscentedKalmanFilter ukf(layout, process_noise_std, alpha, beta, kappa);
         ukf.set_state(*python_data.prior_state);
         ukf.set_covariance(python_data.prior_covariance);

@@ -15,17 +15,17 @@
 
 namespace posetrak {
 
-Tracker::Tracker(Skeleton const& skeleton, std::unordered_map<int, Camera> const& cameras,
-                 TrackerConfig const& config)
-    : skeleton_(skeleton), cameras_(cameras), config_(config) {
+Tracker::Tracker(std::shared_ptr<const Skeleton> skeleton,
+                 std::unordered_map<int, Camera> const& cameras, TrackerConfig const& config)
+    : skeleton_(std::move(skeleton)), cameras_(cameras), config_(config) {
     // Build Pinocchio model for FK/IK
     model_ = std::make_unique<pinocchio::Model>();
     data_ = std::make_unique<pinocchio::Data>();
-    PinocchioModelBuilder::build_model_and_data(skeleton_, *model_, *data_);
-    marker_frame_map_ = PinocchioModelBuilder::build_marker_frame_map(*model_, skeleton_);
+    PinocchioModelBuilder::build_model_and_data(*skeleton_, *model_, *data_);
+    marker_frame_map_ = PinocchioModelBuilder::build_marker_frame_map(*model_, *skeleton_);
 
     // Create FK computer
-    fk_ = std::make_unique<ForwardKinematics>(*model_, *data_, marker_frame_map_, skeleton_);
+    fk_ = std::make_unique<ForwardKinematics>(*model_, *data_, marker_frame_map_, *skeleton_);
 
     // Create triangulator
     triangulator_ = std::make_unique<Triangulator>(Triangulator::Method::DLT);
@@ -54,10 +54,10 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
         }
 
         // Get marker name
-        if (marker_id >= static_cast<int>(skeleton_.markers().size())) {
+        if (marker_id >= static_cast<int>(skeleton_->markers().size())) {
             continue;
         }
-        std::string marker_name = skeleton_.markers()[marker_id].name;
+        std::string marker_name = skeleton_->markers()[marker_id].name;
 
         // Prepare for triangulation
         std::vector<Eigen::Vector2d> pixel_coords;
@@ -87,7 +87,7 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
     }
 
     // Step 2: Solve IK to get initial joint configuration
-    auto ik_result = ik_solver_->solve(marker_positions, skeleton_, std::nullopt,
+    auto ik_result = ik_solver_->solve(marker_positions, *skeleton_, std::nullopt,
                                        config_.ik_max_iterations, config_.ik_tolerance);
 
     if (!ik_result.converged) {
@@ -112,7 +112,7 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
 
 void Tracker::initialize_from_rest_pose(double timestamp) {
     // Create state with all zeros (rest pose)
-    int num_dof = skeleton_.total_dof_count();
+    int num_dof = skeleton_->total_dof_count();
 
     Eigen::Vector3d root_position = Eigen::Vector3d::Zero();
     Eigen::Quaterniond root_orientation = Eigen::Quaterniond::Identity();
@@ -162,7 +162,7 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
     int const pos_dim = error_dim / 2;  // position/orientation half
 
     fmt::print("\n=== TRACKER INITIALIZATION DEBUG ===\n");
-    fmt::print("total_dof (storage)={}, error_dim={}\n", skeleton_.total_dof_count(), error_dim);
+    fmt::print("total_dof (storage)={}, error_dim={}\n", skeleton_->total_dof_count(), error_dim);
     fmt::print("Covariance will be {}x{}\n", error_dim, error_dim);
     fmt::print(
         "init_position_std={}, init_orientation_std={}, init_joint_std={}, init_velocity_std={}\n",

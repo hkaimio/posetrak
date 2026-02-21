@@ -516,7 +516,7 @@ int main(int argc, char* argv[]) {
         }
 
         auto tracker_config = config.to_tracker_config();
-        Tracker tracker(skeleton, cameras, tracker_config);
+        Tracker tracker(std::make_shared<const Skeleton>(skeleton), cameras, tracker_config);
 
         // Validate camera model by triangulating first frame
         double t_first_window = config.start_time + dt;
@@ -739,7 +739,6 @@ int main(int argc, char* argv[]) {
             }
 
             // Export state vector AFTER tracking update (posterior state)
-            // CRITICAL: Use same frame index as tracking_results to keep them synchronized
             if (state_vec_file.is_open()) {
                 export_state_vector(state_vec_file, step, t_effective, result.state, skeleton);
             }

@@ -83,7 +83,8 @@ class Tracker {
      * @param cameras Map of camera_id → Camera
      * @param config Tracking configuration parameters
      */
-    Tracker(Skeleton const& skeleton, std::unordered_map<int, Camera> const& cameras,
+    Tracker(std::shared_ptr<const Skeleton> skeleton,
+            std::unordered_map<int, Camera> const& cameras,
             TrackerConfig const& config = TrackerConfig{});
 
     /**
@@ -196,7 +197,7 @@ class Tracker {
      */
     bool has_sufficient_observations(std::vector<Observation> const& observations) const;
 
-    Skeleton const& skeleton_;
+    std::shared_ptr<const Skeleton> skeleton_;
     std::unordered_map<int, Camera> const& cameras_;
     TrackerConfig config_;
 

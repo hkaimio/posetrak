@@ -107,7 +107,7 @@ static State make_compact_state(SkeletonLayout const& layout,
 
 TEST_CASE("SkeletonState create() preserves layout and state", "[skeleton_state]") {
     Skeleton skel = create_test_skeleton();
-    auto layout = SkeletonLayout::from_full_skeleton(skel);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
     State s = make_compact_state(*layout);
 
     SkeletonState ss = SkeletonState::create(layout, s);
@@ -119,7 +119,8 @@ TEST_CASE("SkeletonState create() preserves layout and state", "[skeleton_state]
 
 TEST_CASE("SkeletonState create() throws on size mismatch", "[skeleton_state]") {
     Skeleton skel = create_test_skeleton();
-    auto layout = SkeletonLayout::from_groups(skel, {"main"});  // 17 DOFs
+    auto layout =
+        SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"main"});  // 17 DOFs
 
     State wrong_size(5);  // Wrong
 
@@ -137,8 +138,10 @@ TEST_CASE("SkeletonState create() with null layout throws", "[skeleton_state]") 
 
 TEST_CASE("merge_into() scatters compact DOFs into target", "[skeleton_state]") {
     Skeleton skel = create_test_skeleton();
-    auto full_layout = SkeletonLayout::from_full_skeleton(skel);     // 21 storage DOFs
-    auto main_layout = SkeletonLayout::from_groups(skel, {"main"});  // 17 storage DOFs
+    auto full_layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(skel));  // 21 storage DOFs
+    auto main_layout = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel),
+                                                   {"main"});  // 17 storage DOFs
 
     // Build merge_map: full_layout's state_index positions for each main DOF
     // (same as build_index_map_from)
@@ -185,8 +188,9 @@ TEST_CASE("merge_into() scatters compact DOFs into target", "[skeleton_state]") 
 
 TEST_CASE("merge_into() throws on wrong merge_map size", "[skeleton_state]") {
     Skeleton skel = create_test_skeleton();
-    auto full_layout = SkeletonLayout::from_full_skeleton(skel);
-    auto main_layout = SkeletonLayout::from_groups(skel, {"main"});
+    auto full_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    auto main_layout =
+        SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"main"});
 
     SkeletonState target = SkeletonState::create(full_layout, make_compact_state(*full_layout));
     SkeletonState subset = SkeletonState::create(main_layout, make_compact_state(*main_layout));
@@ -202,8 +206,10 @@ TEST_CASE("merge_into() throws on wrong merge_map size", "[skeleton_state]") {
 TEST_CASE("Round-trip: build_index_map_from + merge_into recovers original values",
           "[skeleton_state]") {
     Skeleton skel = create_test_skeleton();
-    auto full_layout = SkeletonLayout::from_full_skeleton(skel);     // 21 DOFs
-    auto main_layout = SkeletonLayout::from_groups(skel, {"main"});  // 17 DOFs
+    auto full_layout =
+        SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));  // 21 DOFs
+    auto main_layout =
+        SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"main"});  // 17 DOFs
 
     // Full state with a linear ramp, easy to verify
     State original_full(full_layout->total_storage_dof_count());
@@ -255,8 +261,10 @@ TEST_CASE("Round-trip: build_index_map_from + merge_into recovers original value
 
 TEST_CASE("extract_covariance() dimensions match layout error_state_dim", "[skeleton_state]") {
     Skeleton skel = create_test_skeleton();
-    auto full_layout = SkeletonLayout::from_full_skeleton(skel);     // error_dim = 2*(6+21)=54
-    auto main_layout = SkeletonLayout::from_groups(skel, {"main"});  // error_dim = 2*(6+17)=46
+    auto full_layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(skel));  // error_dim = 2*(6+21)=54
+    auto main_layout = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel),
+                                                   {"main"});  // error_dim = 2*(6+17)=46
 
     int const full_dim = full_layout->error_state_dim();
     REQUIRE(full_dim == 54);
@@ -273,8 +281,9 @@ TEST_CASE("extract_covariance() dimensions match layout error_state_dim", "[skel
 
 TEST_CASE("extract_covariance() result is symmetric", "[skeleton_state]") {
     Skeleton skel = create_test_skeleton();
-    auto full_layout = SkeletonLayout::from_full_skeleton(skel);
-    auto main_layout = SkeletonLayout::from_groups(skel, {"main"});
+    auto full_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    auto main_layout =
+        SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"main"});
 
     int const full_dim = full_layout->error_state_dim();
     // Build a random symmetric pos-def covariance
@@ -289,8 +298,9 @@ TEST_CASE("extract_covariance() result is symmetric", "[skeleton_state]") {
 
 TEST_CASE("extract_covariance() root diagonal preserved", "[skeleton_state]") {
     Skeleton skel = create_test_skeleton();
-    auto full_layout = SkeletonLayout::from_full_skeleton(skel);
-    auto main_layout = SkeletonLayout::from_groups(skel, {"main"});
+    auto full_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    auto main_layout =
+        SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"main"});
 
     int const full_dim = full_layout->error_state_dim();
 
@@ -312,8 +322,9 @@ TEST_CASE("extract_covariance() root diagonal preserved", "[skeleton_state]") {
 TEST_CASE("extract_covariance() joint angle entries match full layout positions",
           "[skeleton_state]") {
     Skeleton skel = create_test_skeleton();
-    auto full_layout = SkeletonLayout::from_full_skeleton(skel);
-    auto main_layout = SkeletonLayout::from_groups(skel, {"main"});
+    auto full_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    auto main_layout =
+        SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"main"});
 
     int const full_dim = full_layout->error_state_dim();
 
@@ -351,8 +362,9 @@ TEST_CASE("extract_covariance() joint angle entries match full layout positions"
 TEST_CASE("extract_covariance() joint velocity entries match full layout positions",
           "[skeleton_state]") {
     Skeleton skel = create_test_skeleton();
-    auto full_layout = SkeletonLayout::from_full_skeleton(skel);
-    auto main_layout = SkeletonLayout::from_groups(skel, {"main"});
+    auto full_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    auto main_layout =
+        SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"main"});
 
     int const full_dim = full_layout->error_state_dim();
 
@@ -398,8 +410,9 @@ TEST_CASE("extract_covariance() joint velocity entries match full layout positio
 
 TEST_CASE("extract_covariance() throws on mismatched full_cov dimensions", "[skeleton_state]") {
     Skeleton skel = create_test_skeleton();
-    auto full_layout = SkeletonLayout::from_full_skeleton(skel);
-    auto main_layout = SkeletonLayout::from_groups(skel, {"main"});
+    auto full_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    auto main_layout =
+        SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"main"});
 
     SkeletonState main_ss = SkeletonState::create(main_layout, make_compact_state(*main_layout));
 
@@ -417,8 +430,10 @@ TEST_CASE("extract_covariance() throws on mismatched full_cov dimensions", "[ske
 
 TEST_CASE("extract_covariance() on child filter (no floating root)", "[skeleton_state]") {
     Skeleton skel = create_test_skeleton();
-    auto full_layout = SkeletonLayout::from_full_skeleton(skel);       // has root
-    auto handl_layout = SkeletonLayout::from_groups(skel, {"HandL"});  // no root, 2 DOFs
+    auto full_layout =
+        SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));  // has root
+    auto handl_layout = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel),
+                                                    {"HandL"});  // no root, 2 DOFs
 
     REQUIRE(!handl_layout->has_floating_root());
     REQUIRE(handl_layout->error_state_dim() == 4);  // 2*(0+2)

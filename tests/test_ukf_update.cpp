@@ -47,7 +47,7 @@ TEST_CASE("UKF update with single observation", "[ukf][update]") {
     cameras.emplace(0, camera);
 
     // Create UKF
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     UnscentedKalmanFilter ukf(layout, 0.01);
 
     // Set initial state at origin
@@ -122,7 +122,7 @@ TEST_CASE("UKF update corrects position error", "[ukf][update]") {
     cameras.emplace(0, camera);
 
     // Create UKF
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     UnscentedKalmanFilter ukf(layout, 0.01);
 
     // Set WRONG initial state (shifted right by 0.2m)
@@ -192,7 +192,7 @@ TEST_CASE("UKF update with multiple observations", "[ukf][update]") {
     cameras.emplace(0, camera);
 
     // Create UKF
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     UnscentedKalmanFilter ukf(layout, 0.01);
 
     // Set initial state
@@ -247,7 +247,7 @@ TEST_CASE("UKF update with missing observations", "[ukf][update]") {
     std::unordered_map<int, Camera> cameras;
 
     // Create UKF
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     UnscentedKalmanFilter ukf(layout, 0.01);
 
     Eigen::Vector3d pos = Eigen::Vector3d::Zero();
@@ -311,7 +311,7 @@ TEST_CASE("UKF update maintains positive definite covariance", "[ukf][update]") 
     cameras.emplace(0, camera);
 
     // Create UKF
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     UnscentedKalmanFilter ukf(layout, 0.01);
 
     Eigen::Vector3d pos = Eigen::Vector3d::Zero();
@@ -385,7 +385,7 @@ TEST_CASE("UKF update handles markers behind camera gracefully", "[ukf][update][
     cameras.emplace(0, camera);
 
     // Create UKF
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     UnscentedKalmanFilter ukf(layout, 0.01);
 
     // Place marker BEHIND camera (at z = -3, while camera is at z = -2)
@@ -465,7 +465,7 @@ TEST_CASE("UKF update with outlier rejection", "[ukf][update][outlier]") {
     cameras.emplace(0, camera);
 
     // Create UKF with state at origin
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     UnscentedKalmanFilter ukf(layout, 0.01);
 
     Eigen::Vector3d pos = Eigen::Vector3d::Zero();
@@ -575,7 +575,7 @@ TEST_CASE("UKF velocity damping at joint limits", "[ukf][update][damping]") {
     cameras.emplace(0, camera);
 
     // Create UKF with joint angle near upper limit and positive velocity
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     UnscentedKalmanFilter ukf(layout, 0.01);
 
     Eigen::Vector3d pos = Eigen::Vector3d::Zero();

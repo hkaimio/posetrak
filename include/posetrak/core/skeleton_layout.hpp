@@ -81,10 +81,6 @@ class SkeletonLayout {
     /// has_floating_root() returns true.
     static std::shared_ptr<const SkeletonLayout>
     from_full_skeleton(std::shared_ptr<const Skeleton> skeleton);
-    /// @brief Convenience overload — wraps skeleton in a shared_ptr (copies).
-    static std::shared_ptr<const SkeletonLayout> from_full_skeleton(Skeleton const& skeleton) {
-        return from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
-    }
 
     /// @brief Build layout for joints whose group field matches one of group_names.
     ///
@@ -97,11 +93,6 @@ class SkeletonLayout {
     static std::shared_ptr<const SkeletonLayout>
     from_groups(std::shared_ptr<const Skeleton> skeleton,
                 std::vector<std::string> const& group_names);
-    /// @brief Convenience overload — wraps skeleton in a shared_ptr (copies).
-    static std::shared_ptr<const SkeletonLayout>
-    from_groups(Skeleton const& skeleton, std::vector<std::string> const& group_names) {
-        return from_groups(std::make_shared<const Skeleton>(skeleton), group_names);
-    }
 
     /// @brief Build layout respecting the skeleton's current active-group filter.
     ///
@@ -110,10 +101,6 @@ class SkeletonLayout {
     /// from_full_skeleton().
     static std::shared_ptr<const SkeletonLayout>
     from_active_skeleton(std::shared_ptr<const Skeleton> skeleton);
-    /// @brief Convenience overload — wraps skeleton in a shared_ptr (copies).
-    static std::shared_ptr<const SkeletonLayout> from_active_skeleton(Skeleton const& skeleton) {
-        return from_active_skeleton(std::make_shared<const Skeleton>(skeleton));
-    }
 
     // -------------------------------------------------------------------------
     // O(1) accessors (all values precomputed at construction)

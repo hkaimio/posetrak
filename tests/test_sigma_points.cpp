@@ -16,7 +16,7 @@ TEST_CASE("SigmaPointGenerator construction", "[sigma_points]") {
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     skeleton.add_joint("joint1", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1));
 
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     SigmaPointGenerator gen(layout);
 
     // Error dim should be 2 * (root 6 DOF + 1 joint DOF) = 2 * 7 = 14
@@ -42,7 +42,7 @@ TEST_CASE("Sigma point generation creates correct number of points", "[sigma_poi
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     skeleton.add_joint("joint1", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1));
 
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     SigmaPointGenerator gen(layout);
 
     // Create nominal state
@@ -67,7 +67,7 @@ TEST_CASE("Sigma points spread around nominal state", "[sigma_points]") {
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     skeleton.add_joint("joint1", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1));
 
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     SigmaPointGenerator gen(layout);
 
     // Create nominal state with non-zero values
@@ -117,7 +117,7 @@ TEST_CASE("Sigma points preserve quaternion normalization", "[sigma_points]") {
     Skeleton skeleton;
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
 
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     SigmaPointGenerator gen(layout);
 
     State nominal(0);  // No joints, just root
@@ -138,7 +138,7 @@ TEST_CASE("Sigma points handle spherical joints", "[sigma_points]") {
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
     skeleton.add_joint("shoulder", 0, JointType::SPHERICAL, Eigen::Vector3d(0, 0, 0.1));
 
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     SigmaPointGenerator gen(layout);
 
     // Error dim: 2 * (6 root + 3 shoulder) = 18
@@ -178,7 +178,7 @@ TEST_CASE("Sigma points handle locked DOFs in spherical joints", "[sigma_points]
     limits[2] = Eigen::Vector2d(-M_PI, M_PI);  // Z active
     skeleton.set_joint_limits(shoulder_idx, limits, 3);
 
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     SigmaPointGenerator gen(layout);
 
     // Error dim: 2 * (6 root + 1 active DOF) = 14
@@ -211,7 +211,7 @@ TEST_CASE("Covariance decomposition fallback to eigenvalue", "[sigma_points]") {
     Skeleton skeleton;
     skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
 
-    auto layout = SkeletonLayout::from_full_skeleton(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
     SigmaPointGenerator gen(layout);
 
     State nominal(0);

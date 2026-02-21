@@ -25,6 +25,11 @@ struct ChildFilterConfig {
     /// Typically matches joint_groups but may differ when marker naming diverges.
     std::vector<std::string> observation_groups;
 
+    /// Name of the last joint in the PARENT skeleton that stays under parent
+    /// control. Its world-transform is injected each frame as this child's
+    /// fixed floating root. e.g. "forearm.R" for a hand child filter.
+    std::string anchor_joint_name;
+
     double process_noise_std = 0.3;      ///< Process noise std for child joints.
     double measurement_noise_std = 2.0;  ///< Pixel measurement noise std.
     double outlier_threshold = 4.0;      ///< Chi-squared outlier rejection threshold.
@@ -97,6 +102,10 @@ struct TrackerConfig {
 
     // Layout selection
     std::vector<std::string> active_joint_groups;  ///< Joint groups to track (empty = all)
+
+    /// Child filters run after the parent predict+update each frame.
+    /// Empty by default (monolithic single-filter mode).
+    std::vector<ChildFilterConfig> child_filters;
 };
 
 /**

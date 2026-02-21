@@ -188,19 +188,55 @@ class Tracker {
 
    private:
     /**
-     * @brief Placeholder for a child filter (subtree tracker).
+     * @brief Child filter — a self-contained subtree UKF.
      *
-     * Phase 3h will populate this with: layout, ukf, fk, model, data,
-     * marker_frame_map, freeflyer_joint_name, merge_map, and config.
+     * Runs after the parent predict+update each frame. The anchor joint's
+     * world-transform (from the parent FK) is injected as a fixed floating
+     * root before each predict, so the child only estimates its own joints.
      */
     struct ChildFilter {
-        // Phase 3h members go here
+        std::shared_ptr<const SkeletonLayout> layout;
+        std::unique_ptr<UnscentedKalmanFilter> ukf;
+        std::unique_ptr<ForwardKinematics> fk;
+        std::unique_ptr<pinocchio::Model> model;
+        std::unique_ptr<pinocchio::Data> data;
+        std::map<std::string, pinocchio::FrameIndex> marker_frame_map;
+
+        /// Name of the anchor joint in the parent skeleton whose world-transform
+        /// is injected as this child's fixed floating root each frame.
+        std::string anchor_joint_name;
+
+        /// merge_map[i] = state_index in the full-skeleton layout for child DOF i.
+        /// Used to write child joint angles back into the parent UKF state.
+        std::vector<int> merge_map;
+
+        double measurement_noise_std = 2.0;
+        double outlier_threshold = 4.0;
     };
 
     /**
      * @brief Initialize UKF with given state and initial covariance
      */
     void initialize_ukf(State const& initial_state, double timestamp);
+
+    /**
+     * @brief Build all child filters from config_.child_filters.
+     *
+     * Called at the end of initialize_ukf() with the global initial state
+     * (full-skeleton State from IK or rest pose). Must NOT use ukf_->state()
+     * because the parent UKF only holds parent-group DOFs.
+     */
+    void build_children(State const& global_initial_state);
+
+    /**
+     * @brief Extract child-relevant joint angles from a full-skeleton State.
+     *
+     * @param global_state  Full-skeleton State (from IK or rest-pose init).
+     * @param child_layout  Layout for the child filter.
+     * @return A compact State with only the child's joints; root at identity.
+     */
+    State slice_state_for_child(State const& global_state,
+                                SkeletonLayout const& child_layout) const;
 
     /**
      * @brief Run the parent (full-body) predict+update step.

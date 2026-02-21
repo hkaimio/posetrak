@@ -210,7 +210,81 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
 
     ukf_->set_covariance(initial_cov);
 
+    // Build child filters from config (must come after parent UKF is ready)
+    build_children(initial_state);
+
     last_timestamp_ = timestamp;
+}
+
+void Tracker::build_children(State const& global_initial_state) {
+    if (config_.child_filters.empty()) {
+        return;
+    }
+
+    // Full-skeleton layout is needed to build merge maps from child layouts.
+    auto full_layout = SkeletonLayout::from_full_skeleton(skeleton_);
+
+    for (auto const& ccfg : config_.child_filters) {
+        ChildFilter child;
+        child.anchor_joint_name = ccfg.anchor_joint_name;
+        child.measurement_noise_std = ccfg.measurement_noise_std;
+        child.outlier_threshold = ccfg.outlier_threshold;
+
+        // 1. Build subtree pinocchio model + data
+        child.layout = SkeletonLayout::from_groups(skeleton_, ccfg.joint_groups);
+        child.model = std::make_unique<pinocchio::Model>();
+        PinocchioModelBuilder::build_subtree_model(*skeleton_, child.anchor_joint_name,
+                                                   ccfg.joint_groups, *child.model);
+        child.data = std::make_unique<pinocchio::Data>(*child.model);
+        child.marker_frame_map = PinocchioModelBuilder::build_subtree_marker_frame_map(
+            *child.model, *skeleton_, child.anchor_joint_name, ccfg.joint_groups);
+
+        // 2. Build child FK
+        child.fk = std::make_unique<ForwardKinematics>(*child.model, *child.data,
+                                                       child.marker_frame_map, child.layout);
+
+        // 3. Build child UKF
+        child.ukf = std::make_unique<UnscentedKalmanFilter>(child.layout, ccfg.process_noise_std,
+                                                            config_.ukf_alpha, config_.ukf_beta,
+                                                            config_.ukf_kappa);
+
+        // 4. Seed child state from the GLOBAL initial state (full-skeleton).
+        //    ukf_->state() must NOT be used here — the parent UKF only holds
+        //    parent-group DOFs and has no slots for child joints.
+        child.ukf->set_state(slice_state_for_child(global_initial_state, *child.layout));
+
+        // 5. Initial covariance: diagonal joint uncertainty (no floating root for child)
+        int const child_error_dim = child.ukf->error_dim();
+        child.ukf->set_covariance(Eigen::MatrixXd::Identity(child_error_dim, child_error_dim) *
+                                  (config_.init_joint_std * config_.init_joint_std));
+
+        // 6. Build merge map: child DOF i → state_index in full-skeleton layout
+        child.merge_map = full_layout->build_index_map_from(*child.layout);
+
+        fmt::print("Built child filter '{}': {} joints, {} child markers, merge_map size {}\n",
+                   ccfg.name, child.layout->joints().size(), child.marker_frame_map.size(),
+                   child.merge_map.size());
+
+        children_.push_back(std::move(child));
+    }
+}
+
+State Tracker::slice_state_for_child(State const& global_state,
+                                     SkeletonLayout const& child_layout) const {
+    auto full_layout = SkeletonLayout::from_full_skeleton(skeleton_);
+    auto const index_map = full_layout->build_index_map_from(child_layout);
+
+    int const n = child_layout.total_storage_dof_count();
+    Eigen::VectorXd child_angles(n);
+    for (int i = 0; i < n; ++i) {
+        child_angles[i] = global_state.joint_angles()[index_map[i]];
+    }
+
+    // Root will be overwritten by set_root_transform() before the first predict;
+    // use identity here so the State is well-formed.
+    State s(n);
+    s.set_joint_angles(child_angles);
+    return s;
 }
 
 TrackingResult Tracker::track_frame(std::vector<Observation> const& observations,
@@ -299,9 +373,30 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
                           ""};
 }
 
-void Tracker::run_child_step(ChildFilter& /*child*/,
-                             std::vector<Observation> const& /*observations*/, double /*dt*/) {
-    // Phase 3h: inject root from parent FK, run child UKF predict+update, merge state
+void Tracker::run_child_step(ChildFilter& child, std::vector<Observation> const& obs, double dt) {
+    // 1. Inject the anchor joint's world-transform (already refreshed by run_parent_step).
+    auto [root_pos, root_ori] = fk_->world_transform(child.anchor_joint_name);
+    child.ukf->set_root_transform(root_pos, root_ori);
+
+    // 2. Predict (root stays fixed; process model integration is discarded for root)
+    child.ukf->predict(dt);
+
+    // 3. Update — child FK silently ignores markers it doesn't know
+    child.ukf->update(obs, cameras_, *child.fk, child.measurement_noise_std,
+                      child.outlier_threshold);
+
+    // 4. FK refresh (enables grandchild support in the future)
+    child.fk->compute(child.ukf->state());
+
+    // 5. Merge child joint angles back into parent UKF state
+    State parent_state = ukf_->state();
+    auto parent_angles = parent_state.joint_angles();
+    auto const& child_angles = child.ukf->state().joint_angles();
+    for (int i = 0; i < static_cast<int>(child.merge_map.size()); ++i) {
+        parent_angles[child.merge_map[i]] = child_angles[i];
+    }
+    parent_state.set_joint_angles(parent_angles);
+    ukf_->set_state(parent_state);
 }
 
 bool Tracker::has_sufficient_observations(std::vector<Observation> const& observations) const {

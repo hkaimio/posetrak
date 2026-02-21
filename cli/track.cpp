@@ -232,12 +232,7 @@ std::optional<State> load_python_state(std::string const& csv_path, Skeleton con
                 continue;
             }
 
-            int num_joint_dof = joint.dof;  // CSV has ALL DoFs, not just active ones
-
-            if (!skeleton.is_joint_active(joint.name)) {
-                dof_idx += num_joint_dof;  // Skip inactive joint DOFs
-                continue;
-            }
+            int num_joint_dof = joint.dof;  // CSV has ALL DoFs
 
             // Read angles for this joint
             for (int i = 0; i < num_joint_dof; ++i) {
@@ -429,20 +424,8 @@ int main(int argc, char* argv[]) {
             fmt::print("  Loaded {} joints\n", skeleton.joints().size());
         }
 
-        // Apply active joint groups filter (if specified)
-        if (!config.active_joint_groups.empty()) {
-            skeleton.set_active_groups(config.active_joint_groups);
-            if (!quiet) {
-                std::string groups_str;
-                for (size_t i = 0; i < config.active_joint_groups.size(); ++i) {
-                    if (i > 0)
-                        groups_str += ", ";
-                    groups_str += config.active_joint_groups[i];
-                }
-                fmt::print("  Active joint groups: {}\n", groups_str);
-                fmt::print("  Active DOFs: {}\n", skeleton.active_dof());
-            }
-        }
+        // active_joint_groups are used when constructing the SkeletonLayout:
+        // Tracker reads config.active_joint_groups to build from_groups() layout.
 
         // Load cameras
         if (!quiet) {

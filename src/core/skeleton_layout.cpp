@@ -130,61 +130,6 @@ SkeletonLayout::from_groups(std::shared_ptr<const Skeleton> skeleton,
     return build(std::move(skeleton), /*include_all=*/false, group_names);
 }
 
-std::shared_ptr<const SkeletonLayout>
-SkeletonLayout::from_active_skeleton(std::shared_ptr<const Skeleton> skeleton) {
-    // Builds a layout respecting skeleton.is_joint_active().
-    // IMPORTANT: state_index uses the full-skeleton State vector offset
-    // (advances over ALL non-fixed non-root joints, including inactive ones),
-    // because the UKF State is always total_dof_count()-sized.
-    // error_index is layout-relative (only active joints contribute).
-    auto layout = std::shared_ptr<SkeletonLayout>(new SkeletonLayout());
-    layout->skeleton_ = skeleton;  // shared ownership
-
-    int full_state_idx = 0;    // position in State::joint_angles (all joints)
-    int layout_error_idx = 0;  // position in error-state joint block (active only)
-
-    for (auto const& joint : skeleton->get_joints_ordered()) {
-        bool const active = skeleton->is_joint_active(joint.name);
-
-        if (is_root(joint)) {
-            if (active) {
-                layout->has_floating_root_ = true;
-            }
-            continue;
-        }
-
-        if (is_fixed(joint)) {
-            continue;
-        }
-
-        if (active) {
-            JointDesc desc;
-            desc.name = joint.name;
-            desc.type = joint.type;
-            desc.storage_dof_count = static_cast<int>(joint.dof);
-            desc.active_dof_count = static_cast<int>(joint.active_dof());
-            desc.state_index = full_state_idx;    // full-skeleton offset
-            desc.error_index = layout_error_idx;  // layout-relative
-            desc.is_floating_root = false;
-            desc.limits = joint.limits;
-            desc.limit_count = static_cast<int>(joint.num_limits);
-            desc.active_dof_mask = joint.get_active_dof_mask();
-
-            layout->name_to_idx_[desc.name] = static_cast<int>(layout->joints_.size());
-            layout->joints_.push_back(std::move(desc));
-
-            layout_error_idx += static_cast<int>(joint.active_dof());
-            layout->total_storage_dof_count_ += static_cast<int>(joint.dof);
-            layout->joint_active_dof_count_ += static_cast<int>(joint.active_dof());
-        }
-
-        // Always advance full-skeleton offset, regardless of active status
-        full_state_idx += static_cast<int>(joint.dof);
-    }
-
-    return layout;
-}
-
 // ---------------------------------------------------------------------------
 // Lookup
 // ---------------------------------------------------------------------------

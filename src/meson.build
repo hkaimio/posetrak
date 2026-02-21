@@ -21,6 +21,7 @@ posetrak_sources = files(
   'filters/process_model.cpp',
   'filters/sigma_points.cpp',
   'filters/ukf.cpp',
+  # 'filters/subset_ukf.cpp',  # SubsetUKF scheduled for deletion (Phase 3c)
 
   # Tracking (Phase 4)
   'tracking/tracker.cpp',

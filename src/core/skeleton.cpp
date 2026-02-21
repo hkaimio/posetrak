@@ -144,58 +144,6 @@ int Skeleton::total_dof_count() const {
     return total;
 }
 
-int Skeleton::active_dof() const {
-    if (!filter_active_) {
-        // Count active DOFs considering locked axes
-        // Python convention: active_dof INCLUDES root's 6 DOFs (3 pos + 3 rot)
-        // With 99 body joint DOFs + 6 root = 105 total, error_dim = 2*105 = 210
-        int total = 6;  // Root always contributes 6 DOFs (3 pos + 3 rot)
-        for (auto const& joint : joints_) {
-            if (!joint.parent_index.has_value()) {
-                continue;  // Skip root in iteration (already counted above)
-            }
-            total += joint.active_dof();
-        }
-        return total;
-    }
-
-    int total = 6;  // Include root
-    for (auto const& joint : joints_) {
-        if (!joint.parent_index.has_value()) {
-            continue;  // Skip root (already counted)
-        }
-        if (active_joints_.contains(joint.name) && active_joints_.at(joint.name)) {
-            total += joint.active_dof();
-        }
-    }
-    return total;
-}
-
-void Skeleton::set_active_groups(std::vector<std::string> const& groups) {
-    active_joints_.clear();
-    std::unordered_set<std::string> group_set(groups.begin(), groups.end());
-
-    for (auto const& joint : joints_) {
-        active_joints_[joint.name] = (group_set.find(joint.group) != group_set.end());
-    }
-    filter_active_ = true;
-}
-
-void Skeleton::set_active_joints(std::vector<std::string> const& joint_names) {
-    active_joints_.clear();
-    std::unordered_set<std::string> joint_set(joint_names.begin(), joint_names.end());
-
-    for (auto const& joint : joints_) {
-        active_joints_[joint.name] = (joint_set.find(joint.name) != joint_set.end());
-    }
-    filter_active_ = true;
-}
-
-void Skeleton::clear_active_filter() {
-    active_joints_.clear();
-    filter_active_ = false;
-}
-
 Joint const* Skeleton::get_joint(std::string const& name) const {
     for (auto const& joint : joints_) {
         if (joint.name == name) {
@@ -217,14 +165,6 @@ Marker const* Skeleton::get_marker(std::string const& name) const {
 std::vector<Joint> Skeleton::get_joints_ordered() const {
     // Now just return a copy since vector already preserves insertion order
     return joints_;
-}
-
-bool Skeleton::is_joint_active(std::string const& name) const {
-    if (!filter_active_) {
-        return true;
-    }
-    auto it = active_joints_.find(name);
-    return it != active_joints_.end() && it->second;
 }
 
 nlohmann::json Skeleton::to_json() const {

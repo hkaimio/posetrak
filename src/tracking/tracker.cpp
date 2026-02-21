@@ -150,7 +150,9 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
     double beta = config_.ukf_beta;    // Gaussian distribution parameter
     double kappa = config_.ukf_kappa;  // Secondary scaling
 
-    auto layout = SkeletonLayout::from_active_skeleton(skeleton_);
+    auto const& groups = config_.active_joint_groups;
+    auto layout = groups.empty() ? SkeletonLayout::from_full_skeleton(skeleton_)
+                                 : SkeletonLayout::from_groups(skeleton_, groups);
     ukf_ = std::make_unique<UnscentedKalmanFilter>(layout, config_.process_noise_std, alpha, beta,
                                                    kappa);
 

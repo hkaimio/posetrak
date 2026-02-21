@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "posetrak/core/skeleton.hpp"
+#include "posetrak/core/skeleton_layout.hpp"
 
 using namespace posetrak;
 
@@ -95,24 +96,14 @@ TEST_CASE("Skeleton DOF counting", "[skeleton]") {
 
     REQUIRE(skel.total_dof() == 11);  // 3 + 1 + 3 + 1 + 3 + 0
 
-    SECTION("All joints active by default") {
-        REQUIRE(skel.active_dof() == 11);
+    SECTION("All joints have correct total_dof") {
+        REQUIRE(skel.total_dof_count() == 11);
     }
 
-    SECTION("Filter by group") {
-        skel.set_active_groups({"legs"});
-        REQUIRE(skel.active_dof() == 7);  // 3 + 1 + 3 (legs only)
-    }
-
-    SECTION("Filter by explicit joints") {
-        skel.set_active_joints({"pelvis", "spine"});
-        REQUIRE(skel.active_dof() == 4);  // 3 + 1
-    }
-
-    SECTION("Clear filter restores all") {
-        skel.set_active_groups({"legs"});
-        skel.clear_active_filter();
-        REQUIRE(skel.active_dof() == 11);
+    SECTION("Group-based filtering via SkeletonLayout") {
+        auto layout = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"legs"});
+        // legs: left_hip(3) + left_knee(1) + right_hip(3) = 7 storage DOFs
+        REQUIRE(layout->total_storage_dof_count() == 7);
     }
 }
 
@@ -199,11 +190,5 @@ TEST_CASE("Skeleton joint queries", "[skeleton]") {
     SECTION("Get missing joint returns nullptr") {
         auto const* j = skel.get_joint("missing");
         REQUIRE(j == nullptr);
-    }
-
-    SECTION("Check active status") {
-        REQUIRE(skel.is_joint_active("pelvis"));
-        skel.set_active_groups({"legs"});
-        REQUIRE(!skel.is_joint_active("pelvis"));
     }
 }

@@ -94,6 +94,9 @@ struct TrackerConfig {
     int ik_max_iterations = 50;    ///< Max IK iterations for initialization
     double ik_tolerance = 0.01;    ///< IK convergence tolerance (meters)
     int min_cameras_for_init = 2;  ///< Minimum cameras required for triangulation
+
+    // Layout selection
+    std::vector<std::string> active_joint_groups;  ///< Joint groups to track (empty = all)
 };
 
 /**
@@ -190,6 +193,7 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.ik_max_iterations = ik_max_iterations;
     tc.ik_tolerance = ik_tolerance;
     tc.min_cameras_for_init = min_cameras_for_init;
+    tc.active_joint_groups = active_joint_groups;
     return tc;
 }
 

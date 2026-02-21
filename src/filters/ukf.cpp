@@ -95,22 +95,12 @@ void UnscentedKalmanFilter::predict(double dt) {
         std::ofstream f(debug_dir_ + "/frame_0000/predict_sigma_points_generated.csv");
         f << std::setprecision(15);
 
-        // Build list of active joints with their DOF indices in State vector
+        // Build list of active joints from layout (layout only contains active joints)
         std::vector<std::pair<std::string, int>> active_joint_info;  // (joint_name, dof_start_idx)
-        int dof_offset = 0;
-        for (auto const& joint : layout_->skeleton()->joints()) {
-            if (!joint.parent_index.has_value()) {
-                continue;  // Skip root (handled separately)
+        for (auto const& jdesc : layout_->joints()) {
+            if (!jdesc.is_floating_root) {
+                active_joint_info.push_back({jdesc.name, jdesc.state_index});
             }
-            bool is_active = layout_->skeleton()->is_joint_active(joint.name);
-            if (is_active) {
-                // Store joint name and its starting DOF index
-                active_joint_info.push_back({joint.name, dof_offset});
-            }
-            // Advance DOF offset regardless (State stores all joints)
-            dof_offset += (joint.type == JointType::SPHERICAL)
-                              ? 3
-                              : (joint.type == JointType::REVOLUTE ? 1 : 0);
         }
 
         // Write header matching Python format (named joints, active only)
@@ -223,20 +213,12 @@ void UnscentedKalmanFilter::predict(double dt) {
         std::ofstream f(debug_dir_ + "/frame_0000/predict_sigma_points_propagated.csv");
         f << std::setprecision(15);
 
-        // Build list of active joints with their DOF indices in State vector
+        // Build list of active joints from layout (layout only contains active joints)
         std::vector<std::pair<std::string, int>> active_joint_info;
-        int dof_offset = 0;
-        for (auto const& joint : layout_->skeleton()->joints()) {
-            if (!joint.parent_index.has_value()) {
-                continue;  // Skip root
+        for (auto const& jdesc : layout_->joints()) {
+            if (!jdesc.is_floating_root) {
+                active_joint_info.push_back({jdesc.name, jdesc.state_index});
             }
-            bool is_active = layout_->skeleton()->is_joint_active(joint.name);
-            if (is_active) {
-                active_joint_info.push_back({joint.name, dof_offset});
-            }
-            dof_offset += (joint.type == JointType::SPHERICAL)
-                              ? 3
-                              : (joint.type == JointType::REVOLUTE ? 1 : 0);
         }
 
         // Write header matching Python format (named joints, active only)

@@ -94,14 +94,6 @@ class SkeletonLayout {
     from_groups(std::shared_ptr<const Skeleton> skeleton,
                 std::vector<std::string> const& group_names);
 
-    /// @brief Build layout respecting the skeleton's current active-group filter.
-    ///
-    /// Uses Skeleton::is_joint_active() as the inclusion predicate. When no
-    /// active filter has been set on the skeleton, this is identical to
-    /// from_full_skeleton().
-    static std::shared_ptr<const SkeletonLayout>
-    from_active_skeleton(std::shared_ptr<const Skeleton> skeleton);
-
     // -------------------------------------------------------------------------
     // O(1) accessors (all values precomputed at construction)
     // -------------------------------------------------------------------------

@@ -137,21 +137,6 @@ class Skeleton {
     ///       For SPHERICAL joints, always counts 3 DOFs even if some are locked.
     int total_dof_count() const;
 
-    /// @brief Get active DOF count based on filter
-    /// @return Active degrees of freedom
-    int active_dof() const;
-
-    /// @brief Set active joints by group names
-    /// @param groups List of group names to activate
-    void set_active_groups(std::vector<std::string> const& groups);
-
-    /// @brief Set active joints by explicit joint names
-    /// @param joint_names List of joint names to activate
-    void set_active_joints(std::vector<std::string> const& joint_names);
-
-    /// @brief Clear active filter (all joints active)
-    void clear_active_filter();
-
     /// @brief Get joint by name
     /// @param name Joint name
     /// @return Pointer to joint or nullptr if not found
@@ -165,11 +150,6 @@ class Skeleton {
     /// @brief Get all joints in depth-first order
     /// @return Ordered list of joints
     std::vector<Joint> get_joints_ordered() const;
-
-    /// @brief Check if joint is active
-    /// @param name Joint name
-    /// @return True if joint is active
-    bool is_joint_active(std::string const& name) const;
 
     /// @brief Get all joints in state vector order
     /// @return Vector of joints
@@ -202,8 +182,6 @@ class Skeleton {
 
     std::vector<Joint> joints_;    ///< Joint definitions (in state vector order)
     std::vector<Marker> markers_;  ///< Marker definitions (in state vector order)
-    std::unordered_map<std::string, bool> active_joints_;  ///< Active joint filter
-    bool filter_active_ = false;                           ///< Whether active filter is enabled
 };
 
 }  // namespace posetrak

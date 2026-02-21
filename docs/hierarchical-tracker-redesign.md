@@ -699,7 +699,140 @@ reused unchanged by `add_subtree_joints_recursive()`.
 
 ---
 
-## 10. Implementation Phases
+## 10. Phase 3e — Detailed Design and Changes
+
+Phase 3e makes `UnscentedKalmanFilter` usable as a child filter by adding a fixed-root
+injection path. The parent filter's predict/update cycle is entirely unchanged — the new code
+only activates when `layout_->has_floating_root() == false`.
+
+### 10.1 What changes
+
+Two new responsibilities for `UnscentedKalmanFilter` when acting as a child filter:
+
+1. **Accept an externally-supplied root transform** (`set_root_transform()`). The coordinator
+   calls this once per frame before `predict()`/`update()`.
+2. **Hold the root fixed throughout predict/update**. The process model would otherwise
+   integrate root velocity and advance root position. This integration is discarded for child
+   filters: the root in every propagated sigma point is overwritten with the stored transform
+   after process model propagation.
+
+### 10.2 New API on `UnscentedKalmanFilter`
+
+```cpp
+/// @brief Inject the externally-known root transform for child-filter mode.
+///
+/// Must be called once per frame by the coordinator before predict()/update().
+/// Has no effect if layout_->has_floating_root() == true (safety no-op).
+///
+/// Also updates state_.root_position() / root_orientation() immediately so that
+/// the stored nominal state is consistent before sigma generation.
+void set_root_transform(Eigen::Vector3d const& position,
+                        Eigen::Quaterniond const& orientation);
+```
+
+No other public API changes. `predict()` and `update()` signatures are unchanged.
+
+New private members:
+
+```cpp
+// Only meaningful when !layout_->has_floating_root()
+Eigen::Vector3d  fixed_root_pos_;   ///< Injected root position (child filter)
+Eigen::Quaterniond fixed_root_ori_; ///< Injected root orientation (child filter)
+```
+
+### 10.3 Root injection in `predict()`
+
+```cpp
+void UnscentedKalmanFilter::predict(double dt) {
+    // [CHILD FILTER] Root is already correct in state_ from set_root_transform().
+    // Generate sigma points — root is NOT perturbed because root_error_dof_count() == 0.
+    auto sigma_points = sigma_gen_.generate_sigma_points(state_, covariance_);
+
+    // Propagate each sigma point through the process model
+    std::vector<State> propagated;
+    propagated.reserve(sigma_points.size());
+    for (auto const& sp : sigma_points) {
+        State prop = process_model_.propagate(sp, dt);
+
+        // [CHILD FILTER] Undo root velocity integration — root is externally set.
+        if (!layout_->has_floating_root()) {
+            prop = State(fixed_root_pos_, fixed_root_ori_,
+                         prop.joint_angles(),
+                         prop.root_velocity(), prop.root_angular_velocity(),
+                         prop.joint_velocities());
+        }
+        propagated.push_back(std::move(prop));
+    }
+
+    // compute_state_mean / compute_state_covariance unchanged
+    // ...
+}
+```
+
+Key points:
+
+- `SigmaPointGenerator::generate_sigma_points()` already does the right thing: when
+  `has_floating_root() == false`, `error_dim_` has no root component (`root_error_dof_count()`
+  returns 0), so `apply_error_to_state()` never touches root fields. Sigma-point roots carry
+  through from the nominal state unchanged.
+- The process model propagates the full `State` including root; we selectively overwrite root
+  after propagation. Joint angles and velocities propagate normally.
+- Root velocities (`prop.root_velocity()`, `prop.root_angular_velocity()`) are kept from the
+  propagated state so they stay consistent — they are ignored by FK but the state struct holds
+  them.
+
+### 10.4 Root injection in `update()`
+
+No changes needed. Sigma points are generated from the current `state_` (root already set by
+`predict()` via `set_root_transform()`). `predict_measurements()` calls FK on each sigma point;
+FK reads `state.root_position()` / `state.root_orientation()`, which are correct. The
+innovation, Kalman gain, and state update all operate on joint DOFs only (root is not in the
+error state for child filters, so `apply_error_to_state()` leaves root untouched during the
+mean/covariance update as well).
+
+### 10.5 `SigmaPointGenerator` and `apply_error_to_state` — no changes
+
+`has_floating_root() == false` is already handled by both:
+
+- `SigmaPointGenerator` constructor: `error_dim_ = layout_->error_state_dim()`, which uses
+  `root_error_dof_count() == 0`, so error vectors have no root slots at all.
+- `apply_error_to_state()`: applies `error_vec[0..5]` to root position/orientation only when
+  root DOFs exist in the error vector; with `has_floating_root() == false`, those slots aren't
+  present and root is never touched.
+
+No test changes. No `SigmaPointGenerator` changes. No `ProcessModel` changes.
+
+### 10.6 Files Changed in Phase 3e
+
+| File | Change |
+|------|--------|
+| `include/posetrak/filters/ukf.hpp` | Declare `set_root_transform()`; add `fixed_root_pos_`, `fixed_root_ori_` private members |
+| `src/filters/ukf.cpp` | Implement `set_root_transform()` (updates `state_` immediately + stores members); add root overwrite in `predict()` after process model propagation |
+| `tests/test_ukf_update.cpp` or new `tests/test_child_ukf.cpp` | Test: child-layout UKF with fixed root — after `set_root_transform()` + `predict(dt)`, root in `state()` must equal the injected transform regardless of prior velocity |
+
+### 10.7 Coordinator usage pattern (preview)
+
+```cpp
+// Per frame, inside HierarchicalTracker::step():
+parent_ukf_->predict(dt);
+parent_ukf_->update(parent_obs, cameras, *parent_fk_);
+parent_fk_->compute(parent_ukf_->state());         // refresh pinocchio cache to posterior
+
+for (auto& child : children_) {
+    // Extract boundary joint world transform from parent FK
+    auto const& wrist_pos = ...;   // from parent_fk_->world_transform("wrist.R")
+    auto const& wrist_ori = ...;
+    child.ukf->set_root_transform(wrist_pos, wrist_ori);  // Phase 3e
+    child.ukf->predict(dt);
+    child.ukf->update(child_obs, cameras, *child.fk);
+}
+```
+
+`ForwardKinematics::world_transform()` is the missing piece delivered in Phase 3f.
+
+---
+
+## 11. Implementation Phases
 
 Approximate ordering (each independently committable):
 
@@ -719,11 +852,11 @@ Approximate ordering (each independently committable):
 
 Phases 3a–3c are pure refactors with no behaviour change; existing tests must stay green.
 Phases 3d–3f add new functionality with new tests.
-Phase 3g is the first end-to-end hierarchical run.
+Phase 3g is the first end-to-end hierarchical run (zero-children parity test).
 
 ---
 
-## 11. What Gets Deleted
+## 12. What Gets Deleted
 
 - `SubsetUKF` (header + implementation + tests) — replaced by the coordinator pattern.
 - `sync_from_background()` — the concept disappears.

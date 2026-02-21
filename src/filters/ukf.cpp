@@ -85,6 +85,18 @@ void UnscentedKalmanFilter::set_covariance(Eigen::MatrixXd const& covariance) {
     covariance_ = covariance;
 }
 
+void UnscentedKalmanFilter::set_root_transform(Eigen::Vector3d const& position,
+                                               Eigen::Quaterniond const& orientation) {
+    if (layout_->has_floating_root()) {
+        return;  // Safety no-op: parent filters manage their own root.
+    }
+    fixed_root_pos_ = position;
+    fixed_root_ori_ = orientation.normalized();
+    // Update nominal state immediately so sigma generation starts from the correct root.
+    state_.set_root_position(fixed_root_pos_);
+    state_.set_root_orientation(fixed_root_ori_);
+}
+
 void UnscentedKalmanFilter::predict(double dt) {
     // Generate sigma points
     auto sigma_points = sigma_gen_.generate_sigma_points(state_, covariance_);
@@ -206,6 +218,14 @@ void UnscentedKalmanFilter::predict(double dt) {
 
     for (auto const& sigma_state : sigma_points) {
         propagated_points.push_back(process_model_.propagate(sigma_state, dt));
+    }
+
+    // [Child filter] Root pose is externally supplied — overwrite process-model root drift.
+    if (!layout_->has_floating_root()) {
+        for (auto& sp : propagated_points) {
+            sp.set_root_position(fixed_root_pos_);
+            sp.set_root_orientation(fixed_root_ori_);
+        }
     }
 
     // Debug: Export propagated sigma points (frame 0 - Python matching format)
@@ -613,25 +633,27 @@ Eigen::VectorXd UnscentedKalmanFilter::compute_state_error(State const& state,
     int const active_dof = root_n + jac;  // == error_dim() / 2
     Eigen::VectorXd error = Eigen::VectorXd::Zero(error_dim());
 
-    // Position error
-    error.segment<3>(0) = state.root_position() - reference.root_position();
+    if (root_n > 0) {
+        // Position error
+        error.segment<3>(0) = state.root_position() - reference.root_position();
 
-    // Rotation error (in tangent space)
-    Eigen::Quaterniond const& q_ref = reference.root_orientation();
-    Eigen::Quaterniond const& q_state = state.root_orientation();
-    Eigen::Quaterniond const q_diff = q_ref.conjugate() * q_state;
+        // Rotation error (in tangent space)
+        Eigen::Quaterniond const& q_ref = reference.root_orientation();
+        Eigen::Quaterniond const& q_state = state.root_orientation();
+        Eigen::Quaterniond const q_diff = q_ref.conjugate() * q_state;
 
-    // Convert to axis-angle
-    double const angle = 2.0 * std::atan2(q_diff.vec().norm(), q_diff.w());
-    if (angle > 1e-8) {
-        Eigen::Vector3d const axis = q_diff.vec().normalized();
-        error.segment<3>(3) = angle * axis;
+        // Convert to axis-angle
+        double const angle = 2.0 * std::atan2(q_diff.vec().norm(), q_diff.w());
+        if (angle > 1e-8) {
+            Eigen::Vector3d const axis = q_diff.vec().normalized();
+            error.segment<3>(3) = angle * axis;
+        }
+
+        // Root velocity errors (in velocity section of error vector)
+        error.segment<3>(active_dof) = state.root_velocity() - reference.root_velocity();
+        error.segment<3>(active_dof + 3) =
+            state.root_angular_velocity() - reference.root_angular_velocity();
     }
-
-    // Root velocity errors (in velocity section of error vector)
-    error.segment<3>(active_dof) = state.root_velocity() - reference.root_velocity();
-    error.segment<3>(active_dof + 3) =
-        state.root_angular_velocity() - reference.root_angular_velocity();
 
     // Joint angle and velocity errors
 

@@ -665,3 +665,98 @@ TEST_CASE("UKF velocity damping at joint limits", "[ukf][update][damping]") {
     REQUIRE(std::isfinite(final_state.joint_angles()(0)));
     REQUIRE(std::isfinite(final_state.joint_velocities()(0)));
 }
+
+// ===========================================================================
+// Phase 3e: Child-filter fixed-root injection
+// ===========================================================================
+
+/// Build a minimal skeleton for child-filter tests:
+///   pelvis (SPHERICAL, root, group="main")
+///     └── wrist.R (FIXED, group="main")    ← freeflyer anchor for HandR
+///           └── palm.R  (SPHERICAL, group="HandR")
+///                └── finger1.R (REVOLUTE, group="HandR")
+static Skeleton make_child_filter_skeleton() {
+    Skeleton skel;
+    uint32_t pelvis = skel.add_joint("pelvis", std::nullopt, JointType::SPHERICAL,
+                                     Eigen::Vector3d::Zero(), "main");
+    uint32_t wrist =
+        skel.add_joint("wrist.R", pelvis, JointType::FIXED, Eigen::Vector3d(0, 0, 1.0), "main");
+    uint32_t palm =
+        skel.add_joint("palm.R", wrist, JointType::SPHERICAL, Eigen::Vector3d(0.05, 0, 0), "HandR");
+    skel.add_joint("finger1.R", palm, JointType::REVOLUTE, Eigen::Vector3d(0.04, 0, 0), "HandR");
+    skel.add_marker("MRK-palm", palm, Eigen::Vector3d(0, 0, 0.01));
+    return skel;
+}
+
+TEST_CASE("Child UKF: set_root_transform updates state immediately", "[ukf][child_filter]") {
+    Skeleton skeleton = make_child_filter_skeleton();
+    auto skel_ptr = std::make_shared<const Skeleton>(skeleton);
+    auto layout = SkeletonLayout::from_groups(skel_ptr, {"HandR"});
+    REQUIRE_FALSE(layout->has_floating_root());
+
+    UnscentedKalmanFilter ukf(layout, 0.1);
+
+    Eigen::Vector3d injected_pos(1.5, 2.5, 3.5);
+    Eigen::Quaterniond injected_ori =
+        Eigen::Quaterniond(Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitZ()));
+
+    ukf.set_root_transform(injected_pos, injected_ori);
+
+    // Root in state() must match the injected transform immediately
+    REQUIRE_THAT(ukf.state().root_position().x(), WithinAbs(injected_pos.x(), 1e-10));
+    REQUIRE_THAT(ukf.state().root_position().y(), WithinAbs(injected_pos.y(), 1e-10));
+    REQUIRE_THAT(ukf.state().root_position().z(), WithinAbs(injected_pos.z(), 1e-10));
+    REQUIRE_THAT(ukf.state().root_orientation().w(),
+                 WithinAbs(injected_ori.normalized().w(), 1e-10));
+    REQUIRE_THAT(ukf.state().root_orientation().x(),
+                 WithinAbs(injected_ori.normalized().x(), 1e-10));
+}
+
+TEST_CASE("Child UKF: predict keeps root fixed despite large root velocity",
+          "[ukf][child_filter]") {
+    Skeleton skeleton = make_child_filter_skeleton();
+    auto skel_ptr = std::make_shared<const Skeleton>(skeleton);
+    auto layout = SkeletonLayout::from_groups(skel_ptr, {"HandR"});
+    REQUIRE_FALSE(layout->has_floating_root());
+
+    UnscentedKalmanFilter ukf(layout, 0.1);
+
+    Eigen::Vector3d injected_pos(1.0, 2.0, 3.0);
+    Eigen::Quaterniond injected_ori =
+        Eigen::Quaterniond(Eigen::AngleAxisd(0.3, Eigen::Vector3d::UnitY()));
+    ukf.set_root_transform(injected_pos, injected_ori);
+
+    // Inject a large root velocity into state — process model would drift root significantly.
+    State s_with_vel(injected_pos, injected_ori.normalized(), ukf.state().joint_angles(),
+                     Eigen::Vector3d(100.0, 100.0, 100.0),  // huge root translational velocity
+                     Eigen::Vector3d(50.0, 50.0, 50.0),     // huge root angular velocity
+                     ukf.state().joint_velocities());
+    ukf.set_state(s_with_vel);
+
+    // After predict, root must still be the injected transform (not drifted).
+    double dt = 0.033;
+    ukf.predict(dt);
+
+    REQUIRE_THAT(ukf.state().root_position().x(), WithinAbs(injected_pos.x(), 1e-6));
+    REQUIRE_THAT(ukf.state().root_position().y(), WithinAbs(injected_pos.y(), 1e-6));
+    REQUIRE_THAT(ukf.state().root_position().z(), WithinAbs(injected_pos.z(), 1e-6));
+    REQUIRE_THAT(ukf.state().root_orientation().w(),
+                 WithinAbs(injected_ori.normalized().w(), 1e-6));
+}
+
+TEST_CASE("Child UKF: set_root_transform is no-op on parent filter", "[ukf][child_filter]") {
+    // Parent layout: full skeleton, has_floating_root == true
+    Skeleton skeleton;
+    skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    skeleton.add_marker("m", 0, Eigen::Vector3d(0, 0, 0));
+    auto skel_ptr = std::make_shared<const Skeleton>(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(skel_ptr);
+    REQUIRE(layout->has_floating_root());
+
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    Eigen::Vector3d orig_pos = ukf.state().root_position();
+
+    // Calling set_root_transform on a parent filter must not change state
+    ukf.set_root_transform(Eigen::Vector3d(99.0, 99.0, 99.0), Eigen::Quaterniond::Identity());
+    REQUIRE_THAT(ukf.state().root_position().x(), WithinAbs(orig_pos.x(), 1e-10));
+}

@@ -106,6 +106,22 @@ class UnscentedKalmanFilter {
     void set_covariance(Eigen::MatrixXd const& covariance);
 
     /**
+     * @brief Inject the externally-known root transform for child-filter mode.
+     *
+     * Must be called once per frame by the coordinator before predict()/update().
+     * Has no effect if layout_->has_floating_root() == true (safety no-op for
+     * parent filters — calling it on a parent filter is harmless but meaningless).
+     *
+     * Updates state_ root immediately so predict()'s sigma generation starts from
+     * the correct nominal root, and also stores the transform for overwriting
+     * process-model root drift in every propagated sigma point.
+     *
+     * @param position     World-frame position of the freeflyer joint (e.g. wrist.R)
+     * @param orientation  World-frame orientation of the freeflyer joint
+     */
+    void set_root_transform(Eigen::Vector3d const& position, Eigen::Quaterniond const& orientation);
+
+    /**
      * @brief Get error state dimension
      * @return Dimension of error state (2 * (6 + active_dof))
      */
@@ -290,6 +306,10 @@ class UnscentedKalmanFilter {
     Eigen::MatrixXd process_noise_;                 ///< Process noise covariance
     SigmaPointGenerator sigma_gen_;                 ///< Sigma point generator
     ConstantVelocityModel process_model_;           ///< Process model
+
+    // Child-filter fixed root (only meaningful when !layout_->has_floating_root())
+    Eigen::Vector3d fixed_root_pos_ = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond fixed_root_ori_ = Eigen::Quaterniond::Identity();
 
     // Debug state
     bool debug_enabled_ = false;  ///< Debug mode flag

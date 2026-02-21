@@ -121,23 +121,25 @@ State SigmaPointGenerator::apply_error_to_state(State const& nominal_state,
     //   [active_dof..active_dof+root_n-1] = root velocity (3) + angular velocity (3)
     //   [active_dof+root_n..]       = joint velocity errors
 
-    // Apply root position error (first 3 elements)
-    Eigen::Vector3d new_pos = nominal_state.root_position() + error_vec.segment<3>(0);
-    new_state.set_root_position(new_pos);
+    if (root_n > 0) {
+        // Apply root position error (first 3 elements)
+        Eigen::Vector3d new_pos = nominal_state.root_position() + error_vec.segment<3>(0);
+        new_state.set_root_position(new_pos);
 
-    // Apply root rotation error (next 3 elements, multiplicative on manifold)
-    Eigen::Vector3d rot_error = error_vec.segment<3>(3);
-    Eigen::Quaterniond q_error = State::axis_angle_to_quaternion(rot_error);
-    Eigen::Quaterniond q_nominal = nominal_state.root_orientation();
-    Eigen::Quaterniond q_new = (q_nominal * q_error).normalized();
-    new_state.set_root_orientation(q_new);
+        // Apply root rotation error (next 3 elements, multiplicative on manifold)
+        Eigen::Vector3d rot_error = error_vec.segment<3>(3);
+        Eigen::Quaterniond q_error = State::axis_angle_to_quaternion(rot_error);
+        Eigen::Quaterniond q_nominal = nominal_state.root_orientation();
+        Eigen::Quaterniond q_new = (q_nominal * q_error).normalized();
+        new_state.set_root_orientation(q_new);
 
-    // Apply root velocity errors (first 6 elements of velocity section)
-    Eigen::Vector3d new_vel = nominal_state.root_velocity() + error_vec.segment<3>(active_dof);
-    Eigen::Vector3d new_angvel =
-        nominal_state.root_angular_velocity() + error_vec.segment<3>(active_dof + 3);
-    new_state.set_root_velocity(new_vel);
-    new_state.set_root_angular_velocity(new_angvel);
+        // Apply root velocity errors (first 6 elements of velocity section)
+        Eigen::Vector3d new_vel = nominal_state.root_velocity() + error_vec.segment<3>(active_dof);
+        Eigen::Vector3d new_angvel =
+            nominal_state.root_angular_velocity() + error_vec.segment<3>(active_dof + 3);
+        new_state.set_root_velocity(new_vel);
+        new_state.set_root_angular_velocity(new_angvel);
+    }
 
     // Apply joint angle and velocity errors using precomputed layout indices
     Eigen::VectorXd new_angles = nominal_state.joint_angles();

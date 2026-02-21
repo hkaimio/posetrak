@@ -227,8 +227,9 @@ private:
         std::unique_ptr<ForwardKinematics>     fk;
         std::shared_ptr<const SkeletonLayout>  layout;
         std::vector<int>                       merge_map;   // child compact DOF → full state idx
-        std::string                            freeflyer_joint_name;  // skeleton parent of child root
-        //   e.g. "wrist.R" for HandR — set from parent tracker, not estimated by child
+        std::string                            anchor_joint_name;  // last parent-controlled joint
+        //   e.g. "forearm.R" for a hand filter — its world-transform is injected
+        //   as the child's fixed root; palm.R and below are tracked by the child
         ChildFilterConfig                      config;
     };
     std::vector<ChildFilter> children_;
@@ -255,9 +256,9 @@ dt = timestamp - last_timestamp_
     → refreshes pinocchio cache to posterior state so world_transform() is correct
 
 3. for each child c:
-   a. freeflyer_world = parent_fk_.world_transform(c.freeflyer_joint_name)
-      // c.freeflyer_joint_name = skeleton parent of the shallowest joint in child's groups
-      // e.g. "wrist.R" for HandR group (palm.R's parent)
+   a. anchor_world = parent_fk_.world_transform(c.anchor_joint_name)
+      // c.anchor_joint_name = last joint under parent control, just above child's groups
+      // e.g. "forearm.R" for a hand filter (palm.R's parent in skeleton)
    b. c.ukf.set_root_transform(freeflyer_world)
    c. c.ukf.predict(dt)
    d. c.ukf.update(filter_obs(obs, c.config.obs_groups), cameras, c.fk)
@@ -891,7 +892,7 @@ The coordinator usage (from §10.7) becomes:
 parent_fk_->compute(parent_ukf_->state());  // refresh pinocchio cache to posterior
 
 for (auto& child : children_) {
-    auto [pos, ori] = parent_fk_->world_transform(child.freeflyer_joint_name);
+    auto [pos, ori] = parent_fk_->world_transform(child.anchor_joint_name);
     child.ukf->set_root_transform(pos, ori);
     child.ukf->predict(dt);
     child.ukf->update(child_obs, cameras, *child.fk);
@@ -986,9 +987,425 @@ Use the existing §9.4 skeleton fixture but query only non-FIXED joints
    `compute()` must not crash (pinocchio zero-initialises `data_.oMi`). The
    result value is unspecified but safe.
 
+### 11.6 Implementation Notes (Phase 3f — completed)
+
+**Design vs reality — simpler than planned:**
+
+The original §11 design involved adding named pinocchio frames for every joint
+(including FIXED ones) and using `data_.oMf[]`. Once we confirmed that real
+skeletons contain no FIXED mid-chain joints, the implementation reduced to:
+- `joint_id_map_: std::unordered_map<std::string, pinocchio::JointIndex>` populated
+  in the constructor from `model_.names[1..njoints-1]`
+- `world_transform()` reads `data_.oMi[id]` — already populated by
+  `forwardKinematics()` inside `compute()`, no extra call needed
+- No changes to `PinocchioModelBuilder`, `model_.nframes`, or any existing tests
+
+FIXED joints in the full-skeleton model throw `std::out_of_range` (correct — the
+coordinator will never query one; the freeflyer boundary joint is always non-FIXED
+in real skeletons).
+
+In the **subtree** model the freeflyer joint (e.g. `wrist.R`) is a real pinocchio
+joint at index 1, so `world_transform("wrist.R")` returns the injected root
+transform exactly — tested in `[world_transform]` test case 2.
+
+**Tests delivered:** 2 `TEST_CASE`s, 18 assertions, all passing. No regressions.
+
 ---
 
-## 12. Implementation Phases
+## 12. Phase 3g — Detailed Design and Changes
+
+Phase 3g restructures `Tracker` to host a (currently empty) `children_` vector
+and extracts the parent predict+update+FK-refresh sequence into a private helper.
+With an empty child list the observable behaviour is bit-identical to today; the
+existing tests are the zero-children regression guard.
+
+### 12.1 What changes
+
+Three purely mechanical changes to `Tracker` — no logic moves, no new public API:
+
+1. **Add `ChildFilter` placeholder struct** (private, in `tracker.hpp`).
+   At this stage it holds only the fields needed by the empty loop; the full
+   population of those fields happens in Phase 3h.
+
+2. **Add `children_` empty vector** — `std::vector<ChildFilter> children_{}`.
+
+3. **Extract `run_parent_step()`** containing what is currently inline in
+   `track_frame()`: the `predict(dt)` call, the observation sufficiency check,
+   and the `update()` call. `track_frame()` becomes:
+   ```cpp
+   run_parent_step(observations, dt);
+   for (auto& c : children_) { run_child_step(c, observations, dt); }
+   ```
+   where `run_child_step()` is also added as a stub that asserts `false` or
+   does nothing (`children_` is always empty at this phase).
+
+4. **FK refresh after parent update** — `parent_fk_.compute(ukf_->state())` is
+   the step the coordinator needs before calling `world_transform()` on behalf of
+   children. This call is added to `run_parent_step()` so Phase 3h can rely on it.
+   Currently `fk_` is used only inside `ukf_->update()` (passed by reference);
+   an explicit post-update `fk_->compute(ukf_->state())` ensures `data_.oMi[]`
+   reflects the posterior state before any child step.
+
+> **Renaming `Tracker` → `HierarchicalTracker`** is deferred to Phase 3h, when
+> children are actually wired up and the rename earns its complexity cost. For 3g
+> the class stays named `Tracker`.
+
+### 12.2 Proposed changes
+
+```cpp
+// In tracker.hpp — new private section
+
+/// Placeholder for a child filter slot (fully populated in Phase 3h).
+struct ChildFilter {
+    // Phase 3h will add: layout, ukf, fk, model, data,
+    // anchor_joint_name, merge_map, config
+};
+
+// New private methods
+void run_parent_step(std::vector<Observation> const& obs, double dt);
+void run_child_step(ChildFilter& child,
+                    std::vector<Observation> const& obs, double dt);
+
+// New private member
+std::vector<ChildFilter> children_;  // always empty in Phase 3g
+```
+
+`track_frame()` body after the `dt` computation:
+```cpp
+run_parent_step(observations, dt);
+for (auto& c : children_) {
+    run_child_step(c, observations, dt);
+}
+last_timestamp_ = timestamp;
+```
+
+`run_parent_step()` contains exactly the current inline logic:
+```cpp
+void Tracker::run_parent_step(std::vector<Observation> const& obs, double dt) {
+    ukf_->predict(dt);
+    if (!has_sufficient_observations(obs)) { return; }
+    ukf_->update(obs, cameras_, *fk_, ...);
+    // Refresh FK cache to posterior — needed by children (Phase 3h).
+    fk_->compute(ukf_->state());
+}
+```
+
+`run_child_step()` stub (Phase 3g):
+```cpp
+void Tracker::run_child_step(ChildFilter& /*child*/,
+                             std::vector<Observation> const& /*obs*/,
+                             double /*dt*/) {
+    // Phase 3h will implement this.
+}
+```
+
+### 12.3 Zero-children regression test
+
+Existing tracker-related tests (`[statistics_tracker]`, `[config]`, `[ukf]`) all
+continue to pass unchanged. No new test file is needed: the unchanged passing
+of all existing tests is itself the zero-children parity proof.
+
+A single new lightweight test is added to confirm the FK-refresh after parent
+update is actually called:
+
+```cpp
+TEST_CASE("Tracker: world_transform valid after track_frame", "[tracker][3g]") {
+    // Build a simple 2-joint skeleton, run one track_frame with a trivial
+    // observation set, then call fk_->world_transform() — must not throw
+    // and must return a non-NaN vector.
+    // (This verifies the post-update FK refresh lands correctly.)
+}
+```
+
+Location: `tests/test_statistics_tracker.cpp` or a new `tests/test_tracker.cpp`
+— whichever already has the skeleton/camera setup boilerplate.
+
+### 12.4 Files Changed in Phase 3g
+
+| File | Change |
+|------|---------|
+| `include/posetrak/tracking/tracker.hpp` | Add `ChildFilter` struct; declare `run_parent_step()`, `run_child_step()`; add `children_` member |
+| `src/tracking/tracker.cpp` | Extract `run_parent_step()` from `track_frame()`; add empty `run_child_step()`; add `fk_->compute(ukf_->state())` post-update call |
+
+### 12.5 Implementation Notes (Phase 3g — committed 26835ee)
+
+**Signature divergence from design:** `run_parent_step()` takes a third argument
+`timestamp` and returns `TrackingResult` (not `void`). This made `track_frame()`
+cleaner — it checks `result.tracking_lost` before looping children, so a
+"no observations" frame skips child steps entirely and returns early.
+
+**No dedicated `[tracker][3g]` test written.** The FK-refresh bug (stale
+`data_.oMi[]` between update and the next measurement model call) was already
+causing 14 integration tests to fail. Adding `fk_->compute(ukf_->state())` in
+`run_parent_step()` fixed all 14 incidentally — those tests are the zero-children
+regression guard. Test count went from 138/168 pass to **152/168 pass**; the
+remaining 16 failures are all pre-existing and unrelated to this phase.
+
+**`last_timestamp_`** update lives in `track_frame()` (not `run_parent_step()`)
+so that out-of-order or no-observation frames still preserve the last valid
+timestamp correctly.
+
+---
+
+## 13. Phase 3h — Detailed Design and Changes
+
+Phase 3h wires up the first real child filter: populates `ChildFilter` with its
+own UKF + FK, injects the parent FK world-transform as a fixed root each frame,
+runs the child predict-update cycle, and merges the child joint angles back into
+the parent state. With a non-empty `children_` vector the tracker becomes
+truly hierarchical for the first time.
+
+#### Anchor joint concept
+
+Each child filter needs to know **where in the parent skeleton to attach its
+subtree**. We call this the *anchor joint* — the last joint that remains under
+the **parent** tracker's control, immediately above the joints the child will
+control. All joints below the anchor joint (i.e. the child's groups) are removed
+from the parent filter and handed to the child.
+
+Example: for a hand child filter on our test skeleton the joint hierarchy looks
+like:
+
+```
+upper_arm.R  →  forearm.R  →  palm.R  →  finger1.R  → …
+               ^^^^^^^^^^^^   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+               anchor joint   child filter controls these
+```
+
+`forearm.R` is the anchor: its world-transform (as computed by the parent FK
+after each update) is injected into the child filter as its fixed floating root.
+`palm.R` and everything below are tracked by the child, not the parent.
+
+> The underlying Pinocchio joint type for the child's root is a *freeflyer*
+> (6-DOF floating joint), but we avoid that term in the public API because it
+> describes the mechanism, not the intent.
+
+### 13.1 Config additions
+
+A new `ChildFilterConfig` struct is added to `config.hpp`:
+
+```cpp
+struct ChildFilterConfig {
+    std::vector<std::string> groups;   ///< Joint groups this child filter tracks
+    std::string anchor_joint_name;     ///< Last joint in the PARENT hierarchy
+                                       ///  that stays under parent control.
+                                       ///  Its world-transform is injected as
+                                       ///  the child's fixed floating root.
+                                       ///  e.g. "forearm.R" for a hand filter
+                                       ///  (palm.R and fingers are in groups).
+    double measurement_noise_std = 1.0;
+    double outlier_threshold = 3.0;
+};
+```
+
+`TrackerConfig` gains one new field:
+
+```cpp
+std::vector<ChildFilterConfig> child_filters;  ///< Empty → no child filters
+```
+
+### 13.2 `ChildFilter` struct — full population
+
+```cpp
+struct ChildFilter {
+    std::shared_ptr<SkeletonLayout>          layout;
+    std::unique_ptr<UnscentedKalmanFilter>   ukf;
+    std::unique_ptr<ForwardKinematics>       fk;
+    std::unique_ptr<pinocchio::Model>        model;
+    std::unique_ptr<pinocchio::Data>         data;
+    std::map<std::string, pinocchio::FrameIndex> marker_frame_map;
+
+    /// Name of the last joint in the PARENT skeleton that remains under
+    /// parent control — its world-transform is injected each frame as the
+    /// child's fixed floating root. For a hand filter on our test skeleton
+    /// this is "forearm.R" (the elbow), NOT "palm.R" which the child tracks.
+    std::string anchor_joint_name;
+
+    /// Flattened list of (child_dof, parent_dof) pairs — built at
+    /// construction time by cross-referencing child layout joint names with
+    /// their storage-DOF offset in the parent skeleton.
+    std::vector<std::pair<int,int>> merge_map;
+
+    double measurement_noise_std;
+    double outlier_threshold;
+};
+```
+
+### 13.3 Child construction
+
+Children are built inside `initialize_ukf()` (or a new helper
+`build_children()`) immediately after the parent UKF is ready.
+
+> **Important:** child state must be seeded from the **global initial state**
+> (the full-skeleton `State` produced by IK or rest-pose init), not from
+> `ukf_->state()`. The parent UKF's state only carries DOFs for the parent's
+> own joint groups; the child's joints are simply absent from it. The global
+> initial state is already available as the `initial_state` parameter of
+> `initialize_ukf()`.
+
+```cpp
+// In initialize_ukf(State const& initial_state, double timestamp):
+// ... parent UKF construction ...
+build_children(initial_state);
+```
+
+```cpp
+void Tracker::build_children(State const& global_initial_state) {
+    for (auto const& ccfg : config_.child_filters) {
+        ChildFilter child;
+        child.anchor_joint_name      = ccfg.anchor_joint_name;
+        child.measurement_noise_std  = ccfg.measurement_noise_std;
+        child.outlier_threshold      = ccfg.outlier_threshold;
+
+        // 1. Build subtree pinocchio model + data
+        child.layout = SkeletonLayout::from_groups(skeleton_, ccfg.groups);
+        auto [model, data, marker_map] =
+            PinocchioModelBuilder::build_subtree_model(*skeleton_, *child.layout);
+        child.model = std::move(model);
+        child.data  = std::move(data);
+        child.marker_frame_map = std::move(marker_map);
+
+        // 2. Build child FK
+        child.fk = std::make_unique<ForwardKinematics>(
+            child.layout, child.model.get(), child.data.get(),
+            child.marker_frame_map);
+
+        // 3. Build child UKF (same alpha/beta/kappa as parent for now)
+        child.ukf = std::make_unique<UnscentedKalmanFilter>(
+            child.layout, config_.process_noise_std,
+            config_.ukf_alpha, config_.ukf_beta, config_.ukf_kappa);
+
+        // 4. Seed child state from the GLOBAL initial state (full-skeleton,
+        //    from IK or rest pose) — not from ukf_->state(), which only
+        //    contains parent-group DOFs and has no slots for child joints.
+        child.ukf->set_state(slice_state_for_child(global_initial_state, *child.layout));
+        child.ukf->set_covariance( /* identity scaled by init_joint_std */ );
+
+        // 5. Build merge map: child DOF i → parent DOF j
+        child.merge_map = build_merge_map(*child.layout, *skeleton_);
+
+        children_.push_back(std::move(child));
+    }
+}
+
+Two new private helpers:
+
+```cpp
+/// Extract the child-relevant joint angles from the global initial state
+/// (full-skeleton State produced by IK or rest-pose init).
+/// The parent UKF's state cannot be used here — it only holds parent-group DOFs.
+State slice_state_for_child(State const& global_state,
+                             SkeletonLayout const& child_layout) const;
+
+/// Build a vector of (child_dof_index, parent_dof_index) pairs.
+std::vector<std::pair<int,int>>
+build_merge_map(SkeletonLayout const& child_layout,
+                Skeleton const& parent_skeleton) const;
+```
+
+`build_merge_map` iterates `child_layout.joints()` in order, maintaining a
+`child_dof_offset` counter; for each child joint it looks up the same joint name
+in the parent skeleton's joint list (also in order) to find the
+`parent_dof_offset`, then appends `storage_dof_count` pairs.
+
+### 13.4 `run_child_step()` implementation
+
+```cpp
+void Tracker::run_child_step(ChildFilter& child,
+                             std::vector<Observation> const& obs, double dt) {
+    // 1. Inject the anchor joint's world-transform (from the *parent* FK,
+    //    already refreshed by run_parent_step) as the child's fixed root.
+    auto [root_pos, root_ori] = fk_->world_transform(child.anchor_joint_name);
+    child.ukf->set_root_transform(root_pos, root_ori);
+
+    // 2. Predict (process model overwrites root position from fixed_root_)
+    child.ukf->predict(dt);
+
+    // 3. Update — child FK only knows child markers so unknown markers are
+    //    silently ignored by the measurement model
+    child.ukf->update(obs, cameras_, *child.fk,
+                      child.measurement_noise_std, child.outlier_threshold);
+
+    // 4. FK refresh for potential grandchildren (Phase 3k+)
+    child.fk->compute(child.ukf->state());
+
+    // 5. Merge child joint angles back into parent state
+    State parent_state = ukf_->state();
+    auto child_angles  = child.ukf->state().joint_angles();
+    auto parent_angles = parent_state.joint_angles();
+    for (auto [ci, pi] : child.merge_map) {
+        parent_angles[pi] = child_angles[ci];
+    }
+    parent_state.set_joint_angles(parent_angles);
+    ukf_->set_state(parent_state);
+}
+```
+
+### 13.5 Tests
+
+A new `tests/test_tracker_child_filter.cpp` with tag `[tracker][3h]` covering:
+
+1. **Child construction test** — build a `Tracker` with one `ChildFilterConfig`;
+   verify `children_` has exactly one entry, child UKF is initialised, merge
+   map is non-empty.
+2. **Per-frame sequencing test** — one `track_frame()` call with a skeleton that
+   has two joint groups ("main" + "hand_r"); verify that after the call:
+   - Parent state and child state are mutually consistent (merged joint angles
+     match).
+   - `world_transform()` on the parent FK returns a non-NaN transform.
+3. **State merge test** — manually set a known child state, call `run_child_step()`
+   directly, confirm the parent state's joint angle vector is updated at the
+   correct DOF indices per the merge map.
+
+### 13.6 Files Changed in Phase 3h
+
+| File | Change |
+|------|---------|
+| `include/posetrak/core/config.hpp` | Add `ChildFilterConfig` struct; add `child_filters` field to `TrackerConfig` |
+| `include/posetrak/tracking/tracker.hpp` | Fully populate `ChildFilter` struct; add `num_children()` accessor; declare `slice_state_for_child()`, `build_children()` |
+| `src/tracking/tracker.cpp` | `build_children()` (with `children_.clear()` re-init guard); `run_child_step()`; `slice_state_for_child()`; `marker_id_remap` construction |
+| `include/posetrak/kinematics/forward_kinematics.hpp` | `marker_frame_map_` changed from `const&` to owned value (bug fix) |
+| `src/filters/ukf.cpp` | `state_` and `compute_state_mean` sized from `layout->total_storage_dof_count()` not `skeleton->total_dof_count()` (bug fix) |
+| `src/tracking/tracker.cpp` | `initialize_from_rest_pose`: size `joint_angles` from layout not `skeleton->total_dof_count()` (bug fix) |
+| `tests/test_tracker_child_filter.cpp` (new) | `[tracker][3h]`: construction, per-frame, merge, monolithic-unaffected tests |
+
+### 13.7 Implementation Notes (Phase 3h — committed 9fdcf74, tests committed 6cb8172)
+
+**Bug: `ForwardKinematics` dangling reference.**  `marker_frame_map_` was stored
+as `const&` to the map inside `ChildFilter`. When `children_.push_back(std::move(child))`
+moved the struct, the `std::map` moved in-place on the heap, invalidating the reference;
+the next FK call segfaulted at `data_.oMf[frame_id]`. Fixed by changing the member to an
+owned copy (`std::map<…> marker_frame_map_`). This bug was latent in all prior code because
+no other `ForwardKinematics` instance was built from a temporary.
+
+**Bug: wrong `joint_angles` size with SPHERICAL root.** `Skeleton::total_dof_count()`
+counts all non-FIXED joints including the root SPHERICAL — so for the test skeleton it
+returned 8 instead of the layout's 5. Two sites were affected:
+
+1. `Tracker::initialize_from_rest_pose` — sized `joint_angles` by `skeleton->total_dof_count()`
+   instead of `layout->total_storage_dof_count()`.
+2. `UnscentedKalmanFilter` constructor + `compute_state_mean` — also used
+   `skeleton()->total_dof_count()` to construct `State` and intermediate vectors.
+
+Both fixed. The bug was latent because existing skeletons use FIXED roots (0 DOFs), making
+both counts equal.
+
+**`marker_id_remap` field added to `ChildFilter`.** Observations carry full-skeleton
+`marker_id` indices. The child UKF indexes `layout->skeleton()->markers()` by `obs.marker_id`,
+so passing full-skeleton IDs → OOB access. `build_children()` constructs a
+`std::unordered_map<int,int>` (full marker index → child marker index). `run_child_step()`
+filters+remaps observations before calling `child.ukf->update()`.
+
+**`children_.clear()` guard.** `build_children()` is called from `initialize_ukf()`, which is
+called every time `initialize_from_rest_pose()` / `initialize_from_state()` is called. Without
+the `clear()` a second initialisation doubled the child count.
+
+**Test count.** 4 new `[tracker][3h]` tests; full suite now **156/172** (16 pre-existing
+failures unchanged, all unrelated to hierarchical tracking).
+
+---
+
+## 14. Implementation Phases
 
 Approximate ordering (each independently committable):
 
@@ -999,11 +1416,11 @@ Approximate ordering (each independently committable):
 | 3c | ✅ done | Remove `set_active_groups()` from `Skeleton`; pass groups to layout factory |
 | 3d | ✅ done | `PinocchioModelBuilder::build_subtree_model()` + unified `ForwardKinematics` API (`shared_ptr<const SkeletonLayout>` constructor + `state_to_config(State, SkeletonLayout)`) + 9 passing `[subtree_model]` tests |
 | 3e | ✅ done | `UnscentedKalmanFilter::set_root_transform()` + fixed-root sigma point path |
-| 3f | **next** | `ForwardKinematics::world_transform(joint_name)` |
-| 3g | | Rename `Tracker` → `HierarchicalTracker`; add empty `children_`; zero-children test |
-| 3h | | Child filter construction, per-frame sequencing, state merge |
-| 3i | | Debug dir scoping, stats aggregation, statistics tracker wiring |
-| 3j | | CLI / config plumbing; `HierarchicalConfig` drives child construction |
+| 3f | ✅ done | `ForwardKinematics::world_transform(joint_name)` |
+| 3g | ✅ done | Add `ChildFilter` stub + `children_` vector to `Tracker`; extract `run_parent_step()`; FK-refresh post-update (incidentally fixed 14 integration tests) |
+| 3h | ✅ done | Child filter construction, per-frame sequencing, state merge; 3 latent bug fixes |
+| 3i | **next** | Debug dir scoping, per-child diagnostics in `TrackingResult`, `StatisticsTracker` child CSV wiring |
+| 3j | | CLI / config plumbing: call `tracker.enable_debug()` instead of bare `ukf->enable_debug()` |
 | 3k | | Integration test: parent+child on recorded data, compare to single-filter baseline |
 
 Phases 3a–3c are pure refactors with no behaviour change; existing tests must stay green.
@@ -1012,7 +1429,160 @@ Phase 3g is the first end-to-end hierarchical run (zero-children parity test).
 
 ---
 
-## 13. What Gets Deleted
+## 16. Phase 3i — Debug Dir Scoping and Stats Aggregation
+
+Phase 3i makes the hierarchical tracker's diagnostic output observable:
+callers can enable per-filter debug directories and read per-child update
+diagnostics from `TrackingResult`. `StatisticsTracker` learns to write a
+separate CSV for every child filter.
+
+### 15.1 `Tracker::enable_debug()`
+
+Currently debug is enabled by calling `ukf_->enable_debug()` directly on the
+parent UKF from the CLI. With children present this never reaches child UKFs.
+Add a `Tracker`-level method that owns the intent and propagates it:
+
+```cpp
+// tracker.hpp — new public method
+void enable_debug(bool enable, std::string const& dir = "tracking_output/debug");
+
+// tracker.hpp — new private members
+bool debug_enabled_ = false;
+std::string debug_dir_;
+```
+
+```cpp
+// tracker.cpp
+void Tracker::enable_debug(bool enable, std::string const& dir) {
+    debug_enabled_ = enable;
+    debug_dir_     = dir;
+    if (ukf_) ukf_->enable_debug(enable, dir);
+    for (auto& child : children_) {
+        child.ukf->enable_debug(enable, dir + "/" + child.name);
+    }
+}
+```
+
+UKF debug is applied eagerly to any already-built UKFs. In `build_children()`,
+after constructing each child UKF, propagate the stored setting:
+
+```cpp
+child.ukf->enable_debug(debug_enabled_, debug_dir_ + "/" + ccfg.name);
+```
+
+The `ChildFilter` struct gains a `std::string name` field (copied from
+`ChildFilterConfig::name`) so `enable_debug()` can look it up without access to
+the original config.
+
+The CLI call `ukf->enable_debug(…)` in `cli/track.cpp` becomes
+`tracker.enable_debug(…)`.
+
+### 15.2 Per-child diagnostics in `TrackingResult`
+
+Add a `child_update_info` map to `TrackingResult`:
+
+```cpp
+struct TrackingResult {
+    double timestamp;
+    State state;
+    Eigen::MatrixXd covariance;
+    UpdateResult update_info;               ///< Parent filter diagnostics
+    std::map<std::string, UpdateResult> child_update_info;  ///< Keyed by child name — NEW
+    int num_observations_used;
+    bool tracking_lost;
+    std::string failure_reason;
+};
+```
+
+`run_child_step()` changes return type from `void` to `UpdateResult` (the
+return value of `child.ukf->update()` is already computed; just return it).
+`track_frame()` stores each child's result:
+
+```cpp
+for (auto& child : children_) {
+    auto child_result = run_child_step(child, observations, dt);
+    result.child_update_info[child.name] = std::move(child_result);
+}
+```
+
+### 15.3 `StatisticsTracker` child CSV wiring
+
+`StatisticsTracker` currently has one vector of `FrameStatistics` and writes
+one CSV. Add per-child trackers as private lazy-init members:
+
+```cpp
+// statistics_tracker.hpp — new private fields
+std::unordered_map<std::string, std::vector<FrameStatistics>> child_frame_stats_;
+```
+
+Add a new overload that takes the whole `TrackingResult`:
+
+```cpp
+void add_frame_stats(int frame, TrackingResult const& result);
+```
+
+Implementation:
+
+```cpp
+void StatisticsTracker::add_frame_stats(int frame, TrackingResult const& result) {
+    // Existing parent path
+    add_frame_stats(frame, result.timestamp, result.update_info,
+                    result.covariance, result.tracking_lost);
+    // Per-child paths
+    for (auto const& [name, child_result] : result.child_update_info) {
+        FrameStatistics stats;
+        stats.frame = frame;
+        stats.timestamp = result.timestamp;
+        stats.num_observations = child_result.num_observations;
+        stats.num_inliers      = child_result.num_inliers;
+        stats.num_outliers     = child_result.num_outliers;
+        // reprojection error from child_result.observations — same loop as parent path
+        // …
+        child_frame_stats_[name].push_back(stats);
+    }
+}
+```
+
+`write_frame_stats(output_path)` writes the parent CSV as today. If
+`child_frame_stats_` is non-empty it also writes sibling files:
+
+```
+tracking_stats.csv             ← parent (existing)
+tracking_stats_hand_r.csv      ← child "hand_r" (new)
+```
+
+The sibling filename is formed as `output_path.stem() + "_" + name +
+output_path.extension()`.
+
+### 15.4 Tests
+
+New file `tests/test_statistics_tracker_child.cpp` with tag `[statistics_tracker][3i]`
+(or extend `tests/test_statistics_tracker.cpp`):
+
+1. **`enable_debug` propagation** — build a tracker with one child; call
+   `tracker.enable_debug(true, "tmp_debug")`; verify child UKF\'s debug dir is
+   `"tmp_debug/hand_r"` via `child.ukf->get_debug_dir()` (requires a
+   `children()` or test-friend accessor).
+2. **`child_update_info` populated** — `track_frame()` result must contain
+   `"hand_r"` key in `child_update_info`.
+3. **StatisticsTracker child CSV** — add 2 frames via the `TrackingResult`
+   overload, call `write_frame_stats(tmp_path)`; verify the sibling CSV file
+   exists and has the correct number of data rows.
+
+### 15.5 Files Changed in Phase 3i
+
+| File | Change |
+|------|--------|
+| `include/posetrak/tracking/tracker.hpp` | Add `enable_debug()` method; `debug_enabled_` + `debug_dir_` members; `ChildFilter::name`; `TrackingResult::child_update_info` |
+| `src/tracking/tracker.cpp` | `enable_debug()` impl; propagate in `build_children()`; `run_child_step()` → `UpdateResult`; store results in `track_frame()` |
+| `include/posetrak/io/statistics_tracker.hpp` | `child_frame_stats_` member; `add_frame_stats(int, TrackingResult const&)` overload |
+| `src/io/statistics_tracker.cpp` | Implement new overload; update `write_frame_stats()` to write child CSVs |
+| `cli/track.cpp` | `tracker.enable_debug(…)` instead of `ukf->enable_debug(…)` |
+| `tests/` | New `[statistics_tracker][3i]` tests |
+
+---
+
+## 16. What Gets Deleted
 
 - `SubsetUKF` (header + implementation + tests) — replaced by the coordinator pattern.
 - `sync_from_background()` — the concept disappears.

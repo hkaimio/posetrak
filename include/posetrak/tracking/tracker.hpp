@@ -188,9 +188,38 @@ class Tracker {
 
    private:
     /**
+     * @brief Placeholder for a child filter (subtree tracker).
+     *
+     * Phase 3h will populate this with: layout, ukf, fk, model, data,
+     * marker_frame_map, freeflyer_joint_name, merge_map, and config.
+     */
+    struct ChildFilter {
+        // Phase 3h members go here
+    };
+
+    /**
      * @brief Initialize UKF with given state and initial covariance
      */
     void initialize_ukf(State const& initial_state, double timestamp);
+
+    /**
+     * @brief Run the parent (full-body) predict+update step.
+     *
+     * Calls ukf_->predict(), ukf_->update(), writes debug output, then
+     * refreshes fk_ so children can query world_transform() immediately after.
+     *
+     * @param obs  Observations for this frame
+     * @param dt   Time elapsed since last frame
+     * @param timestamp  Frame timestamp (used only to populate the result)
+     * @return TrackingResult for the parent filter
+     */
+    TrackingResult run_parent_step(std::vector<Observation> const& obs, double dt,
+                                   double timestamp);
+
+    /**
+     * @brief Run one child filter's predict+update step (stub for Phase 3h).
+     */
+    void run_child_step(ChildFilter& child, std::vector<Observation> const& obs, double dt);
 
     /**
      * @brief Check if we have sufficient observations for tracking
@@ -211,6 +240,9 @@ class Tracker {
     std::unique_ptr<pinocchio::Model> model_;
     std::unique_ptr<pinocchio::Data> data_;
     std::map<std::string, pinocchio::FrameIndex> marker_frame_map_;
+
+    // Child filters (populated in Phase 3h)
+    std::vector<ChildFilter> children_{};
 
     // State
     bool initialized_ = false;

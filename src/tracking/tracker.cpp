@@ -219,38 +219,51 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
         throw std::runtime_error("Tracker::track_frame() called before initialization");
     }
 
-    fmt::print("\n=== Tracking frame at timestamp {:.6f} ===\n", timestamp);
-
-    // Compute dt
+    // Compute dt; reject out-of-order timestamps before doing any work
     double dt = timestamp - last_timestamp_;
     if (dt < 0.0) {
-        // Return failure result
-        TrackingResult result{timestamp,
+        return TrackingResult{timestamp,
                               ukf_->state(),
                               ukf_->covariance(),
                               {},
                               0,
                               true,
                               "Negative dt: timestamps out of order"};
-        return result;
     }
+
+    auto result = run_parent_step(observations, dt, timestamp);
+
+    if (!result.tracking_lost) {
+        for (auto& child : children_) {
+            run_child_step(child, observations, dt);
+        }
+        last_timestamp_ = timestamp;
+        if (frame_callback_) {
+            frame_callback_(result);
+        }
+    }
+
+    return result;
+}
+
+TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observations, double dt,
+                                        double timestamp) {
+    fmt::print("\n=== Tracking frame at timestamp {:.6f} ===\n", timestamp);
 
     // Step 1: Predict
     ukf_->predict(dt);
 
     // Step 2: Check if we have observations
     if (!has_sufficient_observations(observations)) {
-        TrackingResult result{timestamp, ukf_->state(), ukf_->covariance(),         {},
+        return TrackingResult{timestamp, ukf_->state(), ukf_->covariance(),         {},
                               0,         true,          "Insufficient observations"};
-        return result;
     }
 
     // Step 3: Update
     auto update_info = ukf_->update(observations, cameras_, *fk_, config_.measurement_noise_std,
                                     config_.outlier_threshold);
 
-    // Debug: Export observation results (all frames) - moved here to ensure it runs even when all
-    // observations are outliers
+    // Debug: Export observation results (all frames) — runs even when all observations are outliers
     if (ukf_->is_debug_enabled()) {
         std::string const& debug_dir = ukf_->get_debug_dir();
         int frame_number = ukf_->get_frame_number();
@@ -267,7 +280,6 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
         f << "marker_name,camera_id,frame_idx,observed_u,observed_v,predicted_u,predicted_v,"
           << "residual_u,residual_v,residual_norm,mahalanobis_distance,is_outlier\n";
 
-        // Write each observation result
         for (auto const& obs_result : update_info.observations) {
             f << obs_result.marker_name << "," << obs_result.camera_id << ","
               << obs_result.camera_frame_idx << "," << obs_result.actual.x() << ","
@@ -279,22 +291,17 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
         }
     }
 
-    auto post_joint_angles = ukf_->state().joint_angles();
+    // Step 4: Refresh FK on posterior state so children can call world_transform()
+    fk_->compute(ukf_->state());
 
-    // Step 4: Create result
-    TrackingResult result{timestamp,   ukf_->state(),           ukf_->covariance(),
+    return TrackingResult{timestamp,   ukf_->state(),           ukf_->covariance(),
                           update_info, update_info.num_inliers, false,
                           ""};
+}
 
-    // Update last timestamp
-    last_timestamp_ = timestamp;
-
-    // Call frame callback if set
-    if (frame_callback_) {
-        frame_callback_(result);
-    }
-
-    return result;
+void Tracker::run_child_step(ChildFilter& /*child*/,
+                             std::vector<Observation> const& /*observations*/, double /*dt*/) {
+    // Phase 3h: inject root from parent FK, run child UKF predict+update, merge state
 }
 
 bool Tracker::has_sufficient_observations(std::vector<Observation> const& observations) const {

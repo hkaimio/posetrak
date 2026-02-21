@@ -30,7 +30,7 @@ bool is_root(Joint const& joint) {
 // ---------------------------------------------------------------------------
 
 std::shared_ptr<const SkeletonLayout>
-SkeletonLayout::build(Skeleton const& skeleton, bool include_all,
+SkeletonLayout::build(std::shared_ptr<const Skeleton> skeleton, bool include_all,
                       std::vector<std::string> const& group_names) {
     if (!include_all && group_names.empty()) {
         throw std::invalid_argument("SkeletonLayout::from_groups: group_names must not be empty");
@@ -40,7 +40,7 @@ SkeletonLayout::build(Skeleton const& skeleton, bool include_all,
 
     // Use new, not make_shared, because constructor is private.
     auto layout = std::shared_ptr<SkeletonLayout>(new SkeletonLayout());
-    layout->skeleton_ = std::make_shared<Skeleton>(skeleton);  // store immutable copy
+    layout->skeleton_ = skeleton;  // shared ownership — no copy
 
     // ------------------------------------------------------------------
     // Pass 1: walk joints in state-vector order and record the full-skeleton
@@ -54,7 +54,7 @@ SkeletonLayout::build(Skeleton const& skeleton, bool include_all,
     std::unordered_map<std::string, int> full_state_idx;
     {
         int fs_idx = 0;
-        for (auto const& joint : skeleton.get_joints_ordered()) {
+        for (auto const& joint : skeleton->get_joints_ordered()) {
             if (is_root(joint) || is_fixed(joint))
                 continue;
             full_state_idx[joint.name] = fs_idx;
@@ -69,7 +69,7 @@ SkeletonLayout::build(Skeleton const& skeleton, bool include_all,
     int layout_state_idx = 0;  // layout-relative position in joint_angles
     int layout_error_idx = 0;  // layout-relative position in error-state joint block
 
-    for (auto const& joint : skeleton.get_joints_ordered()) {
+    for (auto const& joint : skeleton->get_joints_ordered()) {
         bool const in_layout = include_all || (group_set.count(joint.group) > 0);
         if (!in_layout)
             continue;
@@ -119,29 +119,32 @@ SkeletonLayout::build(Skeleton const& skeleton, bool include_all,
 // Factory functions
 // ---------------------------------------------------------------------------
 
-std::shared_ptr<const SkeletonLayout> SkeletonLayout::from_full_skeleton(Skeleton const& skeleton) {
-    return build(skeleton, /*include_all=*/true, /*group_names=*/{});
+std::shared_ptr<const SkeletonLayout>
+SkeletonLayout::from_full_skeleton(std::shared_ptr<const Skeleton> skeleton) {
+    return build(std::move(skeleton), /*include_all=*/true, /*group_names=*/{});
 }
 
 std::shared_ptr<const SkeletonLayout>
-SkeletonLayout::from_groups(Skeleton const& skeleton, std::vector<std::string> const& group_names) {
-    return build(skeleton, /*include_all=*/false, group_names);
+SkeletonLayout::from_groups(std::shared_ptr<const Skeleton> skeleton,
+                            std::vector<std::string> const& group_names) {
+    return build(std::move(skeleton), /*include_all=*/false, group_names);
 }
 
 std::shared_ptr<const SkeletonLayout>
-SkeletonLayout::from_active_skeleton(Skeleton const& skeleton) {
+SkeletonLayout::from_active_skeleton(std::shared_ptr<const Skeleton> skeleton) {
     // Builds a layout respecting skeleton.is_joint_active().
     // IMPORTANT: state_index uses the full-skeleton State vector offset
     // (advances over ALL non-fixed non-root joints, including inactive ones),
     // because the UKF State is always total_dof_count()-sized.
     // error_index is layout-relative (only active joints contribute).
     auto layout = std::shared_ptr<SkeletonLayout>(new SkeletonLayout());
+    layout->skeleton_ = skeleton;  // shared ownership
 
     int full_state_idx = 0;    // position in State::joint_angles (all joints)
     int layout_error_idx = 0;  // position in error-state joint block (active only)
 
-    for (auto const& joint : skeleton.get_joints_ordered()) {
-        bool const active = skeleton.is_joint_active(joint.name);
+    for (auto const& joint : skeleton->get_joints_ordered()) {
+        bool const active = skeleton->is_joint_active(joint.name);
 
         if (is_root(joint)) {
             if (active) {

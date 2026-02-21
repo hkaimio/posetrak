@@ -79,7 +79,12 @@ class SkeletonLayout {
     /// @brief Build layout for ALL joints in the skeleton.
     /// The kinematic root (joint with no parent) is treated as a floating body:
     /// has_floating_root() returns true.
-    static std::shared_ptr<const SkeletonLayout> from_full_skeleton(Skeleton const& skeleton);
+    static std::shared_ptr<const SkeletonLayout>
+    from_full_skeleton(std::shared_ptr<const Skeleton> skeleton);
+    /// @brief Convenience overload — wraps skeleton in a shared_ptr (copies).
+    static std::shared_ptr<const SkeletonLayout> from_full_skeleton(Skeleton const& skeleton) {
+        return from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+    }
 
     /// @brief Build layout for joints whose group field matches one of group_names.
     ///
@@ -90,14 +95,25 @@ class SkeletonLayout {
     /// @param group_names  Group names to include (e.g. {"main"} or {"HandR"})
     /// @throws std::invalid_argument if group_names is empty or no joints match
     static std::shared_ptr<const SkeletonLayout>
-    from_groups(Skeleton const& skeleton, std::vector<std::string> const& group_names);
+    from_groups(std::shared_ptr<const Skeleton> skeleton,
+                std::vector<std::string> const& group_names);
+    /// @brief Convenience overload — wraps skeleton in a shared_ptr (copies).
+    static std::shared_ptr<const SkeletonLayout>
+    from_groups(Skeleton const& skeleton, std::vector<std::string> const& group_names) {
+        return from_groups(std::make_shared<const Skeleton>(skeleton), group_names);
+    }
 
     /// @brief Build layout respecting the skeleton's current active-group filter.
     ///
     /// Uses Skeleton::is_joint_active() as the inclusion predicate. When no
     /// active filter has been set on the skeleton, this is identical to
     /// from_full_skeleton().
-    static std::shared_ptr<const SkeletonLayout> from_active_skeleton(Skeleton const& skeleton);
+    static std::shared_ptr<const SkeletonLayout>
+    from_active_skeleton(std::shared_ptr<const Skeleton> skeleton);
+    /// @brief Convenience overload — wraps skeleton in a shared_ptr (copies).
+    static std::shared_ptr<const SkeletonLayout> from_active_skeleton(Skeleton const& skeleton) {
+        return from_active_skeleton(std::make_shared<const Skeleton>(skeleton));
+    }
 
     // -------------------------------------------------------------------------
     // O(1) accessors (all values precomputed at construction)
@@ -167,10 +183,11 @@ class SkeletonLayout {
     SkeletonLayout() = default;  // Only factory functions construct
 
     /// @brief Core construction logic shared by both factory functions.
-    /// @param skeleton          Source skeleton
+    /// @param skeleton          Source skeleton (shared ownership stored in layout)
     /// @param include_all       If true, include all non-fixed joints (from_full_skeleton)
     /// @param group_names       Groups to include (used when include_all is false)
-    static std::shared_ptr<const SkeletonLayout> build(Skeleton const& skeleton, bool include_all,
+    static std::shared_ptr<const SkeletonLayout> build(std::shared_ptr<const Skeleton> skeleton,
+                                                       bool include_all,
                                                        std::vector<std::string> const& group_names);
 
     std::vector<JointDesc> joints_;                     ///< Non-root joints in order

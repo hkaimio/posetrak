@@ -832,7 +832,163 @@ for (auto& child : children_) {
 
 ---
 
-## 11. Implementation Phases
+### 10.8 Implementation Notes (Phase 3e — completed)
+
+**Design vs reality — sigma-point root guards:**
+
+Section §10.5 stated that `apply_error_to_state()` already handles
+`has_floating_root() == false` correctly. This turned out to be wrong: both
+`apply_error_to_state()` (sigma_points.cpp) and `compute_state_error()` (ukf.cpp)
+unconditionally accessed `error_vec.segment<3>(active_dof)` and
+`error_vec.segment<3>(active_dof + 3)` for root velocity and angular velocity.
+For a child filter with `root_n = 0` and `active_dof = 4` (e.g. palm.R(3) +
+finger1.R(1)), those accesses require indices {7,8,9} from an 8-element vector —
+an out-of-bounds Eigen assertion (SIGABRT).
+
+Fix: wrapped all four root-section reads/writes in both functions with
+`if (root_n > 0) { ... }`. Joint sections were already correct because
+they use `root_n + j.error_index` (= 0 + ... for child filters).
+
+**Actual files changed vs design:**
+
+| File | Planned | Actual |
+|------|---------|--------|
+| `include/posetrak/filters/ukf.hpp` | Declare `set_root_transform()`; add private members | ✅ as planned |
+| `src/filters/ukf.cpp` | Implement `set_root_transform()`; root overwrite in `predict()` | ✅ as planned |
+| `src/filters/sigma_points.cpp` | No changes planned | **Added** `if (root_n > 0)` guard in `apply_error_to_state()` |
+| `src/filters/ukf.cpp` | — | **Added** `if (root_n > 0)` guard in `compute_state_error()` |
+| `tests/test_ukf_update.cpp` | One new test | **Three** tests added under `[ukf][child_filter]` |
+
+All three `[ukf][child_filter]` tests pass. No regressions against HEAD^.
+
+---
+
+## 11. Phase 3f — Detailed Design and Changes
+
+Phase 3f adds `ForwardKinematics::world_transform(joint_name)`, which lets the
+coordinator extract a skeleton joint's world-frame pose from the parent FK cache
+after each update. This is the last missing piece before Phase 3g can wire up
+`HierarchicalTracker`.
+
+### 11.1 What it does
+
+```cpp
+/// @brief Get world-frame pose of a named skeleton joint after compute().
+///
+/// Reads from the Pinocchio joint cache (data_.oMi[]).  Must be called after
+/// compute() has been called at least once for the current configuration.
+///
+/// @param joint_name  Name of a non-fixed skeleton joint (ball or revolute).
+/// @return {position, orientation} of the joint frame in world coordinates.
+/// @throws std::out_of_range if joint_name is not a known pinocchio joint.
+std::pair<Eigen::Vector3d, Eigen::Quaterniond>
+world_transform(std::string const& joint_name) const;
+```
+
+The coordinator usage (from §10.7) becomes:
+
+```cpp
+parent_fk_->compute(parent_ukf_->state());  // refresh pinocchio cache to posterior
+
+for (auto& child : children_) {
+    auto [pos, ori] = parent_fk_->world_transform(child.freeflyer_joint_name);
+    child.ukf->set_root_transform(pos, ori);
+    child.ukf->predict(dt);
+    child.ukf->update(child_obs, cameras, *child.fk);
+}
+```
+
+### 11.2 Why this is simple
+
+Real skeletons contain no FIXED joints in the interior of the hierarchy — only
+`root`, `ball`, and `revolute` types are used. (The `fixed` type in the skeleton
+format doc is a synonym for `root` and only applies to the top-level root joint.)
+Therefore every joint that could serve as a child filter's freeflyer is a real
+pinocchio joint with its own slot in `model_.joints` and a corresponding world
+transform in `data_.oMi[]` after `forwardKinematics()`.
+
+The Phase 3d test fixture artificially introduced a FIXED `wrist.R` mid-chain,
+which is not representative of real skeletons. In practice the freeflyer boundary
+joint (e.g. `hand.L`, a ball joint) is always non-FIXED, and no special frame
+plumbing is needed.
+
+### 11.3 Implementation
+
+A new private member in `ForwardKinematics`:
+
+```cpp
+std::unordered_map<std::string, pinocchio::JointIndex> joint_id_map_;
+```
+
+Populated in the constructor body by iterating `model_.names` (pinocchio's
+joint name array, indexed 0 = universe, 1..njoints-1 = actual joints):
+
+```cpp
+// In ForwardKinematics constructor (after existing init-list)
+for (pinocchio::JointIndex i = 1; i < static_cast<pinocchio::JointIndex>(model_.njoints); ++i) {
+    joint_id_map_[model_.names[i]] = i;
+}
+```
+
+`world_transform()` implementation — reads `data_.oMi[]` which `forwardKinematics()`
+already populates (no extra pinocchio call needed):
+
+```cpp
+std::pair<Eigen::Vector3d, Eigen::Quaterniond>
+ForwardKinematics::world_transform(std::string const& joint_name) const {
+    auto it = joint_id_map_.find(joint_name);
+    if (it == joint_id_map_.end()) {
+        throw std::out_of_range("world_transform: unknown joint '" + joint_name + "'");
+    }
+    pinocchio::SE3 const& T = data_.oMi[it->second];
+    return {T.translation(), Eigen::Quaterniond(T.rotation())};
+}
+```
+
+No changes to `PinocchioModelBuilder`. No changes to `model_.nframes`. Existing
+`[subtree_model]` tests are unaffected.
+
+### 11.4 Files Changed in Phase 3f
+
+| File | Change |
+|------|---------|
+| `include/posetrak/kinematics/forward_kinematics.hpp` | Declare `world_transform()`; add `joint_id_map_` private member |
+| `src/kinematics/forward_kinematics.cpp` | Populate `joint_id_map_` in constructor; implement `world_transform()` |
+| `tests/test_pinocchio_integration.cpp` | Tests under `[world_transform]` tag (see §11.5) |
+
+### 11.5 Tests
+
+All in `tests/test_pinocchio_integration.cpp` under `[world_transform]` tag.
+Use the existing §9.4 skeleton fixture but query only non-FIXED joints
+(`palm.R`, `forearm.R`), matching real-skeleton constraints.
+
+1. **Ball joint at identity root, zero angles**: `world_transform("palm.R")`
+   position equals the composed offset chain (forearm.R offset + wrist.R offset +
+   palm.R offset) with identity root.
+
+2. **Non-identity root shifts all joints**: inject root position `{1, 0, 0}`;
+   verify `world_transform("palm.R").first` shifts by exactly `{1, 0, 0}`.
+
+3. **Non-zero joint angles rotate child joints**: set `palm.R` to a known
+   rotation; verify `world_transform("forearm.R")` is unchanged but a marker on
+   palm moves as expected (cross-check against `compute()` output).
+
+4. **Unknown joint throws**: `world_transform("nonexistent")` throws
+   `std::out_of_range`.
+
+5. **Subtree FK**: build child FK for HandR (subtree model) with freeflyer =
+   `wrist.R`; the subtree pinocchio model contains `wrist.R` as a real pinocchio
+   joint (the FreeFlyer), so `world_transform("wrist.R")` returns the injected
+   root transform unchanged; `world_transform("palm.R")` gives the correct
+   world position.
+
+6. **Stale data before first compute**: calling `world_transform()` before any
+   `compute()` must not crash (pinocchio zero-initialises `data_.oMi`). The
+   result value is unspecified but safe.
+
+---
+
+## 12. Implementation Phases
 
 Approximate ordering (each independently committable):
 
@@ -842,8 +998,8 @@ Approximate ordering (each independently committable):
 | 3b | ✅ done | `SkeletonLayout` factory functions take `shared_ptr<const Skeleton>` |
 | 3c | ✅ done | Remove `set_active_groups()` from `Skeleton`; pass groups to layout factory |
 | 3d | ✅ done | `PinocchioModelBuilder::build_subtree_model()` + unified `ForwardKinematics` API (`shared_ptr<const SkeletonLayout>` constructor + `state_to_config(State, SkeletonLayout)`) + 9 passing `[subtree_model]` tests |
-| 3e | **next** | `UnscentedKalmanFilter::set_root_transform()` + fixed-root sigma point path |
-| 3f | | `ForwardKinematics::world_transform(joint_name)` |
+| 3e | ✅ done | `UnscentedKalmanFilter::set_root_transform()` + fixed-root sigma point path |
+| 3f | **next** | `ForwardKinematics::world_transform(joint_name)` |
 | 3g | | Rename `Tracker` → `HierarchicalTracker`; add empty `children_`; zero-children test |
 | 3h | | Child filter construction, per-frame sequencing, state merge |
 | 3i | | Debug dir scoping, stats aggregation, statistics tracker wiring |
@@ -856,7 +1012,7 @@ Phase 3g is the first end-to-end hierarchical run (zero-children parity test).
 
 ---
 
-## 12. What Gets Deleted
+## 13. What Gets Deleted
 
 - `SubsetUKF` (header + implementation + tests) — replaced by the coordinator pattern.
 - `sync_from_background()` — the concept disappears.

@@ -20,7 +20,23 @@ ForwardKinematics::ForwardKinematics(
     pinocchio::Model const& model, pinocchio::Data& data,
     std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map,
     std::shared_ptr<const SkeletonLayout> layout)
-    : model_(model), data_(data), marker_frame_map_(marker_frame_map), layout_(std::move(layout)) {}
+    : model_(model), data_(data), marker_frame_map_(marker_frame_map), layout_(std::move(layout)) {
+    // Populate joint_id_map_ from pinocchio joint names.
+    // Index 0 is universe (skip); 1..njoints-1 are real joints.
+    for (pinocchio::JointIndex i = 1; i < static_cast<pinocchio::JointIndex>(model_.njoints); ++i) {
+        joint_id_map_[model_.names[i]] = i;
+    }
+}
+
+std::pair<Eigen::Vector3d, Eigen::Quaterniond>
+ForwardKinematics::world_transform(std::string const& joint_name) const {
+    auto it = joint_id_map_.find(joint_name);
+    if (it == joint_id_map_.end()) {
+        throw std::out_of_range("world_transform: unknown joint '" + joint_name + "'");
+    }
+    pinocchio::SE3 const& T = data_.oMi[it->second];
+    return {T.translation(), Eigen::Quaterniond(T.rotation())};
+}
 
 std::unordered_map<std::string, Eigen::Vector3d> ForwardKinematics::compute(State const& state) {
     Eigen::VectorXd q = state_to_config(state, *layout_);

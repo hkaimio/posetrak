@@ -632,3 +632,122 @@ TEST_CASE("Subtree model: state_to_config layout overload", "[subtree_model]") {
     // finger2.R angle = 0
     CHECK_THAT(q[12], Catch::Matchers::WithinAbs(0.0, 1e-10));
 }
+// ===========================================================================
+// Phase 3f: world_transform() Tests
+// ===========================================================================
+
+/// Helper: build full-skeleton FK from make_hand_skeleton() and compute at
+/// the given root position with zero joint angles.  Caller owns model/data.
+///
+/// Uses from_groups(skel, {"main"}) — not from_full_skeleton — because the full
+/// pinocchio model stops at the FIXED wrist.R joint (add_joint_recursive returns
+/// immediately on FIXED joints), so HandR joints (palm.R, fingers) are absent from
+/// the model.  The "main" group layout covers exactly the joints that ARE in the
+/// model: upper_arm.R (SPHERICAL) and forearm.R (REVOLUTE).
+static ForwardKinematics make_full_fk(Skeleton const& skel, pinocchio::Model& model,
+                                      pinocchio::Data& data,
+                                      std::map<std::string, pinocchio::FrameIndex>& marker_map,
+                                      std::shared_ptr<const SkeletonLayout>& layout) {
+    PinocchioModelBuilder::build_model_and_data(skel, model, data);
+    marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skel);
+    layout = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"main"});
+    return ForwardKinematics(model, data, marker_map, layout);
+}
+
+TEST_CASE("world_transform: non-fixed joints in full-skeleton FK", "[world_transform]") {
+    Skeleton skel = make_hand_skeleton();
+    pinocchio::Model model;
+    pinocchio::Data data;
+    std::map<std::string, pinocchio::FrameIndex> marker_map;
+    std::shared_ptr<const SkeletonLayout> layout;
+    ForwardKinematics fk = make_full_fk(skel, model, data, marker_map, layout);
+
+    // zero-angle state
+    int n = static_cast<int>(layout->total_storage_dof_count());
+    State state_id(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(),
+                   Eigen::VectorXd::Zero(n), Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                   Eigen::VectorXd::Zero(n));
+    fk.compute(state_id);
+
+    // Offsets (all along X at identity orientation):
+    //   pelvis root at (0,0,0)
+    //   upper_arm.R: offset (0.2, 0, 0)
+    //   forearm.R: offset (0.3, 0, 0) from upper_arm.R → world (0.5, 0, 0)
+
+    SECTION("upper_arm.R position at identity") {
+        auto [pos, ori] = fk.world_transform("upper_arm.R");
+        CHECK_THAT(pos[0], Catch::Matchers::WithinAbs(0.2, 1e-6));
+        CHECK_THAT(pos[1], Catch::Matchers::WithinAbs(0.0, 1e-6));
+        CHECK_THAT(pos[2], Catch::Matchers::WithinAbs(0.0, 1e-6));
+    }
+
+    SECTION("forearm.R position at identity") {
+        auto [pos, ori] = fk.world_transform("forearm.R");
+        CHECK_THAT(pos[0], Catch::Matchers::WithinAbs(0.5, 1e-6));
+        CHECK_THAT(pos[1], Catch::Matchers::WithinAbs(0.0, 1e-6));
+        CHECK_THAT(pos[2], Catch::Matchers::WithinAbs(0.0, 1e-6));
+    }
+
+    SECTION("non-zero root shifts all joints") {
+        State state_shifted(Eigen::Vector3d(1.0, 0.0, 0.0), Eigen::Quaterniond::Identity(),
+                            Eigen::VectorXd::Zero(n), Eigen::Vector3d::Zero(),
+                            Eigen::Vector3d::Zero(), Eigen::VectorXd::Zero(n));
+        fk.compute(state_shifted);
+        auto [pos, ori] = fk.world_transform("forearm.R");
+        CHECK_THAT(pos[0], Catch::Matchers::WithinAbs(1.5, 1e-6));
+        CHECK_THAT(pos[1], Catch::Matchers::WithinAbs(0.0, 1e-6));
+        CHECK_THAT(pos[2], Catch::Matchers::WithinAbs(0.0, 1e-6));
+    }
+
+    SECTION("FIXED joint (wrist.R) throws out_of_range") {
+        // wrist.R is FIXED in the full-skeleton model so it has no pinocchio joint slot
+        REQUIRE_THROWS_AS(fk.world_transform("wrist.R"), std::out_of_range);
+    }
+
+    SECTION("unknown joint name throws out_of_range") {
+        REQUIRE_THROWS_AS(fk.world_transform("nonexistent"), std::out_of_range);
+    }
+}
+
+TEST_CASE("world_transform: subtree FK freeflyer and child joint", "[world_transform]") {
+    Skeleton skel = make_hand_skeleton();
+    pinocchio::Model model;
+    pinocchio::Data data;
+    PinocchioModelBuilder::build_subtree_model(skel, "wrist.R", {"HandR"}, model);
+    data = pinocchio::Data(model);
+
+    auto marker_map =
+        PinocchioModelBuilder::build_subtree_marker_frame_map(model, skel, "wrist.R", {"HandR"});
+    auto layout = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"HandR"});
+    ForwardKinematics fk(model, data, marker_map, layout);
+
+    // Inject freeflyer root at (1, 2, 3)
+    Eigen::Vector3d root_pos(1.0, 2.0, 3.0);
+    Eigen::Quaterniond root_ori = Eigen::Quaterniond::Identity();
+    int n = static_cast<int>(layout->total_storage_dof_count());
+    State state(root_pos, root_ori, Eigen::VectorXd::Zero(n), Eigen::Vector3d::Zero(),
+                Eigen::Vector3d::Zero(), Eigen::VectorXd::Zero(n));
+    fk.compute(state);
+
+    SECTION("wrist.R freeflyer returns injected root transform") {
+        // In the subtree model wrist.R IS the pinocchio freeflyer (joint index 1)
+        auto [pos, ori] = fk.world_transform("wrist.R");
+        CHECK_THAT(pos[0], Catch::Matchers::WithinAbs(1.0, 1e-6));
+        CHECK_THAT(pos[1], Catch::Matchers::WithinAbs(2.0, 1e-6));
+        CHECK_THAT(pos[2], Catch::Matchers::WithinAbs(3.0, 1e-6));
+    }
+
+    SECTION("palm.R world position = root + palm offset") {
+        // palm.R is placed at (0.05, 0, 0) from the wrist.R freeflyer
+        auto [pos, ori] = fk.world_transform("palm.R");
+        CHECK_THAT(pos[0], Catch::Matchers::WithinAbs(1.05, 1e-6));
+        CHECK_THAT(pos[1], Catch::Matchers::WithinAbs(2.0, 1e-6));
+        CHECK_THAT(pos[2], Catch::Matchers::WithinAbs(3.0, 1e-6));
+    }
+
+    SECTION("orientation matches injected root orientation") {
+        auto [pos, ori] = fk.world_transform("wrist.R");
+        Eigen::Quaterniond expected = Eigen::Quaterniond::Identity();
+        CHECK_THAT(ori.angularDistance(expected), Catch::Matchers::WithinAbs(0.0, 1e-6));
+    }
+}

@@ -19,6 +19,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 namespace posetrak {
 
@@ -109,11 +110,29 @@ class ForwardKinematics {
      */
     static Eigen::VectorXd state_to_config(State const& state, Skeleton const& skeleton);
 
+    /**
+     * @brief Get world-frame pose of a named skeleton joint after compute().
+     *
+     * Reads from data_.oMi[] which is populated by forwardKinematics() inside compute().
+     * Must be called after at least one compute() call for a meaningful result.
+     *
+     * Only works for joints that are actual Pinocchio joints (non-FIXED skeleton joints,
+     * plus any FreeFlyer added by build_subtree_model).  FIXED joints in the full-skeleton
+     * model are folded into their parent; querying them throws.
+     *
+     * @param joint_name  Pinocchio joint name (matches skeleton joint name for non-FIXED joints).
+     * @return {position, orientation} of the joint frame in world coordinates.
+     * @throws std::out_of_range if joint_name is not a known Pinocchio joint.
+     */
+    std::pair<Eigen::Vector3d, Eigen::Quaterniond>
+    world_transform(std::string const& joint_name) const;
+
    private:
     pinocchio::Model const& model_;
     pinocchio::Data& data_;
     std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map_;
-    std::shared_ptr<const SkeletonLayout> layout_;  ///< Always non-null
+    std::shared_ptr<const SkeletonLayout> layout_;                         ///< Always non-null
+    std::unordered_map<std::string, pinocchio::JointIndex> joint_id_map_;  ///< name → oMi index
 };
 
 }  // namespace posetrak

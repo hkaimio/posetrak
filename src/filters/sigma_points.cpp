@@ -16,11 +16,9 @@
 
 namespace posetrak {
 
-SigmaPointGenerator::SigmaPointGenerator(Skeleton const& skeleton,
-                                         std::shared_ptr<const SkeletonLayout> layout, double alpha,
+SigmaPointGenerator::SigmaPointGenerator(std::shared_ptr<const SkeletonLayout> layout, double alpha,
                                          double beta, double kappa)
-    : skeleton_(skeleton),
-      layout_(std::move(layout)),
+    : layout_(std::move(layout)),
       error_dim_(layout_->error_state_dim()),
       alpha_(alpha),
       beta_(beta),

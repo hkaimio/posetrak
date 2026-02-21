@@ -151,8 +151,8 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
     double kappa = config_.ukf_kappa;  // Secondary scaling
 
     auto layout = SkeletonLayout::from_active_skeleton(skeleton_);
-    ukf_ = std::make_unique<UnscentedKalmanFilter>(skeleton_, layout, config_.process_noise_std,
-                                                   alpha, beta, kappa);
+    ukf_ = std::make_unique<UnscentedKalmanFilter>(layout, config_.process_noise_std, alpha, beta,
+                                                   kappa);
 
     // Set initial state
     ukf_->set_state(initial_state);

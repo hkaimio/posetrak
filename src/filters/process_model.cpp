@@ -10,10 +10,9 @@
 
 namespace posetrak {
 
-ConstantVelocityModel::ConstantVelocityModel(Skeleton const& skeleton,
-                                             std::shared_ptr<const SkeletonLayout> layout,
+ConstantVelocityModel::ConstantVelocityModel(std::shared_ptr<const SkeletonLayout> layout,
                                              double process_noise_std)
-    : skeleton_(skeleton), layout_(std::move(layout)), process_noise_std_(process_noise_std) {}
+    : layout_(std::move(layout)), process_noise_std_(process_noise_std) {}
 
 State ConstantVelocityModel::propagate(State const& state, double dt) const {
     // Create a mutable copy to modify

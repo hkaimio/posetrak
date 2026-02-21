@@ -58,25 +58,23 @@ namespace posetrak {
 //     }
 // }
 
-UnscentedKalmanFilter::UnscentedKalmanFilter(Skeleton const& skeleton,
-                                             std::shared_ptr<const SkeletonLayout> layout,
+UnscentedKalmanFilter::UnscentedKalmanFilter(std::shared_ptr<const SkeletonLayout> layout,
                                              double process_noise_std, double alpha, double beta,
                                              double kappa)
-    : skeleton_(skeleton),
-      layout_(layout),
-      state_(skeleton.total_dof_count()),
+    : layout_(layout),
+      state_(layout->skeleton()->total_dof_count()),
       covariance_(Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim())),
       process_noise_(
           Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim())),
-      sigma_gen_(skeleton, layout, alpha, beta, kappa),
-      process_model_(skeleton, layout) {
+      sigma_gen_(layout, alpha, beta, kappa),
+      process_model_(layout) {
     // Initialize process noise with given standard deviation
     double const variance = process_noise_std * process_noise_std;
     process_noise_ *= variance;
 
     // Debug: Print DOF counts
-    fmt::print("UKF initialized: total_dof={}, error_dim={}\n", skeleton.total_dof_count(),
-               layout->error_state_dim());
+    fmt::print("UKF initialized: total_dof={}, error_dim={}\n",
+               layout->skeleton()->total_dof_count(), layout->error_state_dim());
 }
 
 void UnscentedKalmanFilter::set_covariance(Eigen::MatrixXd const& covariance) {
@@ -100,11 +98,11 @@ void UnscentedKalmanFilter::predict(double dt) {
         // Build list of active joints with their DOF indices in State vector
         std::vector<std::pair<std::string, int>> active_joint_info;  // (joint_name, dof_start_idx)
         int dof_offset = 0;
-        for (auto const& joint : skeleton_.joints()) {
+        for (auto const& joint : layout_->skeleton()->joints()) {
             if (!joint.parent_index.has_value()) {
                 continue;  // Skip root (handled separately)
             }
-            bool is_active = skeleton_.is_joint_active(joint.name);
+            bool is_active = layout_->skeleton()->is_joint_active(joint.name);
             if (is_active) {
                 // Store joint name and its starting DOF index
                 active_joint_info.push_back({joint.name, dof_offset});
@@ -122,14 +120,14 @@ void UnscentedKalmanFilter::predict(double dt) {
           << "root_angvel_x,root_angvel_y,root_angvel_z";
         for (auto const& [joint_name, dof_idx] : active_joint_info) {
             // Determine DOF count for this joint
-            auto const* joint = skeleton_.get_joint(joint_name);
+            auto const* joint = layout_->skeleton()->get_joint(joint_name);
             int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
             for (int i = 0; i < num_dof; ++i) {
                 f << "," << joint_name << "_angle_" << i;
             }
         }
         for (auto const& [joint_name, dof_idx] : active_joint_info) {
-            auto const* joint = skeleton_.get_joint(joint_name);
+            auto const* joint = layout_->skeleton()->get_joint(joint_name);
             int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
             for (int i = 0; i < num_dof; ++i) {
                 f << "," << joint_name << "_vel_" << i;
@@ -151,7 +149,7 @@ void UnscentedKalmanFilter::predict(double dt) {
               << s.root_angular_velocity().z();
             // Write only active joint angles
             for (auto const& [joint_name, dof_idx] : active_joint_info) {
-                auto const* joint = skeleton_.get_joint(joint_name);
+                auto const* joint = layout_->skeleton()->get_joint(joint_name);
                 int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
                 for (int j = 0; j < num_dof; ++j) {
                     f << "," << s.joint_angles()(dof_idx + j);
@@ -159,7 +157,7 @@ void UnscentedKalmanFilter::predict(double dt) {
             }
             // Write only active joint velocities
             for (auto const& [joint_name, dof_idx] : active_joint_info) {
-                auto const* joint = skeleton_.get_joint(joint_name);
+                auto const* joint = layout_->skeleton()->get_joint(joint_name);
                 int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
                 for (int j = 0; j < num_dof; ++j) {
                     f << "," << s.joint_velocities()(dof_idx + j);
@@ -179,11 +177,11 @@ void UnscentedKalmanFilter::predict(double dt) {
 
         // Write header
         f << "sigma_idx,root_x,root_y,root_z,root_qw,root_qx,root_qy,root_qz";
-        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+        for (int i = 0; i < layout_->skeleton()->total_dof_count(); ++i) {
             f << ",joint_" << i;
         }
         f << ",root_vx,root_vy,root_vz,root_wx,root_wy,root_wz";
-        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+        for (int i = 0; i < layout_->skeleton()->total_dof_count(); ++i) {
             f << ",joint_vel_" << i;
         }
         f << "\n";
@@ -228,11 +226,11 @@ void UnscentedKalmanFilter::predict(double dt) {
         // Build list of active joints with their DOF indices in State vector
         std::vector<std::pair<std::string, int>> active_joint_info;
         int dof_offset = 0;
-        for (auto const& joint : skeleton_.joints()) {
+        for (auto const& joint : layout_->skeleton()->joints()) {
             if (!joint.parent_index.has_value()) {
                 continue;  // Skip root
             }
-            bool is_active = skeleton_.is_joint_active(joint.name);
+            bool is_active = layout_->skeleton()->is_joint_active(joint.name);
             if (is_active) {
                 active_joint_info.push_back({joint.name, dof_offset});
             }
@@ -247,14 +245,14 @@ void UnscentedKalmanFilter::predict(double dt) {
           << "root_vel_x,root_vel_y,root_vel_z,"
           << "root_angvel_x,root_angvel_y,root_angvel_z";
         for (auto const& [joint_name, dof_idx] : active_joint_info) {
-            auto const* joint = skeleton_.get_joint(joint_name);
+            auto const* joint = layout_->skeleton()->get_joint(joint_name);
             int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
             for (int i = 0; i < num_dof; ++i) {
                 f << "," << joint_name << "_angle_" << i;
             }
         }
         for (auto const& [joint_name, dof_idx] : active_joint_info) {
-            auto const* joint = skeleton_.get_joint(joint_name);
+            auto const* joint = layout_->skeleton()->get_joint(joint_name);
             int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
             for (int i = 0; i < num_dof; ++i) {
                 f << "," << joint_name << "_vel_" << i;
@@ -276,7 +274,7 @@ void UnscentedKalmanFilter::predict(double dt) {
               << s.root_angular_velocity().z();
             // Write only active joint angles
             for (auto const& [joint_name, dof_idx] : active_joint_info) {
-                auto const* joint = skeleton_.get_joint(joint_name);
+                auto const* joint = layout_->skeleton()->get_joint(joint_name);
                 int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
                 for (int j = 0; j < num_dof; ++j) {
                     f << "," << s.joint_angles()(dof_idx + j);
@@ -284,7 +282,7 @@ void UnscentedKalmanFilter::predict(double dt) {
             }
             // Write only active joint velocities
             for (auto const& [joint_name, dof_idx] : active_joint_info) {
-                auto const* joint = skeleton_.get_joint(joint_name);
+                auto const* joint = layout_->skeleton()->get_joint(joint_name);
                 int num_dof = (joint->type == JointType::SPHERICAL) ? 3 : 1;
                 for (int j = 0; j < num_dof; ++j) {
                     f << "," << s.joint_velocities()(dof_idx + j);
@@ -303,11 +301,11 @@ void UnscentedKalmanFilter::predict(double dt) {
 
         // Write header
         f << "sigma_idx,root_x,root_y,root_z,root_qw,root_qx,root_qy,root_qz";
-        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+        for (int i = 0; i < layout_->skeleton()->total_dof_count(); ++i) {
             f << ",joint_" << i;
         }
         f << ",root_vx,root_vy,root_vz,root_wx,root_wy,root_wz";
-        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+        for (int i = 0; i < layout_->skeleton()->total_dof_count(); ++i) {
             f << ",joint_vel_" << i;
         }
         f << "\n";
@@ -382,11 +380,11 @@ void UnscentedKalmanFilter::predict(double dt) {
         std::ofstream f(debug_dir_ + "/frame_0001/prior_state_computed.csv");
         f << std::setprecision(15);
         f << "root_x,root_y,root_z,root_qw,root_qx,root_qy,root_qz";
-        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+        for (int i = 0; i < layout_->skeleton()->total_dof_count(); ++i) {
             f << ",joint_" << i;
         }
         f << ",root_vx,root_vy,root_vz,root_wx,root_wy,root_wz";
-        for (int i = 0; i < skeleton_.total_dof_count(); ++i) {
+        for (int i = 0; i < layout_->skeleton()->total_dof_count(); ++i) {
             f << ",joint_vel_" << i;
         }
         f << "\n";
@@ -460,7 +458,7 @@ void UnscentedKalmanFilter::predict(double dt) {
 State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states,
                                                 Eigen::VectorXd const& weights) const {
     // Create mean state
-    State mean_state(skeleton_.total_dof_count());
+    State mean_state(layout_->skeleton()->total_dof_count());
 
     // Mean position (simple weighted average)
     Eigen::Vector3d pos_mean = Eigen::Vector3d::Zero();
@@ -516,8 +514,8 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
     mean_state.set_root_angular_velocity(angvel_mean);
 
     // Mean joint angles and velocities
-    Eigen::VectorXd angles_mean = Eigen::VectorXd::Zero(skeleton_.total_dof_count());
-    Eigen::VectorXd velocities_mean = Eigen::VectorXd::Zero(skeleton_.total_dof_count());
+    Eigen::VectorXd angles_mean = Eigen::VectorXd::Zero(layout_->skeleton()->total_dof_count());
+    Eigen::VectorXd velocities_mean = Eigen::VectorXd::Zero(layout_->skeleton()->total_dof_count());
 
     for (JointDesc const& j : layout_->joints()) {
         int const si = j.state_index;
@@ -1148,7 +1146,7 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
         Observation const& obs = observations[i];
 
         // Get marker position (3D world)
-        auto const& marker = skeleton_.markers()[obs.marker_id];
+        auto const& marker = layout_->skeleton()->markers()[obs.marker_id];
         std::string const& marker_name = marker.name;
 
         auto it = marker_positions.find(marker_name);
@@ -1348,7 +1346,7 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
         ObsData const& data = obs_data[i];
 
         ObservationResult obs_result;
-        obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
+        obs_result.marker_name = layout_->skeleton()->markers()[obs.marker_id].name;
         obs_result.camera_id = obs.camera_id;
         obs_result.camera_frame_idx = obs.frame_idx;
         obs_result.predicted = data.predicted;
@@ -1395,7 +1393,7 @@ std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagno
         // Check for NaN in predicted (failed projection)
         if (!std::isfinite(predicted.x()) || !std::isfinite(predicted.y())) {
             ObservationResult obs_result;
-            obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
+            obs_result.marker_name = layout_->skeleton()->markers()[obs.marker_id].name;
             obs_result.camera_id = obs.camera_id;
             obs_result.camera_frame_idx = obs.frame_idx;
             obs_result.is_outlier = true;  // Mark as outlier for diagnostics
@@ -1418,7 +1416,7 @@ std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagno
 
         // Create result (not an outlier - just diagnostics)
         ObservationResult obs_result;
-        obs_result.marker_name = skeleton_.markers()[obs.marker_id].name;
+        obs_result.marker_name = layout_->skeleton()->markers()[obs.marker_id].name;
         obs_result.camera_id = obs.camera_id;
         obs_result.camera_frame_idx = obs.frame_idx;
         obs_result.is_outlier = false;
@@ -1434,7 +1432,7 @@ std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagno
 
 void UnscentedKalmanFilter::enforce_joint_limits() {
     // Clamp joint angles to their limits
-    auto const& joints = skeleton_.joints();
+    auto const& joints = layout_->skeleton()->joints();
     Eigen::VectorXd angles = state_.joint_angles();
 
     int joint_angle_idx = 0;
@@ -1646,7 +1644,7 @@ void UnscentedKalmanFilter::write_sigma_points_csv(std::vector<State> const& sig
       << "root_angvel_x,root_angvel_y,root_angvel_z";
 
     // Add joint angle columns (in skeleton order)
-    auto const joints_ordered = skeleton_.get_joints_ordered();
+    auto const joints_ordered = layout_->skeleton()->get_joints_ordered();
     for (auto const& joint : joints_ordered) {
         if (!joint.parent_index.has_value()) {
             continue;  // Skip root

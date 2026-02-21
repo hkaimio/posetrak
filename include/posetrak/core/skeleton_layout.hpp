@@ -133,6 +133,10 @@ class SkeletonLayout {
     /// False for child filters (e.g. hand filter) where root pose is set externally.
     bool has_floating_root() const { return has_floating_root_; }
 
+    /// @brief The skeleton this layout was derived from.
+    /// Guaranteed non-null after construction via any factory function.
+    std::shared_ptr<const Skeleton> const& skeleton() const { return skeleton_; }
+
     // -------------------------------------------------------------------------
     // Index mapping (for extract / merge between subset and full layouts)
     // -------------------------------------------------------------------------
@@ -171,6 +175,7 @@ class SkeletonLayout {
 
     std::vector<JointDesc> joints_;                     ///< Non-root joints in order
     std::unordered_map<std::string, int> name_to_idx_;  ///< name → index in joints_
+    std::shared_ptr<const Skeleton> skeleton_;          ///< Source skeleton (immutable)
     int total_storage_dof_count_ = 0;
     int joint_active_dof_count_ = 0;
     bool has_floating_root_ = false;

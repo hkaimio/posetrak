@@ -42,7 +42,7 @@ class UnscentedKalmanFilter {
      * @param beta UKF distribution parameter (default: 2.0 for Gaussian)
      * @param kappa UKF secondary scaling (default: 0.0)
      */
-    UnscentedKalmanFilter(Skeleton const& skeleton, std::shared_ptr<const SkeletonLayout> layout,
+    UnscentedKalmanFilter(std::shared_ptr<const SkeletonLayout> layout,
                           double process_noise_std = 0.1, double alpha = 0.001, double beta = 2.0,
                           double kappa = 0.0);
 
@@ -284,7 +284,6 @@ class UnscentedKalmanFilter {
      */
     void write_matrix_csv(Eigen::MatrixXd const& matrix, std::string const& filename) const;
 
-    Skeleton const& skeleton_;                      ///< Skeleton structure
     std::shared_ptr<const SkeletonLayout> layout_;  ///< Precomputed DOF index table
     State state_;                                   ///< Current state estimate
     Eigen::MatrixXd covariance_;                    ///< Covariance in error space

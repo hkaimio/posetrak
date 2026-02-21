@@ -40,6 +40,7 @@ SkeletonLayout::build(Skeleton const& skeleton, bool include_all,
 
     // Use new, not make_shared, because constructor is private.
     auto layout = std::shared_ptr<SkeletonLayout>(new SkeletonLayout());
+    layout->skeleton_ = std::make_shared<Skeleton>(skeleton);  // store immutable copy
 
     // ------------------------------------------------------------------
     // Pass 1: walk joints in state-vector order and record the full-skeleton

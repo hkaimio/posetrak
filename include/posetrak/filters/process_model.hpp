@@ -70,8 +70,7 @@ class ConstantVelocityModel : public ProcessModel {
      *        - Joint angles: radians
      *        - Velocities: meters/s or radians/s
      */
-    explicit ConstantVelocityModel(Skeleton const& skeleton,
-                                   std::shared_ptr<const SkeletonLayout> layout,
+    explicit ConstantVelocityModel(std::shared_ptr<const SkeletonLayout> layout,
                                    double process_noise_std = 0.1);
 
     State propagate(State const& state, double dt) const override;
@@ -100,7 +99,6 @@ class ConstantVelocityModel : public ProcessModel {
      */
     void enforce_joint_limits(State& state) const;
 
-    Skeleton const& skeleton_;
     std::shared_ptr<const SkeletonLayout> layout_;  ///< Precomputed DOF index table
     double process_noise_std_;
 };

@@ -11,6 +11,7 @@
 #include <pinocchio/multibody/model.hpp>
 
 #include "posetrak/core/skeleton.hpp"
+#include "posetrak/core/skeleton_layout.hpp"
 #include <map>
 #include <string>
 #include <unordered_set>
@@ -102,20 +103,18 @@ class PinocchioModelBuilder {
     /**
      * @brief Build marker frame map for a subtree model.
      *
-     * Only markers whose parent joint (or ancestor chain via FIXED joints) is included
-     * in the subtree (i.e. parent joint's group ∈ group_names, or parent is the
-     * freeflyer joint itself) are returned.
+     * Returns a frame map for every marker that is present in the pinocchio model
+     * AND whose parent joint is reachable in @p layout (as computed by
+     * SkeletonLayout::markers()). This is the single source of truth for which
+     * markers are included — no secondary group-membership filtering.
      *
-     * @param model               Subtree model built by build_subtree_model().
-     * @param skeleton            Full skeleton.
-     * @param freeflyer_joint_name  Same value passed to build_subtree_model().
-     * @param group_names         Same value passed to build_subtree_model().
-     * @return Map of marker_name → frame_id (only for markers in the subtree).
+     * @param model   Subtree model built by build_subtree_model().
+     * @param layout  Layout corresponding to the subtree (must be derived from the
+     *                same skeleton that was passed to build_subtree_model()).
+     * @return Map of marker_name → frame_id (only for markers in the layout).
      */
     static std::map<std::string, pinocchio::FrameIndex>
-    build_subtree_marker_frame_map(pinocchio::Model const& model, Skeleton const& skeleton,
-                                   std::string const& freeflyer_joint_name,
-                                   std::vector<std::string> const& group_names);
+    build_subtree_marker_frame_map(pinocchio::Model const& model, SkeletonLayout const& layout);
 
     /**
      * @brief Print model structure for debugging

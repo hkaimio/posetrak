@@ -179,8 +179,7 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
         model_ = std::make_unique<pinocchio::Model>();
         PinocchioModelBuilder::build_subtree_model(*skeleton_, root_name, groups, *model_);
         data_ = std::make_unique<pinocchio::Data>(*model_);
-        marker_frame_map_ = PinocchioModelBuilder::build_subtree_marker_frame_map(
-            *model_, *skeleton_, root_name, groups);
+        marker_frame_map_ = PinocchioModelBuilder::build_subtree_marker_frame_map(*model_, *layout);
         fk_ = std::make_unique<ForwardKinematics>(*model_, *data_, marker_frame_map_, layout);
     }
 
@@ -266,8 +265,8 @@ void Tracker::build_children(State const& global_initial_state) {
         PinocchioModelBuilder::build_subtree_model(*skeleton_, child.anchor_joint_name,
                                                    ccfg.joint_groups, *child.model);
         child.data = std::make_unique<pinocchio::Data>(*child.model);
-        child.marker_frame_map = PinocchioModelBuilder::build_subtree_marker_frame_map(
-            *child.model, *skeleton_, child.anchor_joint_name, ccfg.joint_groups);
+        child.marker_frame_map =
+            PinocchioModelBuilder::build_subtree_marker_frame_map(*child.model, *child.layout);
 
         // 2. Build child FK
         child.fk = std::make_unique<ForwardKinematics>(*child.model, *child.data,
@@ -291,22 +290,10 @@ void Tracker::build_children(State const& global_initial_state) {
         // 6. Build merge map: child DOF i → state_index in full-skeleton layout
         child.merge_map = full_layout->build_index_map_from(*child.layout);
 
-        // 7. Build marker_id remap: full-skeleton marker index → child-skeleton marker index.
-        //    The child UKF indexes markers() by obs.marker_id; observations use full-skeleton IDs.
-        {
-            auto const& full_markers = skeleton_->markers();
-            auto const& child_markers = child.layout->skeleton()->markers();
-            for (int child_mid = 0; child_mid < static_cast<int>(child_markers.size());
-                 ++child_mid) {
-                std::string const& child_name = child_markers[child_mid].name;
-                for (int full_mid = 0; full_mid < static_cast<int>(full_markers.size());
-                     ++full_mid) {
-                    if (full_markers[full_mid].name == child_name) {
-                        child.marker_id_remap[full_mid] = child_mid;
-                        break;
-                    }
-                }
-            }
+        // 7. Build marker_id remap: full-skeleton marker ID (obs.marker_id) → child layout ID.
+        //    Derived directly from the child layout's markers() — no O(N²) name search needed.
+        for (MarkerDesc const& mdesc : child.layout->markers()) {
+            child.marker_id_remap[mdesc.full_id] = mdesc.layout_id;
         }
 
         fmt::print("Built child filter '{}': {} joints, {} child markers, merge_map size {}\n",

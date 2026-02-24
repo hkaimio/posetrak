@@ -12,7 +12,7 @@ namespace posetrak {
 
 uint32_t Skeleton::add_joint(std::string const& name, std::optional<uint32_t> parent_index,
                              JointType type, Eigen::Vector3d const& offset,
-                             std::string const& group, Eigen::Vector3d const& rest_orientation) {
+                             Eigen::Vector3d const& rest_orientation) {
     // Check for duplicates
     for (auto const& existing : joints_) {
         if (existing.name == name) {
@@ -43,7 +43,7 @@ uint32_t Skeleton::add_joint(std::string const& name, std::optional<uint32_t> pa
 
     uint32_t index = static_cast<uint32_t>(joints_.size());
     joints_.push_back(
-        Joint{name, parent_index, type, dof, limits, num_limits, group, offset, rest_orientation});
+        Joint{name, parent_index, type, dof, limits, num_limits, offset, rest_orientation});
 
     return index;
 }
@@ -64,9 +64,40 @@ uint32_t Skeleton::add_marker(std::string const& name, uint32_t joint_index,
     }
 
     uint32_t index = static_cast<uint32_t>(markers_.size());
-    markers_.push_back(Marker{name, joint_index, local_pos, coco_id, ""});
+    markers_.push_back(Marker{name, joint_index, local_pos, coco_id});
 
     return index;
+}
+
+void Skeleton::register_group(std::string const& group_name,
+                              std::vector<std::string> const& joint_names,
+                              std::vector<std::string> const& marker_names) {
+    auto& jset = group_joints_[group_name];
+    for (auto const& n : joint_names)
+        jset.insert(n);
+    auto& mset = group_markers_[group_name];
+    for (auto const& n : marker_names)
+        mset.insert(n);
+}
+
+bool Skeleton::joint_in_groups(std::string const& joint_name,
+                               std::unordered_set<std::string> const& groups) const {
+    for (auto const& g : groups) {
+        auto it = group_joints_.find(g);
+        if (it != group_joints_.end() && it->second.count(joint_name))
+            return true;
+    }
+    return false;
+}
+
+bool Skeleton::marker_in_groups(std::string const& marker_name,
+                                std::unordered_set<std::string> const& groups) const {
+    for (auto const& g : groups) {
+        auto it = group_markers_.find(g);
+        if (it != group_markers_.end() && it->second.count(marker_name))
+            return true;
+    }
+    return false;
 }
 
 void Skeleton::set_joint_limits(uint32_t joint_index, std::array<Eigen::Vector2d, 3> const& limits,
@@ -195,7 +226,6 @@ nlohmann::json Skeleton::to_json() const {
         }
         joint_json["limits"] = limits_json;
 
-        joint_json["group"] = joint.group;
         joint_json["offset"] = {joint.offset[0], joint.offset[1], joint.offset[2]};
 
         // Always include rest_orientation (even if zero)
@@ -261,8 +291,6 @@ Skeleton Skeleton::from_json(nlohmann::json const& j) {
         offset << offset_arr[0].get<double>(), offset_arr[1].get<double>(),
             offset_arr[2].get<double>();
 
-        std::string group = joint_json.value("group", std::string{});
-
         // Parse rest orientation
         Eigen::Vector3d rest_orientation = Eigen::Vector3d::Zero();
         if (joint_json.contains("rest_orientation")) {
@@ -271,7 +299,7 @@ Skeleton Skeleton::from_json(nlohmann::json const& j) {
                 orient_arr[2].get<double>();
         }
 
-        uint32_t idx = skel.add_joint(name, parent_index, type, offset, group, rest_orientation);
+        uint32_t idx = skel.add_joint(name, parent_index, type, offset, rest_orientation);
         name_to_index[name] = idx;
 
         // Parse and set limits if present

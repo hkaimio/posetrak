@@ -25,6 +25,13 @@
 
 namespace posetrak {
 
+/// @brief Per-marker descriptor for markers whose parent joint is in this layout.
+struct MarkerDesc {
+    std::string name;  ///< Marker name (matches Skeleton::Marker::name)
+    int full_id;       ///< Index in skeleton_->markers() — same value as obs.marker_id
+    int layout_id;     ///< Index within this layout's markers() vector (0-based)
+};
+
 /// @brief Per-joint descriptor with all DOF information precomputed.
 ///
 /// Populated once at SkeletonLayout construction. Every field needed by
@@ -102,6 +109,17 @@ class SkeletonLayout {
     /// Root joint is NOT included; use has_floating_root() to handle it.
     std::vector<JointDesc> const& joints() const { return joints_; }
 
+    /// @brief Markers whose parent joint is reachable from this layout.
+    /// Order matches full-skeleton marker order.
+    std::vector<MarkerDesc> const& markers() const { return markers_; }
+
+    /// @brief Convert a full-skeleton marker ID (obs.marker_id) to this layout's marker index.
+    /// @return layout_id (index into markers()), or -1 if not in this layout.
+    int layout_marker_id(int full_id) const {
+        auto it = full_to_layout_marker_id_.find(full_id);
+        return it == full_to_layout_marker_id_.end() ? -1 : it->second;
+    }
+
     /// @brief Look up joint by name. O(1) via internal unordered_map.
     /// @return Pointer to descriptor, or nullptr if not in this layout.
     JointDesc const* get_joint(std::string const& name) const;
@@ -169,9 +187,11 @@ class SkeletonLayout {
                                                        bool include_all,
                                                        std::vector<std::string> const& group_names);
 
-    std::vector<JointDesc> joints_;                     ///< Non-root joints in order
-    std::unordered_map<std::string, int> name_to_idx_;  ///< name → index in joints_
-    std::shared_ptr<const Skeleton> skeleton_;          ///< Source skeleton (immutable)
+    std::vector<JointDesc> joints_;                          ///< Non-root joints in order
+    std::unordered_map<std::string, int> name_to_idx_;       ///< name → index in joints_
+    std::vector<MarkerDesc> markers_;                        ///< Markers in this layout
+    std::unordered_map<int, int> full_to_layout_marker_id_;  ///< full_id → layout_id
+    std::shared_ptr<const Skeleton> skeleton_;               ///< Source skeleton (immutable)
     int total_storage_dof_count_ = 0;
     int joint_active_dof_count_ = 0;
     bool has_floating_root_ = false;

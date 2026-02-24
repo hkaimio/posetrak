@@ -28,7 +28,6 @@ struct Joint {
     int dof;  ///< Degrees of freedom (1 for revolute, 3 for spherical, 0 for fixed)
     std::array<Eigen::Vector2d, 3> limits;  ///< Joint limits [min, max] per DOF (max 3)
     size_t num_limits;                      ///< Number of active limit pairs (0-3)
-    std::string group;                      ///< Joint group for filtering (e.g., "legs", "arms")
     Eigen::Vector3d offset;                 ///< Translation from parent in parent's frame
     Eigen::Vector3d rest_orientation;       ///< Rest orientation as ZYX Euler angles (radians)
 
@@ -71,7 +70,6 @@ struct Marker {
     uint32_t joint_index;        ///< Attached joint index in skeleton
     Eigen::Vector3d local_pos;   ///< Position in joint's local frame
     std::optional<int> coco_id;  ///< Optional COCO keypoint ID for compatibility
-    std::string group;           ///< Marker group for filtering (e.g., "main", "HandL")
 };
 
 /// @brief Skeleton hierarchy with joints and markers
@@ -88,14 +86,28 @@ class Skeleton {
     /// @param parent_index Parent joint index (nullopt for root)
     /// @param type Joint type
     /// @param offset Translation from parent in parent's frame
-    /// @param group Joint group for filtering
     /// @param rest_orientation Rest orientation as ZYX Euler angles
     /// @return Index of the added joint
     /// @throws std::invalid_argument if joint name already exists or parent index invalid
     uint32_t add_joint(std::string const& name, std::optional<uint32_t> parent_index,
                        JointType type, Eigen::Vector3d const& offset = Eigen::Vector3d::Zero(),
-                       std::string const& group = "",
                        Eigen::Vector3d const& rest_orientation = Eigen::Vector3d::Zero());
+
+    /// @brief Register a named group with its joint and marker members.
+    ///
+    /// A joint or marker may belong to multiple groups (m:n relationship).
+    /// Calling register_group multiple times for the same group_name is allowed
+    /// and cumulative (adds to the existing member sets).
+    void register_group(std::string const& group_name, std::vector<std::string> const& joint_names,
+                        std::vector<std::string> const& marker_names);
+
+    /// @brief Return true if joint_name belongs to any of the given groups.
+    bool joint_in_groups(std::string const& joint_name,
+                         std::unordered_set<std::string> const& groups) const;
+
+    /// @brief Return true if marker_name belongs to any of the given groups.
+    bool marker_in_groups(std::string const& marker_name,
+                          std::unordered_set<std::string> const& groups) const;
 
     /// @brief Add marker to skeleton
     /// @param name Unique marker name
@@ -182,6 +194,11 @@ class Skeleton {
 
     std::vector<Joint> joints_;    ///< Joint definitions (in state vector order)
     std::vector<Marker> markers_;  ///< Marker definitions (in state vector order)
+
+    /// group_name → set of joint names belonging to that group
+    std::unordered_map<std::string, std::unordered_set<std::string>> group_joints_;
+    /// group_name → set of marker names belonging to that group
+    std::unordered_map<std::string, std::unordered_set<std::string>> group_markers_;
 };
 
 }  // namespace posetrak

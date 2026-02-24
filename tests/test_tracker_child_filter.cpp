@@ -69,14 +69,16 @@ struct HierarchicalFixture {
     HierarchicalFixture() {
         Skeleton skel;
         uint32_t pelvis = skel.add_joint("pelvis", std::nullopt, JointType::SPHERICAL,
-                                         Eigen::Vector3d::Zero(), "main");  // root → FreeFlyer
+                                         Eigen::Vector3d::Zero());  // root → FreeFlyer
         uint32_t forearm = skel.add_joint("forearm.R", pelvis, JointType::REVOLUTE,
-                                          Eigen::Vector3d(0.30, 0, 0), "main");  // anchor joint
-        uint32_t palm = skel.add_joint("palm.R", forearm, JointType::SPHERICAL,
-                                       Eigen::Vector3d(0.25, 0, 0), "HandR");
-        uint32_t finger = skel.add_joint("finger1.R", palm, JointType::REVOLUTE,
-                                         Eigen::Vector3d(0.04, 0, 0), "HandR");
+                                          Eigen::Vector3d(0.30, 0, 0));  // anchor joint
+        uint32_t palm =
+            skel.add_joint("palm.R", forearm, JointType::SPHERICAL, Eigen::Vector3d(0.25, 0, 0));
+        uint32_t finger =
+            skel.add_joint("finger1.R", palm, JointType::REVOLUTE, Eigen::Vector3d(0.04, 0, 0));
         (void)finger;
+        skel.register_group("main", {"pelvis", "forearm.R"}, {});
+        skel.register_group("HandR", {"palm.R", "finger1.R"}, {});
 
         body_marker_id = skel.add_marker("MRK-body", pelvis, Eigen::Vector3d(0, 0.1, 0));
         palm_marker_id = skel.add_marker("MRK-palm", palm, Eigen::Vector3d(0, 0, 0.02));

@@ -30,10 +30,10 @@ beta = 2.0
 kappa = 0.0
 
 [output]
-directory = "/home/harri/projects/posetrak/tracking_tests/harri-no-palms-ba17fc1"
+directory = "/home/harri/projects/posetrak/tracking_tests/harri-no-palms-marker-fix"
 export_tracking_results = true
 export_statistics = true
-export_debug = true
+export_debug = false
 
 [processing]
 start_time = 0.0

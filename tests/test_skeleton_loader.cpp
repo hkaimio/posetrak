@@ -298,7 +298,7 @@ TEST_CASE("Skeleton loader handles optional fields", "[skeleton_loader]") {
         Skeleton skeleton = load_skeleton_from_yaml(test_file.string());
         Joint const* joint = skeleton.get_joint("root");
         REQUIRE(joint != nullptr);
-        REQUIRE(joint->group.empty());
+        // group membership is tracked at skeleton level, not per-joint
     }
 
     SECTION("Marker without COCO ID has nullopt") {

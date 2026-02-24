@@ -21,12 +21,11 @@ TEST_CASE("PinocchioModelBuilder builds model from skeleton", "[pinocchio]") {
 
     // Root joint (pelvis)
     uint32_t pelvis_idx = skeleton.add_joint("pelvis", std::nullopt, JointType::REVOLUTE,
-                                             Eigen::Vector3d::Zero(), "", Eigen::Vector3d::Zero());
+                                             Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
 
     // Child joint (spine)
-    uint32_t spine_idx =
-        skeleton.add_joint("spine", pelvis_idx, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 0.1), "",
-                           Eigen::Vector3d::Zero());
+    uint32_t spine_idx = skeleton.add_joint("spine", pelvis_idx, JointType::REVOLUTE,
+                                            Eigen::Vector3d(0, 0, 0.1), Eigen::Vector3d::Zero());
 
     // Marker on spine
     skeleton.add_marker("head_marker", spine_idx, Eigen::Vector3d(0, 0, 0.2), std::nullopt);
@@ -71,11 +70,10 @@ TEST_CASE("ForwardKinematics computes marker positions", "[forward_kinematics]")
     // Create a simple skeleton
     Skeleton skeleton;
     uint32_t pelvis_idx = skeleton.add_joint("pelvis", std::nullopt, JointType::REVOLUTE,
-                                             Eigen::Vector3d::Zero(), "", Eigen::Vector3d::Zero());
+                                             Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
 
-    uint32_t spine_idx =
-        skeleton.add_joint("spine", pelvis_idx, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 0.1), "",
-                           Eigen::Vector3d::Zero());
+    uint32_t spine_idx = skeleton.add_joint("spine", pelvis_idx, JointType::REVOLUTE,
+                                            Eigen::Vector3d(0, 0, 0.1), Eigen::Vector3d::Zero());
 
     skeleton.add_marker("head_marker", spine_idx, Eigen::Vector3d(0, 0, 0.2), std::nullopt);
 
@@ -147,11 +145,10 @@ TEST_CASE("ForwardKinematics handles spherical joints", "[forward_kinematics]") 
     // Create skeleton with spherical joint
     Skeleton skeleton;
     uint32_t pelvis_idx = skeleton.add_joint("pelvis", std::nullopt, JointType::REVOLUTE,
-                                             Eigen::Vector3d::Zero(), "", Eigen::Vector3d::Zero());
+                                             Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
 
-    uint32_t shoulder_idx =
-        skeleton.add_joint("shoulder", pelvis_idx, JointType::SPHERICAL, Eigen::Vector3d(0.2, 0, 0),
-                           "", Eigen::Vector3d::Zero());
+    uint32_t shoulder_idx = skeleton.add_joint("shoulder", pelvis_idx, JointType::SPHERICAL,
+                                               Eigen::Vector3d(0.2, 0, 0), Eigen::Vector3d::Zero());
 
     skeleton.add_marker("hand", shoulder_idx, Eigen::Vector3d(0.3, 0, 0), std::nullopt);
     skeleton.add_marker("shoulder_marker", shoulder_idx, Eigen::Vector3d(0, 0, 0.1), std::nullopt);
@@ -432,20 +429,22 @@ TEST_CASE("ForwardKinematics validates against Python ground truth",
 static Skeleton make_hand_skeleton() {
     Skeleton skel;
 
-    uint32_t pelvis = skel.add_joint("pelvis", std::nullopt, JointType::SPHERICAL,
-                                     Eigen::Vector3d::Zero(), "main");
-    uint32_t upper_arm = skel.add_joint("upper_arm.R", pelvis, JointType::SPHERICAL,
-                                        Eigen::Vector3d(0.2, 0, 0), "main");
-    uint32_t forearm = skel.add_joint("forearm.R", upper_arm, JointType::REVOLUTE,
-                                      Eigen::Vector3d(0.3, 0, 0), "main");
+    uint32_t pelvis =
+        skel.add_joint("pelvis", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero());
+    uint32_t upper_arm =
+        skel.add_joint("upper_arm.R", pelvis, JointType::SPHERICAL, Eigen::Vector3d(0.2, 0, 0));
+    uint32_t forearm =
+        skel.add_joint("forearm.R", upper_arm, JointType::REVOLUTE, Eigen::Vector3d(0.3, 0, 0));
     uint32_t wrist =
-        skel.add_joint("wrist.R", forearm, JointType::FIXED, Eigen::Vector3d(0.25, 0, 0), "main");
+        skel.add_joint("wrist.R", forearm, JointType::FIXED, Eigen::Vector3d(0.25, 0, 0));
     uint32_t palm =
-        skel.add_joint("palm.R", wrist, JointType::SPHERICAL, Eigen::Vector3d(0.05, 0, 0), "HandR");
-    uint32_t f1 = skel.add_joint("finger1.R", palm, JointType::REVOLUTE,
-                                 Eigen::Vector3d(0.04, 0.01, 0), "HandR");
-    skel.add_joint("finger2.R", palm, JointType::REVOLUTE, Eigen::Vector3d(0.04, -0.01, 0),
-                   "HandR");
+        skel.add_joint("palm.R", wrist, JointType::SPHERICAL, Eigen::Vector3d(0.05, 0, 0));
+    uint32_t f1 =
+        skel.add_joint("finger1.R", palm, JointType::REVOLUTE, Eigen::Vector3d(0.04, 0.01, 0));
+    skel.add_joint("finger2.R", palm, JointType::REVOLUTE, Eigen::Vector3d(0.04, -0.01, 0));
+
+    skel.register_group("main", {"pelvis", "upper_arm.R", "forearm.R", "wrist.R"}, {});
+    skel.register_group("HandR", {"palm.R", "finger1.R", "finger2.R"}, {});
 
     skel.add_marker("MRK-body", pelvis, Eigen::Vector3d(0, 0, 0.1));
     skel.add_marker("MRK-palm", palm, Eigen::Vector3d(0, 0, 0.01));
@@ -505,9 +504,9 @@ TEST_CASE("Subtree model: only subtree markers included", "[subtree_model]") {
     Skeleton skel = make_hand_skeleton();
     pinocchio::Model model;
     PinocchioModelBuilder::build_subtree_model(skel, "wrist.R", {"HandR"}, model);
+    auto layout = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"HandR"});
 
-    auto marker_map =
-        PinocchioModelBuilder::build_subtree_marker_frame_map(model, skel, "wrist.R", {"HandR"});
+    auto marker_map = PinocchioModelBuilder::build_subtree_marker_frame_map(model, *layout);
 
     // MRK-palm and MRK-tip1 are in HandR group; MRK-body is in main group → excluded
     REQUIRE(marker_map.size() == 2);
@@ -522,10 +521,9 @@ TEST_CASE("Subtree model: FK at identity state gives correct marker position", "
     pinocchio::Data data;
     PinocchioModelBuilder::build_subtree_model(skel, "wrist.R", {"HandR"}, model);
     data = pinocchio::Data(model);
-
-    auto marker_map =
-        PinocchioModelBuilder::build_subtree_marker_frame_map(model, skel, "wrist.R", {"HandR"});
     auto layout = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"HandR"});
+
+    auto marker_map = PinocchioModelBuilder::build_subtree_marker_frame_map(model, *layout);
 
     // Identity state: root at origin, all joint angles zero
     int n_angles = static_cast<int>(layout->total_storage_dof_count());
@@ -555,10 +553,9 @@ TEST_CASE("Subtree model: FK with injected root transform", "[subtree_model]") {
     pinocchio::Data data;
     PinocchioModelBuilder::build_subtree_model(skel, "wrist.R", {"HandR"}, model);
     data = pinocchio::Data(model);
-
-    auto marker_map =
-        PinocchioModelBuilder::build_subtree_marker_frame_map(model, skel, "wrist.R", {"HandR"});
     auto layout = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"HandR"});
+
+    auto marker_map = PinocchioModelBuilder::build_subtree_marker_frame_map(model, *layout);
 
     // Inject root offset: wrist.R world position = (1, 2, 3), identity orientation
     Eigen::Vector3d root_pos(1.0, 2.0, 3.0);
@@ -715,10 +712,9 @@ TEST_CASE("world_transform: subtree FK freeflyer and child joint", "[world_trans
     pinocchio::Data data;
     PinocchioModelBuilder::build_subtree_model(skel, "wrist.R", {"HandR"}, model);
     data = pinocchio::Data(model);
-
-    auto marker_map =
-        PinocchioModelBuilder::build_subtree_marker_frame_map(model, skel, "wrist.R", {"HandR"});
     auto layout = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"HandR"});
+
+    auto marker_map = PinocchioModelBuilder::build_subtree_marker_frame_map(model, *layout);
     ForwardKinematics fk(model, data, marker_map, layout);
 
     // Inject freeflyer root at (1, 2, 3)

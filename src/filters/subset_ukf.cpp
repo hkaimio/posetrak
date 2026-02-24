@@ -178,7 +178,8 @@ SubsetUKF::filter_observations(std::vector<Observation> const& observations) con
         if (obs.marker_id < 0 || static_cast<size_t>(obs.marker_id) >= markers.size()) {
             continue;
         }
-        if (obs_group_set_.count(markers[static_cast<size_t>(obs.marker_id)].group) > 0) {
+        if (skeleton_.marker_in_groups(markers[static_cast<size_t>(obs.marker_id)].name,
+                                       obs_group_set_)) {
             result.push_back(obs);
         }
     }

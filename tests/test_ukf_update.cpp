@@ -677,13 +677,15 @@ TEST_CASE("UKF velocity damping at joint limits", "[ukf][update][damping]") {
 ///                └── finger1.R (REVOLUTE, group="HandR")
 static Skeleton make_child_filter_skeleton() {
     Skeleton skel;
-    uint32_t pelvis = skel.add_joint("pelvis", std::nullopt, JointType::SPHERICAL,
-                                     Eigen::Vector3d::Zero(), "main");
+    uint32_t pelvis =
+        skel.add_joint("pelvis", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero());
     uint32_t wrist =
-        skel.add_joint("wrist.R", pelvis, JointType::FIXED, Eigen::Vector3d(0, 0, 1.0), "main");
+        skel.add_joint("wrist.R", pelvis, JointType::FIXED, Eigen::Vector3d(0, 0, 1.0));
     uint32_t palm =
-        skel.add_joint("palm.R", wrist, JointType::SPHERICAL, Eigen::Vector3d(0.05, 0, 0), "HandR");
-    skel.add_joint("finger1.R", palm, JointType::REVOLUTE, Eigen::Vector3d(0.04, 0, 0), "HandR");
+        skel.add_joint("palm.R", wrist, JointType::SPHERICAL, Eigen::Vector3d(0.05, 0, 0));
+    skel.add_joint("finger1.R", palm, JointType::REVOLUTE, Eigen::Vector3d(0.04, 0, 0));
+    skel.register_group("main", {"pelvis", "wrist.R"}, {});
+    skel.register_group("HandR", {"palm.R", "finger1.R"}, {});
     skel.add_marker("MRK-palm", palm, Eigen::Vector3d(0, 0, 0.01));
     return skel;
 }

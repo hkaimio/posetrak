@@ -14,12 +14,11 @@ TEST_CASE("InverseKinematics solves simple 2-joint problem", "[ik][inverse_kinem
     Skeleton skeleton;
 
     uint32_t pelvis_idx = skeleton.add_joint("pelvis", std::nullopt, JointType::REVOLUTE,
-                                             Eigen::Vector3d::Zero(), "", Eigen::Vector3d::Zero());
+                                             Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
 
     // Spine joint at 0.1m above pelvis
-    uint32_t spine_idx =
-        skeleton.add_joint("spine", pelvis_idx, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 0.1), "",
-                           Eigen::Vector3d::Zero());
+    uint32_t spine_idx = skeleton.add_joint("spine", pelvis_idx, JointType::REVOLUTE,
+                                            Eigen::Vector3d(0, 0, 0.1), Eigen::Vector3d::Zero());
 
     // Marker on spine at 0.2m above joint
     skeleton.add_marker("head", spine_idx, Eigen::Vector3d(0, 0, 0.2), std::nullopt);
@@ -101,11 +100,10 @@ TEST_CASE("InverseKinematics handles multiple markers", "[ik][inverse_kinematics
     Skeleton skeleton;
 
     uint32_t root_idx = skeleton.add_joint("pelvis", std::nullopt, JointType::REVOLUTE,
-                                           Eigen::Vector3d::Zero(), "", Eigen::Vector3d::Zero());
+                                           Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
 
-    uint32_t spine_idx =
-        skeleton.add_joint("spine", root_idx, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 0.1), "",
-                           Eigen::Vector3d::Zero());
+    uint32_t spine_idx = skeleton.add_joint("spine", root_idx, JointType::REVOLUTE,
+                                            Eigen::Vector3d(0, 0, 0.1), Eigen::Vector3d::Zero());
 
     // Two markers
     skeleton.add_marker("marker1", root_idx, Eigen::Vector3d(0.1, 0, 0), std::nullopt);

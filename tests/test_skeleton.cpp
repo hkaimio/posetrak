@@ -16,16 +16,14 @@ TEST_CASE("Joint construction and properties", "[skeleton]") {
         REQUIRE_FALSE(j.parent_index.has_value());
         REQUIRE(j.type == JointType::REVOLUTE);
         REQUIRE(j.dof == 1);
-        REQUIRE(j.group.empty());
     }
 
     SECTION("Spherical joint") {
         uint32_t parent_idx = skel.add_joint("torso", std::nullopt, JointType::SPHERICAL);
         uint32_t idx = skel.add_joint("shoulder", parent_idx, JointType::SPHERICAL,
-                                      Eigen::Vector3d(0.1, 0.2, 0.3), "arms");
+                                      Eigen::Vector3d(0.1, 0.2, 0.3));
         auto const& j = skel.joints()[idx];
         REQUIRE(j.dof == 3);
-        REQUIRE(j.group == "arms");
         REQUIRE(j.offset.isApprox(Eigen::Vector3d(0.1, 0.2, 0.3)));
     }
 
@@ -85,14 +83,17 @@ TEST_CASE("Skeleton construction and validation", "[skeleton]") {
 
 TEST_CASE("Skeleton DOF counting", "[skeleton]") {
     Skeleton skel;
-    uint32_t pelvis = skel.add_joint("pelvis", std::nullopt, JointType::SPHERICAL,
-                                     Eigen::Vector3d::Zero(), "torso");
-    skel.add_joint("spine", pelvis, JointType::REVOLUTE, Eigen::Vector3d::Zero(), "torso");
+    uint32_t pelvis =
+        skel.add_joint("pelvis", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero());
+    skel.add_joint("spine", pelvis, JointType::REVOLUTE, Eigen::Vector3d::Zero());
     uint32_t left_hip =
-        skel.add_joint("left_hip", pelvis, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "legs");
-    skel.add_joint("left_knee", left_hip, JointType::REVOLUTE, Eigen::Vector3d::Zero(), "legs");
-    skel.add_joint("right_hip", pelvis, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "legs");
+        skel.add_joint("left_hip", pelvis, JointType::SPHERICAL, Eigen::Vector3d::Zero());
+    skel.add_joint("left_knee", left_hip, JointType::REVOLUTE, Eigen::Vector3d::Zero());
+    skel.add_joint("right_hip", pelvis, JointType::SPHERICAL, Eigen::Vector3d::Zero());
     skel.add_joint("marker", pelvis, JointType::FIXED);
+
+    skel.register_group("torso", {"pelvis", "spine"}, {});
+    skel.register_group("legs", {"left_hip", "left_knee", "right_hip"}, {});
 
     REQUIRE(skel.total_dof() == 11);  // 3 + 1 + 3 + 1 + 3 + 0
 
@@ -178,8 +179,8 @@ TEST_CASE("Skeleton JSON serialization", "[skeleton]") {
 
 TEST_CASE("Skeleton joint queries", "[skeleton]") {
     Skeleton skel;
-    skel.add_joint("pelvis", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "torso");
-    skel.add_joint("spine", 0, JointType::REVOLUTE, Eigen::Vector3d::Zero(), "torso");
+    skel.add_joint("pelvis", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero());
+    skel.add_joint("spine", 0, JointType::REVOLUTE, Eigen::Vector3d::Zero());
 
     SECTION("Get existing joint") {
         auto const* j = skel.get_joint("pelvis");

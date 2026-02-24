@@ -47,17 +47,23 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
     // Create skeleton
     Skeleton skeleton;
 
-    // Parse groups section first to build joint-to-group and marker-to-group mappings
-    std::unordered_map<std::string, std::string> joint_to_group_map;
-    std::unordered_map<std::string, std::string> marker_to_group_map;
+    // Parse groups section — register each group with its joint and marker members.
+    // A joint/marker may appear in multiple groups (m:n); register_group handles this correctly.
     std::unordered_map<std::string, std::string> group_dependencies;  // group -> depends_on
     std::unordered_set<std::string> optional_groups;
+
+    // Collect raw group data first so we can call register_group after joints are parsed.
+    struct GroupData {
+        std::string name;
+        std::vector<std::string> joint_names;
+        std::vector<std::string> marker_names;
+    };
+    std::vector<GroupData> groups_raw;
 
     if (root["groups"]) {
         for (auto const& group_node : root["groups"]) {
             std::string group_name = group_node["name"].as<std::string>();
 
-            // Parse optional attribute (defaults to true if not specified)
             bool is_optional = true;
             if (group_node["optional"]) {
                 is_optional = group_node["optional"].as<bool>();
@@ -66,27 +72,21 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
                 optional_groups.insert(group_name);
             }
 
-            // Parse depends_on attribute
             if (group_node["depends_on"]) {
-                std::string depends_on = group_node["depends_on"].as<std::string>();
-                group_dependencies[group_name] = depends_on;
+                group_dependencies[group_name] = group_node["depends_on"].as<std::string>();
             }
 
-            // Map all joints in this group to the group name
+            GroupData gd;
+            gd.name = group_name;
             if (group_node["joints"]) {
-                for (auto const& joint_name_node : group_node["joints"]) {
-                    std::string joint_name = joint_name_node.as<std::string>();
-                    joint_to_group_map[joint_name] = group_name;
-                }
+                for (auto const& n : group_node["joints"])
+                    gd.joint_names.push_back(n.as<std::string>());
             }
-
-            // Map all markers in this group to the group name
             if (group_node["markers"]) {
-                for (auto const& marker_name_node : group_node["markers"]) {
-                    std::string marker_name = marker_name_node.as<std::string>();
-                    marker_to_group_map[marker_name] = group_name;
-                }
+                for (auto const& n : group_node["markers"])
+                    gd.marker_names.push_back(n.as<std::string>());
             }
+            groups_raw.push_back(std::move(gd));
         }
     }
 
@@ -120,23 +120,15 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
             offset = parse_vec3(joint_node["offset"]);
         }
 
-        // Parse group if present (from individual joint or from groups section)
-        std::string group = "";
-        if (joint_node["group"]) {
-            group = joint_node["group"].as<std::string>();
-        } else if (joint_to_group_map.count(joint_name) > 0) {
-            group = joint_to_group_map[joint_name];
-        }
-
         // Parse rest orientation (ZYX Euler angles in radians)
         Eigen::Vector3d rest_orientation = Eigen::Vector3d::Zero();
         if (joint_node["orientation"]) {
             rest_orientation = parse_vec3(joint_node["orientation"]);
         }
 
-        // Add joint to skeleton
+        // Add joint to skeleton (no group string — groups registered separately below)
         uint32_t joint_idx =
-            skeleton.add_joint(joint_name, parent_index, type, offset, group, rest_orientation);
+            skeleton.add_joint(joint_name, parent_index, type, offset, rest_orientation);
         joint_name_to_idx[joint_name] = joint_idx;
 
         // Parse and set limits if present
@@ -204,13 +196,13 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
                 coco_id = static_cast<int>(marker_node["openpose_keypoint"].as<size_t>());
             }
 
-            uint32_t marker_idx = skeleton.add_marker(marker_name, it->second, offset, coco_id);
-
-            // Assign group from groups section if defined
-            if (marker_to_group_map.count(marker_name) > 0) {
-                skeleton.markers()[marker_idx].group = marker_to_group_map[marker_name];
-            }
+            skeleton.add_marker(marker_name, it->second, offset, coco_id);
         }
+    }
+
+    // Register all groups now that joints and markers exist.
+    for (auto const& gd : groups_raw) {
+        skeleton.register_group(gd.name, gd.joint_names, gd.marker_names);
     }
 
     return skeleton;

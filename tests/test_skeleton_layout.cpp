@@ -41,30 +41,33 @@ static Skeleton create_test_skeleton() {
     Skeleton skel;
 
     uint32_t hips =
-        skel.add_joint("hips", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "main");
+        skel.add_joint("hips", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero());
     uint32_t spine =
-        skel.add_joint("spine", hips, JointType::SPHERICAL, Eigen::Vector3d(0, 0.1, 0), "main");
-    uint32_t left_shoulder = skel.add_joint("shoulder.L", spine, JointType::SPHERICAL,
-                                            Eigen::Vector3d(0.2, 0.1, 0), "main");
-    uint32_t left_elbow = skel.add_joint("elbow.L", left_shoulder, JointType::REVOLUTE,
-                                         Eigen::Vector3d(0.3, 0, 0), "main");
-    uint32_t left_wrist = skel.add_joint("wrist.L", left_elbow, JointType::SPHERICAL,
-                                         Eigen::Vector3d(0.3, 0, 0), "main");
-    skel.add_joint("finger1.L", left_wrist, JointType::REVOLUTE, Eigen::Vector3d(0.1, 0, 0),
-                   "HandL");
-    skel.add_joint("finger2.L", left_wrist, JointType::REVOLUTE, Eigen::Vector3d(0.1, 0.05, 0),
-                   "HandL");
+        skel.add_joint("spine", hips, JointType::SPHERICAL, Eigen::Vector3d(0, 0.1, 0));
+    uint32_t left_shoulder =
+        skel.add_joint("shoulder.L", spine, JointType::SPHERICAL, Eigen::Vector3d(0.2, 0.1, 0));
+    uint32_t left_elbow =
+        skel.add_joint("elbow.L", left_shoulder, JointType::REVOLUTE, Eigen::Vector3d(0.3, 0, 0));
+    uint32_t left_wrist =
+        skel.add_joint("wrist.L", left_elbow, JointType::SPHERICAL, Eigen::Vector3d(0.3, 0, 0));
+    skel.add_joint("finger1.L", left_wrist, JointType::REVOLUTE, Eigen::Vector3d(0.1, 0, 0));
+    skel.add_joint("finger2.L", left_wrist, JointType::REVOLUTE, Eigen::Vector3d(0.1, 0.05, 0));
 
-    uint32_t right_shoulder = skel.add_joint("shoulder.R", spine, JointType::SPHERICAL,
-                                             Eigen::Vector3d(-0.2, 0.1, 0), "main");
-    uint32_t right_elbow = skel.add_joint("elbow.R", right_shoulder, JointType::REVOLUTE,
-                                          Eigen::Vector3d(-0.3, 0, 0), "main");
-    uint32_t right_wrist = skel.add_joint("wrist.R", right_elbow, JointType::SPHERICAL,
-                                          Eigen::Vector3d(-0.3, 0, 0), "main");
-    skel.add_joint("finger1.R", right_wrist, JointType::REVOLUTE, Eigen::Vector3d(-0.1, 0, 0),
-                   "HandR");
-    skel.add_joint("finger2.R", right_wrist, JointType::REVOLUTE, Eigen::Vector3d(-0.1, 0.05, 0),
-                   "HandR");
+    uint32_t right_shoulder =
+        skel.add_joint("shoulder.R", spine, JointType::SPHERICAL, Eigen::Vector3d(-0.2, 0.1, 0));
+    uint32_t right_elbow =
+        skel.add_joint("elbow.R", right_shoulder, JointType::REVOLUTE, Eigen::Vector3d(-0.3, 0, 0));
+    uint32_t right_wrist =
+        skel.add_joint("wrist.R", right_elbow, JointType::SPHERICAL, Eigen::Vector3d(-0.3, 0, 0));
+    skel.add_joint("finger1.R", right_wrist, JointType::REVOLUTE, Eigen::Vector3d(-0.1, 0, 0));
+    skel.add_joint("finger2.R", right_wrist, JointType::REVOLUTE, Eigen::Vector3d(-0.1, 0.05, 0));
+
+    skel.register_group(
+        "main",
+        {"hips", "spine", "shoulder.L", "elbow.L", "wrist.L", "shoulder.R", "elbow.R", "wrist.R"},
+        {});
+    skel.register_group("HandL", {"finger1.L", "finger2.L"}, {});
+    skel.register_group("HandR", {"finger1.R", "finger2.R"}, {});
 
     return skel;
 }

@@ -70,7 +70,7 @@ SkeletonLayout::build(std::shared_ptr<const Skeleton> skeleton, bool include_all
     int layout_error_idx = 0;  // layout-relative position in error-state joint block
 
     for (auto const& joint : skeleton->get_joints_ordered()) {
-        bool const in_layout = include_all || (group_set.count(joint.group) > 0);
+        bool const in_layout = include_all || skeleton->joint_in_groups(joint.name, group_set);
         if (!in_layout)
             continue;
 
@@ -110,6 +110,71 @@ SkeletonLayout::build(std::shared_ptr<const Skeleton> skeleton, bool include_all
     if (!include_all && layout->joints_.empty() && !layout->has_floating_root_) {
         throw std::invalid_argument(
             fmt::format("SkeletonLayout::from_groups: no joints matched the provided groups"));
+    }
+
+    // ------------------------------------------------------------------
+    // Pass 3: populate markers whose parent joint is reachable in this layout.
+    //
+    // "Reachable" means the marker's parent joint is either:
+    //   (a) directly in joints_ (a non-root, non-fixed tracked joint), or
+    //   (b) the kinematic root (when has_floating_root_), or
+    //   (c) a FIXED joint whose nearest non-fixed ancestor is reachable
+    //       (FIXED joints are mapped to their parent in pinocchio; markers
+    //        attached to them resolve via that parent's frame).
+    //
+    // This mirrors what build_subtree_model / add_subtree_joints_recursive
+    // does with joint_to_id, ensuring the two sets are always in sync.
+    // ------------------------------------------------------------------
+    {
+        auto const& all_joints = skeleton->joints();
+
+        // Build reachable set (joint names that exist in the pinocchio model).
+        std::unordered_set<std::string> reachable;
+        reachable.reserve(layout->joints_.size() + 4);
+
+        for (auto const& desc : layout->joints_)
+            reachable.insert(desc.name);
+
+        if (layout->has_floating_root_) {
+            for (auto const& j : all_joints) {
+                if (is_root(j)) {
+                    reachable.insert(j.name);
+                    break;
+                }
+            }
+        }
+
+        // Propagate through FIXED chains iteratively.
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (auto const& j : all_joints) {
+                if (j.type != JointType::FIXED)
+                    continue;
+                if (reachable.count(j.name))
+                    continue;
+                if (!j.parent_index.has_value())
+                    continue;
+                if (reachable.count(all_joints[j.parent_index.value()].name)) {
+                    reachable.insert(j.name);
+                    changed = true;
+                }
+            }
+        }
+
+        // Walk full-skeleton markers in order, keeping those with reachable parents.
+        auto const& full_markers = skeleton->markers();
+        for (int fid = 0; fid < static_cast<int>(full_markers.size()); ++fid) {
+            auto const& m = full_markers[fid];
+            if (!reachable.count(all_joints[m.joint_index].name))
+                continue;
+            MarkerDesc mdesc;
+            mdesc.name = m.name;
+            mdesc.full_id = fid;
+            mdesc.layout_id = static_cast<int>(layout->markers_.size());
+            layout->full_to_layout_marker_id_[fid] = mdesc.layout_id;
+            layout->markers_.push_back(std::move(mdesc));
+        }
     }
 
     return layout;

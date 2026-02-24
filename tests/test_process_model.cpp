@@ -16,8 +16,8 @@ TEST_CASE("ConstantVelocityModel propagates state correctly", "[process_model]")
     Skeleton skeleton;
     // Add root (represented as a joint with no parent)
     uint32_t root_idx = skeleton.add_joint("root", std::nullopt, JointType::FIXED,
-                                           Eigen::Vector3d::Zero(), "", Eigen::Vector3d::Zero());
-    skeleton.add_joint("joint1", root_idx, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1), "",
+                                           Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+    skeleton.add_joint("joint1", root_idx, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1),
                        Eigen::Vector3d::Zero());
 
     auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
@@ -119,12 +119,12 @@ TEST_CASE("ConstantVelocityModel propagates state correctly", "[process_model]")
         Skeleton skeleton_limited;
         uint32_t root =
             skeleton_limited.add_joint("root", std::nullopt, JointType::FIXED,
-                                       Eigen::Vector3d::Zero(), "", Eigen::Vector3d::Zero());
+                                       Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
 
         // Revolute with limits [-1.0, 1.0]
         uint32_t joint =
             skeleton_limited.add_joint("limited", root, JointType::REVOLUTE,
-                                       Eigen::Vector3d(0, 0, 1), "", Eigen::Vector3d::Zero());
+                                       Eigen::Vector3d(0, 0, 1), Eigen::Vector3d::Zero());
 
         // Set limits
         std::array<Eigen::Vector2d, 3> limits;
@@ -173,7 +173,7 @@ TEST_CASE("ConstantVelocityModel propagates state correctly", "[process_model]")
 
 TEST_CASE("ConstantVelocityModel generates process noise", "[process_model]") {
     Skeleton skeleton;
-    skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero(), "",
+    skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero(),
                        Eigen::Vector3d::Zero());
 
     double noise_std = 0.5;
@@ -228,7 +228,7 @@ TEST_CASE("ConstantVelocityModel generates process noise", "[process_model]") {
 
 TEST_CASE("ConstantVelocityModel handles zero velocities", "[process_model]") {
     Skeleton skeleton;
-    skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero(), "",
+    skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero(),
                        Eigen::Vector3d::Zero());
 
     auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));

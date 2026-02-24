@@ -127,6 +127,9 @@ class UnscentedKalmanFilter {
      */
     int error_dim() const { return sigma_gen_.error_dim(); }
 
+    /// Return the layout used to build this UKF (joints, DOF indices, etc.).
+    std::shared_ptr<const SkeletonLayout> layout() const { return layout_; }
+
     // Debug instrumentation
     /**
      * @brief Enable debug mode to export UKF internals

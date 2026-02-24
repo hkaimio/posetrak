@@ -187,6 +187,12 @@ class Tracker {
     UnscentedKalmanFilter* get_ukf() { return ukf_.get(); }
 
     /**
+     * @brief Get the tracker's ForwardKinematics (initialized for the active layout).
+     * @return Reference to FK (only valid after initialization)
+     */
+    ForwardKinematics& fk() { return *fk_; }
+
+    /**
      * @brief Number of active child filters (0 in monolithic mode).
      * @note Only valid after initialization.
      */

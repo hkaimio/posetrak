@@ -159,6 +159,31 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
     auto const& groups = config_.active_joint_groups;
     auto layout = groups.empty() ? SkeletonLayout::from_full_skeleton(skeleton_)
                                  : SkeletonLayout::from_groups(skeleton_, groups);
+
+    // When active_joint_groups restricts the layout, rebuild the pinocchio model/data/FK
+    // scoped to those joints so that state_to_config works against the layout-sized state.
+    // (The constructor built everything for the full skeleton; IK init already ran.)
+    if (!groups.empty()) {
+        // Find skeleton root joint (no parent) to use as free-flyer anchor.
+        std::string root_name;
+        for (auto const& joint : skeleton_->joints()) {
+            if (!joint.parent_index.has_value()) {
+                root_name = joint.name;
+                break;
+            }
+        }
+        if (root_name.empty()) {
+            throw std::runtime_error("initialize_ukf: skeleton has no root joint");
+        }
+
+        model_ = std::make_unique<pinocchio::Model>();
+        PinocchioModelBuilder::build_subtree_model(*skeleton_, root_name, groups, *model_);
+        data_ = std::make_unique<pinocchio::Data>(*model_);
+        marker_frame_map_ = PinocchioModelBuilder::build_subtree_marker_frame_map(
+            *model_, *skeleton_, root_name, groups);
+        fk_ = std::make_unique<ForwardKinematics>(*model_, *data_, marker_frame_map_, layout);
+    }
+
     ukf_ = std::make_unique<UnscentedKalmanFilter>(layout, config_.process_noise_std, alpha, beta,
                                                    kappa);
 

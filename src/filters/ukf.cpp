@@ -1641,46 +1641,26 @@ void UnscentedKalmanFilter::write_sigma_points_csv(std::vector<State> const& sig
 
     f << std::setprecision(15);
 
-    // Write header
+    // Write header — iterate layout joints (not full skeleton) so indices match state vector
     f << "sigma_idx,root_pos_x,root_pos_y,root_pos_z,"
       << "root_quat_w,root_quat_x,root_quat_y,root_quat_z,"
       << "root_vel_x,root_vel_y,root_vel_z,"
       << "root_angvel_x,root_angvel_y,root_angvel_z";
 
-    // Add joint angle columns (in skeleton order)
-    auto const joints_ordered = layout_->skeleton()->get_joints_ordered();
-    for (auto const& joint : joints_ordered) {
-        if (!joint.parent_index.has_value()) {
-            continue;  // Skip root
-        }
-
-        int dof = 0;
-        if (joint.type == JointType::REVOLUTE) {
-            dof = 1;
-        } else if (joint.type == JointType::SPHERICAL) {
-            dof = 3;
-        }
-
+    for (JointDesc const& desc : layout_->joints()) {
+        if (desc.is_floating_root)
+            continue;
+        int const dof = static_cast<int>(desc.storage_dof_count);
         for (int i = 0; i < dof; ++i) {
-            f << "," << joint.name << "_angle_" << i;
+            f << "," << desc.name << "_angle_" << i;
         }
     }
-
-    // Add joint velocity columns (in skeleton order)
-    for (auto const& joint : joints_ordered) {
-        if (!joint.parent_index.has_value()) {
-            continue;  // Skip root
-        }
-
-        int dof = 0;
-        if (joint.type == JointType::REVOLUTE) {
-            dof = 1;
-        } else if (joint.type == JointType::SPHERICAL) {
-            dof = 3;
-        }
-
+    for (JointDesc const& desc : layout_->joints()) {
+        if (desc.is_floating_root)
+            continue;
+        int const dof = static_cast<int>(desc.storage_dof_count);
         for (int i = 0; i < dof; ++i) {
-            f << "," << joint.name << "_vel_" << i;
+            f << "," << desc.name << "_vel_" << i;
         }
     }
     f << "\n";
@@ -1689,60 +1669,36 @@ void UnscentedKalmanFilter::write_sigma_points_csv(std::vector<State> const& sig
     for (size_t sigma_idx = 0; sigma_idx < sigma_points.size(); ++sigma_idx) {
         State const& state = sigma_points[sigma_idx];
 
-        // Sigma index
         f << sigma_idx;
 
-        // Root position
         f << "," << state.root_position().x() << "," << state.root_position().y() << ","
           << state.root_position().z();
-
-        // Root quaternion (w,x,y,z)
         f << "," << state.root_orientation().w() << "," << state.root_orientation().x() << ","
           << state.root_orientation().y() << "," << state.root_orientation().z();
-
-        // Root velocity
         f << "," << state.root_velocity().x() << "," << state.root_velocity().y() << ","
           << state.root_velocity().z();
-
-        // Root angular velocity
         f << "," << state.root_angular_velocity().x() << "," << state.root_angular_velocity().y()
           << "," << state.root_angular_velocity().z();
 
-        // Joint angles (in skeleton order)
-        int joint_angle_idx = 0;
-        for (auto const& joint : joints_ordered) {
-            if (!joint.parent_index.has_value()) {
-                continue;  // Skip root
-            }
-
-            if (joint.type == JointType::REVOLUTE) {
-                f << "," << state.joint_angles()(joint_angle_idx);
-                joint_angle_idx += 1;
-            } else if (joint.type == JointType::SPHERICAL) {
-                // Ball joint: 3 DOF (axis-angle representation in joint_angles)
-                f << "," << state.joint_angles()(joint_angle_idx) << ","
-                  << state.joint_angles()(joint_angle_idx + 1) << ","
-                  << state.joint_angles()(joint_angle_idx + 2);
-                joint_angle_idx += 3;
+        // Joint angles — use desc.state_index, which is layout-relative
+        for (JointDesc const& desc : layout_->joints()) {
+            if (desc.is_floating_root)
+                continue;
+            int const si = desc.state_index;
+            int const dof = static_cast<int>(desc.storage_dof_count);
+            for (int i = 0; i < dof; ++i) {
+                f << "," << state.joint_angles()(si + i);
             }
         }
 
-        // Joint velocities (in skeleton order)
-        int joint_vel_idx = 0;
-        for (auto const& joint : joints_ordered) {
-            if (!joint.parent_index.has_value()) {
-                continue;  // Skip root
-            }
-
-            if (joint.type == JointType::REVOLUTE) {
-                f << "," << state.joint_velocities()(joint_vel_idx);
-                joint_vel_idx += 1;
-            } else if (joint.type == JointType::SPHERICAL) {
-                // Ball joint: 3 DOF velocities
-                f << "," << state.joint_velocities()(joint_vel_idx) << ","
-                  << state.joint_velocities()(joint_vel_idx + 1) << ","
-                  << state.joint_velocities()(joint_vel_idx + 2);
-                joint_vel_idx += 3;
+        // Joint velocities
+        for (JointDesc const& desc : layout_->joints()) {
+            if (desc.is_floating_root)
+                continue;
+            int const si = desc.state_index;
+            int const dof = static_cast<int>(desc.storage_dof_count);
+            for (int i = 0; i < dof; ++i) {
+                f << "," << state.joint_velocities()(si + i);
             }
         }
 

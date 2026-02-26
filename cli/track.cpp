@@ -25,11 +25,11 @@ using namespace posetrak;
 // Helper: Export predicted observations for comparison with Python
 void export_predicted_observations(std::ofstream& file, int frame_idx, double timestamp,
                                    std::vector<Observation> const& observations, State const& state,
-                                   ForwardKinematics& fk,
+                                   ForwardKinematics* fk,
                                    std::unordered_map<int, Camera> const& cameras,
                                    Skeleton const& skeleton) {
     // Compute 3D marker positions from current state
-    auto marker_positions_3d = fk.compute(state);
+    auto marker_positions_3d = fk->compute(state);
 
     // For each observation, project and compute residual
     for (auto const& obs : observations) {
@@ -75,7 +75,7 @@ void export_predicted_observations(std::ofstream& file, int frame_idx, double ti
 
 // Helper: Export complete state vector for comparison with Python
 void export_state_vector(std::ofstream& file, int frame_idx, double timestamp, State const& state,
-                         Skeleton const& skeleton) {
+                         SkeletonLayout const& layout) {
     // Format matches Python: tracker_frame_idx,timestamp,root_position_x/y/z,
     // root_quaternion_w/x/y/z, root_velocity_x/y/z, root_angular_velocity_x/y/z,
     // joint_<name>_angle_<n>, joint_<name>_velocity_<n>
@@ -98,36 +98,34 @@ void export_state_vector(std::ofstream& file, int frame_idx, double timestamp, S
     file << state.root_angular_velocity().x() << "," << state.root_angular_velocity().y() << ","
          << state.root_angular_velocity().z();
 
-    // Joint angles and velocities (in skeleton order)
-    size_t state_idx = 0;
-    for (auto const& joint : skeleton.joints()) {
-        for (int i = 0; i < joint.dof; ++i) {
-            file << "," << state.joint_angles()[state_idx + i];
+    // Joint angles and velocities (in layout order, using precomputed indices)
+    for (auto const& desc : layout.joints()) {
+        for (int i = 0; i < static_cast<int>(desc.storage_dof_count); ++i) {
+            file << "," << state.joint_angles()[desc.state_index + i];
         }
-        for (int i = 0; i < joint.dof; ++i) {
-            file << "," << state.joint_velocities()[state_idx + i];
+        for (int i = 0; i < static_cast<int>(desc.storage_dof_count); ++i) {
+            file << "," << state.joint_velocities()[desc.state_index + i];
         }
-        state_idx += joint.dof;
     }
 
     file << "\n";
 }
 
 // Helper: Generate state vector CSV header
-std::string generate_state_header(Skeleton const& skeleton) {
+std::string generate_state_header(SkeletonLayout const& layout) {
     std::string header = "tracker_frame_idx,timestamp,";
     header += "root_position_x,root_position_y,root_position_z,";
     header += "root_quaternion_w,root_quaternion_x,root_quaternion_y,root_quaternion_z,";
     header += "root_velocity_x,root_velocity_y,root_velocity_z,";
     header += "root_angular_velocity_x,root_angular_velocity_y,root_angular_velocity_z";
 
-    // Joint angles and velocities
-    for (auto const& joint : skeleton.joints()) {
-        for (int i = 0; i < joint.dof; ++i) {
-            header += ",joint_" + joint.name + "_angle_" + std::to_string(i);
+    // Joint angles and velocities (in layout order)
+    for (auto const& desc : layout.joints()) {
+        for (int i = 0; i < static_cast<int>(desc.storage_dof_count); ++i) {
+            header += ",joint_" + desc.name + "_angle_" + std::to_string(i);
         }
-        for (int i = 0; i < joint.dof; ++i) {
-            header += ",joint_" + joint.name + "_velocity_" + std::to_string(i);
+        for (int i = 0; i < static_cast<int>(desc.storage_dof_count); ++i) {
+            header += ",joint_" + desc.name + "_velocity_" + std::to_string(i);
         }
     }
 
@@ -500,7 +498,8 @@ int main(int argc, char* argv[]) {
         }
 
         auto tracker_config = config.to_tracker_config();
-        Tracker tracker(std::make_shared<const Skeleton>(skeleton), cameras, tracker_config);
+        auto skeleton_ptr = std::make_shared<const Skeleton>(skeleton);
+        Tracker tracker(skeleton_ptr, cameras, tracker_config);
 
         // Validate camera model by triangulating first frame
         double t_first_window = config.start_time + dt;
@@ -542,15 +541,11 @@ int main(int argc, char* argv[]) {
             fmt::print("  Initialization successful\n\n");
         }
 
-        // Create FK for computing marker positions
-        pinocchio::Model model;
-        pinocchio::Data data;
-        PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
-        auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
-        auto fk_layout =
-            SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
-
-        ForwardKinematics fk(model, data, marker_frame_map, fk_layout);
+        // Get FK from tracker (matches the layout being used)
+        ForwardKinematics* fk = tracker.get_fk();
+        if (!fk) {
+            throw std::runtime_error("Failed to get FK from tracker");
+        }
 
         // Create exporters
         std::unique_ptr<TrackingExporter> exporter;
@@ -565,6 +560,11 @@ int main(int argc, char* argv[]) {
             stats_tracker = std::make_unique<StatisticsTracker>();
         }
 
+        // Create layout for state export (matches tracker's layout)
+        auto layout = config.active_joint_groups.empty()
+                          ? SkeletonLayout::from_full_skeleton(skeleton_ptr)
+                          : SkeletonLayout::from_groups(skeleton_ptr, config.active_joint_groups);
+
         // Create diagnostic export files
         std::ofstream pred_obs_file;
         std::ofstream state_vec_file;
@@ -573,7 +573,7 @@ int main(int argc, char* argv[]) {
             pred_obs_file << "frame,camera,marker,obs_u,obs_v,pred_u,pred_v,res_u,res_v,res_norm\n";
 
             state_vec_file.open(config.output_dir / "state_vectors.csv");
-            state_vec_file << generate_state_header(skeleton) << "\n";
+            state_vec_file << generate_state_header(*layout) << "\n";
         }
 
         // Enable UKF debug mode
@@ -681,9 +681,9 @@ int main(int argc, char* argv[]) {
                 std::ofstream prior_file(prior_state_path);
                 if (prior_file.is_open()) {
                     // Write header (same as state_vectors.csv)
-                    prior_file << generate_state_header(skeleton) << "\n";
+                    prior_file << generate_state_header(*layout) << "\n";
                     // Write prior state (before update)
-                    export_state_vector(prior_file, 2, t_effective, tracker.state(), skeleton);
+                    export_state_vector(prior_file, 2, t_effective, tracker.state(), *layout);
                     prior_file.close();
                     if (!quiet) {
                         fmt::print("  [DEBUG] Exported step 1 prior state to {}\n",
@@ -727,13 +727,13 @@ int main(int argc, char* argv[]) {
 
             // Export state vector AFTER tracking update (posterior state)
             if (state_vec_file.is_open()) {
-                export_state_vector(state_vec_file, step, t_effective, result.state, skeleton);
+                export_state_vector(state_vec_file, step, t_effective, result.state, *layout);
             }
 
             // Export
             if (exporter) {
                 // Compute marker positions using FK
-                auto marker_positions_3d_map = fk.compute(result.state);
+                auto marker_positions_3d_map = fk->compute(result.state);
 
                 // Convert to std::map (exporter expects std::map, not unordered_map)
                 std::map<std::string, Eigen::Vector3d> marker_positions_3d(

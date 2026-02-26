@@ -132,7 +132,7 @@ class TriangulationTestFixture {
             SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
 
         ForwardKinematics fk(model, data, marker_map, fk_layout);
-        Eigen::VectorXd q = ForwardKinematics::state_to_config(state, skeleton);
+        Eigen::VectorXd q = ForwardKinematics::state_to_config(state, *fk_layout);
         auto marker_positions = fk.compute(q);
 
         // Create observations

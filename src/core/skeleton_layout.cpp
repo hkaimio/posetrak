@@ -167,4 +167,30 @@ std::vector<int> SkeletonLayout::build_index_map_from(SkeletonLayout const& subs
     return map;
 }
 
+State SkeletonLayout::slice_state(State const& full_state) const {
+    // If already the right size, return a copy
+    if (full_state.num_dof() == total_storage_dof_count_) {
+        return full_state;
+    }
+
+    // Build full-skeleton layout for the index map
+    auto full_layout = SkeletonLayout::from_full_skeleton(skeleton_);
+
+    // Build index map: this layout (subset) -> full layout
+    std::vector<int> map = full_layout->build_index_map_from(*this);
+
+    // Extract joint angles and velocities
+    Eigen::VectorXd sliced_angles(total_storage_dof_count_);
+    Eigen::VectorXd sliced_velocities(total_storage_dof_count_);
+
+    for (size_t i = 0; i < map.size(); ++i) {
+        sliced_angles(i) = full_state.joint_angles()(map[i]);
+        sliced_velocities(i) = full_state.joint_velocities()(map[i]);
+    }
+
+    // Root pose/velocity pass through unchanged
+    return State(full_state.root_position(), full_state.root_orientation(), sliced_angles,
+                 full_state.root_velocity(), full_state.root_angular_velocity(), sliced_velocities);
+}
+
 }  // namespace posetrak

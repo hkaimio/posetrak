@@ -35,7 +35,10 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
             q[6] = 1.0;        // w component
         }
     } else {
-        q = ForwardKinematics::state_to_config(*initial_guess, skeleton);
+        // IK always works with full-skeleton states (returns full initialization)
+        auto skeleton_ptr = std::make_shared<Skeleton const>(skeleton);
+        auto layout = SkeletonLayout::from_full_skeleton(skeleton_ptr);
+        q = ForwardKinematics::state_to_config(*initial_guess, *layout);
     }
 
     // Extract marker names (maintain consistent ordering)

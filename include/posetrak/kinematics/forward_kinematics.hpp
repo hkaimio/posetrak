@@ -103,14 +103,6 @@ class ForwardKinematics {
     static Eigen::VectorXd state_to_config(State const& state, SkeletonLayout const& layout);
 
     /**
-     * @brief Convert State to Pinocchio configuration vector (legacy, skeleton-only path).
-     *
-     * Iterates skeleton.get_joints_ordered() directly.  Kept for tests that construct
-     * FK from a skeleton without a layout.  Prefer the layout overload for new code.
-     */
-    static Eigen::VectorXd state_to_config(State const& state, Skeleton const& skeleton);
-
-    /**
      * @brief Get world-frame pose of a named skeleton joint after compute().
      *
      * Reads from data_.oMi[] which is populated by forwardKinematics() inside compute().

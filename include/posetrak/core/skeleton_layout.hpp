@@ -18,6 +18,7 @@
 #include <Eigen/Core>
 
 #include "posetrak/core/skeleton.hpp"
+#include "posetrak/core/state.hpp"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -157,6 +158,20 @@ class SkeletonLayout {
     ///       similar but distinct skeletons.
     /// @throws std::invalid_argument if any joint in subset is not present in this layout.
     std::vector<int> build_index_map_from(SkeletonLayout const& subset) const;
+
+    /// @brief Slice a full-skeleton State to match this (subset) layout's dimensions.
+    ///
+    /// If the input state already matches this layout's size, returns a copy.
+    /// Otherwise, extracts DOFs from @p full_state according to the joint names
+    /// in this layout, using an internal index map.
+    ///
+    /// Intended use: when loading IK results or CSV states (full-skeleton sized)
+    /// into a layout-scoped UKF.
+    ///
+    /// @param full_state  State vector sized for the full skeleton
+    /// @return State vector sized for this layout (total_storage_dof_count())
+    /// @throws std::invalid_argument if skeleton pointers do not match
+    State slice_state(State const& full_state) const;
 
    private:
     SkeletonLayout() = default;  // Only factory functions construct

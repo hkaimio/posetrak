@@ -186,6 +186,12 @@ class Tracker {
      */
     UnscentedKalmanFilter* get_ukf() { return ukf_.get(); }
 
+    /**
+     * @brief Get ForwardKinematics for access by child filters (Phase 3h+)
+     * @return Pointer to FK (or nullptr if not initialized)
+     */
+    ForwardKinematics* get_fk() { return fk_.get(); }
+
    private:
     /**
      * @brief Placeholder for a child filter (subtree tracker).

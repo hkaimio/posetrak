@@ -114,7 +114,11 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
 
 void Tracker::initialize_from_rest_pose(double timestamp) {
     // Create state with all zeros (rest pose)
-    int num_dof = skeleton_->total_dof_count();
+    // Use layout that will be created by initialize_ukf to size the state correctly
+    auto const& groups = config_.active_joint_groups;
+    auto layout = groups.empty() ? SkeletonLayout::from_full_skeleton(skeleton_)
+                                 : SkeletonLayout::from_groups(skeleton_, groups);
+    int num_dof = layout->total_storage_dof_count();
 
     Eigen::Vector3d root_position = Eigen::Vector3d::Zero();
     Eigen::Quaterniond root_orientation = Eigen::Quaterniond::Identity();
@@ -158,8 +162,35 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
     ukf_ = std::make_unique<UnscentedKalmanFilter>(layout, config_.process_noise_std, alpha, beta,
                                                    kappa);
 
-    // Set initial state
-    ukf_->set_state(initial_state);
+    // Slice initial state to match layout dimensions if needed
+    State sliced_state = layout->slice_state(initial_state);
+
+    // Set initial state (now correctly sized for the layout)
+    ukf_->set_state(sliced_state);
+
+    // Rebuild FK if using a subset layout (so state_to_config and FK work on layout-sized state)
+    if (!groups.empty()) {
+        // Find skeleton root joint (the one with no parent)
+        std::string root_joint_name;
+        for (auto const& joint : skeleton_->joints()) {
+            if (!joint.parent_index.has_value()) {
+                root_joint_name = joint.name;
+                break;
+            }
+        }
+        if (root_joint_name.empty()) {
+            throw std::runtime_error("Tracker::initialize_ukf: No root joint found in skeleton");
+        }
+
+        // Rebuild pinocchio model/data/FK scoped to the layout groups
+        // Use build_subtree_model with the skeleton root as the freeflyer
+        model_ = std::make_unique<pinocchio::Model>();
+        PinocchioModelBuilder::build_subtree_model(*skeleton_, root_joint_name, groups, *model_);
+        data_ = std::make_unique<pinocchio::Data>(*model_);
+        marker_frame_map_ = PinocchioModelBuilder::build_subtree_marker_frame_map(
+            *model_, *skeleton_, root_joint_name, groups);
+        fk_ = std::make_unique<ForwardKinematics>(*model_, *data_, marker_frame_map_, layout);
+    }
 
     // Set initial covariance — size from the UKF (driven by the layout, not skeleton.active_dof())
     int const error_dim = ukf_->error_dim();

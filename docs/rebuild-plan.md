@@ -5,7 +5,7 @@
 | Step | Status | Commit | Notes |
 |------|--------|--------|-------|
 | Step 0 | ✅ Complete | `cb50617` | Branch created, baseline config committed |
-| Step 1 | 🔲 Not started | — | Layout-relative UKF indexing |
+| Step 1 | ✅ Complete | (next) | Layout-relative UKF indexing |
 | Step 2 | 🔲 Not started | — | M:N joint/marker group membership |
 | Step 3 | 🔲 Not started | — | Phase 3h: child filter construction & sequencing |
 | Step 4 | 🔲 Not started | — | Phase 3i: debug scoping & per-filter statistics |

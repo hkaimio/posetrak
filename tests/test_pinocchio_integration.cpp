@@ -123,7 +123,9 @@ TEST_CASE("ForwardKinematics computes marker positions", "[forward_kinematics]")
 
         State state(root_pos, root_quat, joint_angles, root_vel, root_angvel, joint_vels);
 
-        auto q = ForwardKinematics::state_to_config(state, skeleton);
+        auto skeleton_ptr = std::make_shared<const Skeleton>(skeleton);
+        auto layout = SkeletonLayout::from_full_skeleton(skeleton_ptr);
+        auto q = ForwardKinematics::state_to_config(state, *layout);
 
         REQUIRE(q.size() == model.nq);
 
@@ -179,7 +181,9 @@ TEST_CASE("ForwardKinematics handles spherical joints", "[forward_kinematics]") 
 
         State state(root_pos, root_quat, joint_angles, root_vel, root_angvel, joint_vels);
 
-        auto q = ForwardKinematics::state_to_config(state, skeleton);
+        auto skeleton_ptr = std::make_shared<const Skeleton>(skeleton);
+        auto layout = SkeletonLayout::from_full_skeleton(skeleton_ptr);
+        auto q = ForwardKinematics::state_to_config(state, *layout);
 
         // Root: 7 DOF, Shoulder (spherical): 4 DOF (quaternion)
         REQUIRE(q.size() == 11);

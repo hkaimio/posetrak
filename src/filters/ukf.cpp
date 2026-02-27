@@ -719,10 +719,6 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     int const n_obs = static_cast<int>(observations.size());
     int const measurement_dim = 2 * n_obs;  // 2D pixel per observation
 
-    // These will be updated after outlier rejection
-    int effective_n_obs = n_obs;
-    int effective_measurement_dim = measurement_dim;
-
     // Step 1: Generate sigma points from current state and covariance
     auto sigma_points = sigma_gen_.generate_sigma_points(state_, covariance_);
     int const n_sigma = static_cast<int>(sigma_points.size());
@@ -926,10 +922,6 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         // Update observed vector to use inliers
         observed = observations_to_vector(inlier_observations);
 
-        // Update effective dimensions for inliers
-        effective_n_obs = n_inliers;
-        effective_measurement_dim = inlier_dim;
-
         // ===============================================================================
         // CRITICAL FIX FOR REPROJECTION ERROR REPORTING BUG
         // ===============================================================================
@@ -1021,85 +1013,51 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     State prev_state = state_;  // Save state before limit enforcement
     enforce_joint_limits();
 
-    // Step 9: Update covariance using Joseph form for numerical stability
-    // Joseph form: P' = (I - K)*P*(I - K)^T + K*R*K^T
-    // For UKF, a simpler stable form is: P' = P - K*S*K^T + K*R*K^T
-    // Which simplifies to: P' = P - K*(S - R)*K^T
+    // Step 9: Update covariance — standard UKF update P' = P - K*S*K^T
+    // where S = innovation_cov (already includes measurement noise R).
+    //
+    // Note: K = Pxy * S^-1, so K*S*K^T = Pxy * S^-1 * Pxy^T, which is the
+    // information gained from the measurement. Subtracting it reduces uncertainty
+    // in the directions constrained by the observations.
+    //
+    // The previous "Joseph form" here was incorrect: it computed
+    //   P' = P - K*(S-R)*K^T + K*R*K^T = P - K*S*K^T + 2*K*R*K^T
+    // which double-counted K*R*K^T and inflated the covariance erroneously.
 
-    // Build measurement noise covariance R (use inlier observations if outlier rejection was done)
-    Eigen::MatrixXd R = Eigen::MatrixXd::Zero(effective_measurement_dim, effective_measurement_dim);
-    for (int i = 0; i < effective_n_obs; ++i) {
-        double noise_std = inlier_observations[i].measurement_noise_std(measurement_noise_std);
-        double variance = noise_std * noise_std;
-        R(2 * i, 2 * i) = variance;          // x coordinate
-        R(2 * i + 1, 2 * i + 1) = variance;  // y coordinate
-    }
-
-    // Check innovation covariance before inversion
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> s_solver(innovation_cov);
-    double min_s_eigenvalue = s_solver.eigenvalues().minCoeff();
-    std::cout << "Innovation cov min eigenvalue (before update): " << min_s_eigenvalue << std::endl;
-
-    if (min_s_eigenvalue < 1e-9) {
-        // Innovation covariance is nearly singular - add regularization
-        double reg = 1e-6;
-        innovation_cov +=
-            reg * Eigen::MatrixXd::Identity(effective_measurement_dim, effective_measurement_dim);
-        std::cout << "  Added regularization " << reg << " to innovation covariance\n";
-    }
-
-    // Compute Kalman gain with regularized innovation covariance
+    // Recompute Kalman gain using (possibly regularised) innovation covariance
+    // (innovation_cov may have been regularised for the outlier-rejection inversion above)
     kalman_gain = cross_cov * innovation_cov.inverse();
 
-    // Joseph form covariance update for numerical stability
-    // Joseph form: P' = (I - K*H)*P*(I - K*H)^T + K*R*K^T
-    // This guarantees positive semi-definiteness and symmetry
-    //
-    // For UKF, we compute I - K*Pyy*P^-1, but matrix inversion is expensive.
-    // Instead, use the equivalent algebraic form that avoids explicit P^-1:
-    // P' = P - K*Pyy*K^T, then symmetrize and add K*R*K^T
+    // Standard UKF covariance update
+    covariance_ = covariance_ - kalman_gain * innovation_cov * kalman_gain.transpose();
 
-    Eigen::MatrixXd Pyy = innovation_cov - R;  // Innovation cov without measurement noise
-
-    // Joseph form update: guarantees symmetry
-    Eigen::MatrixXd P_minus_K_Pyy_Kt = covariance_ - kalman_gain * Pyy * kalman_gain.transpose();
-
-    // Enforce symmetry (critical for numerical stability)
-    P_minus_K_Pyy_Kt = 0.5 * (P_minus_K_Pyy_Kt + P_minus_K_Pyy_Kt.transpose());
-
-    // Add measurement noise contribution (completes Joseph form)
-    covariance_ = P_minus_K_Pyy_Kt + kalman_gain * R * kalman_gain.transpose();
-
-    // Final symmetry enforcement (Joseph form should be symmetric, but floating point errors)
+    // Enforce symmetry (floating-point arithmetic can break it slightly)
     covariance_ = 0.5 * (covariance_ + covariance_.transpose());
 
-    // Add small regularization to diagonal for additional numerical safety
-    double epsilon = 1e-8;  // Smaller epsilon since Joseph form is more stable
-    covariance_ += epsilon * Eigen::MatrixXd::Identity(error_dim(), error_dim());
+    // Step 10: Project covariance to nearest PSD matrix by clipping negative eigenvalues.
+    //
+    // We use eigenvalue clipping rather than the scalar epsilon*I shift that was here
+    // before. The scalar shift uniformly bloats all dimensions (including velocities)
+    // and accumulates over time; clipping only lifts directions that went negative,
+    // preserving the shape of the distribution in well-constrained directions.
+    {
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen_solver(covariance_);
+        if (eigen_solver.info() != Eigen::Success) {
+            throw std::runtime_error("Failed to compute eigenvalues for covariance conditioning");
+        }
 
-    // Step 10: Condition covariance for numerical stability
+        const double min_eig_floor = 1e-6;
+        Eigen::VectorXd eigenvalues = eigen_solver.eigenvalues();
+        double min_eigenvalue = eigenvalues.minCoeff();
 
-    // Ensure positive definiteness by checking eigenvalues
-    // Use self-adjoint eigenvalue solver (faster for symmetric matrices)
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen_solver(covariance_);
-    if (eigen_solver.info() != Eigen::Success) {
-        throw std::runtime_error("Failed to compute eigenvalues for covariance conditioning");
-    }
-
-    Eigen::VectorXd eigenvalues = eigen_solver.eigenvalues();
-    double min_eigenvalue = eigenvalues.minCoeff();
-    std::cout << "Min covariance eigenvalue: " << min_eigenvalue << std::endl;
-
-    if (min_eigenvalue < 1e-6) {
-        // Add enough to make minimum eigenvalue at least 1e-6
-        double epsilon_fix = 1e-6 - min_eigenvalue + 1e-7;
-        covariance_ += epsilon_fix * Eigen::MatrixXd::Identity(error_dim(), error_dim());
-        std::cout << "  Fixed covariance with epsilon=" << epsilon_fix << std::endl;
-
-        // Recompute eigenvalues to verify
-        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> verify_solver(covariance_);
-        double new_min = verify_solver.eigenvalues().minCoeff();
-        std::cout << "  New min eigenvalue: " << new_min << std::endl;
+        if (min_eigenvalue < min_eig_floor) {
+            // Clip negative (and near-zero) eigenvalues to floor, reconstruct matrix
+            eigenvalues = eigenvalues.cwiseMax(min_eig_floor);
+            covariance_ = eigen_solver.eigenvectors() * eigenvalues.asDiagonal() *
+                          eigen_solver.eigenvectors().transpose();
+            // Re-enforce symmetry after reconstruction
+            covariance_ = 0.5 * (covariance_ + covariance_.transpose());
+        }
     }
 
     // Step 11: Damp velocity covariance for joints that hit limits

@@ -504,41 +504,53 @@ int main(int argc, char* argv[]) {
         // Validate camera model by triangulating first frame
         double t_first_window = config.start_time + dt;
         auto first_frame_obs = observations_set.get_all_in_range(config.start_time, t_first_window);
-        std::string python_markers_csv =
-            "tracking_tests/kotegaeshi/makers_person0_python_tracker.csv";
-        validate_camera_model(first_frame_obs, cameras, skeleton, python_markers_csv);
 
-        // Try to load Python state for initialization (if available)
-        std::string python_state_csv =
-            config.python_state_path.value_or("tracking_tests/kotegaeshi/python_tracker_state.csv");
-        auto python_state = load_python_state(python_state_csv, skeleton, 0);
+        // Initialization priority:
+        //  1. Explicit python_state_path in config → load that state directly (useful for
+        //  debugging)
+        //  2. Otherwise → run IK on first frame's triangulated observations (the normal path)
+        //  3. If IK initialization fails → fall back to rest pose with a warning
+        bool initialized = false;
 
-        if (python_state.has_value()) {
-            if (!quiet) {
-                fmt::print("  Initializing from Python tracker state (frame 0)\n");
-                auto const& s = python_state.value();
-                fmt::print("    Root position: ({:.3f}, {:.3f}, {:.3f})\n", s.root_position().x(),
-                           s.root_position().y(), s.root_position().z());
-                fmt::print("    Root orientation: w={:.3f}, x={:.3f}, y={:.3f}, z={:.3f}\n",
-                           s.root_orientation().w(), s.root_orientation().x(),
-                           s.root_orientation().y(), s.root_orientation().z());
-                fmt::print("    Joint angles (first 5):");
-                for (int i = 0; i < 5 && i < s.joint_angles().size(); ++i) {
-                    fmt::print(" {:.4f}", s.joint_angles()[i]);
+        if (config.python_state_path.has_value()) {
+            auto python_state =
+                load_python_state(config.python_state_path.value().string(), skeleton, 0);
+            if (python_state.has_value()) {
+                if (!quiet) {
+                    fmt::print("  Initializing from Python tracker state: {}\n",
+                               config.python_state_path.value().string());
+                    auto const& s = python_state.value();
+                    fmt::print("    Root position: ({:.3f}, {:.3f}, {:.3f})\n",
+                               s.root_position().x(), s.root_position().y(), s.root_position().z());
                 }
-                fmt::print("\n");
+                tracker.initialize_from_state(python_state.value(), config.start_time);
+                initialized = true;
+            } else {
+                fmt::print(
+                    "  WARNING: python_state_path '{}' could not be loaded, "
+                    "falling back to IK initialization\n",
+                    config.python_state_path.value().string());
             }
-            tracker.initialize_from_state(python_state.value(), config.start_time);
-        } else {
-            // Fall back to rest pose if Python state not available
+        }
+
+        if (!initialized) {
             if (!quiet) {
-                fmt::print("  Python state not available, initializing from rest pose\n");
+                fmt::print("  Initializing from first-frame observations via IK...\n");
             }
-            tracker.initialize_from_rest_pose(config.start_time);
+            initialized = tracker.initialize(first_frame_obs, config.start_time);
+            if (initialized) {
+                if (!quiet) {
+                    fmt::print("  IK initialization successful\n");
+                }
+            } else {
+                fmt::print("  WARNING: IK initialization failed, falling back to rest pose\n");
+                tracker.initialize_from_rest_pose(config.start_time);
+                initialized = true;
+            }
         }
 
         if (!quiet) {
-            fmt::print("  Initialization successful\n\n");
+            fmt::print("  Initialization complete\n\n");
         }
 
         // Get FK from tracker (matches the layout being used)

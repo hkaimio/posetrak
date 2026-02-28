@@ -7,12 +7,15 @@
 
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
+#include <pinocchio/algorithm/joint-configuration.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
 
 #include <fmt/core.h>
 
+#include <cmath>
 #include <fstream>
 #include <iostream>
+#include <limits>
 
 namespace posetrak {
 
@@ -25,14 +28,141 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
                                   Skeleton const& skeleton,
                                   std::optional<State> const& initial_guess, int max_iterations,
                                   double tolerance, double damping) {
+    // Extract marker names (maintain consistent ordering) — needed before init block
+    // because the multi-start orientation search uses them.
+    std::vector<std::string> marker_names;
+    for (auto const& [name, pos] : target_markers) {
+        if (marker_frame_map_.count(name) > 0) {
+            marker_names.push_back(name);
+        }
+    }
+    if (marker_names.empty()) {
+        return IKResult::failure();
+    }
+
     // Convert initial guess to configuration vector
     Eigen::VectorXd q;
     if (!initial_guess.has_value() || initial_guess->joint_angles().size() == 0) {
-        // Default: zero configuration
         q = Eigen::VectorXd::Zero(model_.nq);
-        // Set root quaternion to identity [x,y,z,w] = [0,0,0,1]
-        if (model_.nq >= 7) {  // Has root (free-flyer)
-            q[6] = 1.0;        // w component
+        if (model_.nq >= 7) {
+            q[6] = 1.0;  // root quaternion w = 1 (identity)
+        }
+
+        // --- Helper: find a marker in any map ---
+        auto find_marker = [](auto const& markers,
+                              std::string const& name) -> std::optional<Eigen::Vector3d> {
+            auto it = markers.find(name);
+            if (it == markers.end())
+                return std::nullopt;
+            return it->second;
+        };
+
+        // --- Root position: hip midpoint if available, else all-marker centroid ---
+        {
+            auto hip_L_obs = find_marker(target_markers, "MRK-hip.L");
+            auto hip_R_obs = find_marker(target_markers, "MRK-hip.R");
+            if (hip_L_obs && hip_R_obs) {
+                q.head<3>() = (*hip_L_obs + *hip_R_obs) / 2.0;
+            } else {
+                Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+                int count = 0;
+                for (auto const& [name, pos] : target_markers) {
+                    centroid += pos;
+                    ++count;
+                }
+                if (count > 0) {
+                    q.head<3>() = centroid / count;
+                }
+            }
+        }
+
+        // --- Root orientation: body-frame Procrustes alignment ---
+        // Compute rest-pose marker positions at q=0 with root at origin.
+        // Then find rotation R such that R * rest_frame ≈ observed_frame.
+        if (model_.nq >= 7) {
+            Eigen::VectorXd q_rest = Eigen::VectorXd::Zero(model_.nq);
+            q_rest[6] = 1.0;
+            auto rest_markers = fk_.compute(q_rest);
+
+            auto hip_L_rest = find_marker(rest_markers, "MRK-hip.L");
+            auto hip_R_rest = find_marker(rest_markers, "MRK-hip.R");
+            auto sho_L_rest = find_marker(rest_markers, "MRK-shoulder.L");
+            auto sho_R_rest = find_marker(rest_markers, "MRK-shoulder.R");
+            auto hip_L_obs = find_marker(target_markers, "MRK-hip.L");
+            auto hip_R_obs = find_marker(target_markers, "MRK-hip.R");
+            auto sho_L_obs = find_marker(target_markers, "MRK-shoulder.L");
+            auto sho_R_obs = find_marker(target_markers, "MRK-shoulder.R");
+
+            // Build orthonormal frame from two vectors (up, lateral).
+            // Returns matrix whose columns are [lateral, up, forward].
+            auto make_frame = [](Eigen::Vector3d up, Eigen::Vector3d lateral) -> Eigen::Matrix3d {
+                up = up.normalized();
+                // Re-orthogonalize lateral against up
+                lateral = (lateral - lateral.dot(up) * up).normalized();
+                Eigen::Vector3d forward = lateral.cross(up).normalized();
+                Eigen::Matrix3d R;
+                R.col(0) = lateral;
+                R.col(1) = up;
+                R.col(2) = forward;
+                return R;
+            };
+
+            bool aligned = false;
+            if (hip_L_rest && hip_R_rest && hip_L_obs && hip_R_obs) {
+                Eigen::Vector3d hip_center_rest = (*hip_L_rest + *hip_R_rest) / 2.0;
+                Eigen::Vector3d hip_center_obs = (*hip_L_obs + *hip_R_obs) / 2.0;
+                Eigen::Vector3d lateral_rest = *hip_L_rest - *hip_R_rest;
+                Eigen::Vector3d lateral_obs = *hip_L_obs - *hip_R_obs;
+
+                Eigen::Vector3d spine_rest, spine_obs;
+                if (sho_L_rest && sho_R_rest && sho_L_obs && sho_R_obs) {
+                    Eigen::Vector3d sho_center_rest = (*sho_L_rest + *sho_R_rest) / 2.0;
+                    Eigen::Vector3d sho_center_obs = (*sho_L_obs + *sho_R_obs) / 2.0;
+                    spine_rest = sho_center_rest - hip_center_rest;
+                    spine_obs = sho_center_obs - hip_center_obs;
+                } else {
+                    // Fallback: use world Y as up
+                    spine_rest = Eigen::Vector3d::UnitY();
+                    spine_obs = Eigen::Vector3d::UnitY();
+                }
+
+                if (lateral_rest.norm() > 0.01 && lateral_obs.norm() > 0.01 &&
+                    spine_rest.norm() > 0.05 && spine_obs.norm() > 0.05) {
+                    Eigen::Matrix3d F_rest = make_frame(spine_rest, lateral_rest);
+                    Eigen::Matrix3d F_obs = make_frame(spine_obs, lateral_obs);
+
+                    // R_root maps rest body-frame to observed body-frame:
+                    //   F_obs = R_root * F_rest  =>  R_root = F_obs * F_rest^T
+                    Eigen::Matrix3d R_root = F_obs * F_rest.transpose();
+                    // Project onto SO(3) via SVD to correct numerical drift
+                    Eigen::JacobiSVD<Eigen::Matrix3d> svd(R_root, Eigen::ComputeFullU |
+                                                                      Eigen::ComputeFullV);
+                    R_root = svd.matrixU() *
+                             Eigen::Vector3d(
+                                 1, 1, svd.matrixU().determinant() * svd.matrixV().determinant())
+                                 .asDiagonal() *
+                             svd.matrixV().transpose();
+
+                    Eigen::Quaterniond q_root(R_root);
+                    q_root.normalize();
+                    q[3] = q_root.x();
+                    q[4] = q_root.y();
+                    q[5] = q_root.z();
+                    q[6] = q_root.w();
+                    aligned = true;
+                    fmt::print(
+                        "  IK body-frame alignment: spine=[{:.2f},{:.2f},{:.2f}] "
+                        "lateral=[{:.2f},{:.2f},{:.2f}]\n",
+                        spine_obs.normalized().x(), spine_obs.normalized().y(),
+                        spine_obs.normalized().z(), lateral_obs.normalized().x(),
+                        lateral_obs.normalized().y(), lateral_obs.normalized().z());
+                }
+            }
+            if (!aligned) {
+                fmt::print(
+                    "  IK body-frame alignment skipped (hip/shoulder markers not found), "
+                    "using identity orientation\n");
+            }
         }
     } else {
         // IK always works with full-skeleton states (returns full initialization)
@@ -41,247 +171,74 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
         q = ForwardKinematics::state_to_config(*initial_guess, *layout);
     }
 
-    // Extract marker names (maintain consistent ordering)
-    std::vector<std::string> marker_names;
-    for (auto const& [name, pos] : target_markers) {
-        if (marker_frame_map_.count(name) > 0) {
-            marker_names.push_back(name);
-        }
-    }
-
-    if (marker_names.empty()) {
-        return IKResult::failure();
-    }
-
     // Open CSV file for iteration tracking
     std::ofstream csv_file("/tmp/ik_iterations.csv");
-    csv_file << "iteration,marker_name,target_x,target_y,target_z,current_x,current_y,current_z,"
-                "error_x,error_y,error_z\n";
+    csv_file << "iteration,rms_error,damping\n";
 
-    // Open separate CSV for root updates
-    std::ofstream root_csv("/tmp/ik_root_updates.csv");
-    root_csv << "iteration,delta_x,delta_y,delta_z,omega_x,omega_y,omega_z,damping\n";
-
-    // Damped least squares iteration with adaptive damping
-    double prev_error = std::numeric_limits<double>::infinity();
+    // Levenberg-Marquardt with backtracking:
+    //   - compute step dv in tangent space (nv)
+    //   - use pinocchio::integrate to retract onto the manifold
+    //   - accept step only if error decreases; otherwise increase damping and retry
     double current_damping = damping;
+    Eigen::VectorXd error = compute_error(q, target_markers);
+    double rms_error = error.norm() / std::sqrt(static_cast<double>(marker_names.size()));
+
     int iter = 0;
-    int stall_count = 0;
-
     for (; iter < max_iterations; ++iter) {
-        // Compute current error
-        Eigen::VectorXd error = compute_error(q, target_markers);
-        double rms_error = error.norm() / std::sqrt(marker_names.size());
-
-        // Log to CSV
-        auto current_markers = fk_.compute(q);
-        for (auto const& [name, target_pos] : target_markers) {
-            auto it = current_markers.find(name);
-            if (it != current_markers.end()) {
-                Eigen::Vector3d const& current_pos = it->second;
-                Eigen::Vector3d err = target_pos - current_pos;
-                csv_file << iter << "," << name << "," << target_pos.x() << "," << target_pos.y()
-                         << "," << target_pos.z() << "," << current_pos.x() << ","
-                         << current_pos.y() << "," << current_pos.z() << "," << err.x() << ","
-                         << err.y() << "," << err.z() << "\n";
-            }
-        }
+        csv_file << iter << "," << rms_error << "," << current_damping << "\n";
 
         // Check convergence
         if (rms_error < tolerance) {
-            csv_file.close();
-            root_csv.close();
-            fmt::print(
-                "IK converged after {} iterations. Final RMS error: {:.4f} m. CSV: "
-                "/tmp/ik_iterations.csv, /tmp/ik_root_updates.csv\n",
-                iter + 1, rms_error);
-            // Convert configuration back to State
-            State final_state = config_to_state(q, skeleton);
-            return IKResult{final_state, rms_error, iter + 1, true};
+            break;
         }
 
-        // Adaptive damping: reduce as we get closer to solution
-        if (iter > 0) {
-            double error_reduction = prev_error - rms_error;
-            if (error_reduction > 1e-6) {
-                // Making progress - reduce damping for faster convergence
-                current_damping *= 0.8;
-                stall_count = 0;
-            } else {
-                // Stalled - try different strategies
-                stall_count++;
-
-                if (stall_count > 5) {
-                    // Been stalled for a while - reduce damping aggressively to take bigger steps
-                    current_damping *= 0.5;
-                    stall_count = 0;  // Reset to try again
-                } else {
-                    // Just started stalling - increase damping slightly
-                    current_damping *= 1.2;
-                }
-            }
-            // Keep damping in reasonable range - don't let it get too small!
-            current_damping = std::clamp(current_damping, 1e-5, 1e-1);
-        }
-
-        prev_error = rms_error;
-
-        // Compute Jacobian
+        // Compute Jacobian at current q
         Eigen::MatrixXd J = compute_jacobian(q, marker_names);
 
-        // Damped least squares: Δq = J^T(JJ^T + λI)^(-1) * error
+        // Levenberg-Marquardt step: dv = J^T (J J^T + λI)^{-1} * error
+        // This is the "right-hand" DLS formulation (numerically better when n_obs > nv).
         Eigen::MatrixXd JJT = J * J.transpose();
-        Eigen::MatrixXd damped =
-            JJT + current_damping * Eigen::MatrixXd::Identity(JJT.rows(), JJT.cols());
+        JJT.diagonal().array() += current_damping;
+        Eigen::VectorXd dv = J.transpose() * JJT.llt().solve(error);
 
-        // Solve: damped * y = error, then Δq = J^T * y
-        Eigen::VectorXd y = damped.ldlt().solve(error);
-        Eigen::VectorXd delta_q = J.transpose() * y;
+        // Retract onto the configuration manifold using pinocchio's Lie-group integrate.
+        // This correctly handles free-flyer and spherical joint quaternions.
+        Eigen::VectorXd q_new(model_.nq);
+        pinocchio::integrate(model_, q, dv, q_new);
+        enforce_joint_limits(q_new, skeleton);
 
-        // Scale step to avoid too large updates
-        double max_step = 0.5;  // Max 0.5 rad or 0.5m per iteration (conservative)
+        // Evaluate candidate
+        Eigen::VectorXd error_new = compute_error(q_new, target_markers);
+        double rms_new = error_new.norm() / std::sqrt(static_cast<double>(marker_names.size()));
 
-        // If stalled for many iterations, try a larger step to escape local minimum
-        if (stall_count > 3) {
-            max_step = 1.0;  // Allow larger steps when stalled
-        }
-
-        double delta_norm = delta_q.norm();
-        if (delta_norm > max_step) {
-            delta_q *= max_step / delta_norm;
-        }
-
-        // If step is extremely small, we're truly stuck - boost damping down aggressively
-        if (delta_norm < 1e-6) {
-            current_damping *= 0.1;  // Make much smaller to allow larger steps
-            if (current_damping < 1e-5) {
-                current_damping = 1e-4;  // Reset to reasonable value
+        if (rms_new < rms_error) {
+            // Accept step, reduce damping (more Newton-like next iteration)
+            q = q_new;
+            error = error_new;
+            rms_error = rms_new;
+            current_damping = std::max(current_damping * 0.5, 1e-7);
+        } else {
+            // Reject step, increase damping (more gradient-descent-like)
+            current_damping *= 4.0;
+            if (current_damping > 1e8) {
+                // Truly stuck even with near-gradient-descent step sizes — give up
+                break;
             }
         }
-
-        // Log root updates
-        if (model_.nv >= 6) {
-            root_csv << iter << "," << delta_q[0] << "," << delta_q[1] << "," << delta_q[2] << ","
-                     << delta_q[3] << "," << delta_q[4] << "," << delta_q[5] << ","
-                     << current_damping << "\n";
-        }
-
-        // Update configuration with delta
-        // Root position (indices 0-2)
-        q.head(3) += delta_q.head(3);
-
-        if (model_.nq >= 7) {
-            // Root quaternion (indices 3-6): Simple integration for now
-            // Extract quaternion update from delta_q (which is in velocity space, nv)
-            // For free-flyer, the velocity has 6 DOF: 3 linear + 3 angular
-            Eigen::Vector3d omega = delta_q.segment<3>(3);  // Angular velocity
-
-            // Scale up root rotation if it's too small (damping might be killing it)
-            if (stall_count > 3 && omega.norm() < 0.01) {
-                omega *= 5.0;  // Boost small rotation updates when stalled
-            }
-
-            // If truly stuck (omega extremely small), try random perturbation
-            if (iter > 50 && iter % 50 == 0 && omega.norm() < 1e-5) {
-                // Every 50 iterations when stuck, add a random rotation
-                omega =
-                    Eigen::Vector3d(0, 0.1 * (rand() % 100 - 50) / 50.0, 0);  // Random Y rotation
-            }
-
-            // Convert angular velocity to quaternion update (small angle approximation)
-            Eigen::Quaterniond q_current(q[6], q[3], q[4], q[5]);  // [w, x, y, z]
-            Eigen::Quaterniond q_delta;
-            double angle = omega.norm();
-            if (angle > 1e-8) {
-                Eigen::AngleAxisd aa(angle, omega.normalized());
-                q_delta = Eigen::Quaterniond(aa);
-            } else {
-                q_delta = Eigen::Quaterniond::Identity();
-            }
-
-            Eigen::Quaterniond q_new = q_delta * q_current;
-            q_new.normalize();
-
-            // Store back [x, y, z, w]
-            q[3] = q_new.x();
-            q[4] = q_new.y();
-            q[5] = q_new.z();
-            q[6] = q_new.w();
-        }
-
-        // Update joint configurations from velocity-space delta_q
-        // Need to map from velocity space (nv) to configuration space (nq)
-        if (model_.nv > 6 && model_.nq > 7) {
-            int v_idx = 6;  // Start after root in velocity space
-            int q_idx = 7;  // Start after root in config space
-
-            for (auto const& joint : skeleton.joints()) {
-                if (joint.parent_index == std::nullopt) {
-                    continue;  // Skip root
-                }
-
-                if (joint.type == JointType::REVOLUTE) {
-                    // 1 DOF in both spaces
-                    if (v_idx < model_.nv && q_idx < model_.nq) {
-                        q[q_idx] += delta_q[v_idx];
-                        v_idx++;
-                        q_idx++;
-                    }
-                } else if (joint.type == JointType::SPHERICAL) {
-                    // 3 DOF in velocity space, 4 DOF in config space (quaternion)
-                    if (v_idx + 2 < model_.nv && q_idx + 3 < model_.nq) {
-                        // Extract angular velocity delta
-                        Eigen::Vector3d omega = delta_q.segment<3>(v_idx);
-
-                        // Current joint quaternion [x, y, z, w]
-                        Eigen::Quaterniond q_joint(q[q_idx + 3], q[q_idx], q[q_idx + 1],
-                                                   q[q_idx + 2]);
-
-                        // Convert angular velocity to quaternion update
-                        Eigen::Quaterniond q_delta;
-                        double angle = omega.norm();
-                        if (angle > 1e-8) {
-                            Eigen::AngleAxisd aa(angle, omega.normalized());
-                            q_delta = Eigen::Quaterniond(aa);
-                        } else {
-                            q_delta = Eigen::Quaterniond::Identity();
-                        }
-
-                        // Apply update
-                        Eigen::Quaterniond q_new = q_delta * q_joint;
-                        q_new.normalize();
-
-                        // Store back
-                        q[q_idx] = q_new.x();
-                        q[q_idx + 1] = q_new.y();
-                        q[q_idx + 2] = q_new.z();
-                        q[q_idx + 3] = q_new.w();
-
-                        v_idx += 3;
-                        q_idx += 4;
-                    }
-                }
-            }
-        }
-
-        // Enforce joint limits
-        enforce_joint_limits(q, skeleton);
     }
 
-    // Failed to converge
     csv_file.close();
-    root_csv.close();
-    Eigen::VectorXd final_error = compute_error(q, target_markers);
-    double final_rms = final_error.norm() / std::sqrt(marker_names.size());
 
-    fmt::print(
-        "IK failed to converge after {} iterations. Final RMS error: {:.4f} m (tolerance: {:.4f} "
-        "m). CSV: /tmp/ik_iterations.csv, /tmp/ik_root_updates.csv\n",
-        iter, final_rms, tolerance);
+    bool converged = rms_error < tolerance;
+    if (converged) {
+        fmt::print("IK converged after {} iterations. Final RMS: {:.4f} m\n", iter, rms_error);
+    } else {
+        fmt::print("IK did not converge after {} iterations. Final RMS: {:.4f} m (tol {:.4f} m)\n",
+                   iter, rms_error, tolerance);
+    }
 
-    // Convert configuration back to State even if not converged
     State final_state = config_to_state(q, skeleton);
-    return IKResult{final_state, final_rms, iter, false};
+    return IKResult{final_state, rms_error, iter, converged};
 }
 
 Eigen::VectorXd
@@ -317,8 +274,12 @@ InverseKinematics::compute_error(Eigen::VectorXd const& q,
 
 Eigen::MatrixXd InverseKinematics::compute_jacobian(Eigen::VectorXd const& q,
                                                     std::vector<std::string> const& marker_names) {
-    // Update kinematics for current q
-    pinocchio::forwardKinematics(model_, data_, q);
+    // computeJointJacobians runs FK and fills data_.J (the joint Jacobian matrix).
+    // updateFramePlacements then fills data_.oMf (frame placements in world frame).
+    // computeFrameJacobian then reads data_.J to build per-frame Jacobians.
+    // Calling forwardKinematics alone does NOT fill data_.J, so without this call
+    // every frame Jacobian row is zero.
+    pinocchio::computeJointJacobians(model_, data_, q);
     pinocchio::updateFramePlacements(model_, data_);
 
     // Allocate stacked Jacobian (3 * num_markers × nv)
@@ -335,15 +296,16 @@ Eigen::MatrixXd InverseKinematics::compute_jacobian(Eigen::VectorXd const& q,
 
         pinocchio::FrameIndex frame_id = it->second;
 
-        // Compute 6D Jacobian (spatial velocity) in WORLD frame
+        // Compute 6D Jacobian in LOCAL_WORLD_ALIGNED frame (linear part = linear velocity
+        // of the frame origin expressed in world orientation).
         Eigen::Matrix<double, 6, Eigen::Dynamic> J_frame(6, model_.nv);
         J_frame.setZero();
 
-        pinocchio::computeFrameJacobian(model_, data_, q, frame_id, pinocchio::LOCAL_WORLD_ALIGNED,
-                                        J_frame);
+        // Use the 5-argument (no-q) form so pinocchio reads the already-computed data_.J.
+        pinocchio::getFrameJacobian(model_, data_, frame_id, pinocchio::LOCAL_WORLD_ALIGNED,
+                                    J_frame);
 
-        // Extract linear velocity part (first 3 rows)
-        // Pinocchio stores [linear; angular] in 6D Jacobian
+        // Pinocchio 6D spatial jacobian: [linear; angular] → take top 3 rows (linear velocity).
         J_stacked.block(3 * i, 0, 3, model_.nv) = J_frame.topRows(3);
     }
 
@@ -432,13 +394,21 @@ State InverseKinematics::config_to_state(Eigen::VectorXd const& q, Skeleton cons
                                                   q[q_idx + 2]);
                     joint_quat.normalize();
 
-                    // Convert to Euler angles (simple extraction for now)
-                    // TODO: Proper quaternion to Euler conversion
-                    Eigen::Vector3d euler(joint_quat.x(), joint_quat.y(), joint_quat.z());
+                    // Convert quaternion to axis-angle (the storage format used by State).
+                    // quat = [cos(θ/2), sin(θ/2)·axis], so axis_angle = axis * θ.
+                    Eigen::Vector3d xyz(joint_quat.x(), joint_quat.y(), joint_quat.z());
+                    double sin_half = xyz.norm();
+                    double angle = 2.0 * std::atan2(sin_half, joint_quat.w());
+                    Eigen::Vector3d axis_angle;
+                    if (sin_half > 1e-8) {
+                        axis_angle = xyz / sin_half * angle;
+                    } else {
+                        axis_angle = Eigen::Vector3d::Zero();
+                    }
 
-                    joint_angles[angle_idx] = euler[0];
-                    joint_angles[angle_idx + 1] = euler[1];
-                    joint_angles[angle_idx + 2] = euler[2];
+                    joint_angles[angle_idx] = axis_angle[0];
+                    joint_angles[angle_idx + 1] = axis_angle[1];
+                    joint_angles[angle_idx + 2] = axis_angle[2];
 
                     q_idx += 4;
                     angle_idx += 3;

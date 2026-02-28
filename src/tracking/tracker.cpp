@@ -5,6 +5,8 @@
 
 #include "posetrak/tracking/tracker.hpp"
 
+#include <Eigen/Dense>
+
 #include <fmt/core.h>
 
 #include "posetrak/core/skeleton_layout.hpp"
@@ -13,6 +15,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 
 namespace posetrak {
 
@@ -42,73 +45,161 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
     }
 
     // Step 1: Triangulate marker positions
-    // Group observations by marker
     std::map<int, std::vector<Observation>> obs_by_marker;
     for (auto const& obs : observations) {
         obs_by_marker[obs.marker_id].push_back(obs);
     }
 
-    // Triangulate each marker
     std::map<std::string, Eigen::Vector3d> marker_positions;
     for (auto const& [marker_id, marker_obs] : obs_by_marker) {
         if (marker_obs.size() < static_cast<size_t>(config_.min_cameras_for_init)) {
-            continue;  // Need at least N cameras
+            continue;
         }
-
-        // Get marker name
         if (marker_id >= static_cast<int>(skeleton_->markers().size())) {
             continue;
         }
         std::string marker_name = skeleton_->markers()[marker_id].name;
 
-        // Prepare for triangulation
         std::vector<Eigen::Vector2d> pixel_coords;
         std::vector<Camera const*> marker_cameras;
         std::vector<double> confidences;
-
         for (auto const& obs : marker_obs) {
             auto it = cameras_.find(obs.camera_id);
-            if (it == cameras_.end()) {
+            if (it == cameras_.end())
                 continue;
-            }
             pixel_coords.push_back(obs.position);
             marker_cameras.push_back(&it->second);
             confidences.push_back(obs.confidence);
         }
 
-        // Triangulate
         auto result = triangulator_->triangulate(pixel_coords, marker_cameras, confidences);
         if (result.success) {
             marker_positions[marker_name] = result.position;
         }
     }
 
-    // Check if we have enough markers
     if (marker_positions.size() < 3) {
-        return false;  // Need at least 3 markers for reasonable initialization
+        return false;
     }
 
-    // Step 2: Solve IK to get initial joint configuration
-    auto ik_result = ik_solver_->solve(marker_positions, *skeleton_, std::nullopt,
+    // Step 2: Analytically estimate root position + orientation from observed markers.
+    // This gives us a good global pose even before IK runs.
+    auto estimate_analytic_state = [&]() -> State {
+        auto const& groups = config_.active_joint_groups;
+        auto layout = groups.empty() ? SkeletonLayout::from_full_skeleton(skeleton_)
+                                     : SkeletonLayout::from_groups(skeleton_, groups);
+        int num_dof = layout->total_storage_dof_count();
+
+        // Root position: hip midpoint if visible, else all-marker centroid.
+        Eigen::Vector3d root_pos = Eigen::Vector3d::Zero();
+        {
+            auto hip_L = marker_positions.find("MRK-hip.L");
+            auto hip_R = marker_positions.find("MRK-hip.R");
+            if (hip_L != marker_positions.end() && hip_R != marker_positions.end()) {
+                root_pos = (hip_L->second + hip_R->second) / 2.0;
+            } else {
+                Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+                for (auto const& [n, p] : marker_positions)
+                    centroid += p;
+                root_pos = centroid / static_cast<double>(marker_positions.size());
+            }
+        }
+
+        // Root orientation: Procrustes alignment using FK rest-pose body axes vs observed axes.
+        Eigen::Quaterniond root_ori = Eigen::Quaterniond::Identity();
+        {
+            // Rest-pose FK (root at origin, all joints zero)
+            Eigen::VectorXd q_rest = Eigen::VectorXd::Zero(model_->nq);
+            if (model_->nq >= 7)
+                q_rest[6] = 1.0;
+            auto rest_mkrs = fk_->compute(q_rest);
+
+            auto get = [](auto const& m, std::string const& k) -> std::optional<Eigen::Vector3d> {
+                auto it = m.find(k);
+                if (it == m.end())
+                    return std::nullopt;
+                return it->second;
+            };
+
+            auto hL_r = get(rest_mkrs, "MRK-hip.L"), hR_r = get(rest_mkrs, "MRK-hip.R");
+            auto sL_r = get(rest_mkrs, "MRK-shoulder.L"), sR_r = get(rest_mkrs, "MRK-shoulder.R");
+            auto hL_o = get(marker_positions, "MRK-hip.L"),
+                 hR_o = get(marker_positions, "MRK-hip.R");
+            auto sL_o = get(marker_positions, "MRK-shoulder.L"),
+                 sR_o = get(marker_positions, "MRK-shoulder.R");
+
+            if (hL_r && hR_r && hL_o && hR_o && sL_r && sR_r && sL_o && sR_o) {
+                Eigen::Vector3d hip_ctr_r = (*hL_r + *hR_r) / 2.0;
+                Eigen::Vector3d hip_ctr_o = (*hL_o + *hR_o) / 2.0;
+                Eigen::Vector3d spine_r = (*sL_r + *sR_r) / 2.0 - hip_ctr_r;
+                Eigen::Vector3d spine_o = (*sL_o + *sR_o) / 2.0 - hip_ctr_o;
+                Eigen::Vector3d lat_r = *hL_r - *hR_r;
+                Eigen::Vector3d lat_o = *hL_o - *hR_o;
+
+                if (spine_r.norm() > 0.05 && spine_o.norm() > 0.05 && lat_r.norm() > 0.05 &&
+                    lat_o.norm() > 0.05) {
+                    // Build orthonormal body frames: columns = [lateral, spine, forward]
+                    auto make_frame = [](Eigen::Vector3d up, Eigen::Vector3d lat) {
+                        up = up.normalized();
+                        lat = (lat - lat.dot(up) * up).normalized();
+                        Eigen::Matrix3d F;
+                        F.col(0) = lat;
+                        F.col(1) = up;
+                        F.col(2) = lat.cross(up).normalized();
+                        return F;
+                    };
+                    Eigen::Matrix3d F_r = make_frame(spine_r, lat_r);
+                    Eigen::Matrix3d F_o = make_frame(spine_o, lat_o);
+
+                    // R maps rest body frame to observed body frame: F_o = R * F_r
+                    Eigen::Matrix3d R = F_o * F_r.transpose();
+                    // Project onto SO(3)
+                    Eigen::JacobiSVD<Eigen::Matrix3d> svd(R, Eigen::ComputeFullU |
+                                                                 Eigen::ComputeFullV);
+                    double det_sign = svd.matrixU().determinant() * svd.matrixV().determinant();
+                    R = svd.matrixU() * Eigen::DiagonalMatrix<double, 3>(1.0, 1.0, det_sign) *
+                        svd.matrixV().transpose();
+
+                    root_ori = Eigen::Quaterniond(R);
+                    root_ori.normalize();
+                    fmt::print("  Analytic root orientation estimated from hip/shoulder markers\n");
+                }
+            }
+        }
+
+        // Build a rest-pose state with the analytically estimated root transform.
+        fmt::print("  Analytic root position: ({:.3f}, {:.3f}, {:.3f})\n", root_pos.x(),
+                   root_pos.y(), root_pos.z());
+        return State(root_pos, root_ori, Eigen::VectorXd::Zero(num_dof), Eigen::Vector3d::Zero(),
+                     Eigen::Vector3d::Zero(), Eigen::VectorXd::Zero(num_dof));
+    };
+
+    State analytic_state = estimate_analytic_state();
+
+    // Step 3: Run IK from the analytic starting state to refine joint angles.
+    // Pass it as initial_guess so IK uses our root estimate instead of re-computing from scratch.
+    auto ik_result = ik_solver_->solve(marker_positions, *skeleton_, analytic_state,
                                        config_.ik_max_iterations, config_.ik_tolerance);
 
-    if (!ik_result.converged) {
-        // Accept non-converged solution if error is reasonable (< 50cm RMS)
-        // The UKF may be able to refine it over subsequent frames
-        if (ik_result.residual > 0.5) {
-            fmt::print("IK failed badly (RMS: {:.3f}m) - cannot initialize\n", ik_result.residual);
-            return false;
-        }
-        fmt::print("IK didn't fully converge (RMS: {:.3f}m), but proceeding with initialization\n",
-                   ik_result.residual);
+    // Step 4: Choose the best available state for UKF initialisation.
+    // IK may not fully converge (joint angles are hard), but as long as the root is
+    // in the right place the UKF will fix the pose within a handful of frames.
+    State init_state = analytic_state;  // baseline: correct root, zero joints
+    if (ik_result.residual < 0.5) {
+        // IK converged well enough — use it (better joint angles)
+        init_state = ik_result.state;
+        fmt::print("  Using IK result (RMS: {:.3f} m)\n", ik_result.residual);
+    } else {
+        fmt::print(
+            "  IK residual {:.3f} m > 0.50 m — using analytic root estimate with zero "
+            "joint angles (UKF will refine over first frames)\n",
+            ik_result.residual);
     }
 
-    // Step 3: Initialize UKF
-    initialize_ukf(ik_result.state, timestamp);
-
+    // Step 5: Initialize UKF
+    initialize_ukf(init_state, timestamp);
     initialized_ = true;
     last_timestamp_ = timestamp;
-
     return true;
 }
 

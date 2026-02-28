@@ -15,6 +15,7 @@
 #include "posetrak/core/observation.hpp"
 #include "posetrak/core/skeleton.hpp"
 #include "posetrak/core/state.hpp"
+#include "posetrak/filters/rts_smoother.hpp"
 #include "posetrak/filters/ukf.hpp"
 #include "posetrak/filters/update_result.hpp"
 #include "posetrak/kinematics/forward_kinematics.hpp"
@@ -192,6 +193,31 @@ class Tracker {
      */
     ForwardKinematics* get_fk() { return fk_.get(); }
 
+    // ── RTS Smoothing ────────────────────────────────────────────────────────────
+
+    /**
+     * @brief Enable accumulation of RTS smoother data during tracking.
+     *
+     * Must be called BEFORE any track_frame() calls.  When enabled, the
+     * tracker stores the per-frame forward-pass cache required by the RTS
+     * backward sweep.  This slightly increases memory usage (O(N * edim^2))
+     * but does not affect the filtered estimates produced by track_frame().
+     *
+     * @param enable  True to enable, false to disable (and clear the cache).
+     */
+    void enable_smoothing(bool enable);
+
+    /**
+     * @brief Run the RTS backward pass and return smoothed estimates.
+     *
+     * Requires enable_smoothing(true) to have been called before tracking,
+     * and at least one tracked frame.
+     *
+     * @return Smoothed frames in chronological order (same order as track_frame calls).
+     * @throws std::runtime_error if smoothing was not enabled or cache is empty.
+     */
+    std::vector<SmoothedFrame> smooth() const;
+
    private:
     /**
      * @brief Placeholder for a child filter (subtree tracker).
@@ -253,6 +279,10 @@ class Tracker {
     // State
     bool initialized_ = false;
     double last_timestamp_ = 0.0;
+
+    // RTS smoother
+    bool smoothing_enabled_ = false;
+    std::vector<FrameSmootherData> smoother_cache_;
 
     // Callbacks
     FrameCallback frame_callback_;

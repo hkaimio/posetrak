@@ -97,7 +97,11 @@ void UnscentedKalmanFilter::set_root_transform(Eigen::Vector3d const& position,
     state_.set_root_orientation(fixed_root_ori_);
 }
 
-void UnscentedKalmanFilter::predict(double dt) {
+PredictResult UnscentedKalmanFilter::predict(double dt) {
+    // Save posterior state x_{k|k} before anything modifies state_.
+    // Needed to compute the cross-covariance for the RTS smoother.
+    State const posterior_state = state_;
+
     // Generate sigma points
     auto sigma_points = sigma_gen_.generate_sigma_points(state_, covariance_);
 
@@ -454,6 +458,24 @@ void UnscentedKalmanFilter::predict(double dt) {
     // Debug: Export prior covariance if debug mode enabled
     if (debug_enabled_) {
         write_matrix_csv(covariance_, "prior_covariance.csv");
+    }
+
+    // ── RTS smoother cross-covariance ─────────────────────────────────────────
+    // D = Σ_i W_c^i * e_pre_i * e_prop_i^T
+    // e_pre_i  = tangent error of sigma_points[i]     wrt posterior x_{k|k}
+    // e_prop_i = tangent error of propagated_points[i] wrt predicted mean x_{k+1|k}
+    // Both computed in error-state space so manifold geometry is respected.
+    {
+        int const n_sigma = static_cast<int>(sigma_points.size());
+        auto const& wc = sigma_gen_.get_covariance_weights();
+        int const edim = error_dim();
+        Eigen::MatrixXd cross_cov = Eigen::MatrixXd::Zero(edim, edim);
+        for (int i = 0; i < n_sigma; ++i) {
+            Eigen::VectorXd const e_pre = compute_state_error(sigma_points[i], posterior_state);
+            Eigen::VectorXd const e_prop = compute_state_error(propagated_points[i], state_);
+            cross_cov += wc(i) * e_pre * e_prop.transpose();
+        }
+        return PredictResult{std::move(cross_cov)};
     }
 }
 

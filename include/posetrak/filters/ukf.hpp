@@ -24,6 +24,18 @@
 namespace posetrak {
 
 /**
+ * @brief Result returned by UnscentedKalmanFilter::predict().
+ *
+ * Contains the sigma-point cross-covariance D between the posterior
+ * x_{k|k} and the prior x_{k+1|k}.  Required by the RTS smoother.
+ */
+struct PredictResult {
+    /// D = sum_i W_c^i * e_pre_i * e_prop_i^T  (error/tangent space)
+    /// Shape: error_dim x error_dim.
+    Eigen::MatrixXd cross_covariance;
+};
+
+/**
  * @brief Unscented Kalman Filter for joint space tracking
  *
  * Implements UKF with:
@@ -54,8 +66,11 @@ class UnscentedKalmanFilter {
      * - Position: p(t+dt) = p(t) + v*dt
      * - Quaternion: q(t+dt) = q(t) ⊗ exp(ω*dt/2)
      * - Velocities: v(t+dt) = v(t), ω(t+dt) = ω(t)
+     *
+     * @return PredictResult with sigma-point cross-covariance for RTS smoother.
+     *         May be discarded by callers that do not use smoothing.
      */
-    void predict(double dt);
+    PredictResult predict(double dt);
 
     /**
      * @brief Update step: correct state with observations
@@ -126,6 +141,9 @@ class UnscentedKalmanFilter {
      * @return Dimension of error state (2 * (6 + active_dof))
      */
     int error_dim() const { return sigma_gen_.error_dim(); }
+
+    /// Return the layout used to build this UKF (joints, DOF indices, etc.).
+    std::shared_ptr<const SkeletonLayout> layout() const { return layout_; }
 
     // Debug instrumentation
     /**

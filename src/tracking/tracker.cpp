@@ -373,7 +373,9 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
     fmt::print("\n=== Tracking frame at timestamp {:.6f} ===\n", timestamp);
 
     // Step 1: Predict
-    ukf_->predict(dt);
+    auto predict_result = ukf_->predict(dt);
+    State const prior_state = ukf_->state();
+    Eigen::MatrixXd const prior_cov = ukf_->covariance();
 
     // Step 2: Check if we have observations
     if (!has_sufficient_observations(observations)) {
@@ -416,6 +418,18 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
     // Step 4: Refresh FK on posterior state so children can call world_transform()
     fk_->compute(ukf_->state());
 
+    // Accumulate RTS smoother data if enabled (only for successful frames).
+    if (smoothing_enabled_) {
+        smoother_cache_.push_back(FrameSmootherData{
+            timestamp,
+            ukf_->state(),
+            ukf_->covariance(),  // posterior
+            prior_state,
+            prior_cov,                        // prior
+            predict_result.cross_covariance,  // D_{k-1,k}
+        });
+    }
+
     return TrackingResult{timestamp,   ukf_->state(),           ukf_->covariance(),
                           update_info, update_info.num_inliers, false,
                           ""};
@@ -436,6 +450,29 @@ void Tracker::reset() {
     initialized_ = false;
     last_timestamp_ = 0.0;
     ukf_.reset();
+    smoother_cache_.clear();
+}
+
+// ─── RTS smoothing ────────────────────────────────────────────────────────────
+
+void Tracker::enable_smoothing(bool enable) {
+    smoothing_enabled_ = enable;
+    if (!enable) {
+        smoother_cache_.clear();
+    }
+}
+
+std::vector<SmoothedFrame> Tracker::smooth() const {
+    if (!smoothing_enabled_) {
+        throw std::runtime_error(
+            "Tracker::smooth(): smoothing was not enabled. "
+            "Call enable_smoothing(true) before track_frame().");
+    }
+    if (smoother_cache_.empty()) {
+        throw std::runtime_error("Tracker::smooth(): no frames tracked yet.");
+    }
+    RTSSmoother smoother(ukf_->layout());
+    return smoother.smooth(smoother_cache_);
 }
 
 }  // namespace posetrak

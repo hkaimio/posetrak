@@ -377,6 +377,9 @@ def main() -> None:
                              "most other tools; default: m)")
     parser.add_argument("--no-rest-frame", action="store_true",
                         help="Omit frame 0 rest pose (not recommended)")
+    parser.add_argument("--smoothed", action="store_true",
+                        help="Use smoothed_joint_angles.csv / smoothed_root_pose.csv instead of "
+                             "the forward-pass outputs (requires --smooth during tracking)")
     parser.add_argument("--start-frame", type=int, default=None,
                         help="First tracking frame to export (1-based)")
     parser.add_argument("--end-frame", type=int, default=None,
@@ -384,8 +387,8 @@ def main() -> None:
     args = parser.parse_args()
 
     tracking_dir: Path = args.tracking_dir
-    root_pose_csv = tracking_dir / "root_pose.csv"
-    joint_angles_csv = tracking_dir / "joint_angles.csv"
+    root_pose_csv = tracking_dir / ("smoothed_root_pose.csv" if args.smoothed else "root_pose.csv")
+    joint_angles_csv = tracking_dir / ("smoothed_joint_angles.csv" if args.smoothed else "joint_angles.csv")
 
     for p in (root_pose_csv, joint_angles_csv, args.skeleton):
         if not p.exists():

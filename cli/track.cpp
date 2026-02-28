@@ -132,6 +132,51 @@ std::string generate_state_header(SkeletonLayout const& layout) {
     return header;
 }
 
+// Helper: Write one frame of joint angles in exact joint_angles.csv format.
+// Mirrors TrackingExporter::write_frame section 2.  The angle_idx counter
+// must match the order used when the state was built (skeleton.joints(),
+// skipping root and FIXED joints, SPHERICAL=3 DOF, REVOLUTE=1 DOF).
+void write_smoothed_joint_angles_frame(std::ofstream& file, int frame, double timestamp,
+                                       State const& state, Skeleton const& skeleton) {
+    auto const& joints = skeleton.joints();
+    auto const& angles = state.joint_angles();
+    auto const& vels = state.joint_velocities();
+    int idx = 0;
+    for (auto const& joint : joints) {
+        if (joint.type == JointType::FIXED || !joint.parent_index.has_value()) {
+            continue;
+        }
+        if (joint.type == JointType::SPHERICAL && idx + 2 < angles.size()) {
+            Eigen::Vector3d a = angles.segment<3>(idx);
+            Eigen::Vector3d v = Eigen::Vector3d::Zero();
+            if (idx + 2 < vels.size()) {
+                v = vels.segment<3>(idx);
+            }
+            file << fmt::format("{},{},{},{},{},{},{},{},{}\n", frame, timestamp, joint.name, a.x(),
+                                a.y(), a.z(), v.x(), v.y(), v.z());
+            idx += 3;
+        } else if (joint.type == JointType::REVOLUTE && idx < angles.size()) {
+            double a = angles(idx);
+            double v = (idx < vels.size()) ? vels(idx) : 0.0;
+            file << fmt::format("{},{},{},{},{},{},{},{},{}\n", frame, timestamp, joint.name, a,
+                                0.0, 0.0, v, 0.0, 0.0);
+            idx += 1;
+        }
+    }
+}
+
+// Helper: Write one frame of root pose in exact root_pose.csv format.
+void write_smoothed_root_pose_frame(std::ofstream& file, int frame, double timestamp,
+                                    State const& state) {
+    auto const& p = state.root_position();
+    Eigen::Quaterniond q = state.root_orientation().normalized();
+    auto const& lv = state.root_velocity();
+    auto const& av = state.root_angular_velocity();
+    file << fmt::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n", frame, timestamp, p.x(),
+                        p.y(), p.z(), q.w(), q.x(), q.y(), q.z(), lv.x(), lv.y(), lv.z(), av.x(),
+                        av.y(), av.z());
+}
+
 // Helper: Load Python tracker state from CSV (for validation/comparison)
 std::optional<State> load_python_state(std::string const& csv_path, Skeleton const& skeleton,
                                        int frame = 0) {
@@ -404,6 +449,11 @@ int main(int argc, char* argv[]) {
     bool quiet = false;
     app.add_flag("-q,--quiet", quiet, "Quiet mode (only show errors)");
 
+    bool smooth_output = false;
+    app.add_flag("--smooth", smooth_output,
+                 "Run RTS backward smoother after forward pass and export "
+                 "smoothed_joint_angles.csv, smoothed_root_pose.csv, smoothed_state_vectors.csv");
+
     CLI11_PARSE(app, argc, argv);
 
     try {
@@ -500,6 +550,13 @@ int main(int argc, char* argv[]) {
         auto tracker_config = config.to_tracker_config();
         auto skeleton_ptr = std::make_shared<const Skeleton>(skeleton);
         Tracker tracker(skeleton_ptr, cameras, tracker_config);
+
+        if (smooth_output) {
+            tracker.enable_smoothing(true);
+            if (!quiet) {
+                fmt::print("RTS smoothing enabled: caching forward-pass data.\n");
+            }
+        }
 
         // Validate camera model by triangulating first frame
         double t_first_window = config.start_time + dt;
@@ -790,6 +847,56 @@ int main(int argc, char* argv[]) {
         }
         if (state_vec_file.is_open()) {
             state_vec_file.close();
+        }
+
+        // RTS smoother backward pass
+        if (smooth_output) {
+            if (!quiet) {
+                fmt::print("Running RTS backward smoother...\n");
+            }
+            auto smoothed = tracker.smooth();
+
+            // smoothed_state_vectors.csv  (diagnostic, same format as state_vectors.csv)
+            {
+                auto path = config.output_dir / "smoothed_state_vectors.csv";
+                std::ofstream f(path);
+                f << generate_state_header(*layout) << "\n";
+                int step = 1;
+                for (auto const& sf : smoothed) {
+                    export_state_vector(f, step++, sf.timestamp, sf.state, *layout);
+                }
+            }
+
+            // smoothed_joint_angles.csv  (same format as joint_angles.csv — BVH input)
+            {
+                auto path = config.output_dir / "smoothed_joint_angles.csv";
+                std::ofstream f(path);
+                f << "frame,timestamp,joint_name,angle_x,angle_y,angle_z,"
+                     "velocity_x,velocity_y,velocity_z\n";
+                int step = 1;
+                for (auto const& sf : smoothed) {
+                    write_smoothed_joint_angles_frame(f, step++, sf.timestamp, sf.state, skeleton);
+                }
+            }
+
+            // smoothed_root_pose.csv  (same format as root_pose.csv)
+            {
+                auto path = config.output_dir / "smoothed_root_pose.csv";
+                std::ofstream f(path);
+                f << "frame,timestamp,pos_x,pos_y,pos_z,quat_w,quat_x,quat_y,quat_z,"
+                     "vel_x,vel_y,vel_z,omega_x,omega_y,omega_z\n";
+                int step = 1;
+                for (auto const& sf : smoothed) {
+                    write_smoothed_root_pose_frame(f, step++, sf.timestamp, sf.state);
+                }
+            }
+
+            if (!quiet) {
+                fmt::print(
+                    "  Smoothed {} frames \u2192 smoothed_joint_angles.csv, "
+                    "smoothed_root_pose.csv, smoothed_state_vectors.csv\n",
+                    smoothed.size());
+            }
         }
 
         // Write statistics

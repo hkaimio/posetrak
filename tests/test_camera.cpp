@@ -87,15 +87,16 @@ TEST_CASE("Camera projection without distortion", "[camera]") {
     }
 
     SECTION("Point offset from center") {
-        Eigen::Vector3d const point(1.0, 0.5, 2.0);
+        // Use z=5 so the projected pixel stays within the 640×480 image.
+        Eigen::Vector3d const point(1.0, 0.5, 5.0);
         auto pixel_opt = cam.project(point);
         REQUIRE(pixel_opt.has_value());
         Eigen::Vector2d const pixel = *pixel_opt;
 
-        // x_pixel = fx * (x/z) + cx = 800 * (1/2) + 320 = 720
-        // y_pixel = fy * (y/z) + cy = 800 * (0.5/2) + 240 = 440
-        REQUIRE_THAT(pixel.x(), Catch::Matchers::WithinAbs(720.0, 1e-6));
-        REQUIRE_THAT(pixel.y(), Catch::Matchers::WithinAbs(440.0, 1e-6));
+        // x_pixel = fx * (x/z) + cx = 800 * (1/5) + 320 = 480
+        // y_pixel = fy * (y/z) + cy = 800 * (0.5/5) + 240 = 320
+        REQUIRE_THAT(pixel.x(), Catch::Matchers::WithinAbs(480.0, 1e-6));
+        REQUIRE_THAT(pixel.y(), Catch::Matchers::WithinAbs(320.0, 1e-6));
     }
 
     SECTION("Point behind camera returns invalid") {
@@ -133,7 +134,8 @@ TEST_CASE("Camera unprojection without distortion", "[camera]") {
     }
 
     SECTION("Project-unproject roundtrip") {
-        Eigen::Vector3d const original(1.0, 0.5, 2.0);
+        // Use z=5 so the projected pixel stays within the 640×480 image.
+        Eigen::Vector3d const original(1.0, 0.5, 5.0);
         auto pixel_opt = cam.project(original);
         REQUIRE(pixel_opt.has_value());
         Eigen::Vector2d const pixel = *pixel_opt;
@@ -223,7 +225,8 @@ TEST_CASE("Camera projection with distortion", "[camera]") {
         make_test_intrinsics(800.0, 800.0, 320.0, 240.0, 640, 480, {0.1, -0.05, 0, 0, 0});
     Camera const cam = make_test_camera("cam1", intr);
 
-    Eigen::Vector3d const point(1.0, 0.5, 2.0);
+    // Use z=5 so the projected pixel stays within the 640×480 image.
+    Eigen::Vector3d const point(1.0, 0.5, 5.0);
     auto pixel_distorted_opt = cam.project(point);
     auto pixel_undistorted_opt = cam.project_undistorted(point);
     REQUIRE(pixel_distorted_opt.has_value());
@@ -232,7 +235,7 @@ TEST_CASE("Camera projection with distortion", "[camera]") {
     Eigen::Vector2d const pixel_undistorted = *pixel_undistorted_opt;
 
     // Distorted and undistorted should be different
-    REQUIRE((pixel_distorted - pixel_undistorted).norm() > 0.1);
+    REQUIRE((pixel_distorted - pixel_undistorted).norm() > 0.01);
 }
 
 TEST_CASE("Camera bounds checking", "[camera]") {

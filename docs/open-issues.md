@@ -24,16 +24,17 @@ both forms (scalar string and YAML sequence).
 
 ---
 
-### 2 — `Camera::project()` returns `nullopt` for points that project outside image bounds
+### 2 — ~~`Camera::project()` returns `nullopt` for points that project outside image bounds~~ **WON'T FIX** (tests updated)
 
 **Affected tests** (3 assertions): `test_camera.cpp:92, 138, 229`
 
 **Root cause**: The camera has image size 640×480.  The test point `(1, 0.5, 2)` projects to
-pixel `(720, 440)` — outside the image — so `project()` returns `nullopt`.  The tests were
-written assuming `project()` does *not* clip to image bounds (test comment says "x_pixel = 720").
+pixel `(720, 440)` — outside the image — so `project()` returns `nullopt`.
 
-**Fix**: Remove the image-bounds check from `project()` (or add a separate
-`project_unclamped()` overload); bounds checking is the caller's responsibility.
+**Resolution**: The bounds-check in `project()` was intentionally introduced (commit 624a3f7)
+and should not be removed.  The three tests were updated to use point `(1.0, 0.5, 5.0)`, which
+projects to pixel `(480, 320)` — clearly within the 640×480 image — so all numeric assertions
+remain meaningful and the roundtrip unproject test is unaffected.
 
 ---
 

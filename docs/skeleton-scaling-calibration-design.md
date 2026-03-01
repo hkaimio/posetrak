@@ -514,6 +514,82 @@ lengths, Option A for a final high-fidelity refinement with Bayesian uncertainty
 
 ---
 
+## Testing Plan
+
+### Unit tests
+
+**Prismatic model builder** (`tests/kinematics/test_prismatic_model_builder.cpp`):
+- Given a two-joint skeleton (root → child, offset `[0.1, 0.3, 0.0]`) with the child in a
+  scale group, verify the Pinocchio model contains an extra prismatic joint with
+  `axis ≈ normalize([0.1, 0.3, 0.0])` and that child joint `offset` becomes zero.
+- Verify round-trip: build model at nominal `q_pris = |offset₀|`, run FK, confirm child
+  frame position matches original FK at the same configuration.
+- Verify that joints *not* in any scale group are unaffected by the model builder.
+
+**Offset direction preservation** (`tests/kinematics/test_prismatic_fk.cpp`):
+- For a range of `q_pris` values (0.5·L₀, L₀, 1.5·L₀), confirm the child joint translates
+  strictly along `ĉ` in the parent frame with no lateral drift.
+- Multi-link chain (root → prismatic_A → joint_A → prismatic_B → joint_B): verify that
+  scaling A does not affect B's local frame orientation and vice versa.
+
+**Convergence criteria logic** (`tests/calibration/test_convergence.cpp`):
+- Given a synthetic posterior time-series that starts noisy and stabilises, verify the
+  CONVERGED / UNCERTAIN / NOT_OBSERVABLE thresholds fire at the expected frames.
+- Verify bilateral divergence warning triggers at >5 % difference between `.L` and `.R`
+  joint estimates.
+
+**YAML round-trip** (`tests/calibration/test_yaml_output.cpp`):
+- Load a skeleton YAML with `scale_groups`, run the calibration output writer with synthetic
+  `q_pris_mean` values, reload the output YAML, and verify:
+  - Updated `offset` vectors have correct magnitudes (`q_pris_mean`) and directions
+    (`normalize(offset₀)`).
+  - All non-calibrated fields (orientations, limits, markers, groups) are bit-for-bit
+    identical to the input.
+  - `scale_groups` key is absent in the output.
+
+---
+
+### Integration tests
+
+**Synthetic calibration sequence** (`tests/calibration/test_scale_calibration.cpp`):
+
+Generate a ground-truth skeleton with known offsets differing by ±20 % from the default,
+then:
+1. Synthesise noiseless marker trajectories from the ground-truth skeleton and a fixed
+   motion sequence (arm circles + squat).
+2. Run `posetrak scale` with the default skeleton and the synthetic markers.
+3. Assert that each calibrated offset is within 5 mm of the ground-truth value.
+4. Assert that all scale groups report CONVERGED status.
+
+A noise variant adds Gaussian noise (σ = 5 mm) to the synthetic markers and asserts
+convergence within 10 mm.
+
+**Regression guard** (`tests/calibration/test_scale_regression.cpp`):
+- Run the full calibration pipeline on the existing regression recording
+  (`tracking_tests/harri-regress-latest/`) with the reference skeleton.
+- Store the resulting calibrated offsets as a golden file.
+- The test fails if any offset changes by more than 1 mm on a future run, catching
+  regressions in the prismatic model builder, UKF integration, or smoother.
+
+---
+
+### System / acceptance tests
+
+**Residual improvement check**:
+- Track the calibration recording with the default skeleton → compute per-frame marker RMSE.
+- Track the same recording with the calibrated skeleton → compute RMSE.
+- Assert: mean RMSE with calibrated skeleton < mean RMSE with default skeleton.
+- This is the primary acceptance criterion from US-1.
+
+**Downstream compatibility**:
+- After `posetrak scale`, run `posetrak track` with the calibrated YAML on the regression
+  recording and confirm the existing regression test still passes (calibrated YAML is a
+  drop-in replacement).
+- Run `scripts/export_bvh.py` on the tracking output and confirm it produces a valid BVH
+  with the same joint count as before.
+
+---
+
 ## Open Issues Not Addressed Here
 
 - **Foot/ankle**: difficult to scale correctly without foot-marker ground constraints

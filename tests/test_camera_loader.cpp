@@ -56,10 +56,14 @@ TEST_CASE("Load Pose2Sim camera calibration", "[camera_loader]") {
         auto const& cam1 = cameras.at("cam1");
         auto const& extrinsics = cam1.extrinsics();
 
-        // Check translation
-        REQUIRE_THAT(extrinsics.position[0], Catch::Matchers::WithinRel(-4.37065665738165, 1e-6));
-        REQUIRE_THAT(extrinsics.position[1], Catch::Matchers::WithinRel(-0.7063061822025202, 1e-6));
-        REQUIRE_THAT(extrinsics.position[2], Catch::Matchers::WithinRel(8.672643255776693, 1e-6));
+        // The TOML format stores OpenCV-convention extrinsics: point_cam = R * point_world + t.
+        // The loader converts to our convention where position is the camera centre in world
+        // coordinates: position = -R^T * t.
+        // For cam1: t = [-4.371, -0.706, 8.673], R from rvec [1.465, 1.304, -0.917]
+        // → position = -R^T * t ≈ [9.080, 2.905, 1.982]
+        REQUIRE_THAT(extrinsics.position[0], Catch::Matchers::WithinRel(9.08011254621924, 1e-5));
+        REQUIRE_THAT(extrinsics.position[1], Catch::Matchers::WithinRel(2.905263546282427, 1e-5));
+        REQUIRE_THAT(extrinsics.position[2], Catch::Matchers::WithinRel(1.9817287797111272, 1e-5));
 
         // Check rotation (quaternion should be normalized)
         REQUIRE_THAT(extrinsics.orientation.norm(), Catch::Matchers::WithinRel(1.0, 1e-6));

@@ -38,16 +38,17 @@ remain meaningful and the roundtrip unproject test is unaffected.
 
 ---
 
-### 3 — Camera loader loads extrinsics with wrong position values
+### 3 — ~~Camera loader loads extrinsics with wrong position values~~ **WON'T FIX** (test updated)
 
 **Affected tests** (1 assertion): `test_camera_loader.cpp:60`
 
-**Root cause**: Loaded `extrinsics.position[0] = +9.08` instead of expected `-4.37`.
-Likely a frame-convention mismatch: the loader stores the raw TOML translation vector
-instead of the camera position in world frame (`position = -R^T * t`).
+**Root cause**: Test was asserting `extrinsics.position == raw TOML translation` (`-4.37, -0.706, 8.67`),
+but the loader correctly converts from OpenCV convention (`point_cam = R·point_world + t`) to
+world-space camera position (`position = -R^T · t`), giving `[9.08, 2.91, 1.98]`.
+The loader is correct (tracker works); the test expectation was wrong.
 
-**Fix**: Audit `src/io/camera_loader.cpp`; ensure the stored position is the camera
-origin in world coordinates, consistent with what `Intrinsics`/`Extrinsics` documents.
+**Resolution**: Updated assertion to check the actual world-space position values `[9.080, 2.905, 1.982]`
+and added a comment explaining the OpenCV→world convention conversion.
 
 ---
 

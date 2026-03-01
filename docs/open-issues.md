@@ -52,20 +52,15 @@ and added a comment explaining the OpenCV→world convention conversion.
 
 ---
 
-### 4 — `Observation::measurement_noise_std()` ignores confidence
+### 4 — ~~`Observation::measurement_noise_std()` ignores confidence~~ **FIXED**
 
 **Affected tests** (3 assertions): `test_observation.cpp:32, 38, 44`
 
-**Root cause**: `measurement_noise_std(base_std)` returns `base_std` unchanged instead of
-`base_std / confidence`.  The implementation is a stub that forgets to divide.
+**Root cause**: `measurement_noise_std(base_std)` returned `base_std` unchanged — the
+actual divide-by-confidence line was commented out.
 
-**Fix**: In `src/core/observation.cpp` (or wherever `measurement_noise_std` is defined):
-```cpp
-double Observation::measurement_noise_std(double base_std) const {
-    double conf = std::max(confidence, 0.1);   // clamp to avoid div-by-zero
-    return base_std / conf;
-}
-```
+**Fix**: Uncommented `return base_noise / std::max(confidence, 0.1);` in the inline
+method in `include/posetrak/core/observation.hpp`.
 
 ---
 
@@ -118,16 +113,16 @@ functionality, so Python-vs-C++ comparison tests are no longer meaningful.
 
 ---
 
-### 9 — `State::apply_error_update` quaternion multiplication order mismatch
+### 9 — ~~`State::apply_error_update` quaternion multiplication order mismatch~~ **WON'T FIX** (test updated)
 
 **Affected tests** (1 assertion): `test_state.cpp:221`
 
-**Root cause**: Test computes `expected_quat = delta_q * quat` (left-compose, global frame
-update), but the implementation uses `quat * delta_q` (right-compose, body-frame update),
-or vice-versa.  One of the two is wrong for the established convention.
+**Root cause**: Test computed `expected_quat = delta_q * quat` (left-compose, global frame)
+but the implementation uses right-compose body-frame convention `quat * delta_q`, which is
+consistent with `compute_state_error` in `ukf.cpp` (`q_ref⁻¹ * q_state`).
 
-**Fix**: Audit `State::apply_error_update` in `src/core/state.cpp` and decide the correct
-convention (global vs body frame perturbation); update the test or implementation to match.
+**Resolution**: Updated the test to use the correct body-frame expectation
+`expected_quat = quat * delta_q`.  The implementation was correct.
 
 ---
 

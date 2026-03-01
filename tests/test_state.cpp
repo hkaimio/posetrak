@@ -217,7 +217,8 @@ TEST_CASE("Error-state update", "[state]") {
 
         // Check orientation update (more involved)
         Eigen::Quaterniond delta_q = State::axis_angle_to_quaternion(delta.segment<3>(3));
-        Eigen::Quaterniond expected_quat = delta_q * quat;
+        // Body-frame (right-compose) convention: q_new = q_nominal * delta_q
+        Eigen::Quaterniond expected_quat = quat * delta_q;
         REQUIRE(state.root_orientation().isApprox(expected_quat, 1e-6));
 
         // Check joint angles

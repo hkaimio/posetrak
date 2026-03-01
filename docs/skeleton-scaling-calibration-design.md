@@ -48,25 +48,29 @@ before tracking begins.
 ### US-2 — Scale group definition in YAML
 
 > As a skeleton designer, I want to define named scale groups in the skeleton YAML that
-> specify which joints' offsets are scaled together, so that calibration can be controlled
-> at the same level of abstraction as the skeleton definition itself.
+> declare which joint offsets should be calibrated, so that calibration scope is explicit
+> and controlled at the skeleton-definition level.
 
 **Acceptance criteria**:
-- An optional `scale_groups` key in the skeleton YAML lists groups, each referencing one or
-  more joint names and an optional symmetric flag.
+- An optional `scale_groups` key in the skeleton YAML lists named groups, each containing
+  a list of joint names.
+- Every joint in a group's `joints:` list receives **one independent** prismatic calibration
+  DOF.  Grouping is for reporting and configuration only — it does not imply shared
+  parameters.
 - Joints not referenced in any group are not modified by calibration.
-- The calibration tool validates that all group joints exist in the skeleton.
+- The calibration tool validates that all referenced joint names exist in the skeleton.
 
 ### US-3 — Asymmetric body support
 
 > As a user, I want left and right homologous bones to be calibrated independently so that
-> natural asymmetries in the subject's body are captured correctly.
+> natural body asymmetries are captured correctly without any special configuration.
 
 **Acceptance criteria**:
-- Left and right bones in the same scale group converge to independent values by default.
-- A `symmetric: true` option forces a shared parameter (useful for heavily occluded sides).
-- If independent values diverge by more than 5 %, a warning is emitted in the calibration
-  report; the values are still written separately to the output YAML.
+- Every joint listed in a scale group always gets its own independent parameter, regardless
+  of whether a bilateral counterpart is in the same group.
+- After calibration the tool reports the estimated offset magnitude for each joint and emits
+  a warning if left/right counterparts in the same group diverge by more than 5 %.
+- Both values are written to the output YAML regardless; no forced symmetry is applied.
 
 ### US-4 — Convergence transparency
 
@@ -117,30 +121,26 @@ architectures are described below, with a recommendation.
 
 ---
 
-## Questions / Clarifications Needed
+## Resolved Design Questions
 
-1. **Pinocchio model immutability**: The current FK path runs through Pinocchio, which bakes
-   joint offsets into an internal rigid model at construction time.  Rebuilding the model every
-   UKF sigma-point pass (2·n+1 evaluations per frame) would be prohibitively expensive.
-   Before committing to in-state scales, do you want to explore the alternative architecture
-   described in §2 below, or is online state augmentation a hard requirement?
+1. **Pinocchio model immutability** — resolved via `JointModelPrismaticUnaligned`.  Scale
+   parameters enter through the configuration vector `q`; the Pinocchio model is built once
+   and stays immutable.  See §Architecture Options.
 
-2. **Symmetry assumption**: Should "upper_arm" mean *one* shared parameter forced left=right,
-   or two independent parameters (which would be observable if the optical system sees both
-   arms)?  Asymmetric bodies exist.  Recommended default: independent, converge separately,
-   warn if they diverge by more than a threshold.
+2. **Symmetric vs. independent parameters** — resolved: every joint in a `scale_groups`
+   entry always receives its own independent prismatic DOF.  The group name exists for
+   display and configuration only.  Bilateral pairs (e.g., shin.L and shin.R) are independent
+   by design; a divergence warning is emitted if they differ by more than 5 %.
 
-3. **What scales?**: Should scale parameters only modify joint `offset` vectors (bone length),
-   or also marker `offset` vectors within each joint (attachment point position)?  Marker
-   offsets are often wrong too (sensor placement varies).  Including them dramatically
-   increases the number of parameters but may be necessary for accuracy.
+3. **What scales?** — first version calibrates joint `offset` magnitudes only (bone lengths
+   and joint socket positions).  Marker attachment offsets are a follow-on feature.
 
-4. **Calibration motion**: Is this a free-form sequence (user just moves naturally), or should
-   it be a guided protocol (T-pose → arm circles → squat, etc.)?  Observability depends
-   heavily on pose diversity; some guidance improves conditioning.
+4. **Calibration motion** — free-form motion covering a broad range of joint angles is
+   sufficient.  Guidance ("raise both arms, do a squat") improves conditioning but is not
+   required.  Observability is reported per group after the run.
 
-5. **Output destination**: Should the tool write a *new* YAML alongside the default, or
-   mutate the existing file in place?  A separate `<name>_calibrated.yaml` seems safer.
+5. **Output destination** — the tool always writes a new file.  Default path:
+   `<tracking_dir>/skeleton_calibrated.yaml`.  The input skeleton is never modified.
 
 ---
 
@@ -188,12 +188,33 @@ Marginal computational cost at 120 Hz.
 The calibration YAML is then used for all subsequent normal tracking (no prismatic joints,
 no extra state DOFs).
 
-**Requirement on offset vectors**: this decomposition assumes the original `offset` vector is
-purely (or predominantly) along the bone's longitudinal axis `ĉ`.  This should be enforced
-by skeleton design: a small perpendicular component (≤ 1 mm) is harmless because the
-prismatic sliding absorbs the full projection along ĉ while the perpendicular remainder goes
-into the child's fixed placement.  The model builder can warn if `|offset - (offset·ĉ)ĉ|` >
-some threshold (e.g., 5 mm).
+**Offset vector semantics**: the prismatic axis is `ĉ = normalize(original_offset)`, so the
+prismatic DOF scales the *magnitude* of the full 3D offset vector while preserving its
+direction.  This is biomechanically correct for all joint types:
+
+- **End-of-bone joints** (forearm, shin, hand, foot): offset is nearly pure along the
+  bone axis; the prismatic directly encodes bone length.
+- **Socket/junction joints** (thigh, shoulder): offset is a diagonal 3D vector encoding
+  both lateral displacement and height drop of the socket from the parent origin.  Scaling
+  its magnitude moves the socket in the correct anatomical direction — away from the pelvis
+  / top of spine — proportionally in all three components.
+
+Crucially, anatomically distinct quantities (hip socket position vs. femur length) are
+always in **separate scale groups with separate joints** and thus get fully independent
+prismatic DOFs.  For example:
+
+```
+hips
+ ├─ prismatic_thigh.L  → thigh.L    (hip socket, calibrates socket reach from pelvis)
+ │     └─ prismatic_shin.L  → shin.L (femur length, fully independent of socket)
+ └─ prismatic_thigh.R  → thigh.R    (independent of .L)
+```
+
+A woman with wider hips and shorter femurs simply converges to a larger `|thigh.L offset|`
+and a smaller `|shin.L offset|` than the reference.  No coupling.  Helper bones are not
+needed for the 1-DOF-per-joint model.  Independent orthogonal components of a single offset
+(e.g., hip-width vs. hip-drop independently) could be addressed with helper bones in a
+future extension, but the single-scalar model captures the dominant anatomical variation.
 
 **Advantages**
 - Pinocchio model immutable — no changes to FK, UKF sigma-point loop, RTS smoother, or
@@ -353,68 +374,114 @@ bone lengths from dynamic motion.  This is a follow-on feature.
 
 ---
 
-## Scale Group Definition Proposal (YAML Extension)
+## Scale Group Definition (YAML Extension)
 
-Add an optional top-level `scale_groups` key to the skeleton YAML:
+Add an optional top-level `scale_groups` key to the skeleton YAML.  Each group lists joint
+names; **each joint receives exactly one independent prismatic DOF**.  The group name is used
+only for the convergence report and has no effect on estimation.
 
 ```yaml
 scale_groups:
+  # Hip socket position — encodes where each thigh joint sits relative to the pelvis.
+  # Independent of femur length; a wider pelvis does not imply longer femurs.
+  - name: hip_socket
+    description: "position of hip joints relative to pelvis origin"
+    joints: [thigh.L, thigh.R]      # 2 independent DOFs
+
+  # Femur length — from hip socket to knee.
+  - name: femur
+    joints: [shin.L, shin.R]        # 2 independent DOFs
+
+  # Tibia length — from knee to ankle.
+  - name: tibia
+    joints: [foot.L, foot.R]        # 2 independent DOFs
+
+  # Clavicle / shoulder reach — position of shoulder joint relative to top of spine.
+  - name: shoulder_reach
+    description: "position of shoulder joints relative to top of spine"
+    joints: [shoulder.L, shoulder.R]
+
+  # Upper arm — from shoulder to elbow.
   - name: upper_arm
-    joints:
-      - left_upper_arm   # offset of this joint is scaled
-      - right_upper_arm
-    symmetric: false     # true = share one parameter; false = independent (recommended)
+    joints: [upper_arm.L, upper_arm.R]
 
-  - name: lower_arm
-    joints: [left_lower_arm, right_lower_arm]
-    symmetric: false
+  # Forearm — from elbow to wrist.
+  - name: forearm
+    joints: [forearm.L, forearm.R]
 
-  - name: back
-    joints: [lumbar, thorax, neck_base]
-    symmetric: false     # (there's only one spine, but the field is required)
+  # Spine segments — each independent (lumbar ≠ thoracic length).
+  - name: spine
+    joints: [spine1, spine2]
 
-  - name: thigh
-    joints: [left_thigh, right_thigh]
-    symmetric: false
-
-  - name: shin
-    joints: [left_shin, right_shin]
-    symmetric: false
-
-  - name: hip_width
-    description: "lateral offset of thigh joints from pelvis"
-    joints: [left_thigh, right_thigh]
-    axes: [0]            # future extension: scale only the x-component of offset, not full length
+  # Neck
+  - name: neck
+    joints: [neck1]
 ```
 
-When `symmetric: false` and two joints are listed, two independent parameters are estimated.
-If they converge to values differing by more than 3% a warning is emitted; the left and right
-values are written separately to the output YAML (no forced symmetry).
+**Semantics**:
+- No `symmetric` flag — bilateral symmetry is never enforced.  Left/right always converge
+  independently.  A >5 % divergence between bilateral counterparts triggers a report warning.
+- The `description` field is optional and informational only.
+- Joints absent from all scale groups are not modified by calibration.
+- The model builder inserts `JointModelPrismaticUnaligned(normalize(offset))` before each
+  listed joint.  The prismatic `q` is initialized to `|offset|`.
+
+**Known naming debt**: the current skeleton uses joint names that mix joint and bone naming
+conventions (e.g., `shin` refers to the knee joint, `thigh` to the hip socket).  This will
+be corrected in a future skeleton rename — scale group descriptions should be updated at
+the same time.
 
 ---
 
-## Calibration CLI Design
+## CLI Design — Subcommand Architecture
+
+Calibration is exposed as a subcommand of the main `posetrak` binary:
 
 ```
-posetrak-calibrate \
+posetrak scale \
   --skeleton default.yaml \
   --input-dir <recording_dir> \
-  --output-skeleton calibrated.yaml \
-  [--max-iterations 10] \
+  --output <calibrated.yaml> \
   [--convergence-tol 0.002] \
   [--min-observable-frames 240]
+
+posetrak track \
+  --skeleton calibrated.yaml \
+  --input-dir <recording_dir> \
+  ...
 ```
 
-Internally (Option B):
+The subcommand structure is introduced simultaneously with this feature.  `main.cpp` becomes
+a thin dispatcher:
 
-1. Load recording + default skeleton
-2. For each iteration:
-   a. Run forward UKF (re-uses existing tracker)
-   b. Run RTS smoother
-   c. Solve per-group LS: `s_g ← argmin Σ_t ||y_t - ŷ_t(q̂_t, s)||²`
-   d. Rebuild skeleton with updated offsets
-   e. Check convergence
-3. Write `calibrated.yaml` with updated `offset` values
+```cpp
+int main(int argc, char** argv) {
+    if (argc < 2) { print_usage(); return 1; }
+    std::string cmd = argv[1];
+    if (cmd == "track")    return run_track(argc - 1, argv + 1);
+    if (cmd == "scale")    return run_scale(argc - 1, argv + 1);
+    if (cmd == "validate") return run_validate(argc - 1, argv + 1);
+    print_usage(); return 1;
+}
+```
+
+File layout:
+```
+cli/
+  main.cpp        — subcommand dispatch only
+  cmd_track.cpp   — current track.cpp content
+  cmd_scale.cpp   — calibration subcommand
+```
+
+`posetrak scale` internally (Option A):
+
+1. Load default skeleton YAML, parse `scale_groups`
+2. For each listed joint, insert a prismatic DOF → build calibration Pinocchio model
+3. Run UKF + RTS smoother on the calibration recording
+4. Compute precision-weighted mean of smoothed posterior for each prismatic DOF
+5. Print convergence table (CONVERGED / UNCERTAIN / NOT_OBSERVABLE per joint)
+6. Write `calibrated.yaml`: set `offset ← q_pris_mean · normalize(offset₀)` for each
+   calibrated joint, omit `scale_groups` key (calibrated skeleton needs none)
 
 ---
 

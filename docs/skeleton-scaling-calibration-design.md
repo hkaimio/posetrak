@@ -590,6 +590,81 @@ convergence within 10 mm.
 
 ---
 
+## Phased Implementation Plan
+
+Implementation is split into four checkpoints, each leaving the codebase in a buildable,
+testable state.
+
+### Checkpoint 1 — Core prismatic joint infrastructure
+
+**Goal**: `PRISMATIC` joints exist end-to-end.  A skeleton YAML with `scale_groups` loads,
+builds a valid Pinocchio model, and can be tracked with the existing UKF unchanged.
+Bone-length DOFs are initialised from the YAML offsets and frozen (zero process noise for
+now — calibration mode is CP2).
+
+**Files changed**:
+| File | Change |
+|---|---|
+| `include/posetrak/core/skeleton.hpp` | Add `PRISMATIC` to `JointType`; add `prismatic_axis` field to `Joint`; add `set_joint_axis()` to `Skeleton`; handle `PRISMATIC` in `get_active_dof_mask` |
+| `src/core/skeleton.cpp` | Handle `PRISMATIC` in `add_joint`, `total_dof_count`, `to_json`/`from_json`; implement `set_joint_axis()` |
+| `src/io/skeleton_loader.cpp` | Pre-parse `scale_groups`; insert a `prismatic_<name>` joint before each calibrated joint during loading |
+| `src/kinematics/pinocchio_model_builder.cpp` | Emit `JointModelPrismaticUnaligned` for `PRISMATIC`; add required include |
+| `src/core/skeleton_layout.cpp` | Verify `PRISMATIC` is treated like `REVOLUTE` (no code change expected) |
+| `src/kinematics/forward_kinematics.cpp` | Verify existing `else` branch covers `PRISMATIC` in `state_to_config` (no code change expected) |
+
+**Definition of done**: `meson compile -C builddir` succeeds; existing regression tests pass
+on a skeleton YAML *without* `scale_groups` (skeleton is structurally identical to before).
+
+---
+
+### Checkpoint 2 — UKF process model for calibration DOFs
+
+**Goal**: Prismatic DOFs have a small, independent process noise so the filter can slowly
+update bone lengths during a calibration recording.  A `[calibration]` TOML section and
+`--calibrate` tracking flag enable this mode.
+
+**Files changed**:
+- `src/kalman/ukf.cpp` — detect prismatic DOFs in process noise covariance; set σ ≈ 0.1 mm/√s
+  for those DOFs, zero for normal tracking mode.
+- `include/posetrak/config.hpp` + `src/io/config_loader.cpp` — new `[calibration]` section.
+- `cli/track.cpp` — `--calibrate` flag passed through to UKF config.
+
+**Definition of done**: Running `posetrak track --calibrate` on a sequence with a skeleton
+that has `scale_groups` produces a tracking output whose prismatic DOFs drift slowly toward
+the correct bone length over the sequence.
+
+---
+
+### Checkpoint 3 — `posetrak scale` subcommand
+
+**Goal**: Full calibration workflow.  The `scale` subcommand runs calibration-mode tracking,
+detects convergence, and writes a calibrated YAML with updated `offset` values (prismatic
+DOFs absorbed back into child-joint offsets; prismatic joints removed from the calibrated
+YAML).
+
+**Files changed**:
+- `cli/track.cpp` — new `scale` subcommand.
+- `src/calibration/scale_calibration.cpp` (new) — rolling-window convergence test; reads
+  final prismatic state; updates child-joint offsets in the skeleton; writes calibrated YAML.
+- `src/io/skeleton_loader.cpp` — YAML writer (inverse of loader).
+
+**Definition of done**: `posetrak scale --skeleton ref.yaml --input calib.json --output cal.yaml`
+produces a valid drop-in skeleton whose per-group convergence status is printed.
+
+---
+
+### Checkpoint 4 — Tests
+
+**Goal**: Automated regression coverage as described in the Testing Plan section.
+
+**Files changed**:
+- `tests/calibration/test_scale_calibration.cpp` — synthetic GT sequence; assert offsets
+  within 5 mm.
+- `tests/calibration/test_scale_regression.cpp` — golden-file guard.
+- `tests/meson.build` — register new test targets.
+
+---
+
 ## Open Issues Not Addressed Here
 
 - **Foot/ankle**: difficult to scale correctly without foot-marker ground constraints

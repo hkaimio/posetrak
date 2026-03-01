@@ -10,6 +10,7 @@
 
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/multibody/joint/joint-free-flyer.hpp>
+#include <pinocchio/multibody/joint/joint-prismatic-unaligned.hpp>
 #include <pinocchio/multibody/joint/joint-revolute.hpp>
 #include <pinocchio/multibody/joint/joint-spherical.hpp>
 
@@ -123,6 +124,12 @@ void PinocchioModelBuilder::add_joint_recursive(
         } else {  // Z
             joint_id = model.addJoint(parent_id, pinocchio::JointModelRZ(), placement, joint.name);
         }
+    } else if (joint.type == JointType::PRISMATIC) {
+        // 1-DOF sliding joint along prismatic_axis (parent frame).
+        // The placement carries no offset — the bone length is encoded in q.
+        joint_id =
+            model.addJoint(parent_id, pinocchio::JointModelPrismaticUnaligned(joint.prismatic_axis),
+                           placement, joint.name);
     } else if (joint.type == JointType::FIXED) {
         // Fixed joint: Skip adding to Pinocchio (markers will attach to parent)
         // Store mapping but don't recurse
@@ -309,6 +316,10 @@ void PinocchioModelBuilder::add_subtree_joints_recursive(
         if (child.type == JointType::SPHERICAL) {
             pin_id = model.addJoint(parent_pin_id, pinocchio::JointModelSpherical(), placement,
                                     child.name);
+        } else if (child.type == JointType::PRISMATIC) {
+            pin_id = model.addJoint(parent_pin_id,
+                                    pinocchio::JointModelPrismaticUnaligned(child.prismatic_axis),
+                                    placement, child.name);
         } else {  // REVOLUTE
             char axis = get_revolute_axis(child);
             if (axis == 'X')

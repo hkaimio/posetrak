@@ -544,7 +544,7 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
     for (JointDesc const& j : layout_->joints()) {
         int const si = j.state_index;
 
-        if (j.type == JointType::REVOLUTE) {
+        if (j.type == JointType::REVOLUTE || j.type == JointType::PRISMATIC) {
             // Simple weighted average
             for (size_t i = 0; i < states.size(); ++i) {
                 angles_mean(si) += weights(i) * states[i].joint_angles()(si);
@@ -684,7 +684,7 @@ Eigen::VectorXd UnscentedKalmanFilter::compute_state_error(State const& state,
         int const pos_base = root_n + j.error_index;
         int const vel_base = active_dof + root_n + j.error_index;
 
-        if (j.type == JointType::REVOLUTE) {
+        if (j.type == JointType::REVOLUTE || j.type == JointType::PRISMATIC) {
             error(pos_base) = state.joint_angles()(si) - reference.joint_angles()(si);
             error(vel_base) = state.joint_velocities()(si) - reference.joint_velocities()(si);
 
@@ -1428,8 +1428,9 @@ void UnscentedKalmanFilter::enforce_joint_limits() {
             continue;
         }
 
-        if (joint.type == JointType::REVOLUTE) {
-            if (joint.num_limits > 0 && joint_angle_idx < angles.size()) {
+        if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
+            if (joint.type == JointType::REVOLUTE && joint.num_limits > 0 &&
+                joint_angle_idx < angles.size()) {
                 double min_limit = joint.limits[0].x();
                 double max_limit = joint.limits[0].y();
                 angles[joint_angle_idx] = std::clamp(angles[joint_angle_idx], min_limit, max_limit);
@@ -1475,9 +1476,10 @@ void UnscentedKalmanFilter::enforce_joint_limits() {
             continue;
         }
 
-        if (joint.type == JointType::REVOLUTE) {
-            // Check if at limit
-            if (joint.num_limits > 0 && joint_angle_idx < angles.size()) {
+        if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
+            // Check if at limit (revolute only; prismatic has no limits in CP1)
+            if (joint.type == JointType::REVOLUTE && joint.num_limits > 0 &&
+                joint_angle_idx < angles.size()) {
                 double angle = angles(joint_angle_idx);
                 double min_limit = joint.limits[0].x();
                 double max_limit = joint.limits[0].y();
@@ -1635,7 +1637,7 @@ void UnscentedKalmanFilter::write_sigma_points_csv(std::vector<State> const& sig
         }
 
         int dof = 0;
-        if (joint.type == JointType::REVOLUTE) {
+        if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
             dof = 1;
         } else if (joint.type == JointType::SPHERICAL) {
             dof = 3;
@@ -1653,7 +1655,7 @@ void UnscentedKalmanFilter::write_sigma_points_csv(std::vector<State> const& sig
         }
 
         int dof = 0;
-        if (joint.type == JointType::REVOLUTE) {
+        if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
             dof = 1;
         } else if (joint.type == JointType::SPHERICAL) {
             dof = 3;
@@ -1695,7 +1697,7 @@ void UnscentedKalmanFilter::write_sigma_points_csv(std::vector<State> const& sig
                 continue;  // Skip root
             }
 
-            if (joint.type == JointType::REVOLUTE) {
+            if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
                 f << "," << state.joint_angles()(joint_angle_idx);
                 joint_angle_idx += 1;
             } else if (joint.type == JointType::SPHERICAL) {
@@ -1714,7 +1716,7 @@ void UnscentedKalmanFilter::write_sigma_points_csv(std::vector<State> const& sig
                 continue;  // Skip root
             }
 
-            if (joint.type == JointType::REVOLUTE) {
+            if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
                 f << "," << state.joint_velocities()(joint_vel_idx);
                 joint_vel_idx += 1;
             } else if (joint.type == JointType::SPHERICAL) {

@@ -155,7 +155,8 @@ void write_smoothed_joint_angles_frame(std::ofstream& file, int frame, double ti
             file << fmt::format("{},{},{},{},{},{},{},{},{}\n", frame, timestamp, joint.name, a.x(),
                                 a.y(), a.z(), v.x(), v.y(), v.z());
             idx += 3;
-        } else if (joint.type == JointType::REVOLUTE && idx < angles.size()) {
+        } else if ((joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) &&
+                   idx < angles.size()) {
             double a = angles(idx);
             double v = (idx < vels.size()) ? vels(idx) : 0.0;
             file << fmt::format("{},{},{},{},{},{},{},{},{}\n", frame, timestamp, joint.name, a,

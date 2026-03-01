@@ -176,7 +176,8 @@ void TrackingExporter::write_frame(
             }
             write_joint_angles_row(frame_number, timestamp, joint.name, angles, velocities);
             angle_idx += 3;
-        } else if (joint.type == JointType::REVOLUTE && angle_idx < joint_angles_vec.size()) {
+        } else if ((joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) &&
+                   angle_idx < joint_angles_vec.size()) {
             Eigen::Vector3d angles(joint_angles_vec(angle_idx), 0.0, 0.0);
             Eigen::Vector3d velocities(
                 angle_idx < joint_velocities_vec.size() ? joint_velocities_vec(angle_idx) : 0.0,

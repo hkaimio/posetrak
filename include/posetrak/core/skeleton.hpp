@@ -17,7 +17,8 @@ namespace posetrak {
 enum class JointType {
     REVOLUTE,   ///< Single-axis rotation
     SPHERICAL,  ///< 3-DOF ball joint (represented as 3 consecutive revolute joints)
-    FIXED       ///< No DOF (virtual joint for marker attachment)
+    FIXED,      ///< No DOF (virtual joint for marker attachment)
+    PRISMATIC   ///< 1-DOF sliding joint; used for bone-length calibration
 };
 
 /// @brief Joint definition in skeleton hierarchy
@@ -31,6 +32,8 @@ struct Joint {
     std::string group;                      ///< Joint group for filtering (e.g., "legs", "arms")
     Eigen::Vector3d offset;                 ///< Translation from parent in parent's frame
     Eigen::Vector3d rest_orientation;       ///< Rest orientation as ZYX Euler angles (radians)
+    Eigen::Vector3d prismatic_axis{
+        0, 1, 0};  ///< Sliding axis for PRISMATIC joints (unit vector, parent frame)
 
     /// @brief Get mask of active (non-locked) DOFs
     /// @return Array indicating which DOFs are active (true) or locked (false)
@@ -38,7 +41,7 @@ struct Joint {
     std::array<bool, 3> get_active_dof_mask() const {
         std::array<bool, 3> mask = {false, false, false};
 
-        if (type == JointType::REVOLUTE) {
+        if (type == JointType::REVOLUTE || type == JointType::PRISMATIC) {
             mask[0] = true;
         } else if (type == JointType::SPHERICAL) {
             for (size_t i = 0; i < num_limits && i < 3; ++i) {
@@ -115,6 +118,12 @@ class Skeleton {
     /// @throws std::invalid_argument if joint index invalid
     void set_joint_limits(uint32_t joint_index, std::array<Eigen::Vector2d, 3> const& limits,
                           size_t num_limits);
+
+    /// @brief Set prismatic axis for a PRISMATIC joint
+    /// @param joint_index Index of the joint (must be PRISMATIC type)
+    /// @param axis Unit vector in parent frame defining the sliding direction
+    /// @throws std::invalid_argument if joint index invalid or joint is not PRISMATIC
+    void set_joint_axis(uint32_t joint_index, Eigen::Vector3d const& axis);
 
     /// @brief Validate skeleton structure
     ///

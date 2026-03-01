@@ -329,9 +329,9 @@ void InverseKinematics::enforce_joint_limits(Eigen::VectorXd& q, Skeleton const&
             continue;  // Root joint
         }
 
-        if (joint.type == JointType::REVOLUTE) {
-            // Single DOF - apply limits
-            if (q_idx < model_.nq && joint.num_limits > 0) {
+        if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
+            // Single DOF - apply limits (only revolute has limits in CP1)
+            if (q_idx < model_.nq && joint.type == JointType::REVOLUTE && joint.num_limits > 0) {
                 double min_limit = joint.limits[0].x();  // limits is array of Vector2d
                 double max_limit = joint.limits[0].y();
 
@@ -360,7 +360,7 @@ State InverseKinematics::config_to_state(Eigen::VectorXd const& q, Skeleton cons
         if (joint.parent_index == std::nullopt) {
             continue;  // Skip root
         }
-        if (joint.type == JointType::REVOLUTE) {
+        if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
             joint_dof += 1;
         } else if (joint.type == JointType::SPHERICAL) {
             joint_dof += 3;  // Euler angles storage
@@ -379,7 +379,7 @@ State InverseKinematics::config_to_state(Eigen::VectorXd const& q, Skeleton cons
                 continue;  // Skip root
             }
 
-            if (joint.type == JointType::REVOLUTE) {
+            if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
                 // Single DOF - copy directly
                 if (q_idx < model_.nq && angle_idx < joint_dof) {
                     joint_angles[angle_idx] = q[q_idx];

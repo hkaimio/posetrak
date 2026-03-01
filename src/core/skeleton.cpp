@@ -80,6 +80,24 @@ void Skeleton::set_joint_limits(uint32_t joint_index, std::array<Eigen::Vector2d
     joints_[joint_index].num_limits = num_limits;
 }
 
+void Skeleton::set_joint_axis(uint32_t joint_index, Eigen::Vector3d const& axis) {
+    if (joint_index >= joints_.size()) {
+        throw std::invalid_argument(
+            fmt::format("Invalid joint index {} for set_joint_axis", joint_index));
+    }
+    if (joints_[joint_index].type != JointType::PRISMATIC) {
+        throw std::invalid_argument(
+            fmt::format("Joint '{}' is not PRISMATIC", joints_[joint_index].name));
+    }
+
+    double const norm = axis.norm();
+    if (norm < 1e-9) {
+        throw std::invalid_argument(
+            fmt::format("Prismatic axis for joint '{}' is nearly zero", joints_[joint_index].name));
+    }
+    joints_[joint_index].prismatic_axis = axis / norm;
+}
+
 std::optional<std::string> Skeleton::validate() const {
     if (joints_.empty()) {
         return "Skeleton has no joints";
@@ -134,7 +152,7 @@ int Skeleton::total_dof_count() const {
     // For state storage: always 3 DOFs for SPHERICAL joints regardless of locked DOFs
     int total = 0;
     for (auto const& joint : joints_) {
-        if (joint.type == JointType::REVOLUTE) {
+        if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
             total += 1;
         } else if (joint.type == JointType::SPHERICAL) {
             total += 3;  // Always 3, regardless of locked DOFs
@@ -185,7 +203,14 @@ nlohmann::json Skeleton::to_json() const {
 
         joint_json["type"] = (joint.type == JointType::REVOLUTE    ? "revolute"
                               : joint.type == JointType::SPHERICAL ? "spherical"
+                              : joint.type == JointType::PRISMATIC ? "prismatic"
                                                                    : "fixed");
+
+        // Serialize prismatic axis if applicable
+        if (joint.type == JointType::PRISMATIC) {
+            joint_json["prismatic_axis"] = {joint.prismatic_axis[0], joint.prismatic_axis[1],
+                                            joint.prismatic_axis[2]};
+        }
         joint_json["dof"] = joint.dof;
 
         // Serialize limits
@@ -251,6 +276,8 @@ Skeleton Skeleton::from_json(nlohmann::json const& j) {
             type = JointType::SPHERICAL;
         } else if (type_str == "fixed") {
             type = JointType::FIXED;
+        } else if (type_str == "prismatic") {
+            type = JointType::PRISMATIC;
         } else {
             throw std::invalid_argument(fmt::format("Unknown joint type: {}", type_str));
         }
@@ -273,6 +300,14 @@ Skeleton Skeleton::from_json(nlohmann::json const& j) {
 
         uint32_t idx = skel.add_joint(name, parent_index, type, offset, group, rest_orientation);
         name_to_index[name] = idx;
+
+        // Parse and set prismatic axis if present
+        if (type == JointType::PRISMATIC && joint_json.contains("prismatic_axis")) {
+            auto const& ax_arr = joint_json.at("prismatic_axis");
+            Eigen::Vector3d ax;
+            ax << ax_arr[0].get<double>(), ax_arr[1].get<double>(), ax_arr[2].get<double>();
+            skel.set_joint_axis(idx, ax);
+        }
 
         // Parse and set limits if present
         if (joint_json.contains("limits")) {

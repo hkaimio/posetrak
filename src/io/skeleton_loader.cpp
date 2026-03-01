@@ -19,6 +19,8 @@ JointType parse_joint_type(std::string const& type_str) {
         return JointType::REVOLUTE;
     if (type_str == "ball" || type_str == "spherical")
         return JointType::SPHERICAL;
+    if (type_str == "prismatic")
+        return JointType::PRISMATIC;
     throw std::runtime_error("Unknown joint type: " + type_str);
 }
 
@@ -95,6 +97,18 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
         throw std::runtime_error("YAML file missing 'joints' section");
     }
 
+    // Pre-parse scale_groups to know which joints need a prismatic joint inserted before them
+    std::unordered_set<std::string> scale_group_joints;
+    if (root["scale_groups"]) {
+        for (auto const& sg_node : root["scale_groups"]) {
+            if (sg_node["joints"]) {
+                for (auto const& jname_node : sg_node["joints"]) {
+                    scale_group_joints.insert(jname_node.as<std::string>());
+                }
+            }
+        }
+    }
+
     std::unordered_map<std::string, uint32_t> joint_name_to_idx;
 
     for (auto const& joint_node : root["joints"]) {
@@ -135,6 +149,28 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
         }
 
         // Add joint to skeleton
+        // If this joint is in a scale group, insert a prismatic joint first so that the
+        // bone-length DOF can be calibrated.  The prismatic joint slides along
+        // normalize(original_offset) and the child joint's offset becomes zero.
+        if (scale_group_joints.count(joint_name) && parent_index.has_value()) {
+            double const offset_norm = offset.norm();
+            if (offset_norm < 1e-6) {
+                throw std::runtime_error(
+                    "Joint '" + joint_name +
+                    "' in scale_groups has a near-zero offset; cannot determine prismatic axis");
+            }
+            Eigen::Vector3d const axis = offset / offset_norm;
+            std::string const pris_name = "prismatic_" + joint_name;
+            uint32_t pris_idx = skeleton.add_joint(pris_name, parent_index, JointType::PRISMATIC,
+                                                   Eigen::Vector3d::Zero(), group);
+            skeleton.set_joint_axis(pris_idx, axis);
+            joint_name_to_idx[pris_name] = pris_idx;
+
+            // Redirect child: its parent is now the prismatic joint; offset absorbed into q
+            parent_index = pris_idx;
+            offset = Eigen::Vector3d::Zero();
+        }
+
         uint32_t joint_idx =
             skeleton.add_joint(joint_name, parent_index, type, offset, group, rest_orientation);
         joint_name_to_idx[joint_name] = joint_idx;

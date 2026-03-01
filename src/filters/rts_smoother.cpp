@@ -52,7 +52,7 @@ Eigen::VectorXd RTSSmoother::state_error(State const& a, State const& b) const {
         int const pos_base = root_n + j.error_index;
         int const vel_base = active_dof + root_n + j.error_index;
 
-        if (j.type == JointType::REVOLUTE) {
+        if (j.type == JointType::REVOLUTE || j.type == JointType::PRISMATIC) {
             err(pos_base) = a.joint_angles()(si) - b.joint_angles()(si);
             err(vel_base) = a.joint_velocities()(si) - b.joint_velocities()(si);
 
@@ -113,7 +113,7 @@ State RTSSmoother::state_retract(State const& nominal, Eigen::VectorXd const& er
         int const pos_base = root_n + j.error_index;
         int const vel_base = active_dof + root_n + j.error_index;
 
-        if (j.type == JointType::REVOLUTE) {
+        if (j.type == JointType::REVOLUTE || j.type == JointType::PRISMATIC) {
             new_angles(si) += error(pos_base);
             new_vels(si) += error(vel_base);
 

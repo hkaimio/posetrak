@@ -100,6 +100,8 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
     // Pre-parse scale_groups to know which joints need a prismatic joint inserted before them
     // Maps joint_name -> scale_group_name so the prismatic joint knows its group.
     std::unordered_map<std::string, std::string> scale_group_joints;  // joint_name -> group_name
+    std::unordered_map<std::string, Eigen::Vector2d>
+        scale_group_limits;                                    // group_name -> [min, max]
     std::unordered_set<std::string> scale_group_leaders_seen;  // groups that already have a leader
     if (root["scale_groups"]) {
         for (auto const& sg_node : root["scale_groups"]) {
@@ -107,6 +109,15 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
                 std::string const sg_name = sg_node["name"].as<std::string>();
                 for (auto const& jname_node : sg_node["joints"]) {
                     scale_group_joints[jname_node.as<std::string>()] = sg_name;
+                }
+                // Optional per-group scale factor limits [min, max].
+                // Defaults to [0.3, 3.0] to prevent negative/runaway scale factors.
+                if (sg_node["limits"] && sg_node["limits"].IsSequence() &&
+                    sg_node["limits"].size() == 2) {
+                    scale_group_limits[sg_name] = Eigen::Vector2d(
+                        sg_node["limits"][0].as<double>(), sg_node["limits"][1].as<double>());
+                } else {
+                    scale_group_limits[sg_name] = Eigen::Vector2d(0.3, 3.0);
                 }
             }
         }
@@ -177,6 +188,16 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
                 scale_group_leaders_seen.insert(sg_name);
             }
             skeleton.set_joint_scale_follower(pris_idx, is_follower);
+            // Apply per-group scale factor limits to prevent geometry inversion (s < 0).
+            // Limits are parsed from YAML `limits:` field or defaulted to [0.3, 3.0].
+            {
+                Eigen::Vector2d const lim = scale_group_limits.count(sg_name)
+                                                ? scale_group_limits.at(sg_name)
+                                                : Eigen::Vector2d(0.3, 3.0);
+                std::array<Eigen::Vector2d, 3> limits_arr{lim, Eigen::Vector2d::Zero(),
+                                                          Eigen::Vector2d::Zero()};
+                skeleton.set_joint_limits(pris_idx, limits_arr, 1);
+            }
             joint_name_to_idx[pris_name] = pris_idx;
 
             // Redirect child: its parent is now the prismatic joint; offset absorbed into q

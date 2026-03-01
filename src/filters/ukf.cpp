@@ -1468,8 +1468,7 @@ void UnscentedKalmanFilter::enforce_joint_limits() {
         }
 
         if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
-            if (joint.type == JointType::REVOLUTE && joint.num_limits > 0 &&
-                joint_angle_idx < angles.size()) {
+            if (joint.num_limits > 0 && joint_angle_idx < angles.size()) {
                 double min_limit = joint.limits[0].x();
                 double max_limit = joint.limits[0].y();
                 angles[joint_angle_idx] = std::clamp(angles[joint_angle_idx], min_limit, max_limit);
@@ -1519,14 +1518,12 @@ void UnscentedKalmanFilter::enforce_joint_limits() {
         }
 
         if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
-            // Check if at limit (revolute only; prismatic has no limits in CP1)
-            if (joint.type == JointType::REVOLUTE && joint.num_limits > 0 &&
-                joint_angle_idx < angles.size()) {
+            if (joint.num_limits > 0 && joint_angle_idx < angles.size()) {
                 double angle = angles(joint_angle_idx);
                 double min_limit = joint.limits[0].x();
                 double max_limit = joint.limits[0].y();
 
-                // If at limit (within tolerance), zero velocity
+                // If at limit (within tolerance), zero velocity to prevent pushing through boundary
                 if (std::abs(angle - min_limit) < 1e-6 || std::abs(angle - max_limit) < 1e-6) {
                     velocities(joint_vel_idx) = 0.0;
                 }

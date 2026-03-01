@@ -27,6 +27,9 @@ posetrak_sources = files(
   # Tracking (Phase 4)
   'tracking/tracker.cpp',
 
+  # Calibration (CP3)
+  'calibration/scale_calibration.cpp',
+
   # I/O (Phase 2)
   'io/skeleton_loader.cpp',
   'io/camera_loader.cpp',

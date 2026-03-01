@@ -2,6 +2,7 @@
 #include <fmt/core.h>
 
 #include "fmt/base.h"
+#include "posetrak/calibration/scale_calibration.hpp"
 #include "posetrak/core/config.hpp"
 #include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/io/camera_loader.hpp"
@@ -21,6 +22,58 @@
 #include <stdexcept>
 
 using namespace posetrak;
+
+// ---------------------------------------------------------------------------
+// 'scale' subcommand: post-process a completed calibration run.
+// Reads state_vectors.csv from the config output directory, checks per-group
+// convergence, then writes a calibrated skeleton YAML with updated offsets.
+// ---------------------------------------------------------------------------
+static int run_scale(std::string const& config_path, std::string scale_output_yaml, bool quiet) {
+    try {
+        if (!quiet) {
+            fmt::print("Loading configuration: {}\n", config_path);
+        }
+        auto config = TrackerAppConfig::load(config_path);
+
+        auto csv_path = (config.output_dir / "state_vectors.csv").string();
+        if (!quiet) {
+            fmt::print("Reading calibration data from: {}\n", csv_path);
+        }
+
+        ScaleCalibrationOptions opts;
+        auto results = check_scale_convergence(csv_path, opts);
+
+        // Print results table
+        int converged_count = 0;
+        fmt::print("\nScale calibration convergence (last {} frames):\n\n", opts.window_frames);
+        fmt::print("  {:<24}  {:>8}  {:>8}  {}\n", "Group", "Scale", "Std", "Status");
+        fmt::print("  {:<24}  {:>8}  {:>8}  {}\n", std::string(24, '-'), std::string(8, '-'),
+                   std::string(8, '-'), "--------");
+        for (auto const& r : results) {
+            fmt::print("  {:<24}  {:>8.4f}  {:>8.4f}  {}\n", r.name, r.final_scale, r.scale_std,
+                       r.converged ? "converged" : "NOT converged");
+            if (r.converged)
+                ++converged_count;
+        }
+        fmt::print("\n  {}/{} groups converged.\n\n", converged_count,
+                   static_cast<int>(results.size()));
+
+        if (scale_output_yaml.empty()) {
+            scale_output_yaml = (config.output_dir / "calibrated.yaml").string();
+        }
+
+        if (!quiet) {
+            fmt::print("Writing calibrated skeleton to: {}\n", scale_output_yaml);
+        }
+        write_calibrated_yaml(config.skeleton_path.string(), scale_output_yaml, results);
+        fmt::print("Done. Calibrated skeleton: {}\n", scale_output_yaml);
+        return 0;
+
+    } catch (std::exception const& e) {
+        fmt::print(stderr, "Error: {}\n", e.what());
+        return 1;
+    }
+}
 
 // Helper: Export predicted observations for comparison with Python
 void export_predicted_observations(std::ofstream& file, int frame_idx, double timestamp,
@@ -449,32 +502,11 @@ void validate_camera_model(std::vector<Observation> const& observations,
     fmt::print("==============================\n\n");
 }
 
-int main(int argc, char* argv[]) {
-    CLI::App app{"Posetrak - Motion Capture Tracker"};
-
-    std::string config_path;
-    app.add_option("config", config_path, "Configuration file (TOML)")
-        ->required()
-        ->check(CLI::ExistingFile);
-
-    bool verbose = false;
-    app.add_flag("-v,--verbose", verbose, "Verbose output (show per-frame statistics)");
-
-    bool quiet = false;
-    app.add_flag("-q,--quiet", quiet, "Quiet mode (only show errors)");
-
-    bool smooth_output = false;
-    app.add_flag("--smooth", smooth_output,
-                 "Run RTS backward smoother after forward pass and export "
-                 "smoothed_joint_angles.csv, smoothed_root_pose.csv, smoothed_state_vectors.csv");
-
-    bool calibrate = false;
-    app.add_flag("--calibrate", calibrate,
-                 "Enable calibration mode: prismatic (bone-length) DOFs receive small "
-                 "process noise so the UKF can update bone lengths from marker residuals");
-
-    CLI11_PARSE(app, argc, argv);
-
+// ---------------------------------------------------------------------------
+// 'track' subcommand: run the UKF tracker on a TOML config.
+// ---------------------------------------------------------------------------
+static int run_track(std::string const& config_path, bool verbose, bool quiet, bool smooth_output,
+                     bool calibrate) {
     try {
         // Load configuration
         if (!quiet) {
@@ -989,4 +1021,58 @@ int main(int argc, char* argv[]) {
         fmt::print(stderr, "Error: {}\n", e.what());
         return 1;
     }
+}
+
+// ---------------------------------------------------------------------------
+// main: thin subcommand dispatcher
+// ---------------------------------------------------------------------------
+int main(int argc, char* argv[]) {
+    CLI::App app{"Posetrak - Motion Capture Tracker"};
+    app.require_subcommand(1);
+
+    // ---- 'track' subcommand ---------------------------------------------
+    auto* track_cmd = app.add_subcommand("track", "Run the UKF tracker on a capture sequence.");
+    std::string track_config;
+    bool verbose = false;
+    bool quiet = false;
+    bool smooth_output = false;
+    bool calibrate = false;
+    track_cmd->add_option("config", track_config, "Configuration file (TOML)")
+        ->required()
+        ->check(CLI::ExistingFile);
+    track_cmd->add_flag("-v,--verbose", verbose, "Verbose output (show per-frame statistics)");
+    track_cmd->add_flag("-q,--quiet", quiet, "Quiet mode (only show errors)");
+    track_cmd->add_flag("--smooth", smooth_output,
+                        "Run RTS backward smoother after forward pass and export "
+                        "smoothed_joint_angles.csv, smoothed_root_pose.csv, "
+                        "smoothed_state_vectors.csv");
+    track_cmd->add_flag("--calibrate", calibrate,
+                        "Enable calibration mode: prismatic (bone-length) DOFs receive "
+                        "small process noise so the UKF can update bone lengths from "
+                        "marker residuals");
+
+    // ---- 'scale' subcommand ---------------------------------------------
+    auto* scale_cmd = app.add_subcommand(
+        "scale",
+        "Post-process a calibration run: check per-scale-group convergence and\n"
+        "write a calibrated skeleton YAML with offsets absorbed from the final\n"
+        "scale factors.  Reads state_vectors.csv from the config output directory.");
+    std::string scale_config;
+    std::string scale_output;
+    bool scale_quiet = false;
+    scale_cmd->add_option("config", scale_config, "Configuration file (TOML)")
+        ->required()
+        ->check(CLI::ExistingFile);
+    scale_cmd->add_option("-o,--output", scale_output,
+                          "Output path for calibrated skeleton YAML "
+                          "(default: <output_dir>/calibrated.yaml)");
+    scale_cmd->add_flag("-q,--quiet", scale_quiet, "Quiet mode (only show errors)");
+
+    CLI11_PARSE(app, argc, argv);
+
+    if (*track_cmd)
+        return run_track(track_config, verbose, quiet, smooth_output, calibrate);
+    if (*scale_cmd)
+        return run_scale(scale_config, scale_output, scale_quiet);
+    return 1;
 }

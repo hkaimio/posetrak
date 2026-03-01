@@ -439,17 +439,22 @@ Calibration is exposed as a subcommand of the main `posetrak` binary:
 
 ```
 posetrak scale \
-  --skeleton default.yaml \
-  --input-dir <recording_dir> \
+  --config <recording.toml> \
   --output <calibrated.yaml> \
   [--convergence-tol 0.002] \
   [--min-observable-frames 240]
 
 posetrak track \
-  --skeleton calibrated.yaml \
-  --input-dir <recording_dir> \
+  --config <recording.toml> \
   ...
 ```
+
+Both subcommands take the same TOML config file that describes the recording (camera
+calibration, sync metadata, input paths, etc.).  `scale` reuses the same config loading
+path as `track` and adds only `--output` for the calibrated YAML destination.
+
+Exact config/CLI parameter design is left as a separate enhancement task — the above
+reflects the current shape of the `track` subcommand and should evolve with it.
 
 The subcommand structure is introduced simultaneously with this feature.  `main.cpp` becomes
 a thin dispatcher:

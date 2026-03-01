@@ -97,6 +97,11 @@ struct TrackerConfig {
 
     // Layout selection
     std::vector<std::string> active_joint_groups;  ///< Joint groups to track (empty = all)
+
+    // === Calibration ===
+    bool calibration_mode = false;  ///< Enable bone-length calibration DOFs
+    double prismatic_process_noise_std =
+        0.0001;  ///< σ for prismatic DOFs in calibration mode (m/√s)
 };
 
 /**
@@ -148,6 +153,11 @@ struct TrackerAppConfig {
     // === Hierarchical tracking ===
     HierarchicalConfig hierarchical;
 
+    // === Calibration ===
+    bool calibration_mode = false;  ///< Enable bone-length calibration DOFs
+    double prismatic_process_noise_std =
+        0.0001;  ///< σ for prismatic DOFs in calibration mode (m/√s)
+
     /**
      * @brief Load configuration from TOML file
      *
@@ -194,6 +204,8 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.ik_tolerance = ik_tolerance;
     tc.min_cameras_for_init = min_cameras_for_init;
     tc.active_joint_groups = active_joint_groups;
+    tc.calibration_mode = calibration_mode;
+    tc.prismatic_process_noise_std = prismatic_process_noise_std;
     return tc;
 }
 

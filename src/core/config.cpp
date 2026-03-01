@@ -148,6 +148,12 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
         }
     }
 
+    // === Calibration ===
+    if (auto calib = config["calibration"]) {
+        result.calibration_mode = calib["enabled"].value_or(false);
+        result.prismatic_process_noise_std = calib["prismatic_process_noise_std"].value_or(0.0001);
+    }
+
     return result;
 }
 

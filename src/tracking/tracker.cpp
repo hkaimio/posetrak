@@ -253,6 +253,11 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
     ukf_ = std::make_unique<UnscentedKalmanFilter>(layout, config_.process_noise_std, alpha, beta,
                                                    kappa);
 
+    // Enable calibration mode if requested (prismatic DOFs get small process noise)
+    if (config_.calibration_mode) {
+        ukf_->enable_calibration_mode(config_.prismatic_process_noise_std);
+    }
+
     // Slice initial state to match layout dimensions if needed
     State sliced_state = layout->slice_state(initial_state);
 

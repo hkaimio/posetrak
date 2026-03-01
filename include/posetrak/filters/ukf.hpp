@@ -154,6 +154,13 @@ class UnscentedKalmanFilter {
     void enable_debug(bool enable, std::string const& debug_dir = "cpp_results/debug");
 
     /**
+     * @brief Enable calibration mode: prismatic (bone-length) DOFs receive small
+     * process noise so the filter can update bone lengths from marker residuals.
+     * @param prismatic_noise_std Sigma per sqrt(s) for each prismatic DOF (default 0.1 mm/sqrt(s))
+     */
+    void enable_calibration_mode(double prismatic_noise_std = 0.0001);
+
+    /**
      * @brief Set current frame number for debug exports
      * @param frame_num Frame number
      */
@@ -324,6 +331,12 @@ class UnscentedKalmanFilter {
     Eigen::MatrixXd process_noise_;                 ///< Process noise covariance
     SigmaPointGenerator sigma_gen_;                 ///< Sigma point generator
     ConstantVelocityModel process_model_;           ///< Process model
+
+    // Calibration mode
+    double base_noise_std_;                ///< Base process noise std stored for rebuild
+    bool calibration_mode_ = false;        ///< Whether prismatic DOFs have active process noise
+    double prismatic_noise_std_ = 0.0001;  ///< Sigma for prismatic DOFs in calibration mode
+    void rebuild_process_noise();          ///< Rebuild process_noise_ matrix with per-DOF values
 
     // Child-filter fixed root (only meaningful when !layout_->has_floating_root())
     Eigen::Vector3d fixed_root_pos_ = Eigen::Vector3d::Zero();

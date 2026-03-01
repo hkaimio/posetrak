@@ -67,14 +67,44 @@ UnscentedKalmanFilter::UnscentedKalmanFilter(std::shared_ptr<const SkeletonLayou
       process_noise_(
           Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim())),
       sigma_gen_(layout, alpha, beta, kappa),
-      process_model_(layout) {
-    // Initialize process noise with given standard deviation
-    double const variance = process_noise_std * process_noise_std;
-    process_noise_ *= variance;
+      process_model_(layout),
+      base_noise_std_(process_noise_std) {
+    // Build per-DOF process noise (prismatic DOFs start frozen; calibration mode activates them)
+    rebuild_process_noise();
 
     // Debug: Print DOF counts
     fmt::print("UKF initialized: total_dof={}, error_dim={}\n",
                layout->skeleton()->total_dof_count(), layout->error_state_dim());
+}
+
+void UnscentedKalmanFilter::rebuild_process_noise() {
+    int const n = error_dim();
+    int const root_n = layout_->root_error_dof_count();
+    int const jac = layout_->joint_active_dof_count();
+    int const active_dof = root_n + jac;
+    double const base_var = base_noise_std_ * base_noise_std_;
+    double const pris_var = calibration_mode_ ? prismatic_noise_std_ * prismatic_noise_std_ : 0.0;
+
+    process_noise_ = base_var * Eigen::MatrixXd::Identity(n, n);
+
+    // Override prismatic DOF diagonals (frozen at zero unless calibration mode)
+    for (JointDesc const& j : layout_->joints()) {
+        if (j.type != JointType::PRISMATIC)
+            continue;
+        for (uint32_t d = 0; d < j.active_dof_count; ++d) {
+            int const pos_idx = root_n + static_cast<int>(j.error_index) + static_cast<int>(d);
+            int const vel_idx =
+                active_dof + root_n + static_cast<int>(j.error_index) + static_cast<int>(d);
+            process_noise_(pos_idx, pos_idx) = pris_var;
+            process_noise_(vel_idx, vel_idx) = pris_var;
+        }
+    }
+}
+
+void UnscentedKalmanFilter::enable_calibration_mode(double prismatic_noise_std) {
+    calibration_mode_ = true;
+    prismatic_noise_std_ = prismatic_noise_std;
+    rebuild_process_noise();
 }
 
 void UnscentedKalmanFilter::set_covariance(Eigen::MatrixXd const& covariance) {

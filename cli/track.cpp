@@ -455,6 +455,11 @@ int main(int argc, char* argv[]) {
                  "Run RTS backward smoother after forward pass and export "
                  "smoothed_joint_angles.csv, smoothed_root_pose.csv, smoothed_state_vectors.csv");
 
+    bool calibrate = false;
+    app.add_flag("--calibrate", calibrate,
+                 "Enable calibration mode: prismatic (bone-length) DOFs receive small "
+                 "process noise so the UKF can update bone lengths from marker residuals");
+
     CLI11_PARSE(app, argc, argv);
 
     try {
@@ -464,6 +469,11 @@ int main(int argc, char* argv[]) {
         }
         auto config = TrackerAppConfig::load(config_path);
         config.validate();
+
+        // Apply CLI overrides after config load
+        if (calibrate) {
+            config.calibration_mode = true;
+        }
 
         // Load skeleton
         if (!quiet) {

@@ -65,6 +65,9 @@ State ConstantVelocityModel::propagate(State const& state, double dt) const {
             Eigen::Vector3d new_axis_angle = State::quaternion_to_axis_angle(new_q);
 
             new_angles.segment<3>(j.state_index) = new_axis_angle;
+        } else if (j.type == JointType::PRISMATIC) {
+            // Scalar integration: bone length drifts with its velocity estimate
+            new_angles[j.state_index] += state.joint_velocities()[j.state_index] * dt;
         }
         // FIXED joints have 0 DOF, nothing to update
     }

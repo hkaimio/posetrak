@@ -18,7 +18,7 @@ def _(Path):
     #result_dir = Path("/home/harri/projects/posetrak/tracking_tests/full-alpha-0_1")
     # CPP-python comparison resultsÄ*
     #result_dir= Path("/home/harri/projects/posetrak/tracking_tests/harri-hierarchical-palms")
-    result_dir = Path("/home/harri/projects/posetrak/tracking_tests/cp2-calibrate-timo")
+    result_dir = Path("/home/harri/projects/posetrak/tracking_tests/timo-scaled-test")
     return (result_dir,)
 
 

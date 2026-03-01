@@ -95,17 +95,18 @@ explaining the active-DOF compaction policy.
 
 ---
 
-### 7 — UKF update fails with "Failed to compute eigenvalues for covariance conditioning"
+### 7 — ~~UKF update fails with "Failed to compute eigenvalues for covariance conditioning"~~ **FIXED**
 
 **Affected tests** (1 assertion): `test_ukf_update.cpp:429`
 
-**Root cause**: After a purely translational predict step with a very stiff covariance, the
-innovation covariance `S = Pyy + R` becomes numerically ill-conditioned (near-singular
-because marker reprojection residuals have ~zero spread across sigma points).
-The covariance conditioning (likely a Cholesky or eigen-decomposition) fails.
+**Root cause**: When all sigma-point projections fail (marker behind camera), `measurement_mean`
+is all-NaN.  The outlier-rejection path already had an early-return guard for this case, but
+the no-outlier-rejection path did not.  NaN propagated through the Kalman gain into the state
+and covariance, causing `SelfAdjointEigenSolver` to fail on the corrupted covariance.
 
-**Fix**: Add a floor to the diagonal of `S` before decomposition, or detect and skip
-the update when `S` is singular (return current state unchanged with a warning).
+**Fix**: Added an "all projections failed" early-return to the no-outlier path in
+`UnscentedKalmanFilter::update()` in `src/filters/ukf.cpp`, mirroring the existing
+guard in the outlier-rejection branch.
 
 ---
 

@@ -1029,6 +1029,25 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
             compute_observation_diagnostics(observations, measurement_mean, innovation_cov);
         inlier_observations = observations;
         observed = observations_to_vector(observations);
+
+        // If every measurement dimension has a NaN mean (i.e. all sigma-point projections
+        // failed — e.g. marker behind camera), there is no usable information to integrate.
+        // Return early to keep the state and covariance untouched, mirroring what the
+        // outlier-rejection path does when every observation is rejected.
+        bool all_projections_failed = true;
+        for (int dim = 0; dim < measurement_dim; ++dim) {
+            if (std::isfinite(measurement_mean(dim))) {
+                all_projections_failed = false;
+                break;
+            }
+        }
+        if (all_projections_failed) {
+            result.num_observations = n_obs;
+            result.num_outliers = n_obs;  // treat failed projections as outliers for accounting
+            result.num_inliers = 0;
+            result.observations = observation_results;
+            return result;
+        }
     }
 
     // Debug export moved to Tracker::track_frame to ensure it runs even when all observations are

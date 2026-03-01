@@ -313,8 +313,10 @@ TEST_CASE("UKF prediction with locked DOFs", "[ukf]") {
     State initial_state(pos, quat, angles, vel, angvel, joint_vels);
     ukf.set_state(initial_state);
 
-    // Error dimension: 2*(6 + 3) = 18
-    REQUIRE(ukf.error_dim() == 18);
+    // Error dimension: only 1 active DOF (Z), so 2*(6 + 1) = 14.
+    // Storage always holds 3 DOFs for spherical joints, but the UKF error
+    // state is compacted to active DOFs only to keep sigma points correct.
+    REQUIRE(ukf.error_dim() == 14);
 
     // Predict
     double dt = 0.1;
@@ -324,7 +326,7 @@ TEST_CASE("UKF prediction with locked DOFs", "[ukf]") {
     REQUIRE(ukf.state().joint_angles().size() == 3);
     REQUIRE(ukf.state().joint_velocities().size() == 3);
 
-    // Check locked DOFs remain at 0
+    // Check locked DOFs remain at 0 (UKF enforces limits after prediction)
     REQUIRE_THAT(ukf.state().joint_angles()(0), WithinAbs(0.0, 1e-6));
     REQUIRE_THAT(ukf.state().joint_angles()(1), WithinAbs(0.0, 1e-6));
 }

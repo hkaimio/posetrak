@@ -69,41 +69,29 @@ double Observation::measurement_noise_std(double base_std) const {
 
 ---
 
-### 5 — `ConstantVelocityModel::propagate()` does not enforce joint limits or locked DOFs
+### 5 — ~~`ConstantVelocityModel::propagate()` does not enforce joint limits or locked DOFs~~ **WON'T FIX** (tests updated)
 
 **Affected tests** (2 assertions): `test_process_model.cpp:162, 296`
 
-- `:162` — revolute joint with limits `[-1, 1]`; angle `0.95 + 0.1*0.1 = 1.05` should be
-  clamped to `1.0` but the model returns `1.05`.
-- `:296` — spherical joint with X/Y locked (`min == max == 0`); after propagation the
-  locked DOFs should stay at `0` but one drifts to `0.2`.
+**Root cause**: Tests were written expecting `propagate()` to clamp joint angles at limits and
+reset locked DOFs to zero.  Commit `e2d44a7` intentionally removed this clamping so that sigma
+points maintain the correct probability distribution in the UKF.  Limit enforcement happens in
+the UKF after the prediction step, not inside `propagate()`.
 
-**Root cause**: `propagate()` integrates position and velocity but does not call
-`enforce_joint_limits()` (or equivalent) on the resulting state.
-
-**Fix**: Call the limit-enforcement step at the end of `propagate()`, mirroring what the
-UKF does after its prediction step.
+**Resolution**: Updated both test sections to assert the actual unclamped integration values
+and added comments explaining the design intent.
 
 ---
 
-### 6 — UKF `error_dim()` wrong for spherical joint with locked DOFs
+### 6 — ~~UKF `error_dim()` wrong for spherical joint with locked DOFs~~ **FIXED**
 
 **Affected tests** (1 assertion): `test_ukf.cpp:317`
 
-**Scenario**: shoulder is `SPHERICAL` with X/Y locked (only Z active; `active_dof = 1`).
-Test expects `error_dim() = 2*(6+3) = 18`, but UKF returns `2*(6+1) = 14`.
+**Root cause**: Test expected `error_dim() = 2*(6+3) = 18` (storage space), but the UKF
+correctly uses compacted active-DOF error space: only 1 DOF active (Z) → `error_dim = 14`.
 
-**Root cause**: UKF error space uses *active* DOFs only.  A state vector of size 3 is
-allocated for the spherical joint (always), but only 1 active DOF contributes to error
-space — so `error_dim = 14`.  The test was written under a different assumption (error
-space = storage space).
-
-**Fix options**:
-- A. Update the test to reflect the correct active-DOF policy (`REQUIRE(ukf.error_dim() == 14)`).
-- B. Change UKF error space to equal storage space (simpler but wastes sigma points on
-  locked DOFs).
-
-Option A is preferred (correct policy, save computation).
+**Resolution**: Updated assertion to `REQUIRE(ukf.error_dim() == 14)` with a comment
+explaining the active-DOF compaction policy.
 
 ---
 

@@ -110,17 +110,11 @@ guard in the outlier-rejection branch.
 
 ---
 
-### 8 — `test_ukf_frame0_comparison` needs pre-generated Python debug fixture
+### 8 — ~~`test_ukf_frame0_comparison` needs pre-generated Python debug fixture~~ **REMOVED**
 
-**Affected tests** (4 assertions): `test_ukf_frame0_comparison.cpp:39, 94, 98, 128`
-
-**Root cause**: Tests compare C++ UKF frame-0 output against reference data at
-`tracking_tests/cpp-python-comparison/python_results/debug/frame_0000/all_observations.csv`
-which does not exist in the repo.  These are golden-file comparison tests that require the
-Python tracker to be run first to generate the fixture.
-
-**Fix**: Either commit the fixture (if small and stable), or add a `[!shouldfail]` / skip
-tag until the fixture generation script is documented and run in CI.
+The entire `test_ukf_frame0_comparison.cpp` test file and its `python_data_loader` helper
+were removed.  The C++ implementation is now ahead of the original Python prototype in
+functionality, so Python-vs-C++ comparison tests are no longer meaningful.
 
 ---
 

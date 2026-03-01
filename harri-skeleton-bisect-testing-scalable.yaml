@@ -1854,11 +1854,11 @@ markers:
   openpose_name: LSmallToe
   confidence_threshold: 0.3
 - name: MRK-Ankle.L
-  parent: shin.L
+  parent: foot.L
   offset:
-  - 4.86335727245546e-09
-  - 0.40406879782676697
-  - 7.27801818811713e-10
+  - 0.0
+  - 0.0
+  - 0.0
   openpose_keypoint: 15
   openpose_name: LAnkle
   confidence_threshold: 0.3
@@ -1872,11 +1872,11 @@ markers:
   openpose_name: LHeel
   confidence_threshold: 0.3
 - name: MRK-knee.L
-  parent: thigh.L
+  parent: shin.L
   offset:
-  - 5.401074254507421e-09
-  - 0.47358936071395874
-  - 4.453079682775751e-09
+  - 0.0
+  - 0.0
+  - 0.0
   openpose_keypoint: 13
   openpose_name: LKnee
   confidence_threshold: 0.3
@@ -1899,11 +1899,11 @@ markers:
   openpose_name: RSmallToe
   confidence_threshold: 0.3
 - name: MRK-Ankle.R
-  parent: shin.R
+  parent: foot.R
   offset:
-  - -2.5872228803791586e-09
-  - 0.4040687680244446
-  - -7.278053715253918e-10
+  - 0
+  - 0
+  - 0
   openpose_keypoint: 16
   openpose_name: RAnkle
   confidence_threshold: 0.3
@@ -1917,29 +1917,29 @@ markers:
   openpose_name: RHeel
   confidence_threshold: 0.3
 - name: MRK-knee.R
-  parent: thigh.R
+  parent: shin.R
   offset:
-  - 5.401074698596631e-09
-  - 0.47358936071395874
-  - 4.860142510665355e-09
+  - 0.0
+  - 0.0
+  - 0.0
   openpose_keypoint: 14
   openpose_name: RKnee
   confidence_threshold: 0.3
 - name: MRK-hip.R
-  parent: hips
+  parent: thigh.R
   offset:
-  - -0.08288553357124329
-  - -0.01916893571615219
-  - -0.0053980001248419285
+  - 0.0
+  - 0.0
+  - 0.0
   openpose_keypoint: 12
   openpose_name: RHip
   confidence_threshold: 0.3
 - name: MRK-hip.L
-  parent: hips
+  parent: thigh.L
   offset:
-  - 0.08288553357124329
-  - -0.01916893571615219
-  - -0.005397918168455362
+  - 0.0
+  - 0.0
+  - 0.0
   openpose_keypoint: 11
   openpose_name: LHip
   confidence_threshold: 0.3

@@ -107,7 +107,13 @@ Eigen::VectorXd ForwardKinematics::state_to_config(State const& state,
             q[idx++] = quat.y();
             q[idx++] = quat.z();
             q[idx++] = quat.w();
-        } else {  // REVOLUTE
+        } else if (desc.type == JointType::PRISMATIC) {
+            // State stores a proportional scale factor s; Pinocchio q = s * nominal_length.
+            // For scale-group followers, desc.state_index == leader's state_index,
+            // so the same scale factor is read and multiplied by this joint's own nominal_length.
+            q[idx++] =
+                state.joint_angles()[static_cast<int>(desc.state_index)] * desc.nominal_length;
+        } else {  // REVOLUTE: angle in radians, stored directly
             q[idx++] = state.joint_angles()[static_cast<int>(desc.state_index)];
         }
     }

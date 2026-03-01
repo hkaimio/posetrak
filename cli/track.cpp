@@ -98,8 +98,11 @@ void export_state_vector(std::ofstream& file, int frame_idx, double timestamp, S
     file << state.root_angular_velocity().x() << "," << state.root_angular_velocity().y() << ","
          << state.root_angular_velocity().z();
 
-    // Joint angles and velocities (in layout order, using precomputed indices)
+    // Joint angles and velocities (in layout order, using precomputed indices).
+    // PRISMATIC leaders output the scale factor once (followers share the same slot, skip).
     for (auto const& desc : layout.joints()) {
+        if (desc.is_scale_follower)
+            continue;  // same state_index as leader, skip duplicate
         for (int i = 0; i < static_cast<int>(desc.storage_dof_count); ++i) {
             file << "," << state.joint_angles()[desc.state_index + i];
         }
@@ -119,13 +122,23 @@ std::string generate_state_header(SkeletonLayout const& layout) {
     header += "root_velocity_x,root_velocity_y,root_velocity_z,";
     header += "root_angular_velocity_x,root_angular_velocity_y,root_angular_velocity_z";
 
-    // Joint angles and velocities (in layout order)
+    // Joint angles and velocities (in layout order).
+    // PRISMATIC leaders use the scale-group name; followers are skipped (same slot).
     for (auto const& desc : layout.joints()) {
-        for (int i = 0; i < static_cast<int>(desc.storage_dof_count); ++i) {
-            header += ",joint_" + desc.name + "_angle_" + std::to_string(i);
-        }
-        for (int i = 0; i < static_cast<int>(desc.storage_dof_count); ++i) {
-            header += ",joint_" + desc.name + "_velocity_" + std::to_string(i);
+        if (desc.is_scale_follower)
+            continue;
+        if (desc.type == JointType::PRISMATIC && !desc.scale_group.empty()) {
+            // Scale-group leader: one column named by the group, no DOF index needed
+            header += ",scale_group_" + desc.scale_group;
+            header += ",scale_group_" + desc.scale_group + "_velocity";
+        } else {
+            // Normal joint: angle_0 / angle_1 / angle_2 + matching velocity columns
+            for (int i = 0; i < static_cast<int>(desc.storage_dof_count); ++i) {
+                header += ",joint_" + desc.name + "_angle_" + std::to_string(i);
+            }
+            for (int i = 0; i < static_cast<int>(desc.storage_dof_count); ++i) {
+                header += ",joint_" + desc.name + "_velocity_" + std::to_string(i);
+            }
         }
     }
 

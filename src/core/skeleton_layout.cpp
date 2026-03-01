@@ -69,6 +69,15 @@ SkeletonLayout::build(std::shared_ptr<const Skeleton> skeleton, bool include_all
     int layout_state_idx = 0;  // layout-relative position in joint_angles
     int layout_error_idx = 0;  // layout-relative position in error-state joint block
 
+    // Scale-group sharing: when a PRISMATIC joint belongs to a scale_group, all joints
+    // in that group share one state/error slot.  The first joint encountered is the
+    // "leader" (gets a real slot); subsequent ones are "followers" (storage_dof_count=0,
+    // same state_index as leader, read the same scale factor but use their own nominal_length).
+    // This applies to all layout types including the full-skeleton layout used by IK.
+    // Follower Jacobian columns are zeroed during IK so scale DOFs are never disturbed.
+    std::unordered_map<std::string, int> scale_group_leader_state_idx;  // group_name -> state_idx
+    std::unordered_map<std::string, int> scale_group_leader_error_idx;  // group_name -> error_idx
+
     for (auto const& joint : skeleton->get_joints_ordered()) {
         bool const in_layout = include_all || (group_set.count(joint.group) > 0);
         if (!in_layout)
@@ -97,14 +106,39 @@ SkeletonLayout::build(std::shared_ptr<const Skeleton> skeleton, bool include_all
         desc.limits = joint.limits;
         desc.limit_count = static_cast<int>(joint.num_limits);
         desc.active_dof_mask = joint.get_active_dof_mask();
+        desc.nominal_length = joint.nominal_length;
+        desc.scale_group = joint.scale_group;
+        desc.is_scale_follower = false;
+
+        // Scale-group sharing: PRISMATIC joints in the same scale_group share a single
+        // state DOF (the proportional scale factor).  The first joint in a group is the
+        // "leader"; subsequent ones are "followers" that read the leader's state slot and
+        // multiply by their own nominal_length.  This applies to ALL layouts — the IK
+        // Jacobian freezes these DOFs separately, so IK never modifies them.
+        if (joint.type == JointType::PRISMATIC && !joint.scale_group.empty()) {
+            auto it = scale_group_leader_state_idx.find(joint.scale_group);
+            if (it == scale_group_leader_state_idx.end()) {
+                // Leader: assign a new state slot and register the group
+                scale_group_leader_state_idx[joint.scale_group] = layout_state_idx;
+                scale_group_leader_error_idx[joint.scale_group] = layout_error_idx;
+                // desc.state_index / error_index / storage_dof_count already set above
+            } else {
+                // Follower: share the leader's slot; contributes no independent DOF
+                desc.state_index = it->second;
+                desc.error_index = scale_group_leader_error_idx.at(joint.scale_group);
+                desc.storage_dof_count = 0;
+                desc.active_dof_count = 0;
+                desc.is_scale_follower = true;
+            }
+        }
 
         layout->name_to_idx_[desc.name] = static_cast<int>(layout->joints_.size());
         layout->joints_.push_back(std::move(desc));
 
-        layout_state_idx += static_cast<int>(joint.dof);
-        layout_error_idx += static_cast<int>(joint.active_dof());
-        layout->total_storage_dof_count_ += static_cast<int>(joint.dof);
-        layout->joint_active_dof_count_ += static_cast<int>(joint.active_dof());
+        layout_state_idx += static_cast<int>(desc.storage_dof_count);
+        layout_error_idx += static_cast<int>(desc.active_dof_count);
+        layout->total_storage_dof_count_ += static_cast<int>(desc.storage_dof_count);
+        layout->joint_active_dof_count_ += static_cast<int>(desc.active_dof_count);
     }
 
     if (!include_all && layout->joints_.empty() && !layout->has_floating_root_) {

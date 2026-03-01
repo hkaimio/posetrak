@@ -33,7 +33,12 @@ struct Joint {
     Eigen::Vector3d offset;                 ///< Translation from parent in parent's frame
     Eigen::Vector3d rest_orientation;       ///< Rest orientation as ZYX Euler angles (radians)
     Eigen::Vector3d prismatic_axis{
-        0, 1, 0};  ///< Sliding axis for PRISMATIC joints (unit vector, parent frame)
+        0, 1, 0};             ///< Sliding axis for PRISMATIC joints (unit vector, parent frame)
+    std::string scale_group;  ///< Scale group name for PRISMATIC joints ("" if ungrouped)
+    double nominal_length =
+        0.0;  ///< |original_offset| in metres for PRISMATIC joints (q = scale × nominal_length)
+    bool is_scale_follower = false;  ///< True for non-first PRISMATIC joints in a scale group; they
+                                     ///< share the leader's state slot and do not occupy their own
 
     /// @brief Get mask of active (non-locked) DOFs
     /// @return Array indicating which DOFs are active (true) or locked (false)
@@ -124,6 +129,22 @@ class Skeleton {
     /// @param axis Unit vector in parent frame defining the sliding direction
     /// @throws std::invalid_argument if joint index invalid or joint is not PRISMATIC
     void set_joint_axis(uint32_t joint_index, Eigen::Vector3d const& axis);
+
+    /// @brief Set the nominal bone length for a PRISMATIC joint (metres).
+    /// @param joint_index Index of the joint (must be PRISMATIC type)
+    /// @param length |original_offset|; state stores scale factor s where q = s * length
+    void set_joint_nominal_length(uint32_t joint_index, double length);
+
+    /// @brief Set the scale group name for a PRISMATIC joint.
+    /// @param joint_index Index of the joint (must be PRISMATIC type)
+    /// @param group_name Name of the scale group (from scale_groups in YAML)
+    void set_joint_scale_group(uint32_t joint_index, std::string const& group_name);
+
+    /// @brief Mark a PRISMATIC joint as a scale-group follower.
+    /// Followers share the leader's state slot and do not occupy their own.
+    /// @param joint_index Index of the joint (must be PRISMATIC type)
+    /// @param value True if this joint is a follower (non-first in its group)
+    void set_joint_scale_follower(uint32_t joint_index, bool value);
 
     /// @brief Validate skeleton structure
     ///

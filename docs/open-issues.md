@@ -194,3 +194,42 @@ convention (global vs body frame perturbation); update the test or implementatio
     \`measurement_mean\` (including outliers). \`StatisticsTracker\` read these stale values.
   - **Fix**: Added recomputation of innovation values in \`observation_results\` after
     \`measurement_mean\` is updated for inliers (\`src/filters/ukf.cpp\`, lines ~962-1010).
+
+```
+
+---
+
+## Architectural debt: raw `skeleton.joints()` iteration mixed with state-vector indexing
+
+**Status**: Partially mitigated; root cause not yet resolved.
+
+**Problem**:
+`SkeletonLayout` exists precisely to decouple the raw skeleton joint list from the state-vector
+layout.  It handles follower collapsing, group filtering, locked DOFs, and all DOF index
+arithmetic.  Yet numerous sites iterate `skeleton.joints()` directly while simultaneously
+advancing a `joint_angle_idx` / `angle_idx` counter into the state vector.  This is a layering
+violation: the raw joint list includes scale-group *follower* prismatic joints that share a state
+slot with their leader, so the index counter goes out of bounds whenever followers exist.
+
+**Known affected sites** (each caused an `Eigen` out-of-bounds abort, found 2026-03-01):
+- `Skeleton::total_dof_count()` — counted followers as independent slots
+- `InverseKinematics::config_to_state()` — DOF count loop + extraction loop
+- `Tracker::estimate_analytic_state()` — init loop
+- `UnscentedKalmanFilter::enforce_joint_limits()` — two passes (angle clamping + velocity zeroing)
+- `UnscentedKalmanFilter::write_sigma_points_csv()` — four loops (header + data, angle + vel)
+- `TrackingExporter::write_frame()` — joint angle export loop
+
+**Mitigations applied** (2026-03-01):
+Added `Joint::is_scale_follower` flag so loops that must iterate raw joints can skip followers
+explicitly.  Removed the `!include_all` guard in `SkeletonLayout::build()` so follower collapsing
+applies to all layouts including the full-skeleton one used by IK.
+
+**Correct long-term fix**:
+All code that iterates joints in state-vector order should use `SkeletonLayout::joints()`, which
+already presents only leaders in the correct order with precomputed `state_index` values.
+Raw `skeleton.joints()` iteration is legitimate only for:
+- Building the Pinocchio model (`pinocchio_model_builder.cpp`) — operates in `q`-space, not state-space
+- Structural queries (root finding, group membership) that do not touch state indices
+
+Any new code that combines `skeleton.joints()` with a manual `state_index` counter should be
+treated as a bug by default and refactored to use `SkeletonLayout::joints()` instead.

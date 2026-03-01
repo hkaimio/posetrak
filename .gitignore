@@ -76,3 +76,4 @@ ik_iterations.csv
 ik_root_updates.csv
 tracker_markers.csv
 __marimo__/
+*.rrd

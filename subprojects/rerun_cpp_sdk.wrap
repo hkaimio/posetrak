@@ -1,0 +1,9 @@
+[wrap-file]
+directory = rerun_cpp_sdk
+source_url = https://github.com/rerun-io/rerun/releases/download/0.29.1/rerun_cpp_sdk.zip
+source_filename = rerun_cpp_sdk-0.29.1.zip
+source_hash = 98adbe76ca9f340c36846580fd7e363c7fdc8f8deb4018e8848a02394fba4a5c
+patch_directory = rerun_cpp_sdk
+
+[provide]
+rerun_sdk = rerun_sdk_dep

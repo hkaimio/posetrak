@@ -98,12 +98,15 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
     }
 
     // Pre-parse scale_groups to know which joints need a prismatic joint inserted before them
-    std::unordered_set<std::string> scale_group_joints;
+    // Maps joint_name -> scale_group_name so the prismatic joint knows its group.
+    std::unordered_map<std::string, std::string> scale_group_joints;  // joint_name -> group_name
+    std::unordered_set<std::string> scale_group_leaders_seen;  // groups that already have a leader
     if (root["scale_groups"]) {
         for (auto const& sg_node : root["scale_groups"]) {
             if (sg_node["joints"]) {
+                std::string const sg_name = sg_node["name"].as<std::string>();
                 for (auto const& jname_node : sg_node["joints"]) {
-                    scale_group_joints.insert(jname_node.as<std::string>());
+                    scale_group_joints[jname_node.as<std::string>()] = sg_name;
                 }
             }
         }
@@ -161,9 +164,19 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
             }
             Eigen::Vector3d const axis = offset / offset_norm;
             std::string const pris_name = "prismatic_" + joint_name;
+            std::string const sg_name = scale_group_joints.at(joint_name);
             uint32_t pris_idx = skeleton.add_joint(pris_name, parent_index, JointType::PRISMATIC,
                                                    Eigen::Vector3d::Zero(), group);
             skeleton.set_joint_axis(pris_idx, axis);
+            skeleton.set_joint_nominal_length(pris_idx, offset_norm);
+            skeleton.set_joint_scale_group(pris_idx, sg_name);
+            // Mark as follower if another joint in the same group has already been seen.
+            // Followers share the leader's state slot and don't get their own DOF in the state.
+            bool const is_follower = scale_group_leaders_seen.count(sg_name) > 0;
+            if (!is_follower) {
+                scale_group_leaders_seen.insert(sg_name);
+            }
+            skeleton.set_joint_scale_follower(pris_idx, is_follower);
             joint_name_to_idx[pris_name] = pris_idx;
 
             // Redirect child: its parent is now the prismatic joint; offset absorbed into q

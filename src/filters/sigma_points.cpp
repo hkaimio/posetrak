@@ -150,8 +150,11 @@ State SigmaPointGenerator::apply_error_to_state(State const& nominal_state,
         int const pos_base = root_n + j.error_index;
         int const vel_base = active_dof + root_n + j.error_index;
 
-        if (j.type == JointType::REVOLUTE) {
-            // REVOLUTE: always 1 active DOF
+        if ((j.type == JointType::REVOLUTE) ||
+            (j.type == JointType::PRISMATIC && !j.is_scale_follower)) {
+            // REVOLUTE / PRISMATIC leader: always 1 active DOF, additive perturbation.
+            // Scale-group followers share the leader's state_index; the leader's update
+            // propagates to all followers automatically — do NOT apply again here.
             new_angles(si) += error_vec(pos_base);
             new_joint_vels(si) += error_vec(vel_base);
 

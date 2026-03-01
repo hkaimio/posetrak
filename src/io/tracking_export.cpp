@@ -166,6 +166,10 @@ void TrackingExporter::write_frame(
         if (joint.type == JointType::FIXED || !joint.parent_index.has_value()) {
             continue;
         }
+        // Followers share the leader's state slot; don't write a separate row or advance angle_idx
+        if (joint.is_scale_follower) {
+            continue;
+        }
 
         // Get joint angles (3 values for spherical joints)
         if (joint.type == JointType::SPHERICAL && angle_idx + 2 < joint_angles_vec.size()) {

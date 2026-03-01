@@ -60,6 +60,20 @@ struct JointDesc {
     std::array<Eigen::Vector2d, 3> limits;  ///< Joint limits [min, max] per DOF
     int limit_count;                        ///< Number of active limit pairs (0-3)
     std::array<bool, 3> active_dof_mask;    ///< Which axes are free (SPHERICAL)
+
+    // Scale-group fields (PRISMATIC joints only)
+    /// Original bone length in metres (|original_offset|). State stores a proportional
+    /// scale factor s; the Pinocchio q value is q = s * nominal_length.
+    double nominal_length = 0.0;
+
+    /// Scale group name for PRISMATIC joints (same value for leader and all followers in a group).
+    std::string scale_group;
+
+    /// True for PRISMATIC joints that are the 2nd-or-later member of a scale group.
+    /// Followers share state_index with the group leader and contribute no independent
+    /// DOF (storage_dof_count = 0, active_dof_count = 0). FK still reads their slot
+    /// via state_index (which equals the leader's) and multiplies by their own nominal_length.
+    bool is_scale_follower = false;
 };
 
 /// @brief Precomputed, immutable DOF layout for a (sub)set of skeleton joints.

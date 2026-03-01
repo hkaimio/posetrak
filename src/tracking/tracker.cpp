@@ -85,10 +85,10 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
     // Step 2: Analytically estimate root position + orientation from observed markers.
     // This gives us a good global pose even before IK runs.
     auto estimate_analytic_state = [&]() -> State {
-        auto const& groups = config_.active_joint_groups;
-        auto layout = groups.empty() ? SkeletonLayout::from_full_skeleton(skeleton_)
-                                     : SkeletonLayout::from_groups(skeleton_, groups);
-        int num_dof = layout->total_storage_dof_count();
+        // Always use the full skeleton DOF count: the IK works in full-skeleton
+        // space regardless of active_joint_groups, so the initial_guess State
+        // must be sized for all joints (including any inserted prismatic DOFs).
+        int num_dof = skeleton_->total_dof_count();
 
         // Root position: hip midpoint if visible, else all-marker centroid.
         Eigen::Vector3d root_pos = Eigen::Vector3d::Zero();
@@ -168,9 +168,25 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
         }
 
         // Build a rest-pose state with the analytically estimated root transform.
+        // Scale-group DOFs (stored as proportional scale factors) must start at 1.0,
+        // not zero, so that bone lengths equal the reference skeleton at t=0.
+        Eigen::VectorXd init_joint_angles = Eigen::VectorXd::Zero(num_dof);
+        {
+            int si = 0;
+            for (auto const& j : skeleton_->joints()) {
+                if (!j.parent_index.has_value() || j.type == JointType::FIXED)
+                    continue;
+                if (j.is_scale_follower)
+                    continue;  // shares leader's slot; no separate index
+                if (j.type == JointType::PRISMATIC) {
+                    init_joint_angles[si] = 1.0;  // neutral scale: q = 1.0 * nominal_length
+                }
+                si += j.dof;
+            }
+        }
         fmt::print("  Analytic root position: ({:.3f}, {:.3f}, {:.3f})\n", root_pos.x(),
                    root_pos.y(), root_pos.z());
-        return State(root_pos, root_ori, Eigen::VectorXd::Zero(num_dof), Eigen::Vector3d::Zero(),
+        return State(root_pos, root_ori, init_joint_angles, Eigen::Vector3d::Zero(),
                      Eigen::Vector3d::Zero(), Eigen::VectorXd::Zero(num_dof));
     };
 
@@ -186,7 +202,8 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
     // in the right place the UKF will fix the pose within a handful of frames.
     State init_state = analytic_state;  // baseline: correct root, zero joints
     if (ik_result.residual < 0.5) {
-        // IK converged well enough — use it (better joint angles)
+        // IK converged well enough — use it (prismatic DOFs are already frozen
+        // during IK via zeroed Jacobian columns, so they remain at 1.0).
         init_state = ik_result.state;
         fmt::print("  Using IK result (RMS: {:.3f} m)\n", ik_result.residual);
     } else {
@@ -254,8 +271,13 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
                                                    kappa);
 
     // Enable calibration mode if requested (prismatic DOFs get small process noise)
+    fmt::print("calibration_mode={}, prismatic_process_noise_std={}\n", config_.calibration_mode,
+               config_.prismatic_process_noise_std);
     if (config_.calibration_mode) {
         ukf_->enable_calibration_mode(config_.prismatic_process_noise_std);
+        fmt::print("  Calibration mode enabled: prismatic DOFs will drift during tracking\n");
+    } else {
+        fmt::print("  Calibration mode OFF: prismatic DOFs are frozen\n");
     }
 
     // Slice initial state to match layout dimensions if needed

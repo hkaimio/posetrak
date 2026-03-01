@@ -34,11 +34,11 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "C++ - Python test",
+            "name": "Posetrak lldb",
             "targetCreateCommands": [
                 "target create ${workspaceFolder}/builddir/cli/posetrak"
             ],
-            "args": ["${workspaceFolder}/tests/harri-no-palms.toml"],
+            "args": ["${workspaceFolder}/tests/regress-calibrate-timo.toml"],
             "processCreateCommands": [
                 "process launch"
             ]
@@ -58,9 +58,10 @@
         "type": "cppdbg",
         "request": "launch",
         "program": "${workspaceFolder}/builddir/cli/posetrak",
-        "args": ["${workspaceFolder}/tests/harri-no-palms.toml"],
+        "args": ["${workspaceFolder}/tests/regress-calibrate-timo.toml"],
         "cwd": "${workspaceRoot}"
     },
+
 
 
     ],

@@ -98,6 +98,42 @@ void Skeleton::set_joint_axis(uint32_t joint_index, Eigen::Vector3d const& axis)
     joints_[joint_index].prismatic_axis = axis / norm;
 }
 
+void Skeleton::set_joint_nominal_length(uint32_t joint_index, double length) {
+    if (joint_index >= joints_.size()) {
+        throw std::invalid_argument(
+            fmt::format("Invalid joint index {} for set_joint_nominal_length", joint_index));
+    }
+    if (joints_[joint_index].type != JointType::PRISMATIC) {
+        throw std::invalid_argument(
+            fmt::format("Joint '{}' is not PRISMATIC", joints_[joint_index].name));
+    }
+    joints_[joint_index].nominal_length = length;
+}
+
+void Skeleton::set_joint_scale_group(uint32_t joint_index, std::string const& group_name) {
+    if (joint_index >= joints_.size()) {
+        throw std::invalid_argument(
+            fmt::format("Invalid joint index {} for set_joint_scale_group", joint_index));
+    }
+    if (joints_[joint_index].type != JointType::PRISMATIC) {
+        throw std::invalid_argument(
+            fmt::format("Joint '{}' is not PRISMATIC", joints_[joint_index].name));
+    }
+    joints_[joint_index].scale_group = group_name;
+}
+
+void Skeleton::set_joint_scale_follower(uint32_t joint_index, bool value) {
+    if (joint_index >= joints_.size()) {
+        throw std::invalid_argument(
+            fmt::format("Invalid joint index {} for set_joint_scale_follower", joint_index));
+    }
+    if (joints_[joint_index].type != JointType::PRISMATIC) {
+        throw std::invalid_argument(
+            fmt::format("Joint '{}' is not PRISMATIC", joints_[joint_index].name));
+    }
+    joints_[joint_index].is_scale_follower = value;
+}
+
 std::optional<std::string> Skeleton::validate() const {
     if (joints_.empty()) {
         return "Skeleton has no joints";
@@ -149,9 +185,12 @@ int Skeleton::total_dof() const {
 }
 
 int Skeleton::total_dof_count() const {
-    // For state storage: always 3 DOFs for SPHERICAL joints regardless of locked DOFs
+    // For state storage: always 3 DOFs for SPHERICAL joints regardless of locked DOFs.
+    // Scale-group followers share the leader's state slot → do not count them.
     int total = 0;
     for (auto const& joint : joints_) {
+        if (joint.is_scale_follower)
+            continue;  // shares leader's state slot
         if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
             total += 1;
         } else if (joint.type == JointType::SPHERICAL) {

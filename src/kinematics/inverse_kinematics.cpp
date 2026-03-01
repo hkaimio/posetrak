@@ -195,6 +195,24 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
         // Compute Jacobian at current q
         Eigen::MatrixXd J = compute_jacobian(q, marker_names);
 
+        // Freeze prismatic (scale) DOFs: zero their Jacobian columns so the DLS
+        // step produces dv=0 for those indices and pinocchio::integrate leaves their
+        // q values unchanged.  Scale factors are calibrated by the UKF, not by IK.
+        for (auto const& joint : skeleton.joints()) {
+            if (joint.type != JointType::PRISMATIC)
+                continue;
+            // Find the matching Pinocchio joint by name
+            for (pinocchio::JointIndex ji = 1;
+                 ji < static_cast<pinocchio::JointIndex>(model_.njoints); ++ji) {
+                if (model_.names[ji] == joint.name) {
+                    int const col = model_.joints[ji].idx_v();
+                    int const ncols = model_.joints[ji].nv();
+                    J.middleCols(col, ncols).setZero();
+                    break;
+                }
+            }
+        }
+
         // Levenberg-Marquardt step: dv = J^T (J J^T + λI)^{-1} * error
         // This is the "right-hand" DLS formulation (numerically better when n_obs > nv).
         Eigen::MatrixXd JJT = J * J.transpose();
@@ -354,12 +372,14 @@ State InverseKinematics::config_to_state(Eigen::VectorXd const& q, Skeleton cons
     Eigen::Quaterniond root_orientation(q[6], q[3], q[4], q[5]);  // [w, x, y, z]
     root_orientation.normalize();
 
-    // Count joint DOFs (storage DOFs)
+    // Count joint DOFs (storage DOFs).
+    // Scale-group followers share the leader's state slot → do not count them.
     int joint_dof = 0;
     for (auto const& joint : skeleton.joints()) {
-        if (joint.parent_index == std::nullopt) {
+        if (joint.parent_index == std::nullopt)
             continue;  // Skip root
-        }
+        if (joint.is_scale_follower)
+            continue;  // shares leader's state slot
         if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
             joint_dof += 1;
         } else if (joint.type == JointType::SPHERICAL) {
@@ -379,12 +399,27 @@ State InverseKinematics::config_to_state(Eigen::VectorXd const& q, Skeleton cons
                 continue;  // Skip root
             }
 
-            if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
-                // Single DOF - copy directly
+            if (joint.type == JointType::REVOLUTE) {
+                // Single DOF - copy angle directly
                 if (q_idx < model_.nq && angle_idx < joint_dof) {
                     joint_angles[angle_idx] = q[q_idx];
                     q_idx++;
                     angle_idx++;
+                }
+            } else if (joint.type == JointType::PRISMATIC) {
+                // Always advance the pinocchio config index (each prismatic has its own q slot).
+                // But only the leader writes to the state vector; followers share the leader's
+                // slot.
+                if (q_idx < model_.nq) {
+                    if (!joint.is_scale_follower && angle_idx < joint_dof) {
+                        // Leader: store scale factor s = q / nominal_length (1.0 = reference).
+                        double const scale = (joint.nominal_length > 1e-9)
+                                                 ? q[q_idx] / joint.nominal_length
+                                                 : q[q_idx];
+                        joint_angles[angle_idx] = scale;
+                        angle_idx++;
+                    }
+                    q_idx++;  // advance past this pinocchio joint regardless of leader/follower
                 }
             } else if (joint.type == JointType::SPHERICAL) {
                 // 4 DOF quaternion in config space -> 3 DOF Euler angles in State

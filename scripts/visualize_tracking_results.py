@@ -20,11 +20,15 @@ import toml
 import json
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional
+import uuid
 
+# 1. Generate or define a consistent ID for this specific video dataset
+# You can use a static string or a UUID based on the video filename
+consistent_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, "posetrak_visualization"))
 
 def setup_rerun(recording_path: Path | None = None, live: bool = False, app_id: str = "posetrak"):
     """Initialize Rerun recording."""
-    rr.init(app_id)
+    rr.init(app_id, recording_id=consistent_uuid)
 
     if live:
         # Stream to viewer
@@ -1000,7 +1004,7 @@ def visualize_tracking_results(csv_path: Path, skeleton_path: Path | None = None
     print(f"🎯 Tracking {df['marker_id'].nunique()} markers")
 
     # Set up world coordinate system
-    log_world_setup()
+    #log_world_setup()
 
     # Create class descriptions for all markers (logged once, statically)
     person_id = 0
@@ -1271,15 +1275,17 @@ def main():
             debug_dir = None
             print("ℹ️  No debug data available")
 
-        # Log 3D camera positions and frustums (for both modes)
-        for camera_name, camera_data in camera_config.items():
-            if camera_name == 'metadata':
-                continue
-            print(f"📷 Setting up {camera_name} in 3D space...")
-            log_camera_3d(camera_name, camera_data)
+
 
         # Handle camera images (base layer)
         if log_cameras:
+            # Log 3D camera positions and frustums (for both modes)
+            for camera_name, camera_data in camera_config.items():
+                if camera_name == 'metadata':
+                    continue
+                print(f"📷 Setting up {camera_name} in 3D space...")
+                log_camera_3d(camera_name, camera_data)
+
             print(f"\n🎥 Processing camera videos (base layer - images only)...")
 
             for camera_name, camera_data in camera_config.items():
@@ -1328,11 +1334,11 @@ def main():
                 for camera_name, camera_data in camera_config.items():
                     if camera_name == 'metadata':
                         continue
-                    rr.log(
-                        f"camera/{camera_name}/image",
-                        rr.AnnotationContext(marker_class_descriptions),
-                        static=True,
-                    )
+                    # rr.log(
+                    #     f"camera/{camera_name}/image",
+                    #     rr.AnnotationContext(marker_class_descriptions),
+                    #     static=True,
+                    # )
 
                 # Process each camera's observations
                 for camera_name, camera_data in camera_config.items():

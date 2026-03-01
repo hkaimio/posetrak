@@ -574,8 +574,10 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
     for (JointDesc const& j : layout_->joints()) {
         int const si = j.state_index;
 
-        if (j.type == JointType::REVOLUTE || j.type == JointType::PRISMATIC) {
-            // Simple weighted average
+        if ((j.type == JointType::REVOLUTE) ||
+            (j.type == JointType::PRISMATIC && !j.is_scale_follower)) {
+            // Simple weighted average (followers share the leader's slot; skip to avoid
+            // double-accumulation on the same state_index).
             for (size_t i = 0; i < states.size(); ++i) {
                 angles_mean(si) += weights(i) * states[i].joint_angles()(si);
                 velocities_mean(si) += weights(i) * states[i].joint_velocities()(si);
@@ -714,7 +716,10 @@ Eigen::VectorXd UnscentedKalmanFilter::compute_state_error(State const& state,
         int const pos_base = root_n + j.error_index;
         int const vel_base = active_dof + root_n + j.error_index;
 
-        if (j.type == JointType::REVOLUTE || j.type == JointType::PRISMATIC) {
+        if ((j.type == JointType::REVOLUTE) ||
+            (j.type == JointType::PRISMATIC && !j.is_scale_follower)) {
+            // Followers share state_index with leader; skip to avoid a second (wrong)
+            // error entry for the same logical DOF.
             error(pos_base) = state.joint_angles()(si) - reference.joint_angles()(si);
             error(vel_base) = state.joint_velocities()(si) - reference.joint_velocities()(si);
 
@@ -1457,6 +1462,10 @@ void UnscentedKalmanFilter::enforce_joint_limits() {
         if (joint.type == JointType::FIXED) {
             continue;
         }
+        // Followers share the leader's state slot; the leader already handled the limit.
+        if (joint.is_scale_follower) {
+            continue;
+        }
 
         if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
             if (joint.type == JointType::REVOLUTE && joint.num_limits > 0 &&
@@ -1503,6 +1512,9 @@ void UnscentedKalmanFilter::enforce_joint_limits() {
         Joint const& joint = joints[joint_idx];
 
         if (joint.type == JointType::FIXED) {
+            continue;
+        }
+        if (joint.is_scale_follower) {
             continue;
         }
 
@@ -1659,12 +1671,14 @@ void UnscentedKalmanFilter::write_sigma_points_csv(std::vector<State> const& sig
       << "root_vel_x,root_vel_y,root_vel_z,"
       << "root_angvel_x,root_angvel_y,root_angvel_z";
 
-    // Add joint angle columns (in skeleton order)
+    // Add joint angle columns (in skeleton order). Skip scale-group followers
+    // (they share the leader's state slot; no independent column in the state vector).
     auto const joints_ordered = layout_->skeleton()->get_joints_ordered();
     for (auto const& joint : joints_ordered) {
-        if (!joint.parent_index.has_value()) {
+        if (!joint.parent_index.has_value())
             continue;  // Skip root
-        }
+        if (joint.is_scale_follower)
+            continue;  // Shares leader's slot
 
         int dof = 0;
         if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
@@ -1680,9 +1694,10 @@ void UnscentedKalmanFilter::write_sigma_points_csv(std::vector<State> const& sig
 
     // Add joint velocity columns (in skeleton order)
     for (auto const& joint : joints_ordered) {
-        if (!joint.parent_index.has_value()) {
+        if (!joint.parent_index.has_value())
             continue;  // Skip root
-        }
+        if (joint.is_scale_follower)
+            continue;  // Shares leader's slot
 
         int dof = 0;
         if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
@@ -1723,9 +1738,10 @@ void UnscentedKalmanFilter::write_sigma_points_csv(std::vector<State> const& sig
         // Joint angles (in skeleton order)
         int joint_angle_idx = 0;
         for (auto const& joint : joints_ordered) {
-            if (!joint.parent_index.has_value()) {
+            if (!joint.parent_index.has_value())
                 continue;  // Skip root
-            }
+            if (joint.is_scale_follower)
+                continue;  // Shares leader's slot
 
             if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
                 f << "," << state.joint_angles()(joint_angle_idx);
@@ -1742,9 +1758,10 @@ void UnscentedKalmanFilter::write_sigma_points_csv(std::vector<State> const& sig
         // Joint velocities (in skeleton order)
         int joint_vel_idx = 0;
         for (auto const& joint : joints_ordered) {
-            if (!joint.parent_index.has_value()) {
+            if (!joint.parent_index.has_value())
                 continue;  // Skip root
-            }
+            if (joint.is_scale_follower)
+                continue;  // Shares leader's slot
 
             if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
                 f << "," << state.joint_velocities()(joint_vel_idx);

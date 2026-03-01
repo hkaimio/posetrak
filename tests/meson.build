@@ -41,12 +41,16 @@ test_sources = files(
   # Phase 7: Export
   'test_tracking_export.cpp',
   'test_statistics_tracker.cpp',
+
+  # Scale calibration
+  'calibration/test_scale_calibration.cpp',
+  'calibration/test_scale_regression.cpp',
 )
 
 test_exe = executable('test_posetrak',
   test_sources,
   include_directories: posetrak_inc,
-  dependencies: [posetrak_dep, test_dep, pinocchio_dep],
+  dependencies: [posetrak_dep, test_dep, pinocchio_dep, yaml_cpp_dep],
 )
 
 test('posetrak_tests', test_exe,

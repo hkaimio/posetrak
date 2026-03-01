@@ -7,27 +7,20 @@ all pre-date the prismatic joint work (confirmed by stashing CP1 changes and re-
 
 ---
 
-### 1 — `yaml-cpp` bad conversion when loading skeleton YAML with `scale_groups` / `depends_on`
+### 1 — ~~`yaml-cpp` bad conversion when loading skeleton YAML with `scale_groups` / `depends_on`~~ **FIXED**
 
 **Affected tests** (3 assertions):
 - `test_skeleton_loader.cpp:22` — `load_skeleton_from_yaml("tests/data/simple_humanoid.yaml")`
 - `test_tracker_integration.cpp:222`
 - `test_triangulation.cpp:423`
 
-**Root cause**: `src/io/skeleton_loader.cpp:73` does
+**Root cause**: `src/io/skeleton_loader.cpp:73` did
 `group_node["depends_on"].as<std::string>()`, but `simple_humanoid.yaml:174` stores it as a
 YAML sequence (`depends_on: ["core"]`), not a scalar.  `yaml-cpp` throws `bad conversion`.
 
-**Fix**: parse `depends_on` as a sequence (or accept both):
-```cpp
-if (group_node["depends_on"]) {
-    if (group_node["depends_on"].IsSequence()) {
-        // collect list; currently unused anyway
-    } else {
-        group_dependencies[group_name] = group_node["depends_on"].as<std::string>();
-    }
-}
-```
+**Fix applied**: Parse `depends_on` as either a scalar or a sequence.  Changed
+`group_dependencies` to `unordered_map<string, vector<string>>` and the parser now handles
+both forms (scalar string and YAML sequence).
 
 ---
 

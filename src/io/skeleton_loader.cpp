@@ -52,7 +52,8 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
     // Parse groups section first to build joint-to-group and marker-to-group mappings
     std::unordered_map<std::string, std::string> joint_to_group_map;
     std::unordered_map<std::string, std::string> marker_to_group_map;
-    std::unordered_map<std::string, std::string> group_dependencies;  // group -> depends_on
+    std::unordered_map<std::string, std::vector<std::string>>
+        group_dependencies;  // group -> depends_on list
     std::unordered_set<std::string> optional_groups;
 
     if (root["groups"]) {
@@ -68,10 +69,18 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
                 optional_groups.insert(group_name);
             }
 
-            // Parse depends_on attribute
+            // Parse depends_on attribute — accepts both a scalar string and a sequence
             if (group_node["depends_on"]) {
-                std::string depends_on = group_node["depends_on"].as<std::string>();
-                group_dependencies[group_name] = depends_on;
+                auto const& dep_node = group_node["depends_on"];
+                std::vector<std::string> deps;
+                if (dep_node.IsSequence()) {
+                    for (auto const& item : dep_node) {
+                        deps.push_back(item.as<std::string>());
+                    }
+                } else {
+                    deps.push_back(dep_node.as<std::string>());
+                }
+                group_dependencies[group_name] = std::move(deps);
             }
 
             // Map all joints in this group to the group name

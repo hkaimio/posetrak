@@ -3,6 +3,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <deque>
 #include <fstream>
@@ -177,22 +178,89 @@ void write_calibrated_yaml(std::string const& input_yaml_path, std::string const
         }
     }
 
-    // Modify joint offsets in-place
+    // Pre-pass: collect original offset vectors and parent names before any mutation.
+    // These are used to identify which child's offset a bone_tip_offset matches.
+    struct ChildScaleEntry {
+        std::array<double, 3> original_offset;
+        double scale;
+    };
+    // parent_name → list of (original child offset, child scale factor) for scaled children only
+    std::unordered_map<std::string, std::vector<ChildScaleEntry>> children_of;
+
+    if (root["joints"] && root["joints"].IsSequence()) {
+        for (auto const& joint_node : root["joints"]) {
+            if (!joint_node["name"])
+                continue;
+            std::string const jname = joint_node["name"].as<std::string>();
+            auto sit = scale_by_joint.find(jname);
+            if (sit == scale_by_joint.end())
+                continue;  // unscaled joint — no entry needed
+            if (!joint_node["parent"] || joint_node["parent"].IsNull())
+                continue;
+            std::string const pname = joint_node["parent"].as<std::string>();
+            if (!joint_node["offset"] || !joint_node["offset"].IsSequence() ||
+                joint_node["offset"].size() != 3)
+                continue;
+            ChildScaleEntry entry;
+            entry.scale = sit->second;
+            for (std::size_t i = 0; i < 3; ++i) {
+                entry.original_offset[i] = joint_node["offset"][i].as<double>();
+            }
+            children_of[pname].push_back(entry);
+        }
+    }
+
+    // Modify joint offsets and bone_tip_offsets in-place
     if (root["joints"] && root["joints"].IsSequence()) {
         for (auto joint_node : root["joints"]) {
             if (!joint_node["name"])
                 continue;
             std::string const jname = joint_node["name"].as<std::string>();
-            auto it = scale_by_joint.find(jname);
-            if (it == scale_by_joint.end())
-                continue;
-            double const s = it->second;
 
-            if (joint_node["offset"] && joint_node["offset"].IsSequence() &&
-                joint_node["offset"].size() == 3) {
-                for (std::size_t i = 0; i < 3; ++i) {
-                    double v = joint_node["offset"][i].as<double>();
-                    joint_node["offset"][i] = v * s;
+            // Scale this joint's own offset if it belongs to a scale group
+            auto sit = scale_by_joint.find(jname);
+            if (sit != scale_by_joint.end()) {
+                double const s = sit->second;
+                if (joint_node["offset"] && joint_node["offset"].IsSequence() &&
+                    joint_node["offset"].size() == 3) {
+                    for (std::size_t i = 0; i < 3; ++i) {
+                        double v = joint_node["offset"][i].as<double>();
+                        joint_node["offset"][i] = v * s;
+                    }
+                }
+            }
+
+            // Scale bone_tip_offset if it closely matches one of this joint's scaled children.
+            // A match means the Euclidean distance to a child's original offset is < 5mm.
+            // This correctly handles multi-child joints (e.g. spine2 → shoulder.L/R + neck1):
+            // only the child whose offset direction/magnitude matches the bone_tip_offset
+            // contributes its scale factor.
+            if (joint_node["bone_tip_offset"] && joint_node["bone_tip_offset"].IsSequence() &&
+                joint_node["bone_tip_offset"].size() == 3) {
+                auto cit = children_of.find(jname);
+                if (cit != children_of.end()) {
+                    double const bx = joint_node["bone_tip_offset"][0].as<double>();
+                    double const by = joint_node["bone_tip_offset"][1].as<double>();
+                    double const bz = joint_node["bone_tip_offset"][2].as<double>();
+
+                    constexpr double kTolerance = 0.005;  // 5 mm
+                    double best_dist = kTolerance;
+                    double best_scale = -1.0;
+                    for (auto const& entry : cit->second) {
+                        double const dx = bx - entry.original_offset[0];
+                        double const dy = by - entry.original_offset[1];
+                        double const dz = bz - entry.original_offset[2];
+                        double const dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                        if (dist < best_dist) {
+                            best_dist = dist;
+                            best_scale = entry.scale;
+                        }
+                    }
+                    if (best_scale > 0.0) {
+                        joint_node["bone_tip_offset"][0] = bx * best_scale;
+                        joint_node["bone_tip_offset"][1] = by * best_scale;
+                        joint_node["bone_tip_offset"][2] = bz * best_scale;
+                    }
                 }
             }
         }

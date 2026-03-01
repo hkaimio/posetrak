@@ -1,0 +1,66 @@
+# Minimal skeleton with scale_groups for calibration unit tests.
+# Three scaled bones + one unscaled bone.
+name: "scale_test"
+units: "meters"
+
+joints:
+  - name: root
+    type: root
+    parent: null
+    offset: [0.0, 0.0, 0.0]
+    # bone_tip_offset matches upper_arm's offset → should be scaled by arm factor
+    bone_tip_offset: [0.3, 0.0, 0.0]
+
+  # upper_arm: offset magnitude = 0.3 m, direction = +X
+  - name: upper_arm
+    type: revolute
+    parent: root
+    offset: [0.3, 0.0, 0.0]
+    axis: [1.0, 0.0, 0.0]
+    limits: [-1.5707963, 1.5707963]
+    # bone_tip_offset matches lower_arm's offset → should be scaled by forearm factor
+    bone_tip_offset: [0.25, 0.0, 0.0]
+
+  # lower_arm: offset magnitude = 0.25 m, direction = +X
+  - name: lower_arm
+    type: revolute
+    parent: upper_arm
+    offset: [0.25, 0.0, 0.0]
+    axis: [1.0, 0.0, 0.0]
+    limits: [-1.5707963, 1.5707963]
+
+  # spine: offset magnitude = 0.4 m, direction = +Y — unscaled (not in any group)
+  # bone_tip_offset points in +Y, away from any scaled child; no scaling should occur
+  - name: spine
+    type: revolute
+    parent: root
+    offset: [0.0, 0.4, 0.0]
+    axis: [1.0, 0.0, 0.0]
+    limits: [-0.5, 0.5]
+    bone_tip_offset: [0.0, 0.4, 0.0]
+
+markers:
+  - name: MRK-elbow
+    parent: upper_arm
+    offset: [0.0, 0.0, 0.0]
+    openpose_keypoint: 3
+    openpose_name: RElbow
+    confidence_threshold: 0.3
+
+  - name: MRK-wrist
+    parent: lower_arm
+    offset: [0.0, 0.0, 0.0]
+    openpose_keypoint: 4
+    openpose_name: RWrist
+    confidence_threshold: 0.3
+
+groups:
+  - name: main
+    joints: [root, upper_arm, lower_arm, spine]
+    markers: [MRK-elbow, MRK-wrist]
+
+scale_groups:
+  - name: arm
+    joints: [upper_arm]
+  - name: forearm
+    joints: [lower_arm]

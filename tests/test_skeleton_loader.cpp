@@ -332,3 +332,55 @@ TEST_CASE("Skeleton loader handles optional fields", "[skeleton_loader]") {
         REQUIRE_NOTHROW(load_skeleton_from_yaml(test_file.string()));
     }
 }
+
+TEST_CASE("Skeleton loader handles depends_on scalar and sequence forms", "[skeleton_loader]") {
+    // Minimal skeleton with two groups: 'core' has no dependency, 'limbs' depends on 'core'.
+    // Both the scalar form (depends_on: "core") and sequence form (depends_on: ["core"])
+    // must load without error.  The two YAML files are otherwise identical.
+
+    char const* const skeleton_body = R"yaml(
+joints:
+  - name: root
+    type: root
+    offset: [0, 0, 0]
+  - name: arm
+    type: revolute
+    parent: root
+    offset: [0.3, 0, 0]
+    axis: [1, 0, 0]
+    limits: [-1.5, 1.5]
+markers:
+  - name: MRK-arm
+    parent: arm
+    offset: [0, 0, 0]
+groups:
+  - name: core
+    joints: [root]
+    markers: []
+  - name: limbs
+    joints: [arm]
+    markers: [MRK-arm]
+)yaml";
+
+    SECTION("depends_on as scalar string loads without error") {
+        auto test_file = get_temp_test_dir() / "depends_on_scalar.yaml";
+        std::ofstream f(test_file);
+        f << skeleton_body << "    depends_on: \"core\"\n";
+        f.close();
+
+        REQUIRE_NOTHROW(load_skeleton_from_yaml(test_file.string()));
+        Skeleton sk = load_skeleton_from_yaml(test_file.string());
+        REQUIRE(sk.get_joint("arm") != nullptr);
+    }
+
+    SECTION("depends_on as sequence loads without error") {
+        auto test_file = get_temp_test_dir() / "depends_on_sequence.yaml";
+        std::ofstream f(test_file);
+        f << skeleton_body << "    depends_on: [\"core\"]\n";
+        f.close();
+
+        REQUIRE_NOTHROW(load_skeleton_from_yaml(test_file.string()));
+        Skeleton sk = load_skeleton_from_yaml(test_file.string());
+        REQUIRE(sk.get_joint("arm") != nullptr);
+    }
+}

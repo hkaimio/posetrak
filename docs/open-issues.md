@@ -1,5 +1,158 @@
 # Open Issues
 
+## Failing Tests — to fix after scaling feature (2026-03-01)
+
+16 test assertions fail across 8 distinct root causes.  None were introduced by CP1;
+all pre-date the prismatic joint work (confirmed by stashing CP1 changes and re-running).
+
+---
+
+### 1 — `yaml-cpp` bad conversion when loading skeleton YAML with `scale_groups` / `depends_on`
+
+**Affected tests** (3 assertions):
+- `test_skeleton_loader.cpp:22` — `load_skeleton_from_yaml("tests/data/simple_humanoid.yaml")`
+- `test_tracker_integration.cpp:222`
+- `test_triangulation.cpp:423`
+
+**Root cause**: `src/io/skeleton_loader.cpp:73` does
+`group_node["depends_on"].as<std::string>()`, but `simple_humanoid.yaml:174` stores it as a
+YAML sequence (`depends_on: ["core"]`), not a scalar.  `yaml-cpp` throws `bad conversion`.
+
+**Fix**: parse `depends_on` as a sequence (or accept both):
+```cpp
+if (group_node["depends_on"]) {
+    if (group_node["depends_on"].IsSequence()) {
+        // collect list; currently unused anyway
+    } else {
+        group_dependencies[group_name] = group_node["depends_on"].as<std::string>();
+    }
+}
+```
+
+---
+
+### 2 — `Camera::project()` returns `nullopt` for points that project outside image bounds
+
+**Affected tests** (3 assertions): `test_camera.cpp:92, 138, 229`
+
+**Root cause**: The camera has image size 640×480.  The test point `(1, 0.5, 2)` projects to
+pixel `(720, 440)` — outside the image — so `project()` returns `nullopt`.  The tests were
+written assuming `project()` does *not* clip to image bounds (test comment says "x_pixel = 720").
+
+**Fix**: Remove the image-bounds check from `project()` (or add a separate
+`project_unclamped()` overload); bounds checking is the caller's responsibility.
+
+---
+
+### 3 — Camera loader loads extrinsics with wrong position values
+
+**Affected tests** (1 assertion): `test_camera_loader.cpp:60`
+
+**Root cause**: Loaded `extrinsics.position[0] = +9.08` instead of expected `-4.37`.
+Likely a frame-convention mismatch: the loader stores the raw TOML translation vector
+instead of the camera position in world frame (`position = -R^T * t`).
+
+**Fix**: Audit `src/io/camera_loader.cpp`; ensure the stored position is the camera
+origin in world coordinates, consistent with what `Intrinsics`/`Extrinsics` documents.
+
+---
+
+### 4 — `Observation::measurement_noise_std()` ignores confidence
+
+**Affected tests** (3 assertions): `test_observation.cpp:32, 38, 44`
+
+**Root cause**: `measurement_noise_std(base_std)` returns `base_std` unchanged instead of
+`base_std / confidence`.  The implementation is a stub that forgets to divide.
+
+**Fix**: In `src/core/observation.cpp` (or wherever `measurement_noise_std` is defined):
+```cpp
+double Observation::measurement_noise_std(double base_std) const {
+    double conf = std::max(confidence, 0.1);   // clamp to avoid div-by-zero
+    return base_std / conf;
+}
+```
+
+---
+
+### 5 — `ConstantVelocityModel::propagate()` does not enforce joint limits or locked DOFs
+
+**Affected tests** (2 assertions): `test_process_model.cpp:162, 296`
+
+- `:162` — revolute joint with limits `[-1, 1]`; angle `0.95 + 0.1*0.1 = 1.05` should be
+  clamped to `1.0` but the model returns `1.05`.
+- `:296` — spherical joint with X/Y locked (`min == max == 0`); after propagation the
+  locked DOFs should stay at `0` but one drifts to `0.2`.
+
+**Root cause**: `propagate()` integrates position and velocity but does not call
+`enforce_joint_limits()` (or equivalent) on the resulting state.
+
+**Fix**: Call the limit-enforcement step at the end of `propagate()`, mirroring what the
+UKF does after its prediction step.
+
+---
+
+### 6 — UKF `error_dim()` wrong for spherical joint with locked DOFs
+
+**Affected tests** (1 assertion): `test_ukf.cpp:317`
+
+**Scenario**: shoulder is `SPHERICAL` with X/Y locked (only Z active; `active_dof = 1`).
+Test expects `error_dim() = 2*(6+3) = 18`, but UKF returns `2*(6+1) = 14`.
+
+**Root cause**: UKF error space uses *active* DOFs only.  A state vector of size 3 is
+allocated for the spherical joint (always), but only 1 active DOF contributes to error
+space — so `error_dim = 14`.  The test was written under a different assumption (error
+space = storage space).
+
+**Fix options**:
+- A. Update the test to reflect the correct active-DOF policy (`REQUIRE(ukf.error_dim() == 14)`).
+- B. Change UKF error space to equal storage space (simpler but wastes sigma points on
+  locked DOFs).
+
+Option A is preferred (correct policy, save computation).
+
+---
+
+### 7 — UKF update fails with "Failed to compute eigenvalues for covariance conditioning"
+
+**Affected tests** (1 assertion): `test_ukf_update.cpp:429`
+
+**Root cause**: After a purely translational predict step with a very stiff covariance, the
+innovation covariance `S = Pyy + R` becomes numerically ill-conditioned (near-singular
+because marker reprojection residuals have ~zero spread across sigma points).
+The covariance conditioning (likely a Cholesky or eigen-decomposition) fails.
+
+**Fix**: Add a floor to the diagonal of `S` before decomposition, or detect and skip
+the update when `S` is singular (return current state unchanged with a warning).
+
+---
+
+### 8 — `test_ukf_frame0_comparison` needs pre-generated Python debug fixture
+
+**Affected tests** (4 assertions): `test_ukf_frame0_comparison.cpp:39, 94, 98, 128`
+
+**Root cause**: Tests compare C++ UKF frame-0 output against reference data at
+`tracking_tests/cpp-python-comparison/python_results/debug/frame_0000/all_observations.csv`
+which does not exist in the repo.  These are golden-file comparison tests that require the
+Python tracker to be run first to generate the fixture.
+
+**Fix**: Either commit the fixture (if small and stable), or add a `[!shouldfail]` / skip
+tag until the fixture generation script is documented and run in CI.
+
+---
+
+### 9 — `State::apply_error_update` quaternion multiplication order mismatch
+
+**Affected tests** (1 assertion): `test_state.cpp:221`
+
+**Root cause**: Test computes `expected_quat = delta_q * quat` (left-compose, global frame
+update), but the implementation uses `quat * delta_q` (right-compose, body-frame update),
+or vice-versa.  One of the two is wrong for the established convention.
+
+**Fix**: Audit `State::apply_error_update` in `src/core/state.cpp` and decide the correct
+convention (global vs body frame perturbation); update the test or implementation to match.
+
+---
+
 ## Active
 
 - **`Skeleton::active_dof()` does not count root DOFs** (2026-01-26)

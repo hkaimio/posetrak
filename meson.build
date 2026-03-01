@@ -84,17 +84,15 @@ if not cli11_dep.found()
   cli11_dep = dependency('CLI11', required: true)
 endif
 
-# Pinocchio - manually construct dependency to avoid pkg-config issues
-# Installed via robotpkg at /opt/openrobots, but pkg-config may conflict with wrapped Eigen
+# Pinocchio - header-only mode
+# All algorithm headers expose full template bodies when
+# PINOCCHIO_ENABLE_TEMPLATE_INSTANTIATION is NOT defined, so no libpinocchio_default.so
+# linking is required.  The only non-Eigen dependencies (boost/math/constants and
+# boost/type_traits) are themselves header-only and present at the system include path.
+# See docs/pinocchio-header-only-analysis.md for the full rationale.
 pinocchio_inc = include_directories('/opt/openrobots/include', is_system: true)
 pinocchio_dep = declare_dependency(
   include_directories: pinocchio_inc,
-  dependencies: [
-    cpp.find_library('pinocchio_default', dirs: ['/opt/openrobots/lib'], required: true),
-    cpp.find_library('pinocchio_parsers', dirs: ['/opt/openrobots/lib'], required: false),
-  ],
-  link_args: ['-L/opt/openrobots/lib', '-Wl,-rpath,/opt/openrobots/lib'],
-  compile_args: ['-DPINOCCHIO_WITH_URDFDOM', '-DPINOCCHIO_ENABLE_TEMPLATE_INSTANTIATION']
 )
 
 # Will add these as we progress:

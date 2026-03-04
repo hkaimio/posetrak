@@ -1136,8 +1136,31 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         }
     }
 
-    // Step 11: Damp velocity covariance for joints that hit limits
+    // Step 11: Damp velocity covariance for joints that hit limits.
+    //
+    // NOTE: This must be followed by a PSD re-projection because the zeroing of
+    // row/col plus clamping of the diagonal can technically leave off-diagonal
+    // entries that violate PSD if the caller has skipped Step 10 for any reason.
+    // The re-projection step below ensures the posterior covariance remains PSD
+    // before it is stored in the smoother cache and used in sigma-point generation
+    // for the next predict step.
     damp_velocity_covariance_at_limits(prev_state, state_);
+
+    // Step 11b: Re-assert PSD after velocity damping (zeroing rows/cols can leave
+    // residual numerical non-PSD from prior off-diagonal cross-terms).
+    {
+        covariance_ = 0.5 * (covariance_ + covariance_.transpose());
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> post_damp_solver(covariance_);
+        if (post_damp_solver.info() == Eigen::Success) {
+            Eigen::VectorXd eigs = post_damp_solver.eigenvalues();
+            if (eigs.minCoeff() < 0.0) {
+                eigs = eigs.cwiseMax(0.0);
+                covariance_ = post_damp_solver.eigenvectors() * eigs.asDiagonal() *
+                              post_damp_solver.eigenvectors().transpose();
+                covariance_ = 0.5 * (covariance_ + covariance_.transpose());
+            }
+        }
+    }
 
     // Step 12: Compute Normalized Innovation Squared (NIS) for filter validation
     // NIS = innovation^T * S^-1 * innovation (should follow chi-squared distribution)
@@ -1575,9 +1598,21 @@ void UnscentedKalmanFilter::enforce_joint_limits() {
 
 void UnscentedKalmanFilter::damp_velocity_covariance_at_limits(State const& prev_state,
                                                                State const& current_state,
-                                                               double damping_factor) {
-    // Compare velocities before and after limit enforcement
-    // Damp covariance for velocities that changed
+                                                               double /*damping_factor*/) {
+    // When a joint velocity is zeroed (because the joint hit a limit), we want to
+    // reflect "we now know this velocity is ~zero" in the covariance.  The previous
+    // implementation scaled the row and column by damping_factor (e.g. 0.01), but
+    // scaling the row AND column scales the diagonal by damping_factor^2 while the
+    // off-diagonals are only scaled by damping_factor.  With a tiny diagonal and
+    // still-significant off-diagonals the resulting matrix can become non-PSD.
+    // A non-PSD posterior corrupts sigma-point generation and, critically, yields
+    // an invalid prior_cov in the smoother cache that causes the RTS backward pass
+    // to blow up (det(prior_cov) < 0 → LDLT inversion is garbage → G → Inf/NaN).
+    //
+    // The correct treatment: zero the entire row and col (decorrelate the limit-hit
+    // velocity from all other DOFs, since it is now known) and set the diagonal to
+    // a small floor.  This is equivalent to conditioning on "velocity_i ≈ 0" and
+    // always produces a PSD result as long as the rest of the matrix is PSD.
 
     Eigen::VectorXd const& prev_velocities = prev_state.joint_velocities();
     Eigen::VectorXd const& curr_velocities = current_state.joint_velocities();
@@ -1586,10 +1621,10 @@ void UnscentedKalmanFilter::damp_velocity_covariance_at_limits(State const& prev
         return;
     }
 
-    // Find velocity indices that were modified
+    constexpr double kVelCovFloor = 1e-8;  // minimum variance for zeroed velocity
     int const error_pos_dim = error_dim() / 2;
 
-    // Check root velocities (always first 6 in velocity state)
+    // Check root velocities (always first 6 in velocity state).
     Eigen::Vector3d prev_root_vel = prev_state.root_velocity();
     Eigen::Vector3d curr_root_vel = current_state.root_velocity();
     Eigen::Vector3d prev_root_angvel = prev_state.root_angular_velocity();
@@ -1597,27 +1632,27 @@ void UnscentedKalmanFilter::damp_velocity_covariance_at_limits(State const& prev
 
     for (int i = 0; i < 3; ++i) {
         if (std::abs(prev_root_vel(i) - curr_root_vel(i)) > 1e-9) {
-            int vel_idx = error_pos_dim + i;
-            covariance_.row(vel_idx) *= damping_factor;
-            covariance_.col(vel_idx) *= damping_factor;
-            covariance_(vel_idx, vel_idx) = std::max(covariance_(vel_idx, vel_idx), 1e-8);
+            int const vel_idx = error_pos_dim + i;
+            covariance_.row(vel_idx).setZero();
+            covariance_.col(vel_idx).setZero();
+            covariance_(vel_idx, vel_idx) = kVelCovFloor;
         }
         if (std::abs(prev_root_angvel(i) - curr_root_angvel(i)) > 1e-9) {
-            int vel_idx = error_pos_dim + 3 + i;
-            covariance_.row(vel_idx) *= damping_factor;
-            covariance_.col(vel_idx) *= damping_factor;
-            covariance_(vel_idx, vel_idx) = std::max(covariance_(vel_idx, vel_idx), 1e-8);
+            int const vel_idx = error_pos_dim + 3 + i;
+            covariance_.row(vel_idx).setZero();
+            covariance_.col(vel_idx).setZero();
+            covariance_(vel_idx, vel_idx) = kVelCovFloor;
         }
     }
 
-    // Check joint velocities
+    // Check joint velocities.
     for (int i = 0; i < prev_velocities.size(); ++i) {
         if (std::abs(prev_velocities(i) - curr_velocities(i)) > 1e-9) {
-            int vel_idx = error_pos_dim + 6 + i;
+            int const vel_idx = error_pos_dim + 6 + i;
             if (vel_idx < error_dim()) {
-                covariance_.row(vel_idx) *= damping_factor;
-                covariance_.col(vel_idx) *= damping_factor;
-                covariance_(vel_idx, vel_idx) = std::max(covariance_(vel_idx, vel_idx), 1e-8);
+                covariance_.row(vel_idx).setZero();
+                covariance_.col(vel_idx).setZero();
+                covariance_(vel_idx, vel_idx) = kVelCovFloor;
             }
         }
     }

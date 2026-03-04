@@ -489,7 +489,7 @@ void Tracker::enable_smoothing(bool enable) {
     }
 }
 
-std::vector<SmoothedFrame> Tracker::smooth() const {
+std::vector<SmoothedFrame> Tracker::smooth(std::string const& diag_path) const {
     if (!smoothing_enabled_) {
         throw std::runtime_error(
             "Tracker::smooth(): smoothing was not enabled. "
@@ -499,7 +499,7 @@ std::vector<SmoothedFrame> Tracker::smooth() const {
         throw std::runtime_error("Tracker::smooth(): no frames tracked yet.");
     }
     RTSSmoother smoother(ukf_->layout());
-    return smoother.smooth(smoother_cache_);
+    return smoother.smooth(smoother_cache_, diag_path);
 }
 
 }  // namespace posetrak

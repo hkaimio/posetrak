@@ -216,7 +216,7 @@ class Tracker {
      * @return Smoothed frames in chronological order (same order as track_frame calls).
      * @throws std::runtime_error if smoothing was not enabled or cache is empty.
      */
-    std::vector<SmoothedFrame> smooth() const;
+    std::vector<SmoothedFrame> smooth(std::string const& diag_path = {}) const;
 
    private:
     /**

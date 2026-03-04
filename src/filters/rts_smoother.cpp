@@ -9,6 +9,9 @@
 
 #include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/core/state.hpp"
+#include <fstream>
+#include <iomanip>
+#include <limits>
 #include <stdexcept>
 
 namespace posetrak {
@@ -147,7 +150,8 @@ State RTSSmoother::state_retract(State const& nominal, Eigen::VectorXd const& er
 
 // ─── Backward sweep ───────────────────────────────────────────────────────────
 
-std::vector<SmoothedFrame> RTSSmoother::smooth(std::vector<FrameSmootherData> const& data) const {
+std::vector<SmoothedFrame> RTSSmoother::smooth(std::vector<FrameSmootherData> const& data,
+                                               std::string const& diag_path) const {
     if (data.empty()) {
         throw std::invalid_argument("RTSSmoother::smooth(): data vector is empty");
     }
@@ -163,6 +167,18 @@ std::vector<SmoothedFrame> RTSSmoother::smooth(std::vector<FrameSmootherData> co
         result.push_back({data[k].timestamp, data[k].posterior_state, data[k].posterior_cov});
     }
 
+    // Open diagnostic file (if requested).
+    std::ofstream diag_file;
+    if (!diag_path.empty()) {
+        diag_file.open(diag_path);
+        if (diag_file.is_open()) {
+            diag_file << std::setprecision(10);
+            diag_file << "k,timestamp,prior_min_eig,prior_max_eig,prior_condition,"
+                         "cross_cov_fnorm,G_spectral_norm_raw,G_spectral_norm_clamped,"
+                         "delta_norm,correction_norm,llt_ok\n";
+        }
+    }
+
     // Backward sweep: k = N-2 down to 0.
     // For step k, the RTS gain uses cross-cov and prior from frame k+1
     // (they describe the transition k → k+1).
@@ -171,17 +187,78 @@ std::vector<SmoothedFrame> RTSSmoother::smooth(std::vector<FrameSmootherData> co
         SmoothedFrame const& sm_next = result[k + 1];     // smoothed estimate at k+1
 
         // G_k = D_k * P_{k+1|k}^{-1}
-        // Use LDLT (symmetric positive-definite) for stability.
-        Eigen::MatrixXd const G =
-            fwd_next.cross_cov *
-            fwd_next.prior_cov.ldlt().solve(Eigen::MatrixXd::Identity(error_dim_, error_dim_));
+        // Use LLT (Cholesky, valid only for PSD matrices) as the primary solver; if the
+        // prior covariance is not PSD (can happen due to velocity-limit damping or
+        // accumulated sigma-point numerical drift), fall back to LDLT with a small
+        // Tikhonov ridge to prevent the gain from blowing up.
+        bool llt_ok = false;
+        Eigen::MatrixXd G;
+        {
+            Eigen::LLT<Eigen::MatrixXd> llt(fwd_next.prior_cov);
+            llt_ok = (llt.info() == Eigen::Success);
+            if (llt_ok) {
+                G = fwd_next.cross_cov *
+                    llt.solve(Eigen::MatrixXd::Identity(error_dim_, error_dim_));
+            } else {
+                // prior_cov is not PSD: regularise before inverting.
+                double const ridge = fwd_next.prior_cov.diagonal().maxCoeff() * 1e-6;
+                Eigen::MatrixXd prior_reg = fwd_next.prior_cov;
+                prior_reg.diagonal().array() += ridge;
+                G = fwd_next.cross_cov *
+                    prior_reg.ldlt().solve(Eigen::MatrixXd::Identity(error_dim_, error_dim_));
+            }
+        }
+
+        // ── Spectral clamping of the smoother gain ─────────────────────────────
+        // The RTS theory guarantees G_spec ≤ 1 for a perfectly observable linear
+        // system; in practice, poor conditioning (high-ratio covariance, near-zero
+        // process noise on calibration DOFs, velocity-limit zeroing) can push
+        // singular values well above 1, causing exponential blow-up of the backward
+        // sweep.  Clamping each singular value to [0, 1] preserves the directional
+        // information from the cross-covariance while preventing amplification.
+        //
+        // G_clamped = U * diag(min(σ_i, 1)) * V^T
+        double g_spec_raw = 0.0;
+        {
+            Eigen::JacobiSVD<Eigen::MatrixXd> svd(G, Eigen::ComputeThinU | Eigen::ComputeThinV);
+            Eigen::VectorXd sv = svd.singularValues();
+            g_spec_raw = sv(0);
+            if (g_spec_raw > 1.0) {
+                sv = sv.cwiseMin(1.0);
+                G = svd.matrixU() * sv.asDiagonal() * svd.matrixV().transpose();
+            }
+        }
 
         // Tangent-space difference: x_{k+1|N} ⊖ x_{k+1|k}
         Eigen::VectorXd const delta = state_error(sm_next.state, fwd_next.prior_state);
+        Eigen::VectorXd const correction = G * delta;
+
+        // Diagnostic logging.
+        if (diag_file.is_open()) {
+            // Prior covariance eigenvalue stats (symmetric, use SelfAdjointEigenSolver).
+            Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(fwd_next.prior_cov,
+                                                               Eigen::EigenvaluesOnly);
+            double const p_min = eig.info() == Eigen::Success
+                                     ? eig.eigenvalues().minCoeff()
+                                     : std::numeric_limits<double>::quiet_NaN();
+            double const p_max = eig.info() == Eigen::Success
+                                     ? eig.eigenvalues().maxCoeff()
+                                     : std::numeric_limits<double>::quiet_NaN();
+            double const cond =
+                (p_min > 0.0) ? p_max / p_min : std::numeric_limits<double>::infinity();
+
+            // G spectral norm after clamping (max singular value ≤ 1 now).
+            double const g_spec_clamped = G.jacobiSvd().singularValues()(0);
+
+            diag_file << k << "," << data[k].timestamp << "," << p_min << "," << p_max << ","
+                      << cond << "," << fwd_next.cross_cov.norm() << "," << g_spec_raw << ","
+                      << g_spec_clamped << "," << delta.norm() << "," << correction.norm() << ","
+                      << (llt_ok ? 1 : 0) << "\n";
+        }
 
         // Smoothed state: x_{k|N} = x_{k|k} ⊕ G * delta
         result[k].timestamp = data[k].timestamp;
-        result[k].state = state_retract(data[k].posterior_state, G * delta);
+        result[k].state = state_retract(data[k].posterior_state, correction);
 
         // Smoothed covariance: P_{k|N} = P_{k|k} + G*(P_{k+1|N} - P_{k+1|k})*G^T
         Eigen::MatrixXd const cov_diff = sm_next.covariance - fwd_next.prior_cov;

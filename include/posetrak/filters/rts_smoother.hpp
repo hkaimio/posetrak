@@ -26,6 +26,7 @@
 #include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/core/state.hpp"
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace posetrak {
@@ -66,11 +67,16 @@ class RTSSmoother {
 
     /// @brief Run the RTS backward pass.
     ///
-    /// @param data  Forward-pass data in *chronological* order (frame 0 … N).
-    ///              Requires at least one frame; single-frame input is returned
-    ///              unchanged (smoother trivially equals the filter).
-    /// @return      Smoothed frames in *chronological* order (frame 0 … N).
-    std::vector<SmoothedFrame> smooth(std::vector<FrameSmootherData> const& data) const;
+    /// @param data      Forward-pass data in *chronological* order (frame 0 … N).
+    ///                  Requires at least one frame; single-frame input is returned
+    ///                  unchanged (smoother trivially equals the filter).
+    /// @param diag_path If non-empty, write a per-step diagnostic CSV to this path.
+    ///                  Logged fields: step k, timestamp, prior_cov min/max eigenvalue,
+    ///                  cross_cov Frobenius norm, G spectral norm, delta norm,
+    ///                  correction (G*delta) norm, llt_ok flag.
+    /// @return          Smoothed frames in *chronological* order (frame 0 … N).
+    std::vector<SmoothedFrame> smooth(std::vector<FrameSmootherData> const& data,
+                                      std::string const& diag_path = {}) const;
 
    private:
     /// Manifold-aware log-map: returns tangent-space error vector e such that

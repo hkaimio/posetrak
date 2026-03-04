@@ -915,7 +915,7 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
             if (!quiet) {
                 fmt::print("Running RTS backward smoother...\n");
             }
-            auto smoothed = tracker.smooth();
+            auto smoothed = tracker.smooth((config.output_dir / "rts_smoother_diag.csv").string());
 
             // smoothed_state_vectors.csv  (diagnostic, same format as state_vectors.csv)
             {

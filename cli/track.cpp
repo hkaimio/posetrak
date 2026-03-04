@@ -506,7 +506,7 @@ void validate_camera_model(std::vector<Observation> const& observations,
 // 'track' subcommand: run the UKF tracker on a TOML config.
 // ---------------------------------------------------------------------------
 static int run_track(std::string const& config_path, bool verbose, bool quiet, bool smooth_output,
-                     bool calibrate) {
+                     bool calibrate, bool debug_output) {
     try {
         // Load configuration
         if (!quiet) {
@@ -518,6 +518,9 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
         // Apply CLI overrides after config load
         if (calibrate) {
             config.calibration_mode = true;
+        }
+        if (debug_output) {
+            config.export_debug = true;
         }
 
         // Load skeleton
@@ -701,9 +704,11 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
             state_vec_file << generate_state_header(*layout) << "\n";
         }
 
-        // Enable UKF debug mode
-        if (auto* ukf = tracker.get_ukf()) {
-            ukf->enable_debug(true, (config.output_dir / "debug").string());
+        // Enable UKF debug mode if requested via config or --debug flag
+        if (config.export_debug) {
+            if (auto* ukf = tracker.get_ukf()) {
+                ukf->enable_debug(true, (config.output_dir / "debug").string());
+            }
         }
 
         // Track sequence
@@ -1037,6 +1042,7 @@ int main(int argc, char* argv[]) {
     bool quiet = false;
     bool smooth_output = false;
     bool calibrate = false;
+    bool debug_output = false;
     track_cmd->add_option("config", track_config, "Configuration file (TOML)")
         ->required()
         ->check(CLI::ExistingFile);
@@ -1050,6 +1056,9 @@ int main(int argc, char* argv[]) {
                         "Enable calibration mode: prismatic (bone-length) DOFs receive "
                         "small process noise so the UKF can update bone lengths from "
                         "marker residuals");
+    track_cmd->add_flag("--debug", debug_output,
+                        "Enable UKF debug output (overrides export_debug in config file). "
+                        "Writes per-frame diagnostics to <output_dir>/debug/");
 
     // ---- 'scale' subcommand ---------------------------------------------
     auto* scale_cmd = app.add_subcommand(
@@ -1071,7 +1080,7 @@ int main(int argc, char* argv[]) {
     CLI11_PARSE(app, argc, argv);
 
     if (*track_cmd)
-        return run_track(track_config, verbose, quiet, smooth_output, calibrate);
+        return run_track(track_config, verbose, quiet, smooth_output, calibrate, debug_output);
     if (*scale_cmd)
         return run_scale(scale_config, scale_output, scale_quiet);
     return 1;

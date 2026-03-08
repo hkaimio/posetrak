@@ -28,10 +28,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import math
 import sys
 import tomllib
 from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
@@ -136,7 +138,7 @@ def load_cameras(toml_path: Path) -> dict[int, Camera]:
         if not key.startswith("cam") or key == "metadata":
             continue
         try:
-            cam_id = int(key[3:])
+            cam_id = int(key[3:]) - 1  # TOML uses 1-based cam1…camN; CSV uses 0-based
         except ValueError:
             continue
 
@@ -400,20 +402,31 @@ def load_inlier_observations(
 # Triangulation helpers
 # ---------------------------------------------------------------------------
 
+class TriResult(NamedTuple):
+    """Detailed result of a single-marker triangulation attempt."""
+    pos: np.ndarray | None   # 3D position, or None if rejected
+    cond: float              # DLT condition number (inf if fewer than 2 known cameras)
+    n_cams: int              # number of inlier cameras with known calibration
+    reject_reason: str       # "" if accepted, otherwise reason string
+
+
 def triangulate_marker(
     cam_obs: dict[int, tuple[float, float]],
     cameras: dict[int, Camera],
     min_inlier_cameras: int,
     max_tri_cond: float,
-) -> np.ndarray | None:
+) -> TriResult:
     """Triangulate a single marker from inlier camera observations.
 
-    Returns 3D position or None if quality criteria are not met.
+    Always returns a TriResult.  pos is None if quality criteria are not met.
     """
     available = [(cam_id, obs) for cam_id, obs in cam_obs.items()
                  if cam_id in cameras]
-    if len(available) < min_inlier_cameras:
-        return None
+    n_cams = len(available)
+
+    if n_cams < min_inlier_cameras:
+        return TriResult(None, float("inf"), n_cams,
+                         f"too_few_cams({n_cams}<{min_inlier_cameras})")
 
     undistorted = []
     Ps = []
@@ -424,9 +437,12 @@ def triangulate_marker(
         Ps.append(cam.P)
 
     pos, cond = triangulate_dlt(undistorted, Ps)
-    if cond > max_tri_cond or not np.all(np.isfinite(pos)):
-        return None
-    return pos
+
+    if cond > max_tri_cond:
+        return TriResult(None, cond, n_cams, f"cond_too_high({cond:.1f}>{max_tri_cond})")
+    if not np.all(np.isfinite(pos)):
+        return TriResult(None, cond, n_cams, "non_finite")
+    return TriResult(pos, cond, n_cams, "")
 
 
 # ---------------------------------------------------------------------------
@@ -455,15 +471,116 @@ def resolve_spec(
         return tri.get(spec)
 
 
+def resolve_spec_debug(
+    spec: str,
+    tri_raw: dict[str, TriResult],
+) -> tuple[np.ndarray | None, float, int, str]:
+    """Like resolve_spec but returns (pos, cond, n_cams, reject_reason) from raw TriResults.
+
+    For midpoint specs the worst-case cond/n_cams across the two constituent markers
+    is returned, since both must be valid for the midpoint to be usable.
+    """
+    if spec.startswith("_midpoint:"):
+        parts = spec.split(":")
+        a, b = parts[1], parts[2]
+        ra = tri_raw.get(a, TriResult(None, float("inf"), 0, "not_observed"))
+        rb = tri_raw.get(b, TriResult(None, float("inf"), 0, "not_observed"))
+        if ra.pos is None or rb.pos is None:
+            reasons = [r for r in [ra.reject_reason, rb.reject_reason] if r]
+            return None, max(ra.cond, rb.cond), min(ra.n_cams, rb.n_cams), "|".join(reasons)
+        return (ra.pos + rb.pos) * 0.5, max(ra.cond, rb.cond), min(ra.n_cams, rb.n_cams), ""
+    elif spec.startswith("_model_joint:"):
+        # Not yet implemented; caller will see pos=None
+        return None, float("inf"), 0, "model_joint_not_implemented"
+    else:
+        r = tri_raw.get(spec, TriResult(None, float("inf"), 0, "not_observed"))
+        return r.pos, r.cond, r.n_cams, r.reject_reason
+
+
+# ---------------------------------------------------------------------------
+# Debug record
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DebugRecord:
+    frame: int
+    group: str
+    joint: str           # joint name, or group name for chain groups
+    prox_spec: str
+    dist_spec: str
+    # Proximal endpoint
+    prox_tri_x: float = float("nan")
+    prox_tri_y: float = float("nan")
+    prox_tri_z: float = float("nan")
+    prox_model_x: float = float("nan")
+    prox_model_y: float = float("nan")
+    prox_model_z: float = float("nan")
+    prox_n_cams: int = 0
+    prox_cond: float = float("nan")
+    prox_reject: str = ""
+    # Distal endpoint
+    dist_tri_x: float = float("nan")
+    dist_tri_y: float = float("nan")
+    dist_tri_z: float = float("nan")
+    dist_model_x: float = float("nan")
+    dist_model_y: float = float("nan")
+    dist_model_z: float = float("nan")
+    dist_n_cams: int = 0
+    dist_cond: float = float("nan")
+    dist_reject: str = ""
+    # Distances and scale
+    tri_dist: float = float("nan")
+    model_dist: float = float("nan")
+    scale_estimate: float = float("nan")
+    accepted: bool = False
+    reject_reason: str = ""
+
+    @staticmethod
+    def csv_header() -> list[str]:
+        return [
+            "frame", "group", "joint", "prox_spec", "dist_spec",
+            "prox_tri_x", "prox_tri_y", "prox_tri_z",
+            "prox_model_x", "prox_model_y", "prox_model_z",
+            "prox_n_cams", "prox_cond", "prox_reject",
+            "dist_tri_x", "dist_tri_y", "dist_tri_z",
+            "dist_model_x", "dist_model_y", "dist_model_z",
+            "dist_n_cams", "dist_cond", "dist_reject",
+            "tri_dist", "model_dist", "scale_estimate",
+            "accepted", "reject_reason",
+        ]
+
+    def to_csv_row(self) -> list:
+        def f(v: float) -> str:
+            return "" if math.isnan(v) or math.isinf(v) else f"{v:.6f}"
+        return [
+            self.frame, self.group, self.joint, self.prox_spec, self.dist_spec,
+            f(self.prox_tri_x), f(self.prox_tri_y), f(self.prox_tri_z),
+            f(self.prox_model_x), f(self.prox_model_y), f(self.prox_model_z),
+            self.prox_n_cams, f(self.prox_cond), self.prox_reject,
+            f(self.dist_tri_x), f(self.dist_tri_y), f(self.dist_tri_z),
+            f(self.dist_model_x), f(self.dist_model_y), f(self.dist_model_z),
+            self.dist_n_cams, f(self.dist_cond), self.dist_reject,
+            f(self.tri_dist), f(self.model_dist), f(self.scale_estimate),
+            self.accepted, self.reject_reason,
+        ]
+
+
 # ---------------------------------------------------------------------------
 # Per-frame scale estimation
 # ---------------------------------------------------------------------------
 
+def _pair_specs(group: ScaleGroup) -> list[tuple[str, str, str]]:
+    """Return list of (joint_label, prox_spec, dist_spec) for a group."""
+    if group.is_chain:
+        prox, dist = group.pair_spec  # type: ignore[misc]
+        return [(group.name, prox, dist)]
+    return [(jname, prox, dist) for jname, (prox, dist) in group.joint_pairs.items()]
+
+
 def compute_frame_samples(
-    frame: int,
     groups: list[ScaleGroup],
     model: dict[str, np.ndarray],           # marker_name → model 3D pos
-    tri: dict[str, np.ndarray],              # marker_name → triangulated 3D pos
+    tri: dict[str, np.ndarray],              # marker_name → accepted triangulated pos
     scale_min: float,
     scale_max: float,
 ) -> dict[str, list[float]]:
@@ -474,8 +591,7 @@ def compute_frame_samples(
     samples: dict[str, list[float]] = defaultdict(list)
 
     for group in groups:
-        if group.is_chain:
-            prox_spec, dist_spec = group.pair_spec  # type: ignore[misc]
+        for _jlabel, prox_spec, dist_spec in _pair_specs(group):
             p_tri = resolve_spec(prox_spec, tri)
             d_tri = resolve_spec(dist_spec, tri)
             p_mod = resolve_spec(prox_spec, model)
@@ -493,26 +609,70 @@ def compute_frame_samples(
             if scale_min <= s <= scale_max:
                 samples[group.name].append(s)
 
-        else:
-            for jname, (prox_spec, dist_spec) in group.joint_pairs.items():
-                p_tri = resolve_spec(prox_spec, tri)
-                d_tri = resolve_spec(dist_spec, tri)
-                p_mod = resolve_spec(prox_spec, model)
-                d_mod = resolve_spec(dist_spec, model)
-
-                if p_tri is None or d_tri is None or p_mod is None or d_mod is None:
-                    continue
-
-                tri_dist = float(np.linalg.norm(d_tri - p_tri))
-                mod_dist = float(np.linalg.norm(d_mod - p_mod))
-                if mod_dist < 1e-6:
-                    continue
-
-                s = tri_dist / mod_dist
-                if scale_min <= s <= scale_max:
-                    samples[group.name].append(s)
-
     return dict(samples)
+
+
+def compute_frame_debug(
+    frame: int,
+    groups: list[ScaleGroup],
+    model: dict[str, np.ndarray],
+    tri_raw: dict[str, TriResult],
+    scale_min: float,
+    scale_max: float,
+) -> list[DebugRecord]:
+    """Like compute_frame_samples but returns full DebugRecord per pair."""
+    records: list[DebugRecord] = []
+
+    for group in groups:
+        for jlabel, prox_spec, dist_spec in _pair_specs(group):
+            rec = DebugRecord(frame=frame, group=group.name, joint=jlabel,
+                              prox_spec=prox_spec, dist_spec=dist_spec)
+
+            # --- proximal endpoint ---
+            p_tri, p_cond, p_ncams, p_rej = resolve_spec_debug(prox_spec, tri_raw)
+            p_mod = resolve_spec(prox_spec, model)
+            rec.prox_n_cams = p_ncams
+            rec.prox_cond = p_cond if not math.isinf(p_cond) else float("nan")
+            rec.prox_reject = p_rej
+            if p_tri is not None:
+                rec.prox_tri_x, rec.prox_tri_y, rec.prox_tri_z = p_tri
+            if p_mod is not None:
+                rec.prox_model_x, rec.prox_model_y, rec.prox_model_z = p_mod
+
+            # --- distal endpoint ---
+            d_tri, d_cond, d_ncams, d_rej = resolve_spec_debug(dist_spec, tri_raw)
+            d_mod = resolve_spec(dist_spec, model)
+            rec.dist_n_cams = d_ncams
+            rec.dist_cond = d_cond if not math.isinf(d_cond) else float("nan")
+            rec.dist_reject = d_rej
+            if d_tri is not None:
+                rec.dist_tri_x, rec.dist_tri_y, rec.dist_tri_z = d_tri
+            if d_mod is not None:
+                rec.dist_model_x, rec.dist_model_y, rec.dist_model_z = d_mod
+
+            # --- distances and scale ---
+            if p_tri is not None and d_tri is not None:
+                rec.tri_dist = float(np.linalg.norm(d_tri - p_tri))
+            if p_mod is not None and d_mod is not None:
+                rec.model_dist = float(np.linalg.norm(d_mod - p_mod))
+
+            if not math.isnan(rec.tri_dist) and not math.isnan(rec.model_dist):
+                if rec.model_dist > 1e-6:
+                    s = rec.tri_dist / rec.model_dist
+                    rec.scale_estimate = s
+                    if scale_min <= s <= scale_max:
+                        rec.accepted = True
+                    else:
+                        rec.reject_reason = f"scale_clamp({s:.3f})"
+                else:
+                    rec.reject_reason = "zero_model_dist"
+            else:
+                reasons = [r for r in [p_rej, d_rej] if r]
+                rec.reject_reason = "|".join(reasons) if reasons else "no_tri"
+
+            records.append(rec)
+
+    return records
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +788,19 @@ def write_calibrated_yaml(
 
 
 # ---------------------------------------------------------------------------
+# Debug CSV writer
+# ---------------------------------------------------------------------------
+
+def write_debug_csv(records: list[DebugRecord], path: Path) -> None:
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(DebugRecord.csv_header())
+        for r in records:
+            w.writerow(r.to_csv_row())
+    print(f"Debug CSV written to: {path}  ({len(records)} rows)")
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
@@ -679,6 +852,8 @@ def parse_args() -> argparse.Namespace:
                    help="Sanity clamp: discard samples above this scale (default: 2.0)")
     p.add_argument("--min-samples", type=int, default=240, metavar="N",
                    help="Minimum valid samples for CONVERGED/UNCERTAIN status (default: 240)")
+    p.add_argument("--debug-csv", type=Path, default=None, metavar="PATH",
+                   help="Write per-frame per-pair debug CSV to this path (optional)")
     return p.parse_args()
 
 
@@ -723,6 +898,7 @@ def main() -> None:
     # --- Per-frame loop -------------------------------------------------
     print("Computing triangulated distances …")
     all_samples: dict[str, list[float]] = defaultdict(list)
+    all_debug: list[DebugRecord] = [] if args.debug_csv else []
 
     frames = sorted(model_by_frame.keys())
     n_frames = len(frames)
@@ -735,22 +911,31 @@ def main() -> None:
         model = model_by_frame.get(frame, {})
         cam_obs_by_marker = obs_by_frame.get(frame, {})
 
-        # Triangulate all markers that have enough inlier cameras
+        # Triangulate all markers; keep raw results for debug, accepted-only for samples
+        tri_raw: dict[str, TriResult] = {}
         tri: dict[str, np.ndarray] = {}
         for marker_name, cam_obs in cam_obs_by_marker.items():
-            pos = triangulate_marker(
+            result = triangulate_marker(
                 cam_obs, cameras, args.min_inlier_cameras, args.max_tri_cond
             )
-            if pos is not None:
-                tri[marker_name] = pos
+            tri_raw[marker_name] = result
+            if result.pos is not None:
+                tri[marker_name] = result.pos
 
         # Compute scale samples for this frame
         frame_samples = compute_frame_samples(
-            frame, observable_groups, model, tri,
+            observable_groups, model, tri,
             args.scale_min, args.scale_max,
         )
         for group_name, vals in frame_samples.items():
             all_samples[group_name].extend(vals)
+
+        # Optionally collect debug records
+        if args.debug_csv is not None:
+            all_debug.extend(compute_frame_debug(
+                frame, observable_groups, model, tri_raw,
+                args.scale_min, args.scale_max,
+            ))
 
     print(f"\nProcessed {n_frames} frames.")
 
@@ -762,6 +947,10 @@ def main() -> None:
     # --- Aggregation and reporting --------------------------------------
     agg = aggregate_samples(dict(all_samples), args.min_samples)
     print_convergence_table(scale_groups, agg)
+
+    # --- Write debug CSV (if requested) --------------------------------
+    if args.debug_csv is not None:
+        write_debug_csv(all_debug, args.debug_csv)
 
     # --- Write output ---------------------------------------------------
     write_calibrated_yaml(args.skeleton, scale_groups, agg, args.output)

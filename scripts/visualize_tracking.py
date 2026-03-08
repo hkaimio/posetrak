@@ -406,6 +406,30 @@ def load_marker_projections(csv_path: Path) -> tuple[MarkerFrameData, FrameTimes
     )
 
 
+def fill_forward_marker_observations(marker_data: MarkerFrameData) -> MarkerFrameData:
+    """For each camera, carry the last known observations forward to frames that have none.
+
+    Cameras that capture at a lower rate than the tracker (e.g. 60 fps cameras in a
+    120 fps tracker) only have observations at every 2nd (or 4th, etc.) tracker frame.
+    Without fill-forward the visualizer shows empty dots on the in-between frames even
+    though the displayed video frame is identical.  Fill-forward makes markers visible
+    continuously, matching what is actually visible in the source image.
+    """
+    all_frames = sorted(marker_data.keys())
+    result: MarkerFrameData = {}
+    last_per_cam: dict[int, dict[str, tuple]] = {}
+
+    for frame in all_frames:
+        # Start from carried-forward data, then overlay this frame's actual observations
+        merged: dict[int, dict] = {cam: dict(obs) for cam, obs in last_per_cam.items()}
+        for cam, obs in marker_data[frame].items():
+            merged[cam] = dict(obs)
+            last_per_cam[cam] = obs
+        result[frame] = merged
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Video file discovery
 # ---------------------------------------------------------------------------
@@ -754,6 +778,7 @@ def main() -> None:
             print(f"  [warn] {proj_path} not found — skipping", file=sys.stderr)
             continue
         mdata, timestamps = load_marker_projections(proj_path)
+        mdata = fill_forward_marker_observations(mdata)
         if primary_timestamps is None:
             primary_timestamps = timestamps
         all_frames |= set(mdata.keys())

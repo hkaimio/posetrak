@@ -275,6 +275,41 @@ def _rotation_for_frame(
     return matrix_to_zxy_euler_deg(R_bvh)
 
 
+def _coord_matrices(coord: str) -> tuple[np.ndarray, np.ndarray]:
+    """Return (M_track, M_rest_rot) for the chosen coordinate system.
+
+    M_track    — applied to tracking-frame root positions AND rotations (p' = M @ p,
+                 R' = M @ R).  Also applied to the rest-frame root position.
+    M_rest_rot — applied to the rest-frame root rotation only (R_rest' = M_rest_rot @ R_rest).
+
+    Rationale
+    ---------
+    The tracker works in a Z-up world (X right, Y backward, Z up).  The skeleton's
+    local frame is Y-up (bones along local Y).
+
+    yup  — target is Y-up (X right, Y up, Z forward), the standard for Blender/Unity.
+           M_track = [[1,0,0],[0,0,1],[0,-1,0]] converts Z-up ↔ Y-up.
+           Rest-frame rotation: identity already places the skeleton upright in Y-up
+           (local Y = world Y), so M_rest_rot = I.
+
+    zup  — target is Z-up (X right, Y backward, Z up), unchanged tracker frame.
+           M_track = I (no position/rotation change for tracking frames).
+           Rest-frame rotation: identity would leave the skeleton lying on its side
+           (local Y = world Y = "backward"), so M_rest_rot = Rx(+90°) which maps
+           local Y → world Z (upright).
+    """
+    if coord == "yup":
+        M = np.array([[1, 0,  0],
+                      [0, 0,  1],
+                      [0, -1, 0]], dtype=float)
+        return M, np.eye(3)
+    else:  # zup
+        Rx90 = np.array([[1, 0,  0],
+                         [0, 0, -1],
+                         [0, 1,  0]], dtype=float)
+        return np.eye(3), Rx90
+
+
 def _write_motion(
     f,
     joints: dict[str, Joint],
@@ -286,6 +321,7 @@ def _write_motion(
     include_rest_frame: bool,
     start_frame: int | None,
     end_frame: int | None,
+    coord: str = "yup",
 ) -> None:
     all_frames = sorted(root_poses.keys())
     if start_frame is not None:
@@ -295,6 +331,8 @@ def _write_motion(
 
     # DFS order — must match the HIERARCHY section traversal exactly
     dfs_order = _dfs_order(joints, root_name)
+
+    M_track, M_rest_rot = _coord_matrices(coord)
 
     frame_time = 1.0 / fps
     n_frames = len(all_frames) + (1 if include_rest_frame else 0)
@@ -311,14 +349,17 @@ def _write_motion(
             jnt = joints[name]
             if name == root_name:
                 if root_pose_vec is not None:
-                    pos = _scale(root_pose_vec[:3], unit)
+                    # Tracking frame: transform position and rotation from Z-up tracker
+                    # frame to the target coordinate system.
+                    pos = _scale(M_track @ root_pose_vec[:3], unit)
                     qw, qx, qy, qz = root_pose_vec[3:]
                     R_root = quat_to_matrix(qw, qx, qy, qz)
-                    rz, rx, ry = matrix_to_zxy_euler_deg(R_root)
+                    rz, rx, ry = matrix_to_zxy_euler_deg(M_track @ R_root)
                 else:
-                    # Rest frame: use skeleton offset as position, identity rotation
-                    pos = _scale(jnt.offset, unit)
-                    rz, rx, ry = matrix_to_zxy_euler_deg(jnt.rest_rot)
+                    # Rest frame: position uses M_track (world position transform),
+                    # rotation uses M_rest_rot (canonical upright for target frame).
+                    pos = _scale(M_track @ jnt.offset, unit)
+                    rz, rx, ry = matrix_to_zxy_euler_deg(M_rest_rot @ jnt.rest_rot)
                 values.extend([pos[0], pos[1], pos[2], rz, rx, ry])
             else:
                 angles = angles_dict.get(name)
@@ -375,6 +416,12 @@ def main() -> None:
     parser.add_argument("--units", choices=["m", "cm"], default="m",
                         help="Position units in output BVH (m for Blender, cm for "
                              "most other tools; default: m)")
+    parser.add_argument("--coord", choices=["yup", "zup"], default="yup",
+                        help="Target coordinate system for the root node.  "
+                             "yup: Y-up, Z-forward (Blender, Unity, Maya default; default). "
+                             "zup: Z-up, Y-backward (unchanged tracker frame, for 3ds Max etc.). "
+                             "Only the root position and orientation are affected; "
+                             "local joint transforms are unchanged.")
     parser.add_argument("--no-rest-frame", action="store_true",
                         help="Omit frame 0 rest pose (not recommended)")
     parser.add_argument("--smoothed", action="store_true",
@@ -422,7 +469,7 @@ def main() -> None:
             fps = round(1.0 / dt) if dt > 0 else 120.0
         else:
             fps = 120.0
-    print(f"  FPS: {fps}, units: {args.units}")
+    print(f"  FPS: {fps}, units: {args.units}, coord: {args.coord}")
 
     print(f"Writing: {output}")
     with open(output, "w") as f:
@@ -435,6 +482,7 @@ def main() -> None:
             include_rest_frame=not args.no_rest_frame,
             start_frame=args.start_frame,
             end_frame=args.end_frame,
+            coord=args.coord,
         )
 
     print("Done.")

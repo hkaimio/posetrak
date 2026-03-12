@@ -3,6 +3,7 @@
 
 #include "posetrak/core/camera.hpp"
 #include "posetrak/core/skeleton.hpp"
+#include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/core/state.hpp"
 #include "posetrak/filters/update_result.hpp"
 #include "posetrak/io/tracking_export.hpp"
@@ -47,8 +48,12 @@ TEST_CASE("TrackingExporter basic functionality", "[io][export]") {
     std::filesystem::remove_all(temp_dir);
     std::filesystem::create_directories(temp_dir);
 
+    // Create layout (full skeleton — test skeleton has no groups)
+    auto skeleton_ptr = std::make_shared<Skeleton>(skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton_ptr);
+
     // Create exporter
-    TrackingExporter exporter(temp_dir, skeleton, cameras);
+    TrackingExporter exporter(temp_dir, skeleton, *layout, cameras);
     exporter.open();
 
     SECTION("Write single frame") {

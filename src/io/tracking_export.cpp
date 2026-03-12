@@ -8,9 +8,9 @@
 namespace posetrak {
 
 TrackingExporter::TrackingExporter(std::filesystem::path const& output_dir,
-                                   Skeleton const& skeleton,
+                                   Skeleton const& skeleton, SkeletonLayout const& layout,
                                    std::unordered_map<int, Camera> const& cameras)
-    : output_dir_(output_dir), skeleton_(skeleton), cameras_(cameras) {}
+    : output_dir_(output_dir), skeleton_(skeleton), layout_(layout), cameras_(cameras) {}
 
 void TrackingExporter::open() {
     // Create output directory if it doesn't exist
@@ -153,41 +153,31 @@ void TrackingExporter::write_frame(
         }
     }
 
-    // 2. Write joint angles
-    auto const& joints = skeleton_.joints();
+    // 2. Write joint angles using the SkeletonLayout so only active-group joints
+    // are written in the correct state-vector order.  Iterating skeleton_.joints()
+    // would count non-active-group joints (e.g. heel.02.L/R) as if they consume
+    // state DOFs, shifting all subsequent joints to wrong indices.
     auto const& joint_angles_vec = state.joint_angles();
     auto const& joint_velocities_vec = state.joint_velocities();
 
-    int angle_idx = 0;
-    for (size_t i = 0; i < joints.size(); ++i) {
-        auto const& joint = joints[i];
-
-        // Skip root joint (pelvis) - handled separately in root_pose
-        if (joint.type == JointType::FIXED || !joint.parent_index.has_value()) {
+    for (auto const& desc : layout_.joints()) {
+        if (desc.is_scale_follower)
             continue;
-        }
-        // Followers share the leader's state slot; don't write a separate row or advance angle_idx
-        if (joint.is_scale_follower) {
-            continue;
-        }
-
-        // Get joint angles (3 values for spherical joints)
-        if (joint.type == JointType::SPHERICAL && angle_idx + 2 < joint_angles_vec.size()) {
-            Eigen::Vector3d angles = joint_angles_vec.segment<3>(angle_idx);
+        if (desc.type == JointType::SPHERICAL) {
+            Eigen::Vector3d angles = joint_angles_vec.segment<3>(desc.state_index);
             Eigen::Vector3d velocities = Eigen::Vector3d::Zero();
-            if (angle_idx + 2 < joint_velocities_vec.size()) {
-                velocities = joint_velocities_vec.segment<3>(angle_idx);
+            if (desc.state_index + 2 < static_cast<uint32_t>(joint_velocities_vec.size())) {
+                velocities = joint_velocities_vec.segment<3>(desc.state_index);
             }
-            write_joint_angles_row(frame_number, timestamp, joint.name, angles, velocities);
-            angle_idx += 3;
-        } else if ((joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) &&
-                   angle_idx < joint_angles_vec.size()) {
-            Eigen::Vector3d angles(joint_angles_vec(angle_idx), 0.0, 0.0);
-            Eigen::Vector3d velocities(
-                angle_idx < joint_velocities_vec.size() ? joint_velocities_vec(angle_idx) : 0.0,
-                0.0, 0.0);
-            write_joint_angles_row(frame_number, timestamp, joint.name, angles, velocities);
-            angle_idx += 1;
+            write_joint_angles_row(frame_number, timestamp, desc.name, angles, velocities);
+        } else if (desc.type == JointType::REVOLUTE || desc.type == JointType::PRISMATIC) {
+            Eigen::Vector3d angles(joint_angles_vec(desc.state_index), 0.0, 0.0);
+            Eigen::Vector3d velocities(desc.state_index <
+                                               static_cast<uint32_t>(joint_velocities_vec.size())
+                                           ? joint_velocities_vec(desc.state_index)
+                                           : 0.0,
+                                       0.0, 0.0);
+            write_joint_angles_row(frame_number, timestamp, desc.name, angles, velocities);
         }
     }
 

@@ -5,6 +5,7 @@
 #include "posetrak/core/camera.hpp"
 #include "posetrak/core/observation.hpp"
 #include "posetrak/core/skeleton.hpp"
+#include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/core/state.hpp"
 #include "posetrak/filters/ukf.hpp"
 #include <filesystem>
@@ -35,7 +36,7 @@ class TrackingExporter {
      * @param cameras Map of camera ID to Camera (for projections)
      */
     TrackingExporter(std::filesystem::path const& output_dir, Skeleton const& skeleton,
-                     std::unordered_map<int, Camera> const& cameras);
+                     SkeletonLayout const& layout, std::unordered_map<int, Camera> const& cameras);
 
     /**
      * @brief Open all CSV files for writing
@@ -67,6 +68,7 @@ class TrackingExporter {
    private:
     std::filesystem::path output_dir_;
     Skeleton const& skeleton_;
+    SkeletonLayout const& layout_;
     std::unordered_map<int, Camera> const& cameras_;
 
     // Output file streams

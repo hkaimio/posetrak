@@ -199,35 +199,32 @@ std::string generate_state_header(SkeletonLayout const& layout) {
 }
 
 // Helper: Write one frame of joint angles in exact joint_angles.csv format.
-// Mirrors TrackingExporter::write_frame section 2.  The angle_idx counter
-// must match the order used when the state was built (skeleton.joints(),
-// skipping root and FIXED joints, SPHERICAL=3 DOF, REVOLUTE=1 DOF).
+// Uses the SkeletonLayout (not skeleton.joints()) so that only active-group
+// joints are written in the correct state-vector order.  Iterating skeleton.joints()
+// would count non-active joints (e.g. heel.02.L/R) as if they have state DOFs,
+// shifting all subsequent joints to wrong state indices.
 void write_smoothed_joint_angles_frame(std::ofstream& file, int frame, double timestamp,
-                                       State const& state, Skeleton const& skeleton) {
-    auto const& joints = skeleton.joints();
+                                       State const& state, SkeletonLayout const& layout) {
     auto const& angles = state.joint_angles();
     auto const& vels = state.joint_velocities();
-    int idx = 0;
-    for (auto const& joint : joints) {
-        if (joint.type == JointType::FIXED || !joint.parent_index.has_value()) {
+    for (auto const& desc : layout.joints()) {
+        if (desc.is_scale_follower)
             continue;
-        }
-        if (joint.type == JointType::SPHERICAL && idx + 2 < angles.size()) {
-            Eigen::Vector3d a = angles.segment<3>(idx);
+        if (desc.type == JointType::SPHERICAL) {
+            Eigen::Vector3d a = angles.segment<3>(desc.state_index);
             Eigen::Vector3d v = Eigen::Vector3d::Zero();
-            if (idx + 2 < vels.size()) {
-                v = vels.segment<3>(idx);
+            if (desc.state_index + 2 < static_cast<uint32_t>(vels.size())) {
+                v = vels.segment<3>(desc.state_index);
             }
-            file << fmt::format("{},{},{},{},{},{},{},{},{}\n", frame, timestamp, joint.name, a.x(),
+            file << fmt::format("{},{},{},{},{},{},{},{},{}\n", frame, timestamp, desc.name, a.x(),
                                 a.y(), a.z(), v.x(), v.y(), v.z());
-            idx += 3;
-        } else if ((joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) &&
-                   idx < angles.size()) {
-            double a = angles(idx);
-            double v = (idx < vels.size()) ? vels(idx) : 0.0;
-            file << fmt::format("{},{},{},{},{},{},{},{},{}\n", frame, timestamp, joint.name, a,
-                                0.0, 0.0, v, 0.0, 0.0);
-            idx += 1;
+        } else if (desc.type == JointType::REVOLUTE || desc.type == JointType::PRISMATIC) {
+            double a = angles(desc.state_index);
+            double v = (desc.state_index < static_cast<uint32_t>(vels.size()))
+                           ? vels(desc.state_index)
+                           : 0.0;
+            file << fmt::format("{},{},{},{},{},{},{},{},{}\n", frame, timestamp, desc.name, a, 0.0,
+                                0.0, v, 0.0, 0.0);
         }
     }
 }
@@ -679,19 +676,21 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
         std::unique_ptr<TrackingExporter> exporter;
         std::unique_ptr<StatisticsTracker> stats_tracker;
 
+        // Create layout for state export (matches tracker's layout).
+        // Must be created before TrackingExporter since the exporter references it.
+        auto layout = config.active_joint_groups.empty()
+                          ? SkeletonLayout::from_full_skeleton(skeleton_ptr)
+                          : SkeletonLayout::from_groups(skeleton_ptr, config.active_joint_groups);
+
         if (config.export_tracking_results) {
-            exporter = std::make_unique<TrackingExporter>(config.output_dir, skeleton, cameras);
+            exporter =
+                std::make_unique<TrackingExporter>(config.output_dir, skeleton, *layout, cameras);
             exporter->open();
         }
 
         if (config.export_statistics) {
             stats_tracker = std::make_unique<StatisticsTracker>();
         }
-
-        // Create layout for state export (matches tracker's layout)
-        auto layout = config.active_joint_groups.empty()
-                          ? SkeletonLayout::from_full_skeleton(skeleton_ptr)
-                          : SkeletonLayout::from_groups(skeleton_ptr, config.active_joint_groups);
 
         // Create diagnostic export files
         std::ofstream pred_obs_file;
@@ -936,7 +935,7 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
                      "velocity_x,velocity_y,velocity_z\n";
                 int step = 1;
                 for (auto const& sf : smoothed) {
-                    write_smoothed_joint_angles_frame(f, step++, sf.timestamp, sf.state, skeleton);
+                    write_smoothed_joint_angles_frame(f, step++, sf.timestamp, sf.state, *layout);
                 }
             }
 

@@ -1,0 +1,2046 @@
+name: Reallusion_skeleton_template
+units: meters
+joints:
+- name: hips
+  type: root
+  parent: null
+  offset:
+  - -3.808287262379426e-17
+  - 2.5555697558132806e-09
+  - 0.9511853456497192
+  bone_tip_offset:
+  - 0.0
+  - 0.09023181349039078
+  - 0.0
+- name: waist
+  type: ball
+  parent: hips
+  offset:
+  - -6.775735528208315e-11
+  - 0.09023184329271317
+  - -4.297888267501548e-09
+  bone_tip_offset:
+  - 0.0
+  - 0.04745917022228241
+  - 0.0
+  orientation:
+  - -0.0009551859693601727
+  - -0.0013296521501615644
+  - 0.12523522973060608
+  limits:
+    x:
+    - -0.12217304855585098
+    - 0.5235987901687622
+    y:
+    - -0.2617993950843811
+    - 0.2617993950843811
+    z:
+    - -0.2617993950843811
+    - 0.2617993950843811
+- name: spine1
+  type: ball
+  parent: waist
+  offset:
+  - -1.0231815394945443e-12
+  - 0.04745904728770256
+  - -5.105411204908705e-09
+  bone_tip_offset:
+  - 0.0
+  - 0.14516296982765198
+  - 0.0
+  orientation:
+  - -0.0010080867214128375
+  - -0.0009501240565441549
+  - -0.2310285121202469
+  limits:
+    x:
+    - -0.12217304855585098
+    - 0.5235987901687622
+    y:
+    - -0.2617993950843811
+    - 0.2617993950843811
+    z:
+    - -0.2617993950843811
+    - 0.2617993950843811
+- name: spine2
+  type: ball
+  parent: spine1
+  offset:
+  - -1.546140993013978e-11
+  - 0.14516311883926392
+  - 4.9507260513337314e-09
+  bone_tip_offset:
+  - 0.0
+  - 0.21223080158233643
+  - 0.0
+  orientation:
+  - 0.0010032751597464085
+  - 0.0009086028439924121
+  - -0.030256660655140877
+  limits:
+    x:
+    - -0.12217304855585098
+    - 0.5235987901687622
+    y:
+    - -0.2617993950843811
+    - 0.2617993950843811
+    z:
+    - -0.2617993950843811
+    - 0.2617993950843811
+- name: neck1
+  type: ball
+  parent: spine2
+  offset:
+  - 1.4261559044825844e-08
+  - 0.2935514748096466
+  - 2.2233152776607312e-06
+  bone_tip_offset:
+  - 0.0
+  - 0.04200303927063942
+  - 0.0
+  orientation:
+  - -0.005877715535461903
+  - -0.006659277714788914
+  - 0.19319921731948853
+  limits:
+    x:
+    - -0.1745329201221466
+    - 0.1745329201221466
+    y:
+    - -0.1745329201221466
+    - 0.1745329201221466
+    z:
+    - -0.1745329201221466
+    - 0.1745329201221466
+- name: neck2
+  type: ball
+  parent: neck1
+  offset:
+  - -7.676135282963514e-10
+  - 0.04200298339128494
+  - -1.7464572010794654e-09
+  bone_tip_offset:
+  - 0.0
+  - 0.042050402611494064
+  - 0.0
+  orientation:
+  - 0.005224913824349642
+  - 0.0060323080979287624
+  - 0.009701507166028023
+  limits:
+    x:
+    - -0.1745329201221466
+    - 0.1745329201221466
+    y:
+    - -0.1745329201221466
+    - 0.1745329201221466
+    z:
+    - -0.1745329201221466
+    - 0.1745329201221466
+- name: head
+  type: ball
+  parent: neck2
+  offset:
+  - 4.3144154915353283e-11
+  - 0.04205053299665451
+  - 1.0549129569881188e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.12787412106990814
+  - 0.0
+  orientation:
+  - 0.0027835520450025797
+  - 0.0027064599562436342
+  - -0.13250982761383057
+  limits:
+    x:
+    - -0.6981316804885864
+    - 0.5235987901687622
+    y:
+    - -0.5235987901687622
+    - 0.5235987901687622
+    z:
+    - -0.5235987901687622
+    - 0.5235987901687622
+- name: shoulder.L
+  type: ball
+  parent: spine2
+  offset:
+  - 0.06379950791597366
+  - 0.2260894626379013
+  - 0.006158370524644852
+  bone_tip_offset:
+  - 0.0
+  - 0.13031812012195587
+  - 0.0
+  orientation:
+  - -1.169760823249817
+  - 0.04971593618392944
+  - -1.5313611030578613
+  limits:
+    x:
+    - -0.0872664600610733
+    - 0.4363323152065277
+    y:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    z:
+    - -0.4363323152065277
+    - 0.2617993950843811
+- name: upper_arm.L
+  type: ball
+  parent: shoulder.L
+  offset:
+  - -5.587935447692871e-09
+  - 0.13031810522079468
+  - 1.3504177331924438e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.2680199146270752
+  - 0.0
+  orientation:
+  - 1.2161378860473633
+  - 1.9298089742660522
+  - -1.1676490306854248
+  limits:
+    x:
+    - -0.5235987901687622
+    - 2.7925267219543457
+    y:
+    - -0.7853981852531433
+    - 0.7853981852531433
+    z:
+    - -2.6179938316345215
+    - 0.3490658402442932
+- name: forearm.L
+  type: ball
+  parent: upper_arm.L
+  offset:
+  - -4.6566128730773926e-08
+  - 0.2680198848247528
+  - -1.862645149230957e-09
+  bone_tip_offset:
+  - 0.0
+  - 0.24702629446983337
+  - 0.0
+  orientation:
+  - 0.002978199627250433
+  - -0.03858045116066933
+  - 0.056037768721580505
+  limits:
+    x:
+    - 0.0
+    - 2.4434609413146973
+    y:
+    - -1.5707963705062866
+    - 1.5707963705062866
+    z:
+    - -1.5707963267948966
+    - 1.5707963267948966
+- name: hand.L
+  type: ball
+  parent: forearm.L
+  offset:
+  - -1.8067657947540283e-07
+  - 0.24702632427215576
+  - 1.7229467630386353e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.0826081782579422
+  - 0.0
+  orientation:
+  - 0.017324961721897125
+  - 0.0643664300441742
+  - -0.0476335845887661
+  limits:
+    x:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    y:
+    - -0.5235987901687622
+    - 0.5235987901687622
+    z:
+    - -1.5707963705062866
+    - 1.5707963705062866
+- name: f_index.01.L
+  type: ball
+  parent: hand.L
+  offset:
+  - -0.009045565500855446
+  - 0.09139268100261688
+  - 0.0422251932322979
+  bone_tip_offset:
+  - 0.0
+  - 0.04230469465255737
+  - 0.0
+  orientation:
+  - -0.19759735465049744
+  - 1.3219341039657593
+  - 0.2403278350830078
+  limits:
+    x:
+    - -0.6981316804885864
+    - 1.5707963705062866
+    y:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    z:
+    - -0.3490658402442932
+    - 0.3490658402442932
+- name: f_index.02.L
+  type: revolute
+  parent: f_index.01.L
+  offset:
+  - 9.313225746154785e-09
+  - 0.042304642498493195
+  - 5.960464477539063e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.028326930478215218
+  - 0.0
+  orientation:
+  - 0.032802119851112366
+  - -0.1640087217092514
+  - 0.09967400133609772
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: f_index.03.L
+  type: revolute
+  parent: f_index.02.L
+  offset:
+  - -5.587935447692871e-09
+  - 0.028326943516731262
+  - 2.7939677238464355e-09
+  bone_tip_offset:
+  - 0.0
+  - 0.028292054310441017
+  - 0.0
+  orientation:
+  - -0.025967814028263092
+  - 0.10277210175991058
+  - -0.06544827669858932
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: thumb.01.L
+  type: ball
+  parent: hand.L
+  offset:
+  - 0.0009608729742467403
+  - 0.020828047767281532
+  - 0.03295949101448059
+  bone_tip_offset:
+  - 0.0
+  - 0.05794414132833481
+  - 0.0
+  orientation:
+  - -0.09510722011327744
+  - -2.6010353565216064
+  - 0.827261745929718
+  limits:
+    x:
+    - -0.2617993950843811
+    - 0.5235987901687622
+    y:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    z:
+    - -0.3490658402442932
+    - 0.3490658402442932
+- name: thumb.02.L
+  type: revolute
+  parent: thumb.01.L
+  offset:
+  - 1.3853423297405243e-08
+  - 0.05794411897659302
+  - -9.42964106798172e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.027722226455807686
+  - 0.0
+  orientation:
+  - 0.23862606287002563
+  - -0.142333984375
+  - 0.34237217903137207
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: thumb.03.L
+  type: revolute
+  parent: thumb.02.L
+  offset:
+  - -1.4202669262886047e-07
+  - 0.027722150087356567
+  - 5.122274160385132e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.028114978224039078
+  - 0.0
+  orientation:
+  - -0.04369748383760452
+  - 0.15554122626781464
+  - 0.10072314739227295
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: f_middle.01.L
+  type: ball
+  parent: hand.L
+  offset:
+  - -0.0068179043009877205
+  - 0.09323567897081375
+  - 0.018904022872447968
+  bone_tip_offset:
+  - 0.0
+  - 0.048974547535181046
+  - 0.0
+  orientation:
+  - -0.10818742215633392
+  - 1.1938164234161377
+  - 0.16451062262058258
+  limits:
+    x:
+    - -0.6981316804885864
+    - 1.5707963705062866
+    y:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    z:
+    - -0.3490658402442932
+    - 0.3490658402442932
+- name: f_middle.02.L
+  type: revolute
+  parent: f_middle.01.L
+  offset:
+  - -2.7939677238464355e-09
+  - 0.048974595963954926
+  - -1.8347054719924927e-07
+  bone_tip_offset:
+  - 0.0
+  - 0.030559437349438667
+  - 0.0
+  orientation:
+  - 0.04208320751786232
+  - 0.143705815076828
+  - 0.07302773743867874
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: f_middle.03.L
+  type: revolute
+  parent: f_middle.02.L
+  offset:
+  - 3.725290298461914e-09
+  - 0.030559521168470383
+  - -9.872019290924072e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.030509503558278084
+  - 0.0
+  orientation:
+  - -0.024967636913061142
+  - -0.06102253124117851
+  - 0.008769283071160316
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: f_ring.01.L
+  type: ball
+  parent: hand.L
+  offset:
+  - 0.0005320580676198006
+  - 0.09086518734693527
+  - 0.0006275996565818787
+  bone_tip_offset:
+  - 0.0
+  - 0.04687720537185669
+  - 0.0
+  orientation:
+  - -0.02907620556652546
+  - 1.1868960857391357
+  - 0.07362120598554611
+  limits:
+    x:
+    - -0.6981316804885864
+    - 1.5707963705062866
+    y:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    z:
+    - -0.3490658402442932
+    - 0.3490658402442932
+- name: f_ring.02.L
+  type: revolute
+  parent: f_ring.01.L
+  offset:
+  - 2.7939677238464355e-09
+  - 0.046877216547727585
+  - -9.685754776000977e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.028118468821048737
+  - 0.0
+  orientation:
+  - 0.017312899231910706
+  - -0.028225937858223915
+  - 0.13007068634033203
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: f_ring.03.L
+  type: revolute
+  parent: f_ring.02.L
+  offset:
+  - -5.3085386753082275e-08
+  - 0.028118465095758438
+  - 8.754432201385498e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.02809242345392704
+  - 0.0
+  orientation:
+  - -0.027490166947245598
+  - -0.14358258247375488
+  - -0.08208847045898438
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: f_pinky.01.L
+  type: ball
+  parent: hand.L
+  offset:
+  - 0.008389638736844063
+  - 0.09037483483552933
+  - -0.017660342156887054
+  bone_tip_offset:
+  - 0.0
+  - 0.03250934183597565
+  - 0.0
+  orientation:
+  - -0.15042118728160858
+  - 1.229640245437622
+  - 0.20953883230686188
+  limits:
+    x:
+    - -0.6981316804885864
+    - 1.5707963705062866
+    y:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    z:
+    - -0.3490658402442932
+    - 0.3490658402442932
+- name: f_pinky.02.L
+  type: revolute
+  parent: f_pinky.01.L
+  offset:
+  - 1.257285475730896e-08
+  - 0.032509323209524155
+  - 9.499490261077881e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.019348302856087685
+  - 0.0
+  orientation:
+  - 0.087016262114048
+  - -0.256995290517807
+  - 0.0708964392542839
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: f_pinky.03.L
+  type: revolute
+  parent: f_pinky.02.L
+  offset:
+  - -4.842877388000488e-08
+  - 0.01934819668531418
+  - 7.82310962677002e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.019274458289146423
+  - 0.0
+  orientation:
+  - -0.038148123770952225
+  - 0.19971151649951935
+  - -0.14039000868797302
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: shoulder.R
+  type: ball
+  parent: spine2
+  offset:
+  - -0.0638171136379242
+  - 0.2260970175266266
+  - 0.006151295267045498
+  bone_tip_offset:
+  - 0.0
+  - 0.13031812012195587
+  - 0.0
+  orientation:
+  - 1.169645071029663
+  - -0.04960190877318382
+  - -1.5313668251037598
+  limits:
+    x:
+    - -0.0872664600610733
+    - 0.4363323152065277
+    y:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    z:
+    - -0.2617993950843811
+    - 0.4363323152065277
+- name: upper_arm.R
+  type: ball
+  parent: shoulder.R
+  offset:
+  - -1.862645149230957e-09
+  - 0.13031812012195587
+  - 1.5599653124809265e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.2680199146270752
+  - 0.0
+  orientation:
+  - -1.2161378860473633
+  - -1.9298089742660522
+  - -1.1676490306854248
+  limits:
+    x:
+    - -0.5235987901687622
+    - 2.7925267219543457
+    y:
+    - -0.7853981852531433
+    - 0.7853981852531433
+    z:
+    - -0.3490658402442932
+    - 2.6179938316345215
+- name: forearm.R
+  type: ball
+  parent: upper_arm.R
+  offset:
+  - 5.21540641784668e-08
+  - 0.2680198848247528
+  - -1.1175870895385742e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.24702630937099457
+  - 0.0
+  orientation:
+  - -0.002978227799758315
+  - 0.03858048841357231
+  - 0.056037843227386475
+  limits:
+    x:
+    - 0.0
+    - 2.4434609413146973
+    y:
+    - -1.5707963705062866
+    - 1.5707963705062866
+    z:
+    - -1.5707963267948966
+    - 1.5707963267948966
+- name: hand.R
+  type: ball
+  parent: forearm.R
+  offset:
+  - 1.7741695046424866e-07
+  - 0.24702629446983337
+  - 2.3283064365386963e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.0826081782579422
+  - 0.0
+  orientation:
+  - -0.017324957996606827
+  - -0.06436644494533539
+  - -0.047633588314056396
+  limits:
+    x:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    y:
+    - -0.5235987901687622
+    - 0.5235987901687622
+    z:
+    - -1.5707963705062866
+    - 1.5707963705062866
+- name: f_index.01.R
+  type: ball
+  parent: hand.R
+  offset:
+  - 0.009045446291565895
+  - 0.09139271825551987
+  - 0.042225200682878494
+  bone_tip_offset:
+  - 0.0
+  - 0.04230469837784767
+  - 0.0
+  orientation:
+  - 0.19759729504585266
+  - -1.3219342231750488
+  - 0.24032782018184662
+  limits:
+    x:
+    - -0.6981316804885864
+    - 1.5707963705062866
+    y:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    z:
+    - -0.3490658402442932
+    - 0.3490658402442932
+- name: f_index.02.R
+  type: revolute
+  parent: f_index.01.R
+  offset:
+  - -1.862645149230957e-08
+  - 0.04230474308133125
+  - -5.3783878684043884e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.02832692861557007
+  - 0.0
+  orientation:
+  - -0.03280213847756386
+  - 0.16400882601737976
+  - 0.09967400878667831
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: f_index.03.R
+  type: revolute
+  parent: f_index.02.R
+  offset:
+  - -4.6566128730773926e-09
+  - 0.028326869010925293
+  - -1.210719347000122e-07
+  bone_tip_offset:
+  - 0.0
+  - 0.02829204872250557
+  - 0.0
+  orientation:
+  - 0.025967825204133987
+  - -0.10277209430932999
+  - -0.06544828414916992
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: thumb.01.R
+  type: ball
+  parent: hand.R
+  offset:
+  - -0.0009609926491975784
+  - 0.020828083157539368
+  - 0.03295949846506119
+  bone_tip_offset:
+  - 0.0
+  - 0.05794414505362511
+  - 0.0
+  orientation:
+  - 0.09510722011327744
+  - 2.6010351181030273
+  - 0.827261745929718
+  limits:
+    x:
+    - -0.2617993950843811
+    - 0.5235987901687622
+    y:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    z:
+    - -0.3490658402442932
+    - 0.3490658402442932
+- name: thumb.02.R
+  type: revolute
+  parent: thumb.01.R
+  offset:
+  - 4.400499165058136e-08
+  - 0.05794403329491615
+  - 5.2386894822120667e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.02772221714258194
+  - 0.0
+  orientation:
+  - -0.2386261373758316
+  - 0.14233411848545074
+  - 0.3423723578453064
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: thumb.03.R
+  type: revolute
+  parent: thumb.02.R
+  offset:
+  - -1.1175870895385742e-07
+  - 0.027722254395484924
+  - -7.543712854385376e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.02811496891081333
+  - 0.0
+  orientation:
+  - 0.043697476387023926
+  - -0.15554124116897583
+  - 0.10072312504053116
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: f_middle.01.R
+  type: ball
+  parent: hand.R
+  offset:
+  - 0.006817784626036882
+  - 0.09323570877313614
+  - 0.018904026597738266
+  bone_tip_offset:
+  - 0.0
+  - 0.048974547535181046
+  - 0.0
+  orientation:
+  - 0.10818742215633392
+  - -1.1938164234161377
+  - 0.1645105928182602
+  limits:
+    x:
+    - -0.6981316804885864
+    - 1.5707963705062866
+    y:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    z:
+    - -0.3490658402442932
+    - 0.3490658402442932
+- name: f_middle.02.R
+  type: revolute
+  parent: f_middle.01.R
+  offset:
+  - 2.514570951461792e-08
+  - 0.04897462576627731
+  - 5.8673322200775146e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.030559435486793518
+  - 0.0
+  orientation:
+  - -0.04208322614431381
+  - -0.14370578527450562
+  - 0.07302775233983994
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: f_middle.03.R
+  type: revolute
+  parent: f_middle.02.R
+  offset:
+  - -1.4901161193847656e-08
+  - 0.0305594764649868
+  - -1.0384246706962585e-07
+  bone_tip_offset:
+  - 0.0
+  - 0.030509499832987785
+  - 0.0
+  orientation:
+  - 0.024967649951577187
+  - 0.0610225535929203
+  - 0.008769280277192593
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: f_ring.01.R
+  type: ball
+  parent: hand.R
+  offset:
+  - -0.000532178208231926
+  - 0.09086522459983826
+  - 0.0006275959312915802
+  bone_tip_offset:
+  - 0.0
+  - 0.04687720164656639
+  - 0.0
+  orientation:
+  - 0.02907620556652546
+  - -1.1868960857391357
+  - 0.07362121343612671
+  limits:
+    x:
+    - -0.6981316804885864
+    - 1.5707963705062866
+    y:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    z:
+    - -0.3490658402442932
+    - 0.3490658402442932
+- name: f_ring.02.R
+  type: revolute
+  parent: f_ring.01.R
+  offset:
+  - -2.7008354663848877e-08
+  - 0.04687712714076042
+  - 1.341104507446289e-07
+  bone_tip_offset:
+  - 0.0
+  - 0.028118466958403587
+  - 0.0
+  orientation:
+  - -0.017312895506620407
+  - 0.028225984424352646
+  - 0.13007068634033203
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: f_ring.03.R
+  type: revolute
+  parent: f_ring.02.R
+  offset:
+  - 4.1676685214042664e-08
+  - 0.028118405491113663
+  - 8.940696716308594e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.02809242159128189
+  - 0.0
+  orientation:
+  - 0.027490166947245598
+  - 0.14358264207839966
+  - -0.08208844810724258
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: f_pinky.01.R
+  type: ball
+  parent: hand.R
+  offset:
+  - -0.008389759808778763
+  - 0.09037487208843231
+  - -0.017660364508628845
+  bone_tip_offset:
+  - 0.0
+  - 0.03250934183597565
+  - 0.0
+  orientation:
+  - 0.1504211574792862
+  - -1.229640245437622
+  - 0.2095387876033783
+  limits:
+    x:
+    - -0.6981316804885864
+    - 1.5707963705062866
+    y:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    z:
+    - -0.3490658402442932
+    - 0.3490658402442932
+- name: f_pinky.02.R
+  type: revolute
+  parent: f_pinky.01.R
+  offset:
+  - -2.514570951461792e-08
+  - 0.03250928595662117
+  - 9.685754776000977e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.019348304718732834
+  - 0.0
+  orientation:
+  - -0.08701630681753159
+  - 0.25699540972709656
+  - 0.07089649885892868
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: f_pinky.03.R
+  type: revolute
+  parent: f_pinky.02.R
+  offset:
+  - -2.60770320892334e-08
+  - 0.019348250702023506
+  - 7.82310962677002e-08
+  bone_tip_offset:
+  - 0.0
+  - 0.019274458289146423
+  - 0.0
+  orientation:
+  - 0.03814812749624252
+  - -0.19971148669719696
+  - -0.14039002358913422
+  limits:
+  - 0.0
+  - 1.5707963705062866
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: thigh.L
+  type: ball
+  parent: hips
+  offset:
+  - 0.0984005406498909
+  - -0.024375831708312035
+  - -0.0017475730273872614
+  bone_tip_offset:
+  - 0.0
+  - 0.4184127748012543
+  - 0.0
+  orientation:
+  - 0.019352836534380913
+  - -0.016761256381869316
+  - 3.0825576782226562
+  limits:
+    x:
+    - -2.6179938316345215
+    - 0.8726646304130554
+    y:
+    - -1.2217304706573486
+    - 0.6981316804885864
+    z:
+    - -1.0471975803375244
+    - 0.5235987901687622
+- name: shin.L
+  type: revolute
+  parent: thigh.L
+  offset:
+  - 5.871697794646025e-09
+  - 0.41841280460357666
+  - 3.4924596548080444e-10
+  bone_tip_offset:
+  - 0.0
+  - 0.44135719537734985
+  - 0.0
+  orientation:
+  - 0.004520238842815161
+  - -0.00491558900102973
+  - 0.03195948898792267
+  limits:
+  - 0.0
+  - 2.7052602767944336
+- name: foot.L
+  type: ball
+  parent: shin.L
+  offset:
+  - 8.731149137020111e-10
+  - 0.44135716557502747
+  - 1.0477378964424133e-09
+  bone_tip_offset:
+  - 0.0
+  - 0.1479179412126541
+  - 0.0
+  orientation:
+  - -0.06262465566396713
+  - 0.006134373601526022
+  - -1.3229132890701294
+  limits:
+    x:
+    - -1.0471975803375244
+    - 1.0471975803375244
+    y:
+    - -0.3490658402442932
+    - 0.3490658402442932
+    z:
+    - -0.3490658402442932
+    - 0.3490658402442932
+- name: toe.L
+  type: revolute
+  parent: foot.L
+  offset:
+  - -7.927155820652843e-09
+  - 0.1479179412126541
+  - -4.889443516731262e-09
+  bone_tip_offset:
+  - 0.0
+  - 0.022921878844499588
+  - 0.0
+  orientation:
+  - 0.9163600206375122
+  - -0.9385696053504944
+  - 1.1494537591934204
+  limits:
+  - -0.7853981852531433
+  - 0.7853981852531433
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: heel.02.L
+  type: ball
+  parent: foot.L
+  offset:
+  - -0.0285781417042017
+  - 0.0015322703402489424
+  - 0.0702446922659874
+  bone_tip_offset:
+  - 0.0
+  - 0.06766164302825928
+  - 0.0
+  orientation:
+  - -1.6523016691207886
+  - 0.0012993132695555687
+  - 2.8547635078430176
+  limits:
+    x:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    y:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    z:
+    - -1.5707963267948966
+    - 1.5707963267948966
+- name: thigh.R
+  type: ball
+  parent: hips
+  offset:
+  - -0.09845380485057831
+  - -0.024140391498804092
+  - -0.001999127445742488
+  bone_tip_offset:
+  - 0.0
+  - 0.4184127449989319
+  - 0.0
+  orientation:
+  - -0.016813119873404503
+  - 0.019171277061104774
+  - 3.0825119018554688
+  limits:
+    x:
+    - -2.6179938316345215
+    - 0.8726646304130554
+    y:
+    - -0.6981316804885864
+    - 1.2217304706573486
+    z:
+    - -0.5235987901687622
+    - 1.0471975803375244
+- name: shin.R
+  type: revolute
+  parent: thigh.R
+  offset:
+  - 5.842593964189291e-09
+  - 0.4184126853942871
+  - -2.3283064365386963e-10
+  bone_tip_offset:
+  - 0.0
+  - 0.44135719537734985
+  - 0.0
+  orientation:
+  - -0.004520223010331392
+  - 0.004915659315884113
+  - 0.03195951133966446
+  limits:
+  - 0.0
+  - 2.7052602767944336
+- name: foot.R
+  type: ball
+  parent: shin.R
+  offset:
+  - 3.4924596548080444e-10
+  - 0.44135719537734985
+  - -2.3283064365386963e-10
+  bone_tip_offset:
+  - 0.0
+  - 0.1479179561138153
+  - 0.0
+  orientation:
+  - 0.0628211572766304
+  - -0.07929414510726929
+  - -1.3183152675628662
+  limits:
+    x:
+    - -1.0471975803375244
+    - 1.0471975803375244
+    y:
+    - -0.3490658402442932
+    - 0.3490658402442932
+    z:
+    - -0.3490658402442932
+    - 0.3490658402442932
+- name: toe.R
+  type: revolute
+  parent: foot.R
+  offset:
+  - -5.005858838558197e-09
+  - 0.1479179412126541
+  - -4.656612873077393e-10
+  bone_tip_offset:
+  - 0.0
+  - 0.022921880707144737
+  - 0.0
+  orientation:
+  - -1.0340615510940552
+  - 0.965349555015564
+  - 1.2453739643096924
+  limits:
+  - -0.7853981852531433
+  - 0.7853981852531433
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+- name: heel.02.R
+  type: ball
+  parent: foot.R
+  offset:
+  - 0.03364597260951996
+  - 0.0015322298277169466
+  - 0.06796303391456604
+  bone_tip_offset:
+  - 0.0
+  - 0.06766163557767868
+  - 0.0
+  orientation:
+  - 1.6315275430679321
+  - -0.07160308212041855
+  - 2.8540055751800537
+  limits:
+    x:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    y:
+    - -1.5707963267948966
+    - 1.5707963267948966
+    z:
+    - -1.5707963267948966
+    - 1.5707963267948966
+markers:
+- name: MRK-nose
+  parent: head
+  offset:
+  - -0.00038745382335036993
+  - 0.04401915520429611
+  - 0.09727554768323898
+  openpose_keypoint: 0
+  openpose_name: Nose
+  confidence_threshold: 0.3
+- name: MRK-ear.R
+  parent: head
+  offset:
+  - -0.06703063100576401
+  - 0.052690621465444565
+  - -0.01957486756145954
+  openpose_keypoint: 4
+  openpose_name: REar
+  confidence_threshold: 0.3
+- name: MRK-ear.L
+  parent: head
+  offset:
+  - 0.06679820269346237
+  - 0.05240065976977348
+  - -0.019285019487142563
+  openpose_keypoint: 3
+  openpose_name: LEar
+  confidence_threshold: 0.3
+- name: MRK-index4.L
+  parent: f_index.03.L
+  offset:
+  - -1.30385160446167e-08
+  - 0.028292063623666763
+  - -8.242204785346985e-08
+  openpose_keypoint: 99
+  openpose_name: LIndex4
+  confidence_threshold: 0.3
+- name: MRK-index3.L
+  parent: f_index.02.L
+  offset:
+  - -5.587935447692871e-09
+  - 0.028326943516731262
+  - 2.7939677238464355e-09
+  openpose_keypoint: 98
+  openpose_name: LIndex3
+  confidence_threshold: 0.3
+- name: MRK-index2.L
+  parent: f_index.01.L
+  offset:
+  - 9.313225746154785e-09
+  - 0.042304642498493195
+  - 5.960464477539063e-08
+  openpose_keypoint: 97
+  openpose_name: LIndex2
+  confidence_threshold: 0.3
+- name: MRK-thumb4.L
+  parent: thumb.03.L
+  offset:
+  - -1.778826117515564e-07
+  - 0.028114989399909973
+  - -6.51925802230835e-08
+  openpose_keypoint: 95
+  openpose_name: LThumb4
+  confidence_threshold: 0.3
+- name: MRK-thumb3.L
+  parent: thumb.02.L
+  offset:
+  - -1.4202669262886047e-07
+  - 0.027722150087356567
+  - 5.122274160385132e-08
+  openpose_keypoint: 94
+  openpose_name: LThumb3
+  confidence_threshold: 0.3
+- name: MRK-thumb.L
+  parent: thumb.01.L
+  offset:
+  - 1.3853423297405243e-08
+  - 0.05794411897659302
+  - -9.42964106798172e-08
+  openpose_keypoint: 93
+  openpose_name: LThumb
+  confidence_threshold: 0.3
+- name: MRK-thumb1.L
+  parent: hand.L
+  offset:
+  - 0.0009608729742467403
+  - 0.020828047767281532
+  - 0.03295949101448059
+  openpose_keypoint: 92
+  openpose_name: LThumb1
+  confidence_threshold: 0.3
+- name: MRK-index.L
+  parent: hand.L
+  offset:
+  - -0.009045565500855446
+  - 0.09139268100261688
+  - 0.0422251932322979
+  openpose_keypoint: 96
+  openpose_name: LIndex
+  confidence_threshold: 0.3
+- name: MRK-middle4.L
+  parent: f_middle.03.L
+  offset:
+  - 3.725290298461914e-09
+  - 0.03050948865711689
+  - -2.7474015951156616e-07
+  openpose_keypoint: 103
+  openpose_name: LMiddle4
+  confidence_threshold: 0.3
+- name: MRK-middle3.L
+  parent: f_middle.02.L
+  offset:
+  - 3.725290298461914e-09
+  - 0.030559521168470383
+  - -9.872019290924072e-08
+  openpose_keypoint: 102
+  openpose_name: LMiddle3
+  confidence_threshold: 0.3
+- name: MRK-middle2.L
+  parent: f_middle.01.L
+  offset:
+  - -2.7939677238464355e-09
+  - 0.048974595963954926
+  - -1.8347054719924927e-07
+  openpose_keypoint: 101
+  openpose_name: LMiddle2
+  confidence_threshold: 0.3
+- name: MRK-middle1.L
+  parent: hand.L
+  offset:
+  - -0.0068179043009877205
+  - 0.09323567897081375
+  - 0.018904022872447968
+  openpose_keypoint: 100
+  openpose_name: LMiddle1
+  confidence_threshold: 0.3
+- name: MRK-ring4.L
+  parent: f_ring.03.L
+  offset:
+  - 6.332993507385254e-08
+  - 0.0280925165861845
+  - 1.0617077350616455e-07
+  openpose_keypoint: 107
+  openpose_name: LRing4
+  confidence_threshold: 0.3
+- name: MRK-ring3.L
+  parent: f_ring.02.L
+  offset:
+  - -5.3085386753082275e-08
+  - 0.028118465095758438
+  - 8.754432201385498e-08
+  openpose_keypoint: 106
+  openpose_name: LRing3
+  confidence_threshold: 0.3
+- name: MRK-ring2.L
+  parent: f_ring.01.L
+  offset:
+  - 2.7939677238464355e-09
+  - 0.046877216547727585
+  - -9.685754776000977e-08
+  openpose_keypoint: 105
+  openpose_name: LRing2
+  confidence_threshold: 0.3
+- name: MRK-ring1.L
+  parent: hand.L
+  offset:
+  - 0.0005320580676198006
+  - 0.09086518734693527
+  - 0.0006275996565818787
+  openpose_keypoint: 104
+  openpose_name: LRing1
+  confidence_threshold: 0.3
+- name: MRK-pinky4.L
+  parent: f_pinky.03.L
+  offset:
+  - -4.6333298087120056e-08
+  - 0.01927451603114605
+  - -2.3283064365386963e-08
+  openpose_keypoint: 111
+  openpose_name: LPinky4
+  confidence_threshold: 0.3
+- name: MRK-pinky3.L
+  parent: f_pinky.02.L
+  offset:
+  - -4.842877388000488e-08
+  - 0.01934819668531418
+  - 7.82310962677002e-08
+  openpose_keypoint: 110
+  openpose_name: LPinky3
+  confidence_threshold: 0.3
+- name: MRK-pinky2.L
+  parent: f_pinky.01.L
+  offset:
+  - 1.257285475730896e-08
+  - 0.032509323209524155
+  - 9.499490261077881e-08
+  openpose_keypoint: 109
+  openpose_name: LPinky2
+  confidence_threshold: 0.3
+- name: MRK-pinky.L
+  parent: hand.L
+  offset:
+  - 0.008389638736844063
+  - 0.09037483483552933
+  - -0.017660342156887054
+  openpose_keypoint: 108
+  openpose_name: LPinky
+  confidence_threshold: 0.3
+- name: MRK-wrist.L
+  parent: forearm.L
+  offset:
+  - 1.3420358300209045e-06
+  - 0.24699832499027252
+  - 4.3446198105812073e-07
+  openpose_keypoint: 9
+  openpose_name: LWrist
+  confidence_threshold: 0.3
+- name: MRK-elbow.L
+  parent: upper_arm.L
+  offset:
+  - -4.6566128730773926e-08
+  - 0.2680198848247528
+  - -1.862645149230957e-09
+  openpose_keypoint: 7
+  openpose_name: LElbow
+  confidence_threshold: 0.3
+- name: MRK-shoulder.L
+  parent: shoulder.L
+  offset:
+  - -5.587935447692871e-09
+  - 0.13031810522079468
+  - 1.3504177331924438e-08
+  openpose_keypoint: 5
+  openpose_name: LShoulder
+  confidence_threshold: 0.3
+- name: MRK-index4.R
+  parent: f_index.03.R
+  offset:
+  - -7.450580596923828e-09
+  - 0.02829204872250557
+  - -7.962808012962341e-08
+  openpose_keypoint: 120
+  openpose_name: RIndex4
+  confidence_threshold: 0.3
+- name: MRK-index3.R
+  parent: f_index.02.R
+  offset:
+  - -4.6566128730773926e-09
+  - 0.028326869010925293
+  - -1.210719347000122e-07
+  openpose_keypoint: 119
+  openpose_name: RIndex3
+  confidence_threshold: 0.3
+- name: MRK-index2.R
+  parent: f_index.01.R
+  offset:
+  - -1.862645149230957e-08
+  - 0.04230474308133125
+  - -5.3783878684043884e-08
+  openpose_keypoint: 118
+  openpose_name: RIndex2
+  confidence_threshold: 0.3
+- name: MRK-thumb4.R
+  parent: thumb.03.R
+  offset:
+  - -1.4901161193847656e-08
+  - 0.02811504527926445
+  - -8.568167686462402e-08
+  openpose_keypoint: 116
+  openpose_name: RThumb4
+  confidence_threshold: 0.3
+- name: MRK-thumb3.R
+  parent: thumb.02.R
+  offset:
+  - -1.1175870895385742e-07
+  - 0.027722254395484924
+  - -7.543712854385376e-08
+  openpose_keypoint: 115
+  openpose_name: RThumb3
+  confidence_threshold: 0.3
+- name: MRK-thumb.R
+  parent: thumb.01.R
+  offset:
+  - 4.400499165058136e-08
+  - 0.05794403329491615
+  - 5.2386894822120667e-08
+  openpose_keypoint: 114
+  openpose_name: RThumb
+  confidence_threshold: 0.3
+- name: MRK-thumb1.R
+  parent: hand.R
+  offset:
+  - -0.0009609926491975784
+  - 0.020828083157539368
+  - 0.03295949846506119
+  openpose_keypoint: 113
+  openpose_name: RThumb1
+  confidence_threshold: 0.3
+- name: MRK-index.R
+  parent: hand.R
+  offset:
+  - 0.009045446291565895
+  - 0.09139271825551987
+  - 0.042225200682878494
+  openpose_keypoint: 117
+  openpose_name: RIndex
+  confidence_threshold: 0.3
+- name: MRK-middle4.R
+  parent: f_middle.03.R
+  offset:
+  - -7.450580596923828e-09
+  - 0.030509546399116516
+  - -2.8312206268310547e-07
+  openpose_keypoint: 124
+  openpose_name: RMiddle4
+  confidence_threshold: 0.3
+- name: MRK-middle3.R
+  parent: f_middle.02.R
+  offset:
+  - -1.4901161193847656e-08
+  - 0.0305594764649868
+  - -1.0384246706962585e-07
+  openpose_keypoint: 123
+  openpose_name: RMiddle3
+  confidence_threshold: 0.3
+- name: MRK-middle2.R
+  parent: f_middle.01.R
+  offset:
+  - 2.514570951461792e-08
+  - 0.04897462576627731
+  - 5.8673322200775146e-08
+  openpose_keypoint: 122
+  openpose_name: RMiddle2
+  confidence_threshold: 0.3
+- name: MRK-middle1.R
+  parent: hand.R
+  offset:
+  - 0.006817784626036882
+  - 0.09323570877313614
+  - 0.018904026597738266
+  openpose_keypoint: 121
+  openpose_name: RMiddle1
+  confidence_threshold: 0.3
+- name: MRK-ring4.R
+  parent: f_ring.03.R
+  offset:
+  - -7.450580596923828e-08
+  - 0.028092456981539726
+  - 8.568167686462402e-08
+  openpose_keypoint: 128
+  openpose_name: RRing4
+  confidence_threshold: 0.3
+- name: MRK-ring3.R
+  parent: f_ring.02.R
+  offset:
+  - 4.1676685214042664e-08
+  - 0.028118405491113663
+  - 8.940696716308594e-08
+  openpose_keypoint: 127
+  openpose_name: RRing3
+  confidence_threshold: 0.3
+- name: MRK-ring2.R
+  parent: f_ring.01.R
+  offset:
+  - -2.7008354663848877e-08
+  - 0.04687712714076042
+  - 1.341104507446289e-07
+  openpose_keypoint: 126
+  openpose_name: RRing2
+  confidence_threshold: 0.3
+- name: MRK-ring1.R
+  parent: hand.R
+  offset:
+  - -0.000532178208231926
+  - 0.09086522459983826
+  - 0.0006275959312915802
+  openpose_keypoint: 125
+  openpose_name: RRing1
+  confidence_threshold: 0.3
+- name: MRK-pinky4.R
+  parent: f_pinky.03.R
+  offset:
+  - -2.514570951461792e-08
+  - 0.019274456426501274
+  - 9.12696123123169e-08
+  openpose_keypoint: 132
+  openpose_name: RPinky4
+  confidence_threshold: 0.3
+- name: MRK-pinky3.R
+  parent: f_pinky.02.R
+  offset:
+  - -2.60770320892334e-08
+  - 0.019348250702023506
+  - 7.82310962677002e-08
+  openpose_keypoint: 131
+  openpose_name: RPinky3
+  confidence_threshold: 0.3
+- name: MRK-pinky2.R
+  parent: f_pinky.01.R
+  offset:
+  - -2.514570951461792e-08
+  - 0.03250928595662117
+  - 9.685754776000977e-08
+  openpose_keypoint: 130
+  openpose_name: RPinky2
+  confidence_threshold: 0.3
+- name: MRK-pinky.R
+  parent: hand.R
+  offset:
+  - -0.008389759808778763
+  - 0.09037487208843231
+  - -0.017660364508628845
+  openpose_keypoint: 129
+  openpose_name: RPinky
+  confidence_threshold: 0.3
+- name: MRK-wrist.R
+  parent: forearm.R
+  offset:
+  - -1.3471581041812897e-06
+  - 0.24699831008911133
+  - 4.400499165058136e-07
+  openpose_keypoint: 10
+  openpose_name: RWrist
+  confidence_threshold: 0.3
+- name: MRK-elbow.R
+  parent: upper_arm.R
+  offset:
+  - 5.21540641784668e-08
+  - 0.2680198848247528
+  - -1.1175870895385742e-08
+  openpose_keypoint: 8
+  openpose_name: RElbow
+  confidence_threshold: 0.3
+- name: MRK-shoulder.R
+  parent: shoulder.R
+  offset:
+  - -1.862645149230957e-09
+  - 0.13031812012195587
+  - 1.5599653124809265e-08
+  openpose_keypoint: 6
+  openpose_name: RShoulder
+  confidence_threshold: 0.3
+- name: MRK-bigToe.L
+  parent: foot.L
+  offset:
+  - -0.02694961614906788
+  - 0.16994550824165344
+  - 0.0005620740121230483
+  openpose_keypoint: 17
+  openpose_name: LBigToe
+  confidence_threshold: 0.3
+- name: MRK-smallToe.L
+  parent: foot.L
+  offset:
+  - -0.0013877544552087784
+  - 0.16876795887947083
+  - 0.012566831894218922
+  openpose_keypoint: 18
+  openpose_name: LSmallToe
+  confidence_threshold: 0.3
+- name: MRK-Ankle.L
+  parent: shin.L
+  offset:
+  - 8.731149137020111e-10
+  - 0.44135716557502747
+  - 1.0477378964424133e-09
+  openpose_keypoint: 15
+  openpose_name: LAnkle
+  confidence_threshold: 0.3
+- name: MRK-heel.L
+  parent: shin.L
+  offset:
+  - 0.004120944533497095
+  - 0.5083571672439575
+  - 0.01442049816250801
+  openpose_keypoint: 19
+  openpose_name: LHeel
+  confidence_threshold: 0.3
+- name: MRK-knee.L
+  parent: thigh.L
+  offset:
+  - 5.871697794646025e-09
+  - 0.41841280460357666
+  - 3.4924596548080444e-10
+  openpose_keypoint: 13
+  openpose_name: LKnee
+  confidence_threshold: 0.3
+- name: MRK-bigToe.R
+  parent: foot.R
+  offset:
+  - 0.02691839635372162
+  - 0.16994549334049225
+  - -0.0014131807256489992
+  openpose_keypoint: 20
+  openpose_name: RBigToe
+  confidence_threshold: 0.3
+- name: MRK-smallToe.R
+  parent: foot.R
+  offset:
+  - 0.002304394030943513
+  - 0.16876794397830963
+  - 0.012431450188159943
+  openpose_keypoint: 21
+  openpose_name: RSmallToe
+  confidence_threshold: 0.3
+- name: MRK-Ankle.R
+  parent: shin.R
+  offset:
+  - 3.4924596548080444e-10
+  - 0.44135719537734985
+  - -2.3283064365386963e-10
+  openpose_keypoint: 16
+  openpose_name: RAnkle
+  confidence_threshold: 0.3
+- name: MRK-heel.R
+  parent: shin.R
+  offset:
+  - -0.0041209436021745205
+  - 0.5083571672439575
+  - 0.014420497231185436
+  openpose_keypoint: 22
+  openpose_name: RHeel
+  confidence_threshold: 0.3
+- name: MRK-knee.R
+  parent: thigh.R
+  offset:
+  - 5.842593964189291e-09
+  - 0.4184126853942871
+  - -2.3283064365386963e-10
+  openpose_keypoint: 14
+  openpose_name: RKnee
+  confidence_threshold: 0.3
+- name: MRK-hip.R
+  parent: hips
+  offset:
+  - -0.09845380485057831
+  - -0.024140391498804092
+  - -0.001999127445742488
+  openpose_keypoint: 12
+  openpose_name: RHip
+  confidence_threshold: 0.3
+- name: MRK-hip.L
+  parent: hips
+  offset:
+  - 0.0984005406498909
+  - -0.024375831708312035
+  - -0.0017475730273872614
+  openpose_keypoint: 11
+  openpose_name: LHip
+  confidence_threshold: 0.3
+groups:
+- name: main
+  joints:
+  - hips
+  - waist
+  - spine1
+  - spine2
+  - neck1
+  - neck2
+  - head
+  - shoulder.L
+  - upper_arm.L
+  - forearm.L
+  - hand.L
+  - shoulder.R
+  - upper_arm.R
+  - forearm.R
+  - hand.R
+  - thigh.L
+  - shin.L
+  - foot.L
+  - toe.L
+  - thigh.R
+  - shin.R
+  - foot.R
+  - toe.R
+  - palm.01.L
+  - palm.04.L
+  - palm.01.R
+  - palm.04.R
+  markers:
+  - MRK-nose
+  - MRK-ear.R
+  - MRK-ear.L
+  - MRK-wrist.L
+  - MRK-elbow.L
+  - MRK-shoulder.L
+  - MRK-wrist.R
+  - MRK-elbow.R
+  - MRK-shoulder.R
+  - MRK-hip.L
+  - MRK-hip.R
+  - MRK-knee.L
+  - MRK-knee.R
+  - MRK-Ankle.L
+  - MRK-Ankle.R
+  - MRK-heel.L
+  - MRK-heel.R
+  - MRK-bigToe.L
+  - MRK-smallToe.L
+  - MRK-bigToe.R
+  - MRK-smallToe.R
+  - MRK-index.L
+  - MRK-pinky.L
+  - MRK-index.R
+  - MRK-pinky.R
+  optional: false
+- name: HandL
+  depends_on: main
+  joints:
+  - palm.01.L
+  - palm.02.L
+  - palm.03.L
+  - palm.04.L
+  - thumb.01.L
+  - thumb.02.L
+  - thumb.03.L
+  - f_index.01.L
+  - f_index.02.L
+  - f_index.03.L
+  - f_middle.01.L
+  - f_middle.02.L
+  - f_middle.03.L
+  - f_ring.01.L
+  - f_ring.02.L
+  - f_ring.03.L
+  - f_pinky.01.L
+  - f_pinky.02.L
+  - f_pinky.03.L
+  markers:
+  - MRK-thumb.L
+  - MRK-thumb1.L
+  - MRK-thumb2.L
+  - MRK-thumb3.L
+  - MRK-thumb4.L
+  - MRK-index.L
+  - MRK-index2.L
+  - MRK-index3.L
+  - MRK-index4.L
+  - MRK-middle1.L
+  - MRK-middle2.L
+  - MRK-middle3.L
+  - MRK-middle4.L
+  - MRK-ring1.L
+  - MRK-ring2.L
+  - MRK-ring3.L
+  - MRK-ring4.L
+  - MRK-pinky.L
+  - MRK-pinky2.L
+  - MRK-pinky3.L
+  - MRK-pinky4.L
+- name: HandR
+  depends_on: main
+  joints:
+  - palm.01.R
+  - palm.02.R
+  - palm.03.R
+  - palm.04.R
+  - thumb.01.R
+  - thumb.02.R
+  - thumb.03.R
+  - f_index.01.R
+  - f_index.02.R
+  - f_index.03.R
+  - f_middle.01.R
+  - f_middle.02.R
+  - f_middle.03.R
+  - f_ring.01.R
+  - f_ring.02.R
+  - f_ring.03.R
+  - f_pinky.01.R
+  - f_pinky.02.R
+  - f_pinky.03.R
+  markers:
+  - MRK-thumb.R
+  - MRK-thumb1.R
+  - MRK-thumb2.R
+  - MRK-thumb3.R
+  - MRK-thumb4.R
+  - MRK-index.R
+  - MRK-index2.R
+  - MRK-index3.R
+  - MRK-index4.R
+  - MRK-middle1.R
+  - MRK-middle2.R
+  - MRK-middle3.R
+  - MRK-middle4.R
+  - MRK-ring1.R
+  - MRK-ring2.R
+  - MRK-ring3.R
+  - MRK-ring4.R
+  - MRK-pinky.R
+  - MRK-pinky2.R
+  - MRK-pinky3.R
+  - MRK-pinky4.R
+scale_groups:
+- name: hip_socket
+  description: position of hip joints relative to pelvis origin
+  joints:
+  - name: thigh.L
+    marker_pair:
+    - MRK-hip.L
+    - _midpoint:MRK-hip.L:MRK-hip.R
+  - name: thigh.R
+    marker_pair:
+    - MRK-hip.R
+    - _midpoint:MRK-hip.L:MRK-hip.R
+- name: femur
+  joints:
+  - name: shin.L
+    marker_pair:
+    - MRK-hip.L
+    - MRK-knee.L
+  - name: shin.R
+    marker_pair:
+    - MRK-hip.R
+    - MRK-knee.R
+- name: tibia
+  joints:
+  - name: foot.L
+    marker_pair:
+    - MRK-knee.L
+    - MRK-Ankle.L
+  - name: foot.R
+    marker_pair:
+    - MRK-knee.R
+    - MRK-Ankle.R
+- name: spine
+  joints:
+  - waist
+  - spine1
+  - spine2
+- name: shoulder_reach
+  joints:
+  - name: shoulder.L
+    marker_pair:
+    - MRK-shoulder.L
+    - _midpoint:MRK-shoulder.L:MRK-shoulder.R
+  - name: shoulder.R
+    marker_pair:
+    - MRK-shoulder.R
+    - _midpoint:MRK-shoulder.L:MRK-shoulder.R
+- name: upper_arm
+  joints:
+  - name: upper_arm.L
+    marker_pair:
+    - MRK-shoulder.L
+    - MRK-elbow.L
+  - name: upper_arm.R
+    marker_pair:
+    - MRK-shoulder.R
+    - MRK-elbow.R
+- name: forearm
+  joints:
+  - name: forearm.L
+    marker_pair:
+    - MRK-elbow.L
+    - MRK-wrist.L
+  - name: forearm.R
+    marker_pair:
+    - MRK-elbow.R
+    - MRK-wrist.R

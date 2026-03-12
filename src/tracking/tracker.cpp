@@ -200,12 +200,32 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
     // Step 4: Choose the best available state for UKF initialisation.
     // IK may not fully converge (joint angles are hard), but as long as the root is
     // in the right place the UKF will fix the pose within a handful of frames.
-    State init_state = analytic_state;  // baseline: correct root, zero joints
+    //
+    // Sanity check: if the IK displaced the root by more than max_root_drift from
+    // the analytically estimated position, the IK found a degenerate local minimum
+    // (e.g. root 1 m too high with joints compensating).  In that case keep the IK
+    // joint angles but restore the analytic root pose, which is the Procrustes
+    // estimate from triangulated hip/shoulder markers and is usually more reliable.
+    constexpr double max_root_drift = 0.50;  // metres
+    State init_state = analytic_state;       // baseline: correct root, zero joints
     if (ik_result.residual < 0.5) {
-        // IK converged well enough — use it (prismatic DOFs are already frozen
-        // during IK via zeroed Jacobian columns, so they remain at 1.0).
-        init_state = ik_result.state;
-        fmt::print("  Using IK result (RMS: {:.3f} m)\n", ik_result.residual);
+        double root_drift =
+            (ik_result.state.root_position() - analytic_state.root_position()).norm();
+        if (root_drift <= max_root_drift) {
+            // IK converged and root stayed close — trust the full IK result.
+            init_state = ik_result.state;
+            fmt::print("  Using IK result (RMS: {:.3f} m, root drift: {:.3f} m)\n",
+                       ik_result.residual, root_drift);
+        } else {
+            // IK moved the root too far — use IK joint angles but analytic root pose.
+            init_state = ik_result.state;
+            init_state.set_root_position(analytic_state.root_position());
+            init_state.set_root_orientation(analytic_state.root_orientation());
+            fmt::print(
+                "  IK root drifted {:.3f} m > {:.2f} m limit — using IK joints + "
+                "analytic root (RMS: {:.3f} m)\n",
+                root_drift, max_root_drift, ik_result.residual);
+        }
     } else {
         fmt::print(
             "  IK residual {:.3f} m > 0.50 m — using analytic root estimate with zero "

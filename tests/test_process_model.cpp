@@ -114,8 +114,10 @@ TEST_CASE("ConstantVelocityModel propagates state correctly", "[process_model]")
         REQUIRE_THAT(next_state.joint_velocities()[0], WithinAbs(0.2, 1e-6));
     }
 
-    SECTION("Enforces joint limits") {
-        // Add joint with limits
+    SECTION("Does not clamp at joint limits during propagation") {
+        // propagate() intentionally performs unclamped integration so that sigma points
+        // maintain the correct probability distribution.  Limit enforcement is the
+        // responsibility of the UKF (applied after the prediction step).
         Skeleton skeleton_limited;
         uint32_t root =
             skeleton_limited.add_joint("root", std::nullopt, JointType::FIXED,
@@ -153,21 +155,21 @@ TEST_CASE("ConstantVelocityModel propagates state correctly", "[process_model]")
         // Should propagate: 0.5 + 0.1 * 1.0 = 0.6
         REQUIRE_THAT(next_state.joint_angles()[0], WithinAbs(0.6, 1e-6));
 
-        // Test 2: Angle would exceed upper limit - should be clamped
+        // Test 2: Angle would exceed upper limit - propagate() does NOT clamp
         angles[0] = 0.95;
-        joint_vels[0] = 0.1;  // Would reach 1.05, should clamp to 1.0
+        joint_vels[0] = 0.1;  // Reaches 1.05, which is beyond the limit — no clamping here
         State state2(pos, quat, angles, vel, angular_velocity, joint_vels);
         State next_state2 = model_limited.propagate(state2, dt);
 
-        REQUIRE_THAT(next_state2.joint_angles()[0], WithinAbs(1.0, 1e-6));
+        REQUIRE_THAT(next_state2.joint_angles()[0], WithinAbs(1.05, 1e-6));
 
-        // Test 3: Angle would go below lower limit - should be clamped
+        // Test 3: Angle would go below lower limit - propagate() does NOT clamp
         angles[0] = -0.95;
-        joint_vels[0] = -0.1;  // Would reach -1.05, should clamp to -1.0
+        joint_vels[0] = -0.1;  // Reaches -1.05, which is beyond the limit — no clamping here
         State state3(pos, quat, angles, vel, angular_velocity, joint_vels);
         State next_state3 = model_limited.propagate(state3, dt);
 
-        REQUIRE_THAT(next_state3.joint_angles()[0], WithinAbs(-1.0, 1e-6));
+        REQUIRE_THAT(next_state3.joint_angles()[0], WithinAbs(-1.05, 1e-6));
     }
 }
 
@@ -292,10 +294,13 @@ TEST_CASE("ConstantVelocityModel handles locked DOFs in spherical joints", "[pro
     double dt = 0.1;
     State next_state = model.propagate(state, dt);
 
-    // X and Y should be reset to 0 (locked)
-    REQUIRE_THAT(next_state.joint_angles()[0], WithinAbs(0.0, 1e-9));
-    REQUIRE_THAT(next_state.joint_angles()[1], WithinAbs(0.0, 1e-9));
-
-    // Z should be integrated: 0.3 + 3.0 * 0.1 = 0.6
+    // propagate() does NOT reset locked DOFs — it integrates freely so that sigma points
+    // maintain the correct probability distribution.  Locked-DOF enforcement happens in
+    // the UKF after the prediction step.
+    // X: 0.1 + 1.0 * 0.1 = 0.2
+    REQUIRE_THAT(next_state.joint_angles()[0], WithinAbs(0.2, 1e-6));
+    // Y: 0.2 + 2.0 * 0.1 = 0.4
+    REQUIRE_THAT(next_state.joint_angles()[1], WithinAbs(0.4, 1e-6));
+    // Z: 0.3 + 3.0 * 0.1 = 0.6
     REQUIRE_THAT(next_state.joint_angles()[2], WithinAbs(0.6, 1e-6));
 }

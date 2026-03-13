@@ -1469,107 +1469,63 @@ std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagno
 }
 
 void UnscentedKalmanFilter::enforce_joint_limits() {
-    // Clamp joint angles to their limits
-    auto const& joints = layout_->skeleton()->joints();
+    // Clamp joint angles to their limits, then zero velocities for joints at limits.
+    //
+    // IMPORTANT: iterate layout_->joints() (active-group joints in state-vector order)
+    // rather than skeleton()->joints() (all joints in YAML order).  Using skeleton
+    // joints with a running counter shifts every index after any non-active-group joint
+    // (e.g. heel.02.L/R), causing limits to be applied to wrong state slots and leaving
+    // the actual joint angles unclamped.  The same class of bug was fixed in
+    // TrackingExporter::write_frame (March 2026).
     Eigen::VectorXd angles = state_.joint_angles();
+    Eigen::VectorXd velocities = state_.joint_velocities();
 
-    int joint_angle_idx = 0;
-
-    for (size_t joint_idx = 1; joint_idx < joints.size(); ++joint_idx) {
-        Joint const& joint = joints[joint_idx];
-
-        if (joint.type == JointType::FIXED) {
+    for (auto const& desc : layout_->joints()) {
+        if (desc.is_scale_follower)
             continue;
-        }
-        // Followers share the leader's state slot; the leader already handled the limit.
-        if (joint.is_scale_follower) {
-            continue;
-        }
 
-        if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
-            if (joint.num_limits > 0 && joint_angle_idx < angles.size()) {
-                double min_limit = joint.limits[0].x();
-                double max_limit = joint.limits[0].y();
-                angles[joint_angle_idx] = std::clamp(angles[joint_angle_idx], min_limit, max_limit);
-            }
-            joint_angle_idx++;
+        uint32_t ai = desc.state_index;  // angle index in state vector
+        uint32_t vi = desc.state_index;  // velocity index (same layout for angles + vels)
 
-        } else if (joint.type == JointType::SPHERICAL) {
-            auto active_mask = joint.get_active_dof_mask();
-            if (joint_angle_idx + 2 < angles.size()) {
-                for (int i = 0; i < 3; ++i) {
-                    if (!active_mask[i]) {
-                        // Locked DOF
-                        if (joint.num_limits > static_cast<size_t>(i)) {
-                            angles[joint_angle_idx + i] = joint.limits[i].x();
-                        } else {
-                            angles[joint_angle_idx + i] = 0.0;
-                        }
-                    } else if (joint.num_limits > static_cast<size_t>(i)) {
-                        // Active DOF with limits
-                        double min_limit = joint.limits[i].x();
-                        double max_limit = joint.limits[i].y();
-                        angles[joint_angle_idx + i] =
-                            std::clamp(angles[joint_angle_idx + i], min_limit, max_limit);
+        if (desc.type == JointType::REVOLUTE || desc.type == JointType::PRISMATIC) {
+            if (static_cast<size_t>(desc.limit_count) > 0 &&
+                ai < static_cast<uint32_t>(angles.size())) {
+                double lo = desc.limits[0].x(), hi = desc.limits[0].y();
+                angles[ai] = std::clamp(angles[ai], lo, hi);
+                if (vi < static_cast<uint32_t>(velocities.size())) {
+                    if (std::abs(angles[ai] - lo) < 1e-6 || std::abs(angles[ai] - hi) < 1e-6) {
+                        velocities[vi] = 0.0;
                     }
                 }
             }
-            joint_angle_idx += 3;
+
+        } else if (desc.type == JointType::SPHERICAL) {
+            auto active_mask = desc.active_dof_mask;
+            if (ai + 2 < static_cast<uint32_t>(angles.size())) {
+                for (int i = 0; i < 3; ++i) {
+                    if (!active_mask[i]) {
+                        angles[ai + i] =
+                            (static_cast<size_t>(desc.limit_count) > static_cast<size_t>(i))
+                                ? desc.limits[i].x()
+                                : 0.0;
+                        if (vi + i < static_cast<uint32_t>(velocities.size()))
+                            velocities[vi + i] = 0.0;
+                    } else if (static_cast<size_t>(desc.limit_count) > static_cast<size_t>(i)) {
+                        double lo = desc.limits[i].x(), hi = desc.limits[i].y();
+                        angles[ai + i] = std::clamp(angles[ai + i], lo, hi);
+                        if (vi + i < static_cast<uint32_t>(velocities.size())) {
+                            if (std::abs(angles[ai + i] - lo) < 1e-6 ||
+                                std::abs(angles[ai + i] - hi) < 1e-6) {
+                                velocities[vi + i] = 0.0;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
     state_.set_joint_angles(angles);
-
-    // Zero out velocities for joints at limits
-    Eigen::VectorXd velocities = state_.joint_velocities();
-
-    int joint_vel_idx = 0;
-    joint_angle_idx = 0;  // Reset for velocity processing
-
-    for (size_t joint_idx = 1; joint_idx < joints.size(); ++joint_idx) {
-        Joint const& joint = joints[joint_idx];
-
-        if (joint.type == JointType::FIXED) {
-            continue;
-        }
-        if (joint.is_scale_follower) {
-            continue;
-        }
-
-        if (joint.type == JointType::REVOLUTE || joint.type == JointType::PRISMATIC) {
-            if (joint.num_limits > 0 && joint_angle_idx < angles.size()) {
-                double angle = angles(joint_angle_idx);
-                double min_limit = joint.limits[0].x();
-                double max_limit = joint.limits[0].y();
-
-                // If at limit (within tolerance), zero velocity to prevent pushing through boundary
-                if (std::abs(angle - min_limit) < 1e-6 || std::abs(angle - max_limit) < 1e-6) {
-                    velocities(joint_vel_idx) = 0.0;
-                }
-            }
-            joint_vel_idx++;
-            joint_angle_idx++;
-
-        } else if (joint.type == JointType::SPHERICAL) {
-            // Check each DOF
-            for (int i = 0; i < 3; ++i) {
-                if (joint.num_limits > static_cast<size_t>(i) &&
-                    joint_angle_idx + i < angles.size()) {
-                    double angle = angles(joint_angle_idx + i);
-                    double min_limit = joint.limits[i].x();
-                    double max_limit = joint.limits[i].y();
-
-                    // If at limit, zero velocity
-                    if (std::abs(angle - min_limit) < 1e-6 || std::abs(angle - max_limit) < 1e-6) {
-                        velocities(joint_vel_idx + i) = 0.0;
-                    }
-                }
-            }
-            joint_vel_idx += 3;
-            joint_angle_idx += 3;
-        }
-    }
-
     state_.set_joint_velocities(velocities);
 }
 

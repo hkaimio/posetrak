@@ -149,16 +149,19 @@ TEST_CASE("Sync loader error handling", "[sync_loader][errors]") {
         REQUIRE_THROWS_AS(load_sync_metadata(test_file.string()), std::runtime_error);
     }
 
-    SECTION("Negative timestamp throws") {
+    SECTION("Negative timestamp is valid (camera started before t=0)") {
         auto test_file = get_temp_dir() / "negative_timestamp.json";
         std::ofstream f(test_file);
         f << R"({
   "cam1": [
-    {"frame": 0, "timestamp": -1.0}
+    {"frame": 0, "timestamp": -0.061},
+    {"frame": 1, "timestamp": 0.0}
   ]
 })";
         f.close();
-        REQUIRE_THROWS_AS(load_sync_metadata(test_file.string()), std::runtime_error);
+        auto sync_data = load_sync_metadata(test_file.string());
+        REQUIRE_THAT(sync_data.at("cam1").sync_points[0].timestamp_sec,
+                     Catch::Matchers::WithinAbs(-0.061, 1e-9));
     }
 
     SECTION("Empty cameras throws") {
@@ -349,6 +352,57 @@ TEST_CASE("Sync loader with FPS support", "[sync_loader][fps]") {
 })";
         f.close();
         REQUIRE_THROWS_AS(load_sync_metadata(test_file.string()), std::runtime_error);
+    }
+}
+
+TEST_CASE("Sync loader accepts 'syncpoints' key (no underscore)", "[sync_loader]") {
+    auto get_temp_dir = []() {
+        static auto temp = std::filesystem::temp_directory_path() / "posetrak_tests";
+        std::filesystem::create_directories(temp);
+        return temp;
+    };
+
+    SECTION("Object format with 'syncpoints' key loads correctly") {
+        auto test_file = get_temp_dir() / "sync_syncpoints_key.json";
+        std::ofstream f(test_file);
+        f << R"({
+  "cam1": {
+    "fps": 120.0,
+    "syncpoints": [
+      {"frame": 0, "timestamp": 0.023},
+      {"frame": 120, "timestamp": 1.023}
+    ]
+  }
+})";
+        f.close();
+
+        auto sync_data = load_sync_metadata(test_file.string());
+        auto const& cam1 = sync_data.at("cam1");
+        REQUIRE_THAT(cam1.fps, Catch::Matchers::WithinRel(120.0, 1e-6));
+        REQUIRE(cam1.sync_points.size() == 2);
+        REQUIRE(cam1.sync_points[0].frame_idx == 0);
+        REQUIRE_THAT(cam1.sync_points[0].timestamp_sec, Catch::Matchers::WithinRel(0.023, 1e-9));
+        REQUIRE(cam1.sync_points[1].frame_idx == 120);
+    }
+
+    SECTION("Camera with negative first timestamp (started before t=0)") {
+        auto test_file = get_temp_dir() / "sync_negative_offset.json";
+        std::ofstream f(test_file);
+        f << R"({
+  "cam4": {
+    "fps": 60.0,
+    "syncpoints": [
+      {"frame": 0, "timestamp": -0.0608},
+      {"frame": 60, "timestamp": 0.939}
+    ]
+  }
+})";
+        f.close();
+
+        auto sync_data = load_sync_metadata(test_file.string());
+        auto const& cam4 = sync_data.at("cam4");
+        REQUIRE(cam4.sync_points.size() == 2);
+        REQUIRE(cam4.sync_points[0].timestamp_sec < 0.0);
     }
 }
 

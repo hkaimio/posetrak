@@ -16,14 +16,6 @@ void validate_sync_points(std::vector<SyncPoint> const& points, std::string cons
         return;  // Empty is valid (means no sync points)
     }
 
-    // Check for negative values
-    for (auto const& pt : points) {
-        if (pt.timestamp_sec < 0.0) {
-            throw std::runtime_error("Camera '" + cam_name +
-                                     "': sync point has negative timestamp");
-        }
-    }
-
     // Check monotonic ordering
     for (size_t i = 1; i < points.size(); ++i) {
         if (points[i].frame_idx <= points[i - 1].frame_idx) {
@@ -101,9 +93,13 @@ std::unordered_map<std::string, CameraSyncData> load_sync_metadata(std::string c
 
             data.fps = cam_data.value("fps", 30.0);  // Default to 30 fps if not specified
 
-            // sync_points can be missing (empty), or an array
-            if (cam_data.contains("sync_points")) {
-                auto const& points_arr = cam_data["sync_points"];
+            // sync_points can be missing (empty), or an array.
+            // Accept both "sync_points" and "syncpoints" key names.
+            std::string const sync_key = cam_data.contains("sync_points")  ? "sync_points"
+                                         : cam_data.contains("syncpoints") ? "syncpoints"
+                                                                           : "";
+            if (!sync_key.empty()) {
+                auto const& points_arr = cam_data[sync_key];
                 if (!points_arr.is_array()) {
                     throw std::runtime_error("Camera '" + cam_name +
                                              "': 'sync_points' must be an array");

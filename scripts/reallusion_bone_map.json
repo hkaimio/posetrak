@@ -1,0 +1,68 @@
+{
+    "_comment": "Maps template joint names → CC armature bone names as they appear in Blender after FBX export from Character Creator. Fill in the CC bone names; template names must match the skeleton YAML exactly.",
+
+    "hips":        "CC_Base_Hip",
+    "waist":       "CC_Base_Waist",
+    "spine1":      "CC_Base_Spine01",
+    "spine2":      "CC_Base_Spine02",
+    "neck1":       "CC_Base_NeckTwist01",
+    "neck2":       "CC_Base_NeckTwist02",
+    "head":        "CC_Base_Head",
+
+    "shoulder.L":  "CC_Base_L_Clavicle",
+    "upper_arm.L": "CC_Base_L_Upperarm",
+    "forearm.L":   "CC_Base_L_Forearm",
+    "hand.L":      "CC_Base_L_Hand",
+
+    "shoulder.R":  "CC_Base_R_Clavicle",
+    "upper_arm.R": "CC_Base_R_Upperarm",
+    "forearm.R":   "CC_Base_R_Forearm",
+    "hand.R":      "CC_Base_R_Hand",
+
+    "thigh.L":     "CC_Base_L_Thigh",
+    "shin.L":      "CC_Base_L_Calf",
+    "foot.L":      "CC_Base_L_Foot",
+    "toe.L":       "CC_Base_L_ToeBase",
+
+    "thigh.R":     "CC_Base_R_Thigh",
+    "shin.R":      "CC_Base_R_Calf",
+    "foot.R":      "CC_Base_R_Foot",
+    "toe.R":       "CC_Base_R_ToeBase",
+
+    "f_index.01.L":  "CC_Base_L_Index1",
+    "f_index.02.L":  "CC_Base_L_Index2",
+    "f_index.03.L":  "CC_Base_L_Index3",
+    "f_middle.01.L": "CC_Base_L_Mid1",
+    "f_middle.02.L": "CC_Base_L_Mid2",
+    "f_middle.03.L": "CC_Base_L_Mid3",
+    "f_ring.01.L":   "CC_Base_L_Ring1",
+    "f_ring.02.L":   "CC_Base_L_Ring2",
+    "f_ring.03.L":   "CC_Base_L_Ring3",
+    "f_pinky.01.L":  "CC_Base_L_Pinky1",
+    "f_pinky.02.L":  "CC_Base_L_Pinky2",
+    "f_pinky.03.L":  "CC_Base_L_Pinky3",
+    "thumb.01.L":    "CC_Base_L_Thumb1",
+    "thumb.02.L":    "CC_Base_L_Thumb2",
+    "thumb.03.L":    "CC_Base_L_Thumb3",
+
+    "f_index.01.R":  "CC_Base_R_Index1",
+    "f_index.02.R":  "CC_Base_R_Index2",
+    "f_index.03.R":  "CC_Base_R_Index3",
+    "f_middle.01.R": "CC_Base_R_Mid1",
+    "f_middle.02.R": "CC_Base_R_Mid2",
+    "f_middle.03.R": "CC_Base_R_Mid3",
+    "f_ring.01.R":   "CC_Base_R_Ring1",
+    "f_ring.02.R":   "CC_Base_R_Ring2",
+    "f_ring.03.R":   "CC_Base_R_Ring3",
+    "f_pinky.01.R":  "CC_Base_R_Pinky1",
+    "f_pinky.02.R":  "CC_Base_R_Pinky2",
+    "f_pinky.03.R":  "CC_Base_R_Pinky3",
+    "thumb.01.R":    "CC_Base_R_Thumb1",
+    "thumb.02.R":    "CC_Base_R_Thumb2",
+    "thumb.03.R":    "CC_Base_R_Thumb3",
+
+    "_no_cc_equivalent": [
+        "heel.02.L",
+        "heel.02.R"
+    ]
+}

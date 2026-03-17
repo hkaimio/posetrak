@@ -45,8 +45,16 @@ import yaml
 # Colours — BGR order for OpenCV
 # ---------------------------------------------------------------------------
 
-PERSON_COLORS_BGR: list[tuple[int, int, int]] = [
+PERSON_BONE_COLORS_BGR: list[tuple[int, int, int]] = [
     (  0, 220,   0),   # green
+    (139, 170, 255),   # orange
+    (200,  40,  40),   # blue
+    (  0, 200, 220),   # yellow
+    (210,   0, 210),   # magenta
+    (255, 180,   0),   # cyan
+]
+PERSON_MARKER_COLORS_BGR: list[tuple[int, int, int]] = [
+    (  33, 255,   0),   # green
     (  0, 120, 255),   # orange
     (200,  40,  40),   # blue
     (  0, 200, 220),   # yellow
@@ -568,7 +576,7 @@ def draw_bone(
     right_w = (int(wide_x - half_w * perp_x), int(wide_y - half_w * perp_y))
 
     outline = np.array([head, left_w, (int(tx), int(ty)), right_w], dtype=np.int32)
-    cv2.polylines(img, [outline], isClosed=True, color=color, thickness=1)
+    cv2.polylines(img, [outline], isClosed=True, color=color, thickness=2)
 
 
 def draw_marker_dot(
@@ -576,10 +584,10 @@ def draw_marker_dot(
     x: int,
     y: int,
     color: tuple[int, int, int],
-    radius: int = 5,
+    radius: int = 3,
 ) -> None:
     cv2.circle(img, (x, y), radius, color, -1)
-    cv2.circle(img, (x, y), radius, (0, 0, 0), 1)
+    # cv2.circle(img, (x, y), radius, (0, 0, 0), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -649,7 +657,7 @@ def render_cell(
     # Draw skeleton bones for each person (from FK 3D positions)
     for person in persons:
         bones_3d = person.get("bones_3d", {})
-        color = person["color"]
+        color = person["bone_color"]
         for _jname, (head_3d, tail_3d) in bones_3d.items():
             h2d = _project_to_cell(head_3d, cam.P, x1c, y1c, sx, sy)
             t2d = _project_to_cell(tail_3d, cam.P, x1c, y1c, sx, sy)
@@ -667,7 +675,7 @@ def render_cell(
     # Draw observation dots (outliers first, inliers on top)
     for person in persons:
         mdata = person["mdata"]
-        color = person["color"]
+        color = person["marker_color"]
         for _mname, (px, py, ox, oy, outlier) in mdata.items():
             cx, cy = to_cell(ox, oy)
             if 0 <= cx < cell_w and 0 <= cy < cell_h:
@@ -770,7 +778,8 @@ def main() -> None:
 
     for idx, tdir_str in enumerate(args.tracking_dirs):
         tdir = Path(tdir_str)
-        color = PERSON_COLORS_BGR[idx % len(PERSON_COLORS_BGR)]
+        bone_color = PERSON_BONE_COLORS_BGR[idx % len(PERSON_BONE_COLORS_BGR)]
+        marker_color = PERSON_MARKER_COLORS_BGR[idx % len(PERSON_MARKER_COLORS_BGR)]
 
         # Load marker projections
         proj_path = tdir / "marker_projections.csv"
@@ -805,11 +814,12 @@ def main() -> None:
         persons_data.append({
             "mdata": mdata,
             "timestamps": timestamps,
-            "color": color,
+            "bone_color": bone_color,
+            "marker_color": marker_color,
             "label": tdir.name,
             "bone_data": bone_data,
         })
-        print(f"  Person {idx}: {tdir.name}  ({len(mdata)} frames, colour {color})")
+        print(f"  Person {idx}: {tdir.name}  ({len(mdata)} frames, bone color {bone_color}, marker color {marker_color})")
 
     if not persons_data:
         print("No tracking data loaded.", file=sys.stderr)
@@ -920,7 +930,8 @@ def main() -> None:
                 persons_for_cell.append({
                     "mdata":    mdata_cam,
                     "bones_3d": bones_3d,
-                    "color":    person["color"],
+                    "bone_color":    person["bone_color"],
+                    "marker_color":  person["marker_color"],
                 })
 
             crop = crops.get(cid, (0, 0,

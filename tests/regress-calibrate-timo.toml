@@ -42,5 +42,5 @@ export_statistics = true
 
 [processing]
 start_time = 0.0
-end_time = 8.0
+end_time = 3.5
 tracker_fps = 120.0

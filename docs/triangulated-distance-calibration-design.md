@@ -134,6 +134,30 @@ A single scale factor is estimated from the hip-midpoint to shoulder-midpoint di
 and applied uniformly to both joints. Independent scaling of the two segments is not
 observable without a thoracic or sternum marker.
 
+**Chain group denominator.** For kinematic chains the denominator in the scale
+estimator is **not** `|p_A_model − p_B_model|` (the tracked model chord) but instead
+the **nominal straight chain length** = `sum(|offset_j|)` for all joints `j` in the
+chain, taken directly from the source skeleton YAML.
+
+The reason: when the source skeleton's chain is shorter than the target person's, the
+UKF compensates during tracking by distorting the root pose (e.g. tilting the pelvis),
+which makes the model chord artificially short and inflates the ratio
+`chord_tri / chord_model` above the true scale factor — especially in frames where the
+chain is bent.  Using the nominal straight length as the fixed denominator avoids this
+tracking-distortion bias.  Each per-frame sample is then `chord_tri / L_nominal`, which
+is a lower bound on the true scale (chord ≤ chain length).
+
+**Chain group aggregation.** Because `chord_tri / L_nominal ≤ s*` always holds, with
+equality only when the chain is fully extended, chain groups aggregate at a high
+**percentile** (default: 90th) rather than the median.  The 90th percentile corresponds
+to near-straight-spine frames; the median would systematically underestimate because
+bent-chain frames dominate in a typical walking calibration sequence.
+
+**Optional frame range filter.** A `reference_frames: [start, end]` field can be added
+to any chain group in the `scale_groups` YAML block to restrict calibration to a known
+upright segment (e.g. a few seconds of quiet standing).  When set, only frames in
+`[start, end]` contribute samples for that group.
+
 ### 2.5 Frame Selection and Quality Filtering
 
 A (frame, joint) sample contributes to the group's estimate only if all of the
@@ -261,12 +285,21 @@ offsets are typically 1–3 cm against bone lengths of 30–50 cm, giving a rela
 marker attachment offsets separately (static T-pose) before running bone-length
 calibration.
 
-### 4.3 Spine chain — single shared scale factor
+### 4.3 Spine chain — single shared scale factor; curvature bias
 
 Spine1 and spine2 are estimated jointly. A person with an unusually long lumbar and
 short thoracic segment will have both scaled by the same average factor. This is a
 practical limitation of not having a mid-torso marker; it could be resolved by adding a
 sternum or xiphoid process marker.
+
+**Curvature bias** (mitigated in current implementation): the endpoint chord distance
+between hip-midpoint and shoulder-midpoint is always ≤ the true chain length.  The
+nominal-denominator + high-percentile approach (§2.3 note ²) handles this by selecting
+near-straight frames.  If the calibration sequence contains no upright standing (e.g. a
+crouching or forward-leaning sequence throughout), the estimate will still be
+systematically low.  In that case provide a `reference_frames` range covering the most
+upright segment, or use a dedicated calibration sequence with a few seconds of quiet
+standing.
 
 ### 4.4 Hip socket — body-centre estimated from markers
 

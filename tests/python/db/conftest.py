@@ -12,7 +12,12 @@ _PROJECT_ROOT = Path(__file__).parents[3]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from scripts.db.posetrak_db import create_registry, create_session  # noqa: E402
+from scripts.db.posetrak_db import (  # noqa: E402
+    create_camera_model,
+    create_camera_mode,
+    create_registry,
+    create_session,
+)
 
 
 @pytest.fixture()
@@ -31,6 +36,23 @@ def session_db(tmp_path: Path):
     conn = create_session(db_path)
     yield conn
     conn.close()
+
+
+@pytest.fixture()
+def camera_mode_id(registry_db) -> str:
+    """Create a camera model and mode in the registry; return the mode ID."""
+    model_id = create_camera_model(
+        registry_db,
+        manufacturer="TestCo",
+        model_name="Test Cam",
+    )
+    return create_camera_mode(
+        registry_db,
+        model_id,
+        width_px=1280,
+        height_px=720,
+        nominal_fps=60.0,
+    )
 
 
 @pytest.fixture()

@@ -14,10 +14,14 @@ sys.path.insert(0, str(Path(__file__).parents[3]))  # project root
 from scripts.db.posetrak_db import (
     REGISTRY_SCHEMA_VERSION,
     SESSION_SCHEMA_VERSION,
+    create_camera_model,
+    create_camera_mode,
     create_registry,
     create_session,
     generate_id,
     get_project_root,
+    list_camera_models,
+    list_camera_modes,
     get_schema_version,
     open_registry,
     open_session,
@@ -255,3 +259,93 @@ def test_session_has_expected_tables(session_db: sqlite3.Connection) -> None:
     actual = {row["name"] for row in rows}
     for table in _SESSION_TABLES:
         assert table in actual, f"Missing session table: {table!r}"
+
+
+# ---------------------------------------------------------------------------
+# Camera model management
+# ---------------------------------------------------------------------------
+
+
+def test_create_camera_model_returns_id(registry_db: sqlite3.Connection) -> None:
+    """create_camera_model() should return a non-empty UUID string."""
+    model_id = create_camera_model(registry_db, manufacturer="Acme", model_name="Cam X")
+    assert model_id
+    row = registry_db.execute(
+        "SELECT manufacturer, model_name FROM camera_models WHERE id = ?", (model_id,)
+    ).fetchone()
+    assert row["manufacturer"] == "Acme"
+    assert row["model_name"] == "Cam X"
+
+
+def test_create_camera_model_optional_fields(registry_db: sqlite3.Connection) -> None:
+    """create_camera_model() with no arguments should create a row with empty strings."""
+    model_id = create_camera_model(registry_db)
+    row = registry_db.execute(
+        "SELECT id FROM camera_models WHERE id = ?", (model_id,)
+    ).fetchone()
+    assert row is not None
+
+
+def test_list_camera_models_empty(registry_db: sqlite3.Connection) -> None:
+    """list_camera_models() should return an empty list when no models are registered."""
+    assert list_camera_models(registry_db) == []
+
+
+def test_list_camera_models_returns_all(registry_db: sqlite3.Connection) -> None:
+    """list_camera_models() should return one row per registered model."""
+    create_camera_model(registry_db, model_name="Alpha")
+    create_camera_model(registry_db, model_name="Beta")
+    rows = list_camera_models(registry_db)
+    assert len(rows) == 2
+    names = {row["model_name"] for row in rows}
+    assert names == {"Alpha", "Beta"}
+
+
+# ---------------------------------------------------------------------------
+# Camera mode management
+# ---------------------------------------------------------------------------
+
+
+def test_create_camera_mode_returns_id(registry_db: sqlite3.Connection) -> None:
+    """create_camera_mode() should return a UUID and create a row with correct fields."""
+    model_id = create_camera_model(registry_db, model_name="Cam")
+    mode_id = create_camera_mode(
+        registry_db, model_id, width_px=1920, height_px=1080, nominal_fps=60.0
+    )
+    assert mode_id
+    row = registry_db.execute(
+        "SELECT width_px, height_px, nominal_fps, camera_model_id "
+        "FROM camera_modes WHERE id = ?",
+        (mode_id,),
+    ).fetchone()
+    assert row["width_px"] == 1920
+    assert row["height_px"] == 1080
+    assert row["nominal_fps"] == pytest.approx(60.0)
+    assert row["camera_model_id"] == model_id
+
+
+def test_create_camera_mode_invalid_model_raises(registry_db: sqlite3.Connection) -> None:
+    """create_camera_mode() with a non-existent camera_model_id should raise IntegrityError."""
+    import sqlite3 as _sqlite3
+    with pytest.raises(_sqlite3.IntegrityError):
+        create_camera_mode(registry_db, "00000000-0000-0000-0000-000000000000")
+
+
+def test_list_camera_modes_empty(registry_db: sqlite3.Connection) -> None:
+    """list_camera_modes() should return an empty list when no modes are registered."""
+    assert list_camera_modes(registry_db) == []
+
+
+def test_list_camera_modes_filtered(registry_db: sqlite3.Connection) -> None:
+    """list_camera_modes() should filter by camera_model_id when provided."""
+    m1 = create_camera_model(registry_db, model_name="M1")
+    m2 = create_camera_model(registry_db, model_name="M2")
+    create_camera_mode(registry_db, m1, width_px=1920, height_px=1080)
+    create_camera_mode(registry_db, m1, width_px=3840, height_px=2160)
+    create_camera_mode(registry_db, m2, width_px=1280, height_px=720)
+
+    modes_m1 = list_camera_modes(registry_db, camera_model_id=m1)
+    modes_m2 = list_camera_modes(registry_db, camera_model_id=m2)
+    assert len(modes_m1) == 2
+    assert len(modes_m2) == 1
+    assert len(list_camera_modes(registry_db)) == 3

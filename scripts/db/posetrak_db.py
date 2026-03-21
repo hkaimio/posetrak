@@ -324,6 +324,148 @@ def set_project_root(registry: sqlite3.Connection, root: Path) -> None:
     registry.commit()
 
 
+# ---------------------------------------------------------------------------
+# Camera model / mode management
+# ---------------------------------------------------------------------------
+
+
+def create_camera_model(
+    registry: sqlite3.Connection,
+    *,
+    manufacturer: str = "",
+    model_name: str = "",
+    sensor_size: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """Insert a new camera_models row and return its ID.
+
+    Parameters
+    ----------
+    registry:
+        Open connection to a posetrak registry database.
+    manufacturer:
+        Camera manufacturer name (e.g. ``"GoPro"``).
+    model_name:
+        Camera model name (e.g. ``"Hero 10 Black"``).
+    sensor_size:
+        Optional sensor size descriptor (e.g. ``"1/2.3\""``).
+    notes:
+        Optional free-text notes.
+
+    Returns
+    -------
+    str
+        The UUID of the newly created row.
+    """
+    model_id = generate_id()
+    with registry:
+        registry.execute(
+            "INSERT INTO camera_models (id, manufacturer, model_name, sensor_size) "
+            "VALUES (?, ?, ?, ?)",
+            (model_id, manufacturer, model_name, sensor_size),
+        )
+    return model_id
+
+
+def create_camera_mode(
+    registry: sqlite3.Connection,
+    camera_model_id: str,
+    *,
+    width_px: int = 0,
+    height_px: int = 0,
+    nominal_fps: float = 0.0,
+    codec: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """Insert a new camera_modes row and return its ID.
+
+    Parameters
+    ----------
+    registry:
+        Open connection to a posetrak registry database.
+    camera_model_id:
+        ID of the parent ``camera_models`` row.
+    width_px:
+        Image width in pixels (0 = unknown).
+    height_px:
+        Image height in pixels (0 = unknown).
+    nominal_fps:
+        Nominal frame rate in frames per second (0.0 = unknown).
+    codec:
+        Optional codec identifier string (e.g. ``"h264"``).
+    notes:
+        Optional free-text notes.
+
+    Returns
+    -------
+    str
+        The UUID of the newly created row.
+
+    Raises
+    ------
+    sqlite3.IntegrityError
+        If *camera_model_id* does not refer to an existing camera_models row.
+    """
+    mode_id = generate_id()
+    with registry:
+        registry.execute(
+            "INSERT INTO camera_modes "
+            "(id, camera_model_id, width_px, height_px, nominal_fps, codec, notes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (mode_id, camera_model_id, width_px, height_px, nominal_fps, codec, notes),
+        )
+    return mode_id
+
+
+def list_camera_models(registry: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return all rows from the camera_models table.
+
+    Parameters
+    ----------
+    registry:
+        Open connection to a posetrak registry database.
+
+    Returns
+    -------
+    list[sqlite3.Row]
+        All camera model rows, ordered by rowid.
+    """
+    return registry.execute("SELECT * FROM camera_models ORDER BY rowid").fetchall()
+
+
+def list_camera_modes(
+    registry: sqlite3.Connection,
+    camera_model_id: str | None = None,
+) -> list[sqlite3.Row]:
+    """Return rows from the camera_modes table.
+
+    Parameters
+    ----------
+    registry:
+        Open connection to a posetrak registry database.
+    camera_model_id:
+        If provided, return only modes belonging to this camera model.
+
+    Returns
+    -------
+    list[sqlite3.Row]
+        Matching camera mode rows, ordered by rowid.
+    """
+    if camera_model_id is not None:
+        return registry.execute(
+            "SELECT * FROM camera_modes WHERE camera_model_id = ? ORDER BY rowid",
+            (camera_model_id,),
+        ).fetchall()
+    return registry.execute(
+        "SELECT * FROM camera_modes ORDER BY rowid"
+    ).fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Path resolution
+# ---------------------------------------------------------------------------
+
+
 def resolve_path(path_str: str, registry: sqlite3.Connection) -> Path:
     """Resolve a path string relative to the registry ``project_root`` if necessary.
 

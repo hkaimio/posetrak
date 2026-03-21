@@ -5,8 +5,10 @@ The Pose2Sim calibration TOML contains sections named ``cam1``, ``cam2``, …
 and extrinsic rotation/translation vectors. This module imports only the
 **intrinsic** parameters (Phase 1). Extrinsics are handled in Phase 2.
 
-Camera IDs in the registry use 0-based integer strings: ``cam1`` → ``"0"``,
-``cam2`` → ``"1"``, etc., matching the convention in ``calibrate_scale.py``.
+Before calling :func:`import_calib_toml`, register the camera hardware in the
+registry using :func:`~scripts.db.posetrak_db.create_camera_model` and
+:func:`~scripts.db.posetrak_db.create_camera_mode`.  The importer then links
+each imported camera to the supplied camera mode(s).
 """
 
 from __future__ import annotations
@@ -27,33 +29,27 @@ class CalibImportResult:
 
     Attributes
     ----------
-    camera_model_id:
-        The registry ID of the shared camera model row created for this file.
     camera_instance_ids:
         Mapping from camera label (e.g. ``"Camera1"``) to the registry
-        ``camera_instances.id`` for each imported camera.
-    camera_mode_ids:
-        Mapping from camera label to the registry ``camera_modes.id`` for each
-        imported camera.
+        ``camera_instances.id`` created for each imported camera.
     intrinsics_ids:
         Mapping from camera label to the registry ``intrinsics_calibrations.id``
-        for each imported camera.
+        created for each imported camera.
+    skipped:
+        Set of TOML section keys (e.g. ``"cam3"``) that were present in the
+        file but not listed in the per-camera mode mapping and therefore skipped.
     """
 
-    camera_model_id: str
     camera_instance_ids: dict[str, str] = field(default_factory=dict)
-    camera_mode_ids: dict[str, str] = field(default_factory=dict)
     intrinsics_ids: dict[str, str] = field(default_factory=dict)
+    skipped: set[str] = field(default_factory=set)
 
 
 def import_calib_toml(
     registry: sqlite3.Connection,
     calib_path: Path,
+    camera_modes: str | dict[str, str],
     *,
-    width_px: int = 0,
-    height_px: int = 0,
-    nominal_fps: float = 0.0,
-    codec: str = "",
     calibration_tool: str = "pose2sim",
     distortion_model: str = "radtan",
     calibrated_at: str | None = None,
@@ -61,17 +57,16 @@ def import_calib_toml(
 ) -> CalibImportResult:
     """Import intrinsic calibration data from a Pose2Sim TOML file.
 
-    One shared ``camera_models`` row is created for the entire file (since all
-    cameras in a single calibration file are treated as an unnamed group).
-    For each ``camN`` section a ``camera_instances``, ``camera_modes``, and
-    ``intrinsics_calibrations`` row are inserted. All inserts are executed in a
-    single transaction.
+    The camera hardware (model + mode) must already exist in *registry* before
+    calling this function. For each camera section that is imported, a
+    ``camera_instances`` row and an ``intrinsics_calibrations`` row are
+    inserted. All inserts are executed in a single transaction.
 
     Only intrinsics are imported (Phase 1). Extrinsic data (``rotation``,
     ``translation``) present in the TOML is silently ignored.
 
     The ``[metadata]`` section and any section whose key does not start with
-    ``"cam"`` are skipped.
+    ``"cam"`` are always skipped.
 
     Parameters
     ----------
@@ -79,14 +74,14 @@ def import_calib_toml(
         Open connection to a posetrak registry database.
     calib_path:
         Path to the Pose2Sim calibration ``.toml`` file to import.
-    width_px:
-        Image width in pixels for the ``camera_modes`` row (0 = unknown).
-    height_px:
-        Image height in pixels for the ``camera_modes`` row (0 = unknown).
-    nominal_fps:
-        Nominal frame rate for the ``camera_modes`` row (0.0 = unknown).
-    codec:
-        Optional codec string stored in ``camera_modes``.
+    camera_modes:
+        Camera mode assignment for cameras in the TOML. Two forms are accepted:
+
+        - **Homogeneous** (``str``): a single ``camera_modes.id`` UUID applied
+          to every camera in the file.
+        - **Per-camera** (``dict[str, str]``): mapping from TOML section key
+          (e.g. ``"cam1"``) to ``camera_modes.id``. Only cameras whose section
+          key appears in the dict are imported; others are silently skipped.
     calibration_tool:
         Name of the tool that produced the calibration (default ``"pose2sim"``).
     distortion_model:
@@ -101,58 +96,89 @@ def import_calib_toml(
     Returns
     -------
     CalibImportResult
-        IDs of all rows created in the registry.
+        IDs of all rows created in the registry, plus the set of skipped
+        section keys (only relevant for per-camera mode mappings).
+
+    Raises
+    ------
+    ValueError
+        If any camera mode ID in *camera_modes* does not exist in the registry.
     """
     if calibrated_at is None:
         calibrated_at = datetime.date.today().isoformat()
 
+    # --- Validate all referenced mode IDs upfront and cache model IDs ---
+    # mode_to_model: camera_mode_id → camera_model_id
+    mode_to_model: dict[str, str] = {}
+
+    if isinstance(camera_modes, str):
+        unique_modes = {camera_modes}
+    else:
+        unique_modes = set(camera_modes.values())
+
+    for mode_id in unique_modes:
+        row = registry.execute(
+            "SELECT camera_model_id FROM camera_modes WHERE id = ?",
+            (mode_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"camera_mode_id '{mode_id}' not found in registry. "
+                "Create the camera model and mode first with create_camera_model() "
+                "and create_camera_mode()."
+            )
+        mode_to_model[mode_id] = row["camera_model_id"]
+
+    # --- Parse TOML ---
     with calib_path.open("rb") as fh:
         raw: dict[str, object] = tomllib.load(fh)
 
-    # Collect camera sections: keys starting with "cam", excluding "metadata",
-    # sorted lexicographically (cam1, cam10, cam2, … — use numeric sort on suffix).
+    # Collect camera section keys sorted by numeric suffix.
     cam_keys = sorted(
         (k for k in raw if k.startswith("cam") and k != "metadata"),
         key=lambda k: int(k[3:]) if k[3:].isdigit() else float("inf"),
     )
 
-    # --- Create one shared camera_model row for this calibration file ---
-    model_id = generate_id()
-    model_name = f"Imported from {calib_path.name}"
+    result = CalibImportResult()
 
-    result = CalibImportResult(camera_model_id=model_id)
-
-    # Collect all rows before touching the DB so we fail fast on bad TOML.
-    rows_instances: list[tuple[str, str, str, str]] = []  # (id, model_id, serial, label)
-    rows_modes: list[tuple[str, str, int, int, float, str]] = []  # (id, model_id, w, h, fps, codec)
+    rows_instances: list[tuple[str, str, str, str]] = []
     rows_intrinsics: list[tuple[str, str, str, str, str, float, float, float, float, bytes, str]] = []
 
     for cam_key in cam_keys:
+        # Resolve mode for this camera; skip if not in per-camera mapping.
+        if isinstance(camera_modes, str):
+            mode_id_for_cam = camera_modes
+        else:
+            if cam_key not in camera_modes:
+                result.skipped.add(cam_key)
+                continue
+            mode_id_for_cam = camera_modes[cam_key]
+
+        camera_model_id = mode_to_model[mode_id_for_cam]
+
         vals: dict[str, object] = raw[cam_key]  # type: ignore[assignment]
         label: str = str(vals.get("name", cam_key))
         matrix: list[list[float]] = vals["matrix"]  # type: ignore[assignment]
 
-        # Extract focal lengths and principal point from 3×3 camera matrix
         fx: float = float(matrix[0][0])
         fy: float = float(matrix[1][1])
         cx: float = float(matrix[0][2])
         cy: float = float(matrix[1][2])
 
-        # Distortion coefficients — default to four zeros if absent
         dist_raw: list[float] | None = vals.get("distortions")  # type: ignore[assignment]
-        dist: list[float] = [float(d) for d in dist_raw] if dist_raw is not None else [0.0, 0.0, 0.0, 0.0]
+        dist: list[float] = (
+            [float(d) for d in dist_raw] if dist_raw is not None else [0.0, 0.0, 0.0, 0.0]
+        )
         dist_blob: bytes = struct.pack(f"<{len(dist)}d", *dist)
 
         instance_id = generate_id()
-        mode_id = generate_id()
         intrinsics_id = generate_id()
 
-        rows_instances.append((instance_id, model_id, "", label))
-        rows_modes.append((mode_id, model_id, width_px, height_px, nominal_fps, codec))
+        rows_instances.append((instance_id, camera_model_id, "", label))
         rows_intrinsics.append(
             (
                 intrinsics_id,
-                mode_id,
+                mode_id_for_cam,
                 calibrated_at,
                 calibration_tool,
                 distortion_model,
@@ -166,26 +192,13 @@ def import_calib_toml(
         )
 
         result.camera_instance_ids[label] = instance_id
-        result.camera_mode_ids[label] = mode_id
         result.intrinsics_ids[label] = intrinsics_id
 
-    # --- Insert everything in a single transaction ---
     with registry:
-        registry.execute(
-            "INSERT INTO camera_models (id, manufacturer, model_name, sensor_size) "
-            "VALUES (?, ?, ?, ?)",
-            (model_id, "", model_name, None),
-        )
         registry.executemany(
             "INSERT INTO camera_instances (id, camera_model_id, serial_number, label) "
             "VALUES (?, ?, ?, ?)",
             rows_instances,
-        )
-        registry.executemany(
-            "INSERT INTO camera_modes "
-            "(id, camera_model_id, width_px, height_px, nominal_fps, codec) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            rows_modes,
         )
         registry.executemany(
             "INSERT INTO intrinsics_calibrations "

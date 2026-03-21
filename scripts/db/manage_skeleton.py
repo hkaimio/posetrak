@@ -1,0 +1,113 @@
+"""manage_skeleton.py — Registry CRUD for skeleton definitions.
+
+Skeletons are stored in the registry database. The primary key is the
+SHA-256 hex digest of the YAML content, which makes import idempotent:
+re-importing the same YAML file returns the existing ID without creating
+a duplicate row.
+"""
+
+from __future__ import annotations
+
+import datetime
+import hashlib
+import sqlite3
+from pathlib import Path
+
+
+def import_skeleton(
+    registry: sqlite3.Connection,
+    yaml_path: Path,
+    *,
+    name: str | None = None,
+    person_label: str | None = None,
+    source: str | None = None,
+    parent_id: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """Import a skeleton YAML file into the registry.
+
+    The skeleton ID is the SHA-256 hex digest of the YAML file content.
+    If a skeleton with the same ID already exists, the function returns the
+    existing ID without reinserting any rows.
+
+    Parameters
+    ----------
+    registry:
+        Open connection to a posetrak registry database.
+    yaml_path:
+        Path to the skeleton YAML file to import.
+    name:
+        Human-readable name for the skeleton. Defaults to ``yaml_path.stem``
+        if ``None``.
+    person_label:
+        Optional label identifying the person this skeleton belongs to
+        (e.g. ``"subject_01"``).
+    source:
+        Optional provenance string (e.g. path or description of origin).
+    parent_id:
+        Optional ID of a parent skeleton (for recording lineage, e.g. scaled
+        versions).
+    notes:
+        Optional free-text notes stored with the skeleton row.
+
+    Returns
+    -------
+    str
+        SHA-256 hex ID (64 characters) of the skeleton row — either the newly
+        created row or the pre-existing one.
+
+    Raises
+    ------
+    FileNotFoundError
+        If *yaml_path* does not exist.
+    """
+    yaml_content = yaml_path.read_text(encoding="utf-8")
+    skeleton_id = hashlib.sha256(yaml_content.encode("utf-8")).hexdigest()
+
+    # Idempotency: return early if already imported.
+    existing = registry.execute(
+        "SELECT id FROM skeletons WHERE id = ?", (skeleton_id,)
+    ).fetchone()
+    if existing is not None:
+        return skeleton_id
+
+    resolved_name = name if name is not None else yaml_path.stem
+    created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    with registry:
+        registry.execute(
+            "INSERT INTO skeletons "
+            "(id, name, parent_id, person_label, source, yaml_content, created_at, notes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                skeleton_id,
+                resolved_name,
+                parent_id,
+                person_label,
+                source,
+                yaml_content,
+                created_at,
+                notes,
+            ),
+        )
+
+    return skeleton_id
+
+
+def list_skeletons(registry: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return all skeleton rows from the registry, ordered by creation time.
+
+    Parameters
+    ----------
+    registry:
+        Open connection to a posetrak registry database.
+
+    Returns
+    -------
+    list[sqlite3.Row]
+        All rows from the ``skeletons`` table, ordered by ``created_at``
+        ascending.
+    """
+    return registry.execute(
+        "SELECT * FROM skeletons ORDER BY created_at"
+    ).fetchall()

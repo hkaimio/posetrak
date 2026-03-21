@@ -465,6 +465,189 @@ def list_camera_modes(
 
 
 # ---------------------------------------------------------------------------
+# Session database management
+# ---------------------------------------------------------------------------
+
+
+def create_mocap_session(
+    session: sqlite3.Connection,
+    *,
+    recorded_at: str | None = None,
+    location: str = "",
+    notes: str = "",
+) -> str:
+    """Insert a mocap_sessions row and return its ID.
+
+    Parameters
+    ----------
+    session:
+        Open connection to a posetrak session database.
+    recorded_at:
+        ISO-format date/datetime string for when the session was recorded.
+        Defaults to today's date (``datetime.date.today().isoformat()``).
+    location:
+        Optional human-readable description of the recording location.
+    notes:
+        Optional free-text notes.
+
+    Returns
+    -------
+    str
+        UUID of the newly created ``mocap_sessions`` row.
+    """
+    import datetime as _dt
+    if recorded_at is None:
+        recorded_at = _dt.date.today().isoformat()
+    session_id = generate_id()
+    with session:
+        session.execute(
+            "INSERT INTO mocap_sessions (id, recorded_at, location, notes) "
+            "VALUES (?, ?, ?, ?)",
+            (session_id, recorded_at, location, notes),
+        )
+    return session_id
+
+
+def add_session_camera(
+    session: sqlite3.Connection,
+    session_id: str,
+    camera_instance_id: str,
+    camera_mode_id: str,
+    intrinsics_calibration_id: str,
+    *,
+    label: str = "",
+) -> None:
+    """Insert a session_cameras row linking a camera to a session.
+
+    Parameters
+    ----------
+    session:
+        Open connection to a posetrak session database.
+    session_id:
+        ID of the parent ``mocap_sessions`` row.
+    camera_instance_id:
+        Registry ``camera_instances.id`` for the camera.
+    camera_mode_id:
+        Registry ``camera_modes.id`` describing the capture mode.
+    intrinsics_calibration_id:
+        Registry ``intrinsics_calibrations.id`` used for this camera.
+    label:
+        Optional short label for the camera within this session (e.g. ``"cam1"``).
+
+    Raises
+    ------
+    sqlite3.IntegrityError
+        If the (session_id, camera_instance_id) pair already exists.
+    """
+    with session:
+        session.execute(
+            "INSERT INTO session_cameras "
+            "(session_id, camera_instance_id, camera_mode_id, "
+            "intrinsics_calibration_id, label) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (session_id, camera_instance_id, camera_mode_id,
+             intrinsics_calibration_id, label),
+        )
+
+
+def create_shot(
+    session: sqlite3.Connection,
+    session_id: str,
+    extrinsic_calibration_id: str,
+    *,
+    shot_number: int | None = None,
+    label: str = "",
+    notes: str = "",
+) -> str:
+    """Insert a shots row and return its ID.
+
+    Parameters
+    ----------
+    session:
+        Open connection to a posetrak session database.
+    session_id:
+        ID of the parent ``mocap_sessions`` row.
+    extrinsic_calibration_id:
+        ID of the ``extrinsic_calibrations`` row used for this shot.
+    shot_number:
+        Explicit shot number. If ``None``, auto-increments from the highest
+        existing ``shot_number`` within this session (starting at 1).
+    label:
+        Optional short label for the shot.
+    notes:
+        Optional free-text notes.
+
+    Returns
+    -------
+    str
+        UUID of the newly created ``shots`` row.
+    """
+    if shot_number is None:
+        row = session.execute(
+            "SELECT MAX(shot_number) FROM shots WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        max_num = row[0]
+        shot_number = 1 if max_num is None else max_num + 1
+
+    shot_id = generate_id()
+    with session:
+        session.execute(
+            "INSERT INTO shots "
+            "(id, session_id, extrinsic_calibration_id, shot_number, label, notes) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (shot_id, session_id, extrinsic_calibration_id, shot_number, label, notes),
+        )
+    return shot_id
+
+
+def add_shot_video(
+    session: sqlite3.Connection,
+    shot_id: str,
+    camera_instance_id: str,
+    file_path: str,
+    first_frame: int,
+    last_frame: int,
+    fps: float,
+) -> str:
+    """Insert a shot_videos row and return its ID.
+
+    Parameters
+    ----------
+    session:
+        Open connection to a posetrak session database.
+    shot_id:
+        ID of the parent ``shots`` row.
+    camera_instance_id:
+        Registry ``camera_instances.id`` for the camera that recorded this video.
+    file_path:
+        Path string to the video file (stored as-is, not validated).
+    first_frame:
+        Index of the first video frame in the file (0-based).
+    last_frame:
+        Index of the last video frame in the file (inclusive).
+    fps:
+        Actual recorded frames per second.
+
+    Returns
+    -------
+    str
+        UUID of the newly created ``shot_videos`` row.
+    """
+    video_id = generate_id()
+    with session:
+        session.execute(
+            "INSERT INTO shot_videos "
+            "(id, shot_id, camera_instance_id, file_path, "
+            "first_video_frame, last_video_frame, actual_fps) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (video_id, shot_id, camera_instance_id, file_path,
+             first_frame, last_frame, fps),
+        )
+    return video_id
+
+
+# ---------------------------------------------------------------------------
 # Path resolution
 # ---------------------------------------------------------------------------
 

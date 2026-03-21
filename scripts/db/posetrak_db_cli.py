@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from scripts.db.posetrak_db import (
+    DEFAULT_REGISTRY_PATH,
     REGISTRY_SCHEMA_VERSION,
     create_camera_model,
     create_camera_mode,
@@ -277,6 +278,16 @@ def _cmd_info(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _add_registry_arg(p: argparse.ArgumentParser) -> None:
+    """Add the standard --registry argument with the default path."""
+    p.add_argument(
+        "--registry",
+        default=str(DEFAULT_REGISTRY_PATH),
+        metavar="PATH",
+        help=f"Path to the registry .db file (default: {DEFAULT_REGISTRY_PATH})",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="posetrak_db_cli",
@@ -286,12 +297,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # --- init ---
     p_init = sub.add_parser("init", help="Create a new registry database")
-    p_init.add_argument("--registry", required=True, metavar="PATH",
-                        help="Path for the new registry .db file")
+    _add_registry_arg(p_init)
 
     # --- camera-model-add ---
     p_cma = sub.add_parser("camera-model-add", help="Register a camera hardware model")
-    p_cma.add_argument("--registry", required=True, metavar="PATH")
+    _add_registry_arg(p_cma)
     p_cma.add_argument("--manufacturer", default="", metavar="S")
     p_cma.add_argument("--model-name", default="", metavar="S")
     p_cma.add_argument("--sensor-size", default="", metavar="S")
@@ -299,14 +309,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # --- camera-model-list ---
     p_cml = sub.add_parser("camera-model-list", help="List registered camera models")
-    p_cml.add_argument("--registry", required=True, metavar="PATH")
+    _add_registry_arg(p_cml)
 
     # --- camera-mode-add ---
     p_coda = sub.add_parser(
         "camera-mode-add",
         help="Register a capture mode (resolution/fps) for a camera model",
     )
-    p_coda.add_argument("--registry", required=True, metavar="PATH")
+    _add_registry_arg(p_coda)
     p_coda.add_argument("--model-id", required=True, metavar="UUID",
                         help="ID of the parent camera_models row")
     p_coda.add_argument("--width", type=int, default=0, metavar="N",
@@ -320,7 +330,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # --- camera-mode-list ---
     p_codl = sub.add_parser("camera-mode-list", help="List registered camera modes")
-    p_codl.add_argument("--registry", required=True, metavar="PATH")
+    _add_registry_arg(p_codl)
     p_codl.add_argument("--model-id", default="", metavar="UUID",
                         help="Filter by camera model ID")
 
@@ -329,7 +339,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "import-calib",
         help="Import intrinsic calibration from a Pose2Sim TOML file",
     )
-    p_ic.add_argument("--registry", required=True, metavar="PATH")
+    _add_registry_arg(p_ic)
     p_ic.add_argument("--calib", required=True, metavar="TOML_PATH",
                       help="Path to the Pose2Sim calibration TOML file")
     p_ic.add_argument(
@@ -352,12 +362,12 @@ def _build_parser() -> argparse.ArgumentParser:
     # --- set-project-root ---
     p_spr = sub.add_parser("set-project-root",
                             help="Set the project_root setting in the registry")
-    p_spr.add_argument("--registry", required=True, metavar="PATH")
+    _add_registry_arg(p_spr)
     p_spr.add_argument("--root", required=True, metavar="DIR")
 
     # --- info ---
     p_info = sub.add_parser("info", help="Print registry info and settings")
-    p_info.add_argument("--registry", required=True, metavar="PATH")
+    _add_registry_arg(p_info)
 
     return parser
 

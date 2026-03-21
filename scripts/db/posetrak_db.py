@@ -21,6 +21,9 @@ from typing import Final
 REGISTRY_SCHEMA_VERSION: Final[int] = 1
 SESSION_SCHEMA_VERSION: Final[int] = 1
 
+#: Default registry database location — shared across all projects on the machine.
+DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
+
 # ---------------------------------------------------------------------------
 # SQL file paths (resolved relative to this source file)
 # ---------------------------------------------------------------------------

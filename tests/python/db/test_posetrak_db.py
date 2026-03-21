@@ -12,6 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[3]))  # project root
 
 from scripts.db.posetrak_db import (
+    DEFAULT_REGISTRY_PATH,
     REGISTRY_SCHEMA_VERSION,
     SESSION_SCHEMA_VERSION,
     create_camera_model,
@@ -36,6 +37,12 @@ from scripts.db.posetrak_db import (
 _UUID4_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
+
+
+def test_default_registry_path_under_home() -> None:
+    """DEFAULT_REGISTRY_PATH should be inside the user's home directory."""
+    from pathlib import Path
+    assert DEFAULT_REGISTRY_PATH == Path.home() / ".posetrak" / "registry.db"
 
 
 def test_generate_id_is_uuid4() -> None:

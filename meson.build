@@ -74,6 +74,9 @@ if not toml_dep.found()
   toml_dep = dependency('tomlplusplus', required: true)
 endif
 
+# SQLite3 (system library, used for session DB read/write)
+sqlite3_dep = dependency('sqlite3', required: true)
+
 # CLI11 (header-only, use wrap)
 cli11_dep = dependency('CLI11',
   version: '>=2.3',
@@ -156,4 +159,5 @@ summary({
   'tomlplusplus': toml_dep.found(),
   'CLI11': cli11_dep.found(),
   'pinocchio': pinocchio_dep.found(),
+  'sqlite3': sqlite3_dep.found(),
 }, section: 'Dependencies')

@@ -41,12 +41,15 @@ test_sources = files(
   # Scale calibration
   'calibration/test_scale_calibration.cpp',
   'calibration/test_scale_regression.cpp',
+
+  # DB read path
+  'test_session_reader.cpp',
 )
 
 test_exe = executable('test_posetrak',
   test_sources,
   include_directories: posetrak_inc,
-  dependencies: [posetrak_dep, test_dep, pinocchio_dep, yaml_cpp_dep],
+  dependencies: [posetrak_dep, test_dep, pinocchio_dep, yaml_cpp_dep, sqlite3_dep],
 )
 
 test('posetrak_tests', test_exe,

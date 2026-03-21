@@ -5,6 +5,7 @@
 #include "posetrak/calibration/scale_calibration.hpp"
 #include "posetrak/core/config.hpp"
 #include "posetrak/core/skeleton_layout.hpp"
+#include "posetrak/db/session_reader.hpp"
 #include "posetrak/io/camera_loader.hpp"
 #include "posetrak/io/observation_loader.hpp"
 #include "posetrak/io/skeleton_loader.hpp"
@@ -1028,6 +1029,343 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
 }
 
 // ---------------------------------------------------------------------------
+// 'track --session-db' subcommand: run the tracker from a session DB.
+// ---------------------------------------------------------------------------
+static int run_track_from_db(std::string const& db_path, std::string const& session_id,
+                             std::string const& extrinsics_id, std::string const& sync_config_id,
+                             std::string const& sequence_id, std::string const& skeleton_id,
+                             std::string const& config_id, std::string const& output_dir,
+                             bool verbose, bool quiet, bool smooth_output, double min_confidence,
+                             std::vector<std::string> const& active_joint_groups) {
+    try {
+        if (!quiet) {
+            fmt::print("Opening session DB: {}\n", db_path);
+        }
+        SessionReader reader(db_path);
+
+        // Load skeleton
+        if (!quiet) {
+            fmt::print("Loading skeleton '{}' from DB\n", skeleton_id);
+        }
+        std::string yaml_content = reader.load_skeleton_yaml(skeleton_id);
+        auto skeleton = load_skeleton_from_yaml_string(yaml_content);
+        if (!quiet) {
+            fmt::print("  Loaded {} joints\n", skeleton.joints().size());
+        }
+
+        // Load tracker config
+        if (!quiet) {
+            fmt::print("Loading tracker config '{}' from DB\n", config_id);
+        }
+        auto db_cfg = reader.load_tracker_config(config_id);
+        auto tracker_config = db_cfg.tracker;
+        double tracker_fps = db_cfg.tracker_fps;
+
+        // Apply active_joint_groups override from CLI
+        if (!active_joint_groups.empty()) {
+            tracker_config.active_joint_groups = active_joint_groups;
+        }
+
+        // Load sequence info
+        auto seq_info = reader.load_sequence_info(sequence_id);
+        double start_time = seq_info.time_start_s;
+        double end_time = seq_info.time_end_s;
+
+        // Load cameras
+        if (!quiet) {
+            fmt::print("Loading cameras for session '{}'\n", session_id);
+        }
+        auto cameras_by_name = reader.load_cameras(session_id, extrinsics_id, sync_config_id);
+        if (!quiet) {
+            fmt::print("  Loaded {} cameras\n", cameras_by_name.size());
+        }
+
+        // Load observations
+        if (!quiet) {
+            fmt::print("Loading observations from sequence '{}'\n", sequence_id);
+        }
+        auto observations_set =
+            reader.load_observations(sequence_id, cameras_by_name, skeleton, min_confidence, 0);
+
+        if (observations_set.empty()) {
+            throw std::runtime_error("No observations found in sequence");
+        }
+
+        if (!quiet) {
+            fmt::print("  Loaded {} observations across {} cameras\n",
+                       observations_set.total_observations(), observations_set.camera_count());
+        }
+
+        // Auto-detect end time if not set by sequence
+        if (end_time < 0.0) {
+            end_time = observations_set.max_time();
+        }
+
+        // Calculate tracker steps
+        double dt = 1.0 / tracker_fps;
+        int num_steps = static_cast<int>((end_time - start_time) / dt);
+        if (num_steps <= 0) {
+            throw std::runtime_error(
+                "No time steps to process - check time_start_s, time_end_s, and tracker_fps");
+        }
+
+        if (!quiet) {
+            fmt::print("  Time range: [{:.3f}, {:.3f}) seconds\n", start_time, end_time);
+            fmt::print("  Tracker sample rate: {:.1f} Hz (dt = {:.6f} s)\n", tracker_fps, dt);
+            fmt::print("  Will process {} time steps\n", num_steps);
+        }
+
+        // Create output directory
+        std::filesystem::path out_dir(output_dir);
+        std::filesystem::create_directories(out_dir);
+
+        // Convert cameras to ID-keyed map for Tracker
+        std::unordered_map<int, Camera> cameras;
+        for (auto const& [name, cam] : cameras_by_name) {
+            cameras.emplace(cam.id(), cam);
+        }
+
+        // Create tracker
+        if (!quiet) {
+            fmt::print("\nInitializing tracker...\n");
+        }
+        auto skeleton_ptr = std::make_shared<const Skeleton>(skeleton);
+        Tracker tracker(skeleton_ptr, cameras, tracker_config);
+
+        if (smooth_output) {
+            tracker.enable_smoothing(true);
+            if (!quiet) {
+                fmt::print("RTS smoothing enabled: caching forward-pass data.\n");
+            }
+        }
+
+        // Initialize from first-frame observations
+        double t_first_window = start_time + dt;
+        auto first_frame_obs = observations_set.get_all_in_range(start_time, t_first_window);
+        bool initialized = tracker.initialize(first_frame_obs, start_time);
+        if (initialized) {
+            if (!quiet) {
+                fmt::print("  IK initialization successful\n");
+            }
+        } else {
+            fmt::print("  WARNING: IK initialization failed, falling back to rest pose\n");
+            tracker.initialize_from_rest_pose(start_time);
+        }
+
+        if (!quiet) {
+            fmt::print("  Initialization complete\n\n");
+        }
+
+        // Get FK from tracker
+        ForwardKinematics* fk = tracker.get_fk();
+        if (!fk) {
+            throw std::runtime_error("Failed to get FK from tracker");
+        }
+
+        // Create exporters
+        auto layout =
+            tracker_config.active_joint_groups.empty()
+                ? SkeletonLayout::from_full_skeleton(skeleton_ptr)
+                : SkeletonLayout::from_groups(skeleton_ptr, tracker_config.active_joint_groups);
+
+        auto exporter = std::make_unique<TrackingExporter>(out_dir, skeleton, *layout, cameras);
+        exporter->open();
+
+        auto stats_tracker = std::make_unique<StatisticsTracker>();
+
+        std::ofstream pred_obs_file(out_dir / "predicted_observations.csv");
+        pred_obs_file << "frame,camera,marker,obs_u,obs_v,pred_u,pred_v,res_u,res_v,res_norm\n";
+
+        std::ofstream state_vec_file(out_dir / "state_vectors.csv");
+        state_vec_file << generate_state_header(*layout) << "\n";
+
+        // Track sequence
+        if (!quiet) {
+            fmt::print("Tracking:\n");
+        }
+
+        auto track_start_time = std::chrono::steady_clock::now();
+        int frames_tracked = 0;
+        int frames_lost = 0;
+
+        // Process first update (step 0)
+        {
+            auto frame_0_obs = observations_set.get_all_in_range(start_time, t_first_window);
+            if (!frame_0_obs.empty()) {
+                if (auto* ukf = tracker.get_ukf()) {
+                    ukf->set_frame_number(0);
+                }
+                double t_effective = start_time - dt * 0.5;
+                auto result = tracker.track_frame(frame_0_obs, t_effective);
+                if (result.tracking_lost) {
+                    fmt::print(stderr, "Warning: Tracking lost on first update\n");
+                } else {
+                    frames_tracked++;
+                }
+            }
+        }
+
+        // Main tracking loop
+        for (int step = 1; step < num_steps; ++step) {
+            double t_start = start_time + step * dt - dt / 2.0;
+            double t_end = t_start + dt;
+
+            if (auto* ukf = tracker.get_ukf()) {
+                ukf->set_frame_number(step);
+            }
+
+            auto frame_obs = observations_set.get_all_in_range(t_start, t_end);
+
+            if (frame_obs.empty()) {
+                if (verbose) {
+                    fmt::print("  Step {}: t=[{:.3f}, {:.3f}): No observations, skipping\n", step,
+                               t_start, t_end);
+                }
+                continue;
+            }
+
+            double t_effective = t_start + dt / 2.0;
+
+            if (pred_obs_file.is_open()) {
+                export_predicted_observations(pred_obs_file, step + 1, t_effective, frame_obs,
+                                              tracker.state(), fk, cameras, skeleton);
+            }
+
+            auto result = tracker.track_frame(frame_obs, t_effective);
+
+            if (result.tracking_lost) {
+                frames_lost++;
+                if (verbose) {
+                    fmt::print("  Step {}: t=[{:.3f}, {:.3f}): Tracking LOST\n", step, t_start,
+                               t_end);
+                }
+            } else {
+                frames_tracked++;
+                if (verbose) {
+                    fmt::print("  Step {}: t=[{:.3f}, {:.3f}): {} inliers, {} outliers\n", step,
+                               t_start, t_end, result.update_info.num_inliers,
+                               result.update_info.num_outliers);
+                }
+            }
+
+            if (state_vec_file.is_open()) {
+                export_state_vector(state_vec_file, step, t_effective, result.state, *layout);
+            }
+
+            {
+                auto marker_positions_3d_map = fk->compute(result.state);
+                std::map<std::string, Eigen::Vector3d> marker_positions_3d(
+                    marker_positions_3d_map.begin(), marker_positions_3d_map.end());
+                exporter->write_frame(step, t_effective, result.state, marker_positions_3d,
+                                      frame_obs, result.update_info);
+            }
+
+            stats_tracker->add_frame_stats(step, t_effective, result.update_info, result.covariance,
+                                           result.tracking_lost);
+
+            if (!quiet && !verbose && step % 10 == 0) {
+                double percent = 100.0 * step / num_steps;
+                auto elapsed = std::chrono::steady_clock::now() - track_start_time;
+                double elapsed_sec =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() / 1000.0;
+                double steps_per_sec = step / elapsed_sec;
+                int eta_sec = static_cast<int>((num_steps - step) / steps_per_sec);
+                fmt::print("  Progress: {}/{} ({:.1f}%) | {:.1f} steps/s | ETA: {}s\r", step,
+                           num_steps, percent, steps_per_sec, eta_sec);
+                std::cout.flush();
+            }
+        }
+
+        if (!quiet && !verbose) {
+            fmt::print("\n");
+        }
+
+        exporter->close();
+        pred_obs_file.close();
+        state_vec_file.close();
+
+        // RTS smoother
+        if (smooth_output) {
+            if (!quiet) {
+                fmt::print("Running RTS backward smoother...\n");
+            }
+            auto smoothed = tracker.smooth();
+
+            {
+                auto path = out_dir / "smoothed_state_vectors.csv";
+                std::ofstream f(path);
+                f << generate_state_header(*layout) << "\n";
+                int step = 1;
+                for (auto const& sf : smoothed) {
+                    export_state_vector(f, step++, sf.timestamp, sf.state, *layout);
+                }
+            }
+            {
+                auto path = out_dir / "smoothed_joint_angles.csv";
+                std::ofstream f(path);
+                f << "frame,timestamp,joint_name,angle_x,angle_y,angle_z,"
+                     "velocity_x,velocity_y,velocity_z\n";
+                int step = 1;
+                for (auto const& sf : smoothed) {
+                    write_smoothed_joint_angles_frame(f, step++, sf.timestamp, sf.state, *layout);
+                }
+            }
+            {
+                auto path = out_dir / "smoothed_root_pose.csv";
+                std::ofstream f(path);
+                f << "frame,timestamp,pos_x,pos_y,pos_z,quat_w,quat_x,quat_y,quat_z,"
+                     "vel_x,vel_y,vel_z,omega_x,omega_y,omega_z\n";
+                int step = 1;
+                for (auto const& sf : smoothed) {
+                    write_smoothed_root_pose_frame(f, step++, sf.timestamp, sf.state);
+                }
+            }
+
+            if (!quiet) {
+                fmt::print("  Smoothed {} frames\n", smoothed.size());
+            }
+        }
+
+        // Write statistics
+        stats_tracker->write_frame_stats(out_dir / "tracking_stats.csv");
+
+        nlohmann::json metadata;
+        metadata["sequence_id"] = sequence_id;
+        metadata["session_id"] = session_id;
+        metadata["skeleton_id"] = skeleton_id;
+        metadata["num_cameras"] = cameras.size();
+        metadata["num_markers"] = skeleton.markers().size();
+        metadata["start_time"] = start_time;
+        metadata["end_time"] = end_time;
+        metadata["num_steps"] = num_steps;
+        metadata["tracker_fps"] = tracker_fps;
+        stats_tracker->write_summary_stats(out_dir / "overall_stats.json", metadata);
+
+        // Final summary
+        auto tracking_end = std::chrono::steady_clock::now();
+        auto total_elapsed = tracking_end - track_start_time;
+        double total_sec =
+            std::chrono::duration_cast<std::chrono::milliseconds>(total_elapsed).count() / 1000.0;
+
+        if (!quiet) {
+            fmt::print("\nTracking complete!\n");
+            fmt::print("  Tracked: {}/{} steps ({:.1f}%)\n", frames_tracked, num_steps,
+                       100.0 * frames_tracked / num_steps);
+            fmt::print("  Lost: {} steps\n", frames_lost);
+            fmt::print("  Average rate: {:.1f} steps/s\n", frames_tracked / total_sec);
+            fmt::print("  Total time: {:.1f}s\n", total_sec);
+            fmt::print("\nResults exported to: {}\n", output_dir);
+        }
+
+        return 0;
+
+    } catch (std::exception const& e) {
+        fmt::print(stderr, "Error: {}\n", e.what());
+        return 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // main: thin subcommand dispatcher
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
@@ -1042,8 +1380,20 @@ int main(int argc, char* argv[]) {
     bool smooth_output = false;
     bool calibrate = false;
     bool debug_output = false;
+    // DB mode arguments
+    std::string db_path;
+    std::string db_session_id;
+    std::string db_extrinsics_id;
+    std::string db_sync_config_id;
+    std::string db_sequence_id;
+    std::string db_skeleton_id;
+    std::string db_config_id;
+    std::string db_output_dir = "tracking_output";
+    double db_min_confidence = 0.1;
+    std::vector<std::string> db_active_joint_groups;
+
     track_cmd->add_option("config", track_config, "Configuration file (TOML)")
-        ->required()
+        ->expected(0, 1)
         ->check(CLI::ExistingFile);
     track_cmd->add_flag("-v,--verbose", verbose, "Verbose output (show per-frame statistics)");
     track_cmd->add_flag("-q,--quiet", quiet, "Quiet mode (only show errors)");
@@ -1058,6 +1408,20 @@ int main(int argc, char* argv[]) {
     track_cmd->add_flag("--debug", debug_output,
                         "Enable UKF debug output (overrides export_debug in config file). "
                         "Writes per-frame diagnostics to <output_dir>/debug/");
+    // DB mode options
+    track_cmd->add_option("--session-db", db_path, "Session DB file (enables DB mode)");
+    track_cmd->add_option("--session", db_session_id, "Session ID (required with --session-db)");
+    track_cmd->add_option("--extrinsics", db_extrinsics_id, "Extrinsic calibration ID");
+    track_cmd->add_option("--sync-config", db_sync_config_id, "Sync config ID");
+    track_cmd->add_option("--sequence", db_sequence_id, "Pose observation sequence ID");
+    track_cmd->add_option("--skeleton", db_skeleton_id, "Skeleton ID");
+    track_cmd->add_option("--tracker-config", db_config_id, "Tracker config ID");
+    track_cmd->add_option("--output-dir", db_output_dir,
+                          "Output directory for DB mode (default: tracking_output)");
+    track_cmd->add_option("--min-confidence", db_min_confidence,
+                          "Min keypoint confidence for DB mode (default: 0.1)");
+    track_cmd->add_option("--joint-groups", db_active_joint_groups,
+                          "Active joint groups for DB mode (empty = all)");
 
     // ---- 'scale' subcommand ---------------------------------------------
     auto* scale_cmd = app.add_subcommand(
@@ -1078,8 +1442,28 @@ int main(int argc, char* argv[]) {
 
     CLI11_PARSE(app, argc, argv);
 
-    if (*track_cmd)
-        return run_track(track_config, verbose, quiet, smooth_output, calibrate, debug_output);
+    if (*track_cmd) {
+        if (!db_path.empty()) {
+            // DB mode: validate required DB args
+            if (db_session_id.empty() || db_extrinsics_id.empty() || db_sync_config_id.empty() ||
+                db_sequence_id.empty() || db_skeleton_id.empty() || db_config_id.empty()) {
+                fmt::print(stderr,
+                           "Error: --session-db requires --session, --extrinsics, --sync-config, "
+                           "--sequence, --skeleton, and --tracker-config\n");
+                return 1;
+            }
+            return run_track_from_db(db_path, db_session_id, db_extrinsics_id, db_sync_config_id,
+                                     db_sequence_id, db_skeleton_id, db_config_id, db_output_dir,
+                                     verbose, quiet, smooth_output, db_min_confidence,
+                                     db_active_joint_groups);
+        } else {
+            if (track_config.empty()) {
+                fmt::print(stderr, "Error: config file required when not using --session-db\n");
+                return 1;
+            }
+            return run_track(track_config, verbose, quiet, smooth_output, calibrate, debug_output);
+        }
+    }
     if (*scale_cmd)
         return run_scale(scale_config, scale_output, scale_quiet);
     return 1;

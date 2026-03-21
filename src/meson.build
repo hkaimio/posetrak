@@ -1,3 +1,5 @@
+subdir('db')
+
 # Core library source files
 posetrak_sources = files(
   # Core models (Phase 1)
@@ -39,6 +41,9 @@ posetrak_sources = files(
   'io/statistics_tracker.cpp',
 )
 
+# Add DB sources (Phase 3 DB)
+posetrak_sources += db_sources
+
 # Build core library
 libposetrak = library('posetrak',
   posetrak_sources,
@@ -50,6 +55,7 @@ libposetrak = library('posetrak',
     yaml_cpp_dep,
     toml_dep,
     pinocchio_dep,
+    sqlite3_dep,
   ],
   install: true,
   version: meson.project_version(),

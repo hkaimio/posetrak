@@ -29,12 +29,15 @@ erDiagram
     string id PK
     string camera_mode_id FK
     date   calibrated_at
+    string calibration_tool
+    string distortion_model
     float  fx
     float  fy
     float  cx
     float  cy
-    float[] dist_coeffs
-    float   rms_error
+    blob   dist_coeffs
+    float  rms_error
+    string notes
   }
 
   CameraInstance {
@@ -70,8 +73,8 @@ erDiagram
   ExtrinsicEntry {
     string extrinsic_calibration_id FK
     string camera_instance_id FK
-    float[9] R
-    float[3] t
+    blob   R
+    blob   t
   }
 
   Shot {
@@ -88,8 +91,8 @@ erDiagram
     string shot_id FK
     string camera_instance_id FK
     string file_path
-    int    first_frame
-    int    last_frame
+    int    first_video_frame
+    int    last_video_frame
     float  actual_fps
   }
 
@@ -103,7 +106,7 @@ erDiagram
   SyncPoint {
     string sync_config_id FK
     string camera_instance_id FK
-    int    frame
+    int    video_frame
     float  timestamp_s
   }
 
@@ -120,47 +123,81 @@ erDiagram
   PoseObservation {
     string sequence_id FK
     string camera_instance_id FK
-    int    frame
+    int    video_frame
     float  timestamp_s
     int    person_id
-    int[]  keypoint_ids
-    float[N][2] coords_px
-    float[N][2] coords_undistorted_px
-    float[N]    confidence
+    blob   kp_blob
   }
 
   Skeleton {
     string id PK
     string name
+    string parent_id FK
     string person_label
     string source
     string yaml_content
-  }
-
-  TrackerConfig {
-    string id PK
-    string name
-    string toml_content
+    datetime created_at
     string notes
   }
 
+  TrackerConfig {
+    string   id PK
+    string   name
+    string   parent_id FK
+    datetime created_at
+    float    alpha
+    float    beta
+    float    kappa
+    float    process_noise_std
+    float    measurement_noise_std
+    float    outlier_threshold
+    float    tracker_fps
+    int      ik_max_iterations
+    float    ik_tolerance
+    float    init_position_std
+    float    init_orientation_std
+    float    init_joint_std
+    float    init_velocity_std
+    int      min_cameras_for_init
+    string   notes
+  }
+
   TrackingRun {
-    string id PK
-    string observation_sequence_id FK
-    string skeleton_id FK
-    string tracker_config_id FK
-    string extrinsic_calibration_id FK
-    string sync_config_id FK
+    string   id PK
+    string   observation_sequence_id FK
+    string   tracker_config_id FK
+    string   extrinsic_calibration_id FK
+    string   sync_config_id FK
     datetime ran_at
-    string posetrak_version
+    string   posetrak_version
+    string   active_camera_ids
+    string   marker_names
+  }
+
+  TrackingRunPerson {
+    string run_id FK
+    int    person_id
+    string skeleton_id FK
   }
 
   TrackingResult {
+    string  run_id FK
+    int     person_id FK
+    int     tracker_step
+    bool    is_smoothed
+    float   timestamp_s
+    bool    tracking_lost
+    int     n_inlier_observations
+    float   cov_condition_number
+    blob    state
+    blob    cov_diag
+  }
+
+  TrackingObsResult {
     string run_id FK
-    int    frame
-    float  timestamp_s
-    float[] state_vector
-    float[] covariance_diagonal
+    int    person_id FK
+    int    tracker_step
+    blob   obs_blob
   }
 
   CameraModel     ||--o{ CameraMode               : "has modes"
@@ -181,19 +218,59 @@ erDiagram
   SyncConfig      ||--o{ PoseObservationSequence   : "used by"
   PoseObservationSequence ||--o{ PoseObservation   : "contains"
   PoseObservationSequence ||--o{ TrackingRun       : "input to"
-  Skeleton        ||--o{ TrackingRun               : "used by"
+  Skeleton        ||--o{ Skeleton                  : "parent of"
+  Skeleton        ||--o{ TrackingRunPerson         : "used by"
+  TrackerConfig   ||--o{ TrackerConfig             : "parent of"
   TrackerConfig   ||--o{ TrackingRun               : "used by"
+  TrackingRun     ||--o{ TrackingRunPerson         : "has persons"
   TrackingRun     ||--o{ TrackingResult            : "produces"
+  TrackingRun     ||--o{ TrackingObsResult         : "produces"
+  TrackingRunPerson ||--o{ TrackingResult          : "produces"
+  TrackingRunPerson ||--o{ TrackingObsResult       : "produces"
 ```
 
 ---
 
-## 2. Key Design Decisions Embedded in the Model
+## 2. Primary Keys
+
+All composite primary keys are listed explicitly here.
+
+| Table | Primary Key |
+|---|---|
+| `CameraModel` | `id` |
+| `CameraMode` | `id` |
+| `IntrinsicsCalibration` | `id` |
+| `CameraInstance` | `id` |
+| `MocapSession` | `id` |
+| `SessionCamera` | `(session_id, camera_instance_id)` |
+| `ExtrinsicCalibration` | `id` |
+| `ExtrinsicEntry` | `(extrinsic_calibration_id, camera_instance_id)` |
+| `Shot` | `id` |
+| `ShotVideo` | `id` |
+| `SyncConfig` | `id` |
+| `SyncPoint` | `(sync_config_id, camera_instance_id)` |
+| `PoseObservationSequence` | `id` |
+| `PoseObservation` | `(sequence_id, camera_instance_id, video_frame, person_id)` |
+| `Skeleton` | `id` (SHA-256 of `yaml_content`) |
+| `TrackerConfig` | `id` (UUID) |
+| `TrackingRun` | `id` |
+| `TrackingRunPerson` | `(run_id, person_id)` |
+| `TrackingResult` | `(run_id, person_id, tracker_step, is_smoothed)` |
+| `TrackingObsResult` | `(run_id, person_id, tracker_step)` |
+
+---
+
+## 3. Key Design Decisions Embedded in the Model
 
 ### Camera modes decouple hardware from calibration
 Intrinsics are tied to `CameraMode` (resolution + codec), not to `CameraInstance`.  The same
 physical camera (instance) can run in different modes across sessions; each combination gets
 its own intrinsics calibration without duplicating hardware metadata.
+
+### Intrinsics carry distortion model metadata
+`distortion_model` (`"radtan"` / `"fisheye"` / `"none"`) makes the interpretation of
+`dist_coeffs` unambiguous without reading code.  `calibration_tool` records the provenance
+(e.g. `"opencv_charuco"`, `"kalibr"`).
 
 ### Extrinsics live at the shot level, not the session level
 A session usually shares one extrinsic calibration, but re-calibration mid-session (e.g.
@@ -205,21 +282,69 @@ A shot has exactly one sync config; multiple pose observation sequences share it
 matches reality: the sync alignment is done once per recording, then different time windows
 or person crops are extracted from the same sync baseline.
 
+### Frame-index namespacing
+Two distinct integer frame counters appear in the model and must not be confused:
+- **`video_frame`** — index into a specific camera's video file (`ShotVideo`, `SyncPoint`,
+  `PoseObservation`)
+- **`tracker_step`** — UKF predict/update cycle index, starting at 0 for each tracking run
+  (`TrackingResult`, `TrackingObsResult`)
+
+`timestamp_s` is the bridge between the two domains.
+
 ### `PoseObservationSequence` is the atomic tracking input
 A single run of `posetrak track` consumes exactly one sequence.  All relationships required
 to reproduce a tracking run are reachable from `TrackingRun`:
 - observations → sequence → shot → extrinsics → cameras (with intrinsics)
 - sync config (from sequence or shot)
-- skeleton
+- per-person skeletons (via `TrackingRunPerson`)
 - tracker config
 
-### Skeletons are global / cross-session
-A skeleton file may be created from one session's calibration result and reused across many
-sessions.  `Skeleton` therefore has no mandatory session FK.
+### Multi-person tracking via `TrackingRunPerson`
+A single tracking run can track any number of persons simultaneously.
+`TrackingRunPerson` maps each `person_id` (matching the `person_id` in `PoseObservation`)
+to the skeleton used for that person.  `TrackingResult` and `TrackingObsResult` are
+partitioned by `person_id` so per-person results never interleave.
+
+### Skeletons are content-addressed and immutable
+`Skeleton.id` is the SHA-256 hash of `yaml_content`.  Identical content always maps to the
+same row; the content of an existing row can never change.  `parent_id` chains versions
+explicitly: if a skeleton is scaled or edited, a new row is inserted with `parent_id`
+pointing to its predecessor.  `notes` is the only mutable field (it annotates the row,
+not the content).
+
+### TrackerConfigs are immutable with explicit versioning
+`TrackerConfig.id` is a UUID assigned at creation.  Rows are never updated.  `name` is a
+human-readable label (e.g. `"tight_noise"`) that can be shared across versions; `parent_id`
+links the version chain.  This supports CLI patterns such as:
+
+```
+posetrak config edit --name tight_noise      # creates new version, parent = current latest
+posetrak config history --name tight_noise   # walks parent_id chain
+posetrak track --config tight_noise …        # resolves to latest version of that name
+```
+
+`TrackingRun` records the exact config `id` (UUID), so past runs always reference the
+exact parameters that produced them.
+
+### TrackingResult merges state and per-frame statistics
+There is no separate statistics table.  `TrackingResult` holds both the filter state
+(`state`, `cov_diag`) and the frame-level diagnostics (`tracking_lost`,
+`n_inlier_observations`, `cov_condition_number`).  Smoothed and unsmoothed results share
+the same table; `is_smoothed` is part of the primary key.
+
+### TrackingObsResult uses a packed float32 blob
+Per-observation diagnostics (reprojection coordinates, Mahalanobis distance, outlier flag)
+are stored as a packed `float32` array rather than individual rows.  At 120 fps × 600 s ×
+6 cameras × 30 markers, row-per-observation would produce ~13 M rows per run; the blob
+approach gives one row per `(run_id, person_id, tracker_step)` instead.
+
+The canonical camera and marker ordering that indexes into the blob is stored once per run
+in `TrackingRun.active_camera_ids` and `TrackingRun.marker_names` (JSON arrays).  See §5
+for the full blob layout.
 
 ---
 
-## 3. Data Flow
+## 4. Data Flow
 
 ```mermaid
 flowchart TD
@@ -260,23 +385,10 @@ flowchart TD
     DB -->|intrinsics| PT
     SF -->|extrinsics + sync + observations| PT
     DB -->|Skeleton + TrackerConfig| PT
-    PT -->|TrackingResults| SF
+    PT -->|TrackingResults + ObsResults| SF
     SF -->|TrackingResults| SKEL
     SKEL -->|updated Skeleton| DB
 ```
-
----
-
-## 4. Current Pain Points vs. Model Properties
-
-| Problem now | How the model addresses it |
-|---|---|
-| "What calibration goes with this observation directory?" | `PoseObservationSequence → Shot → ExtrinsicCalibration` is a navigable FK chain |
-| Sync file references pose directory frame numbers (fragile) | `SyncPoint` uses `camera_instance_id + frame`, independent of directory layout |
-| Skeleton may or may not match camera session | `TrackingRun` explicitly records which skeleton was used |
-| Reproducing a tracking run requires finding 5 separate files | `TrackingRun` records all 5 FKs; everything is findable from one row |
-| Data scattered across arbitrary paths | Session file + registry keep all non-video data in ≤2 places |
-| Disk heavy (per-frame JSON) | Binary/columnar storage of observations (see §5) |
 
 ---
 
@@ -290,10 +402,11 @@ arbitrary-length sessions efficiently.
 ### Option A — Single SQLite File per Session ⭐ recommended
 
 One `.db` file per session contains everything: relational metadata in normal tables,
-and bulk numeric arrays as **packed BLOBs** (one BLOB per frame per camera).
+and bulk numeric arrays as **packed BLOBs** (one BLOB per frame per camera or per
+tracker step).
 
 ```
-~/.posetrak/registry.db          ← cameras, modes, intrinsics, skeletons (tiny)
+~/.posetrak/registry.db          ← cameras, modes, intrinsics, skeletons, configs (tiny)
 sessions/
   2026-02-15-gym.db              ← session: extrinsics, sync, observations, results
   2026-03-01-studio.db
@@ -304,109 +417,298 @@ skeletons/
 #### Schema sketch
 
 ```sql
--- Relational tables (normal rows)
-CREATE TABLE shots (id TEXT PRIMARY KEY, extrinsic_id TEXT, label TEXT, ...);
-CREATE TABLE sync_points (shot_id TEXT, camera_id TEXT, frame INT, timestamp REAL);
-CREATE TABLE observation_sequences (id TEXT, shot_id TEXT, time_start REAL, ...);
-CREATE TABLE tracking_runs (id TEXT, seq_id TEXT, skeleton_id TEXT, ran_at TEXT, ...);
+-- Schema version (readable without any table knowledge)
+PRAGMA user_version = 1;
 
--- Bulk array tables (BLOB rows — one row per frame × camera)
-CREATE TABLE observations (
-    seq_id   TEXT    NOT NULL,
-    camera   TEXT    NOT NULL,
-    frame    INTEGER NOT NULL,
-    ts       REAL    NOT NULL,
-    -- packed little-endian float32: K×3 values (kx, ky, confidence for each keypoint)
-    kp_blob  BLOB    NOT NULL,
-    PRIMARY KEY (seq_id, camera, frame)
+-- ── Registry tables ──────────────────────────────────────────────────────────
+
+CREATE TABLE camera_models (
+    id TEXT PRIMARY KEY, manufacturer TEXT, model_name TEXT, sensor_size TEXT
+);
+
+CREATE TABLE camera_modes (
+    id TEXT PRIMARY KEY,
+    camera_model_id TEXT NOT NULL REFERENCES camera_models(id),
+    width_px INTEGER NOT NULL, height_px INTEGER NOT NULL,
+    nominal_fps REAL NOT NULL, codec TEXT, notes TEXT
+);
+
+CREATE TABLE intrinsics_calibrations (
+    id TEXT PRIMARY KEY,
+    camera_mode_id TEXT NOT NULL REFERENCES camera_modes(id),
+    calibrated_at DATE NOT NULL,
+    calibration_tool TEXT,               -- e.g. "opencv_charuco", "kalibr"
+    distortion_model TEXT NOT NULL,      -- "radtan" | "fisheye" | "none"
+    fx REAL, fy REAL, cx REAL, cy REAL,
+    dist_coeffs BLOB,                    -- float64 array, length depends on model
+    rms_error REAL,
+    notes TEXT
+);
+
+CREATE TABLE camera_instances (
+    id TEXT PRIMARY KEY,
+    camera_model_id TEXT NOT NULL REFERENCES camera_models(id),
+    serial_number TEXT, label TEXT
+);
+
+CREATE TABLE skeletons (
+    id TEXT PRIMARY KEY,                 -- SHA-256 of yaml_content; immutable
+    name TEXT NOT NULL,
+    parent_id TEXT REFERENCES skeletons(id),
+    person_label TEXT,
+    source TEXT,
+    yaml_content TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    notes TEXT                           -- only mutable field
+);
+
+CREATE TABLE tracker_configs (
+    id TEXT PRIMARY KEY,                 -- UUID; immutable
+    name TEXT NOT NULL,
+    parent_id TEXT REFERENCES tracker_configs(id),
+    created_at DATETIME NOT NULL,
+    -- UKF parameters
+    alpha REAL, beta REAL, kappa REAL,
+    process_noise_std REAL,
+    measurement_noise_std REAL,
+    outlier_threshold REAL,
+    tracker_fps REAL,
+    -- Initialisation parameters
+    ik_max_iterations INTEGER,
+    ik_tolerance REAL,
+    init_position_std REAL,
+    init_orientation_std REAL,
+    init_joint_std REAL,
+    init_velocity_std REAL,
+    min_cameras_for_init INTEGER,
+    notes TEXT                           -- only mutable field
+);
+
+-- ── Session tables ────────────────────────────────────────────────────────────
+
+CREATE TABLE mocap_sessions (
+    id TEXT PRIMARY KEY, recorded_at DATE NOT NULL, location TEXT, notes TEXT
+);
+
+CREATE TABLE session_cameras (
+    session_id TEXT NOT NULL REFERENCES mocap_sessions(id),
+    camera_instance_id TEXT NOT NULL REFERENCES camera_instances(id),
+    camera_mode_id TEXT NOT NULL REFERENCES camera_modes(id),
+    intrinsics_calibration_id TEXT NOT NULL REFERENCES intrinsics_calibrations(id),
+    label TEXT,
+    PRIMARY KEY (session_id, camera_instance_id)
+);
+
+CREATE TABLE extrinsic_calibrations (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES mocap_sessions(id),
+    calibrated_at DATE NOT NULL, method TEXT, rms_error REAL
+);
+
+CREATE TABLE extrinsic_entries (
+    extrinsic_calibration_id TEXT NOT NULL REFERENCES extrinsic_calibrations(id),
+    camera_instance_id TEXT NOT NULL REFERENCES camera_instances(id),
+    R BLOB NOT NULL,   -- float64[9] row-major rotation matrix
+    t BLOB NOT NULL,   -- float64[3] translation vector
+    PRIMARY KEY (extrinsic_calibration_id, camera_instance_id)
+);
+
+CREATE TABLE shots (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES mocap_sessions(id),
+    extrinsic_calibration_id TEXT NOT NULL REFERENCES extrinsic_calibrations(id),
+    shot_number INTEGER NOT NULL, label TEXT, notes TEXT
+);
+
+CREATE TABLE shot_videos (
+    id TEXT PRIMARY KEY,
+    shot_id TEXT NOT NULL REFERENCES shots(id),
+    camera_instance_id TEXT NOT NULL REFERENCES camera_instances(id),
+    file_path TEXT NOT NULL,
+    first_video_frame INTEGER NOT NULL,
+    last_video_frame INTEGER NOT NULL,
+    actual_fps REAL NOT NULL
+);
+
+CREATE TABLE sync_configs (
+    id TEXT PRIMARY KEY,
+    shot_id TEXT NOT NULL REFERENCES shots(id),
+    created_by TEXT, notes TEXT
+);
+
+CREATE TABLE sync_points (
+    sync_config_id TEXT NOT NULL REFERENCES sync_configs(id),
+    camera_instance_id TEXT NOT NULL REFERENCES camera_instances(id),
+    video_frame INTEGER NOT NULL,
+    timestamp_s REAL NOT NULL,
+    PRIMARY KEY (sync_config_id, camera_instance_id)
+);
+
+CREATE TABLE pose_observation_sequences (
+    id TEXT PRIMARY KEY,
+    shot_id TEXT NOT NULL REFERENCES shots(id),
+    sync_config_id TEXT NOT NULL REFERENCES sync_configs(id),
+    time_start_s REAL NOT NULL, time_end_s REAL NOT NULL,
+    pose_model TEXT, notes TEXT
+);
+
+CREATE TABLE pose_observations (
+    sequence_id TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+    camera_instance_id TEXT NOT NULL REFERENCES camera_instances(id),
+    video_frame INTEGER NOT NULL,
+    timestamp_s REAL NOT NULL,
+    person_id INTEGER NOT NULL,
+    -- packed float32: K×3 values (kx, ky, confidence per keypoint)
+    kp_blob BLOB NOT NULL,
+    PRIMARY KEY (sequence_id, camera_instance_id, video_frame, person_id)
+);
+
+-- ── Tracking tables ───────────────────────────────────────────────────────────
+
+CREATE TABLE tracking_runs (
+    id TEXT PRIMARY KEY,
+    observation_sequence_id TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+    tracker_config_id TEXT NOT NULL REFERENCES tracker_configs(id),
+    extrinsic_calibration_id TEXT NOT NULL REFERENCES extrinsic_calibrations(id),
+    sync_config_id TEXT NOT NULL REFERENCES sync_configs(id),
+    ran_at DATETIME NOT NULL,
+    posetrak_version TEXT NOT NULL,
+    -- ordered JSON arrays defining the obs_blob layout (see §5 blob layout)
+    active_camera_ids TEXT NOT NULL,  -- e.g. ["cam_A","cam_B","cam_C"]
+    marker_names TEXT NOT NULL        -- e.g. ["MRK-knee.L","MRK-knee.R",...]
+);
+
+CREATE TABLE tracking_run_persons (
+    run_id TEXT NOT NULL REFERENCES tracking_runs(id),
+    person_id INTEGER NOT NULL,       -- matches person_id in pose_observations
+    skeleton_id TEXT NOT NULL REFERENCES skeletons(id),
+    PRIMARY KEY (run_id, person_id)
 );
 
 CREATE TABLE tracking_results (
-    run_id  TEXT    NOT NULL,
-    frame   INTEGER NOT NULL,
-    ts      REAL    NOT NULL,
-    -- packed float64: state vector (D values)
-    state   BLOB    NOT NULL,
-    PRIMARY KEY (run_id, frame)
+    run_id TEXT NOT NULL REFERENCES tracking_runs(id),
+    person_id INTEGER NOT NULL,
+    tracker_step INTEGER NOT NULL,    -- UKF cycle index, 0-based
+    is_smoothed BOOLEAN NOT NULL DEFAULT FALSE,
+    timestamp_s REAL NOT NULL,
+    tracking_lost BOOLEAN NOT NULL DEFAULT FALSE,
+    n_inlier_observations INTEGER,
+    cov_condition_number REAL,
+    state BLOB NOT NULL,              -- float64 packed state vector
+    cov_diag BLOB NOT NULL,           -- float64 packed covariance diagonal
+    PRIMARY KEY (run_id, person_id, tracker_step, is_smoothed)
+);
+
+CREATE TABLE tracking_obs_results (
+    run_id TEXT NOT NULL REFERENCES tracking_runs(id),
+    person_id INTEGER NOT NULL,
+    tracker_step INTEGER NOT NULL,
+    -- float32[n_cameras × n_markers × 8] — see §5 blob layout
+    obs_blob BLOB NOT NULL,
+    PRIMARY KEY (run_id, person_id, tracker_step)
 );
 ```
 
-#### BLOB layout and encoding
+#### BLOB layouts and encoding
 
-The BLOB contains raw little-endian IEEE 754 binary (float32 for observations, float64
-for tracking state).  Both Python and C++ interpret this identically with zero conversion:
+**`pose_observations.kp_blob`** — float32, shape `[K, 3]`, row-major.
+Column order: `(kx_px, ky_px, confidence)` per keypoint.  `K` is fixed for a given
+`pose_model` and known from the sequence metadata.
 
-**Python write (pose extractor):**
 ```python
-import sqlite3, struct, numpy as np
-
 kp = np.zeros((17, 3), dtype=np.float32)   # always explicit dtype — never infer
 kp_blob = kp.tobytes()                      # 17 × 3 × 4 = 204 bytes
-
-conn.execute(
-    "INSERT INTO observations VALUES (?,?,?,?,?)",
-    (seq_id, camera_id, frame, ts, kp_blob)
-)
 ```
 
-**C++ read (posetrak tracker):**
+**`tracking_results.state` / `cov_diag`** — float64, length `D` (DOF count from skeleton).
+
+**`tracking_obs_results.obs_blob`** — float32, shape `[n_cameras, n_markers, 8]`, row-major.
+Each 32-byte record contains:
+
+```
+index  field                  type     notes
+  0    obs_pixel_x            float32  observed (undistorted), NaN if no observation
+  1    obs_pixel_y            float32
+  2    pred_pixel_x           float32  FK-projected, NaN if tracking lost
+  3    pred_pixel_y           float32
+  4    mahalanobis_distance   float32  NaN if not in measurement set
+  5    used_in_update         float32  1.0 = inlier, 0.0 = outlier/absent
+  6    is_outlier             float32  1.0 = Mahalanobis-rejected, 0.0 otherwise
+  7    _pad                   float32  reserved, write 0.0
+```
+
+All booleans are encoded as `float32` (0.0 / 1.0) to keep the struct 4-byte aligned
+throughout.  NaN unambiguously signals "slot not applicable" for absent camera/marker
+combinations.
+
+Camera dimension order follows `TrackingRun.active_camera_ids`; marker dimension order
+follows `TrackingRun.marker_names`.  Both are JSON arrays stored once per run.
+
+```python
+# Python decode
+import json, numpy as np, sqlite3
+
+run = conn.execute("SELECT active_camera_ids, marker_names FROM tracking_runs WHERE id=?",
+                   (run_id,)).fetchone()
+cameras = json.loads(run["active_camera_ids"])
+markers = json.loads(run["marker_names"])
+
+row = conn.execute(
+    "SELECT obs_blob FROM tracking_obs_results WHERE run_id=? AND person_id=? AND tracker_step=?",
+    (run_id, person_id, step)).fetchone()
+obs = np.frombuffer(row["obs_blob"], dtype=np.float32
+      ).reshape(len(cameras), len(markers), 8)
+
+# obs[cam_idx, marker_idx, 0] = obs_pixel_x  etc.
+cam_idx    = cameras.index("cam_A")
+marker_idx = markers.index("MRK-knee.L")
+obs_x = obs[cam_idx, marker_idx, 0]   # NaN if no observation
+```
+
 ```cpp
-// SQLiteCpp or raw sqlite3 C API
+// C++ decode (run metadata already loaded into vectors)
 sqlite3_stmt* stmt;
 sqlite3_prepare_v2(db,
-    "SELECT frame, ts, kp_blob FROM observations "
-    "WHERE seq_id=? AND camera=? ORDER BY frame", -1, &stmt, nullptr);
+    "SELECT obs_blob FROM tracking_obs_results "
+    "WHERE run_id=? AND person_id=? AND tracker_step=?", -1, &stmt, nullptr);
 
-while (sqlite3_step(stmt) == SQLITE_ROW) {
-    int frame = sqlite3_column_int(stmt, 0);
-    double ts  = sqlite3_column_double(stmt, 1);
-    auto* blob = static_cast<float const*>(sqlite3_column_blob(stmt, 2));
-    int   nbytes = sqlite3_column_bytes(stmt, 2);
-    Eigen::Map<Eigen::Matrix<float, Eigen::Dynamic, 3, Eigen::RowMajor> const>
-        kp(blob, nbytes / (3 * sizeof(float)), 3);
-    // kp(k, 0) = kx,  kp(k, 1) = ky,  kp(k, 2) = confidence
-}
+auto* blob    = static_cast<float const*>(sqlite3_column_blob(stmt, 0));
+int   n_cams  = active_camera_ids.size();
+int   n_marks = marker_names.size();
+// blob[cam * n_marks * 8 + mark * 8 + field]
 ```
-
-No type negotiation, no numpy interop layer, no HDF5 library — just bytes both sides agree on.
 
 #### Performance at scale
 
-Benchmark: 10-minute session at 30 fps, 5 cameras, 17 keypoints.
+Benchmark: 10-minute session at 120 fps, 6 cameras, 30 markers, 2 persons.
 
 | Metric | Value |
 |---|---|
-| Observation rows | 5 cameras × 30 fps × 600 s = **90 000 rows** |
-| BLOB size per row | 17 × 3 × 4 bytes = **204 bytes** |
-| Observations total (uncompressed) | 90 000 × 204 bytes ≈ **18 MB** |
-| Sequential read (one camera, full sequence) | one SQL scan, 18 000 rows → **< 50 ms** |
-| Tracking result rows (one run) | 30 fps × 600 s = **18 000 rows** |
-| State BLOB (e.g. 50-DOF skeleton) | 50 × 8 bytes = 400 bytes/row → **7 MB** |
+| `pose_observation` rows | 6 × 120 × 600 = **432 000** |
+| kp_blob size (17 keypoints) | 17 × 3 × 4 = **204 bytes** |
+| Observations total | 432 000 × 204 bytes ≈ **88 MB** |
+| `tracking_result` rows (raw + smoothed) | 2 × 2 × 120 × 600 = **288 000** |
+| `tracking_obs_result` rows | 2 × 120 × 600 = **144 000** |
+| obs_blob size (6 cams × 30 markers) | 6 × 30 × 8 × 4 = **5 760 bytes** |
+| ObsResults total | 144 000 × 5 760 bytes ≈ **830 MB** |
 
-The old concern about SQLite at scale assumed **row-per-keypoint** storage (77 M rows for
-this session).  BLOB-per-frame-per-camera reduces that to 90 000 rows — well within SQLite's
-sweet spot.
-
-Page-level Zstandard compression (available in SQLite since 3.43 via `zstd_vfs`) can reduce
-the observation data to 30–50% of the uncompressed size at negligible read overhead.  An
-alternative is per-blob `zstd_compress` / `zstd_decompress` in the application layer (~5
-lines each side).
+The obs_result size is significant for long high-fps sessions.  Page-level Zstandard
+compression (SQLite 3.43+ `zstd_vfs`) or per-blob `zstd_compress` at write time reduces
+this by 60–70% in practice given the NaN-heavy sparse structure.
 
 **Pros:**
 - Single file — trivially backed up, moved, or attached to the registry record
 - Zero extra C libraries beyond SQLite (embedded everywhere, stdlib in Python)
-- Full SQL queryability for all metadata and time-range selection
-  (`WHERE ts BETWEEN 12.0 AND 15.0` works on the `ts` column)
-- BLOB byte layout is under application control → explicit, self-documenting,
-  no interop surprises
+- Full SQL queryability for metadata and time-range selection
+- BLOB byte layout is under application control → explicit, self-documenting
 - Foreign key constraints enforce referential integrity
 - WAL mode gives safe concurrent reads (e.g. GUI + tracker at same time)
+- `PRAGMA user_version` enables forward-compatible schema migration
 
 **Cons:**
+- obs_result BLOBs are large for high-fps multi-camera runs; compression recommended
+- No built-in partial-array read (whole blob must be decoded even for one marker)
 - BLOBs need documentation; not inspectable with a generic SQLite browser
-- No built-in partial-array read (you always decode the whole BLOB for a frame, even
-  if you only need one keypoint) — acceptable given BLOBs are small
-- No chunked compression or native random slice access like HDF5 hyperslab
 
 ---
 
@@ -464,7 +766,6 @@ f.create_dataset("state", data=arr, **hdf5plugin.Blosc())
 
 # RIGHT — gzip is built into every HDF5 installation
 f.create_dataset("state", data=arr, compression="gzip", compression_opts=4)
-# or lz4 (via hdf5plugin) — only if C++ side also installs hdf5plugin
 ```
 
 Following these three rules, every dataset written by h5py reads correctly from HighFive
@@ -477,45 +778,45 @@ session.h5
 ├─ /metadata               attributes only: session_id (str), date (str), version (int)
 ├─ /extrinsics/
 │   └─ CAM_A/
-│       ├─ R   float64[3,3]  ← matrix only, no string datasets
+│       ├─ R   float64[3,3]
 │       └─ t   float64[3]
 ├─ /shots/shot_001/observations/seq_001/CAM_A/
-│   ├─ frame       int32[F]        ← plain numeric datasets throughout
-│   ├─ timestamp   float64[F]
-│   ├─ keypoints   float32[F,K,2]  ← gzip-compressed, chunk=(1,K,2)
-│   └─ confidence  float32[F,K]
-└─ /tracking/run_001/
-    ├─ frame       int32[T]
-    ├─ timestamp   float64[T]
-    ├─ state       float64[T,D]    ← gzip level 4
-    └─ cov_diag    float64[T,D]
+│   ├─ video_frame  int32[F]
+│   ├─ timestamp    float64[F]
+│   ├─ keypoints    float32[F,K,3]   ← (kx, ky, conf); gzip chunk=(1,K,3)
+└─ /tracking/run_001/person_0/
+    ├─ tracker_step    int32[T]
+    ├─ timestamp       float64[T]
+    ├─ state           float64[T,D]   ← gzip level 4
+    ├─ cov_diag        float64[T,D]
+    └─ obs_results     float32[T,C,M,8]
 ```
 
-**Pros:** Best compression ratio; partial reads (hyperslabs) avoid loading the full sequence;
+**Pros:** Best compression ratio; hyperslab reads avoid loading the full sequence;
 `h5ls` / `h5dump` / HDFView for inspection; HighFive provides Eigen-native read/write.
 
-**Cons:** Requires HDF5 C library (~3 MB); write corruption risk on interrupted flush (use
-`H5F_ACC_SWMR_WRITE` for concurrent access); hierarchical layout is more complex to
-implement than flat SQL tables; the interop rules above must be enforced by convention.
+**Cons:** Requires HDF5 C library (~3 MB); write corruption risk on interrupted flush;
+hierarchical layout is more complex to implement; interop rules above must be enforced
+by convention.
 
 ---
 
 ## 6. Recommendation
 
-**Use Option A (SQLite with BLOB packing).**  The BLOB-per-frame-per-camera design
-eliminates the row-count concern entirely (90 K rows vs 77 M for a 10-minute session) while
-keeping full SQL queryability for metadata and time selection.  The byte layout is explicit
-and under application control, so there is no type-negotiation interop layer to get wrong.
-SQLite ships with Python's stdlib and is embeddable in C++ as a single amalgamation file —
-zero extra dependencies on either side.
+**Use Option A (SQLite with BLOB packing).**  The BLOB-per-frame design eliminates
+row-count concerns while keeping full SQL queryability for metadata.  The byte layout is
+explicit and self-described by companion JSON columns, so there is no type-negotiation
+interop layer.  SQLite ships with Python's stdlib and is embeddable in C++ as a single
+amalgamation file — zero extra dependencies on either side.  `PRAGMA user_version` gives
+a clean migration path as the schema evolves.
 
 HDF5 (Option B) remains the better choice if you need:
-- Hyperslab reads (read only frames 500–700 of one dataset efficiently)
+- Hyperslab reads (only frames 500–700 of one dataset)
 - Very large sessions where chunked compression gives a significant size advantage
-- Third-party tools (e.g. MATLAB, Julia DataFrames) that read HDF5 natively
+- Third-party tools (MATLAB, Julia DataFrames) that read HDF5 natively
 
-The two can coexist: use SQLite as the primary session format, and add an HDF5 export
-path for inter-tool exchange if a specific consumer requires it.
+The two can coexist: use SQLite as the primary format, add an HDF5 export path for
+inter-tool exchange if a specific consumer requires it.
 
 ### Access pattern mapping
 
@@ -523,17 +824,30 @@ path for inter-tool exchange if a specific consumer requires it.
 |---|---|
 | "List all sessions using camera CAM-A in 2026" | SQL on `registry.db` |
 | "Which intrinsics calibration was active for this run?" | SQL JOIN across registry tables |
-| "Read cam3 observations, frames 500–700" | `SELECT … WHERE seq_id=? AND camera=? AND frame BETWEEN 500 AND 700` |
-| "Export observations to pandas" | `pd.read_sql("SELECT …", conn)` + `np.frombuffer(row.kp_blob, dtype=np.float32).reshape(-1,3)` |
-| "Reproduce run_001 exactly" | FK lookup in `tracking_runs` table |
+| "Read cam3 observations, video frames 500–700" | `WHERE seq_id=? AND camera=? AND video_frame BETWEEN 500 AND 700` |
+| "Export observations to pandas" | `pd.read_sql(…)` + `np.frombuffer(row.kp_blob, dtype=np.float32).reshape(-1,3)` |
+| "Reproduce run_001 exactly" | FK lookup in `tracking_runs` → config + persons + extrinsics |
+| "All runs with outlier_threshold > 4.0" | `SELECT … FROM tracker_configs WHERE outlier_threshold > 4.0` |
+| "History of skeleton 'harri-scaled'" | `WITH RECURSIVE … FOLLOW parent_id` |
 | "Inspect file without code" | DB Browser for SQLite (GUI, free, cross-platform) |
 
 ### Migration path from current layout
 
-1. Write a Python importer that reads the current per-frame JSON trees and inserts rows
-   into `observations` (one BLOB per frame × camera).
-2. Write a second importer that reads the current TOML camera calibrations and inserts
-   them into `registry.db`.
-3. Existing YAML skeletons stay as-is; `registry.db` holds the path and a content hash.
-4. The `posetrak` CLI grows a `--session-db` flag alongside the existing directory-tree
+1. Write a Python importer that reads current per-frame JSON trees and inserts rows into
+   `pose_observations` (one BLOB per video_frame × camera).
+2. Write a second importer that reads current TOML camera calibrations and inserts them
+   into `registry.db`.
+3. Write an importer for existing CSV tracking output (`observations.csv`,
+   `tracking_results.csv`, etc.) into `tracking_results` and `tracking_obs_results`.
+4. Existing YAML skeletons are hashed and inserted as `Skeleton` rows; the YAML content
+   is stored verbatim.
+5. The `posetrak` CLI grows a `--session-db` flag alongside the existing directory-tree
    reader, for backward compatibility during transition.
+
+### Open questions
+
+- **CLI config resolution**: `posetrak track --config <name>` should resolve to the
+  latest version of that name.  Exact semantics (latest by `created_at`, explicit
+  `--version`, etc.) to be decided during implementation.
+- **obs_blob compression**: decide between page-level `zstd_vfs` (transparent, no code
+  changes) vs. per-blob application-layer compression (more portable).

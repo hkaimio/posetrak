@@ -94,6 +94,34 @@ def import_skeleton(
     return skeleton_id
 
 
+def copy_skeleton_to_session(
+    registry: sqlite3.Connection,
+    session: sqlite3.Connection,
+    skeleton_id: str,
+) -> None:
+    """Copy a skeleton row from registry into a session DB.
+
+    Uses INSERT OR IGNORE so calling this function multiple times with the
+    same *skeleton_id* is safe.
+
+    Parameters
+    ----------
+    registry:
+        Open connection to the posetrak registry database (source).
+    session:
+        Open connection to a posetrak session database (destination).
+    skeleton_id:
+        ``skeletons.id`` (SHA-256 hex) to copy.
+
+    Raises
+    ------
+    ValueError
+        If *skeleton_id* does not exist in *registry*.
+    """
+    from scripts.db.posetrak_db import _copy_rows_if_missing
+    _copy_rows_if_missing(registry, session, "skeletons", [skeleton_id])
+
+
 def list_skeletons(registry: sqlite3.Connection) -> list[sqlite3.Row]:
     """Return all skeleton rows from the registry, ordered by creation time.
 

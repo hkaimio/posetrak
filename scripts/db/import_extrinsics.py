@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from scripts.db.posetrak_db import generate_id
+from scripts.db.posetrak_db import _copy_rows_if_missing, generate_id
 
 
 @dataclass
@@ -96,6 +96,7 @@ def import_extrinsics(
     calib_path: Path,
     camera_instances: str | dict[str, str],
     *,
+    registry: sqlite3.Connection | None = None,
     method: str = "pose2sim",
     calibrated_at: str | None = None,
 ) -> ExtrinsicsImportResult:
@@ -103,6 +104,10 @@ def import_extrinsics(
 
     Creates one ``extrinsic_calibrations`` row and one ``extrinsic_entries``
     row per imported camera. All inserts are executed in a single transaction.
+
+    When *registry* is provided, the ``camera_models`` and
+    ``camera_instances`` rows for each imported camera are copied into the
+    session database so the session remains self-contained.
 
     Parameters
     ----------
@@ -120,6 +125,10 @@ def import_extrinsics(
         - **Per-camera** (``dict[str, str]``): mapping from TOML section key
           (e.g. ``"cam1"``) to ``camera_instances.id``. Sections not listed
           are silently skipped.
+    registry:
+        Optional open connection to the registry database.  When provided,
+        ``camera_models`` and ``camera_instances`` rows for each imported
+        camera are copied into *session* using INSERT OR IGNORE.
     method:
         Name of the calibration method stored in ``extrinsic_calibrations``
         (default ``"pose2sim"``).
@@ -169,6 +178,22 @@ def import_extrinsics(
 
         rows_entries.append((calib_id, instance_id, r_blob, t_blob))
         result.camera_instance_ids[cam_key] = instance_id
+
+    # If a registry connection was provided, copy camera rows into the session
+    # so it remains self-contained.
+    if registry is not None:
+        for instance_id in dict.fromkeys(result.camera_instance_ids.values()):
+            inst_row = registry.execute(
+                "SELECT camera_model_id FROM camera_instances WHERE id = ?",
+                (instance_id,),
+            ).fetchone()
+            if inst_row is not None:
+                _copy_rows_if_missing(
+                    registry, session, "camera_models", [inst_row["camera_model_id"]]
+                )
+                _copy_rows_if_missing(
+                    registry, session, "camera_instances", [instance_id]
+                )
 
     with session:
         session.execute(

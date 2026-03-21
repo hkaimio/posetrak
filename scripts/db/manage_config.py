@@ -223,6 +223,34 @@ def edit_config(
     return new_id
 
 
+def copy_config_to_session(
+    registry: sqlite3.Connection,
+    session: sqlite3.Connection,
+    config_id: str,
+) -> None:
+    """Copy a tracker_config row from registry into a session DB.
+
+    Uses INSERT OR IGNORE so calling this function multiple times with the
+    same *config_id* is safe.
+
+    Parameters
+    ----------
+    registry:
+        Open connection to the posetrak registry database (source).
+    session:
+        Open connection to a posetrak session database (destination).
+    config_id:
+        ``tracker_configs.id`` UUID to copy.
+
+    Raises
+    ------
+    ValueError
+        If *config_id* does not exist in *registry*.
+    """
+    from scripts.db.posetrak_db import _copy_rows_if_missing
+    _copy_rows_if_missing(registry, session, "tracker_configs", [config_id])
+
+
 def list_configs(
     registry: sqlite3.Connection,
     *,

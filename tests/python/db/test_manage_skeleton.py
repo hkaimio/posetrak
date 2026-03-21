@@ -11,7 +11,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[3]))  # project root
 
-from scripts.db.manage_skeleton import import_skeleton, list_skeletons
+from scripts.db.manage_skeleton import copy_skeleton_to_session, import_skeleton, list_skeletons
+from scripts.db.posetrak_db import create_session
 
 
 # ---------------------------------------------------------------------------
@@ -133,3 +134,43 @@ def test_list_skeletons_returns_all(registry_db: sqlite3.Connection, tmp_path: P
     assert len(rows) == 2
     names = {row["name"] for row in rows}
     assert names == {"skel_a", "skel_b"}
+
+
+# ---------------------------------------------------------------------------
+# import_skeleton on session connection / copy_skeleton_to_session
+# ---------------------------------------------------------------------------
+
+
+def test_skeleton_import_to_session(
+    registry_db: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """import_skeleton() should work directly on a session connection."""
+    sess_path = tmp_path / "skel_session.db"
+    session = create_session(sess_path)
+    yaml_path = _write_yaml(tmp_path, content="joints: [hip, knee]\n")
+    skeleton_id = import_skeleton(session, yaml_path, name="session_skel")
+    row = session.execute(
+        "SELECT name FROM skeletons WHERE id = ?", (skeleton_id,)
+    ).fetchone()
+    session.close()
+    assert row is not None
+    assert row["name"] == "session_skel"
+
+
+def test_skeleton_copy_to_session(
+    registry_db: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """copy_skeleton_to_session() copies a skeleton row from registry into a session DB."""
+    sess_path = tmp_path / "copy_session.db"
+    session = create_session(sess_path)
+    yaml_path = _write_yaml(tmp_path, content="joints: [shoulder]\n")
+    skeleton_id = import_skeleton(registry_db, yaml_path, name="reg_skel")
+
+    copy_skeleton_to_session(registry_db, session, skeleton_id)
+
+    row = session.execute(
+        "SELECT name FROM skeletons WHERE id = ?", (skeleton_id,)
+    ).fetchone()
+    session.close()
+    assert row is not None
+    assert row["name"] == "reg_skel"

@@ -233,6 +233,11 @@ def open_registry(path: Path) -> sqlite3.Connection:
 def create_session(path: Path) -> sqlite3.Connection:
     """Create a new session database at *path* and return an open connection.
 
+    The session database is self-contained: it embeds a full copy of the
+    registry tables (camera_models, camera_modes, camera_instances,
+    intrinsics_calibrations, skeletons, tracker_configs) so the DB remains
+    usable even when the registry file is not accessible.
+
     Parameters
     ----------
     path:
@@ -253,7 +258,11 @@ def create_session(path: Path) -> sqlite3.Connection:
         raise FileExistsError(f"Session database already exists: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = _connect(path)
-    _apply_schema(conn, _SESSION_SCHEMA_SQL, SESSION_SCHEMA_VERSION)
+    registry_sql = _REGISTRY_SCHEMA_SQL.read_text(encoding="utf-8")
+    session_sql = _SESSION_SCHEMA_SQL.read_text(encoding="utf-8")
+    conn.executescript(registry_sql + "\n" + session_sql)
+    _set_schema_version(conn, SESSION_SCHEMA_VERSION)
+    conn.commit()
     return conn
 
 
@@ -465,6 +474,49 @@ def list_camera_modes(
 
 
 # ---------------------------------------------------------------------------
+# Cross-database row copy helper
+# ---------------------------------------------------------------------------
+
+
+def _copy_rows_if_missing(
+    src: sqlite3.Connection,
+    dst: sqlite3.Connection,
+    table: str,
+    ids: list[str],
+) -> None:
+    """Copy rows from *src* to *dst* by ID using INSERT OR IGNORE.
+
+    Allows idempotent copy: if the row already exists in *dst* it is silently
+    skipped.  Raises ValueError if a row is not found in *src*.
+
+    Parameters
+    ----------
+    src:
+        Source database connection (rows are read from here).
+    dst:
+        Destination database connection (rows are inserted here).
+    table:
+        Name of the table to copy rows from/to.
+    ids:
+        List of primary key values (``id`` column) to copy.  Duplicates are
+        automatically deduplicated while preserving order.
+
+    Raises
+    ------
+    ValueError
+        If any ``id`` in *ids* is not found in *src*.
+    """
+    for row_id in dict.fromkeys(ids):  # deduplicate, preserve order
+        row = src.execute(f"SELECT * FROM {table} WHERE id = ?", (row_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"Row '{row_id}' not found in {table} of source database")
+        dst.execute(
+            f"INSERT OR IGNORE INTO {table} VALUES ({', '.join('?' * len(row))})",
+            tuple(row),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Session database management
 # ---------------------------------------------------------------------------
 
@@ -510,6 +562,7 @@ def create_mocap_session(
 
 def add_session_camera(
     session: sqlite3.Connection,
+    registry: sqlite3.Connection,
     session_id: str,
     camera_instance_id: str,
     camera_mode_id: str,
@@ -519,10 +572,16 @@ def add_session_camera(
 ) -> None:
     """Insert a session_cameras row linking a camera to a session.
 
+    Registry rows for the camera model, mode, instance, and intrinsics are
+    copied into the session database so the session is self-contained.
+
     Parameters
     ----------
     session:
         Open connection to a posetrak session database.
+    registry:
+        Open connection to the posetrak registry database.  Used to look up
+        and copy camera rows into *session*.
     session_id:
         ID of the parent ``mocap_sessions`` row.
     camera_instance_id:
@@ -536,10 +595,39 @@ def add_session_camera(
 
     Raises
     ------
+    ValueError
+        If *camera_instance_id* or *camera_mode_id* is not found in *registry*.
     sqlite3.IntegrityError
         If the (session_id, camera_instance_id) pair already exists.
     """
+    instance_row = registry.execute(
+        "SELECT camera_model_id FROM camera_instances WHERE id = ?",
+        (camera_instance_id,),
+    ).fetchone()
+    if instance_row is None:
+        raise ValueError(
+            f"camera_instance '{camera_instance_id}' not found in registry"
+        )
+
+    mode_row = registry.execute(
+        "SELECT camera_model_id FROM camera_modes WHERE id = ?",
+        (camera_mode_id,),
+    ).fetchone()
+    if mode_row is None:
+        raise ValueError(
+            f"camera_mode '{camera_mode_id}' not found in registry"
+        )
+
+    camera_model_id = instance_row["camera_model_id"]
+
     with session:
+        # Copy dependency chain: camera_models → camera_modes/instances → intrinsics
+        _copy_rows_if_missing(registry, session, "camera_models", [camera_model_id])
+        _copy_rows_if_missing(registry, session, "camera_modes", [camera_mode_id])
+        _copy_rows_if_missing(registry, session, "camera_instances", [camera_instance_id])
+        _copy_rows_if_missing(
+            registry, session, "intrinsics_calibrations", [intrinsics_calibration_id]
+        )
         session.execute(
             "INSERT INTO session_cameras "
             "(session_id, camera_instance_id, camera_mode_id, "

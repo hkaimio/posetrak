@@ -15,8 +15,11 @@ from scripts.db.posetrak_db import (
     DEFAULT_REGISTRY_PATH,
     REGISTRY_SCHEMA_VERSION,
     SESSION_SCHEMA_VERSION,
+    _copy_rows_if_missing,
+    add_session_camera,
     create_camera_model,
     create_camera_mode,
+    create_mocap_session,
     create_registry,
     create_session,
     generate_id,
@@ -241,6 +244,7 @@ def test_registry_has_expected_tables(registry_db: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 _SESSION_TABLES = {
+    # session-specific tables
     "mocap_sessions",
     "session_cameras",
     "extrinsic_calibrations",
@@ -255,11 +259,18 @@ _SESSION_TABLES = {
     "tracking_run_persons",
     "tracking_results",
     "tracking_obs_results",
+    # registry tables embedded in every session DB
+    "camera_models",
+    "camera_modes",
+    "camera_instances",
+    "intrinsics_calibrations",
+    "skeletons",
+    "tracker_configs",
 }
 
 
 def test_session_has_expected_tables(session_db: sqlite3.Connection) -> None:
-    """The session schema should create all expected tables."""
+    """The session schema should create all expected tables, including registry tables."""
     rows = session_db.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     ).fetchall()
@@ -356,3 +367,94 @@ def test_list_camera_modes_filtered(registry_db: sqlite3.Connection) -> None:
     assert len(modes_m1) == 2
     assert len(modes_m2) == 1
     assert len(list_camera_modes(registry_db)) == 3
+
+
+# ---------------------------------------------------------------------------
+# New tests: self-contained session DB and _copy_rows_if_missing
+# ---------------------------------------------------------------------------
+
+
+def test_session_db_has_registry_tables(session_db: sqlite3.Connection) -> None:
+    """A newly created session DB should contain all registry tables."""
+    rows = session_db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()
+    actual = {row["name"] for row in rows}
+    for table in ("camera_models", "camera_modes", "camera_instances",
+                  "intrinsics_calibrations", "skeletons", "tracker_configs"):
+        assert table in actual, f"Registry table missing from session DB: {table!r}"
+
+
+def test_add_session_camera_copies_camera_rows(
+    tmp_path: Path,
+    registry_db: sqlite3.Connection,
+    session_db: sqlite3.Connection,
+) -> None:
+    """After add_session_camera, registry rows are present in the session DB."""
+    import struct, datetime as _dt
+    model_id = create_camera_model(registry_db, manufacturer="Acme", model_name="C1")
+    mode_id = create_camera_mode(registry_db, model_id, width_px=1920, height_px=1080)
+    dist_blob = struct.pack("<4d", 0.0, 0.0, 0.0, 0.0)
+    inst_id = "inst-copy-test"
+    registry_db.execute(
+        "INSERT INTO camera_instances (id, camera_model_id, serial_number, label) "
+        "VALUES (?, ?, '', 'c1')",
+        (inst_id, model_id),
+    )
+    intr_id = "intr-copy-test"
+    registry_db.execute(
+        "INSERT INTO intrinsics_calibrations "
+        "(id, camera_mode_id, calibrated_at, distortion_model, fx, fy, cx, cy, dist_coeffs) "
+        "VALUES (?, ?, ?, 'radtan', 800.0, 800.0, 320.0, 240.0, ?)",
+        (intr_id, mode_id, _dt.date.today().isoformat(), dist_blob),
+    )
+    registry_db.commit()
+
+    session_id = create_mocap_session(session_db)
+    add_session_camera(
+        session_db, registry_db, session_id, inst_id, mode_id, intr_id, label="c1"
+    )
+
+    # All four registry rows should now exist in the session DB.
+    assert session_db.execute(
+        "SELECT id FROM camera_models WHERE id = ?", (model_id,)
+    ).fetchone() is not None
+
+    assert session_db.execute(
+        "SELECT id FROM camera_modes WHERE id = ?", (mode_id,)
+    ).fetchone() is not None
+
+    assert session_db.execute(
+        "SELECT id FROM camera_instances WHERE id = ?", (inst_id,)
+    ).fetchone() is not None
+
+    assert session_db.execute(
+        "SELECT id FROM intrinsics_calibrations WHERE id = ?", (intr_id,)
+    ).fetchone() is not None
+
+
+def test_copy_rows_if_missing_idempotent(
+    registry_db: sqlite3.Connection,
+    session_db: sqlite3.Connection,
+) -> None:
+    """Calling _copy_rows_if_missing twice with the same ID should not raise."""
+    model_id = create_camera_model(registry_db, manufacturer="Idempotent", model_name="X")
+    # First copy
+    _copy_rows_if_missing(registry_db, session_db, "camera_models", [model_id])
+    # Second copy — should be silently skipped (INSERT OR IGNORE)
+    _copy_rows_if_missing(registry_db, session_db, "camera_models", [model_id])
+    count = session_db.execute(
+        "SELECT COUNT(*) FROM camera_models WHERE id = ?", (model_id,)
+    ).fetchone()[0]
+    assert count == 1
+
+
+def test_copy_rows_if_missing_missing_row_raises(
+    registry_db: sqlite3.Connection,
+    session_db: sqlite3.Connection,
+) -> None:
+    """_copy_rows_if_missing should raise ValueError when the source row is absent."""
+    with pytest.raises(ValueError, match="not found in camera_models"):
+        _copy_rows_if_missing(
+            registry_db, session_db, "camera_models", ["nonexistent-uuid"]
+        )

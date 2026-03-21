@@ -14,7 +14,10 @@ sys.path.insert(0, str(Path(__file__).parents[3]))  # project root
 from scripts.db.posetrak_db import (
     add_session_camera,
     add_shot_video,
+    create_camera_model,
+    create_camera_mode,
     create_mocap_session,
+    create_registry,
     create_session,
     create_shot,
 )
@@ -73,35 +76,71 @@ def test_create_mocap_session_stores_location_and_notes(
 # ---------------------------------------------------------------------------
 
 
+def _make_registry_with_camera(tmp_path: Path) -> tuple[sqlite3.Connection, str, str, str]:
+    """Create a registry with one camera model, mode, instance, and intrinsics row.
+
+    Returns (registry_conn, camera_instance_id, camera_mode_id, intrinsics_id).
+    """
+    import struct
+    import datetime
+    reg_path = tmp_path / "reg_for_session.db"
+    reg = create_registry(reg_path)
+    model_id = create_camera_model(reg, manufacturer="TestCo", model_name="Cam")
+    mode_id = create_camera_mode(reg, model_id, width_px=1280, height_px=720)
+    inst_id = reg.execute(
+        "INSERT INTO camera_instances (id, camera_model_id, serial_number, label) "
+        "VALUES ('inst-uuid-1', ?, '', 'cam1') RETURNING id",
+        (model_id,),
+    ).fetchone()[0]
+    reg.commit()
+    dist_blob = struct.pack("<4d", 0.0, 0.0, 0.0, 0.0)
+    intr_id = "intr-uuid-1"
+    reg.execute(
+        "INSERT INTO intrinsics_calibrations "
+        "(id, camera_mode_id, calibrated_at, distortion_model, fx, fy, cx, cy, dist_coeffs) "
+        "VALUES (?, ?, ?, 'radtan', 800.0, 800.0, 320.0, 240.0, ?)",
+        (intr_id, mode_id, datetime.date.today().isoformat(), dist_blob),
+    )
+    reg.commit()
+    return reg, inst_id, mode_id, intr_id
+
+
 def test_add_session_camera_creates_row(
     session_db: sqlite3.Connection,
+    tmp_path: Path,
 ) -> None:
     """add_session_camera() inserts a session_cameras row."""
+    reg, inst_id, mode_id, intr_id = _make_registry_with_camera(tmp_path)
     session_id = create_mocap_session(session_db)
     add_session_camera(
         session_db,
+        reg,
         session_id,
-        "inst-uuid-1",
-        "mode-uuid-1",
-        "intr-uuid-1",
+        inst_id,
+        mode_id,
+        intr_id,
         label="cam1",
     )
+    reg.close()
     row = session_db.execute(
         "SELECT * FROM session_cameras WHERE session_id = ?", (session_id,)
     ).fetchone()
     assert row is not None
-    assert row["camera_instance_id"] == "inst-uuid-1"
+    assert row["camera_instance_id"] == inst_id
     assert row["label"] == "cam1"
 
 
 def test_add_session_camera_duplicate_raises(
     session_db: sqlite3.Connection,
+    tmp_path: Path,
 ) -> None:
     """Inserting the same (session_id, camera_instance_id) pair twice raises IntegrityError."""
+    reg, inst_id, mode_id, intr_id = _make_registry_with_camera(tmp_path)
     session_id = create_mocap_session(session_db)
-    add_session_camera(session_db, session_id, "inst-1", "mode-1", "intr-1")
+    add_session_camera(session_db, reg, session_id, inst_id, mode_id, intr_id)
     with pytest.raises(sqlite3.IntegrityError):
-        add_session_camera(session_db, session_id, "inst-1", "mode-1", "intr-1")
+        add_session_camera(session_db, reg, session_id, inst_id, mode_id, intr_id)
+    reg.close()
 
 
 # ---------------------------------------------------------------------------

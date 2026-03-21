@@ -114,8 +114,8 @@ def session_db_full(tmp_path: Path, registry_db, camera_mode_id):
     sess_path = tmp_path / "test_full.db"
     session_conn = create_session(sess_path)
     session_id = create_mocap_session(session_conn, location="test gym")
-    add_session_camera(session_conn, session_id, inst1, camera_mode_id, intr1, label="cam1")
-    add_session_camera(session_conn, session_id, inst2, camera_mode_id, intr2, label="cam2")
+    add_session_camera(session_conn, registry_db, session_id, inst1, camera_mode_id, intr1, label="cam1")
+    add_session_camera(session_conn, registry_db, session_id, inst2, camera_mode_id, intr2, label="cam2")
     yield session_conn, session_id, inst1, inst2
     session_conn.close()
 

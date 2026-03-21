@@ -14,4 +14,6 @@ dependencies = [
 [dependency-groups]
 dev = [
     "marimo>=0.19.7",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
 ]

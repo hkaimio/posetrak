@@ -1006,41 +1006,314 @@ and wires them to subcommands.
 
 ### 7.3 Implementation phases
 
+#### Status summary
+
+| Phase | Status | Commits |
+|---|---|---|
+| 1 — Schema and Python foundation | **Complete** | `6ddbbc9`, `21ab173` |
+| 2 — Session ingestion | Not started | — |
+| 3 — C++ read path | Not started | — |
+| 4 — C++ write path | Not started | — |
+| 5 — Analysis integration | Not started | — |
+
 ---
 
-#### Phase 1 — Schema and Python foundation
+#### Phase 1 — Schema and Python foundation ✓ COMPLETE
+
 *Goal: schema exists, can be created from scratch, Python can read/write all registry tables.*
 
-- `db/schema.sql` with full schema and `PRAGMA user_version = 1`
-- `scripts/db/posetrak_db.py`:
-  - `open_registry(path)` / `open_session(path)` — open or create, check schema version
-  - UUID generation helper
-  - Schema creation from `schema.sql`
-- `scripts/db/import_calib_toml.py` — imports Pose2Sim camera TOML into registry
-  (`camera_models`, `camera_instances`, `camera_modes`, `intrinsics_calibrations`)
-- Unit tests: schema creation, round-trip for camera registry tables
+**What was implemented** (differs from original spec in italics):
 
-**Deliverable**: `posetrak-db init` and `posetrak-db import-calib` commands work;
-registry populated from existing TOML files.
+- `db/registry_schema.sql` and `db/session_schema.sql` (separate files, not a single `schema.sql`)
+- `scripts/db/posetrak_db.py`:
+  - `create_registry(path)` / `open_registry(path)` / `create_session(path)` / `open_session(path)`
+  - `generate_id()`, `get_schema_version()`, `get_project_root()`, `set_project_root()`, `resolve_path()`
+  - *`create_camera_model()`, `create_camera_mode()`, `list_camera_models()`, `list_camera_modes()`*
+- `scripts/db/import_calib_toml.py`:
+  - *Does NOT create `camera_models` or `camera_modes` rows.* Camera hardware must be pre-registered
+    via `camera-model-add` / `camera-mode-add` before importing intrinsics.
+  - *Accepts `camera_modes` as `str` (homogeneous UUID) or `dict[str, str]` (per-camera
+    `{"cam1": uuid, "cam2": uuid}`) — cameras not listed are skipped.*
+  - Creates `camera_instances` and `intrinsics_calibrations` rows only.
+- `scripts/db/posetrak_db_cli.py` — nested `<topic> <action>` CLI:
+  `registry init/info/set-root`,
+  `camera-model add/list`, `camera-mode add/list`,
+  `calib import`
+- *Session DBs are self-contained*: `create_session()` embeds all registry tables
+  (`camera_models`, `camera_modes`, `camera_instances`, `intrinsics_calibrations`,
+  `skeletons`, `tracker_configs`) so the session `.db` file is portable without the
+  registry.
+- `_copy_rows_if_missing(src, dst, table, ids)` — copies dependency chains from registry
+  into session DB using `INSERT OR IGNORE`; idempotent.
+- `add_session_camera(session, registry, ...)` — copies the full camera dependency chain
+  (model → mode/instance → intrinsics) into the session DB automatically.
+- 112 pytest tests in `tests/python/db/`
+
+**Key lesson from Phase 1**: always require the caller to pre-register the things a command depends
+on. Generating implicit parent rows (as the original `import-calib` did for camera models/modes)
+creates the wrong rows and requires refactoring. Every command below lists its pre-conditions
+explicitly.
+
+**Typical Phase 1 workflow:**
+
+```bash
+posetrak-db registry init --registry registry.db
+posetrak-db registry set-root --registry registry.db --root /mnt/d/mocap
+
+# Register hardware (once per physical camera model)
+posetrak-db camera-model add --registry registry.db \
+  --manufacturer GoPro --model-name "Hero 10 Black"
+  # → camera_model_id: <model-uuid>
+
+# Register capture mode (once per resolution/codec combination)
+posetrak-db camera-mode add --registry registry.db \
+  --model-id <model-uuid> --width 1920 --height 1080 --fps 120
+  # → camera_mode_id: <mode-uuid>
+
+# Import intrinsics from Pose2Sim TOML — one --camera-mode per camera
+posetrak-db calib import --registry registry.db \
+  --calib calib.toml \
+  --camera-mode cam1=<mode-uuid-A> \
+  --camera-mode cam2=<mode-uuid-B>
+  # → per-camera: instance_id, intrinsics_id
+```
 
 ---
 
 #### Phase 2 — Session ingestion
-*Goal: a full recording session can be imported from the current directory layout.*
+*Goal: a complete recording session can be imported from the current directory layout.*
 
-- `import_sync_json.py` — `sync_data.json` → `sync_configs` + `sync_points`
-  (creates `MocapSession`, `Shot`, `ShotVideo` rows as needed)
-- `import_pose_json.py` — per-frame OpenPose/RTMPose JSON → `pose_observations` blobs
-  (one `kp_blob` per video_frame × camera)
-- Extrinsic calibration import (from Pose2Sim extrinsic TOML)
-- `manage_skeleton.py` — import YAML, compute SHA-256, insert skeleton row; list and
-  history commands
-- `manage_config.py` — create tracker config row from parameters; edit (creates new
-  version with `parent_id`); history command
+**Pre-conditions**: Phase 1 complete. `registry.db` populated with camera instances and
+intrinsics calibrations for all cameras that appear in the session. Session DBs are
+self-contained (registry tables embedded); `--registry` is only needed for `session add-camera`
+to copy rows, and for `skeleton import`/`config create` with `--global`.
 
-**Deliverable**: `posetrak-db import-session <dir>` ingests a complete recorded session;
-`posetrak-db skeleton list/import/history` and `posetrak-db config list/create/history`
-manage the registry.
+##### Design principle (lesson from Phase 1)
+
+No command creates implicit parent rows. Every command that references a pre-existing entity
+requires its ID to be supplied explicitly. Commands that operate on multi-camera data use the
+same `cam1=<uuid>` per-camera mapping pattern as `import-calib`.
+
+##### Commands to implement
+
+The commands below are grouped by which database they write to.
+
+The commands below use the `<topic> <action>` structure. All write to `session.db` unless
+noted; `--registry` is only required where rows must be copied from it.
+
+**Skeleton and config commands** (can write to registry and/or session):
+
+```
+posetrak-db skeleton import
+    [--registry <db>]          # writes to registry when --global is set
+    [--session-db <db>]        # writes to session DB (default target)
+    [--global]                 # write to registry; requires --registry
+    --file <path/to/skeleton.yaml>
+    [--name NAME]              # human label; defaults to filename stem
+    [--person-label LABEL]     # e.g. "harri"
+    [--source TEXT]            # e.g. "scaled from kevin-template"
+    [--parent-id UUID]         # set if this is a derived version of another skeleton
+```
+Creates one `skeletons` row. ID = SHA-256 of YAML content. **Idempotent**: re-importing
+identical content is a no-op. Prints the skeleton ID.
+
+```
+posetrak-db skeleton list
+    [--registry <db>] [--session-db <db>]
+```
+Lists all skeletons. Shows id, name, person_label, created_at, parent_id.
+
+```
+posetrak-db config create
+    [--registry <db>] [--session-db <db>] [--global]
+    --name NAME
+    --from-toml <path/to/config.toml>
+    [--notes TEXT]
+```
+Reads `[tracking]`, `[tracking.ukf]`, `[tracking.initialization]` and `[processing]` sections.
+**Does not** read `[data]` or `[output]` — those are run-specific. Prints the config ID.
+
+```
+posetrak-db config edit
+    [--registry <db>] [--session-db <db>] [--global]
+    (--name NAME | --id UUID)
+    [--alpha F] [--beta F] [--process-noise-std F] [--measurement-noise-std F]
+    [--outlier-threshold F] [--tracker-fps F] [--notes TEXT]
+```
+Creates a new `tracker_configs` row with `parent_id` pointing to the referenced row.
+Prints the new config ID.
+
+```
+posetrak-db config list
+    [--registry <db>] [--session-db <db>]
+    [--name NAME]
+```
+
+---
+
+**Session commands** (write to `session.db`):
+
+A session `.db` file is created once and then grown incrementally. The commands below must be
+run in the order shown because each step depends on IDs from the previous one. Session DBs
+embed all registry tables so they are portable without the registry file.
+
+```
+posetrak-db session create
+    --session-db <path/to/new-session.db>
+    [--date DATE]       # ISO date, e.g. "2026-03-10"; defaults to today
+    [--location TEXT]
+    [--notes TEXT]
+```
+Creates the session `.db` file (both schemas + PRAGMA) and inserts one `mocap_sessions` row.
+Prints the session ID. **Fails** if the file already exists.
+
+```
+posetrak-db session add-camera
+    --registry <db>
+    --session-db <db>
+    --session <session-id>
+    --camera-instance <instance-id>
+    --camera-mode <mode-id>
+    --intrinsics <intrinsics-id>
+    [--label TEXT]
+```
+Registers one camera for use in a session. Copies the camera dependency chain (model → mode,
+instance, intrinsics) from registry into the session DB automatically. Creates one
+`session_cameras` row. Must be called once per camera before `extrinsics import`,
+`shot add-video`, or `sync import`.
+
+```
+posetrak-db extrinsics import
+    --session-db <db>
+    --session <session-id>
+    --calib <path/to/calib.toml>
+    --camera-instance (cam1=<id> [cam2=<id>...] | <id>)
+    [--registry <db>]      # if provided, copies camera rows into session DB
+    [--method TEXT]        # e.g. "pose2sim_bundle"
+    [--calibrated-at DATE]
+```
+Reads rotation/translation for each listed TOML section. Creates one `extrinsic_calibrations`
+row and one `extrinsic_entries` row per listed camera. Cameras not listed are skipped.
+**Does not** create `session_cameras` rows — those must already exist. Prints the
+extrinsic_calibration ID.
+
+```
+posetrak-db shot create
+    --session-db <db>
+    --session <session-id>
+    --extrinsics <extrinsic-calibration-id>
+    [--number N]
+    [--label TEXT]
+    [--notes TEXT]
+```
+Creates one `shots` row. Prints the shot ID.
+
+```
+posetrak-db shot add-video
+    --session-db <db>
+    --shot <shot-id>
+    --camera-instance <instance-id>
+    --file <path>            # absolute or relative to project_root
+    --first-frame N
+    --last-frame N
+    --fps F
+```
+Creates one `shot_videos` row. Must be called once per camera per shot. **Requires** that a
+`session_cameras` row for `(session_id, camera_instance_id)` already exists. Prints the
+shot_video ID.
+
+```
+posetrak-db sync import
+    --session-db <db>
+    --shot <shot-id>
+    --sync-json <path/to/sync_data.json>
+    --camera-instance (cam1=<id> [cam2=<id>...] | <id>)
+    [--notes TEXT]
+```
+Reads `sync_data.json`. Creates one `sync_configs` row and one `sync_points` row per listed
+camera. `shot_video_id` is looked up automatically from existing `shot_videos` rows for the
+shot (matched by `camera_instance_id`). **Fails** if no `shot_videos` row exists for a listed
+camera. Prints the sync_config ID.
+
+```
+posetrak-db pose import
+    --session-db <db>
+    --shot <shot-id>
+    --sync-config <sync-config-id>
+    --pose-dir <dir>          # directory containing per-camera pose JSON files
+    --camera-instance (cam1=<id> [cam2=<id>...] | <id>)
+    [--person-id N]           # integer person index in the JSON; default 0
+    [--time-start F]          # seconds; default: start of sync range
+    [--time-end F]            # seconds; default: end of sync range
+    [--pose-model NAME]       # e.g. "rtmpose-body8-halpe26"; stored as metadata
+```
+Reads per-frame pose JSON files from `<dir>`. Creates one `pose_observation_sequences` row
+and one `pose_observations` row per (video_frame, camera). `kp_blob` packed as float32
+`[K, 3]` (kx, ky, confidence per keypoint). Cameras not in `--camera-instance` are skipped.
+Prints the sequence ID.
+
+##### Typical Phase 2 workflow (one shot)
+
+```bash
+# Pre-condition: camera instances and intrinsics already in registry.db (Phase 1)
+
+# 1. Create a session db (embeds all registry tables — portable without registry.db)
+posetrak-db session create --session-db session.db --date 2026-03-10 --location "gym"
+  # → session-id: <S>
+
+# 2. Register which cameras participate (once per camera)
+#    Copies camera rows from registry into session.db automatically.
+posetrak-db session add-camera --registry registry.db --session-db session.db \
+  --session <S> --camera-instance <inst-cam1> --camera-mode <mode-uuid> --intrinsics <intr-cam1>
+posetrak-db session add-camera --registry registry.db --session-db session.db \
+  --session <S> --camera-instance <inst-cam2> --camera-mode <mode-uuid> --intrinsics <intr-cam2>
+
+# 3. Import extrinsics
+posetrak-db extrinsics import --session-db session.db \
+  --session <S> --calib calib.toml \
+  --camera-instance cam1=<inst-cam1> cam2=<inst-cam2>
+  # → extrinsics-id: <E>
+
+# 4. Create a shot
+posetrak-db shot create --session-db session.db \
+  --session <S> --extrinsics <E> --label "shomenuchi_iriminage_korkea"
+  # → shot-id: <SH>
+
+# 5. Register video files
+posetrak-db shot add-video --session-db session.db \
+  --shot <SH> --camera-instance <inst-cam1> \
+  --file videos/cam1.mp4 --first-frame 0 --last-frame 14400 --fps 120
+posetrak-db shot add-video --session-db session.db \
+  --shot <SH> --camera-instance <inst-cam2> \
+  --file videos/cam2.mp4 --first-frame 0 --last-frame 14400 --fps 120
+
+# 6. Import sync
+posetrak-db sync import --session-db session.db \
+  --shot <SH> --sync-json sync_data.json \
+  --camera-instance cam1=<inst-cam1> cam2=<inst-cam2>
+  # → sync-config-id: <SC>
+
+# 7. Import pose observations
+posetrak-db pose import --session-db session.db \
+  --shot <SH> --sync-config <SC> \
+  --pose-dir pose/ \
+  --camera-instance cam1=<inst-cam1> cam2=<inst-cam2> \
+  --pose-model rtmpose-body8-halpe26
+  # → sequence-id: <SEQ>
+
+# 8. Import skeleton and tracker config
+#    --global writes to registry.db; without it writes to session.db only
+posetrak-db skeleton import --session-db session.db \
+  --file harri-scaled.yaml --person-label harri
+  # → skeleton-id: <SK>
+
+posetrak-db config create --session-db session.db \
+  --name default --from-toml harri.toml
+  # → config-id: <CFG>
+```
+
+**Deliverable**: all commands above work; a complete session imported from the existing
+directory layout is fully queryable from Python; 46+ passing pytest tests.
 
 ---
 

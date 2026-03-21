@@ -954,18 +954,38 @@ np.frombuffer(blob, dtype=np.dtype('<f4'))   # float32 LE
 np.frombuffer(blob, dtype=np.dtype('<f8'))   # float64 LE
 ```
 
-### 7.2 Code structure
+### 7.2 CLI split
+
+`posetrak` is a C++ executable.  There is no mechanism to call Python from within it
+without embedding the interpreter, which would be a heavy and unwanted dependency.
+Python-based functionality therefore lives in a **separate tool** that shares the
+database file as the handoff point — the two processes never call each other.
+
+| Tool | Language | Responsibilities |
+|---|---|---|
+| `posetrak` | C++ | `track`, `scale` — everything that touches the tracker at runtime |
+| `posetrak-db` | Python | `init`, `import-*`, `skeleton`, `config`, `session` — all DB management |
+
+`posetrak-db` is a single argparse dispatcher script (`scripts/db/posetrak_db_cli.py`),
+runnable directly (`uv run scripts/db/posetrak_db_cli.py …`) or via a thin shell alias.
+No package installation required; the same `uv`-based workflow already used by other
+Python scripts in the project.
+
+### 7.3 Code structure
 
 ```
 db/
   schema.sql                  ← canonical schema, single source of truth
   migrations/
-    0001_initial.sql           ← baseline (same as schema.sql at v1)
+    0001_initial.sql           ← baseline (same content as schema.sql at v1)
     0002_add_foo.sql           ← future migrations
 
 scripts/
   db/
-    posetrak_db.py             ← Python DB access module (connection, helpers, UUIDs)
+    posetrak_db.py             ← shared Python module: open_registry(), open_session(),
+                               │  schema creation, PRAGMA user_version check, UUID gen,
+                               │  low-level INSERT helpers
+    posetrak_db_cli.py         ← CLI entry point: dispatches to subcommands below
     import_calib_toml.py       ← TOML camera calibration → registry
     import_sync_json.py        ← sync_data.json → sync_points
     import_pose_json.py        ← per-frame pose JSON → pose_observations
@@ -980,9 +1000,9 @@ src/
     schema_embedded.hpp        ← generated at build time from db/schema.sql
 ```
 
-`posetrak_db.py` is the shared Python foundation — connection management, schema version
-check (`PRAGMA user_version`), UUID generation, and low-level INSERT helpers.  All other
-Python tools import from it rather than opening the DB directly.
+`posetrak_db.py` is the shared Python foundation imported by all other scripts.
+`posetrak_db_cli.py` is the user-facing entry point — it imports the module files above
+and wires them to subcommands.
 
 ### 7.3 Implementation phases
 
@@ -1000,8 +1020,8 @@ Python tools import from it rather than opening the DB directly.
   (`camera_models`, `camera_instances`, `camera_modes`, `intrinsics_calibrations`)
 - Unit tests: schema creation, round-trip for camera registry tables
 
-**Deliverable**: `posetrak db init`, `posetrak db import-calib` commands work; registry
-populated from existing TOML files.
+**Deliverable**: `posetrak-db init` and `posetrak-db import-calib` commands work;
+registry populated from existing TOML files.
 
 ---
 
@@ -1018,8 +1038,9 @@ populated from existing TOML files.
 - `manage_config.py` — create tracker config row from parameters; edit (creates new
   version with `parent_id`); history command
 
-**Deliverable**: `posetrak db import-session <dir>` ingests a complete recorded session;
-`posetrak db skeletons` and `posetrak db configs` manage the registry.
+**Deliverable**: `posetrak-db import-session <dir>` ingests a complete recorded session;
+`posetrak-db skeleton list/import/history` and `posetrak-db config list/create/history`
+manage the registry.
 
 ---
 

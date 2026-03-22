@@ -5,6 +5,7 @@
 #include "posetrak/calibration/scale_calibration.hpp"
 #include "posetrak/core/config.hpp"
 #include "posetrak/core/skeleton_layout.hpp"
+#include "posetrak/db/result_writer.hpp"
 #include "posetrak/db/session_reader.hpp"
 #include "posetrak/io/camera_loader.hpp"
 #include "posetrak/io/observation_loader.hpp"
@@ -1031,11 +1032,10 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
 // ---------------------------------------------------------------------------
 // 'track --session-db' subcommand: run the tracker from a session DB.
 // ---------------------------------------------------------------------------
-static int run_track_from_db(std::string const& db_path, std::string const& session_id,
-                             std::string const& extrinsics_id, std::string const& sync_config_id,
-                             std::string const& sequence_id, std::string const& skeleton_id,
-                             std::string const& config_id, std::string const& output_dir,
-                             bool verbose, bool quiet, bool smooth_output, double min_confidence,
+static int run_track_from_db(std::string const& db_path, std::string const& sequence_id,
+                             std::string const& skeleton_id, std::string const& config_id,
+                             std::string const& output_dir, bool verbose, bool quiet,
+                             bool smooth_output, double min_confidence, int person_id,
                              std::vector<std::string> const& active_joint_groups) {
     try {
         if (!quiet) {
@@ -1043,11 +1043,16 @@ static int run_track_from_db(std::string const& db_path, std::string const& sess
         }
         SessionReader reader(db_path);
 
+        // Resolve any prefix IDs to full UUIDs
+        std::string full_sequence_id = reader.resolve_id("pose_observation_sequences", sequence_id);
+        std::string full_skeleton_id = reader.resolve_id("skeletons", skeleton_id);
+        std::string full_config_id = reader.resolve_id("tracker_configs", config_id);
+
         // Load skeleton
         if (!quiet) {
-            fmt::print("Loading skeleton '{}' from DB\n", skeleton_id);
+            fmt::print("Loading skeleton '{}' from DB\n", full_skeleton_id);
         }
-        std::string yaml_content = reader.load_skeleton_yaml(skeleton_id);
+        std::string yaml_content = reader.load_skeleton_yaml(full_skeleton_id);
         auto skeleton = load_skeleton_from_yaml_string(yaml_content);
         if (!quiet) {
             fmt::print("  Loaded {} joints\n", skeleton.joints().size());
@@ -1055,9 +1060,9 @@ static int run_track_from_db(std::string const& db_path, std::string const& sess
 
         // Load tracker config
         if (!quiet) {
-            fmt::print("Loading tracker config '{}' from DB\n", config_id);
+            fmt::print("Loading tracker config '{}' from DB\n", full_config_id);
         }
-        auto db_cfg = reader.load_tracker_config(config_id);
+        auto db_cfg = reader.load_tracker_config(full_config_id);
         auto tracker_config = db_cfg.tracker;
         double tracker_fps = db_cfg.tracker_fps;
 
@@ -1067,25 +1072,28 @@ static int run_track_from_db(std::string const& db_path, std::string const& sess
         }
 
         // Load sequence info
-        auto seq_info = reader.load_sequence_info(sequence_id);
+        auto seq_info = reader.load_sequence_info(full_sequence_id);
         double start_time = seq_info.time_start_s;
         double end_time = seq_info.time_end_s;
 
-        // Load cameras
+        // Load cameras (derives session/extrinsics/sync from the sequence record)
         if (!quiet) {
-            fmt::print("Loading cameras for session '{}'\n", session_id);
+            fmt::print("Loading cameras for sequence '{}'\n", full_sequence_id);
         }
-        auto cameras_by_name = reader.load_cameras(session_id, extrinsics_id, sync_config_id);
+        auto cameras_by_name = reader.load_cameras_for_sequence(full_sequence_id);
         if (!quiet) {
             fmt::print("  Loaded {} cameras\n", cameras_by_name.size());
         }
 
+        // Load sequence metadata (session_id, extrinsic_calibration_id, sync_config_id)
+        auto seq_meta = reader.load_sequence_metadata(full_sequence_id);
+
         // Load observations
         if (!quiet) {
-            fmt::print("Loading observations from sequence '{}'\n", sequence_id);
+            fmt::print("Loading observations from sequence '{}'\n", full_sequence_id);
         }
-        auto observations_set =
-            reader.load_observations(sequence_id, cameras_by_name, skeleton, min_confidence, 0);
+        auto observations_set = reader.load_observations(full_sequence_id, cameras_by_name,
+                                                         skeleton, min_confidence, person_id);
 
         if (observations_set.empty()) {
             throw std::runtime_error("No observations found in sequence");
@@ -1124,6 +1132,11 @@ static int run_track_from_db(std::string const& db_path, std::string const& sess
         for (auto const& [name, cam] : cameras_by_name) {
             cameras.emplace(cam.id(), cam);
         }
+
+        // Create result writer (writes tracking results to the session DB alongside CSV output)
+        ResultWriter result_writer(db_path, full_sequence_id, full_skeleton_id, full_config_id,
+                                   seq_meta.extrinsic_calibration_id, seq_meta.sync_config_id,
+                                   person_id, cameras_by_name, skeleton);
 
         // Create tracker
         if (!quiet) {
@@ -1260,6 +1273,13 @@ static int run_track_from_db(std::string const& db_path, std::string const& sess
                                       frame_obs, result.update_info);
             }
 
+            result_writer.write_frame(step, t_effective, result.state.to_error_vector(),
+                                      result.covariance, result.tracking_lost,
+                                      result.update_info.num_inliers,
+                                      0.0 /* cov_condition placeholder */);
+            if (!result.update_info.observations.empty())
+                result_writer.write_obs_results(step, result.update_info.observations);
+
             stats_tracker->add_frame_stats(step, t_effective, result.update_info, result.covariance,
                                            result.tracking_lost);
 
@@ -1321,9 +1341,24 @@ static int run_track_from_db(std::string const& db_path, std::string const& sess
                 }
             }
 
+            // Write smoothed frames to DB
+            {
+                int step_idx = 1;
+                for (auto const& sf : smoothed) {
+                    result_writer.write_smoothed_frame(step_idx++, sf.timestamp,
+                                                       sf.state.to_error_vector(), sf.covariance);
+                }
+            }
+
             if (!quiet) {
                 fmt::print("  Smoothed {} frames\n", smoothed.size());
             }
+        }
+
+        // Flush result writer and report run ID
+        result_writer.flush();
+        if (!quiet) {
+            fmt::print("tracking_run_id: {}\n", result_writer.run_id());
         }
 
         // Write statistics
@@ -1331,7 +1366,6 @@ static int run_track_from_db(std::string const& db_path, std::string const& sess
 
         nlohmann::json metadata;
         metadata["sequence_id"] = sequence_id;
-        metadata["session_id"] = session_id;
         metadata["skeleton_id"] = skeleton_id;
         metadata["num_cameras"] = cameras.size();
         metadata["num_markers"] = skeleton.markers().size();
@@ -1382,14 +1416,12 @@ int main(int argc, char* argv[]) {
     bool debug_output = false;
     // DB mode arguments
     std::string db_path;
-    std::string db_session_id;
-    std::string db_extrinsics_id;
-    std::string db_sync_config_id;
     std::string db_sequence_id;
     std::string db_skeleton_id;
     std::string db_config_id;
     std::string db_output_dir = "tracking_output";
     double db_min_confidence = 0.1;
+    int db_person_id = 0;
     std::vector<std::string> db_active_joint_groups;
 
     track_cmd->add_option("config", track_config, "Configuration file (TOML)")
@@ -1410,16 +1442,16 @@ int main(int argc, char* argv[]) {
                         "Writes per-frame diagnostics to <output_dir>/debug/");
     // DB mode options
     track_cmd->add_option("--session-db", db_path, "Session DB file (enables DB mode)");
-    track_cmd->add_option("--session", db_session_id, "Session ID (required with --session-db)");
-    track_cmd->add_option("--extrinsics", db_extrinsics_id, "Extrinsic calibration ID");
-    track_cmd->add_option("--sync-config", db_sync_config_id, "Sync config ID");
-    track_cmd->add_option("--sequence", db_sequence_id, "Pose observation sequence ID");
+    track_cmd->add_option("--sequence", db_sequence_id,
+                          "Pose observation sequence ID (required with --session-db)");
     track_cmd->add_option("--skeleton", db_skeleton_id, "Skeleton ID");
     track_cmd->add_option("--tracker-config", db_config_id, "Tracker config ID");
     track_cmd->add_option("--output-dir", db_output_dir,
                           "Output directory for DB mode (default: tracking_output)");
     track_cmd->add_option("--min-confidence", db_min_confidence,
                           "Min keypoint confidence for DB mode (default: 0.1)");
+    track_cmd->add_option("--person-id", db_person_id,
+                          "Person index in pose observations (default: 0)");
     track_cmd->add_option("--joint-groups", db_active_joint_groups,
                           "Active joint groups for DB mode (empty = all)");
 
@@ -1445,17 +1477,15 @@ int main(int argc, char* argv[]) {
     if (*track_cmd) {
         if (!db_path.empty()) {
             // DB mode: validate required DB args
-            if (db_session_id.empty() || db_extrinsics_id.empty() || db_sync_config_id.empty() ||
-                db_sequence_id.empty() || db_skeleton_id.empty() || db_config_id.empty()) {
+            if (db_sequence_id.empty() || db_skeleton_id.empty() || db_config_id.empty()) {
                 fmt::print(stderr,
-                           "Error: --session-db requires --session, --extrinsics, --sync-config, "
-                           "--sequence, --skeleton, and --tracker-config\n");
+                           "Error: --session-db requires --sequence, --skeleton, "
+                           "and --tracker-config\n");
                 return 1;
             }
-            return run_track_from_db(db_path, db_session_id, db_extrinsics_id, db_sync_config_id,
-                                     db_sequence_id, db_skeleton_id, db_config_id, db_output_dir,
-                                     verbose, quiet, smooth_output, db_min_confidence,
-                                     db_active_joint_groups);
+            return run_track_from_db(db_path, db_sequence_id, db_skeleton_id, db_config_id,
+                                     db_output_dir, verbose, quiet, smooth_output,
+                                     db_min_confidence, db_person_id, db_active_joint_groups);
         } else {
             if (track_config.empty()) {
                 fmt::print(stderr, "Error: config file required when not using --session-db\n");

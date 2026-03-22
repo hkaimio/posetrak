@@ -1,7 +1,7 @@
 [project]
 name = "posetrak"
 version = "0.1.0"
-description = "Add your description here"
+description = "Multi-camera skeletal motion capture tracker"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -11,9 +11,29 @@ dependencies = [
     "toml>=0.10.2",
 ]
 
+[project.scripts]
+posetrak-db = "posetrak.db.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["python"]
+
 [dependency-groups]
 dev = [
-    "marimo>=0.19.7",
     "pytest>=8.0",
     "pytest-cov>=5.0",
 ]
+analysis = [
+    "marimo>=0.19",
+    "plotly>=5.0",
+]
+setup-app = [
+    "PySide6>=6.7",
+]
+# pipeline group is GPU-heavy and never installed in CI.
+# rtmlib is not on PyPI — install from git: uv add git+https://github.com/...
+pipeline = [
+    "ultralytics",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]

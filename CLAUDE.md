@@ -111,9 +111,17 @@ Performacne between debug & optimized builds is big; therefore before executing 
 
 The tracker writes CSV files to `output_dir/`: `state_vectors.csv`, `joint_angles.csv`, `root_pose.csv`, `marker_projections.csv`, `observations.csv`, `tracking_stats.csv`, `predicted_observations.csv`, `tracking_results.csv`.
 
-### Python Notebooks
+### Python Package
 
-`notebooks/` contains debugging scripts for comparing C++ and Python tracker outputs. Data lives on `/mnt/d/mocap/` (Windows drive mount).
+The `python/` directory contains the installable `posetrak` Python package:
+
+- `python/posetrak/db/` — SQLite DB layer (install with `pip install -e .`)
+- `python/app/analysis/` — Marimo analysis scripts (formerly `notebooks/`)
+- `python/tools/` — standalone utility scripts
+- `python/tests/` — pytest suite; run with `pytest python/tests/`
+- `python/pipeline/` — capture pipeline tools (calibration, pose extraction)
+
+Data lives on `/mnt/d/mocap/` (Windows drive mount).
 
 ## Code Style
 

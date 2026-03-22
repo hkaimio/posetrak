@@ -341,6 +341,90 @@ def test_missing_cameras_section(tmp_path, registry_db, session_db):
         import_session_yaml(session_db, registry_db, yaml_path)
 
 
+def test_list_camera_format(tmp_path, registry_db, session_db, two_camera_registry):
+    """sync_videos.py list format (cameras as list, path key, ref_camera) is accepted."""
+    cam1 = two_camera_registry["cam1_instance"]
+    cam2 = two_camera_registry["cam2_instance"]
+    yaml_path = _write_yaml(tmp_path, f"""\
+        ref_camera: cam1
+        cameras:
+          - name: cam1
+            path: "/v/cam1.mp4"
+            fps: 120.0
+            sync_frame: 1000
+            camera_instance_id: {cam1}
+            camera_mode_id: {two_camera_registry["mode_id"]}
+            intrinsics_calibration_id: {two_camera_registry["cam1_intrinsics"]}
+          - name: cam2
+            path: "/v/cam2.mp4"
+            fps: 120.0
+            sync_frame: 1003
+            camera_instance_id: {cam2}
+            camera_mode_id: {two_camera_registry["mode_id"]}
+            intrinsics_calibration_id: {two_camera_registry["cam2_intrinsics"]}
+        scenes:
+          - name: "take1"
+            start_frame: 1100
+            end_frame: 2400
+    """)
+    result = import_session_yaml(session_db, registry_db, yaml_path)
+
+    assert result.session_id
+    assert "take1" in result.shot_ids
+    # Verify per-camera frames were derived: cam1 start = 1000 + (1100-1000) = 1100
+    # cam2 start = 1003 + (1100-1000) = 1103
+    shot_id = result.shot_ids["take1"]
+    videos = session_db.execute(
+        "SELECT camera_instance_id, first_video_frame FROM shot_videos WHERE shot_id = ?",
+        (shot_id,)
+    ).fetchall()
+    by_cam = {v["camera_instance_id"]: v["first_video_frame"] for v in videos}
+    assert by_cam[cam1] == 1100
+    assert by_cam[cam2] == 1103  # sync offset: 1003 + (1100-1000) = 1103
+
+
+def test_ref_camera_relative_scenes(tmp_path, registry_db, session_db, two_camera_registry):
+    """Scenes with start_frame/end_frame derive per-camera frames from sync offsets."""
+    cam1 = two_camera_registry["cam1_instance"]
+    cam2 = two_camera_registry["cam2_instance"]
+    yaml_path = _write_yaml(tmp_path, f"""\
+        ref_camera: cam1
+        cameras:
+          cam1:
+            video_path: "/v/c1.mp4"
+            fps: 120.0
+            sync_frame: 1000
+            camera_instance_id: {cam1}
+            camera_mode_id: {two_camera_registry["mode_id"]}
+            intrinsics_calibration_id: {two_camera_registry["cam1_intrinsics"]}
+          cam2:
+            video_path: "/v/c2.mp4"
+            fps: 60.0
+            sync_frame: 500
+            camera_instance_id: {cam2}
+            camera_mode_id: {two_camera_registry["mode_id"]}
+            intrinsics_calibration_id: {two_camera_registry["cam2_intrinsics"]}
+        scenes:
+          - name: "run1"
+            start_frame: 1120   # +120 frames after ref sync @ 120fps = +1.0s
+            end_frame: 1360     # +360 frames = +3.0s after ref sync
+    """)
+    result = import_session_yaml(session_db, registry_db, yaml_path)
+
+    shot_id = result.shot_ids["run1"]
+    videos = session_db.execute(
+        "SELECT camera_instance_id, first_video_frame, last_video_frame FROM shot_videos WHERE shot_id = ?",
+        (shot_id,)
+    ).fetchall()
+    by_cam = {v["camera_instance_id"]: v for v in videos}
+    # cam1: sync=1000 fps=120 → start=1000+120=1120  end=1000+360=1360
+    assert by_cam[cam1]["first_video_frame"] == 1120
+    assert by_cam[cam1]["last_video_frame"] == 1360
+    # cam2: sync=500 fps=60 → +1.0s*60=+60 frames; +3.0s*60=+180 frames
+    assert by_cam[cam2]["first_video_frame"] == 560
+    assert by_cam[cam2]["last_video_frame"] == 680
+
+
 def test_session_v2_migrates_to_v3(tmp_path):
     """open_session should auto-migrate a v2 session to v3 (nullable extrinsics)."""
     import sqlite3

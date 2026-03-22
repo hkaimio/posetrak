@@ -8,20 +8,32 @@ rough sync anchor frame.
 
 YAML format
 -----------
-::
+Two equivalent forms are accepted for the ``cameras`` section:
 
-    name: "my-session"            # used as session notes (required)
-    location: "gym"               # optional
-    recorded_at: "2024-03-15"     # optional ISO date; defaults to today
+Dict form (key is the camera label)::
 
     cameras:
-      cam1:                       # key used as camera label for DB lookup
-        video_path: "/path/to/cam1.mp4"  # stored in shot_videos.file_path
+      cam1:
+        video_path: "/path/to/cam1.mp4"
         fps: 120.0
-        sync_frame: 5678          # frame number at the common sync moment (timestamp_s=0)
+        sync_frame: 5678
         camera_instance_id: "uuid"          # optional; looked up by label if absent
-        camera_mode_id: "uuid"              # optional; required if session DB lacks the mode
+        camera_mode_id: "uuid"              # optional
         intrinsics_calibration_id: "uuid"   # optional
+
+List form (as produced by sync_videos.py; ``path`` is accepted as alias for
+``video_path``)::
+
+    ref_camera: cam1
+    cameras:
+      - name: cam1
+        path: "/path/to/cam1.mp4"
+        fps: 120.0
+        sync_frame: 5678
+
+Two equivalent forms are accepted for the ``scenes`` section:
+
+Explicit per-camera frames::
 
     scenes:
       - label: "scene1"
@@ -29,6 +41,20 @@ YAML format
           cam1:
             first_frame: 6001
             last_frame: 7200
+
+Ref-camera relative (``start_frame``/``end_frame`` are in the ref_camera's
+frame coordinates; per-camera frames are derived via fps + sync offsets)::
+
+    scenes:
+      - name: "scene1"         # "label" is also accepted
+        start_frame: 6001      # ref-camera frame number
+        end_frame: 7200
+
+Top-level fields::
+
+    name: "my-session"            # used as session notes (optional)
+    location: "gym"               # optional
+    recorded_at: "2024-03-15"     # optional ISO date; defaults to today
 
 Notes
 -----
@@ -44,6 +70,7 @@ import datetime
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from posetrak.db.db import (
     add_session_camera,
@@ -74,6 +101,74 @@ class SessionYamlImportResult:
     shot_ids: dict[str, str] = field(default_factory=dict)
     sync_config_ids: dict[str, str] = field(default_factory=dict)
     camera_instance_ids: dict[str, str] = field(default_factory=dict)
+
+
+def _normalise_cameras(raw: Any) -> dict[str, dict]:
+    """Accept both dict and list camera sections; return a uniform dict."""
+    if isinstance(raw, dict):
+        return raw
+    # List form from sync_videos.py: [{name: cam1, path: ..., ...}, ...]
+    result = {}
+    for entry in raw:
+        key = str(entry["name"])
+        cam = dict(entry)
+        cam.pop("name")
+        # Accept "path" as alias for "video_path"
+        if "video_path" not in cam and "path" in cam:
+            cam["video_path"] = cam.pop("path")
+        result[key] = cam
+    return result
+
+
+def _normalise_scenes(
+    raw: list,
+    cameras: dict[str, dict],
+    ref_camera: str | None,
+) -> list[dict]:
+    """Accept both explicit and ref-camera-relative scene formats.
+
+    Explicit format already has ``cameras`` sub-dict with first/last frames.
+    Relative format has ``start_frame``/``end_frame`` in ref-camera coordinates;
+    per-camera frames are derived via sync offsets and fps.
+    """
+    result = []
+    for scene in raw:
+        label = str(scene.get("label") or scene.get("name", ""))
+        if "cameras" in scene:
+            result.append({"label": label, "cameras": scene["cameras"]})
+            continue
+
+        # Relative format — derive per-camera frames
+        if "start_frame" not in scene or "end_frame" not in scene:
+            raise ValueError(
+                f"Scene {label!r}: must have either 'cameras' (explicit frames) "
+                "or 'start_frame'/'end_frame' (ref-camera relative)."
+            )
+        if not ref_camera:
+            raise ValueError(
+                "YAML must specify 'ref_camera' when scenes use start_frame/end_frame."
+            )
+        if ref_camera not in cameras:
+            raise ValueError(
+                f"ref_camera {ref_camera!r} not found in cameras section."
+            )
+        ref_sync = int(cameras[ref_camera]["sync_frame"])
+        ref_fps = float(cameras[ref_camera]["fps"])
+        start_ref = int(scene["start_frame"])
+        end_ref = int(scene["end_frame"])
+        start_offset_s = (start_ref - ref_sync) / ref_fps
+        end_offset_s = (end_ref - ref_sync) / ref_fps
+
+        cam_frames: dict[str, dict] = {}
+        for cam_key, cam_cfg in cameras.items():
+            fps = float(cam_cfg["fps"])
+            sync = int(cam_cfg["sync_frame"])
+            cam_frames[cam_key] = {
+                "first_frame": sync + int(round(start_offset_s * fps)),
+                "last_frame": sync + int(round(end_offset_s * fps)),
+            }
+        result.append({"label": label, "cameras": cam_frames})
+    return result
 
 
 def _resolve_camera_instance(registry: sqlite3.Connection, label: str) -> str:
@@ -191,8 +286,9 @@ def import_session_yaml(
     name: str = session_label or str(doc.get("name", ""))
     location: str = str(doc.get("location", ""))
     recorded_at: str | None = str(doc["recorded_at"]) if "recorded_at" in doc else None
-    cameras_raw: dict = doc.get("cameras", {})
-    scenes_raw: list = doc.get("scenes", [])
+    ref_camera: str | None = doc.get("ref_camera")
+    cameras_raw: dict = _normalise_cameras(doc.get("cameras", {}))
+    scenes_raw: list = _normalise_scenes(doc.get("scenes", []), cameras_raw, ref_camera)
 
     if not cameras_raw:
         raise ValueError("YAML must contain a non-empty 'cameras' section")

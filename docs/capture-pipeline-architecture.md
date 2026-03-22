@@ -378,7 +378,20 @@ The JSON format `video_sync.py` produces:
 | `posetrak-db calib import-h5` | ❌ New | Phase 1b above |
 | `posetrak-db session import-yaml` | ❌ New | Phase 1c above |
 
-### 1g. Schema: `image_width` / `image_height` on `IntrinsicsCalibration`
+### 1g. Refactor `poseanalysis.py` to remove Jupyter dependencies
+
+`poseanalysis.py` currently imports `ipycanvas`, `ipywidgets`, and `IPython` at module level. These are Jupyter notebook widgets that are unused by `pose_extraction.py` (which is a Marimo app with its own UI). They exist only because `poseanalysis.py` was originally written as part of a Jupyter workflow.
+
+**Task**: audit which symbols `pose_extraction.py` imports from `poseanalysis.py`, then split the file:
+
+- `python/pipeline/pose/poseanalysis.py` — keep only the algorithm functions used by the Marimo app (YOLO tracking, RTMpose inference, `NamedPersonTimeline`, `VideoData`, `MultiVideoPoseDataset`, frame-reading helpers). No Jupyter imports.
+- The Jupyter-facing widgets code can be deleted entirely — it is not used in the current workflow.
+
+This allows removing `ipycanvas` and `ipywidgets` from `[dependency-groups.pipeline]`.
+
+**Acceptance**: `from posetrak.pipeline.pose.poseanalysis import analyze_video_with_yolo_tracker` succeeds in an environment that has `rtmlib` and `ultralytics` but not `ipycanvas`.
+
+### 1h. Schema: `image_width` / `image_height` on `IntrinsicsCalibration`
 
 The current schema has no explicit image size on `IntrinsicsCalibration`. Size is implied by the undistortion maps (if present) or stored in the HDF5. During Phase 1 import, add:
 
@@ -394,6 +407,7 @@ ALTER TABLE intrinsic_calibrations ADD COLUMN image_height INTEGER;
 3. `python -c "from posetrak.db.db import open_registry; r = open_registry('r.db')"` works after `pip install -e .` (verifies Phase 0 package layout)
 4. Existing tests still pass
 5. A real session from the current `mocap/` archive can be round-tripped: import YAML + HDF5 + LED sync JSON + extrinsics TOML → session DB → `load_tracking_run_with_markers()` returns data equivalent to what the CSV-based path returned
+6. `from posetrak.pipeline.pose.poseanalysis import analyze_video_with_yolo_tracker` succeeds without `ipycanvas` or `ipywidgets` installed
 
 ---
 

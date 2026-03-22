@@ -104,7 +104,71 @@ Use `--no-maps` if storage space is a concern (skips the ~3 MB undistortion maps
 
 ---
 
-## Part 3 — Session setup
+## Part 3 — Extract undistorted video clips
+
+`setup_project.py` reads a project YAML (produced by `sync_videos.py` or written
+manually), loads undistortion maps, and writes a trimmed, undistorted clip per
+scene per camera.  These clips are the inputs to pose extraction (Part 6).
+
+The project YAML used here has a different format from the session YAML in Part 4
+— it is the older format with a flat `cameras` list and `scenes` with
+`start_frame`/`end_frame`:
+
+```yaml
+# /mnt/d/mocap/2026-03-22-my-session/setup_project.yaml
+path: /mnt/d/mocap/2026-03-22-my-session
+ref_camera: cam1
+
+cameras:
+  - name: cam1
+    path: /mnt/d/mocap/2026-03-22-my-session/raw/cam1.mp4
+    fps: 120
+    sync_frame: 5678
+    calib:
+      intrinsics: <new_intr1_id>   # intrinsics_calibration_id UUID from Part 2
+      extrinsics:
+        frame: 6100                # frame to extract for extrinsics calibration
+
+  - name: cam2
+    path: /mnt/d/mocap/2026-03-22-my-session/raw/cam2.mp4
+    fps: 120
+    sync_frame: 5681
+    calib:
+      intrinsics: <new_intr2_id>
+      extrinsics:
+        frame: 6100
+
+scenes:
+  - name: take1
+    start_frame: 6000
+    end_frame: 8400
+  - name: take2
+    start_frame: 10000
+    end_frame: 12000
+```
+
+When `calib.intrinsics` is a UUID, pass `--registry` so the script can load
+the undistortion maps from the DB:
+
+```bash
+python python/pipeline/calibration/setup_project.py \
+    /mnt/d/mocap/2026-03-22-my-session/setup_project.yaml \
+    --registry ~/.posetrak/registry.db
+
+# → extracts per-scene clips with undistortion applied:
+#   take1/videos/cam1.mp4  take1/videos/cam2.mp4
+#   take2/videos/cam1.mp4  take2/videos/cam2.mp4
+# → saves extrinsics calibration frames:
+#   calibration/extrinsics/ext_cam1_ext/frame_NNNN.png
+#   calibration/extrinsics/ext_cam2_ext/frame_NNNN.png
+```
+
+A file path (`.h5` or `.yaml`) is still accepted for `calib.intrinsics` if you
+have not imported intrinsics into the DB yet.
+
+---
+
+## Part 4 — Session setup
 
 Each recording session gets its own session database.
 
@@ -175,7 +239,7 @@ Use `--dry-run` first to check that all camera lookups resolve correctly.
 
 ---
 
-## Part 4 — Extrinsics calibration
+## Part 5 — Extrinsics calibration
 
 Run `calibrate_extrinsics.py` on a checkerboard frame captured during (or close
 to) the recording session, when the camera rig was in place.
@@ -212,7 +276,7 @@ posetrak-db extrinsics import \
 
 ---
 
-## Part 5 — Video synchronisation
+## Part 6 — Video synchronisation
 
 Run `video_sync.py` to detect the LED sync flash and produce `sync_data.json`.
 
@@ -246,7 +310,7 @@ posetrak-db sync import \
 
 ---
 
-## Part 6 — Pose extraction
+## Part 7 — Pose extraction
 
 Run the Marimo `pose_extraction.py` app to extract 2D keypoints from all camera
 videos. This produces a directory of OpenPose-format JSON files per camera.
@@ -298,9 +362,9 @@ posetrak-db pose import \
 
 ---
 
-## Part 7 — Tracker config
+## Part 8 — Tracker config
 
-### 7a. Import skeleton
+### 8a. Import skeleton
 
 ```bash
 posetrak-db skeleton import \
@@ -309,7 +373,7 @@ posetrak-db skeleton import \
 # → skeleton_id: <skel_id>
 ```
 
-### 7b. Create tracker TOML
+### 8b. Create tracker TOML
 
 Copy `tests/regress.toml` and edit the `[data]` section to point at the session:
 
@@ -351,7 +415,7 @@ tracker_fps = 120.0
 
 ---
 
-## Part 8 — Run the tracker
+## Part 9 — Run the tracker
 
 Use the optimised build for performance (debug build is ~10× slower):
 
@@ -391,7 +455,7 @@ Smoothed results are written alongside the non-smoothed ones (flagged in
 
 ---
 
-## Part 9 — Export BVH
+## Part 10 — Export BVH
 
 ```bash
 python python/tools/export_bvh.py \

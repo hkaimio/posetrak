@@ -12,7 +12,9 @@ camera-model  list  List registered camera models.
 camera-mode   add   Register a capture mode (resolution/fps) for a camera model.
 camera-mode   list  List registered camera modes.
 
-calib     import    Import intrinsic calibration from a Pose2Sim TOML file.
+calib     import      Import intrinsic calibration from a Pose2Sim TOML file.
+calib     import-h5   Import intrinsic calibration from an HDF5 file.
+calib     list        List camera instances and intrinsics calibrations.
 
 skeleton  import    Import a skeleton YAML file.
 skeleton  list      List skeletons.
@@ -21,9 +23,10 @@ config    create    Create a tracker config snapshot from a TOML file.
 config    edit      Derive a new tracker config by overriding fields.
 config    list      List tracker configs.
 
-session   create    Create a new mocap session in a session database.
-session   list      List mocap sessions in a session database.
-session   add-camera  Link a camera (with registry copy) to a session.
+session   create         Create a new mocap session in a session database.
+session   list           List mocap sessions in a session database.
+session   add-camera     Link a camera (with registry copy) to a session.
+session   import-yaml    Import a capture project YAML into a session database.
 
 extrinsics  import  Import extrinsic calibration from a Pose2Sim TOML file.
 extrinsics  list    List extrinsic calibrations in a session database.
@@ -66,8 +69,11 @@ from posetrak.db.db import (
     open_session,
     resolve_id_prefix,
     set_project_root,
+    set_shot_extrinsics,
 )
 from posetrak.db.import_calib_toml import import_calib_toml
+from posetrak.db.import_calib_h5 import import_calib_h5
+from posetrak.db.import_session_yaml import import_session_yaml
 from posetrak.db.manage_skeleton import (
     copy_skeleton_to_session,
     import_skeleton,
@@ -408,6 +414,37 @@ def _cmd_calib_import(args: argparse.Namespace) -> int:
         print(f"  {label!r}  instance={iid}  intrinsics={intr_id}")
     if result.skipped:
         print(f"  skipped: {', '.join(sorted(result.skipped))}")
+    return 0
+
+
+def _cmd_calib_import_h5(args: argparse.Namespace) -> int:
+    """Import intrinsic calibration from an HDF5 file."""
+    try:
+        registry = open_registry(Path(args.registry))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error opening registry: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        camera_mode_id = _resolve(registry, "camera_modes", args.camera_mode)
+        result = import_calib_h5(
+            registry,
+            Path(args.h5_file),
+            camera_mode_id,
+            camera_instance_id=args.camera_instance or None,
+            store_maps=not args.no_maps,
+            notes=args.notes or "",
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error importing HDF5 calibration: {exc}", file=sys.stderr)
+        registry.close()
+        return 1
+    finally:
+        registry.close()
+
+    print(f"intrinsics_id: {result.intrinsics_id}")
+    if result.camera_name:
+        print(f"camera_name: {result.camera_name}")
     return 0
 
 
@@ -813,6 +850,59 @@ def _cmd_session_add_camera(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_session_import_yaml(args: argparse.Namespace) -> int:
+    """Import a capture project YAML into a session database."""
+    try:
+        registry = open_registry(Path(args.registry))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error opening registry: {exc}", file=sys.stderr)
+        return 1
+
+    session_path = Path(args.session_db)
+    if session_path.exists():
+        try:
+            session_conn = open_session(session_path)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"Error opening session db: {exc}", file=sys.stderr)
+            registry.close()
+            return 1
+    else:
+        try:
+            session_conn = create_session(session_path)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error creating session db: {exc}", file=sys.stderr)
+            registry.close()
+            return 1
+
+    try:
+        result = import_session_yaml(
+            session_conn,
+            registry,
+            Path(args.yaml_file),
+            session_label=args.session_label or "",
+            dry_run=args.dry_run,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error importing session YAML: {exc}", file=sys.stderr)
+        session_conn.close()
+        registry.close()
+        return 1
+    finally:
+        session_conn.close()
+        registry.close()
+
+    if args.dry_run:
+        return 0
+
+    print(f"session_id: {result.session_id}")
+    for cam_key, iid in result.camera_instance_ids.items():
+        print(f"  camera {cam_key}: instance={iid}")
+    for label, shot_id in result.shot_ids.items():
+        sync_id = result.sync_config_ids.get(label, "")
+        print(f"  shot {label!r}: id={shot_id}  sync_config={sync_id}")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Command handlers — extrinsics
 # ---------------------------------------------------------------------------
@@ -848,6 +938,9 @@ def _cmd_extrinsics_import(args: argparse.Namespace) -> int:
             registry=registry,
             method=args.method or "pose2sim",
         )
+        if getattr(args, "shot", None):
+            shot_id = _resolve(session_conn, "shots", args.shot)
+            set_shot_extrinsics(session_conn, shot_id, result.extrinsic_calibration_id)
     except Exception as exc:  # noqa: BLE001
         print(f"Error importing extrinsics: {exc}", file=sys.stderr)
         session_conn.close()
@@ -1019,6 +1112,7 @@ def _cmd_sync_import(args: argparse.Namespace) -> int:
             shot_id,
             Path(args.sync_json),
             cam_inst,
+            notes=getattr(args, "notes", "") or "",
         )
     except (ValueError, Exception) as exc:  # noqa: BLE001
         print(f"Error importing sync: {exc}", file=sys.stderr)
@@ -1287,6 +1381,19 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Distortion model (default: radtan)")
     p.add_argument("--notes", default="", metavar="S")
 
+    p = cal_actions.add_parser("import-h5",
+                               help="Import intrinsic calibration from an HDF5 file")
+    _add_registry_arg(p)
+    p.add_argument("h5_file", metavar="H5_FILE",
+                   help="Path to the calibration .h5 file")
+    p.add_argument("--camera-mode", required=True, metavar="UUID", dest="camera_mode",
+                   help="camera_modes.id (or unique prefix) to associate with this calibration")
+    p.add_argument("--camera-instance", default=None, metavar="UUID", dest="camera_instance",
+                   help="Optional camera_instances.id for the notes field")
+    p.add_argument("--no-maps", action="store_true", dest="no_maps",
+                   help="Skip storing undistortion maps (saves ~3 MB per camera)")
+    p.add_argument("--notes", default="", metavar="S")
+
     # -------------------------------------------------------------------------
     # skeleton topic
     # -------------------------------------------------------------------------
@@ -1381,6 +1488,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--intrinsics", required=True, metavar="UUID")
     p.add_argument("--label", default="", metavar="S")
 
+    p = ses_actions.add_parser("import-yaml",
+                               help="Import a capture project YAML into a session database")
+    _add_registry_arg(p)
+    _add_session_db_arg(p, required=True)
+    p.add_argument("yaml_file", metavar="YAML_FILE",
+                   help="Path to the project YAML file")
+    p.add_argument("--session-label", default="", metavar="S", dest="session_label",
+                   help="Override the 'name' field from the YAML as the session notes")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="Print what would be created without writing to the database")
+
     # -------------------------------------------------------------------------
     # extrinsics topic
     # -------------------------------------------------------------------------
@@ -1403,6 +1521,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    dest="camera_instance",
                    help="cam1=<uuid> pairs or single UUID")
     p.add_argument("--method", default="pose2sim", metavar="S")
+    p.add_argument("--shot", default=None, metavar="UUID",
+                   help="shots.id to link after import (sets extrinsic_calibration_id)")
 
     # -------------------------------------------------------------------------
     # shot topic
@@ -1454,6 +1574,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sync-json", required=True, metavar="JSON_PATH", dest="sync_json")
     p.add_argument("--camera-instance", action="append", metavar="SPEC",
                    dest="camera_instance")
+    p.add_argument("--notes", default="", metavar="S",
+                   help="Description of the sync method (e.g. 'LED detection', 'manual')")
 
     # -------------------------------------------------------------------------
     # pose topic
@@ -1511,6 +1633,7 @@ def main() -> None:
         ("camera-mode", "add"): _cmd_camera_mode_add,
         ("camera-mode", "list"): _cmd_camera_mode_list,
         ("calib", "import"): _cmd_calib_import,
+        ("calib", "import-h5"): _cmd_calib_import_h5,
         ("calib", "list"): _cmd_calib_list,
         ("skeleton", "import"): _cmd_skeleton_import,
         ("skeleton", "list"): _cmd_skeleton_list,
@@ -1520,6 +1643,7 @@ def main() -> None:
         ("session", "list"): _cmd_session_list,
         ("session", "create"): _cmd_session_create,
         ("session", "add-camera"): _cmd_session_add_camera,
+        ("session", "import-yaml"): _cmd_session_import_yaml,
         ("extrinsics", "list"): _cmd_extrinsics_list,
         ("extrinsics", "import"): _cmd_extrinsics_import,
         ("shot", "list"): _cmd_shot_list,

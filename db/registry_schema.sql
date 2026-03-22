@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS camera_instances (
 );
 
 -- Intrinsic calibrations tied to a specific camera mode
--- dist_coeffs is a little-endian float64 blob (radtan: [k1,k2,p1,p2], fisheye: [k1,k2,k3,k4])
+-- dist_coeffs: little-endian float64 blob (radtan: [k1,k2,p1,p2], fisheye: [k1,k2,k3,k4])
+-- matrix_original: little-endian float64 blob, 3×3 row-major — K directly from calibrateCamera()
+-- undistort_mapx/mapy: zlib-compressed float32 arrays (cv2.remap maps), shape (height, width)
 CREATE TABLE IF NOT EXISTS intrinsics_calibrations (
     id                TEXT PRIMARY KEY,
     camera_mode_id    TEXT NOT NULL REFERENCES camera_modes(id),
@@ -49,7 +51,12 @@ CREATE TABLE IF NOT EXISTS intrinsics_calibrations (
     cy                REAL NOT NULL,
     dist_coeffs       BLOB,
     rms_error         REAL,
-    notes             TEXT
+    notes             TEXT,
+    image_width       INTEGER,
+    image_height      INTEGER,
+    matrix_original   BLOB,
+    undistort_mapx    BLOB,
+    undistort_mapy    BLOB
 );
 
 -- Skeleton definitions; id is SHA-256 of yaml_content

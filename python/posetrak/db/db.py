@@ -18,8 +18,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 1
-SESSION_SCHEMA_VERSION: Final[int] = 2
+REGISTRY_SCHEMA_VERSION: Final[int] = 2
+SESSION_SCHEMA_VERSION: Final[int] = 3
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -28,8 +28,9 @@ DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
 # SQL file paths (resolved relative to this source file)
 # ---------------------------------------------------------------------------
 
-_REGISTRY_SCHEMA_SQL: Final[Path] = Path(__file__).parents[3] / "db" / "registry_schema.sql"
-_SESSION_SCHEMA_SQL: Final[Path] = Path(__file__).parents[3] / "db" / "session_schema.sql"
+_DB_DIR: Final[Path] = Path(__file__).parents[3] / "db"
+_REGISTRY_SCHEMA_SQL: Final[Path] = _DB_DIR / "registry_schema.sql"
+_SESSION_SCHEMA_SQL: Final[Path] = _DB_DIR / "session_schema.sql"
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +222,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
     if not path.exists():
         raise FileNotFoundError(f"Registry database not found: {path}")
     conn = _connect(path)
+    actual = get_schema_version(conn)
+    if actual == 1:
+        _migrate_registry_v1_to_v2(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -266,6 +270,16 @@ def create_session(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _migrate_registry_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 1 to 2.
+
+    v2 adds image_width, image_height, matrix_original, undistort_mapx,
+    undistort_mapy columns to intrinsics_calibrations. All nullable.
+    """
+    sql = (_DB_DIR / "migrations" / "001_registry_intrinsics.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+
+
 def _migrate_session_v1_to_v2(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 1 to 2.
 
@@ -276,7 +290,8 @@ def _migrate_session_v1_to_v2(conn: sqlite3.Connection) -> None:
     SQLite does not support ALTER TABLE to change a primary key, so we recreate the table.
     Existing single-anchor rows are preserved.
     """
-    conn.executescript("""
+    conn.executescript(
+        """
         BEGIN;
         CREATE TABLE sync_points_v2 (
             sync_config_id     TEXT    NOT NULL REFERENCES sync_configs(id),
@@ -291,7 +306,20 @@ def _migrate_session_v1_to_v2(conn: sqlite3.Connection) -> None:
         ALTER TABLE sync_points_v2 RENAME TO sync_points;
         PRAGMA user_version = 2;
         COMMIT;
-    """)
+    """
+    )
+
+
+def _migrate_session_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 2 to 3.
+
+    v3 makes shots.extrinsic_calibration_id nullable so shots can be created
+    before extrinsics are imported (e.g. during YAML project import).
+    """
+    sql = (_DB_DIR / "migrations" / "002_session_nullable_extrinsics.sql").read_text(
+        encoding="utf-8"
+    )
+    conn.executescript(sql)
 
 
 def open_session(path: Path) -> sqlite3.Connection:
@@ -320,6 +348,9 @@ def open_session(path: Path) -> sqlite3.Connection:
     actual = get_schema_version(conn)
     if actual == 1:
         _migrate_session_v1_to_v2(conn)
+        actual = 2
+    if actual == 2:
+        _migrate_session_v2_to_v3(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 
@@ -672,7 +703,7 @@ def add_session_camera(
 def create_shot(
     session: sqlite3.Connection,
     session_id: str,
-    extrinsic_calibration_id: str,
+    extrinsic_calibration_id: str | None = None,
     *,
     shot_number: int | None = None,
     label: str = "",
@@ -764,6 +795,29 @@ def add_shot_video(
              first_frame, last_frame, fps),
         )
     return video_id
+
+
+def set_shot_extrinsics(
+    session: sqlite3.Connection,
+    shot_id: str,
+    extrinsic_calibration_id: str,
+) -> None:
+    """Set or update the extrinsic_calibration_id on an existing shot.
+
+    Parameters
+    ----------
+    session:
+        Open connection to a posetrak session database.
+    shot_id:
+        ID of the ``shots`` row to update.
+    extrinsic_calibration_id:
+        ID of the ``extrinsic_calibrations`` row to link.
+    """
+    with session:
+        session.execute(
+            "UPDATE shots SET extrinsic_calibration_id = ? WHERE id = ?",
+            (extrinsic_calibration_id, shot_id),
+        )
 
 
 # ---------------------------------------------------------------------------

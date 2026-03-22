@@ -49,10 +49,11 @@ CREATE TABLE IF NOT EXISTS extrinsic_entries (
 );
 
 -- A shot is a single continuous capture take within a session
+-- extrinsic_calibration_id is nullable: shots may be created before extrinsics are imported
 CREATE TABLE IF NOT EXISTS shots (
     id                       TEXT PRIMARY KEY,
     session_id               TEXT NOT NULL REFERENCES mocap_sessions(id),
-    extrinsic_calibration_id TEXT NOT NULL REFERENCES extrinsic_calibrations(id),
+    extrinsic_calibration_id TEXT REFERENCES extrinsic_calibrations(id),
     shot_number              INTEGER NOT NULL,
     label                    TEXT,
     notes                    TEXT

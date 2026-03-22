@@ -16,11 +16,11 @@ structure::
         ...
     }
 
-The **first** syncpoint for each camera is used as the sync anchor:
-``video_frame`` and ``timestamp_s`` come from ``syncpoints[0]``.
+All syncpoints for each camera are stored. The tracker uses them for
+piecewise-linear timestamp interpolation between anchor frames.
 
 One ``sync_configs`` row is created per call, and one ``sync_points`` row is
-created per imported camera.
+created per (camera, video_frame) pair.
 """
 
 from __future__ import annotations
@@ -65,8 +65,8 @@ def import_sync_json(
 ) -> SyncImportResult:
     """Import camera synchronisation anchors from a sync JSON file.
 
-    Creates one ``sync_configs`` row and one ``sync_points`` row per imported
-    camera. All inserts are executed in a single transaction.
+    Creates one ``sync_configs`` row and one ``sync_points`` row per (camera,
+    video_frame) pair. All inserts are executed in a single transaction.
 
     The ``shot_video_id`` for each camera is looked up from ``shot_videos``
     using ``shot_id`` and ``camera_instance_id``. A ``ValueError`` is raised
@@ -127,9 +127,6 @@ def import_sync_json(
 
         cam_data: dict[str, object] = raw[cam_key]  # type: ignore[assignment]
         syncpoints: list[dict[str, object]] = cam_data["syncpoints"]  # type: ignore[assignment]
-        first = syncpoints[0]
-        anchor_frame = int(first["frame"])
-        anchor_ts = float(first["timestamp"])
 
         # Look up the shot_video row for this camera/shot combination.
         sv_row = session.execute(
@@ -145,7 +142,10 @@ def import_sync_json(
             )
 
         shot_video_id = sv_row["id"]
-        rows_points.append((sync_config_id, instance_id, shot_video_id, anchor_frame, anchor_ts))
+        for sp in syncpoints:
+            frame = int(sp["frame"])
+            ts = float(sp["timestamp"])
+            rows_points.append((sync_config_id, instance_id, shot_video_id, frame, ts))
         result.camera_instance_ids[cam_key] = instance_id
 
     with session:

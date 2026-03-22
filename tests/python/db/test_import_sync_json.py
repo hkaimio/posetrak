@@ -91,7 +91,7 @@ def test_sync_import_creates_sync_config(
 def test_sync_import_creates_two_sync_points(
     session_db_full, sample_calib_toml: Path, sample_sync_json: Path
 ) -> None:
-    """Two sync_points rows should be created for a two-camera sync JSON."""
+    """All syncpoints for both cameras should be stored (2 cameras × 2 points = 4)."""
     session_conn, session_id, inst1, inst2 = session_db_full
     shot_id, _ = _setup_shot_with_videos(
         session_conn, session_id, inst1, inst2, sample_calib_toml
@@ -104,13 +104,13 @@ def test_sync_import_creates_two_sync_points(
         "SELECT COUNT(*) FROM sync_points WHERE sync_config_id = ?",
         (result.sync_config_id,),
     ).fetchone()[0]
-    assert count == 2
+    assert count == 4  # 2 cameras × 2 syncpoints each
 
 
-def test_sync_import_uses_first_syncpoint_frame(
+def test_sync_import_stores_all_frames_for_camera(
     session_db_full, sample_calib_toml: Path, sample_sync_json: Path
 ) -> None:
-    """sync_points.video_frame should be the first syncpoint frame (0 for cam1)."""
+    """All syncpoint frames for cam1 should be stored (frames 0 and 1)."""
     session_conn, session_id, inst1, inst2 = session_db_full
     shot_id, _ = _setup_shot_with_videos(
         session_conn, session_id, inst1, inst2, sample_calib_toml
@@ -119,18 +119,19 @@ def test_sync_import_uses_first_syncpoint_frame(
         session_conn, shot_id, sample_sync_json,
         {"cam1": inst1, "cam2": inst2},
     )
-    row = session_conn.execute(
+    rows = session_conn.execute(
         "SELECT video_frame FROM sync_points "
-        "WHERE sync_config_id = ? AND camera_instance_id = ?",
+        "WHERE sync_config_id = ? AND camera_instance_id = ? "
+        "ORDER BY video_frame",
         (result.sync_config_id, inst1),
-    ).fetchone()
-    assert row["video_frame"] == 0
+    ).fetchall()
+    assert [r["video_frame"] for r in rows] == [0, 1]
 
 
-def test_sync_import_uses_first_syncpoint_timestamp(
+def test_sync_import_stores_correct_timestamps(
     session_db_full, sample_calib_toml: Path, sample_sync_json: Path
 ) -> None:
-    """sync_points.timestamp_s for cam1 should be 0.0 (first syncpoint timestamp)."""
+    """Timestamps for cam1 should match the fixture: 0.0 and 0.00833."""
     session_conn, session_id, inst1, inst2 = session_db_full
     shot_id, _ = _setup_shot_with_videos(
         session_conn, session_id, inst1, inst2, sample_calib_toml
@@ -139,12 +140,14 @@ def test_sync_import_uses_first_syncpoint_timestamp(
         session_conn, shot_id, sample_sync_json,
         {"cam1": inst1, "cam2": inst2},
     )
-    row = session_conn.execute(
+    rows = session_conn.execute(
         "SELECT timestamp_s FROM sync_points "
-        "WHERE sync_config_id = ? AND camera_instance_id = ?",
+        "WHERE sync_config_id = ? AND camera_instance_id = ? "
+        "ORDER BY video_frame",
         (result.sync_config_id, inst1),
-    ).fetchone()
-    assert row["timestamp_s"] == pytest.approx(0.0)
+    ).fetchall()
+    assert rows[0]["timestamp_s"] == pytest.approx(0.0)
+    assert rows[1]["timestamp_s"] == pytest.approx(0.00833)
 
 
 def test_sync_import_links_correct_shot_video(
@@ -159,10 +162,11 @@ def test_sync_import_links_correct_shot_video(
         session_conn, shot_id, sample_sync_json,
         {"cam1": inst1, "cam2": inst2},
     )
-    # Get the shot_video_id from the sync_points row and verify it exists.
+    # Get the shot_video_id from the first sync_points row and verify it exists.
     row = session_conn.execute(
         "SELECT shot_video_id FROM sync_points "
-        "WHERE sync_config_id = ? AND camera_instance_id = ?",
+        "WHERE sync_config_id = ? AND camera_instance_id = ? "
+        "ORDER BY video_frame LIMIT 1",
         (result.sync_config_id, inst1),
     ).fetchone()
     sv_row = session_conn.execute(
@@ -189,7 +193,7 @@ def test_sync_import_skip_unlisted_camera(
         "SELECT COUNT(*) FROM sync_points WHERE sync_config_id = ?",
         (result.sync_config_id,),
     ).fetchone()[0]
-    assert count == 1
+    assert count == 2  # cam1 only, 2 syncpoints
 
 
 def test_sync_import_fails_without_shot_video(

@@ -78,7 +78,9 @@ CREATE TABLE IF NOT EXISTS sync_configs (
     notes      TEXT
 );
 
--- Per-camera sync anchor points within a sync configuration
+-- Per-camera sync points within a sync configuration.
+-- Multiple rows per camera are allowed; the tracker uses all of them for
+-- piecewise-linear timestamp interpolation between anchor frames.
 -- camera_instance_id -- references registry: camera_instances(id)
 CREATE TABLE IF NOT EXISTS sync_points (
     sync_config_id     TEXT    NOT NULL REFERENCES sync_configs(id),
@@ -86,7 +88,7 @@ CREATE TABLE IF NOT EXISTS sync_points (
     shot_video_id      TEXT    NOT NULL REFERENCES shot_videos(id),
     video_frame        INTEGER NOT NULL,
     timestamp_s        REAL    NOT NULL,
-    PRIMARY KEY (sync_config_id, camera_instance_id)
+    PRIMARY KEY (sync_config_id, camera_instance_id, video_frame)
 );
 
 -- A sequence of 2-D pose observations covering a time window of a shot

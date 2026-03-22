@@ -176,8 +176,14 @@ setup-app = [
 ]
 pipeline = [
     "h5py>=3.10",
-    "rtmlib",        # from local install or git
+    "rtmlib",           # GPU-heavy: pulls in ultralytics, onnxruntime-gpu, etc.
+    "ultralytics",      # YOLO11 (transitive via rtmlib but pinned separately for clarity)
+    "ipycanvas",        # required by poseanalysis.py (Jupyter-era widget)
+    "ipywidgets",       # required by poseanalysis.py
 ]
+# NOTE: the pipeline group is never installed in CI. Developers running pose
+# extraction install it explicitly: `uv sync --group pipeline`.
+# rtmlib must be installed from a local clone or git URL since it is not on PyPI.
 
 [tool.setuptools.packages.find]
 where = ["python"]
@@ -345,9 +351,11 @@ Already partially implemented as `extrinsics import` in the current CLI. Needs:
 
 This command already works for the basic case; the main gap is the `--shot` association.
 
-### 1e. CLI command: `posetrak-db sync import-led-json`
+### 1e. CLI command: `posetrak-db sync import` (rename + verify)
 
-The LED sync JSON from `video_sync.py` has this format:
+The command already exists as `posetrak-db sync import --sync-json <file>`. The JSON format from `video_sync.py` is the canonical format; no separate "led" variant is needed since the sync data format is the same regardless of how the sync was determined (LED detection, audio click, manual frame matching, etc.).
+
+The JSON format `video_sync.py` produces:
 ```json
 {
   "cam1": { "fps": 120, "syncpoints": [{"frame": 1234, "timestamp": 10.28}, ...] },
@@ -355,7 +363,7 @@ The LED sync JSON from `video_sync.py` has this format:
 }
 ```
 
-This maps to `SyncConfig` + multiple `SyncPoint` rows (one per camera per LED flash event). An existing `import-sync-json` command is already implemented; verify it handles multiple sync points per camera correctly (the schema was extended to allow this).
+**Action for Phase 1**: verify the existing `sync import` command handles multiple sync points per camera correctly (the `SyncPoint` primary key was extended to include `video_frame` specifically for this). Add a `--notes` flag to record the sync method (e.g. `"LED detection"`, `"manual"`) on the `SyncConfig` row.
 
 ### 1f. Existing commands: verify and document gaps
 

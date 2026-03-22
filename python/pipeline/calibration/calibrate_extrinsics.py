@@ -1,4 +1,5 @@
 import json
+import re
 import yaml
 import h5py
 import click
@@ -89,16 +90,97 @@ def load_intrinsics_from_h5(h5_path: str) -> dict:
         }
 
 
-def load_intrinsics(calib_path: str) -> dict:
-    """Load intrinsics from either YAML or HDF5 file."""
-    calib_path = Path(calib_path)
+_UUID_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    re.IGNORECASE,
+)
 
-    if calib_path.suffix.lower() in ['.h5', '.hdf5']:
-        return load_intrinsics_from_h5(str(calib_path))
-    elif calib_path.suffix.lower() in ['.yaml', '.yml']:
-        return load_intrinsics_from_yaml(str(calib_path))
+
+def load_intrinsics_from_db(registry_path: str, intrinsics_id: str) -> dict:
+    """Load camera intrinsics from the posetrak registry database.
+
+    The DB stores K_new (undistorted optimal matrix) in fx/fy/cx/cy and the
+    original K in matrix_original.  This matches what load_intrinsics_from_h5
+    returns — callers use ``matrix`` (= K_new) with zero distortion for
+    undistorted images.
+    """
+    import sqlite3
+    import struct
+    import zlib
+
+    conn = sqlite3.connect(registry_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM intrinsics_calibrations WHERE id = ?", (intrinsics_id,)
+    ).fetchone()
+    conn.close()
+
+    if row is None:
+        raise ValueError(f"intrinsics_calibration {intrinsics_id!r} not found in {registry_path}")
+
+    # K_new (undistorted optimal matrix) — stored as fx/fy/cx/cy
+    fx, fy, cx_val, cy = row["fx"], row["fy"], row["cx"], row["cy"]
+    matrix_undistorted = np.array([[fx, 0.0, cx_val], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+
+    # Original K — stored as 9 float64s little-endian
+    if row["matrix_original"]:
+        vals = struct.unpack("<9d", bytes(row["matrix_original"]))
+        matrix_original = np.array(vals).reshape(3, 3)
     else:
-        raise ValueError(f"Unsupported calibration file format: {calib_path.suffix}")
+        matrix_original = matrix_undistorted.copy()
+
+    # Distortion coefficients
+    if row["dist_coeffs"]:
+        n = len(bytes(row["dist_coeffs"])) // 8
+        dist = np.array(struct.unpack(f"<{n}d", bytes(row["dist_coeffs"]))).reshape(1, -1)
+    else:
+        dist = np.zeros((1, 4))
+
+    image_width = row["image_width"]
+    image_height = row["image_height"]
+    size = (image_width, image_height) if image_width and image_height else (0, 0)
+
+    # Undistortion maps (optional)
+    undistort_mapx = None
+    undistort_mapy = None
+    if row["undistort_mapx"] and image_width and image_height:
+        mapx_bytes = zlib.decompress(bytes(row["undistort_mapx"]))
+        mapy_bytes = zlib.decompress(bytes(row["undistort_mapy"]))
+        undistort_mapx = np.frombuffer(mapx_bytes, dtype=np.float32).reshape(image_height, image_width)
+        undistort_mapy = np.frombuffer(mapy_bytes, dtype=np.float32).reshape(image_height, image_width)
+
+    fisheye = (row["distortion_model"] == "fisheye")
+
+    print(f"  Loaded intrinsics from DB: {intrinsics_id}")
+    print(f"  Size: {size}  fx={fx:.2f} fy={fy:.2f}  rms={row['rms_error']}")
+
+    return {
+        "size": size,
+        "matrix": matrix_undistorted,      # K_new — for undistorted images
+        "matrix_original": matrix_original, # original K
+        "distortion": dist,
+        "fisheye": fisheye,
+        "undistort_mapx": undistort_mapx,
+        "undistort_mapy": undistort_mapy,
+    }
+
+
+def load_intrinsics(calib_path: str, registry_path: str | None = None) -> dict:
+    """Load intrinsics from a UUID (DB), HDF5 file, or YAML file."""
+    if _UUID_RE.match(calib_path):
+        if not registry_path:
+            raise ValueError(
+                f"calib.intrinsics is a UUID ({calib_path!r}) but --registry was not provided."
+            )
+        return load_intrinsics_from_db(registry_path, calib_path)
+
+    p = Path(calib_path)
+    if p.suffix.lower() in ['.h5', '.hdf5']:
+        return load_intrinsics_from_h5(str(p))
+    elif p.suffix.lower() in ['.yaml', '.yml']:
+        return load_intrinsics_from_yaml(str(p))
+    else:
+        raise ValueError(f"Unsupported calibration file format: {p.suffix}")
 
 
 def convert_undistorted_to_distorted_coords(undist_x: float, undist_y: float,
@@ -1132,6 +1214,7 @@ def generate_report(output_path: str,
 @click.command()
 @click.option("--config", required=True, help="Path to project YAML configuration file")
 @click.option("--annotations", required=True, help="Path to VIA JSON annotation file")
+@click.option("--registry", default=None, help="Path to posetrak registry DB (required when calib.intrinsics is a UUID)")
 @click.option("--output-toml", help="Path to output TOML file (default: <project_path>/calibration/intrinsics.toml)")
 @click.option("--output-report", help="Path to validation report (default: <project_path>/calibration/extrinsics_report.txt)")
 @click.option("--bundle-adjust", is_flag=True, help="Enable bundle adjustment")
@@ -1141,7 +1224,7 @@ def generate_report(output_path: str,
 @click.option("--annotations-distorted", is_flag=True, help="Annotation points are in distorted (original) image coordinates")
 @click.option("--images-distorted", is_flag=True, help="Calibration images are distorted (original, not undistorted)")
 @click.option("--undistort-visualization", is_flag=True, help="Undistort the visualization output images (only used with --images-distorted)")
-def main(config, annotations, output_toml, output_report, bundle_adjust, reprojection_threshold, fix_reference, visualize, annotations_distorted, images_distorted, undistort_visualization):
+def main(config, annotations, registry, output_toml, output_report, bundle_adjust, reprojection_threshold, fix_reference, visualize, annotations_distorted, images_distorted, undistort_visualization):
     """
     Estimate camera extrinsics from annotated point correspondences.
     """
@@ -1175,16 +1258,15 @@ def main(config, annotations, output_toml, output_report, bundle_adjust, reproje
 
         intrinsics_path = cam_config["calib"]["intrinsics"]
 
-        # Check if intrinsics is a string (path to file)
         if isinstance(intrinsics_path, str):
-            intrinsics = load_intrinsics(intrinsics_path)
+            intrinsics = load_intrinsics(intrinsics_path, registry_path=registry)
             cameras[cam_name] = {
                 "intrinsics": intrinsics,
                 "config": cam_config
             }
             print(f"  Loaded intrinsics for '{cam_name}' from {intrinsics_path}")
         else:
-            print(f"  Warning: Camera '{cam_name}' intrinsics is not a file path, skipping")
+            print(f"  Warning: Camera '{cam_name}' intrinsics is not a string, skipping")
 
     # Parse VIA JSON annotations
     print("\n[3/6] Parsing annotation file...")

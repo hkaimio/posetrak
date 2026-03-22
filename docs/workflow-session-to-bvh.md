@@ -172,69 +172,59 @@ have not imported intrinsics into the DB yet.
 
 Each recording session gets its own session database.
 
-### 3a. Write a project YAML
+### 4a. Write the project YAML
 
-`session import-yaml` accepts the YAML format that `sync_videos.py` already
-produces, extended with a `scenes` section you add manually.
-
-**sync_videos.py format** (cameras as list; `path` key; `ref_camera` + relative
-`start_frame`/`end_frame` for scenes — per-camera frames are derived from sync
-offsets):
+This is the **same YAML file** used by `setup_project.py` in Part 3 — you do
+not write a second file.  `sync_videos.py` creates the initial file with
+`cameras` and `ref_camera`; you then add `camera_instance_id`, `calib`, and
+`scenes` manually:
 
 ```yaml
 # /mnt/d/mocap/2026-03-22-my-session/project.yaml
-# (this is the file sync_videos.py creates — add scenes + optional IDs)
 
+name: "2026-03-22-my-session"
+location: "gym"
+recorded_at: "2026-03-22"
+path: /mnt/d/mocap/2026-03-22-my-session   # used by setup_project.py
 ref_camera: cam1
 
 cameras:
   - name: cam1
-    path: "/mnt/d/mocap/2026-03-22-my-session/raw/cam1.mp4"
-    fps: 120.0
-    sync_frame: 5678          # from sync_videos.py — LED flash frame
+    path: /mnt/d/mocap/2026-03-22-my-session/raw/cam1.mp4
+    fps: 120
+    sync_frame: 5678             # LED flash frame (from sync_videos.py)
+    camera_instance_id: <inst1_id>
+    calib:
+      intrinsics: <intr1_id>     # UUID from Part 2; used by setup_project.py + session import-yaml
+      extrinsics:
+        frame: 6100              # frame to extract for extrinsics calibration (Part 5)
 
   - name: cam2
-    path: "/mnt/d/mocap/2026-03-22-my-session/raw/cam2.mp4"
-    fps: 120.0
+    path: /mnt/d/mocap/2026-03-22-my-session/raw/cam2.mp4
+    fps: 120
     sync_frame: 5681
+    camera_instance_id: <inst2_id>
+    calib:
+      intrinsics: <intr2_id>
+      extrinsics:
+        frame: 6100
 
 scenes:
   - name: "take1"
-    start_frame: 6000         # ref-camera (cam1) frame numbers
-    end_frame: 8400           # 20 s at 120 fps
+    start_frame: 6000            # ref-camera (cam1) frame numbers
+    end_frame: 8400              # per-camera frames derived from sync offsets + fps
 
   - name: "take2"
     start_frame: 10000
     end_frame: 12000
 ```
 
-Camera instances are looked up by label (`cam1`, `cam2`, …) from the registry —
-no need to put IDs in the YAML if you registered instances with matching labels.
-Intrinsics are auto-selected (most recent for the camera's mode).
+`camera_instance_id` is optional if camera labels (`cam1`, `cam2`, …) match
+registered instances.  `calib.intrinsics` UUID is used both by
+`setup_project.py` (to load undistortion maps) and by `session import-yaml`
+(to link the calibration in the DB).
 
-**Dict format** (also accepted; explicit per-camera frames; useful when cameras
-run at different fps or need explicit IDs):
-
-```yaml
-name: "2026-03-22-my-session"
-cameras:
-  cam1:
-    video_path: "/mnt/d/mocap/2026-03-22-my-session/raw/cam1.mp4"
-    fps: 120.0
-    sync_frame: 5678
-    camera_instance_id: <inst1_id>   # optional; looked up by label if absent
-  cam2:
-    video_path: "..."
-    fps: 60.0
-    sync_frame: 2839
-scenes:
-  - label: "take1"
-    cameras:
-      cam1: {first_frame: 6000, last_frame: 8400}
-      cam2: {first_frame: 3020, last_frame: 4220}
-```
-
-### 3b. Import the YAML
+### 4b. Import the YAML
 
 ```bash
 SESSION_DIR=/mnt/d/mocap/2026-03-22-my-session

@@ -34,6 +34,9 @@ Eigen::Vector3d parse_vec3(YAML::Node const& node) {
 
 }  // anonymous namespace
 
+/// @brief Parse a skeleton from an already-loaded YAML::Node (shared implementation)
+static Skeleton parse_skeleton_node(YAML::Node const& root);
+
 Skeleton load_skeleton_from_yaml(std::string const& filepath) {
     // Load YAML file
     YAML::Node root;
@@ -42,7 +45,20 @@ Skeleton load_skeleton_from_yaml(std::string const& filepath) {
     } catch (YAML::Exception const& e) {
         throw std::runtime_error("Failed to load YAML file '" + filepath + "': " + e.what());
     }
+    return parse_skeleton_node(root);
+}
 
+Skeleton load_skeleton_from_yaml_string(std::string const& yaml_content) {
+    YAML::Node root;
+    try {
+        root = YAML::Load(yaml_content);
+    } catch (YAML::Exception const& e) {
+        throw std::runtime_error(std::string("Failed to parse skeleton YAML: ") + e.what());
+    }
+    return parse_skeleton_node(root);
+}
+
+static Skeleton parse_skeleton_node(YAML::Node const& root) {
     // Parse skeleton name
     std::string name = root["name"].as<std::string>("unnamed_skeleton");
 

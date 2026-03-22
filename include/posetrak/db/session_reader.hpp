@@ -24,6 +24,13 @@ struct SequenceInfo {
     double time_end_s = -1.0;
 };
 
+/// @brief Key IDs associated with a pose observation sequence
+struct SequenceMetadata {
+    std::string session_id;
+    std::string extrinsic_calibration_id;
+    std::string sync_config_id;
+};
+
 /// @brief Reads tracking data from a per-session SQLite database
 ///
 /// Opens the DB read-only and provides typed accessors for all data needed
@@ -42,8 +49,16 @@ class SessionReader {
     SessionReader(SessionReader&&) noexcept;
     SessionReader& operator=(SessionReader&&) noexcept;
 
+    /// @brief Resolve a UUID prefix to a full ID within a table
+    ///
+    /// @param table Table name (must have an `id` TEXT PRIMARY KEY column)
+    /// @param prefix Full UUID or a unique prefix
+    /// @return Full UUID matching the prefix
+    /// @throws std::runtime_error if zero or more than one record matches
+    std::string resolve_id(std::string const& table, std::string const& prefix);
+
     /// @brief Load skeleton YAML content from the skeletons table
-    /// @param skeleton_id Primary key of the skeleton record
+    /// @param skeleton_id Primary key or unique prefix of the skeleton record
     /// @return Raw YAML content string
     std::string load_skeleton_yaml(std::string const& skeleton_id);
 
@@ -56,6 +71,21 @@ class SessionReader {
     /// @param sequence_id Primary key of the pose_observation_sequences record
     /// @return SequenceInfo with start and end timestamps
     SequenceInfo load_sequence_info(std::string const& sequence_id);
+
+    /// @brief Load key IDs (session, extrinsic calibration, sync config) for a sequence
+    /// @param sequence_id Primary key of the pose_observation_sequences record
+    /// @return SequenceMetadata containing associated IDs
+    /// @throws std::runtime_error if the sequence is not found
+    SequenceMetadata load_sequence_metadata(std::string const& sequence_id);
+
+    /// @brief Load cameras by resolving all IDs from a pose observation sequence
+    ///
+    /// Derives session_id, extrinsic_calibration_id, and sync_config_id by following
+    /// the link chain: pose_observation_sequences → shots → (session, extrinsics, sync).
+    ///
+    /// @param sequence_id pose_observation_sequences primary key
+    /// @return Map from camera label to Camera (ordered by label for deterministic ID assignment)
+    std::map<std::string, Camera> load_cameras_for_sequence(std::string const& sequence_id);
 
     /// @brief Load cameras for a session with calibration and sync data applied
     ///

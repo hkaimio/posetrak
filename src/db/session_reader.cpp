@@ -103,6 +103,30 @@ SessionReader& SessionReader::operator=(SessionReader&& other) noexcept {
 
 // ---------------------------------------------------------------------------
 
+std::string SessionReader::resolve_id(std::string const& table, std::string const& prefix) {
+    // Use a dynamic query — table name cannot be parameterised in SQLite
+    std::string sql = "SELECT id FROM " + table + " WHERE id LIKE ? || '%'";
+    Stmt stmt(db_, sql.c_str());
+    sqlite3_bind_text(stmt.ptr, 1, prefix.c_str(), -1, SQLITE_STATIC);
+
+    std::string first;
+    int count = 0;
+    while (stmt.step()) {
+        if (count == 0)
+            first = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 0));
+        ++count;
+    }
+
+    if (count == 0)
+        throw std::runtime_error("No " + table + " record found with id prefix '" + prefix + "'");
+    if (count > 1)
+        throw std::runtime_error("Ambiguous prefix '" + prefix + "' matches " +
+                                 std::to_string(count) + " " + table + " records");
+    return first;
+}
+
+// ---------------------------------------------------------------------------
+
 std::string SessionReader::load_skeleton_yaml(std::string const& skeleton_id) {
     Stmt stmt(db_, "SELECT yaml_content FROM skeletons WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, skeleton_id.c_str(), -1, SQLITE_STATIC);
@@ -186,6 +210,49 @@ SequenceInfo SessionReader::load_sequence_info(std::string const& sequence_id) {
 
 // ---------------------------------------------------------------------------
 
+SequenceMetadata SessionReader::load_sequence_metadata(std::string const& sequence_id) {
+    Stmt stmt(db_,
+              "SELECT s.session_id, s.extrinsic_calibration_id, pos.sync_config_id"
+              " FROM pose_observation_sequences pos"
+              " JOIN shots s ON s.id = pos.shot_id"
+              " WHERE pos.id = ?");
+    sqlite3_bind_text(stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+
+    if (!stmt.step()) {
+        throw std::runtime_error("pose_observation_sequence not found: " + sequence_id);
+    }
+
+    SequenceMetadata meta;
+    meta.session_id = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 0));
+    meta.extrinsic_calibration_id = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 1));
+    meta.sync_config_id = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 2));
+    return meta;
+}
+
+// ---------------------------------------------------------------------------
+
+std::map<std::string, Camera>
+SessionReader::load_cameras_for_sequence(std::string const& sequence_id) {
+    Stmt stmt(db_,
+              "SELECT s.session_id, s.extrinsic_calibration_id, pos.sync_config_id"
+              " FROM pose_observation_sequences pos"
+              " JOIN shots s ON s.id = pos.shot_id"
+              " WHERE pos.id = ?");
+    sqlite3_bind_text(stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+
+    if (!stmt.step()) {
+        throw std::runtime_error("pose_observation_sequence not found: " + sequence_id);
+    }
+
+    std::string session_id = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 0));
+    std::string extrinsics_id = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 1));
+    std::string sync_id = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 2));
+
+    return load_cameras(session_id, extrinsics_id, sync_id);
+}
+
+// ---------------------------------------------------------------------------
+
 std::map<std::string, Camera>
 SessionReader::load_cameras(std::string const& session_id,
                             std::string const& extrinsic_calibration_id,
@@ -255,7 +322,8 @@ SessionReader::load_cameras(std::string const& session_id,
                    "SELECT sp.video_frame, sp.timestamp_s, sv.actual_fps"
                    " FROM sync_points sp"
                    " JOIN shot_videos sv ON sv.id = sp.shot_video_id"
-                   " WHERE sp.sync_config_id = ? AND sp.camera_instance_id = ?");
+                   " WHERE sp.sync_config_id = ? AND sp.camera_instance_id = ?"
+                   " ORDER BY sp.video_frame ASC");
 
     std::map<std::string, Camera> result;
     int camera_id = 0;
@@ -290,18 +358,22 @@ SessionReader::load_cameras(std::string const& session_id,
 
         Camera cam(camera_id++, row.label, intrinsics, extrinsics);
 
-        // Step 3: Fetch sync for this camera
+        // Step 3: Fetch all sync points for this camera
         sync_stmt.reset();
         sqlite3_bind_text(sync_stmt.ptr, 1, sync_config_id.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(sync_stmt.ptr, 2, row.instance_id.c_str(), -1, SQLITE_STATIC);
 
-        if (sync_stmt.step()) {
+        std::vector<SyncPoint> sync_pts;
+        double actual_fps = 0.0;
+        while (sync_stmt.step()) {
             int video_frame = sqlite3_column_int(sync_stmt.ptr, 0);
             double timestamp_s = sqlite3_column_double(sync_stmt.ptr, 1);
-            double actual_fps = sqlite3_column_double(sync_stmt.ptr, 2);
-
+            actual_fps = sqlite3_column_double(sync_stmt.ptr, 2);
+            sync_pts.push_back({static_cast<uint32_t>(video_frame), timestamp_s});
+        }
+        if (!sync_pts.empty()) {
             cam.set_fps(actual_fps);
-            cam.set_sync_points({{static_cast<uint32_t>(video_frame), timestamp_s}});
+            cam.set_sync_points(sync_pts);
         }
 
         result.emplace(row.label, std::move(cam));
@@ -357,6 +429,10 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
 
     // Accumulate observations per instance_id
     std::unordered_map<std::string, std::vector<Observation>> seq_observations;
+    int rows_total = 0;
+    int rows_skipped_camera = 0;
+    int rows_skipped_confidence = 0;
+    int rows_skipped_coco = 0;
 
     while (obs_stmt.step()) {
         std::string inst_id = reinterpret_cast<char const*>(sqlite3_column_text(obs_stmt.ptr, 0));
@@ -364,21 +440,28 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
         double timestamp_s = sqlite3_column_double(obs_stmt.ptr, 2);
         void const* kp_data = sqlite3_column_blob(obs_stmt.ptr, 3);
         int kp_bytes = sqlite3_column_bytes(obs_stmt.ptr, 3);
+        ++rows_total;
 
         // Skip rows whose camera instance is not in the camera map
         auto cam_it = inst_to_cam.find(inst_id);
-        if (cam_it == inst_to_cam.end())
+        if (cam_it == inst_to_cam.end()) {
+            ++rows_skipped_camera;
             continue;
+        }
         Camera const* camera = cam_it->second;
 
         // Step 4: Decode keypoints and create Observation objects
         auto kps = db::decode_keypoints(kp_data, kp_bytes);
         for (int i = 0; i < static_cast<int>(kps.size()); ++i) {
-            if (kps[static_cast<size_t>(i)].confidence < static_cast<float>(min_confidence))
+            if (kps[static_cast<size_t>(i)].confidence < static_cast<float>(min_confidence)) {
+                ++rows_skipped_confidence;
                 continue;
+            }
             auto it = coco_to_marker_idx.find(i);
-            if (it == coco_to_marker_idx.end())
+            if (it == coco_to_marker_idx.end()) {
+                ++rows_skipped_coco;
                 continue;
+            }
 
             Observation obs;
             obs.camera_id = camera->id();
@@ -393,7 +476,42 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
         }
     }
 
-    // Step 5: Build ObservationSet
+    // Step 5: Build ObservationSet — throw a diagnostic error if nothing came through
+    if (rows_total == 0) {
+        // Query returned no rows — most likely wrong person_id. Show available IDs.
+        Stmt pid_stmt(db_,
+                      "SELECT DISTINCT person_id FROM pose_observations"
+                      " WHERE sequence_id = ? ORDER BY person_id");
+        sqlite3_bind_text(pid_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+        std::string available;
+        while (pid_stmt.step()) {
+            if (!available.empty())
+                available += ", ";
+            available += std::to_string(sqlite3_column_int(pid_stmt.ptr, 0));
+        }
+        throw std::runtime_error("No pose_observations rows found for sequence '" + sequence_id +
+                                 "' with person_id=" + std::to_string(person_id) +
+                                 ". Available person_ids: [" +
+                                 (available.empty() ? "none" : available) + "]");
+    }
+    if (seq_observations.empty() && rows_total > 0) {
+        throw std::runtime_error(
+            "load_observations: " + std::to_string(rows_total) + " DB rows found for sequence '" +
+            sequence_id + "' person_id=" + std::to_string(person_id) +
+            ", but all were filtered out.\n"
+            "  cameras in map: " +
+            std::to_string(inst_to_cam.size()) + " (skipped " +
+            std::to_string(rows_skipped_camera) +
+            " rows with unknown camera)\n"
+            "  COCO markers in skeleton: " +
+            std::to_string(coco_to_marker_idx.size()) + " (skipped " +
+            std::to_string(rows_skipped_coco) +
+            " keypoints with unknown COCO id)\n"
+            "  skipped " +
+            std::to_string(rows_skipped_confidence) + " keypoints below confidence threshold " +
+            std::to_string(min_confidence));
+    }
+
     ObservationSet obs_set(person_id);
     for (auto const& [inst_id, obs_list] : seq_observations) {
         auto* cam = inst_to_cam.at(inst_id);

@@ -471,6 +471,25 @@ TEST_CASE("SessionReader load_observations", "[session_reader]") {
     REQUIRE(first.camera_id == 0);
 }
 
+TEST_CASE("SessionReader load_cameras_for_sequence", "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    // Should resolve session/extrinsics/sync automatically from the sequence ID
+    auto cameras = reader.load_cameras_for_sequence("seq1");
+
+    REQUIRE(cameras.size() == 1);
+    REQUIRE(cameras.count("cam1") == 1);
+
+    auto const& cam = cameras.at("cam1");
+    REQUIRE(cam.id() == 0);
+    REQUIRE(cam.intrinsics().fx == Catch::Approx(1000.0));
+    REQUIRE(cam.position().norm() == Catch::Approx(0.0));
+    REQUIRE(cam.fps() == Catch::Approx(120.0));
+
+    REQUIRE_THROWS_AS(reader.load_cameras_for_sequence("nonexistent"), std::runtime_error);
+}
+
 TEST_CASE("SessionReader error on missing record", "[session_reader]") {
     auto db_path = ensure_fixture();
     SessionReader reader(db_path.string());

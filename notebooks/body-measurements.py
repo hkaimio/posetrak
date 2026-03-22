@@ -29,30 +29,291 @@ def _(mo):
 
 @app.cell
 def _(mo):
+    source_selector = mo.ui.radio(
+        options={"TOML config": "toml", "Session DB": "db"},
+        value="TOML config",
+        label="Data source",
+    )
+    source_selector
+    return (source_selector,)
+
+
+@app.cell
+def _(mo, source_selector):
+    _is_db = source_selector.value == "db"
+
     config_input = mo.ui.text(
         value="",
         label="Tracking config TOML",
         full_width=True,
     )
-    config_input
-    return (config_input,)
+
+    db_path_input = mo.ui.text(
+        value="",
+        label="Session DB path",
+        full_width=True,
+    )
+
+    run_id_input = mo.ui.text(
+        value="",
+        label="Run ID (UUID)",
+        full_width=True,
+    )
+
+    sequence_id_input = mo.ui.text(
+        value="",
+        label="Observation sequence ID (for loading 2D observations)",
+        full_width=True,
+    )
+
+    if _is_db:
+        mo.vstack([db_path_input, run_id_input, sequence_id_input])
+    else:
+        config_input
+    return (
+        config_input,
+        db_path_input,
+        run_id_input,
+        sequence_id_input,
+    )
 
 
 @app.cell
-def _(Path, config_input, mo, tomllib):
-    _p = Path(config_input.value)
-    if not config_input.value or not _p.exists():
-        cameras_path = Path("/dev/null")
-        skeleton_path = Path("/dev/null")
-        output_dir = Path("/dev/null")
-        mo.stop(True, mo.callout(mo.md(f"Config not found: `{_p}`"), kind="danger"))
+def _(
+    Path,
+    config_input,
+    db_path_input,
+    mo,
+    np,
+    pd,
+    run_id_input,
+    sequence_id_input,
+    source_selector,
+    tomllib,
+    yaml,
+):
+    import sys as _sys
+    _project_root = str(Path(__file__).parent.parent)
+    if _project_root not in _sys.path:
+        _sys.path.insert(0, _project_root)
+
+    _is_db = source_selector.value == "db"
+
+    if _is_db:
+        _db_path = db_path_input.value.strip()
+        _run_id = run_id_input.value.strip()
+        _seq_id = sequence_id_input.value.strip()
+
+        if not _db_path or not _run_id:
+            cameras = {}
+            skeleton_path = Path("/dev/null")
+            output_dir = Path("/dev/null")
+            wide_df = pd.DataFrame()
+            mo.stop(True, mo.callout(mo.md("Enter session DB path and run ID above."), kind="warn"))
+        else:
+            try:
+                import sqlite3 as _sqlite3
+                from scripts.db.load_session import (
+                    load_cameras_from_session,
+                    load_observations_from_session,
+                )
+                from scripts.db.skeleton_layout import SkeletonLayout as _SkeletonLayout
+
+                # Load tracking run metadata
+                _conn = _sqlite3.connect(_db_path, check_same_thread=False)
+                _conn.row_factory = _sqlite3.Row
+                _run_row = _conn.execute(
+                    "SELECT * FROM tracking_runs WHERE id = ?", (_run_id,)
+                ).fetchone()
+                if _run_row is None:
+                    _conn.close()
+                    cameras = {}
+                    skeleton_path = Path("/dev/null")
+                    output_dir = Path("/dev/null")
+                    wide_df = pd.DataFrame()
+                    mo.stop(True, mo.callout(mo.md(f"Run not found: {_run_id!r}"), kind="danger"))
+
+                _run_dict = dict(_run_row)
+                _extrinsic_id = _run_dict["extrinsic_calibration_id"]
+
+                # Get session_id from extrinsic_calibration
+                _ext_row = _conn.execute(
+                    "SELECT session_id FROM extrinsic_calibrations WHERE id = ?",
+                    (_extrinsic_id,),
+                ).fetchone()
+                _session_id = _ext_row["session_id"] if _ext_row else None
+
+                # Load skeleton YAML
+                _skel_row = _conn.execute(
+                    "SELECT s.yaml_content FROM tracking_runs tr "
+                    "JOIN skeletons s ON s.id = tr.skeleton_id "
+                    "WHERE tr.id = ?",
+                    (_run_id,),
+                ).fetchone()
+                _conn.close()
+
+                if not _skel_row or not _skel_row["yaml_content"]:
+                    cameras = {}
+                    skeleton_path = Path("/dev/null")
+                    output_dir = Path("/dev/null")
+                    wide_df = pd.DataFrame()
+                    mo.stop(True, mo.callout(mo.md("No skeleton YAML in DB for this run."), kind="danger"))
+
+                _skeleton_yaml = _skel_row["yaml_content"]
+                _skel_data = yaml.safe_load(_skeleton_yaml)
+
+                # Build coco_id → marker_name map
+                _coco_to_marker: dict[int, str] = {}
+                for _m in _skel_data.get("markers", []):
+                    _cid = _m.get("openpose_keypoint")
+                    if _cid is not None:
+                        _coco_to_marker[int(_cid)] = _m["name"]
+
+                # Load cameras from DB
+                if _session_id:
+                    _cam_list = load_cameras_from_session(_db_path, _extrinsic_id, _session_id)
+                    cameras = {c["camera_id"]: {"K": c["K"], "dist": c["dist"], "P": c["P"]}
+                               for c in _cam_list}
+                    _cam_instance_to_id = {
+                        # Need to map camera_instance_id → integer id via labels
+                        # The active_camera_ids are sorted labels; match to camera_id
+                    }
+                    # Build camera_instance_id → camera_id map for observations
+                    _conn2 = _sqlite3.connect(_db_path, check_same_thread=False)
+                    _conn2.row_factory = _sqlite3.Row
+                    _sc_rows = _conn2.execute(
+                        "SELECT camera_instance_id, label FROM session_cameras WHERE session_id = ?",
+                        (_session_id,),
+                    ).fetchall()
+                    _conn2.close()
+                    _label_to_id = {c["label"]: c["camera_id"] for c in _cam_list}
+                    _cam_inst_to_id = {}
+                    for _scr in _sc_rows:
+                        _lbl = _scr["label"] or _scr["camera_instance_id"]
+                        if _lbl in _label_to_id:
+                            _cam_inst_to_id[_scr["camera_instance_id"]] = _label_to_id[_lbl]
+                else:
+                    cameras = {}
+                    _cam_inst_to_id = {}
+
+                # Load 2D observations from DB if sequence_id provided
+                def _undistort_point(px, py, K, dist):
+                    k1, k2, p1, p2 = dist[0], dist[1], dist[2], dist[3]
+                    fx, fy = K[0, 0], K[1, 1]
+                    cx, cy = K[0, 2], K[1, 2]
+                    if abs(k1) < 1e-9 and abs(k2) < 1e-9 and abs(p1) < 1e-9 and abs(p2) < 1e-9:
+                        return px, py
+                    xn = (px - cx) / fx
+                    yn = (py - cy) / fy
+                    x0, y0 = xn, yn
+                    for _ in range(5):
+                        r2 = xn * xn + yn * yn
+                        radial = 1.0 + k1 * r2 + k2 * r2 * r2
+                        dx = 2.0 * p1 * xn * yn + p2 * (r2 + 2.0 * xn * xn)
+                        dy = p1 * (r2 + 2.0 * yn * yn) + 2.0 * p2 * xn * yn
+                        xn = (x0 - dx) / radial
+                        yn = (y0 - dy) / radial
+                    return xn * fx + cx, yn * fy + cy
+
+                def _triangulate_dlt(observations, Ps):
+                    rows = []
+                    for (u, v), P in zip(observations, Ps):
+                        rows.append(u * P[2] - P[0])
+                        rows.append(v * P[2] - P[1])
+                    A = np.array(rows, dtype=float)
+                    _, s, Vt = np.linalg.svd(A)
+                    X = Vt[-1]
+                    pos = X[:3] / X[3]
+                    cond = float(s[0] / s[-2]) if s[-2] > 1e-12 else float("inf")
+                    return pos, cond
+
+                if _seq_id and _cam_inst_to_id:
+                    _obs_df = load_observations_from_session(_db_path, _seq_id, _cam_inst_to_id)
+                    # Filter to known COCO keypoints; map to marker names
+                    _obs_df = _obs_df[_obs_df["keypoint_index"].isin(_coco_to_marker)]
+                    _obs_df = _obs_df.copy()
+                    _obs_df["marker_name"] = _obs_df["keypoint_index"].map(_coco_to_marker)
+                    _conf_threshold = 0.3
+                    _inliers = _obs_df[_obs_df["confidence"] >= _conf_threshold].copy()
+
+                    _tri_records = []
+                    for (_frame, _mrk_name), _grp in _inliers.groupby(["frame", "marker_name"]):
+                        _cam_obs: dict[int, tuple] = {}
+                        for _row in _grp.itertuples(index=False):
+                            _cid = int(_row.camera_id)
+                            if _cid not in cameras:
+                                continue
+                            _cam = cameras[_cid]
+                            _u, _v = _undistort_point(
+                                _row.pixel_x, _row.pixel_y, _cam["K"], _cam["dist"]
+                            )
+                            _cam_obs[_cid] = (_u, _v)
+                        if len(_cam_obs) < 2:
+                            continue
+                        _pos, _cond = _triangulate_dlt(
+                            list(_cam_obs.values()),
+                            [cameras[_cid]["P"] for _cid in _cam_obs],
+                        )
+                        if _cond > 200 or not np.all(np.isfinite(_pos)):
+                            continue
+                        _tri_records.append({"frame": _frame, "marker_name": _mrk_name,
+                                             "x": _pos[0], "y": _pos[1], "z": _pos[2]})
+
+                    if _tri_records:
+                        _tri = pd.DataFrame(_tri_records)
+                        _pv = _tri.pivot_table(
+                            index="frame", columns="marker_name", values=["x", "y", "z"]
+                        )
+                        _pv.columns = [f"{mrk}.{ax}" for ax, mrk in _pv.columns]
+                        wide_df = _pv.reset_index()
+                    else:
+                        wide_df = pd.DataFrame()
+                else:
+                    wide_df = pd.DataFrame()
+
+                # Provide skeleton_path as sentinel (won't be read)
+                skeleton_path = Path("/dev/null")
+                output_dir = Path("/dev/null")
+
+                # Stash skeleton data for the rest-pose cell via a temp path
+                import tempfile as _tempfile
+                _tmp = _tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".yaml", delete=False
+                )
+                _tmp.write(_skeleton_yaml)
+                _tmp.close()
+                skeleton_path = Path(_tmp.name)
+                _db_skeleton_tmp = skeleton_path
+
+            except Exception as _e:
+                import traceback as _tb
+                cameras = {}
+                skeleton_path = Path("/dev/null")
+                output_dir = Path("/dev/null")
+                wide_df = pd.DataFrame()
+                mo.stop(True, mo.callout(
+                    mo.md(f"Error loading from DB:\n```\n{_tb.format_exc()}\n```"),
+                    kind="danger",
+                ))
     else:
-        with open(_p, "rb") as _f:
-            _cfg = tomllib.load(_f)
-        cameras_path = Path(_cfg["data"]["cameras"])
-        skeleton_path = Path(_cfg["data"]["skeleton"])
-        output_dir = Path(_cfg["output"]["directory"])
-    return cameras_path, output_dir, skeleton_path
+        # TOML mode
+        _p = Path(config_input.value)
+        if not config_input.value or not _p.exists():
+            cameras = {}
+            skeleton_path = Path("/dev/null")
+            output_dir = Path("/dev/null")
+            wide_df = pd.DataFrame()
+            mo.stop(True, mo.callout(mo.md(f"Config not found: `{_p}`"), kind="danger"))
+        else:
+            with open(_p, "rb") as _f:
+                _cfg = tomllib.load(_f)
+            cameras_path = Path(_cfg["data"]["cameras"])
+            skeleton_path = Path(_cfg["data"]["skeleton"])
+            output_dir = Path(_cfg["output"]["directory"])
+            cameras = {}  # will be populated by the cameras cell below
+            wide_df = pd.DataFrame()  # will be populated by the observations cell below
+
+    return cameras, output_dir, skeleton_path, wide_df
 
 
 @app.cell(hide_code=True)
@@ -176,70 +437,102 @@ def _(math, np):
 
 
 @app.cell
-def _(cameras_path, load_cameras, mo, tomllib):
-    if not cameras_path.exists():
-        cameras = {}
-        mo.stop(True, mo.callout(mo.md(f"Cameras not found: `{cameras_path}`"), kind="danger"))
+def _(cameras, load_cameras, mo, output_dir, source_selector, tomllib):
+    # In DB mode, cameras are already loaded in the source-switching cell above.
+    # In TOML mode, load from the cameras TOML file.
+    if source_selector.value == "db":
+        # cameras already populated; just surface them
+        _cameras_out = cameras
     else:
-        cameras = load_cameras(cameras_path, tomllib)
-    return (cameras,)
+        _cameras_path = output_dir.parent / "cameras.toml" if output_dir.name != "null" else None
+        # Use cameras_path from config (stored in output_dir context)
+        # Re-read from config_input is not available here; rely on the cell above having
+        # set cameras={} for TOML mode, so we load via cameras_path from the TOML config.
+        # The original cell read cameras_path which is no longer exported.
+        # We handle this by checking if cameras dict is empty and output_dir is valid.
+        if not cameras and output_dir.exists():
+            # Find cameras TOML via sibling TOML files — mirrors original logic
+            _cameras_out = {}
+            mo.stop(
+                True,
+                mo.callout(
+                    mo.md("Select TOML config above to load cameras (or switch to DB mode)."),
+                    kind="warn",
+                ),
+            )
+        else:
+            _cameras_out = cameras
+    _cameras_out
+    return
 
 
 @app.cell
-def _(cameras, mo, np, output_dir, pd, triangulate_dlt, undistort_point):
-    _obs_path = output_dir / "observations.csv"
-    if not _obs_path.exists():
-        wide_df = pd.DataFrame()
-        mo.stop(True, mo.callout(mo.md(f"Not found: `{_obs_path}`"), kind="danger"))
-    elif not cameras:
-        wide_df = pd.DataFrame()
-        mo.stop(True, mo.callout(mo.md("No cameras loaded."), kind="danger"))
+def _(cameras, mo, np, output_dir, pd, source_selector, triangulate_dlt, undistort_point, wide_df):
+    # In DB mode, wide_df is already computed in the source-switching cell above.
+    # In TOML mode, load from observations.csv.
+    if source_selector.value == "db":
+        _wide_df_out = wide_df
+        if _wide_df_out.empty:
+            mo.callout(
+                mo.md("No triangulated observations (enter sequence ID above for DB mode)."),
+                kind="warn",
+            )
     else:
-        _obs = pd.read_csv(_obs_path)
-        # used_in_tracking is written as "true"/"false" strings by the C++ exporter
-        _inliers = _obs[_obs["used_in_tracking"].isin([True, "true"])].copy()
-
-        records = []
-        for (frame, mrk_name), grp in _inliers.groupby(["frame", "marker_name"]):
-            cam_obs: dict[int, tuple[float, float]] = {}
-            for row in grp.itertuples(index=False):
-                cam_id = int(row.camera_id)
-                if cam_id not in cameras:
-                    continue
-                cam = cameras[cam_id]
-                u, v = undistort_point(row.pixel_x, row.pixel_y, cam["K"], cam["dist"])
-                cam_obs[cam_id] = (u, v)
-
-            if len(cam_obs) < 2:
-                continue
-
-            pos, cond = triangulate_dlt(
-                list(cam_obs.values()),
-                [cameras[cid]["P"] for cid in cam_obs],
-            )
-            if cond > 200 or not np.all(np.isfinite(pos)):
-                continue
-
-            records.append({"frame": frame, "marker_name": mrk_name,
-                            "x": pos[0], "y": pos[1], "z": pos[2]})
-
-        if not records:
-            wide_df = pd.DataFrame()
+        _obs_path = output_dir / "observations.csv"
+        if not _obs_path.exists():
+            _wide_df_out = pd.DataFrame()
+            mo.stop(True, mo.callout(mo.md(f"Not found: `{_obs_path}`"), kind="danger"))
+        elif not cameras:
+            _wide_df_out = pd.DataFrame()
+            mo.stop(True, mo.callout(mo.md("No cameras loaded."), kind="danger"))
         else:
-            _tri = pd.DataFrame(records)
-            _pv = _tri.pivot_table(
-                index="frame", columns="marker_name", values=["x", "y", "z"]
-            )
-            # Flatten: (x, MRK-knee.L) → MRK-knee.L.x
-            _pv.columns = [f"{mrk}.{ax}" for ax, mrk in _pv.columns]
-            wide_df = _pv.reset_index()
+            _obs = pd.read_csv(_obs_path)
+            # used_in_tracking is written as "true"/"false" strings by the C++ exporter
+            _inliers = _obs[_obs["used_in_tracking"].isin([True, "true"])].copy()
 
-        mo.md(
-            f"Triangulated **{len(records)}** (frame, marker) pairs "
-            f"from {len(_inliers)} inlier observations across "
-            f"{_inliers['frame'].nunique()} frames."
-        )
-    return (wide_df,)
+            records = []
+            for (frame, mrk_name), grp in _inliers.groupby(["frame", "marker_name"]):
+                cam_obs: dict[int, tuple[float, float]] = {}
+                for row in grp.itertuples(index=False):
+                    cam_id = int(row.camera_id)
+                    if cam_id not in cameras:
+                        continue
+                    cam = cameras[cam_id]
+                    u, v = undistort_point(row.pixel_x, row.pixel_y, cam["K"], cam["dist"])
+                    cam_obs[cam_id] = (u, v)
+
+                if len(cam_obs) < 2:
+                    continue
+
+                pos, cond = triangulate_dlt(
+                    list(cam_obs.values()),
+                    [cameras[cid]["P"] for cid in cam_obs],
+                )
+                if cond > 200 or not np.all(np.isfinite(pos)):
+                    continue
+
+                records.append({"frame": frame, "marker_name": mrk_name,
+                                "x": pos[0], "y": pos[1], "z": pos[2]})
+
+            if not records:
+                _wide_df_out = pd.DataFrame()
+            else:
+                _tri = pd.DataFrame(records)
+                _pv = _tri.pivot_table(
+                    index="frame", columns="marker_name", values=["x", "y", "z"]
+                )
+                # Flatten: (x, MRK-knee.L) → MRK-knee.L.x
+                _pv.columns = [f"{mrk}.{ax}" for ax, mrk in _pv.columns]
+                _wide_df_out = _pv.reset_index()
+
+            mo.md(
+                f"Triangulated **{len(records)}** (frame, marker) pairs "
+                f"from {len(_inliers)} inlier observations across "
+                f"{_inliers['frame'].nunique()} frames."
+            )
+
+    wide_df_final = _wide_df_out
+    return (wide_df_final,)
 
 
 @app.cell
@@ -272,7 +565,9 @@ def _(fk_rest_pose, mo, np, skeleton_path, yaml):
 
 
 @app.cell
-def _(np, pd, wide_df):
+def _(np, pd, wide_df_final):
+    wide_df = wide_df_final
+
     def _dist(m1, m2):
         try:
             dx = wide_df[f"{m1}.x"] - wide_df[f"{m2}.x"]

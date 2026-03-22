@@ -32,6 +32,7 @@ import argparse
 import csv
 import math
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -402,15 +403,86 @@ def _dfs_order(joints: dict[str, Joint], root_name: str) -> list[str]:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _df_to_root_poses(df) -> dict[int, np.ndarray]:
+    """Convert a root_pose DataFrame to the dict[frame, array] format used by _write_motion."""
+    result: dict[int, np.ndarray] = {}
+    for _, row in df.iterrows():
+        frame = int(row["frame"])
+        result[frame] = np.array([
+            float(row["pos_x"]), float(row["pos_y"]), float(row["pos_z"]),
+            float(row["quat_w"]), float(row["quat_x"]),
+            float(row["quat_y"]), float(row["quat_z"]),
+        ])
+    return result
+
+
+def _df_to_joint_angles(df) -> dict[int, dict[str, np.ndarray]]:
+    """Convert a joint_angles DataFrame to the dict[frame, {name: array}] format."""
+    result: dict[int, dict[str, np.ndarray]] = defaultdict(dict)
+    for _, row in df.iterrows():
+        frame = int(row["frame"])
+        name = row["joint_name"]
+        result[frame][name] = np.array([
+            float(row["angle_x"]),
+            float(row["angle_y"]),
+            float(row["angle_z"]),
+        ])
+    return dict(result)
+
+
+def _detect_fps_from_df(df) -> float:
+    """Auto-detect FPS from a root_pose DataFrame."""
+    if df is None or len(df) < 2:
+        return 120.0
+    sorted_df = df.sort_values("frame")
+    ts = sorted_df["timestamp"].values
+    dt = ts[1] - ts[0]
+    return round(1.0 / dt) if dt > 0 else 120.0
+
+
+def _load_fps_from_db(session_db: str, run_id: str) -> float:
+    """Query actual_fps from shot_videos via tracking_run → observation_sequence → shot."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(session_db, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT sv.actual_fps
+            FROM tracking_runs tr
+            JOIN pose_observation_sequences pos ON pos.id = tr.observation_sequence_id
+            JOIN shots s ON s.id = pos.shot_id
+            JOIN shot_videos sv ON sv.shot_id = s.id
+            WHERE tr.id = ?
+            LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        conn.close()
+        if row and row["actual_fps"]:
+            return float(row["actual_fps"])
+    except Exception:
+        pass
+    return 120.0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Export posetrak tracking results to BVH.")
-    parser.add_argument("tracking_dir", type=Path,
-                        help="Directory containing root_pose.csv and joint_angles.csv")
-    parser.add_argument("--skeleton", "-s", type=Path, required=True,
-                        help="Skeleton YAML file")
+    parser.add_argument("tracking_dir", type=Path, nargs="?", default=None,
+                        help="Directory containing root_pose.csv and joint_angles.csv "
+                             "(not required when using --session-db)")
+    parser.add_argument("--skeleton", "-s", type=Path, default=None,
+                        help="Skeleton YAML file (not required when using --session-db)")
+    parser.add_argument("--session-db", type=str, default=None,
+                        help="Path to session SQLite database")
+    parser.add_argument("--run-id", type=str, default=None,
+                        help="Tracking run UUID (required with --session-db)")
+    parser.add_argument("--person-id", type=int, default=0,
+                        help="Person ID to export (default: 0, used with --session-db)")
     parser.add_argument("--output", "-o", type=Path, default=None,
-                        help="Output .bvh file (default: <tracking_dir>/tracking.bvh)")
+                        help="Output .bvh file (default: <tracking_dir>/tracking.bvh "
+                             "or ./tracking.bvh in DB mode)")
     parser.add_argument("--fps", type=float, default=None,
                         help="Frame rate (default: auto-detect from timestamps)")
     parser.add_argument("--units", choices=["m", "cm"], default="m",
@@ -425,50 +497,113 @@ def main() -> None:
     parser.add_argument("--no-rest-frame", action="store_true",
                         help="Omit frame 0 rest pose (not recommended)")
     parser.add_argument("--smoothed", action="store_true",
-                        help="Use smoothed_joint_angles.csv / smoothed_root_pose.csv instead of "
-                             "the forward-pass outputs (requires --smooth during tracking)")
+                        help="Use smoothed results (--session-db) or "
+                             "smoothed_joint_angles.csv / smoothed_root_pose.csv (CSV mode)")
     parser.add_argument("--start-frame", type=int, default=None,
                         help="First tracking frame to export (1-based)")
     parser.add_argument("--end-frame", type=int, default=None,
                         help="Last tracking frame to export (1-based, inclusive)")
     args = parser.parse_args()
 
-    tracking_dir: Path = args.tracking_dir
-    root_pose_csv = tracking_dir / ("smoothed_root_pose.csv" if args.smoothed else "root_pose.csv")
-    joint_angles_csv = tracking_dir / ("smoothed_joint_angles.csv" if args.smoothed else "joint_angles.csv")
-
-    for p in (root_pose_csv, joint_angles_csv, args.skeleton):
-        if not p.exists():
-            print(f"Error: file not found: {p}", file=sys.stderr)
+    # ---- DB mode ----
+    if args.session_db is not None:
+        if args.run_id is None:
+            print("Error: --run-id is required when using --session-db", file=sys.stderr)
             sys.exit(1)
 
-    output: Path = args.output or (tracking_dir / "tracking.bvh")
+        # Import here so the script still works without these deps when using CSV mode
+        import sys as _sys
+        import os as _os
+        _sys.path.insert(0, str(Path(__file__).parents[1]))
+        from scripts.db.load_session import load_tracking_run_data
 
-    print(f"Loading skeleton: {args.skeleton}")
-    joints, root_name = load_skeleton(args.skeleton)
-    print(f"  {len(joints)} joints, root: {root_name}")
+        print(f"Loading tracking run {args.run_id!r} from {args.session_db!r}")
+        data = load_tracking_run_data(
+            args.session_db, args.run_id,
+            person_id=args.person_id,
+            smoothed=args.smoothed,
+        )
 
-    print(f"Loading root pose: {root_pose_csv}")
-    root_poses = load_root_pose(root_pose_csv)
-    print(f"  {len(root_poses)} frames")
+        if data["root_pose_df"].empty:
+            print("Error: no tracking results found", file=sys.stderr)
+            sys.exit(1)
 
-    print(f"Loading joint angles: {joint_angles_csv}")
-    joint_angles = load_joint_angles(joint_angles_csv)
+        # Write skeleton YAML to temp file so load_skeleton() can read it
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as tmp:
+            tmp.write(data["skeleton_yaml"])
+            skel_tmp_path = Path(tmp.name)
 
-    # Auto-detect FPS from timestamp difference
-    fps = args.fps
-    if fps is None:
-        sorted_frames = sorted(root_poses.keys())
-        if len(sorted_frames) >= 2:
-            # Read timestamps from CSV for two consecutive frames
-            with open(root_pose_csv) as f:
-                reader = csv.DictReader(f)
-                ts = {int(r["frame"]): float(r["timestamp"]) for r in reader}
-            f1, f2 = sorted_frames[0], sorted_frames[1]
-            dt = ts[f2] - ts[f1]
-            fps = round(1.0 / dt) if dt > 0 else 120.0
-        else:
-            fps = 120.0
+        try:
+            joints, root_name = load_skeleton(skel_tmp_path)
+        finally:
+            skel_tmp_path.unlink(missing_ok=True)
+
+        print(f"  {len(joints)} joints, root: {root_name}")
+
+        root_poses = _df_to_root_poses(data["root_pose_df"])
+        joint_angles = _df_to_joint_angles(data["joint_angles_df"])
+        print(f"  {len(root_poses)} frames")
+
+        fps = args.fps
+        if fps is None:
+            fps = _load_fps_from_db(args.session_db, args.run_id)
+            if fps == 120.0:
+                fps = _detect_fps_from_df(data["root_pose_df"])
+
+        output = args.output or Path("tracking.bvh")
+
+    # ---- CSV mode ----
+    else:
+        if args.tracking_dir is None:
+            print("Error: tracking_dir is required when not using --session-db",
+                  file=sys.stderr)
+            sys.exit(1)
+        if args.skeleton is None:
+            print("Error: --skeleton is required when not using --session-db",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        tracking_dir: Path = args.tracking_dir
+        root_pose_csv = tracking_dir / (
+            "smoothed_root_pose.csv" if args.smoothed else "root_pose.csv"
+        )
+        joint_angles_csv = tracking_dir / (
+            "smoothed_joint_angles.csv" if args.smoothed else "joint_angles.csv"
+        )
+
+        for p in (root_pose_csv, joint_angles_csv, args.skeleton):
+            if not p.exists():
+                print(f"Error: file not found: {p}", file=sys.stderr)
+                sys.exit(1)
+
+        output = args.output or (tracking_dir / "tracking.bvh")
+
+        print(f"Loading skeleton: {args.skeleton}")
+        joints, root_name = load_skeleton(args.skeleton)
+        print(f"  {len(joints)} joints, root: {root_name}")
+
+        print(f"Loading root pose: {root_pose_csv}")
+        root_poses = load_root_pose(root_pose_csv)
+        print(f"  {len(root_poses)} frames")
+
+        print(f"Loading joint angles: {joint_angles_csv}")
+        joint_angles = load_joint_angles(joint_angles_csv)
+
+        fps = args.fps
+        if fps is None:
+            sorted_frames = sorted(root_poses.keys())
+            if len(sorted_frames) >= 2:
+                with open(root_pose_csv) as f:
+                    reader = csv.DictReader(f)
+                    ts = {int(r["frame"]): float(r["timestamp"]) for r in reader}
+                f1, f2 = sorted_frames[0], sorted_frames[1]
+                dt = ts[f2] - ts[f1]
+                fps = round(1.0 / dt) if dt > 0 else 120.0
+            else:
+                fps = 120.0
+
     print(f"  FPS: {fps}, units: {args.units}, coord: {args.coord}")
 
     print(f"Writing: {output}")

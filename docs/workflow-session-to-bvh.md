@@ -470,21 +470,22 @@ Smoothed results are written alongside the non-smoothed ones (flagged in
 
 ```bash
 python python/tools/export_bvh.py \
-    /mnt/d/mocap/2026-03-22-my-session/tracking/take1 \
-    --skeleton tests/harri-skeleton.yaml \
-    --output /mnt/d/mocap/2026-03-22-my-session/take1.bvh \
+    --session-db "$SESSION_DIR/session.db" \
+    --run-id <run_id> \
     --fps 120 \
+    --coord yup \
     --units m \
-    --coord yup
+    --output /mnt/d/mocap/2026-03-22-my-session/take1.bvh
 ```
 
 Key options:
 
-| Flag | Default | Notes |
-|---|---|---|
-| `--fps` | from CSV | Output BVH frame rate |
-| `--units` | `m` | `m` = metres, `cm` = centimetres |
-| `--coord` | `yup` | `yup` for Blender/MotionBuilder, `zup` for some other tools |
+| Flag | Notes |
+|---|---|
+| `--run-id` | `tracking_runs.id` from the session DB (or unique prefix) |
+| `--fps` | Output BVH frame rate |
+| `--units` | `m` = metres, `cm` = centimetres |
+| `--coord` | `yup` for Blender/MotionBuilder, `zup` for some other tools |
 | `--smoothed` | off | Export the RTS-smoothed result |
 | `--start-frame` / `--end-frame` | all | Trim the output |
 | `--no-rest-frame` | off | Skip frame 0 (rest pose) |

@@ -1437,6 +1437,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="posetrak-db",
         description="posetrak database management CLI",
+        allow_abbrev=False,
     )
     topics = parser.add_subparsers(dest="topic", required=True)
 

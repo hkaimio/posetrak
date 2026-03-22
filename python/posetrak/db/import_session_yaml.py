@@ -104,18 +104,27 @@ class SessionYamlImportResult:
 
 
 def _normalise_cameras(raw: Any) -> dict[str, dict]:
-    """Accept both dict and list camera sections; return a uniform dict."""
+    """Accept both dict and list camera sections; return a uniform dict.
+
+    Normalises field aliases:
+    - ``path`` → ``video_path``
+    - ``calib.intrinsics`` (UUID) → ``intrinsics_calibration_id``
+    """
     if isinstance(raw, dict):
-        return raw
-    # List form from sync_videos.py: [{name: cam1, path: ..., ...}, ...]
+        entries = [{"name": k, **v} for k, v in raw.items()]
+    else:
+        entries = list(raw)
+
     result = {}
-    for entry in raw:
+    for entry in entries:
         key = str(entry["name"])
-        cam = dict(entry)
-        cam.pop("name")
-        # Accept "path" as alias for "video_path"
+        cam = {k: v for k, v in entry.items() if k != "name"}
         if "video_path" not in cam and "path" in cam:
             cam["video_path"] = cam.pop("path")
+        # calib.intrinsics UUID → intrinsics_calibration_id
+        calib = cam.pop("calib", None)
+        if calib and "intrinsics" in calib and "intrinsics_calibration_id" not in cam:
+            cam["intrinsics_calibration_id"] = calib["intrinsics"]
         result[key] = cam
     return result
 
@@ -194,12 +203,22 @@ def _resolve_camera_instance(registry: sqlite3.Connection, label: str) -> str:
     return rows[0][0]
 
 
+def _mode_from_intrinsics(registry: sqlite3.Connection, intrinsics_id: str) -> str:
+    """Look up the camera_mode_id for a known intrinsics_calibration_id."""
+    row = registry.execute(
+        "SELECT camera_mode_id FROM intrinsics_calibrations WHERE id = ?",
+        (intrinsics_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"intrinsics_calibration {intrinsics_id!r} not found in registry")
+    return row["camera_mode_id"]
+
+
 def _resolve_camera_mode(registry: sqlite3.Connection, camera_instance_id: str) -> str:
     """Return the camera_mode_id associated with a camera instance via camera_model.
 
-    If multiple modes exist for the model, picks the one with the most recent
-    intrinsics calibration.  Raises ``ValueError`` if no unique mode can be
-    determined.
+    Raises ``ValueError`` if there is not exactly one mode for the model.
+    Prefer calling ``_mode_from_intrinsics`` first when an intrinsics ID is known.
     """
     inst = registry.execute(
         "SELECT camera_model_id FROM camera_instances WHERE id = ?",
@@ -216,32 +235,12 @@ def _resolve_camera_mode(registry: sqlite3.Connection, camera_instance_id: str) 
             f"No camera_modes found for model {inst['camera_model_id']!r}. "
             "Provide camera_mode_id in the YAML."
         )
-    if len(modes) == 1:
-        return modes[0][0]
-
-    # Multiple modes — pick the one with the most recent intrinsics calibration.
-    row = registry.execute(
-        "SELECT camera_mode_id FROM intrinsics_calibrations "
-        "WHERE camera_mode_id IN "
-        "  (SELECT id FROM camera_modes WHERE camera_model_id = ?) "
-        "ORDER BY calibrated_at DESC LIMIT 1",
-        (inst["camera_model_id"],),
-    ).fetchone()
-    if row is not None:
-        import warnings
-        warnings.warn(
-            f"Multiple camera modes for model {inst['camera_model_id']!r}; "
-            f"auto-selected mode {row['camera_mode_id']!r} (most recently calibrated). "
-            "Set camera_mode_id in the YAML to suppress this warning."
+    if len(modes) > 1:
+        raise ValueError(
+            f"Ambiguous: {len(modes)} modes for camera model {inst['camera_model_id']!r}. "
+            "Provide camera_mode_id or intrinsics_calibration_id in the YAML."
         )
-        return row["camera_mode_id"]
-
-    mode_ids = ", ".join(m[0] for m in modes)
-    raise ValueError(
-        f"Ambiguous: {len(modes)} modes for camera model {inst['camera_model_id']!r} "
-        f"and none have intrinsics ({mode_ids}). "
-        "Provide camera_mode_id explicitly in the YAML."
-    )
+    return modes[0][0]
 
 
 def _latest_intrinsics(registry: sqlite3.Connection, camera_mode_id: str) -> str | None:
@@ -331,12 +330,14 @@ def import_session_yaml(
         instance_id: str = cam_cfg.get("camera_instance_id") or _resolve_camera_instance(
             registry, cam_key
         )
-        mode_id: str = cam_cfg.get("camera_mode_id") or _resolve_camera_mode(
-            registry, instance_id
+        intrinsics_id: str | None = cam_cfg.get("intrinsics_calibration_id")
+        mode_id: str = (
+            cam_cfg.get("camera_mode_id")
+            or (intrinsics_id and _mode_from_intrinsics(registry, intrinsics_id))
+            or _resolve_camera_mode(registry, instance_id)
         )
-        intrinsics_id: str | None = cam_cfg.get("intrinsics_calibration_id") or _latest_intrinsics(
-            registry, mode_id
-        )
+        if not intrinsics_id:
+            intrinsics_id = _latest_intrinsics(registry, mode_id)
         if intrinsics_id is None:
             raise ValueError(
                 f"No intrinsics_calibration found for camera {cam_key!r} "

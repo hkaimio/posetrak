@@ -358,7 +358,9 @@ def undistort_points(cameras: Dict[str, dict],
     return annotations
 
 
-def parse_via_json(json_path: str) -> Dict[str, dict]:
+def parse_via_json(json_path: str,
+                   col_spacing: float = 1.0,
+                   row_spacing: float = 1.0) -> Dict[str, dict]:
     """
     Parse VIA JSON annotation file and organize by camera.
 
@@ -419,9 +421,8 @@ def parse_via_json(json_path: str) -> Dict[str, dict]:
                 col = region_attrs['col']
 
                 try:
-                    # Convert to float (row=Y, col=X, Z=0)
-                    X = float(col)
-                    Y = float(row)
+                    X = float(col) * col_spacing
+                    Y = float(row) * row_spacing
                     Z = 0.0
                     cameras_data[cam_name]["known_points"].append((X, Y, Z, cx, cy))
                 except (ValueError, TypeError):
@@ -1221,10 +1222,12 @@ def generate_report(output_path: str,
 @click.option("--reprojection-threshold", default=5.0, help="Maximum reprojection error threshold in pixels")
 @click.option("--fix-reference", is_flag=True, help="Keep reference camera at origin")
 @click.option("--visualize", is_flag=True, help="Generate visualization images with reprojection errors")
+@click.option("--col-spacing", default=1.0, type=float, help="Real-world distance between adjacent columns (negative to reverse axis, default: 1.0)")
+@click.option("--row-spacing", default=1.0, type=float, help="Real-world distance between adjacent rows (negative to reverse axis, default: 1.0)")
 @click.option("--annotations-distorted", is_flag=True, help="Annotation points are in distorted (original) image coordinates")
 @click.option("--images-distorted", is_flag=True, help="Calibration images are distorted (original, not undistorted)")
 @click.option("--undistort-visualization", is_flag=True, help="Undistort the visualization output images (only used with --images-distorted)")
-def main(config, annotations, registry, output_toml, output_report, bundle_adjust, reprojection_threshold, fix_reference, visualize, annotations_distorted, images_distorted, undistort_visualization):
+def main(config, annotations, registry, output_toml, output_report, bundle_adjust, reprojection_threshold, fix_reference, visualize, col_spacing, row_spacing, annotations_distorted, images_distorted, undistort_visualization):
     """
     Estimate camera extrinsics from annotated point correspondences.
     """
@@ -1270,7 +1273,7 @@ def main(config, annotations, registry, output_toml, output_report, bundle_adjus
 
     # Parse VIA JSON annotations
     print("\n[3/6] Parsing annotation file...")
-    annotations = parse_via_json(annotations)
+    annotations = parse_via_json(annotations, col_spacing=col_spacing, row_spacing=row_spacing)
 
     for cam_name, ann_data in annotations.items():
         n_known = len(ann_data["known_points"])

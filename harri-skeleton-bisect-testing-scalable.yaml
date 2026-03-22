@@ -2106,8 +2106,8 @@ scale_groups:
     joints: [forearm.L, forearm.R]
   - name: forearm
     joints: [hand.L, hand.R]
-  - name: hip_socket
-    joints: [thigh.L, thigh.R]
+  # - name: hip_socket
+  #   joints: [thigh.L, thigh.R]
   - name: femur
     joints: [shin.L, shin.R]
   - name: tibia

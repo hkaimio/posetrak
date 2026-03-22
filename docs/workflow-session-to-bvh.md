@@ -54,32 +54,32 @@ posetrak-db camera-mode add \
     --width 1920 --height 1080 --fps 120
 ```
 
-### Register camera instances from an extrinsics TOML
+### Register camera instances
 
-Camera *instances* (individual physical units) are created the first time you
-import a Pose2Sim calibration TOML. If you have never run `calibrate_extrinsics.py`
-yet, do a quick calibration capture first (checkerboard in view of all cameras)
-and run it now — you need the TOML before the session can be set up.
+Camera *instances* (individual physical units) represent your actual cameras.
+Register each one once — the labels you assign here (`cam1`, `cam2`, …) are
+matched automatically when importing session YAMLs.
 
 ```bash
-# Run the extrinsics calibration (external tool)
-python calibrate_extrinsics.py --input /mnt/d/mocap/<session>/calib_frame/ \
-    --output /mnt/d/mocap/<session>/Calib_scene.toml
+posetrak-db camera-instance add \
+    --model-id <model_id> \
+    --label cam1 \
+    --serial SN12345
+# → camera_instance_id: <inst1_id>  label='cam1'
 
-# Import TOML → creates camera instances + rough intrinsics in registry
-posetrak-db calib import \
-    --calib /mnt/d/mocap/<session>/Calib_scene.toml \
-    --camera-mode <mode_id>
-# → prints instance IDs for cam1, cam2, …
-#   cam1  instance=<inst1_id>  intrinsics=<intr1_id>
-#   cam2  instance=<inst2_id>  intrinsics=<intr2_id>
+posetrak-db camera-instance add \
+    --model-id <model_id> \
+    --label cam2 \
+    --serial SN12346
+# → camera_instance_id: <inst2_id>  label='cam2'
 ```
 
-The printed instance IDs (`inst1_id`, `inst2_id`, …) are reused for every
-future session with the same cameras.  Check them any time with:
+List registered instances at any time:
 
 ```bash
-posetrak-db calib list
+posetrak-db camera-instance list
+# or with full calibration history:
+posetrak-db camera-instance show <inst1_id>
 ```
 
 ---

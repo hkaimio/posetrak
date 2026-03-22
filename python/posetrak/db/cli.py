@@ -6,11 +6,15 @@ registry  init      Create a new registry database.
 registry  info      Print registry info and settings.
 registry  set-root  Set the project_root path in the registry.
 
-camera-model  add   Register a camera hardware model.
-camera-model  list  List registered camera models.
+camera-model     add   Register a camera hardware model.
+camera-model     list  List registered camera models.
 
-camera-mode   add   Register a capture mode (resolution/fps) for a camera model.
-camera-mode   list  List registered camera modes.
+camera-mode      add   Register a capture mode (resolution/fps) for a camera model.
+camera-mode      list  List registered camera modes.
+
+camera-instance  add   Register a physical camera unit (label + optional serial number).
+camera-instance  list  List registered camera instances.
+camera-instance  show  Show full details for one camera instance (calibration history).
 
 calib     import      Import intrinsic calibration from a Pose2Sim TOML file.
 calib     import-h5   Import intrinsic calibration from an HDF5 file.
@@ -55,6 +59,7 @@ from posetrak.db.db import (
     REGISTRY_SCHEMA_VERSION,
     add_session_camera,
     add_shot_video,
+    create_camera_instance,
     create_camera_model,
     create_camera_mode,
     create_mocap_session,
@@ -63,6 +68,7 @@ from posetrak.db.db import (
     create_shot,
     get_project_root,
     get_schema_version,
+    list_camera_instances,
     list_camera_models,
     list_camera_modes,
     open_registry,
@@ -370,6 +376,145 @@ def _cmd_camera_mode_list(args: argparse.Namespace) -> int:
         )
         codec = f"  codec={row['codec']}" if row["codec"] else ""
         print(f"{row['id']}  model={row['camera_model_id']}  {res}  {fps}{codec}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Command handlers — camera-instance
+# ---------------------------------------------------------------------------
+
+
+def _cmd_camera_instance_add(args: argparse.Namespace) -> int:
+    """Register a physical camera unit in the registry."""
+    try:
+        registry = open_registry(Path(args.registry))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error opening registry: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        model_id = _resolve(registry, "camera_models", args.model_id)
+        instance_id = create_camera_instance(
+            registry,
+            model_id,
+            label=args.label,
+            serial_number=args.serial or None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error: {exc}", file=sys.stderr)
+        registry.close()
+        return 1
+    finally:
+        registry.close()
+
+    print(f"camera_instance_id: {instance_id}  label={args.label!r}")
+    return 0
+
+
+def _cmd_camera_instance_list(args: argparse.Namespace) -> int:
+    """List camera instances registered in the registry."""
+    try:
+        registry = open_registry(Path(args.registry))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error opening registry: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        rows = list_camera_instances(registry, camera_model_id=args.model_id or None)
+        if not rows:
+            print("No camera instances registered.")
+            return 0
+        # Fetch model names for display
+        models = {
+            r["id"]: f"{r['manufacturer'] or ''} {r['model_name'] or ''}".strip()
+            for r in registry.execute("SELECT * FROM camera_models").fetchall()
+        }
+    finally:
+        registry.close()
+
+    print(f"{'id':<36}  {'label':<10}  {'serial':<16}  model")
+    print("-" * 90)
+    for row in rows:
+        serial = row["serial_number"] or ""
+        model_desc = models.get(row["camera_model_id"], row["camera_model_id"][:8])
+        print(f"{row['id']}  {row['label']:<10}  {serial:<16}  {model_desc}")
+    return 0
+
+
+def _cmd_camera_instance_show(args: argparse.Namespace) -> int:
+    """Show full details for one camera instance including calibration history."""
+    try:
+        registry = open_registry(Path(args.registry))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error opening registry: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        instance_id = _resolve(registry, "camera_instances", args.instance_id)
+        inst = registry.execute(
+            "SELECT ci.*, cm.manufacturer, cm.model_name, cm.sensor_size "
+            "FROM camera_instances ci "
+            "JOIN camera_models cm ON cm.id = ci.camera_model_id "
+            "WHERE ci.id = ?",
+            (instance_id,),
+        ).fetchone()
+        if inst is None:
+            print(f"Error: camera instance {instance_id!r} not found", file=sys.stderr)
+            return 1
+
+        modes = registry.execute(
+            "SELECT * FROM camera_modes WHERE camera_model_id = ? ORDER BY rowid",
+            (inst["camera_model_id"],),
+        ).fetchall()
+
+        # Intrinsics calibrations for all modes of this model
+        calibrations = registry.execute(
+            """
+            SELECT ic.*, cm.width_px, cm.height_px, cm.nominal_fps
+            FROM intrinsics_calibrations ic
+            JOIN camera_modes cm ON cm.id = ic.camera_mode_id
+            WHERE cm.camera_model_id = ?
+            ORDER BY ic.calibrated_at DESC
+            """,
+            (inst["camera_model_id"],),
+        ).fetchall()
+    finally:
+        registry.close()
+
+    manufacturer = inst["manufacturer"] or ""
+    model_name = inst["model_name"] or ""
+    sensor = f"  sensor={inst['sensor_size']}" if inst["sensor_size"] else ""
+
+    print(f"Instance:  {inst['id']}")
+    print(f"Label:     {inst['label']}")
+    print(f"Serial:    {inst['serial_number'] or '(none)'}")
+    print(f"Model:     {manufacturer} {model_name}{sensor}  [{inst['camera_model_id']}]")
+
+    print(f"\nCapture modes ({len(modes)}):")
+    for mode in modes:
+        fps = f"{mode['nominal_fps']:.3g}" if mode["nominal_fps"] else "?"
+        res = (
+            f"{mode['width_px']}×{mode['height_px']}"
+            if mode["width_px"] and mode["height_px"]
+            else "?×?"
+        )
+        codec = f"  {mode['codec']}" if mode["codec"] else ""
+        print(f"  {mode['id']}  {res} @ {fps} fps{codec}")
+
+    print(f"\nIntrinsics calibrations ({len(calibrations)}):")
+    if not calibrations:
+        print("  (none)")
+    else:
+        print(f"  {'id':<36}  {'date':<12}  {'mode':<16}  {'rms':>6}  maps  tool")
+        print("  " + "-" * 95)
+        for cal in calibrations:
+            rms = f"{cal['rms_error']:.4f}" if cal["rms_error"] is not None else "     ?"
+            has_maps = "yes" if cal["undistort_mapx"] else " no"
+            res = f"{cal['width_px']}×{cal['height_px']}" if cal["width_px"] else "?×?"
+            fps = f"{cal['nominal_fps']:.3g}" if cal["nominal_fps"] else "?"
+            mode_desc = f"{res}@{fps}"
+            tool = cal["calibration_tool"] or ""
+            print(f"  {cal['id']}  {cal['calibrated_at']:<12}  {mode_desc:<16}  {rms}  {has_maps}   {tool}")
     return 0
 
 
@@ -1352,6 +1497,31 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Filter by camera model ID")
 
     # -------------------------------------------------------------------------
+    # camera-instance topic
+    # -------------------------------------------------------------------------
+    ci = topics.add_parser("camera-instance", help="Manage physical camera units")
+    ci_actions = ci.add_subparsers(dest="action", required=True)
+
+    p = ci_actions.add_parser("add", help="Register a physical camera unit")
+    _add_registry_arg(p)
+    p.add_argument("--model-id", required=True, metavar="UUID", dest="model_id",
+                   help="camera_models.id (or unique prefix)")
+    p.add_argument("--label", required=True, metavar="S",
+                   help="Human-readable label (e.g. 'cam1')")
+    p.add_argument("--serial", default="", metavar="S",
+                   help="Camera serial number (optional)")
+
+    p = ci_actions.add_parser("list", help="List registered camera instances")
+    _add_registry_arg(p)
+    p.add_argument("--model-id", default="", metavar="UUID", dest="model_id",
+                   help="Filter by camera model ID (or unique prefix)")
+
+    p = ci_actions.add_parser("show", help="Show full details for a camera instance")
+    _add_registry_arg(p)
+    p.add_argument("instance_id", metavar="ID_OR_PREFIX",
+                   help="camera_instances.id or unique prefix")
+
+    # -------------------------------------------------------------------------
     # calib topic
     # -------------------------------------------------------------------------
     cal = topics.add_parser("calib", help="Manage intrinsic calibrations")
@@ -1632,6 +1802,9 @@ def main() -> None:
         ("camera-model", "list"): _cmd_camera_model_list,
         ("camera-mode", "add"): _cmd_camera_mode_add,
         ("camera-mode", "list"): _cmd_camera_mode_list,
+        ("camera-instance", "add"): _cmd_camera_instance_add,
+        ("camera-instance", "list"): _cmd_camera_instance_list,
+        ("camera-instance", "show"): _cmd_camera_instance_show,
         ("calib", "import"): _cmd_calib_import,
         ("calib", "import-h5"): _cmd_calib_import_h5,
         ("calib", "list"): _cmd_calib_list,

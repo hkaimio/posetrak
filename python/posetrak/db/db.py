@@ -491,6 +491,73 @@ def create_camera_mode(
     return mode_id
 
 
+def create_camera_instance(
+    registry: sqlite3.Connection,
+    camera_model_id: str,
+    *,
+    label: str,
+    serial_number: str | None = None,
+) -> str:
+    """Insert a new camera_instances row and return its ID.
+
+    Parameters
+    ----------
+    registry:
+        Open connection to a posetrak registry database.
+    camera_model_id:
+        ID of the parent ``camera_models`` row.
+    label:
+        Short human-readable label for this camera unit (e.g. ``"cam1"``).
+        Used for lookup by label in session YAML import.
+    serial_number:
+        Optional manufacturer serial number.
+
+    Returns
+    -------
+    str
+        The UUID of the newly created row.
+
+    Raises
+    ------
+    sqlite3.IntegrityError
+        If *camera_model_id* does not exist.
+    """
+    instance_id = generate_id()
+    with registry:
+        registry.execute(
+            "INSERT INTO camera_instances (id, camera_model_id, serial_number, label) "
+            "VALUES (?, ?, ?, ?)",
+            (instance_id, camera_model_id, serial_number, label),
+        )
+    return instance_id
+
+
+def list_camera_instances(
+    registry: sqlite3.Connection,
+    camera_model_id: str | None = None,
+) -> list[sqlite3.Row]:
+    """Return rows from the camera_instances table.
+
+    Parameters
+    ----------
+    registry:
+        Open connection to a posetrak registry database.
+    camera_model_id:
+        If provided, return only instances belonging to this camera model.
+
+    Returns
+    -------
+    list[sqlite3.Row]
+        Matching camera instance rows, ordered by rowid.
+    """
+    if camera_model_id is not None:
+        return registry.execute(
+            "SELECT * FROM camera_instances WHERE camera_model_id = ? ORDER BY rowid",
+            (camera_model_id,),
+        ).fetchall()
+    return registry.execute("SELECT * FROM camera_instances ORDER BY rowid").fetchall()
+
+
 def list_camera_models(registry: sqlite3.Connection) -> list[sqlite3.Row]:
     """Return all rows from the camera_models table.
 

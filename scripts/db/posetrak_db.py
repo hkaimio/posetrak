@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 1
-SESSION_SCHEMA_VERSION: Final[int] = 1
+SESSION_SCHEMA_VERSION: Final[int] = 2
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -266,6 +266,34 @@ def create_session(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _migrate_session_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 1 to 2.
+
+    v2 changes: sync_points PRIMARY KEY changed from (sync_config_id, camera_instance_id)
+    to (sync_config_id, camera_instance_id, video_frame) to allow multiple sync points
+    per camera per sync config.
+
+    SQLite does not support ALTER TABLE to change a primary key, so we recreate the table.
+    Existing single-anchor rows are preserved.
+    """
+    conn.executescript("""
+        BEGIN;
+        CREATE TABLE sync_points_v2 (
+            sync_config_id     TEXT    NOT NULL REFERENCES sync_configs(id),
+            camera_instance_id TEXT    NOT NULL,
+            shot_video_id      TEXT    NOT NULL REFERENCES shot_videos(id),
+            video_frame        INTEGER NOT NULL,
+            timestamp_s        REAL    NOT NULL,
+            PRIMARY KEY (sync_config_id, camera_instance_id, video_frame)
+        );
+        INSERT INTO sync_points_v2 SELECT * FROM sync_points;
+        DROP TABLE sync_points;
+        ALTER TABLE sync_points_v2 RENAME TO sync_points;
+        PRAGMA user_version = 2;
+        COMMIT;
+    """)
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -289,6 +317,9 @@ def open_session(path: Path) -> sqlite3.Connection:
     if not path.exists():
         raise FileNotFoundError(f"Session database not found: {path}")
     conn = _connect(path)
+    actual = get_schema_version(conn)
+    if actual == 1:
+        _migrate_session_v1_to_v2(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 
@@ -776,3 +807,38 @@ def resolve_path(path_str: str, registry: sqlite3.Connection) -> Path:
             "Use set_project_root() first."
         )
     return project_root / p
+
+
+def resolve_id_prefix(conn: sqlite3.Connection, table: str, prefix: str) -> str:
+    """Resolve a UUID prefix to a full ID, raising if ambiguous or not found.
+
+    Parameters
+    ----------
+    conn:
+        An open SQLite connection to a registry or session database.
+    table:
+        Table name to search (must have an ``id`` TEXT PRIMARY KEY column).
+    prefix:
+        Full UUID or a unique prefix thereof.
+
+    Returns
+    -------
+    str
+        The full UUID matching *prefix*.
+
+    Raises
+    ------
+    ValueError
+        If zero or more than one row matches *prefix*.
+    """
+    rows = conn.execute(
+        f"SELECT id FROM {table} WHERE id LIKE ? || '%'", (prefix,)  # noqa: S608
+    ).fetchall()
+    if len(rows) == 0:
+        raise ValueError(f"No {table} record found with id prefix '{prefix}'")
+    if len(rows) > 1:
+        matches = ", ".join(r[0] for r in rows)
+        raise ValueError(
+            f"Ambiguous prefix '{prefix}' matches {len(rows)} {table} records: {matches}"
+        )
+    return rows[0][0]

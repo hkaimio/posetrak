@@ -22,16 +22,23 @@ config    edit      Derive a new tracker config by overriding fields.
 config    list      List tracker configs.
 
 session   create    Create a new mocap session in a session database.
+session   list      List mocap sessions in a session database.
 session   add-camera  Link a camera (with registry copy) to a session.
 
 extrinsics  import  Import extrinsic calibration from a Pose2Sim TOML file.
+extrinsics  list    List extrinsic calibrations in a session database.
 
 shot      create    Create a new shot within a session.
+shot      list      List shots in a session database.
 shot      add-video Add a video file record to a shot.
 
 sync      import    Import camera sync anchors from a sync JSON file.
+sync      list      List sync configs in a session database.
 
 pose      import    Import 2-D pose observations from a pose directory.
+pose      list      List pose observation sequences in a session database.
+
+tracking-run  list  List tracking runs in a session database.
 """
 
 from __future__ import annotations
@@ -57,6 +64,7 @@ from scripts.db.posetrak_db import (
     list_camera_modes,
     open_registry,
     open_session,
+    resolve_id_prefix,
     set_project_root,
 )
 from scripts.db.import_calib_toml import import_calib_toml
@@ -74,6 +82,22 @@ from scripts.db.manage_config import (
 from scripts.db.import_extrinsics import import_extrinsics
 from scripts.db.import_sync_json import import_sync_json
 from scripts.db.import_pose_json import import_pose_json
+
+
+# ---------------------------------------------------------------------------
+# ID resolution helper
+# ---------------------------------------------------------------------------
+
+
+def _resolve(conn, table: str, prefix: str | None) -> str | None:
+    """Resolve a UUID prefix to a full ID; returns None if prefix is None."""
+    if prefix is None:
+        return None
+    try:
+        return resolve_id_prefix(conn, table, prefix)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -478,8 +502,10 @@ def _cmd_skeleton_list(args: argparse.Namespace) -> int:
         print("No skeletons registered.")
         return 0
 
+    print(f"{'id':<36}  {'name':<30}  created_at")
+    print("-" * 85)
     for row in rows:
-        print(f"{row['id'][:16]}…  {row['name']}  created={row['created_at']}")
+        print(f"{row['id']:<36}  {row['name']:<30}  {row['created_at']}")
     return 0
 
 
@@ -641,8 +667,81 @@ def _cmd_config_list(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Command handlers — calib
+# ---------------------------------------------------------------------------
+
+
+def _cmd_calib_list(args: argparse.Namespace) -> int:
+    """List camera instances and their intrinsics calibrations."""
+    import sqlite3
+
+    try:
+        conn = open_registry(Path(args.registry)) if args.registry else None
+        if conn is None and args.session_db:
+            conn = open_session(Path(args.session_db))
+        if conn is None:
+            print("Error: provide --registry or --session-db", file=sys.stderr)
+            return 1
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        rows = conn.execute(
+            "SELECT ci.id, ci.label, ic.id, ic.calibrated_at, ic.fx, ic.fy, ic.cx, ic.cy"
+            " FROM camera_instances ci"
+            " JOIN intrinsics_calibrations ic ON ic.camera_mode_id IN"
+            "   (SELECT id FROM camera_modes WHERE camera_model_id = ci.camera_model_id)"
+            " ORDER BY ci.label, ic.calibrated_at"
+        ).fetchall()
+        if not rows:
+            print("(no calibrations found)")
+            return 0
+        print(f"{'camera_key':<12}  {'instance_id':<36}  {'intrinsics_id':<36}  "
+              f"{'calibrated_at':<10}  {'fx':>8}  {'fy':>8}")
+        print("-" * 115)
+        for r in rows:
+            print(f"{r[1]:<12}  {r[0]:<36}  {r[2]:<36}  {r[3]:<10}  {r[4]:>8.1f}  {r[5]:>8.1f}")
+    except sqlite3.Error as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Command handlers — session
 # ---------------------------------------------------------------------------
+
+
+def _cmd_session_list(args: argparse.Namespace) -> int:
+    """List mocap sessions in a session database."""
+    import sqlite3
+
+    try:
+        conn = open_session(Path(args.session_db))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        rows = conn.execute(
+            "SELECT id, recorded_at, location FROM mocap_sessions ORDER BY recorded_at"
+        ).fetchall()
+        if not rows:
+            print("(no sessions)")
+            return 0
+        print(f"{'id':<36}  {'recorded_at':<12}  location")
+        print("-" * 80)
+        for r in rows:
+            print(f"{r[0]:<36}  {r[1]:<12}  {r[2] or ''}")
+    except sqlite3.Error as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    return 0
 
 
 def _cmd_session_create(args: argparse.Namespace) -> int:
@@ -688,13 +787,17 @@ def _cmd_session_add_camera(args: argparse.Namespace) -> int:
 
     try:
         import sqlite3
+        session_id = _resolve(session_conn, "mocap_sessions", args.session)
+        camera_instance = _resolve(registry, "camera_instances", args.camera_instance)
+        camera_mode = _resolve(registry, "camera_modes", args.camera_mode)
+        intrinsics = _resolve(registry, "intrinsics_calibrations", args.intrinsics)
         add_session_camera(
             session_conn,
             registry,
-            args.session,
-            args.camera_instance,
-            args.camera_mode,
-            args.intrinsics,
+            session_id,
+            camera_instance,
+            camera_mode,
+            intrinsics,
             label=args.label or "",
         )
     except (sqlite3.IntegrityError, ValueError) as exc:
@@ -736,9 +839,10 @@ def _cmd_extrinsics_import(args: argparse.Namespace) -> int:
         return 1
 
     try:
+        session_id = _resolve(session_conn, "mocap_sessions", args.session)
         result = import_extrinsics(
             session_conn,
-            args.session,
+            session_id,
             Path(args.calib),
             cam_inst,
             registry=registry,
@@ -762,8 +866,79 @@ def _cmd_extrinsics_import(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Command handlers — extrinsics (list)
+# ---------------------------------------------------------------------------
+
+
+def _cmd_extrinsics_list(args: argparse.Namespace) -> int:
+    """List extrinsic calibrations in a session database."""
+    import sqlite3
+
+    try:
+        conn = open_session(Path(args.session_db))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        q = "SELECT id, session_id, calibrated_at, method FROM extrinsic_calibrations"
+        params: list = []
+        if args.session:
+            q += " WHERE session_id = ?"
+            params.append(args.session)
+        q += " ORDER BY calibrated_at"
+        rows = conn.execute(q, params).fetchall()
+        if not rows:
+            print("(no extrinsic calibrations)")
+            return 0
+        print(f"{'id':<36}  {'session_id':<36}  {'calibrated_at':<12}  method")
+        print("-" * 100)
+        for r in rows:
+            print(f"{r[0]:<36}  {r[1]:<36}  {r[2]:<12}  {r[3] or ''}")
+    except sqlite3.Error as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Command handlers — shot
 # ---------------------------------------------------------------------------
+
+
+def _cmd_shot_list(args: argparse.Namespace) -> int:
+    """List shots in a session database."""
+    import sqlite3
+
+    try:
+        conn = open_session(Path(args.session_db))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        q = "SELECT id, session_id, shot_number, label, extrinsic_calibration_id FROM shots"
+        params: list = []
+        if args.session:
+            q += " WHERE session_id = ?"
+            params.append(args.session)
+        q += " ORDER BY shot_number"
+        rows = conn.execute(q, params).fetchall()
+        if not rows:
+            print("(no shots)")
+            return 0
+        print(f"{'id':<36}  {'#':>4}  {'label':<30}  {'extrinsics_id':<36}")
+        print("-" * 115)
+        for r in rows:
+            print(f"{r[0]:<36}  {r[2]:>4}  {(r[3] or ''):<30}  {r[4]:<36}")
+    except sqlite3.Error as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    return 0
 
 
 def _cmd_shot_create(args: argparse.Namespace) -> int:
@@ -775,10 +950,12 @@ def _cmd_shot_create(args: argparse.Namespace) -> int:
         return 1
 
     try:
+        session_id = _resolve(session_conn, "mocap_sessions", args.session)
+        extrinsics_id = _resolve(session_conn, "extrinsic_calibrations", args.extrinsics)
         shot_id = create_shot(
             session_conn,
-            args.session,
-            args.extrinsics,
+            session_id,
+            extrinsics_id,
             shot_number=args.number,
             label=args.label or "",
             notes=args.notes or "",
@@ -799,10 +976,12 @@ def _cmd_shot_add_video(args: argparse.Namespace) -> int:
         return 1
 
     try:
+        shot_id = _resolve(session_conn, "shots", args.shot)
+        camera_instance = _resolve(session_conn, "camera_instances", args.camera_instance)
         video_id = add_shot_video(
             session_conn,
-            args.shot,
-            args.camera_instance,
+            shot_id,
+            camera_instance,
             args.file,
             args.first_frame,
             args.last_frame,
@@ -834,9 +1013,10 @@ def _cmd_sync_import(args: argparse.Namespace) -> int:
         return 1
 
     try:
+        shot_id = _resolve(session_conn, "shots", args.shot)
         result = import_sync_json(
             session_conn,
-            args.shot,
+            shot_id,
             Path(args.sync_json),
             cam_inst,
         )
@@ -852,6 +1032,82 @@ def _cmd_sync_import(args: argparse.Namespace) -> int:
         print(f"  {cam_key}  instance={iid}")
     if result.skipped:
         print(f"  skipped: {', '.join(sorted(result.skipped))}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Command handlers — sync (list)
+# ---------------------------------------------------------------------------
+
+
+def _cmd_sync_list(args: argparse.Namespace) -> int:
+    """List sync configs in a session database."""
+    import sqlite3
+
+    try:
+        conn = open_session(Path(args.session_db))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        q = "SELECT id, shot_id FROM sync_configs"
+        params: list = []
+        if args.shot:
+            q += " WHERE shot_id = ?"
+            params.append(args.shot)
+        rows = conn.execute(q, params).fetchall()
+        if not rows:
+            print("(no sync configs)")
+            return 0
+        print(f"{'id':<36}  {'shot_id':<36}")
+        print("-" * 75)
+        for r in rows:
+            print(f"{r[0]:<36}  {r[1]:<36}")
+    except sqlite3.Error as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Command handlers — pose (list)
+# ---------------------------------------------------------------------------
+
+
+def _cmd_pose_list(args: argparse.Namespace) -> int:
+    """List pose observation sequences in a session database."""
+    import sqlite3
+
+    try:
+        conn = open_session(Path(args.session_db))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        q = ("SELECT id, shot_id, sync_config_id, time_start_s, time_end_s, pose_model"
+             " FROM pose_observation_sequences")
+        params: list = []
+        if args.shot:
+            q += " WHERE shot_id = ?"
+            params.append(args.shot)
+        q += " ORDER BY time_start_s"
+        rows = conn.execute(q, params).fetchall()
+        if not rows:
+            print("(no pose sequences)")
+            return 0
+        print(f"{'id':<36}  {'t_start':>8}  {'t_end':>8}  {'pose_model':<24}  sync_config_id")
+        print("-" * 120)
+        for r in rows:
+            print(f"{r[0]:<36}  {r[3]:>8.2f}  {r[4]:>8.2f}  {(r[5] or ''):<24}  {r[2]}")
+    except sqlite3.Error as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
     return 0
 
 
@@ -874,13 +1130,15 @@ def _cmd_pose_import(args: argparse.Namespace) -> int:
         return 1
 
     try:
+        shot_id = _resolve(session_conn, "shots", args.shot)
+        sync_config_id = _resolve(session_conn, "sync_configs", args.sync_config)
         result = import_pose_json(
             session_conn,
-            args.shot,
-            args.sync_config,
+            shot_id,
+            sync_config_id,
             Path(args.pose_dir),
             cam_inst,
-            person_id=args.person_id,
+            person_ids=args.person_ids or None,
             time_start=args.time_start,
             time_end=args.time_end,
             pose_model=args.pose_model or "",
@@ -896,6 +1154,38 @@ def _cmd_pose_import(args: argparse.Namespace) -> int:
     print(f"n_observations: {result.n_observations}")
     if result.skipped_cameras:
         print(f"skipped cameras: {', '.join(sorted(result.skipped_cameras))}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Command handlers — tracking-run
+# ---------------------------------------------------------------------------
+
+
+def _cmd_tracking_run_list(args: argparse.Namespace) -> int:
+    """List tracking runs in a session database."""
+    import sqlite3
+    try:
+        conn = open_session(Path(args.session_db))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        q = ("SELECT id, observation_sequence_id, skeleton_id, ran_at, posetrak_version"
+             " FROM tracking_runs ORDER BY ran_at")
+        rows = conn.execute(q).fetchall()
+        if not rows:
+            print("(no tracking runs)")
+            return 0
+        print(f"{'id':<36}  {'sequence_id':<36}  {'ran_at':<20}  version")
+        print("-" * 105)
+        for r in rows:
+            print(f"{r[0]:<36}  {r[1]:<36}  {r[2]:<20}  {r[4] or ''}")
+    except sqlite3.Error as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
     return 0
 
 
@@ -972,6 +1262,10 @@ def _build_parser() -> argparse.ArgumentParser:
     # -------------------------------------------------------------------------
     cal = topics.add_parser("calib", help="Manage intrinsic calibrations")
     cal_actions = cal.add_subparsers(dest="action", required=True)
+
+    p = cal_actions.add_parser("list", help="List camera instances and intrinsics calibrations")
+    _add_registry_arg(p)
+    _add_session_db_arg(p)
 
     p = cal_actions.add_parser("import",
                                help="Import intrinsic calibration from a Pose2Sim TOML file")
@@ -1064,6 +1358,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ses = topics.add_parser("session", help="Manage mocap sessions")
     ses_actions = ses.add_subparsers(dest="action", required=True)
 
+    p = ses_actions.add_parser("list", help="List mocap sessions")
+    _add_session_db_arg(p, required=True)
+
     p = ses_actions.add_parser("create", help="Create a new mocap session")
     _add_session_db_arg(p, required=True)
     p.add_argument("--date", default="", metavar="ISO_DATE",
@@ -1090,6 +1387,11 @@ def _build_parser() -> argparse.ArgumentParser:
     ext = topics.add_parser("extrinsics", help="Manage extrinsic calibrations")
     ext_actions = ext.add_subparsers(dest="action", required=True)
 
+    p = ext_actions.add_parser("list", help="List extrinsic calibrations")
+    _add_session_db_arg(p, required=True)
+    p.add_argument("--session", default=None, metavar="UUID",
+                   help="Filter by mocap_sessions.id")
+
     p = ext_actions.add_parser("import",
                                help="Import extrinsic calibration from a Pose2Sim TOML file")
     _add_registry_arg(p)
@@ -1107,6 +1409,11 @@ def _build_parser() -> argparse.ArgumentParser:
     # -------------------------------------------------------------------------
     shot = topics.add_parser("shot", help="Manage shots within a session")
     shot_actions = shot.add_subparsers(dest="action", required=True)
+
+    p = shot_actions.add_parser("list", help="List shots")
+    _add_session_db_arg(p, required=True)
+    p.add_argument("--session", default=None, metavar="UUID",
+                   help="Filter by mocap_sessions.id")
 
     p = shot_actions.add_parser("create", help="Create a new shot within a session")
     _add_session_db_arg(p, required=True)
@@ -1135,6 +1442,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sync = topics.add_parser("sync", help="Manage sync configurations")
     sync_actions = sync.add_subparsers(dest="action", required=True)
 
+    p = sync_actions.add_parser("list", help="List sync configs")
+    _add_session_db_arg(p, required=True)
+    p.add_argument("--shot", default=None, metavar="UUID",
+                   help="Filter by shots.id")
+
     p = sync_actions.add_parser("import",
                                 help="Import camera sync anchors from a sync JSON file")
     _add_session_db_arg(p, required=True)
@@ -1149,6 +1461,11 @@ def _build_parser() -> argparse.ArgumentParser:
     pose = topics.add_parser("pose", help="Manage pose observations")
     pose_actions = pose.add_subparsers(dest="action", required=True)
 
+    p = pose_actions.add_parser("list", help="List pose observation sequences")
+    _add_session_db_arg(p, required=True)
+    p.add_argument("--shot", default=None, metavar="UUID",
+                   help="Filter by shots.id")
+
     p = pose_actions.add_parser("import",
                                 help="Import 2-D pose observations from a pose directory")
     _add_session_db_arg(p, required=True)
@@ -1157,10 +1474,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pose-dir", required=True, metavar="DIR", dest="pose_dir")
     p.add_argument("--camera-instance", action="append", metavar="SPEC",
                    dest="camera_instance")
-    p.add_argument("--person-id", type=int, default=0, dest="person_id")
+    p.add_argument("--person-id", type=int, action="append", default=None,
+                   dest="person_ids", metavar="N",
+                   help="Import only this person ID (repeatable). Default: import all persons.")
     p.add_argument("--time-start", type=float, default=None, dest="time_start")
     p.add_argument("--time-end", type=float, default=None, dest="time_end")
     p.add_argument("--pose-model", default="", dest="pose_model", metavar="S")
+
+    # -------------------------------------------------------------------------
+    # tracking-run topic
+    # -------------------------------------------------------------------------
+    tr = topics.add_parser("tracking-run", help="Inspect tracking run results")
+    tr_actions = tr.add_subparsers(dest="action", required=True)
+    p = tr_actions.add_parser("list", help="List tracking runs")
+    _add_session_db_arg(p, required=True)
 
     return parser
 
@@ -1184,18 +1511,25 @@ def main() -> None:
         ("camera-mode", "add"): _cmd_camera_mode_add,
         ("camera-mode", "list"): _cmd_camera_mode_list,
         ("calib", "import"): _cmd_calib_import,
+        ("calib", "list"): _cmd_calib_list,
         ("skeleton", "import"): _cmd_skeleton_import,
         ("skeleton", "list"): _cmd_skeleton_list,
         ("config", "create"): _cmd_config_create,
         ("config", "edit"): _cmd_config_edit,
         ("config", "list"): _cmd_config_list,
+        ("session", "list"): _cmd_session_list,
         ("session", "create"): _cmd_session_create,
         ("session", "add-camera"): _cmd_session_add_camera,
+        ("extrinsics", "list"): _cmd_extrinsics_list,
         ("extrinsics", "import"): _cmd_extrinsics_import,
+        ("shot", "list"): _cmd_shot_list,
         ("shot", "create"): _cmd_shot_create,
         ("shot", "add-video"): _cmd_shot_add_video,
+        ("sync", "list"): _cmd_sync_list,
         ("sync", "import"): _cmd_sync_import,
+        ("pose", "list"): _cmd_pose_list,
         ("pose", "import"): _cmd_pose_import,
+        ("tracking-run", "list"): _cmd_tracking_run_list,
     }
 
     handler = handlers.get((args.topic, args.action))

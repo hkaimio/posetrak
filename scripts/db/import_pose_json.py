@@ -65,7 +65,7 @@ def import_pose_json(
     pose_dir: Path,
     camera_instances: str | dict[str, str],
     *,
-    person_id: int = 0,
+    person_ids: list[int] | None = None,
     time_start: float | None = None,
     time_end: float | None = None,
     pose_model: str = "",
@@ -77,6 +77,9 @@ def import_pose_json(
     ``{pose_dir}/{cam_key}/``, computes a timestamp for each frame using the
     sync anchor, applies the optional time window filter, and inserts
     ``pose_observations`` rows in batches of 500.
+
+    All persons found in each JSON frame are imported by default. Pass
+    *person_ids* to restrict to a specific subset.
 
     A single ``pose_observation_sequences`` row is created covering the full
     imported time range (``time_start_s`` = minimum timestamp,
@@ -100,9 +103,9 @@ def import_pose_json(
         - **Per-camera** (``dict[str, str]``): mapping from camera key
           (e.g. ``"cam1"``) to ``camera_instances.id``. Keys not in the
           mapping are skipped.
-    person_id:
-        Index into the ``people`` list to select; rows where the person is
-        absent are skipped (default ``0``).
+    person_ids:
+        If ``None`` (default), all persons found in each JSON frame are
+        imported. Pass a list of ints to restrict to specific person IDs.
     time_start:
         If provided, only observations with ``timestamp >= time_start`` are
         imported.
@@ -119,6 +122,7 @@ def import_pose_json(
     PoseImportResult
         Sequence ID, total observation count, and skipped camera keys.
     """
+    person_id_filter: set[int] | None = set(person_ids) if person_ids is not None else None
     result = PoseImportResult()
 
     # Discover all camera dirs present in pose_dir.
@@ -151,7 +155,8 @@ def import_pose_json(
 
         sp_row = session.execute(
             "SELECT video_frame, timestamp_s FROM sync_points "
-            "WHERE sync_config_id = ? AND camera_instance_id = ?",
+            "WHERE sync_config_id = ? AND camera_instance_id = ? "
+            "ORDER BY video_frame LIMIT 1",
             (sync_config_id, instance_id),
         ).fetchone()
 
@@ -211,23 +216,16 @@ def import_pose_json(
                 data = json.load(fh)
 
             people = data.get("people", [])
-            # Find the entry matching person_id.
-            kp_flat: list[float] | None = None
             for person_entry in people:
                 pid_val = person_entry.get("person_id", [])
-                pid = pid_val[0] if isinstance(pid_val, list) and pid_val else pid_val
-                if int(pid) == person_id:
-                    kp_flat = person_entry["pose_keypoints_2d"]
-                    break
-
-            if kp_flat is None:
-                continue
-
-            kp_blob = np.array(kp_flat, dtype=np.float32).reshape(-1, 3).tobytes()
-
-            all_rows.append(
-                (sequence_id, instance_id, frame_num, timestamp, person_id, kp_blob)
-            )
+                pid = int(pid_val[0] if isinstance(pid_val, list) and pid_val else pid_val)
+                if person_id_filter is not None and pid not in person_id_filter:
+                    continue
+                kp_flat: list[float] = person_entry["pose_keypoints_2d"]
+                kp_blob = np.array(kp_flat, dtype=np.float32).reshape(-1, 3).tobytes()
+                all_rows.append(
+                    (sequence_id, instance_id, frame_num, timestamp, pid, kp_blob)
+                )
 
     # Determine actual time range from imported observations.
     if all_rows:

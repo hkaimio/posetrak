@@ -38,7 +38,7 @@ DEFAULT_CALIB_TOML   = DEFAULT_SESSION_ROOT / "calibration" / "calib.toml"
 # Reallusion skeletns
 # (name, person_id, skeleton_yaml_relative_to_project_root)
 PERSONS = [
-    ("harri", 0,  "/mnt/d/mocap/posetrak-templates/kevin-scaled-harri-2026-03-17.yaml"),
+    ("harri", 0,  "/mnt/d/mocap/posetrak-templates/harri-scaled-kevin-2026-03-17.yaml"),
     ("timo",  1, "/mnt/d/mocap/posetrak-templates/girl-scaled-timo-2026-03-17.yaml"),
 ]
 

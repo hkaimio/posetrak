@@ -215,7 +215,7 @@ def test_pose_import_skip_missing_person(
     result = import_pose_json(
         session_conn, shot_id, sync_config_id, pose_dir,
         {"cam1": inst1, "cam2": inst2},
-        person_id=1,  # no one has person_id=1
+        person_ids=[1],  # no one has person_id=1
     )
     assert result.n_observations == 0
 

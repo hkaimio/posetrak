@@ -369,27 +369,22 @@ posetrak-db pose import \
 
 ### 8a. Import skeleton
 
+Import the skeleton YAML into the registry (one-time per skeleton):
+
 ```bash
 posetrak-db skeleton import \
     --file tests/harri-skeleton.yaml \
-    --session-db "$SESSION_DIR/session.db"
+    --global
 # → skeleton_id: <skel_id>
 ```
 
-### 8b. Create tracker TOML
+### 8b. Create tracker config
 
-Copy `tests/regress.toml` and edit the `[data]` section to point at the session:
+Create a tracker config snapshot in the registry from a TOML containing
+the UKF and initialisation parameters (no file paths — those come from the DB):
 
 ```toml
-# /mnt/d/mocap/2026-03-22-my-session/tracker_take1.toml
-
-[data]
-skeleton       = "tests/harri-skeleton.yaml"
-cameras        = "/mnt/d/mocap/2026-03-22-my-session/Calib_scene.toml"
-observations_dir = "/mnt/d/mocap/2026-03-22-my-session/pose/"
-sync           = "/mnt/d/mocap/2026-03-22-my-session/sync_data.json"
-person_id      = 0
-
+# tracker_params.toml  — tuning parameters only, no [data] section needed
 [tracking]
 process_noise_std     = 0.15
 measurement_noise_std = 20.0
@@ -401,19 +396,20 @@ ik_tolerance       = 0.02
 min_cameras_for_init = 2
 
 [tracking.ukf]
-alpha = 0.1
+alpha = 0.5
 beta  = 2.0
 kappa = 0.0
 
-[output]
-directory             = "/mnt/d/mocap/2026-03-22-my-session/tracking/take1"
-export_tracking_results = true
-export_statistics       = true
-
 [processing]
-start_time  = 0.0         # seconds in the common timeline
-end_time    = 20.0
 tracker_fps = 120.0
+```
+
+```bash
+posetrak-db config create \
+    --file tracker_params.toml \
+    --name "default-120fps" \
+    --global
+# → tracker_config_id: <cfg_id>
 ```
 
 ---
@@ -427,8 +423,20 @@ Use the optimised build for performance (debug build is ~10× slower):
 meson setup optbuild --buildtype=release
 meson compile -C optbuild
 
-# Run the tracker
-optbuild/cli/posetrak track /mnt/d/mocap/2026-03-22-my-session/tracker_take1.toml
+# Run the tracker — all inputs resolved from the session DB by ID
+optbuild/cli/posetrak track \
+    --session-db "$SESSION_DIR/session.db" \
+    --sequence <seq_id>      \   # pose_observation_sequences.id (or prefix)
+    --skeleton <skel_id>     \   # skeleton ID from Part 8a
+    --person-id 1            \
+    --tracker-config <cfg_id> \  # tracker config ID from Part 8b
+    --smooth                     # optional RTS smoothing
+```
+
+Sequence IDs can be listed with:
+
+```bash
+posetrak-db pose list --session-db "$SESSION_DIR/session.db" --shot <shot_id>
 ```
 
 Output CSVs are written to the `[output] directory`:

@@ -197,7 +197,9 @@ def _resolve_camera_instance(registry: sqlite3.Connection, label: str) -> str:
 def _resolve_camera_mode(registry: sqlite3.Connection, camera_instance_id: str) -> str:
     """Return the camera_mode_id associated with a camera instance via camera_model.
 
-    Raises ``ValueError`` if no unique mode is found for the instance's model.
+    If multiple modes exist for the model, picks the one with the most recent
+    intrinsics calibration.  Raises ``ValueError`` if no unique mode can be
+    determined.
     """
     inst = registry.execute(
         "SELECT camera_model_id FROM camera_instances WHERE id = ?",
@@ -214,12 +216,32 @@ def _resolve_camera_mode(registry: sqlite3.Connection, camera_instance_id: str) 
             f"No camera_modes found for model {inst['camera_model_id']!r}. "
             "Provide camera_mode_id in the YAML."
         )
-    if len(modes) > 1:
-        raise ValueError(
-            f"Ambiguous: {len(modes)} modes for camera model {inst['camera_model_id']!r}. "
-            "Provide camera_mode_id explicitly in the YAML."
+    if len(modes) == 1:
+        return modes[0][0]
+
+    # Multiple modes — pick the one with the most recent intrinsics calibration.
+    row = registry.execute(
+        "SELECT camera_mode_id FROM intrinsics_calibrations "
+        "WHERE camera_mode_id IN "
+        "  (SELECT id FROM camera_modes WHERE camera_model_id = ?) "
+        "ORDER BY calibrated_at DESC LIMIT 1",
+        (inst["camera_model_id"],),
+    ).fetchone()
+    if row is not None:
+        import warnings
+        warnings.warn(
+            f"Multiple camera modes for model {inst['camera_model_id']!r}; "
+            f"auto-selected mode {row['camera_mode_id']!r} (most recently calibrated). "
+            "Set camera_mode_id in the YAML to suppress this warning."
         )
-    return modes[0][0]
+        return row["camera_mode_id"]
+
+    mode_ids = ", ".join(m[0] for m in modes)
+    raise ValueError(
+        f"Ambiguous: {len(modes)} modes for camera model {inst['camera_model_id']!r} "
+        f"and none have intrinsics ({mode_ids}). "
+        "Provide camera_mode_id explicitly in the YAML."
+    )
 
 
 def _latest_intrinsics(registry: sqlite3.Connection, camera_mode_id: str) -> str | None:

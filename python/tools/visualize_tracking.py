@@ -881,8 +881,28 @@ def _load_obs_mdata_from_db(
         n_cams = len(cam_labels)
         n_markers = len(marker_names)
 
-        # Build label → csv_id (same sort order as cameras list)
-        label_to_csv_id = {c.display_name: c.csv_id for c in cameras}
+        # Build ci.label → csv_id.  active_camera_ids stores camera_instances.label
+        # (the registry label the C++ tracker used), while cameras list is keyed by
+        # session_cameras.label.  Query the mapping between the two.
+        ext_id = run_row["extrinsic_calibration_id"]
+        ci_rows = conn.execute(
+            """
+            SELECT ci.label AS ci_label, sc.label AS sc_label
+            FROM extrinsic_entries ee
+            JOIN extrinsic_calibrations exc ON exc.id = ee.extrinsic_calibration_id
+            JOIN session_cameras sc
+                ON sc.camera_instance_id = ee.camera_instance_id
+               AND sc.session_id = exc.session_id
+            JOIN camera_instances ci ON ci.id = ee.camera_instance_id
+            WHERE ee.extrinsic_calibration_id = ?
+            """,
+            (ext_id,),
+        ).fetchall()
+        sc_label_to_csv_id = {c.display_name: c.csv_id for c in cameras}
+        label_to_csv_id = {
+            r["ci_label"]: sc_label_to_csv_id.get(r["sc_label"])
+            for r in ci_rows
+        }
 
         all_rows = conn.execute(
             "SELECT tracker_step, obs_blob FROM tracking_obs_results "
@@ -1214,50 +1234,8 @@ def main() -> None:
                 # tracking_obs_results available: _load_obs_mdata_from_db returns
                 # (pred_x, pred_y, obs_x, obs_y, is_outlier) — already the MarkerFrameData convention.
                 mdata_db = dict(_obs_by_step)
-                for _step in primary_timestamps_db:
-                    if _step not in mdata_db:
-                        mdata_db[_step] = {}
-            elif bone_data_db and cameras:
-                # Fallback: use FK for pred positions; obs from pose_observations
-                _conn_proj = _sqlite3.connect(args.session_db, check_same_thread=False)
-                _conn_proj.row_factory = _sqlite3.Row
-                _proj_rows = _conn_proj.execute(
-                    "SELECT tracker_step, state FROM tracking_results "
-                    "WHERE run_id = ? AND person_id = ? AND is_smoothed = ? "
-                    "ORDER BY tracker_step",
-                    (args.run_id, args.person_id, 1 if _smoothed_rows else 0),
-                ).fetchall()
-                _conn_proj.close()
-
-                for _prow in _proj_rows:
-                    _step = _prow["tracker_step"]
-                    _obs_cams = _obs_by_step.get(_step, {})
-                    try:
-                        _decoded = _layout.decode_state_blob(bytes(_prow["state"]))
-                        _mpos = _layout.compute_marker_positions(_decoded)
-                    except Exception:
-                        mdata_db[_step] = {}
-                        continue
-                    _frame_cams = {}
-                    for _cam in cameras:
-                        _cam_entry: dict[str, tuple] = {}
-                        _cam_obs_markers = _obs_cams.get(_cam.csv_id, {})
-                        for _mname, _pos3d in _mpos.items():
-                            _p_cam = _cam.R @ _pos3d + _cam.t
-                            if _p_cam[2] <= 0:
-                                continue
-                            _pu = _cam.K[0, 0] * _p_cam[0] / _p_cam[2] + _cam.K[0, 2]
-                            _pv = _cam.K[1, 1] * _p_cam[1] / _p_cam[2] + _cam.K[1, 2]
-                            if _mname in _cam_obs_markers:
-                                _ox_raw, _oy_raw = _cam_obs_markers[_mname][:2]
-                            else:
-                                _ox_raw, _oy_raw = _pu, _pv
-                            _cam_entry[_mname] = (_pu, _pv, _ox_raw, _oy_raw, False)
-                        if _cam_entry:
-                            _frame_cams[_cam.csv_id] = _cam_entry
-                    mdata_db[_step] = _frame_cams
-            else:
-                for _step in primary_timestamps_db:
+            for _step in primary_timestamps_db:
+                if _step not in mdata_db:
                     mdata_db[_step] = {}
 
             persons_data.append({

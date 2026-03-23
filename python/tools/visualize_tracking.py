@@ -907,11 +907,13 @@ def _load_obs_mdata_from_db(
                 cam_entry: dict[str, tuple] = {}
                 for mi, mname in enumerate(marker_names):
                     slot = obs[ci, mi]
-                    pred_x, pred_y = float(slot[0]), float(slot[1])  # FK-projected pixel position
-                    obs_x, obs_y   = float(slot[2]), float(slot[3])  # observed (detected) pixel position
+                    obs_x, obs_y   = float(slot[0]), float(slot[1])  # obs.actual  — detected pixel position
+                    pred_x, pred_y = float(slot[2]), float(slot[3])  # obs.predicted — FK-projected pixel position
                     is_outlier = bool(slot[6] > 0.5)
-                    if math.isnan(pred_x):
+                    if math.isnan(obs_x):
                         continue  # no observation for this slot
+                    # MarkerFrameData convention: (proj_x, proj_y, obs_x, obs_y, is_outlier)
+                    # consumers unpack (px, py, ox, oy) and draw (ox, oy) = observed position
                     cam_entry[mname] = (pred_x, pred_y, obs_x, obs_y, is_outlier)
                 if cam_entry:
                     frame_cams[csv_id] = cam_entry

@@ -54,28 +54,65 @@ def _(mo, source_selector):
         full_width=True,
     )
 
-    run_id_input = mo.ui.text(
-        value="",
-        label="Run ID (UUID)",
-        full_width=True,
+    inliers_only_input = mo.ui.checkbox(
+        value=True,
+        label="Inliers only (uncheck to include tracker outliers)",
     )
 
-    sequence_id_input = mo.ui.text(
-        value="",
-        label="Observation sequence ID (for loading 2D observations)",
-        full_width=True,
-    )
-
-    if _is_db:
-        mo.vstack([db_path_input, run_id_input, sequence_id_input])
-    else:
-        config_input
+    mo.vstack([db_path_input, inliers_only_input]) if _is_db else config_input
     return (
         config_input,
         db_path_input,
-        run_id_input,
-        sequence_id_input,
+        inliers_only_input,
     )
+
+
+@app.cell
+def _(db_path_input, mo, source_selector):
+    import sqlite3 as _sqlite3_rs
+    import json as _json_rs
+    from pathlib import Path as _Path_rs
+
+    _is_db = source_selector.value == "db"
+    _db_path_rs = db_path_input.value.strip()
+    _options: dict[str, str] = {}
+
+    if _is_db and _db_path_rs and _Path_rs(_db_path_rs).exists():
+        try:
+            _conn_rs = _sqlite3_rs.connect(_db_path_rs, check_same_thread=False)
+            _conn_rs.row_factory = _sqlite3_rs.Row
+            _run_rows = _conn_rs.execute(
+                """
+                SELECT tr.id, tr.ran_at, tr.active_camera_ids,
+                       COUNT(res.tracker_step) AS n_frames
+                FROM tracking_runs tr
+                LEFT JOIN tracking_results res
+                    ON res.run_id = tr.id
+                   AND res.person_id = 0
+                   AND res.is_smoothed = 0
+                GROUP BY tr.id
+                ORDER BY tr.ran_at DESC
+                """
+            ).fetchall()
+            _conn_rs.close()
+            for _r in _run_rows:
+                _cams = _json_rs.loads(_r["active_camera_ids"] or "[]")
+                _lbl = (
+                    f"{_r['ran_at']}  "
+                    f"[{_r['n_frames']} frames, {len(_cams)} cams]  "
+                    f"{_r['id'][:8]}…"
+                )
+                _options[_lbl] = _r["id"]
+        except Exception as _ex_rs:
+            pass
+
+    run_selector = mo.ui.dropdown(
+        options=_options,
+        label="Tracking run",
+        full_width=True,
+    )
+    run_selector if _is_db else mo.md("")
+    return (run_selector,)
 
 
 @app.cell
@@ -83,11 +120,11 @@ def _(
     Path,
     config_input,
     db_path_input,
+    inliers_only_input,
     mo,
     np,
     pd,
-    run_id_input,
-    sequence_id_input,
+    run_selector,
     source_selector,
     tomllib,
     yaml,
@@ -101,21 +138,20 @@ def _(
 
     if _is_db:
         _db_path = db_path_input.value.strip()
-        _run_id = run_id_input.value.strip()
-        _seq_id = sequence_id_input.value.strip()
+        _run_id = run_selector.value or ""
 
         if not _db_path or not _run_id:
             cameras = {}
             skeleton_path = Path("/dev/null")
             output_dir = Path("/dev/null")
             wide_df = pd.DataFrame()
-            mo.stop(True, mo.callout(mo.md("Enter session DB path and run ID above."), kind="warn"))
+            mo.stop(True, mo.callout(mo.md("Enter session DB path and select a run above."), kind="warn"))
         else:
             try:
                 import sqlite3 as _sqlite3
                 from posetrak.db.load_session import (
                     load_cameras_from_session,
-                    load_observations_from_session,
+                    load_inlier_obs_from_tracking_run,
                 )
                 from posetrak.db.skeleton_layout import SkeletonLayout as _SkeletonLayout
 
@@ -160,60 +196,19 @@ def _(
                     mo.stop(True, mo.callout(mo.md("No skeleton YAML in DB for this run."), kind="danger"))
 
                 _skeleton_yaml = _skel_row["yaml_content"]
-                _skel_data = yaml.safe_load(_skeleton_yaml)
 
-                # Build coco_id → marker_name map
-                _coco_to_marker: dict[int, str] = {}
-                for _m in _skel_data.get("markers", []):
-                    _cid = _m.get("openpose_keypoint")
-                    if _cid is not None:
-                        _coco_to_marker[int(_cid)] = _m["name"]
-
-                # Load cameras from DB
+                # Load cameras from DB; build label → camera_id map
                 if _session_id:
                     _cam_list = load_cameras_from_session(_db_path, _extrinsic_id, _session_id)
                     cameras = {c["camera_id"]: {"K": c["K"], "dist": c["dist"], "P": c["P"]}
                                for c in _cam_list}
-                    _cam_instance_to_id = {
-                        # Need to map camera_instance_id → integer id via labels
-                        # The active_camera_ids are sorted labels; match to camera_id
+                    _label_to_id = {
+                        c.get("instance_label") or c["label"]: c["camera_id"]
+                        for c in _cam_list
                     }
-                    # Build camera_instance_id → camera_id map for observations
-                    _conn2 = _sqlite3.connect(_db_path, check_same_thread=False)
-                    _conn2.row_factory = _sqlite3.Row
-                    _sc_rows = _conn2.execute(
-                        "SELECT camera_instance_id, label FROM session_cameras WHERE session_id = ?",
-                        (_session_id,),
-                    ).fetchall()
-                    _conn2.close()
-                    _label_to_id = {c["label"]: c["camera_id"] for c in _cam_list}
-                    _cam_inst_to_id = {}
-                    for _scr in _sc_rows:
-                        _lbl = _scr["label"] or _scr["camera_instance_id"]
-                        if _lbl in _label_to_id:
-                            _cam_inst_to_id[_scr["camera_instance_id"]] = _label_to_id[_lbl]
                 else:
                     cameras = {}
-                    _cam_inst_to_id = {}
-
-                # Load 2D observations from DB if sequence_id provided
-                def _undistort_point(px, py, K, dist):
-                    k1, k2, p1, p2 = dist[0], dist[1], dist[2], dist[3]
-                    fx, fy = K[0, 0], K[1, 1]
-                    cx, cy = K[0, 2], K[1, 2]
-                    if abs(k1) < 1e-9 and abs(k2) < 1e-9 and abs(p1) < 1e-9 and abs(p2) < 1e-9:
-                        return px, py
-                    xn = (px - cx) / fx
-                    yn = (py - cy) / fy
-                    x0, y0 = xn, yn
-                    for _ in range(5):
-                        r2 = xn * xn + yn * yn
-                        radial = 1.0 + k1 * r2 + k2 * r2 * r2
-                        dx = 2.0 * p1 * xn * yn + p2 * (r2 + 2.0 * xn * xn)
-                        dy = p1 * (r2 + 2.0 * yn * yn) + 2.0 * p2 * xn * yn
-                        xn = (x0 - dx) / radial
-                        yn = (y0 - dy) / radial
-                    return xn * fx + cx, yn * fy + cy
+                    _label_to_id = {}
 
                 def _triangulate_dlt(observations, Ps):
                     rows = []
@@ -227,27 +222,23 @@ def _(
                     cond = float(s[0] / s[-2]) if s[-2] > 1e-12 else float("inf")
                     return pos, cond
 
-                if _seq_id and _cam_inst_to_id:
-                    _obs_df = load_observations_from_session(_db_path, _seq_id, _cam_inst_to_id)
-                    # Filter to known COCO keypoints; map to marker names
-                    _obs_df = _obs_df[_obs_df["keypoint_index"].isin(_coco_to_marker)]
-                    _obs_df = _obs_df.copy()
-                    _obs_df["marker_name"] = _obs_df["keypoint_index"].map(_coco_to_marker)
-                    _conf_threshold = 0.3
-                    _inliers = _obs_df[_obs_df["confidence"] >= _conf_threshold].copy()
+                # Load observations from tracking_obs_results.
+                # Pixels are already in undistorted space (K_new) — no undistortion needed.
+                _inlier_obs = load_inlier_obs_from_tracking_run(
+                    _db_path, _run_id, inliers_only=inliers_only_input.value
+                )
 
+                if not _inlier_obs.empty and _label_to_id:
                     _tri_records = []
-                    for (_frame, _mrk_name), _grp in _inliers.groupby(["frame", "marker_name"]):
+                    for (_step, _mrk_name), _grp in _inlier_obs.groupby(
+                        ["tracker_step", "marker_name"]
+                    ):
                         _cam_obs: dict[int, tuple] = {}
                         for _row in _grp.itertuples(index=False):
-                            _cid = int(_row.camera_id)
-                            if _cid not in cameras:
+                            _cid = _label_to_id.get(_row.camera_label)
+                            if _cid is None or _cid not in cameras:
                                 continue
-                            _cam = cameras[_cid]
-                            _u, _v = _undistort_point(
-                                _row.pixel_x, _row.pixel_y, _cam["K"], _cam["dist"]
-                            )
-                            _cam_obs[_cid] = (_u, _v)
+                            _cam_obs[_cid] = (_row.pixel_x, _row.pixel_y)
                         if len(_cam_obs) < 2:
                             continue
                         _pos, _cond = _triangulate_dlt(
@@ -256,7 +247,7 @@ def _(
                         )
                         if _cond > 200 or not np.all(np.isfinite(_pos)):
                             continue
-                        _tri_records.append({"frame": _frame, "marker_name": _mrk_name,
+                        _tri_records.append({"frame": _step, "marker_name": _mrk_name,
                                              "x": _pos[0], "y": _pos[1], "z": _pos[2]})
 
                     if _tri_records:
@@ -271,9 +262,9 @@ def _(
                 else:
                     wide_df = pd.DataFrame()
 
-                # Provide skeleton_path as sentinel (won't be read)
+                # In DB mode output goes next to the session DB
+                output_dir = Path(_db_path).parent
                 skeleton_path = Path("/dev/null")
-                output_dir = Path("/dev/null")
 
                 # Stash skeleton data for the rest-pose cell via a temp path
                 import tempfile as _tempfile
@@ -566,30 +557,28 @@ def _(fk_rest_pose, mo, np, skeleton_path, yaml):
 
 @app.cell
 def _(np, pd, wide_df_final):
-    wide_df = wide_df_final
-
     def _dist(m1, m2):
         try:
-            dx = wide_df[f"{m1}.x"] - wide_df[f"{m2}.x"]
-            dy = wide_df[f"{m1}.y"] - wide_df[f"{m2}.y"]
-            dz = wide_df[f"{m1}.z"] - wide_df[f"{m2}.z"]
+            dx = wide_df_final[f"{m1}.x"] - wide_df_final[f"{m2}.x"]
+            dy = wide_df_final[f"{m1}.y"] - wide_df_final[f"{m2}.y"]
+            dz = wide_df_final[f"{m1}.z"] - wide_df_final[f"{m2}.z"]
             return np.sqrt(dx**2 + dy**2 + dz**2)
         except KeyError:
-            return pd.Series(float("nan"), index=wide_df.index)
+            return pd.Series(float("nan"), index=wide_df_final.index)
 
     def _mid_dist(m1a, m1b, m2a, m2b):
-        mx1 = (wide_df[f"{m1a}.x"] + wide_df[f"{m1b}.x"]) / 2
-        my1 = (wide_df[f"{m1a}.y"] + wide_df[f"{m1b}.y"]) / 2
-        mz1 = (wide_df[f"{m1a}.z"] + wide_df[f"{m1b}.z"]) / 2
-        mx2 = (wide_df[f"{m2a}.x"] + wide_df[f"{m2b}.x"]) / 2
-        my2 = (wide_df[f"{m2a}.y"] + wide_df[f"{m2b}.y"]) / 2
-        mz2 = (wide_df[f"{m2a}.z"] + wide_df[f"{m2b}.z"]) / 2
+        mx1 = (wide_df_final[f"{m1a}.x"] + wide_df_final[f"{m1b}.x"]) / 2
+        my1 = (wide_df_final[f"{m1a}.y"] + wide_df_final[f"{m1b}.y"]) / 2
+        mz1 = (wide_df_final[f"{m1a}.z"] + wide_df_final[f"{m1b}.z"]) / 2
+        mx2 = (wide_df_final[f"{m2a}.x"] + wide_df_final[f"{m2b}.x"]) / 2
+        my2 = (wide_df_final[f"{m2a}.y"] + wide_df_final[f"{m2b}.y"]) / 2
+        mz2 = (wide_df_final[f"{m2a}.z"] + wide_df_final[f"{m2b}.z"]) / 2
         return np.sqrt((mx1-mx2)**2 + (my1-my2)**2 + (mz1-mz2)**2)
 
-    if wide_df.empty:
+    if wide_df_final.empty:
         meas_df = pd.DataFrame()
     else:
-        meas_df = pd.DataFrame({"frame": wide_df["frame"]})
+        meas_df = pd.DataFrame({"frame": wide_df_final["frame"]})
         meas_df["shin"] = (
             _dist("MRK-knee.L", "MRK-Ankle.L") + _dist("MRK-knee.R", "MRK-Ankle.R")
         ) / 2
@@ -714,8 +703,9 @@ def _(MEAS_KEYS, frame_range, go, make_subplots, meas_df, tmpl_ref):
 def _(mo, range_medians):
     def _num(key, label):
         v = range_medians.get(key, 0.0)
+        raw = round(v * 100, 1) if v else 0.0
         return mo.ui.number(
-            value=round(v * 100, 1) if v else 0.0,
+            value=max(1.0, raw),
             start=1.0, stop=300.0, step=0.1,
             label=label,
         )

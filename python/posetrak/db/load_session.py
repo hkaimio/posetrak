@@ -226,12 +226,15 @@ def load_cameras_from_session(
                 ee.R AS R_blob,
                 ee.t AS t_blob,
                 sc.label,
+                ci.label AS instance_label,
                 ic.fx, ic.fy, ic.cx, ic.cy,
                 ic.dist_coeffs AS dist_blob
             FROM extrinsic_entries ee
             JOIN session_cameras sc
                 ON sc.camera_instance_id = ee.camera_instance_id
                 AND sc.session_id = ?
+            LEFT JOIN camera_instances ci
+                ON ci.id = ee.camera_instance_id
             JOIN intrinsics_calibrations ic
                 ON ic.id = sc.intrinsics_calibration_id
             WHERE ee.extrinsic_calibration_id = ?
@@ -261,9 +264,11 @@ def load_cameras_from_session(
                 dist = dist[:4]
             else:
                 dist = np.zeros(4)
+            instance_label = row["instance_label"] or label
             P = K @ np.hstack([R, t.reshape(3, 1)])
             cams.append({
                 "label": label,
+                "instance_label": instance_label,
                 "K": K,
                 "R": R,
                 "t": t,
@@ -401,6 +406,114 @@ def load_observations_from_session(
             return pd.DataFrame(columns=[
                 "frame", "timestamp", "camera_id", "keypoint_index",
                 "pixel_x", "pixel_y", "confidence",
+            ])
+        return pd.DataFrame(records)
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Inlier observations from tracking run
+# ---------------------------------------------------------------------------
+
+def load_inlier_obs_from_tracking_run(
+    session_db: str,
+    run_id: str,
+    person_id: int = 0,
+    inliers_only: bool = True,
+) -> pd.DataFrame:
+    """Load inlier 2D observations from tracking_obs_results for a run.
+
+    Parses the obs_blob (float32[n_cams, n_markers, 8]) and returns only
+    observations where slot[6] (is_outlier) == 0.  Absent slots (NaN) and
+    outlier slots are excluded.  Pixels are in undistorted pixel space (K_new).
+
+    Parameters
+    ----------
+    session_db : str
+        Path to the session SQLite file.
+    run_id : str
+        UUID of the tracking run.
+    person_id : int
+        Person ID (default 0).
+
+    Returns
+    -------
+    DataFrame with columns:
+      tracker_step, timestamp_s, camera_label, marker_name, pixel_x, pixel_y
+    """
+    conn = _open_db(session_db)
+    try:
+        run_row = conn.execute(
+            "SELECT active_camera_ids, marker_names FROM tracking_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if run_row is None:
+            raise ValueError(f"No tracking run found with id={run_id!r}")
+
+        active_camera_labels: list[str] = json.loads(run_row["active_camera_ids"] or "[]")
+        marker_names: list[str] = json.loads(run_row["marker_names"] or "[]")
+        n_cams = len(active_camera_labels)
+        n_markers = len(marker_names)
+
+        if n_cams == 0 or n_markers == 0:
+            return pd.DataFrame(columns=[
+                "tracker_step", "timestamp_s", "camera_label",
+                "marker_name", "pixel_x", "pixel_y",
+            ])
+
+        rows = conn.execute(
+            """
+            SELECT tor.tracker_step, tor.obs_blob, tr.timestamp_s
+            FROM tracking_obs_results tor
+            JOIN tracking_results tr
+                ON tr.run_id = tor.run_id
+               AND tr.person_id = tor.person_id
+               AND tr.tracker_step = tor.tracker_step
+               AND tr.is_smoothed = 0
+            WHERE tor.run_id = ? AND tor.person_id = ?
+            ORDER BY tor.tracker_step
+            """,
+            (run_id, person_id),
+        ).fetchall()
+
+        records = []
+        expected_floats = n_cams * n_markers * 8
+        for row in rows:
+            step = row["tracker_step"]
+            ts = row["timestamp_s"]
+            obs_data = np.frombuffer(bytes(row["obs_blob"]), dtype="<f4")
+            if len(obs_data) != expected_floats:
+                warnings.warn(
+                    f"Unexpected obs_blob size at step {step}: "
+                    f"got {len(obs_data)}, expected {expected_floats}"
+                )
+                continue
+            obs = obs_data.reshape(n_cams, n_markers, 8)
+            for ci, cam_label in enumerate(active_camera_labels):
+                for mi, marker_name in enumerate(marker_names):
+                    # slot[6] = is_outlier: 0.0 = inlier, 1.0 = outlier, NaN = absent
+                    is_outlier = obs[ci, mi, 6]
+                    if not np.isfinite(is_outlier):
+                        continue  # absent slot — no observation
+                    if inliers_only and is_outlier != 0.0:
+                        continue
+                    px, py = float(obs[ci, mi, 0]), float(obs[ci, mi, 1])
+                    if not (np.isfinite(px) and np.isfinite(py)):
+                        continue
+                    records.append({
+                        "tracker_step": step,
+                        "timestamp_s": ts,
+                        "camera_label": cam_label,
+                        "marker_name": marker_name,
+                        "pixel_x": px,
+                        "pixel_y": py,
+                    })
+
+        if not records:
+            return pd.DataFrame(columns=[
+                "tracker_step", "timestamp_s", "camera_label",
+                "marker_name", "pixel_x", "pixel_y",
             ])
         return pd.DataFrame(records)
     finally:

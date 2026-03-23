@@ -91,7 +91,16 @@ Camera::Camera(int id, std::string name, Intrinsics const& intrinsics, Extrinsic
       intrinsics_(intrinsics),
       extrinsics_(extrinsics),
       fps_(fps),
-      start_frame_(start_frame) {}
+      start_frame_(start_frame) {
+    // Default K_original to K_new so undistort() is a no-op on already-undistorted pixels
+    // until set_K_original() is called with the real distorted camera matrix.
+    K_original_ = Eigen::Matrix3d::Zero();
+    K_original_(0, 0) = intrinsics_.fx;
+    K_original_(1, 1) = intrinsics_.fy;
+    K_original_(0, 2) = intrinsics_.cx;
+    K_original_(1, 2) = intrinsics_.cy;
+    K_original_(2, 2) = 1.0;
+}
 
 void Camera::set_fps(double fps) {
     if (fps <= 0.0) {
@@ -345,15 +354,19 @@ Eigen::Vector2d Camera::distort(Eigen::Vector2d const& point_norm) const {
     return apply_distortion(point_norm);
 }
 
-Eigen::Vector2d Camera::undistort(Eigen::Vector2d const& pixel) const {
-    // Convert from pixel to normalized coordinates
-    Eigen::Vector2d point_dist((pixel.x() - intrinsics_.cx) / intrinsics_.fx,
-                               (pixel.y() - intrinsics_.cy) / intrinsics_.fy);
+void Camera::set_K_original(Eigen::Matrix3d const& K) {
+    K_original_ = K;
+}
 
-    // Remove distortion
+Eigen::Vector2d Camera::undistort(Eigen::Vector2d const& pixel) const {
+    // Normalise using K_original (input is in distorted pixel space)
+    Eigen::Vector2d point_dist((pixel.x() - K_original_(0, 2)) / K_original_(0, 0),
+                               (pixel.y() - K_original_(1, 2)) / K_original_(1, 1));
+
+    // Remove distortion in normalised coordinates
     Eigen::Vector2d const point_norm = remove_distortion(point_dist);
 
-    // Convert back to pixel coordinates
+    // Convert to undistorted pixel coordinates using K_new (intrinsics_)
     double const u = intrinsics_.fx * point_norm.x() + intrinsics_.cx;
     double const v = intrinsics_.fy * point_norm.y() + intrinsics_.cy;
 

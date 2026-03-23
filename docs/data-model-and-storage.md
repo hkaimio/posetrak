@@ -617,11 +617,14 @@ CREATE TABLE sync_points (
 );
 
 CREATE TABLE pose_observation_sequences (
-    id TEXT PRIMARY KEY,
-    shot_id TEXT NOT NULL REFERENCES shots(id),
-    sync_config_id TEXT NOT NULL REFERENCES sync_configs(id),
-    time_start_s REAL NOT NULL, time_end_s REAL NOT NULL,
-    pose_model TEXT, notes TEXT
+    id                      TEXT PRIMARY KEY,
+    shot_id                 TEXT NOT NULL REFERENCES shots(id),
+    sync_config_id          TEXT NOT NULL REFERENCES sync_configs(id),
+    time_start_s            REAL NOT NULL,
+    time_end_s              REAL NOT NULL,
+    pose_model              TEXT,
+    notes                   TEXT,
+    pixels_are_undistorted  INTEGER NOT NULL DEFAULT 1  -- 1 = K_new space, 0 = K_original space
 );
 
 CREATE TABLE pose_observations (

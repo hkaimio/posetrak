@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 2
-SESSION_SCHEMA_VERSION: Final[int] = 3
+SESSION_SCHEMA_VERSION: Final[int] = 4
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -322,6 +322,19 @@ def _migrate_session_v2_to_v3(conn: sqlite3.Connection) -> None:
     conn.executescript(sql)
 
 
+def _migrate_session_v3_to_v4(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 3 to 4.
+
+    v4 adds pixels_are_undistorted to pose_observation_sequences.
+    Existing rows default to 1 (undistorted) because all prior captures
+    used pre-undistorted video.
+    """
+    sql = (_DB_DIR / "migrations" / "003_session_pixels_are_undistorted.sql").read_text(
+        encoding="utf-8"
+    )
+    conn.executescript(sql)
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -351,6 +364,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 2
     if actual == 2:
         _migrate_session_v2_to_v3(conn)
+        actual = 3
+    if actual == 3:
+        _migrate_session_v3_to_v4(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

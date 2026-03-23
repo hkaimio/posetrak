@@ -188,10 +188,21 @@ class Camera {
     /// @return Distorted normalized coordinates
     Eigen::Vector2d distort(Eigen::Vector2d const& point_norm) const;
 
-    /// @brief Remove distortion from pixel coordinates (OpenPose → UKF input)
-    /// @param pixel Distorted pixel coordinates
-    /// @return Undistorted pixel coordinates
-    /// @note Uses iterative method (Gauss-Newton)
+    /// @brief Set the original (distorted) camera matrix K_original.
+    ///
+    /// Must be called when loading cameras from the DB so that undistort()
+    /// normalises input pixels correctly using K_original rather than K_new.
+    /// If never called, K_original defaults to K_new (undistorted matrix).
+    /// @param K 3×3 camera matrix for the original distorted image space
+    void set_K_original(Eigen::Matrix3d const& K);
+
+    /// @brief Remove distortion from distorted pixel coordinates → undistorted pixel space.
+    ///
+    /// Input is assumed to be in distorted pixel space (K_original coordinates).
+    /// Output is in undistorted pixel space (K_new / intrinsics_ coordinates).
+    /// Uses K_original for input normalisation and the iterative Gauss-Newton method.
+    /// @param pixel Distorted pixel coordinates [u, v] in K_original space
+    /// @return Undistorted pixel coordinates [u, v] in K_new space
     Eigen::Vector2d undistort(Eigen::Vector2d const& pixel) const;
 
     /// @brief Check if pixel is within image bounds
@@ -232,11 +243,14 @@ class Camera {
 
     int id_;                              ///< Camera numeric identifier
     std::string name_;                    ///< Camera name/identifier
-    Intrinsics intrinsics_;               ///< Intrinsic parameters
+    Intrinsics intrinsics_;               ///< Intrinsic parameters (K_new / undistorted)
     Extrinsics extrinsics_;               ///< Extrinsic parameters
     double fps_;                          ///< Frame rate (fallback when no sync points)
     int start_frame_;                     ///< Starting frame offset
     std::vector<SyncPoint> sync_points_;  ///< Synchronization points for timestamp conversion
+    /// Original (distorted) camera matrix used to normalise distorted input pixels in undistort().
+    /// Defaults to K_new (intrinsics_ matrix) when set_K_original() has not been called.
+    Eigen::Matrix3d K_original_;
 };
 
 }  // namespace posetrak

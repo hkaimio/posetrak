@@ -121,7 +121,8 @@ static void create_fixture_db() {
             cy REAL NOT NULL,
             dist_coeffs BLOB,
             rms_error REAL,
-            notes TEXT
+            notes TEXT,
+            matrix_original BLOB
         );
     )");
     exec_sql(db, R"(
@@ -244,7 +245,8 @@ static void create_fixture_db() {
             time_start_s REAL NOT NULL,
             time_end_s REAL NOT NULL,
             pose_model TEXT,
-            notes TEXT
+            notes TEXT,
+            pixels_are_undistorted INTEGER NOT NULL DEFAULT 1
         );
     )");
     exec_sql(db, R"(

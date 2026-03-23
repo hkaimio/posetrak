@@ -93,14 +93,20 @@ CREATE TABLE IF NOT EXISTS sync_points (
 );
 
 -- A sequence of 2-D pose observations covering a time window of a shot
+-- pixels_are_undistorted: 1 if keypoint coordinates are already in undistorted
+--   pixel space (K_new) and must NOT be undistorted by the tracker again;
+--   0 if coordinates are in distorted pixel space (K_original) and the tracker
+--   must apply undistortion.  Default 1 matches the current pipeline where pose
+--   estimation runs on pre-undistorted video frames.
 CREATE TABLE IF NOT EXISTS pose_observation_sequences (
-    id               TEXT PRIMARY KEY,
-    shot_id          TEXT NOT NULL REFERENCES shots(id),
-    sync_config_id   TEXT NOT NULL REFERENCES sync_configs(id),
-    time_start_s     REAL NOT NULL,
-    time_end_s       REAL NOT NULL,
-    pose_model       TEXT,
-    notes            TEXT
+    id                      TEXT PRIMARY KEY,
+    shot_id                 TEXT NOT NULL REFERENCES shots(id),
+    sync_config_id          TEXT NOT NULL REFERENCES sync_configs(id),
+    time_start_s            REAL NOT NULL,
+    time_end_s              REAL NOT NULL,
+    pose_model              TEXT,
+    notes                   TEXT,
+    pixels_are_undistorted  INTEGER NOT NULL DEFAULT 1
 );
 
 -- Individual 2-D pose observations: one row per (sequence, camera, frame, person)

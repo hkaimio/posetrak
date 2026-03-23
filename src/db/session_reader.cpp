@@ -261,7 +261,7 @@ SessionReader::load_cameras(std::string const& session_id,
     Stmt cam_stmt(db_,
                   "SELECT ci.id, ci.label,"
                   "       ic.fx, ic.fy, ic.cx, ic.cy, ic.dist_coeffs, ic.distortion_model,"
-                  "       cm.width_px, cm.height_px"
+                  "       cm.width_px, cm.height_px, ic.matrix_original"
                   " FROM session_cameras sc"
                   " JOIN camera_instances ci ON ci.id = sc.camera_instance_id"
                   " JOIN intrinsics_calibrations ic ON ic.id = sc.intrinsics_calibration_id"
@@ -278,6 +278,7 @@ SessionReader::load_cameras(std::string const& session_id,
         std::vector<double> dist_coeffs;
         Intrinsics::DistortionModel dist_model;
         int width, height;
+        std::optional<Eigen::Matrix3d> K_original;  // from matrix_original blob; nullopt if absent
     };
     std::vector<CamRow> rows;
 
@@ -306,6 +307,21 @@ SessionReader::load_cameras(std::string const& session_id,
 
         row.width = sqlite3_column_int(cam_stmt.ptr, 8);
         row.height = sqlite3_column_int(cam_stmt.ptr, 9);
+
+        // matrix_original blob (nullable) — 9 float64 values, row-major
+        if (sqlite3_column_type(cam_stmt.ptr, 10) != SQLITE_NULL) {
+            void const* blob = sqlite3_column_blob(cam_stmt.ptr, 10);
+            int nbytes = sqlite3_column_bytes(cam_stmt.ptr, 10);
+            auto vals = db::decode_float64_blob(blob, nbytes);
+            if (vals.size() == 9) {
+                Eigen::Matrix3d K;
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        K(r, c) = vals[static_cast<size_t>(r * 3 + c)];
+                row.K_original = K;
+            }
+        }
+
         rows.push_back(std::move(row));
     }
 
@@ -357,6 +373,9 @@ SessionReader::load_cameras(std::string const& session_id,
         Extrinsics extrinsics{camera_position, orientation};
 
         Camera cam(camera_id++, row.label, intrinsics, extrinsics);
+        if (row.K_original.has_value()) {
+            cam.set_K_original(row.K_original.value());
+        }
 
         // Step 3: Fetch all sync points for this camera
         sync_stmt.reset();
@@ -388,6 +407,20 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                                                 std::map<std::string, Camera> const& cameras,
                                                 Skeleton const& skeleton, double min_confidence,
                                                 int person_id) {
+    // Step 0: Read pixels_are_undistorted flag for this sequence
+    bool pixels_are_undistorted = true;  // default: assume undistorted (safe for existing data)
+    {
+        Stmt flag_stmt(db_,
+                       "SELECT pixels_are_undistorted"
+                       " FROM pose_observation_sequences WHERE id = ?");
+        sqlite3_bind_text(flag_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+        if (flag_stmt.step()) {
+            if (sqlite3_column_type(flag_stmt.ptr, 0) != SQLITE_NULL) {
+                pixels_are_undistorted = (sqlite3_column_int(flag_stmt.ptr, 0) != 0);
+            }
+        }
+    }
+
     // Step 1: Build instance_id → Camera const* map
     Stmt inst_stmt(db_,
                    "SELECT ci.id, ci.label"
@@ -470,7 +503,10 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
             obs.timestamp = timestamp_s;
             obs.position_distorted =
                 Eigen::Vector2d(kps[static_cast<size_t>(i)].x, kps[static_cast<size_t>(i)].y);
-            obs.position = camera->undistort(obs.position_distorted);
+            // When pixels_are_undistorted, coordinates are already in K_new space;
+            // skip undistortion to avoid applying the distortion model a second time.
+            obs.position = pixels_are_undistorted ? obs.position_distorted
+                                                  : camera->undistort(obs.position_distorted);
             obs.confidence = kps[static_cast<size_t>(i)].confidence;
             seq_observations[inst_id].push_back(obs);
         }

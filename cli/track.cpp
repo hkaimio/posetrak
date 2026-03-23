@@ -17,9 +17,12 @@
 #include "posetrak/kinematics/pinocchio_model_builder.hpp"
 #include "posetrak/kinematics/triangulation.hpp"
 #include "posetrak/tracking/tracker.hpp"
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -1036,7 +1039,9 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                              std::string const& skeleton_id, std::string const& config_id,
                              std::string const& output_dir, bool verbose, bool quiet,
                              bool smooth_output, double min_confidence, int person_id,
-                             std::vector<std::string> const& active_joint_groups) {
+                             std::vector<std::string> const& active_joint_groups,
+                             double override_start_time = std::numeric_limits<double>::quiet_NaN(),
+                             double override_end_time = std::numeric_limits<double>::quiet_NaN()) {
     try {
         if (!quiet) {
             fmt::print("Opening session DB: {}\n", db_path);
@@ -1073,8 +1078,6 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
 
         // Load sequence info
         auto seq_info = reader.load_sequence_info(full_sequence_id);
-        double start_time = seq_info.time_start_s;
-        double end_time = seq_info.time_end_s;
 
         // Load cameras (derives session/extrinsics/sync from the sequence record)
         if (!quiet) {
@@ -1104,13 +1107,53 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                        observations_set.total_observations(), observations_set.camera_count());
         }
 
-        // Auto-detect end time if not set by sequence
+        // Determine effective end time
+        double end_time = std::isnan(override_end_time) ? seq_info.time_end_s : override_end_time;
         if (end_time < 0.0) {
             end_time = observations_set.max_time();
         }
 
-        // Calculate tracker steps
+        // Determine effective start time.
+        // If not explicitly overridden, auto-detect the first tracker step at which at least
+        // min_cameras_for_init cameras have observations — so initialization has enough views.
         double dt = 1.0 / tracker_fps;
+        double start_time;
+        if (!std::isnan(override_start_time)) {
+            start_time = override_start_time;
+        } else {
+            // Collect per-camera first-observation times and find the Nth smallest,
+            // where N = min_cameras_for_init.
+            int n_needed = tracker_config.min_cameras_for_init;
+            std::vector<double> cam_starts;
+            for (auto const& [name, seq] : observations_set.sequences()) {
+                if (!seq.empty())
+                    cam_starts.push_back(seq.min_time());
+            }
+            std::sort(cam_starts.begin(), cam_starts.end());
+
+            double seq_start = seq_info.time_start_s;
+            if (static_cast<int>(cam_starts.size()) >= n_needed) {
+                // Nth smallest start time gives earliest point where N cameras are active.
+                // Round up to the nearest tracker step boundary relative to seq_start.
+                double t_n = cam_starts[static_cast<size_t>(n_needed - 1)];
+                if (t_n > seq_start) {
+                    int steps_ahead = static_cast<int>(std::ceil((t_n - seq_start) / dt));
+                    start_time = seq_start + steps_ahead * dt;
+                    if (!quiet && start_time > seq_start + dt) {
+                        fmt::print(
+                            "  Auto-detected start time: {:.4f}s (sequence start {:.4f}s; "
+                            "waiting for {} cameras)\n",
+                            start_time, seq_start, n_needed);
+                    }
+                } else {
+                    start_time = seq_start;
+                }
+            } else {
+                start_time = seq_start;
+            }
+        }
+
+        // Calculate tracker steps
         int num_steps = static_cast<int>((end_time - start_time) / dt);
         if (num_steps <= 0) {
             throw std::runtime_error(
@@ -1423,6 +1466,8 @@ int main(int argc, char* argv[]) {
     double db_min_confidence = 0.1;
     int db_person_id = 0;
     std::vector<std::string> db_active_joint_groups;
+    double db_start_time = std::numeric_limits<double>::quiet_NaN();
+    double db_end_time = std::numeric_limits<double>::quiet_NaN();
 
     track_cmd->add_option("config", track_config, "Configuration file (TOML)")
         ->expected(0, 1)
@@ -1454,6 +1499,11 @@ int main(int argc, char* argv[]) {
                           "Person index in pose observations (default: 0)");
     track_cmd->add_option("--joint-groups", db_active_joint_groups,
                           "Active joint groups for DB mode (empty = all)");
+    track_cmd->add_option("--start-time", db_start_time,
+                          "Override sequence start time in seconds (default: auto-detect "
+                          "first frame where min_cameras_for_init cameras are active)");
+    track_cmd->add_option("--end-time", db_end_time,
+                          "Override sequence end time in seconds (default: from sequence record)");
 
     // ---- 'scale' subcommand ---------------------------------------------
     auto* scale_cmd = app.add_subcommand(
@@ -1485,7 +1535,8 @@ int main(int argc, char* argv[]) {
             }
             return run_track_from_db(db_path, db_sequence_id, db_skeleton_id, db_config_id,
                                      db_output_dir, verbose, quiet, smooth_output,
-                                     db_min_confidence, db_person_id, db_active_joint_groups);
+                                     db_min_confidence, db_person_id, db_active_joint_groups,
+                                     db_start_time, db_end_time);
         } else {
             if (track_config.empty()) {
                 fmt::print(stderr, "Error: config file required when not using --session-db\n");

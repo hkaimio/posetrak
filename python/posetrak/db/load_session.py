@@ -297,18 +297,25 @@ def load_sync_from_session(session_db: str, sync_config_id: str) -> dict:
 
     Returns
     -------
-    dict[cam_label, {'syncpoints': [{'frame': int, 'timestamp': float}, ...]}]
+    dict[cam_label, {'fps': float, 'syncpoints': [{'frame': int, 'timestamp': float}, ...]}]
     """
     conn = _open_db(session_db)
     try:
         rows = conn.execute(
             """
-            SELECT sp.video_frame, sp.timestamp_s, ci.label AS cam_label
+            SELECT sp.video_frame, sp.timestamp_s, sv.actual_fps,
+                   sp.camera_instance_id,
+                   COALESCE(sc.label, ci.label) AS cam_label
             FROM sync_points sp
             JOIN shot_videos sv ON sv.id = sp.shot_video_id
             JOIN camera_instances ci ON ci.id = sp.camera_instance_id
+            JOIN sync_configs scfg ON scfg.id = sp.sync_config_id
+            JOIN shots sh ON sh.id = scfg.shot_id
+            LEFT JOIN session_cameras sc
+                ON sc.camera_instance_id = sp.camera_instance_id
+               AND sc.session_id = sh.session_id
             WHERE sp.sync_config_id = ?
-            ORDER BY ci.label, sp.video_frame
+            ORDER BY cam_label, sp.video_frame
             """,
             (sync_config_id,),
         ).fetchall()
@@ -317,7 +324,7 @@ def load_sync_from_session(session_db: str, sync_config_id: str) -> dict:
         for row in rows:
             cam_label = row["cam_label"] or row["camera_instance_id"]
             if cam_label not in result:
-                result[cam_label] = {"syncpoints": []}
+                result[cam_label] = {"fps": row["actual_fps"] or 0.0, "syncpoints": []}
             result[cam_label]["syncpoints"].append({
                 "frame": row["video_frame"],
                 "timestamp": row["timestamp_s"],

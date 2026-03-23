@@ -82,24 +82,44 @@ class Camera(NamedTuple):
 
 
 class SyncTable:
-    """Per-camera lookup: tracker timestamp → nearest video frame index."""
+    """Per-camera lookup: tracker timestamp → video frame index via linear interpolation."""
 
     def __init__(self, sync_data: dict):
-        self._tables: dict[str, tuple[list[float], list[int]]] = {}
+        self._tables: dict[str, tuple[list[float], list[int], float]] = {}
         for cam_name, info in sync_data.items():
             pts = info.get("syncpoints", [])
             timestamps = [sp["timestamp"] for sp in pts]
             frames     = [sp["frame"]     for sp in pts]
-            self._tables[cam_name] = (timestamps, frames)
+            fps        = float(info.get("fps", 0.0))
+            self._tables[cam_name] = (timestamps, frames, fps)
 
     def lookup(self, cam_toml_name: str, tracker_timestamp: float) -> int | None:
-        """Return the video frame index whose timestamp is nearest to tracker_timestamp."""
+        """Return video frame for *tracker_timestamp* by linear interpolation/extrapolation.
+
+        With a single sync anchor, extrapolates using fps so the video advances
+        in lock-step with the tracker timeline.
+        """
         if cam_toml_name not in self._tables:
             return None
-        timestamps, frames = self._tables[cam_toml_name]
+        timestamps, frames, fps = self._tables[cam_toml_name]
         if not timestamps:
             return None
-        idx = bisect.bisect_left(timestamps, tracker_timestamp)
+
+        idx = bisect.bisect_right(timestamps, tracker_timestamp)
+
+        if idx == 0:
+            # Before first anchor — extrapolate backward
+            anchor_ts, anchor_frame = timestamps[0], frames[0]
+        elif idx >= len(timestamps):
+            # After last anchor — extrapolate forward
+            anchor_ts, anchor_frame = timestamps[-1], frames[-1]
+        else:
+            # Between two anchors — interpolate using the earlier one
+            anchor_ts, anchor_frame = timestamps[idx - 1], frames[idx - 1]
+
+        if fps > 0:
+            return anchor_frame + round((tracker_timestamp - anchor_ts) * fps)
+        # No fps info: snap to nearest anchor
         if idx == 0:
             return frames[0]
         if idx >= len(timestamps):
@@ -887,12 +907,12 @@ def _load_obs_mdata_from_db(
                 cam_entry: dict[str, tuple] = {}
                 for mi, mname in enumerate(marker_names):
                     slot = obs[ci, mi]
-                    ox, oy = float(slot[0]), float(slot[1])
-                    px, py = float(slot[2]), float(slot[3])
+                    pred_x, pred_y = float(slot[0]), float(slot[1])  # FK-projected pixel position
+                    obs_x, obs_y   = float(slot[2]), float(slot[3])  # observed (detected) pixel position
                     is_outlier = bool(slot[6] > 0.5)
-                    if math.isnan(ox):
+                    if math.isnan(pred_x):
                         continue  # no observation for this slot
-                    cam_entry[mname] = (ox, oy, px, py, is_outlier)
+                    cam_entry[mname] = (pred_x, pred_y, obs_x, obs_y, is_outlier)
                 if cam_entry:
                     frame_cams[csv_id] = cam_entry
             result[step] = frame_cams
@@ -1189,16 +1209,9 @@ def main() -> None:
             ) if _obs_by_step else False
 
             if _obs_has_pred:
-                # tracking_obs_results available: tuples are (obs_x, obs_y, pred_x, pred_y, is_outlier)
-                # Rearrange to MarkerFrameData convention: (proj_x, proj_y, obs_x, obs_y, is_outlier)
-                for _step, _obs_cams in _obs_by_step.items():
-                    _frame_cams: dict[int, dict] = {}
-                    for _csv_id, _obs_markers in _obs_cams.items():
-                        _frame_cams[_csv_id] = {
-                            _mname: (_px, _py, _ox, _oy, _outlier)
-                            for _mname, (_ox, _oy, _px, _py, _outlier) in _obs_markers.items()
-                        }
-                    mdata_db[_step] = _frame_cams
+                # tracking_obs_results available: _load_obs_mdata_from_db returns
+                # (pred_x, pred_y, obs_x, obs_y, is_outlier) — already the MarkerFrameData convention.
+                mdata_db = dict(_obs_by_step)
                 for _step in primary_timestamps_db:
                     if _step not in mdata_db:
                         mdata_db[_step] = {}

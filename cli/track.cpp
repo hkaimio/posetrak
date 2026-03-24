@@ -1038,8 +1038,8 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
 static int run_track_from_db(std::string const& db_path, std::string const& sequence_id,
                              std::string const& skeleton_id, std::string const& config_id,
                              std::string const& output_dir, bool verbose, bool quiet,
-                             bool smooth_output, double min_confidence, int person_id,
-                             std::vector<std::string> const& active_joint_groups,
+                             bool smooth_output, bool debug_output, double min_confidence,
+                             int person_id, std::vector<std::string> const& active_joint_groups,
                              double override_start_time = std::numeric_limits<double>::quiet_NaN(),
                              double override_end_time = std::numeric_limits<double>::quiet_NaN()) {
     try {
@@ -1234,6 +1234,18 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
 
         std::ofstream state_vec_file(out_dir / "state_vectors.csv");
         state_vec_file << generate_state_header(*layout) << "\n";
+
+        // Enable UKF debug output if requested
+        if (debug_output) {
+            auto debug_dir = out_dir / "debug" / result_writer.run_id();
+            std::filesystem::create_directories(debug_dir);
+            if (auto* ukf = tracker.get_ukf()) {
+                ukf->enable_debug(true, debug_dir.string());
+            }
+            if (!quiet) {
+                fmt::print("Debug output enabled: {}\n", debug_dir.string());
+            }
+        }
 
         // Track sequence
         if (!quiet) {
@@ -1534,7 +1546,7 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             return run_track_from_db(db_path, db_sequence_id, db_skeleton_id, db_config_id,
-                                     db_output_dir, verbose, quiet, smooth_output,
+                                     db_output_dir, verbose, quiet, smooth_output, debug_output,
                                      db_min_confidence, db_person_id, db_active_joint_groups,
                                      db_start_time, db_end_time);
         } else {

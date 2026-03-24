@@ -174,6 +174,14 @@ def _(
                 observations_df, projected_markers_df = _load_obs(
                     _db_path, _run_id, person_id=int(person_id_input.value)
                 )
+                # Build joint-type map from the skeleton YAML so the angle plot can
+                # show only the active components for each joint (revolute = 1 DOF).
+                from posetrak.db.skeleton_layout import SkeletonLayout as _SL
+                _sl = _SL(_data["skeleton_yaml"])
+                joint_type_map = {
+                    ji.name: ji.joint_type for ji in _sl._joints
+                    if ji.joint_type not in ("root", "fixed")
+                }
                 _db_mode = True
             except Exception as _e:
                 marker_tracking_df = pd.DataFrame()
@@ -182,11 +190,13 @@ def _(
                 root_pose = pd.DataFrame()
                 observations_df = pd.DataFrame()
                 projected_markers_df = pd.DataFrame()
+                joint_type_map = {}
                 _db_mode = True
                 mo.stop(True, mo.callout(mo.md(f"Error loading from DB: `{_e}`"), kind="danger"))
     else:
         _result_dir = Path(csv_dir_input.value)
         _db_mode = False
+        joint_type_map = {}  # not available from CSV; fall back to zero-filter in plot cell
         if not _result_dir.exists():
             marker_tracking_df = pd.DataFrame()
             tracking_stats = pd.DataFrame()
@@ -219,6 +229,7 @@ def _(
     _db_mode
     return (
         joint_angles,
+        joint_type_map,
         marker_tracking_df,
         observations_df,
         projected_markers_df,
@@ -496,17 +507,24 @@ def _(joint_angles, mo):
 
 
 @app.cell(hide_code=True)
-def _(joint_angles, joint_name_selector, mo, px):
+def _(joint_angles, joint_name_selector, joint_type_map, mo, px):
     mo.stop(joint_angles.empty)
     _filtered_joint_angles = joint_angles[
         joint_angles["joint_name"] == joint_name_selector.value
     ]
-    # Only plot components that have any non-zero values: revolute joints store
-    # their single angle in angle_x and pad angle_y/angle_z with 0.0.
-    _active_components = [
-        c for c in ["angle_x", "angle_y", "angle_z"]
-        if _filtered_joint_angles[c].abs().max() > 0
-    ]
+    _jtype = joint_type_map.get(joint_name_selector.value)
+    if _jtype in ("revolute", "prismatic"):
+        # Revolute/prismatic joints have exactly 1 DOF; angle_y/z are always zero padding.
+        _active_components = ["angle_x"]
+    elif _jtype in ("ball", "spherical"):
+        # Spherical joint: all three slots are meaningful.
+        _active_components = ["angle_x", "angle_y", "angle_z"]
+    else:
+        # CSV mode or unknown type: fall back to showing only non-zero components.
+        _active_components = [
+            c for c in ["angle_x", "angle_y", "angle_z"]
+            if _filtered_joint_angles[c].abs().max() > 0
+        ]
     _joint_angles_long = _filtered_joint_angles.melt(
         id_vars=["frame", "joint_name"],
         value_vars=_active_components,

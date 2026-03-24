@@ -1198,9 +1198,14 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
 
         Eigen::Vector3d const& marker_pos_world = it->second;
 
-        // Project to camera (undistorted coordinates for UKF)
+        // Project to camera (undistorted coordinates for UKF).
+        // clip_to_bounds=false: allow out-of-bounds projections so that sigma points
+        // which move a joint outside the camera view still produce a real pixel value
+        // and contribute non-zero cross-covariance. Without this, out-of-bounds sigma
+        // points get replaced by the measurement mean, zeroing the cross-covariance and
+        // making the corresponding state dimensions (e.g. root_pos_z) unobservable.
         Camera const& camera = cameras.at(obs.camera_id);
-        auto projected_opt = camera.project_undistorted(marker_pos_world);
+        auto projected_opt = camera.project_undistorted(marker_pos_world, /*clip_to_bounds=*/false);
 
         // if (marker.name == "MRK-hip.R" && debug_enabled_) {
         //     std::cout << "  [DEBUG] predict_measurements for marker '" << marker.name

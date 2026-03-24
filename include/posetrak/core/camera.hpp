@@ -157,9 +157,16 @@ class Camera {
 
     /// @brief Project 3D point to undistorted pixel coordinates (for UKF)
     /// @param point_world 3D point in world frame
-    /// @return Undistorted 2D pixel coordinates, or std::nullopt if projection fails (behind camera
-    /// or out of bounds)
-    std::optional<Eigen::Vector2d> project_undistorted(Eigen::Vector3d const& point_world) const;
+    /// @param clip_to_bounds If true (default), returns std::nullopt when the projection falls
+    ///        outside image boundaries. Set to false in UKF sigma-point propagation so that
+    ///        out-of-bounds sigma points still contribute a non-zero cross-covariance; without
+    ///        this the UKF replaces out-of-bounds predictions with the measurement mean, giving
+    ///        zero cross-covariance and making the corresponding state dimension unobservable.
+    /// @return Undistorted 2D pixel coordinates, or std::nullopt if projection fails (behind
+    /// camera,
+    ///         or out of bounds when clip_to_bounds=true)
+    std::optional<Eigen::Vector2d> project_undistorted(Eigen::Vector3d const& point_world,
+                                                       bool clip_to_bounds = true) const;
 
     /// @brief Project multiple points efficiently (with distortion)
     /// @param points 3D points in world frame

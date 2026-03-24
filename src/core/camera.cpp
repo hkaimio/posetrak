@@ -258,12 +258,12 @@ std::optional<Eigen::Vector2d> Camera::project(Eigen::Vector3d const& point_worl
     return Eigen::Vector2d(u, v);
 }
 
-std::optional<Eigen::Vector2d>
-Camera::project_undistorted(Eigen::Vector3d const& point_world) const {
+std::optional<Eigen::Vector2d> Camera::project_undistorted(Eigen::Vector3d const& point_world,
+                                                           bool clip_to_bounds) const {
     // Transform to camera frame
     Eigen::Vector3d const point_cam = world_to_camera(point_world);
 
-    // Check if point is behind camera
+    // Check if point is behind camera (projection undefined regardless of clip_to_bounds)
     if (point_cam.z() <= 0.0) {
         return std::nullopt;  // Behind camera
     }
@@ -275,9 +275,12 @@ Camera::project_undistorted(Eigen::Vector3d const& point_world) const {
     double const u = intrinsics_.fx * point_norm.x() + intrinsics_.cx;
     double const v = intrinsics_.fy * point_norm.y() + intrinsics_.cy;
 
-    // Check if projection is within image bounds (match Python behavior)
-    if (u < 0.0 || u >= intrinsics_.width || v < 0.0 || v >= intrinsics_.height) {
-        return std::nullopt;  // Out of bounds
+    // Optionally check image bounds. UKF sigma-point propagation calls with clip_to_bounds=false
+    // so that out-of-bounds sigma points still yield a real pixel value and contribute non-zero
+    // cross-covariance; clamping them to NaN/mean would make those state dimensions unobservable.
+    if (clip_to_bounds &&
+        (u < 0.0 || u >= intrinsics_.width || v < 0.0 || v >= intrinsics_.height)) {
+        return std::nullopt;
     }
 
     return Eigen::Vector2d(u, v);

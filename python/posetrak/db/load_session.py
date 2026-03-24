@@ -520,6 +520,108 @@ def load_inlier_obs_from_tracking_run(
         conn.close()
 
 
+def load_obs_results(
+    session_db: str,
+    run_id: str,
+    person_id: int = 0,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load observations and projected markers from tracking_obs_results.
+
+    Decodes the obs_blob (float32[n_cams, n_markers, 8]) where slots are:
+    ``[obs_u, obs_v, pred_u, pred_v, mahal_dist, used_in_update, is_outlier, pad]``.
+    NaN values indicate an absent slot.
+
+    Returns
+    -------
+    (observations_df, projected_markers_df)
+
+    observations_df columns:
+        frame, camera_id, marker_name, pixel_x, pixel_y, is_outlier
+
+    projected_markers_df columns:
+        frame, camera_id, marker_name, proj_x, proj_y,
+        error_x, error_y, error_dist, is_outlier
+    """
+    _OBS_COLS = ["frame", "camera_id", "marker_name", "pixel_x", "pixel_y", "is_outlier"]
+    _PROJ_COLS = ["frame", "camera_id", "marker_name", "proj_x", "proj_y",
+                  "error_x", "error_y", "error_dist", "is_outlier"]
+
+    conn = _open_db(session_db)
+    try:
+        run_row = conn.execute(
+            "SELECT active_camera_ids, marker_names FROM tracking_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if run_row is None:
+            return pd.DataFrame(columns=_OBS_COLS), pd.DataFrame(columns=_PROJ_COLS)
+
+        cam_labels: list[str] = json.loads(run_row["active_camera_ids"] or "[]")
+        marker_names: list[str] = json.loads(run_row["marker_names"] or "[]")
+        n_cams = len(cam_labels)
+        n_markers = len(marker_names)
+
+        if n_cams == 0 or n_markers == 0:
+            return pd.DataFrame(columns=_OBS_COLS), pd.DataFrame(columns=_PROJ_COLS)
+
+        blob_rows = conn.execute(
+            "SELECT tracker_step, obs_blob FROM tracking_obs_results "
+            "WHERE run_id = ? AND person_id = ? ORDER BY tracker_step",
+            (run_id, person_id),
+        ).fetchall()
+
+        obs_records: list[dict] = []
+        proj_records: list[dict] = []
+        expected = n_cams * n_markers * 8
+        for row in blob_rows:
+            frame = row["tracker_step"]
+            data = np.frombuffer(bytes(row["obs_blob"]), dtype="<f4")
+            if len(data) != expected:
+                warnings.warn(
+                    f"Unexpected obs_blob size at step {frame}: "
+                    f"got {len(data)}, expected {expected}"
+                )
+                continue
+            blob = data.reshape(n_cams, n_markers, 8)
+            for ci, cam in enumerate(cam_labels):
+                for mi, mname in enumerate(marker_names):
+                    slot = blob[ci, mi]
+                    is_outlier_raw = slot[6]
+                    if not np.isfinite(is_outlier_raw):
+                        continue  # absent slot
+                    is_out = bool(is_outlier_raw != 0.0)
+                    obs_x, obs_y = float(slot[0]), float(slot[1])
+                    pred_x, pred_y = float(slot[2]), float(slot[3])
+                    if np.isfinite(obs_x) and np.isfinite(obs_y):
+                        obs_records.append({
+                            "frame": frame, "camera_id": cam,
+                            "marker_name": mname,
+                            "pixel_x": obs_x, "pixel_y": obs_y,
+                            "is_outlier": is_out,
+                        })
+                    if np.isfinite(pred_x) and np.isfinite(pred_y):
+                        err_x = obs_x - pred_x if np.isfinite(obs_x) else float("nan")
+                        err_y = obs_y - pred_y if np.isfinite(obs_y) else float("nan")
+                        err_d = (float(np.sqrt(err_x**2 + err_y**2))
+                                 if np.isfinite(err_x) and np.isfinite(err_y)
+                                 else float("nan"))
+                        proj_records.append({
+                            "frame": frame, "camera_id": cam,
+                            "marker_name": mname,
+                            "proj_x": pred_x, "proj_y": pred_y,
+                            "error_x": err_x, "error_y": err_y,
+                            "error_dist": err_d,
+                            "is_outlier": is_out,
+                        })
+
+        obs_df = (pd.DataFrame(obs_records) if obs_records
+                  else pd.DataFrame(columns=_OBS_COLS))
+        proj_df = (pd.DataFrame(proj_records) if proj_records
+                   else pd.DataFrame(columns=_PROJ_COLS))
+        return obs_df, proj_df
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Combined loader with marker positions
 # ---------------------------------------------------------------------------

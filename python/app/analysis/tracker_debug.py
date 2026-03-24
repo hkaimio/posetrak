@@ -10,12 +10,15 @@ def _():
     import pandas as pd
     import numpy as np
     from pathlib import Path
-    return Path, mo, np, pd
+    import os
+    return Path, mo, os, pd
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md("## Data source")
+    mo.md("""
+    ## Data source
+    """)
     return
 
 
@@ -31,12 +34,12 @@ def _(mo):
 
 
 @app.cell
-def _(mo, source_selector):
+def _(mo, os, source_selector):
     _is_db = source_selector.value == "db"
 
     # DB inputs
     db_path_input = mo.ui.text(
-        value="",
+        value=os.getenv("POSETRAK_SESSION_DB", ""),
         label="Session DB path",
         full_width=True,
     )
@@ -62,12 +65,7 @@ def _(mo, source_selector):
         db_path_input,
         mo.hstack([person_id_input, smoothed_checkbox]),
     ]) if _is_db else csv_dir_input
-    return (
-        csv_dir_input,
-        db_path_input,
-        person_id_input,
-        smoothed_checkbox,
-    )
+    return csv_dir_input, db_path_input, person_id_input, smoothed_checkbox
 
 
 @app.cell
@@ -172,8 +170,10 @@ def _(
                     tracking_stats = tracking_stats.rename(columns={"timestamp": "timestamp"})
                 joint_angles = _data["joint_angles_df"]
                 root_pose = _data["root_pose_df"].rename(columns={"timestamp": "timestamp"})
-                observations_df = pd.DataFrame()
-                projected_markers_df = pd.DataFrame()
+                from posetrak.db.load_session import load_obs_results as _load_obs
+                observations_df, projected_markers_df = _load_obs(
+                    _db_path, _run_id, person_id=int(person_id_input.value)
+                )
                 _db_mode = True
             except Exception as _e:
                 marker_tracking_df = pd.DataFrame()
@@ -272,19 +272,9 @@ def _(frame_selector, marker_tracking_df):
 
 
 @app.cell(hide_code=True)
-def _(mo, observations_df, projected_markers_df, source_selector):
-    import numpy as _np2
-    if source_selector.value == "db":
-        _obs_placeholder = mo.callout(
-            mo.md("Marker projections are not stored in the session DB — use CSV mode for projection plots."),
-            kind="info",
-        )
-        _obs_placeholder
-    else:
-        if observations_df.empty:
-            mo.callout(mo.md("observations.csv not found."), kind="warn")
-        if projected_markers_df.empty:
-            mo.callout(mo.md("marker_projections.csv not found."), kind="warn")
+def _(mo, observations_df, projected_markers_df):
+    if observations_df.empty and projected_markers_df.empty:
+        mo.callout(mo.md("No observation/projection data available."), kind="warn")
     return
 
 
@@ -321,66 +311,43 @@ def _(mo, observations_df):
 @app.cell(hide_code=True)
 def _(
     camera_selector,
+    mo,
     observations_df,
     pd,
     proj_frame_selector,
     projected_markers_df,
     px,
 ):
-    if observations_df.empty or projected_markers_df.empty:
-        _2d_marker_plot = px.scatter(title="No data (use CSV mode for projection plots)")
-        _2d_marker_plot
-    else:
-        _filtered_observations_2d = observations_df[
-            (observations_df["frame"] == proj_frame_selector.value)
-            & (observations_df["camera_id"] == camera_selector.value)
-        ].copy()
-
-        _filtered_projections_2d = projected_markers_df[
-            (projected_markers_df["frame"] == proj_frame_selector.value)
-            & (projected_markers_df["camera_id"] == camera_selector.value)
-        ].copy()
-
-        _filtered_observations_2d["type"] = "Observation"
-        _filtered_projections_2d["type"] = "Projected Marker"
-
-        # Rename columns to a common name for concatenation
-        _filtered_observations_2d = _filtered_observations_2d.rename(columns={"pixel_x": "x_2d", "pixel_y": "y_2d"})
-        _filtered_projections_2d = _filtered_projections_2d.rename(columns={"proj_x": "x_2d", "proj_y": "y_2d"})
-
-        _combined_2d_df = pd.concat([_filtered_observations_2d, _filtered_projections_2d], ignore_index=True)
-
-        _color_map_2d = {"Observation": "green", "Projected Marker": "red"}
-        # Define a mapping for marker sizes
-        _marker_size_mapping = {"Observation": 5, "Projected Marker": 3}
-        # Create a new column in the DataFrame for marker sizes based on the 'type'
-        _combined_2d_df["_marker_size"] = _combined_2d_df["type"].map(_marker_size_mapping)
-
-        _2d_marker_plot = px.scatter(
-            _combined_2d_df,
-            x="x_2d",
-            y="y_2d",
-            color="type",
-            color_discrete_map=_color_map_2d,
-            # Use the new numerical column for marker size
-            size="_marker_size",
-            hover_name="marker_name",
-            title=f"2D Marker Projections for Frame {proj_frame_selector.value}, Camera {camera_selector.value}",
-            labels={
-                "x_2d": "X (pixels)",
-                "y_2d": "Y (pixels)",
-                "type": "Marker Type",
-            },
-        )
-
-        _2d_marker_plot.update_layout(
-            hovermode="closest"
-        )
-
-        # Reverse the y-axis to make Y increase downward
-        _2d_marker_plot.update_yaxes(autorange="reversed")
-
-        _2d_marker_plot
+    mo.stop(observations_df.empty or projected_markers_df.empty)
+    _filtered_observations_2d = observations_df[
+        (observations_df["frame"] == proj_frame_selector.value)
+        & (observations_df["camera_id"] == camera_selector.value)
+    ].copy()
+    _filtered_projections_2d = projected_markers_df[
+        (projected_markers_df["frame"] == proj_frame_selector.value)
+        & (projected_markers_df["camera_id"] == camera_selector.value)
+    ].copy()
+    _filtered_observations_2d["type"] = "Observation"
+    _filtered_projections_2d["type"] = "Projected Marker"
+    _filtered_observations_2d = _filtered_observations_2d.rename(columns={"pixel_x": "x_2d", "pixel_y": "y_2d"})
+    _filtered_projections_2d = _filtered_projections_2d.rename(columns={"proj_x": "x_2d", "proj_y": "y_2d"})
+    _combined_2d_df = pd.concat([_filtered_observations_2d, _filtered_projections_2d], ignore_index=True)
+    _marker_size_mapping = {"Observation": 5, "Projected Marker": 3}
+    _combined_2d_df["_marker_size"] = _combined_2d_df["type"].map(_marker_size_mapping)
+    _2d_marker_plot = px.scatter(
+        _combined_2d_df,
+        x="x_2d",
+        y="y_2d",
+        color="type",
+        color_discrete_map={"Observation": "green", "Projected Marker": "red"},
+        size="_marker_size",
+        hover_name="marker_name",
+        title=f"2D Marker Projections for Frame {proj_frame_selector.value}, Camera {camera_selector.value}",
+        labels={"x_2d": "X (pixels)", "y_2d": "Y (pixels)", "type": "Marker Type"},
+    )
+    _2d_marker_plot.update_layout(hovermode="closest")
+    _2d_marker_plot.update_yaxes(autorange="reversed")
+    _2d_marker_plot
     return
 
 
@@ -397,140 +364,120 @@ def _(projected_markers_df):
 
 
 @app.cell
-def _(projected_markers_df, px):
-    if projected_markers_df.empty:
-        _histogram_max_error_marker = px.bar(title="No data (use CSV mode)")
-        _histogram_max_error_marker
-    else:
-        _inlier_projections_df = projected_markers_df[projected_markers_df["is_outlier"] == False]
-        _max_error_markers_per_frame = (
-            _inlier_projections_df.loc[_inlier_projections_df.groupby("frame")["error_dist"].idxmax()]
-        )
-
-        _max_error_marker_counts = _max_error_markers_per_frame["marker_name"].value_counts().reset_index()
-        _max_error_marker_counts.columns = ["marker_name", "count"]
-
-        _histogram_max_error_marker = px.bar(
-            _max_error_marker_counts,
-            x="marker_name",
-            y="count",
-            title="Marker Names Most Frequently Having the Largest Reprojection Error",
-            labels={
-                "marker_name": "Marker Name",
-                "count": "Number of Frames with Max Error",
-            },
-            hover_data=["marker_name", "count"],
-        )
-
-        _histogram_max_error_marker.update_xaxes(categoryorder="total descending")
-        _histogram_max_error_marker
+def _(mo, projected_markers_df, px):
+    mo.stop(projected_markers_df.empty)
+    _inlier_projections_df = projected_markers_df[projected_markers_df["is_outlier"] == False]
+    _max_error_markers_per_frame = (
+        _inlier_projections_df.loc[_inlier_projections_df.groupby("frame")["error_dist"].idxmax()]
+    )
+    _max_error_marker_counts = _max_error_markers_per_frame["marker_name"].value_counts().reset_index()
+    _max_error_marker_counts.columns = ["marker_name", "count"]
+    _histogram_max_error_marker = px.bar(
+        _max_error_marker_counts,
+        x="marker_name",
+        y="count",
+        title="Marker Names Most Frequently Having the Largest Reprojection Error",
+        labels={"marker_name": "Marker Name", "count": "Number of Frames with Max Error"},
+        hover_data=["marker_name", "count"],
+    )
+    _histogram_max_error_marker.update_xaxes(categoryorder="total descending")
+    _histogram_max_error_marker
     return
 
 
 @app.cell
-def _(projected_markers_df, px):
-    if projected_markers_df.empty:
-        _error_stats_plot = px.bar(title="No data (use CSV mode)")
-        _error_stats_plot
-    else:
-        _inlier_error_dist = projected_markers_df[projected_markers_df["is_outlier"] == False]
-
-        _marker_error_stats = (
-            _inlier_error_dist.groupby("marker_name")["error_dist"]
-            .agg(["mean", "median"])
-            .reset_index()
-        )
-
-        _marker_error_stats_long = _marker_error_stats.melt(
-            id_vars=["marker_name"],
-            value_vars=["mean", "median"],
-            var_name="metric",
-            value_name="error_value",
-        )
-
-        _error_stats_plot = px.bar(
-            _marker_error_stats_long,
-            x="marker_name",
-            y="error_value",
-            color="metric",
-            barmode="group",
-            title="Mean and Median Reprojection Error per Marker (Inliers Only)",
-            labels={
-                "marker_name": "Marker Name",
-                "error_value": "Error (pixels)",
-                "metric": "Statistic",
-            },
-            hover_data=["marker_name", "metric", "error_value"],
-        )
-
-        _error_stats_plot.update_xaxes(categoryorder="total descending")
-        _error_stats_plot.update_layout(hovermode="x unified")
-        _error_stats_plot
+def _(mo, projected_markers_df, px):
+    mo.stop(projected_markers_df.empty)
+    _inlier_error_dist = projected_markers_df[projected_markers_df["is_outlier"] == False]
+    _marker_error_stats = (
+        _inlier_error_dist.groupby("marker_name")["error_dist"]
+        .agg(["mean", "median"])
+        .reset_index()
+    )
+    _marker_error_stats_long = _marker_error_stats.melt(
+        id_vars=["marker_name"],
+        value_vars=["mean", "median"],
+        var_name="metric",
+        value_name="error_value",
+    )
+    _error_stats_plot = px.bar(
+        _marker_error_stats_long,
+        x="marker_name",
+        y="error_value",
+        color="metric",
+        barmode="group",
+        title="Mean and Median Reprojection Error per Marker (Inliers Only)",
+        labels={
+            "marker_name": "Marker Name",
+            "error_value": "Error (pixels)",
+            "metric": "Statistic",
+        },
+        hover_data=["marker_name", "metric", "error_value"],
+    )
+    _error_stats_plot.update_xaxes(categoryorder="total descending")
+    _error_stats_plot.update_layout(hovermode="x unified")
+    _error_stats_plot
     return
 
 
 @app.cell
 def _(mo, tracking_stats):
-    if tracking_stats.empty:
-        mo.callout(mo.md("No tracking stats available."), kind="warn")
+    mo.stop(not tracking_stats.empty)
+    mo.callout(mo.md("No tracking stats available."), kind="warn")
     return
 
 
 @app.cell
-def _(px, tracking_stats):
-    if not tracking_stats.empty:
-        _tracking_stats_long = tracking_stats.melt(
-            id_vars=["frame"],
-            value_vars=["num_observations", "num_inliers"],
-            var_name="metric",
-            value_name="count",
-        )
-
-        _tracking_stats_plot = px.line(
-            _tracking_stats_long,
-            x="frame",
-            y="count",
-            color="metric",
-            title="Number of Observations and Inliers Over Frames",
-            labels={
-                "frame": "Frame",
-                "count": "Count",
-                "metric": "Tracking Metric",
-            },
-            hover_data=["frame", "metric", "count"],
-        )
-
-        _tracking_stats_plot.update_layout(hovermode="x unified")
-        _tracking_stats_plot
+def _(mo, px, tracking_stats):
+    mo.stop(tracking_stats.empty)
+    _tracking_stats_long = tracking_stats.melt(
+        id_vars=["frame"],
+        value_vars=["num_observations", "num_inliers"],
+        var_name="metric",
+        value_name="count",
+    )
+    _tracking_stats_plot = px.line(
+        _tracking_stats_long,
+        x="frame",
+        y="count",
+        color="metric",
+        title="Number of Observations and Inliers Over Frames",
+        labels={
+            "frame": "Frame",
+            "count": "Count",
+            "metric": "Tracking Metric",
+        },
+        hover_data=["frame", "metric", "count"],
+    )
+    _tracking_stats_plot.update_layout(hovermode="x unified")
+    _tracking_stats_plot
     return
 
 
 @app.cell
-def _(px, tracking_stats):
-    if not tracking_stats.empty:
-        _tracking_stats_long = tracking_stats.melt(
-                id_vars=["frame"],
-                value_vars=["mean_reprojection_error", "max_reprojection_error"],
-                var_name="metric",
-                value_name="err",
-            )
-
-        _tracking_stats_plot = px.line(
-            _tracking_stats_long,
-            x="frame",
-            y="err",
-            color="metric",
-            title="Reprojection Error Over Frames",
-            labels={
-                "frame": "Frame",
-                "err": "Error (pixels)",
-                "metric": "Tracking Metric",
-            },
-            hover_data=["frame", "metric", "err"],
-        )
-
-        _tracking_stats_plot.update_layout(hovermode="x unified")
-        _tracking_stats_plot
+def _(mo, px, tracking_stats):
+    mo.stop(tracking_stats.empty or tracking_stats["mean_reprojection_error"].isna().all())
+    _tracking_stats_long = tracking_stats.melt(
+        id_vars=["frame"],
+        value_vars=["mean_reprojection_error", "max_reprojection_error"],
+        var_name="metric",
+        value_name="err",
+    )
+    _tracking_stats_plot = px.line(
+        _tracking_stats_long,
+        x="frame",
+        y="err",
+        color="metric",
+        title="Reprojection Error Over Frames",
+        labels={
+            "frame": "Frame",
+            "err": "Error (pixels)",
+            "metric": "Tracking Metric",
+        },
+        hover_data=["frame", "metric", "err"],
+    )
+    _tracking_stats_plot.update_layout(hovermode="x unified")
+    _tracking_stats_plot
     return
 
 
@@ -549,95 +496,86 @@ def _(joint_angles, mo):
 
 
 @app.cell(hide_code=True)
-def _(joint_angles, joint_name_selector, px):
-    if not joint_angles.empty:
-        _filtered_joint_angles = joint_angles[
-            joint_angles["joint_name"] == joint_name_selector.value
-        ]
-
-        _joint_angles_long = _filtered_joint_angles.melt(
-            id_vars=["frame", "joint_name"],
-            value_vars=["angle_x", "angle_y", "angle_z"],
-            var_name="angle_component",
-            value_name="angle_value",
-        )
-
-        _joint_angle_plot = px.line(
-            _joint_angles_long,
-            x="frame",
-            y="angle_value",
-            color="angle_component",
-            title=f"Joint Angles for {joint_name_selector.value}",
-            labels={
-                "frame": "Frame",
-                "angle_value": "Angle (radians)",
-                "angle_component": "Angle Component",
-            },
-            hover_data=["frame", "angle_component", "angle_value"]
-        )
-
-        _joint_angle_plot.update_layout(
-            hovermode="x unified"
-        )
-        _joint_angle_plot
+def _(joint_angles, joint_name_selector, mo, px):
+    mo.stop(joint_angles.empty)
+    _filtered_joint_angles = joint_angles[
+        joint_angles["joint_name"] == joint_name_selector.value
+    ]
+    _joint_angles_long = _filtered_joint_angles.melt(
+        id_vars=["frame", "joint_name"],
+        value_vars=["angle_x", "angle_y", "angle_z"],
+        var_name="angle_component",
+        value_name="angle_value",
+    )
+    _joint_angle_plot = px.line(
+        _joint_angles_long,
+        x="frame",
+        y="angle_value",
+        color="angle_component",
+        title=f"Joint Angles for {joint_name_selector.value}",
+        labels={
+            "frame": "Frame",
+            "angle_value": "Angle (radians)",
+            "angle_component": "Angle Component",
+        },
+        hover_data=["frame", "angle_component", "angle_value"],
+    )
+    _joint_angle_plot.update_layout(hovermode="x unified")
+    _joint_angle_plot
     return
 
 
 @app.cell
-def _(px, root_pose):
-    if not root_pose.empty:
-        _root_pose_long = root_pose.melt(
-            id_vars=["frame"],
-            value_vars=["pos_x", "pos_y", "pos_z"],
-            var_name="position_component",
-            value_name="position_value",
-        )
-
-        _root_pose_plot = px.line(
-            _root_pose_long,
-            x="frame",
-            y="position_value",
-            color="position_component",
-            title="Root Pose Position Over Frames",
-            labels={
-                "frame": "Frame",
-                "position_value": "Position (m)",
-                "position_component": "Position Component",
-            },
-            hover_data=["frame", "position_component", "position_value"],
-        )
-
-        _root_pose_plot.update_layout(hovermode="x unified")
-        _root_pose_plot
+def _(mo, px, root_pose):
+    mo.stop(root_pose.empty)
+    _root_pose_long = root_pose.melt(
+        id_vars=["frame"],
+        value_vars=["pos_x", "pos_y", "pos_z"],
+        var_name="position_component",
+        value_name="position_value",
+    )
+    _root_pose_plot = px.line(
+        _root_pose_long,
+        x="frame",
+        y="position_value",
+        color="position_component",
+        title="Root Pose Position Over Frames",
+        labels={
+            "frame": "Frame",
+            "position_value": "Position (m)",
+            "position_component": "Position Component",
+        },
+        hover_data=["frame", "position_component", "position_value"],
+    )
+    _root_pose_plot.update_layout(hovermode="x unified")
+    _root_pose_plot
     return
 
 
 @app.cell
-def _(px, root_pose):
-    if not root_pose.empty:
-        _root_pose_long = root_pose.melt(
-            id_vars=["frame"],
-            value_vars=["quat_x", "quat_y", "quat_w", "quat_z", "quat_w"],
-            var_name="quaternion_component",
-            value_name="quaternion_value",
-        )
-
-        _root_pose_plot = px.line(
-            _root_pose_long,
-            x="frame",
-            y="quaternion_value",
-            color="quaternion_component",
-            title="Root Pose Quaternion Over Frames",
-            labels={
-                "frame": "Frame",
-                "quaternion_value": "Position (m)",
-                "quaternion_component": "Quaternion Component",
-            },
-            hover_data=["frame", "quaternion_component", "quaternion_value"],
-        )
-
-        _root_pose_plot.update_layout(hovermode="x unified")
-        _root_pose_plot
+def _(mo, px, root_pose):
+    mo.stop(root_pose.empty)
+    _root_pose_long = root_pose.melt(
+        id_vars=["frame"],
+        value_vars=["quat_x", "quat_y", "quat_z", "quat_w"],
+        var_name="quaternion_component",
+        value_name="quaternion_value",
+    )
+    _root_pose_plot = px.line(
+        _root_pose_long,
+        x="frame",
+        y="quaternion_value",
+        color="quaternion_component",
+        title="Root Pose Quaternion Over Frames",
+        labels={
+            "frame": "Frame",
+            "quaternion_value": "Quaternion Component Value",
+            "quaternion_component": "Quaternion Component",
+        },
+        hover_data=["frame", "quaternion_component", "quaternion_value"],
+    )
+    _root_pose_plot.update_layout(hovermode="x unified")
+    _root_pose_plot
     return
 
 

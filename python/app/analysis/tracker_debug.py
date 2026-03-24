@@ -501,9 +501,15 @@ def _(joint_angles, joint_name_selector, mo, px):
     _filtered_joint_angles = joint_angles[
         joint_angles["joint_name"] == joint_name_selector.value
     ]
+    # Only plot components that have any non-zero values: revolute joints store
+    # their single angle in angle_x and pad angle_y/angle_z with 0.0.
+    _active_components = [
+        c for c in ["angle_x", "angle_y", "angle_z"]
+        if _filtered_joint_angles[c].abs().max() > 0
+    ]
     _joint_angles_long = _filtered_joint_angles.melt(
         id_vars=["frame", "joint_name"],
-        value_vars=["angle_x", "angle_y", "angle_z"],
+        value_vars=_active_components,
         var_name="angle_component",
         value_name="angle_value",
     )

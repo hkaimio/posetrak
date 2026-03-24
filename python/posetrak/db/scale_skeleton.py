@@ -10,11 +10,12 @@ Torso height (spine1, spine2, shoulder.L/R):
     Scale the Y-component (index 1) of the offset — the principal spine
     direction in this skeleton's local frames — by torso_ratio.
 
-Shoulder width (shoulder.L/R):
-    Scale the X-component (index 0) of the offset by shoulder_ratio.
-
-The two shoulder adjustments (torso + width) apply to different axes and are
-therefore independent.
+Shoulder width (upper_arm.L/R):
+    shoulder_width is measured between glenohumeral joints (upper_arm.L/R),
+    matching the OpenPose shoulder keypoint.  shoulder.L/R are the
+    sternoclavicular joints (clavicle origins); upper_arm.L/R are the
+    far ends of the clavicles.  Scale the full offset vector of upper_arm.L/R
+    by the ratio measured / template, preserving clavicle direction.
 """
 
 from __future__ import annotations
@@ -101,7 +102,11 @@ def _template_measurements(joints: list[dict]) -> dict[str, float]:
         "torso_height": float(np.linalg.norm(
             mid("shoulder.L", "shoulder.R") - mid("thigh.L", "thigh.R")
         )),
-        "shoulder_width": dist("shoulder.L", "shoulder.R"),
+        # shoulder_width = distance between glenohumeral joints (upper_arm.L/R),
+        # matching the OpenPose shoulder keypoint positions used in body_measurements.py.
+        # shoulder.L/R are the sternoclavicular joints (clavicle origins); upper_arm.L/R
+        # are where the upper arm actually attaches.
+        "shoulder_width": dist("upper_arm.L", "upper_arm.R"),
     }
 
 
@@ -112,21 +117,23 @@ def _template_measurements(joints: list[dict]) -> dict[str, float]:
 # Maps child joint name → measurement key whose scale factor applies to its
 # full offset vector (limb length scaling).
 _LIMB_CHILD_TO_MEASURE: dict[str, str] = {
-    "shin.L":    "femur",
-    "shin.R":    "femur",
-    "foot.L":    "shin",
-    "foot.R":    "shin",
-    "forearm.L": "upper_arm",
-    "forearm.R": "upper_arm",
-    "hand.L":    "lower_arm",
-    "hand.R":    "lower_arm",
+    "shin.L":      "femur",
+    "shin.R":      "femur",
+    "foot.L":      "shin",
+    "foot.R":      "shin",
+    "forearm.L":   "upper_arm",
+    "forearm.R":   "upper_arm",
+    "hand.L":      "lower_arm",
+    "hand.R":      "lower_arm",
+    # Scale the clavicle-end (glenohumeral) offset to achieve the target
+    # shoulder_width.  shoulder.L/R are the sternoclavicular joints; upper_arm.L/R
+    # are the glenohumeral joints at the far end of the clavicle.
+    "upper_arm.L": "shoulder_width",
+    "upper_arm.R": "shoulder_width",
 }
 
 # Joints whose Y-component (index 1) is scaled for torso height.
 _TORSO_HEIGHT_JOINTS = ("spine1", "spine2", "shoulder.L", "shoulder.R")
-
-# Joints whose X-component (index 0) is scaled for shoulder width.
-_SHOULDER_WIDTH_JOINTS = ("shoulder.L", "shoulder.R")
 
 
 def scale_skeleton_yaml(
@@ -179,16 +186,6 @@ def scale_skeleton_yaml(
             j = by_name[jname]
             off = list(j.get("offset") or [0.0, 0.0, 0.0])
             j["offset"] = [off[0], off[1] * torso_r, off[2]]
-
-    # --- Shoulder width: scale X-component (index 0) of clavicle joints ----
-    sw_r = _ratio("shoulder_width")
-    if sw_r is not None:
-        for jname in _SHOULDER_WIDTH_JOINTS:
-            if jname not in by_name:
-                continue
-            j = by_name[jname]
-            off = list(j.get("offset") or [0.0, 0.0, 0.0])
-            j["offset"] = [off[0] * sw_r, off[1], off[2]]
 
     return _dump_yaml(skel)
 

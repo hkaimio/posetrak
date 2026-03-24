@@ -549,7 +549,7 @@ def _(fk_rest_pose, mo, np, skeleton_path, yaml):
             "upper_arm":      (_d("upper_arm.L", "forearm.L") + _d("upper_arm.R", "forearm.R")) / 2,
             "lower_arm":      (_d("forearm.L", "hand.L") + _d("forearm.R", "hand.R")) / 2,
             "torso_height":   float(np.linalg.norm(_mid("shoulder.L", "shoulder.R") - _mid("thigh.L", "thigh.R"))),
-            "shoulder_width": _d("shoulder.L", "shoulder.R"),
+            "shoulder_width": _d("upper_arm.L", "upper_arm.R"),
             "head":           float(np.linalg.norm(jp["head"] - _mid("shoulder.L", "shoulder.R"))),
         }
     return jp, tmpl_ref

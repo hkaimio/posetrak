@@ -94,6 +94,45 @@ def import_skeleton(
     return skeleton_id
 
 
+def import_skeleton_str(
+    db: sqlite3.Connection,
+    yaml_content: str,
+    *,
+    name: str | None = None,
+    parent_id: str | None = None,
+    person_label: str | None = None,
+    source: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """Import a skeleton from a YAML string into *db* (registry or session).
+
+    Identical to :func:`import_skeleton` but accepts YAML content directly
+    instead of a file path.  The skeleton ID is the SHA-256 hex digest of the
+    content, so this is idempotent.
+    """
+    skeleton_id = hashlib.sha256(yaml_content.encode("utf-8")).hexdigest()
+
+    existing = db.execute(
+        "SELECT id FROM skeletons WHERE id = ?", (skeleton_id,)
+    ).fetchone()
+    if existing is not None:
+        return skeleton_id
+
+    resolved_name = name or skeleton_id[:12]
+    created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    with db:
+        db.execute(
+            "INSERT INTO skeletons "
+            "(id, name, parent_id, person_label, source, yaml_content, created_at, notes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (skeleton_id, resolved_name, parent_id, person_label,
+             source, yaml_content, created_at, notes),
+        )
+
+    return skeleton_id
+
+
 def copy_skeleton_to_session(
     registry: sqlite3.Connection,
     session: sqlite3.Connection,

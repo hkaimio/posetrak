@@ -22,6 +22,7 @@ calib     list        List camera instances and intrinsics calibrations.
 
 skeleton  import    Import a skeleton YAML file.
 skeleton  list      List skeletons.
+skeleton  scale     Create a scaled skeleton from a tracking run + body measurements.
 
 config    create    Create a tracker config snapshot from a TOML file.
 config    edit      Derive a new tracker config by overriding fields.
@@ -83,8 +84,10 @@ from posetrak.db.import_session_yaml import import_session_yaml
 from posetrak.db.manage_skeleton import (
     copy_skeleton_to_session,
     import_skeleton,
+    import_skeleton_str,
     list_skeletons,
 )
+from posetrak.db.scale_skeleton import scale_skeleton_yaml, scaling_summary
 from posetrak.db.manage_config import (
     copy_config_to_session,
     create_config_from_toml,
@@ -688,6 +691,94 @@ def _cmd_skeleton_list(args: argparse.Namespace) -> int:
     print("-" * 85)
     for row in rows:
         print(f"{row['id']:<36}  {row['name']:<30}  {row['created_at']}")
+    return 0
+
+
+def _cmd_skeleton_scale(args: argparse.Namespace) -> int:
+    """Create a scaled skeleton from a tracking run and body measurements."""
+    import json
+
+    session_db_path = Path(args.session_db)
+    measurements_path = Path(args.measurements)
+
+    # Load measurements JSON
+    try:
+        raw = json.loads(measurements_path.read_text())
+    except Exception as exc:
+        print(f"Error reading measurements file: {exc}", file=sys.stderr)
+        return 1
+
+    meas_section = raw.get("measurements", raw)
+    measurements: dict[str, float] = {}
+    for k, v in meas_section.items():
+        if isinstance(v, dict):
+            measurements[k] = float(v["value"])
+        else:
+            measurements[k] = float(v)
+
+    # Open session DB and load skeleton YAML from the run
+    try:
+        session = open_session(session_db_path)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error opening session DB: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        run_row = session.execute(
+            "SELECT tr.skeleton_id, s.yaml_content, s.name "
+            "FROM tracking_runs tr "
+            "JOIN skeletons s ON s.id = tr.skeleton_id "
+            "WHERE tr.id = ?",
+            (args.run_id,),
+        ).fetchone()
+    except Exception as exc:
+        session.close()
+        print(f"Error querying run: {exc}", file=sys.stderr)
+        return 1
+
+    if run_row is None:
+        session.close()
+        print(f"Run not found: {args.run_id}", file=sys.stderr)
+        return 1
+
+    parent_id: str = run_row["skeleton_id"]
+    original_yaml: str = run_row["yaml_content"]
+    parent_name: str = run_row["name"] or parent_id[:12]
+
+    # Apply scaling
+    try:
+        scaled_yaml = scale_skeleton_yaml(original_yaml, measurements)
+    except Exception as exc:
+        session.close()
+        print(f"Error scaling skeleton: {exc}", file=sys.stderr)
+        return 1
+
+    # Print summary
+    print(scaling_summary(original_yaml, scaled_yaml, measurements))
+    print()
+
+    # Determine name
+    skeleton_name = args.name or f"{parent_name}-scaled"
+
+    # Store in session DB
+    try:
+        skeleton_id = import_skeleton_str(
+            session,
+            scaled_yaml,
+            name=skeleton_name,
+            parent_id=parent_id,
+            source=f"scaled from run {args.run_id}",
+            notes=args.notes or None,
+        )
+    except Exception as exc:
+        session.close()
+        print(f"Error storing skeleton: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        session.close()
+
+    print(f"skeleton_id: {skeleton_id}")
+    print(f"name:        {skeleton_name}")
     return 0
 
 
@@ -1589,6 +1680,19 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_registry_arg(p)
     _add_session_db_arg(p)
 
+    p = sk_actions.add_parser(
+        "scale",
+        help="Create a scaled skeleton from a tracking run and body measurements",
+    )
+    _add_session_db_arg(p, required=True)
+    p.add_argument("--run-id", required=True, metavar="UUID",
+                   help="tracking_runs.id whose skeleton is used as the source")
+    p.add_argument("--measurements", required=True, metavar="JSON_PATH",
+                   help="Path to body-measurements.json from body_measurements.py")
+    p.add_argument("--name", default="", metavar="S",
+                   help="Name for the new skeleton (default: <parent-name>-scaled)")
+    p.add_argument("--notes", default="", metavar="S")
+
     # -------------------------------------------------------------------------
     # config topic
     # -------------------------------------------------------------------------
@@ -1811,6 +1915,7 @@ def main() -> None:
         ("calib", "list"): _cmd_calib_list,
         ("skeleton", "import"): _cmd_skeleton_import,
         ("skeleton", "list"): _cmd_skeleton_list,
+        ("skeleton", "scale"): _cmd_skeleton_scale,
         ("config", "create"): _cmd_config_create,
         ("config", "edit"): _cmd_config_edit,
         ("config", "list"): _cmd_config_list,

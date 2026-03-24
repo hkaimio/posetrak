@@ -464,11 +464,15 @@ def estimate_camera_pose_pnp(object_points: np.ndarray,
     if len(object_points) < 6:
         raise ValueError(f"Need at least 6 points for PnP, got {len(object_points)}")
 
-    # Check if all points are coplanar (same Z). When coplanar, PnP has two
-    # mirror solutions (camera above or below the plane). Use IPPE to get both
+    # Check if all points are coplanar (lie in a common plane). When coplanar, PnP has two
+    # mirror solutions (camera on opposite sides of the plane). Use IPPE to get both
     # and pick the one where the camera has positive Z in world coordinates.
-    z_vals = object_points[:, 2]
-    is_coplanar = np.all(np.abs(z_vals - z_vals[0]) < 1e-6)
+    #
+    # Use SVD on the centred point cloud: if the smallest singular value is negligible
+    # relative to the largest, all points lie in a plane (any orientation, not just Z=const).
+    centered = object_points - object_points.mean(axis=0)
+    _, sv, _ = np.linalg.svd(centered)
+    is_coplanar = sv[-1] < 1e-4 * sv[0]
 
     if is_coplanar:
         retval, rvecs, tvecs, _ = cv2.solvePnPGeneric(
@@ -480,13 +484,19 @@ def estimate_camera_pose_pnp(object_points: np.ndarray,
 
         # Pick solution with camera center at positive Z in world space
         rvec, tvec = rvecs[0], tvecs[0]  # default to first
+        best_z = (-cv2.Rodrigues(rvec)[0].T @ tvec)[2, 0]
         for rv, tv in zip(rvecs, tvecs):
             R, _ = cv2.Rodrigues(rv)
             cam_center_z = (-R.T @ tv)[2, 0]
-            if cam_center_z > 0:
+            if cam_center_z > best_z:
                 rvec, tvec = rv, tv
-                break
-        print(f"  PnP IPPE (coplanar): selected solution with camera Z = {(-cv2.Rodrigues(rvec)[0].T @ tvec)[2, 0]:.3f}")
+                best_z = cam_center_z
+        selected_z = (-cv2.Rodrigues(rvec)[0].T @ tvec)[2, 0]
+        if selected_z <= 0:
+            print(f"  WARNING: PnP IPPE (coplanar): no solution with positive camera Z; "
+                  f"using best available Z = {selected_z:.3f}")
+        else:
+            print(f"  PnP IPPE (coplanar): selected solution with camera Z = {selected_z:.3f}")
     elif use_ransac:
         success, rvec, tvec, inliers = cv2.solvePnPRansac(
             object_points, image_points, camera_matrix, dist_coeffs,

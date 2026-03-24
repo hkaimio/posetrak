@@ -174,13 +174,18 @@ def _(
                 observations_df, projected_markers_df = _load_obs(
                     _db_path, _run_id, person_id=int(person_id_input.value)
                 )
-                # Build joint-type map from the skeleton YAML so the angle plot can
-                # show only the active components for each joint (revolute = 1 DOF).
-                from posetrak.db.skeleton_layout import SkeletonLayout as _SL
-                _sl = _SL(_data["skeleton_yaml"])
+                # Build joint info map from the raw skeleton YAML.
+                # Stores {joint_name: {"type", "parent", "limits"}} for the angle plot.
+                import yaml as _yaml
+                _skel_data = _yaml.safe_load(_data["skeleton_yaml"])
                 joint_type_map = {
-                    ji.name: ji.joint_type for ji in _sl._joints
-                    if ji.joint_type not in ("root", "fixed")
+                    jd["name"]: {
+                        "type": jd.get("type", "fixed"),
+                        "parent": jd.get("parent"),
+                        "limits": jd.get("limits", {}),
+                    }
+                    for jd in _skel_data.get("joints", [])
+                    if jd.get("type", "fixed") not in ("root", "fixed")
                 }
                 _db_mode = True
             except Exception as _e:
@@ -512,12 +517,30 @@ def _(joint_angles, joint_name_selector, joint_type_map, mo, px):
     _filtered_joint_angles = joint_angles[
         joint_angles["joint_name"] == joint_name_selector.value
     ]
-    _jtype = joint_type_map.get(joint_name_selector.value)
+    _jinfo = joint_type_map.get(joint_name_selector.value)
+    _jtype = _jinfo["type"] if _jinfo else None
+
+    # --- Joint info header ---
+    if _jinfo:
+        _lim = _jinfo.get("limits") or {}
+        if _lim:
+            _lim_parts = [f"{ax}: [{v[0]:.3f}, {v[1]:.3f}]" for ax, v in _lim.items()]
+            _lim_str = ",  ".join(_lim_parts)
+        else:
+            _lim_str = "none"
+        _info_md = mo.md(
+            f"**Name:** {joint_name_selector.value} &nbsp;|&nbsp; "
+            f"**Type:** {_jtype} &nbsp;|&nbsp; "
+            f"**Parent:** {_jinfo.get('parent') or '—'} &nbsp;|&nbsp; "
+            f"**Limits:** {_lim_str}"
+        )
+    else:
+        _info_md = mo.md("")
+
+    # --- Active angle components ---
     if _jtype in ("revolute", "prismatic"):
-        # Revolute/prismatic joints have exactly 1 DOF; angle_y/z are always zero padding.
         _active_components = ["angle_x"]
     elif _jtype in ("ball", "spherical"):
-        # Spherical joint: all three slots are meaningful.
         _active_components = ["angle_x", "angle_y", "angle_z"]
     else:
         # CSV mode or unknown type: fall back to showing only non-zero components.
@@ -545,7 +568,7 @@ def _(joint_angles, joint_name_selector, joint_type_map, mo, px):
         hover_data=["frame", "angle_component", "angle_value"],
     )
     _joint_angle_plot.update_layout(hovermode="x unified")
-    _joint_angle_plot
+    mo.vstack([_info_md, _joint_angle_plot])
     return
 
 

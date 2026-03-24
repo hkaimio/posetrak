@@ -39,12 +39,6 @@ def _(mo, source_selector):
         value="",
         label="Session DB path",
         full_width=True,
-    ) if _is_db else mo.ui.text(value="", label="Session DB path (select DB mode above)")
-
-    run_id_input = mo.ui.text(
-        value="",
-        label="Run ID (UUID)",
-        full_width=True,
     )
 
     person_id_input = mo.ui.number(
@@ -64,21 +58,64 @@ def _(mo, source_selector):
         full_width=True,
     )
 
-    if _is_db:
-        mo.vstack([
-            db_path_input,
-            run_id_input,
-            mo.hstack([person_id_input, smoothed_checkbox]),
-        ])
-    else:
-        csv_dir_input
+    mo.vstack([
+        db_path_input,
+        mo.hstack([person_id_input, smoothed_checkbox]),
+    ]) if _is_db else csv_dir_input
     return (
         csv_dir_input,
         db_path_input,
         person_id_input,
-        run_id_input,
         smoothed_checkbox,
     )
+
+
+@app.cell
+def _(db_path_input, mo, source_selector):
+    import sqlite3 as _sqlite3_rs
+    import json as _json_rs
+    from pathlib import Path as _Path_rs
+
+    _is_db = source_selector.value == "db"
+    _db_path_rs = db_path_input.value.strip()
+    _options: dict[str, str] = {}
+
+    if _is_db and _db_path_rs and _Path_rs(_db_path_rs).exists():
+        try:
+            _conn_rs = _sqlite3_rs.connect(_db_path_rs, check_same_thread=False)
+            _conn_rs.row_factory = _sqlite3_rs.Row
+            _run_rows = _conn_rs.execute(
+                """
+                SELECT tr.id, tr.ran_at, tr.active_camera_ids,
+                       COUNT(res.tracker_step) AS n_frames
+                FROM tracking_runs tr
+                LEFT JOIN tracking_results res
+                    ON res.run_id = tr.id
+                   AND res.person_id = 0
+                   AND res.is_smoothed = 0
+                GROUP BY tr.id
+                ORDER BY tr.ran_at DESC
+                """
+            ).fetchall()
+            _conn_rs.close()
+            for _r in _run_rows:
+                _cams = _json_rs.loads(_r["active_camera_ids"] or "[]")
+                _lbl = (
+                    f"{_r['ran_at']}  "
+                    f"[{_r['n_frames']} frames, {len(_cams)} cams]  "
+                    f"{_r['id'][:8]}…"
+                )
+                _options[_lbl] = _r["id"]
+        except Exception:
+            pass
+
+    run_selector = mo.ui.dropdown(
+        options=_options,
+        label="Tracking run",
+        full_width=True,
+    )
+    run_selector if _is_db else mo.md("")
+    return (run_selector,)
 
 
 @app.cell
@@ -89,7 +126,7 @@ def _(
     mo,
     pd,
     person_id_input,
-    run_id_input,
+    run_selector,
     smoothed_checkbox,
     source_selector,
 ):
@@ -102,7 +139,7 @@ def _(
 
     if _is_db:
         _db_path = db_path_input.value.strip()
-        _run_id = run_id_input.value.strip()
+        _run_id = run_selector.value or ""
         if not _db_path or not _run_id:
             marker_tracking_df = pd.DataFrame()
             tracking_stats = pd.DataFrame()
@@ -111,7 +148,7 @@ def _(
             observations_df = pd.DataFrame()
             projected_markers_df = pd.DataFrame()
             _db_mode = True
-            mo.stop(True, mo.callout(mo.md("Enter session DB path and run ID above."), kind="warn"))
+            mo.stop(True, mo.callout(mo.md("Enter session DB path and select a run above."), kind="warn"))
         else:
             try:
                 from posetrak.db.load_session import load_tracking_run_with_markers

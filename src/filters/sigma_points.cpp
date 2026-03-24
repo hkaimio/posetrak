@@ -159,34 +159,24 @@ State SigmaPointGenerator::apply_error_to_state(State const& nominal_state,
             new_joint_vels(si) += error_vec(vel_base);
 
         } else if (j.type == JointType::SPHERICAL) {
-            if (j.active_dof_count == 3) {
-                // All 3 DOFs active: use full SO(3) manifold composition
-                Eigen::Vector3d nominal_axis_angle = nominal_state.joint_angles().segment<3>(si);
-                Eigen::Matrix3d R_nominal =
-                    State::axis_angle_to_quaternion(nominal_axis_angle).toRotationMatrix();
-
-                // Error in tangent space
-                Eigen::Vector3d error_axis_angle = error_vec.segment<3>(pos_base);
-                Eigen::Matrix3d R_error =
-                    State::axis_angle_to_quaternion(error_axis_angle).toRotationMatrix();
-
-                // Compose: R_new = R_nominal * R_error (right multiplication for body frame)
-                Eigen::Matrix3d R_new = R_nominal * R_error;
-                Eigen::Quaterniond q_new_joint(R_new);
-                Eigen::Vector3d new_axis_angle = State::quaternion_to_axis_angle(q_new_joint);
-
-                new_angles.segment<3>(si) = new_axis_angle;
-                new_joint_vels.segment<3>(si) += error_vec.segment<3>(vel_base);
-
-            } else {
-                // Some DOFs locked: only apply error to active axes
-                int partial = 0;
-                for (int axis = 0; axis < 3; ++axis) {
-                    if (j.active_dof_mask[axis]) {
-                        new_angles(si + axis) += error_vec(pos_base + partial);
-                        new_joint_vels(si + axis) += error_vec(vel_base + partial);
-                        partial++;
-                    }
+            // Apply error additively per active axis.
+            //
+            // We previously used full SO(3) manifold composition (R_new = R_nominal * R_error)
+            // for joints with active_dof_count == 3, but this is inconsistent with how joint
+            // limits are enforced: limits are defined and clamped per axis-angle component.
+            // After SO(3) composition the x-component of the resulting axis-angle can become
+            // negative for a knee-flexion correction, causing enforce_joint_limits() to clamp
+            // it to 0 (straight knee), which prevents squatting motion and causes oscillation.
+            //
+            // Additive update is consistent with per-component limit enforcement and works
+            // correctly for human joints where each axis-angle component maps to a bounded
+            // rotation angle around that axis.
+            int partial = 0;
+            for (int axis = 0; axis < 3; ++axis) {
+                if (j.active_dof_mask[axis]) {
+                    new_angles(si + axis) += error_vec(pos_base + partial);
+                    new_joint_vels(si + axis) += error_vec(vel_base + partial);
+                    partial++;
                 }
             }
         }

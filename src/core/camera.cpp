@@ -115,9 +115,6 @@ void Camera::set_sync_points(std::vector<SyncPoint> const& points) {
     // Sort by frame index for binary search
     std::sort(sync_points_.begin(), sync_points_.end(),
               [](SyncPoint const& a, SyncPoint const& b) { return a.frame_idx < b.frame_idx; });
-    for (auto const& sp : sync_points_) {
-        fmt::print("    Frame {} -> Time {:.6f} sec\n", sp.frame_idx, sp.timestamp_sec);
-    }
 }
 
 double Camera::get_timestamp(uint32_t frame_idx) const {

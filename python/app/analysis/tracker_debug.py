@@ -187,7 +187,7 @@ def _(
                     _obs_counts["num_observations"] = _obs_counts["num_observations"].astype(int)
                     _obs_counts["num_inliers"] = _obs_counts["num_inliers"].astype(int)
                     tracking_stats = tracking_stats.drop(
-                        columns=["num_inliers"], errors="ignore"
+                        columns=["num_inliers", "num_observations"], errors="ignore"
                     ).merge(_obs_counts, on="frame", how="left").fillna(0)
                     tracking_stats["num_observations"] = tracking_stats["num_observations"].astype(int)
                     tracking_stats["num_inliers"] = tracking_stats["num_inliers"].astype(int)

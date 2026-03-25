@@ -143,8 +143,10 @@ def _(
             tracking_stats = pd.DataFrame()
             joint_angles = pd.DataFrame()
             root_pose = pd.DataFrame()
+            cov_diag_df = pd.DataFrame()
             observations_df = pd.DataFrame()
             projected_markers_df = pd.DataFrame()
+            joint_type_map = {}
             _db_mode = True
             mo.stop(True, mo.callout(mo.md("Enter session DB path and select a run above."), kind="warn"))
         else:
@@ -170,10 +172,29 @@ def _(
                     tracking_stats = tracking_stats.rename(columns={"timestamp": "timestamp"})
                 joint_angles = _data["joint_angles_df"]
                 root_pose = _data["root_pose_df"].rename(columns={"timestamp": "timestamp"})
+                cov_diag_df = _data.get("cov_diag_df", pd.DataFrame())
                 from posetrak.db.load_session import load_obs_results as _load_obs
                 observations_df, projected_markers_df = _load_obs(
                     _db_path, _run_id, person_id=int(person_id_input.value)
                 )
+                # Derive per-frame inlier/observation counts from obs_results blob
+                # (more reliable than n_inlier_observations in tracking_results).
+                if not observations_df.empty and not tracking_stats.empty:
+                    _obs_counts = (
+                        observations_df.groupby("frame")
+                        .agg(
+                            num_observations=("is_outlier", "count"),
+                            num_inliers=("is_outlier", lambda x: int((~x.astype(bool)).sum())),
+                        )
+                        .reset_index()
+                    )
+                    tracking_stats = tracking_stats.drop(
+                        columns=["num_inliers"], errors="ignore"
+                    ).merge(_obs_counts, on="frame", how="left").fillna(0)
+                    tracking_stats["num_observations"] = tracking_stats["num_observations"].astype(int)
+                    tracking_stats["num_inliers"] = tracking_stats["num_inliers"].astype(int)
+                elif not tracking_stats.empty:
+                    tracking_stats["num_observations"] = tracking_stats["num_inliers"]
                 # Build joint info map from the raw skeleton YAML.
                 # Stores {joint_name: {"type", "parent", "limits"}} for the angle plot.
                 import yaml as _yaml
@@ -193,6 +214,7 @@ def _(
                 tracking_stats = pd.DataFrame()
                 joint_angles = pd.DataFrame()
                 root_pose = pd.DataFrame()
+                cov_diag_df = pd.DataFrame()
                 observations_df = pd.DataFrame()
                 projected_markers_df = pd.DataFrame()
                 joint_type_map = {}
@@ -201,6 +223,7 @@ def _(
     else:
         _result_dir = Path(csv_dir_input.value)
         _db_mode = False
+        cov_diag_df = pd.DataFrame()
         joint_type_map = {}  # not available from CSV; fall back to zero-filter in plot cell
         if not _result_dir.exists():
             marker_tracking_df = pd.DataFrame()
@@ -233,6 +256,7 @@ def _(
 
     _db_mode
     return (
+        cov_diag_df,
         joint_angles,
         joint_type_map,
         marker_tracking_df,
@@ -520,6 +544,8 @@ def _(joint_angles, joint_name_selector, joint_type_map, mo, px):
     _jinfo = joint_type_map.get(joint_name_selector.value)
     _jtype = _jinfo["type"] if _jinfo else None
 
+    _xyz_colors = {"angle_x": "red", "angle_y": "green", "angle_z": "blue"}
+
     # --- Joint info header ---
     if _jinfo:
         _lim = _jinfo.get("limits") or {}
@@ -535,6 +561,7 @@ def _(joint_angles, joint_name_selector, joint_type_map, mo, px):
             f"**Limits:** {_lim_str}"
         )
     else:
+        _lim = {}
         _info_md = mo.md("")
 
     # --- Active angle components ---
@@ -559,6 +586,7 @@ def _(joint_angles, joint_name_selector, joint_type_map, mo, px):
         x="frame",
         y="angle_value",
         color="angle_component",
+        color_discrete_map=_xyz_colors,
         title=f"Joint Angles for {joint_name_selector.value}",
         labels={
             "frame": "Frame",
@@ -567,9 +595,64 @@ def _(joint_angles, joint_name_selector, joint_type_map, mo, px):
         },
         hover_data=["frame", "angle_component", "angle_value"],
     )
+    # Draw limit lines (dotted, same color as the corresponding axis)
+    _axis_to_component = {"x": "angle_x", "y": "angle_y", "z": "angle_z"}
+    for _ax, _bounds in _lim.items():
+        _comp = _axis_to_component.get(_ax)
+        _color = _xyz_colors.get(_comp, "gray")
+        if _comp in _active_components:
+            for _bound in _bounds:
+                _joint_angle_plot.add_hline(
+                    y=_bound,
+                    line_dash="dot",
+                    line_color=_color,
+                    line_width=1,
+                    opacity=0.6,
+                )
     _joint_angle_plot.update_layout(hovermode="x unified")
     mo.vstack([_info_md, _joint_angle_plot])
     return
+
+
+@app.cell(hide_code=True)
+def _(cov_diag_df, joint_name_selector, joint_type_map, mo, px):
+    mo.stop(cov_diag_df.empty)
+    _filtered_cov = cov_diag_df[cov_diag_df["joint_name"] == joint_name_selector.value]
+    mo.stop(_filtered_cov.empty)
+
+    _jinfo_cov = joint_type_map.get(joint_name_selector.value)
+    _jtype_cov = _jinfo_cov["type"] if _jinfo_cov else None
+    if _jtype_cov in ("revolute", "prismatic"):
+        _std_components = ["std_x"]
+    elif _jtype_cov in ("ball", "spherical"):
+        _std_components = ["std_x", "std_y", "std_z"]
+    else:
+        _std_components = [c for c in ["std_x", "std_y", "std_z"]
+                           if _filtered_cov[c].max() > 0]
+
+    _cov_long = _filtered_cov.melt(
+        id_vars=["frame", "joint_name"],
+        value_vars=_std_components,
+        var_name="component",
+        value_name="std_value",
+    )
+    _std_colors = {"std_x": "red", "std_y": "green", "std_z": "blue"}
+    _cov_plot = px.line(
+        _cov_long,
+        x="frame",
+        y="std_value",
+        color="component",
+        color_discrete_map=_std_colors,
+        title=f"UKF angle std dev (σ) for {joint_name_selector.value}",
+        labels={
+            "frame": "Frame",
+            "std_value": "Std dev (radians)",
+            "component": "Component",
+        },
+        hover_data=["frame", "component", "std_value"],
+    )
+    _cov_plot.update_layout(hovermode="x unified")
+    _cov_plot
 
 
 @app.cell
@@ -586,6 +669,7 @@ def _(mo, px, root_pose):
         x="frame",
         y="position_value",
         color="position_component",
+        color_discrete_map={"pos_x": "red", "pos_y": "green", "pos_z": "blue"},
         title="Root Pose Position Over Frames",
         labels={
             "frame": "Frame",
@@ -613,6 +697,12 @@ def _(mo, px, root_pose):
         x="frame",
         y="quaternion_value",
         color="quaternion_component",
+        color_discrete_map={
+            "quat_x": "red",
+            "quat_y": "green",
+            "quat_z": "blue",
+            "quat_w": "purple",
+        },
         title="Root Pose Quaternion Over Frames",
         labels={
             "frame": "Frame",

@@ -141,6 +141,7 @@ def load_tracking_run_data(
 
         root_pose_records = []
         joint_angle_records = []
+        cov_diag_records = []
         stats_records = []
 
         for row in rows:
@@ -160,6 +161,15 @@ def load_tracking_run_data(
             joint_angle_records.extend(
                 layout.decoded_to_joint_angle_rows(step, ts, decoded)
             )
+            cov_blob = row["cov_diag"]
+            if cov_blob is not None and len(cov_blob) > 0:
+                try:
+                    decoded_cov = layout.decode_cov_diag(bytes(cov_blob))
+                    cov_diag_records.extend(
+                        layout.decoded_cov_to_joint_std_rows(step, ts, decoded_cov)
+                    )
+                except Exception as exc:
+                    warnings.warn(f"Could not decode cov_diag at step {step}: {exc}")
             stats_records.append({
                 "frame": step,
                 "timestamp": ts,
@@ -170,11 +180,17 @@ def load_tracking_run_data(
 
         root_pose_df = pd.DataFrame(root_pose_records)
         joint_angles_df = pd.DataFrame(joint_angle_records)
+        cov_diag_df = pd.DataFrame(cov_diag_records) if cov_diag_records else pd.DataFrame(
+            columns=["frame", "timestamp", "joint_name",
+                     "std_x", "std_y", "std_z",
+                     "vel_std_x", "vel_std_y", "vel_std_z"]
+        )
         tracking_stats_df = pd.DataFrame(stats_records)
 
         return {
             "root_pose_df": root_pose_df,
             "joint_angles_df": joint_angles_df,
+            "cov_diag_df": cov_diag_df,
             "tracking_stats_df": tracking_stats_df,
             "skeleton_yaml": skeleton_yaml,
             "marker_names": marker_names,

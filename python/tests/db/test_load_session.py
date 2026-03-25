@@ -243,7 +243,7 @@ class TestLoadTrackingRunData:
         db_path, run_id, _ = session_db_with_run
         result = load_tracking_run_data(db_path, run_id)
         expected_keys = {
-            "root_pose_df", "joint_angles_df", "tracking_stats_df",
+            "root_pose_df", "joint_angles_df", "cov_diag_df", "tracking_stats_df",
             "skeleton_yaml", "marker_names", "n_dof", "run_row",
         }
         assert set(result.keys()) == expected_keys

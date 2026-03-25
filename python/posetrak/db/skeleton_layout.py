@@ -549,3 +549,118 @@ class SkeletonLayout:
             })
 
         return rows
+
+    # -----------------------------------------------------------------------
+    # Covariance diagonal decoding
+    # -----------------------------------------------------------------------
+
+    def decode_cov_diag(self, blob: bytes) -> dict:
+        """Decode a cov_diag blob into per-joint angle and velocity std deviations.
+
+        The error-state layout mirrors the C++ UKF error-state vector:
+          [root_pos(3), root_ori(3), joint_pos(K), root_vel(3), root_angvel(3), joint_vel(K)]
+        where K = total active joint DOF count (sum over non-fixed joints).
+
+        Returns a dict with:
+          root_pos_std   : np.ndarray(3)  — position std dev [m]
+          root_ori_std   : np.ndarray(3)  — orientation std dev [rad]
+          root_vel_std   : np.ndarray(3)
+          root_angvel_std: np.ndarray(3)
+          joint_angle_std: {joint_name: np.ndarray(3)} — std dev for [x,y,z];
+                           inactive axes carry 0.0
+          joint_vel_std  : {joint_name: np.ndarray(3)}
+        """
+        values = np.sqrt(np.maximum(
+            np.frombuffer(blob, dtype="<f8"), 0.0
+        ))  # sqrt(variance) = std dev; clamp negatives from numerical noise
+
+        root_n = 6  # root pos(3) + ori(3) in error state
+        total = len(values)
+        # total = 2*(root_n + K)  →  K = total/2 - root_n
+        K = total // 2 - root_n
+
+        root_pos_std = values[0:3].copy()
+        root_ori_std = values[3:6].copy()
+        joint_pos_flat = values[6:6 + K].copy()
+        root_vel_std = values[6 + K:6 + K + 3].copy()
+        root_angvel_std = values[6 + K + 3:6 + K + 6].copy()
+        joint_vel_flat = values[6 + K + 6:6 + 2 * K + 6].copy()
+
+        joint_angle_std: dict[str, np.ndarray] = {}
+        joint_vel_std: dict[str, np.ndarray] = {}
+
+        error_idx = 0
+        for ji in self._joints:
+            if ji.joint_type in ("root", "fixed") or ji.state_index < 0 or ji.is_scale_follower:
+                continue
+
+            if ji.joint_type == "revolute":
+                active_count = 1
+                pos_std = np.array([
+                    joint_pos_flat[error_idx] if error_idx < len(joint_pos_flat) else 0.0,
+                    0.0, 0.0,
+                ])
+                vel_std = np.array([
+                    joint_vel_flat[error_idx] if error_idx < len(joint_vel_flat) else 0.0,
+                    0.0, 0.0,
+                ])
+            elif ji.joint_type in ("spherical",):
+                active_count = int(sum(ji.active_mask))
+                pos_std = np.zeros(3)
+                vel_std = np.zeros(3)
+                partial = 0
+                for axis_i, active in enumerate(ji.active_mask[:3]):
+                    if active:
+                        if error_idx + partial < len(joint_pos_flat):
+                            pos_std[axis_i] = joint_pos_flat[error_idx + partial]
+                        if error_idx + partial < len(joint_vel_flat):
+                            vel_std[axis_i] = joint_vel_flat[error_idx + partial]
+                        partial += 1
+            elif ji.joint_type == "prismatic":
+                active_count = 1
+                pos_std = np.array([
+                    joint_pos_flat[error_idx] if error_idx < len(joint_pos_flat) else 0.0,
+                    0.0, 0.0,
+                ])
+                vel_std = np.array([
+                    joint_vel_flat[error_idx] if error_idx < len(joint_vel_flat) else 0.0,
+                    0.0, 0.0,
+                ])
+            else:
+                continue
+
+            joint_angle_std[ji.name] = pos_std
+            joint_vel_std[ji.name] = vel_std
+            error_idx += active_count
+
+        return {
+            "root_pos_std": root_pos_std,
+            "root_ori_std": root_ori_std,
+            "root_vel_std": root_vel_std,
+            "root_angvel_std": root_angvel_std,
+            "joint_angle_std": joint_angle_std,
+            "joint_vel_std": joint_vel_std,
+        }
+
+    def decoded_cov_to_joint_std_rows(self, step: int, timestamp: float,
+                                      decoded_cov: dict) -> list:
+        """Convert decoded covariance to per-joint std-dev rows.
+
+        Each row: frame, timestamp, joint_name, std_x, std_y, std_z,
+                  vel_std_x, vel_std_y, vel_std_z
+        """
+        rows = []
+        for name, pos_std in decoded_cov["joint_angle_std"].items():
+            vel_std = decoded_cov["joint_vel_std"].get(name, np.zeros(3))
+            rows.append({
+                "frame": step,
+                "timestamp": timestamp,
+                "joint_name": name,
+                "std_x": float(pos_std[0]),
+                "std_y": float(pos_std[1]),
+                "std_z": float(pos_std[2]),
+                "vel_std_x": float(vel_std[0]),
+                "vel_std_y": float(vel_std[1]),
+                "vel_std_z": float(vel_std[2]),
+            })
+        return rows

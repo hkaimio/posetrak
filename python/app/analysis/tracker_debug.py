@@ -11,7 +11,7 @@ def _():
     import numpy as np
     from pathlib import Path
     import os
-    return Path, mo, os, pd
+    return Path, mo, np, os, pd
 
 
 @app.cell(hide_code=True)
@@ -490,6 +490,43 @@ def _(mo, px, tracking_stats):
     _tracking_stats_plot.update_layout(hovermode="x unified")
     _tracking_stats_plot
     return
+
+
+@app.cell(hide_code=True)
+def _(mo, np, px, tracking_stats):
+    mo.stop(tracking_stats.empty or tracking_stats["nis_value"].isna().all())
+    _nis_df = tracking_stats[["frame", "nis_value", "nis_dof"]].dropna()
+    # Normalised NIS = NIS / dof — expected value is 1.0 when filter is consistent
+    _nis_df = _nis_df.copy()
+    _nis_df["nis_normalised"] = _nis_df["nis_value"] / _nis_df["nis_dof"].clip(lower=1)
+    _nis_plot = px.line(
+        _nis_df,
+        x="frame",
+        y="nis_normalised",
+        title="Normalised Innovation Squared (NIS / dof)  — expected ≈ 1.0",
+        labels={"frame": "Frame", "nis_normalised": "NIS / dof"},
+        hover_data=["frame", "nis_normalised", "nis_value", "nis_dof"],
+    )
+    _nis_plot.add_hline(y=1.0, line_dash="dot", line_color="gray", line_width=1, opacity=0.7)
+    _nis_plot.update_layout(hovermode="x unified")
+    _nis_plot
+
+
+@app.cell(hide_code=True)
+def _(mo, px, tracking_stats):
+    mo.stop(tracking_stats.empty
+            or "cov_condition_number" not in tracking_stats.columns
+            or (tracking_stats["cov_condition_number"] == 0).all())
+    _cond_plot = px.line(
+        tracking_stats[tracking_stats["cov_condition_number"] > 0],
+        x="frame",
+        y="cov_condition_number",
+        title="Covariance condition number (max diag / min diag)",
+        labels={"frame": "Frame", "cov_condition_number": "Condition number"},
+        hover_data=["frame", "cov_condition_number"],
+    )
+    _cond_plot.update_layout(hovermode="x unified")
+    _cond_plot
 
 
 @app.cell

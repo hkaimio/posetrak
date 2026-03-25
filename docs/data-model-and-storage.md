@@ -668,7 +668,9 @@ CREATE TABLE tracking_results (
     timestamp_s REAL NOT NULL,
     tracking_lost BOOLEAN NOT NULL DEFAULT FALSE,
     n_inlier_observations INTEGER,
-    cov_condition_number REAL,
+    cov_condition_number REAL,        -- max(diag) / min(diag) of covariance
+    nis_value REAL,                   -- Normalized Innovation Squared
+    nis_dof INTEGER,                  -- chi-squared degrees of freedom for NIS
     state BLOB NOT NULL,              -- float64 packed state vector
     cov_diag BLOB NOT NULL,           -- float64 packed covariance diagonal
     PRIMARY KEY (run_id, person_id, tracker_step, is_smoothed)

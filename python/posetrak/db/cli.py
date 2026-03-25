@@ -23,6 +23,7 @@ calib     list        List camera instances and intrinsics calibrations.
 skeleton  import    Import a skeleton YAML file.
 skeleton  list      List skeletons.
 skeleton  scale     Create a scaled skeleton from a tracking run + body measurements.
+skeleton  export    Export a skeleton YAML to a file (or stdout).
 
 config    create    Create a tracker config snapshot from a TOML file.
 config    edit      Derive a new tracker config by overriding fields.
@@ -52,6 +53,7 @@ tracking-run  list  List tracking runs in a session database.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -131,13 +133,18 @@ def _add_registry_arg(p: argparse.ArgumentParser) -> None:
 
 
 def _add_session_db_arg(p: argparse.ArgumentParser, *, required: bool = False) -> None:
-    """Add the standard --session-db argument."""
+    """Add the standard --session-db argument.
+
+    Falls back to the ``POSETRAK_SESSION_DB`` environment variable when the
+    flag is omitted on the command line.
+    """
+    env_val = os.environ.get("POSETRAK_SESSION_DB")
     p.add_argument(
         "--session-db",
-        required=required,
-        default=None,
+        required=required and not env_val,
+        default=env_val,
         metavar="PATH",
-        help="Path to the session .db file",
+        help="Path to the session .db file (default: $POSETRAK_SESSION_DB)",
     )
 
 
@@ -691,6 +698,49 @@ def _cmd_skeleton_list(args: argparse.Namespace) -> int:
     print("-" * 85)
     for row in rows:
         print(f"{row['id']:<36}  {row['name']:<30}  {row['created_at']}")
+    return 0
+
+
+def _cmd_skeleton_export(args: argparse.Namespace) -> int:
+    """Export a skeleton YAML from the DB to a file or stdout."""
+    if args.session_db:
+        try:
+            conn = open_session(Path(args.session_db))
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"Error opening session db: {exc}", file=sys.stderr)
+            return 1
+    else:
+        try:
+            conn = open_registry(Path(args.registry))
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"Error opening registry: {exc}", file=sys.stderr)
+            return 1
+
+    try:
+        skeleton_id = resolve_id_prefix(conn, "skeletons", args.id)
+        row = conn.execute(
+            "SELECT yaml_content FROM skeletons WHERE id = ?", (skeleton_id,)
+        ).fetchone()
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        conn.close()
+        return 1
+    finally:
+        conn.close()
+
+    if row is None:
+        print(f"Error: skeleton '{skeleton_id}' has no YAML content", file=sys.stderr)
+        return 1
+
+    yaml_content: str = row[0]
+
+    if args.output:
+        out_path = Path(args.output)
+        out_path.write_text(yaml_content, encoding="utf-8")
+        print(f"Exported skeleton to {out_path}")
+    else:
+        sys.stdout.write(yaml_content)
+
     return 0
 
 
@@ -1693,6 +1743,14 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Name for the new skeleton (default: <parent-name>-scaled)")
     p.add_argument("--notes", default="", metavar="S")
 
+    p = sk_actions.add_parser("export", help="Export a skeleton YAML to a file")
+    _add_registry_arg(p)
+    _add_session_db_arg(p)
+    p.add_argument("--id", required=True, metavar="ID",
+                   help="Skeleton id (or unique prefix) to export")
+    p.add_argument("--output", default="", metavar="PATH",
+                   help="Output file path (default: print to stdout)")
+
     # -------------------------------------------------------------------------
     # config topic
     # -------------------------------------------------------------------------
@@ -1916,6 +1974,7 @@ def main() -> None:
         ("skeleton", "import"): _cmd_skeleton_import,
         ("skeleton", "list"): _cmd_skeleton_list,
         ("skeleton", "scale"): _cmd_skeleton_scale,
+        ("skeleton", "export"): _cmd_skeleton_export,
         ("config", "create"): _cmd_config_create,
         ("config", "edit"): _cmd_config_edit,
         ("config", "list"): _cmd_config_list,

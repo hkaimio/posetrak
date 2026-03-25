@@ -1328,10 +1328,18 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                                       frame_obs, result.update_info);
             }
 
+            double cov_cond = 0.0;
+            if (result.covariance.size() > 0) {
+                Eigen::VectorXd diag = result.covariance.diagonal();
+                double dmax = diag.maxCoeff();
+                double dmin = diag.minCoeff();
+                if (dmin > 0.0)
+                    cov_cond = dmax / dmin;
+            }
             result_writer.write_frame(step, t_effective, result.state.to_error_vector(),
                                       result.covariance, result.tracking_lost,
-                                      result.update_info.num_inliers,
-                                      0.0 /* cov_condition placeholder */);
+                                      result.update_info.num_inliers, cov_cond,
+                                      result.update_info.nis, result.update_info.nis_dof);
             if (!result.update_info.observations.empty())
                 result_writer.write_obs_results(step, result.update_info.observations);
 

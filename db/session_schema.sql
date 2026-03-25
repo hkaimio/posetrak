@@ -161,6 +161,8 @@ CREATE TABLE IF NOT EXISTS tracking_results (
     tracking_lost         INTEGER NOT NULL DEFAULT 0,
     n_inlier_observations INTEGER,
     cov_condition_number  REAL,
+    nis_value             REAL,
+    nis_dof               INTEGER,
     state                 BLOB    NOT NULL,
     cov_diag              BLOB    NOT NULL,
     PRIMARY KEY (run_id, person_id, tracker_step, is_smoothed)

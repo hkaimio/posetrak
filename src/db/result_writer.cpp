@@ -160,7 +160,8 @@ std::vector<uint8_t> ResultWriter::encode_vector(Eigen::VectorXd const& v) {
 
 void ResultWriter::write_frame(int step, double timestamp, Eigen::VectorXd const& state,
                                Eigen::MatrixXd const& covariance, bool tracking_lost,
-                               int n_inlier_observations, double cov_condition_number) {
+                               int n_inlier_observations, double cov_condition_number,
+                               double nis_value, int nis_dof) {
     auto state_blob = encode_vector(state);
 
     std::vector<uint8_t> cov_diag_blob;
@@ -170,7 +171,8 @@ void ResultWriter::write_frame(int step, double timestamp, Eigen::VectorXd const
     }
 
     pending_.emplace_back(step, timestamp, std::move(state_blob), std::move(cov_diag_blob),
-                          tracking_lost ? 1 : 0, n_inlier_observations, cov_condition_number, 0);
+                          tracking_lost ? 1 : 0, n_inlier_observations, cov_condition_number,
+                          nis_value, nis_dof, 0);
 
     if (static_cast<int>(pending_.size()) >= kBatchSize)
         flush_pending();
@@ -189,7 +191,7 @@ void ResultWriter::write_smoothed_frame(int step, double timestamp, Eigen::Vecto
     }
 
     pending_.emplace_back(step, timestamp, std::move(state_blob), std::move(cov_diag_blob), 0, 0,
-                          0.0, 1);
+                          0.0, 0.0, 0, 1);
 
     if (static_cast<int>(pending_.size()) >= kBatchSize)
         flush_pending();
@@ -214,8 +216,9 @@ void ResultWriter::flush_pending() {
     const char* sql =
         "INSERT INTO tracking_results"
         " (run_id, person_id, tracker_step, is_smoothed, timestamp_s,"
-        "  tracking_lost, n_inlier_observations, cov_condition_number, state, cov_diag)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        "  tracking_lost, n_inlier_observations, cov_condition_number,"
+        "  nis_value, nis_dof, state, cov_diag)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
     rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -228,8 +231,8 @@ void ResultWriter::flush_pending() {
     std::string fail_msg;
 
     for (auto const& row : pending_) {
-        auto const& [step, ts, state_blob, cov_diag_blob, tl, n_inliers, cov_cond, is_smoothed] =
-            row;
+        auto const& [step, ts, state_blob, cov_diag_blob, tl, n_inliers, cov_cond, nis_val, nis_d,
+                     is_smoothed] = row;
 
         sqlite3_bind_text(stmt, 1, run_id_.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_int(stmt, 2, person_id_);
@@ -239,18 +242,20 @@ void ResultWriter::flush_pending() {
         sqlite3_bind_int(stmt, 6, tl);
         sqlite3_bind_int(stmt, 7, n_inliers);
         sqlite3_bind_double(stmt, 8, cov_cond);
+        sqlite3_bind_double(stmt, 9, nis_val);
+        sqlite3_bind_int(stmt, 10, nis_d);
 
         if (!state_blob.empty())
-            sqlite3_bind_blob(stmt, 9, state_blob.data(), static_cast<int>(state_blob.size()),
+            sqlite3_bind_blob(stmt, 11, state_blob.data(), static_cast<int>(state_blob.size()),
                               SQLITE_STATIC);
         else
-            sqlite3_bind_null(stmt, 9);
+            sqlite3_bind_null(stmt, 11);
 
         if (!cov_diag_blob.empty())
-            sqlite3_bind_blob(stmt, 10, cov_diag_blob.data(),
+            sqlite3_bind_blob(stmt, 12, cov_diag_blob.data(),
                               static_cast<int>(cov_diag_blob.size()), SQLITE_STATIC);
         else
-            sqlite3_bind_null(stmt, 10);
+            sqlite3_bind_null(stmt, 12);
 
         int step_rc = sqlite3_step(stmt);
         sqlite3_reset(stmt);

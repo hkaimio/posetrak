@@ -272,7 +272,8 @@ class TestLoadTrackingRunData:
         db_path, run_id, _ = session_db_with_run
         result = load_tracking_run_data(db_path, run_id)
         df = result["tracking_stats_df"]
-        for col in ("frame", "timestamp", "tracking_lost", "num_inliers", "cov_condition_number"):
+        for col in ("frame", "timestamp", "tracking_lost", "num_inliers",
+                    "cov_condition_number", "nis_value", "nis_dof"):
             assert col in df.columns
 
     def test_root_pose_df_has_rows(self, session_db_with_run):

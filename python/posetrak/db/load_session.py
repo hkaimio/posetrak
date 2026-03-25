@@ -116,7 +116,7 @@ def load_tracking_run_data(
         is_smoothed_val = 1 if smoothed else 0
         rows = conn.execute(
             "SELECT tracker_step, timestamp_s, tracking_lost, "
-            "n_inlier_observations, cov_condition_number, state, cov_diag "
+            "n_inlier_observations, cov_condition_number, nis_value, nis_dof, state, cov_diag "
             "FROM tracking_results "
             "WHERE run_id = ? AND person_id = ? AND is_smoothed = ? "
             "ORDER BY tracker_step",
@@ -176,6 +176,8 @@ def load_tracking_run_data(
                 "tracking_lost": bool(row["tracking_lost"]),
                 "num_inliers": row["n_inlier_observations"],
                 "cov_condition_number": row["cov_condition_number"],
+                "nis_value": row["nis_value"],
+                "nis_dof": row["nis_dof"],
             })
 
         root_pose_df = pd.DataFrame(root_pose_records)

@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 2
-SESSION_SCHEMA_VERSION: Final[int] = 4
+SESSION_SCHEMA_VERSION: Final[int] = 5
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -335,6 +335,16 @@ def _migrate_session_v3_to_v4(conn: sqlite3.Connection) -> None:
     conn.executescript(sql)
 
 
+def _migrate_session_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 4 to 5.
+
+    v5 adds nis_value and nis_dof columns to tracking_results for UKF
+    consistency monitoring. Existing rows receive NULL.
+    """
+    sql = (_DB_DIR / "migrations" / "004_tracking_results_nis.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -367,6 +377,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 3
     if actual == 3:
         _migrate_session_v3_to_v4(conn)
+        actual = 4
+    if actual == 4:
+        _migrate_session_v4_to_v5(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

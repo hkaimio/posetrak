@@ -46,7 +46,8 @@ class ResultWriter {
     /// @brief Write one forward-pass frame. Batches internally; call flush() when done.
     void write_frame(int step, double timestamp, Eigen::VectorXd const& state,
                      Eigen::MatrixXd const& covariance, bool tracking_lost,
-                     int n_inlier_observations, double cov_condition_number);
+                     int n_inlier_observations, double cov_condition_number, double nis_value,
+                     int nis_dof);
 
     /// @brief Write one smoothed frame (is_smoothed=1).
     /// Pass an empty MatrixXd when covariance is unavailable — encodes as zero-length blob.
@@ -74,9 +75,9 @@ class ResultWriter {
     static constexpr int kBatchSize = 500;
 
     // Pending rows: (step, timestamp, state_blob, cov_diag_blob,
-    //                tracking_lost, n_inliers, cov_condition, is_smoothed)
-    using FrameRow =
-        std::tuple<int, double, std::vector<uint8_t>, std::vector<uint8_t>, int, int, double, int>;
+    //                tracking_lost, n_inliers, cov_condition, nis_value, nis_dof, is_smoothed)
+    using FrameRow = std::tuple<int, double, std::vector<uint8_t>, std::vector<uint8_t>, int, int,
+                                double, double, int, int>;
     std::vector<FrameRow> pending_;
 
     void flush_pending();

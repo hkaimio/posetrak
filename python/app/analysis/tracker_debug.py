@@ -180,14 +180,12 @@ def _(
                 # Derive per-frame inlier/observation counts from obs_results blob
                 # (more reliable than n_inlier_observations in tracking_results).
                 if not observations_df.empty and not tracking_stats.empty:
-                    _obs_counts = (
-                        observations_df.groupby("frame")
-                        .agg(
-                            num_observations=("is_outlier", "count"),
-                            num_inliers=("is_outlier", lambda x: int((~x.astype(bool)).sum())),
-                        )
-                        .reset_index()
-                    )
+                    _is_out = observations_df["is_outlier"].astype(bool)
+                    _n_obs = observations_df.groupby("frame").size().rename("num_observations")
+                    _n_inl = observations_df[~_is_out].groupby("frame").size().rename("num_inliers")
+                    _obs_counts = pd.DataFrame(_n_obs).join(_n_inl, how="left").fillna(0).reset_index()
+                    _obs_counts["num_observations"] = _obs_counts["num_observations"].astype(int)
+                    _obs_counts["num_inliers"] = _obs_counts["num_inliers"].astype(int)
                     tracking_stats = tracking_stats.drop(
                         columns=["num_inliers"], errors="ignore"
                     ).merge(_obs_counts, on="frame", how="left").fillna(0)

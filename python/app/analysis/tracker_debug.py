@@ -161,15 +161,7 @@ def _(
                 marker_tracking_df = _data["marker_positions_df"].rename(columns={
                     "x_3d": "x_3d", "y_3d": "y_3d", "z_3d": "z_3d",
                 })
-                tracking_stats = _data["tracking_stats_df"].rename(columns={
-                    "num_inliers": "num_inliers",
-                })
-                # Add placeholder columns expected by existing cells
-                if not tracking_stats.empty:
-                    tracking_stats["num_observations"] = tracking_stats["num_inliers"]
-                    tracking_stats["mean_reprojection_error"] = float("nan")
-                    tracking_stats["max_reprojection_error"] = float("nan")
-                    tracking_stats = tracking_stats.rename(columns={"timestamp": "timestamp"})
+                tracking_stats = _data["tracking_stats_df"]
                 joint_angles = _data["joint_angles_df"]
                 root_pose = _data["root_pose_df"].rename(columns={"timestamp": "timestamp"})
                 cov_diag_df = _data.get("cov_diag_df", pd.DataFrame())
@@ -177,22 +169,33 @@ def _(
                 observations_df, projected_markers_df = _load_obs(
                     _db_path, _run_id, person_id=int(person_id_input.value)
                 )
-                # Derive per-frame inlier/observation counts from obs_results blob
-                # (more reliable than n_inlier_observations in tracking_results).
-                if not observations_df.empty and not tracking_stats.empty:
-                    _is_out = observations_df["is_outlier"].astype(bool)
-                    _n_obs = observations_df.groupby("frame").size().rename("num_observations")
-                    _n_inl = observations_df[~_is_out].groupby("frame").size().rename("num_inliers")
-                    _obs_counts = pd.DataFrame(_n_obs).join(_n_inl, how="left").fillna(0).reset_index()
-                    _obs_counts["num_observations"] = _obs_counts["num_observations"].astype(int)
-                    _obs_counts["num_inliers"] = _obs_counts["num_inliers"].astype(int)
-                    tracking_stats = tracking_stats.drop(
-                        columns=["num_inliers", "num_observations"], errors="ignore"
-                    ).merge(_obs_counts, on="frame", how="left").fillna(0)
-                    tracking_stats["num_observations"] = tracking_stats["num_observations"].astype(int)
-                    tracking_stats["num_inliers"] = tracking_stats["num_inliers"].astype(int)
-                elif not tracking_stats.empty:
-                    tracking_stats["num_observations"] = tracking_stats["num_inliers"]
+                if not tracking_stats.empty:
+                    # Per-frame inlier/observation counts from obs_results blob
+                    # (more reliable than n_inlier_observations in tracking_results).
+                    if not observations_df.empty:
+                        _is_out = observations_df["is_outlier"].astype(bool)
+                        _n_obs = observations_df.groupby("frame").size().rename("num_observations")
+                        _n_inl = observations_df[~_is_out].groupby("frame").size().rename("num_inliers")
+                        _obs_counts = pd.DataFrame(_n_obs).join(_n_inl, how="left").fillna(0).reset_index()
+                        tracking_stats = tracking_stats.drop(
+                            columns=["num_inliers", "num_observations"], errors="ignore"
+                        ).merge(_obs_counts, on="frame", how="left")
+                        tracking_stats["num_observations"] = tracking_stats["num_observations"].fillna(0).astype(int)
+                        tracking_stats["num_inliers"] = tracking_stats["num_inliers"].fillna(0).astype(int)
+                    else:
+                        tracking_stats["num_observations"] = tracking_stats["num_inliers"]
+                    # Per-frame reprojection error from inlier projected markers
+                    if not projected_markers_df.empty:
+                        _inlier_proj = projected_markers_df[~projected_markers_df["is_outlier"].astype(bool)]
+                        _reproj = (
+                            _inlier_proj.groupby("frame")["error_dist"]
+                            .agg(mean_reprojection_error="mean", max_reprojection_error="max")
+                            .reset_index()
+                        )
+                        tracking_stats = tracking_stats.merge(_reproj, on="frame", how="left")
+                    else:
+                        tracking_stats["mean_reprojection_error"] = float("nan")
+                        tracking_stats["max_reprojection_error"] = float("nan")
                 # Build joint info map from the raw skeleton YAML.
                 # Stores {joint_name: {"type", "parent", "limits"}} for the angle plot.
                 import yaml as _yaml

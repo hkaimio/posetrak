@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
 """
-UKF parameter sweep for posetrak.
+UKF parameter sweep for posetrak (session-DB mode).
 
-Runs the tracker over a grid of noise/damping parameters, collects metrics
-from the output CSV files, and prints a ranked summary table.
+Creates child tracker_config rows from a base config, runs the tracker for
+each, and ranks results by filter consistency (NIS/dof ≈ 1), inlier rate,
+and covariance condition number.  All results are stored in the session DB.
 
 Usage
 -----
     uv run python/tools/param_sweep.py \\
-        --base  /path/to/complete_config.toml \\
-        --out-dir /tmp/posetrak_sweep
+        --session-db /mnt/d/mocap/<session>/session.db \\
+        --config     <base-tracker-config-id-or-prefix> \\
+        [--sequence  <pose-observation-sequence-id>] \\
+        [--skeleton  <skeleton-id>] \\
+        [--out-dir   /tmp/posetrak_sweep]
 
-Edit SWEEP_GRID and FIXED_PARAMS below to change which parameters are varied.
-The script writes a temp config.toml per run (overriding [tracking], [output],
-and [processing] time range), runs the tracker, then reads tracking_stats.csv
-and marker_projections.csv for metrics.
+If --sequence / --skeleton are omitted the script finds them from the most
+recent tracking run that used the given base config.
+
+Edit SWEEP_GRID and FIXED_PARAMS below to change what is varied.
 """
 
 import argparse
-import copy
 import itertools
+import re
 import subprocess
 import sys
 import time
-import tomllib
 from pathlib import Path
 
 import numpy as np
@@ -36,12 +39,12 @@ import pandas as pd
 SWEEP_GRID: dict[str, list] = {
     "process_noise_std":     [0.05, 0.1, 0.2],
     "process_noise_vel_std": [0.2, 0.5, 1.0],
-    "velocity_half_life_s":  [0.5, 1.0, 2.0],
+    "velocity_half_life_s":  [0.25, 0.5, 1.0],
 }
 
-FIXED_PARAMS: dict[str, float] = {
+FIXED_PARAMS: dict[str, float | int | None] = {
     "measurement_noise_std": 60.0,
-    "outlier_threshold": 4.0,
+    "outlier_threshold":     4.0,
 }
 
 TIME_RANGE = (0.0, 10.0)
@@ -49,113 +52,73 @@ TIME_RANGE = (0.0, 10.0)
 # ---------------------------------------------------------------------------
 
 
-def _toml_scalar(v) -> str:
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if isinstance(v, str):
-        # Escape backslashes for Windows paths
-        return '"' + v.replace("\\", "\\\\") + '"'
-    if isinstance(v, float):
-        return repr(v)
-    return str(v)
+def resolve_base_run(session, config_id: str) -> dict:
+    """Return metadata from the most recent tracking run using config_id."""
+    row = session.execute(
+        """
+        SELECT id, observation_sequence_id, skeleton_id,
+               active_camera_ids, marker_names
+        FROM tracking_runs
+        WHERE tracker_config_id = ?
+        ORDER BY ran_at DESC
+        LIMIT 1
+        """,
+        (config_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"No tracking runs found for config {config_id!r}")
+    return dict(row)
 
 
-def _write_section(lines: list[str], d: dict, header: str) -> None:
-    lines.append(f"\n[{header}]")
-    for k, v in d.items():
-        if not isinstance(v, dict):
-            lines.append(f"{k} = {_toml_scalar(v)}")
-    for k, v in d.items():
-        if isinstance(v, dict):
-            _write_section(lines, v, f"{header}.{k}")
+def compute_metrics(session, run_id: str) -> dict | None:
+    rows = session.execute(
+        """
+        SELECT tracking_lost, n_inlier_observations,
+               cov_condition_number, nis_value, nis_dof
+        FROM tracking_results
+        WHERE run_id = ? AND person_id = 0 AND is_smoothed = 0
+        ORDER BY tracker_step
+        """,
+        (run_id,),
+    ).fetchall()
 
-
-def write_toml(d: dict) -> str:
-    lines: list[str] = []
-    for k, v in d.items():
-        if not isinstance(v, dict):
-            lines.append(f"{k} = {_toml_scalar(v)}")
-    for k, v in d.items():
-        if isinstance(v, dict):
-            _write_section(lines, v, k)
-    return "\n".join(lines) + "\n"
-
-
-def _col(df: pd.DataFrame, *names: str) -> pd.Series | None:
-    """Return the first column that exists, or None."""
-    for n in names:
-        if n in df.columns:
-            return df[n]
-    return None
-
-
-def compute_metrics(run_dir: Path) -> dict | None:
-    stats_path = run_dir / "tracking_stats.csv"
-    if not stats_path.exists():
+    if not rows:
         return None
 
-    stats = pd.read_csv(stats_path)
-    if stats.empty:
-        return None
+    df = pd.DataFrame(rows, columns=[
+        "tracking_lost", "n_inlier_observations",
+        "cov_condition_number", "nis_value", "nis_dof",
+    ])
 
-    n_frames = len(stats)
-
-    # tracking_lost
-    lost_col = _col(stats, "tracking_lost")
-    tracking_lost_pct = 100.0 * lost_col.mean() if lost_col is not None else float("nan")
+    n_frames = len(df)
+    tracking_lost_pct = 100.0 * df["tracking_lost"].mean()
 
     # NIS / dof
-    nis_val = _col(stats, "nis_value")
-    nis_dof = _col(stats, "nis_dof")
-    if nis_val is not None and nis_dof is not None:
-        mask = (nis_dof > 0) & nis_val.notna()
-        valid = nis_val[mask] / nis_dof[mask]
-        nis_mean = float(valid.mean()) if not valid.empty else float("nan")
-        nis_std  = float(valid.std())  if len(valid) > 1 else float("nan")
+    nis_rows = df[(df["nis_dof"] > 0) & df["nis_value"].notna()]
+    if not nis_rows.empty:
+        per_dof = nis_rows["nis_value"] / nis_rows["nis_dof"]
+        nis_mean = float(per_dof.mean())
+        nis_std  = float(per_dof.std()) if len(per_dof) > 1 else float("nan")
     else:
         nis_mean = nis_std = float("nan")
 
-    # Covariance condition number
-    cond_col = _col(stats, "cov_condition_number")
-    if cond_col is not None:
-        cond = cond_col.replace(0, float("nan")).dropna()
-        cond_max = float(cond.max())  if not cond.empty else float("nan")
-        cond_p95 = float(np.nanpercentile(cond, 95)) if not cond.empty else float("nan")
+    # Condition number
+    cond = df["cov_condition_number"].replace(0, float("nan")).dropna()
+    if not cond.empty:
+        cond_max = float(cond.max())
+        cond_p95 = float(np.nanpercentile(cond, 95))
     else:
         cond_max = cond_p95 = float("nan")
 
-    # Inlier rate
-    inliers_col  = _col(stats, "num_inliers",  "n_inlier_observations")
-    obs_col      = _col(stats, "num_observations")
-    if inliers_col is not None and obs_col is not None:
-        obs_rows = stats[obs_col > 0]
-        if not obs_rows.empty:
-            inlier_rate = float((inliers_col[obs_col > 0] / obs_col[obs_col > 0]).mean())
-        else:
-            inlier_rate = float("nan")
+    # Inlier rate (frames that had observations)
+    obs_rows = df[df["n_inlier_observations"].notna()]
+    # Approximate: need num_observations too, use inlier count as proxy for activity
+    # Use n_inlier_observations directly; normalise against max (rough inlier rate proxy)
+    active = df[df["tracking_lost"] == 0]
+    if not active.empty and active["n_inlier_observations"].notna().any():
+        avg_inliers = float(active["n_inlier_observations"].mean())
     else:
-        inlier_rate = float("nan")
-
-    # Reprojection error from marker_projections.csv (inliers only when available)
-    reproj_mean = float("nan")
-    proj_path = run_dir / "marker_projections.csv"
-    if proj_path.exists():
-        proj = pd.read_csv(proj_path)
-        if not proj.empty:
-            if "error_dist" not in proj.columns:
-                ex = _col(proj, "error_x")
-                ey = _col(proj, "error_y")
-                if ex is not None and ey is not None:
-                    proj = proj.copy()
-                    proj["error_dist"] = np.sqrt(ex**2 + ey**2)
-            if "error_dist" in proj.columns:
-                outlier_col = _col(proj, "is_outlier")
-                if outlier_col is not None:
-                    inlier_proj = proj[~outlier_col.astype(bool)]
-                else:
-                    inlier_proj = proj
-                if not inlier_proj.empty:
-                    reproj_mean = float(inlier_proj["error_dist"].mean())
+        avg_inliers = float("nan")
 
     return {
         "n_frames":          n_frames,
@@ -163,36 +126,76 @@ def compute_metrics(run_dir: Path) -> dict | None:
         "nis_std":           nis_std,
         "cond_max":          cond_max,
         "cond_p95":          cond_p95,
-        "inlier_rate":       inlier_rate,
+        "avg_inliers":       avg_inliers,
         "tracking_lost_pct": tracking_lost_pct,
-        "reproj_error_mean": reproj_mean,
     }
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--base",    required=True,
-                    help="Base TOML config (must have [data] with all file paths)")
-    ap.add_argument("--binary",  default="optbuild/cli/posetrak",
-                    help="Path to posetrak binary  [default: optbuild/cli/posetrak]")
+    ap.add_argument("--session-db", required=True,
+                    help="Path to the posetrak session DB")
+    ap.add_argument("--config", required=True, metavar="CONFIG_ID",
+                    help="Base tracker_config ID (or unique prefix)")
+    ap.add_argument("--sequence", metavar="SEQ_ID", default=None,
+                    help="Pose observation sequence ID (default: from most recent run)")
+    ap.add_argument("--skeleton", metavar="SKEL_ID", default=None,
+                    help="Skeleton ID (default: from most recent run)")
+    ap.add_argument("--person-id", type=int, default=0,
+                    help="Person ID to track (default: 0)")
+    ap.add_argument("--binary", default="optbuild/cli/posetrak",
+                    help="Path to posetrak binary")
     ap.add_argument("--out-dir", default="/tmp/posetrak_sweep",
-                    help="Root directory for sweep outputs  [default: /tmp/posetrak_sweep]")
+                    help="Directory for per-run CSV output")
     args = ap.parse_args()
 
-    base_path = Path(args.base)
-    binary    = Path(args.binary)
-    out_dir   = Path(args.out_dir)
+    db_path  = Path(args.session_db)
+    binary   = Path(args.binary)
+    out_dir  = Path(args.out_dir)
 
-    if not base_path.exists():
-        print(f"error: base config not found: {base_path}", file=sys.stderr)
+    if not db_path.exists():
+        print(f"error: session DB not found: {db_path}", file=sys.stderr)
         return 1
     if not binary.exists():
         print(f"error: binary not found: {binary}", file=sys.stderr)
         return 1
 
-    with open(base_path, "rb") as fh:
-        base_cfg = tomllib.load(fh)
+    # Open session DB (Python layer handles migrations)
+    import sqlite3
+    sys.path.insert(0, str(Path(__file__).parents[1]))
+    from posetrak.db.db import open_session
+    from posetrak.db.manage_config import edit_config
+
+    session = open_session(db_path)
+    session.row_factory = sqlite3.Row
+
+    # Resolve base config ID prefix
+    row = session.execute(
+        "SELECT id FROM tracker_configs WHERE id LIKE ? ORDER BY created_at DESC LIMIT 1",
+        (args.config + "%",),
+    ).fetchone()
+    if row is None:
+        print(f"error: tracker_config not found: {args.config!r}", file=sys.stderr)
+        return 1
+    base_config_id = row["id"]
+    print(f"Base config : {base_config_id}")
+
+    # Resolve sequence and skeleton from most recent run if not supplied
+    sequence_id = args.sequence
+    skeleton_id = args.skeleton
+    if sequence_id is None or skeleton_id is None:
+        try:
+            base_run = resolve_base_run(session, base_config_id)
+            sequence_id = sequence_id or base_run["observation_sequence_id"]
+            skeleton_id = skeleton_id or base_run["skeleton_id"]
+        except ValueError as e:
+            print(f"error: {e}\n"
+                  "Provide --sequence and --skeleton explicitly.", file=sys.stderr)
+            return 1
+
+    print(f"Sequence    : {sequence_id}")
+    print(f"Skeleton    : {skeleton_id}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -201,9 +204,9 @@ def main() -> int:
     grid  = list(itertools.product(*param_values))
     total = len(grid)
 
-    print(f"Sweep: {total} runs  |  time range: {TIME_RANGE[0]}–{TIME_RANGE[1]} s")
-    print(f"Sweep params : {', '.join(f'{k}={v}' for k, v in SWEEP_GRID.items())}")
-    print(f"Fixed params : {', '.join(f'{k}={v}' for k, v in FIXED_PARAMS.items())}")
+    print(f"\nSweep: {total} runs  |  time range: {TIME_RANGE[0]}–{TIME_RANGE[1]} s")
+    print(f"Sweep  : {', '.join(f'{k}={v}' for k, v in SWEEP_GRID.items())}")
+    print(f"Fixed  : {', '.join(f'{k}={v}' for k, v in FIXED_PARAMS.items())}")
     print()
 
     records: list[dict] = []
@@ -212,65 +215,78 @@ def main() -> int:
         sweep_params = dict(zip(param_names, values))
         all_params   = {**sweep_params, **FIXED_PARAMS}
 
-        run_dir = out_dir / f"run_{idx:03d}"
-        run_dir.mkdir(exist_ok=True)
+        # Create child tracker_config row
+        child_id = edit_config(session, base_config_id, **all_params)
 
-        cfg = copy.deepcopy(base_cfg)
-
-        tracking = cfg.setdefault("tracking", {})
-        for k, v in all_params.items():
-            tracking[k] = v
-
-        output = cfg.setdefault("output", {})
-        output["directory"] = str(run_dir)
-        output.setdefault("export_tracking_results", True)
-        output.setdefault("export_statistics", True)
-
-        proc = cfg.setdefault("processing", {})
-        proc["start_time"] = float(TIME_RANGE[0])
-        proc["end_time"]   = float(TIME_RANGE[1])
-
-        toml_path = run_dir / "config.toml"
-        toml_path.write_text(write_toml(cfg))
+        run_out = out_dir / f"run_{idx:03d}"
+        run_out.mkdir(exist_ok=True)
 
         label = "  ".join(f"{k}={v:g}" for k, v in sweep_params.items())
         print(f"[{idx:3d}/{total}] {label}", end="  ", flush=True)
 
+        cmd = [
+            str(binary), "track",
+            "--session-db",    str(db_path),
+            "--sequence",      sequence_id,
+            "--skeleton",      skeleton_id,
+            "--tracker-config", child_id,
+            "--person-id",     str(args.person_id),
+            "--start-time",    str(TIME_RANGE[0]),
+            "--end-time",      str(TIME_RANGE[1]),
+            "--output-dir",    str(run_out),
+            "--quiet",
+        ]
+
         t0 = time.perf_counter()
         try:
-            proc_result = subprocess.run(
-                [str(binary), "track", str(toml_path)],
-                capture_output=True, text=True, timeout=180,
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             elapsed = time.perf_counter() - t0
         except subprocess.TimeoutExpired:
             print("TIMEOUT")
-            records.append({"run": idx, **sweep_params, **FIXED_PARAMS, "status": "TIMEOUT"})
+            records.append({"run": idx, **sweep_params, **FIXED_PARAMS,
+                             "config_id": child_id, "status": "TIMEOUT"})
             continue
 
-        if proc_result.returncode != 0:
+        if result.returncode != 0:
             print(f"FAILED ({elapsed:.1f}s)")
-            # Save stderr for diagnosis
-            (run_dir / "stderr.txt").write_text(proc_result.stderr)
-            records.append({"run": idx, **sweep_params, **FIXED_PARAMS, "status": "FAILED"})
+            (run_out / "stderr.txt").write_text(result.stderr)
+            records.append({"run": idx, **sweep_params, **FIXED_PARAMS,
+                             "config_id": child_id, "status": "FAILED"})
             continue
 
-        metrics = compute_metrics(run_dir)
+        # Parse tracking_run_id from stdout
+        m = re.search(r"tracking_run_id:\s*(\S+)", result.stdout)
+        if not m:
+            print(f"NO_RUN_ID ({elapsed:.1f}s)")
+            records.append({"run": idx, **sweep_params, **FIXED_PARAMS,
+                             "config_id": child_id, "status": "NO_RUN_ID"})
+            continue
+        run_id = m.group(1)
+
+        # Re-open connection (tracker wrote to the same DB)
+        session.close()
+        session = open_session(db_path)
+        session.row_factory = sqlite3.Row
+
+        metrics = compute_metrics(session, run_id)
         if metrics is None:
             print(f"NO_DATA ({elapsed:.1f}s)")
-            records.append({"run": idx, **sweep_params, **FIXED_PARAMS, "status": "NO_DATA"})
+            records.append({"run": idx, **sweep_params, **FIXED_PARAMS,
+                             "config_id": child_id, "run_id": run_id, "status": "NO_DATA"})
             continue
 
-        m = metrics
+        m2 = metrics
         print(
-            f"NIS={m['nis_mean']:.2f}±{m['nis_std']:.2f}  "
-            f"cond_p95={m['cond_p95']:.1e}  "
-            f"inliers={m['inlier_rate']:.0%}  "
-            f"reproj={m['reproj_error_mean']:.1f}px  "
-            f"lost={m['tracking_lost_pct']:.1f}%  "
+            f"NIS={m2['nis_mean']:.2f}±{m2['nis_std']:.2f}  "
+            f"cond_p95={m2['cond_p95']:.1e}  "
+            f"inliers={m2['avg_inliers']:.0f}/frame  "
+            f"lost={m2['tracking_lost_pct']:.1f}%  "
             f"({elapsed:.1f}s)"
         )
-        records.append({"run": idx, **sweep_params, **FIXED_PARAMS, "status": "OK", **m})
+        records.append({"run": idx, **sweep_params, **FIXED_PARAMS,
+                         "config_id": child_id, "run_id": run_id, "status": "OK", **m2})
+
+    session.close()
 
     # -----------------------------------------------------------------------
     # Summary
@@ -281,14 +297,12 @@ def main() -> int:
 
     ok = df[df["status"] == "OK"].copy()
     if ok.empty:
-        print("\nNo successful runs — check stderr.txt files in individual run dirs.")
+        print("\nNo successful runs.")
         return 1
 
-    # Score: want NIS/dof close to 1, low tracking_lost, good inliers, sane condition
     ok["score"] = (
         (ok["nis_mean"] - 1.0).abs()
         + 0.5  * (ok["tracking_lost_pct"] / 100.0)
-        - 0.2  * ok["inlier_rate"].fillna(0)
         + ok["cond_p95"].apply(
             lambda x: max(0.0, (np.log10(x) - 6) * 0.05) if np.isfinite(x) and x > 0 else 0.0
         )
@@ -301,25 +315,18 @@ def main() -> int:
         f"Results: {len(ok)}/{total} successful"
         + (f", {failed} failed/timeout" if failed else "")
     )
-    print("Ranked by |NIS/dof − 1| + penalties for tracking loss, low inliers, high condition number")
+    print("Ranked by |NIS/dof − 1| + penalty for tracking loss and high condition number")
     print(f"{'─'*110}")
 
     display_cols = (
         param_names
         + list(FIXED_PARAMS.keys())
-        + ["nis_mean", "nis_std", "cond_p95", "inlier_rate",
-           "reproj_error_mean", "tracking_lost_pct", "score"]
+        + ["nis_mean", "nis_std", "cond_p95", "avg_inliers",
+           "tracking_lost_pct", "score", "run_id"]
     )
     display_cols = [c for c in display_cols if c in ok.columns]
-
-    fmt = {
-        "nis_mean": "{:.3f}", "nis_std": "{:.3f}",
-        "cond_p95": "{:.2e}", "inlier_rate": "{:.2f}",
-        "reproj_error_mean": "{:.1f}", "tracking_lost_pct": "{:.1f}",
-        "score": "{:.3f}",
-    }
     print(ok[display_cols].head(15).to_string(index=False, float_format=lambda x: f"{x:.3g}"))
-    print(f"\nFull results: {summary_path}")
+    print(f"\nFull results + run IDs: {summary_path}")
 
     return 0
 

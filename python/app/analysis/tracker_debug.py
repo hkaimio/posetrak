@@ -11,7 +11,7 @@ def _():
     import numpy as np
     from pathlib import Path
     import os
-    return Path, mo, np, os, pd
+    return Path, mo, os, pd
 
 
 @app.cell(hide_code=True)
@@ -114,6 +114,111 @@ def _(db_path_input, mo, source_selector):
     )
     run_selector if _is_db else mo.md("")
     return (run_selector,)
+
+
+@app.cell(hide_code=True)
+def _(db_path_input, mo, run_selector, source_selector):
+    import sqlite3 as _sqlite3_ri
+    from pathlib import Path as _Path_ri
+
+    _is_db = source_selector.value == "db"
+    _run_id = run_selector.value if _is_db else None
+    _db_path = db_path_input.value.strip() if _is_db else ""
+
+    mo.stop(not _is_db or not _run_id or not _db_path or not _Path_ri(_db_path).exists())
+
+    try:
+        _conn = _sqlite3_ri.connect(_db_path, check_same_thread=False)
+        _conn.row_factory = _sqlite3_ri.Row
+        _run = _conn.execute(
+            """
+            SELECT tr.id           AS run_id,
+                   tr.ran_at,
+                   tr.posetrak_version,
+                   tr.observation_sequence_id,
+                   tr.tracker_config_id,
+                   s.name          AS skeleton_name,
+                   s.id            AS skeleton_id,
+                   tc.name         AS config_name,
+                   tc.alpha, tc.beta, tc.kappa,
+                   tc.process_noise_std,
+                   tc.measurement_noise_std,
+                   tc.outlier_threshold,
+                   tc.tracker_fps,
+                   tc.ik_max_iterations, tc.ik_tolerance,
+                   tc.init_position_std, tc.init_orientation_std,
+                   tc.init_joint_std, tc.init_velocity_std,
+                   tc.min_cameras_for_init
+            FROM tracking_runs tr
+            LEFT JOIN skeletons s ON s.id = tr.skeleton_id
+            LEFT JOIN tracker_configs tc ON tc.id = tr.tracker_config_id
+            WHERE tr.id = ?
+            """,
+            (_run_id,),
+        ).fetchone()
+        # process_noise_vel_std added in schema v6; query separately to handle old DBs
+        _vel_std = None
+        try:
+            _row2 = _conn.execute(
+                "SELECT process_noise_vel_std FROM tracker_configs WHERE id = ?",
+                (_run["tracker_config_id"],),
+            ).fetchone()
+            if _row2:
+                _vel_std = _row2[0]
+        except Exception:
+            pass
+        _conn.close()
+
+        def _fmt(v):
+            if v is None:
+                return "—"
+            if isinstance(v, float):
+                return f"{v:g}"
+            return str(v)
+
+        def _md_table(rows):
+            col1, col2 = list(rows[0].keys())
+            lines = [f"| {col1} | {col2} |", "|:---|:---|"]
+            for r in rows:
+                lines.append(f"| {r[col1]} | {r[col2]} |")
+            return "\n".join(lines)
+
+        _run_rows = [
+            {"Field": "Run ID", "Value": _run["run_id"]},
+            {"Field": "Ran at", "Value": _run["ran_at"]},
+            {"Field": "Version", "Value": _fmt(_run["posetrak_version"])},
+            {"Field": "Sequence ID", "Value": _run["observation_sequence_id"]},
+            {"Field": "Skeleton", "Value": f"{_run['skeleton_name']}  ({_run['skeleton_id'][:8]}…)"},
+        ]
+        _cfg_rows = [
+            {"Parameter": "config name", "Value": _fmt(_run["config_name"])},
+            {"Parameter": "config ID", "Value": f"{_run['tracker_config_id']}"},
+            {"Parameter": "alpha / beta / kappa", "Value": f"{_fmt(_run['alpha'])} / {_fmt(_run['beta'])} / {_fmt(_run['kappa'])}"},
+            {"Parameter": "process_noise_std", "Value": _fmt(_run["process_noise_std"])},
+            {"Parameter": "process_noise_vel_std", "Value": _fmt(_vel_std) + (" (= pos)" if _vel_std is None else "")},
+            {"Parameter": "measurement_noise_std", "Value": _fmt(_run["measurement_noise_std"])},
+            {"Parameter": "outlier_threshold", "Value": _fmt(_run["outlier_threshold"])},
+            {"Parameter": "tracker_fps", "Value": _fmt(_run["tracker_fps"])},
+            {"Parameter": "ik_max_iterations", "Value": _fmt(_run["ik_max_iterations"])},
+            {"Parameter": "ik_tolerance", "Value": _fmt(_run["ik_tolerance"])},
+            {"Parameter": "init_position_std", "Value": _fmt(_run["init_position_std"])},
+            {"Parameter": "init_orientation_std", "Value": _fmt(_run["init_orientation_std"])},
+            {"Parameter": "init_joint_std", "Value": _fmt(_run["init_joint_std"])},
+            {"Parameter": "init_velocity_std", "Value": _fmt(_run["init_velocity_std"])},
+            {"Parameter": "min_cameras_for_init", "Value": _fmt(_run["min_cameras_for_init"])}
+
+        ]
+        _ui = mo.md(
+            "### Run info\n\n"
+            + _md_table(_run_rows)
+            + "\n\n### Tracker config\n\n"
+            + _md_table(_cfg_rows)
+        )
+    except Exception as _e:
+        _ui = mo.callout(mo.md(f"Could not load run info: `{_e}`"), kind="warn")
+
+    _ui
+    return
 
 
 @app.cell
@@ -496,7 +601,7 @@ def _(mo, px, tracking_stats):
 
 
 @app.cell(hide_code=True)
-def _(mo, np, px, tracking_stats):
+def _(mo, px, tracking_stats):
     mo.stop(tracking_stats.empty
             or "nis_value" not in tracking_stats.columns
             or "nis_dof" not in tracking_stats.columns
@@ -516,6 +621,7 @@ def _(mo, np, px, tracking_stats):
     _nis_plot.add_hline(y=1.0, line_dash="dot", line_color="gray", line_width=1, opacity=0.7)
     _nis_plot.update_layout(hovermode="x unified")
     _nis_plot
+    return
 
 
 @app.cell(hide_code=True)
@@ -533,6 +639,7 @@ def _(mo, px, tracking_stats):
     )
     _cond_plot.update_layout(hovermode="x unified")
     _cond_plot
+    return
 
 
 @app.cell
@@ -694,6 +801,7 @@ def _(cov_diag_df, joint_name_selector, joint_type_map, mo, px):
     )
     _cov_plot.update_layout(hovermode="x unified")
     _cov_plot
+    return
 
 
 @app.cell

@@ -114,12 +114,18 @@ def load_tracking_run_data(
         layout = SkeletonLayout(skeleton_yaml)
 
         is_smoothed_val = 1 if smoothed else 0
+        # NIS is only computed during the forward pass (is_smoothed=0); join to
+        # forward rows so NIS is always available even when loading smoothed state.
         rows = conn.execute(
-            "SELECT tracker_step, timestamp_s, tracking_lost, "
-            "n_inlier_observations, cov_condition_number, nis_value, nis_dof, state, cov_diag "
-            "FROM tracking_results "
-            "WHERE run_id = ? AND person_id = ? AND is_smoothed = ? "
-            "ORDER BY tracker_step",
+            "SELECT tr.tracker_step, tr.timestamp_s, tr.tracking_lost, "
+            "tr.n_inlier_observations, tr.cov_condition_number, "
+            "fwd.nis_value, fwd.nis_dof, tr.state, tr.cov_diag "
+            "FROM tracking_results tr "
+            "LEFT JOIN tracking_results fwd "
+            "  ON fwd.run_id = tr.run_id AND fwd.person_id = tr.person_id "
+            "  AND fwd.tracker_step = tr.tracker_step AND fwd.is_smoothed = 0 "
+            "WHERE tr.run_id = ? AND tr.person_id = ? AND tr.is_smoothed = ? "
+            "ORDER BY tr.tracker_step",
             (run_id, person_id, is_smoothed_val),
         ).fetchall()
 

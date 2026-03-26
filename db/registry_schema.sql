@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     beta                   REAL,
     kappa                  REAL,
     process_noise_std      REAL,
+    process_noise_vel_std  REAL,
     measurement_noise_std  REAL,
     outlier_threshold      REAL,
     tracker_fps            REAL,

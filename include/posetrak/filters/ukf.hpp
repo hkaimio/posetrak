@@ -161,6 +161,18 @@ class UnscentedKalmanFilter {
     void enable_calibration_mode(double prismatic_noise_std = 0.0001);
 
     /**
+     * @brief Set a separate process noise std for velocity DOFs.
+     *
+     * When set, the position/angle block uses the original process_noise_std and
+     * the velocity block uses this value.  Call before the first predict() step.
+     *
+     * @param vel_noise_std Sigma for velocity DOFs (rad/s or m/s per sqrt(s)).
+     *        Values larger than process_noise_std allow velocities to adapt quickly
+     *        while keeping angle estimates tightly constrained.
+     */
+    void set_vel_noise_std(double vel_noise_std);
+
+    /**
      * @brief Set current frame number for debug exports
      * @param frame_num Frame number
      */
@@ -333,7 +345,8 @@ class UnscentedKalmanFilter {
     ConstantVelocityModel process_model_;           ///< Process model
 
     // Calibration mode
-    double base_noise_std_;                ///< Base process noise std stored for rebuild
+    double base_noise_std_;                ///< Process noise std for position/angle block
+    double vel_noise_std_;                 ///< Process noise std for velocity block
     bool calibration_mode_ = false;        ///< Whether prismatic DOFs have active process noise
     double prismatic_noise_std_ = 0.0001;  ///< Sigma for prismatic DOFs in calibration mode
     void rebuild_process_noise();          ///< Rebuild process_noise_ matrix with per-DOF values

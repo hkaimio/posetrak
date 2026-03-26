@@ -449,6 +449,7 @@ def test_session_v2_migrates_to_v3(tmp_path):
         CREATE TABLE IF NOT EXISTS tracking_run_persons (run_id TEXT NOT NULL, person_id INTEGER NOT NULL, skeleton_id TEXT NOT NULL, PRIMARY KEY (run_id, person_id));
         CREATE TABLE IF NOT EXISTS tracking_results (run_id TEXT NOT NULL, person_id INTEGER NOT NULL, tracker_step INTEGER NOT NULL, is_smoothed INTEGER NOT NULL DEFAULT 0, timestamp_s REAL NOT NULL, tracking_lost INTEGER NOT NULL DEFAULT 0, n_inlier_observations INTEGER, cov_condition_number REAL, state BLOB NOT NULL, cov_diag BLOB NOT NULL, PRIMARY KEY (run_id, person_id, tracker_step, is_smoothed));
         CREATE TABLE IF NOT EXISTS tracking_obs_results (run_id TEXT NOT NULL, person_id INTEGER NOT NULL, tracker_step INTEGER NOT NULL, obs_blob BLOB NOT NULL, PRIMARY KEY (run_id, person_id, tracker_step));
+        CREATE TABLE IF NOT EXISTS tracker_configs (id TEXT PRIMARY KEY, name TEXT NOT NULL, parent_id TEXT REFERENCES tracker_configs(id), created_at TEXT NOT NULL, alpha REAL, beta REAL, kappa REAL, process_noise_std REAL, measurement_noise_std REAL, outlier_threshold REAL, tracker_fps REAL, ik_max_iterations INTEGER, ik_tolerance REAL, init_position_std REAL, init_orientation_std REAL, init_joint_std REAL, init_velocity_std REAL, min_cameras_for_init INTEGER, notes TEXT);
         PRAGMA user_version = 2;
     """)
     conn.close()

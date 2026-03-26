@@ -18,8 +18,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 2
-SESSION_SCHEMA_VERSION: Final[int] = 5
+REGISTRY_SCHEMA_VERSION: Final[int] = 3
+SESSION_SCHEMA_VERSION: Final[int] = 6
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -225,6 +225,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
     actual = get_schema_version(conn)
     if actual == 1:
         _migrate_registry_v1_to_v2(conn)
+        actual = 2
+    if actual == 2:
+        _migrate_registry_v2_to_v3(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -278,6 +281,20 @@ def _migrate_registry_v1_to_v2(conn: sqlite3.Connection) -> None:
     """
     sql = (_DB_DIR / "migrations" / "001_registry_intrinsics.sql").read_text(encoding="utf-8")
     conn.executescript(sql)
+
+
+def _migrate_registry_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 2 to 3.
+
+    v3 adds process_noise_vel_std to tracker_configs. Existing rows receive NULL
+    (fall back to using process_noise_std for both position and velocity blocks).
+    """
+    conn.executescript("""
+        BEGIN;
+        ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_std REAL;
+        PRAGMA user_version = 3;
+        COMMIT;
+    """)
 
 
 def _migrate_session_v1_to_v2(conn: sqlite3.Connection) -> None:
@@ -345,6 +362,19 @@ def _migrate_session_v4_to_v5(conn: sqlite3.Connection) -> None:
     conn.executescript(sql)
 
 
+def _migrate_session_v5_to_v6(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 5 to 6.
+
+    v6 adds process_noise_vel_std to tracker_configs so the velocity DOF
+    process noise can be tuned independently from the position/angle DOF noise.
+    Existing rows receive NULL (fall back to process_noise_std for both blocks).
+    """
+    sql = (_DB_DIR / "migrations" / "005_tracker_configs_vel_noise.sql").read_text(
+        encoding="utf-8"
+    )
+    conn.executescript(sql)
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -380,6 +410,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 4
     if actual == 4:
         _migrate_session_v4_to_v5(conn)
+        actual = 5
+    if actual == 5:
+        _migrate_session_v5_to_v6(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

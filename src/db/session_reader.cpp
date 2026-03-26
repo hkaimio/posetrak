@@ -149,7 +149,7 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
               "SELECT alpha, beta, kappa, process_noise_std, measurement_noise_std,"
               "       outlier_threshold, tracker_fps, ik_max_iterations, ik_tolerance,"
               "       init_position_std, init_orientation_std, init_joint_std, init_velocity_std,"
-              "       min_cameras_for_init"
+              "       min_cameras_for_init, process_noise_vel_std"
               " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -161,7 +161,7 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     // Columns: 0=alpha, 1=beta, 2=kappa, 3=process_noise_std, 4=measurement_noise_std,
     //          5=outlier_threshold, 6=tracker_fps, 7=ik_max_iterations, 8=ik_tolerance,
     //          9=init_position_std, 10=init_orientation_std, 11=init_joint_std,
-    //         12=init_velocity_std, 13=min_cameras_for_init
+    //         12=init_velocity_std, 13=min_cameras_for_init, 14=process_noise_vel_std
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -170,6 +170,10 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     auto apply_int = [&](int col, int& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
             field = sqlite3_column_int(stmt.ptr, col);
+    };
+    auto apply_opt_real = [&](int col, std::optional<double>& field) {
+        if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
+            field = sqlite3_column_double(stmt.ptr, col);
     };
 
     apply_real(0, out.tracker.ukf_alpha);
@@ -186,6 +190,7 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(11, out.tracker.init_joint_std);
     apply_real(12, out.tracker.init_velocity_std);
     apply_int(13, out.tracker.min_cameras_for_init);
+    apply_opt_real(14, out.tracker.process_noise_vel_std);
 
     return out;
 }

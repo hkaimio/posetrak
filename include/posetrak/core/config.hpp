@@ -76,7 +76,9 @@ struct HierarchicalConfig {
  */
 struct TrackerConfig {
     // UKF parameters
-    double process_noise_std = 0.1;      ///< Process noise std deviation
+    double process_noise_std = 0.1;  ///< Process noise std for angle/position DOFs
+    std::optional<double>
+        process_noise_vel_std;  ///< Process noise std for velocity DOFs (nullopt = same as pos)
     double measurement_noise_std = 5.0;  ///< Measurement noise std (pixels)
     double outlier_threshold = 5.991;    ///< Chi-squared threshold (95% for 2-DOF)
 
@@ -121,6 +123,8 @@ struct TrackerAppConfig {
 
     // === Tracking parameters ===
     double process_noise_std = 0.5;
+    std::optional<double>
+        process_noise_vel_std;  ///< Velocity DOF noise std (nullopt = same as pos)
     double measurement_noise_std = 2.0;
     double outlier_threshold = 4.0;
 
@@ -191,6 +195,7 @@ struct TrackerAppConfig {
 inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     TrackerConfig tc;
     tc.process_noise_std = process_noise_std;
+    tc.process_noise_vel_std = process_noise_vel_std;
     tc.measurement_noise_std = measurement_noise_std;
     tc.outlier_threshold = outlier_threshold;
     tc.ukf_alpha = ukf_alpha;

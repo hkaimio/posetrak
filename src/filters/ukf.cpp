@@ -68,7 +68,8 @@ UnscentedKalmanFilter::UnscentedKalmanFilter(std::shared_ptr<const SkeletonLayou
           Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim())),
       sigma_gen_(layout, alpha, beta, kappa),
       process_model_(layout),
-      base_noise_std_(process_noise_std) {
+      base_noise_std_(process_noise_std),
+      vel_noise_std_(process_noise_std) {
     // Build per-DOF process noise (prismatic DOFs start frozen; calibration mode activates them)
     rebuild_process_noise();
 
@@ -82,10 +83,17 @@ void UnscentedKalmanFilter::rebuild_process_noise() {
     int const root_n = layout_->root_error_dof_count();
     int const jac = layout_->joint_active_dof_count();
     int const active_dof = root_n + jac;
-    double const base_var = base_noise_std_ * base_noise_std_;
+    double const pos_var = base_noise_std_ * base_noise_std_;
+    double const vel_var = vel_noise_std_ * vel_noise_std_;
     double const pris_var = calibration_mode_ ? prismatic_noise_std_ * prismatic_noise_std_ : 0.0;
 
-    process_noise_ = base_var * Eigen::MatrixXd::Identity(n, n);
+    process_noise_.setZero(n, n);
+    // Position/angle block (first active_dof dimensions)
+    process_noise_.topLeftCorner(active_dof, active_dof) =
+        pos_var * Eigen::MatrixXd::Identity(active_dof, active_dof);
+    // Velocity block (second active_dof dimensions)
+    process_noise_.bottomRightCorner(active_dof, active_dof) =
+        vel_var * Eigen::MatrixXd::Identity(active_dof, active_dof);
 
     // Override prismatic DOF diagonals (frozen at zero unless calibration mode)
     for (JointDesc const& j : layout_->joints()) {
@@ -99,6 +107,11 @@ void UnscentedKalmanFilter::rebuild_process_noise() {
             process_noise_(vel_idx, vel_idx) = pris_var;
         }
     }
+}
+
+void UnscentedKalmanFilter::set_vel_noise_std(double vel_noise_std) {
+    vel_noise_std_ = vel_noise_std;
+    rebuild_process_noise();
 }
 
 void UnscentedKalmanFilter::enable_calibration_mode(double prismatic_noise_std) {

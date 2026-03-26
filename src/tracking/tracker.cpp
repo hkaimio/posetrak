@@ -289,6 +289,8 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
                                  : SkeletonLayout::from_groups(skeleton_, groups);
     ukf_ = std::make_unique<UnscentedKalmanFilter>(layout, config_.process_noise_std, alpha, beta,
                                                    kappa);
+    if (config_.process_noise_vel_std)
+        ukf_->set_vel_noise_std(*config_.process_noise_vel_std);
 
     // Enable calibration mode if requested (prismatic DOFs get small process noise)
     fmt::print("calibration_mode={}, prismatic_process_noise_std={}\n", config_.calibration_mode,

@@ -114,6 +114,10 @@ void UnscentedKalmanFilter::set_vel_noise_std(double vel_noise_std) {
     rebuild_process_noise();
 }
 
+void UnscentedKalmanFilter::set_vel_half_life(double half_life_s) {
+    vel_half_life_s_ = half_life_s;
+}
+
 void UnscentedKalmanFilter::enable_calibration_mode(double prismatic_noise_std) {
     calibration_mode_ = true;
     prismatic_noise_std_ = prismatic_noise_std;
@@ -265,6 +269,18 @@ PredictResult UnscentedKalmanFilter::predict(double dt) {
 
     for (auto const& sigma_state : sigma_points) {
         propagated_points.push_back(process_model_.propagate(sigma_state, dt));
+    }
+
+    // Apply exponential velocity decay to prevent unbounded covariance growth.
+    // Velocities are not directly observable (H depends only on positions/angles),
+    // so without damping, velocity variance accumulates every predict() step.
+    if (vel_half_life_s_ > 0.0) {
+        double const alpha = std::pow(0.5, dt / vel_half_life_s_);
+        for (auto& sp : propagated_points) {
+            sp.set_root_velocity(alpha * sp.root_velocity());
+            sp.set_root_angular_velocity(alpha * sp.root_angular_velocity());
+            sp.set_joint_velocities(alpha * sp.joint_velocities());
+        }
     }
 
     // [Child filter] Root pose is externally supplied — overwrite process-model root drift.

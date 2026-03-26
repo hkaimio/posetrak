@@ -173,6 +173,19 @@ class UnscentedKalmanFilter {
     void set_vel_noise_std(double vel_noise_std);
 
     /**
+     * @brief Set the velocity half-life for exponential velocity damping.
+     *
+     * Applies a per-frame decay α = pow(0.5, dt / half_life_s) to all velocity
+     * components of each propagated sigma point.  This caps steady-state velocity
+     * variance at σ_vel² · half_life_s / (2·ln2) instead of growing unboundedly,
+     * preventing covariance ill-conditioning over long runs.
+     *
+     * @param half_life_s  Time (seconds) for velocity to decay to half its value.
+     *        Practical range: 0.25–2.0 s.  0.0 = no damping (default behaviour).
+     */
+    void set_vel_half_life(double half_life_s);
+
+    /**
      * @brief Set current frame number for debug exports
      * @param frame_num Frame number
      */
@@ -347,6 +360,7 @@ class UnscentedKalmanFilter {
     // Calibration mode
     double base_noise_std_;                ///< Process noise std for position/angle block
     double vel_noise_std_;                 ///< Process noise std for velocity block
+    double vel_half_life_s_ = 0.0;         ///< Velocity decay half-life in seconds (0 = no decay)
     bool calibration_mode_ = false;        ///< Whether prismatic DOFs have active process noise
     double prismatic_noise_std_ = 0.0001;  ///< Sigma for prismatic DOFs in calibration mode
     void rebuild_process_noise();          ///< Rebuild process_noise_ matrix with per-DOF values

@@ -64,12 +64,12 @@ def create_config_from_toml(
             "INSERT INTO tracker_configs "
             "(id, name, parent_id, created_at, "
             "alpha, beta, kappa, "
-            "process_noise_std, process_noise_vel_std, measurement_noise_std, outlier_threshold, "
+            "process_noise_std, process_noise_vel_std, velocity_half_life_s, measurement_noise_std, outlier_threshold, "
             "tracker_fps, "
             "ik_max_iterations, ik_tolerance, "
             "init_position_std, init_orientation_std, init_joint_std, init_velocity_std, "
             "min_cameras_for_init, notes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 config_id,
                 name,
@@ -80,6 +80,7 @@ def create_config_from_toml(
                 ukf.get("kappa"),
                 tracking.get("process_noise_std"),
                 tracking.get("process_noise_vel_std"),
+                tracking.get("velocity_half_life_s"),
                 tracking.get("measurement_noise_std"),
                 tracking.get("outlier_threshold"),
                 processing.get("tracker_fps"),
@@ -106,6 +107,7 @@ def edit_config(
     kappa: float | None = None,
     process_noise_std: float | None = None,
     process_noise_vel_std: float | None = None,
+    velocity_half_life_s: float | None = None,
     measurement_noise_std: float | None = None,
     outlier_threshold: float | None = None,
     tracker_fps: float | None = None,
@@ -193,12 +195,12 @@ def edit_config(
             "INSERT INTO tracker_configs "
             "(id, name, parent_id, created_at, "
             "alpha, beta, kappa, "
-            "process_noise_std, process_noise_vel_std, measurement_noise_std, outlier_threshold, "
+            "process_noise_std, process_noise_vel_std, velocity_half_life_s, measurement_noise_std, outlier_threshold, "
             "tracker_fps, "
             "ik_max_iterations, ik_tolerance, "
             "init_position_std, init_orientation_std, init_joint_std, init_velocity_std, "
             "min_cameras_for_init, notes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 new_id,
                 row["name"],
@@ -209,6 +211,7 @@ def edit_config(
                 _pick(kappa, "kappa"),
                 _pick(process_noise_std, "process_noise_std"),
                 _pick(process_noise_vel_std, "process_noise_vel_std"),
+                _pick(velocity_half_life_s, "velocity_half_life_s"),
                 _pick(measurement_noise_std, "measurement_noise_std"),
                 _pick(outlier_threshold, "outlier_threshold"),
                 _pick(tracker_fps, "tracker_fps"),

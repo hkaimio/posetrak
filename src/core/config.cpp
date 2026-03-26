@@ -62,6 +62,8 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
         result.process_noise_std = tracking["process_noise_std"].value_or(0.5);
         if (auto v = tracking["process_noise_vel_std"].value<double>())
             result.process_noise_vel_std = *v;
+        if (auto v = tracking["velocity_half_life_s"].value<double>())
+            result.velocity_half_life_s = *v;
         result.measurement_noise_std = tracking["measurement_noise_std"].value_or(2.0);
         result.outlier_threshold = tracking["outlier_threshold"].value_or(4.0);
 

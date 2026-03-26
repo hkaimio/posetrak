@@ -18,8 +18,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 3
-SESSION_SCHEMA_VERSION: Final[int] = 6
+REGISTRY_SCHEMA_VERSION: Final[int] = 4
+SESSION_SCHEMA_VERSION: Final[int] = 7
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -228,6 +228,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 2
     if actual == 2:
         _migrate_registry_v2_to_v3(conn)
+        actual = 3
+    if actual == 3:
+        _migrate_registry_v3_to_v4(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -293,6 +296,20 @@ def _migrate_registry_v2_to_v3(conn: sqlite3.Connection) -> None:
         BEGIN;
         ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_std REAL;
         PRAGMA user_version = 3;
+        COMMIT;
+    """)
+
+
+def _migrate_registry_v3_to_v4(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 3 to 4.
+
+    v4 adds velocity_half_life_s to tracker_configs for exponential velocity
+    damping. NULL = no damping (backward compatible).
+    """
+    conn.executescript("""
+        BEGIN;
+        ALTER TABLE tracker_configs ADD COLUMN velocity_half_life_s REAL;
+        PRAGMA user_version = 4;
         COMMIT;
     """)
 
@@ -375,6 +392,18 @@ def _migrate_session_v5_to_v6(conn: sqlite3.Connection) -> None:
     conn.executescript(sql)
 
 
+def _migrate_session_v6_to_v7(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 6 to 7.
+
+    v7 adds velocity_half_life_s to tracker_configs for exponential velocity
+    damping. NULL = no damping (backward compatible).
+    """
+    sql = (_DB_DIR / "migrations" / "006_tracker_configs_vel_halflife.sql").read_text(
+        encoding="utf-8"
+    )
+    conn.executescript(sql)
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -413,6 +442,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 5
     if actual == 5:
         _migrate_session_v5_to_v6(conn)
+        actual = 6
+    if actual == 6:
+        _migrate_session_v6_to_v7(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

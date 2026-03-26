@@ -918,6 +918,7 @@ def _cmd_config_edit(args: argparse.Namespace) -> int:
                 kappa=args.kappa,
                 process_noise_std=args.process_noise_std,
                 process_noise_vel_std=args.process_noise_vel_std,
+                velocity_half_life_s=args.velocity_half_life_s,
                 measurement_noise_std=args.measurement_noise_std,
                 outlier_threshold=args.outlier_threshold,
                 tracker_fps=args.tracker_fps,
@@ -945,6 +946,7 @@ def _cmd_config_edit(args: argparse.Namespace) -> int:
                 kappa=args.kappa,
                 process_noise_std=args.process_noise_std,
                 process_noise_vel_std=args.process_noise_vel_std,
+                velocity_half_life_s=args.velocity_half_life_s,
                 measurement_noise_std=args.measurement_noise_std,
                 outlier_threshold=args.outlier_threshold,
                 tracker_fps=args.tracker_fps,
@@ -1784,6 +1786,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    dest="process_noise_std")
     p.add_argument("--process-noise-vel-std", type=float, default=None,
                    dest="process_noise_vel_std")
+    p.add_argument("--velocity-half-life-s", type=float, default=None,
+                   dest="velocity_half_life_s")
     p.add_argument("--measurement-noise-std", type=float, default=None,
                    dest="measurement_noise_std")
     p.add_argument("--outlier-threshold", type=float, default=None,

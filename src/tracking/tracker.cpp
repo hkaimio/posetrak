@@ -417,8 +417,6 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
 
 TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observations, double dt,
                                         double timestamp) {
-    fmt::print("\n=== Tracking frame at timestamp {:.6f} ===\n", timestamp);
-
     // Step 1: Predict
     auto predict_result = ukf_->predict(dt);
     State const prior_state = ukf_->state();

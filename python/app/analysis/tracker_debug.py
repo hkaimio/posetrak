@@ -497,7 +497,10 @@ def _(mo, px, tracking_stats):
 
 @app.cell(hide_code=True)
 def _(mo, np, px, tracking_stats):
-    mo.stop(tracking_stats.empty or tracking_stats["nis_value"].isna().all())
+    mo.stop(tracking_stats.empty
+            or "nis_value" not in tracking_stats.columns
+            or "nis_dof" not in tracking_stats.columns
+            or tracking_stats["nis_value"].isna().all())
     _nis_df = tracking_stats[["frame", "nis_value", "nis_dof"]].dropna()
     # Normalised NIS = NIS / dof — expected value is 1.0 when filter is consistent
     _nis_df = _nis_df.copy()

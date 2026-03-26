@@ -1418,11 +1418,9 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
             }
         }
 
-        // Flush result writer and report run ID
+        // Flush result writer and report run ID (always printed for machine parsing)
         result_writer.flush();
-        if (!quiet) {
-            fmt::print("tracking_run_id: {}\n", result_writer.run_id());
-        }
+        fmt::print("tracking_run_id: {}\n", result_writer.run_id());
 
         // Write statistics
         stats_tracker->write_frame_stats(out_dir / "tracking_stats.csv");

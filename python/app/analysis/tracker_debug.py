@@ -156,15 +156,19 @@ def _(db_path_input, mo, run_selector, source_selector):
             """,
             (_run_id,),
         ).fetchone()
-        # process_noise_vel_std added in schema v6; query separately to handle old DBs
+        # process_noise_vel_std / velocity_half_life_s added in later schema versions;
+        # query separately to handle old DBs that predate these columns.
         _vel_std = None
+        _vel_half_life = None
         try:
             _row2 = _conn.execute(
-                "SELECT process_noise_vel_std FROM tracker_configs WHERE id = ?",
+                "SELECT process_noise_vel_std, velocity_half_life_s"
+                " FROM tracker_configs WHERE id = ?",
                 (_run["tracker_config_id"],),
             ).fetchone()
             if _row2:
                 _vel_std = _row2[0]
+                _vel_half_life = _row2[1]
         except Exception:
             pass
         _conn.close()
@@ -196,6 +200,7 @@ def _(db_path_input, mo, run_selector, source_selector):
             {"Parameter": "alpha / beta / kappa", "Value": f"{_fmt(_run['alpha'])} / {_fmt(_run['beta'])} / {_fmt(_run['kappa'])}"},
             {"Parameter": "process_noise_std", "Value": _fmt(_run["process_noise_std"])},
             {"Parameter": "process_noise_vel_std", "Value": _fmt(_vel_std) + (" (= pos)" if _vel_std is None else "")},
+            {"Parameter": "velocity_half_life_s", "Value": _fmt(_vel_half_life) + (" (no decay)" if _vel_half_life is None else " s")},
             {"Parameter": "measurement_noise_std", "Value": _fmt(_run["measurement_noise_std"])},
             {"Parameter": "outlier_threshold", "Value": _fmt(_run["outlier_threshold"])},
             {"Parameter": "tracker_fps", "Value": _fmt(_run["tracker_fps"])},

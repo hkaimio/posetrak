@@ -67,7 +67,7 @@ _TOOLS_DIR = Path(__file__).resolve().parent
 class Person:
     name: str
     person_id: int
-    skeleton_path: Path
+    skeleton: str   # file path to YAML, or skeleton ID / prefix already in the DB
 
 
 # ---------------------------------------------------------------------------
@@ -186,8 +186,8 @@ def main() -> int:
     ap.add_argument(
         "--person", nargs=3, action="append", metavar=("NAME", "PERSON_ID", "SKELETON"),
         dest="persons", required=True,
-        help="Performer: name, person_id (int), path to skeleton YAML. "
-             "Repeat for multiple performers.",
+        help="Performer: name, person_id (int), skeleton (YAML file path or "
+             "skeleton ID/prefix already in the DB). Repeat for multiple performers.",
     )
     # Tracker config
     ap.add_argument("--tracker-config", default=None, metavar="ID",
@@ -234,14 +234,9 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     persons = [
-        Person(name=p[0], person_id=int(p[1]), skeleton_path=Path(p[2]).resolve())
+        Person(name=p[0], person_id=int(p[1]), skeleton=p[2])
         for p in args.persons
     ]
-    for p in persons:
-        if not p.skeleton_path.exists():
-            print(f"error: skeleton not found for {p.name}: {p.skeleton_path}",
-                  file=sys.stderr)
-            return 1
 
     # ------------------------------------------------------------------
     # Open session DB
@@ -250,16 +245,26 @@ def main() -> int:
     db.row_factory = sqlite3.Row
 
     # ------------------------------------------------------------------
-    # Import skeletons (idempotent — same YAML → same SHA-256 ID)
+    # Resolve skeletons — either import from YAML or look up existing ID
     # ------------------------------------------------------------------
-    print("Importing skeletons ...")
+    print("Resolving skeletons ...")
     skeleton_ids: dict[str, str] = {}
     for p in persons:
-        skel_id = import_skeleton(db, p.skeleton_path,
-                                  name=p.skeleton_path.stem,
-                                  person_label=p.name)
+        yaml_path = Path(p.skeleton).resolve()
+        if yaml_path.exists():
+            # File path: import (idempotent — same YAML → same SHA-256 ID)
+            skel_id = import_skeleton(db, yaml_path,
+                                      name=yaml_path.stem,
+                                      person_label=p.name)
+            print(f"  {p.name}: imported {skel_id[:16]}  ({yaml_path.name})")
+        else:
+            # Treat as skeleton ID or prefix already in the DB
+            skel_id = resolve_id_prefix(db, "skeletons", p.skeleton)
+            row = db.execute("SELECT name FROM skeletons WHERE id = ?",
+                             (skel_id,)).fetchone()
+            skel_name = row["name"] if row else "?"
+            print(f"  {p.name}: using DB skeleton {skel_id[:16]}  ({skel_name!r})")
         skeleton_ids[p.name] = skel_id
-        print(f"  {p.name}: {skel_id[:16]}  ({p.skeleton_path.name})")
 
     # ------------------------------------------------------------------
     # Create tracker config

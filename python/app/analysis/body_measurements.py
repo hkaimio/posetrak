@@ -54,21 +54,30 @@ def _(mo, source_selector):
         full_width=True,
     )
 
+    person_id_input = mo.ui.number(
+        value=0,
+        start=0,
+        stop=10,
+        step=1,
+        label="Person ID",
+    )
+
     inliers_only_input = mo.ui.checkbox(
         value=True,
         label="Inliers only (uncheck to include tracker outliers)",
     )
 
-    mo.vstack([db_path_input, inliers_only_input]) if _is_db else config_input
+    mo.vstack([db_path_input, mo.hstack([person_id_input, inliers_only_input])]) if _is_db else config_input
     return (
         config_input,
         db_path_input,
+        person_id_input,
         inliers_only_input,
     )
 
 
 @app.cell
-def _(db_path_input, mo, source_selector):
+def _(db_path_input, mo, person_id_input, source_selector):
     import sqlite3 as _sqlite3_rs
     import json as _json_rs
     from pathlib import Path as _Path_rs
@@ -81,6 +90,7 @@ def _(db_path_input, mo, source_selector):
         try:
             _conn_rs = _sqlite3_rs.connect(_db_path_rs, check_same_thread=False)
             _conn_rs.row_factory = _sqlite3_rs.Row
+            _person_id_rs = int(person_id_input.value)
             _run_rows = _conn_rs.execute(
                 """
                 SELECT tr.id, tr.ran_at, tr.active_camera_ids,
@@ -88,11 +98,12 @@ def _(db_path_input, mo, source_selector):
                 FROM tracking_runs tr
                 LEFT JOIN tracking_results res
                     ON res.run_id = tr.id
-                   AND res.person_id = 0
+                   AND res.person_id = ?
                    AND res.is_smoothed = 0
                 GROUP BY tr.id
                 ORDER BY tr.ran_at DESC
-                """
+                """,
+                (_person_id_rs,),
             ).fetchall()
             _conn_rs.close()
             for _r in _run_rows:
@@ -124,6 +135,7 @@ def _(
     mo,
     np,
     pd,
+    person_id_input,
     run_selector,
     source_selector,
     tomllib,
@@ -225,7 +237,9 @@ def _(
                 # Load observations from tracking_obs_results.
                 # Pixels are already in undistorted space (K_new) — no undistortion needed.
                 _inlier_obs = load_inlier_obs_from_tracking_run(
-                    _db_path, _run_id, inliers_only=inliers_only_input.value
+                    _db_path, _run_id,
+                    person_id=int(person_id_input.value),
+                    inliers_only=inliers_only_input.value,
                 )
 
                 if not _inlier_obs.empty and _label_to_id:

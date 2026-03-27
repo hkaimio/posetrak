@@ -1,0 +1,37 @@
+# cameras.toml — camera hardware description for a mocap project
+#
+# Place this file in the project root directory alongside the calibration/
+# subdirectory. import_project.py discovers it automatically.
+#
+# One section per camera label. Labels must match the keys used in:
+#   - the Pose2Sim calibration TOML (cam1, cam2, ...)
+#   - sync_data.json
+#   - the pose/ subdirectory names
+#
+# model  Free-text camera model name. Cameras sharing the same model string
+#        will reference the same camera_models row in the DB — useful when
+#        multiple units of the same hardware are used.
+#
+# mode   Free-text mode description. Cameras sharing the same (model, mode)
+#        string pair share a camera_modes row.
+#
+# -------------------------------------------------------------------------
+# Example: four-camera aikido session
+# Two GoPro Hero 11 units at 4K, two Sony ZV-E10 units at 1080p
+# -------------------------------------------------------------------------
+
+[cam1]
+model = "GoPro Hero 11 Black"
+mode  = "4K Linear 120fps"
+
+[cam2]
+model = "GoPro Hero 11 Black"
+mode  = "4K Linear 120fps"
+
+[cam3]
+model = "Sony ZV-E10"
+mode  = "1080p 120fps"
+
+[cam4]
+model = "Sony ZV-E10"
+mode  = "1080p 120fps"

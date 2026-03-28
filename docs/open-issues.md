@@ -128,6 +128,20 @@ consistent with `compute_state_error` in `ukf.cpp` (`q_ref⁻¹ * q_state`).
 
 ## Active
 
+- **Spherical joint limit enforcement: revert to old algorithm** (2026-03-28)
+  - The updated spherical joint limit enforcement algorithm was reverted after full-project testing showed it produces worse tracking results than the previous one. The old algorithm remains in place.
+  - Before attempting further changes to spherical limit enforcement, understand specifically which cases the new algorithm was meant to fix and why it fails on real data. Benchmark both on a set of representative shots before merging any future change.
+
+- **Performance: tracker and visualization are too slow for long sequences** (2026-03-28)
+  - The C++ tracker is noticeably slow on long shots; profiling has not yet been done.
+  - `visualize_tracking.py` is the main bottleneck for post-processing: it decodes and seeks video frames individually per tracker step via `cv2.VideoCapture.set(CAP_PROP_POS_FRAMES, ...)`, which is O(N) per frame for compressed video. This should be rewritten to read frames sequentially (forward-only) and skip via decode-and-discard rather than random seek.
+  - For the tracker: profile with `perf`/`gprof` on a long shot to find the hot path before optimizing.
+
+- **IK initialization fails when person is not in standing pose at shot start** (2026-03-28)
+  - `Tracker::initialize` fits the skeleton to the first frame using IK. If the first frame shows a crouching, lunging, or otherwise non-neutral pose, IK converges to a bad solution and the filter never recovers.
+  - Short-term workaround: crop the sequence start time to a frame where the person is near-standing using `--time-start`.
+  - Proper fix: either (a) let the user specify an explicit initialization frame separate from the sequence start, or (b) scan the first N frames and pick the one closest to the T-pose prior (minimum joint angle deviation from zero), or (c) replace the IK initializer with the Procrustes-based approach already noted under "Hardcoded marker names in Tracker::initialize".
+
 - **`Skeleton::active_dof()` does not count root DOFs** (2026-01-26)
   - The method still exists on `Skeleton` but hot-path code (UKF, sigma points, process model)
     now uses `SkeletonLayout::joint_active_dof_count()` and `error_state_dim()` exclusively.

@@ -606,43 +606,92 @@ The current schema stores scalar fx/fy/cx/cy columns, which is correct for the u
 **Three genuinely new tables** for the YOLO/pose-extraction pipeline (currently no equivalent in the schema):
 
 ```sql
--- Raw YOLO tracker output per camera per frame.
--- Source: pose_extraction.py Phase 1. Currently only exported as pickle cache files.
-CREATE TABLE yolo_detections (
-    sequence_id  TEXT NOT NULL REFERENCES pose_observation_sequences(id),
-    camera_id    INTEGER NOT NULL,    -- matches camera order in active_camera_ids
-    video_frame  INTEGER NOT NULL,
-    track_id     INTEGER NOT NULL,    -- YOLO tracking ID (not stable across runs)
-    bbox_x1      REAL NOT NULL,
-    bbox_y1      REAL NOT NULL,
-    bbox_x2      REAL NOT NULL,
-    bbox_y2      REAL NOT NULL,
-    confidence   REAL NOT NULL,
-    PRIMARY KEY (sequence_id, camera_id, video_frame, track_id)
+-- Raw person detector output per camera per frame.
+-- Named generically (not "yolo_detections") because the detection model may change;
+-- the schema is model-agnostic — any bbox-producing tracker can write here.
+-- Keyed on shot_video_id (one video = one camera for one shot), not sequence_id,
+-- because detection runs before a pose_observation_sequence is created.
+-- region_type supports multiple crop types per track (full body, left hand, face, etc.)
+-- so that specialised downstream trackers (hand tracker, face tracker) can each get
+-- their own tight crop without requiring a separate detection pass.
+CREATE TABLE person_detections (
+    shot_video_id  TEXT NOT NULL REFERENCES shot_videos(id),
+    video_frame    INTEGER NOT NULL,
+    track_id       INTEGER NOT NULL,    -- detector tracking ID (not stable across runs)
+    region_type    TEXT NOT NULL DEFAULT 'full_body',
+                                        -- 'full_body' | 'face' | 'hand_l' | 'hand_r' | ...
+    bbox_x1        REAL NOT NULL,
+    bbox_y1        REAL NOT NULL,
+    bbox_x2        REAL NOT NULL,
+    bbox_y2        REAL NOT NULL,
+    confidence     REAL NOT NULL,
+    model_name     TEXT,                -- e.g. 'yolov8n', 'rtmdet' (informational)
+    PRIMARY KEY (shot_video_id, video_frame, track_id, region_type)
 );
 
 -- Named-person timelines assembled by the timeline stitcher.
--- Maps a person name to one or more contiguous YOLO track segments per camera.
+-- Maps a person name to one or more contiguous detector track segments for one video.
+-- Also keyed on shot_video_id for the same reason as person_detections.
 -- Source: pose_extraction.py stitcher UI. Currently stored only in notebook state.
 CREATE TABLE person_tracks (
     id              TEXT PRIMARY KEY,
-    sequence_id     TEXT NOT NULL REFERENCES pose_observation_sequences(id),
-    camera_id       INTEGER NOT NULL,
+    shot_video_id   TEXT NOT NULL REFERENCES shot_videos(id),
     person_name     TEXT NOT NULL,
-    track_segments  TEXT NOT NULL    -- JSON: [[track_id, start_frame, end_frame], ...]
+    -- JSON: [[track_id, start_frame, end_frame], ...]
+    -- Ordered list; JSON is appropriate here because segments are always read
+    -- atomically and individual entries are never queried independently.
+    track_segments  TEXT NOT NULL
 );
 
--- Thumbnail JPEG cache entries for the video frame server.
--- Allows the UI frame server to locate cached thumbnails without re-decoding.
--- Entries are derived data; can be deleted and regenerated freely.
+-- Thumbnail/crop JPEG cache for the video frame server.
+-- Covers multiple cache types (full-frame thumbnails, person crops, etc.).
+-- cache_type values mirror CacheType enum in frame_cache.py.
+-- For PERSON_CROP entries, track_id identifies which detection bbox was used
+-- (not person_name, because crops are needed before timeline stitching assigns names).
+-- region_type further narrows which bbox within a track (full_body / face / hand_l / ...).
+-- src_* columns describe the region of the original (pre-crop) frame used.
+-- For full-frame thumbnails src_* covers the entire frame (0, 0, full_width, full_height).
+-- file_path and data are mutually exclusive storage backends:
+--   small thumbnails (≤256px) may be stored inline as data BLOBs;
+--   larger crops are stored as files.
+-- Entries are derived data and can be deleted and regenerated freely.
 CREATE TABLE frame_cache_entries (
     shot_video_id  TEXT NOT NULL REFERENCES shot_videos(id),
     frame_idx      INTEGER NOT NULL,
-    size_px        INTEGER NOT NULL,   -- thumbnail width in pixels
-    file_path      TEXT NOT NULL,
-    PRIMARY KEY (shot_video_id, frame_idx, size_px)
+    cache_type     TEXT NOT NULL,       -- 'full_frame' | 'thumb' | 'person_crop'
+    track_id       INTEGER,             -- non-NULL for person_crop entries
+    region_type    TEXT,                -- non-NULL for person_crop entries
+    width_px       INTEGER NOT NULL,    -- width of the stored image
+    height_px      INTEGER NOT NULL,    -- height of the stored image
+    src_x          INTEGER NOT NULL,    -- source rect in the original frame (pixels)
+    src_y          INTEGER NOT NULL,
+    src_w          INTEGER NOT NULL,
+    src_h          INTEGER NOT NULL,
+    file_path      TEXT,                -- path to JPEG file (NULL if stored inline)
+    data           BLOB,                -- inline JPEG bytes (NULL if stored as file)
+    PRIMARY KEY (shot_video_id, frame_idx, cache_type, track_id, region_type, width_px)
 );
 ```
+
+**Design notes on these tables:**
+
+**`camera_id` vs `shot_video_id`**: The original draft used `camera_id INTEGER` (an index into `active_camera_ids`) for both `person_detections` and `person_tracks`. This is inconsistent with the rest of the schema (which uses UUID foreign keys) and fragile (breaks if camera ordering changes). Both tables now reference `shot_video_id` instead, which uniquely identifies a (shot, camera) pair and is the natural anchor for per-video processing results.
+
+**`person_detections` not `yolo_detections`**: The table is named generically because the detection model may change (YOLO → RTMDet → any future model). The schema is model-agnostic; `model_name` captures provenance informally without constraining the structure.
+
+**`region_type` in `person_detections`**: A single detection pass can yield multiple bounding boxes per person per frame — for example a full-body box at 384×256 for the main pose tracker, a hand-crop box for a hand tracker, and a face-crop box for a face tracker. Rather than separate tables per region (which would duplicate the tracking ID and frame FK machinery), `region_type` is a discriminator column in the same table. Downstream trackers filter by `region_type` to get the specific crop they need. New region types can be added without schema migration.
+
+**Why not a generic "observation from video" table?** Three separate tables (`person_detections`, `PoseObservation`, and future `marker_detections`) are justified here because:
+- The data shapes differ significantly: person detection produces bboxes + track IDs; RTMpose produces per-keypoint coordinates + confidences; marker detection would produce labelled 2D point sets with different semantics.
+- Raw detection tables feed different downstream pipelines; they are never usefully queried together.
+- `PoseObservation` (RTMpose/marker keypoints) is the unified abstraction at the *output* level — the inputs to the tracker regardless of capture method. The raw detection tables are intermediate processing artefacts below that level.
+- If a future capture method produces data of genuinely the same shape as an existing table, it should reuse that table with a `source_type` discriminator column rather than adding a new table.
+
+**JSON in `person_tracks.track_segments`**: Justified. The segments are always read as a complete ordered list — there is no use case for querying individual segment entries via SQL. A normalised `person_track_segments` child table would add joins without any query benefit. JSON is used elsewhere in the schema for similarly atomic ordered lists.
+
+**JPEG storage in `frame_cache_entries`**: Supporting both inline blobs (`data`) and file references (`file_path`) gives flexibility without committing to one approach. Small thumbnails for the timeline scrubber (≤256px, ~5–15 kB each) are good candidates for inline storage (keeps the cache self-contained, fast random access by primary key). Full-resolution person crops (several hundred kB) should stay as files to avoid bloating the DB and to enable efficient bulk deletion. A `CHECK (file_path IS NOT NULL OR data IS NOT NULL)` constraint enforces that at least one storage backend is set.
+
+**`track_id` not `person_name` in `frame_cache_entries`**: Person crops are needed during the stitcher UI, before `person_tracks` has been populated (and therefore before a `person_name` exists). Using `track_id` as the cache key for `PERSON_CROP` entries means crops are available immediately after detection, and the stitcher UI can display them without waiting for the user to assign names. Post-stitching, looking up a crop by person name requires one extra step: resolve `(person_name, frame)` → `track_id` via `person_tracks.track_segments`, then use `track_id` as the cache key. This indirection is small and keeps the cache key stable regardless of when stitching happens.
 
 #### No change needed
 
@@ -779,21 +828,36 @@ If a single app is preferred over two, **PySide6 is the stronger single-app choi
 
 #### Video Frame Server
 
-Needed by Marimo (as HTTP endpoint) or PySide6 (as in-process cache). Logic is the same:
+Needed by Marimo (as HTTP endpoint) or PySide6 (as in-process cache). Logic is the same. See the detailed design in section 2a for the full `CacheKey` / `CacheType` API; the summary interface is:
 
 ```python
-class FrameCache:
-    """LRU cache of decoded JPEG frames, with optional on-the-fly undistortion."""
+class CacheType(enum.Enum):
+    FULL_FRAME   = "full_frame"   # full-resolution decoded frame
+    THUMB        = "thumb"        # small thumbnail for timeline strip
+    PERSON_CROP  = "person_crop"  # crop for a specific detector track + region_type
 
-    def get_frame(self, shot_video_id: str, frame_idx: int, width_px: int,
-                  undistort_maps: tuple | None = None) -> bytes:
-        # 1. Check LRU (key: shot_video_id + frame_idx + width_px)
-        # 2. Decode with PyAV (preferred) or cv2.VideoCapture
-        # 3. Resize to width_px maintaining aspect ratio
-        # 4. Apply cv2.remap(undistort_maps) if provided
-        # 5. Encode as JPEG and cache
-        # 6. Return bytes
+@dataclass(frozen=True)
+class CacheKey:
+    shot_video_id: str
+    frame_idx:     int
+    cache_type:    CacheType
+    track_id:      int  | None = None   # required for PERSON_CROP
+    region_type:   str  | None = None   # required for PERSON_CROP ('full_body', 'face', ...)
+    width_px:      int  | None = None   # required for THUMB
+
+class FrameCache:
+    """LRU cache of decoded frames with optional on-the-fly undistortion."""
+
+    def get(self, key: CacheKey, *, undistort: bool = False) -> np.ndarray:
+        # 1. Check in-memory LRU
+        # 2. Check frame_cache_entries in DB
+        # 3. Decode from video (sequential read preferred; seek only when necessary)
+        # 4. Crop (PERSON_CROP) or resize (THUMB) as needed
+        # 5. Optionally undistort using stored K/dist maps
+        # 6. Store in LRU + write to DB cache asynchronously
 ```
+
+`track_id` (not `person_name`) is used for `PERSON_CROP` keys so that crops are accessible during the stitcher UI before person names have been assigned. Post-stitching, callers resolve `person_name` → `track_id` via `person_tracks` before calling `get()`. The `region_type` field supports multiple crop windows per track per frame (full body, face, hand, etc.) feeding specialised downstream trackers.
 
 Cache sizing: ~200 full thumbnails + ~1000 person-crop thumbnails fits comfortably in RAM.
 
@@ -833,6 +897,29 @@ The user's instinct to work with original videos is correct. Recommended approac
 
 ---
 
+### Open Issues / Design Decisions
+
+**1. `frame_cache_entries` belongs in a separate DB or a `cache.db` sidecar**
+The session DB stores durable pipeline data; `frame_cache_entries` is derived, disposable data that can be several GB for a full session. Mixing them means `VACUUM`/backup operations handle large transient BLOBs unnecessarily. Options:
+- Store cache entries in a separate `cache.db` file alongside the session DB (simple, no cross-DB FKs)
+- Keep in session DB but in a `cache_*` table that is always excluded from backups/exports
+
+**2. `pose_observation_sequences` ↔ `shot_video_id` relationship is not explicit**
+The sequence groups per-camera observations together, but there is currently no table that lists which `shot_video_id` rows feed a given `sequence_id`. This makes it hard to navigate from a sequence back to its source videos. Consider:
+- A `sequence_videos` join table: `(sequence_id, shot_video_id)`, one row per camera
+- Or adding `shot_id` as a direct FK on `pose_observation_sequences`
+
+**3. Undistortion pipeline for the tracker (long-term)**
+The current tracker works with undistorted pixel coordinates (observation → undistorted camera plane). To work with original distorted videos end-to-end, the tracker's `Camera` struct needs `K_original` and distortion coefficients so it can project markers directly to distorted space. This is a significant change deferred post-Phase 2.
+
+**4. `person_tracks` unique constraint**
+There should be a `UNIQUE (shot_video_id, person_name)` constraint to prevent duplicate timelines. Adding this prevents silent data corruption if the stitcher UI is run twice.
+
+**5. `person_detections` — re-run semantics**
+Person detection is non-deterministic (track IDs change across runs). If detection is re-run on a video, existing rows for that `(shot_video_id, region_type)` pair must be deleted before inserting new results — a re-run of the full-body detector should not invalidate separately-stored hand detections. The CLI / job worker must enforce this explicitly; it is not a cascade-delete scenario.
+
+---
+
 ### Implementation Phases
 
 **Phase 1 — DB integration for existing tools** (glue, minimal new code)
@@ -843,13 +930,314 @@ The user's instinct to work with original videos is correct. Recommended approac
 - OpenPose JSON → `PoseObservation` (already done via `import_pose_json.py`)
 
 **Phase 2 — Unified setup app**
-- Frame cache component
-- Multi-video scrubber (PySide6: `QOpenGLWidget`; Marimo: `mo.Html()` + JS)
-- Shot setup wizard: rough sync, LED fine sync with interactive ROI selection, inline extrinsics annotator
+
+The goal is a PySide6 application that replaces the current sequence of manual hand-off steps (YAML editing, VIA annotator, separate Marimo notebooks) with a wizard that drives the full session setup flow. It builds on `sync_videos.py` as its video scrubber foundation.
+
+---
+
+### Phase 2 detailed design
+
+#### Application structure
+
+```
+python/app/setup/
+├── __init__.py
+├── main.py                  ← QApplication entry point; opens SetupWizard
+├── wizard.py                ← SetupWizard (QWizard subclass); owns DB connection
+├── db_context.py            ← thin wrapper: open_session + cached lookups
+├── components/
+│   ├── frame_cache.py       ← FrameCache (LRU + DB persistence)
+│   ├── video_scrubber.py    ← MultiVideoScrubber widget
+│   ├── overlay.py           ← Overlay Protocol + concrete overlay classes
+│   └── job_runner.py        ← BackgroundJob + QThread wrapper with progress signal
+└── pages/
+    ├── page_open_session.py     ← Step 0: open or create session DB
+    ├── page_add_videos.py       ← Step 1: add ShotVideo rows + shot boundaries
+    ├── page_sync.py             ← Step 2: rough sync + LED fine sync (single page)
+    └── page_extrinsics.py       ← Step 3: extrinsics annotation + PnP
+```
+
+The wizard is launched with a session DB path (either passed on the command line or chosen via the step 0 file dialog). All subsequent wizard pages read and write directly to that DB. There is no intermediate state file; every committed action is immediately durable.
+
+---
+
+#### 2a. `FrameCache`
+
+Central frame provider used by every UI widget that needs to display video pixels.
+
+```python
+class CacheType(enum.Enum):
+    FULL_FRAME   = "full_frame"   # full-resolution decoded frame
+    THUMB        = "thumb"        # small thumbnail for timeline strip (e.g. 320×180)
+    PERSON_CROP  = "person_crop"  # tight crop for one detector track + region
+
+@dataclass(frozen=True)
+class CacheKey:
+    shot_video_id: str
+    frame_idx:     int
+    cache_type:    CacheType
+    track_id:      int | None = None   # required for PERSON_CROP
+    region_type:   str | None = None   # required for PERSON_CROP; e.g. 'full_body', 'face', 'hand_l'
+    width_px:      int | None = None   # required for THUMB
+    height_px:     int | None = None   # required for THUMB
+```
+
+`CacheKey` is the identity for every cache entry. `track_id` + `region_type` together identify which bounding box from `person_detections` to crop — using the raw detector track ID rather than `person_name` so that crops are accessible during the stitcher UI before the user has assigned person names. `region_type` supports multiple crop windows per track per frame, allowing different downstream trackers (full-body pose, face, hand) to each get their own appropriately-sized crop without an extra detection pass. `width_px`/`height_px` allow multiple thumbnail resolutions to coexist.
+
+```
+FrameCache
+├── _lru: dict[CacheKey → np.ndarray]   (in-memory, ~200 entry cap)
+├── _caps: dict[shot_video_id → cv2.VideoCapture]   (open capture pool)
+├── _last_frame: dict[shot_video_id → int]           (last decoded frame index for sequential detection)
+└── get(key: CacheKey, *, undistort: bool = False) → np.ndarray
+```
+
+**`get()` logic**:
+1. Check in-memory LRU → return if found.
+2. Query `frame_cache_entries` in DB matching the key fields → decompress and return if found.
+3. Cache miss: decode from video.
+   - If `key.frame_idx == _last_frame[id] + 1`: read next frame sequentially (no seek needed).
+   - Otherwise: `cap.set(CAP_PROP_POS_FRAMES, frame_idx)` then read.
+4. Apply crop for `PERSON_CROP` (bounding box from `person_tracks`), or resize for `THUMB`.
+5. If `undistort=True`: apply `cv2.undistort` using stored K/dist.
+6. Store in LRU; write compressed JPEG to `frame_cache_entries` asynchronously (off main thread via a write queue) to avoid blocking the UI.
+
+**Performance note — initial scrubbing**: When the user first scrubs a video in the UI, frames are decoded on demand via random seek, which is slow for compressed codecs (H.264 requires decoding from the previous keyframe). This is acceptable for interactive use (a few frames at a time) but would be unacceptable for pre-populating the cache across a full shot. Pre-population should only be triggered explicitly (e.g. a "Generate thumbnails" background job), not implicitly on every `get()` call. If scrubbing performance is still unsatisfactory, the fallback is to use `ffmpeg -vf fps=2` to extract thumbnails into a sidecar directory, bypassing OpenCV entirely for the timeline strip.
+
+**Thread safety**: `get()` is called from the Qt main thread only. Background jobs that decode frames (e.g. LED sync ROI scan) use their own `cv2.VideoCapture` instances, not the pool.
+
+---
+
+#### 2b. `Overlay` protocol
+
+Overlays are typed via a `Protocol` rather than duck typing, giving static-analysis safety without requiring a common base class:
+
+```python
+from typing import Protocol
+
+class Overlay(Protocol):
+    def paint(
+        self,
+        painter:  QPainter,
+        frame_w:  int,    # source video frame width in pixels
+        frame_h:  int,    # source video frame height in pixels
+        cell_w:   int,    # display cell width in pixels
+        cell_h:   int,    # display cell height in pixels
+    ) -> None: ...
+
+    def mouse_press(self, x_px: int, y_px: int) -> None: ...
+    def mouse_move(self,  x_px: int, y_px: int) -> None: ...
+    def mouse_release(self, x_px: int, y_px: int) -> None: ...
+```
+
+Pixel coordinates passed to mouse events are in video-frame space (already mapped from display space by `CameraCell`). Concrete overlay classes:
+
+| Class | Used by | Behaviour |
+|---|---|---|
+| `SyncAnchorOverlay` | Sync page | draws a vertical tick on timeline at user-set anchor frame |
+| `ROIDrawOverlay` | Sync page | rubber-band rectangle for LED ROI selection |
+| `AnnotationPointOverlay` | Extrinsics page | labelled dots at control point clicks; handles zoom-refine interaction |
+| `ReprojectionOverlay` | Extrinsics page | circles + residual lines after PnP compute |
+
+---
+
+#### 2c. `MultiVideoScrubber`
+
+`QWidget` displaying all cameras for a shot in a grid. Each cell is a `CameraCell` (`QLabel` or `QOpenGLWidget`).
+
+```
+MultiVideoScrubber
+├── cells: list[CameraCell]
+├── sync_table: SyncTable | None        ← None = no sync set yet (independent mode)
+├── focused_cell: int | None            ← index of cell receiving keyboard input
+├── _timestamps: dict[int, float]       ← shot_video_id → current position in seconds
+└── methods:
+    seek_synced(timestamp_s)    ← move all cameras together via sync_table
+    seek_camera(cell_idx, frame_idx)  ← move one camera independently
+```
+
+**Navigation modes**:
+
+- **Synced mode** (sync_table present): `←`/`→` advance the reference camera by 1 frame; all other cameras follow via `sync_table.lookup()`. `Shift+←`/`Shift+→` = ±10 frames.
+- **Independent mode** (no sync or user presses `Tab` to focus a cell): keyboard controls move only the focused camera. The focused cell is highlighted with a border. This is essential for rough sync: the user must be able to scrub each camera to the same physical moment independently before setting anchors.
+
+`Space` toggles play/pause (real-time playback at reference fps via `QTimer`). `Home`/`End` go to first/last frame. Clicking a cell focuses it for independent navigation.
+
+**Overlay protocol**: Each `CameraCell` holds a list of `Overlay` instances (typed as `list[Overlay]`). After rendering the video frame it calls `paint()` on each overlay in order. Mouse events on the cell are forwarded to all overlays in reverse order (top-most overlay gets first chance).
+
+**Sync source**: loads the best available `SyncConfig` from the DB (LED preferred, manual-rough as fallback). Exposes a `reload_sync()` slot connected to the DB write signal.
+
+---
+
+#### 2d. Wizard pages
+
+##### Page 0 — Open / create session
+
+File-open dialog with two options:
+- Open existing session DB (`.db` file picker).
+- Create new session DB (name + directory → calls `create_session()`).
+
+Displays a summary of existing DB contents (shots, cameras, sync state). On "Next" the wizard receives the DB path and all subsequent pages share it via `DBContext`.
+
+##### Page 1 — Add videos
+
+Lists cameras from `session_cameras`. For each:
+- File path field + "Browse" button → sets `shot_videos.file_path`.
+- Auto-probes with `cv2.VideoCapture` to fill `actual_fps`, `frame_count`, `width`, `height`.
+- Camera model/mode dropdown from registry.
+
+**Shot boundary definition**: A thumbnail strip for the reference camera (populated lazily by a background `THUMB` cache warm job). The user drags start/end handles to define shot boundaries. Multiple shots can be defined in one pass; each creates a `Shot` row and `ShotVideo` rows for all cameras.
+
+On "Next", writes all rows to DB.
+
+##### Page 2 — Sync (rough + LED, single page)
+
+Rough sync and LED sync are combined on one page because they are iterative: the user may refine the rough sync after seeing LED results, or re-draw an ROI and re-run LED sync. Separating them into two pages would force unnecessary wizard navigation.
+
+The page layout:
+
+```
+┌─────────────────────────────────────────┐
+│  MultiVideoScrubber  (most of the page) │
+│  (cells show current camera frames)     │
+├──────────────┬──────────────────────────┤
+│ Sync panel   │  LED sync panel          │
+│              │                          │
+│ [Set anchor] │  (ROI draw mode toggle)  │
+│ cam1: frame? │  [Run LED sync]          │
+│ cam2: frame? │  ████████░░ Analyzing    │
+│ ...          │  camera 3/6 · frame 870  │
+│ [Apply rough]│  [Accept LED result]     │
+└──────────────┴──────────────────────────┘
+```
+
+**Rough sync workflow**:
+1. Initially no sync_table → scrubber is in independent mode.
+2. User clicks on a camera cell to focus it (`Tab` or mouse click), then steps to the sync moment.
+3. Clicks "Set anchor" (or `S`). The anchor frame is recorded for that camera and shown in the panel. `SyncAnchorOverlay` marks it on each cell's timeline strip.
+4. Repeat for all cameras.
+5. "Apply rough sync": computes frame offsets relative to reference camera, writes `SyncConfig(method="manual-rough")`. Scrubber reloads in synced mode; user verifies alignment.
+
+**LED sync workflow** (continues on the same page after rough sync):
+1. User clicks "Draw LED ROI" toggle. Scrubber cells enter ROI draw mode (`ROIDrawOverlay` active). User drags a rectangle on each camera cell over the LED area. ROIs stored in page state (not in DB).
+2. "Run LED sync" launches a `LedSyncJob` (see below). A single progress bar appears in the LED panel with text like `Analyzing camera 3/6 · frame 870 of 1 500`. No per-camera dialogs.
+3. On completion: results shown as anchor dots on the scrubber timeline strip. The panel shows per-camera quality metrics (peak signal-to-noise, correlation score).
+4. If quality is poor: user can adjust the ROI and re-run without leaving the page.
+5. "Accept LED sync": writes `SyncConfig(method="led-auto")` with all sync points. Scrubber reloads.
+
+**`LedSyncJob`**:
+```python
+class LedSyncJob(BackgroundJob):
+    """Scans ROI patches for brightness peaks; no full-frame decode needed."""
+
+    def run(self):
+        for cam_idx, (shot_video_id, roi) in enumerate(self._cameras):
+            cap = cv2.VideoCapture(file_path)
+            n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            brightness = []
+            for f in range(n_frames):
+                ret, frame = cap.read()   # sequential — no seek
+                if not ret:
+                    break
+                # Crop to ROI and compute mean brightness of the patch only
+                patch = frame[roi.y1:roi.y2, roi.x1:roi.x2]
+                brightness.append(patch.mean())
+                if f % 50 == 0:
+                    pct = int(100 * (cam_idx * n_frames + f) / (n_cams * n_frames))
+                    self.progress.emit(pct, f"Analyzing camera {cam_idx+1}/{n_cams} · frame {f:,} of {n_frames:,}")
+            # find peaks, cross-correlate with reference
+            ...
+        self.finished.emit(result)
+```
+
+Key performance point: the job reads frames **sequentially** and only computes the mean of the small ROI patch (not the full frame). Even though every compressed frame is decoded, the CPU cost of the decode itself dominates; the ROI crop does not add meaningful overhead. For a 4K H.264 video at 120 fps, full decode is roughly 8–15 ms/frame; for a 1080p video it is 2–5 ms/frame. A 90-second shot at 120 fps (10 800 frames) would take ~1.5 minutes per camera at 4K or ~25 s at 1080p. For 6 cameras sequentially, this is 9–15 minutes total. If that proves too slow, the optimization path is to use an `ffmpeg` subprocess with `-vf crop=W:H:X:Y` to decode only the ROI region — many decoders can skip chroma planes and full luma decode when the output region is tiny.
+
+**`BackgroundJob` base class**:
+```python
+class BackgroundJob(QThread):
+    progress = Signal(int, str)   # (percent 0–100, human-readable message)
+    finished = Signal(object)     # result payload (job-specific type)
+    error    = Signal(str)        # error message if run() raises
+
+    def run(self) -> None: ...    # override in subclass
+```
+
+##### Page 3 — Extrinsics annotation
+
+Shows one fixed calibration frame per camera (not a synchronized scrub). `MultiVideoScrubber` is reused but each cell is locked to its designated calibration frame.
+
+**Control point set**: loaded from a JSON file (list of `{name, x_m, y_m, z_m}` entries) or typed in via a small table editor on the page. The set is not persisted to the session DB (it is a property of the physical calibration rig, not the capture session).
+
+**`AnnotationPointOverlay` interaction — zoom-to-refine**:
+
+Each camera cell has a mode toggle: overview (video scaled to fit cell) vs. zoom-refine (1:1 pixel scale, panned so the clicked point stays centred). The interaction:
+
+1. In overview mode: user clicks on a control point location → a new dot is placed, labelled with the point name. The cell immediately switches to zoom-refine mode: the image is displayed at 1:1 scale, panned so that the clicked pixel stays at the same screen position under the cursor. (The cell renders a `QTransform` that maps video pixels to display pixels with the clicked point as the fixed point.)
+2. In zoom-refine mode with mouse button held: moving the mouse adjusts the dot position at full resolution. The label and a crosshair follow the cursor. This allows sub-pixel precision that would be impossible in the scaled-down overview.
+3. On mouse release: the final pixel coordinate is committed to the overlay's point list. The cell returns to overview mode.
+4. Clicking an existing dot selects it and re-enters zoom-refine mode for that point.
+5. Right-click on a dot: delete it.
+
+The coordinate stored is always in original video pixel space (before any display scaling), so there is no precision loss from the overview rendering.
+
+**Compute and review**:
+1. "Compute extrinsics" runs per-camera `cv2.solvePnPRansac` → R, t per camera.
+2. `ReprojectionOverlay` activates: draws circles at reprojected control point positions, residual lines from annotation clicks to reprojections, per-camera RMS reprojection error label.
+3. Optional "Bundle adjustment" refines all cameras jointly using SciPy `least_squares`.
+4. "Accept" writes `ExtrinsicCalibration` + `ExtrinsicEntry` rows.
+
+**Annotation persistence**: annotation clicks are stored in the page's own state dict (keyed by `shot_video_id → list[(point_name, x_px, y_px)]`). A future `calibration_annotations` table can be added to persist them across app restarts.
+
+---
+
+#### 2e. DB writes from the wizard
+
+All writes go through a `DBContext` object owned by the wizard. Pages call methods on it; they do not open their own connections. A transaction is held open within each page; "Back" rolls it back.
+
+```python
+class DBContext:
+    conn: sqlite3.Connection
+    def create_shot(self, label: str, shot_number: int) -> str
+    def create_shot_video(self, shot_id: str, cam_instance_id: str,
+                          path: str, fps: float, frame_count: int,
+                          width: int, height: int) -> str
+    def write_sync_config(self, shot_id: str, method: str,
+                          points: dict[str, list[SyncPoint]]) -> str
+    def write_extrinsics(self, shot_id: str,
+                         entries: list[ExtrinsicEntry]) -> str
+    def get_shot_videos(self, shot_id: str) -> list[ShotVideoInfo]
+    def get_active_sync(self, shot_id: str) -> SyncTable | None
+```
+
+`SyncPoint`, `ExtrinsicEntry`, `ShotVideoInfo` are typed `dataclass` or `NamedTuple` objects, not plain dicts.
+
+---
+
+#### 2f. Dependency and launch
+
+The setup app lives in `python/app/setup/` and is launched via:
+
+```bash
+uv run python -m posetrak.app.setup.main [session.db]
+```
+
+or as a named script in `pyproject.toml`:
+
+```toml
+[project.scripts]
+posetrak-setup = "posetrak.app.setup.main:main"
+```
+
+Dependencies (added to `[dependency-groups.app]`):
+- `PySide6` (already listed)
+- `opencv-python` (already used in pipeline)
+- `numpy` (already used)
+- `scipy` (for bundle adjustment, optional — guarded by `try/import`)
 
 **Phase 3 — Background job integration**
-- YOLO + RTMpose wrapped as job workers writing to `yolo_detections` and `PoseObservation`
-- Timeline stitcher rewritten against `person_tracks` / `yolo_detections` tables
+- Person detector wrapped as a job worker writing to `person_detections` (keyed on `shot_video_id` + `region_type`)
+- RTMpose wrapped as a job worker writing to `PoseObservation` (existing table)
+- Timeline stitcher rewritten against `person_tracks` / `person_detections` tables
 - Progress reporting in UI
 
 **Phase 4 — Results visualization**

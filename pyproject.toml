@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 posetrak-db = "posetrak.db.cli:main"
+posetrak-setup = "app.setup.main:main"
 
 [tool.setuptools.packages.find]
 where = ["python"]

@@ -1,0 +1,184 @@
+"""Tests for app.setup.page_shots (ShotsPage wizard page)."""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from app.setup.db_context import DBContext
+from app.setup.page_shots import ShotEntry, ShotsPage, VideoEntry
+from app.setup.video_probe import VideoProbeResult
+from posetrak.db.db import create_session, generate_id
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_session_db(tmp_path: Path) -> tuple[sqlite3.Connection, str]:
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.row_factory = sqlite3.Row
+    session_id = generate_id()
+    conn.execute(
+        "INSERT INTO mocap_sessions (id, recorded_at) VALUES (?, ?)",
+        (session_id, "2026-03-01T10:00:00+00:00"),
+    )
+    conn.commit()
+    return conn, session_id
+
+
+def _make_wizard_mock(page: ShotsPage, conn, session_id: str):
+    ctx = DBContext(conn, session_id)
+    wiz = MagicMock()
+    wiz.db_context = ctx
+    page.wizard = MagicMock(return_value=wiz)
+    return wiz, ctx
+
+
+def _fake_probe(width=1920, height=1080, fps=30.0, frames=300) -> VideoProbeResult:
+    return VideoProbeResult(
+        width=width, height=height,
+        container_fps=fps, frame_count=frames,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Construction
+# ---------------------------------------------------------------------------
+
+
+def test_page_constructs_with_one_shot(qapp) -> None:
+    page = ShotsPage()
+    assert page.title() == "Shots & Videos"
+    assert len(page._shots) == 1
+
+
+def test_add_shot_increments_shot_number(qapp) -> None:
+    page = ShotsPage()
+    page._add_shot()
+    assert len(page._shots) == 2
+    assert page._shots[0].shot_number == 1
+    assert page._shots[1].shot_number == 2
+
+
+def test_remove_shot(qapp) -> None:
+    page = ShotsPage()
+    page._add_shot()
+    assert len(page._shots) == 2
+    entry = page._shots[0]
+    page._remove_shot(entry)
+    assert len(page._shots) == 1
+    assert entry not in page._shots
+
+
+# ---------------------------------------------------------------------------
+# validatePage — writes to DB
+# ---------------------------------------------------------------------------
+
+
+def test_validate_writes_shot(qapp, tmp_path) -> None:
+    conn, session_id = _make_session_db(tmp_path)
+    page = ShotsPage()
+    _make_wizard_mock(page, conn, session_id)
+
+    # Manually configure shot entry with a probed video
+    page._shots.clear()
+    entry = ShotEntry(shot_number=1, label="walk")
+    ve = VideoEntry(path="/fake/cam1.mp4", probe=_fake_probe(frames=600))
+    entry.videos.append(ve)
+    page._shots.append(entry)
+
+    # initializePage to begin the savepoint
+    page.initializePage()
+    result = page.validatePage()
+
+    assert result is True
+
+    shot = conn.execute("SELECT * FROM shots WHERE shot_number = 1").fetchone()
+    assert shot is not None
+    assert shot["label"] == "walk"
+
+    video = conn.execute(
+        "SELECT * FROM shot_videos WHERE shot_id = ?", (shot["id"],)
+    ).fetchone()
+    assert video is not None
+    assert video["file_path"] == "/fake/cam1.mp4"
+    assert video["last_video_frame"] == 599   # frame_count - 1
+    conn.close()
+
+
+def test_validate_writes_multiple_shots(qapp, tmp_path) -> None:
+    conn, session_id = _make_session_db(tmp_path)
+    page = ShotsPage()
+    _make_wizard_mock(page, conn, session_id)
+
+    page._shots.clear()
+    for i in range(3):
+        entry = ShotEntry(shot_number=i + 1, label=f"shot{i+1}")
+        page._shots.append(entry)
+
+    page.initializePage()
+    result = page.validatePage()
+
+    assert result is True
+    count = conn.execute("SELECT COUNT(*) FROM shots").fetchone()[0]
+    assert count == 3
+    conn.close()
+
+
+def test_validate_fails_with_no_shots(qapp, tmp_path) -> None:
+    conn, session_id = _make_session_db(tmp_path)
+    page = ShotsPage()
+    _make_wizard_mock(page, conn, session_id)
+
+    page._shots.clear()
+    page.initializePage()
+    result = page.validatePage()
+
+    assert result is False
+    assert not page._error_label.isHidden()
+    conn.close()
+
+
+def test_cleanup_rolls_back(qapp, tmp_path) -> None:
+    """cleanupPage should undo any partial writes."""
+    conn, session_id = _make_session_db(tmp_path)
+    page = ShotsPage()
+    _make_wizard_mock(page, conn, session_id)
+
+    entry = ShotEntry(shot_number=1)
+    page._shots = [entry]
+    page.initializePage()
+
+    # Directly write a shot (simulating partial progress) then clean up
+    ctx = DBContext(conn, session_id)
+    ctx.begin_page()
+    ctx.create_shot("partial", 99)
+    ctx.rollback_page()
+
+    count = conn.execute("SELECT COUNT(*) FROM shots").fetchone()[0]
+    assert count == 0
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# VideoEntry / ShotEntry data models
+# ---------------------------------------------------------------------------
+
+
+def test_shot_entry_defaults(qapp) -> None:
+    e = ShotEntry(shot_number=5)
+    assert e.label == ""
+    assert e.videos == []
+
+
+def test_video_entry_stores_path() -> None:
+    ve = VideoEntry(path="/path/to/file.mp4")
+    assert ve.path == "/path/to/file.mp4"
+    assert ve.probe is None
+    assert ve.error is None

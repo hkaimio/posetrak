@@ -316,6 +316,8 @@ def main() -> int:
         print(f"\n{'='*70}")
         print(f"Shot: {shot_label}  |  sequence: {sequence_id[:12]}")
 
+        shot_run_ids: list[str] = []  # run IDs for all persons in this shot
+
         for p in persons:
             print(f"\n  -- {p.name} (person_id={p.person_id}) --")
             skel_id  = skeleton_ids[p.name]
@@ -332,7 +334,7 @@ def main() -> int:
                 "--person-id",       str(p.person_id),
                 "--output-dir",      str(run_dir),
                 "--smooth",
-                "--quiet",
+#                "--quiet",
             ]
             if args.joint_groups:
                 track_cmd += ["--joint-groups"] + args.joint_groups
@@ -353,6 +355,7 @@ def main() -> int:
                 run_id = m.group(1)
                 print(f"  Tracking run: {run_id[:16]}")
             succeeded.append((shot_label, p.name, run_id))
+            shot_run_ids.append(run_id)
 
             # ── BVH export ───────────────────────────────────────────
             if args.export_bvh:
@@ -362,7 +365,7 @@ def main() -> int:
                     "--session-db", str(db_path),
                     "--run-id",     run_id,
                     "--person-id",  str(p.person_id),
-                    "--skeleton",   str(p.skeleton_path),
+                    "--skeleton",   str(p.skeleton),
                     "--smoothed",
                     "--output",     str(bvh_path),
                 ]
@@ -370,24 +373,25 @@ def main() -> int:
                 if not ok:
                     failed.append(f"{shot_label}/{p.name}: BVH export failed")
 
-            # ── Visualization ────────────────────────────────────────
-            if args.visualize:
-                if video_dir is None:
-                    print(f"  [warn] No video files found for shot {shot_label}; "
-                          "skipping visualization.")
-                else:
-                    viz_path = out_dir / shot_label / p.name / f"{shot_label}_{p.name}.mp4"
-                    viz_cmd = [
-                        sys.executable, str(_TOOLS_DIR / "visualize_tracking.py"),
-                        "--session-db", str(db_path),
-                        "--run-id",     run_id,
-                        "--person-id",  str(p.person_id),
-                        "--video-dir",  str(video_dir),
-                        "--output",     str(viz_path),
-                    ]
-                    ok, _ = _run(viz_cmd, args.dry_run)
-                    if not ok:
-                        failed.append(f"{shot_label}/{p.name}: visualization failed")
+        # ── Combined visualization (one video per shot, all persons) ──
+        if args.visualize and shot_run_ids:
+            if video_dir is None:
+                print(f"  [warn] No video files found for shot {shot_label}; "
+                      "skipping visualization.")
+            else:
+                persons_label = "_".join(p.name for p in persons)
+                viz_path = out_dir / shot_label / f"{shot_label}_{persons_label}.mp4"
+                viz_cmd = [
+                    sys.executable, str(_TOOLS_DIR / "visualize_tracking.py"),
+                    "--session-db", str(db_path),
+                    "--video-dir",  str(video_dir),
+                    "--output",     str(viz_path),
+                ]
+                for rid in shot_run_ids:
+                    viz_cmd += ["--run-id", rid]
+                ok, _ = _run(viz_cmd, args.dry_run)
+                if not ok:
+                    failed.append(f"{shot_label}: combined visualization failed")
 
     db.close()
 

@@ -741,10 +741,14 @@ def parse_args() -> argparse.Namespace:
                         "not required with --session-db).")
     p.add_argument("--session-db", default=None, type=str,
                    help="Path to session SQLite database (alternative to --cameras/--sync).")
-    p.add_argument("--run-id", default=None, type=str,
-                   help="Tracking run UUID (required with --session-db).")
-    p.add_argument("--person-id", default=0, type=int,
-                   help="Person ID for DB mode (default: 0).")
+    p.add_argument("--run-id", action="append", default=None, type=str, dest="run_ids",
+                   metavar="RUN_ID",
+                   help="Tracking run UUID (required with --session-db). "
+                        "Repeat to overlay multiple runs.")
+    p.add_argument("--person-id", action="append", default=None, type=int, dest="person_ids",
+                   metavar="PERSON_ID",
+                   help="Person ID(s) for DB mode. Repeat for multiple. "
+                        "Default: auto-detect all persons available in each run.")
     p.add_argument("--video-dir", required=True, type=Path,
                    help="Directory containing one video file per camera.")
     p.add_argument("--camera", default=None,
@@ -1059,13 +1063,54 @@ def _load_skeleton_from_db(session_db: str, run_id: str) -> tuple[dict, Path]:
     return skel_dict, tmp_path
 
 
+def _resolve_run_persons(
+    session_db: str,
+    run_id_args: list[str],
+    person_id_args: list[int] | None,
+) -> list[tuple[str, int]]:
+    """Resolve run ID prefixes and enumerate person IDs.
+
+    Returns a list of (full_run_id, person_id) pairs in the order they should
+    be rendered (run order, then person order within each run).
+    """
+    import sqlite3 as _sq3
+    conn = _sq3.connect(session_db, check_same_thread=False)
+    conn.row_factory = _sq3.Row
+    pairs: list[tuple[str, int]] = []
+    for run_arg in run_id_args:
+        row = conn.execute(
+            "SELECT id FROM tracking_runs WHERE id LIKE ? ORDER BY id LIMIT 1",
+            (run_arg + "%",),
+        ).fetchone()
+        if row is None:
+            conn.close()
+            raise ValueError(f"No tracking run found matching: {run_arg!r}")
+        run_id = row["id"]
+
+        if person_id_args:
+            pids = list(person_id_args)
+        else:
+            pid_rows = conn.execute(
+                "SELECT DISTINCT person_id FROM tracking_results "
+                "WHERE run_id = ? ORDER BY person_id",
+                (run_id,),
+            ).fetchall()
+            pids = [r["person_id"] for r in pid_rows] or [0]
+
+        for pid in pids:
+            pairs.append((run_id, pid))
+
+    conn.close()
+    return pairs
+
+
 def main() -> None:
     args = parse_args()
 
     # Validate arguments
     db_mode = args.session_db is not None
     if db_mode:
-        if args.run_id is None:
+        if not args.run_ids:
             print("Error: --run-id is required with --session-db", file=sys.stderr)
             sys.exit(1)
         if not (args.tracking_dirs or True):  # tracking_dirs is optional in db mode
@@ -1089,7 +1134,7 @@ def main() -> None:
 
     print("Loading cameras …")
     if db_mode:
-        cameras = _load_cameras_from_db(args.session_db, args.run_id)
+        cameras = _load_cameras_from_db(args.session_db, args.run_ids[0])
     else:
         cameras = load_cameras(args.cameras)
     cam_by_name = {c.display_name: c for c in cameras}
@@ -1107,7 +1152,7 @@ def main() -> None:
 
     print("Loading sync …")
     if db_mode:
-        sync = _load_sync_from_db(args.session_db, args.run_id)
+        sync = _load_sync_from_db(args.session_db, args.run_ids[0])
     else:
         with open(args.sync) as f:
             sync_raw = json.load(f)
@@ -1123,72 +1168,84 @@ def main() -> None:
     if db_mode:
         import sqlite3 as _sqlite3
         import tempfile as _tempfile
-        _conn_db = _sqlite3.connect(args.session_db, check_same_thread=False)
-        _conn_db.row_factory = _sqlite3.Row
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from posetrak.db.skeleton_layout import SkeletonLayout as _SkeletonLayout
 
-        bone_color = PERSON_BONE_COLORS_BGR[0]
-        marker_color = PERSON_MARKER_COLORS_BGR[0]
+        run_person_pairs = _resolve_run_persons(
+            args.session_db, args.run_ids, args.person_ids
+        )
+        print(f"  DB mode: {len(run_person_pairs)} run×person pair(s): "
+              f"{[(r[:8], p) for r, p in run_person_pairs]}")
 
-        # Load skeleton from DB
-        _skel_row = _conn_db.execute(
-            "SELECT s.yaml_content FROM tracking_runs tr "
-            "JOIN skeletons s ON s.id = tr.skeleton_id "
-            "WHERE tr.id = ?",
-            (args.run_id,),
-        ).fetchone()
+        # Cache skeletons by skeleton_id to avoid reloading the same skeleton
+        _skel_dict_cache: dict[str, dict] = {}
+        _skel_yaml_cache: dict[str, str] = {}
+        _layout_cache: dict[str, object] = {}
 
-        if _skel_row and _skel_row["yaml_content"]:
-            with _tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as _tf:
-                _tf.write(_skel_row["yaml_content"])
-                _skel_tmp = Path(_tf.name)
-            skeleton_db = load_skeleton_structure(_skel_tmp)
-            _skel_tmp.unlink(missing_ok=True)
-            print(f"  Loaded skeleton from DB ({len(skeleton_db)} joints)")
-        else:
-            skeleton_db = {}
-            print("  [warn] No skeleton in DB — bones disabled", file=sys.stderr)
+        for pair_idx, (run_id, person_id) in enumerate(run_person_pairs):
+            bone_color = PERSON_BONE_COLORS_BGR[pair_idx % len(PERSON_BONE_COLORS_BGR)]
+            marker_color = PERSON_MARKER_COLORS_BGR[pair_idx % len(PERSON_MARKER_COLORS_BGR)]
+            label = f"{run_id[:8]}/p{person_id}"
+            print(f"\n  [{pair_idx}] run={run_id[:8]}  person_id={person_id}")
 
-        # Build bone_data from DB state blobs
-        _state_rows = _conn_db.execute(
-            "SELECT tracker_step, timestamp_s, state FROM tracking_results "
-            "WHERE run_id = ? AND person_id = ? AND is_smoothed = 0 "
-            "ORDER BY tracker_step",
-            (args.run_id, args.person_id),
-        ).fetchall()
+            _conn_db = _sqlite3.connect(args.session_db, check_same_thread=False)
+            _conn_db.row_factory = _sqlite3.Row
 
-        # Try smoothed first
-        _smoothed_rows = _conn_db.execute(
-            "SELECT tracker_step, timestamp_s, state FROM tracking_results "
-            "WHERE run_id = ? AND person_id = ? AND is_smoothed = 1 "
-            "ORDER BY tracker_step",
-            (args.run_id, args.person_id),
-        ).fetchall()
-        if _smoothed_rows:
-            _state_rows = _smoothed_rows
-            print("  Using smoothed state from DB")
-
-        _conn_db.close()
-
-        bone_data_db: BoneWorldData = {}
-        primary_timestamps_db: FrameTimestamps = {}
-
-        if skeleton_db and _state_rows:
-            sys.path.insert(0, str(Path(__file__).parent.parent))
-            from posetrak.db.skeleton_layout import SkeletonLayout as _SkeletonLayout
-            # Need skeleton YAML again for SkeletonLayout
-            _skel_row2 = None
-            _conn_db2 = _sqlite3.connect(args.session_db, check_same_thread=False)
-            _conn_db2.row_factory = _sqlite3.Row
-            _skel_row2 = _conn_db2.execute(
-                "SELECT s.yaml_content FROM tracking_runs tr "
+            # Load skeleton (cached by skeleton_id)
+            _skel_meta = _conn_db.execute(
+                "SELECT tr.skeleton_id, s.yaml_content FROM tracking_runs tr "
                 "JOIN skeletons s ON s.id = tr.skeleton_id WHERE tr.id = ?",
-                (args.run_id,),
+                (run_id,),
             ).fetchone()
-            _conn_db2.close()
 
-            if _skel_row2:
-                _layout = _SkeletonLayout(_skel_row2["yaml_content"])
-                print(f"  Computing FK from DB ({len(_state_rows)} frames) …")
+            skeleton_db: dict = {}
+            _skel_yaml = ""
+            if _skel_meta and _skel_meta["yaml_content"]:
+                skel_key = _skel_meta["skeleton_id"]
+                _skel_yaml = _skel_meta["yaml_content"]
+                if skel_key not in _skel_dict_cache:
+                    with _tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as _tf:
+                        _tf.write(_skel_yaml)
+                        _skel_tmp = Path(_tf.name)
+                    _skel_dict_cache[skel_key] = load_skeleton_structure(_skel_tmp)
+                    _skel_yaml_cache[skel_key] = _skel_yaml
+                    _skel_tmp.unlink(missing_ok=True)
+                    print(f"    Loaded skeleton {skel_key[:8]} ({len(_skel_dict_cache[skel_key])} joints)")
+                skeleton_db = _skel_dict_cache[skel_key]
+                _skel_yaml = _skel_yaml_cache[skel_key]
+            else:
+                print(f"    [warn] No skeleton for run {run_id[:8]} — bones disabled", file=sys.stderr)
+
+            # Load state rows (prefer smoothed)
+            _smoothed_rows = _conn_db.execute(
+                "SELECT tracker_step, timestamp_s, state FROM tracking_results "
+                "WHERE run_id = ? AND person_id = ? AND is_smoothed = 1 ORDER BY tracker_step",
+                (run_id, person_id),
+            ).fetchall()
+            _state_rows = _smoothed_rows or _conn_db.execute(
+                "SELECT tracker_step, timestamp_s, state FROM tracking_results "
+                "WHERE run_id = ? AND person_id = ? AND is_smoothed = 0 ORDER BY tracker_step",
+                (run_id, person_id),
+            ).fetchall()
+            if _smoothed_rows:
+                print(f"    Using smoothed state ({len(_smoothed_rows)} frames)")
+            elif _state_rows:
+                print(f"    Using raw state ({len(_state_rows)} frames)")
+            else:
+                print(f"    [warn] No tracking_results for run={run_id[:8]} person_id={person_id}",
+                      file=sys.stderr)
+
+            _conn_db.close()
+
+            bone_data_db: BoneWorldData = {}
+            primary_timestamps_db: FrameTimestamps = {}
+
+            if skeleton_db and _state_rows:
+                skel_key = _skel_meta["skeleton_id"]
+                if skel_key not in _layout_cache:
+                    _layout_cache[skel_key] = _SkeletonLayout(_skel_yaml)
+                _layout = _layout_cache[skel_key]
+                print(f"    Computing FK ({len(_state_rows)} frames) …")
                 for _srow in _state_rows:
                     _step = _srow["tracker_step"]
                     _ts = _srow["timestamp_s"]
@@ -1208,21 +1265,13 @@ def main() -> None:
                         bone_data_db[_step] = _bones
                     except Exception:
                         pass
-                print(f"    {len(bone_data_db)} frames")
+                print(f"      {len(bone_data_db)} frames with FK")
 
-        # Build marker_data for DB mode: actual observations + FK projections
-        _tracking_dirs_db = args.tracking_dirs or []
-        if not _tracking_dirs_db:
-            mdata_db: MarkerFrameData = {}
-
-            # Load actual 2D observations from DB (keyed by tracker step via timestamp match)
-            _skel_yaml_for_obs = _skel_row["yaml_content"] if _skel_row else ""
+            # Observations from tracking_obs_results
             _obs_by_step = _load_obs_mdata_from_db(
-                args.session_db, args.run_id, args.person_id,
-                cameras, _skel_yaml_for_obs, primary_timestamps_db,
+                args.session_db, run_id, person_id,
+                cameras, _skel_yaml, primary_timestamps_db,
             )
-
-            # Check if obs data already includes pred positions (from tracking_obs_results)
             _obs_has_pred = any(
                 v[2] is not None
                 for step_cams in _obs_by_step.values()
@@ -1230,10 +1279,7 @@ def main() -> None:
                 for v in cam_markers.values()
             ) if _obs_by_step else False
 
-            if _obs_has_pred:
-                # tracking_obs_results available: _load_obs_mdata_from_db returns
-                # (pred_x, pred_y, obs_x, obs_y, is_outlier) — already the MarkerFrameData convention.
-                mdata_db = dict(_obs_by_step)
+            mdata_db: MarkerFrameData = dict(_obs_by_step) if _obs_has_pred else {}
             for _step in primary_timestamps_db:
                 if _step not in mdata_db:
                     mdata_db[_step] = {}
@@ -1243,21 +1289,21 @@ def main() -> None:
                 "timestamps": primary_timestamps_db,
                 "bone_color": bone_color,
                 "marker_color": marker_color,
-                "label": f"run:{args.run_id[:8]}",
+                "label": label,
                 "bone_data": bone_data_db,
             })
             all_frames |= set(mdata_db.keys())
-            primary_timestamps = primary_timestamps_db
-        else:
-            # In DB mode with tracking dirs: still collect timestamps for reference
-            primary_timestamps = primary_timestamps_db
+            if primary_timestamps is None:
+                primary_timestamps = primary_timestamps_db
 
-    tracking_dirs_to_process = [] if db_mode and not args.tracking_dirs else (args.tracking_dirs or [])
+    tracking_dirs_to_process = [] if db_mode else (args.tracking_dirs or [])
+    _dir_color_offset = len(persons_data)
 
     for idx, tdir_str in enumerate(tracking_dirs_to_process):
         tdir = Path(tdir_str)
-        bone_color = PERSON_BONE_COLORS_BGR[idx % len(PERSON_BONE_COLORS_BGR)]
-        marker_color = PERSON_MARKER_COLORS_BGR[idx % len(PERSON_MARKER_COLORS_BGR)]
+        color_idx = (_dir_color_offset + idx) % len(PERSON_BONE_COLORS_BGR)
+        bone_color = PERSON_BONE_COLORS_BGR[color_idx]
+        marker_color = PERSON_MARKER_COLORS_BGR[color_idx]
 
         # Load marker projections
         proj_path = tdir / "marker_projections.csv"

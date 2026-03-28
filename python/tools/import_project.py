@@ -7,7 +7,7 @@ Expected project directory layout:
     <project-dir>/
       cameras.toml            # camera hardware description (optional but recommended)
       calibration/
-        intrinsics.toml       # Pose2Sim TOML: intrinsics + extrinsics for all cameras
+        calib.toml       # Pose2Sim TOML: intrinsics + extrinsics for all cameras
       <shot1>/                # any subdir with pose/ + sync_data.json is treated as a shot
         pose/
           cam1/
@@ -50,7 +50,7 @@ Usage
     uv run python/tools/import_project.py \\
         --project-dir /mnt/d/mocap/2026-03-10-posetrak-test \\
         --session-db  /mnt/d/mocap/2026-03-10-posetrak-test/session.db \\
-        [--calib      calibration/intrinsics.toml]   # relative to project-dir
+        [--calib      calibration/calib.toml]   # relative to project-dir
         [--cameras    cameras.toml]                  # relative to project-dir
         [--camera-model "GoPro Hero 12"]             # fallback if cameras.toml absent
         [--camera-mode  "1080p120"]                  # fallback if cameras.toml absent
@@ -217,9 +217,9 @@ def main() -> int:
     ap.add_argument("--project-dir", required=True, type=Path)
     ap.add_argument("--session-db",  required=True, type=Path,
                     help="Path for the new session DB (must not already exist).")
-    ap.add_argument("--calib", default="calibration/intrinsics.toml",
+    ap.add_argument("--calib", default="calibration/calib.toml",
                     help="Calibration TOML, relative to --project-dir "
-                         "[default: calibration/intrinsics.toml]")
+                         "[default: calibration/calib.toml]")
     ap.add_argument("--cameras", default=None,
                     help="Camera hardware TOML, relative to --project-dir "
                          "[default: cameras.toml if it exists]")

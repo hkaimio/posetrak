@@ -1,0 +1,146 @@
+"""CameraCell — single-camera video display widget for the setup wizard.
+
+Displays one decoded video frame as a scaled image, then calls each
+registered ``Overlay.paint()`` on top.  Mouse events are forwarded to
+overlays in reverse order (top-most overlay gets first chance) after mapping
+display coordinates to video-frame coordinates.
+"""
+
+from __future__ import annotations
+
+import cv2
+import numpy as np
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QWidget
+
+from app.setup.overlay import Overlay
+
+# Focus border width and colour
+_FOCUS_BORDER_PX = 2
+_FOCUS_COLOR = QColor(0, 150, 255)
+_PLACEHOLDER_COLOR = QColor(30, 30, 30)
+
+
+class CameraCell(QWidget):
+    """Widget that displays a single camera's video frame with overlays.
+
+    Frames are stretched to fill the widget area (no letterboxing).  This
+    keeps the coordinate mapping between display and frame space linear, with
+    no offset:
+
+        frame_x = display_x * frame_w / cell_w
+        frame_y = display_y * frame_h / cell_h
+
+    Parameters
+    ----------
+    label:
+        Optional camera label shown in the top-left corner when no frame is
+        loaded.
+    parent:
+        Parent widget.
+    """
+
+    #: Emitted when the cell is clicked (before focus changes).
+    clicked = Signal()
+
+    def __init__(self, label: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._label = label
+        self._frame: np.ndarray | None = None
+        self._overlays: list[Overlay] = []
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMinimumSize(160, 90)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def set_frame(self, frame: np.ndarray) -> None:
+        """Display *frame* (H×W×3 BGR uint8 array) and repaint."""
+        self._frame = frame
+        self.update()
+
+    def clear_frame(self) -> None:
+        """Remove the current frame and show the placeholder."""
+        self._frame = None
+        self.update()
+
+    def set_overlays(self, overlays: list[Overlay]) -> None:
+        """Replace the overlay list.  Triggers a repaint."""
+        self._overlays = list(overlays)
+        self.update()
+
+    def display_to_frame(self, dx: int, dy: int) -> tuple[int, int]:
+        """Map display-pixel coordinates to video-frame pixel coordinates."""
+        if self._frame is None:
+            return dx, dy
+        fh, fw = self._frame.shape[:2]
+        cw, ch = self.width(), self.height()
+        fx = int(dx * fw / cw) if cw > 0 else 0
+        fy = int(dy * fh / ch) if ch > 0 else 0
+        return fx, fy
+
+    # ------------------------------------------------------------------
+    # Qt overrides
+    # ------------------------------------------------------------------
+
+    def paintEvent(self, event) -> None:  # noqa: ARG002
+        painter = QPainter(self)
+        cw, ch = self.width(), self.height()
+
+        if self._frame is not None:
+            fh, fw = self._frame.shape[:2]
+            # Convert BGR → RGB for QImage
+            rgb = cv2.cvtColor(self._frame, cv2.COLOR_BGR2RGB)
+            # Ensure contiguous layout for QImage
+            if not rgb.flags["C_CONTIGUOUS"]:
+                rgb = np.ascontiguousarray(rgb)
+            img = QImage(
+                rgb.data,
+                fw, fh,
+                int(rgb.strides[0]),
+                QImage.Format.Format_RGB888,
+            )
+            pixmap = QPixmap.fromImage(img).scaled(
+                cw, ch,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap(0, 0, pixmap)
+
+            # Paint overlays in forward order (last overlay is top-most)
+            for overlay in self._overlays:
+                overlay.paint(painter, fw, fh, cw, ch)
+        else:
+            # Placeholder
+            painter.fillRect(0, 0, cw, ch, _PLACEHOLDER_COLOR)
+            if self._label:
+                painter.setPen(QColor(120, 120, 120))
+                painter.drawText(4, 16, self._label)
+
+        # Focus border
+        if self.hasFocus():
+            pen = QPen(_FOCUS_COLOR, _FOCUS_BORDER_PX)
+            painter.setPen(pen)
+            b = _FOCUS_BORDER_PX // 2
+            painter.drawRect(b, b, cw - _FOCUS_BORDER_PX, ch - _FOCUS_BORDER_PX)
+
+    def mousePressEvent(self, event) -> None:
+        self.clicked.emit()
+        fx, fy = self.display_to_frame(int(event.position().x()), int(event.position().y()))
+        for overlay in reversed(self._overlays):
+            overlay.mouse_press(fx, fy)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        fx, fy = self.display_to_frame(int(event.position().x()), int(event.position().y()))
+        for overlay in reversed(self._overlays):
+            overlay.mouse_move(fx, fy)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        fx, fy = self.display_to_frame(int(event.position().x()), int(event.position().y()))
+        for overlay in reversed(self._overlays):
+            overlay.mouse_release(fx, fy)
+        super().mouseReleaseEvent(event)

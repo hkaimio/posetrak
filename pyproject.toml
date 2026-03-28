@@ -33,6 +33,7 @@ analysis = [
 ]
 setup-app = [
     "PySide6>=6.7",
+    "pyexiftool>=0.5",
 ]
 # pipeline group is GPU-heavy and never installed in CI.
 # rtmlib is not on PyPI — install from git: uv add git+https://github.com/...

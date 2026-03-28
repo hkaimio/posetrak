@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 4
-SESSION_SCHEMA_VERSION: Final[int] = 7
+SESSION_SCHEMA_VERSION: Final[int] = 8
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -404,6 +404,18 @@ def _migrate_session_v6_to_v7(conn: sqlite3.Connection) -> None:
     conn.executescript(sql)
 
 
+def _migrate_session_v7_to_v8(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 7 to 8.
+
+    v8 adds person_detections, person_tracks, and frame_cache_entries tables
+    for the Phase 2 capture pipeline setup application.
+    """
+    sql = (_DB_DIR / "migrations" / "007_phase2_detection_tables.sql").read_text(
+        encoding="utf-8"
+    )
+    conn.executescript(sql)
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -445,6 +457,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 6
     if actual == 6:
         _migrate_session_v6_to_v7(conn)
+        actual = 7
+    if actual == 7:
+        _migrate_session_v7_to_v8(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

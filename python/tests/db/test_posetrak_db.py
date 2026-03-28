@@ -257,6 +257,9 @@ _SESSION_TABLES = {
     "tracking_run_persons",
     "tracking_results",
     "tracking_obs_results",
+    "person_detections",
+    "person_tracks",
+    "frame_cache_entries",
     # registry tables embedded in every session DB
     "camera_models",
     "camera_modes",

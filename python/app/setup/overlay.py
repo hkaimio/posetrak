@@ -235,14 +235,14 @@ class ROIDrawOverlay:
 
 
 # ---------------------------------------------------------------------------
-# Stubs (needed in D4)
+# Stubs for future overlays
 # ---------------------------------------------------------------------------
 
 
 class AnnotationPointOverlay:
     """Labelled dots + zoom-refine interaction for extrinsics annotation.
 
-    Implemented in D4a.  All methods are stubs here.
+    Not yet implemented — all methods are stubs.
     """
 
     def paint(
@@ -266,9 +266,9 @@ class AnnotationPointOverlay:
 
 
 class ReprojectionOverlay:
-    """Reprojected circles + residual lines after PnP compute.
+    """Reprojected circles + residual lines after PnP solve.
 
-    Implemented in D4b.  All methods are stubs here.
+    Not yet implemented — all methods are stubs.
     """
 
     def paint(

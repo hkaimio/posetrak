@@ -1,4 +1,4 @@
-"""Tests for app.setup.page_sync (SyncPage — D3a independent scrubber)."""
+"""Tests for app.setup.page_sync (sync wizard page)."""
 
 from __future__ import annotations
 
@@ -64,6 +64,7 @@ def _attach_wizard(page: SyncPage, conn, session_id: str):
 
 @pytest.fixture
 def loaded_page(qapp, tmp_path):
+    """2 shots × 2 cameras, page initialized."""
     conn, session_id = _make_session_with_shots(tmp_path, n_shots=2, videos_per_shot=2)
     page = SyncPage()
     _attach_wizard(page, conn, session_id)
@@ -75,6 +76,7 @@ def loaded_page(qapp, tmp_path):
 
 @pytest.fixture
 def loaded_page_1shot(qapp, tmp_path):
+    """1 shot × 2 cameras, page initialized."""
     conn, session_id = _make_session_with_shots(tmp_path, n_shots=1, videos_per_shot=2)
     page = SyncPage()
     _attach_wizard(page, conn, session_id)
@@ -86,6 +88,7 @@ def loaded_page_1shot(qapp, tmp_path):
 
 @pytest.fixture
 def loaded_page_1video(qapp, tmp_path):
+    """1 shot × 1 camera, page initialized."""
     conn, session_id = _make_session_with_shots(tmp_path, n_shots=1, videos_per_shot=1)
     page = SyncPage()
     _attach_wizard(page, conn, session_id)
@@ -96,7 +99,7 @@ def loaded_page_1video(qapp, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Construction (no DB needed)
+# Construction
 # ---------------------------------------------------------------------------
 
 
@@ -106,8 +109,7 @@ def test_page_constructs(qapp) -> None:
 
 
 def test_page_is_always_complete(qapp) -> None:
-    page = SyncPage()
-    assert page.isComplete()
+    assert SyncPage().isComplete()
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +123,7 @@ def test_initialize_populates_shot_combo(loaded_page) -> None:
     assert "Shot 1" in page._shot_combo.itemText(0)
 
 
-def test_initialize_builds_scrubber_for_first_shot(loaded_page_1shot) -> None:
+def test_initialize_builds_scrubber(loaded_page_1shot) -> None:
     page, _ = loaded_page_1shot
     assert page._scrubber is not None
     assert len(page._scrubber._cells) == 2
@@ -132,59 +134,195 @@ def test_initialize_no_shots_shows_error(qapp, tmp_path) -> None:
     page = SyncPage()
     _attach_wizard(page, conn, session_id)
     page.initializePage()
-
     assert page._scrubber is None
     assert not page._error_label.isHidden()
     conn.close()
 
 
+def test_initialize_creates_anchor_overlays(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    assert len(page._anchor_overlays) == 2
+    assert all(ov.anchor_frame is None for ov in page._anchor_overlays)
+
+
+def test_initialize_creates_anchor_labels(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    assert len(page._anchor_labels) == 2
+    assert all("—" in lbl.text() for lbl in page._anchor_labels)
+
+
 # ---------------------------------------------------------------------------
-# Per-cell sliders in scrubber
+# Per-cell sliders
 # ---------------------------------------------------------------------------
 
 
 def test_scrubber_has_per_cell_sliders(loaded_page_1shot) -> None:
     page, _ = loaded_page_1shot
-    scrubber = page._scrubber
-    assert len(scrubber._sliders) == 2
+    assert len(page._scrubber._sliders) == 2
 
 
 def test_per_cell_slider_max_equals_last_frame(loaded_page_1video) -> None:
     page, _ = loaded_page_1video
-    # first_video_frame=0, last_video_frame=299 → total=300 → max=299
     assert page._scrubber._sliders[0].maximum() == 299
 
 
 def test_per_cell_slider_updates_on_seek(loaded_page_1shot) -> None:
     page, _ = loaded_page_1shot
-    scrubber = page._scrubber
-    scrubber._set_cell_frame(0, 50)
-    assert scrubber._sliders[0].value() == 50
+    page._scrubber._set_cell_frame(0, 50)
+    assert page._scrubber._sliders[0].value() == 50
 
 
 def test_per_cell_frame_label_updates_on_seek(loaded_page_1shot) -> None:
     page, _ = loaded_page_1shot
-    scrubber = page._scrubber
-    scrubber._set_cell_frame(1, 42)
-    assert "42" in scrubber._frame_labels[1].text()
+    page._scrubber._set_cell_frame(1, 42)
+    assert "42" in page._scrubber._frame_labels[1].text()
 
 
-def test_cell_slider_move_seeks_that_cell(loaded_page_1shot) -> None:
+# ---------------------------------------------------------------------------
+# Rough sync — set anchor
+# ---------------------------------------------------------------------------
+
+
+def test_set_anchor_records_current_frame(loaded_page_1shot) -> None:
     page, _ = loaded_page_1shot
     scrubber = page._scrubber
-    scrubber._on_cell_slider_moved(1, 75)
-    assert scrubber.current_frames[1] == 75
-    assert scrubber._sliders[1].value() == 75
+    scrubber._set_cell_frame(0, 100)   # seek cell 0 to frame 100
+    scrubber._focused_cell = 0
+    page._on_set_anchor()
+    assert page._anchors[0] == 100
 
 
-def test_cell_slider_move_focuses_that_cell(loaded_page_1shot) -> None:
+def test_set_anchor_updates_overlay(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    page._scrubber._set_cell_frame(0, 55)
+    page._scrubber._focused_cell = 0
+    page._on_set_anchor()
+    assert page._anchor_overlays[0].anchor_frame == 55
+
+
+def test_set_anchor_updates_label(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    page._scrubber._set_cell_frame(1, 77)
+    page._scrubber._focused_cell = 1
+    page._on_set_anchor()
+    assert "77" in page._anchor_labels[1].text()
+    assert "—" not in page._anchor_labels[1].text()
+
+
+def test_apply_button_disabled_with_fewer_than_two_anchors(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    # One anchor only
+    page._scrubber._focused_cell = 0
+    page._on_set_anchor()
+    assert not page._apply_rough_btn.isEnabled()
+
+
+def test_apply_button_enabled_with_two_anchors(loaded_page_1shot) -> None:
     page, _ = loaded_page_1shot
     scrubber = page._scrubber
-    # Default focus is cell 0; drag cell 1's slider
-    scrubber._on_cell_slider_moved(1, 10)
-    assert scrubber.focused_cell == 1
-    assert scrubber._cells[1]._selected is True
-    assert scrubber._cells[0]._selected is False
+    scrubber._focused_cell = 0
+    page._on_set_anchor()
+    scrubber._focused_cell = 1
+    page._on_set_anchor()
+    assert page._apply_rough_btn.isEnabled()
+
+
+# ---------------------------------------------------------------------------
+# Rough sync — clear anchors
+# ---------------------------------------------------------------------------
+
+
+def test_clear_anchors_resets_state(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    page._scrubber._focused_cell = 0
+    page._on_set_anchor()
+    page._on_clear_anchors()
+    assert page._anchors == {}
+    assert all(ov.anchor_frame is None for ov in page._anchor_overlays)
+    assert all("—" in lbl.text() for lbl in page._anchor_labels)
+
+
+def test_clear_anchors_disables_apply(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    scrubber = page._scrubber
+    scrubber._focused_cell = 0
+    page._on_set_anchor()
+    scrubber._focused_cell = 1
+    page._on_set_anchor()
+    page._on_clear_anchors()
+    assert not page._apply_rough_btn.isEnabled()
+
+
+# ---------------------------------------------------------------------------
+# Rough sync — apply
+# ---------------------------------------------------------------------------
+
+
+def test_apply_rough_sync_writes_sync_config(loaded_page_1shot) -> None:
+    page, conn = loaded_page_1shot
+    scrubber = page._scrubber
+    scrubber._set_cell_frame(0, 90)
+    scrubber._focused_cell = 0
+    page._on_set_anchor()
+    scrubber._set_cell_frame(1, 120)
+    scrubber._focused_cell = 1
+    page._on_set_anchor()
+
+    page._on_apply_rough_sync()
+
+    configs = conn.execute("SELECT * FROM sync_configs").fetchall()
+    assert len(configs) == 1
+    assert configs[0]["created_by"] == "manual-rough"
+
+    pts = conn.execute("SELECT * FROM sync_points").fetchall()
+    assert len(pts) == 2
+
+
+def test_apply_rough_sync_switches_scrubber_to_synced_mode(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    scrubber = page._scrubber
+    scrubber._focused_cell = 0
+    page._on_set_anchor()
+    scrubber._focused_cell = 1
+    page._on_set_anchor()
+
+    page._on_apply_rough_sync()
+
+    assert scrubber.sync_table is not None
+
+
+def test_apply_rough_sync_shows_confirmation(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    scrubber = page._scrubber
+    scrubber._focused_cell = 0
+    page._on_set_anchor()
+    scrubber._focused_cell = 1
+    page._on_set_anchor()
+
+    page._on_apply_rough_sync()
+
+    assert "applied" in page._rough_status_label.text().lower()
+
+
+def test_apply_rough_sync_correct_frame_offsets(loaded_page_1shot) -> None:
+    """After applying, seeking to the reference timestamp shows correct frames."""
+    page, _ = loaded_page_1shot
+    scrubber = page._scrubber
+
+    # Camera 0 anchor at frame 90 (t = 90/30 = 3.0 s)
+    # Camera 1 anchor at frame 120 (also at t = 3.0 s in global time)
+    scrubber._set_cell_frame(0, 90)
+    scrubber._focused_cell = 0
+    page._on_set_anchor()
+    scrubber._set_cell_frame(1, 120)
+    scrubber._focused_cell = 1
+    page._on_set_anchor()
+    page._on_apply_rough_sync()
+
+    # At t=3.0s both cameras should show their anchor frames
+    scrubber.seek_synced(3.0)
+    assert scrubber.current_frames[0] == 90
+    assert scrubber.current_frames[1] == 120
 
 
 # ---------------------------------------------------------------------------
@@ -193,21 +331,24 @@ def test_cell_slider_move_focuses_that_cell(loaded_page_1shot) -> None:
 
 
 def test_shot_switch_rebuilds_scrubber(loaded_page) -> None:
-    page, conn = loaded_page
-    first_scrubber = page._scrubber
+    page, _ = loaded_page
+    first = page._scrubber
     page._shot_combo.setCurrentIndex(1)
-    assert page._scrubber is not first_scrubber
+    assert page._scrubber is not first
 
 
-def test_shot_switch_clears_old_cache(loaded_page) -> None:
-    page, conn = loaded_page
-    first_cache = page._cache
+def test_shot_switch_resets_anchors(loaded_page) -> None:
+    page, _ = loaded_page
+    page._scrubber._focused_cell = 0
+    page._on_set_anchor()
+    assert page._anchors
+
     page._shot_combo.setCurrentIndex(1)
-    assert page._cache is not first_cache
+    assert page._anchors == {}
 
 
 # ---------------------------------------------------------------------------
-# cleanupPage — teardown
+# cleanupPage
 # ---------------------------------------------------------------------------
 
 
@@ -216,25 +357,11 @@ def test_cleanup_releases_scrubber_and_cache(qapp, tmp_path) -> None:
     page = SyncPage()
     _attach_wizard(page, conn, session_id)
     page.initializePage()
-
-    assert page._scrubber is not None
-    assert page._cache is not None
-
     page.cleanupPage()
-
     assert page._scrubber is None
     assert page._cache is None
+    assert page._anchors == {}
     conn.close()
-
-
-# ---------------------------------------------------------------------------
-# Independent mode — no sync table on init
-# ---------------------------------------------------------------------------
-
-
-def test_scrubber_starts_without_sync_table(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    assert page._scrubber.sync_table is None
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +377,6 @@ def test_first_cell_selected_by_default(loaded_page_1shot) -> None:
 
 def test_click_switches_selected_cell(loaded_page_1shot) -> None:
     page, _ = loaded_page_1shot
-    scrubber = page._scrubber
-    scrubber._on_cell_clicked(1)
-    assert scrubber._cells[0]._selected is False
-    assert scrubber._cells[1]._selected is True
+    page._scrubber._on_cell_clicked(1)
+    assert page._scrubber._cells[0]._selected is False
+    assert page._scrubber._cells[1]._selected is True

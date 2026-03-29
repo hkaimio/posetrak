@@ -14,10 +14,11 @@ Supports two navigation modes:
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import dataclass, field
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QGridLayout, QWidget
 
 from app.setup.camera_cell import CameraCell
@@ -49,6 +50,66 @@ class CellInfo:
     total_frames: int
     fps: float
     label: str = ""
+
+
+class _FrameDecoder(QThread):
+    """Background thread that decodes video frames without blocking the UI.
+
+    Callers post requests via ``request(cell_idx, frame_idx)``.  When many
+    requests arrive for the same cell before the previous one completes, only
+    the latest is decoded (stale intermediate frames are discarded).
+    """
+
+    #: Emitted on the main thread once a frame is ready.
+    frame_ready = Signal(int, int, object)  # cell_idx, frame_idx, ndarray
+
+    def __init__(self, cells_info: list, cache, parent=None) -> None:
+        super().__init__(parent)
+        self._cells_info = cells_info
+        self._cache = cache
+        self._pending: dict[int, int] = {}
+        self._lock = threading.Lock()
+        self._wakeup = threading.Event()
+        self._stop = False
+
+    def request(self, cell_idx: int, frame_idx: int) -> None:
+        """Queue a decode request; supersedes any earlier request for the same cell."""
+        with self._lock:
+            self._pending[cell_idx] = frame_idx
+        self._wakeup.set()
+
+    def shutdown(self) -> None:
+        """Stop the thread and wait for it to finish (up to 3 s)."""
+        self._stop = True
+        self._wakeup.set()
+        self.wait(3000)
+
+    def run(self) -> None:
+        while not self._stop:
+            self._wakeup.wait()
+            if self._stop:
+                break
+            self._wakeup.clear()
+            with self._lock:
+                batch = dict(self._pending)
+                self._pending.clear()
+            for cell_idx, frame_idx in batch.items():
+                if self._stop:
+                    break
+                info = self._cells_info[cell_idx]
+                frame_idx = max(0, min(frame_idx, info.total_frames - 1))
+                try:
+                    img = self._cache.get(
+                        CacheKey(
+                            shot_video_id=info.shot_video_id,
+                            frame_idx=frame_idx,
+                            cache_type=CacheType.FULL_FRAME,
+                        ),
+                        file_path=info.file_path,
+                    )
+                    self.frame_ready.emit(cell_idx, frame_idx, img)
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 class MultiVideoScrubber(QWidget):
@@ -86,6 +147,11 @@ class MultiVideoScrubber(QWidget):
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_play_tick)
 
+        # Background frame decoder
+        self._decoder = _FrameDecoder(cells_info, cache, self)
+        self._decoder.frame_ready.connect(self._on_frame_ready)
+        self._decoder.start()
+
         # Build grid layout
         layout = QGridLayout(self)
         layout.setSpacing(2)
@@ -100,6 +166,9 @@ class MultiVideoScrubber(QWidget):
             self._cells.append(cell)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Mark cell 0 as selected by default
+        if self._cells:
+            self._cells[0].set_selected(True)
 
     # ------------------------------------------------------------------
     # Properties
@@ -183,24 +252,23 @@ class MultiVideoScrubber(QWidget):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def shutdown(self) -> None:
+        """Stop the background decoder — call before deleting the widget."""
+        self._play_timer.stop()
+        self._decoder.shutdown()
+
     def _set_cell_frame(self, cell_idx: int, frame_idx: int) -> None:
-        """Clamp, decode, and display *frame_idx* for *cell_idx*."""
+        """Clamp frame index, record it, and request async decode."""
         info = self._cells_info[cell_idx]
         frame_idx = max(0, min(frame_idx, info.total_frames - 1))
         self._current_frames[cell_idx] = frame_idx
-        try:
-            img = self._cache.get(
-                CacheKey(
-                    shot_video_id=info.shot_video_id,
-                    frame_idx=frame_idx,
-                    cache_type=CacheType.FULL_FRAME,
-                ),
-                file_path=info.file_path,
-            )
-            self._cells[cell_idx].set_frame(img)
-        except Exception:  # noqa: BLE001
-            pass  # leave the cell showing its previous frame
+        self._decoder.request(cell_idx, frame_idx)
         self.frame_changed.emit(cell_idx, frame_idx)
+
+    def _on_frame_ready(self, cell_idx: int, frame_idx: int, img) -> None:
+        """Display *img* only if *frame_idx* is still the current frame."""
+        if self._current_frames[cell_idx] == frame_idx:
+            self._cells[cell_idx].set_frame(img)
 
     def _step(self, delta: int) -> None:
         if self._sync_table is not None:
@@ -236,6 +304,8 @@ class MultiVideoScrubber(QWidget):
             self.seek_camera(self._focused_cell, info.total_frames - 1)
 
     def _on_cell_clicked(self, cell_idx: int) -> None:
+        for i, cell in enumerate(self._cells):
+            cell.set_selected(i == cell_idx)
         self._focused_cell = cell_idx
         self.setFocus()
 

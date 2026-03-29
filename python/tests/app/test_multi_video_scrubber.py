@@ -50,7 +50,8 @@ def _two_anchor_sync() -> SyncTable:
 def scrubber(qapp):
     s = MultiVideoScrubber(_make_cells(), _make_cache())
     s.resize(640, 360)
-    return s
+    yield s
+    s.shutdown()
 
 
 # ---------------------------------------------------------------------------

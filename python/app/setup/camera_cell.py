@@ -16,9 +16,10 @@ from PySide6.QtWidgets import QWidget
 
 from app.setup.overlay import Overlay
 
-# Focus border width and colour
-_FOCUS_BORDER_PX = 2
-_FOCUS_COLOR = QColor(0, 150, 255)
+# Border constants
+_BORDER_PX = 3
+_SELECTED_COLOR = QColor(220, 60, 0)   # red-orange — scrubber-selected camera
+_FOCUS_COLOR = QColor(0, 150, 255)     # blue — Qt keyboard focus (fallback)
 _PLACEHOLDER_COLOR = QColor(30, 30, 30)
 
 
@@ -49,6 +50,7 @@ class CameraCell(QWidget):
         self._label = label
         self._frame: np.ndarray | None = None
         self._overlays: list[Overlay] = []
+        self._selected = False
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(160, 90)
 
@@ -65,6 +67,12 @@ class CameraCell(QWidget):
         """Remove the current frame and show the placeholder."""
         self._frame = None
         self.update()
+
+    def set_selected(self, selected: bool) -> None:
+        """Mark this cell as the scrubber-focused camera (red border)."""
+        if self._selected != selected:
+            self._selected = selected
+            self.update()
 
     def set_overlays(self, overlays: list[Overlay]) -> None:
         """Replace the overlay list.  Triggers a repaint."""
@@ -119,12 +127,18 @@ class CameraCell(QWidget):
                 painter.setPen(QColor(120, 120, 120))
                 painter.drawText(4, 16, self._label)
 
-        # Focus border
-        if self.hasFocus():
-            pen = QPen(_FOCUS_COLOR, _FOCUS_BORDER_PX)
+        # Border: selected (red) takes priority over Qt keyboard focus (blue)
+        if self._selected:
+            color = _SELECTED_COLOR
+        elif self.hasFocus():
+            color = _FOCUS_COLOR
+        else:
+            color = None
+        if color is not None:
+            pen = QPen(color, _BORDER_PX)
             painter.setPen(pen)
-            b = _FOCUS_BORDER_PX // 2
-            painter.drawRect(b, b, cw - _FOCUS_BORDER_PX, ch - _FOCUS_BORDER_PX)
+            b = _BORDER_PX // 2
+            painter.drawRect(b, b, cw - _BORDER_PX, ch - _BORDER_PX)
 
     def mousePressEvent(self, event) -> None:
         self.clicked.emit()

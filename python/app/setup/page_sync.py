@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -88,8 +88,17 @@ class SyncPage(QWizardPage):
         self._seek_slider.setMaximum(0)
         self._seek_slider.setValue(0)
         self._seek_slider.setEnabled(False)
-        self._seek_slider.valueChanged.connect(self._on_slider_moved)
-        self._slider_updating = False  # guard against feedback loop
+        # NoFocus so keyboard events always reach the scrubber, not the slider
+        self._seek_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._seek_slider.sliderMoved.connect(self._on_slider_gesture)
+        self._slider_updating = False  # guard: prevent seek when we set value programmatically
+
+        # Debounce timer: decode only after slider has been idle for 80 ms
+        self._slider_timer = QTimer(self)
+        self._slider_timer.setSingleShot(True)
+        self._slider_timer.setInterval(80)
+        self._slider_timer.timeout.connect(self._on_slider_debounced)
+        self._slider_pending_value: int = 0
 
         # --- camera status strip ---
         self._status_label = QLabel()
@@ -223,11 +232,17 @@ class SyncPage(QWizardPage):
             self._slider_updating = False
         self._update_status()
 
-    def _on_slider_moved(self, value: int) -> None:
+    def _on_slider_gesture(self, value: int) -> None:
+        """Fires on every pixel of user drag; debounced before seeking."""
+        self._slider_pending_value = value
+        self._slider_timer.start()   # restart — fires 80 ms after last movement
+
+    def _on_slider_debounced(self) -> None:
+        """Fires once after the slider has been idle for 80 ms."""
         if self._slider_updating or self._scrubber is None:
             return
         fc = self._scrubber.focused_cell
-        self._scrubber.seek_camera(fc, value)
+        self._scrubber.seek_camera(fc, self._slider_pending_value)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -253,6 +268,8 @@ class SyncPage(QWizardPage):
 
     def _teardown_scrubber(self) -> None:
         if self._scrubber is not None:
+            self._slider_timer.stop()
+            self._scrubber.shutdown()   # stop background decoder before deleting
             self._scrubber_layout.removeWidget(self._scrubber)
             self._scrubber.deleteLater()
             self._scrubber = None

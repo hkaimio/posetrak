@@ -10,12 +10,13 @@ def main() -> int:
 
     from app.setup.page_session import SessionPage
     from app.setup.page_shots import ShotsPage
+    from app.setup.page_sync import SyncPage
 
     app = QApplication(sys.argv)
 
     wizard = QWizard()
     wizard.setWindowTitle("posetrak Setup Wizard")
-    wizard.resize(800, 600)
+    wizard.resize(1000, 700)
 
     # Placeholders for page 1 to write to; downstream pages read these.
     wizard.session_conn = None
@@ -24,6 +25,7 @@ def main() -> int:
 
     wizard.addPage(SessionPage())
     wizard.addPage(ShotsPage())
+    wizard.addPage(SyncPage())
 
     wizard.show()
     return app.exec()

@@ -191,10 +191,15 @@ class MultiVideoScrubber(QWidget):
             slider.sliderMoved.connect(lambda val, idx=i: self._on_cell_slider_moved(idx, val))
             slider_row.addWidget(slider)
 
-            frame_label = QLabel(f"0 / {info.total_frames - 1}")
-            frame_label.setFixedWidth(72)
+            last = info.total_frames - 1
+            frame_label = QLabel(f"0 / {last}")
             frame_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             frame_label.setStyleSheet("font-family: monospace; font-size: 11px;")
+            # Size to the widest possible text so it never truncates
+            worst = f"{last} / {last}"
+            frame_label.setFixedWidth(
+                frame_label.fontMetrics().horizontalAdvance(worst) + 8
+            )
             slider_row.addWidget(frame_label)
 
             vbox.addLayout(slider_row)
@@ -208,6 +213,9 @@ class MultiVideoScrubber(QWidget):
         # Mark cell 0 as selected by default
         if self._cells:
             self._cells[0].set_selected(True)
+        # Kick off an initial decode for frame 0 of every cell
+        for i in range(len(cells_info)):
+            self._decoder.request(i, 0)
 
     # ------------------------------------------------------------------
     # Properties

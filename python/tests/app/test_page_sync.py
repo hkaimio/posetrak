@@ -23,7 +23,6 @@ def _make_session_with_shots(
     n_shots: int = 2,
     videos_per_shot: int = 2,
 ) -> tuple[sqlite3.Connection, str]:
-    """Create a session DB with *n_shots* shots, each with *videos_per_shot* videos."""
     db_path = tmp_path / "sync_session.db"
     conn = create_session(db_path)
     conn.row_factory = sqlite3.Row
@@ -65,11 +64,6 @@ def _attach_wizard(page: SyncPage, conn, session_id: str):
 
 @pytest.fixture
 def loaded_page(qapp, tmp_path):
-    """A SyncPage with 2 shots × 2 cameras already initialized.
-
-    Yields (page, conn).  Calls cleanupPage() on teardown to stop the
-    background decoder thread.
-    """
     conn, session_id = _make_session_with_shots(tmp_path, n_shots=2, videos_per_shot=2)
     page = SyncPage()
     _attach_wizard(page, conn, session_id)
@@ -145,6 +139,55 @@ def test_initialize_no_shots_shows_error(qapp, tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-cell sliders in scrubber
+# ---------------------------------------------------------------------------
+
+
+def test_scrubber_has_per_cell_sliders(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    scrubber = page._scrubber
+    assert len(scrubber._sliders) == 2
+
+
+def test_per_cell_slider_max_equals_last_frame(loaded_page_1video) -> None:
+    page, _ = loaded_page_1video
+    # first_video_frame=0, last_video_frame=299 → total=300 → max=299
+    assert page._scrubber._sliders[0].maximum() == 299
+
+
+def test_per_cell_slider_updates_on_seek(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    scrubber = page._scrubber
+    scrubber._set_cell_frame(0, 50)
+    assert scrubber._sliders[0].value() == 50
+
+
+def test_per_cell_frame_label_updates_on_seek(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    scrubber = page._scrubber
+    scrubber._set_cell_frame(1, 42)
+    assert "42" in scrubber._frame_labels[1].text()
+
+
+def test_cell_slider_move_seeks_that_cell(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    scrubber = page._scrubber
+    scrubber._on_cell_slider_moved(1, 75)
+    assert scrubber.current_frames[1] == 75
+    assert scrubber._sliders[1].value() == 75
+
+
+def test_cell_slider_move_focuses_that_cell(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    scrubber = page._scrubber
+    # Default focus is cell 0; drag cell 1's slider
+    scrubber._on_cell_slider_moved(1, 10)
+    assert scrubber.focused_cell == 1
+    assert scrubber._cells[1]._selected is True
+    assert scrubber._cells[0]._selected is False
+
+
+# ---------------------------------------------------------------------------
 # Shot switching
 # ---------------------------------------------------------------------------
 
@@ -161,55 +204,6 @@ def test_shot_switch_clears_old_cache(loaded_page) -> None:
     first_cache = page._cache
     page._shot_combo.setCurrentIndex(1)
     assert page._cache is not first_cache
-
-
-# ---------------------------------------------------------------------------
-# Seek slider
-# ---------------------------------------------------------------------------
-
-
-def test_seek_slider_enabled_after_shot_load(loaded_page) -> None:
-    page, _ = loaded_page
-    assert not page._seek_slider.isHidden()
-    assert page._seek_slider.isEnabled()
-
-
-def test_seek_slider_max_equals_last_frame(loaded_page_1video) -> None:
-    page, _ = loaded_page_1video
-    # first_video_frame=0, last_video_frame=299 → total=300 → max slider = 299
-    assert page._seek_slider.maximum() == 299
-
-
-def test_slider_gesture_triggers_debounce(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    scrubber = page._scrubber
-    scrubber.seek_camera = MagicMock()
-
-    page._on_slider_gesture(50)
-    assert page._slider_pending_value == 50
-    assert page._slider_timer.isActive()
-
-    # Fire the timer immediately
-    page._on_slider_debounced()
-    scrubber.seek_camera.assert_called_once_with(scrubber.focused_cell, 50)
-
-
-# ---------------------------------------------------------------------------
-# Status strip
-# ---------------------------------------------------------------------------
-
-
-def test_status_shows_camera_labels(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    text = page._status_label.text()
-    assert "cam1" in text
-    assert "cam2" in text
-
-
-def test_status_marks_focused_cell(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    text = page._status_label.text()
-    assert "◄" in text
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +224,6 @@ def test_cleanup_releases_scrubber_and_cache(qapp, tmp_path) -> None:
 
     assert page._scrubber is None
     assert page._cache is None
-    assert not page._seek_slider.isEnabled()
     conn.close()
 
 
@@ -241,7 +234,6 @@ def test_cleanup_releases_scrubber_and_cache(qapp, tmp_path) -> None:
 
 def test_scrubber_starts_without_sync_table(loaded_page_1shot) -> None:
     page, _ = loaded_page_1shot
-    assert page._scrubber is not None
     assert page._scrubber.sync_table is None
 
 

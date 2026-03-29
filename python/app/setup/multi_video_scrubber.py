@@ -19,7 +19,14 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtWidgets import QGridLayout, QWidget
+from PySide6.QtWidgets import (
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
 
 from app.setup.camera_cell import CameraCell
 from app.setup.db_context import SyncTable
@@ -152,18 +159,50 @@ class MultiVideoScrubber(QWidget):
         self._decoder.frame_ready.connect(self._on_frame_ready)
         self._decoder.start()
 
-        # Build grid layout
+        # Build grid layout — each column is a container with the video cell
+        # on top and a (slider + frame label) row below.
         layout = QGridLayout(self)
-        layout.setSpacing(2)
+        layout.setSpacing(4)
         layout.setContentsMargins(0, 0, 0, 0)
         self._cells: list[CameraCell] = []
+        self._sliders: list[QSlider] = []
+        self._frame_labels: list[QLabel] = []
         n = len(cells_info)
         cols = max(1, math.ceil(math.sqrt(n)))
         for i, info in enumerate(cells_info):
-            cell = CameraCell(label=info.label, parent=self)
+            container = QWidget(self)
+            vbox = QVBoxLayout(container)
+            vbox.setContentsMargins(0, 0, 0, 0)
+            vbox.setSpacing(2)
+
+            cell = CameraCell(label=info.label, parent=container)
             cell.clicked.connect(lambda idx=i: self._on_cell_clicked(idx))
-            layout.addWidget(cell, i // cols, i % cols)
+            vbox.addWidget(cell, stretch=1)
+
+            # Slider + frame counter row
+            slider_row = QHBoxLayout()
+            slider_row.setContentsMargins(0, 0, 0, 0)
+
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setMinimum(0)
+            slider.setMaximum(max(info.total_frames - 1, 0))
+            slider.setValue(0)
+            slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            slider.sliderMoved.connect(lambda val, idx=i: self._on_cell_slider_moved(idx, val))
+            slider_row.addWidget(slider)
+
+            frame_label = QLabel(f"0 / {info.total_frames - 1}")
+            frame_label.setFixedWidth(72)
+            frame_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            frame_label.setStyleSheet("font-family: monospace; font-size: 11px;")
+            slider_row.addWidget(frame_label)
+
+            vbox.addLayout(slider_row)
+
+            layout.addWidget(container, i // cols, i % cols)
             self._cells.append(cell)
+            self._sliders.append(slider)
+            self._frame_labels.append(frame_label)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # Mark cell 0 as selected by default
@@ -258,12 +297,22 @@ class MultiVideoScrubber(QWidget):
         self._decoder.shutdown()
 
     def _set_cell_frame(self, cell_idx: int, frame_idx: int) -> None:
-        """Clamp frame index, record it, and request async decode."""
+        """Clamp frame index, update slider/label immediately, request async decode."""
         info = self._cells_info[cell_idx]
         frame_idx = max(0, min(frame_idx, info.total_frames - 1))
         self._current_frames[cell_idx] = frame_idx
+        self._sliders[cell_idx].setValue(frame_idx)
+        self._frame_labels[cell_idx].setText(f"{frame_idx} / {info.total_frames - 1}")
         self._decoder.request(cell_idx, frame_idx)
         self.frame_changed.emit(cell_idx, frame_idx)
+
+    def _on_cell_slider_moved(self, cell_idx: int, value: int) -> None:
+        """User dragged a per-cell slider — focus that cell and seek it."""
+        for i, cell in enumerate(self._cells):
+            cell.set_selected(i == cell_idx)
+        self._focused_cell = cell_idx
+        self._set_cell_frame(cell_idx, value)
+        self.setFocus()
 
     def _on_frame_ready(self, cell_idx: int, frame_idx: int, img) -> None:
         """Display *img* only if *frame_idx* is still the current frame."""

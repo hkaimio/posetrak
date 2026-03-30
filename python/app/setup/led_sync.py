@@ -380,18 +380,23 @@ def ransac_affine_fit(
 def build_time_map(
     t_ref: np.ndarray,
     t_cam: np.ndarray,
-    use_piecewise_threshold_s: float = 0.008,
+    use_piecewise_threshold_s: float = 0.003,
 ) -> tuple[Callable[[np.ndarray], np.ndarray], dict]:
     """Fit t_ref = f(t_cam).  Returns (callable, meta_dict).
 
     Uses an affine LS fit; upgrades to monotone piecewise interpolation if
     residual std exceeds *use_piecewise_threshold_s*.
+
+    The default threshold (3 ms, ~0.36 frames at 120 fps) ensures piecewise
+    interpolation is used whenever there is any detectable clock drift.  At
+    120 fps one frame = 8.3 ms; genuine LED-detection noise is ~2–4 ms, so
+    residuals above 3 ms are real drift rather than measurement noise.
     """
     B = np.vstack([t_cam, np.ones_like(t_cam)]).T
     a, b = np.linalg.lstsq(B, t_ref, rcond=None)[0]
     resid_std = float(np.std(t_ref - (a * t_cam + b)))
 
-    if resid_std <= use_piecewise_threshold_s or len(t_cam) < 4:
+    if resid_std <= use_piecewise_threshold_s or len(t_cam) < 6:
         a_f, b_f = float(a), float(b)
         return (lambda t, _a=a_f, _b=b_f: _a * t + _b), {
             "type": "affine", "a": a_f, "b": b_f, "resid_std_s": resid_std,
@@ -401,8 +406,25 @@ def build_time_map(
     x, y = t_cam[order], t_ref[order]
 
     if _HAS_PCHIP and _PchipInterpolator is not None:
-        f = _PchipInterpolator(x, y, extrapolate=True)
-        return (lambda t, _f=f: np.asarray(_f(t))), {
+        # Use PCHIP within the knot range, but fall back to the global affine
+        # outside it.  PCHIP's cubic extrapolation can diverge severely when
+        # t=0 is far from the first knot (e.g. when early events are RANSAC
+        # outliers), whereas the affine gives a well-behaved baseline.
+        f_inner = _PchipInterpolator(x, y, extrapolate=False)
+        x0, x1 = float(x[0]), float(x[-1])
+        a_f, b_f = float(a), float(b)
+
+        def _f_pchip(t: np.ndarray, _f=f_inner, _a=a_f, _b=b_f,
+                     _x0=x0, _x1=x1) -> np.ndarray:
+            t_arr = np.asarray(t, dtype=float)
+            out = _a * t_arr + _b          # global affine as default
+            mid = (t_arr >= _x0) & (t_arr <= _x1)
+            if mid.any():
+                out = out.copy()
+                out[mid] = np.asarray(_f(t_arr[mid]))
+            return out
+
+        return _f_pchip, {
             "type": "pchip", "knots": len(x), "resid_std_s": resid_std,
         }
 
@@ -481,44 +503,41 @@ def _sync_one_camera(
             n_inliers=0,
         )
 
-    pairs = dtw_match_event_times(t_ref_events, t_cam_events, band_s=dtw_band_s)
-    _log.debug("[%s] DTW (band_s=%.2f): %d pairs", cam_id, dtw_band_s or 0, pairs.shape[0])
+    # When a rough offset is available and it exceeds half the DTW band, DTW
+    # would match wrong events (e.g. cam[0]=0s matches ref[0]=1s instead of
+    # ref[5]=5s when offset=5s, blink_interval=1s).  Skip DTW entirely and
+    # use nearest-neighbour matching shifted by initial_offset_s instead.
+    _use_nn = dtw_band_s is not None and abs(initial_offset_s) > 0.5 * dtw_band_s
 
-    if pairs.shape[0] == 0 and dtw_band_s is not None:
-        if abs(initial_offset_s) > 0.5 * dtw_band_s:
-            # Large initial offset: DTW path construction breaks because boundary
-            # events that are outside the overlap region corrupt the DP path.
-            # Use nearest-neighbour matching instead: for each shifted cam event,
-            # find the closest ref event within band_s.  This is robust to
-            # different detection rates between cameras and avoids path issues.
-            _log.debug(
-                "[%s] DTW band too restrictive (rough_offset=%.3f s) — "
-                "switching to nearest-neighbour matching",
-                cam_id, initial_offset_s,
-            )
-            cam_shifted = t_cam_events + initial_offset_s
-            nn_pairs: list[tuple[int, int]] = []
-            for j_idx in range(len(cam_shifted)):
-                t_cs = cam_shifted[j_idx]
-                # Binary search for the closest ref event
-                ins = int(np.searchsorted(t_ref_events, t_cs))
-                best_i, best_d = -1, dtw_band_s + 1.0
-                for i_cand in (ins - 1, ins):
-                    if 0 <= i_cand < len(t_ref_events):
-                        d = abs(t_ref_events[i_cand] - t_cs)
-                        if d < best_d:
-                            best_d, best_i = d, i_cand
-                if best_i >= 0 and best_d <= dtw_band_s:
-                    nn_pairs.append((best_i, j_idx))
-            if nn_pairs:
-                pairs = np.array(nn_pairs, dtype=int)
-            _log.debug(
-                "[%s] nearest-neighbour with offset: %d pairs "
-                "(%.1f%% of cam events matched)",
-                cam_id, len(nn_pairs),
-                100.0 * len(nn_pairs) / max(len(cam_shifted), 1),
-            )
-        else:
+    if _use_nn:
+        _log.debug(
+            "[%s] rough_offset=%.3f s > 0.5×band_s — using nearest-neighbour matching",
+            cam_id, initial_offset_s,
+        )
+        cam_shifted = t_cam_events + initial_offset_s
+        nn_pairs: list[tuple[int, int]] = []
+        for j_idx in range(len(cam_shifted)):
+            t_cs = cam_shifted[j_idx]
+            ins = int(np.searchsorted(t_ref_events, t_cs))
+            best_i, best_d = -1, dtw_band_s + 1.0
+            for i_cand in (ins - 1, ins):
+                if 0 <= i_cand < len(t_ref_events):
+                    d = abs(t_ref_events[i_cand] - t_cs)
+                    if d < best_d:
+                        best_d, best_i = d, i_cand
+            if best_i >= 0 and best_d <= dtw_band_s:
+                nn_pairs.append((best_i, j_idx))
+        pairs = np.array(nn_pairs, dtype=int) if nn_pairs else np.empty((0, 2), dtype=int)
+        _log.debug(
+            "[%s] nearest-neighbour: %d pairs (%.1f%% of cam events matched)",
+            cam_id, len(nn_pairs),
+            100.0 * len(nn_pairs) / max(len(cam_shifted), 1),
+        )
+    else:
+        pairs = dtw_match_event_times(t_ref_events, t_cam_events, band_s=dtw_band_s)
+        _log.debug("[%s] DTW (band_s=%.2f): %d pairs", cam_id, dtw_band_s or 0, pairs.shape[0])
+
+        if pairs.shape[0] == 0 and dtw_band_s is not None:
             # Small or zero initial offset — band was just too tight; retry unconstrained.
             _log.debug("[%s] DTW band too restrictive — retrying unconstrained", cam_id)
             pairs = dtw_match_event_times(t_ref_events, t_cam_events, band_s=None)

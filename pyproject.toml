@@ -19,6 +19,10 @@ dependencies = [
 posetrak-db = "posetrak.db.cli:main"
 posetrak-setup = "app.setup.main:main"
 
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
 [tool.setuptools.packages.find]
 where = ["python"]
 
@@ -34,6 +38,7 @@ analysis = [
 setup-app = [
     "PySide6>=6.7",
     "pyexiftool>=0.5",
+    "matplotlib>=3.8",
 ]
 # pipeline group is GPU-heavy and never installed in CI.
 # rtmlib is not on PyPI — install from git: uv add git+https://github.com/...

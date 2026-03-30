@@ -1139,7 +1139,7 @@ wheels = [
 [[package]]
 name = "posetrak"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "h5py" },
     { name = "numpy" },
@@ -1164,6 +1164,7 @@ pipeline = [
     { name = "ultralytics" },
 ]
 setup-app = [
+    { name = "matplotlib" },
     { name = "pyexiftool" },
     { name = "pyside6" },
 ]
@@ -1191,6 +1192,7 @@ dev = [
 ]
 pipeline = [{ name = "ultralytics" }]
 setup-app = [
+    { name = "matplotlib", specifier = ">=3.8" },
     { name = "pyexiftool", specifier = ">=0.5" },
     { name = "pyside6", specifier = ">=6.7" },
 ]

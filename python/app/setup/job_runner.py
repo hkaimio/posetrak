@@ -22,6 +22,8 @@ Usage::
 
 from __future__ import annotations
 
+import traceback
+
 from PySide6.QtCore import QThread, Signal
 
 
@@ -65,6 +67,7 @@ def _wrap_run(cls: type) -> None:
         try:
             original(self)
         except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
             self.error.emit(str(exc))
 
     _safe_run.__wrapped__ = original  # type: ignore[attr-defined]

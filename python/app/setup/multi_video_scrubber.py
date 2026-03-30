@@ -315,11 +315,24 @@ class MultiVideoScrubber(QWidget):
         self.frame_changed.emit(cell_idx, frame_idx)
 
     def _on_cell_slider_moved(self, cell_idx: int, value: int) -> None:
-        """User dragged a per-cell slider — focus that cell and seek it."""
+        """User dragged a per-cell slider — focus that cell and seek it.
+
+        In synced mode the slider position is converted to a global timestamp
+        so that all cameras follow together (consistent with keyboard navigation).
+        In independent mode only the dragged cell is seeked.
+        """
         for i, cell in enumerate(self._cells):
             cell.set_selected(i == cell_idx)
         self._focused_cell = cell_idx
-        self._set_cell_frame(cell_idx, value)
+        if self._sync_table is not None:
+            vid_id = self._cells_info[cell_idx].shot_video_id
+            t = self._sync_table.frame_to_global_time(value, vid_id)
+            if t is not None:
+                self.seek_synced(t)
+            else:
+                self._set_cell_frame(cell_idx, value)
+        else:
+            self._set_cell_frame(cell_idx, value)
         self.setFocus()
 
     def _on_frame_ready(self, cell_idx: int, frame_idx: int, img) -> None:

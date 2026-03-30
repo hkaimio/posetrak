@@ -57,6 +57,7 @@ class VideoEntry:
     path: str
     probe: VideoProbeResult | None = None
     error: str | None = None
+    camera_id: str = ""  # editable camera identifier; defaults to filename stem
 
 
 @dataclass
@@ -110,6 +111,21 @@ class _VideoRow(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
 
+        cam_lbl = QLabel("Cam:")
+        cam_lbl.setStyleSheet("font-size: 11px;")
+
+        self._cam_id_edit = QLineEdit(entry.camera_id)
+        self._cam_id_edit.setPlaceholderText("camera id")
+        self._cam_id_edit.setFixedWidth(110)
+        self._cam_id_edit.setStyleSheet("font-size: 11px;")
+        self._cam_id_edit.setToolTip(
+            "Camera identifier used as camera_instance_id in the database.\n"
+            "Use the same ID across shots for the same physical camera."
+        )
+        self._cam_id_edit.textChanged.connect(
+            lambda t: setattr(self._entry, "camera_id", t)
+        )
+
         self._meta_label = QLabel("Probing…")
         self._meta_label.setStyleSheet("color: grey; font-size: 11px;")
 
@@ -120,6 +136,8 @@ class _VideoRow(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.addWidget(self._path_label)
+        layout.addWidget(cam_lbl)
+        layout.addWidget(self._cam_id_edit)
         layout.addWidget(self._meta_label)
         layout.addWidget(self._remove_btn)
 
@@ -133,6 +151,10 @@ class _VideoRow(QWidget):
             parts.append(f"{result.width}×{result.height} {fps_str}")
         if result.serial_number:
             parts.append(f"S/N {result.serial_number}")
+            # Pre-fill camera ID with serial number only if the user hasn't
+            # changed the default (which was set to the filename stem).
+            if self._entry.camera_id == Path(self._entry.path).stem:
+                self._cam_id_edit.setText(result.serial_number)
         self._meta_label.setText(" · ".join(parts) if parts else "OK")
         self._meta_label.setStyleSheet("color: #444; font-size: 11px;")
 
@@ -218,7 +240,7 @@ class _ShotPanel(QGroupBox):
         for p in paths:
             if p in self._video_rows:
                 continue  # already added
-            ve = VideoEntry(path=p)
+            ve = VideoEntry(path=p, camera_id=Path(p).stem)
             self._entry.videos.append(ve)
 
             row = _VideoRow(ve, self._video_container)
@@ -338,11 +360,9 @@ class ShotsPage(QWizardPage):
                     frames = probe.frame_count if probe else 0
                     w = probe.width if probe else 0
                     h = probe.height if probe else 0
-                    # Use a placeholder camera_instance_id; camera assignment
-                    # is handled in a later wizard page.
                     ctx.create_shot_video(
                         shot_id=shot_id,
-                        cam_instance_id="__unassigned__",
+                        cam_instance_id=ve.camera_id or Path(ve.path).stem,
                         path=ve.path,
                         fps=fps,
                         frame_count=max(frames, 1),

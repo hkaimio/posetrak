@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import sys
+
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stderr,
+)
+# Verbose debug output for the setup wizard and LED sync algorithm.
+for _name in ("app.setup", "app.setup.led_sync"):
+    logging.getLogger(_name).setLevel(logging.DEBUG)
 
 
 def main() -> int:

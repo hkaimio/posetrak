@@ -26,9 +26,12 @@ Algorithm overview
 from __future__ import annotations
 
 import dataclasses
+import logging
 from typing import Callable, Optional
 
 import numpy as np
+
+_log = logging.getLogger(__name__)
 
 try:
     from scipy.signal import find_peaks as _sp_find_peaks
@@ -162,6 +165,8 @@ def extract_brightness_changes(
 
 
 def zscore(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    if x.size == 0:
+        return x.copy()
     mu = np.nanmean(x)
     sd = np.nanstd(x)
     return (x - mu) / (sd + eps)
@@ -322,6 +327,8 @@ def dtw_match_event_times(
             pairs.append((i - 1, j - 1))
         i, j = int(pi), int(pj)
     pairs.reverse()
+    if not pairs:
+        return np.empty((0, 2), dtype=int)
     return np.array(pairs, dtype=int)
 
 
@@ -425,9 +432,11 @@ def _sync_one_camera(
     fs_ref: float,
     sig_cam: np.ndarray,
     fs_cam: float,
+    cam_id: str = "cam",
     event_cfg: dict | None = None,
     dtw_band_s: float = 1.0,
     ransac_max_err_s: float = 0.01,
+    initial_offset_s: float = 0.0,
 ) -> dict:
     """Synchronise one camera to the reference.  Returns internal info dict."""
     cfg = event_cfg or dict(
@@ -436,9 +445,21 @@ def _sync_one_camera(
     )
     t_ref_events = detect_events(sig_ref, fs_ref, **cfg)
     t_cam_events = detect_events(sig_cam, fs_cam, **cfg)
+    _log.debug(
+        "[%s] event detection: ref=%d events (%.2f–%.2f s), "
+        "cam=%d events (%.2f–%.2f s)",
+        cam_id,
+        len(t_ref_events),
+        float(t_ref_events[0]) if len(t_ref_events) else 0,
+        float(t_ref_events[-1]) if len(t_ref_events) else 0,
+        len(t_cam_events),
+        float(t_cam_events[0]) if len(t_cam_events) else 0,
+        float(t_cam_events[-1]) if len(t_cam_events) else 0,
+    )
 
     # Fallback: cross-correlation shift if too few events
     if len(t_ref_events) < 2 or len(t_cam_events) < 2:
+        _log.debug("[%s] too few events for DTW — using cross-correlation fallback", cam_id)
         n, m = len(sig_ref), len(sig_cam)
         t_r = np.arange(n) / fs_ref
         t_c = np.arange(m) / fs_cam
@@ -451,6 +472,7 @@ def _sync_one_camera(
         else:
             delta = 0.0
         offset_s = float((lags[k] + delta) / fs_ref)
+        _log.debug("[%s] cross-corr offset: %.4f s", cam_id, offset_s)
         return dict(
             f_map=lambda t, _o=offset_s: t + _o,
             meta={"type": "shift_only", "offset_s": offset_s, "resid_std_s": 0.0},
@@ -460,15 +482,120 @@ def _sync_one_camera(
         )
 
     pairs = dtw_match_event_times(t_ref_events, t_cam_events, band_s=dtw_band_s)
+    _log.debug("[%s] DTW (band_s=%.2f): %d pairs", cam_id, dtw_band_s or 0, pairs.shape[0])
+
+    if pairs.shape[0] == 0 and dtw_band_s is not None:
+        if abs(initial_offset_s) > 0.5 * dtw_band_s:
+            # Large initial offset: DTW path construction breaks because boundary
+            # events that are outside the overlap region corrupt the DP path.
+            # Use nearest-neighbour matching instead: for each shifted cam event,
+            # find the closest ref event within band_s.  This is robust to
+            # different detection rates between cameras and avoids path issues.
+            _log.debug(
+                "[%s] DTW band too restrictive (rough_offset=%.3f s) — "
+                "switching to nearest-neighbour matching",
+                cam_id, initial_offset_s,
+            )
+            cam_shifted = t_cam_events + initial_offset_s
+            nn_pairs: list[tuple[int, int]] = []
+            for j_idx in range(len(cam_shifted)):
+                t_cs = cam_shifted[j_idx]
+                # Binary search for the closest ref event
+                ins = int(np.searchsorted(t_ref_events, t_cs))
+                best_i, best_d = -1, dtw_band_s + 1.0
+                for i_cand in (ins - 1, ins):
+                    if 0 <= i_cand < len(t_ref_events):
+                        d = abs(t_ref_events[i_cand] - t_cs)
+                        if d < best_d:
+                            best_d, best_i = d, i_cand
+                if best_i >= 0 and best_d <= dtw_band_s:
+                    nn_pairs.append((best_i, j_idx))
+            if nn_pairs:
+                pairs = np.array(nn_pairs, dtype=int)
+            _log.debug(
+                "[%s] nearest-neighbour with offset: %d pairs "
+                "(%.1f%% of cam events matched)",
+                cam_id, len(nn_pairs),
+                100.0 * len(nn_pairs) / max(len(cam_shifted), 1),
+            )
+        else:
+            # Small or zero initial offset — band was just too tight; retry unconstrained.
+            _log.debug("[%s] DTW band too restrictive — retrying unconstrained", cam_id)
+            pairs = dtw_match_event_times(t_ref_events, t_cam_events, band_s=None)
+            _log.debug("[%s] DTW unconstrained: %d pairs", cam_id, pairs.shape[0])
+
+    if pairs.shape[0] == 0:
+        if abs(initial_offset_s) > 1e-6:
+            # Rough offset available but DTW found nothing — use it as a constant shift.
+            _log.debug(
+                "[%s] DTW found no pairs — using rough offset %.3f s as shift-only fallback",
+                cam_id, initial_offset_s,
+            )
+            return dict(
+                f_map=lambda t, _o=initial_offset_s: t + _o,
+                meta={"type": "shift_only", "offset_s": initial_offset_s, "resid_std_s": 0.0},
+                n_events=len(t_cam_events),
+                n_pairs=0,
+                n_inliers=0,
+            )
+        # No rough offset: cross-correlation fallback (both cameras near-synchronous).
+        _log.debug("[%s] DTW found no pairs — using cross-correlation fallback", cam_id)
+        n, m = len(sig_ref), len(sig_cam)
+        t_r = np.arange(n) / fs_ref
+        t_c = np.arange(m) / fs_cam
+        sig_cam_interp = np.interp(t_r, t_c, zscore(sig_cam))
+        corr, lags = _correlate_fft(zscore(sig_ref), sig_cam_interp)
+        k = int(np.argmax(corr))
+        if 1 <= k < len(corr) - 1:
+            y0, y1, y2 = corr[k - 1], corr[k], corr[k + 1]
+            delta = 0.5 * (y0 - y2) / (y0 - 2 * y1 + y2 + 1e-12)
+        else:
+            delta = 0.0
+        offset_s = float((lags[k] + delta) / fs_ref)
+        _log.debug("[%s] cross-corr offset: %.4f s", cam_id, offset_s)
+        return dict(
+            f_map=lambda t, _o=offset_s: t + _o,
+            meta={"type": "shift_only", "offset_s": offset_s, "resid_std_s": 0.0},
+            n_events=len(t_cam_events),
+            n_pairs=0,
+            n_inliers=0,
+        )
+
     A = t_ref_events[pairs[:, 0]]
     B_ev = t_cam_events[pairs[:, 1]]
-    (_, _), inliers = ransac_affine_fit(A, B_ev, max_err_s=ransac_max_err_s)
+    (a_raw, b_raw), inliers = ransac_affine_fit(A, B_ev, max_err_s=ransac_max_err_s)
+    _log.debug(
+        "[%s] RANSAC (max_err=%.1f ms): %d / %d pairs are inliers, "
+        "raw model a=%.6f b=%.4f s",
+        cam_id, ransac_max_err_s * 1000,
+        inliers.size, len(A), a_raw, b_raw,
+    )
+    if inliers.size >= 2:
+        resid = A[inliers] - (a_raw * B_ev[inliers] + b_raw)
+        _log.debug(
+            "[%s] inlier residuals: mean=%.2f ms  std=%.2f ms  max=%.2f ms",
+            cam_id,
+            float(np.mean(resid)) * 1000,
+            float(np.std(resid)) * 1000,
+            float(np.max(np.abs(resid))) * 1000,
+        )
 
     if inliers.size < 2:
-        # Not enough inliers; fall back to LS on all pairs
+        _log.debug(
+            "[%s] RANSAC found < 2 inliers — falling back to LS on all %d pairs",
+            cam_id, len(A),
+        )
         inliers = np.arange(len(A))
 
     f_map, meta = build_time_map(A[inliers], B_ev[inliers])
+    _log.debug(
+        "[%s] time map: type=%s  a=%.6f  b=%.4f s  resid_std=%.2f ms",
+        cam_id,
+        meta.get("type"),
+        meta.get("a", float("nan")),
+        meta.get("b", float("nan")),
+        meta.get("resid_std_s", 0.0) * 1000,
+    )
     meta["events_cam"] = len(t_cam_events)
     meta["events_ref"] = len(t_ref_events)
     return dict(
@@ -494,6 +621,7 @@ def run_led_sync(
     event_cfg: dict | None = None,
     dtw_band_s: float = 1.0,
     ransac_max_err_s: float = 0.01,
+    rough_offsets: list[float] | None = None,
 ) -> LedSyncResult:
     """Synchronise all cameras using LED brightness-change signals.
 
@@ -514,6 +642,7 @@ def run_led_sync(
     """
     K = len(signals)
     assert K == len(fps_list) == len(cam_ids) == len(video_ids)
+    _offsets: list[float] = rough_offsets if rough_offsets is not None else [0.0] * K
 
     cam_results: list[CameraSyncResult] = []
 
@@ -523,6 +652,14 @@ def run_led_sync(
     ref_frames = np.arange(len(ref_sig), dtype=int)
     ref_times = ref_frames / ref_fps
     ref_events = detect_events(ref_sig, ref_fps, **(event_cfg or {}))
+    _log.debug(
+        "reference camera [%s]: %d frames @ %.3f fps, "
+        "%d events, frame_times %.4f – %.4f s",
+        cam_ids[ref_cam], len(ref_sig), ref_fps,
+        len(ref_events),
+        float(ref_times[0]) if len(ref_times) else 0,
+        float(ref_times[-1]) if len(ref_times) else 0,
+    )
 
     for k in range(K):
         if k == ref_cam:
@@ -543,8 +680,10 @@ def run_led_sync(
         info = _sync_one_camera(
             sig_ref=ref_sig, fs_ref=ref_fps,
             sig_cam=signals[k], fs_cam=fps_list[k],
+            cam_id=cam_ids[k],
             event_cfg=event_cfg, dtw_band_s=dtw_band_s,
             ransac_max_err_s=ransac_max_err_s,
+            initial_offset_s=_offsets[k],
         )
         f_map = info["f_map"]
         meta = info["meta"]
@@ -552,6 +691,15 @@ def run_led_sync(
         N_k = len(signals[k])
         t_local = np.arange(N_k) / fps_list[k]
         t_global = np.asarray(f_map(t_local), dtype=float)
+        _log.debug(
+            "[%s]: %d frames @ %.3f fps, "
+            "frame_times %.4f – %.4f s  "
+            "(offset at frame 0: %.4f s, at last frame: %.4f s)",
+            cam_ids[k], N_k, fps_list[k],
+            float(t_global[0]), float(t_global[-1]),
+            float(t_global[0]),
+            float(t_global[-1]) - float(t_local[-1]),
+        )
 
         cam_results.append(CameraSyncResult(
             camera_instance_id=cam_ids[k],
@@ -567,3 +715,69 @@ def run_led_sync(
         ))
 
     return LedSyncResult(cameras=cam_results, ref_camera_idx=ref_cam)
+
+
+# ---------------------------------------------------------------------------
+# Brightness dump I/O  (for algorithm testing without the GUI)
+# ---------------------------------------------------------------------------
+
+
+def save_brightness_dump(
+    path: str,
+    result: LedSyncResult,
+    rough_offsets: list[float] | None = None,
+) -> None:
+    """Save per-camera brightness signals and sync metadata to a .npz file.
+
+    The file can be loaded with :func:`load_brightness_dump` and used to run
+    or regression-test :func:`run_led_sync` without the GUI or any video files.
+
+    File layout
+    -----------
+    ``signal_<i>``       brightness-change array for camera i (float64, 1-D)
+    ``fps``              fps per camera (float64, shape (K,))
+    ``cam_ids``          camera instance IDs (object array of str, shape (K,))
+    ``video_ids``        shot video IDs (object array of str, shape (K,))
+    ``rough_offsets``    rough sync offset per camera in seconds (float64, (K,))
+    ``ref_camera_idx``   index of the reference camera (scalar)
+    """
+    K = len(result.cameras)
+    arrays: dict = {}
+    for i, cr in enumerate(result.cameras):
+        arrays[f"signal_{i}"] = cr.brightness
+    arrays["fps"] = np.array([cr.fps_used for cr in result.cameras], dtype=float)
+    arrays["cam_ids"] = np.array(
+        [cr.camera_instance_id for cr in result.cameras], dtype=object,
+    )
+    arrays["video_ids"] = np.array(
+        [cr.shot_video_id for cr in result.cameras], dtype=object,
+    )
+    arrays["rough_offsets"] = np.array(
+        rough_offsets if rough_offsets is not None else [0.0] * K, dtype=float,
+    )
+    arrays["ref_camera_idx"] = np.array(result.ref_camera_idx)
+    np.savez(path, **arrays)
+
+
+def load_brightness_dump(path: str) -> dict:
+    """Load a brightness dump saved by :func:`save_brightness_dump`.
+
+    Returns a dict with keys ``signals``, ``fps_list``, ``cam_ids``,
+    ``video_ids``, ``rough_offsets``, ``ref_cam`` — ready to pass straight
+    into :func:`run_led_sync`.
+
+    Example
+    -------
+    >>> d = load_brightness_dump("dump.npz")
+    >>> result = run_led_sync(**d)
+    """
+    data = np.load(path, allow_pickle=True)
+    K = len(data["fps"])
+    return {
+        "signals": [data[f"signal_{i}"] for i in range(K)],
+        "fps_list": data["fps"].tolist(),
+        "cam_ids": data["cam_ids"].tolist(),
+        "video_ids": data["video_ids"].tolist(),
+        "rough_offsets": data["rough_offsets"].tolist(),
+        "ref_cam": int(data["ref_camera_idx"]),
+    }

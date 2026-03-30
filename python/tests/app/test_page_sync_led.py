@@ -1,4 +1,4 @@
-"""Tests for the LED sync panel in app.setup.page_sync."""
+"""Tests for the LED sync dialog in app.setup.page_sync."""
 
 from __future__ import annotations
 
@@ -9,12 +9,13 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from app.setup.db_context import DBContext
-from app.setup.led_sync import LedSyncResult, ROI, CameraSyncResult
+from app.setup.db_context import DBContext, SyncTable
+from app.setup.led_sync import CameraSyncResult, LedSyncResult, ROI
 from app.setup.page_sync import (
     SyncPage,
+    _LedSyncDialog,
     _LedSyncJob,
-    _ROISelectDialog,
+    _ShotMeta,
     _sync_points_from_led_result,
 )
 from posetrak.db.db import create_session, generate_id
@@ -54,6 +55,18 @@ def _make_session(tmp_path: Path, n_shots: int = 1, videos_per_shot: int = 2):
     return conn, session_id
 
 
+def _make_shot_meta(conn, session_id: str, shot_idx: int = 0) -> _ShotMeta:
+    ctx = DBContext(conn, session_id)
+    rows = conn.execute(
+        "SELECT id, shot_number, label FROM shots WHERE session_id = ? ORDER BY shot_number",
+        (session_id,),
+    ).fetchall()
+    row = rows[shot_idx]
+    label = row["label"] or f"Shot {row['shot_number']}"
+    videos = ctx.get_shot_videos(row["id"])
+    return _ShotMeta(shot_id=row["id"], label=label, videos=list(videos))
+
+
 def _attach_wizard(page: SyncPage, conn, session_id: str):
     ctx = DBContext(conn, session_id)
     wiz = MagicMock()
@@ -84,52 +97,57 @@ def _make_led_result(cam_ids=("cam1", "cam2"), video_ids=("v1", "v2"), fps=30.0)
 
 
 @pytest.fixture
-def loaded_page(qapp, tmp_path):
+def loaded_dlg(qapp, tmp_path):
     conn, session_id = _make_session(tmp_path)
-    page = SyncPage()
-    _attach_wizard(page, conn, session_id)
-    page.initializePage()
-    yield page, conn
-    page.cleanupPage()
+    ctx = DBContext(conn, session_id)
+    shot = _make_shot_meta(conn, session_id)
+    on_accepted = MagicMock()
+    dlg = _LedSyncDialog(
+        shot=shot,
+        fps_overrides={},
+        ctx=ctx,
+        current_frames=[0, 0],
+        on_sync_accepted=on_accepted,
+    )
+    yield dlg, conn, on_accepted
     conn.close()
 
 
 # ---------------------------------------------------------------------------
-# LED panel construction
+# Dialog construction
 # ---------------------------------------------------------------------------
 
 
-def test_led_panel_created_with_camera_rows(loaded_page) -> None:
-    page, _ = loaded_page
-    # 2 cameras → 2 fps spinboxes and 2 roi labels
-    assert len(page._led_fps_spinboxes) == 2
-    assert len(page._led_roi_labels) == 2
+def test_led_dialog_created_with_camera_rows(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
+    assert len(dlg._fps_spinboxes) == 2
+    assert len(dlg._roi_labels) == 2
 
 
-def test_led_fps_spinbox_defaults_to_actual_fps(loaded_page) -> None:
-    page, _ = loaded_page
-    assert page._led_fps_spinboxes[0].value() == pytest.approx(30.0)
-    assert page._led_fps_spinboxes[1].value() == pytest.approx(30.0)
+def test_led_fps_spinbox_defaults_to_actual_fps(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
+    assert dlg._fps_spinboxes[0].value() == pytest.approx(30.0)
+    assert dlg._fps_spinboxes[1].value() == pytest.approx(30.0)
 
 
-def test_led_run_btn_disabled_without_rois(loaded_page) -> None:
-    page, _ = loaded_page
-    assert not page._led_run_btn.isEnabled()
+def test_led_run_btn_disabled_without_rois(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
+    assert not dlg._run_btn.isEnabled()
 
 
-def test_led_accept_btn_disabled_initially(loaded_page) -> None:
-    page, _ = loaded_page
-    assert not page._led_accept_btn.isEnabled()
+def test_led_accept_btn_disabled_initially(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
+    assert not dlg._accept_btn.isEnabled()
 
 
-def test_led_plot_btn_disabled_initially(loaded_page) -> None:
-    page, _ = loaded_page
-    assert not page._led_plot_btn.isEnabled()
+def test_led_plot_btn_disabled_initially(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
+    assert not dlg._plot_btn.isEnabled()
 
 
-def test_led_quality_widget_hidden_initially(loaded_page) -> None:
-    page, _ = loaded_page
-    assert not page._led_quality_widget.isVisible()
+def test_led_quality_widget_hidden_initially(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
+    assert not dlg._quality_widget.isVisible()
 
 
 # ---------------------------------------------------------------------------
@@ -137,27 +155,26 @@ def test_led_quality_widget_hidden_initially(loaded_page) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_setting_all_rois_enables_run_btn(loaded_page) -> None:
-    page, _ = loaded_page
-    page._led_rois[0] = ROI(10, 10, 30, 30)
-    page._led_rois[1] = ROI(20, 20, 40, 40)
-    page._update_led_run_btn()
-    assert page._led_run_btn.isEnabled()
+def test_setting_all_rois_enables_run_btn(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
+    dlg._led_rois[0] = ROI(10, 10, 30, 30)
+    dlg._led_rois[1] = ROI(20, 20, 40, 40)
+    dlg._update_run_btn()
+    assert dlg._run_btn.isEnabled()
 
 
-def test_partial_rois_does_not_enable_run_btn(loaded_page) -> None:
-    page, _ = loaded_page
-    page._led_rois[0] = ROI(10, 10, 30, 30)  # only one camera
-    page._update_led_run_btn()
-    assert not page._led_run_btn.isEnabled()
+def test_partial_rois_does_not_enable_run_btn(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
+    dlg._led_rois[0] = ROI(10, 10, 30, 30)  # only one camera
+    dlg._update_run_btn()
+    assert not dlg._run_btn.isEnabled()
 
 
-def test_roi_label_updated_after_set(loaded_page) -> None:
-    page, _ = loaded_page
-    # Simulate what _on_set_led_roi does after dialog confirms
-    page._led_rois[0] = ROI(10, 20, 50, 60)
-    page._led_roi_labels[0].setText("ROI: (10,20)→(50,60)")
-    assert "10" in page._led_roi_labels[0].text()
+def test_roi_label_updated_after_set(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
+    dlg._led_rois[0] = ROI(10, 20, 50, 60)
+    dlg._roi_labels[0].setText("ROI: (10,20)→(50,60)")
+    assert "10" in dlg._roi_labels[0].text()
 
 
 # ---------------------------------------------------------------------------
@@ -165,45 +182,45 @@ def test_roi_label_updated_after_set(loaded_page) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_on_led_sync_done_enables_accept(loaded_page) -> None:
-    page, _ = loaded_page
+def test_on_led_sync_done_enables_accept(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
     result = _make_led_result()
-    page._on_led_sync_done(result)
-    assert page._led_accept_btn.isEnabled()
+    dlg._on_done(result)
+    assert dlg._accept_btn.isEnabled()
 
 
-def test_on_led_sync_done_shows_quality_widget(loaded_page) -> None:
-    page, _ = loaded_page
+def test_on_led_sync_done_shows_quality_widget(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
     result = _make_led_result()
-    page._on_led_sync_done(result)
-    assert not page._led_quality_widget.isHidden()
+    dlg._on_done(result)
+    assert not dlg._quality_widget.isHidden()
 
 
-def test_on_led_sync_done_populates_quality_labels(loaded_page) -> None:
-    page, _ = loaded_page
+def test_on_led_sync_done_populates_quality_labels(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
     result = _make_led_result()
-    page._on_led_sync_done(result)
-    assert len(page._led_quality_labels) == 2
+    dlg._on_done(result)
+    assert dlg._quality_layout.count() == 2
 
 
-def test_on_led_sync_done_reference_label_grey(loaded_page) -> None:
-    page, _ = loaded_page
+def test_on_led_sync_done_reference_label_grey(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
     result = _make_led_result()
-    page._on_led_sync_done(result)
-    # First camera is reference; label should contain "reference"
-    assert "reference" in page._led_quality_labels[0].text()
+    dlg._on_done(result)
+    lbl = dlg._quality_layout.itemAt(0).widget()
+    assert "reference" in lbl.text()
 
 
-def test_on_led_sync_error_shows_message(loaded_page) -> None:
-    page, _ = loaded_page
-    page._on_led_sync_error("CV2 failed")
-    assert "CV2 failed" in page._led_accept_label.text()
+def test_on_led_sync_error_shows_message(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
+    dlg._on_error("CV2 failed")
+    assert "CV2 failed" in dlg._accept_label.text()
 
 
-def test_on_led_sync_error_re_enables_run_btn(loaded_page) -> None:
-    page, _ = loaded_page
-    page._on_led_sync_error("oops")
-    assert page._led_run_btn.isEnabled()
+def test_on_led_sync_error_re_enables_run_btn(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
+    dlg._on_error("oops")
+    assert dlg._run_btn.isEnabled()
 
 
 # ---------------------------------------------------------------------------
@@ -211,107 +228,95 @@ def test_on_led_sync_error_re_enables_run_btn(loaded_page) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_accept_led_sync_writes_config(loaded_page) -> None:
-    page, conn = loaded_page
-    shot_idx = page._shot_combo.currentIndex()
-    shot = page._shots[shot_idx]
-    # Provide a valid result that matches the shot's videos
-    videos = shot.videos
+def test_accept_led_sync_writes_config(loaded_dlg) -> None:
+    dlg, conn, _ = loaded_dlg
+    videos = dlg._shot.videos
     result = _make_led_result(
         cam_ids=[sv.camera_instance_id for sv in videos],
         video_ids=[sv.id for sv in videos],
     )
-    page._led_result = result
-    page._on_accept_led_sync()
+    dlg._led_result = result
+    dlg._on_accept()
 
     configs = conn.execute("SELECT * FROM sync_configs").fetchall()
     assert len(configs) == 1
     assert configs[0]["created_by"] == "led-auto"
 
 
-def test_accept_led_sync_writes_sync_points(loaded_page) -> None:
-    page, conn = loaded_page
-    shot_idx = page._shot_combo.currentIndex()
-    shot = page._shots[shot_idx]
-    videos = shot.videos
+def test_accept_led_sync_writes_sync_points(loaded_dlg) -> None:
+    dlg, conn, _ = loaded_dlg
+    videos = dlg._shot.videos
     result = _make_led_result(
         cam_ids=[sv.camera_instance_id for sv in videos],
         video_ids=[sv.id for sv in videos],
     )
-    page._led_result = result
-    page._on_accept_led_sync()
+    dlg._led_result = result
+    dlg._on_accept()
 
     pts = conn.execute("SELECT * FROM sync_points").fetchall()
     assert len(pts) > 0
 
 
-def test_accept_led_sync_switches_scrubber_to_synced(loaded_page) -> None:
-    page, _ = loaded_page
-    shot = page._shots[page._shot_combo.currentIndex()]
-    videos = shot.videos
+def test_accept_led_sync_calls_accepted_callback(loaded_dlg) -> None:
+    dlg, _, on_accepted = loaded_dlg
+    videos = dlg._shot.videos
     result = _make_led_result(
         cam_ids=[sv.camera_instance_id for sv in videos],
         video_ids=[sv.id for sv in videos],
     )
-    page._led_result = result
-    page._on_accept_led_sync()
+    dlg._led_result = result
+    dlg._on_accept()
 
-    assert page._scrubber.sync_table is not None
+    on_accepted.assert_called_once()
+    assert isinstance(on_accepted.call_args[0][0], SyncTable)
 
 
-def test_accept_led_sync_disables_accept_btn(loaded_page) -> None:
-    page, _ = loaded_page
-    shot = page._shots[page._shot_combo.currentIndex()]
-    videos = shot.videos
+def test_accept_led_sync_disables_accept_btn(loaded_dlg) -> None:
+    dlg, _, _ = loaded_dlg
+    videos = dlg._shot.videos
     result = _make_led_result(
         cam_ids=[sv.camera_instance_id for sv in videos],
         video_ids=[sv.id for sv in videos],
     )
-    page._led_result = result
-    page._on_accept_led_sync()
-    assert not page._led_accept_btn.isEnabled()
+    dlg._led_result = result
+    dlg._on_accept()
+    assert not dlg._accept_btn.isEnabled()
 
 
 # ---------------------------------------------------------------------------
-# Teardown resets LED state
+# SyncPage LED sync button state
 # ---------------------------------------------------------------------------
 
 
-def test_teardown_clears_led_rois(qapp, tmp_path) -> None:
+def test_led_sync_btn_disabled_initially(qapp, tmp_path) -> None:
     conn, session_id = _make_session(tmp_path)
     page = SyncPage()
     _attach_wizard(page, conn, session_id)
     page.initializePage()
-    page._led_rois[0] = ROI(0, 0, 10, 10)
+    assert not page._led_sync_btn.isEnabled()
     page.cleanupPage()
-    assert page._led_rois == {}
     conn.close()
 
 
-def test_teardown_clears_led_result(qapp, tmp_path) -> None:
+def test_led_sync_btn_disabled_after_cleanup(qapp, tmp_path) -> None:
     conn, session_id = _make_session(tmp_path)
     page = SyncPage()
     _attach_wizard(page, conn, session_id)
     page.initializePage()
-    page._led_result = _make_led_result()
+    page._led_sync_btn.setEnabled(True)
     page.cleanupPage()
-    assert page._led_result is None
+    assert not page._led_sync_btn.isEnabled()
     conn.close()
 
 
-# ---------------------------------------------------------------------------
-# Shot switch resets LED state
-# ---------------------------------------------------------------------------
-
-
-def test_shot_switch_resets_led_rois(qapp, tmp_path) -> None:
+def test_led_sync_btn_disabled_after_shot_switch(qapp, tmp_path) -> None:
     conn, session_id = _make_session(tmp_path, n_shots=2)
     page = SyncPage()
     _attach_wizard(page, conn, session_id)
     page.initializePage()
-    page._led_rois[0] = ROI(0, 0, 10, 10)
+    page._led_sync_btn.setEnabled(True)
     page._shot_combo.setCurrentIndex(1)
-    assert page._led_rois == {}
+    assert not page._led_sync_btn.isEnabled()
     page.cleanupPage()
     conn.close()
 
@@ -321,11 +326,12 @@ def test_shot_switch_resets_led_rois(qapp, tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_sync_points_from_led_result_contains_both_cameras() -> None:
+def test_sync_points_from_led_result_contains_both_videos() -> None:
+    """Points are keyed by shot_video_id to avoid collisions on __unassigned__ IDs."""
     result = _make_led_result()
     points, fps_by_video = _sync_points_from_led_result(result)
-    assert "cam1" in points
-    assert "cam2" in points
+    assert "v1" in points
+    assert "v2" in points
 
 
 def test_sync_points_from_led_result_covers_full_range() -> None:
@@ -335,6 +341,13 @@ def test_sync_points_from_led_result_covers_full_range() -> None:
         frames = [p.video_frame for p in pts]
         assert 0 in frames
         assert max(frames) == 299  # total_frames - 1
+
+
+def test_sync_points_from_led_result_stores_every_frame() -> None:
+    result = _make_led_result()
+    points, _ = _sync_points_from_led_result(result)
+    for pts in points.values():
+        assert len(pts) == 300  # every frame stored
 
 
 def test_sync_points_effective_fps_computed() -> None:
@@ -366,14 +379,10 @@ def test_led_sync_job_emits_finished(qapp, tmp_path) -> None:
         ("/a.mp4", roi, 30.0, "cam1", "v1"),
         ("/b.mp4", roi, 30.0, "cam2", "v2"),
     ]
-    # Both cameras get the same blank signal → NCC fallback
     results_received = []
 
-    def _on_done(r):
-        results_received.append(r)
-
     job = _LedSyncJob(cam_data, ref_cam=0)
-    job.finished.connect(_on_done)
+    job.finished.connect(lambda r: results_received.append(r))
 
     with patch("cv2.VideoCapture", side_effect=[_mock_cap_for_file(), _mock_cap_for_file()]):
         job.run.__wrapped__(job)

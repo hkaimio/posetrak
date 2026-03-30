@@ -123,6 +123,23 @@ class SyncTable:
             return frames[idx]
         return frames[idx - 1]
 
+    def frame_to_global_time(self, frame_idx: int, shot_video_id: str) -> float | None:
+        """Return the approximate global timestamp for a local frame index.
+
+        Inverts the ``lookup`` relationship: given a frame in *shot_video_id*,
+        finds the anchor closest to that frame and extrapolates using the stored
+        fps.  Returns ``None`` if no sync data is available for the video.
+        """
+        if shot_video_id not in self._tables:
+            return None
+        timestamps, frames, fps = self._tables[shot_video_id]
+        if not timestamps:
+            return None
+        if fps <= 0:
+            return float(timestamps[0])
+        best_i = min(range(len(frames)), key=lambda i: abs(frames[i] - frame_idx))
+        return float(timestamps[best_i]) + (frame_idx - frames[best_i]) / fps
+
     def video_ids(self) -> list[str]:
         return list(self._tables.keys())
 
@@ -149,6 +166,7 @@ class DBContext:
     def __init__(self, conn: sqlite3.Connection, session_id: str) -> None:
         self._conn = conn
         self._session_id = session_id
+        self._savepoint_active = False
 
     # ------------------------------------------------------------------
     # Page transaction helpers
@@ -157,15 +175,24 @@ class DBContext:
     def begin_page(self) -> None:
         """Open a savepoint so the current page's writes can be rolled back."""
         self._conn.execute("SAVEPOINT wizard_page")
+        self._savepoint_active = True
 
     def commit_page(self) -> None:
         """Release the current page savepoint (makes writes durable)."""
         self._conn.execute("RELEASE SAVEPOINT wizard_page")
+        self._savepoint_active = False
 
     def rollback_page(self) -> None:
-        """Roll back all writes since the last ``begin_page()``."""
+        """Roll back all writes since the last ``begin_page()``.
+
+        No-op if no savepoint is currently active (e.g. cleanupPage called
+        after the page was already committed and the user later closes the wizard).
+        """
+        if not self._savepoint_active:
+            return
         self._conn.execute("ROLLBACK TO SAVEPOINT wizard_page")
         self._conn.execute("RELEASE SAVEPOINT wizard_page")
+        self._savepoint_active = False
 
     # ------------------------------------------------------------------
     # Writes

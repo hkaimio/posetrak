@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS sync_points (
 --   0 if coordinates are in distorted pixel space (K_original) and the tracker
 --   must apply undistortion.  Default 1 matches the current pipeline where pose
 --   estimation runs on pre-undistorted video frames.
+-- detection_run_id: optional link to the detection run that produced the observations.
 CREATE TABLE IF NOT EXISTS pose_observation_sequences (
     id                      TEXT PRIMARY KEY,
     shot_id                 TEXT NOT NULL REFERENCES shots(id),
@@ -106,12 +107,14 @@ CREATE TABLE IF NOT EXISTS pose_observation_sequences (
     time_end_s              REAL NOT NULL,
     pose_model              TEXT,
     notes                   TEXT,
-    pixels_are_undistorted  INTEGER NOT NULL DEFAULT 1
+    pixels_are_undistorted  INTEGER NOT NULL DEFAULT 1,
+    detection_run_id        TEXT REFERENCES detection_runs(id)
 );
 
 -- Individual 2-D pose observations: one row per (sequence, camera, frame, person)
 -- kp_blob: little-endian float32 array shaped [n_keypoints, 3] (x, y, confidence)
 -- camera_instance_id -- references registry: camera_instances(id)
+-- noise_scale: measurement noise scale factor (bbox_w / pose_input_width)
 CREATE TABLE IF NOT EXISTS pose_observations (
     sequence_id        TEXT    NOT NULL REFERENCES pose_observation_sequences(id),
     camera_instance_id TEXT    NOT NULL, -- references registry: camera_instances(id)
@@ -119,6 +122,7 @@ CREATE TABLE IF NOT EXISTS pose_observations (
     timestamp_s        REAL    NOT NULL,
     person_id          INTEGER NOT NULL,
     kp_blob            BLOB    NOT NULL,
+    noise_scale        REAL,
     PRIMARY KEY (sequence_id, camera_instance_id, video_frame, person_id)
 );
 
@@ -178,32 +182,72 @@ CREATE TABLE IF NOT EXISTS tracking_obs_results (
     PRIMARY KEY (run_id, person_id, tracker_step)
 );
 
--- Person detections: one row per (video, frame, track, region type).
+-- Detection runs: one row per execution of the pose extraction pipeline.
+-- Tracks which detector/pose model was used, over which time range.
+CREATE TABLE IF NOT EXISTS detection_runs (
+    id                  TEXT PRIMARY KEY,
+    shot_id             TEXT NOT NULL REFERENCES shots(id),
+    sync_config_id      TEXT NOT NULL REFERENCES sync_configs(id),
+    time_start_s        REAL NOT NULL,
+    time_end_s          REAL NOT NULL,
+    detector_model      TEXT NOT NULL,
+    pose_model          TEXT NOT NULL,
+    detector_version    TEXT,
+    pose_version        TEXT,
+    detector_conf       REAL NOT NULL DEFAULT 0.3,
+    pose_conf_threshold REAL NOT NULL DEFAULT 0.3,
+    pose_input_width    INTEGER,
+    pose_input_height   INTEGER,
+    status              TEXT NOT NULL DEFAULT 'running',
+    created_at          TEXT NOT NULL,
+    completed_at        TEXT
+);
+
+-- Raw keypoints produced by pose estimation, keyed by detection run.
+-- keypoints: float32 blob shaped [n_kp, 3] (x, y, confidence) in distorted px.
+-- noise_scale: bbox_w / pose_input_width, used when converting to pose_observations.
+CREATE TABLE IF NOT EXISTS detection_keypoints (
+    detection_run_id    TEXT NOT NULL REFERENCES detection_runs(id),
+    shot_video_id       TEXT NOT NULL REFERENCES shot_videos(id),
+    video_frame         INTEGER NOT NULL,
+    track_id            INTEGER NOT NULL,
+    region_type         TEXT NOT NULL DEFAULT 'full_body',
+    keypoints           BLOB NOT NULL,
+    noise_scale         REAL,
+    PRIMARY KEY (detection_run_id, shot_video_id, video_frame, track_id, region_type)
+);
+
+-- Person detections: one row per (detection run, video, frame, track, region type).
 -- Model-agnostic; supports full-body, face, and hand detection models.
 -- region_type: 'full_body' | 'face' | 'hand_l' | 'hand_r'
 -- track_id: detection tracker ID, assigned before person identity is known.
 CREATE TABLE IF NOT EXISTS person_detections (
-    shot_video_id  TEXT    NOT NULL REFERENCES shot_videos(id),
-    video_frame    INTEGER NOT NULL,
-    track_id       INTEGER NOT NULL,
-    region_type    TEXT    NOT NULL DEFAULT 'full_body',
-    model_name     TEXT,
-    bbox_x         REAL,
-    bbox_y         REAL,
-    bbox_w         REAL,
-    bbox_h         REAL,
-    confidence     REAL,
-    PRIMARY KEY (shot_video_id, video_frame, track_id, region_type)
+    detection_run_id    TEXT NOT NULL REFERENCES detection_runs(id),
+    shot_video_id       TEXT NOT NULL REFERENCES shot_videos(id),
+    video_frame         INTEGER NOT NULL,
+    track_id            INTEGER NOT NULL,
+    region_type         TEXT    NOT NULL DEFAULT 'full_body',
+    model_name          TEXT,
+    bbox_x              REAL,
+    bbox_y              REAL,
+    bbox_w              REAL,
+    bbox_h              REAL,
+    confidence          REAL,
+    PRIMARY KEY (detection_run_id, shot_video_id, video_frame, track_id, region_type)
 );
 
--- Person tracks: one row per continuous track span within a shot video.
+CREATE INDEX IF NOT EXISTS idx_person_detections_run_video
+    ON person_detections(detection_run_id, shot_video_id, video_frame);
+
+-- Person tracks: one row per continuous track span within a detection run.
 CREATE TABLE IF NOT EXISTS person_tracks (
-    id             TEXT    PRIMARY KEY,
-    shot_video_id  TEXT    NOT NULL REFERENCES shot_videos(id),
-    track_id       INTEGER NOT NULL,
-    first_frame    INTEGER NOT NULL,
-    last_frame     INTEGER NOT NULL,
-    UNIQUE (shot_video_id, track_id)
+    id                  TEXT PRIMARY KEY,
+    detection_run_id    TEXT NOT NULL REFERENCES detection_runs(id),
+    shot_video_id       TEXT NOT NULL REFERENCES shot_videos(id),
+    track_id            INTEGER NOT NULL,
+    first_frame         INTEGER NOT NULL,
+    last_frame          INTEGER NOT NULL,
+    UNIQUE (detection_run_id, shot_video_id, track_id)
 );
 
 -- Frame cache: stores decoded/cropped image data for fast UI access.
@@ -211,14 +255,16 @@ CREATE TABLE IF NOT EXISTS person_tracks (
 -- track_id:   -1 for cache types that do not require a person track (e.g. THUMB)
 -- region_type: '' (empty) for THUMB; 'full_body'/'face'/'hand_l'/'hand_r' for PERSON_CROP
 -- width_px / height_px: output image dimensions.
+-- detection_run_id: optional link to the detection run that produced this crop.
 CREATE TABLE IF NOT EXISTS frame_cache_entries (
-    shot_video_id  TEXT    NOT NULL REFERENCES shot_videos(id),
-    frame_idx      INTEGER NOT NULL,
-    cache_type     TEXT    NOT NULL,
-    track_id       INTEGER NOT NULL DEFAULT -1,
-    region_type    TEXT    NOT NULL DEFAULT '',
-    width_px       INTEGER NOT NULL,
-    height_px      INTEGER NOT NULL,
-    image_data     BLOB    NOT NULL,
+    shot_video_id       TEXT    NOT NULL REFERENCES shot_videos(id),
+    frame_idx           INTEGER NOT NULL,
+    cache_type          TEXT    NOT NULL,
+    track_id            INTEGER NOT NULL DEFAULT -1,
+    region_type         TEXT    NOT NULL DEFAULT '',
+    width_px            INTEGER NOT NULL,
+    height_px           INTEGER NOT NULL,
+    image_data          BLOB    NOT NULL,
+    detection_run_id    TEXT    REFERENCES detection_runs(id),
     PRIMARY KEY (shot_video_id, frame_idx, cache_type, track_id, region_type, width_px)
 );

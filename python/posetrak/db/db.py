@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 4
-SESSION_SCHEMA_VERSION: Final[int] = 8
+SESSION_SCHEMA_VERSION: Final[int] = 9
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -408,11 +408,24 @@ def _migrate_session_v7_to_v8(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 7 to 8.
 
     v8 adds person_detections, person_tracks, and frame_cache_entries tables
-    for the Phase 2 capture pipeline setup application.
+    for the capture pipeline setup application.
     """
     sql = (_DB_DIR / "migrations" / "007_phase2_detection_tables.sql").read_text(
         encoding="utf-8"
     )
+    conn.executescript(sql)
+
+
+def _migrate_session_v8_to_v9(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 8 to 9.
+
+    v9 adds detection_runs and detection_keypoints tables for the integrated
+    pose extraction pipeline. person_detections and person_tracks are
+    recreated with detection_run_id added to their primary keys. Adds
+    detection_run_id to frame_cache_entries and pose_observation_sequences,
+    and noise_scale to pose_observations.
+    """
+    sql = (_DB_DIR / "migrations" / "008_detection_runs.sql").read_text(encoding="utf-8")
     conn.executescript(sql)
 
 
@@ -460,6 +473,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 7
     if actual == 7:
         _migrate_session_v7_to_v8(conn)
+        actual = 8
+    if actual == 8:
+        _migrate_session_v8_to_v9(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

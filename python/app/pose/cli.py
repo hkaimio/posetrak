@@ -103,6 +103,19 @@ def list_runs(session_db, shot):
         )
 
 
+@main.command(name="ui")
+@click.option("--session-db", type=click.Path(), default=None, help="Session DB to open on launch.")
+def cmd_ui(session_db):
+    """Launch the pose extraction GUI."""
+    import sys
+    from PySide6.QtWidgets import QApplication
+    from app.pose.main import PoseExtractionWindow
+    app = QApplication(sys.argv)
+    win = PoseExtractionWindow(session_db=session_db)
+    win.show()
+    sys.exit(app.exec())
+
+
 def _resolve_id(session, table: str, prefix: str) -> str:
     """Resolve a full or prefix ID from a table."""
     row = session.execute(

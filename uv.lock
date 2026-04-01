@@ -1189,6 +1189,7 @@ pipeline = [
 ]
 pose-app = [
     { name = "av" },
+    { name = "pyside6" },
     { name = "ultralytics" },
 ]
 setup-app = [
@@ -1221,6 +1222,7 @@ dev = [
 pipeline = [{ name = "ultralytics" }]
 pose-app = [
     { name = "av", specifier = ">=12.0" },
+    { name = "pyside6", specifier = ">=6.7" },
     { name = "ultralytics", specifier = ">=8.0" },
 ]
 setup-app = [

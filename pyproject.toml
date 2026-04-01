@@ -47,6 +47,7 @@ pipeline = [
     "ultralytics",
 ]
 pose-app = [
+    "PySide6>=6.7",
     "ultralytics>=8.0",   # YOLOv11 tracker
     "av>=12.0",           # PyAV for fast video decode
     # rtmlib installed separately (not on PyPI)

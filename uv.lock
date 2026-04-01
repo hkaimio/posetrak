@@ -1165,6 +1165,7 @@ name = "posetrak"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "click" },
     { name = "h5py" },
     { name = "numpy" },
     { name = "opencv-python" },
@@ -1200,6 +1201,7 @@ setup-app = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.0" },
     { name = "h5py", specifier = ">=3.10" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "opencv-python", specifier = ">=4.13.0.92" },

@@ -72,5 +72,6 @@ class YOLOv11Detector:
         return detections
 
     def reset_tracker(self) -> None:
-        # Reload model to reset internal tracker state
-        self._model = _YOLO(self._model_name)
+        """Reset tracker state between cameras without reloading model weights."""
+        if hasattr(self._model, "predictor") and self._model.predictor is not None:
+            self._model.predictor = None

@@ -1,12 +1,20 @@
 """cli.py — Command-line interface for the pose extraction pipeline."""
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
 import click
 
 from posetrak.db.db import open_session
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stderr,
+)
 
 
 @click.group()

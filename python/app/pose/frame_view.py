@@ -1,9 +1,12 @@
 """frame_view.py — Single-camera frame viewer with pose overlay."""
 from __future__ import annotations
 
+import logging
 import sqlite3
 
 import cv2
+
+_log = logging.getLogger(__name__)
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter, QPen
@@ -134,6 +137,9 @@ class FrameViewWidget(QWidget):
         self._camera_instance_id: str | None = None
         self._total_frames: int = 0
         self._current_frame: int = 0
+        self._fps: float = 30.0
+        self._ref_frame: int = 0
+        self._ref_timestamp_s: float = 0.0
         self._session: sqlite3.Connection | None = None
         self._detection_run_id: str | None = None
         self._track_id: int | None = None
@@ -191,18 +197,32 @@ class FrameViewWidget(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def load_camera(self, shot_video_id: str, file_path: str, camera_instance_id: str) -> None:
+    def load_camera(
+        self,
+        shot_video_id: str,
+        file_path: str,
+        camera_instance_id: str,
+        fps: float = 30.0,
+        ref_frame: int = 0,
+        ref_timestamp_s: float = 0.0,
+    ) -> None:
         self._shot_video_id = shot_video_id
         self._file_path = file_path
         self._camera_instance_id = camera_instance_id
+        self._fps = fps
+        self._ref_frame = ref_frame
+        self._ref_timestamp_s = ref_timestamp_s
         self._det_by_frame.clear()
         self._kp_by_frame.clear()
         self._overlay.clear()
 
         # Detect total frames
         cap = cv2.VideoCapture(file_path)
+        if not cap.isOpened():
+            _log.error("load_camera: cv2 could not open %s", file_path)
         self._total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
+        _log.info("load_camera: %s  total_frames=%d", file_path, self._total_frames)
 
         self._slider.setMaximum(max(0, self._total_frames - 1))
         self._slider.setValue(0)
@@ -230,6 +250,7 @@ class FrameViewWidget(QWidget):
         if ret:
             self._cell.set_frame(img)
         else:
+            _log.warning("seek_frame: cv2 read failed for frame %d in %s", frame_idx, self._file_path)
             self._cell.clear_frame()
 
         self._update_overlay(frame_idx)
@@ -297,10 +318,10 @@ class FrameViewWidget(QWidget):
         self._cell.update()
 
     def _update_info_label(self, frame_idx: int) -> None:
-        total_s = frame_idx  # rough placeholder without fps
-        mm = total_s // 60
-        ss = total_s % 60
-        self._info_label.setText(f"frame: {frame_idx}  t: {mm:02d}:{ss:02d}.00")
+        global_s = self._ref_timestamp_s + (frame_idx - self._ref_frame) / self._fps
+        mm = int(global_s // 60)
+        ss = global_s % 60
+        self._info_label.setText(f"frame: {frame_idx}  t: {mm:02d}:{ss:05.2f}")
 
     def _on_slider_changed(self, value: int) -> None:
         if value != self._current_frame:

@@ -52,7 +52,10 @@ pose-app = [
     "PySide6>=6.7",
     "ultralytics>=8.0",   # YOLOv11 tracker
     "av>=12.0",           # PyAV for fast video decode
-    # rtmlib installed separately (not on PyPI)
+    "rtmlib>=0.0.15",
+    # onnxruntime-gpu must be installed manually after sync to avoid the CPU
+    # version being reinstalled by uv as a transitive dep:
+    #   uv pip install --reinstall onnxruntime-gpu
 ]
 
 [tool.pytest.ini_options]

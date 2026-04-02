@@ -1,6 +1,7 @@
 """detection_pipeline.py — Synchronous detection + pose estimation pipeline."""
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 from dataclasses import dataclass, field
@@ -8,6 +9,8 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
+
+_log = logging.getLogger(__name__)
 
 try:
     import av as _av
@@ -77,7 +80,11 @@ class DetectionPipeline:
     # Public
     # ------------------------------------------------------------------
 
-    def run(self, on_progress: ProgressCallback | None = None) -> PipelineResult:
+    def run(
+        self,
+        on_progress: ProgressCallback | None = None,
+        on_camera_done: Callable[[int, int], None] | None = None,
+    ) -> PipelineResult:
         run_id = create_detection_run(
             self._session,
             shot_id=self._shot_id,
@@ -100,10 +107,14 @@ class DetectionPipeline:
             for cam in self._cameras:
                 if self._stop_event.is_set():
                     break
+                _log.info("run: resetting tracker for %s", cam.camera_instance_id)
                 self._detector.reset_tracker()
+                _log.info("run: tracker reset done, starting camera %s", cam.camera_instance_id)
                 n = self._process_camera(run_id, cam, on_progress)
                 result.cameras_processed.append(cam.camera_instance_id)
                 result.frames_processed += n
+                if on_camera_done:
+                    on_camera_done(len(result.cameras_processed), len(self._cameras))
 
             status = "failed" if self._stop_event.is_set() else "complete"
             result.status = status
@@ -120,16 +131,23 @@ class DetectionPipeline:
 
     def _load_cameras(self) -> list[CameraInfo]:
         """Load shot videos with sync anchor for each camera."""
+        # Use one anchor sync point per camera (the lowest video_frame).
         rows = self._session.execute(
-            "SELECT sv.id, sv.camera_instance_id, sv.file_path, sv.actual_fps, "
+            "WITH anchor AS ("
+            "    SELECT shot_video_id, MIN(video_frame) AS first_frame"
+            "    FROM sync_points WHERE sync_config_id = ? GROUP BY shot_video_id"
+            ")"
+            "SELECT sv.id, sv.camera_instance_id, sv.file_path, sv.actual_fps,"
             "       sp.video_frame, sp.timestamp_s "
             "FROM shot_videos sv "
+            "JOIN anchor a ON a.shot_video_id = sv.id "
             "JOIN sync_points sp "
-            "    ON sp.camera_instance_id = sv.camera_instance_id "
+            "    ON sp.shot_video_id = sv.id "
             "    AND sp.sync_config_id = ? "
+            "    AND sp.video_frame = a.first_frame "
             "WHERE sv.shot_id = ? "
             "ORDER BY sv.camera_instance_id",
-            (self._sync_config_id, self._shot_id),
+            (self._sync_config_id, self._sync_config_id, self._shot_id),
         ).fetchall()
 
         cameras = []
@@ -143,6 +161,16 @@ class DetectionPipeline:
                 ref_frame=int(row["video_frame"]),
                 ref_timestamp_s=float(row["timestamp_s"]),
             ))
+        _log.info(
+            "_load_cameras: shot=%s sync=%s → %d cameras (query returned %d rows)",
+            self._shot_id, self._sync_config_id, len(cameras), len(rows),
+        )
+        if not cameras:
+            _log.warning(
+                "_load_cameras: no cameras found — check that sync_points exist "
+                "for sync_config_id=%s and shot_id=%s",
+                self._sync_config_id, self._shot_id,
+            )
         return cameras
 
     def _frame_range(self, cam: CameraInfo) -> tuple[int, int]:
@@ -161,6 +189,10 @@ class DetectionPipeline:
     ) -> int:
         first_frame, last_frame = self._frame_range(cam)
         total = max(1, last_frame - first_frame)
+        _log.info(
+            "_process_camera: %s  file=%s  frames %d–%d (%d total)  fps=%.2f",
+            cam.camera_instance_id, cam.file_path, first_frame, last_frame, total, cam.actual_fps,
+        )
 
         writer = DetectionBatchWriter(
             self._session,
@@ -178,6 +210,13 @@ class DetectionPipeline:
                 detections = self._detector.detect_and_track(img, video_frame)
                 pose_results = self._estimator.estimate(img, detections) if detections else []
 
+                if frames_done == 0:
+                    _log.debug(
+                        "_process_camera: first frame %d decoded ok, shape=%s, "
+                        "%d detections, %d poses",
+                        video_frame, img.shape, len(detections), len(pose_results),
+                    )
+
                 writer.add_frame(video_frame, detections, pose_results, self._detector.name)
                 frames_done += 1
 
@@ -186,6 +225,7 @@ class DetectionPipeline:
         finally:
             writer.finalise()
 
+        _log.info("_process_camera: %s done — %d frames", cam.camera_instance_id, frames_done)
         return frames_done
 
     def _iter_frames(
@@ -195,15 +235,19 @@ class DetectionPipeline:
         path = cam.file_path
         fps = cam.actual_fps
 
+        _log.debug("_iter_frames: opening %s (av=%s)", path, _AV_AVAILABLE)
         if _AV_AVAILABLE:
             yield from self._iter_frames_av(path, fps, first_frame, last_frame)
         else:
             yield from self._iter_frames_cv2(path, first_frame, last_frame)
+        _log.debug("_iter_frames: closed %s", path)
 
     @staticmethod
     def _iter_frames_av(path: str, fps: float, first_frame: int, last_frame: int):
         import av
+        _log.debug("_iter_frames_av: av.open(%s)", path)
         with av.open(path) as container:
+            _log.debug("_iter_frames_av: opened ok")
             stream = container.streams.video[0]
             stream.thread_type = "AUTO"
             time_base = float(stream.time_base)

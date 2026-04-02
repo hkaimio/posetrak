@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -36,6 +36,8 @@ from app.setup.job_runner import BackgroundJob
 
 
 class DetectionJob(BackgroundJob):
+    camera_progress = Signal(int, int)   # cameras_done, cameras_total
+
     def __init__(
         self,
         session_path: str,
@@ -74,7 +76,10 @@ class DetectionJob(BackgroundJob):
 
         def on_progress(done: int, total: int, cam_id: str) -> None:
             pct = int(done / max(total, 1) * 100)
-            self.progress.emit(pct, f"{cam_id} {done}/{total}")
+            self.progress.emit(pct, f"{cam_id}  {done}/{total} frames")
+
+        def on_camera_done(done: int, total: int) -> None:
+            self.camera_progress.emit(done, total)
 
         pipeline = DetectionPipeline(
             session=session,
@@ -85,7 +90,7 @@ class DetectionJob(BackgroundJob):
             detector=det,
             estimator=est,
         )
-        result = pipeline.run(on_progress=on_progress)
+        result = pipeline.run(on_progress=on_progress, on_camera_done=on_camera_done)
         self.finished.emit(result.detection_run_id)
 
 
@@ -206,16 +211,26 @@ class PoseExtractionWindow(QMainWindow):
 
         root.addWidget(top)
 
-        # ---- Progress bar ----
-        self._progress_bar = QProgressBar()
-        self._progress_bar.setRange(0, 100)
-        self._progress_bar.setValue(0)
-        self._progress_label = QLabel("")
-        prog_row = QHBoxLayout()
-        prog_row.addWidget(QLabel("Progress:"))
-        prog_row.addWidget(self._progress_bar, 1)
-        prog_row.addWidget(self._progress_label)
-        root.addLayout(prog_row)
+        # ---- Progress bars ----
+        self._cam_progress_bar = QProgressBar()
+        self._cam_progress_bar.setRange(0, 100)
+        self._cam_progress_bar.setValue(0)
+        self._cam_progress_label = QLabel("")
+        cam_prog_row = QHBoxLayout()
+        cam_prog_row.addWidget(QLabel("Frame:"))
+        cam_prog_row.addWidget(self._cam_progress_bar, 1)
+        cam_prog_row.addWidget(self._cam_progress_label)
+        root.addLayout(cam_prog_row)
+
+        self._total_progress_bar = QProgressBar()
+        self._total_progress_bar.setRange(0, 100)
+        self._total_progress_bar.setValue(0)
+        self._total_progress_label = QLabel("")
+        total_prog_row = QHBoxLayout()
+        total_prog_row.addWidget(QLabel("Cameras:"))
+        total_prog_row.addWidget(self._total_progress_bar, 1)
+        total_prog_row.addWidget(self._total_progress_label)
+        root.addLayout(total_prog_row)
 
         # ---- Main splitter: frame view | right panel ----
         splitter = QSplitter(Qt.Horizontal)
@@ -322,29 +337,24 @@ class PoseExtractionWindow(QMainWindow):
         if self._session is None or index < 0:
             return
         self._shot_id = self._shot_combo.itemData(index)
-        self._populate_syncs()
-        self._populate_runs()
+        QTimer.singleShot(0, self._populate_syncs)
+        QTimer.singleShot(0, self._populate_runs)
 
     def _populate_syncs(self) -> None:
-        self._sync_combo.blockSignals(True)
+        self._sync_combo.currentIndexChanged.disconnect(self._on_sync_changed)
         self._sync_combo.clear()
-        if self._session is None or self._shot_id is None:
-            self._sync_combo.blockSignals(False)
-            return
-
-        rows = self._session.execute(
-            "SELECT id, created_by, notes FROM sync_configs WHERE shot_id=? ORDER BY rowid",
-            (self._shot_id,),
-        ).fetchall()
-        for r in rows:
-            label = r["created_by"] or r["id"][:8]
-            if r["notes"]:
-                label += f" ({r['notes']})"
-            self._sync_combo.addItem(label, r["id"])
-
-        self._sync_combo.blockSignals(False)
-        if self._sync_combo.count() > 0:
-            self._on_sync_changed(0)
+        if self._session is not None and self._shot_id is not None:
+            rows = self._session.execute(
+                "SELECT id, created_by, notes FROM sync_configs WHERE shot_id=? ORDER BY rowid",
+                (self._shot_id,),
+            ).fetchall()
+            for r in rows:
+                label = r["created_by"] or r["id"][:8]
+                if r["notes"]:
+                    label += f" ({r['notes']})"
+                self._sync_combo.addItem(label, r["id"])
+        self._sync_combo.currentIndexChanged.connect(self._on_sync_changed)
+        self._sync_config_id = self._sync_combo.itemData(0) if self._sync_combo.count() > 0 else None
 
     def _on_sync_changed(self, index: int) -> None:
         if index < 0:
@@ -352,23 +362,19 @@ class PoseExtractionWindow(QMainWindow):
         self._sync_config_id = self._sync_combo.itemData(index)
 
     def _populate_runs(self) -> None:
-        self._run_combo.blockSignals(True)
+        self._run_combo.currentIndexChanged.disconnect(self._on_run_selected)
         self._run_combo.clear()
-        if self._session is None or self._shot_id is None:
-            self._run_combo.blockSignals(False)
-            return
-
-        runs = list_detection_runs(self._session, self._shot_id)
-        for r in runs:
-            label = (
-                f"{r['id'][:8]}  {r['status']}  "
-                f"{r['detector_model']}+{r['pose_model']}  "
-                f"[{r['time_start_s']:.1f}–{r['time_end_s']:.1f}s]  "
-                f"{r['created_at'][:16]}"
-            )
-            self._run_combo.addItem(label, r["id"])
-
-        self._run_combo.blockSignals(False)
+        if self._session is not None and self._shot_id is not None:
+            runs = list_detection_runs(self._session, self._shot_id)
+            for r in runs:
+                label = (
+                    f"{r['id'][:8]}  {r['status']}  "
+                    f"{r['detector_model']}+{r['pose_model']}  "
+                    f"[{r['time_start_s']:.1f}–{r['time_end_s']:.1f}s]  "
+                    f"{r['created_at'][:16]}"
+                )
+                self._run_combo.addItem(label, r["id"])
+        self._run_combo.currentIndexChanged.connect(self._on_run_selected)
         if self._run_combo.count() > 0:
             self._on_run_selected(0)
 
@@ -392,8 +398,10 @@ class PoseExtractionWindow(QMainWindow):
             return
 
         self._set_controls_enabled(False)
-        self._progress_bar.setValue(0)
-        self._progress_label.setText("Starting...")
+        self._cam_progress_bar.setValue(0)
+        self._cam_progress_label.setText("")
+        self._total_progress_bar.setValue(0)
+        self._total_progress_label.setText("Starting...")
 
         self._job = DetectionJob(
             session_path=self._session_path,
@@ -406,18 +414,24 @@ class PoseExtractionWindow(QMainWindow):
             detector_conf=self._conf_spin.value(),
         )
         self._job.progress.connect(self._on_job_progress)
+        self._job.camera_progress.connect(self._on_camera_progress)
         self._job.finished.connect(self._on_job_finished)
         self._job.error.connect(self._on_job_error)
         self._job.start()
 
     def _on_job_progress(self, pct: int, msg: str) -> None:
-        self._progress_bar.setValue(pct)
-        self._progress_label.setText(msg)
+        self._cam_progress_bar.setValue(pct)
+        self._cam_progress_label.setText(msg)
+
+    def _on_camera_progress(self, done: int, total: int) -> None:
+        self._total_progress_bar.setValue(int(done / max(total, 1) * 100))
+        self._total_progress_label.setText(f"{done}/{total} cameras")
 
     def _on_job_finished(self, run_id: str) -> None:
         self._set_controls_enabled(True)
-        self._progress_bar.setValue(100)
-        self._progress_label.setText("Done")
+        self._cam_progress_bar.setValue(100)
+        self._total_progress_bar.setValue(100)
+        self._total_progress_label.setText("Done")
         self._populate_runs()
         # Select the new run
         idx = self._run_combo.findData(run_id)
@@ -426,7 +440,7 @@ class PoseExtractionWindow(QMainWindow):
 
     def _on_job_error(self, msg: str) -> None:
         self._set_controls_enabled(True)
-        self._progress_label.setText("Error")
+        self._total_progress_label.setText("Error")
         QMessageBox.critical(self, "Detection Error", msg)
 
     def _set_controls_enabled(self, enabled: bool) -> None:
@@ -460,13 +474,34 @@ class PoseExtractionWindow(QMainWindow):
 
         # Load file path and camera_instance_id
         row = self._session.execute(
-            "SELECT file_path, camera_instance_id FROM shot_videos WHERE id=?",
+            "SELECT file_path, camera_instance_id, actual_fps FROM shot_videos WHERE id=?",
             (shot_video_id,),
         ).fetchone()
         if row is None:
             return
 
-        self._frame_view.load_camera(shot_video_id, row["file_path"], row["camera_instance_id"])
+        # Load sync anchor for global-time display in frame view
+        run_row = self._session.execute(
+            "SELECT sync_config_id FROM detection_runs WHERE id=?",
+            (self._current_run_id,),
+        ).fetchone()
+        ref_frame, ref_ts = 0, 0.0
+        if run_row:
+            sp = self._session.execute(
+                "SELECT video_frame, timestamp_s FROM sync_points "
+                "WHERE shot_video_id=? AND sync_config_id=? "
+                "ORDER BY video_frame ASC LIMIT 1",
+                (shot_video_id, run_row["sync_config_id"]),
+            ).fetchone()
+            if sp:
+                ref_frame, ref_ts = int(sp["video_frame"]), float(sp["timestamp_s"])
+
+        self._frame_view.load_camera(
+            shot_video_id, row["file_path"], row["camera_instance_id"],
+            fps=float(row["actual_fps"] or 30.0),
+            ref_frame=ref_frame,
+            ref_timestamp_s=ref_ts,
+        )
         self._frame_view.seek_frame(first_frame)
         self._frame_view.set_pose_data(self._session, self._current_run_id, track_id)
 

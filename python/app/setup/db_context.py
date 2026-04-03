@@ -334,6 +334,38 @@ class DBContext:
             for r in rows
         ]
 
+    def get_sync_configs(self, shot_id: str) -> list[tuple[str, str]]:
+        """Return ``[(config_id, created_by), …]`` for a shot, newest first."""
+        rows = self._conn.execute(
+            "SELECT id, created_by FROM sync_configs WHERE shot_id = ? ORDER BY rowid DESC",
+            (shot_id,),
+        ).fetchall()
+        return [(r["id"], r["created_by"] or "") for r in rows]
+
+    def load_sync_config(self, config_id: str) -> SyncTable | None:
+        """Load a specific sync config into a SyncTable."""
+        rows = self._conn.execute(
+            "SELECT sp.camera_instance_id, sp.shot_video_id, "
+            "sp.video_frame, sp.timestamp_s, sv.actual_fps "
+            "FROM sync_points sp "
+            "JOIN shot_videos sv ON sv.id = sp.shot_video_id "
+            "WHERE sp.sync_config_id = ?",
+            (config_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        points = [
+            SyncPoint(
+                camera_instance_id=r["camera_instance_id"],
+                shot_video_id=r["shot_video_id"],
+                video_frame=r["video_frame"],
+                timestamp_s=r["timestamp_s"],
+            )
+            for r in rows
+        ]
+        fps_by_video = {r["shot_video_id"]: r["actual_fps"] for r in rows}
+        return SyncTable(points, fps_by_video)
+
     def get_active_sync(self, shot_id: str) -> SyncTable | None:
         """Return a ``SyncTable`` for the best available sync config, or ``None``.
 

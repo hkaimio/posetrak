@@ -84,10 +84,22 @@ class CameraCell(QWidget):
         if self._frame is None:
             return dx, dy
         fh, fw = self._frame.shape[:2]
-        cw, ch = self.width(), self.height()
-        fx = int(dx * fw / cw) if cw > 0 else 0
-        fy = int(dy * fh / ch) if ch > 0 else 0
+        x_off, y_off, img_w, img_h = self._letterbox_rect(fw, fh)
+        if img_w <= 0 or img_h <= 0:
+            return 0, 0
+        fx = int((dx - x_off) * fw / img_w)
+        fy = int((dy - y_off) * fh / img_h)
         return fx, fy
+
+    def _letterbox_rect(self, fw: int, fh: int) -> tuple[int, int, int, int]:
+        """Return (x_off, y_off, img_w, img_h) for the frame scaled to fit the cell."""
+        cw, ch = self.width(), self.height()
+        scale = min(cw / max(fw, 1), ch / max(fh, 1))
+        img_w = int(fw * scale)
+        img_h = int(fh * scale)
+        x_off = (cw - img_w) // 2
+        y_off = (ch - img_h) // 2
+        return x_off, y_off, img_w, img_h
 
     # ------------------------------------------------------------------
     # Qt overrides
@@ -110,16 +122,22 @@ class CameraCell(QWidget):
                 int(rgb.strides[0]),
                 QImage.Format.Format_RGB888,
             )
+            # Letterbox: scale to fit preserving aspect ratio, centre in cell
+            x_off, y_off, img_w, img_h = self._letterbox_rect(fw, fh)
             pixmap = QPixmap.fromImage(img).scaled(
-                cw, ch,
+                img_w, img_h,
                 Qt.AspectRatioMode.IgnoreAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            painter.drawPixmap(0, 0, pixmap)
+            painter.fillRect(0, 0, cw, ch, _PLACEHOLDER_COLOR)
+            painter.drawPixmap(x_off, y_off, pixmap)
 
-            # Paint overlays in forward order (last overlay is top-most)
+            # Paint overlays translated to the image origin
+            painter.save()
+            painter.translate(x_off, y_off)
             for overlay in self._overlays:
-                overlay.paint(painter, fw, fh, cw, ch)
+                overlay.paint(painter, fw, fh, img_w, img_h)
+            painter.restore()
         else:
             # Placeholder
             painter.fillRect(0, 0, cw, ch, _PLACEHOLDER_COLOR)

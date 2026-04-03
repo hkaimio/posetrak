@@ -982,9 +982,20 @@ class SyncPage(QWizardPage):
         self._shot_combo = QComboBox()
         self._shot_combo.currentIndexChanged.connect(self._on_shot_selected)
 
+        # ---- sync config selector ----
+        self._sync_config_combo = QComboBox()
+        self._sync_config_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._sync_config_combo.setToolTip(
+            "Select the sync configuration to apply to this shot.\n"
+            "LED-auto configs are preferred; the most recent is pre-selected."
+        )
+        self._sync_config_combo.currentIndexChanged.connect(self._on_sync_config_selected)
+
         shot_bar = QHBoxLayout()
         shot_bar.addWidget(QLabel("Shot:"))
         shot_bar.addWidget(self._shot_combo)
+        shot_bar.addWidget(QLabel("Sync config:"))
+        shot_bar.addWidget(self._sync_config_combo, stretch=1)
         shot_bar.addStretch()
 
         # ---- scrubber area ----
@@ -1147,6 +1158,10 @@ class SyncPage(QWizardPage):
         self._set_anchor_btn.setEnabled(True)
         self._clear_anchors_btn.setEnabled(True)
         self._update_rough_panel_state()
+
+        # Populate sync config combo and auto-load the best available config
+        self._populate_sync_config_combo(shot)
+
         scrubber.setFocus()
 
     # ------------------------------------------------------------------
@@ -1278,6 +1293,28 @@ class SyncPage(QWizardPage):
         dlg.exec()
 
     # ------------------------------------------------------------------
+    # Slots — sync config selection
+    # ------------------------------------------------------------------
+
+    def _on_sync_config_selected(self, index: int) -> None:
+        config_id = self._sync_config_combo.itemData(index)
+        if config_id is None:
+            # "No sync config" option
+            if self._scrubber is not None:
+                self._scrubber.reload_sync(None)
+            self._led_sync_btn.setEnabled(False)
+            return
+        ctx: DBContext = self.wizard().db_context
+        sync_table = ctx.load_sync_config(config_id)
+        if sync_table is not None and self._scrubber is not None:
+            self._scrubber.reload_sync(sync_table)
+            self._led_sync_btn.setEnabled(True)
+            self._rough_status_label.setText(
+                f"Sync config loaded: {self._sync_config_combo.currentText()}"
+            )
+            self._rough_status_label.setStyleSheet("color: green; font-size: 11px;")
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -1290,6 +1327,37 @@ class SyncPage(QWizardPage):
             i: spin.value()
             for i, spin in enumerate(self._fps_spinboxes)
         }
+
+    def _populate_sync_config_combo(self, shot: _ShotMeta) -> None:
+        """Fill the sync config combo for *shot* and load the default config."""
+        ctx: DBContext = self.wizard().db_context
+        configs = ctx.get_sync_configs(shot.shot_id)
+
+        self._sync_config_combo.currentIndexChanged.disconnect(self._on_sync_config_selected)
+        self._sync_config_combo.clear()
+
+        if not configs:
+            self._sync_config_combo.addItem("— no sync config —", None)
+            self._sync_config_combo.currentIndexChanged.connect(self._on_sync_config_selected)
+            return
+
+        # Build labels; configs are already newest-first from the DB query.
+        # Prefer led-auto → manual-rough for the default selection.
+        method_rank = {"led-auto": 0, "manual-rough": 1}
+        best_idx = 0
+        best_rank = 99
+        for i, (cfg_id, method) in enumerate(configs):
+            n = len(configs) - i  # descending count label
+            label = f"{method} #{n}"
+            self._sync_config_combo.addItem(label, cfg_id)
+            rank = method_rank.get(method, 99)
+            if rank < best_rank:
+                best_rank = rank
+                best_idx = i
+
+        self._sync_config_combo.currentIndexChanged.connect(self._on_sync_config_selected)
+        self._sync_config_combo.setCurrentIndex(best_idx)
+        # Signal fires because index changed from -1 → best_idx, loading the config.
 
     def _rebuild_per_camera_widgets(self, shot: _ShotMeta) -> None:
         """Rebuild per-camera fps spinboxes and anchor status labels."""
@@ -1381,6 +1449,9 @@ class SyncPage(QWizardPage):
         self._led_sync_btn.setEnabled(False)
         self._rough_status_label.setText("")
         self._rough_status_label.setStyleSheet("color: grey; font-size: 11px;")
+        self._sync_config_combo.currentIndexChanged.disconnect(self._on_sync_config_selected)
+        self._sync_config_combo.clear()
+        self._sync_config_combo.currentIndexChanged.connect(self._on_sync_config_selected)
 
     def _show_error(self, msg: str) -> None:
         self._error_label.setText(msg)

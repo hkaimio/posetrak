@@ -872,12 +872,17 @@ class _LedSyncDialog(QDialog):
                 style = "color: grey; font-size: 11px;"
                 tooltip = "This camera defines the global time axis (identity map)."
             else:
-                q = "good" if cr.resid_std_s < 0.005 else "poor"
+                offset0 = float(cr.frame_times[0]) if len(cr.frame_times) else 0.0
+                is_shift_only = cr.map_type == "shift_only"
+                q = "good" if (cr.resid_std_s < 0.005 and not is_shift_only) else "poor"
                 txt = (
                     f"{cr.camera_instance_id}: {cr.n_events} events, "
                     f"{cr.n_pairs} DTW pairs, "
                     f"{cr.n_inliers} inliers, "
-                    f"residual σ = {cr.resid_std_s * 1000:.1f} ms — {q}"
+                    f"σ={cr.resid_std_s * 1000:.1f}ms, "
+                    f"offset={offset0:+.3f}s"
+                    + (f"  ⚠ {cr.map_type}" if is_shift_only else f"  [{cr.map_type}]")
+                    + f" — {q}"
                 )
                 style = (
                     "color: green; font-size: 11px;"
@@ -890,9 +895,12 @@ class _LedSyncDialog(QDialog):
                     "Inliers: DTW pairs consistent with the fitted affine timing model\n"
                     "  (within 10 ms tolerance). Non-inliers are DTW mismatches or\n"
                     "  noise peaks — they are excluded from the final fit.\n"
-                    f"Residual σ: std of inlier timing errors after fitting — "
-                    f"< 5 ms is good.\n"
-                    f"Map type: {cr.map_type}"
+                    f"Residual σ: std of inlier timing errors after fitting — < 5 ms is good.\n"
+                    f"Offset: global time at camera frame 0 — should match cameras that\n"
+                    f"  started recording at the same time.\n"
+                    f"Map type: {cr.map_type}\n"
+                    f"  affine/pchip = DTW succeeded\n"
+                    f"  shift_only   = DTW failed, rough offset or cross-correlation used"
                 )
             lbl = QLabel(txt)
             lbl.setStyleSheet(style)

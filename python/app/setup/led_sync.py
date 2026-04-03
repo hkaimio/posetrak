@@ -99,6 +99,112 @@ class LedSyncResult:
 # ---------------------------------------------------------------------------
 
 
+# Target decode width for LED brightness extraction.  Scaling down reduces
+# GPU→CPU memory bandwidth dramatically while preserving all LED transitions.
+_LED_DECODE_WIDTH = 960
+
+
+def _probe_video(file_path: str) -> tuple[int, int, float, int]:
+    """Return (width, height, fps, total_frames) via a cv2 probe (no decode)."""
+    import cv2
+    cap = cv2.VideoCapture(str(file_path))
+    if not cap.isOpened():
+        raise OSError(f"Cannot open video: {file_path}")
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    return w, h, fps, total
+
+
+def _brightness_via_ffmpeg(
+    file_path: str,
+    roi: ROI,
+    orig_w: int,
+    orig_h: int,
+    target_w: int,
+    total_frames: int,
+    use_hwaccel: bool,
+    progress_cb,
+) -> np.ndarray | None:
+    """Stream ROI brightness changes from FFMPEG.
+
+    Decodes at *target_w* width (hardware or software), crops to the scaled
+    ROI, and pipes only the tiny grayscale patch bytes.  Returns None if
+    FFMPEG is unavailable or exits with an error before producing any frames.
+    """
+    import subprocess
+
+    scale = target_w / orig_w
+    target_h = max(1, round(orig_h * scale))
+    roi_x = max(0, round(roi.x1 * scale) if roi.x1 < roi.x2 else round(roi.x2 * scale))
+    roi_y = max(0, round(roi.y1 * scale) if roi.y1 < roi.y2 else round(roi.y2 * scale))
+    crop_w = max(1, round(abs(roi.x2 - roi.x1) * scale))
+    crop_h = max(1, round(abs(roi.y2 - roi.y1) * scale))
+
+    if use_hwaccel:
+        # NVDEC: decode on GPU, scale on GPU via NPP, download scaled frame,
+        # then CPU-side format conversion and crop.
+        hw_opts = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+        vf = (f"scale_npp={target_w}:{target_h},"
+              f"hwdownload,format=gray,"
+              f"crop={crop_w}:{crop_h}:{roi_x}:{roi_y}")
+    else:
+        hw_opts = []
+        vf = (f"scale={target_w}:{target_h},"
+              f"format=gray,"
+              f"crop={crop_w}:{crop_h}:{roi_x}:{roi_y}")
+
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        *hw_opts,
+        "-i", str(file_path),
+        "-vf", vf,
+        "-f", "rawvideo", "-pix_fmt", "gray",
+        "-an", "pipe:1",
+    ]
+    _log.debug("_brightness_via_ffmpeg: %s", " ".join(cmd))
+
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        return None   # ffmpeg not on PATH
+
+    frame_bytes = crop_w * crop_h
+    changes: list[float] = [0.0]
+    prev: np.ndarray | None = None
+    frame_idx = 0
+
+    try:
+        while True:
+            data = proc.stdout.read(frame_bytes)
+            if len(data) < frame_bytes:
+                break
+            patch = np.frombuffer(data, dtype=np.uint8).reshape(crop_h, crop_w).astype(np.float64)
+            if prev is not None:
+                diff = patch - prev
+                mx, mn = float(diff.max()), float(diff.min())
+                changes.append(mx if abs(mx) >= abs(mn) else mn)
+            prev = patch
+            frame_idx += 1
+            if progress_cb is not None and total_frames > 0:
+                progress_cb(frame_idx, total_frames)
+    finally:
+        proc.stdout.close()
+        proc.wait()
+
+    if frame_idx == 0:
+        _log.debug("_brightness_via_ffmpeg: no frames (hwaccel=%s)", use_hwaccel)
+        return None
+
+    _log.info(
+        "extract_brightness: %d frames via ffmpeg (hwaccel=%s, decode_w=%d, roi=%dx%d)",
+        frame_idx, use_hwaccel, target_w, crop_w, crop_h,
+    )
+    return np.array(changes, dtype=np.float64)
+
+
 def extract_brightness_changes(
     file_path: str,
     roi: ROI,
@@ -125,19 +231,42 @@ def extract_brightness_changes(
         ``changes`` is a float64 array of length *frame_count*.  The first
         element is always 0.0 (no previous frame to diff against).
         ``fps`` is the fps value actually used (override or container).
-    """
-    import cv2  # imported lazily so the module loads without OpenCV
 
+    The implementation decodes at reduced resolution (_LED_DECODE_WIDTH) via
+    FFMPEG (NVDEC when available, CPU otherwise) and pipes only the scaled ROI
+    patch bytes.  Falls back to cv2 full-resolution decode if FFMPEG is absent.
+    """
+    import cv2  # lazily imported; cv2 is used for the probe and as fallback
+
+    orig_w, orig_h, fps_container, total = _probe_video(file_path)
+    fps = float(fps_override) if fps_override is not None else fps_container
+
+    # Only apply downscaling if the video is wider than the target.
+    target_w = min(orig_w, _LED_DECODE_WIDTH)
+
+    if target_w < orig_w:
+        changes = _brightness_via_ffmpeg(
+            file_path, roi, orig_w, orig_h, target_w, total,
+            use_hwaccel=True, progress_cb=progress_cb,
+        )
+        if changes is None:
+            _log.info("extract_brightness: NVDEC unavailable, trying CPU FFMPEG")
+            changes = _brightness_via_ffmpeg(
+                file_path, roi, orig_w, orig_h, target_w, total,
+                use_hwaccel=False, progress_cb=progress_cb,
+            )
+        if changes is not None:
+            return changes, fps
+        _log.warning("extract_brightness: FFMPEG failed, falling back to cv2")
+
+    # cv2 fallback: full-resolution software decode.
+    _log.info("extract_brightness: using cv2 (full-res) for %s", file_path)
     cap = cv2.VideoCapture(str(file_path))
     if not cap.isOpened():
         raise OSError(f"Cannot open video: {file_path}")
 
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps_container = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    fps = float(fps_override) if fps_override is not None else fps_container
-
     row_sl, col_sl = roi.to_slice()
-    changes: list[float] = [0.0]
+    changes_list: list[float] = [0.0]
     prev: np.ndarray | None = None
     frame_idx = 0
 
@@ -149,14 +278,14 @@ def extract_brightness_changes(
         if prev is not None:
             diff = patch - prev
             mx, mn = float(diff.max()), float(diff.min())
-            changes.append(mx if abs(mx) >= abs(mn) else mn)
+            changes_list.append(mx if abs(mx) >= abs(mn) else mn)
         prev = patch
         frame_idx += 1
         if progress_cb is not None and total > 0:
             progress_cb(frame_idx, total)
 
     cap.release()
-    return np.array(changes, dtype=np.float64), fps
+    return np.array(changes_list, dtype=np.float64), fps
 
 
 # ---------------------------------------------------------------------------

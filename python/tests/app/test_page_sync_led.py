@@ -384,7 +384,11 @@ def test_led_sync_job_emits_finished(qapp, tmp_path) -> None:
     job = _LedSyncJob(cam_data, ref_cam=0)
     job.finished.connect(lambda r: results_received.append(r))
 
-    with patch("cv2.VideoCapture", side_effect=[_mock_cap_for_file(), _mock_cap_for_file()]):
+    # _probe_video() opens a cap before the decode loop: 2 probes + 2 decode caps
+    with patch("cv2.VideoCapture", side_effect=[
+        _mock_cap_for_file(), _mock_cap_for_file(),
+        _mock_cap_for_file(), _mock_cap_for_file(),
+    ]):
         job.run.__wrapped__(job)
 
     assert len(results_received) == 1
@@ -402,7 +406,11 @@ def test_led_sync_job_two_cameras_in_result(qapp, tmp_path) -> None:
     job = _LedSyncJob(cam_data, ref_cam=0)
     job.finished.connect(lambda r: results_received.append(r))
 
-    with patch("cv2.VideoCapture", side_effect=[_mock_cap_for_file(), _mock_cap_for_file()]):
+    # _probe_video() opens a cap before the decode loop: 2 probes + 2 decode caps
+    with patch("cv2.VideoCapture", side_effect=[
+        _mock_cap_for_file(), _mock_cap_for_file(),
+        _mock_cap_for_file(), _mock_cap_for_file(),
+    ]):
         job.run.__wrapped__(job)
 
     assert len(results_received[0].cameras) == 2

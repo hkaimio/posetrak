@@ -179,7 +179,8 @@ class MultiVideoScrubber(QWidget):
             cell.clicked.connect(lambda idx=i: self._on_cell_clicked(idx))
             vbox.addWidget(cell, stretch=1)
 
-            # Slider + frame counter row
+            # Slider row: slider fills the full container width so it matches
+            # the video cell above it (anchor line uses the same coordinate).
             slider_row = QHBoxLayout()
             slider_row.setContentsMargins(0, 0, 0, 0)
 
@@ -190,19 +191,15 @@ class MultiVideoScrubber(QWidget):
             slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             slider.sliderMoved.connect(lambda val, idx=i: self._on_cell_slider_moved(idx, val))
             slider_row.addWidget(slider)
+            vbox.addLayout(slider_row)
 
+            # Frame counter on a compact row below the slider
             last = info.total_frames - 1
             frame_label = QLabel(f"0 / {last}")
             frame_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            frame_label.setStyleSheet("font-family: monospace; font-size: 11px;")
-            # Size to the widest possible text so it never truncates
-            worst = f"{last} / {last}"
-            frame_label.setFixedWidth(
-                frame_label.fontMetrics().horizontalAdvance(worst) + 8
-            )
-            slider_row.addWidget(frame_label)
-
-            vbox.addLayout(slider_row)
+            frame_label.setStyleSheet("font-family: monospace; font-size: 10px; color: grey;")
+            frame_label.setContentsMargins(0, 0, 2, 0)
+            vbox.addWidget(frame_label)
 
             layout.addWidget(container, i // cols, i % cols)
             self._cells.append(cell)

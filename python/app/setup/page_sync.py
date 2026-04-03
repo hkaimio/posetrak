@@ -641,7 +641,7 @@ class _LedSyncDialog(QDialog):
         ctx: DBContext,
         current_frames: list[int],
         on_sync_accepted,
-        rough_offsets: dict[int, float] | None = None,
+        anchor_frames: dict[int, int] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -652,7 +652,7 @@ class _LedSyncDialog(QDialog):
         self._ctx = ctx
         self._current_frames = current_frames
         self._on_sync_accepted = on_sync_accepted
-        self._rough_offsets = rough_offsets or {}
+        self._anchor_frames = anchor_frames or {}
 
         self._led_rois: dict[int, ROI] = {}
         self._led_result: LedSyncResult | None = None
@@ -790,6 +790,28 @@ class _LedSyncDialog(QDialog):
                 self._roi_labels[cell_idx].setStyleSheet("color: green; font-size: 11px;")
                 self._update_run_btn()
 
+    def _compute_rough_offsets(self) -> list[float]:
+        """Return per-camera rough time offsets using the CURRENT fps spinboxes.
+
+        Recomputes from ``_anchor_frames`` rather than using pre-computed values,
+        so a fps correction made in this dialog is always honoured.
+        """
+        K = len(self._shot.videos)
+        if not self._anchor_frames:
+            return [0.0] * K
+
+        ref_cell = min(self._anchor_frames)
+        ref_frame = self._anchor_frames[ref_cell]
+        ref_fps = self._fps_spinboxes[ref_cell].value() or self._shot.videos[ref_cell].actual_fps or 30.0
+        ref_ts = ref_frame / ref_fps
+
+        offsets: list[float] = []
+        for cell_idx, sv in enumerate(self._shot.videos):
+            fps = self._fps_spinboxes[cell_idx].value() or sv.actual_fps or 30.0
+            anchor = self._anchor_frames.get(cell_idx, 0)
+            offsets.append(ref_ts - anchor / fps)
+        return offsets
+
     def _update_run_btn(self) -> None:
         n_videos = len(self._shot.videos)
         self._run_btn.setEnabled(len(self._led_rois) >= 2 and len(self._led_rois) == n_videos)
@@ -816,9 +838,10 @@ class _LedSyncDialog(QDialog):
         self._dump_btn.setEnabled(False)
         self._accept_label.setText("")
 
-        rough_offsets_list = [
-            self._rough_offsets.get(i, 0.0) for i in range(len(self._shot.videos))
-        ]
+        # Compute rough offsets using the CURRENT fps spinbox values so that a
+        # fps correction made in this dialog is reflected in the time mapping.
+        rough_offsets_list = self._compute_rough_offsets()
+        _log.debug("LED sync rough_offsets (recomputed at run time): %s", rough_offsets_list)
         self._led_job = _LedSyncJob(
             cam_data, ref_cam=0, rough_offsets=rough_offsets_list, parent=self,
         )
@@ -1266,20 +1289,14 @@ class SyncPage(QWizardPage):
             self._rough_status_label.setText("LED sync accepted and applied.")
             self._rough_status_label.setStyleSheet("color: green; font-size: 11px;")
 
-        # Compute per-camera rough offsets from anchor frames so the LED sync
-        # algorithm can handle cameras that started far apart in time.
-        # rough_offset[i] = global time at cam-i local frame 0 (LED sync reference frame).
-        rough_offsets: dict[int, float] = {}
-        if self._anchors:
-            ref_cell = min(self._anchors)
-            ref_frame = self._anchors[ref_cell]
-            ref_fps = self._fps_overrides().get(ref_cell, shot.videos[ref_cell].actual_fps or 30.0) or 30.0
-            ref_ts = ref_frame / ref_fps
-            for cell_idx, sv in enumerate(shot.videos):
-                fps = self._fps_overrides().get(cell_idx, sv.actual_fps or 30.0) or 30.0
-                anchor = self._anchors.get(cell_idx, 0)
-                rough_offsets[cell_idx] = ref_ts - anchor / fps
-            _log.debug("rough offsets for LED sync: %s", rough_offsets)
+        def _on_accepted(sync_table: SyncTable) -> None:
+            self._scrubber.reload_sync(sync_table)
+            self._rough_status_label.setText("LED sync accepted and applied.")
+            self._rough_status_label.setStyleSheet("color: green; font-size: 11px;")
+            # Clear anchor overlays — LED sync supersedes rough anchors
+            for i, ov in enumerate(self._anchor_overlays):
+                ov.anchor_frame = None
+                self._scrubber.set_overlays(i, [ov])
 
         dlg = _LedSyncDialog(
             shot=shot,
@@ -1287,7 +1304,7 @@ class SyncPage(QWizardPage):
             ctx=ctx,
             current_frames=current_frames,
             on_sync_accepted=_on_accepted,
-            rough_offsets=rough_offsets,
+            anchor_frames=dict(self._anchors),
             parent=self,
         )
         dlg.exec()
@@ -1313,6 +1330,11 @@ class SyncPage(QWizardPage):
                 f"Sync config loaded: {self._sync_config_combo.currentText()}"
             )
             self._rough_status_label.setStyleSheet("color: green; font-size: 11px;")
+            # Clear anchor overlays — loaded config supersedes rough anchors
+            for i, ov in enumerate(self._anchor_overlays):
+                ov.anchor_frame = None
+                if self._scrubber is not None:
+                    self._scrubber.set_overlays(i, [ov])
 
     # ------------------------------------------------------------------
     # Helpers

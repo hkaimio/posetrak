@@ -47,6 +47,15 @@ except Exception:
     _PchipInterpolator = None
     _HAS_PCHIP = False
 
+try:
+    from scipy.ndimage import gaussian_filter as _gaussian_filter
+    _HAS_GAUSSIAN = True
+except Exception:
+    _gaussian_filter = None
+    _HAS_GAUSSIAN = False
+
+_BLUR_SIGMA = 1.0  # applied to per-frame diff before taking signed max
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -127,8 +136,14 @@ def _brightness_via_ffmpeg(
 
     x = min(roi.x1, roi.x2)
     y = min(roi.y1, roi.y2)
-    w = max(1, abs(roi.x2 - roi.x1))
-    h = max(1, abs(roi.y2 - roi.y1))
+    # Round up to even: ffmpeg aligns raw-video rows to even widths, so an odd
+    # crop width causes a 1-byte stride mismatch when reading w*h bytes/frame.
+    w = max(2, abs(roi.x2 - roi.x1))
+    h = max(2, abs(roi.y2 - roi.y1))
+    if w % 2:
+        w += 1
+    if h % 2:
+        h += 1
 
     vf = f"crop={w}:{h}:{x}:{y},format=gray"
     cmd = [
@@ -158,6 +173,8 @@ def _brightness_via_ffmpeg(
             patch = np.frombuffer(data, dtype=np.uint8).reshape(h, w).astype(np.float64)
             if prev is not None:
                 diff = patch - prev
+                if _HAS_GAUSSIAN:
+                    diff = _gaussian_filter(diff, sigma=_BLUR_SIGMA)
                 mx, mn = float(diff.max()), float(diff.min())
                 changes.append(mx if abs(mx) >= abs(mn) else mn)
             prev = patch
@@ -238,6 +255,8 @@ def extract_brightness_changes(
         patch = frame[row_sl, col_sl].astype(np.float64)
         if prev is not None:
             diff = patch - prev
+            if _HAS_GAUSSIAN:
+                diff = _gaussian_filter(diff, sigma=_BLUR_SIGMA)
             mx, mn = float(diff.max()), float(diff.min())
             changes_list.append(mx if abs(mx) >= abs(mn) else mn)
         prev = patch

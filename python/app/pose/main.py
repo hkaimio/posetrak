@@ -266,6 +266,7 @@ class PoseExtractionWindow(QMainWindow):
         self._stitcher = StitcherWidget()
         self._stitcher.setMinimumHeight(150)
         self._stitcher.segment_clicked.connect(self._on_segment_clicked)
+        self._stitcher.assignment_changed.connect(self._on_assignment_changed)
         right_layout.addWidget(self._stitcher, 1)
 
         # Assignment panel
@@ -562,9 +563,8 @@ class PoseExtractionWindow(QMainWindow):
         )
         self._run_btn.setEnabled(ready)
 
-    def _on_frame_changed(self, _frame_idx: int, _global_s: float) -> None:
-        # Keep run button state fresh (start/end marks are unchanged but
-        # this is a cheap check so we update on every frame).
+    def _on_frame_changed(self, _frame_idx: int, global_s: float) -> None:
+        self._stitcher.set_current_time(global_s)
         self._update_run_btn()
 
     # ------------------------------------------------------------------
@@ -632,6 +632,8 @@ class PoseExtractionWindow(QMainWindow):
             if self._person_combo.findText(name) < 0:
                 self._person_combo.addItem(name)
             self._person_combo.setCurrentText(name)
+            persons = [self._person_combo.itemText(i) for i in range(self._person_combo.count())]
+            self._stitcher.set_known_persons(persons)
 
     def _on_assign(self) -> None:
         if self._current_svid is None or self._current_track_id is None:
@@ -643,13 +645,25 @@ class PoseExtractionWindow(QMainWindow):
             QMessageBox.warning(self, "No name", "Enter a person name.")
             return
 
-        key = (self._current_svid, self._current_track_id)
-        self._assignments[key] = name
-        self._stitcher.set_assignment(self._current_svid, self._current_track_id, name)
+        self._apply_assignment(self._current_svid, self._current_track_id, name)
 
-        # Add to combo if not present
+    def _on_assignment_changed(self, svid: str, tid: int, person_name) -> None:
+        """Handle assignment made via the stitcher context menu."""
+        if person_name:
+            self._apply_assignment(svid, tid, str(person_name))
+        else:
+            self._assignments.pop((svid, tid), None)
+
+    def _apply_assignment(self, svid: str, tid: int, name: str) -> None:
+        """Record assignment, sync stitcher colour/label and both person lists."""
+        self._assignments[(svid, tid)] = name
+        self._stitcher.set_assignment(svid, tid, name)
+        # Keep combo in sync
         if self._person_combo.findText(name) < 0:
             self._person_combo.addItem(name)
+        # Keep stitcher context-menu list in sync
+        persons = [self._person_combo.itemText(i) for i in range(self._person_combo.count())]
+        self._stitcher.set_known_persons(persons)
 
     # ------------------------------------------------------------------
     # Finalise

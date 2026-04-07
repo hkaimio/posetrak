@@ -341,28 +341,30 @@ class PoseExtractionWindow(QMainWindow):
         QTimer.singleShot(0, self._populate_runs)
 
     def _populate_syncs(self) -> None:
-        self._sync_combo.currentIndexChanged.disconnect(self._on_sync_changed)
+        self._sync_combo.blockSignals(True)
         self._sync_combo.clear()
         if self._session is not None and self._shot_id is not None:
             rows = self._session.execute(
-                "SELECT id, created_by, notes FROM sync_configs WHERE shot_id=? ORDER BY rowid",
+                "SELECT id, created_by, notes FROM sync_configs WHERE shot_id=? ORDER BY rowid DESC",
                 (self._shot_id,),
             ).fetchall()
-            for r in rows:
-                label = r["created_by"] or r["id"][:8]
+            total = len(rows)
+            for i, r in enumerate(rows):
+                # Show newest-first; number as #N counting from oldest so #1 = first ever.
+                n = total - i
+                kind = r["created_by"] or r["id"][:8]
+                label = f"{kind} #{n}"
                 if r["notes"]:
-                    label += f" ({r['notes']})"
+                    label += f"  {r['notes']}"
                 self._sync_combo.addItem(label, r["id"])
-        self._sync_combo.currentIndexChanged.connect(self._on_sync_changed)
-        self._sync_config_id = self._sync_combo.itemData(0) if self._sync_combo.count() > 0 else None
+        self._sync_combo.blockSignals(False)
+        self._on_sync_changed(0)
 
     def _on_sync_changed(self, index: int) -> None:
-        if index < 0:
-            return
-        self._sync_config_id = self._sync_combo.itemData(index)
+        self._sync_config_id = self._sync_combo.itemData(index) if index >= 0 else None
 
     def _populate_runs(self) -> None:
-        self._run_combo.currentIndexChanged.disconnect(self._on_run_selected)
+        self._run_combo.blockSignals(True)
         self._run_combo.clear()
         if self._session is not None and self._shot_id is not None:
             runs = list_detection_runs(self._session, self._shot_id)
@@ -374,15 +376,16 @@ class PoseExtractionWindow(QMainWindow):
                     f"{r['created_at'][:16]}"
                 )
                 self._run_combo.addItem(label, r["id"])
-        self._run_combo.currentIndexChanged.connect(self._on_run_selected)
-        if self._run_combo.count() > 0:
-            self._on_run_selected(0)
+        self._run_combo.blockSignals(False)
+        self._on_run_selected(0)
 
     def _on_run_selected(self, index: int) -> None:
         if self._session is None or index < 0:
+            self._current_run_id = None
             return
         run_id = self._run_combo.itemData(index)
         if run_id is None:
+            self._current_run_id = None
             return
         self._current_run_id = run_id
         self._assignments.clear()

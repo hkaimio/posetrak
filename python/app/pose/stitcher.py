@@ -17,7 +17,8 @@ from app.pose.db_cache import read_track_spans
 ROW_HEIGHT = 16
 ROW_GAP = 4          # vertical gap between cameras
 LABEL_WIDTH = 80
-PX_PER_SEC = 30      # horizontal scale: pixels per second of global time
+_PX_PER_SEC_MIN = 5
+_PX_PER_SEC_MAX = 500
 
 _UNASSIGNED_COLOR = QColor(120, 120, 120)
 
@@ -78,23 +79,49 @@ class StitcherWidget(QGraphicsView):
         # (shot_video_id, track_id) -> (first_frame, last_frame)
         self._spans: dict[tuple[str, int], tuple[int, int]] = {}
         self._time_origin: float = 0.0   # global time at x=LABEL_WIDTH
+        self._total_duration_s: float = 0.0
+
+        # Saved args for rebuild on resize
+        self._last_session: sqlite3.Connection | None = None
+        self._last_run_id: str | None = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def _px_per_sec(self) -> float:
+        """Pixels per second, fitted to the current widget width."""
+        available = max(1, self.viewport().width() - LABEL_WIDTH)
+        dur = self._total_duration_s
+        if dur > 0:
+            fitted = available / dur
+            return max(_PX_PER_SEC_MIN, min(_PX_PER_SEC_MAX, fitted))
+        return 30.0
+
     def load_run(self, session: sqlite3.Connection, detection_run_id: str) -> None:
         """Load track spans for all cameras in this run."""
+        self._last_session = session
+        self._last_run_id = detection_run_id
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        """Rebuild the scene from stored session + run_id."""
+        session = self._last_session
+        detection_run_id = self._last_run_id
         self.clear()
+        if session is None or detection_run_id is None:
+            return
 
         run_row = session.execute(
-            "SELECT sync_config_id, time_start_s FROM detection_runs WHERE id = ?",
+            "SELECT sync_config_id, time_start_s, time_end_s FROM detection_runs WHERE id = ?",
             (detection_run_id,),
         ).fetchone()
         if run_row is None:
             return
         sync_config_id = run_row["sync_config_id"]
         self._time_origin = float(run_row["time_start_s"])
+        self._total_duration_s = max(0.0, float(run_row["time_end_s"]) - float(run_row["time_start_s"]))
 
         rows = session.execute(
             "SELECT DISTINCT shot_video_id FROM person_tracks "
@@ -114,6 +141,8 @@ class StitcherWidget(QGraphicsView):
                 (svid,),
             ).fetchone()
             cam_labels[svid] = row["label"] if row and row["label"] else svid[:8]
+
+        pps = self._px_per_sec
 
         y = 0
         for svid in svids:
@@ -137,8 +166,8 @@ class StitcherWidget(QGraphicsView):
                     t0 = float(first)
                     t1 = float(last)
 
-                x = LABEL_WIDTH + (t0 - self._time_origin) * PX_PER_SEC
-                w = max(2, (t1 - t0) * PX_PER_SEC)
+                x = LABEL_WIDTH + (t0 - self._time_origin) * pps
+                w = max(2, (t1 - t0) * pps)
 
                 rect = self._scene.addRect(
                     x, y, w, ROW_HEIGHT,
@@ -169,8 +198,6 @@ class StitcherWidget(QGraphicsView):
     def set_assignment(self, shot_video_id: str, track_id: int, person_name: str | None) -> None:
         key = (shot_video_id, track_id)
         color = _person_color(person_name) if person_name else _UNASSIGNED_COLOR
-        if person_name is None:
-            self._assignments.pop(key, None)  # type: ignore[attr-defined]
         item = self._items.get(key)
         if item is not None:
             item.setBrush(QBrush(color))
@@ -179,6 +206,11 @@ class StitcherWidget(QGraphicsView):
         self._scene.clear()
         self._items.clear()
         self._spans.clear()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._last_session is not None and self._last_run_id is not None:
+            self._rebuild()
 
     # ------------------------------------------------------------------
     # Mouse interaction

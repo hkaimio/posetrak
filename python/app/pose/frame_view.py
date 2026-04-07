@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from dataclasses import dataclass
 
 import cv2
 
 _log = logging.getLogger(__name__)
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QComboBox,
@@ -21,15 +22,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.setup.camera_cell import CameraCell
+from app.pose.db_cache import read_detections_for_run, read_keypoints_for_run
+
 
 class _ComboBox(QComboBox):
     """QComboBox that reliably closes its popup on item selection (see main.py)."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.activated.connect(lambda _: self.hidePopup())
-
-from app.setup.camera_cell import CameraCell
-from app.pose.db_cache import read_detections_for_run, read_keypoints_for_run
 
 
 # COCO 17-keypoint skeleton connections
@@ -39,6 +40,17 @@ COCO_SKELETON = [
     (5, 11), (6, 12), (11, 12),
     (11, 13), (13, 15), (12, 14), (14, 16),
 ]
+
+
+@dataclass
+class _CameraInfo:
+    shot_video_id: str
+    file_path: str
+    camera_instance_id: str
+    label: str
+    fps: float
+    ref_frame: int
+    ref_timestamp_s: float
 
 
 class SkeletonDetectionOverlay:
@@ -134,14 +146,29 @@ class SkeletonDetectionOverlay:
 
 
 class FrameViewWidget(QWidget):
-    """Single-camera frame viewer with navigation and pose overlay."""
+    """Single-camera frame viewer with navigation and pose overlay.
+
+    Supports browsing multiple cameras for a shot before a detection run
+    exists.  Call ``load_cameras()`` to populate the camera dropdown from
+    a list of shot videos; the user can then switch cameras via the combo.
+
+    Signals:
+        frame_changed(frame_idx, global_time_s): emitted on every seek.
+        camera_switched(shot_video_id): emitted when the user picks a
+            different camera from the dropdown.
+    """
+
+    frame_changed = Signal(int, float)   # frame_idx, global_time_s
+    camera_switched = Signal(str)        # shot_video_id
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
+        # Per-camera metadata, keyed by shot_video_id
+        self._cameras: dict[str, _CameraInfo] = {}
+
         self._shot_video_id: str | None = None
         self._file_path: str | None = None
-        self._camera_instance_id: str | None = None
         self._total_frames: int = 0
         self._current_frame: int = 0
         self._fps: float = 30.0
@@ -152,23 +179,20 @@ class FrameViewWidget(QWidget):
         self._track_id: int | None = None
 
         # Per-frame detections loaded from DB
-        # frame -> list[dict]
         self._det_by_frame: dict[int, list[dict]] = {}
-        # frame -> {track_id: kp array}
         self._kp_by_frame: dict[int, dict[int, np.ndarray]] = {}
 
         self._overlay = SkeletonDetectionOverlay()
         self._cell = CameraCell(parent=self)
         self._cell.set_overlays([self._overlay])
-        self._cell.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding
-        )
+        self._cell.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self._info_label = QLabel("frame: -  t: -")
         self._info_label.setAlignment(Qt.AlignLeft)
 
         self._cam_combo = _ComboBox()
         self._cam_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._cam_combo.currentIndexChanged.connect(self._on_cam_combo_changed)
 
         self._slider = QSlider(Qt.Horizontal)
         self._slider.setMinimum(0)
@@ -204,6 +228,23 @@ class FrameViewWidget(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
+    def load_cameras(self, cameras: list[_CameraInfo]) -> None:
+        """Populate the camera dropdown from a list of shot videos.
+
+        Replaces any previously loaded cameras. Selects the first camera.
+        Does not require a detection run to be present.
+        """
+        self._cameras = {c.shot_video_id: c for c in cameras}
+
+        self._cam_combo.blockSignals(True)
+        self._cam_combo.clear()
+        for c in cameras:
+            self._cam_combo.addItem(c.label, c.shot_video_id)
+        self._cam_combo.blockSignals(False)
+
+        if cameras:
+            self._switch_to_camera(cameras[0].shot_video_id)
+
     def load_camera(
         self,
         shot_video_id: str,
@@ -213,35 +254,32 @@ class FrameViewWidget(QWidget):
         ref_frame: int = 0,
         ref_timestamp_s: float = 0.0,
     ) -> None:
-        self._shot_video_id = shot_video_id
-        self._file_path = file_path
-        self._camera_instance_id = camera_instance_id
-        self._fps = fps
-        self._ref_frame = ref_frame
-        self._ref_timestamp_s = ref_timestamp_s
-        self._det_by_frame.clear()
-        self._kp_by_frame.clear()
-        self._overlay.clear()
+        """Load a single camera (legacy call path, still used from the stitcher click handler)."""
+        label = camera_instance_id[:12]
+        cam = _CameraInfo(
+            shot_video_id=shot_video_id,
+            file_path=file_path,
+            camera_instance_id=camera_instance_id,
+            label=label,
+            fps=fps,
+            ref_frame=ref_frame,
+            ref_timestamp_s=ref_timestamp_s,
+        )
+        if shot_video_id not in self._cameras:
+            self._cameras[shot_video_id] = cam
+            self._cam_combo.blockSignals(True)
+            self._cam_combo.addItem(label, shot_video_id)
+            self._cam_combo.blockSignals(False)
+        else:
+            self._cameras[shot_video_id] = cam
 
-        # Detect total frames
-        cap = cv2.VideoCapture(file_path)
-        if not cap.isOpened():
-            _log.error("load_camera: cv2 could not open %s", file_path)
-        self._total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
-        _log.info("load_camera: %s  total_frames=%d", file_path, self._total_frames)
-
-        self._slider.setMaximum(max(0, self._total_frames - 1))
-        self._slider.setValue(0)
-
-        # Update combo
         idx = self._cam_combo.findData(shot_video_id)
-        if idx < 0:
-            self._cam_combo.addItem(camera_instance_id[:12], shot_video_id)
-            idx = self._cam_combo.count() - 1
-        self._cam_combo.setCurrentIndex(idx)
+        if idx >= 0:
+            self._cam_combo.blockSignals(True)
+            self._cam_combo.setCurrentIndex(idx)
+            self._cam_combo.blockSignals(False)
 
-        self.seek_frame(0)
+        self._switch_to_camera(shot_video_id, seek_to=0)
 
     def seek_frame(self, frame_idx: int) -> None:
         if self._file_path is None:
@@ -261,12 +299,27 @@ class FrameViewWidget(QWidget):
             self._cell.clear_frame()
 
         self._update_overlay(frame_idx)
-        self._update_info_label(frame_idx)
+        global_s = self._update_info_label(frame_idx)
 
-        # Sync slider without triggering seek again
         self._slider.blockSignals(True)
         self._slider.setValue(frame_idx)
         self._slider.blockSignals(False)
+
+        self.frame_changed.emit(frame_idx, global_s)
+
+    def seek_global_time(self, global_s: float) -> None:
+        """Seek to the frame closest to *global_s* using the current camera's sync anchor."""
+        if self._fps <= 0:
+            return
+        frame_idx = int(self._ref_frame + (global_s - self._ref_timestamp_s) * self._fps)
+        self.seek_frame(frame_idx)
+
+    def current_global_time(self) -> float:
+        """Return the global timestamp of the currently displayed frame."""
+        return self._ref_timestamp_s + (self._current_frame - self._ref_frame) / max(self._fps, 1)
+
+    def current_shot_video_id(self) -> str | None:
+        return self._shot_video_id
 
     def set_pose_data(
         self,
@@ -284,13 +337,11 @@ class FrameViewWidget(QWidget):
         self._det_by_frame.clear()
         self._kp_by_frame.clear()
 
-        # Load all detections for this camera
         dets = read_detections_for_run(session, detection_run_id, self._shot_video_id)
         for det in dets:
             f = det["video_frame"]
             self._det_by_frame.setdefault(f, []).append(det)
 
-        # Load keypoints for selected track (or all tracks)
         if track_id is not None:
             kp_map = read_keypoints_for_run(
                 session, detection_run_id, self._shot_video_id, track_id
@@ -298,7 +349,6 @@ class FrameViewWidget(QWidget):
             for frame, kp in kp_map.items():
                 self._kp_by_frame.setdefault(frame, {})[track_id] = kp
         else:
-            # Load all tracks
             track_ids_rows = session.execute(
                 "SELECT DISTINCT track_id FROM person_tracks "
                 "WHERE detection_run_id=? AND shot_video_id=?",
@@ -318,17 +368,63 @@ class FrameViewWidget(QWidget):
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _switch_to_camera(self, shot_video_id: str, seek_to: int | None = None) -> None:
+        """Switch the viewer to the given camera, preserving global time if possible."""
+        cam = self._cameras.get(shot_video_id)
+        if cam is None:
+            return
+
+        # Remember current global time before switching
+        prev_global_s = self.current_global_time() if self._shot_video_id else None
+
+        self._shot_video_id = shot_video_id
+        self._file_path = cam.file_path
+        self._fps = cam.fps
+        self._ref_frame = cam.ref_frame
+        self._ref_timestamp_s = cam.ref_timestamp_s
+        self._det_by_frame.clear()
+        self._kp_by_frame.clear()
+        self._overlay.clear()
+
+        cap = cv2.VideoCapture(cam.file_path)
+        if not cap.isOpened():
+            _log.error("_switch_to_camera: could not open %s", cam.file_path)
+        self._total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+
+        self._slider.blockSignals(True)
+        self._slider.setMaximum(max(0, self._total_frames - 1))
+        self._slider.blockSignals(False)
+
+        # Seek: explicit override > preserve global time > frame 0
+        if seek_to is not None:
+            target = seek_to
+        elif prev_global_s is not None:
+            target = int(cam.ref_frame + (prev_global_s - cam.ref_timestamp_s) * cam.fps)
+        else:
+            target = 0
+
+        self.seek_frame(target)
+        self.camera_switched.emit(shot_video_id)
+
     def _update_overlay(self, frame_idx: int) -> None:
         dets = self._det_by_frame.get(frame_idx, [])
         kps = self._kp_by_frame.get(frame_idx, {})
         self._overlay.set_detections(dets, kps)
         self._cell.update()
 
-    def _update_info_label(self, frame_idx: int) -> None:
-        global_s = self._ref_timestamp_s + (frame_idx - self._ref_frame) / self._fps
+    def _update_info_label(self, frame_idx: int) -> float:
+        """Update the info label; return the computed global time in seconds."""
+        global_s = self._ref_timestamp_s + (frame_idx - self._ref_frame) / max(self._fps, 1)
         mm = int(global_s // 60)
         ss = global_s % 60
         self._info_label.setText(f"frame: {frame_idx}  t: {mm:02d}:{ss:05.2f}")
+        return global_s
+
+    def _on_cam_combo_changed(self, index: int) -> None:
+        svid = self._cam_combo.itemData(index)
+        if svid and svid != self._shot_video_id:
+            self._switch_to_camera(svid)
 
     def _on_slider_changed(self, value: int) -> None:
         if value != self._current_frame:

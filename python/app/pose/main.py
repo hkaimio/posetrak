@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 
 from app.pose.db_cache import list_detection_runs
 from app.pose.finalise import TrackAssignment, finalise_to_db
-from app.pose.frame_view import FrameViewWidget
+from app.pose.frame_view import FrameViewWidget, _CameraInfo
 from app.pose.stitcher import StitcherWidget
 from app.setup.job_runner import BackgroundJob
 
@@ -127,6 +127,10 @@ class PoseExtractionWindow(QMainWindow):
         self._current_svid: str | None = None
         self._current_track_id: int | None = None
 
+        # Detection time range — None until the user marks both endpoints
+        self._time_start_s: float | None = None
+        self._time_end_s: float | None = None
+
         # track -> person assignment (not persisted until Finalise)
         self._assignments: dict[tuple[str, int], str] = {}
 
@@ -178,20 +182,23 @@ class PoseExtractionWindow(QMainWindow):
         row2.addStretch()
         top_layout.addLayout(row2)
 
-        # Row 3: time range + detector + pose model + conf
+        # Row 3: time range (mark buttons) + detector + pose model + conf
         row3 = QHBoxLayout()
-        row3.addWidget(QLabel("Start (s):"))
-        self._start_spin = QDoubleSpinBox()
-        self._start_spin.setRange(0, 99999)
-        self._start_spin.setValue(0)
-        self._start_spin.setSingleStep(1)
-        row3.addWidget(self._start_spin)
-        row3.addWidget(QLabel("End (s):"))
-        self._end_spin = QDoubleSpinBox()
-        self._end_spin.setRange(0, 99999)
-        self._end_spin.setValue(60)
-        self._end_spin.setSingleStep(1)
-        row3.addWidget(self._end_spin)
+        self._mark_start_btn = QPushButton("Mark start")
+        self._mark_start_btn.setToolTip("Set detection start to the currently displayed frame")
+        self._mark_start_btn.clicked.connect(self._on_mark_start)
+        row3.addWidget(self._mark_start_btn)
+        self._start_label = QLabel("–")
+        self._start_label.setStyleSheet("font-family: monospace; min-width: 70px;")
+        row3.addWidget(self._start_label)
+        self._mark_end_btn = QPushButton("Mark end")
+        self._mark_end_btn.setToolTip("Set detection end to the currently displayed frame")
+        self._mark_end_btn.clicked.connect(self._on_mark_end)
+        row3.addWidget(self._mark_end_btn)
+        self._end_label = QLabel("–")
+        self._end_label.setStyleSheet("font-family: monospace; min-width: 70px;")
+        row3.addWidget(self._end_label)
+        row3.addSpacing(12)
         row3.addWidget(QLabel("Detector:"))
         self._detector_combo = _ComboBox()
         self._detector_combo.addItems(["yolo11x", "yolo11l", "yolo11m"])
@@ -249,6 +256,7 @@ class PoseExtractionWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
 
         self._frame_view = FrameViewWidget()
+        self._frame_view.frame_changed.connect(self._on_frame_changed)
         splitter.addWidget(self._frame_view)
 
         right = QWidget()
@@ -352,6 +360,7 @@ class PoseExtractionWindow(QMainWindow):
         self._shot_id = self._shot_combo.itemData(index)
         QTimer.singleShot(0, self._populate_syncs)
         QTimer.singleShot(0, self._populate_runs)
+        QTimer.singleShot(0, self._load_cameras_for_shot)
 
     def _populate_syncs(self) -> None:
         self._sync_combo.blockSignals(True)
@@ -375,6 +384,7 @@ class PoseExtractionWindow(QMainWindow):
 
     def _on_sync_changed(self, index: int) -> None:
         self._sync_config_id = self._sync_combo.itemData(index) if index >= 0 else None
+        QTimer.singleShot(0, self._load_cameras_for_shot)
 
     def _populate_runs(self) -> None:
         self._run_combo.blockSignals(True)
@@ -409,8 +419,10 @@ class PoseExtractionWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_run_detection(self) -> None:
-        if self._session is None or self._shot_id is None or self._sync_config_id is None:
-            QMessageBox.warning(self, "Warning", "Please open a session and select a shot.")
+        if (self._session is None or self._shot_id is None
+                or self._sync_config_id is None
+                or self._time_start_s is None or self._time_end_s is None):
+            QMessageBox.warning(self, "Warning", "Please open a session, select a shot, and mark a time range.")
             return
 
         self._set_controls_enabled(False)
@@ -423,8 +435,8 @@ class PoseExtractionWindow(QMainWindow):
             session_path=self._session_path,
             shot_id=self._shot_id,
             sync_config_id=self._sync_config_id,
-            time_start_s=self._start_spin.value(),
-            time_end_s=self._end_spin.value(),
+            time_start_s=self._time_start_s,
+            time_end_s=self._time_end_s,
             detector_name=self._detector_combo.currentText(),
             pose_model_name=self._pose_combo.currentText(),
             detector_conf=self._conf_spin.value(),
@@ -462,10 +474,98 @@ class PoseExtractionWindow(QMainWindow):
     def _set_controls_enabled(self, enabled: bool) -> None:
         for w in [
             self._open_btn, self._shot_combo, self._sync_combo,
-            self._start_spin, self._end_spin, self._detector_combo,
-            self._pose_combo, self._conf_spin, self._run_btn, self._run_combo,
+            self._mark_start_btn, self._mark_end_btn,
+            self._detector_combo, self._pose_combo, self._conf_spin,
+            self._run_combo,
         ]:
             w.setEnabled(enabled)
+        # Run button also requires both time marks to be set
+        if enabled:
+            self._update_run_btn()
+        else:
+            self._run_btn.setEnabled(False)
+
+    # ------------------------------------------------------------------
+    # Camera loading
+    # ------------------------------------------------------------------
+
+    def _load_cameras_for_shot(self) -> None:
+        """Populate FrameViewWidget from shot_videos using the current sync config."""
+        if self._session is None or self._shot_id is None:
+            return
+
+        rows = self._session.execute(
+            "SELECT sv.id, sv.file_path, sv.actual_fps, ci.label "
+            "FROM shot_videos sv "
+            "JOIN camera_instances ci ON ci.id = sv.camera_instance_id "
+            "WHERE sv.shot_id = ? ORDER BY ci.label",
+            (self._shot_id,),
+        ).fetchall()
+        if not rows:
+            return
+
+        # Build per-camera sync anchors from the current sync config (if any)
+        anchors: dict[str, tuple[int, float]] = {}
+        if self._sync_config_id:
+            sp_rows = self._session.execute(
+                "SELECT shot_video_id, video_frame, timestamp_s "
+                "FROM sync_points WHERE sync_config_id = ? "
+                "ORDER BY shot_video_id, video_frame",
+                (self._sync_config_id,),
+            ).fetchall()
+            for sp in sp_rows:
+                svid = sp["shot_video_id"]
+                if svid not in anchors:
+                    anchors[svid] = (int(sp["video_frame"]), float(sp["timestamp_s"]))
+
+        cameras: list[_CameraInfo] = []
+        for r in rows:
+            ref_frame, ref_ts = anchors.get(r["id"], (0, 0.0))
+            cameras.append(_CameraInfo(
+                shot_video_id=r["id"],
+                file_path=r["file_path"] or "",
+                camera_instance_id=r["id"],
+                label=r["label"] or r["id"][:8],
+                fps=float(r["actual_fps"] or 30.0),
+                ref_frame=ref_frame,
+                ref_timestamp_s=ref_ts,
+            ))
+
+        self._frame_view.load_cameras(cameras)
+
+    # ------------------------------------------------------------------
+    # Mark start / end
+    # ------------------------------------------------------------------
+
+    def _on_mark_start(self) -> None:
+        t = self._frame_view.current_global_time()
+        self._time_start_s = t
+        mm, ss = int(t // 60), t % 60
+        self._start_label.setText(f"{mm:02d}:{ss:05.2f}")
+        self._update_run_btn()
+
+    def _on_mark_end(self) -> None:
+        t = self._frame_view.current_global_time()
+        self._time_end_s = t
+        mm, ss = int(t // 60), t % 60
+        self._end_label.setText(f"{mm:02d}:{ss:05.2f}")
+        self._update_run_btn()
+
+    def _update_run_btn(self) -> None:
+        ready = (
+            self._session is not None
+            and self._shot_id is not None
+            and self._sync_config_id is not None
+            and self._time_start_s is not None
+            and self._time_end_s is not None
+            and self._time_end_s > self._time_start_s
+        )
+        self._run_btn.setEnabled(ready)
+
+    def _on_frame_changed(self, _frame_idx: int, _global_s: float) -> None:
+        # Keep run button state fresh (start/end marks are unchanged but
+        # this is a cheap check so we update on every frame).
+        self._update_run_btn()
 
     # ------------------------------------------------------------------
     # Stitcher / frame view integration

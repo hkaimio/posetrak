@@ -1237,6 +1237,7 @@ analysis = [
     { name = "plotly" },
 ]
 dev = [
+    { name = "marimo" },
     { name = "pytest" },
     { name = "pytest-cov" },
 ]
@@ -1275,6 +1276,7 @@ analysis = [
     { name = "plotly", specifier = ">=5.0" },
 ]
 dev = [
+    { name = "marimo", specifier = ">=0.19.7" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-cov", specifier = ">=5.0" },
 ]

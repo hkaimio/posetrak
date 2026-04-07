@@ -33,6 +33,7 @@ where = ["python"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
+    "marimo>=0.19.7",
 ]
 analysis = [
     "marimo>=0.19",
@@ -43,8 +44,6 @@ setup-app = [
     "pyexiftool>=0.5",
     "matplotlib>=3.8",
 ]
-# pipeline group is GPU-heavy and never installed in CI.
-# rtmlib is not on PyPI — install from git: uv add git+https://github.com/...
 pipeline = [
     "ultralytics",
 ]

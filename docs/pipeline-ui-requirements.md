@@ -75,6 +75,35 @@ directory paths, manually copied file names).
 - R2.5 — Support non-affine time maps for cameras with variable-rate clocks (handled by
   current PCHIP path — preserve).
 - R2.6 — Write sync output to the session storage format.
+- R2.7 — **Frame rate verification**: the RANSAC affine fit estimates the true camera fps
+  implicitly via the `a` coefficient of `t_global = a × t_local + b`. If `a` deviates from
+  1.0 by more than ~0.1%, report a warning and update the stored fps accordingly.  The
+  current tool silently accepts a wrong stored fps (e.g. 118.88 Hz entered for a 120 Hz
+  camera), which causes the NN event-matching window to be exceeded at late recording times
+  and prevents RANSAC from fitting the true slope — producing up to 1.5s of accumulated
+  drift over a 3-minute session.
+
+**Known limitation — fps calibration errors (R2.7 background)**
+
+The current sync algorithm assumes the stored fps value is accurate.  If it is wrong by
+more than ~0.5 Hz, events at the end of a recording drift beyond the NN matching window
+(1.0 s), so RANSAC only sees early-recording pairs and fits slope ≈ 1.0, masking the
+error.  Approaches to make the system robust to this:
+
+1. **Multiple rough-sync anchors**: allow the user to mark two or more widely-spaced
+   anchor frames (not just one near the start).  A pair of anchors constrains both the
+   offset *and* the slope of the affine map, making the rough offset accurate enough for
+   NN matching even with a 1 Hz fps error over 3+ minutes.
+
+2. **Structured LED code (PRBS/Manchester)**: replace the free-running blink with a
+   pseudo-random binary sequence (PRBS) or Manchester-coded timestamp signal.  The global
+   time can then be read directly from the LED pattern at any point in the recording,
+   without requiring cross-camera event matching or a user-supplied anchor frame.
+
+3. **Timecode from video metadata**: many cameras embed SMPTE timecode or creation
+   timestamps in the MP4 container.  Reading this provides an absolute time reference and
+   can resolve rough offsets without any manual anchor, as long as the camera clocks are
+   set correctly.
 
 ### Stage 3 — Extrinsic Calibration
 

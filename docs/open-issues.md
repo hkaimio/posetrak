@@ -128,6 +128,22 @@ consistent with `compute_state_error` in `ukf.cpp` (`q_ref⁻¹ * q_state`).
 
 ## Active
 
+- **QComboBox popups do not close on item selection (XWayland / WSL2)** (2026-04-07)
+  - On the development machine (WSL2 + XWayland), every `QComboBox` popup stays visible
+    after the user clicks an item; it only dismisses when the user clicks elsewhere.
+    The `currentIndexChanged` / `activated` signals fire correctly — the issue is purely
+    visual: `hidePopup()` is never invoked by Qt internally because the popup item view
+    does not receive the mouse-release event under XWayland's window-grab model.
+  - Workaround applied: `_ComboBox` subclass in `python/app/pose/main.py` and
+    `frame_view.py` connects `activated` → `hidePopup()` explicitly.  The workaround
+    was ineffective in practice (popup still stays open), so the underlying platform
+    issue is unresolved.
+  - Likely fix directions: (a) set `QT_QPA_PLATFORM=xcb` in the launch script to force
+    XCB instead of Wayland, (b) install an application-level `QAbstractNativeEventFilter`
+    that intercepts the XButtonRelease event and calls `hidePopup()`, or (c) replace
+    popups with `QListWidget`-based inline selectors for the most-used combos.
+  - Does not affect functionality; only affects usability on this platform.
+
 - **Spherical joint limit enforcement: revert to old algorithm** (2026-03-28)
   - The updated spherical joint limit enforcement algorithm was reverted after full-project testing showed it produces worse tracking results than the previous one. The old algorithm remains in place.
   - Before attempting further changes to spherical limit enforcement, understand specifically which cases the new algorithm was meant to fix and why it fails on real data. Benchmark both on a set of representative shots before merging any future change.

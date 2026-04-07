@@ -28,6 +28,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+# Resolution of the global time slider (ticks per second).
+_GLOBAL_SLIDER_TICKS_PER_S = 1000
+
 from app.setup.camera_cell import CameraCell
 from app.setup.db_context import SyncTable
 from app.setup.frame_cache import CacheKey, CacheType, FrameCache
@@ -159,18 +162,25 @@ class MultiVideoScrubber(QWidget):
         self._decoder.frame_ready.connect(self._on_frame_ready)
         self._decoder.start()
 
-        # Build grid layout — each column is a container with the video cell
-        # on top and a (slider + frame label) row below.
-        layout = QGridLayout(self)
+        # Outer VBox: camera grid on top, global time slider (synced mode) below.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(2)
+
+        # Camera grid
+        grid_widget = QWidget(self)
+        layout = QGridLayout(grid_widget)
         layout.setSpacing(4)
         layout.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(grid_widget, stretch=1)
+
         self._cells: list[CameraCell] = []
         self._sliders: list[QSlider] = []
         self._frame_labels: list[QLabel] = []
         n = len(cells_info)
         cols = max(1, math.ceil(math.sqrt(n)))
         for i, info in enumerate(cells_info):
-            container = QWidget(self)
+            container = QWidget(grid_widget)
             vbox = QVBoxLayout(container)
             vbox.setContentsMargins(0, 0, 0, 0)
             vbox.setSpacing(2)
@@ -205,6 +215,25 @@ class MultiVideoScrubber(QWidget):
             self._cells.append(cell)
             self._sliders.append(slider)
             self._frame_labels.append(frame_label)
+
+        # Global time slider (visible only in synced mode)
+        self._global_slider_row = QWidget(self)
+        global_row_layout = QHBoxLayout(self._global_slider_row)
+        global_row_layout.setContentsMargins(4, 0, 4, 2)
+        global_row_layout.setSpacing(6)
+        global_row_layout.addWidget(QLabel("Time:"))
+        self._global_slider = QSlider(Qt.Orientation.Horizontal)
+        self._global_slider.setMinimum(0)
+        self._global_slider.setMaximum(0)
+        self._global_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._global_slider.sliderMoved.connect(self._on_global_slider_moved)
+        global_row_layout.addWidget(self._global_slider, stretch=1)
+        self._global_time_label = QLabel("0.000 s")
+        self._global_time_label.setStyleSheet("font-family: monospace; font-size: 10px;")
+        self._global_time_label.setFixedWidth(70)
+        global_row_layout.addWidget(self._global_time_label)
+        self._global_slider_row.setVisible(False)
+        outer.addWidget(self._global_slider_row)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # Mark cell 0 as selected by default
@@ -251,6 +280,7 @@ class MultiVideoScrubber(QWidget):
             frame_idx = self._sync_table.lookup(timestamp_s, info.shot_video_id)
             if frame_idx is not None:
                 self._set_cell_frame(i, frame_idx)
+        self._update_global_slider(timestamp_s)
 
     def seek_camera(self, cell_idx: int, frame_idx: int) -> None:
         """Move *cell_idx* to *frame_idx* independently of the sync table."""
@@ -263,7 +293,27 @@ class MultiVideoScrubber(QWidget):
         """Update the sync source and immediately re-render all cells."""
         self._sync_table = sync_table
         if sync_table is not None:
+            # Compute range from the extrapolated endpoints of every camera
+            # (frame 0 and last frame), not just the anchor timestamps.  This
+            # gives a sensible range for sparse rough-sync configs (which have
+            # only one anchor per camera, so time_range() returns a point).
+            t_min, t_max = float("inf"), float("-inf")
+            for info in self._cells_info:
+                t0 = sync_table.frame_to_global_time(0, info.shot_video_id)
+                t1 = sync_table.frame_to_global_time(info.total_frames - 1, info.shot_video_id)
+                if t0 is not None:
+                    t_min = min(t_min, t0)
+                if t1 is not None:
+                    t_max = max(t_max, t1)
+            if t_min < t_max:
+                self._global_slider.blockSignals(True)
+                self._global_slider.setMinimum(int(t_min * _GLOBAL_SLIDER_TICKS_PER_S))
+                self._global_slider.setMaximum(int(t_max * _GLOBAL_SLIDER_TICKS_PER_S))
+                self._global_slider.blockSignals(False)
+            self._global_slider_row.setVisible(True)
             self.seek_synced(self._current_timestamp)
+        else:
+            self._global_slider_row.setVisible(False)
 
     def set_overlays(self, cell_idx: int, overlays: list[Overlay]) -> None:
         """Replace the overlay list for *cell_idx*."""
@@ -336,6 +386,20 @@ class MultiVideoScrubber(QWidget):
         """Display *img* only if *frame_idx* is still the current frame."""
         if self._current_frames[cell_idx] == frame_idx:
             self._cells[cell_idx].set_frame(img)
+
+    def _on_global_slider_moved(self, tick: int) -> None:
+        """User dragged the global time slider — seek all cameras."""
+        t = tick / _GLOBAL_SLIDER_TICKS_PER_S
+        self.seek_synced(t)
+        self.setFocus()
+
+    def _update_global_slider(self, timestamp_s: float) -> None:
+        """Sync global slider position to *timestamp_s* without re-triggering seek."""
+        tick = int(timestamp_s * _GLOBAL_SLIDER_TICKS_PER_S)
+        self._global_slider.blockSignals(True)
+        self._global_slider.setValue(tick)
+        self._global_slider.blockSignals(False)
+        self._global_time_label.setText(f"{timestamp_s:.3f} s")
 
     def _step(self, delta: int) -> None:
         if self._sync_table is not None:

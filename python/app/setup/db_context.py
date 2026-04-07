@@ -143,6 +143,15 @@ class SyncTable:
     def video_ids(self) -> list[str]:
         return list(self._tables.keys())
 
+    def time_range(self) -> tuple[float, float] | None:
+        """Return (min_timestamp, max_timestamp) across all videos, or None if empty."""
+        all_ts: list[float] = []
+        for timestamps, _frames, _fps in self._tables.values():
+            all_ts.extend(timestamps)
+        if not all_ts:
+            return None
+        return (min(all_ts), max(all_ts))
+
 
 # ---------------------------------------------------------------------------
 # DBContext
@@ -308,6 +317,13 @@ class DBContext:
             (calib_id, shot_id),
         )
         return calib_id
+
+    def update_shot_video_fps(self, shot_video_id: str, fps: float) -> None:
+        """Persist a corrected fps value to shot_videos.actual_fps."""
+        self._conn.execute(
+            "UPDATE shot_videos SET actual_fps = ? WHERE id = ?",
+            (fps, shot_video_id),
+        )
 
     # ------------------------------------------------------------------
     # Reads

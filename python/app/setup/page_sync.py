@@ -642,6 +642,7 @@ class _LedSyncDialog(QDialog):
         current_frames: list[int],
         on_sync_accepted,
         anchor_frames: dict[int, int] | None = None,
+        sync_table_offsets: dict[int, float] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -653,6 +654,10 @@ class _LedSyncDialog(QDialog):
         self._current_frames = current_frames
         self._on_sync_accepted = on_sync_accepted
         self._anchor_frames = anchor_frames or {}
+        # Rough offsets derived from the loaded sync table (more reliable than
+        # recomputing from anchor_frames when some cameras were not manually
+        # anchored in the current session).
+        self._sync_table_offsets = sync_table_offsets or {}
 
         self._led_rois: dict[int, ROI] = {}
         self._led_result: LedSyncResult | None = None
@@ -791,25 +796,41 @@ class _LedSyncDialog(QDialog):
                 self._update_run_btn()
 
     def _compute_rough_offsets(self) -> list[float]:
-        """Return per-camera rough time offsets using the CURRENT fps spinboxes.
+        """Return per-camera rough time offsets (global time at each camera's frame 0).
 
-        Recomputes from ``_anchor_frames`` rather than using pre-computed values,
-        so a fps correction made in this dialog is always honoured.
+        Strategy (in order of preference):
+        1. For cameras that were manually anchored in the current session
+           (present in ``_anchor_frames``): recompute from the anchor frame and
+           the current fps spinbox so that any fps correction made here is
+           honoured.
+        2. For cameras NOT in ``_anchor_frames``: use the offset derived from
+           the loaded sync table (``_sync_table_offsets``).  This covers the
+           common case where the user loaded a previous rough-sync config from
+           the dropdown without re-anchoring all cameras manually.
+        3. Fall back to 0.0 (assume camera is synchronous with reference).
         """
         K = len(self._shot.videos)
-        if not self._anchor_frames:
-            return [0.0] * K
 
-        ref_cell = min(self._anchor_frames)
-        ref_frame = self._anchor_frames[ref_cell]
-        ref_fps = self._fps_spinboxes[ref_cell].value() or self._shot.videos[ref_cell].actual_fps or 30.0
-        ref_ts = ref_frame / ref_fps
+        # Build anchor-based offsets for cameras that have a manual anchor.
+        anchor_based: dict[int, float] = {}
+        if self._anchor_frames:
+            ref_cell = min(self._anchor_frames)
+            ref_frame = self._anchor_frames[ref_cell]
+            ref_fps = self._fps_spinboxes[ref_cell].value() or self._shot.videos[ref_cell].actual_fps or 30.0
+            ref_ts = ref_frame / ref_fps
+            for cell_idx, sv in enumerate(self._shot.videos):
+                if cell_idx in self._anchor_frames:
+                    fps = self._fps_spinboxes[cell_idx].value() or sv.actual_fps or 30.0
+                    anchor_based[cell_idx] = ref_ts - self._anchor_frames[cell_idx] / fps
 
         offsets: list[float] = []
-        for cell_idx, sv in enumerate(self._shot.videos):
-            fps = self._fps_spinboxes[cell_idx].value() or sv.actual_fps or 30.0
-            anchor = self._anchor_frames.get(cell_idx, 0)
-            offsets.append(ref_ts - anchor / fps)
+        for cell_idx in range(K):
+            if cell_idx in anchor_based:
+                offsets.append(anchor_based[cell_idx])
+            elif cell_idx in self._sync_table_offsets:
+                offsets.append(self._sync_table_offsets[cell_idx])
+            else:
+                offsets.append(0.0)
         return offsets
 
     def _update_run_btn(self) -> None:
@@ -923,6 +944,12 @@ class _LedSyncDialog(QDialog):
         if self._led_result is None:
             return
         points, fps_by_video = _sync_points_from_led_result(self._led_result)
+        # Persist corrected fps values from the LED dialog spinboxes so that
+        # loading this sync config later uses the correct fps for interpolation.
+        for cell_idx, sv in enumerate(self._shot.videos):
+            fps = self._fps_spinboxes[cell_idx].value() or sv.actual_fps or 30.0
+            if abs(fps - (sv.actual_fps or 0.0)) > 0.01:
+                self._ctx.update_shot_video_fps(sv.id, fps)
         self._ctx.write_sync_config(self._shot.shot_id, "led-auto", points)
         self._ctx._conn.commit()
 
@@ -960,10 +987,7 @@ class _LedSyncDialog(QDialog):
             return
         if not path.endswith(".npz"):
             path += ".npz"
-        rough_offsets = [
-            self._rough_offsets.get(i, 0.0)
-            for i in range(len(self._shot.videos))
-        ]
+        rough_offsets = self._compute_rough_offsets()
         try:
             save_brightness_dump(path, self._led_result, rough_offsets)
             self._accept_label.setText(f"Brightness data saved to {path}")
@@ -1262,6 +1286,12 @@ class SyncPage(QWizardPage):
             fps_by_video[sv.id] = fps
 
         ctx: DBContext = self.wizard().db_context
+        # Persist corrected fps values so that reloading this sync config later
+        # uses the same fps for interpolation (not the container fps).
+        for cell_idx, sv in enumerate(shot.videos):
+            fps = self._fps_overrides().get(cell_idx, sv.actual_fps or 30.0) or 30.0
+            if abs(fps - (sv.actual_fps or 0.0)) > 0.01:
+                ctx.update_shot_video_fps(sv.id, fps)
         ctx.write_sync_config(shot.shot_id, "manual-rough", points)
         ctx._conn.commit()
 
@@ -1277,6 +1307,8 @@ class SyncPage(QWizardPage):
         )
         self._rough_status_label.setStyleSheet("color: green; font-size: 11px;")
         self._led_sync_btn.setEnabled(True)
+        # Refresh sync config dropdown to show the new entry.
+        self._populate_sync_config_combo(shot)
 
     # ------------------------------------------------------------------
     # Slots — LED sync dialog
@@ -1296,15 +1328,25 @@ class SyncPage(QWizardPage):
             self._scrubber.reload_sync(sync_table)
             self._rough_status_label.setText("LED sync accepted and applied.")
             self._rough_status_label.setStyleSheet("color: green; font-size: 11px;")
-
-        def _on_accepted(sync_table: SyncTable) -> None:
-            self._scrubber.reload_sync(sync_table)
-            self._rough_status_label.setText("LED sync accepted and applied.")
-            self._rough_status_label.setStyleSheet("color: green; font-size: 11px;")
             # Clear anchor overlays — LED sync supersedes rough anchors
             for i, ov in enumerate(self._anchor_overlays):
                 ov.anchor_frame = None
                 self._scrubber.set_overlays(i, [ov])
+            # Refresh sync config dropdown to show the new entry.
+            self._populate_sync_config_combo(shot)
+
+        # Derive per-camera rough offsets (global time at each camera's frame 0)
+        # from the currently loaded sync table.  This is more reliable than
+        # recomputing from self._anchors because the sync table was built with
+        # the correct fps values and covers all cameras, including those that
+        # were not manually anchored in the current UI session.
+        sync_table_offsets: dict[int, float] = {}
+        if self._scrubber and self._scrubber.sync_table is not None:
+            st = self._scrubber.sync_table
+            for cell_idx, sv in enumerate(shot.videos):
+                t0 = st.frame_to_global_time(0, sv.id)
+                if t0 is not None:
+                    sync_table_offsets[cell_idx] = t0
 
         dlg = _LedSyncDialog(
             shot=shot,
@@ -1313,6 +1355,7 @@ class SyncPage(QWizardPage):
             current_frames=current_frames,
             on_sync_accepted=_on_accepted,
             anchor_frames=dict(self._anchors),
+            sync_table_offsets=sync_table_offsets,
             parent=self,
         )
         dlg.exec()
@@ -1363,12 +1406,13 @@ class SyncPage(QWizardPage):
         ctx: DBContext = self.wizard().db_context
         configs = ctx.get_sync_configs(shot.shot_id)
 
-        self._sync_config_combo.currentIndexChanged.disconnect(self._on_sync_config_selected)
+        self._sync_config_combo.blockSignals(True)
         self._sync_config_combo.clear()
 
         if not configs:
             self._sync_config_combo.addItem("— no sync config —", None)
-            self._sync_config_combo.currentIndexChanged.connect(self._on_sync_config_selected)
+            self._sync_config_combo.blockSignals(False)
+            self._on_sync_config_selected(0)
             return
 
         # Build labels; configs are already newest-first from the DB query.
@@ -1385,9 +1429,10 @@ class SyncPage(QWizardPage):
                 best_rank = rank
                 best_idx = i
 
-        self._sync_config_combo.currentIndexChanged.connect(self._on_sync_config_selected)
+        self._sync_config_combo.blockSignals(False)
         self._sync_config_combo.setCurrentIndex(best_idx)
-        # Signal fires because index changed from -1 → best_idx, loading the config.
+        # Always call explicitly — setCurrentIndex is a no-op when already at best_idx.
+        self._on_sync_config_selected(best_idx)
 
     def _rebuild_per_camera_widgets(self, shot: _ShotMeta) -> None:
         """Rebuild per-camera fps spinboxes and anchor status labels."""

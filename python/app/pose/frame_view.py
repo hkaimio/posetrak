@@ -21,6 +21,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+
+class _ComboBox(QComboBox):
+    """QComboBox that reliably closes its popup on item selection (see main.py)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.activated.connect(lambda _: self.hidePopup())
+
 from app.setup.camera_cell import CameraCell
 from app.pose.db_cache import read_detections_for_run, read_keypoints_for_run
 
@@ -160,7 +167,7 @@ class FrameViewWidget(QWidget):
         self._info_label = QLabel("frame: -  t: -")
         self._info_label.setAlignment(Qt.AlignLeft)
 
-        self._cam_combo = QComboBox()
+        self._cam_combo = _ComboBox()
         self._cam_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self._slider = QSlider(Qt.Horizontal)

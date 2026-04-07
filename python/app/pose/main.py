@@ -30,6 +30,19 @@ from app.pose.stitcher import StitcherWidget
 from app.setup.job_runner import BackgroundJob
 
 
+class _ComboBox(QComboBox):
+    """QComboBox that reliably closes its popup on item selection.
+
+    On some platforms (XWayland / WSL2) the popup item view does not receive
+    the mouse-release event, so the default hidePopup() is never triggered.
+    Connecting to ``activated`` and calling hidePopup() explicitly is the
+    reliable cross-platform fix.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.activated.connect(lambda _: self.hidePopup())
+
+
 # ---------------------------------------------------------------------------
 # Background job
 # ---------------------------------------------------------------------------
@@ -153,12 +166,12 @@ class PoseExtractionWindow(QMainWindow):
         # Row 2: shot + sync
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("Shot:"))
-        self._shot_combo = QComboBox()
+        self._shot_combo = _ComboBox()
         self._shot_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self._shot_combo.currentIndexChanged.connect(self._on_shot_changed)
         row2.addWidget(self._shot_combo)
         row2.addWidget(QLabel("Sync:"))
-        self._sync_combo = QComboBox()
+        self._sync_combo = _ComboBox()
         self._sync_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self._sync_combo.currentIndexChanged.connect(self._on_sync_changed)
         row2.addWidget(self._sync_combo)
@@ -180,11 +193,11 @@ class PoseExtractionWindow(QMainWindow):
         self._end_spin.setSingleStep(1)
         row3.addWidget(self._end_spin)
         row3.addWidget(QLabel("Detector:"))
-        self._detector_combo = QComboBox()
+        self._detector_combo = _ComboBox()
         self._detector_combo.addItems(["yolo11x", "yolo11l", "yolo11m"])
         row3.addWidget(self._detector_combo)
         row3.addWidget(QLabel("Pose model:"))
-        self._pose_combo = QComboBox()
+        self._pose_combo = _ComboBox()
         self._pose_combo.addItems(["rtmpose-l-133kp", "rtmpose-l-17kp", "rtmpose-m-17kp"])
         row3.addWidget(self._pose_combo)
         row3.addWidget(QLabel("Conf:"))
@@ -199,7 +212,7 @@ class PoseExtractionWindow(QMainWindow):
         # Row 4: detection run combo + run button
         row4 = QHBoxLayout()
         row4.addWidget(QLabel("Detection run:"))
-        self._run_combo = QComboBox()
+        self._run_combo = _ComboBox()
         self._run_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self._run_combo.setMinimumWidth(300)
         self._run_combo.currentIndexChanged.connect(self._on_run_selected)
@@ -256,7 +269,7 @@ class PoseExtractionWindow(QMainWindow):
 
         person_row = QHBoxLayout()
         person_row.addWidget(QLabel("Person:"))
-        self._person_combo = QComboBox()
+        self._person_combo = _ComboBox()
         self._person_combo.setEditable(True)
         self._person_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self._person_combo.setMinimumWidth(120)

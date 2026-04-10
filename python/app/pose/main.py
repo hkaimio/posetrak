@@ -649,32 +649,71 @@ class PoseExtractionWindow(QMainWindow):
             self._stitcher.set_known_persons(persons)
 
     def _on_assign(self) -> None:
+        """Handle the Assign button.
+
+        Reads the person name from the combo box and the current playhead time
+        from the frame view.  If "From here onwards" is checked, uses the
+        playhead position as *min_time_s* so only tracks starting after the
+        currently displayed frame are included in the expansion.
+        """
         if self._current_svid is None or self._current_track_id is None:
             QMessageBox.information(self, "No track selected", "Click a track segment first.")
             return
-
         name = self._person_combo.currentText().strip()
         if not name:
             QMessageBox.warning(self, "No name", "Enter a person name.")
             return
-
+        min_time_s = self._frame_view.current_global_time() if self._from_here_cb.isChecked() else None
         self._do_assign(self._current_svid, self._current_track_id, name,
-                        from_here_onwards=self._from_here_cb.isChecked())
+                        from_here_onwards=self._from_here_cb.isChecked(),
+                        min_time_s=min_time_s)
 
-    def _on_assignment_changed(self, svid: str, tid: int, person_name) -> None:
-        """Handle assignment/detach from the stitcher context menu (this segment only)."""
+    def _on_assignment_changed(self, svid: str, tid: int, person_name: object) -> None:
+        """Handle a single-segment assignment or detach from the stitcher context menu.
+
+        Args:
+            svid: Shot video ID of the clicked track.
+            tid: Track ID of the clicked segment.
+            person_name: Person name string, or None for a detach operation.
+        """
         if person_name:
             self._do_assign(svid, tid, str(person_name), from_here_onwards=False)
         else:
             self._detach(svid, tid)
 
-    def _on_assignment_from_here(self, svid: str, tid: int, person_name: str) -> None:
-        """Handle 'From here onwards' chosen from the stitcher context menu."""
-        self._do_assign(svid, tid, person_name, from_here_onwards=True)
+    def _on_assignment_from_here(self, svid: str, tid: int, person_name: str, min_time_s: float) -> None:
+        """Handle a 'From here onwards' assignment from the stitcher context menu.
 
-    def _do_assign(self, svid: str, tid: int, name: str, *, from_here_onwards: bool) -> None:
-        """Compute the target tids, check conflicts, show dialog, then apply."""
-        tids = self._tracks_to_assign(svid, tid, from_here_onwards)
+        Args:
+            svid: Shot video ID of the clicked track.
+            tid: Track ID of the clicked segment.
+            person_name: Person to assign.
+            min_time_s: Global timestamp at the click position; only tracks
+                starting strictly after this time are included in the expansion.
+        """
+        self._do_assign(svid, tid, person_name, from_here_onwards=True, min_time_s=min_time_s)
+
+    def _do_assign(
+        self,
+        svid: str,
+        tid: int,
+        name: str,
+        *,
+        from_here_onwards: bool,
+        min_time_s: float | None = None,
+    ) -> None:
+        """Compute the target track IDs, check for conflicts, show a dialog if needed, then apply.
+
+        Args:
+            svid: Camera to assign within.
+            tid: The primary track that was selected.
+            name: Person name to assign.
+            from_here_onwards: If True, also assign subsequent unassigned tracks
+                starting after *min_time_s*.
+            min_time_s: Reference timestamp for the expansion.  Required when
+                *from_here_onwards* is True; ignored otherwise.
+        """
+        tids = self._tracks_to_assign(svid, tid, from_here_onwards, min_time_s)
         conflicts = self._find_conflicts(svid, tids, name)
         if conflicts and not self._resolve_conflicts(conflicts, name):
             return
@@ -683,16 +722,57 @@ class PoseExtractionWindow(QMainWindow):
         for t in tids:
             self._apply_assignment(svid, t, name)
 
-    def _tracks_to_assign(self, svid: str, tid: int, from_here_onwards: bool) -> list[int]:
+    def _tracks_to_assign(
+        self,
+        svid: str,
+        tid: int,
+        from_here_onwards: bool,
+        min_time_s: float | None,
+    ) -> list[int]:
+        """Return the list of track IDs that should be assigned.
+
+        Without expansion, returns ``[tid]``.  With expansion, returns the
+        primary track followed by all unassigned tracks in *svid* whose global
+        start time is strictly greater than *min_time_s*.
+
+        Args:
+            svid: Camera to search within.
+            tid: Primary (selected) track; always first in the result.
+            from_here_onwards: Whether to expand beyond the primary track.
+            min_time_s: Expansion cutoff in global seconds.  Must not be None
+                when *from_here_onwards* is True.
+        """
         if not from_here_onwards:
             return [tid]
-        return tracks_from_here_onwards(svid, tid, self._stitcher.get_spans(), self._assignments)
+        assert min_time_s is not None, "min_time_s required for from_here_onwards"
+        return tracks_from_here_onwards(svid, tid, self._stitcher.get_time_spans(),
+                                        self._assignments, min_time_s)
 
-    def _find_conflicts(self, svid: str, tids: list[int], person_name: str) -> list[tuple[str, int]]:
-        return find_assignment_conflicts(svid, tids, person_name, self._stitcher.get_spans(), self._assignments)
+    def _find_conflicts(
+        self,
+        svid: str,
+        tids: list[int],
+        person_name: str,
+    ) -> list[tuple[str, int]]:
+        """Return tracks already assigned to *person_name* that time-overlap any track in *tids*.
+
+        Delegates to the pure ``find_assignment_conflicts`` function using the
+        current frame-based span data from the stitcher.
+        """
+        return find_assignment_conflicts(svid, tids, person_name,
+                                         self._stitcher.get_spans(), self._assignments)
 
     def _resolve_conflicts(self, conflicts: list[tuple[str, int]], person_name: str) -> bool:
-        """Show a conflict dialog.  Returns True if user chose to detach conflicts."""
+        """Show a conflict resolution dialog and return whether to proceed.
+
+        Lists the conflicting tracks with their frame ranges and offers two
+        choices: detach all conflicting bars (returns True) or cancel (returns
+        False).
+
+        Args:
+            conflicts: List of (svid, tid) pairs that time-overlap the proposed assignment.
+            person_name: The person being assigned, shown in the dialog text.
+        """
         msg = QMessageBox(self)
         msg.setWindowTitle("Assignment conflict")
         msg.setText(
@@ -711,7 +791,16 @@ class PoseExtractionWindow(QMainWindow):
         return msg.clickedButton() is detach_btn
 
     def _apply_assignment(self, svid: str, tid: int, name: str) -> None:
-        """Record one assignment and sync stitcher visuals and person lists."""
+        """Record one track-to-person assignment and sync all dependent UI state.
+
+        Updates the internal assignments dict, the stitcher bar colour and name
+        label, the person combo box, and the frame view overlay colours.
+
+        Args:
+            svid: Shot video ID of the track to assign.
+            tid: Track ID to assign.
+            name: Person name to assign.
+        """
         self._assignments[(svid, tid)] = name
         self._stitcher.set_assignment(svid, tid, name)
         if self._person_combo.findText(name) < 0:
@@ -721,13 +810,23 @@ class PoseExtractionWindow(QMainWindow):
         self._sync_frame_view_assignments()
 
     def _detach(self, svid: str, tid: int) -> None:
-        """Remove the person assignment from one track and sync visuals."""
+        """Remove the person assignment from one track and sync all dependent UI state.
+
+        Args:
+            svid: Shot video ID of the track to detach.
+            tid: Track ID to detach.
+        """
         self._assignments.pop((svid, tid), None)
         self._stitcher.set_assignment(svid, tid, None)
         self._sync_frame_view_assignments()
 
     def _sync_frame_view_assignments(self) -> None:
-        """Push current track assignments to the frame view overlay."""
+        """Push the current camera's track→person assignments to the frame view overlay.
+
+        Filters the global assignments dict to tracks belonging to the currently
+        selected camera, then calls ``set_track_assignments`` on the frame view
+        so bbox colours stay consistent with the stitcher bars.
+        """
         if self._current_svid is None:
             return
         tid_to_person = {

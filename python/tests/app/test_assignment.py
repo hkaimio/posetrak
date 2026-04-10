@@ -1,8 +1,6 @@
 """Tests for track assignment conflict detection and 'from here onwards' expansion."""
 from __future__ import annotations
 
-import pytest
-
 from app.pose.assignment import find_assignment_conflicts, tracks_from_here_onwards
 
 # ---------------------------------------------------------------------------
@@ -14,8 +12,13 @@ CAM2 = "cam-b"
 
 
 def spans(*args: tuple[int, int, int]) -> dict:
-    """Build a spans dict from (tid, first, last) triples, all in CAM."""
+    """Build a frame-based spans dict from (tid, first, last) triples, all in CAM."""
     return {(CAM, tid): (first, last) for tid, first, last in args}
+
+
+def time_spans(*args: tuple[int, float, float]) -> dict:
+    """Build a time-based spans dict from (tid, t0_s, t1_s) triples, all in CAM."""
+    return {(CAM, tid): (t0, t1) for tid, t0, t1 in args}
 
 
 def assignments(**kwargs: str) -> dict:
@@ -110,69 +113,84 @@ class TestFindConflicts:
 # ---------------------------------------------------------------------------
 
 class TestTracksFromHereOnwards:
+    """tracks_from_here_onwards uses global seconds (min_time_s) as the reference."""
 
     def test_single_track_no_others(self):
-        sp = spans((0, 0, 100))
-        assert tracks_from_here_onwards(CAM, 0, sp, {}) == [0]
+        """Only the selected track exists — result is just [tid]."""
+        ts = time_spans((0, 0.0, 10.0))
+        assert tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=0.0) == [0]
 
     def test_all_subsequent_unassigned(self):
-        sp = spans((0, 0, 100), (1, 100, 200), (2, 200, 300))
-        result = tracks_from_here_onwards(CAM, 0, sp, {})
+        """Three sequential tracks; clicking at t=0 includes tracks starting after t=0."""
+        ts = time_spans((0, 0.0, 10.0), (1, 10.0, 20.0), (2, 20.0, 30.0))
+        result = tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=0.0)
         assert result == [0, 1, 2]
 
-    def test_earlier_tracks_excluded(self):
-        sp = spans((0, 0, 100), (1, 50, 150), (2, 200, 300))
-        # selecting track 1 (starts at 50): track 0 starts at 0 < 50, excluded
-        result = tracks_from_here_onwards(CAM, 1, sp, {})
+    def test_click_midpoint_excludes_earlier_tracks(self):
+        """Clicking at t=15 should exclude track 0 (starts at t=0) and include track 2 (t=20)."""
+        ts = time_spans((0, 0.0, 10.0), (1, 5.0, 15.0), (2, 20.0, 30.0))
+        result = tracks_from_here_onwards(CAM, 1, ts, {}, min_time_s=15.0)
         assert 0 not in result
         assert 1 in result
         assert 2 in result
 
     def test_already_assigned_tracks_excluded(self):
-        sp = spans((0, 0, 100), (1, 100, 200), (2, 200, 300))
+        """Tracks already assigned to any person are skipped in the expansion."""
+        ts = time_spans((0, 0.0, 10.0), (1, 10.0, 20.0), (2, 20.0, 30.0))
         asn = assignments(t1="timo")  # track 1 already assigned
-        result = tracks_from_here_onwards(CAM, 0, sp, asn)
+        result = tracks_from_here_onwards(CAM, 0, ts, asn, min_time_s=0.0)
         assert result == [0, 2]  # track 1 skipped
 
     def test_primary_tid_always_included(self):
-        # Primary track is already assigned to someone — still included
-        sp = spans((0, 0, 100), (1, 100, 200))
+        """Primary track is always included even if already assigned to someone."""
+        ts = time_spans((0, 0.0, 10.0), (1, 10.0, 20.0))
         asn = assignments(t0="timo")
-        result = tracks_from_here_onwards(CAM, 0, sp, asn)
+        result = tracks_from_here_onwards(CAM, 0, ts, asn, min_time_s=0.0)
         assert 0 in result
 
     def test_different_camera_excluded(self):
-        sp = {(CAM, 0): (0, 100), (CAM2, 1): (100, 200)}
-        result = tracks_from_here_onwards(CAM, 0, sp, {})
-        assert (CAM2, 1) not in [(CAM, t) for t in result]
+        """Tracks in other cameras are never included."""
+        ts = {(CAM, 0): (0.0, 10.0), (CAM2, 1): (10.0, 20.0)}
+        result = tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=0.0)
         assert result == [0]
 
-    def test_result_ordered_by_first_frame(self):
-        # tracks with different start times should come in time order
-        sp = spans((0, 0, 50), (1, 300, 400), (2, 100, 200), (3, 200, 300))
-        result = tracks_from_here_onwards(CAM, 0, sp, {})
+    def test_result_ordered_by_start_time(self):
+        """Expansion tracks are returned in ascending start-time order."""
+        ts = time_spans((0, 0.0, 5.0), (1, 30.0, 40.0), (2, 10.0, 20.0), (3, 20.0, 30.0))
+        result = tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=0.0)
         assert result == [0, 2, 3, 1]
 
-    def test_same_start_frame_not_included(self):
-        # Track 1 starts at the same frame as the selected track — excluded from expansion.
-        # Two tracks starting simultaneously represent different people; auto-assigning
-        # both to the same person would be wrong.
-        sp = spans((0, 100, 200), (1, 100, 300))
-        result = tracks_from_here_onwards(CAM, 0, sp, {})
+    def test_same_start_time_not_included(self):
+        """Tracks starting at exactly min_time_s are excluded (strict >).
+
+        Two tracks starting simultaneously represent different people; including
+        both in the expansion would assign them to the same person.
+        """
+        ts = time_spans((0, 10.0, 20.0), (1, 10.0, 30.0))
+        result = tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=10.0)
         assert 1 not in result
 
     def test_all_tracks_start_at_zero(self):
-        # Regression: when every track starts at frame 0, "from here onwards" should
-        # return only the selected track (nothing starts strictly after it).
-        sp = spans((0, 0, 100), (1, 0, 80), (2, 0, 120))
-        result = tracks_from_here_onwards(CAM, 0, sp, {})
+        """Regression: when every track starts at t=0, clicking at t=0 returns only the
+        selected track — nothing starts strictly after t=0."""
+        ts = time_spans((0, 0.0, 10.0), (1, 0.0, 8.0), (2, 0.0, 12.0))
+        result = tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=0.0)
         assert result == [0]
 
+    def test_click_in_middle_of_bar_uses_clicked_time(self):
+        """Clicking at t=5 on a bar that starts at t=0 should only expand to tracks
+        starting after t=5, not to all tracks starting after t=0."""
+        # bar 0: t=0–30, bar 1: t=0–15 (simultaneous), bar 2: t=8–20 (starts after click)
+        ts = time_spans((0, 0.0, 30.0), (1, 0.0, 15.0), (2, 8.0, 20.0))
+        result = tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=5.0)
+        assert 1 not in result   # starts at 0, not after 5
+        assert 2 in result       # starts at 8 > 5
+
     def test_typical_fragmented_track_scenario(self):
-        # Two people from frame 0 (tracks 0 and 1); person A reappears as track 2 at frame 3000.
-        # From-here-onwards on track 0 should pick up track 2 but NOT track 1.
-        sp = spans((0, 0, 5000), (1, 0, 4000), (2, 3000, 6000))
-        result = tracks_from_here_onwards(CAM, 0, sp, {})
+        """Two people from t=0; person A reappears as track 2 at t=25.
+        From-here-onwards on track 0 (clicked at t=0) picks up track 2 but not track 1."""
+        ts = time_spans((0, 0.0, 50.0), (1, 0.0, 40.0), (2, 25.0, 60.0))
+        result = tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=0.0)
         assert 0 in result
         assert 2 in result
         assert 1 not in result

@@ -53,12 +53,21 @@ class _CameraInfo:
     ref_timestamp_s: float
 
 
+_UNASSIGNED_BOX_COLOR = QColor(100, 100, 100)
+
+
+def _person_color(name: str) -> QColor:
+    hue = hash(name) % 360
+    return QColor.fromHsvF(hue / 360.0, 0.7, 0.9)
+
+
 class SkeletonDetectionOverlay:
     """Overlay drawing bboxes, keypoints, and stick figure."""
 
     def __init__(self):
         self._detections: list[dict] = []
         self._keypoints: dict[int, np.ndarray] = {}  # track_id -> [N,3]
+        self._assignments: dict[int, str] = {}       # track_id -> person_name
 
     def set_detections(
         self,
@@ -67,6 +76,10 @@ class SkeletonDetectionOverlay:
     ) -> None:
         self._detections = detections
         self._keypoints = keypoints
+
+    def set_assignments(self, assignments: dict[int, str]) -> None:
+        """Update track_id → person_name mapping for bbox colouring."""
+        self._assignments = dict(assignments)
 
     def clear(self) -> None:
         self._detections = []
@@ -95,12 +108,14 @@ class SkeletonDetectionOverlay:
             x1 = int(cx - bw / 2)
             y1 = int(cy - bh / 2)
 
-            pen = QPen(QColor(255, 220, 0), 2)
+            tid = det["track_id"]
+            person = self._assignments.get(tid)
+            box_color = _person_color(person) if person else _UNASSIGNED_BOX_COLOR
+            pen = QPen(box_color, 2)
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
             painter.drawRect(x1, y1, int(bw), int(bh))
 
-            tid = det["track_id"]
             painter.drawText(x1 + 2, y1 - 4, f"t{tid}")
 
             kp = self._keypoints.get(tid)
@@ -279,7 +294,7 @@ class FrameViewWidget(QWidget):
             self._cam_combo.setCurrentIndex(idx)
             self._cam_combo.blockSignals(False)
 
-        self._switch_to_camera(shot_video_id, seek_to=0)
+        self._switch_to_camera(shot_video_id, seek_to=None)
 
     def seek_frame(self, frame_idx: int) -> None:
         if self._file_path is None:
@@ -362,6 +377,11 @@ class FrameViewWidget(QWidget):
                 for frame, kp in kp_map.items():
                     self._kp_by_frame.setdefault(frame, {})[tid] = kp
 
+        self._update_overlay(self._current_frame)
+
+    def set_track_assignments(self, assignments: dict[int, str]) -> None:
+        """Update track_id → person_name mapping used to colour bboxes."""
+        self._overlay.set_assignments(assignments)
         self._update_overlay(self._current_frame)
 
     # ------------------------------------------------------------------

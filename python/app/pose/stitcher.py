@@ -24,10 +24,9 @@ LABEL_WIDTH = 80
 _PX_PER_SEC_MIN = 5
 _PX_PER_SEC_MAX = 500
 
-_BG_COLOR = QColor(30, 30, 30)         # scene background
 _UNASSIGNED_COLOR = QColor(100, 100, 100)
-_SELECTED_PEN = QPen(QColor(255, 220, 0), 2)   # bright yellow — visible on any bar colour
-_NAME_FONT = QFont("monospace", 8)
+_SELECTED_PEN = QPen(QColor(0, 0, 0), 2)       # black border on white background
+_NAME_FONT = QFont("monospace", 8, QFont.Bold)
 
 
 def _person_color(name: str) -> QColor:
@@ -86,7 +85,6 @@ class StitcherWidget(QGraphicsView):
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
-        self.setBackgroundBrush(QBrush(_BG_COLOR))
         self.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -170,13 +168,12 @@ class StitcherWidget(QGraphicsView):
             if name_item is None:
                 name_item = QGraphicsSimpleTextItem()
                 name_item.setFont(_NAME_FONT)
-                name_item.setBrush(QBrush(QColor(240, 240, 240)))
+                name_item.setBrush(QBrush(QColor(255, 255, 255)))
                 self._scene.addItem(name_item)
                 self._name_items[key] = name_item
             name_item.setText(person_name)
-            # Right-align within LABEL_WIDTH
-            tw = name_item.boundingRect().width()
-            name_item.setPos(max(0, LABEL_WIDTH - tw - 4), r.y() + 1)
+            # Draw inside bar with small left margin; clip visually by bar width
+            name_item.setPos(r.x() + 4, r.y() + 1)
         else:
             if name_item is not None:
                 self._scene.removeItem(name_item)

@@ -619,8 +619,8 @@ class PoseExtractionWindow(QMainWindow):
             ref_frame=ref_frame,
             ref_timestamp_s=ref_ts,
         )
-        self._frame_view.seek_frame(first_frame)
         self._frame_view.set_pose_data(self._session, self._current_run_id, track_id)
+        self._sync_frame_view_assignments()
 
     # ------------------------------------------------------------------
     # Assignment
@@ -654,6 +654,7 @@ class PoseExtractionWindow(QMainWindow):
             self._apply_assignment(svid, tid, str(person_name))
         else:
             self._assignments.pop((svid, tid), None)
+            self._sync_frame_view_assignments()
 
     def _apply_assignment(self, svid: str, tid: int, name: str) -> None:
         """Record assignment, sync stitcher colour/label and both person lists."""
@@ -665,6 +666,18 @@ class PoseExtractionWindow(QMainWindow):
         # Keep stitcher context-menu list in sync
         persons = [self._person_combo.itemText(i) for i in range(self._person_combo.count())]
         self._stitcher.set_known_persons(persons)
+        self._sync_frame_view_assignments()
+
+    def _sync_frame_view_assignments(self) -> None:
+        """Push current track assignments to the frame view overlay."""
+        if self._current_svid is None:
+            return
+        tid_to_person = {
+            tid: name
+            for (svid, tid), name in self._assignments.items()
+            if svid == self._current_svid
+        }
+        self._frame_view.set_track_assignments(tid_to_person)
 
     # ------------------------------------------------------------------
     # Finalise

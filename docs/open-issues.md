@@ -138,11 +138,12 @@ consistent with `compute_state_error` in `ukf.cpp` (`q_ref⁻¹ * q_state`).
     `frame_view.py` connects `activated` → `hidePopup()` explicitly.  The workaround
     was ineffective in practice (popup still stays open), so the underlying platform
     issue is unresolved.
-  - Likely fix directions: (a) set `QT_QPA_PLATFORM=xcb` in the launch script to force
-    XCB instead of Wayland, (b) install an application-level `QAbstractNativeEventFilter`
-    that intercepts the XButtonRelease event and calls `hidePopup()`, or (c) replace
-    popups with `QListWidget`-based inline selectors for the most-used combos.
-  - Does not affect functionality; only affects usability on this platform.
+  - **Confirmed fix**: set `QT_QPA_PLATFORM=xcb` in the launch script or shell before
+    starting the app. This forces Qt to use XCB instead of Wayland and the popup closes
+    correctly. Other approaches (b) `QAbstractNativeEventFilter` intercepting XButtonRelease,
+    (c) replacing popups with inline `QListWidget` selectors — not needed given the XCB fix.
+  - Does not affect functionality; only affects usability on this platform when running
+    under XWayland without `QT_QPA_PLATFORM=xcb`.
 
 - **Spherical joint limit enforcement: revert to old algorithm** (2026-03-28)
   - The updated spherical joint limit enforcement algorithm was reverted after full-project testing showed it produces worse tracking results than the previous one. The old algorithm remains in place.

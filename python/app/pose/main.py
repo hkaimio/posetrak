@@ -267,6 +267,7 @@ class PoseExtractionWindow(QMainWindow):
         self._stitcher.setMinimumHeight(150)
         self._stitcher.segment_clicked.connect(self._on_segment_clicked)
         self._stitcher.assignment_changed.connect(self._on_assignment_changed)
+        self._stitcher.time_clicked.connect(self._frame_view.seek_global_time)
         right_layout.addWidget(self._stitcher, 1)
 
         # Assignment panel

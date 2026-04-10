@@ -24,8 +24,9 @@ LABEL_WIDTH = 80
 _PX_PER_SEC_MIN = 5
 _PX_PER_SEC_MAX = 500
 
-_UNASSIGNED_COLOR = QColor(120, 120, 120)
-_SELECTED_PEN = QPen(QColor(255, 255, 255), 2)
+_BG_COLOR = QColor(30, 30, 30)         # scene background
+_UNASSIGNED_COLOR = QColor(100, 100, 100)
+_SELECTED_PEN = QPen(QColor(255, 220, 0), 2)   # bright yellow — visible on any bar colour
 _NAME_FONT = QFont("monospace", 8)
 
 
@@ -79,11 +80,13 @@ class StitcherWidget(QGraphicsView):
 
     segment_clicked = Signal(str, int, int, int)
     assignment_changed = Signal(str, int, object)  # svid, tid, str|None
+    time_clicked = Signal(float)                   # global_s at the clicked x position
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
+        self.setBackgroundBrush(QBrush(_BG_COLOR))
         self.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -296,7 +299,7 @@ class StitcherWidget(QGraphicsView):
         # Red playhead line (added last so it draws on top)
         scene_h = max(self._scene.sceneRect().height(), 1)
         x0 = LABEL_WIDTH + 0.0
-        self._time_line = self._scene.addLine(x0, 0, x0, scene_h, QPen(QColor(220, 40, 40), 1))
+        self._time_line = self._scene.addLine(x0, 0, x0, scene_h, QPen(QColor(220, 40, 40), 2))
         self._time_line.setZValue(10)
 
     # ------------------------------------------------------------------
@@ -305,8 +308,8 @@ class StitcherWidget(QGraphicsView):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
-            pos = self.mapToScene(event.pos())
-            item = self._scene.itemAt(pos, self.transform())
+            scene_pos = self.mapToScene(event.pos())
+            item = self._scene.itemAt(scene_pos, self.transform())
             if isinstance(item, QGraphicsRectItem):
                 svid = item.data(0)
                 tid = item.data(1)
@@ -314,6 +317,10 @@ class StitcherWidget(QGraphicsView):
                 last = item.data(3)
                 if svid is not None:
                     self._set_selected(svid, tid)
+                    # Seek to the clicked time position, not necessarily the bar start
+                    pps = self._px_per_sec
+                    global_s = self._time_origin + (scene_pos.x() - LABEL_WIDTH) / max(pps, 1e-6)
+                    self.time_clicked.emit(global_s)
                     self.segment_clicked.emit(svid, tid, first, last)
         super().mousePressEvent(event)
 

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.setup.camera_cell import CameraCell
+from app.pose.colors import UNASSIGNED_COLOR, person_color
 from app.pose.db_cache import read_detections_for_run, read_keypoints_for_run
 
 
@@ -53,14 +54,6 @@ class _CameraInfo:
     ref_timestamp_s: float
 
 
-_UNASSIGNED_BOX_COLOR = QColor(100, 100, 100)
-
-
-def _person_color(name: str) -> QColor:
-    hue = hash(name) % 360
-    return QColor.fromHsvF(hue / 360.0, 0.7, 0.9)
-
-
 class SkeletonDetectionOverlay:
     """Overlay drawing bboxes, keypoints, and stick figure."""
 
@@ -68,6 +61,7 @@ class SkeletonDetectionOverlay:
         self._detections: list[dict] = []
         self._keypoints: dict[int, np.ndarray] = {}  # track_id -> [N,3]
         self._assignments: dict[int, str] = {}       # track_id -> person_name
+        self._selected_track_id: int | None = None
 
     def set_detections(
         self,
@@ -80,6 +74,10 @@ class SkeletonDetectionOverlay:
     def set_assignments(self, assignments: dict[int, str]) -> None:
         """Update track_id → person_name mapping for bbox colouring."""
         self._assignments = dict(assignments)
+
+    def set_selected_track(self, track_id: int | None) -> None:
+        """Highlight the given track with a thicker bbox border."""
+        self._selected_track_id = track_id
 
     def clear(self) -> None:
         self._detections = []
@@ -110,8 +108,9 @@ class SkeletonDetectionOverlay:
 
             tid = det["track_id"]
             person = self._assignments.get(tid)
-            box_color = _person_color(person) if person else _UNASSIGNED_BOX_COLOR
-            pen = QPen(box_color, 2)
+            box_color = person_color(person) if person else UNASSIGNED_COLOR
+            is_selected = (tid == self._selected_track_id)
+            pen = QPen(box_color, 4 if is_selected else 2)
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
             painter.drawRect(x1, y1, int(bw), int(bh))
@@ -382,6 +381,11 @@ class FrameViewWidget(QWidget):
     def set_track_assignments(self, assignments: dict[int, str]) -> None:
         """Update track_id → person_name mapping used to colour bboxes."""
         self._overlay.set_assignments(assignments)
+        self._update_overlay(self._current_frame)
+
+    def set_selected_track(self, track_id: int | None) -> None:
+        """Highlight the given track with a thicker bbox border."""
+        self._overlay.set_selected_track(track_id)
         self._update_overlay(self._current_frame)
 
     # ------------------------------------------------------------------

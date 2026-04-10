@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 
+from app.pose.colors import UNASSIGNED_COLOR, person_color
 from app.pose.db_cache import read_track_spans
 
 
@@ -24,14 +25,8 @@ LABEL_WIDTH = 80
 _PX_PER_SEC_MIN = 5
 _PX_PER_SEC_MAX = 500
 
-_UNASSIGNED_COLOR = QColor(100, 100, 100)
-_SELECTED_PEN = QPen(QColor(0, 0, 0), 2)       # black border on white background
+_SELECTED_PEN = QPen(QColor(0, 0, 0), 2)
 _NAME_FONT = QFont("monospace", 8, QFont.Bold)
-
-
-def _person_color(name: str) -> QColor:
-    hue = hash(name) % 360
-    return QColor.fromHsvF(hue / 360.0, 0.7, 0.9)
 
 
 def _build_frame_to_time(
@@ -155,7 +150,7 @@ class StitcherWidget(QGraphicsView):
         else:
             self._assignments.pop(key, None)
 
-        color = _person_color(person_name) if person_name else _UNASSIGNED_COLOR
+        color = person_color(person_name) if person_name else UNASSIGNED_COLOR
         item = self._items.get(key)
         if item is None:
             return
@@ -265,7 +260,7 @@ class StitcherWidget(QGraphicsView):
                 is_selected = (key == self._selected_key)
                 pen = _SELECTED_PEN if is_selected else QPen(Qt.NoPen)
 
-                rect = self._scene.addRect(x, y, w, ROW_HEIGHT, pen, QBrush(_UNASSIGNED_COLOR))
+                rect = self._scene.addRect(x, y, w, ROW_HEIGHT, pen, QBrush(UNASSIGNED_COLOR))
                 t0_mm = int(t0 // 60)
                 t0_ss = t0 % 60
                 t1_mm = int(t1 // 60)

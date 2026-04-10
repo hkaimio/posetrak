@@ -620,6 +620,7 @@ class PoseExtractionWindow(QMainWindow):
             ref_timestamp_s=ref_ts,
         )
         self._frame_view.set_pose_data(self._session, self._current_run_id, track_id)
+        self._frame_view.set_selected_track(track_id)
         self._sync_frame_view_assignments()
 
     # ------------------------------------------------------------------

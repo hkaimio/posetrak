@@ -270,6 +270,7 @@ class PoseExtractionWindow(QMainWindow):
         self._stitcher.setMinimumHeight(150)
         self._stitcher.segment_clicked.connect(self._on_segment_clicked)
         self._stitcher.assignment_changed.connect(self._on_assignment_changed)
+        self._stitcher.assignment_from_here.connect(self._on_assignment_from_here)
         self._stitcher.time_clicked.connect(self._frame_view.seek_global_time)
         right_layout.addWidget(self._stitcher, 1)
 
@@ -657,35 +658,33 @@ class PoseExtractionWindow(QMainWindow):
             QMessageBox.warning(self, "No name", "Enter a person name.")
             return
 
-        svid = self._current_svid
-        tids = self._tracks_to_assign(svid, self._current_track_id)
+        self._do_assign(self._current_svid, self._current_track_id, name,
+                        from_here_onwards=self._from_here_cb.isChecked())
+
+    def _on_assignment_changed(self, svid: str, tid: int, person_name) -> None:
+        """Handle assignment/detach from the stitcher context menu (this segment only)."""
+        if person_name:
+            self._do_assign(svid, tid, str(person_name), from_here_onwards=False)
+        else:
+            self._detach(svid, tid)
+
+    def _on_assignment_from_here(self, svid: str, tid: int, person_name: str) -> None:
+        """Handle 'From here onwards' chosen from the stitcher context menu."""
+        self._do_assign(svid, tid, person_name, from_here_onwards=True)
+
+    def _do_assign(self, svid: str, tid: int, name: str, *, from_here_onwards: bool) -> None:
+        """Compute the target tids, check conflicts, show dialog, then apply."""
+        tids = self._tracks_to_assign(svid, tid, from_here_onwards)
         conflicts = self._find_conflicts(svid, tids, name)
         if conflicts and not self._resolve_conflicts(conflicts, name):
             return
         for conflict_key in conflicts:
             self._detach(*conflict_key)
-        for tid in tids:
-            self._apply_assignment(svid, tid, name)
+        for t in tids:
+            self._apply_assignment(svid, t, name)
 
-    def _on_assignment_changed(self, svid: str, tid: int, person_name) -> None:
-        """Handle assignment/detach made via the stitcher context menu.
-
-        The context menu always acts on the single selected segment only
-        (no "from here onwards" expansion).  Conflict check still applies.
-        """
-        if person_name:
-            name = str(person_name)
-            conflicts = self._find_conflicts(svid, [tid], name)
-            if conflicts and not self._resolve_conflicts(conflicts, name):
-                return
-            for conflict_key in conflicts:
-                self._detach(*conflict_key)
-            self._apply_assignment(svid, tid, name)
-        else:
-            self._detach(svid, tid)
-
-    def _tracks_to_assign(self, svid: str, tid: int) -> list[int]:
-        if not self._from_here_cb.isChecked():
+    def _tracks_to_assign(self, svid: str, tid: int, from_here_onwards: bool) -> list[int]:
+        if not from_here_onwards:
             return [tid]
         return tracks_from_here_onwards(svid, tid, self._stitcher.get_spans(), self._assignments)
 

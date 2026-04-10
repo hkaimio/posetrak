@@ -153,8 +153,26 @@ class TestTracksFromHereOnwards:
         result = tracks_from_here_onwards(CAM, 0, sp, {})
         assert result == [0, 2, 3, 1]
 
-    def test_same_start_frame_included(self):
-        # Track with same first_frame as selected track is included
+    def test_same_start_frame_not_included(self):
+        # Track 1 starts at the same frame as the selected track — excluded from expansion.
+        # Two tracks starting simultaneously represent different people; auto-assigning
+        # both to the same person would be wrong.
         sp = spans((0, 100, 200), (1, 100, 300))
         result = tracks_from_here_onwards(CAM, 0, sp, {})
-        assert 1 in result
+        assert 1 not in result
+
+    def test_all_tracks_start_at_zero(self):
+        # Regression: when every track starts at frame 0, "from here onwards" should
+        # return only the selected track (nothing starts strictly after it).
+        sp = spans((0, 0, 100), (1, 0, 80), (2, 0, 120))
+        result = tracks_from_here_onwards(CAM, 0, sp, {})
+        assert result == [0]
+
+    def test_typical_fragmented_track_scenario(self):
+        # Two people from frame 0 (tracks 0 and 1); person A reappears as track 2 at frame 3000.
+        # From-here-onwards on track 0 should pick up track 2 but NOT track 1.
+        sp = spans((0, 0, 5000), (1, 0, 4000), (2, 3000, 6000))
+        result = tracks_from_here_onwards(CAM, 0, sp, {})
+        assert 0 in result
+        assert 2 in result
+        assert 1 not in result

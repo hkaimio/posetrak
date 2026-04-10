@@ -24,7 +24,9 @@ def tracks_from_here_onwards(
     first_frame = spans.get((svid, tid), (0, 0))[0]
     result = [tid]
     for (s, t), (ff, _lf) in sorted(spans.items(), key=lambda x: x[1][0]):
-        if s == svid and t != tid and ff >= first_frame and (svid, t) not in assignments:
+        # Use strict > so that tracks starting at the same frame as the selected track
+        # (e.g. two simultaneous people both tracked from frame 0) are not included.
+        if s == svid and t != tid and ff > first_frame and (svid, t) not in assignments:
             result.append(t)
     return result
 

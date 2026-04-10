@@ -6,6 +6,8 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QAbstractButton,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -23,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.pose.assignment import find_assignment_conflicts, tracks_from_here_onwards
 from app.pose.db_cache import list_detection_runs
 from app.pose.finalise import TrackAssignment, finalise_to_db
 from app.pose.frame_view import FrameViewWidget, _CameraInfo
@@ -288,6 +291,13 @@ class PoseExtractionWindow(QMainWindow):
         self._add_person_btn.clicked.connect(self._on_add_person)
         person_row.addWidget(self._add_person_btn)
         assign_layout.addLayout(person_row)
+
+        self._from_here_cb = QCheckBox("From here onwards")
+        self._from_here_cb.setToolTip(
+            "Also assign all subsequent unassigned tracks in this camera "
+            "(start time ≥ selected track)"
+        )
+        assign_layout.addWidget(self._from_here_cb)
 
         btn_row = QHBoxLayout()
         self._assign_btn = QPushButton("Assign")
@@ -647,26 +657,74 @@ class PoseExtractionWindow(QMainWindow):
             QMessageBox.warning(self, "No name", "Enter a person name.")
             return
 
-        self._apply_assignment(self._current_svid, self._current_track_id, name)
+        svid = self._current_svid
+        tids = self._tracks_to_assign(svid, self._current_track_id)
+        conflicts = self._find_conflicts(svid, tids, name)
+        if conflicts and not self._resolve_conflicts(conflicts, name):
+            return
+        for conflict_key in conflicts:
+            self._detach(*conflict_key)
+        for tid in tids:
+            self._apply_assignment(svid, tid, name)
 
     def _on_assignment_changed(self, svid: str, tid: int, person_name) -> None:
-        """Handle assignment made via the stitcher context menu."""
+        """Handle assignment/detach made via the stitcher context menu.
+
+        The context menu always acts on the single selected segment only
+        (no "from here onwards" expansion).  Conflict check still applies.
+        """
         if person_name:
-            self._apply_assignment(svid, tid, str(person_name))
+            name = str(person_name)
+            conflicts = self._find_conflicts(svid, [tid], name)
+            if conflicts and not self._resolve_conflicts(conflicts, name):
+                return
+            for conflict_key in conflicts:
+                self._detach(*conflict_key)
+            self._apply_assignment(svid, tid, name)
         else:
-            self._assignments.pop((svid, tid), None)
-            self._sync_frame_view_assignments()
+            self._detach(svid, tid)
+
+    def _tracks_to_assign(self, svid: str, tid: int) -> list[int]:
+        if not self._from_here_cb.isChecked():
+            return [tid]
+        return tracks_from_here_onwards(svid, tid, self._stitcher.get_spans(), self._assignments)
+
+    def _find_conflicts(self, svid: str, tids: list[int], person_name: str) -> list[tuple[str, int]]:
+        return find_assignment_conflicts(svid, tids, person_name, self._stitcher.get_spans(), self._assignments)
+
+    def _resolve_conflicts(self, conflicts: list[tuple[str, int]], person_name: str) -> bool:
+        """Show a conflict dialog.  Returns True if user chose to detach conflicts."""
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Assignment conflict")
+        msg.setText(
+            f"'{person_name}' is already assigned to {len(conflicts)} "
+            f"overlapping track(s) in this camera:"
+        )
+        lines = []
+        spans = self._stitcher.get_spans()
+        for (s, t) in conflicts:
+            ff, lf = spans.get((s, t), (0, 0))
+            lines.append(f"  track {t}  (frames {ff}–{lf})")
+        msg.setInformativeText("\n".join(lines))
+        detach_btn: QAbstractButton = msg.addButton("Detach conflicting bars", QMessageBox.AcceptRole)
+        msg.addButton("Cancel", QMessageBox.RejectRole)
+        msg.exec()
+        return msg.clickedButton() is detach_btn
 
     def _apply_assignment(self, svid: str, tid: int, name: str) -> None:
-        """Record assignment, sync stitcher colour/label and both person lists."""
+        """Record one assignment and sync stitcher visuals and person lists."""
         self._assignments[(svid, tid)] = name
         self._stitcher.set_assignment(svid, tid, name)
-        # Keep combo in sync
         if self._person_combo.findText(name) < 0:
             self._person_combo.addItem(name)
-        # Keep stitcher context-menu list in sync
         persons = [self._person_combo.itemText(i) for i in range(self._person_combo.count())]
         self._stitcher.set_known_persons(persons)
+        self._sync_frame_view_assignments()
+
+    def _detach(self, svid: str, tid: int) -> None:
+        """Remove the person assignment from one track and sync visuals."""
+        self._assignments.pop((svid, tid), None)
+        self._stitcher.set_assignment(svid, tid, None)
         self._sync_frame_view_assignments()
 
     def _sync_frame_view_assignments(self) -> None:

@@ -111,6 +111,10 @@ class StitcherWidget(QGraphicsView):
     # Public API
     # ------------------------------------------------------------------
 
+    def get_spans(self) -> dict[tuple[str, int], tuple[int, int]]:
+        """Return {(shot_video_id, track_id): (first_frame, last_frame)} for all loaded tracks."""
+        return dict(self._spans)
+
     def set_known_persons(self, persons: list[str]) -> None:
         """Update the person list shown in the assignment context menu."""
         self._persons = list(persons)
@@ -347,7 +351,7 @@ class StitcherWidget(QGraphicsView):
         menu.exec(self.viewport().mapToGlobal(pos))
 
     def _assign(self, svid: str, tid: int, person_name: str | None) -> None:
-        self.set_assignment(svid, tid, person_name)
+        # Emit only — main window handles conflict check and calls set_assignment back.
         self.assignment_changed.emit(svid, tid, person_name)
 
     def _new_person(self, svid: str, tid: int) -> None:

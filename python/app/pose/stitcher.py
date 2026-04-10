@@ -76,9 +76,9 @@ class StitcherWidget(QGraphicsView):
     """
 
     segment_clicked = Signal(str, int, int, int)
-    assignment_changed = Signal(str, int, object)        # svid, tid, str|None
-    assignment_from_here = Signal(str, int, str, float)  # svid, tid, person_name, min_time_s
-    time_clicked = Signal(float)                         # global_s at the clicked x position
+    assignment_changed = Signal(str, int, object)   # svid, tid, str|None
+    assignment_from_here = Signal(str, int, str)    # svid, tid, person_name
+    time_clicked = Signal(float)                    # global_s at the clicked x position
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -346,11 +346,6 @@ class StitcherWidget(QGraphicsView):
 
         self._set_selected(svid, tid)
 
-        # Compute the global time at the click position so "from here onwards"
-        # uses the actual clicked timestamp, not the bar's start time.
-        scene_pos = self.mapToScene(pos)
-        click_s = self._time_origin + (scene_pos.x() - LABEL_WIDTH) / max(self._px_per_sec, 1e-6)
-
         menu = QMenu(self)
         current = self._assignments.get((svid, tid))
 
@@ -374,11 +369,11 @@ class StitcherWidget(QGraphicsView):
         for name in self._persons:
             action = from_here_menu.addAction(name)
             action.triggered.connect(
-                lambda checked, n=name, s=click_s: self._assign_from_here(svid, tid, n, s)
+                lambda checked, n=name: self._assign_from_here(svid, tid, n)
             )
         from_here_menu.addSeparator()
         new_fh = from_here_menu.addAction("New person…")
-        new_fh.triggered.connect(lambda: self._new_person_from_here(svid, tid, click_s))
+        new_fh.triggered.connect(lambda: self._new_person_from_here(svid, tid))
 
         menu.exec(self.viewport().mapToGlobal(pos))
 
@@ -386,9 +381,9 @@ class StitcherWidget(QGraphicsView):
         # Emit only — main window handles conflict check and calls set_assignment back.
         self.assignment_changed.emit(svid, tid, person_name)
 
-    def _assign_from_here(self, svid: str, tid: int, person_name: str, min_time_s: float) -> None:
-        """Emit assignment_from_here so main window assigns from min_time_s onwards."""
-        self.assignment_from_here.emit(svid, tid, person_name, min_time_s)
+    def _assign_from_here(self, svid: str, tid: int, person_name: str) -> None:
+        """Emit assignment_from_here so main window assigns from this bar's start time onwards."""
+        self.assignment_from_here.emit(svid, tid, person_name)
 
     def _new_person(self, svid: str, tid: int) -> None:
         """Prompt for a new person name and emit a single-segment assignment."""
@@ -399,14 +394,14 @@ class StitcherWidget(QGraphicsView):
                 self._persons.append(name)
             self._assign(svid, tid, name)
 
-    def _new_person_from_here(self, svid: str, tid: int, min_time_s: float) -> None:
+    def _new_person_from_here(self, svid: str, tid: int) -> None:
         """Prompt for a new person name and emit a from-here-onwards assignment."""
         name, ok = QInputDialog.getText(self, "New person", "Person name:")
         if ok and name.strip():
             name = name.strip()
             if name not in self._persons:
                 self._persons.append(name)
-            self._assign_from_here(svid, tid, name, min_time_s)
+            self._assign_from_here(svid, tid, name)
 
     def _set_selected(self, svid: str, tid: int) -> None:
         """Highlight the given bar; remove highlight from previously selected."""

@@ -113,23 +113,28 @@ class TestFindConflicts:
 # ---------------------------------------------------------------------------
 
 class TestTracksFromHereOnwards:
-    """tracks_from_here_onwards uses global seconds (min_time_s) as the reference."""
+    """tracks_from_here_onwards uses the selected bar's own t0 as min_time_s.
+
+    Callers pass time_spans[(svid, tid)][0] as min_time_s, so tests reflect
+    that — min_time_s equals the primary track's start time.
+    """
 
     def test_single_track_no_others(self):
         """Only the selected track exists — result is just [tid]."""
         ts = time_spans((0, 0.0, 10.0))
         assert tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=0.0) == [0]
 
-    def test_all_subsequent_unassigned(self):
-        """Three sequential tracks; clicking at t=0 includes tracks starting after t=0."""
+    def test_sequential_tracks_all_included(self):
+        """Three sequential non-overlapping tracks; selecting track 0 (t0=0)
+        includes tracks 1 and 2 because both start strictly after t=0."""
         ts = time_spans((0, 0.0, 10.0), (1, 10.0, 20.0), (2, 20.0, 30.0))
         result = tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=0.0)
         assert result == [0, 1, 2]
 
-    def test_click_midpoint_excludes_earlier_tracks(self):
-        """Clicking at t=15 should exclude track 0 (starts at t=0) and include track 2 (t=20)."""
+    def test_earlier_tracks_excluded(self):
+        """Selecting track 1 (t0=5) excludes track 0 (t0=0 < 5)."""
         ts = time_spans((0, 0.0, 10.0), (1, 5.0, 15.0), (2, 20.0, 30.0))
-        result = tracks_from_here_onwards(CAM, 1, ts, {}, min_time_s=15.0)
+        result = tracks_from_here_onwards(CAM, 1, ts, {}, min_time_s=5.0)
         assert 0 not in result
         assert 1 in result
         assert 2 in result
@@ -137,9 +142,9 @@ class TestTracksFromHereOnwards:
     def test_already_assigned_tracks_excluded(self):
         """Tracks already assigned to any person are skipped in the expansion."""
         ts = time_spans((0, 0.0, 10.0), (1, 10.0, 20.0), (2, 20.0, 30.0))
-        asn = assignments(t1="timo")  # track 1 already assigned
+        asn = assignments(t1="timo")
         result = tracks_from_here_onwards(CAM, 0, ts, asn, min_time_s=0.0)
-        assert result == [0, 2]  # track 1 skipped
+        assert result == [0, 2]
 
     def test_primary_tid_always_included(self):
         """Primary track is always included even if already assigned to someone."""
@@ -160,35 +165,24 @@ class TestTracksFromHereOnwards:
         result = tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=0.0)
         assert result == [0, 2, 3, 1]
 
-    def test_same_start_time_not_included(self):
-        """Tracks starting at exactly min_time_s are excluded (strict >).
-
-        Two tracks starting simultaneously represent different people; including
-        both in the expansion would assign them to the same person.
-        """
+    def test_concurrent_tracks_excluded(self):
+        """Tracks starting at exactly the same time as the selected bar (strict >)
+        are excluded — they represent a different simultaneous person."""
         ts = time_spans((0, 10.0, 20.0), (1, 10.0, 30.0))
         result = tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=10.0)
         assert 1 not in result
 
-    def test_all_tracks_start_at_zero(self):
-        """Regression: when every track starts at t=0, clicking at t=0 returns only the
-        selected track — nothing starts strictly after t=0."""
+    def test_all_tracks_start_at_zero_regression(self):
+        """Regression: when every track starts at t=0, selecting any track returns only
+        that track — nothing starts strictly after t=0, so no expansion occurs."""
         ts = time_spans((0, 0.0, 10.0), (1, 0.0, 8.0), (2, 0.0, 12.0))
         result = tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=0.0)
         assert result == [0]
 
-    def test_click_in_middle_of_bar_uses_clicked_time(self):
-        """Clicking at t=5 on a bar that starts at t=0 should only expand to tracks
-        starting after t=5, not to all tracks starting after t=0."""
-        # bar 0: t=0–30, bar 1: t=0–15 (simultaneous), bar 2: t=8–20 (starts after click)
-        ts = time_spans((0, 0.0, 30.0), (1, 0.0, 15.0), (2, 8.0, 20.0))
-        result = tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=5.0)
-        assert 1 not in result   # starts at 0, not after 5
-        assert 2 in result       # starts at 8 > 5
-
     def test_typical_fragmented_track_scenario(self):
-        """Two people from t=0; person A reappears as track 2 at t=25.
-        From-here-onwards on track 0 (clicked at t=0) picks up track 2 but not track 1."""
+        """Two people detected from t=0 (tracks 0 and 1 start simultaneously).
+        Person A reappears as track 2 at t=25.  Selecting track 0 picks up
+        track 2 but not track 1 because both 0 and 1 share the same start time."""
         ts = time_spans((0, 0.0, 50.0), (1, 0.0, 40.0), (2, 25.0, 60.0))
         result = tracks_from_here_onwards(CAM, 0, ts, {}, min_time_s=0.0)
         assert 0 in result

@@ -651,10 +651,10 @@ class PoseExtractionWindow(QMainWindow):
     def _on_assign(self) -> None:
         """Handle the Assign button.
 
-        Reads the person name from the combo box and the current playhead time
-        from the frame view.  If "From here onwards" is checked, uses the
-        playhead position as *min_time_s* so only tracks starting after the
-        currently displayed frame are included in the expansion.
+        Reads the person name from the combo box and applies the assignment.
+        If "From here onwards" is checked, also assigns all subsequent
+        unassigned tracks in the same camera that start after the selected
+        bar's own start time.
         """
         if self._current_svid is None or self._current_track_id is None:
             QMessageBox.information(self, "No track selected", "Click a track segment first.")
@@ -663,10 +663,8 @@ class PoseExtractionWindow(QMainWindow):
         if not name:
             QMessageBox.warning(self, "No name", "Enter a person name.")
             return
-        min_time_s = self._frame_view.current_global_time() if self._from_here_cb.isChecked() else None
         self._do_assign(self._current_svid, self._current_track_id, name,
-                        from_here_onwards=self._from_here_cb.isChecked(),
-                        min_time_s=min_time_s)
+                        from_here_onwards=self._from_here_cb.isChecked())
 
     def _on_assignment_changed(self, svid: str, tid: int, person_name: object) -> None:
         """Handle a single-segment assignment or detach from the stitcher context menu.
@@ -681,39 +679,28 @@ class PoseExtractionWindow(QMainWindow):
         else:
             self._detach(svid, tid)
 
-    def _on_assignment_from_here(self, svid: str, tid: int, person_name: str, min_time_s: float) -> None:
+    def _on_assignment_from_here(self, svid: str, tid: int, person_name: str) -> None:
         """Handle a 'From here onwards' assignment from the stitcher context menu.
 
         Args:
             svid: Shot video ID of the clicked track.
             tid: Track ID of the clicked segment.
             person_name: Person to assign.
-            min_time_s: Global timestamp at the click position; only tracks
-                starting strictly after this time are included in the expansion.
         """
-        self._do_assign(svid, tid, person_name, from_here_onwards=True, min_time_s=min_time_s)
+        self._do_assign(svid, tid, person_name, from_here_onwards=True)
 
-    def _do_assign(
-        self,
-        svid: str,
-        tid: int,
-        name: str,
-        *,
-        from_here_onwards: bool,
-        min_time_s: float | None = None,
-    ) -> None:
+    def _do_assign(self, svid: str, tid: int, name: str, *, from_here_onwards: bool) -> None:
         """Compute the target track IDs, check for conflicts, show a dialog if needed, then apply.
 
         Args:
             svid: Camera to assign within.
-            tid: The primary track that was selected.
+            tid: The primary (selected) track.
             name: Person name to assign.
-            from_here_onwards: If True, also assign subsequent unassigned tracks
-                starting after *min_time_s*.
-            min_time_s: Reference timestamp for the expansion.  Required when
-                *from_here_onwards* is True; ignored otherwise.
+            from_here_onwards: If True, also assign all subsequent unassigned
+                tracks in *svid* whose start time is strictly after the selected
+                bar's own start time.
         """
-        tids = self._tracks_to_assign(svid, tid, from_here_onwards, min_time_s)
+        tids = self._tracks_to_assign(svid, tid, from_here_onwards)
         conflicts = self._find_conflicts(svid, tids, name)
         if conflicts and not self._resolve_conflicts(conflicts, name):
             return
@@ -722,31 +709,25 @@ class PoseExtractionWindow(QMainWindow):
         for t in tids:
             self._apply_assignment(svid, t, name)
 
-    def _tracks_to_assign(
-        self,
-        svid: str,
-        tid: int,
-        from_here_onwards: bool,
-        min_time_s: float | None,
-    ) -> list[int]:
+    def _tracks_to_assign(self, svid: str, tid: int, from_here_onwards: bool) -> list[int]:
         """Return the list of track IDs that should be assigned.
 
-        Without expansion, returns ``[tid]``.  With expansion, returns the
+        Without expansion returns ``[tid]``.  With expansion returns the
         primary track followed by all unassigned tracks in *svid* whose global
-        start time is strictly greater than *min_time_s*.
+        start time is **strictly greater** than the selected bar's own start
+        time.  Tracks starting at exactly the same time as the selected bar
+        (i.e. simultaneous detections of different people) are excluded.
 
         Args:
             svid: Camera to search within.
             tid: Primary (selected) track; always first in the result.
             from_here_onwards: Whether to expand beyond the primary track.
-            min_time_s: Expansion cutoff in global seconds.  Must not be None
-                when *from_here_onwards* is True.
         """
         if not from_here_onwards:
             return [tid]
-        assert min_time_s is not None, "min_time_s required for from_here_onwards"
-        return tracks_from_here_onwards(svid, tid, self._stitcher.get_time_spans(),
-                                        self._assignments, min_time_s)
+        time_spans = self._stitcher.get_time_spans()
+        min_time_s = time_spans.get((svid, tid), (0.0, 0.0))[0]
+        return tracks_from_here_onwards(svid, tid, time_spans, self._assignments, min_time_s)
 
     def _find_conflicts(
         self,

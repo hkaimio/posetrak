@@ -475,8 +475,11 @@ class StitcherWidget(QGraphicsView):
                     self._set_selected(svid, tid, seg_first)
                     pps = self._px_per_sec
                     global_s = self._time_origin + (scene_pos.x() - LABEL_WIDTH) / max(pps, 1e-6)
-                    self.time_clicked.emit(global_s)
+                    # segment_clicked must fire before time_clicked so that
+                    # main.py sets the preview track_id before seek_frame()
+                    # triggers update_frame().
                     self.segment_clicked.emit(svid, tid, seg_first, seg_last)
+                    self.time_clicked.emit(global_s)
         super().mousePressEvent(event)
 
     def _on_context_menu(self, pos) -> None:

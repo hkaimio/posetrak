@@ -7,7 +7,6 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractButton,
-    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -25,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.pose.assignment import find_assignment_conflicts, tracks_from_here_onwards
+from app.pose.assignment import find_assignment_conflicts
 from app.pose.db_cache import list_detection_runs
 from app.pose.finalise import TrackAssignment, finalise_to_db
 from app.pose.frame_view import FrameViewWidget, _CameraInfo
@@ -134,8 +133,17 @@ class PoseExtractionWindow(QMainWindow):
         self._time_start_s: float | None = None
         self._time_end_s: float | None = None
 
-        # track -> person assignment (not persisted until Finalise)
-        self._assignments: dict[tuple[str, int], str] = {}
+        # Segment assignments: (svid, tid, seg_first) → person_name.  A detection
+        # track can be split into multiple segments; each segment is assigned
+        # independently.  Not persisted until Finalise.
+        self._assignments: dict[tuple[str, int, int], str] = {}
+
+        # Currently selected segment
+        self._current_seg_first: int | None = None
+
+        # Most recent video frame index displayed (used to resolve which segment
+        # applies to the current frame when syncing the frame view overlay)
+        self._current_frame_idx: int = 0
 
         self._job: DetectionJob | None = None
 
@@ -270,7 +278,7 @@ class PoseExtractionWindow(QMainWindow):
         self._stitcher.setMinimumHeight(150)
         self._stitcher.segment_clicked.connect(self._on_segment_clicked)
         self._stitcher.assignment_changed.connect(self._on_assignment_changed)
-        self._stitcher.assignment_from_here.connect(self._on_assignment_from_here)
+        self._stitcher.split_requested.connect(self._on_split_requested)
         self._stitcher.time_clicked.connect(self._frame_view.seek_global_time)
         right_layout.addWidget(self._stitcher, 1)
 
@@ -292,13 +300,6 @@ class PoseExtractionWindow(QMainWindow):
         self._add_person_btn.clicked.connect(self._on_add_person)
         person_row.addWidget(self._add_person_btn)
         assign_layout.addLayout(person_row)
-
-        self._from_here_cb = QCheckBox("From here onwards")
-        self._from_here_cb.setToolTip(
-            "Also assign all subsequent unassigned tracks in this camera "
-            "(start time ≥ selected track)"
-        )
-        assign_layout.addWidget(self._from_here_cb)
 
         btn_row = QHBoxLayout()
         self._assign_btn = QPushButton("Assign")
@@ -425,6 +426,7 @@ class PoseExtractionWindow(QMainWindow):
             return
         self._current_run_id = run_id
         self._assignments.clear()
+        self._current_seg_first = None
         self._stitcher.load_run(self._session, run_id)
 
     # ------------------------------------------------------------------
@@ -575,9 +577,11 @@ class PoseExtractionWindow(QMainWindow):
         )
         self._run_btn.setEnabled(ready)
 
-    def _on_frame_changed(self, _frame_idx: int, global_s: float) -> None:
+    def _on_frame_changed(self, frame_idx: int, global_s: float) -> None:
+        self._current_frame_idx = frame_idx
         self._stitcher.set_current_time(global_s)
         self._update_run_btn()
+        self._sync_frame_view_assignments()
 
     # ------------------------------------------------------------------
     # Stitcher / frame view integration
@@ -590,11 +594,23 @@ class PoseExtractionWindow(QMainWindow):
         first_frame: int,
         last_frame: int,
     ) -> None:
+        """Handle a click on a segment bar in the stitcher.
+
+        Stores the selected segment, updates the sidebar label, and loads
+        the video and pose data for the frame view.
+
+        Args:
+            shot_video_id: Camera / shot-video ID of the clicked segment.
+            track_id: Detection track ID.
+            first_frame: First frame of the clicked segment (also its identifier).
+            last_frame: Last frame of the clicked segment.
+        """
         if self._session is None or self._current_run_id is None:
             return
 
         self._current_svid = shot_video_id
         self._current_track_id = track_id
+        self._current_seg_first = first_frame
         self._selected_label.setText(
             f"video: {shot_video_id[:8]}  track: {track_id}  "
             f"frames {first_frame}–{last_frame}"
@@ -651,170 +667,159 @@ class PoseExtractionWindow(QMainWindow):
     def _on_assign(self) -> None:
         """Handle the Assign button.
 
-        Reads the person name from the combo box and applies the assignment.
-        If "From here onwards" is checked, also assigns all subsequent
-        unassigned tracks in the same camera that start after the selected
-        bar's own start time.
+        Reads the person name from the combo box and assigns the currently
+        selected segment.
         """
-        if self._current_svid is None or self._current_track_id is None:
+        if (self._current_svid is None
+                or self._current_track_id is None
+                or self._current_seg_first is None):
             QMessageBox.information(self, "No track selected", "Click a track segment first.")
             return
         name = self._person_combo.currentText().strip()
         if not name:
             QMessageBox.warning(self, "No name", "Enter a person name.")
             return
-        self._do_assign(self._current_svid, self._current_track_id, name,
-                        from_here_onwards=self._from_here_cb.isChecked())
+        self._do_assign(self._current_svid, self._current_track_id,
+                        self._current_seg_first, name)
 
-    def _on_assignment_changed(self, svid: str, tid: int, person_name: object) -> None:
-        """Handle a single-segment assignment or detach from the stitcher context menu.
+    def _on_assignment_changed(self, svid: str, tid: int, seg_first: int, person_name: object) -> None:
+        """Handle an assignment or detach from the stitcher context menu.
 
         Args:
-            svid: Shot video ID of the clicked track.
-            tid: Track ID of the clicked segment.
+            svid: Shot video ID of the clicked segment.
+            tid: Track ID.
+            seg_first: First frame of the segment (its identifier).
             person_name: Person name string, or None for a detach operation.
         """
         if person_name:
-            self._do_assign(svid, tid, str(person_name), from_here_onwards=False)
+            self._do_assign(svid, tid, seg_first, str(person_name))
         else:
-            self._detach(svid, tid)
+            self._detach(svid, tid, seg_first)
 
-    def _on_assignment_from_here(self, svid: str, tid: int, person_name: str) -> None:
-        """Handle a 'From here onwards' assignment from the stitcher context menu.
+    def _on_split_requested(self, svid: str, tid: int, seg_first: int, split_frame: int) -> None:
+        """Handle a split request from the stitcher context menu.
+
+        Splits the segment at *split_frame*.  The left half keeps its existing
+        assignment; the right half starts unassigned.
 
         Args:
-            svid: Shot video ID of the clicked track.
-            tid: Track ID of the clicked segment.
-            person_name: Person to assign.
+            svid: Shot video ID.
+            tid: Track ID.
+            seg_first: First frame of the segment to split.
+            split_frame: Frame at which to split (first frame of the right half).
         """
-        self._do_assign(svid, tid, person_name, from_here_onwards=True)
+        # Remove any assignment for the right half (it has no assignment yet, but
+        # be defensive in case of a future double-split scenario)
+        right_key = (svid, tid, split_frame)
+        self._assignments.pop(right_key, None)
 
-    def _do_assign(self, svid: str, tid: int, name: str, *, from_here_onwards: bool) -> None:
-        """Compute the target track IDs, check for conflicts, show a dialog if needed, then apply.
+        self._stitcher.split_segment(svid, tid, seg_first, split_frame)
+        self._sync_frame_view_assignments()
+
+    def _do_assign(self, svid: str, tid: int, seg_first: int, name: str) -> None:
+        """Check for conflicts, show a dialog if needed, then apply the segment assignment.
 
         Args:
             svid: Camera to assign within.
-            tid: The primary (selected) track.
+            tid: Track ID.
+            seg_first: First frame of the segment to assign.
             name: Person name to assign.
-            from_here_onwards: If True, also assign all subsequent unassigned
-                tracks in *svid* whose start time is strictly after the selected
-                bar's own start time.
         """
-        tids = self._tracks_to_assign(svid, tid, from_here_onwards)
-        conflicts = self._find_conflicts(svid, tids, name)
+        seg_key = (svid, tid, seg_first)
+        conflicts = find_assignment_conflicts(
+            svid, [seg_key], name,
+            self._stitcher.get_spans(), self._assignments,
+        )
         if conflicts and not self._resolve_conflicts(conflicts, name):
             return
         for conflict_key in conflicts:
             self._detach(*conflict_key)
-        for t in tids:
-            self._apply_assignment(svid, t, name)
+        self._apply_assignment(svid, tid, seg_first, name)
 
-    def _tracks_to_assign(self, svid: str, tid: int, from_here_onwards: bool) -> list[int]:
-        """Return the list of track IDs that should be assigned.
-
-        Without expansion returns ``[tid]``.  With expansion returns the
-        primary track followed by all unassigned tracks in *svid* whose global
-        start time is **strictly greater** than the selected bar's own start
-        time.  Tracks starting at exactly the same time as the selected bar
-        (i.e. simultaneous detections of different people) are excluded.
-
-        Args:
-            svid: Camera to search within.
-            tid: Primary (selected) track; always first in the result.
-            from_here_onwards: Whether to expand beyond the primary track.
-        """
-        if not from_here_onwards:
-            return [tid]
-        time_spans = self._stitcher.get_time_spans()
-        min_time_s = time_spans.get((svid, tid), (0.0, 0.0))[0]
-        return tracks_from_here_onwards(svid, tid, time_spans, self._assignments, min_time_s)
-
-    def _find_conflicts(
+    def _resolve_conflicts(
         self,
-        svid: str,
-        tids: list[int],
+        conflicts: list[tuple[str, int, int]],
         person_name: str,
-    ) -> list[tuple[str, int]]:
-        """Return tracks already assigned to *person_name* that time-overlap any track in *tids*.
-
-        Delegates to the pure ``find_assignment_conflicts`` function using the
-        current frame-based span data from the stitcher.
-        """
-        return find_assignment_conflicts(svid, tids, person_name,
-                                         self._stitcher.get_spans(), self._assignments)
-
-    def _resolve_conflicts(self, conflicts: list[tuple[str, int]], person_name: str) -> bool:
+    ) -> bool:
         """Show a conflict resolution dialog and return whether to proceed.
 
-        Lists the conflicting tracks with their frame ranges and offers two
-        choices: detach all conflicting bars (returns True) or cancel (returns
-        False).
+        Lists the conflicting segments with their frame ranges and offers two
+        choices: detach all conflicting segments (returns True) or cancel
+        (returns False).
 
         Args:
-            conflicts: List of (svid, tid) pairs that time-overlap the proposed assignment.
+            conflicts: List of (svid, tid, seg_first) keys that overlap the proposed assignment.
             person_name: The person being assigned, shown in the dialog text.
         """
         msg = QMessageBox(self)
         msg.setWindowTitle("Assignment conflict")
         msg.setText(
             f"'{person_name}' is already assigned to {len(conflicts)} "
-            f"overlapping track(s) in this camera:"
+            f"overlapping segment(s) in this camera:"
         )
         lines = []
         spans = self._stitcher.get_spans()
-        for (s, t) in conflicts:
-            ff, lf = spans.get((s, t), (0, 0))
-            lines.append(f"  track {t}  (frames {ff}–{lf})")
+        for key in conflicts:
+            s, t, sf = key
+            ff, lf = spans.get(key, (sf, sf))
+            lines.append(f"  track {t}  frames {ff}–{lf}")
         msg.setInformativeText("\n".join(lines))
-        detach_btn: QAbstractButton = msg.addButton("Detach conflicting bars", QMessageBox.AcceptRole)
+        detach_btn: QAbstractButton = msg.addButton("Detach conflicting segments", QMessageBox.AcceptRole)
         msg.addButton("Cancel", QMessageBox.RejectRole)
         msg.exec()
         return msg.clickedButton() is detach_btn
 
-    def _apply_assignment(self, svid: str, tid: int, name: str) -> None:
-        """Record one track-to-person assignment and sync all dependent UI state.
+    def _apply_assignment(self, svid: str, tid: int, seg_first: int, name: str) -> None:
+        """Record a segment-to-person assignment and sync all dependent UI state.
 
-        Updates the internal assignments dict, the stitcher bar colour and name
-        label, the person combo box, and the frame view overlay colours.
+        Updates the internal assignments dict, the stitcher segment colour and
+        name label, the person combo box, and the frame view overlay colours.
 
         Args:
-            svid: Shot video ID of the track to assign.
-            tid: Track ID to assign.
+            svid: Shot video ID.
+            tid: Track ID.
+            seg_first: First frame of the segment to assign.
             name: Person name to assign.
         """
-        self._assignments[(svid, tid)] = name
-        self._stitcher.set_assignment(svid, tid, name)
+        self._assignments[(svid, tid, seg_first)] = name
+        self._stitcher.set_segment_assignment(svid, tid, seg_first, name)
         if self._person_combo.findText(name) < 0:
             self._person_combo.addItem(name)
         persons = [self._person_combo.itemText(i) for i in range(self._person_combo.count())]
         self._stitcher.set_known_persons(persons)
         self._sync_frame_view_assignments()
 
-    def _detach(self, svid: str, tid: int) -> None:
-        """Remove the person assignment from one track and sync all dependent UI state.
+    def _detach(self, svid: str, tid: int, seg_first: int) -> None:
+        """Remove the person assignment from one segment and sync all dependent UI state.
 
         Args:
-            svid: Shot video ID of the track to detach.
-            tid: Track ID to detach.
+            svid: Shot video ID.
+            tid: Track ID.
+            seg_first: First frame of the segment to detach.
         """
-        self._assignments.pop((svid, tid), None)
-        self._stitcher.set_assignment(svid, tid, None)
+        self._assignments.pop((svid, tid, seg_first), None)
+        self._stitcher.set_segment_assignment(svid, tid, seg_first, None)
         self._sync_frame_view_assignments()
 
     def _sync_frame_view_assignments(self) -> None:
         """Push the current camera's track→person assignments to the frame view overlay.
 
-        Filters the global assignments dict to tracks belonging to the currently
-        selected camera, then calls ``set_track_assignments`` on the frame view
-        so bbox colours stay consistent with the stitcher bars.
+        For each track, the assignment that applies at the current frame is
+        used (a split track can have different assignments in different frame
+        ranges).  Calls ``set_track_assignments`` on the frame view so bbox
+        colours stay in sync with the stitcher.
         """
         if self._current_svid is None:
             return
-        tid_to_person = {
-            tid: name
-            for (svid, tid), name in self._assignments.items()
-            if svid == self._current_svid
-        }
+        spans = self._stitcher.get_spans()
+        f = self._current_frame_idx
+        tid_to_person: dict[int, str] = {}
+        for (svid, tid, sf), person in self._assignments.items():
+            if svid != self._current_svid:
+                continue
+            seg_range = spans.get((svid, tid, sf))
+            if seg_range and seg_range[0] <= f <= seg_range[1]:
+                tid_to_person[tid] = person
         self._frame_view.set_track_assignments(tid_to_person)
 
     # ------------------------------------------------------------------
@@ -832,23 +837,21 @@ class PoseExtractionWindow(QMainWindow):
             QMessageBox.warning(self, "Warning", "Shot or sync config not selected.")
             return
 
-        # Get detection_run span data to build assignments
-        # Load all track span info
+        # Build one TrackAssignment per segment that has a person assigned.
+        # The stitcher's get_spans() returns {(svid, tid, seg_first): (first, last)}.
+        spans = self._stitcher.get_spans()
         assignment_list = []
-        for (svid, tid), person_name in self._assignments.items():
-            row = self._session.execute(
-                "SELECT first_frame, last_frame FROM person_tracks "
-                "WHERE detection_run_id=? AND shot_video_id=? AND track_id=?",
-                (self._current_run_id, svid, tid),
-            ).fetchone()
-            if row is None:
+        for (svid, tid, seg_first), person_name in self._assignments.items():
+            seg_range = spans.get((svid, tid, seg_first))
+            if seg_range is None:
                 continue
+            first_frame, last_frame = seg_range
             assignment_list.append(TrackAssignment(
                 shot_video_id=svid,
                 track_id=tid,
                 person_name=person_name,
-                first_frame=row["first_frame"],
-                last_frame=row["last_frame"],
+                first_frame=first_frame,
+                last_frame=last_frame,
             ))
 
         if not assignment_list:

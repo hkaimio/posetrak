@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.pose.assignment import find_assignment_conflicts
+from app.pose.person_preview import PersonPreviewWidget
 from app.pose.db_cache import list_detection_runs
 from app.pose.finalise import TrackAssignment, finalise_to_db
 from app.pose.frame_view import FrameViewWidget, _CameraInfo
@@ -273,6 +274,10 @@ class PoseExtractionWindow(QMainWindow):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(4)
+
+        # ---- Stitcher row: timeline + person preview side by side ----
+        stitcher_row = QSplitter(Qt.Horizontal)
 
         self._stitcher = StitcherWidget()
         self._stitcher.setMinimumHeight(150)
@@ -280,9 +285,21 @@ class PoseExtractionWindow(QMainWindow):
         self._stitcher.assignment_changed.connect(self._on_assignment_changed)
         self._stitcher.split_requested.connect(self._on_split_requested)
         self._stitcher.time_clicked.connect(self._frame_view.seek_global_time)
-        right_layout.addWidget(self._stitcher, 1)
+        stitcher_row.addWidget(self._stitcher)
 
-        # Assignment panel
+        self._preview = PersonPreviewWidget()
+        self._preview.setMinimumWidth(180)
+        self._preview.setMaximumWidth(280)
+        stitcher_row.addWidget(self._preview)
+
+        stitcher_row.setStretchFactor(0, 1)   # stitcher takes all extra space
+        stitcher_row.setStretchFactor(1, 0)   # preview stays at preferred width
+        right_layout.addWidget(stitcher_row, 1)
+
+        # Connect frame view → preview (raw frame + detections forwarded each seek)
+        self._frame_view.frame_data_ready.connect(self._preview.update_frame)
+
+        # ---- Assignment panel ----
         assign_group = QGroupBox("Selected track")
         assign_layout = QVBoxLayout(assign_group)
 
@@ -615,6 +632,8 @@ class PoseExtractionWindow(QMainWindow):
             f"video: {shot_video_id[:8]}  track: {track_id}  "
             f"frames {first_frame}–{last_frame}"
         )
+        person_name = self._assignments.get((shot_video_id, track_id, first_frame))
+        self._preview.set_track(track_id, person_name)
 
         # Load file path and camera_instance_id
         row = self._session.execute(
@@ -787,6 +806,10 @@ class PoseExtractionWindow(QMainWindow):
             self._person_combo.addItem(name)
         persons = [self._person_combo.itemText(i) for i in range(self._person_combo.count())]
         self._stitcher.set_known_persons(persons)
+        # Refresh preview name if the assignment is for the currently selected segment
+        if (svid, tid, seg_first) == (self._current_svid, self._current_track_id,
+                                       self._current_seg_first):
+            self._preview.set_track(tid, name)
         self._sync_frame_view_assignments()
 
     def _detach(self, svid: str, tid: int, seg_first: int) -> None:
@@ -799,6 +822,9 @@ class PoseExtractionWindow(QMainWindow):
         """
         self._assignments.pop((svid, tid, seg_first), None)
         self._stitcher.set_segment_assignment(svid, tid, seg_first, None)
+        if (svid, tid, seg_first) == (self._current_svid, self._current_track_id,
+                                       self._current_seg_first):
+            self._preview.set_track(tid, None)
         self._sync_frame_view_assignments()
 
     def _sync_frame_view_assignments(self) -> None:

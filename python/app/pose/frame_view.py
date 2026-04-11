@@ -174,6 +174,9 @@ class FrameViewWidget(QWidget):
 
     frame_changed = Signal(int, float)   # frame_idx, global_time_s
     camera_switched = Signal(str)        # shot_video_id
+    frame_data_ready = Signal(object, list, dict)
+    # (frame_bgr: np.ndarray, detections: list[dict], keypoints: dict[int, ndarray])
+    # Emitted after every seek, after overlay data is assembled.
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -320,6 +323,11 @@ class FrameViewWidget(QWidget):
         self._slider.blockSignals(False)
 
         self.frame_changed.emit(frame_idx, global_s)
+
+        dets = self._det_by_frame.get(frame_idx, [])
+        kps = self._kp_by_frame.get(frame_idx, {})
+        frame_bgr = img if ret else None
+        self.frame_data_ready.emit(frame_bgr, dets, kps)
 
     def seek_global_time(self, global_s: float) -> None:
         """Seek to the frame closest to *global_s* using the current camera's sync anchor."""

@@ -174,8 +174,9 @@ class FrameViewWidget(QWidget):
 
     frame_changed = Signal(int, float)   # frame_idx, global_time_s
     camera_switched = Signal(str)        # shot_video_id
-    frame_data_ready = Signal(object, list, dict)
+    frame_data_ready = Signal(object, object, object)
     # (frame_bgr: np.ndarray, detections: list[dict], keypoints: dict[int, ndarray])
+    # All three declared as object to prevent PySide6 C++ type conversion.
     # Emitted after every seek, after overlay data is assembled.
 
     def __init__(self, parent=None):

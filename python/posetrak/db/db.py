@@ -18,8 +18,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 4
-SESSION_SCHEMA_VERSION: Final[int] = 9
+REGISTRY_SCHEMA_VERSION: Final[int] = 5
+SESSION_SCHEMA_VERSION: Final[int] = 10
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -231,6 +231,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 3
     if actual == 3:
         _migrate_registry_v3_to_v4(conn)
+        actual = 4
+    if actual == 4:
+        _migrate_registry_v4_to_v5(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -429,6 +432,43 @@ def _migrate_session_v8_to_v9(conn: sqlite3.Connection) -> None:
     conn.executescript(sql)
 
 
+def _migrate_registry_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 4 to 5.
+
+    v5 adds default_intrinsics_calibration_id (nullable FK) to camera_modes so
+    the shot wizard can auto-select the preferred calibration for a mode.
+    """
+    sql = (_DB_DIR / "migrations" / "009_camera_modes_default_calib.sql").read_text(
+        encoding="utf-8"
+    )
+    conn.executescript(sql)
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+
+
+def _migrate_session_v9_to_v10(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 9 to 10.
+
+    v10 adds default_intrinsics_calibration_id (nullable FK) to the session-local
+    copy of camera_modes, mirroring the registry schema v4→v5 change.
+
+    Very old hand-crafted sessions (created before create_session() embedded the
+    registry schema) may not have a camera_modes table.  In that case the ALTER
+    TABLE is skipped; the column will be present when the registry tables are
+    eventually created for that session.
+    """
+    has_camera_modes = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='camera_modes'"
+    ).fetchone() is not None
+    if has_camera_modes:
+        sql = (_DB_DIR / "migrations" / "009_camera_modes_default_calib.sql").read_text(
+            encoding="utf-8"
+        )
+        conn.executescript(sql)
+    conn.execute("PRAGMA user_version = 10")
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -476,6 +516,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 8
     if actual == 8:
         _migrate_session_v8_to_v9(conn)
+        actual = 9
+    if actual == 9:
+        _migrate_session_v9_to_v10(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

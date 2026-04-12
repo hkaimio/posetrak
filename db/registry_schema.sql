@@ -17,14 +17,17 @@ CREATE TABLE IF NOT EXISTS camera_models (
 );
 
 -- Capture modes associated with a camera model (resolution, fps, codec)
+-- default_intrinsics_calibration_id: the preferred calibration for this mode,
+-- auto-offered by the shot wizard; NULL if no default has been set.
 CREATE TABLE IF NOT EXISTS camera_modes (
-    id               TEXT PRIMARY KEY,
-    camera_model_id  TEXT    NOT NULL REFERENCES camera_models(id),
-    width_px         INTEGER NOT NULL DEFAULT 0,
-    height_px        INTEGER NOT NULL DEFAULT 0,
-    nominal_fps      REAL    NOT NULL DEFAULT 0.0,
-    codec            TEXT,
-    notes            TEXT
+    id                                TEXT PRIMARY KEY,
+    camera_model_id                   TEXT    NOT NULL REFERENCES camera_models(id),
+    width_px                          INTEGER NOT NULL DEFAULT 0,
+    height_px                         INTEGER NOT NULL DEFAULT 0,
+    nominal_fps                       REAL    NOT NULL DEFAULT 0.0,
+    codec                             TEXT,
+    notes                             TEXT,
+    default_intrinsics_calibration_id TEXT    REFERENCES intrinsics_calibrations(id)
 );
 
 -- Individual physical camera units (serial number, user label)

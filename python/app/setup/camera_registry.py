@@ -16,6 +16,11 @@ CalibrationImportDialog
     Import an HDF5 calibration or enter calibration values manually.
 InstanceDialog
     Add a camera_instances row.
+InlineCreateModelDialog
+    Lightweight model-creation dialog for use from within the wizard.
+InlineCreateCameraDialog
+    Lightweight instance-creation dialog; opened from the camera picker in the
+    shots page when no suitable camera is registered yet.
 """
 
 from __future__ import annotations
@@ -678,6 +683,278 @@ class _ModelCombo(QWidget):
             if self._combo.itemData(i) == model_id:
                 self._combo.setCurrentIndex(i)
                 return
+
+
+# ---------------------------------------------------------------------------
+# InlineCreateModelDialog
+# ---------------------------------------------------------------------------
+
+
+class InlineCreateModelDialog(QDialog):
+    """Minimal dialog to create a camera_models row on the fly.
+
+    Writes to *session_conn* (always) and *registry_conn* (when not None).
+    """
+
+    def __init__(
+        self,
+        session_conn: sqlite3.Connection,
+        registry_conn: sqlite3.Connection | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._session_conn = session_conn
+        self._registry_conn = registry_conn
+        self._saved_id: str | None = None
+
+        self.setWindowTitle("Register Camera Model")
+        self.setMinimumWidth(340)
+
+        self._manufacturer = QLineEdit()
+        self._manufacturer.setPlaceholderText("e.g. Sony (optional)")
+        self._model_name = QLineEdit()
+        self._model_name.setPlaceholderText("e.g. ZV-E10 (required)")
+
+        self._error = QLabel()
+        self._error.setStyleSheet("color: red;")
+        self._error.setVisible(False)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Create Model")
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+
+        form = QFormLayout()
+        form.addRow("Manufacturer:", self._manufacturer)
+        form.addRow("Model name *:", self._model_name)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(self._error)
+        layout.addWidget(buttons)
+
+    def _accept(self) -> None:
+        model_name = self._model_name.text().strip()
+        if not model_name:
+            self._error.setText("Model name is required.")
+            self._error.setVisible(True)
+            return
+        manufacturer = self._manufacturer.text().strip() or None
+
+        model_id = generate_id()
+        for conn in (self._session_conn, self._registry_conn):
+            if conn is None:
+                continue
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO camera_models (id, manufacturer, model_name) "
+                    "VALUES (?,?,?)",
+                    (model_id, manufacturer, model_name),
+                )
+                conn.commit()
+            except Exception as exc:  # noqa: BLE001
+                self._error.setText(str(exc))
+                self._error.setVisible(True)
+                return
+
+        self._saved_id = model_id
+        self.accept()
+
+    def saved_model_id(self) -> str | None:
+        return self._saved_id
+
+
+# ---------------------------------------------------------------------------
+# InlineCreateCameraDialog
+# ---------------------------------------------------------------------------
+
+
+class InlineCreateCameraDialog(QDialog):
+    """Minimal dialog to create a camera_instances row on the fly.
+
+    Shows a model dropdown with a "New model…" sentinel.  Writes to
+    *session_conn* (always) and *registry_conn* (when not None).
+    """
+
+    def __init__(
+        self,
+        session_conn: sqlite3.Connection,
+        registry_conn: sqlite3.Connection | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._session_conn = session_conn
+        self._registry_conn = registry_conn
+        self._saved_id: str | None = None
+
+        self.setWindowTitle("Register Camera")
+        self.setMinimumWidth(360)
+
+        self._label = QLineEdit()
+        self._label.setPlaceholderText("e.g. cam1  (required)")
+
+        self._model_combo = _InlineModelCombo(session_conn, registry_conn)
+        self._model_combo.new_model_requested.connect(self._open_new_model_dialog)
+
+        self._serial = QLineEdit()
+        self._serial.setPlaceholderText("Serial number (optional)")
+
+        self._error = QLabel()
+        self._error.setStyleSheet("color: red;")
+        self._error.setVisible(False)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Register & Select")
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+
+        form = QFormLayout()
+        form.addRow("Label *:", self._label)
+        form.addRow("Camera model *:", self._model_combo)
+        form.addRow("Serial number:", self._serial)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(self._error)
+        layout.addWidget(buttons)
+
+        # If no models exist at all, immediately prompt to create one
+        if not self._model_combo.has_models():
+            self._open_new_model_dialog()
+
+    def _open_new_model_dialog(self) -> None:
+        dlg = InlineCreateModelDialog(self._session_conn, self._registry_conn, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            model_id = dlg.saved_model_id()
+            self._model_combo.refresh()
+            self._model_combo.set_model_id(model_id)
+
+    def _accept(self) -> None:
+        label = self._label.text().strip()
+        model_id = self._model_combo.current_model_id()
+        if not label:
+            self._error.setText("Label is required.")
+            self._error.setVisible(True)
+            return
+        if not model_id:
+            self._error.setText("Select a camera model.")
+            self._error.setVisible(True)
+            return
+        serial = self._serial.text().strip() or None
+
+        instance_id = generate_id()
+        for conn in (self._session_conn, self._registry_conn):
+            if conn is None:
+                continue
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO camera_instances "
+                    "(id, camera_model_id, serial_number, label) VALUES (?,?,?,?)",
+                    (instance_id, model_id, serial, label),
+                )
+                conn.commit()
+            except Exception as exc:  # noqa: BLE001
+                self._error.setText(str(exc))
+                self._error.setVisible(True)
+                return
+
+        self._saved_id = instance_id
+        self.accept()
+
+    def saved_instance_id(self) -> str | None:
+        return self._saved_id
+
+
+# ---------------------------------------------------------------------------
+# _InlineModelCombo — model picker with "New model…" sentinel
+# ---------------------------------------------------------------------------
+
+
+class _InlineModelCombo(QWidget):
+    """Model picker combo that includes a 'New model…' sentinel item."""
+
+    new_model_requested = Signal()
+
+    _NEW_MODEL_SENTINEL = "__new_model__"
+
+    def __init__(
+        self,
+        session_conn: sqlite3.Connection,
+        registry_conn: sqlite3.Connection | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        from PySide6.QtWidgets import QComboBox
+        self._session_conn = session_conn
+        self._registry_conn = registry_conn
+        self._combo = QComboBox()
+        self._combo.setMinimumWidth(220)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._combo)
+        self.refresh()
+        self._combo.currentIndexChanged.connect(self._on_index_changed)
+
+    def refresh(self) -> None:
+        self._combo.blockSignals(True)
+        self._combo.clear()
+        self._combo.addItem("(select model…)", None)
+        # Collect models from session; registry rows were already upserted by the wizard
+        rows = self._session_conn.execute(
+            "SELECT id, manufacturer, model_name FROM camera_models ORDER BY model_name"
+        ).fetchall()
+        seen: set[str] = set()
+        for row in rows:
+            label = row["model_name"]
+            if row["manufacturer"]:
+                label = f"{row['manufacturer']} {label}"
+            self._combo.addItem(label, row["id"])
+            seen.add(row["id"])
+        # Also surface any models that exist only in registry (not yet copied)
+        if self._registry_conn:
+            for row in self._registry_conn.execute(
+                "SELECT id, manufacturer, model_name FROM camera_models ORDER BY model_name"
+            ).fetchall():
+                if row["id"] in seen:
+                    continue
+                label = row["model_name"]
+                if row["manufacturer"]:
+                    label = f"{row['manufacturer']} {label} [registry]"
+                self._combo.addItem(label, row["id"])
+        self._combo.addItem("New model…", self._NEW_MODEL_SENTINEL)
+        self._combo.blockSignals(False)
+
+    def has_models(self) -> bool:
+        """Return True if at least one real model exists (not the sentinel)."""
+        for i in range(self._combo.count()):
+            d = self._combo.itemData(i)
+            if d is not None and d != self._NEW_MODEL_SENTINEL:
+                return True
+        return False
+
+    def current_model_id(self) -> str | None:
+        data = self._combo.currentData()
+        if data == self._NEW_MODEL_SENTINEL or data is None:
+            return None
+        return data
+
+    def set_model_id(self, model_id: str) -> None:
+        for i in range(self._combo.count()):
+            if self._combo.itemData(i) == model_id:
+                self._combo.setCurrentIndex(i)
+                return
+
+    def _on_index_changed(self) -> None:
+        if self._combo.currentData() == self._NEW_MODEL_SENTINEL:
+            # Reset to placeholder so we don't stay on the sentinel
+            self._combo.blockSignals(True)
+            self._combo.setCurrentIndex(0)
+            self._combo.blockSignals(False)
+            self.new_model_requested.emit()
 
 
 # ---------------------------------------------------------------------------

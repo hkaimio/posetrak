@@ -29,10 +29,11 @@ config    create    Create a tracker config snapshot from a TOML file.
 config    edit      Derive a new tracker config by overriding fields.
 config    list      List tracker configs.
 
-session   create         Create a new mocap session in a session database.
-session   list           List mocap sessions in a session database.
-session   add-camera     Link a camera (with registry copy) to a session.
-session   import-yaml    Import a capture project YAML into a session database.
+session   create           Create a new mocap session in a session database.
+session   list             List mocap sessions in a session database.
+session   add-camera       Link a camera (with registry copy) to a session.
+session   import-yaml      Import a capture project YAML into a session database.
+session   fix-camera-refs  Repair shot_videos with free-text camera_instance_id values.
 
 extrinsics  import  Import extrinsic calibration from a Pose2Sim TOML file.
 extrinsics  list    List extrinsic calibrations in a session database.
@@ -69,6 +70,7 @@ from posetrak.db.db import (
     create_registry,
     create_session,
     create_shot,
+    generate_id,
     get_project_root,
     get_schema_version,
     list_camera_instances,
@@ -1193,6 +1195,356 @@ def _cmd_session_import_yaml(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_session_fix_camera_refs(args: argparse.Namespace) -> int:
+    """Repair shot_videos rows whose camera_instance_id is a free-text string.
+
+    Identifies dangling camera_instance_id values (strings that do not match
+    any row in camera_instances) and interactively prompts the user to map each
+    one to an existing instance or create a new one.
+    """
+    import sqlite3 as _sqlite3
+
+    try:
+        session_conn = open_session(Path(args.session_db))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error opening session db: {exc}", file=sys.stderr)
+        return 1
+
+    registry: _sqlite3.Connection | None = None
+    if args.registry:
+        try:
+            registry = open_registry(Path(args.registry))
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"Error opening registry: {exc}", file=sys.stderr)
+            session_conn.close()
+            return 1
+
+    try:
+        return _fix_camera_refs(session_conn, registry)
+    finally:
+        session_conn.close()
+        if registry:
+            registry.close()
+
+
+def _fix_camera_refs(
+    session_conn,
+    registry,
+) -> int:
+    """Interactive repair of dangling camera_instance_id values."""
+    # 1. Find dangling references
+    dangling_rows = session_conn.execute(
+        """
+        SELECT DISTINCT sv.camera_instance_id
+        FROM shot_videos sv
+        WHERE sv.camera_instance_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM camera_instances ci
+              WHERE ci.id = sv.camera_instance_id
+          )
+        ORDER BY sv.camera_instance_id
+        """
+    ).fetchall()
+
+    if not dangling_rows:
+        print("No dangling camera references found.")
+        return 0
+
+    dangling = [row[0] for row in dangling_rows]
+    print(f"Found {len(dangling)} dangling camera_instance_id value(s):")
+    for d in dangling:
+        print(f"  - {d!r}")
+    print()
+
+    mapping: dict[str, str] = {}  # old dangling value → new UUID
+
+    for old_id in dangling:
+        print(f"Resolving: {old_id!r}")
+        resolved = _prompt_resolve_camera(old_id, session_conn, registry)
+        if resolved is None:
+            print("  Skipped.")
+            continue
+        mapping[old_id] = resolved
+
+    if not mapping:
+        print("Nothing to update.")
+        return 0
+
+    # 3. Apply updates
+    for old_id, new_id in mapping.items():
+        session_conn.execute(
+            "UPDATE shot_videos SET camera_instance_id = ? WHERE camera_instance_id = ?",
+            (new_id, old_id),
+        )
+
+    # 4. Upsert session_cameras for all affected sessions
+    for new_id in set(mapping.values()):
+        affected = session_conn.execute(
+            """
+            SELECT DISTINCT sh.session_id
+            FROM shot_videos sv
+            JOIN shots sh ON sh.id = sv.shot_id
+            WHERE sv.camera_instance_id = ?
+            """,
+            (new_id,),
+        ).fetchall()
+        ci_row = session_conn.execute(
+            "SELECT label FROM camera_instances WHERE id = ?", (new_id,)
+        ).fetchone()
+        label = ci_row["label"] if ci_row else ""
+        for row in affected:
+            session_conn.execute(
+                "INSERT OR IGNORE INTO session_cameras (id, session_id, camera_instance_id, label) "
+                "VALUES (?,?,?,?)",
+                (generate_id(), row["session_id"], new_id, label),
+            )
+
+    session_conn.commit()
+    print(f"\nUpdated {len(mapping)} dangling reference(s).")
+
+    # 5. Optionally fill NULL camera_mode_id / intrinsics_calibration_id
+    null_rows = session_conn.execute(
+        """
+        SELECT sv.id, sv.camera_instance_id,
+               sv.camera_mode_id, sv.intrinsics_calibration_id
+        FROM shot_videos sv
+        WHERE sv.camera_instance_id IS NOT NULL
+          AND (sv.camera_mode_id IS NULL OR sv.intrinsics_calibration_id IS NULL)
+        """
+    ).fetchall()
+    if null_rows:
+        print(
+            f"\n{len(null_rows)} shot_video(s) still have NULL camera_mode or intrinsics. "
+            "Run 'posetrak-db shot add-video --help' or update manually via the wizard."
+        )
+
+    return 0
+
+
+def _prompt_resolve_camera(
+    dangling_id: str,
+    session_conn,
+    registry,
+) -> str | None:
+    """Interactive prompt: map one dangling string to an existing or new instance UUID."""
+    # Collect candidates from session and registry
+    candidates = session_conn.execute(
+        "SELECT id, label, serial_number FROM camera_instances ORDER BY label"
+    ).fetchall()
+    registry_candidates = []
+    if registry:
+        registry_candidates = registry.execute(
+            "SELECT id, label, serial_number FROM camera_instances ORDER BY label"
+        ).fetchall()
+
+    print("  Options:")
+    idx = 1
+    options: list[tuple[str, str]] = []  # (display, uuid)
+    for row in candidates:
+        sn = f"  S/N {row['serial_number']}" if row["serial_number"] else ""
+        print(f"  [{idx}] {row['label']}{sn}  (session-local)")
+        options.append((row["label"], row["id"]))
+        idx += 1
+    for row in registry_candidates:
+        # Skip if already in session
+        if any(o[1] == row["id"] for o in options):
+            continue
+        sn = f"  S/N {row['serial_number']}" if row["serial_number"] else ""
+        print(f"  [{idx}] {row['label']}{sn}  [registry]")
+        options.append((row["label"], row["id"]))
+        idx += 1
+    print(f"  [{idx}] Create new instance")
+    create_idx = idx
+    idx += 1
+    print(f"  [{idx}] Skip")
+    skip_idx = idx
+
+    while True:
+        try:
+            raw = input("  Choice: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        try:
+            choice = int(raw)
+        except ValueError:
+            print("  Please enter a number.")
+            continue
+        if 1 <= choice <= len(options):
+            chosen_id = options[choice - 1][1]
+            # Copy registry row into session if needed
+            if registry:
+                _upsert_instance_from_registry(session_conn, registry, chosen_id)
+            return chosen_id
+        if choice == create_idx:
+            return _create_instance_interactively(session_conn, registry, dangling_id)
+        if choice == skip_idx:
+            return None
+        print("  Invalid choice.")
+
+
+def _upsert_instance_from_registry(session_conn, registry, instance_id: str) -> None:
+    """Copy a camera_instances row (and its model) from registry to session."""
+    model_row = registry.execute(
+        """
+        SELECT cm.id, cm.manufacturer, cm.model_name, cm.sensor_width_mm, cm.sensor_height_mm
+        FROM camera_instances ci
+        JOIN camera_models cm ON cm.id = ci.camera_model_id
+        WHERE ci.id = ?
+        """,
+        (instance_id,),
+    ).fetchone()
+    if model_row:
+        session_conn.execute(
+            "INSERT OR IGNORE INTO camera_models "
+            "(id, manufacturer, model_name, sensor_width_mm, sensor_height_mm) "
+            "VALUES (?,?,?,?,?)",
+            (
+                model_row["id"],
+                model_row["manufacturer"],
+                model_row["model_name"],
+                model_row["sensor_width_mm"],
+                model_row["sensor_height_mm"],
+            ),
+        )
+    inst_row = registry.execute(
+        "SELECT id, camera_model_id, serial_number, label FROM camera_instances WHERE id = ?",
+        (instance_id,),
+    ).fetchone()
+    if inst_row:
+        session_conn.execute(
+            "INSERT OR IGNORE INTO camera_instances (id, camera_model_id, serial_number, label) "
+            "VALUES (?,?,?,?)",
+            (
+                inst_row["id"],
+                inst_row["camera_model_id"],
+                inst_row["serial_number"],
+                inst_row["label"],
+            ),
+        )
+
+
+def _create_instance_interactively(
+    session_conn,
+    registry,
+    suggested_label: str,
+) -> str | None:
+    """Prompt for model + label + serial and create a camera_instances row."""
+    # Gather models
+    models = session_conn.execute(
+        "SELECT id, manufacturer, model_name FROM camera_models ORDER BY model_name"
+    ).fetchall()
+    registry_models = []
+    if registry:
+        registry_models = registry.execute(
+            "SELECT id, manufacturer, model_name FROM camera_models ORDER BY model_name"
+        ).fetchall()
+
+    print("\n  Available models:")
+    idx = 1
+    model_options: list[str] = []
+    seen_model_ids: set[str] = set()
+    for row in models:
+        label = row["model_name"]
+        if row["manufacturer"]:
+            label = f"{row['manufacturer']} {label}"
+        print(f"  [{idx}] {label}")
+        model_options.append(row["id"])
+        seen_model_ids.add(row["id"])
+        idx += 1
+    for row in registry_models:
+        if row["id"] in seen_model_ids:
+            continue
+        label = row["model_name"]
+        if row["manufacturer"]:
+            label = f"{row['manufacturer']} {label} [registry]"
+        print(f"  [{idx}] {label}")
+        model_options.append(row["id"])
+        idx += 1
+    print(f"  [{idx}] Create new model")
+    new_model_idx = idx
+
+    while True:
+        try:
+            raw = input("  Model choice: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        try:
+            choice = int(raw)
+        except ValueError:
+            print("  Please enter a number.")
+            continue
+        if 1 <= choice <= len(model_options):
+            model_id = model_options[choice - 1]
+            # Copy from registry if needed
+            if registry:
+                _upsert_model_from_registry(session_conn, registry, model_id)
+            break
+        if choice == new_model_idx:
+            model_id = _create_model_interactively(session_conn, registry)
+            if model_id is None:
+                return None
+            break
+        print("  Invalid choice.")
+
+    try:
+        label = input(f"  Instance label [{suggested_label}]: ").strip() or suggested_label
+        serial_raw = input("  Serial number (leave blank to skip): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+    serial = serial_raw or None
+    instance_id = generate_id()
+    for conn in (session_conn, registry if registry else None):
+        if conn is None:
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO camera_instances (id, camera_model_id, serial_number, label) "
+            "VALUES (?,?,?,?)",
+            (instance_id, model_id, serial, label),
+        )
+    return instance_id
+
+
+def _upsert_model_from_registry(session_conn, registry, model_id: str) -> None:
+    row = registry.execute(
+        "SELECT id, manufacturer, model_name, sensor_width_mm, sensor_height_mm "
+        "FROM camera_models WHERE id = ?",
+        (model_id,),
+    ).fetchone()
+    if row:
+        session_conn.execute(
+            "INSERT OR IGNORE INTO camera_models "
+            "(id, manufacturer, model_name, sensor_width_mm, sensor_height_mm) "
+            "VALUES (?,?,?,?,?)",
+            (row["id"], row["manufacturer"], row["model_name"],
+             row["sensor_width_mm"], row["sensor_height_mm"]),
+        )
+
+
+def _create_model_interactively(session_conn, registry) -> str | None:
+    try:
+        manufacturer = input("  Manufacturer (leave blank to skip): ").strip() or None
+        model_name = input("  Model name: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if not model_name:
+        print("  Model name is required — skipping.")
+        return None
+    model_id = generate_id()
+    for conn in (session_conn, registry if registry else None):
+        if conn is None:
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO camera_models (id, manufacturer, model_name) VALUES (?,?,?)",
+            (model_id, manufacturer, model_name),
+        )
+    return model_id
+
+
 # ---------------------------------------------------------------------------
 # Command handlers — extrinsics
 # ---------------------------------------------------------------------------
@@ -1840,6 +2192,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", dest="dry_run",
                    help="Print what would be created without writing to the database")
 
+    p = ses_actions.add_parser(
+        "fix-camera-refs",
+        help="Repair shot_videos rows whose camera_instance_id is a free-text string",
+    )
+    _add_session_db_arg(p, required=True)
+    p.add_argument(
+        "--registry",
+        default=None,
+        metavar="PATH",
+        help="Path to the registry .db file (optional; enables registry-backed lookup)",
+    )
+
     # -------------------------------------------------------------------------
     # extrinsics topic
     # -------------------------------------------------------------------------
@@ -1990,6 +2354,7 @@ def main() -> None:
         ("session", "create"): _cmd_session_create,
         ("session", "add-camera"): _cmd_session_add_camera,
         ("session", "import-yaml"): _cmd_session_import_yaml,
+        ("session", "fix-camera-refs"): _cmd_session_fix_camera_refs,
         ("extrinsics", "list"): _cmd_extrinsics_list,
         ("extrinsics", "import"): _cmd_extrinsics_import,
         ("shot", "list"): _cmd_shot_list,

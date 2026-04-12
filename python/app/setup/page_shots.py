@@ -184,6 +184,8 @@ class _VideoRow(QWidget):
     # Private helpers
     # ------------------------------------------------------------------
 
+    _CREATE_SENTINEL = "__create_new__"
+
     def _refresh_cameras(self) -> None:
         if self._db_context is None:
             return
@@ -196,10 +198,20 @@ class _VideoRow(QWidget):
             if row["from_registry"]:
                 label += " [registry]"
             self._cam_combo.addItem(label, row["id"])
+        self._cam_combo.addItem("Create new camera…", self._CREATE_SENTINEL)
         self._cam_combo.blockSignals(False)
 
     def _on_camera_changed(self) -> None:
         instance_id = self._cam_combo.currentData()
+
+        if instance_id == self._CREATE_SENTINEL:
+            # Reset to placeholder before opening dialog so we don't stay on sentinel
+            self._cam_combo.blockSignals(True)
+            self._cam_combo.setCurrentIndex(0)
+            self._cam_combo.blockSignals(False)
+            self._open_inline_create_camera()
+            return
+
         self._entry.camera_instance_id = instance_id
         self._entry.camera_mode_id = None
         self._entry.intrinsics_calibration_id = None
@@ -329,6 +341,31 @@ class _VideoRow(QWidget):
             fps_str = f"{fps:.0f}fps" if fps == int(fps) else f"{fps:.2f}fps"
             prefix = "✓ " if self._mode_matches(probe, row) else ""
             self._mode_combo.setItemText(i, f"{prefix}{w}×{h} {fps_str}")
+
+    def _open_inline_create_camera(self) -> None:
+        """Open InlineCreateCameraDialog; on accept select the new instance."""
+        if self._db_context is None:
+            return
+        from app.setup.camera_registry import InlineCreateCameraDialog
+
+        dlg = InlineCreateCameraDialog(
+            self._db_context._conn,
+            self._db_context._registry_conn,
+            self,
+        )
+        if dlg.exec() != InlineCreateCameraDialog.DialogCode.Accepted:
+            return
+
+        new_id = dlg.saved_instance_id()
+        if not new_id:
+            return
+
+        # Refresh combo and select the new instance
+        self._refresh_cameras()
+        for i in range(self._cam_combo.count()):
+            if self._cam_combo.itemData(i) == new_id:
+                self._cam_combo.setCurrentIndex(i)
+                break
 
 
 # ---------------------------------------------------------------------------

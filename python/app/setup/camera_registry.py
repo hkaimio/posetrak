@@ -483,7 +483,8 @@ class ModeDialog(QDialog):
             rms = f"rms {row['rms_error']:.3f}" if row["rms_error"] else "rms —"
             date = (row["calibrated_at"] or "")[:10]
             marker = " ●" if row["id"] == default_id else ""
-            label = f"{date}  {rms}{f'  {row[\"notes\"]}' if row['notes'] else ''}{marker}"
+            notes_part = f"  {row['notes']}" if row["notes"] else ""
+            label = f"{date}  {rms}{notes_part}{marker}"
             item = QListWidgetItem(label)
             item.setData(_ID_ROLE, row["id"])
             self._calib_list.addItem(item)

@@ -242,7 +242,10 @@ def load_cameras_from_session(
     """
     conn = _open_db(session_db)
     try:
-        # Get extrinsic entries joined with intrinsics via session_cameras
+        # Get extrinsic entries; intrinsics are now stored on shot_videos (v11+).
+        # For each camera instance in the session, pick the intrinsics from the
+        # first shot_video (by shot_number then rowid) that has a non-NULL
+        # intrinsics_calibration_id.  Falls back to NULL if none is set.
         rows = conn.execute(
             """
             SELECT
@@ -254,16 +257,24 @@ def load_cameras_from_session(
                 ic.fx, ic.fy, ic.cx, ic.cy,
                 ic.dist_coeffs AS dist_blob
             FROM extrinsic_entries ee
-            JOIN session_cameras sc
+            LEFT JOIN session_cameras sc
                 ON sc.camera_instance_id = ee.camera_instance_id
-                AND sc.session_id = ?
+                AND sc.session_id = :session_id
             LEFT JOIN camera_instances ci
                 ON ci.id = ee.camera_instance_id
-            JOIN intrinsics_calibrations ic
-                ON ic.id = sc.intrinsics_calibration_id
-            WHERE ee.extrinsic_calibration_id = ?
+            LEFT JOIN (
+                SELECT sv.camera_instance_id, sv.intrinsics_calibration_id
+                FROM shot_videos sv
+                JOIN shots sh ON sh.id = sv.shot_id
+                WHERE sh.session_id = :session_id
+                  AND sv.intrinsics_calibration_id IS NOT NULL
+                GROUP BY sv.camera_instance_id
+            ) sv_intr ON sv_intr.camera_instance_id = ee.camera_instance_id
+            LEFT JOIN intrinsics_calibrations ic
+                ON ic.id = sv_intr.intrinsics_calibration_id
+            WHERE ee.extrinsic_calibration_id = :ext_cal_id
             """,
-            (session_id, extrinsic_calibration_id),
+            {"session_id": session_id, "ext_cal_id": extrinsic_calibration_id},
         ).fetchall()
 
         if not rows:
@@ -274,7 +285,13 @@ def load_cameras_from_session(
 
         cams = []
         for row in rows:
-            label = row["label"] or row["camera_instance_id"]
+            if row["fx"] is None:
+                warnings.warn(
+                    f"No intrinsics found for camera_instance_id={row['camera_instance_id']!r}; "
+                    "camera skipped. Set intrinsics_calibration_id on shot_videos to fix this."
+                )
+                continue
+            label = row["label"] or row["instance_label"] or row["camera_instance_id"]
             R = np.frombuffer(bytes(row["R_blob"]), "<f8").reshape(3, 3).copy()
             t = np.frombuffer(bytes(row["t_blob"]), "<f8").copy()
             fx, fy = float(row["fx"]), float(row["fy"])

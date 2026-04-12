@@ -338,7 +338,10 @@ class TestLoadTrackingRunData:
 
 
 def _insert_cameras(conn: sqlite3.Connection, ids: dict) -> dict:
-    """Insert two cameras with intrinsics and extrinsics; return camera_instance_ids."""
+    """Insert two cameras with intrinsics and extrinsics; return camera_instance_ids.
+
+    Intrinsics are stored on shot_videos (v11+ schema) rather than session_cameras.
+    """
     cam_model_id = _new_id()
     conn.execute(
         "INSERT INTO camera_models (id, manufacturer, model_name) VALUES (?, ?, ?)",
@@ -375,16 +378,30 @@ def _insert_cameras(conn: sqlite3.Connection, ids: dict) -> dict:
 
     session_id = ids["session_id"]
     ext_cal_id = ids["ext_cal_id"]
+    shot_id = ids["shot_id"]
 
-    for inst_id, intr_id, label in [
-        (inst1_id, intr1_id, "cam_a"),
-        (inst2_id, intr2_id, "cam_b"),
+    # session_cameras now only tracks participation (no mode/intrinsics columns)
+    for inst_id, label in [(inst1_id, "cam_a"), (inst2_id, "cam_b")]:
+        conn.execute(
+            "INSERT INTO session_cameras (session_id, camera_instance_id, label) "
+            "VALUES (?, ?, ?)",
+            (session_id, inst_id, label),
+        )
+
+    # Intrinsics are stored per shot_video (v11+ schema)
+    sv1_id, sv2_id = _new_id(), _new_id()
+    for sv_id, inst_id, intr_id, label in [
+        (sv1_id, inst1_id, intr1_id, "cam_a"),
+        (sv2_id, inst2_id, intr2_id, "cam_b"),
     ]:
         conn.execute(
-            "INSERT INTO session_cameras "
-            "(session_id, camera_instance_id, camera_mode_id, intrinsics_calibration_id, label) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (session_id, inst_id, cam_mode_id, intr_id, label),
+            "INSERT INTO shot_videos "
+            "(id, shot_id, camera_instance_id, file_path, "
+            "first_video_frame, last_video_frame, actual_fps, "
+            "camera_mode_id, intrinsics_calibration_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (sv_id, shot_id, inst_id, f"/data/{label}.mp4",
+             0, 99, 60.0, cam_mode_id, intr_id),
         )
 
     R_identity = _float64_blob(np.eye(3).flatten())

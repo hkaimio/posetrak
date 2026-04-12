@@ -27,6 +27,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -57,7 +58,9 @@ class VideoEntry:
     path: str
     probe: VideoProbeResult | None = None
     error: str | None = None
-    camera_id: str = ""  # editable camera identifier; defaults to filename stem
+    camera_instance_id: str | None = None
+    camera_mode_id: str | None = None
+    intrinsics_calibration_id: str | None = None
 
 
 @dataclass
@@ -97,13 +100,14 @@ class _ProbeWorker(QThread):
 
 
 class _VideoRow(QWidget):
-    """Compact row widget showing one video file + its probe result."""
+    """Compact row widget showing one video file + camera/mode pickers."""
 
     remove_requested = Signal(object)  # emits VideoEntry
 
-    def __init__(self, entry: VideoEntry, parent=None) -> None:
+    def __init__(self, entry: VideoEntry, db_context, parent=None) -> None:
         super().__init__(parent)
         self._entry = entry
+        self._db_context = db_context
 
         self._path_label = QLabel(Path(entry.path).name)
         self._path_label.setToolTip(entry.path)
@@ -111,21 +115,24 @@ class _VideoRow(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
 
-        cam_lbl = QLabel("Cam:")
-        cam_lbl.setStyleSheet("font-size: 11px;")
+        # Camera instance picker
+        self._cam_combo = QComboBox()
+        self._cam_combo.setFixedWidth(160)
+        self._cam_combo.setStyleSheet("font-size: 11px;")
+        self._cam_combo.addItem("— select camera —", None)
 
-        self._cam_id_edit = QLineEdit(entry.camera_id)
-        self._cam_id_edit.setPlaceholderText("camera id")
-        self._cam_id_edit.setFixedWidth(110)
-        self._cam_id_edit.setStyleSheet("font-size: 11px;")
-        self._cam_id_edit.setToolTip(
-            "Camera identifier used as camera_instance_id in the database.\n"
-            "Use the same ID across shots for the same physical camera."
-        )
-        self._cam_id_edit.textChanged.connect(
-            lambda t: setattr(self._entry, "camera_id", t)
-        )
+        # Camera mode picker (enabled after camera is chosen)
+        self._mode_combo = QComboBox()
+        self._mode_combo.setFixedWidth(140)
+        self._mode_combo.setStyleSheet("font-size: 11px;")
+        self._mode_combo.setEnabled(False)
+        self._mode_combo.addItem("— mode —", None)
 
+        # Calibration status indicator
+        self._calib_label = QLabel()
+        self._calib_label.setStyleSheet("font-size: 11px;")
+
+        # Probe / error status
         self._meta_label = QLabel("Probing…")
         self._meta_label.setStyleSheet("color: grey; font-size: 11px;")
 
@@ -136,10 +143,21 @@ class _VideoRow(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.addWidget(self._path_label)
-        layout.addWidget(cam_lbl)
-        layout.addWidget(self._cam_id_edit)
+        layout.addWidget(self._cam_combo)
+        layout.addWidget(self._mode_combo)
+        layout.addWidget(self._calib_label)
         layout.addWidget(self._meta_label)
         layout.addWidget(self._remove_btn)
+
+        self._cam_combo.currentIndexChanged.connect(self._on_camera_changed)
+        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+
+        # Populate camera list
+        self._refresh_cameras()
+
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
 
     def set_probe(self, result: VideoProbeResult) -> None:
         parts: list[str] = []
@@ -151,16 +169,166 @@ class _VideoRow(QWidget):
             parts.append(f"{result.width}×{result.height} {fps_str}")
         if result.serial_number:
             parts.append(f"S/N {result.serial_number}")
-            # Pre-fill camera ID with serial number only if the user hasn't
-            # changed the default (which was set to the filename stem).
-            if self._entry.camera_id == Path(self._entry.path).stem:
-                self._cam_id_edit.setText(result.serial_number)
+            # Try to auto-select a camera whose serial number matches
+            self._try_select_by_serial(result.serial_number)
         self._meta_label.setText(" · ".join(parts) if parts else "OK")
         self._meta_label.setStyleSheet("color: #444; font-size: 11px;")
+        # Re-annotate mode combo with probe match hints
+        self._annotate_modes(result)
 
     def set_error(self, msg: str) -> None:
         self._meta_label.setText(f"Probe failed: {msg}")
         self._meta_label.setStyleSheet("color: red; font-size: 11px;")
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _refresh_cameras(self) -> None:
+        if self._db_context is None:
+            return
+        instances = self._db_context.list_camera_instances()
+        self._cam_combo.blockSignals(True)
+        self._cam_combo.clear()
+        self._cam_combo.addItem("— select camera —", None)
+        for row in instances:
+            label = row["label"]
+            if row["from_registry"]:
+                label += " [registry]"
+            self._cam_combo.addItem(label, row["id"])
+        self._cam_combo.blockSignals(False)
+
+    def _on_camera_changed(self) -> None:
+        instance_id = self._cam_combo.currentData()
+        self._entry.camera_instance_id = instance_id
+        self._entry.camera_mode_id = None
+        self._entry.intrinsics_calibration_id = None
+
+        self._mode_combo.blockSignals(True)
+        self._mode_combo.clear()
+        self._mode_combo.addItem("— mode —", None)
+        self._mode_combo.setEnabled(False)
+        self._mode_combo.blockSignals(False)
+        self._calib_label.setText("")
+
+        if instance_id is None or self._db_context is None:
+            return
+
+        model_id = self._db_context.get_camera_model_id(instance_id)
+        if model_id is None:
+            return
+
+        modes = self._db_context.list_camera_modes(model_id)
+        probe = self._entry.probe
+
+        self._mode_combo.blockSignals(True)
+        for mode in modes:
+            w, h = mode["width_px"], mode["height_px"]
+            fps = mode["nominal_fps"]
+            fps_str = f"{fps:.0f}fps" if fps == int(fps) else f"{fps:.2f}fps"
+            label = f"{w}×{h} {fps_str}"
+            if probe and self._mode_matches(probe, mode):
+                label = "✓ " + label
+            self._mode_combo.addItem(label, mode["id"])
+        self._mode_combo.setEnabled(len(modes) > 0)
+        self._mode_combo.blockSignals(False)
+
+        # Auto-select if exactly one mode or probe matches one
+        if len(modes) == 1:
+            self._mode_combo.setCurrentIndex(1)
+        elif probe:
+            for i, mode in enumerate(modes):
+                if self._mode_matches(probe, mode):
+                    self._mode_combo.setCurrentIndex(i + 1)
+                    break
+
+    def _on_mode_changed(self) -> None:
+        mode_id = self._mode_combo.currentData()
+        self._entry.camera_mode_id = mode_id
+        self._entry.intrinsics_calibration_id = None
+        self._calib_label.setText("")
+
+        if mode_id is None or self._db_context is None:
+            return
+
+        # Look up default_intrinsics_calibration_id from the selected mode
+        conn = self._db_context._conn
+        row = conn.execute(
+            "SELECT default_intrinsics_calibration_id FROM camera_modes WHERE id = ?",
+            (mode_id,),
+        ).fetchone()
+        if row is None and self._db_context._registry_conn:
+            row = self._db_context._registry_conn.execute(
+                "SELECT default_intrinsics_calibration_id FROM camera_modes WHERE id = ?",
+                (mode_id,),
+            ).fetchone()
+
+        if row and row["default_intrinsics_calibration_id"]:
+            self._entry.intrinsics_calibration_id = row["default_intrinsics_calibration_id"]
+            self._calib_label.setText("calib ✓")
+            self._calib_label.setStyleSheet("color: green; font-size: 11px;")
+        else:
+            self._calib_label.setText("no calib")
+            self._calib_label.setStyleSheet("color: orange; font-size: 11px;")
+
+    def _mode_matches(self, probe: VideoProbeResult, mode) -> bool:
+        """Return True if *probe* resolution/fps is consistent with *mode*."""
+        if probe.width and probe.height:
+            if mode["width_px"] != probe.width or mode["height_px"] != probe.height:
+                return False
+        fps = probe.capture_fps or probe.container_fps
+        if fps and mode["nominal_fps"]:
+            if abs(mode["nominal_fps"] - fps) > 1.0:
+                return False
+        return True
+
+    def _try_select_by_serial(self, serial: str) -> None:
+        """Select camera instance whose serial_number matches *serial*."""
+        if self._db_context is None:
+            return
+        for i in range(1, self._cam_combo.count()):
+            inst_id = self._cam_combo.itemData(i)
+            if inst_id is None:
+                continue
+            row = self._db_context._conn.execute(
+                "SELECT serial_number FROM camera_instances WHERE id = ?", (inst_id,)
+            ).fetchone()
+            if row and row["serial_number"] == serial:
+                self._cam_combo.setCurrentIndex(i)
+                return
+            if self._db_context._registry_conn:
+                row = self._db_context._registry_conn.execute(
+                    "SELECT serial_number FROM camera_instances WHERE id = ?", (inst_id,)
+                ).fetchone()
+                if row and row["serial_number"] == serial:
+                    self._cam_combo.setCurrentIndex(i)
+                    return
+
+    def _annotate_modes(self, probe: VideoProbeResult) -> None:
+        """Re-label mode combo items with ✓ where probe matches."""
+        for i in range(1, self._mode_combo.count()):
+            mode_id = self._mode_combo.itemData(i)
+            if mode_id is None:
+                continue
+            conn = self._db_context._conn if self._db_context else None
+            if conn is None:
+                continue
+            row = conn.execute(
+                "SELECT width_px, height_px, nominal_fps FROM camera_modes WHERE id = ?",
+                (mode_id,),
+            ).fetchone()
+            if row is None and self._db_context._registry_conn:
+                row = self._db_context._registry_conn.execute(
+                    "SELECT width_px, height_px, nominal_fps FROM camera_modes WHERE id = ?",
+                    (mode_id,),
+                ).fetchone()
+            if row is None:
+                continue
+            w, h = row["width_px"], row["height_px"]
+            fps = row["nominal_fps"]
+            fps_str = f"{fps:.0f}fps" if fps == int(fps) else f"{fps:.2f}fps"
+            prefix = "✓ " if self._mode_matches(probe, row) else ""
+            self._mode_combo.setItemText(i, f"{prefix}{w}×{h} {fps_str}")
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +341,10 @@ class _ShotPanel(QGroupBox):
 
     remove_requested = Signal(object)   # emits ShotEntry
 
-    def __init__(self, entry: ShotEntry, parent=None) -> None:
+    def __init__(self, entry: ShotEntry, db_context=None, parent=None) -> None:
         super().__init__(parent)
         self._entry = entry
+        self._db_context = db_context
         self._video_rows: dict[str, _VideoRow] = {}  # path → row widget
         self._workers: list[_ProbeWorker] = []
 
@@ -240,10 +409,10 @@ class _ShotPanel(QGroupBox):
         for p in paths:
             if p in self._video_rows:
                 continue  # already added
-            ve = VideoEntry(path=p, camera_id=Path(p).stem)
+            ve = VideoEntry(path=p)
             self._entry.videos.append(ve)
 
-            row = _VideoRow(ve, self._video_container)
+            row = _VideoRow(ve, self._db_context, self._video_container)
             row.remove_requested.connect(self._remove_video)
             self._video_layout.addWidget(row)
             self._video_rows[p] = row
@@ -360,14 +529,27 @@ class ShotsPage(QWizardPage):
                     frames = probe.frame_count if probe else 0
                     w = probe.width if probe else 0
                     h = probe.height if probe else 0
+
+                    # Copy camera records from registry into session DB and
+                    # record the camera's participation in this session.
+                    if ve.camera_instance_id:
+                        ctx.upsert_camera_records(
+                            ve.camera_instance_id,
+                            ve.camera_mode_id,
+                            ve.intrinsics_calibration_id,
+                        )
+                        ctx.upsert_session_camera(ve.camera_instance_id)
+
                     ctx.create_shot_video(
                         shot_id=shot_id,
-                        cam_instance_id=ve.camera_id or Path(ve.path).stem,
+                        cam_instance_id=ve.camera_instance_id or Path(ve.path).stem,
                         path=ve.path,
                         fps=fps,
                         frame_count=max(frames, 1),
                         width=w,
                         height=h,
+                        camera_mode_id=ve.camera_mode_id,
+                        intrinsics_calibration_id=ve.intrinsics_calibration_id,
                     )
             ctx.commit_page()
         except Exception as exc:  # noqa: BLE001
@@ -386,7 +568,8 @@ class ShotsPage(QWizardPage):
         entry = ShotEntry(shot_number=shot_number)
         self._shots.append(entry)
 
-        panel = _ShotPanel(entry, self._scroll_widget)
+        ctx = getattr(self.wizard(), "db_context", None) if self.wizard() else None
+        panel = _ShotPanel(entry, db_context=ctx, parent=self._scroll_widget)
         panel.remove_requested.connect(self._remove_shot)
         self._scroll_layout.addWidget(panel)
         self._panels[id(entry)] = panel

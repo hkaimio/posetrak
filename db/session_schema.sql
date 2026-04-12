@@ -15,16 +15,14 @@ CREATE TABLE IF NOT EXISTS mocap_sessions (
     notes        TEXT
 );
 
--- Cameras that participated in this session, with their calibration references
+-- Cameras that participated in this session.
+-- Mode and intrinsics are per-video (on shot_videos), not per-session-camera,
+-- so the same physical camera can be used in different modes across shots.
 -- camera_instance_id  -- references registry: camera_instances(id)
--- camera_mode_id      -- references registry: camera_modes(id)
--- intrinsics_calibration_id -- references registry: intrinsics_calibrations(id)
 CREATE TABLE IF NOT EXISTS session_cameras (
-    session_id                  TEXT NOT NULL REFERENCES mocap_sessions(id),
-    camera_instance_id          TEXT NOT NULL, -- references registry: camera_instances(id)
-    camera_mode_id              TEXT NOT NULL, -- references registry: camera_modes(id)
-    intrinsics_calibration_id   TEXT NOT NULL, -- references registry: intrinsics_calibrations(id)
-    label                       TEXT,
+    session_id         TEXT NOT NULL REFERENCES mocap_sessions(id),
+    camera_instance_id TEXT NOT NULL, -- references registry: camera_instances(id)
+    label              TEXT,
     PRIMARY KEY (session_id, camera_instance_id)
 );
 
@@ -59,16 +57,20 @@ CREATE TABLE IF NOT EXISTS shots (
     notes                    TEXT
 );
 
--- Video files associated with a shot, one per camera
--- camera_instance_id -- references registry: camera_instances(id)
+-- Video files associated with a shot, one per camera.
+-- camera_instance_id     -- references registry: camera_instances(id)
+-- camera_mode_id         -- references registry: camera_modes(id); nullable until wizard sets it
+-- intrinsics_calibration_id -- references registry: intrinsics_calibrations(id); nullable
 CREATE TABLE IF NOT EXISTS shot_videos (
-    id                 TEXT PRIMARY KEY,
-    shot_id            TEXT NOT NULL REFERENCES shots(id),
-    camera_instance_id TEXT NOT NULL, -- references registry: camera_instances(id)
-    file_path          TEXT NOT NULL,
-    first_video_frame  INTEGER NOT NULL,
-    last_video_frame   INTEGER NOT NULL,
-    actual_fps         REAL NOT NULL
+    id                        TEXT PRIMARY KEY,
+    shot_id                   TEXT NOT NULL REFERENCES shots(id),
+    camera_instance_id        TEXT NOT NULL, -- references registry: camera_instances(id)
+    file_path                 TEXT NOT NULL,
+    first_video_frame         INTEGER NOT NULL,
+    last_video_frame          INTEGER NOT NULL,
+    actual_fps                REAL NOT NULL,
+    camera_mode_id            TEXT,          -- references registry: camera_modes(id)
+    intrinsics_calibration_id TEXT           -- references registry: intrinsics_calibrations(id)
 );
 
 -- Synchronisation configuration: maps each camera to a common time axis

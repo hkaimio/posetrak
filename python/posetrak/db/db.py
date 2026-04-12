@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 5
-SESSION_SCHEMA_VERSION: Final[int] = 10
+SESSION_SCHEMA_VERSION: Final[int] = 11
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -469,6 +469,24 @@ def _migrate_session_v9_to_v10(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v10_to_v11(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 10 to 11.
+
+    v11 moves camera_mode_id and intrinsics_calibration_id from session_cameras
+    to shot_videos so that each video can declare its own capture mode and
+    intrinsics (supporting mixed-mode sessions).
+
+    The migration uses ALTER TABLE … DROP COLUMN which requires SQLite 3.35+
+    (available in CPython 3.12+).
+    """
+    sql = (_DB_DIR / "migrations" / "010_shot_videos_mode_intrinsics.sql").read_text(
+        encoding="utf-8"
+    )
+    conn.executescript(sql)
+    conn.execute("PRAGMA user_version = 11")
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -519,6 +537,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 9
     if actual == 9:
         _migrate_session_v9_to_v10(conn)
+        actual = 10
+    if actual == 10:
+        _migrate_session_v10_to_v11(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 
@@ -925,13 +946,13 @@ def add_session_camera(
         _copy_rows_if_missing(
             registry, session, "intrinsics_calibrations", [intrinsics_calibration_id]
         )
+        # session_cameras no longer stores mode/intrinsics (moved to shot_videos in v11).
+        # camera_mode_id and intrinsics_calibration_id are still copied into the session
+        # so the session stays self-contained; they are written to shot_videos by the caller.
         session.execute(
-            "INSERT INTO session_cameras "
-            "(session_id, camera_instance_id, camera_mode_id, "
-            "intrinsics_calibration_id, label) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (session_id, camera_instance_id, camera_mode_id,
-             intrinsics_calibration_id, label),
+            "INSERT INTO session_cameras (session_id, camera_instance_id, label) "
+            "VALUES (?, ?, ?)",
+            (session_id, camera_instance_id, label),
         )
 
 

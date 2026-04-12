@@ -177,7 +177,7 @@ class SessionPage(QWizardPage):
         wiz = self.wizard()
         wiz.session_conn  = conn
         wiz.session_id    = session_id
-        wiz.db_context    = DBContext(conn, session_id)
+        wiz.db_context    = DBContext(conn, session_id, registry_conn)
         wiz.registry_conn = registry_conn
         self.setField("session_db_path", str(path))
         return True

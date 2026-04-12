@@ -264,18 +264,22 @@ std::map<std::string, Camera>
 SessionReader::load_cameras(std::string const& session_id,
                             std::string const& extrinsic_calibration_id,
                             std::string const& sync_config_id) {
-    // Step 1: Fetch camera rows ordered by label for deterministic int ID assignment
+    // Step 1: Fetch camera rows from shot_videos for the shot referenced by sync_config.
+    // Intrinsics are now per shot_video (v11+); mode/dimensions come from camera_modes.
+    // Uses sync_config_id to identify the shot so the right mode/intrinsics are loaded.
     Stmt cam_stmt(db_,
                   "SELECT ci.id, ci.label,"
                   "       ic.fx, ic.fy, ic.cx, ic.cy, ic.dist_coeffs, ic.distortion_model,"
-                  "       cm.width_px, cm.height_px, ic.matrix_original"
-                  " FROM session_cameras sc"
-                  " JOIN camera_instances ci ON ci.id = sc.camera_instance_id"
-                  " JOIN intrinsics_calibrations ic ON ic.id = sc.intrinsics_calibration_id"
-                  " JOIN camera_modes cm ON cm.id = sc.camera_mode_id"
-                  " WHERE sc.session_id = ?"
+                  "       COALESCE(cm.width_px, 0), COALESCE(cm.height_px, 0), ic.matrix_original"
+                  " FROM shot_videos sv"
+                  " JOIN shots sh ON sh.id = sv.shot_id"
+                  " JOIN sync_configs scfg ON scfg.shot_id = sh.id"
+                  " JOIN camera_instances ci ON ci.id = sv.camera_instance_id"
+                  " LEFT JOIN intrinsics_calibrations ic ON ic.id = sv.intrinsics_calibration_id"
+                  " LEFT JOIN camera_modes cm ON cm.id = sv.camera_mode_id"
+                  " WHERE scfg.id = ?"
                   " ORDER BY ci.label ASC");
-    sqlite3_bind_text(cam_stmt.ptr, 1, session_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(cam_stmt.ptr, 1, sync_config_id.c_str(), -1, SQLITE_STATIC);
 
     // Collect camera rows first so we can iterate with sequential IDs
     struct CamRow {
@@ -428,13 +432,14 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
         }
     }
 
-    // Step 1: Build instance_id → Camera const* map
+    // Step 1: Build instance_id → Camera const* map.
+    // Enumerate cameras from shot_videos for the shot this sequence belongs to.
     Stmt inst_stmt(db_,
                    "SELECT ci.id, ci.label"
                    " FROM pose_observation_sequences pos"
                    " JOIN shots s ON s.id = pos.shot_id"
-                   " JOIN session_cameras sc ON sc.session_id = s.session_id"
-                   " JOIN camera_instances ci ON ci.id = sc.camera_instance_id"
+                   " JOIN shot_videos sv ON sv.shot_id = s.id"
+                   " JOIN camera_instances ci ON ci.id = sv.camera_instance_id"
                    " WHERE pos.id = ?");
     sqlite3_bind_text(inst_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
 

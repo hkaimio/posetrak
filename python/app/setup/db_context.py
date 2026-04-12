@@ -167,14 +167,24 @@ class DBContext:
     Parameters
     ----------
     conn:
-        Open connection to a session database (v8+).
+        Open connection to a session database (v11+).
     session_id:
         UUID of the ``mocap_sessions`` row this wizard is operating on.
+    registry_conn:
+        Optional open connection to a registry database.  When present,
+        ``upsert_camera_records()`` copies camera rows from the registry into
+        the session-local tables so the session DB stays self-contained.
     """
 
-    def __init__(self, conn: sqlite3.Connection, session_id: str) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        session_id: str,
+        registry_conn: sqlite3.Connection | None = None,
+    ) -> None:
         self._conn = conn
         self._session_id = session_id
+        self._registry_conn = registry_conn
         self._savepoint_active = False
 
     # ------------------------------------------------------------------
@@ -223,23 +233,189 @@ class DBContext:
         path: str,
         fps: float,
         frame_count: int,
-        width: int,   # noqa: ARG002 — stored for future schema extension
-        height: int,  # noqa: ARG002 — stored for future schema extension
+        width: int,   # noqa: ARG002 — not persisted in current schema
+        height: int,  # noqa: ARG002 — not persisted in current schema
+        camera_mode_id: str | None = None,
+        intrinsics_calibration_id: str | None = None,
     ) -> str:
-        """Insert a ``shot_videos`` row and return its ID.
-
-        ``width`` and ``height`` are accepted to match the interface spec but
-        are not persisted (not in the current ``shot_videos`` schema).
-        """
+        """Insert a ``shot_videos`` row and return its ID."""
         video_id = generate_id()
         self._conn.execute(
             "INSERT INTO shot_videos "
             "(id, shot_id, camera_instance_id, file_path, "
-            "first_video_frame, last_video_frame, actual_fps) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (video_id, shot_id, cam_instance_id, path, 0, frame_count - 1, fps),
+            "first_video_frame, last_video_frame, actual_fps, "
+            "camera_mode_id, intrinsics_calibration_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (video_id, shot_id, cam_instance_id, path, 0, frame_count - 1, fps,
+             camera_mode_id, intrinsics_calibration_id),
         )
         return video_id
+
+    def upsert_session_camera(self, camera_instance_id: str) -> None:
+        """Record that *camera_instance_id* participated in this session.
+
+        Uses INSERT OR IGNORE so calling it multiple times for the same camera
+        is safe.
+        """
+        self._conn.execute(
+            "INSERT OR IGNORE INTO session_cameras (session_id, camera_instance_id) "
+            "VALUES (?, ?)",
+            (self._session_id, camera_instance_id),
+        )
+
+    def upsert_camera_records(
+        self,
+        camera_instance_id: str,
+        camera_mode_id: str | None = None,
+        intrinsics_calibration_id: str | None = None,
+    ) -> None:
+        """Copy camera records from the registry into the session-local tables.
+
+        Copies the camera_instances row, its camera_models row, and (if
+        *camera_mode_id* is given) the camera_modes row plus the selected
+        intrinsics_calibrations row (including undistort maps).  Uses
+        INSERT OR IGNORE so re-calling with the same IDs is harmless.
+
+        No-op if no registry connection was provided at construction time.
+        """
+        reg = self._registry_conn
+        if reg is None:
+            return
+
+        # camera_instances → camera_model_id
+        inst_row = reg.execute(
+            "SELECT id, camera_model_id, serial_number, label FROM camera_instances WHERE id = ?",
+            (camera_instance_id,),
+        ).fetchone()
+        if inst_row is None:
+            return
+
+        model_id = inst_row["camera_model_id"]
+        model_row = reg.execute(
+            "SELECT id, manufacturer, model_name, sensor_size FROM camera_models WHERE id = ?",
+            (model_id,),
+        ).fetchone()
+        if model_row:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO camera_models (id, manufacturer, model_name, sensor_size) "
+                "VALUES (?, ?, ?, ?)",
+                (model_row["id"], model_row["manufacturer"],
+                 model_row["model_name"], model_row["sensor_size"]),
+            )
+
+        self._conn.execute(
+            "INSERT OR IGNORE INTO camera_instances "
+            "(id, camera_model_id, serial_number, label) VALUES (?, ?, ?, ?)",
+            (inst_row["id"], inst_row["camera_model_id"],
+             inst_row["serial_number"], inst_row["label"]),
+        )
+
+        if camera_mode_id:
+            mode_row = reg.execute(
+                "SELECT id, camera_model_id, width_px, height_px, nominal_fps, codec, notes,"
+                "       default_intrinsics_calibration_id "
+                "FROM camera_modes WHERE id = ?",
+                (camera_mode_id,),
+            ).fetchone()
+            if mode_row:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO camera_modes "
+                    "(id, camera_model_id, width_px, height_px, nominal_fps, codec, notes,"
+                    " default_intrinsics_calibration_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (mode_row["id"], mode_row["camera_model_id"],
+                     mode_row["width_px"], mode_row["height_px"],
+                     mode_row["nominal_fps"], mode_row["codec"],
+                     mode_row["notes"], mode_row["default_intrinsics_calibration_id"]),
+                )
+
+        if intrinsics_calibration_id:
+            ic_row = reg.execute(
+                "SELECT id, camera_mode_id, calibrated_at, calibration_tool, distortion_model,"
+                "       fx, fy, cx, cy, dist_coeffs, rms_error, notes,"
+                "       image_width, image_height, matrix_original, undistort_mapx, undistort_mapy "
+                "FROM intrinsics_calibrations WHERE id = ?",
+                (intrinsics_calibration_id,),
+            ).fetchone()
+            if ic_row:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO intrinsics_calibrations "
+                    "(id, camera_mode_id, calibrated_at, calibration_tool, distortion_model,"
+                    " fx, fy, cx, cy, dist_coeffs, rms_error, notes,"
+                    " image_width, image_height, matrix_original, undistort_mapx, undistort_mapy) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (ic_row["id"], ic_row["camera_mode_id"], ic_row["calibrated_at"],
+                     ic_row["calibration_tool"], ic_row["distortion_model"],
+                     ic_row["fx"], ic_row["fy"], ic_row["cx"], ic_row["cy"],
+                     ic_row["dist_coeffs"], ic_row["rms_error"], ic_row["notes"],
+                     ic_row["image_width"], ic_row["image_height"],
+                     ic_row["matrix_original"], ic_row["undistort_mapx"], ic_row["undistort_mapy"]),
+                )
+
+    def list_camera_instances(self) -> list[sqlite3.Row]:
+        """Return all camera_instances from the session DB (and registry if available).
+
+        Registry instances not yet in the session DB are included with a
+        ``from_registry`` marker.  Rows are sqlite3.Row objects with columns:
+        id, label, model_name, from_registry (0 or 1).
+        """
+        session_rows = self._conn.execute(
+            "SELECT ci.id, ci.label, COALESCE(cm.model_name, '') AS model_name, 0 AS from_registry"
+            " FROM camera_instances ci"
+            " LEFT JOIN camera_models cm ON cm.id = ci.camera_model_id"
+            " ORDER BY ci.label"
+        ).fetchall()
+
+        if self._registry_conn is None:
+            return session_rows
+
+        session_ids = {r["id"] for r in session_rows}
+        reg_rows = self._registry_conn.execute(
+            "SELECT ci.id, ci.label, COALESCE(cm.model_name, '') AS model_name, 1 AS from_registry"
+            " FROM camera_instances ci"
+            " LEFT JOIN camera_models cm ON cm.id = ci.camera_model_id"
+            " ORDER BY ci.label"
+        ).fetchall()
+
+        extra = [r for r in reg_rows if r["id"] not in session_ids]
+        return session_rows + extra
+
+    def list_camera_modes(self, model_id: str) -> list[sqlite3.Row]:
+        """Return camera_modes for *model_id*, querying session DB first, then registry.
+
+        Rows have columns: id, width_px, height_px, nominal_fps,
+        default_intrinsics_calibration_id.
+        """
+        rows = self._conn.execute(
+            "SELECT id, width_px, height_px, nominal_fps, default_intrinsics_calibration_id"
+            " FROM camera_modes WHERE camera_model_id = ? ORDER BY width_px DESC, nominal_fps DESC",
+            (model_id,),
+        ).fetchall()
+        if rows:
+            return rows
+        if self._registry_conn is None:
+            return []
+        return self._registry_conn.execute(
+            "SELECT id, width_px, height_px, nominal_fps, default_intrinsics_calibration_id"
+            " FROM camera_modes WHERE camera_model_id = ? ORDER BY width_px DESC, nominal_fps DESC",
+            (model_id,),
+        ).fetchall()
+
+    def get_camera_model_id(self, camera_instance_id: str) -> str | None:
+        """Return the camera_model_id for *camera_instance_id*, or None if not found."""
+        row = self._conn.execute(
+            "SELECT camera_model_id FROM camera_instances WHERE id = ?",
+            (camera_instance_id,),
+        ).fetchone()
+        if row:
+            return row["camera_model_id"]
+        if self._registry_conn:
+            row = self._registry_conn.execute(
+                "SELECT camera_model_id FROM camera_instances WHERE id = ?",
+                (camera_instance_id,),
+            ).fetchone()
+            return row["camera_model_id"] if row else None
+        return None
 
     def write_sync_config(
         self,

@@ -174,8 +174,6 @@ static void create_fixture_db() {
         CREATE TABLE session_cameras (
             session_id TEXT NOT NULL REFERENCES mocap_sessions(id),
             camera_instance_id TEXT NOT NULL,
-            camera_mode_id TEXT NOT NULL,
-            intrinsics_calibration_id TEXT NOT NULL,
             label TEXT,
             PRIMARY KEY (session_id, camera_instance_id)
         );
@@ -216,7 +214,9 @@ static void create_fixture_db() {
             file_path TEXT NOT NULL,
             first_video_frame INTEGER NOT NULL,
             last_video_frame INTEGER NOT NULL,
-            actual_fps REAL NOT NULL
+            actual_fps REAL NOT NULL,
+            camera_mode_id TEXT,
+            intrinsics_calibration_id TEXT
         );
     )");
     exec_sql(db, R"(
@@ -277,9 +277,8 @@ static void create_fixture_db() {
     // Session
     exec_sql(db, "INSERT INTO mocap_sessions VALUES ('sess1','2024-01-01',NULL,NULL);");
     exec_sql(db,
-             "INSERT INTO session_cameras "
-             "(session_id,camera_instance_id,camera_mode_id,intrinsics_calibration_id) "
-             "VALUES ('sess1','inst1','mode1','ic1');");
+             "INSERT INTO session_cameras (session_id,camera_instance_id) "
+             "VALUES ('sess1','inst1');");
 
     // Extrinsics: identity R, zero t
     exec_sql(db,
@@ -305,8 +304,9 @@ static void create_fixture_db() {
     exec_sql(
         db,
         "INSERT INTO shot_videos "
-        "(id,shot_id,camera_instance_id,file_path,first_video_frame,last_video_frame,actual_fps)"
-        " VALUES ('sv1','shot1','inst1','cam1.mp4',0,1000,120.0);");
+        "(id,shot_id,camera_instance_id,file_path,first_video_frame,last_video_frame,actual_fps,"
+        "camera_mode_id,intrinsics_calibration_id)"
+        " VALUES ('sv1','shot1','inst1','cam1.mp4',0,1000,120.0,'mode1','ic1');");
     exec_sql(db, "INSERT INTO sync_configs VALUES ('sc1','shot1',NULL,NULL);");
     exec_sql(db,
              "INSERT INTO sync_points "

@@ -19,6 +19,7 @@ for _name in ("app.setup", "app.setup.led_sync"):
 def main() -> int:
     from PySide6.QtWidgets import QApplication, QWizard
 
+    from app.setup.camera_registry import CameraRegistryWidget
     from app.setup.page_session import SessionPage
     from app.setup.page_shots import ShotsPage
     from app.setup.page_sync import SyncPage
@@ -30,9 +31,30 @@ def main() -> int:
     wizard.resize(1000, 700)
 
     # Placeholders for page 1 to write to; downstream pages read these.
-    wizard.session_conn = None
-    wizard.session_id   = None
-    wizard.db_context   = None
+    wizard.session_conn   = None
+    wizard.session_id     = None
+    wizard.db_context     = None
+    wizard.registry_conn  = None  # set by SessionPage when a registry DB is opened
+
+    # "Manage Cameras…" custom button — opens CameraRegistryWidget backed by
+    # whichever DB connection is currently active (registry preferred, else session).
+    wizard.setOption(QWizard.WizardOption.HaveCustomButton1, True)
+    wizard.setButtonText(QWizard.WizardButton.CustomButton1, "Manage Cameras…")
+
+    def _open_camera_registry() -> None:
+        conn = wizard.registry_conn or wizard.session_conn
+        if conn is None:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                wizard,
+                "No database open",
+                "Open or create a session database first.",
+            )
+            return
+        dlg = CameraRegistryWidget(conn, parent=wizard)
+        dlg.exec()
+
+    wizard.customButtonClicked.connect(lambda btn: _open_camera_registry())
 
     wizard.addPage(SessionPage())
     wizard.addPage(ShotsPage())

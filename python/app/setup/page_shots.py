@@ -529,20 +529,22 @@ class ShotsPage(QWizardPage):
         layout.addWidget(scroll)
         layout.addWidget(self._error_label)
 
-        # Add one shot by default
-        self._add_shot()
-
     # ------------------------------------------------------------------
     # Qt overrides
     # ------------------------------------------------------------------
 
     def initializePage(self) -> None:  # noqa: N802
-        """Called each time the page is shown; begin savepoint."""
+        """Called each time the page is shown; begin savepoint and reset UI."""
         self.wizard().db_context.begin_page()
+        # Add default shot now that db_context is available.
+        if not self._shots:
+            self._add_shot()
 
     def cleanupPage(self) -> None:  # noqa: N802
-        """Called when user clicks Back; roll back any writes."""
+        """Called when user clicks Back; roll back any writes and reset UI."""
         self.wizard().db_context.rollback_page()
+        for entry in list(self._shots):
+            self._remove_shot(entry)
 
     def validatePage(self) -> bool:  # noqa: N802
         """Write shots + shot_videos to DB; return False on error."""

@@ -678,7 +678,7 @@ class _LedSyncDialog(QDialog):
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(6)
 
-            cam_lbl = QLabel(sv.camera_instance_id)
+            cam_lbl = QLabel(sv.camera_label)
             cam_lbl.setFixedWidth(70)
             cam_lbl.setStyleSheet("font-weight: bold; font-size: 11px;")
 
@@ -1191,7 +1191,7 @@ class SyncPage(QWizardPage):
                 file_path=sv.file_path,
                 total_frames=max(sv.last_video_frame - sv.first_video_frame + 1, 1),
                 fps=sv.actual_fps or 30.0,
-                label=sv.camera_instance_id,
+                label=sv.camera_label,
             )
             for sv in shot.videos
         ]
@@ -1233,7 +1233,7 @@ class SyncPage(QWizardPage):
         self._scrubber._cells[fc].update()
 
         shot = self._shots[self._shot_combo.currentIndex()]
-        cam = shot.videos[fc].camera_instance_id
+        cam = shot.videos[fc].camera_label
         self._anchor_labels[fc].setText(f"{cam}: {frame}")
         self._update_rough_panel_state()
 
@@ -1248,7 +1248,7 @@ class SyncPage(QWizardPage):
         if 0 <= shot_idx < len(self._shots):
             shot = self._shots[shot_idx]
             for i, lbl in enumerate(self._anchor_labels):
-                cam = shot.videos[i].camera_instance_id
+                cam = shot.videos[i].camera_label
                 lbl.setText(f"{cam}: —")
         if self._scrubber:
             self._scrubber.reload_sync(None)
@@ -1449,7 +1449,7 @@ class SyncPage(QWizardPage):
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(6)
 
-            cam_lbl = QLabel(sv.camera_instance_id)
+            cam_lbl = QLabel(sv.camera_label)
             cam_lbl.setFixedWidth(70)
             cam_lbl.setStyleSheet("font-size: 11px; font-weight: bold;")
 
@@ -1483,7 +1483,7 @@ class SyncPage(QWizardPage):
                 item.widget().deleteLater()
         self._anchor_labels = []
         for sv in shot.videos:
-            lbl = QLabel(f"{sv.camera_instance_id}: —")
+            lbl = QLabel(f"{sv.camera_label}: —")
             lbl.setStyleSheet("font-size: 11px;")
             self._anchor_status_layout.addWidget(lbl)
             self._anchor_labels.append(lbl)

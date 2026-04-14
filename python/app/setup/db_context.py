@@ -61,6 +61,7 @@ class ShotVideoInfo(NamedTuple):
     actual_fps: float
     first_video_frame: int
     last_video_frame: int
+    camera_label: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -383,11 +384,11 @@ class DBContext:
     def list_camera_modes(self, model_id: str) -> list[sqlite3.Row]:
         """Return camera_modes for *model_id*, querying session DB first, then registry.
 
-        Rows have columns: id, width_px, height_px, nominal_fps,
+        Rows have columns: id, width_px, height_px, nominal_fps, notes,
         default_intrinsics_calibration_id.
         """
         rows = self._conn.execute(
-            "SELECT id, width_px, height_px, nominal_fps, default_intrinsics_calibration_id"
+            "SELECT id, width_px, height_px, nominal_fps, notes, default_intrinsics_calibration_id"
             " FROM camera_modes WHERE camera_model_id = ? ORDER BY width_px DESC, nominal_fps DESC",
             (model_id,),
         ).fetchall()
@@ -396,7 +397,7 @@ class DBContext:
         if self._registry_conn is None:
             return []
         return self._registry_conn.execute(
-            "SELECT id, width_px, height_px, nominal_fps, default_intrinsics_calibration_id"
+            "SELECT id, width_px, height_px, nominal_fps, notes, default_intrinsics_calibration_id"
             " FROM camera_modes WHERE camera_model_id = ? ORDER BY width_px DESC, nominal_fps DESC",
             (model_id,),
         ).fetchall()
@@ -508,9 +509,12 @@ class DBContext:
     def get_shot_videos(self, shot_id: str) -> list[ShotVideoInfo]:
         """Return all shot_videos rows for *shot_id*."""
         rows = self._conn.execute(
-            "SELECT id, shot_id, camera_instance_id, file_path, "
-            "actual_fps, first_video_frame, last_video_frame "
-            "FROM shot_videos WHERE shot_id = ? ORDER BY rowid",
+            "SELECT sv.id, sv.shot_id, sv.camera_instance_id, sv.file_path, "
+            "sv.actual_fps, sv.first_video_frame, sv.last_video_frame, "
+            "COALESCE(ci.label, sv.camera_instance_id) AS camera_label "
+            "FROM shot_videos sv "
+            "LEFT JOIN camera_instances ci ON ci.id = sv.camera_instance_id "
+            "WHERE sv.shot_id = ? ORDER BY sv.rowid",
             (shot_id,),
         ).fetchall()
         return [
@@ -522,6 +526,7 @@ class DBContext:
                 actual_fps=r["actual_fps"],
                 first_video_frame=r["first_video_frame"],
                 last_video_frame=r["last_video_frame"],
+                camera_label=r["camera_label"],
             )
             for r in rows
         ]

@@ -22,6 +22,7 @@ Behaviour
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -234,11 +235,13 @@ class _VideoRow(QWidget):
         probe = self._entry.probe
 
         self._mode_combo.blockSignals(True)
+        # Count duplicate (w, h, fps) combos so unnamed duplicates can be numbered.
+        param_counts: Counter = Counter(
+            (m["width_px"], m["height_px"], m["nominal_fps"]) for m in modes
+        )
+        param_seen: Counter = Counter()
         for mode in modes:
-            w, h = mode["width_px"], mode["height_px"]
-            fps = mode["nominal_fps"]
-            fps_str = f"{fps:.0f}fps" if fps == int(fps) else f"{fps:.2f}fps"
-            label = f"{w}×{h} {fps_str}"
+            label = self._mode_label(mode, param_counts, param_seen)
             if probe and self._mode_matches(probe, mode):
                 label = "✓ " + label
             self._mode_combo.addItem(label, mode["id"])
@@ -283,6 +286,26 @@ class _VideoRow(QWidget):
             self._calib_label.setText("no calib")
             self._calib_label.setStyleSheet("color: orange; font-size: 11px;")
 
+    @staticmethod
+    def _mode_label(mode, param_counts: Counter, param_seen: Counter) -> str:
+        """Build a human-readable label for a camera mode row.
+
+        Prefers mode notes when present.  Falls back to resolution+fps, with a
+        ``#N`` disambiguator when multiple modes share identical parameters.
+        """
+        w, h = mode["width_px"], mode["height_px"]
+        fps = mode["nominal_fps"]
+        fps_str = f"{fps:.0f}fps" if fps == int(fps) else f"{fps:.2f}fps"
+        res_fps = f"{w}×{h} {fps_str}"
+        notes = mode["notes"] or ""
+        if notes:
+            return f"{notes} ({res_fps})"
+        key = (w, h, fps)
+        if param_counts[key] > 1:
+            param_seen[key] += 1
+            return f"{res_fps} #{param_seen[key]}"
+        return res_fps
+
     def _mode_matches(self, probe: VideoProbeResult, mode) -> bool:
         """Return True if *probe* resolution/fps is consistent with *mode*."""
         if probe.width and probe.height:
@@ -317,7 +340,7 @@ class _VideoRow(QWidget):
                     return
 
     def _annotate_modes(self, probe: VideoProbeResult) -> None:
-        """Re-label mode combo items with ✓ where probe matches."""
+        """Re-annotate mode combo items with ✓ where probe matches."""
         for i in range(1, self._mode_combo.count()):
             mode_id = self._mode_combo.itemData(i)
             if mode_id is None:
@@ -336,11 +359,10 @@ class _VideoRow(QWidget):
                 ).fetchone()
             if row is None:
                 continue
-            w, h = row["width_px"], row["height_px"]
-            fps = row["nominal_fps"]
-            fps_str = f"{fps:.0f}fps" if fps == int(fps) else f"{fps:.2f}fps"
+            existing = self._mode_combo.itemText(i)
+            base = existing[2:] if existing.startswith("✓ ") else existing
             prefix = "✓ " if self._mode_matches(probe, row) else ""
-            self._mode_combo.setItemText(i, f"{prefix}{w}×{h} {fps_str}")
+            self._mode_combo.setItemText(i, prefix + base)
 
     def _open_inline_create_camera(self) -> None:
         """Open InlineCreateCameraDialog; on accept select the new instance."""

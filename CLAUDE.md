@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Posetrak is an application suite for video based multi-camera motion capture. Its main applications include
+
+* *posetrak* is the actual motion tacking application. It uses Unscented Kalman Filter based algorithm to predict skeleton pose and joint angles from body keypoints detected from videos. Command line applicatio written in C++, see docs/cpp-architecture-overview.md for overview of architecture
+
+* Posetrak setup provides GUI for setting up and managing motion capture projects. Python, PySide 6. See docs/pipeline-ui-requirements.md and docs/pose-extraction-app-design.md
+
 ## Build System
 
 This project uses **Meson** with wrap-based dependency management. All dependencies download automatically on first setup.

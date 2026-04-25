@@ -355,6 +355,9 @@ class PoseExtractionWindow(QMainWindow):
         act_extrinsics.triggered.connect(self._open_extrinsics_dialog)
         act_skeletons = menu.addAction("Manage Skeletons…")
         act_skeletons.triggered.connect(self._open_skeleton_dialog)
+        menu.addSeparator()
+        act_run = menu.addAction("Run Tracker…")
+        act_run.triggered.connect(self._open_run_tracker_dialog)
         menu.exec(self._session_actions_btn.mapToGlobal(
             self._session_actions_btn.rect().bottomLeft()
         ))
@@ -371,6 +374,13 @@ class PoseExtractionWindow(QMainWindow):
             return
         from app.setup.page_skeleton import SkeletonSetupDialog
         dlg = SkeletonSetupDialog(self._session, self._session_id, parent=self)
+        dlg.exec()
+
+    def _open_run_tracker_dialog(self) -> None:
+        if self._session is None or self._session_path is None:
+            return
+        from app.pose.run_tracker import RunTrackerDialog
+        dlg = RunTrackerDialog(self._session, self._session_path, parent=self)
         dlg.exec()
 
     def _load_session(self, path: str) -> None:

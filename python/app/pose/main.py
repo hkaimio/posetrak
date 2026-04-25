@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -177,6 +178,10 @@ class PoseExtractionWindow(QMainWindow):
         self._open_btn = QPushButton("Open...")
         self._open_btn.clicked.connect(self._on_open_session)
         row1.addWidget(self._open_btn)
+        self._session_actions_btn = QPushButton("Session…")
+        self._session_actions_btn.setEnabled(False)
+        self._session_actions_btn.clicked.connect(self._show_session_menu)
+        row1.addWidget(self._session_actions_btn)
         top_layout.addLayout(row1)
 
         # Row 2: shot + sync
@@ -344,6 +349,21 @@ class PoseExtractionWindow(QMainWindow):
         if path:
             self._load_session(path)
 
+    def _show_session_menu(self) -> None:
+        menu = QMenu(self)
+        act_extrinsics = menu.addAction("Import Extrinsics…")
+        act_extrinsics.triggered.connect(self._open_extrinsics_dialog)
+        menu.exec(self._session_actions_btn.mapToGlobal(
+            self._session_actions_btn.rect().bottomLeft()
+        ))
+
+    def _open_extrinsics_dialog(self) -> None:
+        if self._session is None or self._session_id is None:
+            return
+        from app.setup.page_extrinsics import ExtrinsicsImportDialog
+        dlg = ExtrinsicsImportDialog(self._session, self._session_id, parent=self)
+        dlg.exec()
+
     def _load_session(self, path: str) -> None:
         from posetrak.db.db import open_session
         try:
@@ -362,6 +382,7 @@ class PoseExtractionWindow(QMainWindow):
             QMessageBox.warning(self, "Warning", "No mocap session found in this DB.")
             return
         self._session_id = row["id"]
+        self._session_actions_btn.setEnabled(True)
 
         self._populate_shots()
 

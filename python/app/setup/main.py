@@ -20,6 +20,7 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication, QWizard
 
     from app.setup.camera_registry import CameraRegistryWidget
+    from app.setup.page_extrinsics import ExtrinsicsPage
     from app.setup.page_session import SessionPage
     from app.setup.page_shots import ShotsPage
     from app.setup.page_sync import SyncPage
@@ -59,6 +60,7 @@ def main() -> int:
     wizard.addPage(SessionPage())
     wizard.addPage(ShotsPage())
     wizard.addPage(SyncPage())
+    wizard.addPage(ExtrinsicsPage())
 
     wizard.show()
     return app.exec()

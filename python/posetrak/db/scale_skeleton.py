@@ -83,7 +83,7 @@ def _fk_rest_pose(joints: list[dict]) -> dict[str, np.ndarray]:
 # Template measurement computation
 # ---------------------------------------------------------------------------
 
-def _template_measurements(joints: list[dict]) -> dict[str, float]:
+def template_measurements(joints: list[dict]) -> dict[str, float]:
     jp = _fk_rest_pose(joints)
 
     def dist(a: str, b: str) -> float:
@@ -161,7 +161,7 @@ def scale_skeleton_yaml(
     joints: list[dict] = skel["joints"]
     by_name: dict[str, dict] = {j["name"]: j for j in joints}
 
-    tmpl = _template_measurements(joints)
+    tmpl = template_measurements(joints)
 
     def _ratio(key: str) -> float | None:
         if key not in measurements or tmpl.get(key, 0.0) < 1e-9:
@@ -240,8 +240,8 @@ def scaling_summary(
     """Return a human-readable table comparing template vs measured vs scaled."""
     orig_joints = yaml.safe_load(original_yaml)["joints"]
     scaled_joints = yaml.safe_load(scaled_yaml)["joints"]
-    tmpl = _template_measurements(orig_joints)
-    scaled_m = _template_measurements(scaled_joints)
+    tmpl = template_measurements(orig_joints)
+    scaled_m = template_measurements(scaled_joints)
 
     keys = [k for k in ("femur", "shin", "upper_arm", "lower_arm",
                         "torso_height", "shoulder_width") if k in tmpl]

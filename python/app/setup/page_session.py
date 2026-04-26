@@ -40,6 +40,7 @@ from app.setup.db_context import DBContext
 from posetrak.db.db import (
     REGISTRY_SCHEMA_VERSION,
     SESSION_SCHEMA_VERSION,
+    create_registry,
     create_session,
     generate_id,
     get_schema_version,
@@ -59,6 +60,8 @@ class SessionPage(QWizardPage):
         )
 
         # --- mode radio buttons ---
+        self._just_created_path: Path | None = None  # cleaned up if user goes back
+
         self._rb_open   = QRadioButton("Open existing session")
         self._rb_create = QRadioButton("Create new session")
         self._rb_open.setChecked(True)
@@ -201,6 +204,14 @@ class SessionPage(QWizardPage):
             except Exception:  # noqa: BLE001
                 pass
             wiz.registry_conn = None
+        # Delete any session file we created on this attempt so that going
+        # back and clicking Next again doesn't hit "File already exists".
+        if self._just_created_path is not None:
+            try:
+                self._just_created_path.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
+            self._just_created_path = None
 
     # ------------------------------------------------------------------
     # Slots
@@ -240,7 +251,7 @@ class SessionPage(QWizardPage):
             )
             return
         try:
-            conn = open_registry(p)  # open_registry creates the file with schema
+            conn = create_registry(p)
             conn.close()
             self._registry_path_edit.setText(path)
         except Exception as exc:  # noqa: BLE001
@@ -318,6 +329,7 @@ class SessionPage(QWizardPage):
                 "Choose a new path or use 'Open existing session'."
             )
         conn = create_session(path)
+        self._just_created_path = path
         session_id = generate_id()
         now = datetime.now(timezone.utc).isoformat()
         location = self._location_edit.text().strip() or None

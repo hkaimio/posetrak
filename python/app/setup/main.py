@@ -43,6 +43,8 @@ def main() -> int:
     wizard.setOption(QWizard.WizardOption.HaveCustomButton1, True)
     wizard.setButtonText(QWizard.WizardButton.CustomButton1, "Manage Cameras…")
 
+    shots_page = ShotsPage()
+
     def _open_camera_registry() -> None:
         conn = wizard.registry_conn or wizard.session_conn
         if conn is None:
@@ -54,12 +56,13 @@ def main() -> int:
             )
             return
         dlg = CameraRegistryWidget(conn, parent=wizard)
+        dlg.cameras_changed.connect(shots_page.refresh_camera_combos)
         dlg.exec()
 
     wizard.customButtonClicked.connect(lambda btn: _open_camera_registry())
 
     wizard.addPage(SessionPage())
-    wizard.addPage(ShotsPage())
+    wizard.addPage(shots_page)
     wizard.addPage(SyncPage())
     wizard.addPage(ExtrinsicsPage())
     wizard.addPage(SkeletonPage())

@@ -186,6 +186,7 @@ class _VideoRow(QWidget):
     # ------------------------------------------------------------------
 
     _CREATE_SENTINEL = "__create_new__"
+    _ADD_MODE_SENTINEL = "__add_mode__"
 
     def _refresh_cameras(self) -> None:
         if self._db_context is None:
@@ -245,7 +246,9 @@ class _VideoRow(QWidget):
             if probe and self._mode_matches(probe, mode):
                 label = "✓ " + label
             self._mode_combo.addItem(label, mode["id"])
-        self._mode_combo.setEnabled(len(modes) > 0)
+        # Always offer to create a new mode even if the model has none yet
+        self._mode_combo.addItem("Create new mode…", self._ADD_MODE_SENTINEL)
+        self._mode_combo.setEnabled(True)
         self._mode_combo.blockSignals(False)
 
         # Auto-select if exactly one mode or probe matches one
@@ -259,6 +262,14 @@ class _VideoRow(QWidget):
 
     def _on_mode_changed(self) -> None:
         mode_id = self._mode_combo.currentData()
+
+        if mode_id == self._ADD_MODE_SENTINEL:
+            self._mode_combo.blockSignals(True)
+            self._mode_combo.setCurrentIndex(0)
+            self._mode_combo.blockSignals(False)
+            self._open_add_mode()
+            return
+
         self._entry.camera_mode_id = mode_id
         self._entry.intrinsics_calibration_id = None
         self._calib_label.setText("")
@@ -389,6 +400,30 @@ class _VideoRow(QWidget):
                 self._cam_combo.setCurrentIndex(i)
                 break
 
+    def _open_add_mode(self) -> None:
+        """Open ModeDialog to create a new mode for the currently selected camera's model."""
+        if self._db_context is None:
+            return
+        instance_id = self._cam_combo.currentData()
+        if instance_id is None or instance_id == self._CREATE_SENTINEL:
+            return
+
+        from PySide6.QtWidgets import QDialog as _QDialog
+        from app.setup.camera_registry import ModeDialog
+
+        model_id = self._db_context.get_camera_model_id(instance_id)
+        if model_id is None:
+            return
+        row = self._db_context._conn.execute(
+            "SELECT model_name FROM camera_models WHERE id = ?", (model_id,)
+        ).fetchone()
+        model_name = row["model_name"] if row else "Camera"
+
+        dlg = ModeDialog(self._db_context._conn, model_id, model_name, parent=self)
+        if dlg.exec() == _QDialog.DialogCode.Accepted:
+            # Retrigger camera selection so mode combo is rebuilt with the new mode
+            self._on_camera_changed()
+
 
 # ---------------------------------------------------------------------------
 # Shot panel widget
@@ -491,6 +526,11 @@ class _ShotPanel(QGroupBox):
             row.deleteLater()
         if entry in self._entry.videos:
             self._entry.videos.remove(entry)
+
+    def refresh_camera_combos(self) -> None:
+        """Refresh camera dropdowns in all video rows (call after Manage Cameras closes)."""
+        for row in self._video_rows.values():
+            row._refresh_cameras()
 
     def _on_probe_done(self, entry: VideoEntry, result: VideoProbeResult) -> None:
         entry.probe = result
@@ -646,6 +686,11 @@ class ShotsPage(QWizardPage):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def refresh_camera_combos(self) -> None:
+        """Refresh camera dropdowns in all video rows after camera registry changes."""
+        for panel in self._panels.values():
+            panel.refresh_camera_combos()
 
     def _show_error(self, msg: str) -> None:
         self._error_label.setText(msg)

@@ -435,17 +435,17 @@ class ModeDialog(QDialog):
         self._error.setStyleSheet("color: red;")
         self._error.setVisible(False)
 
-        dialog_btns = QDialogButtonBox(
+        self._dialog_btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
-        dialog_btns.accepted.connect(self._accept)
-        dialog_btns.rejected.connect(self.reject)
+        self._dialog_btns.accepted.connect(self._accept)
+        self._dialog_btns.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
         layout.addLayout(fields_form)
         layout.addWidget(calib_box)
         layout.addWidget(self._error)
-        layout.addWidget(dialog_btns)
+        layout.addWidget(self._dialog_btns)
 
         if mode_id:
             self._load(mode_id)
@@ -525,9 +525,10 @@ class ModeDialog(QDialog):
 
         codec = self._codec.text().strip() or None
         notes = self._notes.text().strip() or None
+        is_new = self._mode_id is None
 
         try:
-            if self._mode_id:
+            if not is_new:
                 self._conn.execute(
                     "UPDATE camera_modes SET width_px=?, height_px=?, nominal_fps=?, "
                     "codec=?, notes=? WHERE id=?",
@@ -546,9 +547,18 @@ class ModeDialog(QDialog):
             self._error.setVisible(True)
             return
 
-        # Enable calibration import now that mode is saved
+        if not is_new:
+            self.accept()
+            return
+
+        # New mode saved — stay open so the user can import a calibration.
         self._import_btn.setEnabled(True)
-        self.accept()
+        self._reload_calibrations()
+        save_btn = self._dialog_btns.button(QDialogButtonBox.StandardButton.Save)
+        if save_btn:
+            save_btn.setText("Close")
+            self._dialog_btns.accepted.disconnect()
+            self._dialog_btns.accepted.connect(self.accept)
 
     def saved_mode_id(self) -> str | None:
         return self._mode_id
@@ -560,14 +570,21 @@ class ModeDialog(QDialog):
 
 
 class InstanceDialog(QDialog):
-    """Add a camera_instances row."""
+    """Add or edit a camera_instances row."""
 
-    def __init__(self, conn: sqlite3.Connection, parent=None) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        instance_id: str | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._conn = conn
+        self._instance_id = instance_id
         self._saved_id: str | None = None
 
-        self.setWindowTitle("Register Physical Camera")
+        is_edit = instance_id is not None
+        self.setWindowTitle("Edit Camera" if is_edit else "Register Physical Camera")
         self.setMinimumWidth(380)
 
         self._label = QLineEdit()
@@ -585,7 +602,8 @@ class InstanceDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Register")
+        btn_label = "Save" if is_edit else "Register"
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText(btn_label)
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
 
@@ -598,6 +616,19 @@ class InstanceDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(self._error)
         layout.addWidget(buttons)
+
+        if is_edit:
+            self._load(instance_id)
+
+    def _load(self, instance_id: str) -> None:
+        row = self._conn.execute(
+            "SELECT label, camera_model_id, serial_number FROM camera_instances WHERE id = ?",
+            (instance_id,),
+        ).fetchone()
+        if row:
+            self._label.setText(row["label"] or "")
+            self._model_combo.set_model_id(row["camera_model_id"])
+            self._serial.setText(row["serial_number"] or "")
 
     def _accept(self) -> None:
         label = self._label.text().strip()
@@ -612,19 +643,28 @@ class InstanceDialog(QDialog):
 
         if serial:
             existing = self._conn.execute(
-                "SELECT id FROM camera_instances WHERE serial_number=?", (serial,)
+                "SELECT id FROM camera_instances WHERE serial_number=? AND id != ?",
+                (serial, self._instance_id or ""),
             ).fetchone()
             if existing:
                 self._show_error(f"Serial number '{serial}' is already registered.")
                 return
 
-        self._saved_id = generate_id()
         try:
-            self._conn.execute(
-                "INSERT INTO camera_instances (id, camera_model_id, serial_number, label) "
-                "VALUES (?,?,?,?)",
-                (self._saved_id, model_id, serial, label),
-            )
+            if self._instance_id:
+                self._conn.execute(
+                    "UPDATE camera_instances SET label=?, camera_model_id=?, serial_number=? "
+                    "WHERE id=?",
+                    (label, model_id, serial, self._instance_id),
+                )
+                self._saved_id = self._instance_id
+            else:
+                self._saved_id = generate_id()
+                self._conn.execute(
+                    "INSERT INTO camera_instances (id, camera_model_id, serial_number, label) "
+                    "VALUES (?,?,?,?)",
+                    (self._saved_id, model_id, serial, label),
+                )
             self._conn.commit()
         except Exception as exc:  # noqa: BLE001
             self._saved_id = None
@@ -973,6 +1013,8 @@ class CameraRegistryWidget(QDialog):
         for the lifetime of the dialog.
     """
 
+    cameras_changed = Signal()  # emitted when camera instances are added/edited/deleted
+
     def __init__(self, conn: sqlite3.Connection, parent=None) -> None:
         super().__init__(parent)
         self._conn = conn
@@ -1031,14 +1073,20 @@ class CameraRegistryWidget(QDialog):
 
         self._add_cam_btn = QPushButton("+ Add Camera")
         self._add_cam_btn.clicked.connect(self._add_instance)
+        self._edit_cam_btn = QPushButton("Edit…")
+        self._edit_cam_btn.clicked.connect(self._edit_instance)
+        self._edit_cam_btn.setEnabled(False)
         self._del_cam_btn = QPushButton("Delete")
         self._del_cam_btn.clicked.connect(self._delete_instance)
         self._del_cam_btn.setEnabled(False)
 
         inst_btns = QHBoxLayout()
         inst_btns.addWidget(self._add_cam_btn)
+        inst_btns.addWidget(self._edit_cam_btn)
         inst_btns.addWidget(self._del_cam_btn)
         inst_btns.addStretch()
+
+        self._inst_table.itemDoubleClicked.connect(lambda _: self._edit_instance())
 
         right_layout = QVBoxLayout()
         right_layout.addLayout(inst_btns)
@@ -1152,7 +1200,9 @@ class CameraRegistryWidget(QDialog):
         self._import_calib_btn.setEnabled(is_mode)
 
     def _on_instance_selection_changed(self) -> None:
-        self._del_cam_btn.setEnabled(bool(self._inst_table.selectedItems()))
+        has_sel = bool(self._inst_table.selectedItems())
+        self._edit_cam_btn.setEnabled(has_sel)
+        self._del_cam_btn.setEnabled(has_sel)
 
     def _on_double_click(self, item: QTreeWidgetItem, _col: int) -> None:
         self._edit_selected()
@@ -1277,6 +1327,20 @@ class CameraRegistryWidget(QDialog):
         dlg = InstanceDialog(self._conn, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._reload_instances()
+            self.cameras_changed.emit()
+
+    def _edit_instance(self) -> None:
+        row_idx = self._inst_table.currentRow()
+        if row_idx < 0:
+            return
+        label_item = self._inst_table.item(row_idx, 0)
+        if label_item is None:
+            return
+        instance_id = label_item.data(_ID_ROLE)
+        dlg = InstanceDialog(self._conn, instance_id=instance_id, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._reload_instances()
+            self.cameras_changed.emit()
 
     def _delete_instance(self) -> None:
         rows = self._inst_table.selectedItems()
@@ -1302,3 +1366,4 @@ class CameraRegistryWidget(QDialog):
             QMessageBox.critical(self, "Delete Failed", str(exc))
             return
         self._reload_instances()
+        self.cameras_changed.emit()

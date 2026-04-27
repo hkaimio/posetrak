@@ -1,6 +1,6 @@
 # Posetrak UI — Status and Roadmap
 
-**Last updated:** 2026-04-25
+**Last updated:** 2026-04-26
 
 ---
 
@@ -162,21 +162,115 @@ subprocess.
 
 ### 4.1 Merge setup wizard and pose window into one application
 
-Today the user runs `posetrak-setup` to prepare the session, then separately launches
-`posetrak-pose` for detection and stitching.  The goal is a single application with
-a persistent navigation sidebar (or tab strip) covering the full pipeline:
+#### Terminology and domain model
+
+The current `shots` table name conflates two distinct concepts.  New terminology:
+
+| Old term | New term | DB table | Meaning |
+|---|---|---|---|
+| Shot | **Capture** | `captures` (rename from `shots`) | One continuous camera recording: cameras on → off.  Owns the video files and sync config. |
+| — | **Trial** | `trials` (new) | A named, bounded time window within a capture: one technique, one attempt.  The user-facing unit of analysis ("shomenuchi shihonage take 1"). |
+| Detection run | **Detection run** | `detection_runs` | Technical execution of pose detection over a trial's time window.  Multiple detection runs per trial are allowed (e.g. different model or confidence threshold). |
+| Observation sequence | **Person track** | `pose_observation_sequences` | One performer's finalised pose data from a detection run. |
+| Tracking run | **Tracking run** | `tracking_runs` | One 3D tracking execution on a person track. |
+
+The `trials` table is a thin concept layer:
+
+```sql
+CREATE TABLE trials (
+    id           TEXT PRIMARY KEY,
+    capture_id   TEXT NOT NULL REFERENCES captures(id),
+    name         TEXT,
+    time_start_s REAL,
+    time_end_s   REAL,
+    notes        TEXT
+);
+```
+
+`detection_runs` gains a `trial_id TEXT REFERENCES trials(id)` column (nullable:
+existing runs without a trial remain valid).
+
+#### Target architecture
+
+A single `posetrak-ui` shell replaces both `posetrak-setup` and `posetrak-pose`.
 
 ```
-[1. Session]  [2. Cameras]  [3. Shots & Sync]  [4. Pose Detection]
-[5. Skeleton]  [6. Run Tracker]  [7. Results]
+┌──────────────────────────────────────────────────────────────────────┐
+│ File   Session   Cameras   Help                       [status bar]   │
+├──────────────────┬───────────────────────────────────────────────────┤
+│ Session tree     │  Main panel (stacked/content area)                │
+│                  │                                                    │
+│ ▼ Capture "morning"         • Nothing selected: welcome / empty      │
+│   ▼ Trial "shomen take 1"   • Capture selected: capture detail,      │
+│     ▼ Detection [yolo11x]     video files, sync status               │
+│       Harri                 • Trial selected: trial metadata,        │
+│         Tracking run 1        list of detection runs                 │
+│       Sensei                • Detection run selected:                │
+│     Detection [yolo8n]        PoseExtractionWindow panel             │
+│   ▼ Trial "shomen take 2"   • Person track selected:                 │
+│     ▼ Detection [yolo11x]     finalised track view (same panel)      │
+│       Harri                 • Tracking run selected:                 │
+│         Tracking run 1        tracking summary (Phase 5: visualizer) │
+└──────────────────┴───────────────────────────────────────────────────┘
 ```
 
-Each stage stays accessible after completion so the user can go back, re-run a step,
-or open a session that was partially processed.
+Tree hierarchy:
+- **Capture** (label, sync status indicator)
+  - **Trial** (user name; time range shown as subtitle)
+    - **Detection run** (model name + timestamp)
+      - **Person track** (performer name; one per `pose_observation_sequences` row)
+        - **Tracking run** (skeleton name + `ran_at` + notes tooltip)
 
-The two existing windows share no global state (each opens its own DB connection), so
-the merge is mainly a navigation and layout change.  The `SyncPage` and
-`PoseExtractionWindow` widget trees can be embedded as-is into the new shell.
+#### Session DB and registry
+
+- On startup the app auto-opens `~/.posetrak/registry.db` (creating it if absent).
+  No prompt unless the user wants a custom location ("File → Change registry…").
+- Session DB is opened via **File → New session database…** / **File → Open session
+  database…** (or equivalent toolbar buttons).  No wizard page for this step.
+- Recent databases listed in File menu for quick re-open.
+
+#### Capture creation: wizard stays, session-open page removed
+
+The wizard's remaining pages (videos → sync → extrinsics → skeleton) are
+capture-specific and stay intact.  The old "Session" page (page 1) moves out: the
+session DB is already open before the wizard runs.
+
+Launching the wizard: **Session → New Capture…** (menu or toolbar button).
+The wizard creates the capture, attaches video files, sets up sync and extrinsics,
+and picks a skeleton.  When it finishes the new capture appears in the tree.
+
+Trials are created inside the pose extraction panel (by marking a time range and
+naming it), or via "New Trial…" from the capture's context menu.
+
+#### Context-menu actions per tree level
+
+| Selected item | Context-menu actions |
+|---|---|
+| Capture | New trial… / Set up sync… / Import extrinsics… / Edit metadata… / Delete capture |
+| Trial | Run detection… / Edit name & notes / Delete trial |
+| Detection run | Assign persons / Finalise → person tracks / Delete run |
+| Person track | Rename / Run tracker… / Delete track |
+| Tracking run | View results (Phase 5) / Export BVH… / Edit notes / Delete run |
+
+#### Schema changes required (migrations)
+
+1. Rename `shots` → `captures`; update all FK references (`shot_id` columns in
+   `detection_runs`, `shot_videos`, `sync_configs`, `extrinsic_calibrations`,
+   `pose_observation_sequences`, `tracking_runs`).
+2. New `trials` table (see above).
+3. Add `trial_id TEXT REFERENCES trials(id)` to `detection_runs`.
+4. Add `name TEXT` to `pose_observation_sequences` (person track display name).
+5. Add `notes TEXT` to `tracking_runs`.
+
+All changes are additive or renames — no existing data is lost.
+
+#### Relation to existing code
+
+The two existing windows share no global state (each opens its own DB connection).
+The merge is mainly navigation and layout: `SyncPage` and `PoseExtractionWindow`
+widget trees embed as-is into the content area, driven by the tree selection.
+The terminology change (shots → captures, new trials level) affects Python query
+strings and UI labels but not algorithmic logic.
 
 ### 4.2 Intrinsics calibration UI
 
@@ -203,6 +297,10 @@ specific algorithm is TBD.  When implemented it replaces the import-from-TOML st
 ---
 
 ## 5. Implementation phasing
+
+Agreed order: Phase 1 → Phase 3 → Phase 5 → Phase 2 → Phase 4.
+Phase 2 (skeleton scaling) fits naturally inside the merged shell; Phase 4 (calibration
+UIs) is deferred as it is self-contained and not on the critical path.
 
 ### Phase 1 — Complete the e2e pipeline in the current two-app structure
 
@@ -238,17 +336,19 @@ Phase 1 (needs at least one tracking run in the DB).
 
 ### Phase 3 — Merge into single application
 
-Combines the two Qt entry points into one unified shell with sidebar navigation.
+Combines the two Qt entry points into one unified shell.  Design spec in section 4.1.
 
 | # | Task | Effort |
 |---|---|---|
-| T3.1 | New shell window with sidebar / tab navigation | M |
-| T3.2 | Embed SyncPage and PoseExtractionWindow as sidebar panels | S |
-| T3.3 | Embed Phase 1 panels (extrinsics, skeleton, tracker, results) | S |
-| T3.4 | Session persistence — remember last-opened DB, last active panel | S |
+| T3.1 | Schema migrations: rename `shots`→`captures`; new `trials` table; `trial_id` on `detection_runs`; `name` on `pose_observation_sequences`; `notes` on `tracking_runs` | M |
+| T3.2 | Shell window: File menu (open/new session DB), registry auto-open, recent files | S |
+| T3.3 | Session tree widget (captures → trials → detection runs → person tracks → tracking runs) with context menus | M |
+| T3.4 | Stacked content area: wire tree selection to embed existing widgets (PoseExtractionWindow, SyncPage, ExtrinsicsImportDialog) | M |
+| T3.5 | Strip session-open page from wizard; launch wizard from "New Capture…" action | S |
+| T3.6 | Session persistence — remember last-opened DB, restore tree selection | S |
 
 **Deliverable:** `posetrak-setup` and `posetrak-pose` replaced by a single `posetrak-ui`
-entry point; old entry points kept as aliases.
+entry point; old entry points kept as thin aliases for backwards compatibility.
 
 ### Phase 4 — Calibration UIs
 

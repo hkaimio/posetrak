@@ -139,7 +139,7 @@ class DetectionPipeline:
             ")"
             "SELECT sv.id, sv.camera_instance_id, sv.file_path, sv.actual_fps,"
             "       sp.video_frame, sp.timestamp_s "
-            "FROM shot_videos sv "
+            "FROM capture_videos sv "
             "JOIN anchor a ON a.shot_video_id = sv.id "
             "JOIN sync_points sp "
             "    ON sp.shot_video_id = sv.id "

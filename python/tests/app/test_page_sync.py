@@ -34,13 +34,13 @@ def _make_session_with_shots(
     for shot_num in range(1, n_shots + 1):
         shot_id = generate_id()
         conn.execute(
-            "INSERT INTO shots (id, session_id, shot_number, label) VALUES (?, ?, ?, ?)",
+            "INSERT INTO captures (id, session_id, capture_number, label) VALUES (?, ?, ?, ?)",
             (shot_id, session_id, shot_num, f"Shot {shot_num}"),
         )
         for cam_num in range(1, videos_per_shot + 1):
             video_id = generate_id()
             conn.execute(
-                "INSERT INTO shot_videos "
+                "INSERT INTO capture_videos "
                 "(id, shot_id, camera_instance_id, file_path, "
                 "first_video_frame, last_video_frame, actual_fps) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -58,6 +58,7 @@ def _attach_wizard(page: SyncPage, conn, session_id: str):
     ctx = DBContext(conn, session_id)
     wiz = MagicMock()
     wiz.db_context = ctx
+    wiz.new_shot_ids = []   # empty → fallback path loads all shots
     page.wizard = MagicMock(return_value=wiz)
     return ctx
 
@@ -117,10 +118,9 @@ def test_page_is_always_complete(qapp) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_initialize_populates_shot_combo(loaded_page) -> None:
-    page, _ = loaded_page
-    assert page._shot_combo.count() == 2
-    assert "Shot 1" in page._shot_combo.itemText(0)
+def test_initialize_shows_shot_label(loaded_page_1shot) -> None:
+    page, _ = loaded_page_1shot
+    assert page._shot_label.text() != ""
 
 
 def test_initialize_builds_scrubber(loaded_page_1shot) -> None:
@@ -329,22 +329,6 @@ def test_apply_rough_sync_correct_frame_offsets(loaded_page_1shot) -> None:
 # Shot switching
 # ---------------------------------------------------------------------------
 
-
-def test_shot_switch_rebuilds_scrubber(loaded_page) -> None:
-    page, _ = loaded_page
-    first = page._scrubber
-    page._shot_combo.setCurrentIndex(1)
-    assert page._scrubber is not first
-
-
-def test_shot_switch_resets_anchors(loaded_page) -> None:
-    page, _ = loaded_page
-    page._scrubber._focused_cell = 0
-    page._on_set_anchor()
-    assert page._anchors
-
-    page._shot_combo.setCurrentIndex(1)
-    assert page._anchors == {}
 
 
 # ---------------------------------------------------------------------------

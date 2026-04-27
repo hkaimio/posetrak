@@ -43,7 +43,7 @@ def _build_frame_to_time(
         row = session.execute(
             "SELECT sp.video_frame, sp.timestamp_s, sv.actual_fps "
             "FROM sync_points sp "
-            "JOIN shot_videos sv ON sv.id = sp.shot_video_id "
+            "JOIN capture_videos sv ON sv.id = sp.shot_video_id "
             "WHERE sp.shot_video_id = ? AND sp.sync_config_id = ? "
             "ORDER BY sp.video_frame ASC LIMIT 1",
             (svid, sync_config_id),
@@ -323,7 +323,7 @@ class StitcherWidget(QGraphicsView):
         cam_labels: dict[str, str] = {}
         for svid in svids:
             row = session.execute(
-                "SELECT ci.label FROM shot_videos sv "
+                "SELECT ci.label FROM capture_videos sv "
                 "JOIN camera_instances ci ON ci.id = sv.camera_instance_id "
                 "WHERE sv.id = ?",
                 (svid,),

@@ -183,16 +183,24 @@ class RunTrackerWidget(QWidget):
         if self._conn is None:
             return
         rows = self._conn.execute(
-            "SELECT pos.id AS seq_id, sh.label AS shot_label, sh.shot_number,"
-            "       pos.time_start_s, pos.time_end_s"
+            "SELECT pos.id AS seq_id, sh.label AS shot_label, sh.capture_number,"
+            "       pos.time_start_s, pos.time_end_s,"
+            "       sh.extrinsic_calibration_id, pos.sync_config_id"
             " FROM pose_observation_sequences pos"
-            " JOIN shots sh ON sh.id = pos.shot_id"
-            " ORDER BY sh.shot_number, pos.time_start_s"
+            " JOIN captures sh ON sh.id = pos.shot_id"
+            " ORDER BY sh.capture_number, pos.time_start_s"
         ).fetchall()
         for r in rows:
-            shot = r["shot_label"] or f"shot{r['shot_number']:03d}"
+            shot = r["shot_label"] or f"capture{r['capture_number']:03d}"
             duration = r["time_end_s"] - r["time_start_s"]
             label = f"{shot}  [{r['time_start_s']:.1f}–{r['time_end_s']:.1f}s, {duration:.1f}s]"
+            missing = []
+            if not r["sync_config_id"]:
+                missing.append("no sync")
+            if not r["extrinsic_calibration_id"]:
+                missing.append("no extrinsics")
+            if missing:
+                label += f"  ⚠ {', '.join(missing)}"
             self._sequence_combo.addItem(label, r["seq_id"])
 
     def _update_run_btn(self) -> None:
@@ -240,6 +248,11 @@ class RunTrackerWidget(QWidget):
         skel_id = self._skeleton_combo.currentData()
         person_id = self._person_id_spin.value()
 
+        err = self._check_sequence_ready(seq_id)
+        if err:
+            QMessageBox.critical(self, "Cannot run tracker", err)
+            return
+
         out_dir = self._resolve_out_dir(seq_id, skel_id)
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -273,22 +286,47 @@ class RunTrackerWidget(QWidget):
         proc.start(str(binary), cmd_args)
         self._process = proc
 
+    def _check_sequence_ready(self, seq_id: str) -> str | None:
+        """Return an error message if the sequence is missing sync or extrinsics, else None."""
+        row = self._conn.execute(
+            "SELECT s.label, s.extrinsic_calibration_id, pos.sync_config_id"
+            " FROM pose_observation_sequences pos"
+            " JOIN captures s ON s.id = pos.shot_id"
+            " WHERE pos.id = ?",
+            (seq_id,),
+        ).fetchone()
+        if row is None:
+            return f"Sequence '{seq_id}' not found in the database."
+        shot = row["label"] or seq_id[:12]
+        if not row["sync_config_id"]:
+            return (
+                f"Capture \"{shot}\" has no sync configuration.\n\n"
+                "Run the setup wizard and complete the Camera Synchronisation step "
+                "before tracking."
+            )
+        if not row["extrinsic_calibration_id"]:
+            return (
+                f"Capture \"{shot}\" has no extrinsic calibration.\n\n"
+                "Run the setup wizard and complete the Extrinsics step before tracking."
+            )
+        return None
+
     def _resolve_out_dir(self, seq_id: str, skel_id: str) -> Path:
         explicit = self._out_dir_edit.text().strip()
         if explicit:
             return Path(explicit)
         db_dir = Path(self._session_path).parent
         seq_row = self._conn.execute(
-            "SELECT sh.label, sh.shot_number"
+            "SELECT sh.label, sh.capture_number"
             " FROM pose_observation_sequences pos"
-            " JOIN shots sh ON sh.id = pos.shot_id"
+            " JOIN captures sh ON sh.id = pos.shot_id"
             " WHERE pos.id = ?",
             (seq_id,),
         ).fetchone()
         shot = (
             seq_row["label"] if seq_row and seq_row["label"]
-            else f"shot{seq_row['shot_number']:03d}" if seq_row
-            else "shot"
+            else f"capture{seq_row['capture_number']:03d}" if seq_row
+            else "capture"
         )
         skel_name = (self._skeleton_combo.currentText() or "skeleton").replace(" ", "_")
         return db_dir / "posetrak_results" / shot / skel_name / "tracking"
@@ -330,7 +368,9 @@ class RunTrackerWidget(QWidget):
                 complete.append(current)
                 current = ""
             elif tok == "\r":
-                current = ""  # overwritten — discard, we'll get the updated version
+                if current:
+                    complete.append(current)
+                current = ""
             else:
                 current += tok
         self._stdout_buf = current  # trailing partial line

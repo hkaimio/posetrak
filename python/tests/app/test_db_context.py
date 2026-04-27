@@ -14,9 +14,10 @@ from posetrak.db.db import (
     SESSION_SCHEMA_VERSION,
 )
 from app.setup.db_context import (
+    CaptureVideoInfo,
     DBContext,
     ExtrinsicEntry,
-    ShotVideoInfo,
+    ShotVideoInfo,  # backwards-compat alias
     SyncPoint,
     SyncTable,
 )
@@ -113,11 +114,11 @@ def test_sync_table_no_fps_snaps_to_nearest() -> None:
 def test_create_shot_inserts_row(ctx: DBContext, session_conn: sqlite3.Connection) -> None:
     shot_id = ctx.create_shot("test-shot", shot_number=1)
     row = session_conn.execute(
-        "SELECT label, shot_number FROM shots WHERE id = ?", (shot_id,)
+        "SELECT label, capture_number FROM captures WHERE id = ?", (shot_id,)
     ).fetchone()
     assert row is not None
     assert row["label"] == "test-shot"
-    assert row["shot_number"] == 1
+    assert row["capture_number"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +138,7 @@ def test_create_shot_video_inserts_row(
     )
     row = session_conn.execute(
         "SELECT file_path, actual_fps, first_video_frame, last_video_frame "
-        "FROM shot_videos WHERE id = ?",
+        "FROM capture_videos WHERE id = ?",
         (vid_id,),
     ).fetchone()
     assert row is not None
@@ -162,7 +163,7 @@ def test_get_shot_videos_returns_list(
     videos = ctx.get_shot_videos(shot_id)
     assert len(videos) == 1
     v = videos[0]
-    assert isinstance(v, ShotVideoInfo)
+    assert isinstance(v, CaptureVideoInfo)
     assert v.file_path == "/v1.mp4"
     assert v.actual_fps == pytest.approx(120.0)
 
@@ -259,7 +260,7 @@ def test_write_extrinsics_inserts_rows(
 
     # Shot should now point to the new calibration
     shot_row = session_conn.execute(
-        "SELECT extrinsic_calibration_id FROM shots WHERE id = ?", (shot_id,)
+        "SELECT extrinsic_calibration_id FROM captures WHERE id = ?", (shot_id,)
     ).fetchone()
     assert shot_row["extrinsic_calibration_id"] == calib_id
 
@@ -278,7 +279,7 @@ def test_rollback_page_undoes_writes(
     ctx.rollback_page()
 
     row = session_conn.execute(
-        "SELECT id FROM shots WHERE id = ?", (shot_id,)
+        "SELECT id FROM captures WHERE id = ?", (shot_id,)
     ).fetchone()
     assert row is None
 
@@ -292,6 +293,6 @@ def test_commit_page_preserves_writes(
     ctx.commit_page()
 
     row = session_conn.execute(
-        "SELECT id FROM shots WHERE id = ?", (shot_id,)
+        "SELECT id FROM captures WHERE id = ?", (shot_id,)
     ).fetchone()
     assert row is not None

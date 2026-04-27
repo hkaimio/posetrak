@@ -366,7 +366,10 @@ class PoseExtractionWindow(QMainWindow):
         if self._session is None or self._session_id is None:
             return
         from app.setup.page_extrinsics import ExtrinsicsImportDialog
-        dlg = ExtrinsicsImportDialog(self._session, self._session_id, parent=self)
+        shot_ids = [self._shot_id] if self._shot_id else []
+        dlg = ExtrinsicsImportDialog(
+            self._session, self._session_id, shot_ids=shot_ids, parent=self
+        )
         dlg.exec()
 
     def _open_skeleton_dialog(self) -> None:
@@ -413,13 +416,13 @@ class PoseExtractionWindow(QMainWindow):
             return
 
         rows = self._session.execute(
-            "SELECT id, label, shot_number FROM shots WHERE session_id=? ORDER BY shot_number",
+            "SELECT id, label, capture_number FROM captures WHERE session_id=? ORDER BY capture_number",
             (self._session_id,),
         ).fetchall()
 
         for r in rows:
-            label = r["label"] or f"Shot {r['shot_number']}"
-            self._shot_combo.addItem(f"{r['shot_number']}: {label}", r["id"])
+            label = r["label"] or f"Capture {r['capture_number']}"
+            self._shot_combo.addItem(f"{r['capture_number']}: {label}", r["id"])
 
         self._shot_combo.blockSignals(False)
         if self._shot_combo.count() > 0:
@@ -485,6 +488,70 @@ class PoseExtractionWindow(QMainWindow):
         self._assignments.clear()
         self._current_seg_first = None
         self._stitcher.load_run(self._session, run_id)
+        self._restore_finalised_assignments(run_id)
+
+    def _restore_finalised_assignments(self, run_id: str) -> None:
+        """Re-colour segments whose detections have already been finalised.
+
+        If a detection run has been finalised into a pose_observation_sequence,
+        reconstruct which track segments were assigned to which person and
+        restore those coloured assignments so the stitcher doesn't show all
+        bars as gray.
+        """
+        if self._session is None:
+            return
+
+        rows = self._session.execute(
+            "SELECT dk.shot_video_id, dk.track_id, po.person_id,"
+            "       COALESCE(sp.person_name, 'person_' || po.person_id) AS person_name,"
+            "       MIN(po.video_frame) AS min_frame"
+            " FROM pose_observation_sequences pos"
+            " JOIN pose_observations po ON po.sequence_id = pos.id"
+            " LEFT JOIN sequence_persons sp"
+            "     ON sp.sequence_id = pos.id AND sp.person_id = po.person_id"
+            " JOIN capture_videos sv"
+            "     ON sv.camera_instance_id = po.camera_instance_id"
+            "     AND sv.shot_id = pos.shot_id"
+            " JOIN detection_keypoints dk"
+            "     ON dk.detection_run_id = pos.detection_run_id"
+            "     AND dk.shot_video_id = sv.id"
+            "     AND dk.video_frame = po.video_frame"
+            "     AND dk.region_type = 'full_body'"
+            " WHERE pos.detection_run_id = ?"
+            " GROUP BY dk.shot_video_id, dk.track_id, po.person_id"
+            " ORDER BY dk.shot_video_id, dk.track_id, min_frame",
+            (run_id,),
+        ).fetchall()
+
+        if not rows:
+            return
+
+        # Group by (svid, tid) — each track may map to multiple persons if it was split
+        from collections import defaultdict
+        by_track: dict[tuple[str, int], list] = defaultdict(list)
+        for r in rows:
+            by_track[(r["shot_video_id"], r["track_id"])].append(r)
+
+        spans = self._stitcher.get_spans()
+        for (svid, tid), track_rows in by_track.items():
+            seg_first = next(
+                (sf for (s, t, sf) in spans if s == svid and t == tid), None
+            )
+            if seg_first is None:
+                continue
+
+            sorted_rows = sorted(track_rows, key=lambda r: r["min_frame"])
+            cur_seg_first = seg_first
+
+            for i, r in enumerate(sorted_rows):
+                person_name = r["person_name"]
+                if i < len(sorted_rows) - 1:
+                    split_frame = sorted_rows[i + 1]["min_frame"]
+                    self._stitcher.split_segment(svid, tid, cur_seg_first, split_frame)
+                    self._apply_assignment(svid, tid, cur_seg_first, person_name)
+                    cur_seg_first = split_frame
+                else:
+                    self._apply_assignment(svid, tid, cur_seg_first, person_name)
 
     # ------------------------------------------------------------------
     # Detection job
@@ -568,7 +635,7 @@ class PoseExtractionWindow(QMainWindow):
 
         rows = self._session.execute(
             "SELECT sv.id, sv.file_path, sv.actual_fps, ci.label "
-            "FROM shot_videos sv "
+            "FROM capture_videos sv "
             "JOIN camera_instances ci ON ci.id = sv.camera_instance_id "
             "WHERE sv.shot_id = ? ORDER BY ci.label",
             (self._shot_id,),
@@ -677,7 +744,7 @@ class PoseExtractionWindow(QMainWindow):
 
         # Load file path and camera_instance_id
         row = self._session.execute(
-            "SELECT file_path, camera_instance_id, actual_fps FROM shot_videos WHERE id=?",
+            "SELECT file_path, camera_instance_id, actual_fps FROM capture_videos WHERE id=?",
             (shot_video_id,),
         ).fetchone()
         if row is None:

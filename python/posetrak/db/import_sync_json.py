@@ -130,15 +130,15 @@ def import_sync_json(
 
         # Look up the shot_video row for this camera/shot combination.
         sv_row = session.execute(
-            "SELECT id FROM shot_videos "
+            "SELECT id FROM capture_videos "
             "WHERE shot_id = ? AND camera_instance_id = ?",
             (shot_id, instance_id),
         ).fetchone()
         if sv_row is None:
             raise ValueError(
-                f"No shot_videos row found for shot_id={shot_id!r} "
+                f"No capture_videos row found for capture_id={shot_id!r} "
                 f"and camera_instance_id={instance_id!r} (cam_key={cam_key!r}). "
-                "Add shot video rows with add_shot_video() before importing sync data."
+                "Add capture video rows with add_capture_video() before importing sync data."
             )
 
         shot_video_id = sv_row["id"]

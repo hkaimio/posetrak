@@ -39,11 +39,11 @@ def _seed_session(conn):
 
     conn.executescript(f"""
         INSERT INTO mocap_sessions (id, recorded_at) VALUES ('{session_id}', '2026-01-01');
-        INSERT INTO shots (id, session_id, shot_number, label)
+        INSERT INTO captures (id, session_id, capture_number, label)
             VALUES ('{_SHOT_ID}', '{session_id}', 1, 'test');
         INSERT INTO sync_configs (id, shot_id, created_by)
             VALUES ('{_SYNC_ID}', '{_SHOT_ID}', 'test');
-        INSERT INTO shot_videos (id, shot_id, camera_instance_id, file_path,
+        INSERT INTO capture_videos (id, shot_id, camera_instance_id, file_path,
                                  first_video_frame, last_video_frame, actual_fps)
             VALUES ('{_SVID}', '{_SHOT_ID}', '{_CAM_ID}', '/fake/video.mp4', 0, 1000, 120.0);
         INSERT INTO sync_points (sync_config_id, camera_instance_id, shot_video_id,

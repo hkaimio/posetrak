@@ -356,11 +356,11 @@ class SessionPage(QWizardPage):
             ).fetchone()
             if row is None:
                 return
-            shot_count = conn.execute("SELECT COUNT(*) FROM shots").fetchone()[0]
+            shot_count = conn.execute("SELECT COUNT(*) FROM captures").fetchone()[0]
             parts = [
                 f"<b>Recorded:</b> {row['recorded_at']}",
                 f"<b>Location:</b> {row['location'] or '—'}",
-                f"<b>Shots:</b> {shot_count}",
+                f"<b>Captures:</b> {shot_count}",
             ]
             if row["notes"]:
                 parts.append(f"<b>Notes:</b> {row['notes']}")

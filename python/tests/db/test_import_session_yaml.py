@@ -212,16 +212,16 @@ def test_import_creates_shot_and_videos(tmp_path, registry_db, session_db, two_c
     assert "run1" in result.shot_ids
     assert "run2" in result.shot_ids
 
-    # Shots have nullable extrinsic_calibration_id
+    # Captures have nullable extrinsic_calibration_id
     for shot_id in result.shot_ids.values():
-        shot = session_db.execute("SELECT * FROM shots WHERE id = ?", (shot_id,)).fetchone()
+        shot = session_db.execute("SELECT * FROM captures WHERE id = ?", (shot_id,)).fetchone()
         assert shot is not None
         assert shot["extrinsic_calibration_id"] is None
 
     # Videos
     for shot_id in result.shot_ids.values():
         videos = session_db.execute(
-            "SELECT * FROM shot_videos WHERE shot_id = ?", (shot_id,)
+            "SELECT * FROM capture_videos WHERE shot_id = ?", (shot_id,)
         ).fetchall()
         assert len(videos) == 2
 
@@ -375,7 +375,7 @@ def test_list_camera_format(tmp_path, registry_db, session_db, two_camera_regist
     # cam2 start = 1003 + (1100-1000) = 1103
     shot_id = result.shot_ids["take1"]
     videos = session_db.execute(
-        "SELECT camera_instance_id, first_video_frame FROM shot_videos WHERE shot_id = ?",
+        "SELECT camera_instance_id, first_video_frame FROM capture_videos WHERE shot_id = ?",
         (shot_id,)
     ).fetchall()
     by_cam = {v["camera_instance_id"]: v["first_video_frame"] for v in videos}
@@ -413,7 +413,7 @@ def test_ref_camera_relative_scenes(tmp_path, registry_db, session_db, two_camer
 
     shot_id = result.shot_ids["run1"]
     videos = session_db.execute(
-        "SELECT camera_instance_id, first_video_frame, last_video_frame FROM shot_videos WHERE shot_id = ?",
+        "SELECT camera_instance_id, first_video_frame, last_video_frame FROM capture_videos WHERE shot_id = ?",
         (shot_id,)
     ).fetchall()
     by_cam = {v["camera_instance_id"]: v for v in videos}

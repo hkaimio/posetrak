@@ -161,7 +161,7 @@ def import_pose_json(
         ).fetchone()
 
         sv_row = session.execute(
-            "SELECT actual_fps FROM shot_videos "
+            "SELECT actual_fps FROM capture_videos "
             "WHERE shot_id = ? AND camera_instance_id = ?",
             (shot_id, instance_id),
         ).fetchone()

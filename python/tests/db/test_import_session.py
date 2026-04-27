@@ -10,14 +10,16 @@ import pytest
 
 
 from posetrak.db.db import (
+    add_capture_video,
     add_session_camera,
-    add_shot_video,
+    add_shot_video,  # backwards-compat alias — still importable
     create_camera_model,
     create_camera_mode,
+    create_capture,
     create_mocap_session,
     create_registry,
     create_session,
-    create_shot,
+    create_shot,  # backwards-compat alias — still importable
 )
 
 
@@ -142,7 +144,7 @@ def test_add_session_camera_duplicate_raises(
 
 
 # ---------------------------------------------------------------------------
-# create_shot
+# create_capture
 # ---------------------------------------------------------------------------
 
 def _make_extrinsic(session_db: sqlite3.Connection, session_id: str) -> str:
@@ -159,75 +161,75 @@ def _make_extrinsic(session_db: sqlite3.Connection, session_id: str) -> str:
 
 
 def test_create_shot_returns_id(session_db: sqlite3.Connection) -> None:
-    """create_shot() should return a non-empty UUID string."""
+    """create_capture() should return a non-empty UUID string."""
     session_id = create_mocap_session(session_db)
     ext_id = _make_extrinsic(session_db, session_id)
-    shot_id = create_shot(session_db, session_id, ext_id)
+    shot_id = create_capture(session_db, session_id, ext_id)
     assert shot_id
     row = session_db.execute(
-        "SELECT id FROM shots WHERE id = ?", (shot_id,)
+        "SELECT id FROM captures WHERE id = ?", (shot_id,)
     ).fetchone()
     assert row is not None
 
 
 def test_create_shot_auto_number(session_db: sqlite3.Connection) -> None:
-    """create_shot() without shot_number auto-increments from 1."""
+    """create_capture() without capture_number auto-increments from 1."""
     session_id = create_mocap_session(session_db)
     ext_id = _make_extrinsic(session_db, session_id)
-    id1 = create_shot(session_db, session_id, ext_id)
-    id2 = create_shot(session_db, session_id, ext_id)
+    id1 = create_capture(session_db, session_id, ext_id)
+    id2 = create_capture(session_db, session_id, ext_id)
     n1 = session_db.execute(
-        "SELECT shot_number FROM shots WHERE id = ?", (id1,)
-    ).fetchone()["shot_number"]
+        "SELECT capture_number FROM captures WHERE id = ?", (id1,)
+    ).fetchone()["capture_number"]
     n2 = session_db.execute(
-        "SELECT shot_number FROM shots WHERE id = ?", (id2,)
-    ).fetchone()["shot_number"]
+        "SELECT capture_number FROM captures WHERE id = ?", (id2,)
+    ).fetchone()["capture_number"]
     assert n1 == 1
     assert n2 == 2
 
 
 def test_create_shot_explicit_number(session_db: sqlite3.Connection) -> None:
-    """create_shot() with an explicit shot_number stores that number."""
+    """create_capture() with an explicit capture_number stores that number."""
     session_id = create_mocap_session(session_db)
     ext_id = _make_extrinsic(session_db, session_id)
-    shot_id = create_shot(session_db, session_id, ext_id, shot_number=42)
+    shot_id = create_capture(session_db, session_id, ext_id, capture_number=42)
     row = session_db.execute(
-        "SELECT shot_number FROM shots WHERE id = ?", (shot_id,)
+        "SELECT capture_number FROM captures WHERE id = ?", (shot_id,)
     ).fetchone()
-    assert row["shot_number"] == 42
+    assert row["capture_number"] == 42
 
 
 # ---------------------------------------------------------------------------
-# add_shot_video
+# add_capture_video
 # ---------------------------------------------------------------------------
 
 
 def test_add_shot_video_returns_id(session_db: sqlite3.Connection) -> None:
-    """add_shot_video() should return a non-empty UUID string."""
+    """add_capture_video() should return a non-empty UUID string."""
     session_id = create_mocap_session(session_db)
     ext_id = _make_extrinsic(session_db, session_id)
-    shot_id = create_shot(session_db, session_id, ext_id)
-    video_id = add_shot_video(
+    shot_id = create_capture(session_db, session_id, ext_id)
+    video_id = add_capture_video(
         session_db, shot_id, "cam-inst-1", "/data/video.mp4", 0, 999, 119.88
     )
     assert video_id
     row = session_db.execute(
-        "SELECT id FROM shot_videos WHERE id = ?", (video_id,)
+        "SELECT id FROM capture_videos WHERE id = ?", (video_id,)
     ).fetchone()
     assert row is not None
 
 
 def test_add_shot_video_stores_path_and_fps(session_db: sqlite3.Connection) -> None:
-    """add_shot_video() stores the file path and fps correctly."""
+    """add_capture_video() stores the file path and fps correctly."""
     session_id = create_mocap_session(session_db)
     ext_id = _make_extrinsic(session_db, session_id)
-    shot_id = create_shot(session_db, session_id, ext_id)
-    video_id = add_shot_video(
+    shot_id = create_capture(session_db, session_id, ext_id)
+    video_id = add_capture_video(
         session_db, shot_id, "cam-inst-1", "/mnt/d/videos/take1.mp4", 10, 500, 119.88
     )
     row = session_db.execute(
         "SELECT file_path, actual_fps, first_video_frame, last_video_frame "
-        "FROM shot_videos WHERE id = ?",
+        "FROM capture_videos WHERE id = ?",
         (video_id,),
     ).fetchone()
     assert row["file_path"] == "/mnt/d/videos/take1.mp4"

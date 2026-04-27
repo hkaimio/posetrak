@@ -37,6 +37,7 @@ def main() -> int:
     wizard.session_id     = None
     wizard.db_context     = None
     wizard.registry_conn  = None  # set by SessionPage when a registry DB is opened
+    wizard.new_shot_ids   = []    # set by ShotsPage so SyncPage can pre-select them
 
     # "Manage Cameras…" custom button — opens CameraRegistryWidget backed by
     # whichever DB connection is currently active (registry preferred, else session).

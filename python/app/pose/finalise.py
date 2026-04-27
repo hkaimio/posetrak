@@ -36,7 +36,7 @@ def finalise_to_db(
     rows = session.execute(
         "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, sv.actual_fps "
         "FROM sync_points sp "
-        "JOIN shot_videos sv ON sv.id = sp.shot_video_id "
+        "JOIN capture_videos sv ON sv.id = sp.shot_video_id "
         "WHERE sp.sync_config_id = ?",
         (sync_config_id,),
     ).fetchall()
@@ -55,7 +55,7 @@ def finalise_to_db(
 
     # Get camera_instance_id per shot_video_id
     sv_rows = session.execute(
-        "SELECT id, camera_instance_id FROM shot_videos WHERE shot_id = ?",
+        "SELECT id, camera_instance_id FROM capture_videos WHERE shot_id = ?",
         (shot_id,),
     ).fetchall()
     camera_by_svid = {r["id"]: r["camera_instance_id"] for r in sv_rows}
@@ -123,6 +123,12 @@ def finalise_to_db(
             "VALUES (?,?,?,?,?,?,?)",
             obs_rows,
         )
+
+    session.executemany(
+        "INSERT OR IGNORE INTO sequence_persons (sequence_id, person_id, person_name) "
+        "VALUES (?, ?, ?)",
+        [(seq_id, pid, name) for name, pid in name_to_pid.items()],
+    )
 
     session.commit()
     return seq_id

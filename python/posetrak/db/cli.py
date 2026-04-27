@@ -33,14 +33,14 @@ session   create           Create a new mocap session in a session database.
 session   list             List mocap sessions in a session database.
 session   add-camera       Link a camera (with registry copy) to a session.
 session   import-yaml      Import a capture project YAML into a session database.
-session   fix-camera-refs  Repair shot_videos with free-text camera_instance_id values.
+session   fix-camera-refs  Repair capture_videos with free-text camera_instance_id values.
 
 extrinsics  import  Import extrinsic calibration from a Pose2Sim TOML file.
 extrinsics  list    List extrinsic calibrations in a session database.
 
-shot      create    Create a new shot within a session.
-shot      list      List shots in a session database.
-shot      add-video Add a video file record to a shot.
+capture   create    Create a new capture within a session.
+capture   list      List captures in a session database.
+capture   add-video Add a video file record to a capture.
 
 sync      import    Import camera sync anchors from a sync JSON file.
 sync      list      List sync configs in a session database.
@@ -62,14 +62,16 @@ from posetrak.db.db import (
     DEFAULT_REGISTRY_PATH,
     REGISTRY_SCHEMA_VERSION,
     add_session_camera,
-    add_shot_video,
+    add_capture_video,
+    add_shot_video,  # backwards-compat alias
     create_camera_instance,
     create_camera_model,
     create_camera_mode,
+    create_capture,
     create_mocap_session,
     create_registry,
     create_session,
-    create_shot,
+    create_shot,  # backwards-compat alias
     generate_id,
     get_project_root,
     get_schema_version,
@@ -79,8 +81,9 @@ from posetrak.db.db import (
     open_registry,
     open_session,
     resolve_id_prefix,
+    set_capture_extrinsics,
     set_project_root,
-    set_shot_extrinsics,
+    set_shot_extrinsics,  # backwards-compat alias
 )
 from posetrak.db.import_calib_toml import import_calib_toml
 from posetrak.db.import_calib_h5 import import_calib_h5
@@ -1196,7 +1199,7 @@ def _cmd_session_import_yaml(args: argparse.Namespace) -> int:
 
 
 def _cmd_session_fix_camera_refs(args: argparse.Namespace) -> int:
-    """Repair shot_videos rows whose camera_instance_id is a free-text string.
+    """Repair capture_videos rows whose camera_instance_id is a free-text string.
 
     Identifies dangling camera_instance_id values (strings that do not match
     any row in camera_instances) and interactively prompts the user to map each
@@ -1236,7 +1239,7 @@ def _fix_camera_refs(
     dangling_rows = session_conn.execute(
         """
         SELECT DISTINCT sv.camera_instance_id
-        FROM shot_videos sv
+        FROM capture_videos sv
         WHERE sv.camera_instance_id IS NOT NULL
           AND NOT EXISTS (
               SELECT 1 FROM camera_instances ci
@@ -1273,7 +1276,7 @@ def _fix_camera_refs(
     # 3. Apply updates
     for old_id, new_id in mapping.items():
         session_conn.execute(
-            "UPDATE shot_videos SET camera_instance_id = ? WHERE camera_instance_id = ?",
+            "UPDATE capture_videos SET camera_instance_id = ? WHERE camera_instance_id = ?",
             (new_id, old_id),
         )
 
@@ -1282,8 +1285,8 @@ def _fix_camera_refs(
         affected = session_conn.execute(
             """
             SELECT DISTINCT sh.session_id
-            FROM shot_videos sv
-            JOIN shots sh ON sh.id = sv.shot_id
+            FROM capture_videos sv
+            JOIN captures sh ON sh.id = sv.shot_id
             WHERE sv.camera_instance_id = ?
             """,
             (new_id,),
@@ -1307,15 +1310,15 @@ def _fix_camera_refs(
         """
         SELECT sv.id, sv.camera_instance_id,
                sv.camera_mode_id, sv.intrinsics_calibration_id
-        FROM shot_videos sv
+        FROM capture_videos sv
         WHERE sv.camera_instance_id IS NOT NULL
           AND (sv.camera_mode_id IS NULL OR sv.intrinsics_calibration_id IS NULL)
         """
     ).fetchall()
     if null_rows:
         print(
-            f"\n{len(null_rows)} shot_video(s) still have NULL camera_mode or intrinsics. "
-            "Run 'posetrak-db shot add-video --help' or update manually via the wizard."
+            f"\n{len(null_rows)} capture_video(s) still have NULL camera_mode or intrinsics. "
+            "Run 'posetrak-db capture add-video --help' or update manually via the wizard."
         )
 
     return 0
@@ -1581,8 +1584,8 @@ def _cmd_extrinsics_import(args: argparse.Namespace) -> int:
             method=args.method or "pose2sim",
         )
         if getattr(args, "shot", None):
-            shot_id = _resolve(session_conn, "shots", args.shot)
-            set_shot_extrinsics(session_conn, shot_id, result.extrinsic_calibration_id)
+            shot_id = _resolve(session_conn, "captures", args.shot)
+            set_capture_extrinsics(session_conn, shot_id, result.extrinsic_calibration_id)
     except Exception as exc:  # noqa: BLE001
         print(f"Error importing extrinsics: {exc}", file=sys.stderr)
         session_conn.close()
@@ -1644,7 +1647,7 @@ def _cmd_extrinsics_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_shot_list(args: argparse.Namespace) -> int:
-    """List shots in a session database."""
+    """List captures in a session database."""
     import sqlite3
 
     try:
@@ -1654,15 +1657,15 @@ def _cmd_shot_list(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        q = "SELECT id, session_id, shot_number, label, extrinsic_calibration_id FROM shots"
+        q = "SELECT id, session_id, capture_number, label, extrinsic_calibration_id FROM captures"
         params: list = []
         if args.session:
             q += " WHERE session_id = ?"
             params.append(args.session)
-        q += " ORDER BY shot_number"
+        q += " ORDER BY capture_number"
         rows = conn.execute(q, params).fetchall()
         if not rows:
-            print("(no shots)")
+            print("(no captures)")
             return 0
         print(f"{'id':<36}  {'#':>4}  {'label':<30}  {'extrinsics_id':<36}")
         print("-" * 115)
@@ -1677,7 +1680,7 @@ def _cmd_shot_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_shot_create(args: argparse.Namespace) -> int:
-    """Create a new shot within a session."""
+    """Create a new capture within a session."""
     try:
         session_conn = open_session(Path(args.session_db))
     except (FileNotFoundError, ValueError) as exc:
@@ -1687,23 +1690,23 @@ def _cmd_shot_create(args: argparse.Namespace) -> int:
     try:
         session_id = _resolve(session_conn, "mocap_sessions", args.session)
         extrinsics_id = _resolve(session_conn, "extrinsic_calibrations", args.extrinsics)
-        shot_id = create_shot(
+        shot_id = create_capture(
             session_conn,
             session_id,
             extrinsics_id,
-            shot_number=args.number,
+            capture_number=args.number,
             label=args.label or "",
             notes=args.notes or "",
         )
     finally:
         session_conn.close()
 
-    print(f"shot_id: {shot_id}")
+    print(f"capture_id: {shot_id}")
     return 0
 
 
 def _cmd_shot_add_video(args: argparse.Namespace) -> int:
-    """Add a video file record to a shot."""
+    """Add a video file record to a capture."""
     try:
         session_conn = open_session(Path(args.session_db))
     except (FileNotFoundError, ValueError) as exc:
@@ -1711,9 +1714,9 @@ def _cmd_shot_add_video(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        shot_id = _resolve(session_conn, "shots", args.shot)
+        shot_id = _resolve(session_conn, "captures", args.shot)
         camera_instance = _resolve(session_conn, "camera_instances", args.camera_instance)
-        video_id = add_shot_video(
+        video_id = add_capture_video(
             session_conn,
             shot_id,
             camera_instance,
@@ -1725,7 +1728,7 @@ def _cmd_shot_add_video(args: argparse.Namespace) -> int:
     finally:
         session_conn.close()
 
-    print(f"shot_video_id: {video_id}")
+    print(f"capture_video_id: {video_id}")
     return 0
 
 
@@ -1748,7 +1751,7 @@ def _cmd_sync_import(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        shot_id = _resolve(session_conn, "shots", args.shot)
+        shot_id = _resolve(session_conn, "captures", args.shot)
         result = import_sync_json(
             session_conn,
             shot_id,
@@ -1866,7 +1869,7 @@ def _cmd_pose_import(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        shot_id = _resolve(session_conn, "shots", args.shot)
+        shot_id = _resolve(session_conn, "captures", args.shot)
         sync_config_id = _resolve(session_conn, "sync_configs", args.sync_config)
         result = import_pose_json(
             session_conn,
@@ -2227,20 +2230,20 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="cam1=<uuid> pairs or single UUID")
     p.add_argument("--method", default="pose2sim", metavar="S")
     p.add_argument("--shot", default=None, metavar="UUID",
-                   help="shots.id to link after import (sets extrinsic_calibration_id)")
+                   help="captures.id to link after import (sets extrinsic_calibration_id)")
 
     # -------------------------------------------------------------------------
-    # shot topic
+    # capture topic (formerly shot)
     # -------------------------------------------------------------------------
-    shot = topics.add_parser("shot", help="Manage shots within a session")
+    shot = topics.add_parser("capture", help="Manage captures within a session")
     shot_actions = shot.add_subparsers(dest="action", required=True)
 
-    p = shot_actions.add_parser("list", help="List shots")
+    p = shot_actions.add_parser("list", help="List captures")
     _add_session_db_arg(p, required=True)
     p.add_argument("--session", default=None, metavar="UUID",
                    help="Filter by mocap_sessions.id")
 
-    p = shot_actions.add_parser("create", help="Create a new shot within a session")
+    p = shot_actions.add_parser("create", help="Create a new capture within a session")
     _add_session_db_arg(p, required=True)
     p.add_argument("--session", required=True, metavar="UUID")
     p.add_argument("--extrinsics", required=True, metavar="UUID",
@@ -2249,9 +2252,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--label", default="", metavar="S")
     p.add_argument("--notes", default="", metavar="S")
 
-    p = shot_actions.add_parser("add-video", help="Add a video file to a shot")
+    p = shot_actions.add_parser("add-video", help="Add a video file to a capture")
     _add_session_db_arg(p, required=True)
-    p.add_argument("--shot", required=True, metavar="UUID")
+    p.add_argument("--shot", required=True, metavar="UUID",
+                   dest="shot", help="captures.id")
     p.add_argument("--camera-instance", required=True, metavar="UUID",
                    dest="camera_instance")
     p.add_argument("--file", required=True, metavar="PATH")
@@ -2270,12 +2274,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sync_actions.add_parser("list", help="List sync configs")
     _add_session_db_arg(p, required=True)
     p.add_argument("--shot", default=None, metavar="UUID",
-                   help="Filter by shots.id")
+                   help="Filter by captures.id")
 
     p = sync_actions.add_parser("import",
                                 help="Import camera sync anchors from a sync JSON file")
     _add_session_db_arg(p, required=True)
-    p.add_argument("--shot", required=True, metavar="UUID")
+    p.add_argument("--shot", required=True, metavar="UUID",
+                   help="captures.id")
     p.add_argument("--sync-json", required=True, metavar="JSON_PATH", dest="sync_json")
     p.add_argument("--camera-instance", action="append", metavar="SPEC",
                    dest="camera_instance")
@@ -2291,12 +2296,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p = pose_actions.add_parser("list", help="List pose observation sequences")
     _add_session_db_arg(p, required=True)
     p.add_argument("--shot", default=None, metavar="UUID",
-                   help="Filter by shots.id")
+                   help="Filter by captures.id")
 
     p = pose_actions.add_parser("import",
                                 help="Import 2-D pose observations from a pose directory")
     _add_session_db_arg(p, required=True)
-    p.add_argument("--shot", required=True, metavar="UUID")
+    p.add_argument("--shot", required=True, metavar="UUID",
+                   help="captures.id")
     p.add_argument("--sync-config", required=True, metavar="UUID", dest="sync_config")
     p.add_argument("--pose-dir", required=True, metavar="DIR", dest="pose_dir")
     p.add_argument("--camera-instance", action="append", metavar="SPEC",
@@ -2357,9 +2363,9 @@ def main() -> None:
         ("session", "fix-camera-refs"): _cmd_session_fix_camera_refs,
         ("extrinsics", "list"): _cmd_extrinsics_list,
         ("extrinsics", "import"): _cmd_extrinsics_import,
-        ("shot", "list"): _cmd_shot_list,
-        ("shot", "create"): _cmd_shot_create,
-        ("shot", "add-video"): _cmd_shot_add_video,
+        ("capture", "list"): _cmd_shot_list,
+        ("capture", "create"): _cmd_shot_create,
+        ("capture", "add-video"): _cmd_shot_add_video,
         ("sync", "list"): _cmd_sync_list,
         ("sync", "import"): _cmd_sync_import,
         ("pose", "list"): _cmd_pose_list,

@@ -52,28 +52,18 @@ def _fake_probe(width=1920, height=1080, fps=30.0, frames=300) -> VideoProbeResu
 # ---------------------------------------------------------------------------
 
 
-def test_page_constructs_with_one_shot(qapp) -> None:
+def test_page_title(qapp) -> None:
     page = ShotsPage()
-    assert page.title() == "Shots & Videos"
+    assert page.title() == "Shot & Videos"
+
+
+def test_initialize_adds_one_shot(qapp, tmp_path) -> None:
+    conn, session_id = _make_session_db(tmp_path)
+    page = ShotsPage()
+    _make_wizard_mock(page, conn, session_id)
+    page.initializePage()
     assert len(page._shots) == 1
-
-
-def test_add_shot_increments_shot_number(qapp) -> None:
-    page = ShotsPage()
-    page._add_shot()
-    assert len(page._shots) == 2
-    assert page._shots[0].shot_number == 1
-    assert page._shots[1].shot_number == 2
-
-
-def test_remove_shot(qapp) -> None:
-    page = ShotsPage()
-    page._add_shot()
-    assert len(page._shots) == 2
-    entry = page._shots[0]
-    page._remove_shot(entry)
-    assert len(page._shots) == 1
-    assert entry not in page._shots
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -99,12 +89,12 @@ def test_validate_writes_shot(qapp, tmp_path) -> None:
 
     assert result is True
 
-    shot = conn.execute("SELECT * FROM shots WHERE shot_number = 1").fetchone()
+    shot = conn.execute("SELECT * FROM captures WHERE capture_number = 1").fetchone()
     assert shot is not None
     assert shot["label"] == "walk"
 
     video = conn.execute(
-        "SELECT * FROM shot_videos WHERE shot_id = ?", (shot["id"],)
+        "SELECT * FROM capture_videos WHERE shot_id = ?", (shot["id"],)
     ).fetchone()
     assert video is not None
     assert video["file_path"] == "/fake/cam1.mp4"
@@ -126,7 +116,7 @@ def test_validate_writes_multiple_shots(qapp, tmp_path) -> None:
     result = page.validatePage()
 
     assert result is True
-    count = conn.execute("SELECT COUNT(*) FROM shots").fetchone()[0]
+    count = conn.execute("SELECT COUNT(*) FROM captures").fetchone()[0]
     assert count == 3
     conn.close()
 
@@ -136,8 +126,8 @@ def test_validate_fails_with_no_shots(qapp, tmp_path) -> None:
     page = ShotsPage()
     _make_wizard_mock(page, conn, session_id)
 
-    page._shots.clear()
     page.initializePage()
+    page._shots.clear()   # remove the auto-added shot to test error path
     result = page.validatePage()
 
     assert result is False
@@ -161,7 +151,7 @@ def test_cleanup_rolls_back(qapp, tmp_path) -> None:
     ctx.create_shot("partial", 99)
     ctx.rollback_page()
 
-    count = conn.execute("SELECT COUNT(*) FROM shots").fetchone()[0]
+    count = conn.execute("SELECT COUNT(*) FROM captures").fetchone()[0]
     assert count == 0
     conn.close()
 

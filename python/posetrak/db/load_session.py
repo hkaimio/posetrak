@@ -242,10 +242,9 @@ def load_cameras_from_session(
     """
     conn = _open_db(session_db)
     try:
-        # Get extrinsic entries; intrinsics are now stored on shot_videos (v11+).
+        # Get extrinsic entries; intrinsics are stored on capture_videos (v11+).
         # For each camera instance in the session, pick the intrinsics from the
-        # first shot_video (by shot_number then rowid) that has a non-NULL
-        # intrinsics_calibration_id.  Falls back to NULL if none is set.
+        # first capture_video that has a non-NULL intrinsics_calibration_id.
         rows = conn.execute(
             """
             SELECT
@@ -264,8 +263,8 @@ def load_cameras_from_session(
                 ON ci.id = ee.camera_instance_id
             LEFT JOIN (
                 SELECT sv.camera_instance_id, sv.intrinsics_calibration_id
-                FROM shot_videos sv
-                JOIN shots sh ON sh.id = sv.shot_id
+                FROM capture_videos sv
+                JOIN captures sh ON sh.id = sv.shot_id
                 WHERE sh.session_id = :session_id
                   AND sv.intrinsics_calibration_id IS NOT NULL
                 GROUP BY sv.camera_instance_id
@@ -353,10 +352,10 @@ def load_sync_from_session(session_db: str, sync_config_id: str) -> dict:
                    sp.camera_instance_id,
                    COALESCE(sc.label, ci.label) AS cam_label
             FROM sync_points sp
-            JOIN shot_videos sv ON sv.id = sp.shot_video_id
+            JOIN capture_videos sv ON sv.id = sp.shot_video_id
             JOIN camera_instances ci ON ci.id = sp.camera_instance_id
             JOIN sync_configs scfg ON scfg.id = sp.sync_config_id
-            JOIN shots sh ON sh.id = scfg.shot_id
+            JOIN captures sh ON sh.id = scfg.shot_id
             LEFT JOIN session_cameras sc
                 ON sc.camera_instance_id = sp.camera_instance_id
                AND sc.session_id = sh.session_id

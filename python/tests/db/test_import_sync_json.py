@@ -168,7 +168,7 @@ def test_sync_import_links_correct_shot_video(
         (result.sync_config_id, inst1),
     ).fetchone()
     sv_row = session_conn.execute(
-        "SELECT id FROM shot_videos WHERE id = ?",
+        "SELECT id FROM capture_videos WHERE id = ?",
         (row["shot_video_id"],),
     ).fetchone()
     assert sv_row is not None
@@ -205,7 +205,7 @@ def test_sync_import_fails_without_shot_video(
     )
     shot_id = create_shot(session_conn, session_id, ext_result.extrinsic_calibration_id)
     # No shot_videos added — should raise ValueError
-    with pytest.raises(ValueError, match="shot_videos"):
+    with pytest.raises(ValueError, match="capture_videos"):
         import_sync_json(
             session_conn, shot_id, sample_sync_json,
             {"cam1": inst1, "cam2": inst2},

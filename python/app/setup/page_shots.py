@@ -1,7 +1,7 @@
-"""page_shots.py — Wizard page 2: define shots and add video files.
+"""page_shots.py — Wizard page 2: define a single shot and add video files.
 
-The user creates one or more shots and assigns video files to each.  After
-the user picks a file, a background probe (cv2 + optional exiftool) fills in
+The user defines one shot (take) and assigns video files to it.  After the
+user picks a file, a background probe (cv2 + optional exiftool) fills in
 camera metadata automatically.
 
 Wizard fields read by this page
@@ -11,12 +11,13 @@ Wizard fields read by this page
 
 Behaviour
 ---------
-- A shot is created for every entry in the shots list when the user clicks
-  *Next*.
-- Each video file within a shot is written to ``shot_videos`` via
+- Exactly one shot is created when the user clicks *Next*.
+- Each video file within the shot is written to ``shot_videos`` via
   ``DBContext.create_shot_video()``.
 - The whole operation is wrapped in a single ``begin_page()`` savepoint so
   that clicking *Back* rolls everything back.
+- The created shot ID is stored on ``wizard().new_shot_ids`` so the next
+  page can pre-select it.
 """
 
 from __future__ import annotations
@@ -435,7 +436,13 @@ class _ShotPanel(QGroupBox):
 
     remove_requested = Signal(object)   # emits ShotEntry
 
-    def __init__(self, entry: ShotEntry, db_context=None, parent=None) -> None:
+    def __init__(
+        self,
+        entry: ShotEntry,
+        db_context=None,
+        show_remove_btn: bool = True,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._entry = entry
         self._db_context = db_context
@@ -462,6 +469,7 @@ class _ShotPanel(QGroupBox):
         self._remove_shot_btn.clicked.connect(
             lambda: self.remove_requested.emit(self._entry)
         )
+        self._remove_shot_btn.setVisible(show_remove_btn)
 
         header = QFormLayout()
         header.addRow("Shot #:", self._num_spin)
@@ -470,7 +478,8 @@ class _ShotPanel(QGroupBox):
         btn_row = QHBoxLayout()
         btn_row.addWidget(self._add_video_btn)
         btn_row.addStretch()
-        btn_row.addWidget(self._remove_shot_btn)
+        if show_remove_btn:
+            btn_row.addWidget(self._remove_shot_btn)
 
         self._video_container = QWidget()
         self._video_layout = QVBoxLayout(self._video_container)
@@ -551,28 +560,25 @@ class _ShotPanel(QGroupBox):
 
 
 class ShotsPage(QWizardPage):
-    """Wizard page 2 — define shots and add video files."""
+    """Wizard page 2 — define one shot and add video files."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setTitle("Shots & Videos")
+        self.setTitle("Shot & Videos")
         self.setSubTitle(
-            "Create one entry per shot (take). Add the video files captured "
-            "by each camera for that shot."
+            "Enter a label for this shot and add the video files captured by "
+            "each camera."
         )
 
         self._shots: list[ShotEntry] = []
-        self._panels: dict[int, _ShotPanel] = {}   # shot_number → panel
-
-        self._add_shot_btn = QPushButton("+ Add Shot")
-        self._add_shot_btn.clicked.connect(self._add_shot)
+        self._panels: dict[int, _ShotPanel] = {}   # id(entry) → panel
 
         self._error_label = QLabel()
         self._error_label.setStyleSheet("color: red;")
         self._error_label.setWordWrap(True)
         self._error_label.setVisible(False)
 
-        # Scrollable area for shot panels
+        # Scrollable area for the single shot panel
         self._scroll_widget = QWidget()
         self._scroll_layout = QVBoxLayout(self._scroll_widget)
         self._scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -582,12 +588,7 @@ class ShotsPage(QWizardPage):
         scroll.setWidget(self._scroll_widget)
         scroll.setWidgetResizable(True)
 
-        top_bar = QHBoxLayout()
-        top_bar.addWidget(self._add_shot_btn)
-        top_bar.addStretch()
-
         layout = QVBoxLayout(self)
-        layout.addLayout(top_bar)
         layout.addWidget(scroll)
         layout.addWidget(self._error_label)
 
@@ -617,6 +618,7 @@ class ShotsPage(QWizardPage):
             return False
 
         ctx = self.wizard().db_context
+        new_shot_ids: list[str] = []
 
         try:
             for entry in self._shots:
@@ -624,6 +626,7 @@ class ShotsPage(QWizardPage):
                     label=entry.label or f"Shot {entry.shot_number}",
                     shot_number=entry.shot_number,
                 )
+                new_shot_ids.append(shot_id)
                 for ve in entry.videos:
                     probe = ve.probe
                     fps = probe.container_fps if probe else 0.0
@@ -657,6 +660,8 @@ class ShotsPage(QWizardPage):
             self._show_error(f"Database error: {exc}")
             return False
 
+        # Store the newly created shot IDs so downstream pages can pre-select them.
+        self.wizard().new_shot_ids = new_shot_ids
         return True
 
     # ------------------------------------------------------------------
@@ -670,7 +675,9 @@ class ShotsPage(QWizardPage):
         self._shots.append(entry)
 
         ctx = getattr(self.wizard(), "db_context", None) if self.wizard() else None
-        panel = _ShotPanel(entry, db_context=ctx, parent=self._scroll_widget)
+        panel = _ShotPanel(
+            entry, db_context=ctx, show_remove_btn=False, parent=self._scroll_widget
+        )
         panel.remove_requested.connect(self._remove_shot)
         self._scroll_layout.addWidget(panel)
         self._panels[id(entry)] = panel

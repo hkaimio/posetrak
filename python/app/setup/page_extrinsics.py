@@ -333,6 +333,7 @@ class ExtrinsicsPage(QWizardPage):
             "This step is optional — you can import extrinsics later from the pose window."
         )
         self._widget = ExtrinsicsImportWidget()
+        self._widget.imported.connect(self._on_imported)
         layout = QVBoxLayout(self)
         layout.addWidget(self._widget)
 
@@ -342,6 +343,18 @@ class ExtrinsicsPage(QWizardPage):
         sid = getattr(wiz, "session_id", None)
         if conn is not None and sid is not None:
             self._widget.set_session(conn, sid)
+
+    def _on_imported(self, calib_id: str) -> None:
+        wiz = self.wizard()
+        conn = getattr(wiz, "session_conn", None)
+        shot_ids: list[str] = getattr(wiz, "new_shot_ids", [])
+        if conn is None or not shot_ids:
+            return
+        with conn:
+            conn.executemany(
+                "UPDATE captures SET extrinsic_calibration_id = ? WHERE id = ?",
+                [(calib_id, sid) for sid in shot_ids],
+            )
 
     def isComplete(self) -> bool:  # noqa: N802
         return True  # extrinsics are optional; never block progression
@@ -359,11 +372,15 @@ class ExtrinsicsImportDialog(QDialog):
         self,
         conn: sqlite3.Connection,
         session_id: str,
+        shot_ids: list[str] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Import Extrinsic Calibration")
         self.setMinimumWidth(560)
+
+        self._conn = conn
+        self._shot_ids = shot_ids or []
 
         self._widget = ExtrinsicsImportWidget()
         self._widget.set_session(conn, session_id)
@@ -376,5 +393,11 @@ class ExtrinsicsImportDialog(QDialog):
         layout.addWidget(self._widget)
         layout.addWidget(buttons)
 
-    def _on_imported(self, _calib_id: str) -> None:
-        pass  # widget already shows a success dialog; nothing extra needed here
+    def _on_imported(self, calib_id: str) -> None:
+        if not self._shot_ids:
+            return
+        with self._conn:
+            self._conn.executemany(
+                "UPDATE captures SET extrinsic_calibration_id = ? WHERE id = ?",
+                [(calib_id, sid) for sid in self._shot_ids],
+            )

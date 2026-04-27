@@ -108,7 +108,7 @@ def _insert_session_scaffolding(conn: sqlite3.Connection) -> dict:
 
     shot_id = _new_id()
     conn.execute(
-        "INSERT INTO shots (id, session_id, extrinsic_calibration_id, shot_number) "
+        "INSERT INTO captures (id, session_id, extrinsic_calibration_id, capture_number) "
         "VALUES (?, ?, ?, ?)",
         (shot_id, session_id, ext_cal_id, 1),
     )
@@ -388,14 +388,14 @@ def _insert_cameras(conn: sqlite3.Connection, ids: dict) -> dict:
             (session_id, inst_id, label),
         )
 
-    # Intrinsics are stored per shot_video (v11+ schema)
+    # Intrinsics are stored per capture_video (v11+ schema)
     sv1_id, sv2_id = _new_id(), _new_id()
     for sv_id, inst_id, intr_id, label in [
         (sv1_id, inst1_id, intr1_id, "cam_a"),
         (sv2_id, inst2_id, intr2_id, "cam_b"),
     ]:
         conn.execute(
-            "INSERT INTO shot_videos "
+            "INSERT INTO capture_videos "
             "(id, shot_id, camera_instance_id, file_path, "
             "first_video_frame, last_video_frame, actual_fps, "
             "camera_mode_id, intrinsics_calibration_id) "
@@ -523,7 +523,7 @@ def _insert_sync_points(conn: sqlite3.Connection, ids: dict,
     for inst_id, label in zip(cam_inst_ids, cam_labels):
         sv_id = _new_id()
         conn.execute(
-            "INSERT INTO shot_videos "
+            "INSERT INTO capture_videos "
             "(id, shot_id, camera_instance_id, file_path, first_video_frame, "
             " last_video_frame, actual_fps) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",

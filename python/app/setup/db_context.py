@@ -52,16 +52,19 @@ class ExtrinsicEntry:
         return hash((self.camera_instance_id, self.R.tobytes(), self.t.tobytes()))
 
 
-class ShotVideoInfo(NamedTuple):
-    """Row from shot_videos, enriched with camera label."""
+class CaptureVideoInfo(NamedTuple):
+    """Row from capture_videos, enriched with camera label."""
     id: str
-    shot_id: str
+    shot_id: str  # historical column name; references captures(id)
     camera_instance_id: str
     file_path: str
     actual_fps: float
     first_video_frame: int
     last_video_frame: int
     camera_label: str = ""
+
+
+ShotVideoInfo = CaptureVideoInfo  # backwards-compat alias
 
 
 # ---------------------------------------------------------------------------
@@ -219,10 +222,10 @@ class DBContext:
     # ------------------------------------------------------------------
 
     def create_shot(self, label: str, shot_number: int) -> str:
-        """Insert a ``shots`` row and return its ID."""
+        """Insert a ``captures`` row and return its ID."""
         shot_id = generate_id()
         self._conn.execute(
-            "INSERT INTO shots (id, session_id, shot_number, label) VALUES (?, ?, ?, ?)",
+            "INSERT INTO captures (id, session_id, capture_number, label) VALUES (?, ?, ?, ?)",
             (shot_id, self._session_id, shot_number, label),
         )
         return shot_id
@@ -239,10 +242,10 @@ class DBContext:
         camera_mode_id: str | None = None,
         intrinsics_calibration_id: str | None = None,
     ) -> str:
-        """Insert a ``shot_videos`` row and return its ID."""
+        """Insert a ``capture_videos`` row and return its ID."""
         video_id = generate_id()
         self._conn.execute(
-            "INSERT INTO shot_videos "
+            "INSERT INTO capture_videos "
             "(id, shot_id, camera_instance_id, file_path, "
             "first_video_frame, last_video_frame, actual_fps, "
             "camera_mode_id, intrinsics_calibration_id) "
@@ -488,17 +491,17 @@ class DBContext:
                 "VALUES (?, ?, ?, ?)",
                 (calib_id, entry.camera_instance_id, r_blob, t_blob),
             )
-        # Link calibration to the shot
+        # Link calibration to the capture
         self._conn.execute(
-            "UPDATE shots SET extrinsic_calibration_id = ? WHERE id = ?",
+            "UPDATE captures SET extrinsic_calibration_id = ? WHERE id = ?",
             (calib_id, shot_id),
         )
         return calib_id
 
     def update_shot_video_fps(self, shot_video_id: str, fps: float) -> None:
-        """Persist a corrected fps value to shot_videos.actual_fps."""
+        """Persist a corrected fps value to capture_videos.actual_fps."""
         self._conn.execute(
-            "UPDATE shot_videos SET actual_fps = ? WHERE id = ?",
+            "UPDATE capture_videos SET actual_fps = ? WHERE id = ?",
             (fps, shot_video_id),
         )
 
@@ -506,19 +509,19 @@ class DBContext:
     # Reads
     # ------------------------------------------------------------------
 
-    def get_shot_videos(self, shot_id: str) -> list[ShotVideoInfo]:
-        """Return all shot_videos rows for *shot_id*."""
+    def get_shot_videos(self, shot_id: str) -> list[CaptureVideoInfo]:
+        """Return all capture_videos rows for *shot_id* (capture id)."""
         rows = self._conn.execute(
             "SELECT sv.id, sv.shot_id, sv.camera_instance_id, sv.file_path, "
             "sv.actual_fps, sv.first_video_frame, sv.last_video_frame, "
             "COALESCE(ci.label, sv.camera_instance_id) AS camera_label "
-            "FROM shot_videos sv "
+            "FROM capture_videos sv "
             "LEFT JOIN camera_instances ci ON ci.id = sv.camera_instance_id "
             "WHERE sv.shot_id = ? ORDER BY sv.rowid",
             (shot_id,),
         ).fetchall()
         return [
-            ShotVideoInfo(
+            CaptureVideoInfo(
                 id=r["id"],
                 shot_id=r["shot_id"],
                 camera_instance_id=r["camera_instance_id"],
@@ -545,7 +548,7 @@ class DBContext:
             "SELECT sp.camera_instance_id, sp.shot_video_id, "
             "sp.video_frame, sp.timestamp_s, sv.actual_fps "
             "FROM sync_points sp "
-            "JOIN shot_videos sv ON sv.id = sp.shot_video_id "
+            "JOIN capture_videos sv ON sv.id = sp.shot_video_id "
             "WHERE sp.sync_config_id = ?",
             (config_id,),
         ).fetchall()
@@ -588,7 +591,7 @@ class DBContext:
             "SELECT sp.camera_instance_id, sp.shot_video_id, "
             "sp.video_frame, sp.timestamp_s, sv.actual_fps "
             "FROM sync_points sp "
-            "JOIN shot_videos sv ON sv.id = sp.shot_video_id "
+            "JOIN capture_videos sv ON sv.id = sp.shot_video_id "
             "WHERE sp.sync_config_id = ?",
             (config_id,),
         ).fetchall()

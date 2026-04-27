@@ -1033,9 +1033,9 @@ class SyncPage(QWizardPage):
         # Per-camera fps override spinboxes (in rough sync panel, rebuilt per shot)
         self._fps_spinboxes: list[QDoubleSpinBox] = []
 
-        # ---- shot selector ----
-        self._shot_combo = QComboBox()
-        self._shot_combo.currentIndexChanged.connect(self._on_shot_selected)
+        # ---- shot display (read-only — always the shot just created) ----
+        self._shot_label = QLabel()
+        self._shot_label.setStyleSheet("font-weight: bold;")
 
         # ---- sync config selector ----
         self._sync_config_combo = QComboBox()
@@ -1048,7 +1048,8 @@ class SyncPage(QWizardPage):
 
         shot_bar = QHBoxLayout()
         shot_bar.addWidget(QLabel("Shot:"))
-        shot_bar.addWidget(self._shot_combo)
+        shot_bar.addWidget(self._shot_label)
+        shot_bar.addSpacing(16)
         shot_bar.addWidget(QLabel("Sync config:"))
         shot_bar.addWidget(self._sync_config_combo, stretch=1)
         shot_bar.addStretch()
@@ -1131,35 +1132,42 @@ class SyncPage(QWizardPage):
     def initializePage(self) -> None:  # noqa: N802
         self._error_label.setVisible(False)
         self._shots.clear()
-        self._shot_combo.blockSignals(True)
-        self._shot_combo.clear()
 
         ctx: DBContext = self.wizard().db_context
+        # Load only the shot(s) just created by the Shots page.  Guard against
+        # MagicMock in tests and missing attribute in other callers.
+        raw = getattr(self.wizard(), "new_shot_ids", None)
+        new_ids: list[str] = raw if isinstance(raw, list) and raw else []
         try:
-            rows = ctx._conn.execute(
-                "SELECT id, shot_number, label FROM shots "
-                "WHERE session_id = ? ORDER BY shot_number",
-                (ctx._session_id,),
-            ).fetchall()
+            if new_ids:
+                placeholders = ",".join("?" * len(new_ids))
+                rows = ctx._conn.execute(
+                    f"SELECT id, capture_number, label FROM captures WHERE id IN ({placeholders})",
+                    new_ids,
+                ).fetchall()
+            else:
+                # Fallback (e.g. navigating back then forward): show all captures.
+                rows = ctx._conn.execute(
+                    "SELECT id, capture_number, label FROM captures "
+                    "WHERE session_id = ? ORDER BY capture_number",
+                    (ctx._session_id,),
+                ).fetchall()
         except Exception as exc:  # noqa: BLE001
-            self._shot_combo.blockSignals(False)
-            self._show_error(f"Could not read shots: {exc}")
+            self._show_error(f"Could not read captures: {exc}")
             return
 
         for row in rows:
-            label = row["label"] or f"Shot {row['shot_number']}"
+            label = row["label"] or f"Capture {row['capture_number']}"
             videos = ctx.get_shot_videos(row["id"])
             meta = _ShotMeta(shot_id=row["id"], label=label, videos=videos)
             self._shots.append(meta)
-            self._shot_combo.addItem(label)
-
-        self._shot_combo.blockSignals(False)
 
         if self._shots:
+            self._shot_label.setText(self._shots[0].label)
             self._on_shot_selected(0)
         else:
             self._show_error(
-                "No shots found. Go back to the Shots & Videos page and add at least one."
+                "No captures found. Go back to the Shot & Videos page and add a capture."
             )
 
     def cleanupPage(self) -> None:  # noqa: N802
@@ -1232,7 +1240,7 @@ class SyncPage(QWizardPage):
         self._anchor_overlays[fc].set_anchor(frame)
         self._scrubber._cells[fc].update()
 
-        shot = self._shots[self._shot_combo.currentIndex()]
+        shot = self._shots[0]
         cam = shot.videos[fc].camera_label
         self._anchor_labels[fc].setText(f"{cam}: {frame}")
         self._update_rough_panel_state()
@@ -1244,9 +1252,8 @@ class SyncPage(QWizardPage):
         if self._scrubber:
             for cell in self._scrubber._cells:
                 cell.update()
-        shot_idx = self._shot_combo.currentIndex()
-        if 0 <= shot_idx < len(self._shots):
-            shot = self._shots[shot_idx]
+        if self._shots:
+            shot = self._shots[0]
             for i, lbl in enumerate(self._anchor_labels):
                 cam = shot.videos[i].camera_label
                 lbl.setText(f"{cam}: —")
@@ -1259,8 +1266,7 @@ class SyncPage(QWizardPage):
         if not self._anchors or self._scrubber is None:
             return
 
-        shot_idx = self._shot_combo.currentIndex()
-        shot = self._shots[shot_idx]
+        shot = self._shots[0]
 
         ref_cell = min(self._anchors)
         ref_frame = self._anchors[ref_cell]
@@ -1302,38 +1308,36 @@ class SyncPage(QWizardPage):
         self._scrubber.seek_synced(ref_ts)
 
         n = len(self._anchors)
+        self._led_sync_btn.setEnabled(True)
+        # Refresh sync config dropdown to show the new entry, then restore the
+        # "applied" message (_populate_sync_config_combo overwrites it).
+        self._populate_sync_config_combo(shot)
         self._rough_status_label.setText(
             f"Rough sync applied ({n} camera{'s' if n != 1 else ''})."
         )
         self._rough_status_label.setStyleSheet("color: green; font-size: 11px;")
-        self._led_sync_btn.setEnabled(True)
-        # Refresh sync config dropdown to show the new entry.
-        self._populate_sync_config_combo(shot)
 
     # ------------------------------------------------------------------
     # Slots — LED sync dialog
     # ------------------------------------------------------------------
 
     def _on_open_led_sync(self) -> None:
-        if self._scrubber is None:
+        if self._scrubber is None or not self._shots:
             return
-        shot_idx = self._shot_combo.currentIndex()
-        if shot_idx < 0 or shot_idx >= len(self._shots):
-            return
-        shot = self._shots[shot_idx]
+        shot = self._shots[0]
         ctx: DBContext = self.wizard().db_context
         current_frames = self._scrubber.current_frames
 
         def _on_accepted(sync_table: SyncTable) -> None:
             self._scrubber.reload_sync(sync_table)
-            self._rough_status_label.setText("LED sync accepted and applied.")
-            self._rough_status_label.setStyleSheet("color: green; font-size: 11px;")
             # Clear anchor overlays — LED sync supersedes rough anchors
             for i, ov in enumerate(self._anchor_overlays):
                 ov.anchor_frame = None
                 self._scrubber.set_overlays(i, [ov])
-            # Refresh sync config dropdown to show the new entry.
+            # Refresh sync config dropdown, then restore the "accepted" message.
             self._populate_sync_config_combo(shot)
+            self._rough_status_label.setText("LED sync accepted and applied.")
+            self._rough_status_label.setStyleSheet("color: green; font-size: 11px;")
 
         # Derive per-camera rough offsets (global time at each camera's frame 0)
         # from the currently loaded sync table.  This is more reliable than
@@ -1393,13 +1397,7 @@ class SyncPage(QWizardPage):
 
     def _fps_overrides(self) -> dict[int, float]:
         """Return the current per-camera fps override values."""
-        shot_idx = self._shot_combo.currentIndex()
-        if shot_idx < 0 or shot_idx >= len(self._shots):
-            return {}
-        return {
-            i: spin.value()
-            for i, spin in enumerate(self._fps_spinboxes)
-        }
+        return {i: spin.value() for i, spin in enumerate(self._fps_spinboxes)}
 
     def _populate_sync_config_combo(self, shot: _ShotMeta) -> None:
         """Fill the sync config combo for *shot* and load the default config."""
@@ -1491,8 +1489,7 @@ class SyncPage(QWizardPage):
 
     def _update_rough_panel_state(self) -> None:
         n_anchored = len(self._anchors)
-        shot_idx = self._shot_combo.currentIndex()
-        n_total = len(self._shots[shot_idx].videos) if 0 <= shot_idx < len(self._shots) else 0
+        n_total = len(self._shots[0].videos) if self._shots else 0
         can_apply = n_anchored >= 2
         self._apply_rough_btn.setEnabled(can_apply)
         if n_anchored == 0:

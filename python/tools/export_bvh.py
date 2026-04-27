@@ -441,7 +441,7 @@ def _detect_fps_from_df(df) -> float:
 
 
 def _load_fps_from_db(session_db: str, run_id: str) -> float:
-    """Query actual_fps from shot_videos via tracking_run → observation_sequence → shot."""
+    """Query actual_fps from capture_videos via tracking_run → observation_sequence → capture."""
     import sqlite3
     try:
         conn = sqlite3.connect(session_db, check_same_thread=False)
@@ -451,8 +451,8 @@ def _load_fps_from_db(session_db: str, run_id: str) -> float:
             SELECT sv.actual_fps
             FROM tracking_runs tr
             JOIN pose_observation_sequences pos ON pos.id = tr.observation_sequence_id
-            JOIN shots s ON s.id = pos.shot_id
-            JOIN shot_videos sv ON sv.shot_id = s.id
+            JOIN captures s ON s.id = pos.shot_id
+            JOIN capture_videos sv ON sv.shot_id = s.id
             WHERE tr.id = ?
             LIMIT 1
             """,

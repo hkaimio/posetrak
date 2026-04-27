@@ -38,13 +38,13 @@ def _make_session(tmp_path: Path, n_shots: int = 1, videos_per_shot: int = 2):
     for shot_num in range(1, n_shots + 1):
         shot_id = generate_id()
         conn.execute(
-            "INSERT INTO shots (id, session_id, shot_number, label) VALUES (?, ?, ?, ?)",
+            "INSERT INTO captures (id, session_id, capture_number, label) VALUES (?, ?, ?, ?)",
             (shot_id, session_id, shot_num, f"Shot {shot_num}"),
         )
         for cam_num in range(1, videos_per_shot + 1):
             vid_id = generate_id()
             conn.execute(
-                "INSERT INTO shot_videos "
+                "INSERT INTO capture_videos "
                 "(id, shot_id, camera_instance_id, file_path, "
                 "first_video_frame, last_video_frame, actual_fps) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -58,11 +58,11 @@ def _make_session(tmp_path: Path, n_shots: int = 1, videos_per_shot: int = 2):
 def _make_shot_meta(conn, session_id: str, shot_idx: int = 0) -> _ShotMeta:
     ctx = DBContext(conn, session_id)
     rows = conn.execute(
-        "SELECT id, shot_number, label FROM shots WHERE session_id = ? ORDER BY shot_number",
+        "SELECT id, capture_number, label FROM captures WHERE session_id = ? ORDER BY capture_number",
         (session_id,),
     ).fetchall()
     row = rows[shot_idx]
-    label = row["label"] or f"Shot {row['shot_number']}"
+    label = row["label"] or f"Shot {row['capture_number']}"
     videos = ctx.get_shot_videos(row["id"])
     return _ShotMeta(shot_id=row["id"], label=label, videos=list(videos))
 
@@ -309,6 +309,7 @@ def test_led_sync_btn_disabled_after_cleanup(qapp, tmp_path) -> None:
     conn.close()
 
 
+@pytest.mark.skip(reason="SyncPage no longer has a per-shot combo; shot selection was removed")
 def test_led_sync_btn_disabled_after_shot_switch(qapp, tmp_path) -> None:
     conn, session_id = _make_session(tmp_path, n_shots=2)
     page = SyncPage()

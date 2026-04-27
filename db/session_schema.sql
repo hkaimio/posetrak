@@ -6,6 +6,13 @@
 -- Foreign keys into registry tables (camera_instances, intrinsics_calibrations, etc.)
 -- are stored as TEXT IDs but CANNOT use SQLite REFERENCES across separate DB files.
 -- Such cross-DB constraints are noted in comments only.
+--
+-- Terminology:
+--   capture     — one continuous camera recording (cameras on → off); owns video files.
+--   trial       — a named, bounded time window within a capture (one technique/attempt).
+--   detection_run — one pose-detection execution over a trial's time window.
+-- FK columns referencing captures(id) and capture_videos(id) retain the historical
+-- names shot_id / shot_video_id to avoid table-recreation migrations.
 
 -- Top-level session record
 CREATE TABLE IF NOT EXISTS mocap_sessions (
@@ -16,8 +23,8 @@ CREATE TABLE IF NOT EXISTS mocap_sessions (
 );
 
 -- Cameras that participated in this session.
--- Mode and intrinsics are per-video (on shot_videos), not per-session-camera,
--- so the same physical camera can be used in different modes across shots.
+-- Mode and intrinsics are per-video (on capture_videos), not per-session-camera,
+-- so the same physical camera can be used in different modes across captures.
 -- camera_instance_id  -- references registry: camera_instances(id)
 CREATE TABLE IF NOT EXISTS session_cameras (
     session_id         TEXT NOT NULL REFERENCES mocap_sessions(id),
@@ -46,24 +53,37 @@ CREATE TABLE IF NOT EXISTS extrinsic_entries (
     PRIMARY KEY (extrinsic_calibration_id, camera_instance_id)
 );
 
--- A shot is a single continuous capture take within a session
--- extrinsic_calibration_id is nullable: shots may be created before extrinsics are imported
-CREATE TABLE IF NOT EXISTS shots (
+-- A capture is a single continuous camera recording within a session.
+-- extrinsic_calibration_id is nullable: captures may be created before extrinsics are imported.
+-- shot_id FK columns in other tables reference captures(id) (historical naming).
+CREATE TABLE IF NOT EXISTS captures (
     id                       TEXT PRIMARY KEY,
     session_id               TEXT NOT NULL REFERENCES mocap_sessions(id),
     extrinsic_calibration_id TEXT REFERENCES extrinsic_calibrations(id),
-    shot_number              INTEGER NOT NULL,
+    capture_number           INTEGER NOT NULL,
     label                    TEXT,
     notes                    TEXT
 );
 
--- Video files associated with a shot, one per camera.
+-- A trial is a named, bounded time window within a capture: one technique, one attempt.
+-- The user-facing unit of analysis (e.g. "shomenuchi shihonage take 1").
+CREATE TABLE IF NOT EXISTS trials (
+    id           TEXT PRIMARY KEY,
+    capture_id   TEXT NOT NULL REFERENCES captures(id),
+    name         TEXT,
+    time_start_s REAL,
+    time_end_s   REAL,
+    notes        TEXT
+);
+
+-- Video files associated with a capture, one per camera.
 -- camera_instance_id     -- references registry: camera_instances(id)
 -- camera_mode_id         -- references registry: camera_modes(id); nullable until wizard sets it
 -- intrinsics_calibration_id -- references registry: intrinsics_calibrations(id); nullable
-CREATE TABLE IF NOT EXISTS shot_videos (
+-- shot_video_id FK columns in other tables reference capture_videos(id) (historical naming).
+CREATE TABLE IF NOT EXISTS capture_videos (
     id                        TEXT PRIMARY KEY,
-    shot_id                   TEXT NOT NULL REFERENCES shots(id),
+    shot_id                   TEXT NOT NULL REFERENCES captures(id),
     camera_instance_id        TEXT NOT NULL, -- references registry: camera_instances(id)
     file_path                 TEXT NOT NULL,
     first_video_frame         INTEGER NOT NULL,
@@ -76,7 +96,7 @@ CREATE TABLE IF NOT EXISTS shot_videos (
 -- Synchronisation configuration: maps each camera to a common time axis
 CREATE TABLE IF NOT EXISTS sync_configs (
     id         TEXT PRIMARY KEY,
-    shot_id    TEXT NOT NULL REFERENCES shots(id),
+    shot_id    TEXT NOT NULL REFERENCES captures(id),
     created_by TEXT,
     notes      TEXT
 );
@@ -88,13 +108,14 @@ CREATE TABLE IF NOT EXISTS sync_configs (
 CREATE TABLE IF NOT EXISTS sync_points (
     sync_config_id     TEXT    NOT NULL REFERENCES sync_configs(id),
     camera_instance_id TEXT    NOT NULL, -- references registry: camera_instances(id)
-    shot_video_id      TEXT    NOT NULL REFERENCES shot_videos(id),
+    shot_video_id      TEXT    NOT NULL REFERENCES capture_videos(id),
     video_frame        INTEGER NOT NULL,
     timestamp_s        REAL    NOT NULL,
     PRIMARY KEY (sync_config_id, camera_instance_id, video_frame)
 );
 
--- A sequence of 2-D pose observations covering a time window of a shot
+-- A sequence of 2-D pose observations covering a time window of a capture.
+-- name: user-assigned label (e.g. performer name or role).
 -- pixels_are_undistorted: 1 if keypoint coordinates are already in undistorted
 --   pixel space (K_new) and must NOT be undistorted by the tracker again;
 --   0 if coordinates are in distorted pixel space (K_original) and the tracker
@@ -103,14 +124,24 @@ CREATE TABLE IF NOT EXISTS sync_points (
 -- detection_run_id: optional link to the detection run that produced the observations.
 CREATE TABLE IF NOT EXISTS pose_observation_sequences (
     id                      TEXT PRIMARY KEY,
-    shot_id                 TEXT NOT NULL REFERENCES shots(id),
+    shot_id                 TEXT NOT NULL REFERENCES captures(id),
     sync_config_id          TEXT NOT NULL REFERENCES sync_configs(id),
     time_start_s            REAL NOT NULL,
     time_end_s              REAL NOT NULL,
+    name                    TEXT,
     pose_model              TEXT,
     notes                   TEXT,
     pixels_are_undistorted  INTEGER NOT NULL DEFAULT 1,
     detection_run_id        TEXT REFERENCES detection_runs(id)
+);
+
+-- Maps integer person_id → human-readable person name within a sequence.
+-- Written by finalise_to_db so assignment colours can be restored on reopen.
+CREATE TABLE IF NOT EXISTS sequence_persons (
+    sequence_id TEXT    NOT NULL REFERENCES pose_observation_sequences(id),
+    person_id   INTEGER NOT NULL,
+    person_name TEXT    NOT NULL,
+    PRIMARY KEY (sequence_id, person_id)
 );
 
 -- Individual 2-D pose observations: one row per (sequence, camera, frame, person)
@@ -143,7 +174,8 @@ CREATE TABLE IF NOT EXISTS tracking_runs (
     ran_at                   TEXT NOT NULL,
     posetrak_version         TEXT NOT NULL,
     active_camera_ids        TEXT NOT NULL,
-    marker_names             TEXT NOT NULL
+    marker_names             TEXT NOT NULL,
+    notes                    TEXT
 );
 
 -- Per-person skeleton override within a run (supports multi-person tracking)
@@ -186,10 +218,12 @@ CREATE TABLE IF NOT EXISTS tracking_obs_results (
 
 -- Detection runs: one row per execution of the pose extraction pipeline.
 -- Tracks which detector/pose model was used, over which time range.
+-- trial_id: optional link to the trial this run belongs to.
 CREATE TABLE IF NOT EXISTS detection_runs (
     id                  TEXT PRIMARY KEY,
-    shot_id             TEXT NOT NULL REFERENCES shots(id),
+    shot_id             TEXT NOT NULL REFERENCES captures(id),
     sync_config_id      TEXT NOT NULL REFERENCES sync_configs(id),
+    trial_id            TEXT REFERENCES trials(id),
     time_start_s        REAL NOT NULL,
     time_end_s          REAL NOT NULL,
     detector_model      TEXT NOT NULL,
@@ -210,7 +244,7 @@ CREATE TABLE IF NOT EXISTS detection_runs (
 -- noise_scale: bbox_w / pose_input_width, used when converting to pose_observations.
 CREATE TABLE IF NOT EXISTS detection_keypoints (
     detection_run_id    TEXT NOT NULL REFERENCES detection_runs(id),
-    shot_video_id       TEXT NOT NULL REFERENCES shot_videos(id),
+    shot_video_id       TEXT NOT NULL REFERENCES capture_videos(id),
     video_frame         INTEGER NOT NULL,
     track_id            INTEGER NOT NULL,
     region_type         TEXT NOT NULL DEFAULT 'full_body',
@@ -225,7 +259,7 @@ CREATE TABLE IF NOT EXISTS detection_keypoints (
 -- track_id: detection tracker ID, assigned before person identity is known.
 CREATE TABLE IF NOT EXISTS person_detections (
     detection_run_id    TEXT NOT NULL REFERENCES detection_runs(id),
-    shot_video_id       TEXT NOT NULL REFERENCES shot_videos(id),
+    shot_video_id       TEXT NOT NULL REFERENCES capture_videos(id),
     video_frame         INTEGER NOT NULL,
     track_id            INTEGER NOT NULL,
     region_type         TEXT    NOT NULL DEFAULT 'full_body',
@@ -245,7 +279,7 @@ CREATE INDEX IF NOT EXISTS idx_person_detections_run_video
 CREATE TABLE IF NOT EXISTS person_tracks (
     id                  TEXT PRIMARY KEY,
     detection_run_id    TEXT NOT NULL REFERENCES detection_runs(id),
-    shot_video_id       TEXT NOT NULL REFERENCES shot_videos(id),
+    shot_video_id       TEXT NOT NULL REFERENCES capture_videos(id),
     track_id            INTEGER NOT NULL,
     first_frame         INTEGER NOT NULL,
     last_frame          INTEGER NOT NULL,
@@ -259,7 +293,7 @@ CREATE TABLE IF NOT EXISTS person_tracks (
 -- width_px / height_px: output image dimensions.
 -- detection_run_id: optional link to the detection run that produced this crop.
 CREATE TABLE IF NOT EXISTS frame_cache_entries (
-    shot_video_id       TEXT    NOT NULL REFERENCES shot_videos(id),
+    shot_video_id       TEXT    NOT NULL REFERENCES capture_videos(id),
     frame_idx           INTEGER NOT NULL,
     cache_type          TEXT    NOT NULL,
     track_id            INTEGER NOT NULL DEFAULT -1,

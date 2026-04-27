@@ -2,7 +2,7 @@
 
 This module handles:
 - Creating and opening registry databases (shared project-wide metadata: cameras, skeletons, configs).
-- Creating and opening per-session databases (mocap sessions, shots, tracking results).
+- Creating and opening per-session databases (mocap sessions, captures, tracking results).
 - Schema versioning via SQLite PRAGMA user_version.
 - Utility helpers for project-root-relative path resolution.
 """
@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 5
-SESSION_SCHEMA_VERSION: Final[int] = 11
+SESSION_SCHEMA_VERSION: Final[int] = 13
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -487,6 +487,36 @@ def _migrate_session_v10_to_v11(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v11_to_v12(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 11 to 12.
+
+    v12 adds the sequence_persons table which maps integer person_id values
+    to human-readable names within a pose_observation_sequence.  This allows
+    the pose UI to restore assignment colours when a detection run is reopened.
+    """
+    sql = (_DB_DIR / "migrations" / "011_sequence_persons.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+    conn.execute("PRAGMA user_version = 12")
+    conn.commit()
+
+
+def _migrate_session_v12_to_v13(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 12 to 13.
+
+    v13 introduces capture/trial terminology:
+    - Renames the shots table to captures (shot_number → capture_number).
+    - Renames shot_videos to capture_videos.
+    - Adds the trials table for named time windows within a capture.
+    - Adds trial_id to detection_runs.
+    - Adds name to pose_observation_sequences (person track label).
+    - Adds notes to tracking_runs.
+    """
+    sql = (_DB_DIR / "migrations" / "012_captures_and_trials.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+    conn.execute("PRAGMA user_version = 13")
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -540,6 +570,12 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 10
     if actual == 10:
         _migrate_session_v10_to_v11(conn)
+        actual = 11
+    if actual == 11:
+        _migrate_session_v11_to_v12(conn)
+        actual = 12
+    if actual == 12:
+        _migrate_session_v12_to_v13(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 
@@ -956,16 +992,16 @@ def add_session_camera(
         )
 
 
-def create_shot(
+def create_capture(
     session: sqlite3.Connection,
     session_id: str,
     extrinsic_calibration_id: str | None = None,
     *,
-    shot_number: int | None = None,
+    capture_number: int | None = None,
     label: str = "",
     notes: str = "",
 ) -> str:
-    """Insert a shots row and return its ID.
+    """Insert a captures row and return its ID.
 
     Parameters
     ----------
@@ -974,56 +1010,60 @@ def create_shot(
     session_id:
         ID of the parent ``mocap_sessions`` row.
     extrinsic_calibration_id:
-        ID of the ``extrinsic_calibrations`` row used for this shot.
-    shot_number:
-        Explicit shot number. If ``None``, auto-increments from the highest
-        existing ``shot_number`` within this session (starting at 1).
+        ID of the ``extrinsic_calibrations`` row used for this capture.
+    capture_number:
+        Explicit capture number. If ``None``, auto-increments from the highest
+        existing ``capture_number`` within this session (starting at 1).
     label:
-        Optional short label for the shot.
+        Optional short label for the capture.
     notes:
         Optional free-text notes.
 
     Returns
     -------
     str
-        UUID of the newly created ``shots`` row.
+        UUID of the newly created ``captures`` row.
     """
-    if shot_number is None:
+    if capture_number is None:
         row = session.execute(
-            "SELECT MAX(shot_number) FROM shots WHERE session_id = ?",
+            "SELECT MAX(capture_number) FROM captures WHERE session_id = ?",
             (session_id,),
         ).fetchone()
         max_num = row[0]
-        shot_number = 1 if max_num is None else max_num + 1
+        capture_number = 1 if max_num is None else max_num + 1
 
-    shot_id = generate_id()
+    capture_id = generate_id()
     with session:
         session.execute(
-            "INSERT INTO shots "
-            "(id, session_id, extrinsic_calibration_id, shot_number, label, notes) "
+            "INSERT INTO captures "
+            "(id, session_id, extrinsic_calibration_id, capture_number, label, notes) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (shot_id, session_id, extrinsic_calibration_id, shot_number, label, notes),
+            (capture_id, session_id, extrinsic_calibration_id, capture_number, label, notes),
         )
-    return shot_id
+    return capture_id
 
 
-def add_shot_video(
+# Backwards-compatible alias used by older call sites being migrated incrementally.
+create_shot = create_capture
+
+
+def add_capture_video(
     session: sqlite3.Connection,
-    shot_id: str,
+    capture_id: str,
     camera_instance_id: str,
     file_path: str,
     first_frame: int,
     last_frame: int,
     fps: float,
 ) -> str:
-    """Insert a shot_videos row and return its ID.
+    """Insert a capture_videos row and return its ID.
 
     Parameters
     ----------
     session:
         Open connection to a posetrak session database.
-    shot_id:
-        ID of the parent ``shots`` row.
+    capture_id:
+        ID of the parent ``captures`` row.
     camera_instance_id:
         Registry ``camera_instances.id`` for the camera that recorded this video.
     file_path:
@@ -1038,42 +1078,50 @@ def add_shot_video(
     Returns
     -------
     str
-        UUID of the newly created ``shot_videos`` row.
+        UUID of the newly created ``capture_videos`` row.
     """
     video_id = generate_id()
     with session:
         session.execute(
-            "INSERT INTO shot_videos "
+            "INSERT INTO capture_videos "
             "(id, shot_id, camera_instance_id, file_path, "
             "first_video_frame, last_video_frame, actual_fps) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (video_id, shot_id, camera_instance_id, file_path,
+            (video_id, capture_id, camera_instance_id, file_path,
              first_frame, last_frame, fps),
         )
     return video_id
 
 
-def set_shot_extrinsics(
+# Backwards-compatible alias.
+add_shot_video = add_capture_video
+
+
+def set_capture_extrinsics(
     session: sqlite3.Connection,
-    shot_id: str,
+    capture_id: str,
     extrinsic_calibration_id: str,
 ) -> None:
-    """Set or update the extrinsic_calibration_id on an existing shot.
+    """Set or update the extrinsic_calibration_id on an existing capture.
 
     Parameters
     ----------
     session:
         Open connection to a posetrak session database.
-    shot_id:
-        ID of the ``shots`` row to update.
+    capture_id:
+        ID of the ``captures`` row to update.
     extrinsic_calibration_id:
         ID of the ``extrinsic_calibrations`` row to link.
     """
     with session:
         session.execute(
-            "UPDATE shots SET extrinsic_calibration_id = ? WHERE id = ?",
-            (extrinsic_calibration_id, shot_id),
+            "UPDATE captures SET extrinsic_calibration_id = ? WHERE id = ?",
+            (extrinsic_calibration_id, capture_id),
         )
+
+
+# Backwards-compatible alias.
+set_shot_extrinsics = set_capture_extrinsics
 
 
 # ---------------------------------------------------------------------------

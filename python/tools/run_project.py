@@ -82,18 +82,18 @@ def _list_sequences(db: sqlite3.Connection) -> list[sqlite3.Row]:
                pos.time_start_s, pos.time_end_s,
                sh.id  AS shot_id,
                sh.label AS shot_label,
-               sh.shot_number
+               sh.capture_number
         FROM pose_observation_sequences pos
-        JOIN shots sh ON sh.id = pos.shot_id
-        ORDER BY sh.shot_number, pos.time_start_s
+        JOIN captures sh ON sh.id = pos.shot_id
+        ORDER BY sh.capture_number, pos.time_start_s
         """
     ).fetchall()
 
 
 def _video_dir_for_shot(db: sqlite3.Connection, shot_id: str) -> Path | None:
-    """Infer the video directory from the first shot_video file_path."""
+    """Infer the video directory from the first capture_video file_path."""
     row = db.execute(
-        "SELECT file_path FROM shot_videos WHERE shot_id = ? LIMIT 1",
+        "SELECT file_path FROM capture_videos WHERE shot_id = ? LIMIT 1",
         (shot_id,),
     ).fetchone()
     if row is None:
@@ -308,7 +308,7 @@ def main() -> int:
     succeeded: list[tuple[str, str, str]] = []  # (shot_label, person_name, run_id)
 
     for seq in sequences:
-        shot_label  = seq["shot_label"] or f"shot{seq['shot_number']:03d}"
+        shot_label  = seq["shot_label"] or f"capture{seq['capture_number']:03d}"
         sequence_id = seq["sequence_id"]
         shot_id     = seq["shot_id"]
         video_dir   = _video_dir_for_shot(db, shot_id)

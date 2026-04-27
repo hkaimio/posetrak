@@ -50,7 +50,7 @@ def run(session_db, shot, sync, start, end, detector, pose_model, device, detect
     session.row_factory = __import__("sqlite3").Row
 
     # Resolve ID prefixes
-    shot_id = _resolve_id(session, "shots", shot)
+    shot_id = _resolve_id(session, "captures", shot)
     sync_id = _resolve_id(session, "sync_configs", sync)
 
     click.echo(f"Shot:        {shot_id}")
@@ -96,7 +96,7 @@ def list_runs(session_db, shot):
 
     session = open_session(Path(session_db))
     session.row_factory = __import__("sqlite3").Row
-    shot_id = _resolve_id(session, "shots", shot)
+    shot_id = _resolve_id(session, "captures", shot)
 
     runs = list_detection_runs(session, shot_id)
     if not runs:

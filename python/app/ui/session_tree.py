@@ -34,6 +34,7 @@ class SessionTreeWidget(QTreeWidget):
     """
 
     capture_selected       = Signal(str)  # capture_id
+    trial_selected         = Signal(str)  # trial_id
     detection_run_selected = Signal(str)  # run_id
     person_track_selected  = Signal(str)  # sequence_id
     tracking_run_selected  = Signal(str)  # tracking_run_id
@@ -195,6 +196,8 @@ class SessionTreeWidget(QTreeWidget):
         item_id: str = current.data(0, _ID)
         if kind == ItemKind.CAPTURE:
             self.capture_selected.emit(item_id)
+        elif kind == ItemKind.TRIAL:
+            self.trial_selected.emit(item_id)
         elif kind == ItemKind.DETECTION_RUN:
             self.detection_run_selected.emit(item_id)
         elif kind == ItemKind.PERSON_TRACK:

@@ -55,9 +55,9 @@ class MainWindow(QMainWindow):
         self._settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
         self._recent: list[str] = self._load_recent()
 
+        self._build_central()
         self._build_menu()
         self._build_toolbar()
-        self._build_central()
         self._build_status_bar()
 
     # ------------------------------------------------------------------
@@ -238,8 +238,52 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"posetrak — {path.name}")
         self._add_recent(str(path))
         self._tree.load(conn)
+        self._tree.capture_selected.connect(self._show_capture)
+        self._tree.trial_selected.connect(self._show_trial)
+        self._tree.detection_run_selected.connect(self._show_detection_run)
+        self._tree.person_track_selected.connect(self._show_person_track)
+        self._tree.tracking_run_selected.connect(self._show_tracking_run)
         self._reload_act.setEnabled(True)
         self._new_capture_act.setEnabled(True)
+        self._show_placeholder()
+
+    def _show_placeholder(self) -> None:
+        self._content.setCurrentIndex(0)
+
+    def _show_capture(self, capture_id: str) -> None:
+        from app.ui.content_panels import CapturePanel
+        panel = CapturePanel(self._session_conn, capture_id, self._session_path)
+        self._swap_content(panel)
+
+    def _show_trial(self, trial_id: str) -> None:
+        from app.ui.content_panels import TrialPanel
+        panel = TrialPanel(self._session_conn, trial_id)
+        self._swap_content(panel)
+
+    def _show_detection_run(self, run_id: str) -> None:
+        from app.ui.content_panels import DetectionRunPanel
+        panel = DetectionRunPanel(self._session_conn, run_id, self._session_path)
+        self._swap_content(panel)
+
+    def _show_person_track(self, sequence_id: str) -> None:
+        from app.ui.content_panels import PersonTrackPanel
+        panel = PersonTrackPanel(self._session_conn, sequence_id, self._session_path)
+        self._swap_content(panel)
+
+    def _show_tracking_run(self, run_id: str) -> None:
+        from app.ui.content_panels import TrackingRunPanel
+        panel = TrackingRunPanel(self._session_conn, run_id)
+        self._swap_content(panel)
+
+    def _swap_content(self, widget: QWidget) -> None:
+        """Replace the content panel, removing the previous non-placeholder widget."""
+        # Index 0 is always the permanent placeholder; everything else is transient.
+        while self._content.count() > 1:
+            old = self._content.widget(1)
+            self._content.removeWidget(old)
+            old.deleteLater()
+        self._content.addWidget(widget)
+        self._content.setCurrentIndex(1)
 
     # ------------------------------------------------------------------
     # Private — recent files

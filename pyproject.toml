@@ -19,7 +19,8 @@ dependencies = [
 
 [project.scripts]
 posetrak-db = "posetrak.db.cli:main"
-posetrak-setup = "app.setup.main:main"
+posetrak-ui = "app.ui.main:main"
+posetrak-setup = "app.setup.main:main"  # backwards-compat alias
 posetrak-pose = "app.pose.cli:main"
 
 [build-system]

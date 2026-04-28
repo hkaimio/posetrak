@@ -14,9 +14,12 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QSplitter,
+    QStackedWidget,
     QStatusBar,
-    QWidget,
+    QToolBar,
 )
+from PySide6.QtCore import Qt
 
 from posetrak.db.db import (
     DEFAULT_REGISTRY_PATH,
@@ -25,6 +28,7 @@ from posetrak.db.db import (
     open_registry,
     open_session,
 )
+from app.ui.session_tree import SessionTreeWidget
 
 _MAX_RECENT = 8
 _SETTINGS_ORG = "posetrak"
@@ -36,8 +40,7 @@ class MainWindow(QMainWindow):
 
     Owns the registry connection (always open) and the current session
     connection (None until the user opens or creates a session DB).
-    The central widget is a placeholder that T3.3 will replace with the
-    session tree + content panel.
+    Left pane: SessionTreeWidget. Right pane: QStackedWidget (filled by T3.4).
     """
 
     def __init__(self, registry_conn: sqlite3.Connection) -> None:
@@ -53,11 +56,9 @@ class MainWindow(QMainWindow):
         self._recent: list[str] = self._load_recent()
 
         self._build_menu()
+        self._build_toolbar()
+        self._build_central()
         self._build_status_bar()
-
-        placeholder = QLabel("Open a session database via File → Open session database…")
-        placeholder.setAlignment(placeholder.alignment())
-        self.setCentralWidget(placeholder)
 
     # ------------------------------------------------------------------
     # Public
@@ -100,14 +101,36 @@ class MainWindow(QMainWindow):
         return True
 
     # ------------------------------------------------------------------
+    # Private — layout
+    # ------------------------------------------------------------------
+
+    def _build_central(self) -> None:
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        self._tree = SessionTreeWidget()
+        splitter.addWidget(self._tree)
+
+        self._content = QStackedWidget()
+        placeholder = QLabel("Open a session database to see its contents.")
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._content.addWidget(placeholder)
+        splitter.addWidget(self._content)
+
+        splitter.setSizes([260, 940])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+        self.setCentralWidget(splitter)
+
+    # ------------------------------------------------------------------
     # Private — menu
     # ------------------------------------------------------------------
 
     def _build_menu(self) -> None:
-        menu_bar = self.menuBar()
+        bar = self.menuBar()
 
         # ---- File menu ----
-        file_menu = menu_bar.addMenu("&File")
+        file_menu = bar.addMenu("&File")
 
         new_act = QAction("&New session database…", self)
         new_act.setShortcut(QKeySequence.StandardKey.New)
@@ -131,6 +154,34 @@ class MainWindow(QMainWindow):
         quit_act.setShortcut(QKeySequence.StandardKey.Quit)
         quit_act.triggered.connect(self.close)
         file_menu.addAction(quit_act)
+
+        # ---- Session menu ----
+        session_menu = bar.addMenu("&Session")
+
+        self._new_capture_act = QAction("New &Capture…", self)
+        self._new_capture_act.setEnabled(False)  # enabled once a session is open (T3.5)
+        session_menu.addAction(self._new_capture_act)
+
+        session_menu.addSeparator()
+
+        reload_act = QAction("&Reload tree", self)
+        reload_act.setShortcut("F5")
+        reload_act.triggered.connect(self._tree.reload)
+        session_menu.addAction(reload_act)
+
+    def _build_toolbar(self) -> None:
+        tb = QToolBar("Main", self)
+        tb.setMovable(False)
+        self.addToolBar(tb)
+
+        open_act = QAction("Open session…", self)
+        open_act.triggered.connect(self._on_open_session)
+        tb.addAction(open_act)
+
+        self._reload_act = QAction("Reload", self)
+        self._reload_act.setEnabled(False)
+        self._reload_act.triggered.connect(self._tree.reload)
+        tb.addAction(self._reload_act)
 
     def _build_status_bar(self) -> None:
         bar = QStatusBar(self)
@@ -186,6 +237,9 @@ class MainWindow(QMainWindow):
         self._status_label.setText(f"Session: {path}")
         self.setWindowTitle(f"posetrak — {path.name}")
         self._add_recent(str(path))
+        self._tree.load(conn)
+        self._reload_act.setEnabled(True)
+        self._new_capture_act.setEnabled(True)
 
     # ------------------------------------------------------------------
     # Private — recent files
@@ -225,7 +279,9 @@ class MainWindow(QMainWindow):
             p = Path(path_str)
             act = QAction(p.name, self)
             act.setToolTip(path_str)
-            act.triggered.connect(lambda checked=False, ps=path_str: self.open_session_file(Path(ps)))
+            act.triggered.connect(
+                lambda checked=False, ps=path_str: self.open_session_file(Path(ps))
+            )
             self._recent_menu.addAction(act)
 
     # ------------------------------------------------------------------
@@ -233,6 +289,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._tree.unload()
         if self._session_conn is not None:
             self._session_conn.close()
             self._session_conn = None

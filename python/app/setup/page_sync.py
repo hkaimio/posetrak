@@ -471,10 +471,17 @@ class _LedSyncJob(BackgroundJob):
 class _BrightnessPlotDialog(QDialog):
     """Shows LED brightness for all cameras on a shared global timeline."""
 
-    def __init__(self, result: LedSyncResult, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        result: LedSyncResult,
+        labels: dict[str, str] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("LED Brightness — Synchronized Timeline")
         self.resize(860, 400)
+
+        labels = labels or {}
 
         layout = QVBoxLayout(self)
         if _HAS_MATPLOTLIB:
@@ -482,7 +489,8 @@ class _BrightnessPlotDialog(QDialog):
             ax = fig.add_subplot(1, 1, 1)
             colors = ["#2196F3", "#E91E63", "#4CAF50", "#FF9800", "#9C27B0", "#00BCD4"]
             for i, cr in enumerate(result.cameras):
-                ax.plot(cr.frame_times, cr.brightness, label=cr.camera_instance_id,
+                lname = labels.get(cr.shot_video_id, cr.camera_instance_id)
+                ax.plot(cr.frame_times, cr.brightness, label=lname,
                         color=colors[i % len(colors)], linewidth=0.8, alpha=0.85)
             ax.set_xlabel("Global time (s)")
             ax.set_ylabel("Brightness change")
@@ -614,6 +622,7 @@ class _LedSyncDialog(QDialog):
         self._led_rois: dict[int, ROI] = {}
         self._led_result: LedSyncResult | None = None
         self._led_job: _LedSyncJob | None = None
+        self._video_labels: dict[str, str] = {sv.id: sv.camera_label for sv in shot.videos}
 
         layout = QVBoxLayout(self)
 
@@ -831,6 +840,7 @@ class _LedSyncDialog(QDialog):
         self._progress_bar.setVisible(False)
         self._progress_label.setText("")
         self._led_result = result
+        self._video_labels = {sv.id: sv.camera_label for sv in self._shot.videos}
         self._run_btn.setEnabled(True)
 
         while self._quality_layout.count():
@@ -839,8 +849,9 @@ class _LedSyncDialog(QDialog):
                 item.widget().deleteLater()
 
         for cr in result.cameras:
+            cam_name = self._video_labels.get(cr.shot_video_id, cr.camera_instance_id)
             if cr.map_type == "reference":
-                txt = f"{cr.camera_instance_id}: reference camera ({cr.n_events} events)"
+                txt = f"{cam_name}: reference camera ({cr.n_events} events)"
                 style = "color: grey; font-size: 11px;"
                 tooltip = "This camera defines the global time axis (identity map)."
             else:
@@ -848,7 +859,7 @@ class _LedSyncDialog(QDialog):
                 is_shift_only = cr.map_type == "shift_only"
                 q = "good" if (cr.resid_std_s < 0.005 and not is_shift_only) else "poor"
                 txt = (
-                    f"{cr.camera_instance_id}: {cr.n_events} events, "
+                    f"{cam_name}: {cr.n_events} events, "
                     f"{cr.n_pairs} DTW pairs, "
                     f"{cr.n_inliers} inliers, "
                     f"σ={cr.resid_std_s * 1000:.1f}ms, "
@@ -923,7 +934,7 @@ class _LedSyncDialog(QDialog):
                 "  uv sync --group setup-app",
             )
             return
-        _BrightnessPlotDialog(self._led_result, parent=self).exec()
+        _BrightnessPlotDialog(self._led_result, labels=self._video_labels, parent=self).exec()
 
     def _on_dump(self) -> None:
         if self._led_result is None:

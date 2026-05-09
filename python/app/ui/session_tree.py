@@ -193,7 +193,9 @@ class SessionTreeWidget(QTreeWidget):
     def _on_item_changed(self, current: QTreeWidgetItem, _prev) -> None:
         if current is None:
             return
-        kind: ItemKind = current.data(0, _KIND)
+        kind = current.data(0, _KIND)
+        if not isinstance(kind, ItemKind):
+            kind = ItemKind(kind)
         item_id: str = current.data(0, _ID)
         if kind == ItemKind.CAPTURE:
             self.capture_selected.emit(item_id)
@@ -230,7 +232,9 @@ class SessionTreeWidget(QTreeWidget):
         item = self.itemAt(pos)
         if item is None:
             return
-        kind: ItemKind = item.data(0, _KIND)
+        kind = item.data(0, _KIND)
+        if not isinstance(kind, ItemKind):
+            kind = ItemKind(kind)
         item_id: str = item.data(0, _ID)
         menu = QMenu(self)
         {
@@ -333,7 +337,16 @@ class SessionTreeWidget(QTreeWidget):
                 )
             conn.execute("DELETE FROM detection_runs WHERE shot_id = ?", (capture_id,))
             conn.execute("DELETE FROM trials WHERE capture_id = ?", (capture_id,))
+            conn.execute(
+                "DELETE FROM sync_points WHERE sync_config_id IN "
+                "(SELECT id FROM sync_configs WHERE shot_id = ?)", (capture_id,)
+            )
             conn.execute("DELETE FROM sync_configs WHERE shot_id = ?", (capture_id,))
+            conn.execute(
+                "DELETE FROM sync_anchor_observations WHERE shot_video_id IN "
+                "(SELECT id FROM capture_videos WHERE shot_id = ?)", (capture_id,)
+            )
+            conn.execute("DELETE FROM sync_anchors WHERE shot_id = ?", (capture_id,))
             conn.execute("DELETE FROM capture_videos WHERE shot_id = ?", (capture_id,))
             conn.execute("DELETE FROM captures WHERE id = ?", (capture_id,))
         self.reload()

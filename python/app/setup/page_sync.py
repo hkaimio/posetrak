@@ -1268,8 +1268,15 @@ class SyncWidget(QWidget):
 
         fps_by_video = {v.id: (v.actual_fps or 30.0) for v in self._videos}
 
+        conn = self._ctx._conn
+        conn.execute(
+            "DELETE FROM sync_points WHERE sync_config_id IN "
+            "(SELECT id FROM sync_configs WHERE shot_id = ?)",
+            (self._shot_id,),
+        )
+        conn.execute("DELETE FROM sync_configs WHERE shot_id = ?", (self._shot_id,))
         self._ctx.write_sync_config(self._shot_id, "manual-graph", points)
-        self._ctx._conn.commit()
+        conn.commit()
 
         self._sync_table = SyncTable(result.sync_points, fps_by_video)
 

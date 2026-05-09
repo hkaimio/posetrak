@@ -149,7 +149,8 @@ class CapturePanel(QWidget):
 
         # Actions
         btn_row = QHBoxLayout()
-        sync_btn = _action_btn("Set up sync…", enabled=False)
+        sync_btn = _action_btn("Set up sync…")
+        sync_btn.clicked.connect(self._open_sync)
         btn_row.addWidget(sync_btn)
 
         ext_btn = _action_btn("Import extrinsics…")
@@ -166,6 +167,18 @@ class CapturePanel(QWidget):
         self.setLayout(QVBoxLayout())
         self.layout().setContentsMargins(0, 0, 0, 0)
         self.layout().addWidget(_scrollable(inner))
+
+    def _open_sync(self) -> None:
+        from app.setup.db_context import DBContext
+        from app.setup.page_sync import SyncDialog
+        session_row = self._conn.execute(
+            "SELECT id FROM mocap_sessions LIMIT 1"
+        ).fetchone()
+        if session_row is None:
+            return
+        ctx = DBContext(self._conn, session_row["id"])
+        dlg = SyncDialog(ctx, self._capture_id, parent=self)
+        dlg.exec()
 
     def _open_extrinsics(self) -> None:
         from app.setup.page_extrinsics import ExtrinsicsImportDialog

@@ -36,6 +36,7 @@ from typing import Optional
 _log = logging.getLogger(__name__)
 
 from PySide6.QtCore import QEvent, QObject, QThread, Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -49,15 +50,16 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
     QWizardPage,
 )
 
 from app.setup.camera_cell import CameraCell
-from app.setup.db_context import DBContext, SyncPoint, SyncTable
+from app.setup.db_context import CaptureVideoInfo, DBContext, SyncPoint, SyncTable
 from app.setup.video_reader import FrameReader
-from app.setup.frame_cache import FrameCache
 from app.setup.job_runner import BackgroundJob
 from app.setup.led_sync import (
     CameraSyncResult,
@@ -67,8 +69,9 @@ from app.setup.led_sync import (
     run_led_sync,
     save_brightness_dump,
 )
-from app.setup.multi_video_scrubber import CellInfo, MultiVideoScrubber
-from app.setup.overlay import ROIDrawOverlay, SyncAnchorOverlay
+from app.setup.overlay import ROIDrawOverlay
+from app.setup.pair_scrubber import PairScrubber
+from app.setup.sync_solver import check_connectivity, solve_sync_graph
 
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as _FigureCanvas
@@ -953,7 +956,379 @@ class _LedSyncDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
-# SyncPage
+# SyncWidget — self-contained graph-based sync editor
+# ---------------------------------------------------------------------------
+
+
+class SyncWidget(QWidget):
+    """Multi-camera sync editor using the graph-based anchor model.
+
+    Left panel: QTreeWidget with cameras as top-level nodes; anchor observations
+    as children.  Connected cameras are shown in green, isolated cameras in red.
+
+    Centre: PairScrubber — reference (left) and target (right) side by side.
+    Select reference and target from the combo boxes above.  Press "Mark sync pair
+    at these frames" when both panes show a shared physical event.
+
+    Bottom controls: "Solve & apply" computes timestamps from all recorded anchor
+    pairs and writes a sync_config to the session DB.  "LED sync…" opens the LED
+    dialog to refine the sync using a blinking LED.
+    """
+
+    def __init__(
+        self, ctx: DBContext, shot_id: str, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self._ctx = ctx
+        self._shot_id = shot_id
+        self._videos: list[CaptureVideoInfo] = []
+        self._video_id_to_idx: dict[str, int] = {}
+        self._sync_table: SyncTable | None = None
+        self._current_anchor_id: str | None = None
+
+        self._build_ui()
+        self._load_shot()
+
+    # ------------------------------------------------------------------
+    # Build UI
+    # ------------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        # --- Left: anchor tree + delete button ---
+        self._tree = QTreeWidget()
+        self._tree.setHeaderLabels(["Sync anchors"])
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self._tree.itemClicked.connect(self._on_tree_item_clicked)
+
+        self._delete_btn = QPushButton("Delete selected anchor")
+        self._delete_btn.setEnabled(False)
+        self._delete_btn.clicked.connect(self._on_delete_anchor)
+
+        left_w = QWidget()
+        left_l = QVBoxLayout(left_w)
+        left_l.setContentsMargins(0, 0, 0, 0)
+        left_l.setSpacing(4)
+        left_l.addWidget(self._tree, stretch=1)
+        left_l.addWidget(self._delete_btn)
+        left_w.setMinimumWidth(180)
+        left_w.setMaximumWidth(260)
+
+        # --- Right: combos + scrubber + controls ---
+        self._ref_combo = QComboBox()
+        self._tgt_combo = QComboBox()
+        self._ref_combo.currentIndexChanged.connect(self._on_ref_combo_changed)
+        self._tgt_combo.currentIndexChanged.connect(self._on_tgt_combo_changed)
+
+        combo_row = QHBoxLayout()
+        combo_row.addWidget(QLabel("Reference:"))
+        combo_row.addWidget(self._ref_combo, stretch=1)
+        combo_row.addSpacing(8)
+        combo_row.addWidget(QLabel("Target:"))
+        combo_row.addWidget(self._tgt_combo, stretch=1)
+
+        self._pair = PairScrubber(self)
+        self._pair.anchor_requested.connect(self._on_anchor_requested)
+
+        self._connectivity_label = QLabel("No cameras loaded.")
+        self._connectivity_label.setStyleSheet("font-size: 11px; color: grey;")
+
+        self._status_label = QLabel()
+        self._status_label.setStyleSheet("font-size: 11px; color: grey;")
+
+        self._solve_btn = QPushButton("Solve && apply sync")
+        self._solve_btn.setEnabled(False)
+        self._solve_btn.setToolTip(
+            "Compute consistent timestamps from all recorded anchor pairs\n"
+            "and write a sync_config to the session database."
+        )
+        self._solve_btn.clicked.connect(self._on_solve)
+
+        self._led_btn = QPushButton("LED sync…")
+        self._led_btn.setEnabled(False)
+        self._led_btn.setToolTip(
+            "Open the LED sync dialog to refine the rough graph sync\n"
+            "using a blinking LED.  Requires at least one solved sync config."
+        )
+        self._led_btn.clicked.connect(self._on_led_sync)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.addWidget(self._connectivity_label, stretch=1)
+        bottom_row.addWidget(self._solve_btn)
+        bottom_row.addWidget(self._led_btn)
+
+        right_w = QWidget()
+        right_l = QVBoxLayout(right_w)
+        right_l.setContentsMargins(0, 0, 0, 0)
+        right_l.setSpacing(4)
+        right_l.addLayout(combo_row)
+        right_l.addWidget(self._pair, stretch=1)
+        right_l.addWidget(self._status_label)
+        right_l.addLayout(bottom_row)
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+        outer.addWidget(left_w)
+        outer.addWidget(right_w, stretch=1)
+
+    # ------------------------------------------------------------------
+    # Load
+    # ------------------------------------------------------------------
+
+    def _load_shot(self) -> None:
+        self._videos = self._ctx.get_shot_videos(self._shot_id)
+        self._video_id_to_idx = {v.id: i for i, v in enumerate(self._videos)}
+
+        self._ref_combo.blockSignals(True)
+        self._tgt_combo.blockSignals(True)
+        self._ref_combo.clear()
+        self._tgt_combo.clear()
+        for v in self._videos:
+            self._ref_combo.addItem(v.camera_label, v.id)
+            self._tgt_combo.addItem(v.camera_label, v.id)
+        if len(self._videos) >= 2:
+            self._tgt_combo.setCurrentIndex(1)
+        self._ref_combo.blockSignals(False)
+        self._tgt_combo.blockSignals(False)
+
+        # Auto-load the best existing sync config so "LED sync…" is available.
+        configs = self._ctx.get_sync_configs(self._shot_id)
+        if configs:
+            self._sync_table = self._ctx.load_sync_config(configs[0][0])
+
+        self._reload_scrubber_ref()
+        self._reload_scrubber_tgt()
+        self._reload_tree()
+
+    # ------------------------------------------------------------------
+    # Scrubber helpers
+    # ------------------------------------------------------------------
+
+    def _reload_scrubber_ref(self) -> None:
+        idx = self._ref_combo.currentIndex()
+        if 0 <= idx < len(self._videos):
+            sv = self._videos[idx]
+            total = max(sv.last_video_frame - sv.first_video_frame + 1, 1)
+            self._pair.set_reference(sv.file_path, total, sv.camera_label)
+
+    def _reload_scrubber_tgt(self) -> None:
+        idx = self._tgt_combo.currentIndex()
+        if 0 <= idx < len(self._videos):
+            sv = self._videos[idx]
+            total = max(sv.last_video_frame - sv.first_video_frame + 1, 1)
+            self._pair.set_target(sv.file_path, total, sv.camera_label)
+
+    # ------------------------------------------------------------------
+    # Tree
+    # ------------------------------------------------------------------
+
+    def _reload_tree(self) -> None:
+        self._tree.clear()
+        self._current_anchor_id = None
+        self._delete_btn.setEnabled(False)
+
+        anchors = self._ctx.get_anchor_observations(self._shot_id)
+        vid_map: dict[str, CaptureVideoInfo] = {v.id: v for v in self._videos}
+        video_ids = [v.id for v in self._videos]
+
+        ok, isolated = check_connectivity(anchors, video_ids)
+        isolated_set = set(isolated)
+
+        for sv in self._videos:
+            top = QTreeWidgetItem(self._tree, [sv.camera_label])
+            if sv.id in isolated_set:
+                top.setForeground(0, QColor("#cc3300"))
+                top.setToolTip(0, "Not yet connected to other cameras via any anchor.")
+            elif video_ids:
+                top.setForeground(0, QColor("#007700"))
+
+            for anchor_id, obs_list in anchors:
+                my_obs = next((o for o in obs_list if o.shot_video_id == sv.id), None)
+                if my_obs is None:
+                    continue
+                for partner in obs_list:
+                    if partner.shot_video_id == sv.id:
+                        continue
+                    pcam = vid_map.get(partner.shot_video_id)
+                    plabel = pcam.camera_label if pcam else partner.shot_video_id
+                    child = QTreeWidgetItem(
+                        top,
+                        [f"f{my_obs.video_frame} ↔ {plabel}: f{partner.video_frame}"],
+                    )
+                    child.setData(0, Qt.ItemDataRole.UserRole, {
+                        "anchor_id": anchor_id,
+                        "ref_video_id": sv.id,
+                        "tgt_video_id": partner.shot_video_id,
+                        "ref_frame": my_obs.video_frame,
+                        "tgt_frame": partner.video_frame,
+                    })
+
+        self._tree.expandAll()
+
+        n = len(self._videos)
+        if n == 0:
+            self._connectivity_label.setText("No cameras.")
+            self._connectivity_label.setStyleSheet("font-size: 11px; color: grey;")
+        elif ok:
+            self._connectivity_label.setText(f"All {n} cameras connected.")
+            self._connectivity_label.setStyleSheet("font-size: 11px; color: green;")
+        else:
+            missing = [
+                vid_map[vid].camera_label if vid in vid_map else vid
+                for vid in isolated
+            ]
+            self._connectivity_label.setText(f"Not connected: {', '.join(missing)}")
+            self._connectivity_label.setStyleSheet("font-size: 11px; color: orange;")
+
+        has_anchors = any(len(obs_list) >= 2 for _, obs_list in anchors)
+        self._solve_btn.setEnabled(has_anchors)
+        self._led_btn.setEnabled(self._sync_table is not None)
+
+    # ------------------------------------------------------------------
+    # Slots
+    # ------------------------------------------------------------------
+
+    def _on_ref_combo_changed(self, _idx: int) -> None:
+        self._reload_scrubber_ref()
+
+    def _on_tgt_combo_changed(self, _idx: int) -> None:
+        self._reload_scrubber_tgt()
+
+    def _on_tree_item_clicked(self, item: QTreeWidgetItem, _col: int) -> None:
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data is None:
+            self._current_anchor_id = None
+            self._delete_btn.setEnabled(False)
+            return
+
+        self._current_anchor_id = data["anchor_id"]
+        self._delete_btn.setEnabled(True)
+
+        ref_idx = self._video_id_to_idx.get(data["ref_video_id"], 0)
+        tgt_idx = self._video_id_to_idx.get(data["tgt_video_id"], 0)
+
+        self._ref_combo.blockSignals(True)
+        self._tgt_combo.blockSignals(True)
+        self._ref_combo.setCurrentIndex(ref_idx)
+        self._tgt_combo.setCurrentIndex(tgt_idx)
+        self._ref_combo.blockSignals(False)
+        self._tgt_combo.blockSignals(False)
+
+        self._reload_scrubber_ref()
+        self._reload_scrubber_tgt()
+        self._pair.seek_reference(data["ref_frame"])
+        self._pair.seek_target(data["tgt_frame"])
+
+    def _on_anchor_requested(self, ref_frame: int, tgt_frame: int) -> None:
+        ref_idx = self._ref_combo.currentIndex()
+        tgt_idx = self._tgt_combo.currentIndex()
+        if ref_idx < 0 or tgt_idx < 0 or ref_idx == tgt_idx:
+            self._status_label.setText("Select different cameras for reference and target.")
+            self._status_label.setStyleSheet("font-size: 11px; color: orange;")
+            return
+
+        ref_sv = self._videos[ref_idx]
+        tgt_sv = self._videos[tgt_idx]
+
+        anchor_id = self._ctx.create_sync_anchor(self._shot_id)
+        self._ctx.add_anchor_observation(anchor_id, ref_sv.id, ref_frame)
+        self._ctx.add_anchor_observation(anchor_id, tgt_sv.id, tgt_frame)
+        self._ctx._conn.commit()
+
+        self._status_label.setText(
+            f"Anchor: {ref_sv.camera_label} f{ref_frame} ↔ "
+            f"{tgt_sv.camera_label} f{tgt_frame}"
+        )
+        self._status_label.setStyleSheet("font-size: 11px; color: green;")
+        self._reload_tree()
+
+    def _on_delete_anchor(self) -> None:
+        if self._current_anchor_id is None:
+            return
+        self._ctx.delete_sync_anchor(self._current_anchor_id)
+        self._ctx._conn.commit()
+        self._current_anchor_id = None
+        self._delete_btn.setEnabled(False)
+        self._status_label.setText("Anchor deleted.")
+        self._status_label.setStyleSheet("font-size: 11px; color: grey;")
+        self._reload_tree()
+
+    def _on_solve(self) -> None:
+        anchors = self._ctx.get_anchor_observations(self._shot_id)
+        result = solve_sync_graph(anchors, self._videos)
+
+        if not result.sync_points:
+            self._status_label.setText("No connected cameras — add anchor pairs first.")
+            self._status_label.setStyleSheet("font-size: 11px; color: orange;")
+            return
+
+        points: dict[str, list[SyncPoint]] = {}
+        for sp in result.sync_points:
+            points.setdefault(sp.shot_video_id, []).append(sp)
+
+        fps_by_video = {v.id: (v.actual_fps or 30.0) for v in self._videos}
+
+        self._ctx.write_sync_config(self._shot_id, "manual-graph", points)
+        self._ctx._conn.commit()
+
+        self._sync_table = SyncTable(result.sync_points, fps_by_video)
+
+        n_conn = len(result.connected_video_ids)
+        n_iso = len(result.isolated_video_ids)
+        msg = f"Sync applied: {n_conn} camera(s) connected."
+        if n_iso:
+            isolated_labels = [
+                next((v.camera_label for v in self._videos if v.id == vid), vid)
+                for vid in result.isolated_video_ids
+            ]
+            msg += f"  Isolated: {', '.join(isolated_labels)}."
+        self._status_label.setText(msg)
+        self._status_label.setStyleSheet("font-size: 11px; color: green;")
+        self._led_btn.setEnabled(True)
+
+    def _on_led_sync(self) -> None:
+        row = self._ctx._conn.execute(
+            "SELECT COALESCE(label, 'Capture ' || capture_number) FROM captures WHERE id = ?",
+            (self._shot_id,),
+        ).fetchone()
+        label = row[0] if row else "Capture"
+        shot = _ShotMeta(shot_id=self._shot_id, label=label, videos=self._videos)
+        current_frames = [0] * len(self._videos)
+
+        sync_table_offsets: dict[int, float] = {}
+        if self._sync_table is not None:
+            for i, sv in enumerate(self._videos):
+                t0 = self._sync_table.frame_to_global_time(0, sv.id)
+                if t0 is not None:
+                    sync_table_offsets[i] = t0
+
+        def _on_accepted(sync_table: SyncTable) -> None:
+            self._sync_table = sync_table
+            self._status_label.setText("LED sync accepted and applied.")
+            self._status_label.setStyleSheet("font-size: 11px; color: green;")
+
+        dlg = _LedSyncDialog(
+            shot=shot,
+            fps_overrides={},
+            ctx=self._ctx,
+            current_frames=current_frames,
+            on_sync_accepted=_on_accepted,
+            sync_table_offsets=sync_table_offsets,
+            parent=self,
+        )
+        dlg.exec()
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
+    def shutdown(self) -> None:
+        self._pair.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# SyncPage — wizard page wrapper
 # ---------------------------------------------------------------------------
 
 
@@ -964,517 +1339,134 @@ class SyncPage(QWizardPage):
         super().__init__(parent)
         self.setTitle("Camera Synchronisation")
         self.setSubTitle(
-            "Scroll each camera to a common reference event, set an anchor per "
-            "camera, then apply rough sync.  Use the LED sync dialog for more "
-            "accurate automated alignment.  Click a cell to focus it; use "
-            "←/→ (±1 frame) or Shift+←/→ (±10 frames) to navigate."
+            "Record sync anchor pairs between cameras using the pair scrubber, "
+            "then click 'Solve & apply sync' to build a shared timeline.  "
+            "Use 'LED sync…' for more accurate automated alignment."
         )
-
         self._shots: list[_ShotMeta] = []
-        self._cache: FrameCache | None = None
-        self._scrubber: MultiVideoScrubber | None = None
+        self._widget: Optional[SyncWidget] = None
 
-        # Rough-sync state (reset on shot change)
-        self._anchors: dict[int, int] = {}
-        self._anchor_overlays: list[SyncAnchorOverlay] = []
-        self._anchor_labels: list[QLabel] = []
+        self._shot_combo = QComboBox()
+        self._shot_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._shot_combo.currentIndexChanged.connect(self._on_shot_changed)
 
-        # Per-camera fps override spinboxes (in rough sync panel, rebuilt per shot)
-        self._fps_spinboxes: list[QDoubleSpinBox] = []
+        self._container = QWidget()
+        self._container_layout = QVBoxLayout(self._container)
+        self._container_layout.setContentsMargins(0, 0, 0, 0)
 
-        # ---- shot display (read-only — always the shot just created) ----
-        self._shot_label = QLabel()
-        self._shot_label.setStyleSheet("font-weight: bold;")
+        shot_row = QHBoxLayout()
+        shot_row.addWidget(QLabel("Capture:"))
+        shot_row.addWidget(self._shot_combo)
+        shot_row.addStretch()
+        self._shot_row_w = QWidget()
+        self._shot_row_w.setLayout(shot_row)
 
-        # ---- sync config selector ----
-        self._sync_config_combo = QComboBox()
-        self._sync_config_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._sync_config_combo.setToolTip(
-            "Select the sync configuration to apply to this shot.\n"
-            "LED-auto configs are preferred; the most recent is pre-selected."
-        )
-        self._sync_config_combo.currentIndexChanged.connect(self._on_sync_config_selected)
-
-        shot_bar = QHBoxLayout()
-        shot_bar.addWidget(QLabel("Shot:"))
-        shot_bar.addWidget(self._shot_label)
-        shot_bar.addSpacing(16)
-        shot_bar.addWidget(QLabel("Sync config:"))
-        shot_bar.addWidget(self._sync_config_combo, stretch=1)
-        shot_bar.addStretch()
-
-        # ---- scrubber area ----
-        self._scrubber_container = QWidget()
-        self._scrubber_layout = QVBoxLayout(self._scrubber_container)
-        self._scrubber_layout.setContentsMargins(0, 0, 0, 0)
-
-        # ---- rough sync panel ----
-        self._rough_panel = QGroupBox("Rough synchronisation")
-        rough_layout = QVBoxLayout(self._rough_panel)
-        rough_layout.setSpacing(4)
-
-        # Per-camera fps rows (dynamic, rebuilt per shot)
-        self._fps_rows_widget = QWidget()
-        self._fps_rows_layout = QVBoxLayout(self._fps_rows_widget)
-        self._fps_rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._fps_rows_layout.setSpacing(2)
-        rough_layout.addWidget(self._fps_rows_widget)
-
-        btn_row = QHBoxLayout()
-        self._set_anchor_btn = QPushButton("Set anchor for focused camera")
-        self._set_anchor_btn.setEnabled(False)
-        self._set_anchor_btn.clicked.connect(self._on_set_anchor)
-        self._clear_anchors_btn = QPushButton("Clear all anchors")
-        self._clear_anchors_btn.setEnabled(False)
-        self._clear_anchors_btn.clicked.connect(self._on_clear_anchors)
-        btn_row.addWidget(self._set_anchor_btn)
-        btn_row.addWidget(self._clear_anchors_btn)
-        btn_row.addStretch()
-        rough_layout.addLayout(btn_row)
-
-        # Per-camera anchor status labels (dynamic)
-        self._anchor_status_widget = QWidget()
-        self._anchor_status_layout = QHBoxLayout(self._anchor_status_widget)
-        self._anchor_status_layout.setContentsMargins(0, 0, 0, 0)
-        rough_layout.addWidget(self._anchor_status_widget)
-
-        apply_row = QHBoxLayout()
-        self._rough_status_label = QLabel()
-        self._rough_status_label.setStyleSheet("color: grey; font-size: 11px;")
-        self._apply_rough_btn = QPushButton("Apply rough sync")
-        self._apply_rough_btn.setEnabled(False)
-        self._apply_rough_btn.clicked.connect(self._on_apply_rough_sync)
-        apply_row.addWidget(self._rough_status_label, stretch=1)
-        apply_row.addWidget(self._apply_rough_btn)
-        rough_layout.addLayout(apply_row)
-
-        # LED sync entry point
-        led_row = QHBoxLayout()
-        self._led_sync_btn = QPushButton("LED synchronisation…")
-        self._led_sync_btn.setEnabled(False)
-        self._led_sync_btn.setToolTip(
-            "Open the LED sync dialog to automate synchronisation using a blinking LED.\n"
-            "Apply rough sync first to establish a starting alignment."
-        )
-        self._led_sync_btn.clicked.connect(self._on_open_led_sync)
-        led_row.addStretch()
-        led_row.addWidget(self._led_sync_btn)
-        rough_layout.addLayout(led_row)
-
-        # ---- error label ----
-        self._error_label = QLabel()
-        self._error_label.setStyleSheet("color: red;")
-        self._error_label.setWordWrap(True)
-        self._error_label.setVisible(False)
-
-        # ---- main layout ----
         layout = QVBoxLayout(self)
-        layout.addLayout(shot_bar)
-        layout.addWidget(self._scrubber_container, stretch=1)
-        layout.addWidget(self._rough_panel)
-        layout.addWidget(self._error_label)
-
-    # ------------------------------------------------------------------
-    # Qt wizard overrides
-    # ------------------------------------------------------------------
+        layout.addWidget(self._shot_row_w)
+        layout.addWidget(self._container, stretch=1)
 
     def initializePage(self) -> None:  # noqa: N802
-        self._error_label.setVisible(False)
-        self._shots.clear()
-
         ctx: DBContext = self.wizard().db_context
-        # Load only the shot(s) just created by the Shots page.  Guard against
-        # MagicMock in tests and missing attribute in other callers.
         raw = getattr(self.wizard(), "new_shot_ids", None)
         new_ids: list[str] = raw if isinstance(raw, list) and raw else []
+
         try:
             if new_ids:
                 placeholders = ",".join("?" * len(new_ids))
                 rows = ctx._conn.execute(
-                    f"SELECT id, capture_number, label FROM captures WHERE id IN ({placeholders})",
+                    f"SELECT id, capture_number, label FROM captures "
+                    f"WHERE id IN ({placeholders})",
                     new_ids,
                 ).fetchall()
             else:
-                # Fallback (e.g. navigating back then forward): show all captures.
                 rows = ctx._conn.execute(
                     "SELECT id, capture_number, label FROM captures "
                     "WHERE session_id = ? ORDER BY capture_number",
                     (ctx._session_id,),
                 ).fetchall()
         except Exception as exc:  # noqa: BLE001
-            self._show_error(f"Could not read captures: {exc}")
+            _log.error("Could not read captures: %s", exc)
             return
 
-        for row in rows:
-            label = row["label"] or f"Capture {row['capture_number']}"
-            videos = ctx.get_shot_videos(row["id"])
-            meta = _ShotMeta(shot_id=row["id"], label=label, videos=videos)
-            self._shots.append(meta)
+        self._shots = [
+            _ShotMeta(
+                shot_id=r["id"],
+                label=r["label"] or f"Capture {r['capture_number']}",
+                videos=[],
+            )
+            for r in rows
+        ]
+
+        self._shot_combo.blockSignals(True)
+        self._shot_combo.clear()
+        for s in self._shots:
+            self._shot_combo.addItem(s.label, s.shot_id)
+        self._shot_row_w.setVisible(len(self._shots) > 1)
+        self._shot_combo.blockSignals(False)
 
         if self._shots:
-            self._shot_label.setText(self._shots[0].label)
-            self._on_shot_selected(0)
-        else:
-            self._show_error(
-                "No captures found. Go back to the Shot & Videos page and add a capture."
-            )
+            self._shot_combo.setCurrentIndex(0)
+            self._on_shot_changed(0)
 
     def cleanupPage(self) -> None:  # noqa: N802
-        self._teardown_scrubber()
+        self._teardown_widget()
 
     def isComplete(self) -> bool:  # noqa: N802
         return True
 
-    # ------------------------------------------------------------------
-    # Slots — shot selection
-    # ------------------------------------------------------------------
-
-    def _on_shot_selected(self, index: int) -> None:
-        self._teardown_scrubber()
+    def _on_shot_changed(self, index: int) -> None:
+        self._teardown_widget()
         if index < 0 or index >= len(self._shots):
             return
-
-        shot = self._shots[index]
-        if not shot.videos:
-            self._show_error(
-                f"Shot '{shot.label}' has no videos. "
-                "Go back and add video files for this shot."
-            )
-            return
-
-        cells_info = [
-            CellInfo(
-                shot_video_id=sv.id,
-                file_path=sv.file_path,
-                total_frames=max(sv.last_video_frame - sv.first_video_frame + 1, 1),
-                fps=sv.actual_fps or 30.0,
-                label=sv.camera_label,
-            )
-            for sv in shot.videos
-        ]
-
-        self._cache = FrameCache()
-        scrubber = MultiVideoScrubber(cells_info, self._cache, self._scrubber_container)
-        self._scrubber_layout.addWidget(scrubber)
-        self._scrubber = scrubber
-
-        self._anchor_overlays = [
-            SyncAnchorOverlay(total_frames=info.total_frames)
-            for info in cells_info
-        ]
-        for i, ov in enumerate(self._anchor_overlays):
-            scrubber.set_overlays(i, [ov])
-
-        self._rebuild_per_camera_widgets(shot)
-
-        self._set_anchor_btn.setEnabled(True)
-        self._clear_anchors_btn.setEnabled(True)
-        self._update_rough_panel_state()
-
-        # Populate sync config combo and auto-load the best available config
-        self._populate_sync_config_combo(shot)
-
-        scrubber.setFocus()
-
-    # ------------------------------------------------------------------
-    # Slots — rough sync
-    # ------------------------------------------------------------------
-
-    def _on_set_anchor(self) -> None:
-        if self._scrubber is None:
-            return
-        fc = self._scrubber.focused_cell
-        frame = self._scrubber.current_frames[fc]
-        self._anchors[fc] = frame
-        self._anchor_overlays[fc].set_anchor(frame)
-        self._scrubber._cells[fc].update()
-
-        shot = self._shots[0]
-        cam = shot.videos[fc].camera_label
-        self._anchor_labels[fc].setText(f"{cam}: {frame}")
-        self._update_rough_panel_state()
-
-    def _on_clear_anchors(self) -> None:
-        self._anchors.clear()
-        for ov in self._anchor_overlays:
-            ov.anchor_frame = None
-        if self._scrubber:
-            for cell in self._scrubber._cells:
-                cell.update()
-        if self._shots:
-            shot = self._shots[0]
-            for i, lbl in enumerate(self._anchor_labels):
-                cam = shot.videos[i].camera_label
-                lbl.setText(f"{cam}: —")
-        if self._scrubber:
-            self._scrubber.reload_sync(None)
-        self._led_sync_btn.setEnabled(False)
-        self._update_rough_panel_state()
-
-    def _on_apply_rough_sync(self) -> None:
-        if not self._anchors or self._scrubber is None:
-            return
-
-        shot = self._shots[0]
-
-        ref_cell = min(self._anchors)
-        ref_frame = self._anchors[ref_cell]
-        ref_sv = shot.videos[ref_cell]
-        # Use fps override if the user has set one
-        ref_fps = self._fps_overrides().get(ref_cell, ref_sv.actual_fps or 30.0) or 30.0
-        ref_ts = ref_frame / ref_fps
-
-        points: dict[str, list[SyncPoint]] = {}
-        fps_by_video: dict[str, float] = {}
-        for cell_idx, anchor_frame in self._anchors.items():
-            sv = shot.videos[cell_idx]
-            cam_id = sv.camera_instance_id
-            fps = self._fps_overrides().get(cell_idx, sv.actual_fps or 30.0) or 30.0
-            points[cam_id] = [
-                SyncPoint(
-                    camera_instance_id=cam_id,
-                    shot_video_id=sv.id,
-                    video_frame=anchor_frame,
-                    timestamp_s=ref_ts,
-                )
-            ]
-            fps_by_video[sv.id] = fps
-
         ctx: DBContext = self.wizard().db_context
-        # Persist corrected fps values so that reloading this sync config later
-        # uses the same fps for interpolation (not the container fps).
-        for cell_idx, sv in enumerate(shot.videos):
-            fps = self._fps_overrides().get(cell_idx, sv.actual_fps or 30.0) or 30.0
-            if abs(fps - (sv.actual_fps or 0.0)) > 0.01:
-                ctx.update_shot_video_fps(sv.id, fps)
-        ctx.write_sync_config(shot.shot_id, "manual-rough", points)
-        ctx._conn.commit()
+        shot_id = self._shots[index].shot_id
+        self._widget = SyncWidget(ctx, shot_id, self._container)
+        self._container_layout.addWidget(self._widget)
 
-        all_points = [sp for pts in points.values() for sp in pts]
-        sync_table = SyncTable(all_points, fps_by_video)
-        self._scrubber.reload_sync(sync_table)
-        # Seek to the anchor timestamp so the user sees their anchor frames
-        self._scrubber.seek_synced(ref_ts)
+    def _teardown_widget(self) -> None:
+        if self._widget is not None:
+            self._widget.shutdown()
+            self._container_layout.removeWidget(self._widget)
+            self._widget.deleteLater()
+            self._widget = None
 
-        n = len(self._anchors)
-        self._led_sync_btn.setEnabled(True)
-        # Refresh sync config dropdown to show the new entry, then restore the
-        # "applied" message (_populate_sync_config_combo overwrites it).
-        self._populate_sync_config_combo(shot)
-        self._rough_status_label.setText(
-            f"Rough sync applied ({n} camera{'s' if n != 1 else ''})."
-        )
-        self._rough_status_label.setStyleSheet("color: green; font-size: 11px;")
 
-    # ------------------------------------------------------------------
-    # Slots — LED sync dialog
-    # ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# SyncDialog — standalone dialog for the session tree
+# ---------------------------------------------------------------------------
 
-    def _on_open_led_sync(self) -> None:
-        if self._scrubber is None or not self._shots:
-            return
-        shot = self._shots[0]
-        ctx: DBContext = self.wizard().db_context
-        current_frames = self._scrubber.current_frames
 
-        def _on_accepted(sync_table: SyncTable) -> None:
-            self._scrubber.reload_sync(sync_table)
-            # Clear anchor overlays — LED sync supersedes rough anchors
-            for i, ov in enumerate(self._anchor_overlays):
-                ov.anchor_frame = None
-                self._scrubber.set_overlays(i, [ov])
-            # Refresh sync config dropdown, then restore the "accepted" message.
-            self._populate_sync_config_combo(shot)
-            self._rough_status_label.setText("LED sync accepted and applied.")
-            self._rough_status_label.setStyleSheet("color: green; font-size: 11px;")
+class SyncDialog(QDialog):
+    """Standalone sync dialog opened from the session tree (CapturePanel)."""
 
-        # Derive per-camera rough offsets (global time at each camera's frame 0)
-        # from the currently loaded sync table.  This is more reliable than
-        # recomputing from self._anchors because the sync table was built with
-        # the correct fps values and covers all cameras, including those that
-        # were not manually anchored in the current UI session.
-        sync_table_offsets: dict[int, float] = {}
-        if self._scrubber and self._scrubber.sync_table is not None:
-            st = self._scrubber.sync_table
-            for cell_idx, sv in enumerate(shot.videos):
-                t0 = st.frame_to_global_time(0, sv.id)
-                if t0 is not None:
-                    sync_table_offsets[cell_idx] = t0
+    def __init__(
+        self,
+        ctx: DBContext,
+        shot_id: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        row = ctx._conn.execute(
+            "SELECT COALESCE(label, 'Capture ' || capture_number) FROM captures WHERE id = ?",
+            (shot_id,),
+        ).fetchone()
+        self.setWindowTitle(f"Sync — {row[0] if row else 'Capture'}")
+        self.resize(1100, 700)
 
-        dlg = _LedSyncDialog(
-            shot=shot,
-            fps_overrides=self._fps_overrides(),
-            ctx=ctx,
-            current_frames=current_frames,
-            on_sync_accepted=_on_accepted,
-            anchor_frames=dict(self._anchors),
-            sync_table_offsets=sync_table_offsets,
-            parent=self,
-        )
-        dlg.exec()
+        self._widget = SyncWidget(ctx, shot_id, self)
 
-    # ------------------------------------------------------------------
-    # Slots — sync config selection
-    # ------------------------------------------------------------------
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
 
-    def _on_sync_config_selected(self, index: int) -> None:
-        config_id = self._sync_config_combo.itemData(index)
-        if config_id is None:
-            # "No sync config" option
-            if self._scrubber is not None:
-                self._scrubber.reload_sync(None)
-            self._led_sync_btn.setEnabled(False)
-            return
-        ctx: DBContext = self.wizard().db_context
-        sync_table = ctx.load_sync_config(config_id)
-        if sync_table is not None and self._scrubber is not None:
-            self._scrubber.reload_sync(sync_table)
-            self._led_sync_btn.setEnabled(True)
-            self._rough_status_label.setText(
-                f"Sync config loaded: {self._sync_config_combo.currentText()}"
-            )
-            self._rough_status_label.setStyleSheet("color: green; font-size: 11px;")
-            # Clear anchor overlays — loaded config supersedes rough anchors
-            for i, ov in enumerate(self._anchor_overlays):
-                ov.anchor_frame = None
-                if self._scrubber is not None:
-                    self._scrubber.set_overlays(i, [ov])
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.addWidget(self._widget, stretch=1)
+        layout.addLayout(btn_row)
 
-    def _fps_overrides(self) -> dict[int, float]:
-        """Return the current per-camera fps override values."""
-        return {i: spin.value() for i, spin in enumerate(self._fps_spinboxes)}
-
-    def _populate_sync_config_combo(self, shot: _ShotMeta) -> None:
-        """Fill the sync config combo for *shot* and load the default config."""
-        ctx: DBContext = self.wizard().db_context
-        configs = ctx.get_sync_configs(shot.shot_id)
-
-        self._sync_config_combo.blockSignals(True)
-        self._sync_config_combo.clear()
-
-        if not configs:
-            self._sync_config_combo.addItem("— no sync config —", None)
-            self._sync_config_combo.blockSignals(False)
-            self._on_sync_config_selected(0)
-            return
-
-        # Build labels; configs are already newest-first from the DB query.
-        # Prefer led-auto → manual-rough for the default selection.
-        method_rank = {"led-auto": 0, "manual-rough": 1}
-        best_idx = 0
-        best_rank = 99
-        for i, (cfg_id, method) in enumerate(configs):
-            n = len(configs) - i  # descending count label
-            label = f"{method} #{n}"
-            self._sync_config_combo.addItem(label, cfg_id)
-            rank = method_rank.get(method, 99)
-            if rank < best_rank:
-                best_rank = rank
-                best_idx = i
-
-        self._sync_config_combo.blockSignals(False)
-        self._sync_config_combo.setCurrentIndex(best_idx)
-        # Always call explicitly — setCurrentIndex is a no-op when already at best_idx.
-        self._on_sync_config_selected(best_idx)
-
-    def _rebuild_per_camera_widgets(self, shot: _ShotMeta) -> None:
-        """Rebuild per-camera fps spinboxes and anchor status labels."""
-        # Clear fps rows
-        while self._fps_rows_layout.count():
-            item = self._fps_rows_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._fps_spinboxes = []
-
-        for sv in shot.videos:
-            row = QWidget()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(6)
-
-            cam_lbl = QLabel(sv.camera_label)
-            cam_lbl.setFixedWidth(70)
-            cam_lbl.setStyleSheet("font-size: 11px; font-weight: bold;")
-
-            fps_lbl = QLabel("fps override:")
-            fps_lbl.setStyleSheet("font-size: 11px;")
-
-            fps_spin = QDoubleSpinBox()
-            fps_spin.setRange(0.0, 960.0)
-            fps_spin.setDecimals(3)
-            fps_spin.setValue(sv.actual_fps or 30.0)
-            fps_spin.setFixedWidth(75)
-            fps_spin.setSpecialValueText("auto")
-            fps_spin.setToolTip(
-                "Override the fps for anchor-timestamp calculation.\n"
-                "Set to 0 to use the probed container fps.\n"
-                "Use the actual capture rate for slow-motion clips."
-            )
-
-            row_layout.addWidget(cam_lbl)
-            row_layout.addWidget(fps_lbl)
-            row_layout.addWidget(fps_spin)
-            row_layout.addStretch()
-
-            self._fps_rows_layout.addWidget(row)
-            self._fps_spinboxes.append(fps_spin)
-
-        # Clear and rebuild anchor status labels
-        while self._anchor_status_layout.count():
-            item = self._anchor_status_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._anchor_labels = []
-        for sv in shot.videos:
-            lbl = QLabel(f"{sv.camera_label}: —")
-            lbl.setStyleSheet("font-size: 11px;")
-            self._anchor_status_layout.addWidget(lbl)
-            self._anchor_labels.append(lbl)
-        self._anchor_status_layout.addStretch()
-
-    def _update_rough_panel_state(self) -> None:
-        n_anchored = len(self._anchors)
-        n_total = len(self._shots[0].videos) if self._shots else 0
-        can_apply = n_anchored >= 2
-        self._apply_rough_btn.setEnabled(can_apply)
-        if n_anchored == 0:
-            msg = "Set an anchor on at least two cameras."
-        elif n_anchored < n_total:
-            msg = (
-                f"{n_anchored} / {n_total} cameras anchored — "
-                "can apply (unanchored cameras will not be synced)."
-            )
-        else:
-            msg = f"All {n_total} cameras anchored."
-        self._rough_status_label.setText(msg)
-        self._rough_status_label.setStyleSheet("color: grey; font-size: 11px;")
-
-    def _teardown_scrubber(self) -> None:
-        if self._scrubber is not None:
-            self._scrubber.shutdown()
-            self._scrubber_layout.removeWidget(self._scrubber)
-            self._scrubber.deleteLater()
-            self._scrubber = None
-        if self._cache is not None:
-            self._cache.close_all()
-            self._cache = None
-        self._anchors.clear()
-        self._anchor_overlays.clear()
-        self._set_anchor_btn.setEnabled(False)
-        self._clear_anchors_btn.setEnabled(False)
-        self._apply_rough_btn.setEnabled(False)
-        self._led_sync_btn.setEnabled(False)
-        self._rough_status_label.setText("")
-        self._rough_status_label.setStyleSheet("color: grey; font-size: 11px;")
-        self._sync_config_combo.currentIndexChanged.disconnect(self._on_sync_config_selected)
-        self._sync_config_combo.clear()
-        self._sync_config_combo.currentIndexChanged.connect(self._on_sync_config_selected)
-
-    def _show_error(self, msg: str) -> None:
-        self._error_label.setText(msg)
-        self._error_label.setVisible(True)
-        self._scrubber = None
+    def done(self, result: int) -> None:
+        self._widget.shutdown()
+        super().done(result)

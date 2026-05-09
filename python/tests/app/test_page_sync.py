@@ -1,4 +1,4 @@
-"""Tests for app.setup.page_sync (sync wizard page)."""
+"""Tests for app.setup.page_sync — SyncPage and SyncWidget."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.setup.db_context import DBContext
-from app.setup.page_sync import SyncPage, _ShotMeta
+from app.setup.page_sync import SyncDialog, SyncPage, SyncWidget, _ShotMeta
 from posetrak.db.db import create_session, generate_id
 
 
@@ -18,349 +18,429 @@ from posetrak.db.db import create_session, generate_id
 # ---------------------------------------------------------------------------
 
 
-def _make_session_with_shots(
+def _make_session(
     tmp_path: Path,
-    n_shots: int = 2,
+    n_shots: int = 1,
     videos_per_shot: int = 2,
-) -> tuple[sqlite3.Connection, str]:
-    db_path = tmp_path / "sync_session.db"
+) -> tuple[sqlite3.Connection, str, str]:
+    """Return (conn, session_id, first_shot_id)."""
+    db_path = tmp_path / "sync_test.db"
     conn = create_session(db_path)
     conn.row_factory = sqlite3.Row
     session_id = generate_id()
     conn.execute(
         "INSERT INTO mocap_sessions (id, recorded_at) VALUES (?, ?)",
-        (session_id, "2026-03-01T10:00:00+00:00"),
+        (session_id, "2026-05-01T10:00:00+00:00"),
     )
-    for shot_num in range(1, n_shots + 1):
+    first_shot_id = None
+    for sn in range(1, n_shots + 1):
         shot_id = generate_id()
+        if first_shot_id is None:
+            first_shot_id = shot_id
         conn.execute(
             "INSERT INTO captures (id, session_id, capture_number, label) VALUES (?, ?, ?, ?)",
-            (shot_id, session_id, shot_num, f"Shot {shot_num}"),
+            (shot_id, session_id, sn, f"Capture {sn}"),
         )
-        for cam_num in range(1, videos_per_shot + 1):
-            video_id = generate_id()
+        for cn in range(1, videos_per_shot + 1):
+            vid_id = generate_id()
+            conn.execute(
+                "INSERT OR IGNORE INTO camera_models (id, manufacturer, model_name) "
+                "VALUES ('mdl-test', 'TestCo', 'TestCam')"
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO camera_instances (id, camera_model_id, label) "
+                "VALUES (?, 'mdl-test', ?)",
+                (f"cam{cn}", f"Cam {cn}"),
+            )
             conn.execute(
                 "INSERT INTO capture_videos "
                 "(id, shot_id, camera_instance_id, file_path, "
                 "first_video_frame, last_video_frame, actual_fps) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
-                    video_id, shot_id, f"cam{cam_num}",
-                    f"/fake/shot{shot_num}_cam{cam_num}.mp4",
+                    vid_id, shot_id, f"cam{cn}",
+                    f"/fake/shot{sn}_cam{cn}.mp4",
                     0, 299, 30.0,
                 ),
             )
     conn.commit()
-    return conn, session_id
+    return conn, session_id, first_shot_id
+
+
+def _make_ctx(conn, session_id):
+    return DBContext(conn, session_id)
 
 
 def _attach_wizard(page: SyncPage, conn, session_id: str):
-    ctx = DBContext(conn, session_id)
+    ctx = _make_ctx(conn, session_id)
     wiz = MagicMock()
     wiz.db_context = ctx
-    wiz.new_shot_ids = []   # empty → fallback path loads all shots
+    wiz.new_shot_ids = []
     page.wizard = MagicMock(return_value=wiz)
     return ctx
 
 
 @pytest.fixture
-def loaded_page(qapp, tmp_path):
-    """2 shots × 2 cameras, page initialized."""
-    conn, session_id = _make_session_with_shots(tmp_path, n_shots=2, videos_per_shot=2)
-    page = SyncPage()
-    _attach_wizard(page, conn, session_id)
-    page.initializePage()
-    yield page, conn
-    page.cleanupPage()
+def session_1shot(qapp, tmp_path):
+    conn, session_id, shot_id = _make_session(tmp_path, n_shots=1, videos_per_shot=2)
+    yield conn, session_id, shot_id
     conn.close()
 
 
 @pytest.fixture
-def loaded_page_1shot(qapp, tmp_path):
-    """1 shot × 2 cameras, page initialized."""
-    conn, session_id = _make_session_with_shots(tmp_path, n_shots=1, videos_per_shot=2)
-    page = SyncPage()
-    _attach_wizard(page, conn, session_id)
-    page.initializePage()
-    yield page, conn
-    page.cleanupPage()
+def session_2shots(qapp, tmp_path):
+    conn, session_id, shot_id = _make_session(tmp_path, n_shots=2, videos_per_shot=2)
+    yield conn, session_id, shot_id
     conn.close()
 
 
 @pytest.fixture
-def loaded_page_1video(qapp, tmp_path):
-    """1 shot × 1 camera, page initialized."""
-    conn, session_id = _make_session_with_shots(tmp_path, n_shots=1, videos_per_shot=1)
-    page = SyncPage()
-    _attach_wizard(page, conn, session_id)
-    page.initializePage()
-    yield page, conn
-    page.cleanupPage()
-    conn.close()
+def widget_1shot(session_1shot):
+    conn, session_id, shot_id = session_1shot
+    ctx = _make_ctx(conn, session_id)
+    w = SyncWidget(ctx, shot_id)
+    yield w, ctx, shot_id, conn
+    w.shutdown()
 
 
 # ---------------------------------------------------------------------------
-# Construction
+# SyncPage — construction
 # ---------------------------------------------------------------------------
 
 
-def test_page_constructs(qapp) -> None:
+def test_sync_page_constructs(qapp) -> None:
     page = SyncPage()
     assert page.title() == "Camera Synchronisation"
 
 
-def test_page_is_always_complete(qapp) -> None:
+def test_sync_page_is_always_complete(qapp) -> None:
     assert SyncPage().isComplete()
 
 
 # ---------------------------------------------------------------------------
-# initializePage — shot loading
+# SyncPage — initializePage
 # ---------------------------------------------------------------------------
 
 
-def test_initialize_shows_shot_label(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    assert page._shot_label.text() != ""
-
-
-def test_initialize_builds_scrubber(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    assert page._scrubber is not None
-    assert len(page._scrubber._cells) == 2
-
-
-def test_initialize_no_shots_shows_error(qapp, tmp_path) -> None:
-    conn, session_id = _make_session_with_shots(tmp_path, n_shots=0)
+def test_sync_page_creates_widget_on_init(qapp, tmp_path) -> None:
+    conn, session_id, _ = _make_session(tmp_path)
     page = SyncPage()
     _attach_wizard(page, conn, session_id)
     page.initializePage()
-    assert page._scrubber is None
-    assert not page._error_label.isHidden()
+    assert page._widget is not None
+    page.cleanupPage()
     conn.close()
 
 
-def test_initialize_creates_anchor_overlays(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    assert len(page._anchor_overlays) == 2
-    assert all(ov.anchor_frame is None for ov in page._anchor_overlays)
+def test_sync_page_shot_row_hidden_for_single_shot(qapp, tmp_path) -> None:
+    conn, session_id, _ = _make_session(tmp_path, n_shots=1)
+    page = SyncPage()
+    _attach_wizard(page, conn, session_id)
+    page.initializePage()
+    assert page._shot_row_w.isHidden()
+    page.cleanupPage()
+    conn.close()
 
 
-def test_initialize_creates_anchor_labels(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    assert len(page._anchor_labels) == 2
-    assert all("—" in lbl.text() for lbl in page._anchor_labels)
+def test_sync_page_shot_row_visible_for_multi_shot(qapp, tmp_path) -> None:
+    conn, session_id, _ = _make_session(tmp_path, n_shots=2)
+    page = SyncPage()
+    _attach_wizard(page, conn, session_id)
+    page.initializePage()
+    # isHidden() reflects the explicit visibility flag; isVisible() also requires
+    # the parent chain to be shown, which is not the case in unit tests.
+    assert not page._shot_row_w.isHidden()
+    page.cleanupPage()
+    conn.close()
 
 
-# ---------------------------------------------------------------------------
-# Per-cell sliders
-# ---------------------------------------------------------------------------
-
-
-def test_scrubber_has_per_cell_sliders(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    assert len(page._scrubber._sliders) == 2
-
-
-def test_per_cell_slider_max_equals_last_frame(loaded_page_1video) -> None:
-    page, _ = loaded_page_1video
-    assert page._scrubber._sliders[0].maximum() == 299
-
-
-def test_per_cell_slider_updates_on_seek(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    page._scrubber._set_cell_frame(0, 50)
-    assert page._scrubber._sliders[0].value() == 50
-
-
-def test_per_cell_frame_label_updates_on_seek(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    page._scrubber._set_cell_frame(1, 42)
-    assert "42" in page._scrubber._frame_labels[1].text()
+def test_sync_page_cleanup_destroys_widget(qapp, tmp_path) -> None:
+    conn, session_id, _ = _make_session(tmp_path)
+    page = SyncPage()
+    _attach_wizard(page, conn, session_id)
+    page.initializePage()
+    assert page._widget is not None
+    page.cleanupPage()
+    assert page._widget is None
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
-# Rough sync — set anchor
+# SyncWidget — construction & initial state
 # ---------------------------------------------------------------------------
 
 
-def test_set_anchor_records_current_frame(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    scrubber = page._scrubber
-    scrubber._set_cell_frame(0, 100)   # seek cell 0 to frame 100
-    scrubber._focused_cell = 0
-    page._on_set_anchor()
-    assert page._anchors[0] == 100
+def test_sync_widget_constructs(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    assert w._pair is not None
+    assert w._tree is not None
 
 
-def test_set_anchor_updates_overlay(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    page._scrubber._set_cell_frame(0, 55)
-    page._scrubber._focused_cell = 0
-    page._on_set_anchor()
-    assert page._anchor_overlays[0].anchor_frame == 55
+def test_sync_widget_combos_populated(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    assert w._ref_combo.count() == 2
+    assert w._tgt_combo.count() == 2
 
 
-def test_set_anchor_updates_label(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    page._scrubber._set_cell_frame(1, 77)
-    page._scrubber._focused_cell = 1
-    page._on_set_anchor()
-    assert "77" in page._anchor_labels[1].text()
-    assert "—" not in page._anchor_labels[1].text()
+def test_sync_widget_combos_default_different(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    assert w._ref_combo.currentIndex() != w._tgt_combo.currentIndex()
 
 
-def test_apply_button_disabled_with_fewer_than_two_anchors(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    # One anchor only
-    page._scrubber._focused_cell = 0
-    page._on_set_anchor()
-    assert not page._apply_rough_btn.isEnabled()
+def test_sync_widget_tree_has_camera_items(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    assert w._tree.topLevelItemCount() == 2
 
 
-def test_apply_button_enabled_with_two_anchors(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    scrubber = page._scrubber
-    scrubber._focused_cell = 0
-    page._on_set_anchor()
-    scrubber._focused_cell = 1
-    page._on_set_anchor()
-    assert page._apply_rough_btn.isEnabled()
+def test_sync_widget_solve_btn_disabled_initially(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    assert not w._solve_btn.isEnabled()
+
+
+def test_sync_widget_delete_btn_disabled_initially(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    assert not w._delete_btn.isEnabled()
 
 
 # ---------------------------------------------------------------------------
-# Rough sync — clear anchors
+# SyncWidget — anchor recording
 # ---------------------------------------------------------------------------
 
 
-def test_clear_anchors_resets_state(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    page._scrubber._focused_cell = 0
-    page._on_set_anchor()
-    page._on_clear_anchors()
-    assert page._anchors == {}
-    assert all(ov.anchor_frame is None for ov in page._anchor_overlays)
-    assert all("—" in lbl.text() for lbl in page._anchor_labels)
+def test_anchor_recording_writes_to_db(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(100, 50)
+    anchors = conn.execute(
+        "SELECT COUNT(*) FROM sync_anchors WHERE shot_id = ?", (shot_id,)
+    ).fetchone()[0]
+    assert anchors == 1
+    obs = conn.execute(
+        "SELECT COUNT(*) FROM sync_anchor_observations"
+    ).fetchone()[0]
+    assert obs == 2
 
 
-def test_clear_anchors_disables_apply(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    scrubber = page._scrubber
-    scrubber._focused_cell = 0
-    page._on_set_anchor()
-    scrubber._focused_cell = 1
-    page._on_set_anchor()
-    page._on_clear_anchors()
-    assert not page._apply_rough_btn.isEnabled()
+def test_anchor_recording_rejected_when_same_camera(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    # Force ref and tgt to same index
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(0)
+    w._on_anchor_requested(100, 100)
+    anchors = conn.execute(
+        "SELECT COUNT(*) FROM sync_anchors WHERE shot_id = ?", (shot_id,)
+    ).fetchone()[0]
+    assert anchors == 0
+
+
+def test_anchor_updates_tree(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    before = w._tree.topLevelItem(0).childCount()
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(100, 50)
+    after = w._tree.topLevelItem(0).childCount()
+    assert after == before + 1
+
+
+def test_anchor_enables_solve_btn(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(100, 50)
+    assert w._solve_btn.isEnabled()
+
+
+def test_anchor_updates_status_label(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(77, 33)
+    assert "77" in w._status_label.text()
+    assert "33" in w._status_label.text()
 
 
 # ---------------------------------------------------------------------------
-# Rough sync — apply
+# SyncWidget — delete anchor
 # ---------------------------------------------------------------------------
 
 
-def test_apply_rough_sync_writes_sync_config(loaded_page_1shot) -> None:
-    page, conn = loaded_page_1shot
-    scrubber = page._scrubber
-    scrubber._set_cell_frame(0, 90)
-    scrubber._focused_cell = 0
-    page._on_set_anchor()
-    scrubber._set_cell_frame(1, 120)
-    scrubber._focused_cell = 1
-    page._on_set_anchor()
+def test_delete_anchor_removes_from_db(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(100, 50)
 
-    page._on_apply_rough_sync()
+    # _reload_tree resets _current_anchor_id; simulate selecting via tree click
+    parent_item = w._tree.topLevelItem(0)
+    child = parent_item.child(0)
+    w._on_tree_item_clicked(child, 0)
+    assert w._current_anchor_id is not None
 
-    configs = conn.execute("SELECT * FROM sync_configs").fetchall()
+    w._on_delete_anchor()
+
+    anchors = conn.execute(
+        "SELECT COUNT(*) FROM sync_anchors WHERE shot_id = ?", (shot_id,)
+    ).fetchone()[0]
+    assert anchors == 0
+    obs = conn.execute(
+        "SELECT COUNT(*) FROM sync_anchor_observations"
+    ).fetchone()[0]
+    assert obs == 0
+
+
+def test_delete_anchor_disables_delete_btn(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(100, 50)
+
+    parent_item = w._tree.topLevelItem(0)
+    child = parent_item.child(0)
+    w._on_tree_item_clicked(child, 0)
+    assert w._delete_btn.isEnabled()
+
+    w._on_delete_anchor()
+    assert not w._delete_btn.isEnabled()
+
+
+# ---------------------------------------------------------------------------
+# SyncWidget — solve
+# ---------------------------------------------------------------------------
+
+
+def test_solve_writes_sync_config(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(300, 150)
+
+    w._on_solve()
+
+    configs = conn.execute(
+        "SELECT * FROM sync_configs WHERE shot_id = ?", (shot_id,)
+    ).fetchall()
     assert len(configs) == 1
-    assert configs[0]["created_by"] == "manual-rough"
+    assert configs[0]["created_by"] == "manual-graph"
+
+
+def test_solve_writes_sync_points(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(300, 150)
+
+    w._on_solve()
 
     pts = conn.execute("SELECT * FROM sync_points").fetchall()
     assert len(pts) == 2
 
 
-def test_apply_rough_sync_switches_scrubber_to_synced_mode(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    scrubber = page._scrubber
-    scrubber._focused_cell = 0
-    page._on_set_anchor()
-    scrubber._focused_cell = 1
-    page._on_set_anchor()
-
-    page._on_apply_rough_sync()
-
-    assert scrubber.sync_table is not None
+def test_solve_sets_sync_table(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(300, 150)
+    w._on_solve()
+    assert w._sync_table is not None
 
 
-def test_apply_rough_sync_shows_confirmation(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    scrubber = page._scrubber
-    scrubber._focused_cell = 0
-    page._on_set_anchor()
-    scrubber._focused_cell = 1
-    page._on_set_anchor()
-
-    page._on_apply_rough_sync()
-
-    assert "applied" in page._rough_status_label.text().lower()
+def test_solve_enables_led_btn(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(300, 150)
+    w._on_solve()
+    assert w._led_btn.isEnabled()
 
 
-def test_apply_rough_sync_correct_frame_offsets(loaded_page_1shot) -> None:
-    """After applying, seeking to the reference timestamp shows correct frames."""
-    page, _ = loaded_page_1shot
-    scrubber = page._scrubber
+def test_solve_correct_timestamps(widget_1shot) -> None:
+    """Reference camera frame 300 and target frame 150 should map to same time."""
+    w, ctx, shot_id, conn = widget_1shot
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(300, 150)
+    w._on_solve()
 
-    # Camera 0 anchor at frame 90 (t = 90/30 = 3.0 s)
-    # Camera 1 anchor at frame 120 (also at t = 3.0 s in global time)
-    scrubber._set_cell_frame(0, 90)
-    scrubber._focused_cell = 0
-    page._on_set_anchor()
-    scrubber._set_cell_frame(1, 120)
-    scrubber._focused_cell = 1
-    page._on_set_anchor()
-    page._on_apply_rough_sync()
-
-    # At t=3.0s both cameras should show their anchor frames
-    scrubber.seek_synced(3.0)
-    assert scrubber.current_frames[0] == 90
-    assert scrubber.current_frames[1] == 120
+    pts = conn.execute("SELECT timestamp_s FROM sync_points").fetchall()
+    timestamps = [r[0] for r in pts]
+    assert len(timestamps) == 2
+    assert abs(timestamps[0] - timestamps[1]) < 1e-9
 
 
 # ---------------------------------------------------------------------------
-# Shot switching
+# SyncWidget — connectivity label
 # ---------------------------------------------------------------------------
 
 
+def test_connectivity_label_isolated_when_no_anchors(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    assert "Not connected" in w._connectivity_label.text()
 
-# ---------------------------------------------------------------------------
-# cleanupPage
-# ---------------------------------------------------------------------------
 
-
-def test_cleanup_releases_scrubber_and_cache(qapp, tmp_path) -> None:
-    conn, session_id = _make_session_with_shots(tmp_path)
-    page = SyncPage()
-    _attach_wizard(page, conn, session_id)
-    page.initializePage()
-    page.cleanupPage()
-    assert page._scrubber is None
-    assert page._cache is None
-    assert page._anchors == {}
-    conn.close()
+def test_connectivity_label_green_after_anchor(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(100, 50)
+    assert "All" in w._connectivity_label.text()
+    assert "connected" in w._connectivity_label.text()
 
 
 # ---------------------------------------------------------------------------
-# Selected cell highlight
+# SyncWidget — tree item click navigates scrubber
 # ---------------------------------------------------------------------------
 
 
-def test_first_cell_selected_by_default(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    assert page._scrubber._cells[0]._selected is True
-    assert page._scrubber._cells[1]._selected is False
+def test_tree_click_sets_current_anchor_id(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(100, 50)
+
+    # Click the child item under first camera
+    parent_item = w._tree.topLevelItem(0)
+    child = parent_item.child(0)
+    w._on_tree_item_clicked(child, 0)
+    assert w._current_anchor_id is not None
 
 
-def test_click_switches_selected_cell(loaded_page_1shot) -> None:
-    page, _ = loaded_page_1shot
-    page._scrubber._on_cell_clicked(1)
-    assert page._scrubber._cells[0]._selected is False
-    assert page._scrubber._cells[1]._selected is True
+def test_tree_click_enables_delete_btn(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(100, 50)
+
+    parent_item = w._tree.topLevelItem(0)
+    child = parent_item.child(0)
+    w._on_tree_item_clicked(child, 0)
+    assert w._delete_btn.isEnabled()
+
+
+def test_tree_click_on_parent_clears_selection(widget_1shot) -> None:
+    w, ctx, shot_id, conn = widget_1shot
+    w._ref_combo.setCurrentIndex(0)
+    w._tgt_combo.setCurrentIndex(1)
+    w._on_anchor_requested(100, 50)
+
+    # Click child then parent
+    parent_item = w._tree.topLevelItem(0)
+    child = parent_item.child(0)
+    w._on_tree_item_clicked(child, 0)
+    w._on_tree_item_clicked(parent_item, 0)
+    assert w._current_anchor_id is None
+    assert not w._delete_btn.isEnabled()
+
+
+# ---------------------------------------------------------------------------
+# SyncDialog — construction
+# ---------------------------------------------------------------------------
+
+
+def test_sync_dialog_constructs(session_1shot) -> None:
+    conn, session_id, shot_id = session_1shot
+    ctx = _make_ctx(conn, session_id)
+    dlg = SyncDialog(ctx, shot_id)
+    assert "Sync" in dlg.windowTitle()
+    dlg._widget.shutdown()

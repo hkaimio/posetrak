@@ -786,8 +786,7 @@ class _LedSyncDialog(QDialog):
         return offsets
 
     def _update_run_btn(self) -> None:
-        n_videos = len(self._shot.videos)
-        self._run_btn.setEnabled(len(self._led_rois) >= 2 and len(self._led_rois) == n_videos)
+        self._run_btn.setEnabled(len(self._led_rois) >= 2)
 
     def _on_run(self) -> None:
         cam_data = []

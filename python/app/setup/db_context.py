@@ -33,6 +33,16 @@ class SyncPoint:
 
 
 @dataclass(frozen=True)
+class SyncAnchorObservation:
+    """One video's observation of a shared sync event."""
+    id: str
+    sync_anchor_id: str
+    shot_video_id: str
+    video_frame: int
+    subframe: float = 0.0
+
+
+@dataclass(frozen=True)
 class ExtrinsicEntry:
     """Rotation + translation for one camera in a calibration set."""
     camera_instance_id: str
@@ -322,15 +332,17 @@ class DBContext:
                 (camera_mode_id,),
             ).fetchone()
             if mode_row:
+                # default_intrinsics_calibration_id is a registry-level hint and
+                # its referenced row may not be in the session DB yet, so store NULL.
                 self._conn.execute(
                     "INSERT OR IGNORE INTO camera_modes "
                     "(id, camera_model_id, width_px, height_px, nominal_fps, codec, notes,"
                     " default_intrinsics_calibration_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
                     (mode_row["id"], mode_row["camera_model_id"],
                      mode_row["width_px"], mode_row["height_px"],
                      mode_row["nominal_fps"], mode_row["codec"],
-                     mode_row["notes"], mode_row["default_intrinsics_calibration_id"]),
+                     mode_row["notes"]),
                 )
 
         if intrinsics_calibration_id:
@@ -506,6 +518,59 @@ class DBContext:
         )
 
     # ------------------------------------------------------------------
+    # Sync anchor writes
+    # ------------------------------------------------------------------
+
+    def create_sync_anchor(self, shot_id: str, notes: str | None = None) -> str:
+        """Insert a sync_anchors row and return its ID."""
+        anchor_id = generate_id()
+        self._conn.execute(
+            "INSERT INTO sync_anchors (id, shot_id, notes) VALUES (?, ?, ?)",
+            (anchor_id, shot_id, notes),
+        )
+        return anchor_id
+
+    def add_anchor_observation(
+        self,
+        anchor_id: str,
+        shot_video_id: str,
+        video_frame: int,
+        subframe: float = 0.0,
+    ) -> str:
+        """Insert a sync_anchor_observations row and return its ID."""
+        obs_id = generate_id()
+        self._conn.execute(
+            "INSERT INTO sync_anchor_observations "
+            "(id, sync_anchor_id, shot_video_id, video_frame, subframe) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (obs_id, anchor_id, shot_video_id, video_frame, subframe),
+        )
+        return obs_id
+
+    def update_anchor_observation(
+        self,
+        obs_id: str,
+        video_frame: int,
+        subframe: float = 0.0,
+    ) -> None:
+        """Update the frame position of an existing anchor observation."""
+        self._conn.execute(
+            "UPDATE sync_anchor_observations SET video_frame = ?, subframe = ? WHERE id = ?",
+            (video_frame, subframe, obs_id),
+        )
+
+    def delete_sync_anchor(self, anchor_id: str) -> None:
+        """Delete an anchor and all its observations."""
+        self._conn.execute(
+            "DELETE FROM sync_anchor_observations WHERE sync_anchor_id = ?",
+            (anchor_id,),
+        )
+        self._conn.execute(
+            "DELETE FROM sync_anchors WHERE id = ?",
+            (anchor_id,),
+        )
+
+    # ------------------------------------------------------------------
     # Reads
     # ------------------------------------------------------------------
 
@@ -533,6 +598,45 @@ class DBContext:
             )
             for r in rows
         ]
+
+    def get_anchor_observations(
+        self, shot_id: str
+    ) -> list[tuple[str, list[SyncAnchorObservation]]]:
+        """Return all sync anchors for *shot_id*, grouped as ``[(anchor_id, [obs, …]), …]``.
+
+        Anchors with no observations are included with an empty list.
+        Ordered by insertion order (rowid) so the list is stable across calls.
+        """
+        rows = self._conn.execute(
+            "SELECT sa.id AS anchor_id, "
+            "       sao.id AS obs_id, sao.shot_video_id, sao.video_frame, sao.subframe "
+            "FROM sync_anchors sa "
+            "LEFT JOIN sync_anchor_observations sao ON sao.sync_anchor_id = sa.id "
+            "WHERE sa.shot_id = ? "
+            "ORDER BY sa.rowid, sao.rowid",
+            (shot_id,),
+        ).fetchall()
+
+        result: list[tuple[str, list[SyncAnchorObservation]]] = []
+        current_anchor: str | None = None
+        current_obs: list[SyncAnchorObservation] = []
+        for r in rows:
+            if r["anchor_id"] != current_anchor:
+                if current_anchor is not None:
+                    result.append((current_anchor, current_obs))
+                current_anchor = r["anchor_id"]
+                current_obs = []
+            if r["obs_id"] is not None:
+                current_obs.append(SyncAnchorObservation(
+                    id=r["obs_id"],
+                    sync_anchor_id=current_anchor,
+                    shot_video_id=r["shot_video_id"],
+                    video_frame=r["video_frame"],
+                    subframe=r["subframe"],
+                ))
+        if current_anchor is not None:
+            result.append((current_anchor, current_obs))
+        return result
 
     def get_sync_configs(self, shot_id: str) -> list[tuple[str, str]]:
         """Return ``[(config_id, created_by), …]`` for a shot, newest first."""

@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 5
-SESSION_SCHEMA_VERSION: Final[int] = 13
+SESSION_SCHEMA_VERSION: Final[int] = 14
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -517,6 +517,18 @@ def _migrate_session_v12_to_v13(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v13_to_v14(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 13 to 14.
+
+    v14 adds the sync anchor input layer:
+    - sync_anchors: one row per shared real-world event visible in 2+ cameras.
+    - sync_anchor_observations: per-video frame number (+subframe) for each anchor.
+    """
+    sql = (_DB_DIR / "migrations" / "013_sync_anchors.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -576,6 +588,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 12
     if actual == 12:
         _migrate_session_v12_to_v13(conn)
+        actual = 13
+    if actual == 13:
+        _migrate_session_v13_to_v14(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

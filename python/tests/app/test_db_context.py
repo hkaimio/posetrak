@@ -18,6 +18,7 @@ from app.setup.db_context import (
     DBContext,
     ExtrinsicEntry,
     ShotVideoInfo,  # backwards-compat alias
+    SyncAnchorObservation,
     SyncPoint,
     SyncTable,
 )
@@ -296,3 +297,184 @@ def test_commit_page_preserves_writes(
         "SELECT id FROM captures WHERE id = ?", (shot_id,)
     ).fetchone()
     assert row is not None
+
+
+# ---------------------------------------------------------------------------
+# DBContext sync anchor CRUD
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def shot_and_videos(
+    ctx: DBContext, cam_instance_id: str, session_conn: sqlite3.Connection
+) -> tuple[str, str, str]:
+    """Return (shot_id, video_id_a, video_id_b) for anchor tests."""
+    shot_id = ctx.create_shot("anchor-test", shot_number=1)
+    vid_a = ctx.create_shot_video(shot_id, cam_instance_id, "/a.mp4", 30.0, 900, 1920, 1080)
+    # second camera instance
+    session_conn.execute(
+        "INSERT OR IGNORE INTO camera_instances (id, camera_model_id, label) "
+        "VALUES ('cam-b', 'mdl-1', 'cam2')"
+    )
+    session_conn.commit()
+    vid_b = ctx.create_shot_video(shot_id, "cam-b", "/b.mp4", 30.0, 900, 1920, 1080)
+    return shot_id, vid_a, vid_b
+
+
+def test_create_sync_anchor_inserts_row(
+    ctx: DBContext,
+    session_conn: sqlite3.Connection,
+    shot_and_videos: tuple,
+) -> None:
+    shot_id, _, _ = shot_and_videos
+    anchor_id = ctx.create_sync_anchor(shot_id, notes="clap at start")
+    row = session_conn.execute(
+        "SELECT shot_id, notes FROM sync_anchors WHERE id = ?", (anchor_id,)
+    ).fetchone()
+    assert row is not None
+    assert row["shot_id"] == shot_id
+    assert row["notes"] == "clap at start"
+
+
+def test_create_sync_anchor_no_notes(
+    ctx: DBContext, session_conn: sqlite3.Connection, shot_and_videos: tuple
+) -> None:
+    shot_id, _, _ = shot_and_videos
+    anchor_id = ctx.create_sync_anchor(shot_id)
+    row = session_conn.execute(
+        "SELECT notes FROM sync_anchors WHERE id = ?", (anchor_id,)
+    ).fetchone()
+    assert row["notes"] is None
+
+
+def test_add_anchor_observation_inserts_row(
+    ctx: DBContext,
+    session_conn: sqlite3.Connection,
+    shot_and_videos: tuple,
+) -> None:
+    shot_id, vid_a, _ = shot_and_videos
+    anchor_id = ctx.create_sync_anchor(shot_id)
+    obs_id = ctx.add_anchor_observation(anchor_id, vid_a, video_frame=42)
+    row = session_conn.execute(
+        "SELECT sync_anchor_id, shot_video_id, video_frame, subframe "
+        "FROM sync_anchor_observations WHERE id = ?",
+        (obs_id,),
+    ).fetchone()
+    assert row is not None
+    assert row["sync_anchor_id"] == anchor_id
+    assert row["shot_video_id"] == vid_a
+    assert row["video_frame"] == 42
+    assert row["subframe"] == pytest.approx(0.0)
+
+
+def test_anchor_observation_default_subframe(
+    ctx: DBContext,
+    session_conn: sqlite3.Connection,
+    shot_and_videos: tuple,
+) -> None:
+    shot_id, vid_a, _ = shot_and_videos
+    anchor_id = ctx.create_sync_anchor(shot_id)
+    obs_id = ctx.add_anchor_observation(anchor_id, vid_a, video_frame=10)
+    row = session_conn.execute(
+        "SELECT subframe FROM sync_anchor_observations WHERE id = ?", (obs_id,)
+    ).fetchone()
+    assert row["subframe"] == pytest.approx(0.0)
+
+
+def test_add_anchor_observation_with_subframe(
+    ctx: DBContext,
+    session_conn: sqlite3.Connection,
+    shot_and_videos: tuple,
+) -> None:
+    shot_id, vid_a, _ = shot_and_videos
+    anchor_id = ctx.create_sync_anchor(shot_id)
+    obs_id = ctx.add_anchor_observation(anchor_id, vid_a, video_frame=100, subframe=0.37)
+    row = session_conn.execute(
+        "SELECT subframe FROM sync_anchor_observations WHERE id = ?", (obs_id,)
+    ).fetchone()
+    assert row["subframe"] == pytest.approx(0.37)
+
+
+def test_get_anchor_observations_returns_grouped(
+    ctx: DBContext,
+    shot_and_videos: tuple,
+) -> None:
+    shot_id, vid_a, vid_b = shot_and_videos
+    anchor_id = ctx.create_sync_anchor(shot_id)
+    ctx.add_anchor_observation(anchor_id, vid_a, video_frame=100)
+    ctx.add_anchor_observation(anchor_id, vid_b, video_frame=55)
+
+    result = ctx.get_anchor_observations(shot_id)
+    assert len(result) == 1
+    aid, obs = result[0]
+    assert aid == anchor_id
+    assert len(obs) == 2
+    assert all(isinstance(o, SyncAnchorObservation) for o in obs)
+    video_ids = {o.shot_video_id for o in obs}
+    assert video_ids == {vid_a, vid_b}
+    frames = {o.shot_video_id: o.video_frame for o in obs}
+    assert frames[vid_a] == 100
+    assert frames[vid_b] == 55
+
+
+def test_get_anchor_observations_multiple_anchors(
+    ctx: DBContext,
+    shot_and_videos: tuple,
+) -> None:
+    shot_id, vid_a, vid_b = shot_and_videos
+    a1 = ctx.create_sync_anchor(shot_id)
+    a2 = ctx.create_sync_anchor(shot_id)
+    ctx.add_anchor_observation(a1, vid_a, 10)
+    ctx.add_anchor_observation(a1, vid_b, 20)
+    ctx.add_anchor_observation(a2, vid_a, 500)
+    ctx.add_anchor_observation(a2, vid_b, 510)
+
+    result = ctx.get_anchor_observations(shot_id)
+    assert len(result) == 2
+    anchor_ids = [aid for aid, _ in result]
+    assert a1 in anchor_ids
+    assert a2 in anchor_ids
+
+
+def test_get_anchor_observations_empty(ctx: DBContext, shot_and_videos: tuple) -> None:
+    shot_id, _, _ = shot_and_videos
+    assert ctx.get_anchor_observations(shot_id) == []
+
+
+def test_delete_sync_anchor_removes_anchor_and_observations(
+    ctx: DBContext,
+    session_conn: sqlite3.Connection,
+    shot_and_videos: tuple,
+) -> None:
+    shot_id, vid_a, vid_b = shot_and_videos
+    anchor_id = ctx.create_sync_anchor(shot_id)
+    ctx.add_anchor_observation(anchor_id, vid_a, 100)
+    ctx.add_anchor_observation(anchor_id, vid_b, 55)
+
+    ctx.delete_sync_anchor(anchor_id)
+    session_conn.commit()
+
+    assert session_conn.execute(
+        "SELECT id FROM sync_anchors WHERE id = ?", (anchor_id,)
+    ).fetchone() is None
+    assert session_conn.execute(
+        "SELECT id FROM sync_anchor_observations WHERE sync_anchor_id = ?", (anchor_id,)
+    ).fetchall() == []
+
+
+def test_update_anchor_observation_changes_frame(
+    ctx: DBContext,
+    session_conn: sqlite3.Connection,
+    shot_and_videos: tuple,
+) -> None:
+    shot_id, vid_a, _ = shot_and_videos
+    anchor_id = ctx.create_sync_anchor(shot_id)
+    obs_id = ctx.add_anchor_observation(anchor_id, vid_a, video_frame=42)
+
+    ctx.update_anchor_observation(obs_id, video_frame=99, subframe=0.5)
+
+    row = session_conn.execute(
+        "SELECT video_frame, subframe FROM sync_anchor_observations WHERE id = ?", (obs_id,)
+    ).fetchone()
+    assert row["video_frame"] == 99
+    assert row["subframe"] == pytest.approx(0.5)

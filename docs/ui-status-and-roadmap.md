@@ -350,6 +350,41 @@ Combines the two Qt entry points into one unified shell.  Design spec in section
 **Deliverable:** `posetrak-setup` and `posetrak-pose` replaced by a single `posetrak-ui`
 entry point; old entry points kept as thin aliases for backwards compatibility.
 
+### Phase 3.5 — Multi-clip sync redesign
+
+Motivation: captures where cameras have non-overlapping time ranges, or where the sync LED is not visible in all cameras, cannot be synced with the single-reference-moment model. This phase replaces it with a graph-based model: pairwise anchor observations feed a BFS solver that produces the existing `sync_points` output consumed by the tracker.
+
+**New DB tables** (input layer, schema v14):
+- `sync_anchors (id, shot_id, notes)` — one row per shared real-world event
+- `sync_anchor_observations (id, sync_anchor_id, shot_video_id, video_frame, subframe)` — per-video frame number; `subframe` carries LED peak sub-frame precision (0.0 for manual)
+
+**Output layer unchanged:** `sync_configs` + `sync_points` with piecewise-linear `timestamp_s`
+
+| # | Task | Effort | Status |
+|---|---|---|---|
+| T_S1 | DB migration 013: `sync_anchors` + `sync_anchor_observations` tables | S | Done |
+| T_S2 | `db.py`: bump `SESSION_SCHEMA_VERSION` → 14; add `_migrate_session_v13_to_v14` | S | Done |
+| T_S3 | `db_context.py`: anchor CRUD helpers + `SyncAnchorObservation` dataclass | M | — |
+| T_S4 | New `sync_solver.py`: graph BFS solver → `list[SyncPoint]` | M | — |
+| T_S5 | New `pair_scrubber.py`: two-camera side-by-side widget (ref + target) | L | — |
+| T_S6 | Redesigned `SyncPage` / new `SyncWidget` + `SyncDialog` | L | — |
+| T_S7 | `_LedSyncDialog`: per-camera LED checkboxes; subset ≥ 2; route accept through solver | M | — |
+| T_S8 | Extract `FrameReader` from `page_sync.py` → `video_reader.py` | S | Done |
+| T_S9 | Wire "Set up sync…" button in `CapturePanel` | S | — |
+| T_S10 | Tests: `DBContext` anchor CRUD | S | — |
+| T_S11 | Tests: `sync_solver.py` | M | — |
+| T_S12 | Tests: `PairScrubber` | S | — |
+| T_S13 | Tests: revised `SyncPage` / `SyncWidget` | M | — |
+
+**Dependency order:** T_S1 → T_S2 → T_S3 → {T_S4, T_S5, T_S10} → T_S6 → {T_S7, T_S9, T_S12, T_S13}
+(T_S8 is independent; T_S5 also needs T_S8.)
+
+**Key risks:**
+- `_on_accept` in `_LedSyncDialog` must route through solver (T_S7); needs `event_frames` added to `CameraSyncResult` in `led_sync.py`
+- `test_page_sync.py` tests many removed internals — substantial rewrite in T_S13
+- `SyncPage` must remain a valid `QWizardPage` (wrap `SyncWidget`)
+- Any test hard-coding `SESSION_SCHEMA_VERSION = 13` will break after T_S2
+
 ### Phase 4 — Calibration UIs
 
 | # | Task | Effort |

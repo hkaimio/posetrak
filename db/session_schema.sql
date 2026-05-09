@@ -114,6 +114,27 @@ CREATE TABLE IF NOT EXISTS sync_points (
     PRIMARY KEY (sync_config_id, camera_instance_id, video_frame)
 );
 
+-- Input layer for the graph-based sync solver (see sync_solver.py).
+-- Each sync_anchor records one real-world event (e.g. LED flash, clap)
+-- that was simultaneously visible in two or more camera videos.
+CREATE TABLE IF NOT EXISTS sync_anchors (
+    id         TEXT PRIMARY KEY,
+    shot_id    TEXT NOT NULL REFERENCES captures(id),
+    notes      TEXT
+);
+
+-- Per-video observation of a sync_anchor event.
+-- video_frame: integer frame number (0-based) where the event is visible.
+-- subframe: fractional frame from LED brightness peak fit; 0.0 for manual.
+CREATE TABLE IF NOT EXISTS sync_anchor_observations (
+    id             TEXT    PRIMARY KEY,
+    sync_anchor_id TEXT    NOT NULL REFERENCES sync_anchors(id),
+    shot_video_id  TEXT    NOT NULL REFERENCES capture_videos(id),
+    video_frame    INTEGER NOT NULL,
+    subframe       REAL    NOT NULL DEFAULT 0.0,
+    UNIQUE (sync_anchor_id, shot_video_id)
+);
+
 -- A sequence of 2-D pose observations covering a time window of a capture.
 -- name: user-assigned label (e.g. performer name or role).
 -- pixels_are_undistorted: 1 if keypoint coordinates are already in undistorted

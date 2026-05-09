@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,7 @@ from PySide6.QtCore import Qt
 
 from posetrak.db.db import (
     DEFAULT_REGISTRY_PATH,
+    create_mocap_session,
     create_registry,
     create_session,
     open_registry,
@@ -51,6 +53,7 @@ class MainWindow(QMainWindow):
         self._registry_conn: sqlite3.Connection = registry_conn
         self._session_conn: Optional[sqlite3.Connection] = None
         self._session_path: Optional[Path] = None
+        self._session_id: Optional[str] = None
 
         self._settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
         self._recent: list[str] = self._load_recent()
@@ -108,6 +111,12 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         self._tree = SessionTreeWidget()
+        self._tree.capture_selected.connect(self._show_capture)
+        self._tree.trial_selected.connect(self._show_trial)
+        self._tree.detection_run_selected.connect(self._show_detection_run)
+        self._tree.person_track_selected.connect(self._show_person_track)
+        self._tree.tracking_run_selected.connect(self._show_tracking_run)
+        self._tree.selection_changed.connect(self._save_tree_selection)
         splitter.addWidget(self._tree)
 
         self._content = QStackedWidget()
@@ -155,11 +164,18 @@ class MainWindow(QMainWindow):
         quit_act.triggered.connect(self.close)
         file_menu.addAction(quit_act)
 
+        # ---- Cameras menu ----
+        cameras_menu = bar.addMenu("&Cameras")
+        manage_cam_act = QAction("Manage cameras…", self)
+        manage_cam_act.triggered.connect(self._on_manage_cameras)
+        cameras_menu.addAction(manage_cam_act)
+
         # ---- Session menu ----
         session_menu = bar.addMenu("&Session")
 
         self._new_capture_act = QAction("New &Capture…", self)
-        self._new_capture_act.setEnabled(False)  # enabled once a session is open (T3.5)
+        self._new_capture_act.setEnabled(False)
+        self._new_capture_act.triggered.connect(self._launch_capture_wizard)
         session_menu.addAction(self._new_capture_act)
 
         session_menu.addSeparator()
@@ -214,6 +230,7 @@ class MainWindow(QMainWindow):
             p.unlink()
         try:
             conn = create_session(p)
+            create_mocap_session(conn)
         except Exception as exc:
             QMessageBox.critical(self, "Cannot create session", str(exc))
             return
@@ -234,21 +251,87 @@ class MainWindow(QMainWindow):
             self._session_conn.close()
         self._session_conn = conn
         self._session_path = path
+        row = conn.execute(
+            "SELECT id FROM mocap_sessions ORDER BY recorded_at LIMIT 1"
+        ).fetchone()
+        self._session_id = row["id"] if row else None
         self._status_label.setText(f"Session: {path}")
         self.setWindowTitle(f"posetrak — {path.name}")
         self._add_recent(str(path))
         self._tree.load(conn)
-        self._tree.capture_selected.connect(self._show_capture)
-        self._tree.trial_selected.connect(self._show_trial)
-        self._tree.detection_run_selected.connect(self._show_detection_run)
-        self._tree.person_track_selected.connect(self._show_person_track)
-        self._tree.tracking_run_selected.connect(self._show_tracking_run)
+        self._restore_tree_selection(path)
         self._reload_act.setEnabled(True)
         self._new_capture_act.setEnabled(True)
         self._show_placeholder()
 
+    def auto_open_last_session(self) -> None:
+        """Open the most-recently-used session DB on startup if one exists."""
+        if self._recent:
+            self.open_session_file(Path(self._recent[0]))
+
+    def _save_tree_selection(self, _kind: str, item_id: str) -> None:
+        if self._session_path is not None:
+            self._settings.setValue(
+                f"selection/{_path_key(self._session_path)}", item_id
+            )
+
+    def _restore_tree_selection(self, path: Path) -> None:
+        item_id = self._settings.value(f"selection/{_path_key(path)}")
+        if item_id:
+            self._tree.restore_selection(item_id)
+
     def _show_placeholder(self) -> None:
         self._content.setCurrentIndex(0)
+
+    def _on_manage_cameras(self) -> None:
+        from app.setup.camera_registry import CameraRegistryWidget
+        conn = self._registry_conn
+        dlg = CameraRegistryWidget(conn, parent=self)
+        dlg.exec()
+
+    def _launch_capture_wizard(self) -> None:
+        if self._session_conn is None or self._session_id is None:
+            return
+        from PySide6.QtWidgets import QWizard
+        from app.setup.camera_registry import CameraRegistryWidget
+        from app.setup.db_context import DBContext
+        from app.setup.page_extrinsics import ExtrinsicsPage
+        from app.setup.page_shots import ShotsPage
+        from app.setup.page_skeleton import SkeletonPage
+        from app.setup.page_sync import SyncPage
+
+        wizard = QWizard(self)
+        wizard.setWindowTitle("New Capture")
+        wizard.resize(1000, 700)
+
+        wizard.session_conn = self._session_conn
+        wizard.session_id   = self._session_id
+        wizard.db_context   = DBContext(
+            self._session_conn, self._session_id, self._registry_conn
+        )
+        wizard.registry_conn = self._registry_conn
+        wizard.new_shot_ids  = []
+
+        wizard.setOption(QWizard.WizardOption.HaveCustomButton1, True)
+        wizard.setButtonText(QWizard.WizardButton.CustomButton1, "Manage Cameras…")
+
+        shots_page = ShotsPage()
+
+        def _open_camera_registry() -> None:
+            conn = wizard.registry_conn or wizard.session_conn
+            dlg = CameraRegistryWidget(conn, parent=wizard)
+            dlg.cameras_changed.connect(shots_page.refresh_camera_combos)
+            dlg.exec()
+
+        wizard.customButtonClicked.connect(lambda _btn: _open_camera_registry())
+
+        wizard.addPage(shots_page)
+        wizard.addPage(SyncPage())
+        wizard.addPage(ExtrinsicsPage())
+        wizard.addPage(SkeletonPage())
+
+        if wizard.exec() == QWizard.DialogCode.Accepted:
+            self._tree.reload()
 
     def _show_capture(self, capture_id: str) -> None:
         from app.ui.content_panels import CapturePanel
@@ -341,6 +424,11 @@ class MainWindow(QMainWindow):
             self._registry_conn.close()
             self._registry_conn = None
         super().closeEvent(event)
+
+
+def _path_key(path: Path) -> str:
+    """Stable, slash-free QSettings key fragment for a filesystem path."""
+    return hashlib.sha1(str(path).encode()).hexdigest()[:16]
 
 
 def open_or_create_registry(path: Path) -> sqlite3.Connection:

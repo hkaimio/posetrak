@@ -38,6 +38,7 @@ class SessionTreeWidget(QTreeWidget):
     detection_run_selected = Signal(str)  # run_id
     person_track_selected  = Signal(str)  # sequence_id
     tracking_run_selected  = Signal(str)  # tracking_run_id
+    selection_changed      = Signal(str, str)  # kind.value, item_id
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -204,18 +205,22 @@ class SessionTreeWidget(QTreeWidget):
             self.person_track_selected.emit(item_id)
         elif kind == ItemKind.TRACKING_RUN:
             self.tracking_run_selected.emit(item_id)
+        self.selection_changed.emit(kind.value, item_id)
 
     def _current_id(self) -> str | None:
         item = self.currentItem()
         return item.data(0, _ID) if item else None
 
-    def _restore_selection(self, item_id: str | None) -> None:
+    def restore_selection(self, item_id: str | None) -> None:
         if item_id is None:
             return
         for item in _iter_items(self):
             if item.data(0, _ID) == item_id:
                 self.setCurrentItem(item)
                 return
+
+    def _restore_selection(self, item_id: str | None) -> None:
+        self.restore_selection(item_id)
 
     # ------------------------------------------------------------------
     # Private — context menu

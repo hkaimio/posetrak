@@ -31,11 +31,14 @@ def main() -> int:
     registry_conn = open_or_create_registry(DEFAULT_REGISTRY_PATH)
     window = MainWindow(registry_conn)
 
-    # If a session DB path was passed on the command line, open it immediately.
+    window.show()
+
+    # CLI arg takes priority; otherwise reopen the last-used session.
     if len(sys.argv) > 1:
         window.open_session_file(Path(sys.argv[1]))
+    else:
+        window.auto_open_last_session()
 
-    window.show()
     return app.exec()
 
 

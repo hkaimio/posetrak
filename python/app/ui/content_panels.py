@@ -149,13 +149,16 @@ class CapturePanel(QWidget):
 
         # Actions
         btn_row = QHBoxLayout()
-        sync_btn = _action_btn("Set up sync…", enabled=False)  # T3.5
-        sync_btn.setToolTip("Available after T3.5 (wizard integration)")
+        sync_btn = _action_btn("Set up sync…", enabled=False)
         btn_row.addWidget(sync_btn)
 
         ext_btn = _action_btn("Import extrinsics…")
         ext_btn.clicked.connect(self._open_extrinsics)
         btn_row.addWidget(ext_btn)
+
+        pose_btn = _action_btn("Open in Pose Extraction…")
+        pose_btn.clicked.connect(self._open_pose_extraction)
+        btn_row.addWidget(pose_btn)
 
         btn_row.addStretch()
         vbox.addLayout(btn_row)
@@ -178,6 +181,11 @@ class CapturePanel(QWidget):
         )
         if dlg.exec():
             pass  # tree reloads when user returns to main window
+
+    def _open_pose_extraction(self) -> None:
+        from app.pose.main import PoseExtractionWindow
+        self._pose_win = PoseExtractionWindow(session_db=str(self._session_path), parent=None)
+        self._pose_win.show()
 
 
 # ---------------------------------------------------------------------------

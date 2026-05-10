@@ -59,6 +59,7 @@ from PySide6.QtWidgets import (
 
 from app.setup.camera_cell import CameraCell
 from app.setup.db_context import CaptureVideoInfo, DBContext, SyncPoint, SyncTable
+from posetrak.db.db import generate_id as _generate_id
 from app.setup.video_reader import FrameReader
 from app.setup.job_runner import BackgroundJob
 from app.setup.led_sync import (
@@ -966,6 +967,275 @@ class _LedSyncDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _probe_video(path: str) -> tuple[float, int]:
+    """Return (fps, frame_count) from a video file using cv2, or (0, 0) on error."""
+    try:
+        import cv2
+        cap = cv2.VideoCapture(path)
+        try:
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            return fps, frames
+        finally:
+            cap.release()
+    except Exception:
+        return 0.0, 0
+
+
+def _merge_led_and_graph(
+    led_table: SyncTable,
+    graph_result,
+    videos: list[CaptureVideoInfo],
+    anchors: list,
+) -> SyncTable:
+    """Return a SyncTable that keeps LED sync points and adds non-LED cameras
+    from the graph result, aligned to the LED global time via a shared anchor."""
+    led_video_ids = set(led_table.video_ids())
+    fps_by_video = {v.id: (v.actual_fps or 30.0) for v in videos}
+    led_points: list[SyncPoint] = []
+    for vid_id, (timestamps, frames, _fps) in led_table._tables.items():
+        for t, f in zip(timestamps, frames):
+            led_points.append(SyncPoint(
+                camera_instance_id=vid_id,
+                shot_video_id=vid_id,
+                video_frame=f,
+                timestamp_s=t,
+            ))
+
+    if not graph_result.sync_points:
+        return SyncTable(led_points, fps_by_video)
+
+    graph_table = SyncTable(graph_result.sync_points, fps_by_video)
+
+    # Find a shared camera and anchor frame to align global time scales
+    shared_vid: str | None = None
+    shared_frame: int | None = None
+    for _anchor_id, obs_list in anchors:
+        for obs in obs_list:
+            if obs.shot_video_id in led_video_ids and obs.shot_video_id in graph_table.video_ids():
+                shared_vid = obs.shot_video_id
+                shared_frame = obs.video_frame
+                break
+        if shared_vid is not None:
+            break
+
+    offset = 0.0
+    if shared_vid is not None and shared_frame is not None:
+        t_led = led_table.frame_to_global_time(shared_frame, shared_vid)
+        t_graph = graph_table.frame_to_global_time(shared_frame, shared_vid)
+        if t_led is not None and t_graph is not None:
+            offset = t_led - t_graph
+
+    extra_points = [
+        SyncPoint(
+            camera_instance_id=sp.shot_video_id,
+            shot_video_id=sp.shot_video_id,
+            video_frame=sp.video_frame,
+            timestamp_s=sp.timestamp_s + offset,
+        )
+        for sp in graph_result.sync_points
+        if sp.shot_video_id not in led_video_ids
+    ]
+
+    return SyncTable(led_points + extra_points, fps_by_video)
+
+
+# ---------------------------------------------------------------------------
+# Camera timeline bar
+# ---------------------------------------------------------------------------
+
+
+class _CameraTimelineBar(QWidget):
+    """Compact horizontal timeline showing each camera's active global-time range.
+
+    One row per camera: [label |========bar========|]
+    A vertical playhead tracks the current scrubber position.
+    Clicking/dragging seeks the scrubber via ``seek_requested(global_s)``.
+
+    Only meaningful after sync is solved — call ``update_cameras`` once a
+    SyncTable is available.
+    """
+
+    seek_requested = Signal(float)  # global_s
+
+    _BAR_H = 12
+    _ROW_H = 16
+    _LABEL_W = 100
+    _AXIS_H = 18
+
+    # Bar colours
+    _COL_SYNCED_GRAPH = "#2196F3"
+    _COL_SYNCED_LED   = "#4CAF50"
+    _COL_ISOLATED     = "#bbbbbb"
+    _COL_ANCHOR_MARK  = "#FF6B00"
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._cameras: list[tuple[str, float, float, str]] = []  # (label, t0, t1, color_hex)
+        self._t_min = 0.0
+        self._t_max = 1.0
+        self._playhead_s: float | None = None
+        self._anchor_marks: list[float] = []   # global timestamps for anchor pair lines
+        self._led_video_ids: set[str] = set()
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(self._AXIS_H)  # collapsed until cameras are loaded
+        self.setMouseTracking(True)
+
+    def update_cameras(
+        self,
+        videos: list[CaptureVideoInfo],
+        sync_table: SyncTable,
+        led_video_ids: set[str] | None = None,
+    ) -> None:
+        self._led_video_ids = led_video_ids or set()
+        fps_map = {v.id: (v.actual_fps or 30.0) for v in videos}
+        cameras: list[tuple[str, float, float, str]] = []
+        t_min, t_max = float("inf"), float("-inf")
+        for v in videos:
+            fps = fps_map[v.id]
+            t0 = sync_table.frame_to_global_time(v.first_video_frame, v.id)
+            t1 = sync_table.frame_to_global_time(v.last_video_frame, v.id)
+            synced = t0 is not None and t1 is not None
+            if not synced:
+                t0 = 0.0
+                t1 = (v.last_video_frame - v.first_video_frame) / fps
+                color = self._COL_ISOLATED
+            elif v.id in self._led_video_ids:
+                color = self._COL_SYNCED_LED
+            else:
+                color = self._COL_SYNCED_GRAPH
+            cameras.append((v.camera_label, t0, t1, color))
+            t_min = min(t_min, t0)
+            t_max = max(t_max, t1)
+        self._cameras = cameras
+        self._t_min = t_min if t_min != float("inf") else 0.0
+        self._t_max = t_max if t_max != float("-inf") else 1.0
+        h = len(cameras) * self._ROW_H + self._AXIS_H
+        self.setFixedHeight(h)
+        self.update()
+
+    def update_anchor_marks(self, global_times: list[float]) -> None:
+        self._anchor_marks = list(global_times)
+        self.update()
+
+    def set_playhead(self, global_s: float | None) -> None:
+        self._playhead_s = global_s
+        self.update()
+
+    # ------------------------------------------------------------------
+    # Coordinate helpers
+    # ------------------------------------------------------------------
+
+    def _t_to_x(self, t: float) -> int:
+        span = self._t_max - self._t_min
+        if span <= 0:
+            return self._LABEL_W
+        frac = (t - self._t_min) / span
+        return self._LABEL_W + int(frac * max(self.width() - self._LABEL_W, 1))
+
+    def _x_to_t(self, x: int) -> float:
+        w = max(self.width() - self._LABEL_W, 1)
+        frac = (x - self._LABEL_W) / w
+        return self._t_min + max(0.0, min(1.0, frac)) * (self._t_max - self._t_min)
+
+    # ------------------------------------------------------------------
+    # Paint
+    # ------------------------------------------------------------------
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        from PySide6.QtGui import QColor, QPainter, QPen
+
+        if not self._cameras:
+            return
+
+        p = QPainter(self)
+
+        text_col = QColor("#333333")
+        axis_col = QColor("#cccccc")
+        playhead_col = QColor("#E91E63")
+        anchor_col = QColor(self._COL_ANCHOR_MARK)
+
+        bars_h = len(self._cameras) * self._ROW_H
+
+        for i, (label, t0, t1, color) in enumerate(self._cameras):
+            y = i * self._ROW_H
+            # Label
+            p.setPen(QPen(text_col))
+            p.setFont(self.font())
+            p.drawText(
+                0, y, self._LABEL_W - 4, self._ROW_H,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                label,
+            )
+            # Bar
+            x0 = self._t_to_x(t0)
+            x1 = self._t_to_x(t1)
+            bar_y = y + (self._ROW_H - self._BAR_H) // 2
+            p.fillRect(x0, bar_y, max(x1 - x0, 2), self._BAR_H, QColor(color))
+
+        # Anchor marks — orange vertical lines spanning all camera rows
+        if self._anchor_marks:
+            p.setPen(QPen(anchor_col, 1))
+            for t in self._anchor_marks:
+                ax = max(self._LABEL_W, min(self.width() - 1, self._t_to_x(t)))
+                p.drawLine(ax, 0, ax, bars_h)
+
+        # Time axis
+        ay = bars_h
+        p.setPen(QPen(axis_col))
+        p.drawLine(self._LABEL_W, ay, self.width(), ay)
+        step = self._nice_step(self._t_max - self._t_min)
+        import math
+        t = math.ceil(self._t_min / step) * step
+        while t <= self._t_max:
+            x = self._t_to_x(t)
+            p.setPen(QPen(axis_col))
+            p.drawLine(x, ay, x, ay + 3)
+            mm, ss = int(t // 60), int(t % 60)
+            p.setPen(QPen(text_col))
+            p.drawText(x - 20, ay + 3, 40, self._AXIS_H - 3,
+                       Qt.AlignmentFlag.AlignHCenter, f"{mm}:{ss:02d}")
+            t += step
+
+        # Playhead — clamp to bar area so it's visible even at edges
+        if self._playhead_s is not None:
+            px = max(self._LABEL_W, min(self.width() - 1, self._t_to_x(self._playhead_s)))
+            p.setPen(QPen(playhead_col, 2))
+            p.drawLine(px, 0, px, self.height())
+
+        p.end()
+
+    @staticmethod
+    def _nice_step(duration: float) -> float:
+        for step in (1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600):
+            if duration / step <= 12:
+                return float(step)
+        return 3600.0
+
+    # ------------------------------------------------------------------
+    # Mouse interaction
+    # ------------------------------------------------------------------
+
+    def _emit_seek(self, x: int) -> None:
+        if not self._cameras:
+            return
+        t = self._x_to_t(x)
+        self.seek_requested.emit(t)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._emit_seek(event.pos().x())
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._emit_seek(event.pos().x())
+
+
+# ---------------------------------------------------------------------------
 # SyncWidget — self-contained graph-based sync editor
 # ---------------------------------------------------------------------------
 
@@ -1015,12 +1285,17 @@ class SyncWidget(QWidget):
         self._delete_btn.setEnabled(False)
         self._delete_btn.clicked.connect(self._on_delete_anchor)
 
+        self._add_video_btn = QPushButton("Add video…")
+        self._add_video_btn.setToolTip("Add a new video file to this capture.")
+        self._add_video_btn.clicked.connect(self._on_add_video)
+
         left_w = QWidget()
         left_l = QVBoxLayout(left_w)
         left_l.setContentsMargins(0, 0, 0, 0)
         left_l.setSpacing(4)
         left_l.addWidget(self._tree, stretch=1)
         left_l.addWidget(self._delete_btn)
+        left_l.addWidget(self._add_video_btn)
         left_w.setMinimumWidth(180)
         left_w.setMaximumWidth(260)
 
@@ -1067,12 +1342,18 @@ class SyncWidget(QWidget):
         bottom_row.addWidget(self._solve_btn)
         bottom_row.addWidget(self._led_btn)
 
+        self._timeline = _CameraTimelineBar(self)
+        self._pair.frames_changed.connect(self._on_pair_frames_changed)
+        self._pair.timeline_seek_step.connect(self._on_timeline_step)
+        self._timeline.seek_requested.connect(self._on_timeline_seek)
+
         right_w = QWidget()
         right_l = QVBoxLayout(right_w)
         right_l.setContentsMargins(0, 0, 0, 0)
         right_l.setSpacing(4)
         right_l.addLayout(combo_row)
         right_l.addWidget(self._pair, stretch=1)
+        right_l.addWidget(self._timeline)
         right_l.addWidget(self._status_label)
         right_l.addLayout(bottom_row)
 
@@ -1106,6 +1387,12 @@ class SyncWidget(QWidget):
         configs = self._ctx.get_sync_configs(self._shot_id)
         if configs:
             self._sync_table = self._ctx.load_sync_config(configs[0][0])
+            if self._sync_table is not None:
+                self._timeline.update_cameras(self._videos, self._sync_table)
+                anchors = self._ctx.get_anchor_observations(self._shot_id)
+                self._timeline.update_anchor_marks(
+                    self._compute_anchor_mark_times(anchors)
+                )
 
         self._reload_scrubber_ref()
         self._reload_scrubber_tgt()
@@ -1252,6 +1539,7 @@ class SyncWidget(QWidget):
         )
         self._status_label.setStyleSheet("font-size: 11px; color: green;")
         self._reload_tree()
+        self._solve_and_refresh()
 
     def _on_delete_anchor(self) -> None:
         if self._current_anchor_id is None:
@@ -1263,6 +1551,7 @@ class SyncWidget(QWidget):
         self._status_label.setText("Anchor deleted.")
         self._status_label.setStyleSheet("font-size: 11px; color: grey;")
         self._reload_tree()
+        self._solve_and_refresh()
 
     def _on_solve(self) -> None:
         anchors = self._ctx.get_anchor_observations(self._shot_id)
@@ -1290,6 +1579,10 @@ class SyncWidget(QWidget):
         conn.commit()
 
         self._sync_table = SyncTable(result.sync_points, fps_by_video)
+        self._timeline.update_cameras(self._videos, self._sync_table)
+        anchors = self._ctx.get_anchor_observations(self._shot_id)
+        self._timeline.update_anchor_marks(self._compute_anchor_mark_times(anchors))
+        self._ensure_combos_show_synced_cameras(result.connected_video_ids)
 
         n_conn = len(result.connected_video_ids)
         n_iso = len(result.isolated_video_ids)
@@ -1321,7 +1614,25 @@ class SyncWidget(QWidget):
                     sync_table_offsets[i] = t0
 
         def _on_accepted(sync_table: SyncTable) -> None:
+            led_video_ids = set(sync_table.video_ids())
+            # Extend to non-LED cameras via graph solver if any are missing
+            if led_video_ids and led_video_ids != {v.id for v in self._videos}:
+                anchors = self._ctx.get_anchor_observations(self._shot_id)
+                graph_result = solve_sync_graph(anchors, self._videos)
+                if graph_result.sync_points:
+                    fps_by_video = {v.id: (v.actual_fps or 30.0) for v in self._videos}
+                    sync_table = _merge_led_and_graph(
+                        sync_table, graph_result, self._videos, anchors
+                    )
             self._sync_table = sync_table
+            self._timeline.update_cameras(
+                self._videos, self._sync_table, led_video_ids=led_video_ids
+            )
+            anchors = self._ctx.get_anchor_observations(self._shot_id)
+            self._timeline.update_anchor_marks(
+                self._compute_anchor_mark_times(anchors)
+            )
+            self._ensure_combos_show_synced_cameras(set(sync_table.video_ids()))
             self._status_label.setText("LED sync accepted and applied.")
             self._status_label.setStyleSheet("font-size: 11px; color: green;")
 
@@ -1335,6 +1646,162 @@ class SyncWidget(QWidget):
             parent=self,
         )
         dlg.exec()
+
+    # ------------------------------------------------------------------
+    # Timeline bar callbacks
+    # ------------------------------------------------------------------
+
+    def _solve_and_refresh(self) -> None:
+        """Run solver in-memory and update the timeline without writing to DB."""
+        anchors = self._ctx.get_anchor_observations(self._shot_id)
+        result = solve_sync_graph(anchors, self._videos)
+        if not result.sync_points:
+            self._timeline.update_anchor_marks([])
+            return
+        fps_by_video = {v.id: (v.actual_fps or 30.0) for v in self._videos}
+        self._sync_table = SyncTable(result.sync_points, fps_by_video)
+        self._timeline.update_cameras(self._videos, self._sync_table)
+        self._timeline.update_anchor_marks(self._compute_anchor_mark_times(anchors))
+        self._ensure_combos_show_synced_cameras(result.connected_video_ids)
+
+    def _compute_anchor_mark_times(
+        self,
+        anchors: list,
+    ) -> list[float]:
+        """Return one global timestamp per anchor for timeline tick marks."""
+        if self._sync_table is None:
+            return []
+        times: list[float] = []
+        for _anchor_id, obs_list in anchors:
+            for obs in obs_list:
+                t = self._sync_table.frame_to_global_time(
+                    obs.video_frame, obs.shot_video_id
+                )
+                if t is not None:
+                    times.append(t)
+                    break  # one representative time per anchor is enough
+        return times
+
+    def _on_timeline_step(self, step: int) -> None:
+        """Seek the global timeline by *step* frames (from arrow keys)."""
+        if self._sync_table is None:
+            return
+        ref_vid = self._ref_combo.currentData()
+        fps = next(
+            (v.actual_fps or 30.0 for v in self._videos if v.id == ref_vid), 30.0
+        )
+        t = self._timeline._playhead_s
+        if t is None:
+            tgt_vid = self._tgt_combo.currentData()
+            t = (
+                self._sync_table.frame_to_global_time(self._pair.ref_frame, ref_vid)
+                if ref_vid else None
+            ) or (
+                self._sync_table.frame_to_global_time(self._pair.target_frame, tgt_vid)
+                if tgt_vid else None
+            )
+        if t is None:
+            return
+        self._on_timeline_seek(t + step / fps)
+
+    def _on_add_video(self) -> None:
+        """Open a file picker and add the selected video to this capture."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Add video to capture",
+            "",
+            "Video files (*.mp4 *.mov *.avi *.mkv *.mts *.m2ts *.MP4 *.MOV);;All files (*)",
+        )
+        if not path:
+            return
+
+        fps, frame_count = _probe_video(path)
+        if frame_count <= 0:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Add video", f"Could not read frame count from:\n{path}")
+            return
+
+        import os
+        cam_id = _generate_id()
+        label = os.path.splitext(os.path.basename(path))[0]
+        conn = self._ctx._conn
+        conn.execute(
+            "INSERT OR IGNORE INTO camera_instances (id, label) VALUES (?, ?)",
+            (cam_id, label),
+        )
+        self._ctx.create_shot_video(
+            self._shot_id, cam_id, path, fps, frame_count, 0, 0
+        )
+        conn.commit()
+
+        # Reload everything
+        self._videos = self._ctx.get_shot_videos(self._shot_id)
+        self._video_id_to_idx = {v.id: i for i, v in enumerate(self._videos)}
+        self._ref_combo.blockSignals(True)
+        self._tgt_combo.blockSignals(True)
+        prev_ref = self._ref_combo.currentData()
+        prev_tgt = self._tgt_combo.currentData()
+        self._ref_combo.clear()
+        self._tgt_combo.clear()
+        for v in self._videos:
+            self._ref_combo.addItem(v.camera_label, v.id)
+            self._tgt_combo.addItem(v.camera_label, v.id)
+        # Restore previous selections where possible
+        for combo, prev in ((self._ref_combo, prev_ref), (self._tgt_combo, prev_tgt)):
+            idx = combo.findData(prev)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        self._ref_combo.blockSignals(False)
+        self._tgt_combo.blockSignals(False)
+        self._reload_tree()
+        if self._sync_table is not None:
+            self._timeline.update_cameras(self._videos, self._sync_table)
+        self._status_label.setText(f"Added: {label}  ({frame_count} frames @ {fps:.3f} fps)")
+        self._status_label.setStyleSheet("font-size: 11px; color: green;")
+
+    def _ensure_combos_show_synced_cameras(self, connected: set[str]) -> None:
+        """Switch ref/tgt combos to synced cameras if they currently show isolated ones."""
+        ref_vid = self._ref_combo.currentData()
+        tgt_vid = self._tgt_combo.currentData()
+        if ref_vid in connected and tgt_vid in connected:
+            return
+        synced_indices = [
+            i for i in range(len(self._videos))
+            if self._videos[i].id in connected
+        ]
+        if len(synced_indices) < 1:
+            return
+        if ref_vid not in connected:
+            self._ref_combo.setCurrentIndex(synced_indices[0])
+        if tgt_vid not in connected:
+            alt = synced_indices[1] if len(synced_indices) > 1 else synced_indices[0]
+            self._tgt_combo.setCurrentIndex(alt)
+
+    def _on_pair_frames_changed(self, ref_frame: int, tgt_frame: int) -> None:
+        if self._sync_table is None:
+            return
+        ref_vid = self._ref_combo.currentData()
+        tgt_vid = self._tgt_combo.currentData()
+        t = None
+        if ref_vid:
+            t = self._sync_table.frame_to_global_time(ref_frame, ref_vid)
+        if t is None and tgt_vid:
+            t = self._sync_table.frame_to_global_time(tgt_frame, tgt_vid)
+        self._timeline.set_playhead(t)
+
+    def _on_timeline_seek(self, global_s: float) -> None:
+        if self._sync_table is None:
+            return
+        ref_vid = self._ref_combo.currentData()
+        tgt_vid = self._tgt_combo.currentData()
+        if ref_vid:
+            f = self._sync_table.lookup(global_s, ref_vid)
+            if f is not None:
+                self._pair.seek_reference(f)
+        if tgt_vid:
+            f = self._sync_table.lookup(global_s, tgt_vid)
+            if f is not None:
+                self._pair.seek_target(f)
 
     # ------------------------------------------------------------------
     # Cleanup

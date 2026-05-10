@@ -108,6 +108,57 @@ def _build_pair_obs(
 # ---------------------------------------------------------------------------
 
 
+def detect_pair_fps_inconsistency(
+    anchors: list[tuple[str, list[SyncAnchorObservation]]],
+    vid_a_id: str,
+    vid_b_id: str,
+    fps_a: float,
+    fps_b: float,
+    threshold: float = 0.10,
+) -> tuple[float, float] | None:
+    """Check if 2+ anchor pairs between two cameras imply an fps inconsistency.
+
+    Treats each camera as the reference in turn and fits the other's fps via OLS.
+
+    Returns
+    -------
+    (fps_b_if_a_correct, fps_a_if_b_correct)
+        The implied fps for each camera assuming the other is accurate.
+        Both will differ from their nominal values by more than *threshold*.
+    None
+        Fewer than 2 shared anchors, or deviation is within *threshold*.
+    """
+    pairs: list[tuple[float, float]] = []
+    for _anchor_id, obs_list in anchors:
+        by_vid = {o.shot_video_id: o for o in obs_list}
+        if vid_a_id in by_vid and vid_b_id in by_vid:
+            oa, ob = by_vid[vid_a_id], by_vid[vid_b_id]
+            pairs.append((oa.video_frame + oa.subframe, ob.video_frame + ob.subframe))
+
+    if len(pairs) < 2:
+        return None
+
+    # Treat A as reference → derive implied fps for B.
+    fps_b_eff, _ = _lstsq_fps_offset(
+        [fa / fps_a for fa, _fb in pairs],
+        [fb for _fa, fb in pairs],
+    )
+    if fps_b_eff is None or fps_b_eff <= 0:
+        return None
+    if abs(fps_b_eff - fps_b) / fps_b <= threshold:
+        return None
+
+    # Treat B as reference → derive implied fps for A.
+    fps_a_eff, _ = _lstsq_fps_offset(
+        [fb / fps_b for _fa, fb in pairs],
+        [fa for fa, _fb in pairs],
+    )
+    if fps_a_eff is None or fps_a_eff <= 0:
+        fps_a_eff = fps_a * fps_b / fps_b_eff  # geometric fallback
+
+    return fps_b_eff, fps_a_eff
+
+
 def check_connectivity(
     anchors: list[tuple[str, list[SyncAnchorObservation]]],
     video_ids: list[str],

@@ -72,7 +72,11 @@ from app.setup.led_sync import (
 )
 from app.setup.overlay import ROIDrawOverlay
 from app.setup.pair_scrubber import PairScrubber
-from app.setup.sync_solver import check_connectivity, solve_sync_graph
+from app.setup.sync_solver import (
+    check_connectivity,
+    detect_pair_fps_inconsistency,
+    solve_sync_graph,
+)
 
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as _FigureCanvas
@@ -1552,10 +1556,24 @@ class SyncWidget(QWidget):
         ref_sv = self._videos[ref_idx]
         tgt_sv = self._videos[tgt_idx]
 
+        # Count shared anchors between this pair before adding the new one.
+        # We only ask about fps when the pair crosses the 2-anchor threshold.
+        old_anchors = self._ctx.get_anchor_observations(self._shot_id)
+        old_pair_count = sum(
+            1 for _aid, obs_list in old_anchors
+            if any(o.shot_video_id == ref_sv.id for o in obs_list)
+            and any(o.shot_video_id == tgt_sv.id for o in obs_list)
+        )
+
         anchor_id = self._ctx.create_sync_anchor(self._shot_id)
         self._ctx.add_anchor_observation(anchor_id, ref_sv.id, ref_frame)
         self._ctx.add_anchor_observation(anchor_id, tgt_sv.id, tgt_frame)
         self._ctx._conn.commit()
+
+        # Immediately check fps consistency when this pair reaches 2 anchors.
+        if old_pair_count == 1:
+            new_anchors = self._ctx.get_anchor_observations(self._shot_id)
+            self._maybe_prompt_fps_correction(new_anchors, ref_sv, tgt_sv)
 
         self._status_label.setText(
             f"Anchor: {ref_sv.camera_label} f{ref_frame} ↔ "
@@ -1577,6 +1595,58 @@ class SyncWidget(QWidget):
         self._reload_tree()
         self._solve_and_refresh()
 
+    def _maybe_prompt_fps_correction(
+        self,
+        anchors: list,
+        vid_a: "CaptureVideoInfo",
+        vid_b: "CaptureVideoInfo",
+    ) -> None:
+        """Show a two-option dialog if anchor pairs imply an fps inconsistency.
+
+        Presents both cameras as candidates so the user can pick which one has
+        the wrong fps.  Updates actual_fps in the DB immediately on confirmation.
+        """
+        fps_a = vid_a.actual_fps or 30.0
+        fps_b = vid_b.actual_fps or 30.0
+        result = detect_pair_fps_inconsistency(
+            anchors, vid_a.id, vid_b.id, fps_a, fps_b
+        )
+        if result is None:
+            return
+
+        fps_b_implied, fps_a_implied = result
+
+        from PySide6.QtWidgets import QMessageBox
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Frame rate mismatch detected")
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setText(
+            f"Sync pairs between <b>{vid_a.camera_label}</b> "
+            f"({fps_a:.6g} fps) and <b>{vid_b.camera_label}</b> "
+            f"({fps_b:.6g} fps) imply an inconsistent frame rate ratio.<br><br>"
+            "Which camera has the wrong fps?"
+        )
+        btn_a = msg.addButton(
+            f"{vid_a.camera_label}  →  {fps_a_implied:.6g} fps",
+            QMessageBox.ButtonRole.ActionRole,
+        )
+        btn_b = msg.addButton(
+            f"{vid_b.camera_label}  →  {fps_b_implied:.6g} fps",
+            QMessageBox.ButtonRole.ActionRole,
+        )
+        msg.addButton("Skip", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked is btn_a:
+            self._ctx.update_shot_video_fps(vid_a.id, fps_a_implied)
+            self._ctx._conn.commit()
+            self._videos = self._ctx.get_shot_videos(self._shot_id)
+        elif clicked is btn_b:
+            self._ctx.update_shot_video_fps(vid_b.id, fps_b_implied)
+            self._ctx._conn.commit()
+            self._videos = self._ctx.get_shot_videos(self._shot_id)
+
     def _on_solve(self) -> None:
         anchors = self._ctx.get_anchor_observations(self._shot_id)
         result = solve_sync_graph(anchors, self._videos)
@@ -1590,33 +1660,41 @@ class SyncWidget(QWidget):
         for sp in result.sync_points:
             points.setdefault(sp.shot_video_id, []).append(sp)
 
-        # Check for fps corrections implied by the anchor pairs (>10% deviation).
-        fps_corrections: list[tuple[str, float, float]] = []  # (label, nom, eff)
-        for v in self._videos:
-            nom = v.actual_fps or 30.0
-            eff = result.effective_fps.get(v.id)
-            if eff is not None and nom > 0 and abs(eff - nom) / nom > 0.10:
-                fps_corrections.append((v.camera_label, nom, eff))
+        # Check every connected camera pair for fps inconsistency.  This catches
+        # cases that weren't caught at anchor-marking time (e.g. loaded sessions),
+        # and correctly identifies which camera needs correction regardless of
+        # which video the BFS solver chose as its reference.
+        vid_by_id = {v.id: v for v in self._videos}
+        seen_pairs: set[frozenset[str]] = set()
+        fps_was_updated = False
+        for _anchor_id, obs_list in anchors:
+            vid_ids = [o.shot_video_id for o in obs_list]
+            for i, a_id in enumerate(vid_ids):
+                for b_id in vid_ids[i + 1:]:
+                    pair_key = frozenset((a_id, b_id))
+                    if pair_key in seen_pairs:
+                        continue
+                    seen_pairs.add(pair_key)
+                    if a_id not in vid_by_id or b_id not in vid_by_id:
+                        continue
+                    va, vb = vid_by_id[a_id], vid_by_id[b_id]
+                    fps_a_before = va.actual_fps or 30.0
+                    fps_b_before = vb.actual_fps or 30.0
+                    self._maybe_prompt_fps_correction(anchors, va, vb)
+                    # Reload to pick up any change made in the dialog.
+                    vid_by_id = {v.id: v for v in self._videos}
+                    if (
+                        vid_by_id[a_id].actual_fps != fps_a_before
+                        or vid_by_id[b_id].actual_fps != fps_b_before
+                    ):
+                        fps_was_updated = True
 
-        if fps_corrections:
-            from PySide6.QtWidgets import QMessageBox
-            lines = "\n".join(
-                f"  {lbl}: file says {nom:.3f} fps, anchors imply {eff:.3f} fps"
-                for lbl, nom, eff in fps_corrections
-            )
-            msg = (
-                "Sync frame pairs imply different frame rates than the video "
-                "file(s) report:\n\n" + lines +
-                "\n\nUpdate the stored frame rate(s) to the anchor-derived values?"
-            )
-            if QMessageBox.question(self, "Frame rate mismatch", msg) == QMessageBox.StandardButton.Yes:
-                for v in self._videos:
-                    eff = result.effective_fps.get(v.id)
-                    nom = v.actual_fps or 30.0
-                    if eff is not None and nom > 0 and abs(eff - nom) / nom > 0.10:
-                        self._ctx.update_shot_video_fps(v.id, eff)
-                self._ctx._conn.commit()
-                self._videos = self._ctx.get_shot_videos(self._shot_id)
+        if fps_was_updated:
+            # Re-solve with updated fps so the written sync_config is correct.
+            result = solve_sync_graph(anchors, self._videos)
+            points = {}
+            for sp in result.sync_points:
+                points.setdefault(sp.shot_video_id, []).append(sp)
 
         fps_by_video = {
             v.id: result.effective_fps.get(v.id, v.actual_fps or 30.0)

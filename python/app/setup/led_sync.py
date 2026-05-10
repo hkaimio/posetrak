@@ -103,6 +103,38 @@ class LedSyncResult:
     ref_camera_idx: int
 
 
+@dataclasses.dataclass
+class PairMatchResult:
+    """LED event matching result for one camera pair (A, B)."""
+    vid_a: str
+    vid_b: str
+    fps_a: float
+    fps_b: float
+    n_events_a: int
+    n_events_b: int
+    n_pairs: int
+    n_inliers: int
+    inlier_t_a: np.ndarray  # inlier event times in cam A local seconds
+    inlier_t_b: np.ndarray  # inlier event times in cam B local seconds
+    resid_std_s: float
+    success: bool            # True when n_inliers >= 2 and RANSAC slope > 0
+
+
+@dataclasses.dataclass
+class LedPairwiseResult:
+    """Result from pairwise LED sync across all cameras in one shot.
+
+    *pairs* maps ``(vid_a, vid_b)`` → ``PairMatchResult`` for every
+    unordered camera pair where both cameras had LED ROIs set.
+    The canonical ordering is ``vid_a < vid_b`` (by index in the input
+    list); the reverse is not stored.
+    """
+    pairs: dict                  # (vid_a, vid_b) → PairMatchResult
+    events_by_vid: dict          # vid → np.ndarray of event times (local s)
+    brightness_by_vid: dict      # vid → np.ndarray raw brightness signal
+    fps_by_vid: dict             # vid → float fps
+
+
 # ---------------------------------------------------------------------------
 # Brightness extraction
 # ---------------------------------------------------------------------------
@@ -843,6 +875,192 @@ def run_led_sync(
         ))
 
     return LedSyncResult(cameras=cam_results, ref_camera_idx=ref_cam)
+
+
+# ---------------------------------------------------------------------------
+# Pairwise LED sync
+# ---------------------------------------------------------------------------
+
+
+def _match_pair_events(
+    vid_a: str,
+    t_a: np.ndarray,
+    fps_a: float,
+    vid_b: str,
+    t_b: np.ndarray,
+    fps_b: float,
+    initial_offset_s: float,
+    dtw_band_s: float = 1.0,
+    ransac_max_err_s: float = 0.01,
+) -> "PairMatchResult":
+    """Match LED events between two cameras, returning RANSAC inlier pairs.
+
+    *t_a* / *t_b* are event times in each camera's local seconds (i.e. as
+    returned by :func:`detect_events`).  *initial_offset_s* is the rough shift
+    that brings *t_b* into *t_a*'s time coordinate; normally
+    ``rough_offsets[b] - rough_offsets[a]``.
+
+    Returns a :class:`PairMatchResult` with ``success=False`` when RANSAC
+    cannot find ≥ 2 inliers or the fitted slope is ≤ 0.
+    """
+    cam_pair_id = f"{vid_a[:6]}-{vid_b[:6]}"
+    n_a, n_b = len(t_a), len(t_b)
+
+    _failed = PairMatchResult(
+        vid_a=vid_a, vid_b=vid_b, fps_a=fps_a, fps_b=fps_b,
+        n_events_a=n_a, n_events_b=n_b,
+        n_pairs=0, n_inliers=0,
+        inlier_t_a=np.empty(0, dtype=float),
+        inlier_t_b=np.empty(0, dtype=float),
+        resid_std_s=0.0, success=False,
+    )
+
+    if n_a < 2 or n_b < 2:
+        return _failed
+
+    _use_nn = dtw_band_s is not None and abs(initial_offset_s) > 0.5 * dtw_band_s
+
+    if _use_nn:
+        _log.debug(
+            "[%s] rough_offset=%.3f s > 0.5×band — nearest-neighbour matching",
+            cam_pair_id, initial_offset_s,
+        )
+        t_b_shifted = t_b + initial_offset_s
+        nn_pairs: list[tuple[int, int]] = []
+        for j_idx, t_bs in enumerate(t_b_shifted):
+            ins = int(np.searchsorted(t_a, t_bs))
+            best_i, best_d = -1, dtw_band_s + 1.0
+            for i_cand in (ins - 1, ins):
+                if 0 <= i_cand < n_a:
+                    d = abs(t_a[i_cand] - t_bs)
+                    if d < best_d:
+                        best_d, best_i = d, i_cand
+            if best_i >= 0 and best_d <= dtw_band_s:
+                nn_pairs.append((best_i, j_idx))
+        pairs = np.array(nn_pairs, dtype=int) if nn_pairs else np.empty((0, 2), dtype=int)
+        _log.debug("[%s] nearest-neighbour: %d pairs", cam_pair_id, len(pairs))
+    else:
+        pairs = dtw_match_event_times(t_a, t_b, band_s=dtw_band_s)
+        _log.debug("[%s] DTW (band=%.2f s): %d pairs", cam_pair_id, dtw_band_s or 0, pairs.shape[0])
+        if pairs.shape[0] == 0 and dtw_band_s is not None:
+            _log.debug("[%s] DTW band too tight — retrying unconstrained", cam_pair_id)
+            pairs = dtw_match_event_times(t_a, t_b, band_s=None)
+            _log.debug("[%s] DTW unconstrained: %d pairs", cam_pair_id, pairs.shape[0])
+
+    if pairs.shape[0] == 0:
+        return _failed
+
+    t_ref_m = t_a[pairs[:, 0]]
+    t_cam_m = t_b[pairs[:, 1]]
+    (a_raw, b_raw), inliers = ransac_affine_fit(t_ref_m, t_cam_m, max_err_s=ransac_max_err_s)
+    _log.debug(
+        "[%s] RANSAC: %d/%d inliers, a=%.6f b=%.4f s",
+        cam_pair_id, inliers.size, len(t_ref_m), a_raw, b_raw,
+    )
+
+    success = inliers.size >= 2 and a_raw > 0
+    if not success:
+        return dataclasses.replace(_failed, n_pairs=len(pairs), n_inliers=int(inliers.size))
+
+    inlier_t_a = t_ref_m[inliers]
+    inlier_t_b = t_cam_m[inliers]
+    resid = inlier_t_a - (a_raw * inlier_t_b + b_raw)
+    return PairMatchResult(
+        vid_a=vid_a, vid_b=vid_b, fps_a=fps_a, fps_b=fps_b,
+        n_events_a=n_a, n_events_b=n_b,
+        n_pairs=len(pairs), n_inliers=int(inliers.size),
+        inlier_t_a=inlier_t_a, inlier_t_b=inlier_t_b,
+        resid_std_s=float(np.std(resid)), success=True,
+    )
+
+
+def run_led_sync_pairwise(
+    signals: list[np.ndarray],
+    fps_list: list[float],
+    cam_ids: list[str],
+    video_ids: list[str],
+    rough_offsets: list[float] | None = None,
+    event_cfg: dict | None = None,
+    dtw_band_s: float = 1.0,
+    ransac_max_err_s: float = 0.01,
+) -> LedPairwiseResult:
+    """Synchronise all cameras pairwise using LED brightness-change signals.
+
+    Unlike :func:`run_led_sync`, there is no fixed reference camera.  For
+    every unordered pair of cameras that both have LED ROIs set, events are
+    matched and RANSAC is run to estimate the relative timing.  The results
+    feed into :func:`~app.setup.sync_solver.solve_sync_graph` (via
+    ``_build_combined_observations`` in ``page_sync``) to derive a
+    globally consistent set of sync points.
+
+    Parameters
+    ----------
+    signals, fps_list, cam_ids, video_ids:
+        Same as :func:`run_led_sync`.
+    rough_offsets:
+        Per-camera rough time offset in seconds (global time at local frame 0).
+        Used to bootstrap the DTW / nearest-neighbour matching window.
+        ``rough_offsets[j] - rough_offsets[i]`` is the initial shift applied
+        to camera j's events when matching against camera i.
+    """
+    K = len(signals)
+    assert K == len(fps_list) == len(cam_ids) == len(video_ids)
+    _offsets = rough_offsets if rough_offsets is not None else [0.0] * K
+    cfg = event_cfg or dict(
+        min_sep_s=0.2, prominence=2.0, polarity="both",
+        smooth_win=5, use_derivative=False,
+    )
+
+    # Stage 1: detect events per camera (once).
+    events_by_vid: dict[str, np.ndarray] = {}
+    brightness_by_vid: dict[str, np.ndarray] = {}
+    fps_by_vid: dict[str, float] = {}
+
+    for k, (sig, fps, vid) in enumerate(zip(signals, fps_list, video_ids)):
+        t_ev = detect_events(sig, fps, **cfg)
+        events_by_vid[vid] = t_ev
+        brightness_by_vid[vid] = sig.copy()
+        fps_by_vid[vid] = fps
+        span = (float(t_ev[-1]) - float(t_ev[0])) if len(t_ev) >= 2 else 0.0
+        _log.debug(
+            "[%s] %d frames @ %.3f fps → %d events spanning %.1f s",
+            vid[:8], len(sig), fps, len(t_ev), span,
+        )
+
+    # Stage 2: match every unordered pair.
+    pairs: dict[tuple[str, str], PairMatchResult] = {}
+
+    for i in range(K):
+        for j in range(i + 1, K):
+            vid_a, vid_b = video_ids[i], video_ids[j]
+            fps_a, fps_b = fps_list[i], fps_list[j]
+            initial_offset_s = _offsets[j] - _offsets[i]
+            _log.debug(
+                "matching pair (%s, %s) initial_offset=%.3f s",
+                vid_a[:8], vid_b[:8], initial_offset_s,
+            )
+            result = _match_pair_events(
+                vid_a=vid_a, t_a=events_by_vid[vid_a], fps_a=fps_a,
+                vid_b=vid_b, t_b=events_by_vid[vid_b], fps_b=fps_b,
+                initial_offset_s=initial_offset_s,
+                dtw_band_s=dtw_band_s,
+                ransac_max_err_s=ransac_max_err_s,
+            )
+            pairs[(vid_a, vid_b)] = result
+            _log.info(
+                "pair (%.8s, %.8s): %d / %d events → %d pairs → %d inliers  "
+                "success=%s  σ=%.2f ms",
+                vid_a, vid_b, result.n_events_a, result.n_events_b,
+                result.n_pairs, result.n_inliers, result.success,
+                result.resid_std_s * 1000,
+            )
+
+    return LedPairwiseResult(
+        pairs=pairs,
+        events_by_vid=events_by_vid,
+        brightness_by_vid=brightness_by_vid,
+        fps_by_vid=fps_by_vid,
+    )
 
 
 # ---------------------------------------------------------------------------

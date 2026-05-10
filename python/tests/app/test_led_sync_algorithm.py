@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.setup.led_sync import run_led_sync
+from app.setup.led_sync import run_led_sync, run_led_sync_pairwise
 
 
 # ---------------------------------------------------------------------------
@@ -133,3 +133,90 @@ def test_large_offset_wrong_without_rough_hint(offset_s: float) -> None:
         f"Expected wrong answer without rough hint for offset={offset_s} s, "
         f"but got estimated_offset={estimated_offset:.3f} s which is suspiciously correct"
     )
+
+
+# ---------------------------------------------------------------------------
+# Pairwise LED sync tests
+# ---------------------------------------------------------------------------
+
+
+# Single-frame blinks get buried by the default smooth_win=5; use
+# no smoothing and a low prominence threshold in pairwise tests.
+_PAIRWISE_EVENT_CFG = dict(
+    min_sep_s=0.2, prominence=0.5, polarity="both",
+    smooth_win=1, use_derivative=False,
+)
+
+
+def test_pairwise_two_cameras_zero_offset() -> None:
+    """Pairwise sync: simultaneous cameras produce a successful pair with near-zero residual."""
+    fps = 60.0
+    sig_a, sig_b = _build_two_camera_signals(fps, offset_s=0.0, n_ref=1800, n_cam=1800)
+
+    result = run_led_sync_pairwise(
+        signals=[sig_a, sig_b],
+        fps_list=[fps, fps],
+        cam_ids=["cam_a", "cam_b"],
+        video_ids=["vid_a", "vid_b"],
+        rough_offsets=[0.0, 0.0],
+        event_cfg=_PAIRWISE_EVENT_CFG,
+    )
+
+    assert ("vid_a", "vid_b") in result.pairs
+    pair = result.pairs[("vid_a", "vid_b")]
+    assert pair.success, f"Expected success, got n_inliers={pair.n_inliers}"
+    assert pair.resid_std_s < 0.05, f"Residual too large: {pair.resid_std_s * 1000:.1f} ms"
+
+
+@pytest.mark.parametrize("offset_s", [5.0, 16.0])
+def test_pairwise_large_offset_with_rough_hint(offset_s: float) -> None:
+    """Pairwise sync recovers large offsets when rough_offsets seeds the matching window."""
+    fps = 60.0
+    n_a = int(fps * 60)
+    n_b = int(fps * 30)
+
+    sig_a, sig_b = _build_two_camera_signals(fps, offset_s=offset_s, n_ref=n_a, n_cam=n_b)
+
+    result = run_led_sync_pairwise(
+        signals=[sig_a, sig_b],
+        fps_list=[fps, fps],
+        cam_ids=["cam_a", "cam_b"],
+        video_ids=["vid_a", "vid_b"],
+        rough_offsets=[0.0, offset_s],
+        event_cfg=_PAIRWISE_EVENT_CFG,
+    )
+
+    pair = result.pairs[("vid_a", "vid_b")]
+    assert pair.success, f"Expected success for offset={offset_s} s"
+    diff = pair.inlier_t_a - (pair.inlier_t_b + offset_s)
+    assert float(np.max(np.abs(diff))) < 0.2, (
+        f"Inlier t_a - (t_b + offset) too large: max={float(np.max(np.abs(diff))):.3f} s"
+    )
+
+
+def test_pairwise_three_cameras_graph() -> None:
+    """Three-camera pairwise result feeds into _build_combined_observations correctly."""
+    from app.setup.page_sync import _build_combined_observations
+
+    fps = 30.0
+    offsets = [0.0, 5.0, 12.0]
+
+    signals = []
+    for off in offsets:
+        n = int(fps * 20)
+        # sig_cam is the camera signal starting offset_s into global time
+        _, sig_cam = _build_two_camera_signals(fps, offset_s=off, n_ref=int(fps * 30), n_cam=n)
+        signals.append(sig_cam)
+
+    result = run_led_sync_pairwise(
+        signals=signals,
+        fps_list=[fps] * 3,
+        cam_ids=["cam_a", "cam_b", "cam_c"],
+        video_ids=["vid_a", "vid_b", "vid_c"],
+        rough_offsets=offsets,
+        event_cfg=_PAIRWISE_EVENT_CFG,
+    )
+
+    assert len(result.pairs) == 3  # (A,B), (A,C), (B,C)
+    combined = _build_combined_observations(result, [])
+    assert len(combined) > 0, "Expected at least some LED observations from successful pairs"

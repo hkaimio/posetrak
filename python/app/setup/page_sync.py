@@ -58,16 +58,25 @@ from PySide6.QtWidgets import (
 )
 
 from app.setup.camera_cell import CameraCell
-from app.setup.db_context import CaptureVideoInfo, DBContext, SyncPoint, SyncTable
+from app.setup.db_context import (
+    CaptureVideoInfo,
+    DBContext,
+    SyncAnchorObservation,
+    SyncPoint,
+    SyncTable,
+)
 from posetrak.db.db import generate_id as _generate_id
 from app.setup.video_reader import FrameReader
 from app.setup.job_runner import BackgroundJob
 from app.setup.led_sync import (
     CameraSyncResult,
+    LedPairwiseResult,
     LedSyncResult,
+    PairMatchResult,
     ROI,
     extract_brightness_changes,
     run_led_sync,
+    run_led_sync_pairwise,
     save_brightness_dump,
 )
 from app.setup.overlay import ROIDrawOverlay
@@ -410,29 +419,28 @@ class _ROISelectDialog(QDialog):
 
 
 class _LedSyncJob(BackgroundJob):
-    """Extracts per-camera brightness signals then runs the LED sync algorithm.
+    """Extracts per-camera brightness signals then runs the pairwise LED sync.
 
     Parameters
     ----------
     cam_data:
         List of ``(file_path, roi, fps_override, cam_id, video_id)`` tuples.
-    ref_cam:
-        Index of the reference camera (identity map).
     event_cfg:
-        Event-detection parameters forwarded to ``run_led_sync``.
+        Event-detection parameters forwarded to ``run_led_sync_pairwise``.
+    rough_offsets:
+        Per-camera rough time offsets (global time at local frame 0).
+        Used to bootstrap event matching windows between pairs.
     """
 
     def __init__(
         self,
         cam_data: list[tuple[str, ROI, float, str, str]],
-        ref_cam: int = 0,
         event_cfg: dict | None = None,
         rough_offsets: list[float] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._cam_data = cam_data
-        self._ref_cam = ref_cam
         self._event_cfg = event_cfg
         self._rough_offsets = rough_offsets
 
@@ -457,12 +465,11 @@ class _LedSyncJob(BackgroundJob):
             cam_ids.append(cam_id)
             video_ids.append(video_id)
 
-        self.progress.emit(82, "Running LED sync algorithm…")
-        result = run_led_sync(
+        self.progress.emit(82, "Running pairwise LED sync…")
+        result = run_led_sync_pairwise(
             signals=signals, fps_list=fps_list,
             cam_ids=cam_ids, video_ids=video_ids,
-            ref_cam=self._ref_cam, event_cfg=self._event_cfg,
-            rough_offsets=self._rough_offsets,
+            rough_offsets=self._rough_offsets, event_cfg=self._event_cfg,
         )
         self.progress.emit(100, "Done.")
         self.finished.emit(result)
@@ -474,32 +481,41 @@ class _LedSyncJob(BackgroundJob):
 
 
 class _BrightnessPlotDialog(QDialog):
-    """Shows LED brightness for all cameras on a shared global timeline."""
+    """Shows LED brightness for all cameras on an approximate shared timeline.
+
+    The x-axis uses each camera's rough global-time offset so signals are
+    approximately aligned even before the graph solver runs.
+    """
 
     def __init__(
         self,
-        result: LedSyncResult,
+        result: LedPairwiseResult,
+        rough_offsets: dict[str, float],
         labels: dict[str, str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("LED Brightness — Synchronized Timeline")
+        self.setWindowTitle("LED Brightness — Approximate Global Timeline")
         self.resize(860, 400)
 
         labels = labels or {}
+        import numpy as _np
 
         layout = QVBoxLayout(self)
         if _HAS_MATPLOTLIB:
             fig = _Figure(figsize=(10, 4), dpi=90, tight_layout=True)
             ax = fig.add_subplot(1, 1, 1)
             colors = ["#2196F3", "#E91E63", "#4CAF50", "#FF9800", "#9C27B0", "#00BCD4"]
-            for i, cr in enumerate(result.cameras):
-                lname = labels.get(cr.shot_video_id, cr.camera_instance_id)
-                ax.plot(cr.frame_times, cr.brightness, label=lname,
+            for i, (vid, brightness) in enumerate(result.brightness_by_vid.items()):
+                fps = result.fps_by_vid.get(vid, 30.0)
+                offset = rough_offsets.get(vid, 0.0)
+                t_local = _np.arange(len(brightness)) / fps
+                lname = labels.get(vid, vid[:8])
+                ax.plot(t_local + offset, brightness, label=lname,
                         color=colors[i % len(colors)], linewidth=0.8, alpha=0.85)
-            ax.set_xlabel("Global time (s)")
+            ax.set_xlabel("Approximate global time (s)")
             ax.set_ylabel("Brightness change")
-            ax.set_title("LED brightness — synchronized global timeline")
+            ax.set_title("LED brightness — approximate global timeline (rough offsets applied)")
             ax.legend(loc="upper right", fontsize=9)
             ax.grid(True, alpha=0.3)
             canvas = _FigureCanvas(fig)
@@ -608,6 +624,7 @@ class _LedSyncDialog(QDialog):
         on_sync_accepted,
         anchor_frames: dict[int, int] | None = None,
         sync_table_offsets: dict[int, float] | None = None,
+        manual_anchors: list | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -623,9 +640,11 @@ class _LedSyncDialog(QDialog):
         # recomputing from anchor_frames when some cameras were not manually
         # anchored in the current session).
         self._sync_table_offsets = sync_table_offsets or {}
+        self._manual_anchors: list = manual_anchors or []
 
         self._led_rois: dict[int, ROI] = {}
-        self._led_result: LedSyncResult | None = None
+        self._led_result: LedPairwiseResult | None = None
+        self._rough_offsets_by_vid: dict[str, float] = {}
         self._led_job: _LedSyncJob | None = None
         self._video_labels: dict[str, str] = {sv.id: sv.camera_label for sv in shot.videos}
 
@@ -828,8 +847,16 @@ class _LedSyncDialog(QDialog):
         # fps correction made in this dialog is reflected in the time mapping.
         rough_offsets_list = self._compute_rough_offsets()
         _log.debug("LED sync rough_offsets (recomputed at run time): %s", rough_offsets_list)
+
+        # Store per-video rough offsets for the brightness plot.
+        self._rough_offsets_by_vid = {
+            sv.id: rough_offsets_list[k]
+            for k, sv in enumerate(self._shot.videos)
+            if k < len(rough_offsets_list)
+        }
+
         self._led_job = _LedSyncJob(
-            cam_data, ref_cam=0, rough_offsets=rough_offsets_list, parent=self,
+            cam_data, rough_offsets=rough_offsets_list, parent=self,
         )
         self._led_job.progress.connect(self._on_progress)
         self._led_job.finished.connect(self._on_done)
@@ -841,7 +868,7 @@ class _LedSyncDialog(QDialog):
         if msg:
             self._progress_label.setText(msg)
 
-    def _on_done(self, result: LedSyncResult) -> None:
+    def _on_done(self, result: LedPairwiseResult) -> None:
         self._progress_bar.setVisible(False)
         self._progress_label.setText("")
         self._led_result = result
@@ -853,53 +880,63 @@ class _LedSyncDialog(QDialog):
             if item.widget():
                 item.widget().deleteLater()
 
-        for cr in result.cameras:
-            cam_name = self._video_labels.get(cr.shot_video_id, cr.camera_instance_id)
-            if cr.map_type == "reference":
-                txt = f"{cam_name}: reference camera ({cr.n_events} events)"
-                style = "color: grey; font-size: 11px;"
-                tooltip = "This camera defines the global time axis (identity map)."
-            else:
-                offset0 = float(cr.frame_times[0]) if len(cr.frame_times) else 0.0
-                is_shift_only = cr.map_type == "shift_only"
-                q = "good" if (cr.resid_std_s < 0.005 and not is_shift_only) else "poor"
+        # Per-camera event count header
+        for vid, t_ev in result.events_by_vid.items():
+            cam_name = self._video_labels.get(vid, vid[:8])
+            lbl = QLabel(f"{cam_name}: {len(t_ev)} events detected")
+            lbl.setStyleSheet("color: grey; font-size: 11px;")
+            self._quality_layout.addWidget(lbl)
+
+        # Per-pair matching quality
+        for (vid_a, vid_b), pair in result.pairs.items():
+            name_a = self._video_labels.get(vid_a, vid_a[:8])
+            name_b = self._video_labels.get(vid_b, vid_b[:8])
+            if not pair.success:
                 txt = (
-                    f"{cam_name}: {cr.n_events} events, "
-                    f"{cr.n_pairs} DTW pairs, "
-                    f"{cr.n_inliers} inliers, "
-                    f"σ={cr.resid_std_s * 1000:.1f}ms, "
-                    f"offset={offset0:+.3f}s"
-                    + (f"  ⚠ {cr.map_type}" if is_shift_only else f"  [{cr.map_type}]")
-                    + f" — {q}"
+                    f"{name_a} ↔ {name_b}: "
+                    f"{pair.n_events_a} / {pair.n_events_b} events → "
+                    f"{pair.n_pairs} pairs → {pair.n_inliers} inliers  — failed"
+                )
+                style = "color: red; font-size: 11px;"
+                tooltip = (
+                    "RANSAC could not find ≥ 2 consistent inliers for this pair.\n"
+                    "Check that the LED ROI is correctly placed on the LED for both cameras\n"
+                    "and that there is a sufficient overlap period with LED visible in both."
+                )
+            else:
+                q = "good" if pair.resid_std_s < 0.005 else "poor"
+                txt = (
+                    f"{name_a} ↔ {name_b}: "
+                    f"{pair.n_events_a} / {pair.n_events_b} events → "
+                    f"{pair.n_pairs} pairs → {pair.n_inliers} inliers, "
+                    f"σ={pair.resid_std_s * 1000:.1f} ms  — {q}"
                 )
                 style = (
                     "color: green; font-size: 11px;"
                     if q == "good" else "color: orange; font-size: 11px;"
                 )
                 tooltip = (
-                    "Events: LED blink peaks detected in the brightness signal.\n"
-                    "DTW pairs: events matched between this camera and the reference\n"
-                    "  using Dynamic Time Warping.\n"
-                    "Inliers: DTW pairs consistent with the fitted affine timing model\n"
-                    "  (within 10 ms tolerance). Non-inliers are DTW mismatches or\n"
-                    "  noise peaks — they are excluded from the final fit.\n"
-                    f"Residual σ: std of inlier timing errors after fitting — < 5 ms is good.\n"
-                    f"Offset: global time at camera frame 0 — should match cameras that\n"
-                    f"  started recording at the same time.\n"
-                    f"Map type: {cr.map_type}\n"
-                    f"  affine/pchip = DTW succeeded\n"
-                    f"  shift_only   = DTW failed, rough offset or cross-correlation used"
+                    "Events: LED blink peaks detected in each camera's brightness signal.\n"
+                    "Pairs: events matched between the two cameras.\n"
+                    "Inliers: matched pairs consistent with the affine timing model\n"
+                    "  (within 10 ms tolerance).\n"
+                    f"Residual σ: std of inlier timing errors — < 5 ms is good."
                 )
             lbl = QLabel(txt)
             lbl.setStyleSheet(style)
             lbl.setToolTip(tooltip)
             self._quality_layout.addWidget(lbl)
 
+        any_success = any(p.success for p in result.pairs.values())
         self._quality_widget.setVisible(True)
         self._accept_btn.setEnabled(True)
         self._plot_btn.setEnabled(True)
-        self._dump_btn.setEnabled(True)
-        self._accept_label.setText("Review quality above, then click Accept.")
+        self._dump_btn.setEnabled(any_success)
+        self._accept_label.setText(
+            "Review quality above, then click Accept."
+            if any_success else
+            "No successful pairs — check ROI placement and re-run."
+        )
 
     def _on_error(self, msg: str) -> None:
         self._progress_bar.setVisible(False)
@@ -910,21 +947,63 @@ class _LedSyncDialog(QDialog):
     def _on_accept(self) -> None:
         if self._led_result is None:
             return
-        points, fps_by_video = _sync_points_from_led_result(self._led_result)
-        # Persist corrected fps values from the LED dialog spinboxes so that
-        # loading this sync config later uses the correct fps for interpolation.
+
+        # Build combined observation list: LED pairs replace manual anchors for
+        # covered camera pairs; manual anchors fill in pairs without LED data.
+        combined = _build_combined_observations(self._led_result, self._manual_anchors)
+
+        # Persist corrected fps values from the LED dialog spinboxes.
         for cell_idx, sv in enumerate(self._shot.videos):
             fps = self._fps_spinboxes[cell_idx].value() or sv.actual_fps or 30.0
             if abs(fps - (sv.actual_fps or 0.0)) > 0.01:
                 self._ctx.update_shot_video_fps(sv.id, fps)
-        self._ctx.write_sync_config(self._shot.shot_id, "led-auto", points)
-        self._ctx._conn.commit()
 
-        all_points = [sp for pts in points.values() for sp in pts]
-        sync_table = SyncTable(all_points, fps_by_video)
+        # Reload videos so solve_sync_graph sees any updated fps values.
+        videos = self._ctx.get_shot_videos(self._shot.shot_id)
+        result = solve_sync_graph(combined, videos)
+
+        if not result.sync_points:
+            self._accept_label.setText(
+                "Solver could not connect any cameras — "
+                "check LED ROIs and manual anchors."
+            )
+            self._accept_label.setStyleSheet("color: red; font-size: 11px;")
+            return
+
+        points: dict[str, list[SyncPoint]] = {}
+        for sp in result.sync_points:
+            points.setdefault(sp.shot_video_id, []).append(sp)
+
+        conn = self._ctx._conn
+        conn.execute(
+            "DELETE FROM sync_points WHERE sync_config_id IN "
+            "(SELECT id FROM sync_configs WHERE shot_id = ? AND created_by = 'led-graph')",
+            (self._shot.shot_id,),
+        )
+        conn.execute(
+            "DELETE FROM sync_configs WHERE shot_id = ? AND created_by = 'led-graph'",
+            (self._shot.shot_id,),
+        )
+        self._ctx.write_sync_config(self._shot.shot_id, "led-graph", points)
+        conn.commit()
+
+        fps_by_video = {
+            v.id: result.effective_fps.get(v.id, v.actual_fps or 30.0)
+            for v in videos
+        }
+        sync_table = SyncTable(result.sync_points, fps_by_video)
         self._on_sync_accepted(sync_table)
 
-        self._accept_label.setText("LED sync accepted.")
+        n_conn = len(result.connected_video_ids)
+        n_iso = len(result.isolated_video_ids)
+        msg = f"LED sync accepted — {n_conn} camera(s) connected."
+        if n_iso:
+            isolated_names = [
+                next((sv.camera_label for sv in self._shot.videos if sv.id == v), v[:8])
+                for v in result.isolated_video_ids
+            ]
+            msg += f"  Isolated: {', '.join(isolated_names)}."
+        self._accept_label.setText(msg)
         self._accept_label.setStyleSheet("color: green; font-size: 11px;")
         self._accept_btn.setEnabled(False)
 
@@ -939,7 +1018,12 @@ class _LedSyncDialog(QDialog):
                 "  uv sync --group setup-app",
             )
             return
-        _BrightnessPlotDialog(self._led_result, labels=self._video_labels, parent=self).exec()
+        _BrightnessPlotDialog(
+            self._led_result,
+            rough_offsets=self._rough_offsets_by_vid,
+            labels=self._video_labels,
+            parent=self,
+        ).exec()
 
     def _on_dump(self) -> None:
         if self._led_result is None:
@@ -954,9 +1038,26 @@ class _LedSyncDialog(QDialog):
             return
         if not path.endswith(".npz"):
             path += ".npz"
-        rough_offsets = self._compute_rough_offsets()
+        rough_offsets_list = self._compute_rough_offsets()
         try:
-            save_brightness_dump(path, self._led_result, rough_offsets)
+            # Build a minimal LedSyncResult-compatible dump from pairwise data.
+            # Uses the first video as the nominal reference for the dump format.
+            import numpy as _np
+            vids = list(self._led_result.brightness_by_vid.keys())
+            arrays: dict = {}
+            for i, vid in enumerate(vids):
+                arrays[f"signal_{i}"] = self._led_result.brightness_by_vid[vid]
+            arrays["fps"] = _np.array(
+                [self._led_result.fps_by_vid[v] for v in vids], dtype=float
+            )
+            arrays["cam_ids"] = _np.array(vids, dtype=object)
+            arrays["video_ids"] = _np.array(vids, dtype=object)
+            arrays["rough_offsets"] = _np.array(
+                rough_offsets_list[:len(vids)] if rough_offsets_list else [0.0] * len(vids),
+                dtype=float,
+            )
+            arrays["ref_camera_idx"] = _np.array(0)
+            _np.savez(path, **arrays)
             self._accept_label.setText(f"Brightness data saved to {path}")
             self._accept_label.setStyleSheet("color: green; font-size: 11px;")
         except Exception as exc:  # noqa: BLE001
@@ -973,6 +1074,74 @@ class _LedSyncDialog(QDialog):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _build_combined_observations(
+    led_result: LedPairwiseResult,
+    manual_anchors: list[tuple[str, list]],
+) -> list[tuple[str, list[SyncAnchorObservation]]]:
+    """Combine LED inlier pairs with manual anchor observations.
+
+    For every camera pair where LED RANSAC succeeded, the LED inlier event
+    pairs replace any manual anchor observations that link the same two
+    cameras — LED sync is more accurate (many sub-frame measurements vs. one
+    manually chosen frame).  Manual anchors are retained for camera pairs
+    where LED failed or was not attempted.
+
+    The returned list is in the format expected by
+    :func:`~app.setup.sync_solver.solve_sync_graph`.
+    """
+    # Canonical pair key: (vid_a, vid_b) in the order stored in led_result.pairs.
+    # Build a set of unordered pairs covered by LED for fast lookup.
+    led_covered: set[frozenset[str]] = {
+        frozenset((vid_a, vid_b))
+        for (vid_a, vid_b), pair in led_result.pairs.items()
+        if pair.success
+    }
+
+    combined: list[tuple[str, list[SyncAnchorObservation]]] = []
+
+    # 1. Add synthetic anchor observations from LED inlier pairs.
+    for (vid_a, vid_b), pair in led_result.pairs.items():
+        if not pair.success:
+            continue
+        fps_a, fps_b = pair.fps_a, pair.fps_b
+        for i, (ta, tb) in enumerate(zip(pair.inlier_t_a, pair.inlier_t_b)):
+            anchor_id = f"led_{vid_a[:6]}_{vid_b[:6]}_{i:04d}"
+            frame_a_f = ta * fps_a
+            frame_a = int(frame_a_f)
+            subframe_a = float(frame_a_f - frame_a)
+            frame_b_f = tb * fps_b
+            frame_b = int(frame_b_f)
+            subframe_b = float(frame_b_f - frame_b)
+            combined.append((anchor_id, [
+                SyncAnchorObservation(
+                    id=anchor_id + "_a", sync_anchor_id=anchor_id,
+                    shot_video_id=vid_a, video_frame=frame_a, subframe=subframe_a,
+                ),
+                SyncAnchorObservation(
+                    id=anchor_id + "_b", sync_anchor_id=anchor_id,
+                    shot_video_id=vid_b, video_frame=frame_b, subframe=subframe_b,
+                ),
+            ]))
+
+    # 2. Add manual anchors for camera pairs not fully covered by LED.
+    for anchor_id, obs_list in manual_anchors:
+        # Retain observations whose connection to another camera in the same
+        # anchor is NOT covered by a successful LED pair.
+        filtered: list[SyncAnchorObservation] = []
+        for obs in obs_list:
+            other_vids = {o.shot_video_id for o in obs_list if o.shot_video_id != obs.shot_video_id}
+            needs_manual = any(
+                frozenset((obs.shot_video_id, other)) not in led_covered
+                for other in other_vids
+            )
+            if needs_manual:
+                filtered.append(obs)
+        if len(filtered) >= 2:
+            combined.append((anchor_id, filtered))
+
+    return combined
 
 
 def _probe_video(path: str) -> tuple[float, int]:
@@ -1761,6 +1930,7 @@ class SyncWidget(QWidget):
         label = row[0] if row else "Capture"
         shot = _ShotMeta(shot_id=self._shot_id, label=label, videos=self._videos)
         current_frames = [0] * len(self._videos)
+        manual_anchors = self._ctx.get_anchor_observations(self._shot_id)
 
         sync_table_offsets: dict[int, float] = {}
         if self._sync_table is not None:
@@ -1770,25 +1940,19 @@ class SyncWidget(QWidget):
                     sync_table_offsets[i] = t0
 
         def _on_accepted(sync_table: SyncTable) -> None:
-            led_video_ids = set(sync_table.video_ids())
-            # Extend to non-LED cameras via graph solver if any are missing
-            if led_video_ids and led_video_ids != {v.id for v in self._videos}:
-                anchors = self._ctx.get_anchor_observations(self._shot_id)
-                graph_result = solve_sync_graph(anchors, self._videos)
-                if graph_result.sync_points:
-                    fps_by_video = {v.id: (v.actual_fps or 30.0) for v in self._videos}
-                    sync_table = _merge_led_and_graph(
-                        sync_table, graph_result, self._videos, anchors
-                    )
+            # The LED dialog already ran solve_sync_graph over LED + manual
+            # observations, so the resulting sync_table covers all reachable
+            # cameras.  No further merging is needed.
             self._sync_table = sync_table
+            synced_ids = set(sync_table.video_ids())
             self._timeline.update_cameras(
-                self._videos, self._sync_table, led_video_ids=led_video_ids
+                self._videos, self._sync_table, led_video_ids=synced_ids,
             )
             anchors = self._ctx.get_anchor_observations(self._shot_id)
             self._timeline.update_anchor_marks(
                 self._compute_anchor_mark_times(anchors)
             )
-            self._ensure_combos_show_synced_cameras(set(sync_table.video_ids()))
+            self._ensure_combos_show_synced_cameras(synced_ids)
             self._status_label.setText("LED sync accepted and applied.")
             self._status_label.setStyleSheet("font-size: 11px; color: green;")
 
@@ -1799,6 +1963,7 @@ class SyncWidget(QWidget):
             current_frames=current_frames,
             on_sync_accepted=_on_accepted,
             sync_table_offsets=sync_table_offsets,
+            manual_anchors=manual_anchors,
             parent=self,
         )
         dlg.exec()

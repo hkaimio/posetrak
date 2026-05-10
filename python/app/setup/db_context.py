@@ -667,7 +667,7 @@ class DBContext:
             )
             for r in rows
         ]
-        fps_by_video = {r["shot_video_id"]: r["actual_fps"] for r in rows}
+        fps_by_video = {r["shot_video_id"]: float(r["actual_fps"] or 30.0) for r in rows}
         return SyncTable(points, fps_by_video)
 
     def get_active_sync(self, shot_id: str) -> SyncTable | None:
@@ -712,5 +712,5 @@ class DBContext:
             )
             for r in rows
         ]
-        fps_by_video = {r["shot_video_id"]: r["actual_fps"] for r in rows}
+        fps_by_video = {r["shot_video_id"]: float(r["actual_fps"] or 30.0) for r in rows}
         return SyncTable(points, fps_by_video)

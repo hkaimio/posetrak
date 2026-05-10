@@ -196,6 +196,11 @@ class PoseExtractionWindow(QMainWindow):
         self._sync_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self._sync_combo.currentIndexChanged.connect(self._on_sync_changed)
         row2.addWidget(self._sync_combo)
+        reload_sync_btn = QPushButton("⟳")
+        reload_sync_btn.setFixedWidth(28)
+        reload_sync_btn.setToolTip("Reload sync configs from DB (use after re-solving sync)")
+        reload_sync_btn.clicked.connect(self._populate_syncs)
+        row2.addWidget(reload_sync_btn)
         row2.addStretch()
         top_layout.addLayout(row2)
 
@@ -487,6 +492,21 @@ class PoseExtractionWindow(QMainWindow):
         self._current_run_id = run_id
         self._assignments.clear()
         self._current_seg_first = None
+
+        # Auto-select the sync config that was used when this run was created,
+        # so the stitcher timeline and the frame view are always in the same
+        # time domain.  (Using different configs causes seek_global_time to
+        # land at a completely wrong frame.)
+        run_row = self._session.execute(
+            "SELECT sync_config_id FROM detection_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if run_row and run_row["sync_config_id"]:
+            run_sync_id = run_row["sync_config_id"]
+            combo_idx = self._sync_combo.findData(run_sync_id)
+            if combo_idx >= 0 and combo_idx != self._sync_combo.currentIndex():
+                self._sync_combo.setCurrentIndex(combo_idx)
+                # _on_sync_changed will fire and reload cameras
+
         self._stitcher.load_run(self._session, run_id)
         self._restore_finalised_assignments(run_id)
 

@@ -1353,8 +1353,13 @@ class SyncWidget(QWidget):
         )
         self._led_btn.clicked.connect(self._on_led_sync)
 
+        self._time_display = QLabel("t: —")
+        self._time_display.setStyleSheet("font-family: monospace; font-size: 11px;")
+        self._time_display.setFixedWidth(90)
+
         bottom_row = QHBoxLayout()
         bottom_row.addWidget(self._connectivity_label, stretch=1)
+        bottom_row.addWidget(self._time_display)
         bottom_row.addWidget(self._solve_btn)
         bottom_row.addWidget(self._led_btn)
 
@@ -1925,6 +1930,11 @@ class SyncWidget(QWidget):
         if t is None and tgt_vid:
             t = self._sync_table.frame_to_global_time(tgt_frame, tgt_vid)
         self._timeline.set_playhead(t)
+        if t is not None:
+            mm, ss = int(t // 60), t % 60
+            self._time_display.setText(f"t: {mm:02d}:{ss:05.2f}")
+        else:
+            self._time_display.setText("t: —")
 
     def _on_timeline_seek(self, global_s: float) -> None:
         if self._sync_table is None:

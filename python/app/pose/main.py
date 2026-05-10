@@ -31,7 +31,32 @@ from app.pose.db_cache import list_detection_runs
 from app.pose.finalise import TrackAssignment, finalise_to_db
 from app.pose.frame_view import FrameViewWidget, _CameraInfo
 from app.pose.stitcher import StitcherWidget
+from app.setup.db_context import SyncPoint, SyncTable
 from app.setup.job_runner import BackgroundJob
+
+
+def _load_sync_table(session: sqlite3.Connection, sync_config_id: str) -> SyncTable:
+    """Build a SyncTable from all sync_points for a given sync_config_id."""
+    rows = session.execute(
+        "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, sv.actual_fps "
+        "FROM sync_points sp "
+        "JOIN capture_videos sv ON sv.id = sp.shot_video_id "
+        "WHERE sp.sync_config_id = ?",
+        (sync_config_id,),
+    ).fetchall()
+    sync_points = [
+        SyncPoint(
+            camera_instance_id=r["shot_video_id"],
+            shot_video_id=r["shot_video_id"],
+            video_frame=r["video_frame"],
+            timestamp_s=r["timestamp_s"],
+        )
+        for r in rows
+    ]
+    fps_by_video: dict[str, float] = {}
+    for r in rows:
+        fps_by_video.setdefault(r["shot_video_id"], float(r["actual_fps"] or 30.0))
+    return SyncTable(sync_points, fps_by_video)
 
 
 class _ComboBox(QComboBox):
@@ -500,12 +525,21 @@ class PoseExtractionWindow(QMainWindow):
         run_row = self._session.execute(
             "SELECT sync_config_id FROM detection_runs WHERE id = ?", (run_id,)
         ).fetchone()
-        if run_row and run_row["sync_config_id"]:
-            run_sync_id = run_row["sync_config_id"]
+        run_sync_id = run_row["sync_config_id"] if run_row else None
+
+        if run_sync_id:
             combo_idx = self._sync_combo.findData(run_sync_id)
             if combo_idx >= 0 and combo_idx != self._sync_combo.currentIndex():
                 self._sync_combo.setCurrentIndex(combo_idx)
-                # _on_sync_changed will fire and reload cameras
+                # _on_sync_changed will fire and reload cameras + set SyncTable
+
+        # Build SyncTable from the run's own sync config (not the UI selection)
+        # so the stitcher uses the correct sync regardless of the combo state.
+        run_sync_table = (
+            _load_sync_table(self._session, run_sync_id) if run_sync_id else None
+        )
+        self._stitcher.set_sync_table(run_sync_table)
+        self._frame_view.set_sync_table(run_sync_table)
 
         self._stitcher.load_run(self._session, run_id)
         self._restore_finalised_assignments(run_id)
@@ -690,6 +724,11 @@ class PoseExtractionWindow(QMainWindow):
                 ref_timestamp_s=ref_ts,
             ))
 
+        sync_table = (
+            _load_sync_table(self._session, self._sync_config_id)
+            if self._sync_config_id else None
+        )
+        self._frame_view.set_sync_table(sync_table)
         self._frame_view.load_cameras(cameras)
 
     # ------------------------------------------------------------------
@@ -770,27 +809,11 @@ class PoseExtractionWindow(QMainWindow):
         if row is None:
             return
 
-        # Load sync anchor for global-time display in frame view
-        run_row = self._session.execute(
-            "SELECT sync_config_id FROM detection_runs WHERE id=?",
-            (self._current_run_id,),
-        ).fetchone()
-        ref_frame, ref_ts = 0, 0.0
-        if run_row:
-            sp = self._session.execute(
-                "SELECT video_frame, timestamp_s FROM sync_points "
-                "WHERE shot_video_id=? AND sync_config_id=? "
-                "ORDER BY video_frame ASC LIMIT 1",
-                (shot_video_id, run_row["sync_config_id"]),
-            ).fetchone()
-            if sp:
-                ref_frame, ref_ts = int(sp["video_frame"]), float(sp["timestamp_s"])
-
+        # Switch the frame view to this camera.  The SyncTable was already set
+        # in _on_run_selected, so global-time ↔ frame conversion is handled there.
         self._frame_view.load_camera(
             shot_video_id, row["file_path"], row["camera_instance_id"],
             fps=float(row["actual_fps"] or 30.0),
-            ref_frame=ref_frame,
-            ref_timestamp_s=ref_ts,
         )
         self._frame_view.set_pose_data(self._session, self._current_run_id, track_id)
         self._frame_view.set_selected_track(track_id)

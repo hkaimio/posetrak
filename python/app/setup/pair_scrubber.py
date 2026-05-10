@@ -16,6 +16,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QPushButton,
     QSizePolicy,
@@ -54,9 +55,15 @@ class _VideoPane(QWidget):
         self._frame_label.setStyleSheet("font-family: monospace; font-size: 11px;")
         self._frame_label.setFixedWidth(90)
 
+        self._goto_btn = QPushButton("Go to…")
+        self._goto_btn.setFixedWidth(54)
+        self._goto_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._goto_btn.clicked.connect(self._on_goto)
+
         slider_row = QHBoxLayout()
         slider_row.addWidget(self._slider)
         slider_row.addWidget(self._frame_label)
+        slider_row.addWidget(self._goto_btn)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -122,6 +129,15 @@ class _VideoPane(QWidget):
 
     def _on_slider_moved(self, value: int) -> None:
         self._seek(value)
+
+    def _on_goto(self) -> None:
+        value, ok = QInputDialog.getInt(
+            self, "Go to frame", "Frame number:",
+            value=self._current_frame,
+            min=0, max=max(0, self._total_frames - 1),
+        )
+        if ok:
+            self._seek(value)
 
     def _on_frame_ready(self, frame_idx: int, frame_data) -> None:
         if frame_idx == self._current_frame:

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 
+from app.setup.db_context import SyncTable
 from app.pose.colors import UNASSIGNED_COLOR, person_color
 from app.pose.db_cache import read_track_spans
 
@@ -108,8 +109,9 @@ class StitcherWidget(QGraphicsView):
         self._items: dict[tuple[str, int, int], QGraphicsRectItem] = {}
         # (svid, tid, seg_first) → QGraphicsSimpleTextItem
         self._name_items: dict[tuple[str, int, int], QGraphicsSimpleTextItem] = {}
-        # svid → (ref_frame, ref_ts, fps)
+        # svid → (ref_frame, ref_ts, fps)  — fallback when no SyncTable
         self._anchors: dict[str, tuple[int, float, float]] = {}
+        self._sync_table: SyncTable | None = None
         # (svid, tid) → y pixel coordinate in scene for this detection's row
         self._row_y: dict[tuple[str, int], float] = {}
 
@@ -130,6 +132,15 @@ class StitcherWidget(QGraphicsView):
     # Public API
     # ------------------------------------------------------------------
 
+    def set_sync_table(self, table: SyncTable | None) -> None:
+        """Set the SyncTable used for frame → global-time conversion in the timeline.
+
+        When set, segment bar positions are computed from piecewise-linear
+        SyncTable interpolation rather than the single-anchor + nominal-fps
+        approximation stored in _anchors.  Must be called before load_run.
+        """
+        self._sync_table = table
+
     def get_spans(self) -> dict[tuple[str, int, int], tuple[int, int]]:
         """Return segment-keyed frame spans: {(svid, tid, seg_first): (first, last)}."""
         return {
@@ -144,7 +155,12 @@ class StitcherWidget(QGraphicsView):
         for (svid, tid), segs in self._segments.items():
             anchor = self._anchors.get(svid)
             for sf, sl in segs:
-                if anchor is not None:
+                if self._sync_table is not None:
+                    t0 = self._sync_table.frame_to_global_time(sf, svid)
+                    t1 = self._sync_table.frame_to_global_time(sl, svid)
+                    t0 = t0 if t0 is not None else float(sf)
+                    t1 = t1 if t1 is not None else float(sl)
+                elif anchor is not None:
                     t0 = _frame_to_time(anchor, sf)
                     t1 = _frame_to_time(anchor, sl)
                 else:
@@ -386,13 +402,19 @@ class StitcherWidget(QGraphicsView):
         seg_last: Last frame of the segment.
         y: Vertical scene coordinate for the row.
         """
-        anchor = self._anchors.get(svid)
         pps = self._px_per_sec
-        if anchor is not None:
-            t0 = _frame_to_time(anchor, seg_first)
-            t1 = _frame_to_time(anchor, seg_last)
+        if self._sync_table is not None:
+            t0 = self._sync_table.frame_to_global_time(seg_first, svid)
+            t1 = self._sync_table.frame_to_global_time(seg_last, svid)
+            t0 = t0 if t0 is not None else float(seg_first)
+            t1 = t1 if t1 is not None else float(seg_last)
         else:
-            t0, t1 = float(seg_first), float(seg_last)
+            anchor = self._anchors.get(svid)
+            if anchor is not None:
+                t0 = _frame_to_time(anchor, seg_first)
+                t1 = _frame_to_time(anchor, seg_last)
+            else:
+                t0, t1 = float(seg_first), float(seg_last)
 
         x = LABEL_WIDTH + (t0 - self._time_origin) * pps
         w = max(2, (t1 - t0) * pps)

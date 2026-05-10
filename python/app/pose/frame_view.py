@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.setup.camera_cell import CameraCell
+from app.setup.db_context import SyncTable
 from app.pose.colors import UNASSIGNED_COLOR, person_color
 from app.pose.db_cache import read_detections_for_run, read_keypoints_for_run
 
@@ -184,6 +185,7 @@ class FrameViewWidget(QWidget):
 
         # Per-camera metadata, keyed by shot_video_id
         self._cameras: dict[str, _CameraInfo] = {}
+        self._sync_table: SyncTable | None = None
 
         self._shot_video_id: str | None = None
         self._file_path: str | None = None
@@ -330,8 +332,21 @@ class FrameViewWidget(QWidget):
         frame_bgr = img if ret else None
         self.frame_data_ready.emit(frame_bgr, dets, kps)
 
+    def set_sync_table(self, table: SyncTable | None) -> None:
+        """Set the SyncTable used for global-time ↔ frame conversion.
+
+        When set, overrides the single-anchor linear calculation so that all
+        sync points are used for piecewise-linear interpolation.
+        """
+        self._sync_table = table
+
     def seek_global_time(self, global_s: float) -> None:
-        """Seek to the frame closest to *global_s* using the current camera's sync anchor."""
+        """Seek to the frame closest to *global_s* using the SyncTable or single anchor."""
+        if self._sync_table is not None and self._shot_video_id:
+            frame_idx = self._sync_table.lookup(global_s, self._shot_video_id)
+            if frame_idx is not None:
+                self.seek_frame(frame_idx)
+                return
         if self._fps <= 0:
             return
         frame_idx = int(self._ref_frame + (global_s - self._ref_timestamp_s) * self._fps)
@@ -339,6 +354,10 @@ class FrameViewWidget(QWidget):
 
     def current_global_time(self) -> float:
         """Return the global timestamp of the currently displayed frame."""
+        if self._sync_table is not None and self._shot_video_id:
+            t = self._sync_table.frame_to_global_time(self._current_frame, self._shot_video_id)
+            if t is not None:
+                return t
         return self._ref_timestamp_s + (self._current_frame - self._ref_frame) / max(self._fps, 1)
 
     def current_shot_video_id(self) -> str | None:
@@ -433,7 +452,10 @@ class FrameViewWidget(QWidget):
         if seek_to is not None:
             target = seek_to
         elif prev_global_s is not None:
-            target = int(cam.ref_frame + (prev_global_s - cam.ref_timestamp_s) * cam.fps)
+            if self._sync_table is not None:
+                target = self._sync_table.lookup(prev_global_s, shot_video_id) or 0
+            else:
+                target = int(cam.ref_frame + (prev_global_s - cam.ref_timestamp_s) * cam.fps)
         else:
             target = 0
 
@@ -448,7 +470,11 @@ class FrameViewWidget(QWidget):
 
     def _update_info_label(self, frame_idx: int) -> float:
         """Update the info label; return the computed global time in seconds."""
-        global_s = self._ref_timestamp_s + (frame_idx - self._ref_frame) / max(self._fps, 1)
+        if self._sync_table is not None and self._shot_video_id:
+            t = self._sync_table.frame_to_global_time(frame_idx, self._shot_video_id)
+            global_s = t if t is not None else 0.0
+        else:
+            global_s = self._ref_timestamp_s + (frame_idx - self._ref_frame) / max(self._fps, 1)
         mm = int(global_s // 60)
         ss = global_s % 60
         self._info_label.setText(f"frame: {frame_idx}  t: {mm:02d}:{ss:05.2f}")

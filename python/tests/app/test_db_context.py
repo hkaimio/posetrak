@@ -95,16 +95,24 @@ def test_sync_table_unknown_video_returns_none() -> None:
     assert table.lookup(0.0, "vid-unknown") is None
 
 
-def test_sync_table_no_fps_snaps_to_nearest() -> None:
-    """Without fps, lookup snaps to the nearest anchor frame."""
+def test_sync_table_two_anchors_local_fps_overrides_stored_zero() -> None:
+    """Two anchors provide a local slope even when stored fps is 0."""
     pts = [
         SyncPoint("cam1", "vid1", video_frame=10, timestamp_s=1.0),
         SyncPoint("cam1", "vid1", video_frame=20, timestamp_s=2.0),
     ]
     table = SyncTable(pts, fps_by_video={"vid1": 0.0})
+    # local fps = (20-10)/(2.0-1.0) = 10
+    assert table.lookup(1.4, "vid1") == 14
+    assert table.lookup(1.6, "vid1") == 16
 
+
+def test_sync_table_single_anchor_zero_fps_snaps_to_anchor() -> None:
+    """Single anchor with fps=0 snaps to the anchor frame."""
+    pts = [SyncPoint("cam1", "vid1", video_frame=10, timestamp_s=1.0)]
+    table = SyncTable(pts, fps_by_video={"vid1": 0.0})
     assert table.lookup(1.4, "vid1") == 10
-    assert table.lookup(1.6, "vid1") == 20
+    assert table.lookup(0.5, "vid1") == 10
 
 
 # ---------------------------------------------------------------------------

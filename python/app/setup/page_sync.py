@@ -1416,16 +1416,12 @@ class SyncWidget(QWidget):
         self._ref_combo.blockSignals(False)
         self._tgt_combo.blockSignals(False)
 
-        # Auto-load the best existing sync config so "LED sync…" is available.
-        configs = self._ctx.get_sync_configs(self._shot_id)
-        if configs:
-            self._sync_table = self._ctx.load_sync_config(configs[0][0])
-            if self._sync_table is not None:
-                self._timeline.update_cameras(self._videos, self._sync_table)
-                anchors = self._ctx.get_anchor_observations(self._shot_id)
-                self._timeline.update_anchor_marks(
-                    self._compute_anchor_mark_times(anchors)
-                )
+        # Always re-solve from anchor observations.  The anchor observations are
+        # the authoritative input for the setup wizard; DB sync configs (LED,
+        # manual-graph) are written outputs read by the detection dialog.
+        # Loading a DB config here would replay stale data and miss anchors
+        # added since the last "Solve && apply sync".
+        self._solve_and_refresh()
 
         self._reload_scrubber_ref()
         self._reload_scrubber_tgt()
@@ -1440,14 +1436,30 @@ class SyncWidget(QWidget):
         if 0 <= idx < len(self._videos):
             sv = self._videos[idx]
             total = max(sv.last_video_frame - sv.first_video_frame + 1, 1)
-            self._pair.set_reference(sv.file_path, total, sv.camera_label)
+            self._pair.set_reference(
+                sv.file_path, total, sv.camera_label,
+                self._frame_at_playhead(sv.id, total),
+            )
 
     def _reload_scrubber_tgt(self) -> None:
         idx = self._tgt_combo.currentIndex()
         if 0 <= idx < len(self._videos):
             sv = self._videos[idx]
             total = max(sv.last_video_frame - sv.first_video_frame + 1, 1)
-            self._pair.set_target(sv.file_path, total, sv.camera_label)
+            self._pair.set_target(
+                sv.file_path, total, sv.camera_label,
+                self._frame_at_playhead(sv.id, total),
+            )
+
+    def _frame_at_playhead(self, video_id: str, total_frames: int) -> int:
+        """Return the frame for *video_id* at the current timeline playhead, or 0."""
+        t = self._timeline._playhead_s
+        if t is None or self._sync_table is None:
+            return 0
+        f = self._sync_table.lookup(t, video_id)
+        if f is None:
+            return 0
+        return max(0, min(total_frames - 1, f))
 
     # ------------------------------------------------------------------
     # Tree
@@ -1707,12 +1719,18 @@ class SyncWidget(QWidget):
         }
 
         conn = self._ctx._conn
+        # Only delete manual-graph configs — LED and other configs may be
+        # referenced by detection_runs / tracking_runs (NOT NULL FK) and
+        # cannot be deleted without cascading changes to those records.
         conn.execute(
             "DELETE FROM sync_points WHERE sync_config_id IN "
-            "(SELECT id FROM sync_configs WHERE shot_id = ?)",
+            "(SELECT id FROM sync_configs WHERE shot_id = ? AND created_by = 'manual-graph')",
             (self._shot_id,),
         )
-        conn.execute("DELETE FROM sync_configs WHERE shot_id = ?", (self._shot_id,))
+        conn.execute(
+            "DELETE FROM sync_configs WHERE shot_id = ? AND created_by = 'manual-graph'",
+            (self._shot_id,),
+        )
         self._ctx.write_sync_config(self._shot_id, "manual-graph", points)
         conn.commit()
 
@@ -1793,9 +1811,37 @@ class SyncWidget(QWidget):
         """Run solver in-memory and update the timeline without writing to DB."""
         anchors = self._ctx.get_anchor_observations(self._shot_id)
         result = solve_sync_graph(anchors, self._videos)
+
+        vid_label = {v.id: v.camera_label for v in self._videos}
+        connected_labels = [vid_label.get(v, v[:8]) for v in sorted(result.connected_video_ids)]
+        isolated_labels  = [vid_label.get(v, v[:8]) for v in sorted(result.isolated_video_ids)]
+        _log.info(
+            "solve_and_refresh: shot=%s anchors=%d sync_points=%d "
+            "connected=%s isolated=%s",
+            self._shot_id[:8], len(anchors), len(result.sync_points),
+            connected_labels, isolated_labels,
+        )
+
+        # Detect anchor observations that reference video IDs not in self._videos.
+        known_ids = {v.id for v in self._videos}
+        orphan_ids: set[str] = set()
+        for _aid, obs_list in anchors:
+            for obs in obs_list:
+                if obs.shot_video_id not in known_ids:
+                    orphan_ids.add(obs.shot_video_id)
+        if orphan_ids:
+            _log.warning(
+                "solve_and_refresh: %d anchor observation(s) reference video IDs "
+                "not in capture_videos for this shot: %s  "
+                "(video may have been deleted and re-added — re-mark those anchors)",
+                len(orphan_ids), list(orphan_ids),
+            )
+
         if not result.sync_points:
+            self._timeline.update_cameras(self._videos, SyncTable([], {}))
             self._timeline.update_anchor_marks([])
             return
+
         fps_by_video = {
             v.id: result.effective_fps.get(v.id, v.actual_fps or 30.0)
             for v in self._videos
@@ -1825,26 +1871,27 @@ class SyncWidget(QWidget):
         return marks
 
     def _on_timeline_step(self, step: int) -> None:
-        """Seek the global timeline by *step* frames (from arrow keys)."""
+        """Advance the ref camera by *step* frames and seek all cameras to match.
+
+        Global time is derived from the new ref-camera frame position via the
+        sync table, so the step size in seconds automatically matches the ref
+        camera's local fps at that point in the video.
+        """
         if self._sync_table is None:
             return
         ref_vid = self._ref_combo.currentData()
-        fps = next(
-            (v.actual_fps or 30.0 for v in self._videos if v.id == ref_vid), 30.0
-        )
-        t = self._timeline._playhead_s
-        if t is None:
-            tgt_vid = self._tgt_combo.currentData()
-            t = (
-                self._sync_table.frame_to_global_time(self._pair.ref_frame, ref_vid)
-                if ref_vid else None
-            ) or (
-                self._sync_table.frame_to_global_time(self._pair.target_frame, tgt_vid)
-                if tgt_vid else None
-            )
+        if not ref_vid:
+            return
+        cur_frame = self._pair.ref_frame
+        new_frame = max(0, cur_frame + step)
+        t = self._sync_table.frame_to_global_time(new_frame, ref_vid)
         if t is None:
             return
-        self._on_timeline_seek(t + step / fps)
+        _log.debug(
+            "timeline_step: step=%d ref_vid=%.8s frame %d->%d t=%.4f",
+            step, ref_vid, cur_frame, new_frame, t,
+        )
+        self._on_timeline_seek(t)
 
     def _on_add_video(self) -> None:
         """Open a file picker and add the selected video to this capture."""
@@ -1941,6 +1988,8 @@ class SyncWidget(QWidget):
             return
         ref_vid = self._ref_combo.currentData()
         tgt_vid = self._tgt_combo.currentData()
+        _log.debug("timeline_seek: global_s=%.4f ref_vid=%.8s tgt_vid=%.8s",
+                   global_s, ref_vid or "", tgt_vid or "")
         if ref_vid:
             f = self._sync_table.lookup(global_s, ref_vid)
             if f is not None:

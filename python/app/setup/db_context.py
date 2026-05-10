@@ -8,10 +8,13 @@ own connections.  A single transaction is held open within each page so that
 from __future__ import annotations
 
 import bisect
+import logging
 import sqlite3
 import struct
 from dataclasses import dataclass
 from typing import NamedTuple
+
+_log = logging.getLogger(__name__)
 
 import numpy as np
 
@@ -110,6 +113,8 @@ class SyncTable:
     def lookup(self, timestamp_s: float, shot_video_id: str) -> int | None:
         """Return the video frame index for *shot_video_id* at *timestamp_s*.
 
+        Uses the local fps of the enclosing anchor interval rather than the
+        globally stored fps so that per-segment drift is handled correctly.
         Returns ``None`` if no sync data is available for this video.
         """
         if shot_video_id not in self._tables:
@@ -119,16 +124,31 @@ class SyncTable:
             return None
 
         idx = bisect.bisect_right(timestamps, timestamp_s)
-        if idx == 0:
+
+        if len(timestamps) == 1:
             anchor_ts, anchor_frame = timestamps[0], frames[0]
+            local_fps = fps
+        elif idx == 0:
+            anchor_ts, anchor_frame = timestamps[0], frames[0]
+            dt = timestamps[1] - timestamps[0]
+            local_fps = (frames[1] - frames[0]) / dt if dt > 0 else fps
         elif idx >= len(timestamps):
             anchor_ts, anchor_frame = timestamps[-1], frames[-1]
+            dt = timestamps[-1] - timestamps[-2]
+            local_fps = (frames[-1] - frames[-2]) / dt if dt > 0 else fps
         else:
             anchor_ts, anchor_frame = timestamps[idx - 1], frames[idx - 1]
+            dt = timestamps[idx] - timestamps[idx - 1]
+            local_fps = (frames[idx] - frames[idx - 1]) / dt if dt > 0 else fps
 
-        if fps > 0:
-            return anchor_frame + round((timestamp_s - anchor_ts) * fps)
-        # No fps: snap to nearest anchor
+        if local_fps > 0:
+            frame = anchor_frame + round((timestamp_s - anchor_ts) * local_fps)
+            _log.debug(
+                "lookup vid=%.8s t=%.4f anchor=(%.4f, %d) local_fps=%.4f -> frame=%d",
+                shot_video_id, timestamp_s, anchor_ts, anchor_frame, local_fps, frame,
+            )
+            return frame
+        # No usable fps: snap to nearest anchor
         if idx == 0:
             return frames[0]
         if idx >= len(timestamps):
@@ -140,19 +160,50 @@ class SyncTable:
     def frame_to_global_time(self, frame_idx: int, shot_video_id: str) -> float | None:
         """Return the approximate global timestamp for a local frame index.
 
-        Inverts the ``lookup`` relationship: given a frame in *shot_video_id*,
-        finds the anchor closest to that frame and extrapolates using the stored
-        fps.  Returns ``None`` if no sync data is available for the video.
+        Uses the local fps of the enclosing anchor interval (same as ``lookup``)
+        so that per-segment drift is handled correctly.
+        Returns ``None`` if no sync data is available for the video.
         """
         if shot_video_id not in self._tables:
             return None
         timestamps, frames, fps = self._tables[shot_video_id]
         if not timestamps:
             return None
-        if fps <= 0:
-            return float(timestamps[0])
-        best_i = min(range(len(frames)), key=lambda i: abs(frames[i] - frame_idx))
-        return float(timestamps[best_i]) + (frame_idx - frames[best_i]) / fps
+
+        if len(frames) == 1:
+            anchor_ts, anchor_frame = timestamps[0], frames[0]
+            local_fps = fps
+        else:
+            # Bisect on frame index to find the enclosing interval.
+            # frames is sorted by timestamp; for well-formed sync data it is
+            # also monotonically increasing in frame index.
+            idx = bisect.bisect_right(frames, frame_idx)
+            if idx == 0:
+                anchor_ts, anchor_frame = timestamps[0], frames[0]
+                dt = timestamps[1] - timestamps[0]
+                local_fps = (frames[1] - frames[0]) / dt if dt > 0 else fps
+            elif idx >= len(frames):
+                anchor_ts, anchor_frame = timestamps[-1], frames[-1]
+                dt = timestamps[-1] - timestamps[-2]
+                local_fps = (frames[-1] - frames[-2]) / dt if dt > 0 else fps
+            else:
+                anchor_ts, anchor_frame = timestamps[idx - 1], frames[idx - 1]
+                dt = timestamps[idx] - timestamps[idx - 1]
+                local_fps = (frames[idx] - frames[idx - 1]) / dt if dt > 0 else fps
+
+        if local_fps <= 0:
+            _log.debug(
+                "frame_to_global_time vid=%.8s frame=%d -> anchor_ts=%.4f (no fps)",
+                shot_video_id, frame_idx, anchor_ts,
+            )
+            return float(anchor_ts)
+
+        t = float(anchor_ts) + (frame_idx - anchor_frame) / local_fps
+        _log.debug(
+            "frame_to_global_time vid=%.8s frame=%d anchor=(%.4f, %d) local_fps=%.4f -> t=%.4f",
+            shot_video_id, frame_idx, anchor_ts, anchor_frame, local_fps, t,
+        )
+        return t
 
     def video_ids(self) -> list[str]:
         return list(self._tables.keys())

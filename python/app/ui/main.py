@@ -11,7 +11,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
     stream=sys.stderr,
 )
-for _name in ("app.setup", "app.setup.led_sync", "app.pose", "app.ui"):
+for _name in ("app.setup", "app.setup.led_sync", "app.pose", "app.ui", "app.setup.db_context", "app.setup.page_sync"):
     logging.getLogger(_name).setLevel(logging.DEBUG)
 
 

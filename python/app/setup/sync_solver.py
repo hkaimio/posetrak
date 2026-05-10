@@ -7,22 +7,30 @@ sync_points via DBContext.write_sync_config().
 Algorithm
 ---------
 1.  Build an undirected graph: nodes = video IDs, edges = shared anchors.
-2.  BFS from the reference video, assigning each reachable video a time offset
-    such that all anchor observations map to the same global timestamp.
-3.  Emit one SyncPoint per anchor observation for each reachable video.
+    Pre-compute all anchor pairs between each ordered camera pair so that
+    the BFS step can see them collectively rather than one at a time.
+2.  BFS from the reference video:
+    - If 2+ anchor pairs connect a new camera to an already-solved camera,
+      fit  frame = fps * global_time + C  by least squares and derive both
+      the effective fps and the time offset.  This corrects nominal fps
+      values that are wrong (e.g. a 120 fps camera reported as 30 fps).
+    - If only 1 anchor pair is available, use the nominal fps from the
+      video file and solve for the offset alone.
+3.  Emit one SyncPoint per anchor observation for each reachable video,
+    timestamped with the effective (possibly corrected) fps.
 
-The output SyncPoints feed the existing piecewise-linear interpolation in
-SyncTable / the tracker unchanged.  Multiple anchor observations per video
-automatically enable drift correction via that interpolation.
-
-Known limitation: cycles in the graph use only the first BFS path; redundant
-constraints are not used to improve the fit.
+Priority
+--------
+LED sync results (written into sync_configs by the LED dialog) are
+authoritative for the cameras they cover.  The graph solver is called
+afterwards only for cameras not covered by LED sync; the caller in
+page_sync._merge_led_and_graph is responsible for that split.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.setup.db_context import CaptureVideoInfo, SyncAnchorObservation, SyncPoint
 
@@ -33,6 +41,71 @@ class SolveResult:
     sync_points: list[SyncPoint]
     connected_video_ids: set[str]
     isolated_video_ids: set[str]
+    # effective fps per video (may differ from nominal when derived from 2+
+    # anchor pairs via least-squares); reference video always has nominal fps.
+    effective_fps: dict[str, float] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+
+def _lstsq_fps_offset(
+    global_times: list[float],
+    local_frames: list[float],
+) -> tuple[float | None, float | None]:
+    """Fit  frame = fps * global_time + C  by ordinary least squares.
+
+    Returns ``(fps, offset)`` where ``offset = -C / fps``, i.e.
+    ``global_time = frame / fps + offset``.
+    Returns ``(None, None)`` if the system is degenerate.
+    """
+    n = len(global_times)
+    if n < 2:
+        return None, None
+    sx = sum(global_times)
+    sy = sum(local_frames)
+    sxx = sum(t * t for t in global_times)
+    sxy = sum(t * f for t, f in zip(global_times, local_frames))
+    denom = n * sxx - sx * sx
+    if abs(denom) < 1e-10:          # all observations at the same instant
+        return None, None
+    m = (n * sxy - sx * sy) / denom  # effective fps
+    c = (sy - m * sx) / n
+    if m <= 0:                        # fps must be positive
+        return None, None
+    return m, -c / m                  # (fps, offset)
+
+
+def _build_pair_obs(
+    anchors: list[tuple[str, list[SyncAnchorObservation]]],
+) -> dict[tuple[str, str], list[tuple[int, float, int, float]]]:
+    """Return a mapping (vid_a, vid_b) → [(frame_a, sub_a, frame_b, sub_b), …].
+
+    Every anchor that involves both vid_a and vid_b contributes one entry.
+    Both orderings (a→b and b→a) are stored so BFS can look up neighbours
+    in either direction.
+    """
+    pair_obs: dict[tuple[str, str], list[tuple[int, float, int, float]]] = (
+        defaultdict(list)
+    )
+    for _anchor_id, obs_list in anchors:
+        for i in range(len(obs_list)):
+            for j in range(len(obs_list)):
+                if i == j:
+                    continue
+                oa, ob = obs_list[i], obs_list[j]
+                pair_obs[(oa.shot_video_id, ob.shot_video_id)].append((
+                    oa.video_frame, oa.subframe,
+                    ob.video_frame, ob.subframe,
+                ))
+    return pair_obs
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 def check_connectivity(
@@ -93,64 +166,79 @@ def solve_sync_graph(
         ``sync_points`` can be passed directly to
         ``DBContext.write_sync_config()``.  Isolated videos are omitted from
         ``sync_points`` and listed in ``isolated_video_ids``.
+        ``effective_fps`` maps each connected video to the fps that was used
+        (may differ from the nominal value stored in the video file).
     """
-    fps_map = {v.id: (v.actual_fps or 30.0) for v in videos}
+    nom_fps: dict[str, float] = {v.id: (v.actual_fps or 30.0) for v in videos}
     all_video_ids = [v.id for v in videos]
 
-    # Index anchors by video so BFS can find neighbours quickly.
-    video_to_anchors: dict[str, list[tuple[str, list[SyncAnchorObservation]]]] = (
-        defaultdict(list)
-    )
-    for anchor_id, obs_list in anchors:
-        for obs in obs_list:
-            video_to_anchors[obs.shot_video_id].append((anchor_id, obs_list))
+    if not all_video_ids:
+        return SolveResult([], set(), set())
 
-    # Choose reference: most-connected video by default.
+    # Pre-compute all anchor pairs between each ordered (cur, new) camera pair.
+    pair_obs = _build_pair_obs(anchors)
+
+    # Build adjacency graph (undirected) for BFS connectivity.
+    adj: dict[str, set[str]] = defaultdict(set)
+    for (va, vb) in pair_obs:
+        adj[va].add(vb)
+
+    # Choose reference: most-connected video.
     if reference_video_id is None:
-        if not all_video_ids:
-            return SolveResult([], set(), set())
         reference_video_id = max(
             all_video_ids,
-            key=lambda vid: len(video_to_anchors.get(vid, [])),
+            key=lambda vid: len(adj.get(vid, set())),
         )
 
-    # BFS: offsets[vid] means  t_global = (frame + subframe)/fps + offset
+    # BFS — solve for offset and effective fps of each reachable video.
     offsets: dict[str, float] = {reference_video_id: 0.0}
+    eff_fps: dict[str, float] = {reference_video_id: nom_fps.get(reference_video_id, 30.0)}
     queue: deque[str] = deque([reference_video_id])
-    used_anchors: set[str] = set()
 
     while queue:
         cur_vid = queue.popleft()
-        cur_fps = fps_map.get(cur_vid, 30.0)
+        cur_fps = eff_fps[cur_vid]
         cur_offset = offsets[cur_vid]
 
-        for anchor_id, obs_list in video_to_anchors.get(cur_vid, []):
-            if anchor_id in used_anchors:
-                continue
-            used_anchors.add(anchor_id)
+        for new_vid in adj.get(cur_vid, set()):
+            if new_vid in offsets:
+                continue  # already solved via an earlier BFS path
 
-            cur_obs = next(
-                (o for o in obs_list if o.shot_video_id == cur_vid), None
-            )
-            if cur_obs is None:
+            pairs = pair_obs.get((cur_vid, new_vid), [])
+            if not pairs:
                 continue
 
-            t_anchor = (cur_obs.video_frame + cur_obs.subframe) / cur_fps + cur_offset
+            nom = nom_fps.get(new_vid, 30.0)
 
-            for obs in obs_list:
-                if obs.shot_video_id == cur_vid or obs.shot_video_id in offsets:
-                    continue
-                other_fps = fps_map.get(obs.shot_video_id, 30.0)
-                offsets[obs.shot_video_id] = (
-                    t_anchor - (obs.video_frame + obs.subframe) / other_fps
-                )
-                queue.append(obs.shot_video_id)
+            if len(pairs) >= 2:
+                # Compute global times for every anchor observation in cur_vid,
+                # then fit  frame_new = fps_new * t_global + C  by OLS.
+                global_times = [
+                    (fa + sa) / cur_fps + cur_offset
+                    for fa, sa, _fb, _sb in pairs
+                ]
+                local_frames = [float(fb + sb) for _fa, _sa, fb, sb in pairs]
+                fps_new, off_new = _lstsq_fps_offset(global_times, local_frames)
+                if fps_new is None or fps_new <= 0:
+                    # Degenerate — fall back to single-anchor with nominal fps.
+                    fps_new = nom
+                    fa, sa, fb, sb = pairs[0]
+                    t = (fa + sa) / cur_fps + cur_offset
+                    off_new = t - (fb + sb) / fps_new
+            else:
+                # Single anchor — use nominal fps, solve for offset only.
+                fps_new = nom
+                fa, sa, fb, sb = pairs[0]
+                t = (fa + sa) / cur_fps + cur_offset
+                off_new = t - (fb + sb) / fps_new
+
+            offsets[new_vid] = off_new
+            eff_fps[new_vid] = fps_new
+            queue.append(new_vid)
 
     # Emit one SyncPoint per anchor observation for each reachable video.
-    # Use shot_video_id as camera_instance_id to avoid PK collisions when
-    # multiple videos share the same camera_instance_id ("__unassigned__").
-    # Deduplicate by (shot_video_id, video_frame) — a camera can appear in
-    # multiple anchors and would otherwise produce duplicate rows.
+    # Use effective fps (possibly corrected) for the timestamp.
+    # Deduplicate by (shot_video_id, video_frame).
     sync_points: list[SyncPoint] = []
     seen: set[tuple[str, int]] = set()
     for _anchor_id, obs_list in anchors:
@@ -161,7 +249,7 @@ def solve_sync_graph(
             if key in seen:
                 continue
             seen.add(key)
-            fps = fps_map.get(obs.shot_video_id, 30.0)
+            fps = eff_fps.get(obs.shot_video_id, nom_fps.get(obs.shot_video_id, 30.0))
             t = (obs.video_frame + obs.subframe) / fps + offsets[obs.shot_video_id]
             sync_points.append(SyncPoint(
                 camera_instance_id=obs.shot_video_id,
@@ -176,4 +264,5 @@ def solve_sync_graph(
         sync_points=sync_points,
         connected_video_ids=connected,
         isolated_video_ids=isolated,
+        effective_fps=dict(eff_fps),
     )

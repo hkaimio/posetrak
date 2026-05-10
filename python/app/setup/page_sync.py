@@ -36,7 +36,7 @@ from typing import Optional
 _log = logging.getLogger(__name__)
 
 from PySide6.QtCore import QEvent, QObject, QThread, Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -1079,7 +1079,9 @@ class _CameraTimelineBar(QWidget):
         self._t_min = 0.0
         self._t_max = 1.0
         self._playhead_s: float | None = None
-        self._anchor_marks: list[float] = []   # global timestamps for anchor pair lines
+        # Each anchor mark: (global_time, frozenset of video_ids in that pair)
+        self._anchor_marks: list[tuple[float, frozenset[str]]] = []
+        self._camera_video_ids: list[str] = []  # parallel to _cameras
         self._led_video_ids: set[str] = set()
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(self._AXIS_H)  # collapsed until cameras are loaded
@@ -1112,14 +1114,16 @@ class _CameraTimelineBar(QWidget):
             t_min = min(t_min, t0)
             t_max = max(t_max, t1)
         self._cameras = cameras
+        self._camera_video_ids = [v.id for v in videos]
         self._t_min = t_min if t_min != float("inf") else 0.0
         self._t_max = t_max if t_max != float("-inf") else 1.0
         h = len(cameras) * self._ROW_H + self._AXIS_H
         self.setFixedHeight(h)
         self.update()
 
-    def update_anchor_marks(self, global_times: list[float]) -> None:
-        self._anchor_marks = list(global_times)
+    def update_anchor_marks(self, marks: list[tuple[float, frozenset[str]]]) -> None:
+        """Update anchor pair markers.  Each entry is (global_time, video_ids)."""
+        self._anchor_marks = list(marks)
         self.update()
 
     def set_playhead(self, global_s: float | None) -> None:
@@ -1177,12 +1181,20 @@ class _CameraTimelineBar(QWidget):
             bar_y = y + (self._ROW_H - self._BAR_H) // 2
             p.fillRect(x0, bar_y, max(x1 - x0, 2), self._BAR_H, QColor(color))
 
-        # Anchor marks — orange vertical lines spanning all camera rows
+        # Anchor marks — short orange lines on the bar rows of the paired cameras
         if self._anchor_marks:
-            p.setPen(QPen(anchor_col, 1))
-            for t in self._anchor_marks:
-                ax = max(self._LABEL_W, min(self.width() - 1, self._t_to_x(t)))
-                p.drawLine(ax, 0, ax, bars_h)
+            p.setPen(QPen(anchor_col, 2))
+            for t, video_ids in self._anchor_marks:
+                ax = self._t_to_x(t)
+                if ax < self._LABEL_W or ax >= self.width():
+                    continue
+                for row, (label, t0, t1, color) in enumerate(self._cameras):
+                    if row >= len(self._camera_video_ids):
+                        continue
+                    if self._camera_video_ids[row] not in video_ids:
+                        continue
+                    bar_y = row * self._ROW_H + (self._ROW_H - self._BAR_H) // 2
+                    p.drawLine(ax, bar_y, ax, bar_y + self._BAR_H)
 
         # Time axis
         ay = bars_h
@@ -1344,8 +1356,20 @@ class SyncWidget(QWidget):
 
         self._timeline = _CameraTimelineBar(self)
         self._pair.frames_changed.connect(self._on_pair_frames_changed)
-        self._pair.timeline_seek_step.connect(self._on_timeline_step)
         self._timeline.seek_requested.connect(self._on_timeline_seek)
+
+        # Arrow-key global-timeline navigation — use QShortcut so focus
+        # doesn't matter (works even when tree widget or other child has focus).
+        for key, step in [
+            (Qt.Key.Key_Left, -1), (Qt.Key.Key_Right, 1),
+        ]:
+            sc = QShortcut(QKeySequence(key), self)
+            sc.activated.connect(lambda s=step: self._on_timeline_step(s))
+        for key, step in [
+            ("Shift+Left", -10), ("Shift+Right", 10),
+        ]:
+            sc = QShortcut(QKeySequence(key), self)
+            sc.activated.connect(lambda s=step: self._on_timeline_step(s))
 
         right_w = QWidget()
         right_l = QVBoxLayout(right_w)
@@ -1566,7 +1590,38 @@ class SyncWidget(QWidget):
         for sp in result.sync_points:
             points.setdefault(sp.shot_video_id, []).append(sp)
 
-        fps_by_video = {v.id: (v.actual_fps or 30.0) for v in self._videos}
+        # Check for fps corrections implied by the anchor pairs (>10% deviation).
+        fps_corrections: list[tuple[str, float, float]] = []  # (label, nom, eff)
+        for v in self._videos:
+            nom = v.actual_fps or 30.0
+            eff = result.effective_fps.get(v.id)
+            if eff is not None and nom > 0 and abs(eff - nom) / nom > 0.10:
+                fps_corrections.append((v.camera_label, nom, eff))
+
+        if fps_corrections:
+            from PySide6.QtWidgets import QMessageBox
+            lines = "\n".join(
+                f"  {lbl}: file says {nom:.3f} fps, anchors imply {eff:.3f} fps"
+                for lbl, nom, eff in fps_corrections
+            )
+            msg = (
+                "Sync frame pairs imply different frame rates than the video "
+                "file(s) report:\n\n" + lines +
+                "\n\nUpdate the stored frame rate(s) to the anchor-derived values?"
+            )
+            if QMessageBox.question(self, "Frame rate mismatch", msg) == QMessageBox.StandardButton.Yes:
+                for v in self._videos:
+                    eff = result.effective_fps.get(v.id)
+                    nom = v.actual_fps or 30.0
+                    if eff is not None and nom > 0 and abs(eff - nom) / nom > 0.10:
+                        self._ctx.update_shot_video_fps(v.id, eff)
+                self._ctx._conn.commit()
+                self._videos = self._ctx.get_shot_videos(self._shot_id)
+
+        fps_by_video = {
+            v.id: result.effective_fps.get(v.id, v.actual_fps or 30.0)
+            for v in self._videos
+        }
 
         conn = self._ctx._conn
         conn.execute(
@@ -1658,7 +1713,10 @@ class SyncWidget(QWidget):
         if not result.sync_points:
             self._timeline.update_anchor_marks([])
             return
-        fps_by_video = {v.id: (v.actual_fps or 30.0) for v in self._videos}
+        fps_by_video = {
+            v.id: result.effective_fps.get(v.id, v.actual_fps or 30.0)
+            for v in self._videos
+        }
         self._sync_table = SyncTable(result.sync_points, fps_by_video)
         self._timeline.update_cameras(self._videos, self._sync_table)
         self._timeline.update_anchor_marks(self._compute_anchor_mark_times(anchors))
@@ -1667,20 +1725,21 @@ class SyncWidget(QWidget):
     def _compute_anchor_mark_times(
         self,
         anchors: list,
-    ) -> list[float]:
-        """Return one global timestamp per anchor for timeline tick marks."""
+    ) -> list[tuple[float, frozenset[str]]]:
+        """Return (global_time, video_ids) per anchor for timeline tick marks."""
         if self._sync_table is None:
             return []
-        times: list[float] = []
+        marks: list[tuple[float, frozenset[str]]] = []
         for _anchor_id, obs_list in anchors:
+            video_ids = frozenset(obs.shot_video_id for obs in obs_list)
             for obs in obs_list:
                 t = self._sync_table.frame_to_global_time(
                     obs.video_frame, obs.shot_video_id
                 )
                 if t is not None:
-                    times.append(t)
+                    marks.append((t, video_ids))
                     break  # one representative time per anchor is enough
-        return times
+        return marks
 
     def _on_timeline_step(self, step: int) -> None:
         """Seek the global timeline by *step* frames (from arrow keys)."""

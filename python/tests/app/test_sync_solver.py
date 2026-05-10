@@ -410,34 +410,40 @@ def test_synctable_two_consistent_anchors_both_correct() -> None:
         )
 
 
-def test_synctable_two_conflicting_anchors_detects_drift() -> None:
-    """Two anchors that imply different offsets produce measurable drift,
-    which is expected — the test documents how large it is."""
+def test_synctable_two_anchors_ols_perfect_fit() -> None:
+    """With 2 anchor pairs between the same cameras the OLS solver fits a
+    line through both points exactly (2 points always determine a line).
+
+    This means the solver finds an 'effective fps' that makes both anchors
+    consistent, even when the anchors imply different single-anchor offsets.
+    Residual at each anchor is 0 regardless of whether the two anchors are
+    genuinely consistent or come from a drifting/wrong-fps camera.
+
+    The old single-anchor BFS would have produced ~2077 frame residual.
+    The OLS solver eliminates that by using all available evidence.
+    """
     fps = 120.0
-    # Old anchor: gopro@1200 ↔ pixel@800 → implied offset = (800-1200)/120 = -3.33s
-    # New anchor: gopro@80442 ↔ pixel@77965 → implied offset = (77965-80442)/120 = -20.64s
-    # BFS only uses ONE anchor to compute offset → the other has residual error
+    # Anchor A: gopro@1200  ↔ pixel@800   → single-anchor offset −3.33 s
+    # Anchor B: gopro@80442 ↔ pixel@77965 → single-anchor offset −20.64 s
+    # OLS through these two points finds an effective fps ≈ 123.2 and a
+    # consistent offset — residual at each anchor is 0.
     videos = [_video("gopro", fps), _video("pixel", fps)]
     anchors = [
         _anchor("old", _obs("old", "gopro", 1200), _obs("old", "pixel", 800)),
         _anchor("new", _obs("new", "gopro", 80442), _obs("new", "pixel", 77965)),
     ]
 
-    # gopro gets ONE offset from the first-encountered anchor.
-    # At the OTHER anchor's pixel frame, the gopro frame prediction will be off.
-    table, _ = _build_sync_table(anchors, videos, reference_video_id="pixel")
+    result = solve_sync_graph(anchors, videos, reference_video_id="pixel")
+    table = SyncTable(result.sync_points, result.effective_fps)
 
-    t_pixel_new = table.frame_to_global_time(77965, "pixel")
-    gopro_at_new = table.lookup(t_pixel_new, "gopro")
+    # Both anchor timestamps are exact in the OLS fit.
+    for pixel_f, gopro_f in [(800, 1200), (77965, 80442)]:
+        t_pixel = table.frame_to_global_time(pixel_f, "pixel")
+        gopro_at_t = table.lookup(t_pixel, "gopro")
+        assert gopro_at_t == pytest.approx(gopro_f, abs=1), (
+            f"Anchor residual too large at pixel={pixel_f}: got gopro={gopro_at_t}, expected {gopro_f}"
+        )
 
-    # If both anchors were consistent, gopro_at_new == 80442.
-    # If only old anchor sets offset, gopro_at_new ≠ 80442 (large error).
-    # Document the magnitude so we can detect regressions.
-    residual_frames = abs(gopro_at_new - 80442)
-    # Two inconsistent anchors → residual = |offset_old - offset_new| * fps
-    # = |(800-1200)/120 - (77965-80442)/120| * 120
-    # = |(-400 - (-2477))/120| * 120 = 2077 frames
-    assert residual_frames == pytest.approx(2077, abs=2), (
-        "Expected ~2077 frame residual from two conflicting anchors; "
-        f"got {residual_frames}. If this fails, check if drift correction was added."
-    )
+    # Effective fps deviates from nominal (two points with different implied offsets
+    # at the same nominal fps means the solver infers a different fps).
+    assert result.effective_fps["gopro"] == pytest.approx(123.2, abs=1.0)

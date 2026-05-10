@@ -249,9 +249,5 @@ class PairScrubber(QWidget):
             self._tgt_pane.step(-step)
         elif key == Qt.Key.Key_L:
             self._tgt_pane.step(step)
-        elif key == Qt.Key.Key_Left:
-            self.timeline_seek_step.emit(-step)
-        elif key == Qt.Key.Key_Right:
-            self.timeline_seek_step.emit(step)
         else:
             super().keyPressEvent(event)

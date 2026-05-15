@@ -56,7 +56,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import logging
+
 from posetrak.db.db import generate_id
+from .intrinsics_calib_dialog import IntrinsicsCalibDialog
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Tree item roles
@@ -377,10 +382,12 @@ class ModeDialog(QDialog):
         model_id: str,
         model_name: str,
         mode_id: str | None = None,
+        session_conn: sqlite3.Connection | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._conn = conn
+        self._session_conn = session_conn if session_conn is not conn else None
         self._model_id = model_id
         self._mode_id = mode_id
 
@@ -414,10 +421,13 @@ class ModeDialog(QDialog):
         calib_btns = QHBoxLayout()
         self._import_btn = QPushButton("Import calibration…")
         self._import_btn.clicked.connect(self._import_calib)
+        self._calibrate_btn = QPushButton("Calibrate from video…")
+        self._calibrate_btn.clicked.connect(self._calibrate_from_video)
         self._set_default_btn = QPushButton("Set as default")
         self._set_default_btn.clicked.connect(self._set_default)
         self._set_default_btn.setEnabled(False)
         calib_btns.addWidget(self._import_btn)
+        calib_btns.addWidget(self._calibrate_btn)
         calib_btns.addWidget(self._set_default_btn)
         calib_btns.addStretch()
 
@@ -451,6 +461,7 @@ class ModeDialog(QDialog):
             self._load(mode_id)
 
         self._import_btn.setEnabled(mode_id is not None)
+        self._calibrate_btn.setEnabled(mode_id is not None)
 
     def _load(self, mode_id: str) -> None:
         row = self._conn.execute(
@@ -499,6 +510,15 @@ class ModeDialog(QDialog):
         dlg = CalibrationImportDialog(self._conn, self._mode_id, mode_label, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._reload_calibrations()
+
+    def _calibrate_from_video(self) -> None:
+        mode_label = self._notes.text().strip() or f"{self._width.text()}×{self._height.text()}"
+        dlg = IntrinsicsCalibDialog(
+            self._conn, self._mode_id, mode_label,
+            session_conn=self._session_conn, parent=self,
+        )
+        dlg.calibration_saved.connect(lambda _: self._reload_calibrations())
+        dlg.exec()
 
     def _set_default(self) -> None:
         item = self._calib_list.currentItem()
@@ -553,6 +573,7 @@ class ModeDialog(QDialog):
 
         # New mode saved — stay open so the user can import a calibration.
         self._import_btn.setEnabled(True)
+        self._calibrate_btn.setEnabled(True)
         self._reload_calibrations()
         save_btn = self._dialog_btns.button(QDialogButtonBox.StandardButton.Save)
         if save_btn:
@@ -1015,9 +1036,18 @@ class CameraRegistryWidget(QDialog):
 
     cameras_changed = Signal()  # emitted when camera instances are added/edited/deleted
 
-    def __init__(self, conn: sqlite3.Connection, parent=None) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        session_conn: sqlite3.Connection | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._conn = conn
+        self._session_conn = session_conn if session_conn is not conn else None
+
+        if self._session_conn is not None:
+            self._sync_registry_to_session()
 
         self.setWindowTitle("Camera Registry")
         self.setMinimumSize(820, 560)
@@ -1110,6 +1140,119 @@ class CameraRegistryWidget(QDialog):
         main_layout.addLayout(close_row)
 
         self._reload()
+
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Registry → session DB sync
+    # ------------------------------------------------------------------
+
+    def _sync_registry_to_session(self) -> None:
+        """Copy camera_models, camera_modes, and intrinsics_calibrations from registry to session.
+
+        Runs once on open so the session DB stays self-contained even when
+        calibrations were previously saved only to the registry DB.
+        Uses INSERT OR IGNORE so existing rows are never overwritten.
+        """
+        reg = self._conn
+        sess = self._session_conn
+        _log.debug("_sync_registry_to_session: starting registry→session sync")
+
+        # Verify session DB has expected tables
+        for tbl in ("camera_models", "camera_modes", "intrinsics_calibrations"):
+            has = sess.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
+            ).fetchone() is not None
+            if not has:
+                _log.warning("  session DB missing table '%s' — skipping sync", tbl)
+                return
+
+        old_factory = reg.row_factory
+        reg.row_factory = sqlite3.Row
+        try:
+            # Camera models — must be inserted before modes (FK dependency)
+            models = reg.execute(
+                "SELECT id, manufacturer, model_name, sensor_size FROM camera_models"
+            ).fetchall()
+            _log.debug("  registry camera_models: %d", len(models))
+            n_new = 0
+            for m in models:
+                r = sess.execute(
+                    "INSERT OR IGNORE INTO camera_models "
+                    "(id, manufacturer, model_name, sensor_size) VALUES (?,?,?,?)",
+                    (m["id"], m["manufacturer"], m["model_name"], m["sensor_size"]),
+                )
+                n_new += r.rowcount
+            _log.debug("  camera_models inserted (new): %d, already existed: %d",
+                       n_new, len(models) - n_new)
+
+            # Camera modes
+            modes = reg.execute(
+                "SELECT id, camera_model_id, width_px, height_px, nominal_fps, "
+                "codec, notes, default_intrinsics_calibration_id FROM camera_modes"
+            ).fetchall()
+            _log.debug("  registry camera_modes: %d", len(modes))
+            n_new = 0
+            for m in modes:
+                r = sess.execute(
+                    "INSERT OR IGNORE INTO camera_modes "
+                    "(id, camera_model_id, width_px, height_px, nominal_fps, codec, notes) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (m["id"], m["camera_model_id"], m["width_px"], m["height_px"],
+                     m["nominal_fps"], m["codec"], m["notes"]),
+                )
+                if r.rowcount == 0:
+                    _log.debug("    SKIP mode %s (FK fail or already exists) model_id=%s",
+                               m["id"], m["camera_model_id"])
+                n_new += r.rowcount
+            _log.debug("  camera_modes inserted (new): %d, skipped: %d",
+                       n_new, len(modes) - n_new)
+
+            # Intrinsics calibrations
+            cals = reg.execute(
+                "SELECT id, camera_mode_id, calibrated_at, calibration_tool, "
+                "distortion_model, fx, fy, cx, cy, dist_coeffs, rms_error, notes, "
+                "image_width, image_height, matrix_original, undistort_mapx, undistort_mapy "
+                "FROM intrinsics_calibrations"
+            ).fetchall()
+            _log.debug("  registry intrinsics_calibrations: %d", len(cals))
+            n_new = 0
+            for c in cals:
+                r = sess.execute(
+                    "INSERT OR IGNORE INTO intrinsics_calibrations "
+                    "(id, camera_mode_id, calibrated_at, calibration_tool, distortion_model, "
+                    "fx, fy, cx, cy, dist_coeffs, rms_error, notes, image_width, image_height, "
+                    "matrix_original, undistort_mapx, undistort_mapy) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (c["id"], c["camera_mode_id"], c["calibrated_at"], c["calibration_tool"],
+                     c["distortion_model"], c["fx"], c["fy"], c["cx"], c["cy"],
+                     c["dist_coeffs"], c["rms_error"], c["notes"], c["image_width"],
+                     c["image_height"], c["matrix_original"], c["undistort_mapx"], c["undistort_mapy"]),
+                )
+                if r.rowcount == 0:
+                    _log.debug("    SKIP calib %s (FK fail or already exists) mode_id=%s",
+                               c["id"], c["camera_mode_id"])
+                n_new += r.rowcount
+            _log.debug("  intrinsics_calibrations inserted (new): %d, skipped: %d",
+                       n_new, len(cals) - n_new)
+
+            # Sync default_intrinsics_calibration_id pointers
+            for m in modes:
+                if m["default_intrinsics_calibration_id"]:
+                    sess.execute(
+                        "UPDATE camera_modes SET default_intrinsics_calibration_id=? WHERE id=?",
+                        (m["default_intrinsics_calibration_id"], m["id"]),
+                    )
+            sess.commit()
+
+            # Post-sync: verify the JOIN that _load_states_from_images relies on
+            n_cams = sess.execute("""
+                SELECT COUNT(DISTINCT ci.id) FROM camera_instances ci
+                JOIN camera_modes cm ON cm.camera_model_id = ci.camera_model_id
+                JOIN intrinsics_calibrations ic ON ic.camera_mode_id = cm.id
+            """).fetchone()[0]
+            _log.debug("  post-sync: %d camera_instance(s) have calibration via JOIN", n_cams)
+        finally:
+            reg.row_factory = old_factory
 
     # ------------------------------------------------------------------
     # Reload / refresh
@@ -1223,7 +1366,8 @@ class CameraRegistryWidget(QDialog):
         # If a mode is selected, add to its parent model
         model_id = item.data(0, _MODEL_ID_ROLE) or item.data(0, _ID_ROLE)
         model_name = (item.parent() or item).text(0)
-        dlg = ModeDialog(self._conn, model_id, model_name, parent=self)
+        dlg = ModeDialog(self._conn, model_id, model_name,
+                         session_conn=self._session_conn, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._reload_tree()
 
@@ -1236,7 +1380,8 @@ class CameraRegistryWidget(QDialog):
         if is_mode:
             model_id = item.data(0, _MODEL_ID_ROLE)
             model_name = item.parent().text(0) if item.parent() else ""
-            dlg = ModeDialog(self._conn, model_id, model_name, mode_id=row_id, parent=self)
+            dlg = ModeDialog(self._conn, model_id, model_name, mode_id=row_id,
+                             session_conn=self._session_conn, parent=self)
         else:
             dlg = ModelDialog(self._conn, model_id=row_id, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:

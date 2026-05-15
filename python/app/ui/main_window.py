@@ -285,8 +285,11 @@ class MainWindow(QMainWindow):
 
     def _on_manage_cameras(self) -> None:
         from app.setup.camera_registry import CameraRegistryWidget
-        conn = self._registry_conn
-        dlg = CameraRegistryWidget(conn, parent=self)
+        conn = self._registry_conn or self._session_conn
+        if conn is None:
+            return
+        session_conn = self._session_conn if conn is not self._session_conn else None
+        dlg = CameraRegistryWidget(conn, session_conn=session_conn, parent=self)
         dlg.exec()
 
     def _launch_capture_wizard(self) -> None:
@@ -319,7 +322,8 @@ class MainWindow(QMainWindow):
 
         def _open_camera_registry() -> None:
             conn = wizard.registry_conn or wizard.session_conn
-            dlg = CameraRegistryWidget(conn, parent=wizard)
+            session_conn = wizard.session_conn if conn is not wizard.session_conn else None
+            dlg = CameraRegistryWidget(conn, session_conn=session_conn, parent=wizard)
             dlg.cameras_changed.connect(shots_page.refresh_camera_combos)
             dlg.exec()
 

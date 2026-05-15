@@ -7,6 +7,17 @@
 -- are stored as TEXT IDs but CANNOT use SQLite REFERENCES across separate DB files.
 -- Such cross-DB constraints are noted in comments only.
 --
+-- SELF-CONTAINMENT REQUIREMENT:
+--   A session DB file must be fully portable — it must not depend on the registry DB
+--   being present on the destination machine.  Concretely this means:
+--     • camera_models, camera_modes, camera_instances rows that are referenced by
+--       this session are duplicated into the session DB at creation time.
+--     • intrinsics_calibrations rows are mirrored into the session DB whenever a
+--       calibration is saved (even if the primary write goes to the registry DB).
+--   The UI enforces this by writing to both connections whenever a separate registry
+--   DB is in use (see IntrinsicsCalibDialog._mirror_to_session and the dual-write
+--   pattern in InlineCreateModelDialog / InlineCreateCameraDialog).
+--
 -- Terminology:
 --   capture     — one continuous camera recording (cameras on → off); owns video files.
 --   trial       — a named, bounded time window within a capture (one technique/attempt).

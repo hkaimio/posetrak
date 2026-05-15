@@ -56,7 +56,8 @@ def main() -> int:
                 "Open or create a session database first.",
             )
             return
-        dlg = CameraRegistryWidget(conn, parent=wizard)
+        session_conn = wizard.session_conn if conn is not wizard.session_conn else None
+        dlg = CameraRegistryWidget(conn, session_conn=session_conn, parent=wizard)
         dlg.cameras_changed.connect(shots_page.refresh_camera_combos)
         dlg.exec()
 

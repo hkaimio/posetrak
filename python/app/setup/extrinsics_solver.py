@@ -915,10 +915,15 @@ def run_calibration(
     ba_max_nfev: int = 2000,
     progress_cb=None,
     cancel_event=None,
+    cp_only: bool = False,
 ) -> CalibResult:
     """Run the full pipeline.  states[*].image must be loaded before calling.
 
-    Pipeline:
+    When cp_only=True, skip SIFT matching/BFS/triangulation entirely and rely
+    solely on control-point observations.  Each camera must have ≥4 world-xyz
+    CP observations to be PnP-initialised; cameras without them stay unsolved.
+
+    Otherwise the full pipeline runs:
     1. PnP-initialise cameras that have ≥4 world-xyz control point observations.
     2. SIFT match all pairs; BFS from a PnP-initialised root where possible.
     3. Cheirality filter: remove SIFT pairs where most triangulated points lie
@@ -949,32 +954,43 @@ def run_calibration(
 
     _check_cancel()
 
-    # --- Stage 1-2: SIFT matching + BFS pose chain ---
-    n_pairs = n * (n - 1) // 2
-    _prog(f"SIFT matching {n} cameras ({n_pairs} pairs)…")
-    pair_matches = match_all_pairs(
-        states, ratio=sift_ratio, min_inliers=sift_min_inliers,
-        progress_cb=progress_cb, cancel_event=cancel_event,
-    )
-    _prog(f"Chaining poses from {len(pair_matches)} matched pairs…")
-    unsolved = chain_poses_bfs(states, pair_matches)
+    if cp_only:
+        _prog("CP-only mode: skipping SIFT matching…")
+        pair_matches_filtered: dict[tuple[str, str], PairMatch] = {}
+        points_3d: list[tuple[np.ndarray, dict]] = []
+        unsolved = [s.video_id for s in states if s.R is None]
+        if unsolved:
+            _log.warning(
+                "CP-only: %d cameras unsolved (need ≥4 world-xyz CPs each): %s",
+                len(unsolved), unsolved,
+            )
+    else:
+        # --- Stage 1-2: SIFT matching + BFS pose chain ---
+        n_pairs = n * (n - 1) // 2
+        _prog(f"SIFT matching {n} cameras ({n_pairs} pairs)…")
+        pair_matches = match_all_pairs(
+            states, ratio=sift_ratio, min_inliers=sift_min_inliers,
+            progress_cb=progress_cb, cancel_event=cancel_event,
+        )
+        _prog(f"Chaining poses from {len(pair_matches)} matched pairs…")
+        unsolved = chain_poses_bfs(states, pair_matches)
 
-    _check_cancel()
+        _check_cancel()
 
-    # --- Stage 2b: Cheirality filter (remove non-overlapping camera pairs) ---
-    _prog("Filtering non-overlapping camera pairs (cheirality check)…")
-    pair_matches_filtered = filter_sift_by_cheirality(states, pair_matches)
-    removed = len(pair_matches) - len(pair_matches_filtered)
-    if removed:
-        _log.info("Cheirality filter removed %d spurious SIFT pairs", removed)
+        # --- Stage 2b: Cheirality filter ---
+        _prog("Filtering non-overlapping camera pairs (cheirality check)…")
+        pair_matches_filtered = filter_sift_by_cheirality(states, pair_matches)
+        removed = len(pair_matches) - len(pair_matches_filtered)
+        if removed:
+            _log.info("Cheirality filter removed %d spurious SIFT pairs", removed)
 
-    _check_cancel()
+        _check_cancel()
 
-    # --- Stage 3: Triangulate with filtered pairs ---
-    _prog(f"Triangulating points from {len(pair_matches_filtered)} verified pairs…")
-    points_3d = triangulate_all_pairs(states, pair_matches_filtered)
+        # --- Stage 3: Triangulate ---
+        _prog(f"Triangulating points from {len(pair_matches_filtered)} verified pairs…")
+        points_3d = triangulate_all_pairs(states, pair_matches_filtered)
 
-    _check_cancel()
+        _check_cancel()
 
     # --- Stage 4: Bundle adjustment ---
     points_3d = run_bundle_adjustment(

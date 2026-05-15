@@ -70,6 +70,8 @@ from app.setup.extrinsics_solver import (
     CamCalibState,
     ControlPoint,
     _Cancelled,
+    _proj_matrix,
+    _undistort_pts,
     run_calibration,
 )
 from posetrak.db.db import generate_id as _generate_id
@@ -349,6 +351,9 @@ class _ClickableImageWidget(QWidget):
         self._sift_hi_obs: np.ndarray | None = None   # (1, 2) observed position
         self._sift_hi_proj: np.ndarray | None = None  # (1, 2) projected position
 
+        # Reprojection markers for control points (open circle+cross, same color as CP)
+        self._proj_markers: list[tuple[float, float, QColor]] = []
+
         self.setMinimumSize(200, 150)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)  # needed for smooth drag
@@ -372,8 +377,14 @@ class _ClickableImageWidget(QWidget):
         self._markers.append((x, y, color, label))
         self.update()
 
+    def add_proj_marker(self, x: float, y: float, color: QColor) -> None:
+        """Add a reprojection marker (open circle + crosshair) at image position (x, y)."""
+        self._proj_markers.append((x, y, color))
+        self.update()
+
     def clear_markers(self) -> None:
         self._markers.clear()
+        self._proj_markers.clear()
         self.update()
 
     def set_calib_status(self, text: str | None, error: bool = False) -> None:
@@ -593,7 +604,18 @@ class _ClickableImageWidget(QWidget):
             painter.setPen(QPen(QColor(255, 120, 120), 1, Qt.PenStyle.DashLine))
             painter.drawLine(int(wx_o), int(wy_o), int(wx_p), int(wy_p))
 
-        # Manual control point markers (solid colored circles)
+        # Reprojection markers (open circle + inner crosshair, same CP colour)
+        for mx, my, color in self._proj_markers:
+            wx, wy = self._img_to_widget(mx, my)
+            r = 8
+            arm = 5
+            painter.setPen(QPen(color, 1.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(int(wx) - r, int(wy) - r, r * 2, r * 2)
+            painter.drawLine(int(wx) - arm, int(wy), int(wx) + arm, int(wy))
+            painter.drawLine(int(wx), int(wy) - arm, int(wx), int(wy) + arm)
+
+        # Manual control point markers (solid colored circles) — drawn on top
         for mx, my, color, mlabel in self._markers:
             wx, wy = self._img_to_widget(mx, my)
             painter.setBrush(color)
@@ -729,11 +751,13 @@ class _SolveThread(QThread):
         self,
         states: list[CamCalibState],
         control_points: list[ControlPoint],
+        cp_only: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._states = states
         self._control_points = control_points
+        self._cp_only = cp_only
         self._cancel_event = threading.Event()
 
     def cancel(self) -> None:
@@ -745,6 +769,7 @@ class _SolveThread(QThread):
                 self._states, self._control_points,
                 progress_cb=lambda msg: self.progress.emit(msg),
                 cancel_event=self._cancel_event,
+                cp_only=self._cp_only,
             )
         except _Cancelled:
             self.cancelled.emit()
@@ -802,6 +827,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._sift_matches: dict[tuple[str, str], object] | None = None
         self._hov_vid: str | None = None
         self._hov_3d_pts: list[tuple[np.ndarray, dict]] = []
+        self._hov_cam_pt_idx: dict[str, list[int]] = {}
+        self._cp_3d: dict[str, np.ndarray] = {}
         self._states_by_id = {s.video_id: s for s in states}
 
         self._cam_widgets: dict[str, _ClickableImageWidget] = {}
@@ -866,6 +893,12 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._cancel_btn = QPushButton("Cancel")
         self._cancel_btn.clicked.connect(self._on_cancel_solve)
         self._cancel_btn.setVisible(False)
+        self._sift_check = QCheckBox("SIFT matching")
+        self._sift_check.setChecked(True)
+        self._sift_check.setToolTip(
+            "Use SIFT feature matching to initialise camera poses.\n"
+            "Uncheck to use only control points (requires ≥4 world-xyz CPs per camera)."
+        )
         self._status_label = QLabel(
             "Click 'Match & Solve' to run SIFT matching and bundle adjustment.  "
             "Optionally add control points first (press a camera image to place one)."
@@ -875,6 +908,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         solve_row = QHBoxLayout()
         solve_row.addWidget(self._solve_btn)
         solve_row.addWidget(self._cancel_btn)
+        solve_row.addWidget(self._sift_check)
         solve_row.addWidget(self._status_label, 1)
 
         # Dialog buttons
@@ -1071,6 +1105,20 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             for vid, (x, y) in cp.obs.items():
                 if vid in self._cam_widgets:
                     self._cam_widgets[vid].add_marker(x, y, color, mlabel)
+            # Reprojection marker (open circle+cross) if we have a 3D position
+            xyz = self._cp_3d.get(cp.name)
+            if xyz is None or self._result is None:
+                continue
+            for vid, w in self._cam_widgets.items():
+                state = self._result.cameras.get(vid)
+                if state is None or state.R is None:
+                    continue
+                rvec, _ = cv2.Rodrigues(state.R)
+                proj, _ = cv2.projectPoints(
+                    xyz.reshape(1, 3), rvec, state.t.reshape(3, 1), state.K, np.zeros(4)
+                )
+                px_, py_ = proj.reshape(2)
+                w.add_proj_marker(float(px_), float(py_), color)
 
     # ------------------------------------------------------------------
     # Solve
@@ -1084,6 +1132,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             s.t = None
         for w in self._cam_widgets.values():
             w.set_calib_status(None)
+        self._cp_3d = {}
+        self._refresh_markers()
 
         self._solve_btn.setVisible(False)
         self._cancel_btn.setVisible(True)
@@ -1091,7 +1141,10 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._accept_btn.setEnabled(False)
         self._status_label.setText("Starting…")
 
-        self._solve_thread = _SolveThread(self._states, self._control_points, parent=self)
+        cp_only = not self._sift_check.isChecked()
+        self._solve_thread = _SolveThread(
+            self._states, self._control_points, cp_only=cp_only, parent=self
+        )
         self._solve_thread.finished.connect(self._on_solve_done)
         self._solve_thread.error_occurred.connect(self._on_solve_error)
         self._solve_thread.progress.connect(self._status_label.setText)
@@ -1137,9 +1190,39 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._status_label.setText("\n".join(lines))
         self._accept_btn.setEnabled(n_solved > 0)
 
+        # Compute triangulated 3D positions for all CPs (for reprojection markers)
+        self._cp_3d = {}
+        state_by_id = result.cameras
+        for cp in self._control_points:
+            if cp.world_xyz is not None:
+                self._cp_3d[cp.name] = cp.world_xyz.astype(np.float64)
+                continue
+            solved_obs = []
+            for vid, (px, py) in cp.obs.items():
+                s = state_by_id.get(vid)
+                if s is None or s.R is None:
+                    continue
+                pts_u = _undistort_pts(np.array([[px, py]], dtype=np.float32), s)
+                solved_obs.append((vid, float(pts_u[0, 0]), float(pts_u[0, 1])))
+            if len(solved_obs) < 2:
+                continue
+            A_rows = []
+            for vid, px, py in solved_obs:
+                P = _proj_matrix(state_by_id[vid])
+                A_rows.append(px * P[2] - P[0])
+                A_rows.append(py * P[2] - P[1])
+            A = np.array(A_rows, dtype=np.float64)
+            _, _, Vt = np.linalg.svd(A)
+            h = Vt[-1]
+            if abs(h[3]) > 1e-10:
+                self._cp_3d[cp.name] = (h[:3] / h[3]).astype(np.float64)
+
+        self._refresh_markers()
+
         # Update per-camera badges; clear any stale SIFT overlays and highlights
         self._hov_vid = None
         self._hov_3d_pts = []
+        self._hov_cam_pt_idx = {}
         for state in self._states:
             vid = state.video_id
             if vid not in self._cam_widgets:
@@ -1156,17 +1239,21 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 w.set_calib_status(None)
 
     def _on_cam_hover(self, vid: str, entered: bool) -> None:
-        """Show/hide SIFT feature overlay when hovering over a camera image."""
+        """Show/hide SIFT feature overlay when hovering over a camera image.
+
+        The hovered camera shows its actual observed SIFT feature positions.
+        Other cameras show the actual matched feature positions (from obs_dict),
+        not reprojections — so diamonds in all cameras are real pixel measurements.
+        """
         if not entered or self._result is None:
             self._hov_vid = None
             self._hov_3d_pts = []
+            self._hov_cam_pt_idx = {}
             for w in self._cam_widgets.values():
                 w.set_sift_overlay(None)
                 w.set_sift_highlight(None, None)
             return
 
-        # Collect all 3D points observed in the hovered camera, preserving index order
-        # so that sift_feature_hovered indices map to this list.
         self._hov_vid = vid
         self._hov_3d_pts = []
         hov_obs_self: list[tuple[float, float]] = []
@@ -1177,52 +1264,58 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         if not self._hov_3d_pts:
             self._hov_vid = None
+            self._hov_cam_pt_idx = {}
             for w in self._cam_widgets.values():
                 w.set_sift_overlay(None)
                 w.set_sift_highlight(None, None)
             return
 
-        xyz_arr = np.array([pt[0] for pt in self._hov_3d_pts])  # (N, 3)
-
+        self._hov_cam_pt_idx = {}
         for v, w in self._cam_widgets.items():
             state = self._result.cameras.get(v)
-            if state is None or state.R is None or state.t is None:
+            if state is None or state.R is None:
                 w.set_sift_overlay(None)
+                self._hov_cam_pt_idx[v] = []
                 continue
 
             if v == vid:
+                # Hovered camera: actual observed positions (already collected)
                 pts = np.array(hov_obs_self, dtype=np.float32)
+                self._hov_cam_pt_idx[v] = list(range(len(self._hov_3d_pts)))
             else:
-                pts_cam = (state.R @ xyz_arr.T).T + state.t.flatten()  # (N, 3)
-                depth_ok = pts_cam[:, 2] > 0
-                if not np.any(depth_ok):
-                    w.set_sift_overlay(None)
-                    continue
-                pts_cam = pts_cam[depth_ok]
-                fx, fy = state.K[0, 0], state.K[1, 1]
-                cx, cy = state.K[0, 2], state.K[1, 2]
-                u = fx * pts_cam[:, 0] / pts_cam[:, 2] + cx
-                v_ = fy * pts_cam[:, 1] / pts_cam[:, 2] + cy
-                pts = np.stack([u, v_], axis=1).astype(np.float32)
+                # Other cameras: show actual matched positions for shared 3D points
+                pairs = [
+                    (obs[v], i)
+                    for i, (_, obs) in enumerate(self._hov_3d_pts)
+                    if v in obs
+                ]
+                if pairs:
+                    pts = np.array([p for p, _ in pairs], dtype=np.float32)
+                    self._hov_cam_pt_idx[v] = [i for _, i in pairs]
+                else:
+                    pts = None
+                    self._hov_cam_pt_idx[v] = []
 
-            w.set_sift_overlay(pts if len(pts) > 0 else None)
+            w.set_sift_overlay(pts if pts is not None and len(pts) > 0 else None)
 
     def _on_sift_feature_hovered(self, vid: str, idx: int) -> None:
-        """Highlight a single SIFT feature across all cameras.
+        """Highlight one SIFT feature across all cameras.
 
-        Orange crosshair = observed position in that camera.
-        Magenta X = projected position (where the solver places the 3D point).
-        Dashed line = residual vector between them.
+        In every camera: magenta X = reprojected 3D position.
+        In cameras that observed this feature: orange crosshair = actual observation.
+        Dashed line = residual between observed and reprojected.
         """
-        if idx < 0 or self._result is None or vid != self._hov_vid:
+        if idx < 0 or self._result is None:
             for w in self._cam_widgets.values():
                 w.set_sift_highlight(None, None)
             return
 
-        if idx >= len(self._hov_3d_pts):
+        # Map diamond index in camera vid → index into _hov_3d_pts
+        cam_idx_list = self._hov_cam_pt_idx.get(vid, [])
+        if idx >= len(cam_idx_list):
             return
-
-        xyz_world, obs_dict = self._hov_3d_pts[idx]
+        hov3d_idx = cam_idx_list[idx]
+        xyz_world, obs_dict = self._hov_3d_pts[hov3d_idx]
         xyz_arr = xyz_world.reshape(1, 3)
 
         for v, w in self._cam_widgets.items():
@@ -1231,7 +1324,6 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 w.set_sift_highlight(None, None)
                 continue
 
-            # Projected position for this camera
             pts_cam = (state.R @ xyz_arr.T).T + state.t.flatten()
             if pts_cam[0, 2] <= 0:
                 w.set_sift_highlight(None, None)
@@ -1242,12 +1334,10 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             proj_y = fy * pts_cam[0, 1] / pts_cam[0, 2] + cy
             proj_pos = np.array([[proj_x, proj_y]], dtype=np.float32)
 
-            # Observed position (only if this camera has an observation)
+            obs_pos = None
             if v in obs_dict:
                 ox, oy = obs_dict[v]
                 obs_pos = np.array([[ox, oy]], dtype=np.float32)
-            else:
-                obs_pos = None
 
             w.set_sift_highlight(obs_pos, proj_pos)
 

@@ -1526,9 +1526,18 @@ class SyncWidget(QWidget):
         self._time_display.setStyleSheet("font-family: monospace; font-size: 11px;")
         self._time_display.setFixedWidth(90)
 
+        self._export_btn = QPushButton("Export frames…")
+        self._export_btn.setToolTip(
+            "Save the current frame of every camera as a full-resolution PNG.\n"
+            "Useful for extrinsics calibration — capture all cameras at the same\n"
+            "shared event, then export and feed into Pose2Sim or similar."
+        )
+        self._export_btn.clicked.connect(self._on_export_frames)
+
         bottom_row = QHBoxLayout()
         bottom_row.addWidget(self._connectivity_label, stretch=1)
         bottom_row.addWidget(self._time_display)
+        bottom_row.addWidget(self._export_btn)
         bottom_row.addWidget(self._solve_btn)
         bottom_row.addWidget(self._led_btn)
 
@@ -1921,6 +1930,82 @@ class SyncWidget(QWidget):
         self._status_label.setText(msg)
         self._status_label.setStyleSheet("font-size: 11px; color: green;")
         self._led_btn.setEnabled(True)
+
+    def _on_export_frames(self) -> None:
+        import os
+        import re
+
+        import cv2
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+
+        prefix, ok = QInputDialog.getText(
+            self, "Export frames", "File prefix:", text="frame"
+        )
+        if not ok or not prefix:
+            return
+
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "Export frames — select output directory"
+        )
+        if not out_dir:
+            return
+
+        playhead_s = self._timeline._playhead_s
+
+        def _ts(t: float) -> str:
+            mm = int(t // 60)
+            ss_f = t % 60
+            ss = int(ss_f)
+            ppp = int(round((ss_f - ss) * 1000))
+            return f"{mm:02d}_{ss:02d}_{ppp:03d}"
+
+        def _cam(label: str) -> str:
+            return re.sub(r"[^\w]", "_", label).strip("_")
+
+        exported: list[str] = []
+        failed: list[str] = []
+
+        for sv in self._videos:
+            if playhead_s is not None and self._sync_table is not None:
+                frame = self._sync_table.lookup(playhead_s, sv.id)
+                if frame is None or frame < sv.first_video_frame:
+                    continue  # camera not yet active at this timestamp
+            else:
+                ref_vid = self._ref_combo.currentData()
+                tgt_vid = self._tgt_combo.currentData()
+                if sv.id == ref_vid:
+                    frame = self._pair.ref_frame
+                elif sv.id == tgt_vid:
+                    frame = self._pair.target_frame
+                else:
+                    frame = 0
+
+            t = playhead_s if playhead_s is not None else 0.0
+            fname = f"{prefix}_{_ts(t)}_{_cam(sv.camera_label)}_{frame:06d}.png"
+            out_path = os.path.join(out_dir, fname)
+
+            cap = cv2.VideoCapture(sv.file_path)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
+            ret, img = cap.read()
+            cap.release()
+            if ret:
+                cv2.imwrite(out_path, img)
+                exported.append(fname)
+            else:
+                failed.append(sv.camera_label)
+
+        if failed:
+            QMessageBox.warning(
+                self,
+                "Export frames",
+                f"Exported {len(exported)} frames.\nFailed to read: {', '.join(failed)}",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Export frames",
+                f"Exported {len(exported)} frame(s) to:\n{out_dir}",
+            )
 
     def _on_led_sync(self) -> None:
         row = self._ctx._conn.execute(

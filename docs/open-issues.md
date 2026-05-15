@@ -128,6 +128,12 @@ consistent with `compute_state_error` in `ukf.cpp` (`q_ref⁻¹ * q_state`).
 
 ## Active
 
+- **LED pairwise sync less accurate than manual sync in practice** (2026-05-15)
+  - The pairwise LED sync (`run_led_sync_pairwise`) was tested on a real multi-camera session and produced sync that was less accurate than the existing manual sync, despite passing regression tests on synthetic data.
+  - Root cause not yet identified. Possible causes: event detection parameters (prominence, smooth_win) tuned for synthetic blinks do not generalise to real LED signals; RANSAC inlier threshold too tight or too loose; `_build_combined_observations` incorrectly excluding useful manual anchors when LED pairs report nominal success.
+  - Until the root cause is identified, manual sync + solve is the preferred production path. The pairwise LED implementation remains in the codebase but should not be treated as reliable.
+  - Suggested debugging approach: use "Dump brightness data" to inspect raw signals and detected event times; compare LED inlier pair timestamps against manually marked anchor frames for the same events.
+
 - **QComboBox popups do not close on item selection (XWayland / WSL2)** (2026-04-07)
   - On the development machine (WSL2 + XWayland), every `QComboBox` popup stays visible
     after the user clicks an item; it only dismisses when the user clicks elsewhere.

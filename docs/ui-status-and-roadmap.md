@@ -31,8 +31,9 @@ tracker, exporting BVH — is CLI-only.
 | Intrinsics entry — manual (pinhole + Brown-Conrady only) | Done; fisheye model not selectable |
 | Shots page — add shot, attach video files | Done |
 | Camera instance and mode assignment per video | Done |
-| Sync page — LED auto-sync with ROI selection | Done |
+| Sync page — LED auto-sync with ROI selection | Done (pairwise graph solver; accuracy on real data unverified — see open issues) |
 | Sync page — manual frame-stepping fallback | Done |
+| Sync page — Export current frames of all cameras as PNG | Done |
 
 ### posetrak-pose window
 

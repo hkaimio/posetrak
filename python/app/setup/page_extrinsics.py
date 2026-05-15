@@ -26,11 +26,15 @@ ExtrinsicsImportDialog
 from __future__ import annotations
 
 import datetime
+import logging
 import re
 import sqlite3
 import struct
+import threading
 import tomllib
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 import cv2
 import numpy as np
@@ -65,6 +69,7 @@ from app.setup.extrinsics_solver import (
     CalibResult,
     CamCalibState,
     ControlPoint,
+    _Cancelled,
     run_calibration,
 )
 from posetrak.db.db import generate_id as _generate_id
@@ -88,7 +93,7 @@ _CP_COLORS = [
 # Label-matching helpers (mirrors calibrate_from_exports.py — kept in sync)
 # ---------------------------------------------------------------------------
 
-_FNAME_RE_UI = re.compile(r"^.+?_\d{2}_\d{2}_\d{3}_(.+?)_\d+\.png$", re.IGNORECASE)
+_FNAME_RE_UI = re.compile(r"^.+?_\d{1,2}_\d{1,2}_\d{1,3}_(.+?)_\d+\.png$", re.IGNORECASE)
 
 
 def _ui_label_from_filename(fname: str) -> str | None:
@@ -116,68 +121,120 @@ def _load_states_from_images(
     conn: sqlite3.Connection,
     shot_id: str,
 ) -> list[CamCalibState]:
-    """Load CamCalibState list by matching exported PNGs to cameras in the DB.
+    """Load CamCalibState list by matching PNG files to calibrated cameras.
 
-    Uses the same label-matching logic as calibrate_from_exports.py.
-    Returns only cameras that have intrinsics AND a matching PNG.
+    Searches ALL camera instances in the session DB that have any intrinsics
+    calibration — not just those with capture_videos entries for the current shot.
+    The session DB must be self-contained (all cameras and intrinsics used by the
+    session must be present there).  When adding intrinsics via the camera registry
+    dialog, they are mirrored to the session DB automatically.
+
+    Priority for picking the calibration:
+      1. Per-video override in capture_videos.intrinsics_calibration_id
+      2. Mode default (camera_modes.default_intrinsics_calibration_id)
+      3. Latest calibration for the camera's mode
     """
+    final_calib: dict[str, str] = {}  # cam_label → calibration_id
+
     old_factory = conn.row_factory
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute(
+        # Diagnostic: log session DB state before querying
+        n_models = conn.execute("SELECT COUNT(*) FROM camera_models").fetchone()[0]
+        n_modes  = conn.execute("SELECT COUNT(*) FROM camera_modes").fetchone()[0]
+        n_cals   = conn.execute("SELECT COUNT(*) FROM intrinsics_calibrations").fetchone()[0]
+        n_insts  = conn.execute("SELECT COUNT(*) FROM camera_instances").fetchone()[0]
+        _log.debug(
+            "_load_states: session DB has %d models, %d modes, %d calibrations, %d instances",
+            n_models, n_modes, n_cals, n_insts,
+        )
+        inst_labels = [r[0] for r in conn.execute("SELECT label FROM camera_instances").fetchall()]
+        _log.debug("  camera_instances labels: %s", inst_labels)
+
+        # Registry-wide search: any camera instance whose model has a calibrated mode.
+        # ORDER BY puts default calibrations first, then newest — first row per label wins.
+        for r in conn.execute(
             """
-            SELECT ci.label AS cam_label,
-                   ci.id AS cam_instance_id,
-                   COALESCE(cv.intrinsics_calibration_id, ic.id) AS intrinsics_calibration_id
+            SELECT ci.label AS cam_label, ic.id AS calib_id,
+                   (cm.default_intrinsics_calibration_id = ic.id) AS is_default
+            FROM camera_instances ci
+            JOIN camera_modes cm ON cm.camera_model_id = ci.camera_model_id
+            JOIN intrinsics_calibrations ic ON ic.camera_mode_id = cm.id
+            ORDER BY is_default DESC, ic.calibrated_at DESC
+            """
+        ).fetchall():
+            if r["cam_label"] not in final_calib:
+                final_calib[r["cam_label"]] = r["calib_id"]
+
+        _log.debug("  cameras with calibration via JOIN: %s", list(final_calib.keys()))
+
+        # Per-video override from capture_videos for this shot takes highest priority.
+        for r in conn.execute(
+            """
+            SELECT ci.label AS cam_label, cv.intrinsics_calibration_id
             FROM capture_videos cv
             JOIN camera_instances ci ON ci.id = cv.camera_instance_id
-            LEFT JOIN camera_modes cm ON cm.id = cv.camera_mode_id
-            LEFT JOIN intrinsics_calibrations ic ON ic.camera_mode_id = cm.id
+            WHERE cv.shot_id = ? AND cv.intrinsics_calibration_id IS NOT NULL
+            """,
+            (shot_id,),
+        ).fetchall():
+            final_calib[r["cam_label"]] = r["intrinsics_calibration_id"]
+
+        # Collect all labels we know about (with or without intrinsics) for matching.
+        all_labels: set[str] = set(final_calib.keys())
+        for r in conn.execute(
+            """
+            SELECT ci.label AS cam_label
+            FROM capture_videos cv
+            JOIN camera_instances ci ON ci.id = cv.camera_instance_id
             WHERE cv.shot_id = ?
             """,
             (shot_id,),
-        ).fetchall()
+        ).fetchall():
+            all_labels.add(r["cam_label"])
 
         intrinsics: dict[str, dict] = {}
-        all_labels: list[str] = []
-        for r in rows:
-            label = r["cam_label"]
-            all_labels.append(label)
-            if r["intrinsics_calibration_id"] is None:
-                continue
+        for label, calib_id in final_calib.items():
             ic = conn.execute(
-                "SELECT * FROM intrinsics_calibrations WHERE id = ?",
-                (r["intrinsics_calibration_id"],),
+                "SELECT * FROM intrinsics_calibrations WHERE id = ?", (calib_id,)
             ).fetchone()
             if ic is None:
                 continue
             fx, fy, cx, cy = ic["fx"], ic["fy"], ic["cx"], ic["cy"]
             K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+            K_orig = K.copy()
             if ic["matrix_original"]:
                 vals = struct.unpack("<9d", bytes(ic["matrix_original"]))
                 K_orig = np.array(vals).reshape(3, 3)
-            else:
-                K_orig = K.copy()
             if ic["dist_coeffs"]:
                 n = len(bytes(ic["dist_coeffs"])) // 8
                 dist = np.array(struct.unpack(f"<{n}d", bytes(ic["dist_coeffs"]))).reshape(1, -1)
             else:
                 dist = np.zeros((1, 4))
-            fisheye = ic["distortion_model"] == "fisheye"
-            intrinsics[label] = {"K": K, "K_orig": K_orig, "dist": dist, "fisheye": fisheye}
+            intrinsics[label] = {
+                "K": K, "K_orig": K_orig, "dist": dist,
+                "fisheye": ic["distortion_model"] == "fisheye",
+            }
     finally:
         conn.row_factory = old_factory
 
+    all_labels_list = list(all_labels)
     states: list[CamCalibState] = []
     for png in sorted(images_dir.glob("*.png")):
         file_label = _ui_label_from_filename(png.name)
         if file_label is None:
+            print(f"  SKIP {png.name} — filename doesn't match expected pattern")
             continue
-        db_label = _ui_match_label(file_label, all_labels)
-        if db_label is None or db_label not in intrinsics:
+        db_label = _ui_match_label(file_label, all_labels_list)
+        if db_label is None:
+            print(f"  SKIP {png.name} — '{file_label}' not found in camera registry")
+            continue
+        if db_label not in intrinsics:
+            print(f"  SKIP {png.name} — '{db_label}' has no intrinsics calibration")
             continue
         img = cv2.imread(str(png))
         if img is None:
+            print(f"  SKIP {png.name} — could not read image")
             continue
         intr = intrinsics[db_label]
         states.append(CamCalibState(
@@ -189,6 +246,7 @@ def _load_states_from_images(
             fisheye=intr["fisheye"],
             image=img,
         ))
+        print(f"  LOAD {db_label} ({img.shape[1]}×{img.shape[0]}) from {png.name}")
     return states
 
 
@@ -250,6 +308,8 @@ class _ClickableImageWidget(QWidget):
     """
 
     point_set = Signal(float, float)   # original image coords on mouse release
+    hovered = Signal(bool)             # True = mouse entered, False = left
+    sift_feature_hovered = Signal(int) # index in _sift_pts nearest mouse, -1 = none
 
     def __init__(self, cam_label: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -281,6 +341,14 @@ class _ClickableImageWidget(QWidget):
         self._status_text: str | None = None
         self._status_error: bool = False
 
+        # SIFT feature overlay (set by parent dialog on hover)
+        self._sift_pts: np.ndarray | None = None  # Nx2 undistorted image coords
+        self._near_sift_idx: int = -1             # index of nearest SIFT pt to cursor
+
+        # Per-feature highlight (set by parent on feature hover)
+        self._sift_hi_obs: np.ndarray | None = None   # (1, 2) observed position
+        self._sift_hi_proj: np.ndarray | None = None  # (1, 2) projected position
+
         self.setMinimumSize(200, 150)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)  # needed for smooth drag
@@ -311,6 +379,22 @@ class _ClickableImageWidget(QWidget):
     def set_calib_status(self, text: str | None, error: bool = False) -> None:
         self._status_text = text
         self._status_error = error
+        self.update()
+
+    def set_sift_overlay(self, pts: np.ndarray | None) -> None:
+        """Set SIFT match points to overlay (Nx2 undistorted image coords, or None)."""
+        self._sift_pts = pts
+        self._near_sift_idx = -1
+        self._sift_hi_obs = None
+        self._sift_hi_proj = None
+        self.update()
+
+    def set_sift_highlight(
+        self, obs: np.ndarray | None, proj: np.ndarray | None
+    ) -> None:
+        """Highlight one SIFT feature: observed position (orange) and/or projected (magenta)."""
+        self._sift_hi_obs = obs
+        self._sift_hi_proj = proj
         self.update()
 
     # ------------------------------------------------------------------
@@ -460,6 +544,56 @@ class _ClickableImageWidget(QWidget):
         painter.drawText(2, 13, f"{pct}%")
 
     def _draw_markers(self, painter: QPainter) -> None:
+        # SIFT match overlay (small cyan diamonds)
+        if self._sift_pts is not None and len(self._sift_pts) > 0:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            r = 5
+            for i, (ix, iy) in enumerate(self._sift_pts):
+                wx, wy = self._img_to_widget(float(ix), float(iy))
+                # Hovered feature drawn larger in a brighter colour
+                if i == self._near_sift_idx:
+                    painter.setPen(QPen(QColor(0, 255, 255), 2))
+                    r2 = 7
+                else:
+                    painter.setPen(QPen(QColor(0, 200, 200), 1.5))
+                    r2 = r
+                diamond = [
+                    (int(wx), int(wy) - r2),
+                    (int(wx) + r2, int(wy)),
+                    (int(wx), int(wy) + r2),
+                    (int(wx) - r2, int(wy)),
+                ]
+                for j in range(4):
+                    painter.drawLine(diamond[j][0], diamond[j][1],
+                                     diamond[(j + 1) % 4][0], diamond[(j + 1) % 4][1])
+
+        # Per-feature highlight: observed (orange crosshair) and projected (magenta X)
+        # with a dashed line connecting them
+        wx_o = wy_o = wx_p = wy_p = None
+        if self._sift_hi_obs is not None and len(self._sift_hi_obs) > 0:
+            ox, oy = float(self._sift_hi_obs[0, 0]), float(self._sift_hi_obs[0, 1])
+            wx_o, wy_o = self._img_to_widget(ox, oy)
+            ro = 9
+            painter.setPen(QPen(QColor(255, 160, 0), 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(int(wx_o) - ro, int(wy_o) - ro, ro * 2, ro * 2)
+            painter.drawLine(int(wx_o) - ro, int(wy_o), int(wx_o) + ro, int(wy_o))
+            painter.drawLine(int(wx_o), int(wy_o) - ro, int(wx_o), int(wy_o) + ro)
+
+        if self._sift_hi_proj is not None and len(self._sift_hi_proj) > 0:
+            px_, py_ = float(self._sift_hi_proj[0, 0]), float(self._sift_hi_proj[0, 1])
+            wx_p, wy_p = self._img_to_widget(px_, py_)
+            rp = 7
+            painter.setPen(QPen(QColor(255, 60, 220), 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawLine(int(wx_p) - rp, int(wy_p) - rp, int(wx_p) + rp, int(wy_p) + rp)
+            painter.drawLine(int(wx_p) - rp, int(wy_p) + rp, int(wx_p) + rp, int(wy_p) - rp)
+
+        if wx_o is not None and wx_p is not None:
+            painter.setPen(QPen(QColor(255, 120, 120), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(wx_o), int(wy_o), int(wx_p), int(wy_p))
+
+        # Manual control point markers (solid colored circles)
         for mx, my, color, mlabel in self._markers:
             wx, wy = self._img_to_widget(mx, my)
             painter.setBrush(color)
@@ -503,9 +637,26 @@ class _ClickableImageWidget(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        pos = event.position()
+        # SIFT feature proximity detection (fit-view only, not during zoom/drag)
+        if not self._zoom_active and self._sift_pts is not None and len(self._sift_pts) > 0:
+            wx, wy = pos.x(), pos.y()
+            threshold = 15.0
+            nearest = -1
+            best = threshold
+            for i, (ix_, iy_) in enumerate(self._sift_pts):
+                sx, sy = self._img_to_widget(float(ix_), float(iy_))
+                d = ((sx - wx) ** 2 + (sy - wy) ** 2) ** 0.5
+                if d < best:
+                    best = d
+                    nearest = i
+            if nearest != self._near_sift_idx:
+                self._near_sift_idx = nearest
+                self.sift_feature_hovered.emit(nearest)
+                self.update()
+
         if not self._zoom_active or self._img_bgr is None:
             return
-        pos = event.position()
         ix, iy = self._widget_to_img(pos.x(), pos.y())
         h_img, w_img = self._img_bgr.shape[:2]
         ix = max(0.0, min(float(w_img - 1), ix))
@@ -536,10 +687,19 @@ class _ClickableImageWidget(QWidget):
         final = self._drag_img
         self._zoom_active = False
         self._drag_img = None
-        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.unsetCursor()
         self.update()
         if final is not None:
             self.point_set.emit(float(final[0]), float(final[1]))
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self.hovered.emit(True)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.hovered.emit(False)
+        if self._near_sift_idx != -1:
+            self._near_sift_idx = -1
+            self.sift_feature_hovered.emit(-1)
 
     def _clamp_zoom_origin(self) -> None:
         """Keep zoom pan within image bounds."""
@@ -562,6 +722,8 @@ class _ClickableImageWidget(QWidget):
 class _SolveThread(QThread):
     finished = Signal(object)      # CalibResult
     error_occurred = Signal(str)
+    progress = Signal(str)
+    cancelled = Signal()
 
     def __init__(
         self,
@@ -572,13 +734,31 @@ class _SolveThread(QThread):
         super().__init__(parent)
         self._states = states
         self._control_points = control_points
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
 
     def run(self) -> None:
         try:
-            result = run_calibration(self._states, self._control_points)
-            self.finished.emit(result)
+            result = run_calibration(
+                self._states, self._control_points,
+                progress_cb=lambda msg: self.progress.emit(msg),
+                cancel_event=self._cancel_event,
+            )
+        except _Cancelled:
+            self.cancelled.emit()
+            return
         except Exception as exc:  # noqa: BLE001
-            self.error_occurred.emit(str(exc))
+            if not self._cancel_event.is_set():
+                self.error_occurred.emit(str(exc))
+            else:
+                self.cancelled.emit()
+            return
+        if not self._cancel_event.is_set():
+            self.finished.emit(result)
+        else:
+            self.cancelled.emit()
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +799,11 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self.setMinimumSize(960, 640)
         self.resize(1200, 760)
 
+        self._sift_matches: dict[tuple[str, str], object] | None = None
+        self._hov_vid: str | None = None
+        self._hov_3d_pts: list[tuple[np.ndarray, dict]] = []
+        self._states_by_id = {s.video_id: s for s in states}
+
         self._cam_widgets: dict[str, _ClickableImageWidget] = {}
         for state in states:
             w = _ClickableImageWidget(state.label)
@@ -626,6 +811,14 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 w.set_image(state.image)
             vid = state.video_id
             w.point_set.connect(lambda x, y, v=vid: self._on_cam_click(v, x, y))
+            w.hovered.connect(lambda entered, v=vid: self._on_cam_hover(v, entered))
+            w.sift_feature_hovered.connect(
+                lambda idx, v=vid: self._on_sift_feature_hovered(v, idx)
+            )
+            w.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            w.customContextMenuRequested.connect(
+                lambda pos, v=vid: self._on_cam_context_menu(v, pos)
+            )
             self._cam_widgets[state.video_id] = w
 
         self._build_ui()
@@ -670,6 +863,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # Solve row
         self._solve_btn = QPushButton("Match && Solve")
         self._solve_btn.clicked.connect(self._on_solve)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.clicked.connect(self._on_cancel_solve)
+        self._cancel_btn.setVisible(False)
         self._status_label = QLabel(
             "Click 'Match & Solve' to run SIFT matching and bundle adjustment.  "
             "Optionally add control points first (press a camera image to place one)."
@@ -678,6 +874,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         solve_row = QHBoxLayout()
         solve_row.addWidget(self._solve_btn)
+        solve_row.addWidget(self._cancel_btn)
         solve_row.addWidget(self._status_label, 1)
 
         # Dialog buttons
@@ -703,6 +900,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         hint = QLabel(
             "Select a point, then press and drag on camera images to place it precisely. "
+            "Double-click a point to rename it. "
+            "Right-click a camera to remove just that camera's observation. "
             "Set World position to fix scale / origin in BA."
         )
         hint.setWordWrap(True)
@@ -710,6 +909,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         self._cp_list = QListWidget()
         self._cp_list.currentRowChanged.connect(self._on_cp_selected)
+        self._cp_list.itemDoubleClicked.connect(self._rename_control_point)
 
         add_del = QHBoxLayout()
         add_btn = QPushButton("Add")
@@ -763,14 +963,21 @@ class ExtrinsicsAutoCalibDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _add_control_point(self) -> None:
-        default = f"CP{len(self._control_points) + 1}"
-        name, ok = QInputDialog.getText(self, "Add Control Point", "Name:", text=default)
-        if not ok or not name.strip():
-            return
-        cp = ControlPoint(name=name.strip())
+        name = f"CP{len(self._control_points) + 1}"
+        cp = ControlPoint(name=name)
         self._control_points.append(cp)
-        self._cp_list.addItem(name.strip())
+        self._cp_list.addItem(name)
         self._cp_list.setCurrentRow(len(self._control_points) - 1)
+
+    def _rename_control_point(self, item) -> None:
+        row = self._cp_list.row(item)
+        if row < 0 or row >= len(self._control_points):
+            return
+        cp = self._control_points[row]
+        name, ok = QInputDialog.getText(self, "Rename Control Point", "Name:", text=cp.name)
+        if ok and name.strip():
+            cp.name = name.strip()
+            item.setText(name.strip())
 
     def _delete_control_point(self) -> None:
         row = self._cp_list.currentRow()
@@ -832,6 +1039,28 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         cp.obs[vid] = (x, y)
         self._refresh_markers()
 
+    def _on_cam_context_menu(self, vid: str, pos) -> None:
+        if self._selected_cp_idx is None or self._selected_cp_idx >= len(self._control_points):
+            return
+        cp = self._control_points[self._selected_cp_idx]
+        if vid not in cp.obs:
+            return
+        from PySide6.QtWidgets import QMenu
+        state = self._states_by_id.get(vid)
+        label = state.label if state else vid
+        menu = QMenu(self)
+        action = menu.addAction(f"Remove '{cp.name}' from {label}")
+        action.triggered.connect(lambda: self._remove_cp_from_camera(vid))
+        w = self._cam_widgets[vid]
+        menu.exec(w.mapToGlobal(pos))
+
+    def _remove_cp_from_camera(self, vid: str) -> None:
+        if self._selected_cp_idx is None or self._selected_cp_idx >= len(self._control_points):
+            return
+        cp = self._control_points[self._selected_cp_idx]
+        cp.obs.pop(vid, None)
+        self._refresh_markers()
+
     def _refresh_markers(self) -> None:
         for w in self._cam_widgets.values():
             w.clear_markers()
@@ -856,27 +1085,49 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         for w in self._cam_widgets.values():
             w.set_calib_status(None)
 
-        self._solve_btn.setEnabled(False)
+        self._solve_btn.setVisible(False)
+        self._cancel_btn.setVisible(True)
+        self._cancel_btn.setEnabled(True)
         self._accept_btn.setEnabled(False)
-        self._status_label.setText("Running SIFT matching and bundle adjustment…")
+        self._status_label.setText("Starting…")
 
         self._solve_thread = _SolveThread(self._states, self._control_points, parent=self)
         self._solve_thread.finished.connect(self._on_solve_done)
         self._solve_thread.error_occurred.connect(self._on_solve_error)
+        self._solve_thread.progress.connect(self._status_label.setText)
+        self._solve_thread.cancelled.connect(self._on_solve_cancelled)
         self._solve_thread.start()
+
+    def _on_cancel_solve(self) -> None:
+        if self._solve_thread and self._solve_thread.isRunning():
+            self._solve_thread.cancel()
+            self._cancel_btn.setEnabled(False)
+            self._status_label.setText("Cancelling…")
+
+    def _on_solve_cancelled(self) -> None:
+        self._solve_btn.setVisible(True)
+        self._cancel_btn.setVisible(False)
+        self._cancel_btn.setEnabled(True)
+        self._status_label.setText("Solve cancelled.")
 
     def _on_solve_done(self, result: CalibResult) -> None:
         self._result = result
-        self._solve_btn.setEnabled(True)
+        self._sift_matches = result.pair_matches
+        self._solve_btn.setVisible(True)
+        self._cancel_btn.setVisible(False)
         n_total = len(result.cameras)
         n_solved = n_total - len(result.unsolved)
 
         lines = [f"Solved: {n_solved}/{n_total} cameras"]
         for vid, stats in result.reprojection_errors.items():
             s = result.cameras[vid]
+            cp_stats = result.cp_reprojection_errors.get(vid)
+            cp_str = (f"  | CP: {cp_stats['mean']:.2f} ± {cp_stats['std']:.2f} px"
+                      f" (max {cp_stats['max']:.1f}, n={cp_stats['n']})"
+                      if cp_stats else "")
             lines.append(
                 f"  {s.label}: {stats['mean']:.2f} ± {stats['std']:.2f} px"
-                f"  (max {stats['max']:.1f}, n={stats['n']})"
+                f"  (max {stats['max']:.1f}, n={stats['n']}){cp_str}"
             )
         if result.unsolved:
             lines.append(
@@ -886,12 +1137,16 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._status_label.setText("\n".join(lines))
         self._accept_btn.setEnabled(n_solved > 0)
 
-        # Update per-camera badges
+        # Update per-camera badges; clear any stale SIFT overlays and highlights
+        self._hov_vid = None
+        self._hov_3d_pts = []
         for state in self._states:
             vid = state.video_id
             if vid not in self._cam_widgets:
                 continue
             w = self._cam_widgets[vid]
+            w.set_sift_overlay(None)
+            w.set_sift_highlight(None, None)
             if vid in result.unsolved:
                 w.set_calib_status("Disconnected", error=True)
             elif vid in result.reprojection_errors:
@@ -900,8 +1155,105 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             else:
                 w.set_calib_status(None)
 
+    def _on_cam_hover(self, vid: str, entered: bool) -> None:
+        """Show/hide SIFT feature overlay when hovering over a camera image."""
+        if not entered or self._result is None:
+            self._hov_vid = None
+            self._hov_3d_pts = []
+            for w in self._cam_widgets.values():
+                w.set_sift_overlay(None)
+                w.set_sift_highlight(None, None)
+            return
+
+        # Collect all 3D points observed in the hovered camera, preserving index order
+        # so that sift_feature_hovered indices map to this list.
+        self._hov_vid = vid
+        self._hov_3d_pts = []
+        hov_obs_self: list[tuple[float, float]] = []
+        for xyz, obs in self._result.points_3d:
+            if vid in obs:
+                self._hov_3d_pts.append((xyz, obs))
+                hov_obs_self.append(obs[vid])
+
+        if not self._hov_3d_pts:
+            self._hov_vid = None
+            for w in self._cam_widgets.values():
+                w.set_sift_overlay(None)
+                w.set_sift_highlight(None, None)
+            return
+
+        xyz_arr = np.array([pt[0] for pt in self._hov_3d_pts])  # (N, 3)
+
+        for v, w in self._cam_widgets.items():
+            state = self._result.cameras.get(v)
+            if state is None or state.R is None or state.t is None:
+                w.set_sift_overlay(None)
+                continue
+
+            if v == vid:
+                pts = np.array(hov_obs_self, dtype=np.float32)
+            else:
+                pts_cam = (state.R @ xyz_arr.T).T + state.t.flatten()  # (N, 3)
+                depth_ok = pts_cam[:, 2] > 0
+                if not np.any(depth_ok):
+                    w.set_sift_overlay(None)
+                    continue
+                pts_cam = pts_cam[depth_ok]
+                fx, fy = state.K[0, 0], state.K[1, 1]
+                cx, cy = state.K[0, 2], state.K[1, 2]
+                u = fx * pts_cam[:, 0] / pts_cam[:, 2] + cx
+                v_ = fy * pts_cam[:, 1] / pts_cam[:, 2] + cy
+                pts = np.stack([u, v_], axis=1).astype(np.float32)
+
+            w.set_sift_overlay(pts if len(pts) > 0 else None)
+
+    def _on_sift_feature_hovered(self, vid: str, idx: int) -> None:
+        """Highlight a single SIFT feature across all cameras.
+
+        Orange crosshair = observed position in that camera.
+        Magenta X = projected position (where the solver places the 3D point).
+        Dashed line = residual vector between them.
+        """
+        if idx < 0 or self._result is None or vid != self._hov_vid:
+            for w in self._cam_widgets.values():
+                w.set_sift_highlight(None, None)
+            return
+
+        if idx >= len(self._hov_3d_pts):
+            return
+
+        xyz_world, obs_dict = self._hov_3d_pts[idx]
+        xyz_arr = xyz_world.reshape(1, 3)
+
+        for v, w in self._cam_widgets.items():
+            state = self._result.cameras.get(v)
+            if state is None or state.R is None or state.t is None:
+                w.set_sift_highlight(None, None)
+                continue
+
+            # Projected position for this camera
+            pts_cam = (state.R @ xyz_arr.T).T + state.t.flatten()
+            if pts_cam[0, 2] <= 0:
+                w.set_sift_highlight(None, None)
+                continue
+            fx, fy = state.K[0, 0], state.K[1, 1]
+            cx, cy = state.K[0, 2], state.K[1, 2]
+            proj_x = fx * pts_cam[0, 0] / pts_cam[0, 2] + cx
+            proj_y = fy * pts_cam[0, 1] / pts_cam[0, 2] + cy
+            proj_pos = np.array([[proj_x, proj_y]], dtype=np.float32)
+
+            # Observed position (only if this camera has an observation)
+            if v in obs_dict:
+                ox, oy = obs_dict[v]
+                obs_pos = np.array([[ox, oy]], dtype=np.float32)
+            else:
+                obs_pos = None
+
+            w.set_sift_highlight(obs_pos, proj_pos)
+
     def _on_solve_error(self, msg: str) -> None:
-        self._solve_btn.setEnabled(True)
+        self._solve_btn.setVisible(True)
+        self._cancel_btn.setVisible(False)
         self._status_label.setText(f"Error: {msg}")
 
     # ------------------------------------------------------------------
@@ -1069,7 +1421,7 @@ class ExtrinsicsImportWidget(QWidget):
             return
 
         states = _load_states_from_images(
-            Path(images_dir), self._conn, self._shot_ids[0]
+            Path(images_dir), self._conn, self._shot_ids[0],
         )
         if not states:
             QMessageBox.warning(

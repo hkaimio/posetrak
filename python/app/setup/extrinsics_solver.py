@@ -24,6 +24,10 @@ from scipy.optimize import least_squares
 _log = logging.getLogger(__name__)
 
 
+class _Cancelled(Exception):
+    """Raised inside the solver when a cancel event fires; caught by callers."""
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -67,8 +71,10 @@ class CalibResult:
     cameras: dict[str, CamCalibState]
     # list of (xyz_world, {video_id: (px_undist, py_undist)})
     points_3d: list[tuple[np.ndarray, dict[str, tuple[float, float]]]]
-    reprojection_errors: dict[str, dict]   # video_id → {mean, std, max, n}
-    unsolved: list[str]                    # video_ids with no pose
+    reprojection_errors: dict[str, dict]      # video_id → {mean, std, max, n}
+    unsolved: list[str]                       # video_ids with no pose
+    pair_matches: dict[tuple[str, str], PairMatch]  # SIFT matches per camera pair
+    cp_reprojection_errors: dict[str, dict] = field(default_factory=dict)  # CP residuals
 
 
 # ---------------------------------------------------------------------------
@@ -201,11 +207,21 @@ def match_all_pairs(
     ratio: float = 0.75,
     min_inliers: int = 20,
     ransac_threshold: float = 0.001,
+    progress_cb=None,
+    cancel_event=None,
 ) -> dict[tuple[str, str], PairMatch]:
     """Match every unordered camera pair. Returns only successful pairs."""
     results: dict[tuple[str, str], PairMatch] = {}
+    n = len(states)
+    total = n * (n - 1) // 2
+    done = 0
     for i, sa in enumerate(states):
         for sb in states[i + 1:]:
+            if cancel_event is not None and cancel_event.is_set():
+                raise _Cancelled()
+            done += 1
+            if progress_cb:
+                progress_cb(f"SIFT matching {sa.label} ↔ {sb.label} ({done}/{total})…")
             pm = match_pair(sa, sb, ratio=ratio, min_inliers=min_inliers,
                             ransac_threshold=ransac_threshold)
             if pm is not None:
@@ -238,12 +254,19 @@ def chain_poses_bfs(
 
     state_by_id = {s.video_id: s for s in states}
 
-    # Root: camera with most matched neighbours
     all_ids = [s.video_id for s in states]
-    root = max(all_ids, key=lambda v: len(adj[v]))
 
-    state_by_id[root].R = np.eye(3)
-    state_by_id[root].t = np.zeros((3, 1))
+    # Prefer a camera already initialised (e.g. via PnP) as BFS root so that
+    # the SIFT chain starts from a world-frame anchor.
+    pnp_ids = [v for v in all_ids if state_by_id[v].R is not None]
+    if pnp_ids:
+        # Pick PnP root with most SIFT edges so the BFS covers the most cameras.
+        root = max(pnp_ids, key=lambda v: len(adj[v]))
+        _log.info("chain_poses_bfs: using PnP-initialised root %s", root)
+    else:
+        root = max(all_ids, key=lambda v: len(adj[v]))
+        state_by_id[root].R = np.eye(3)
+        state_by_id[root].t = np.zeros((3, 1))
 
     queue: deque[str] = deque([root])
     while queue:
@@ -263,6 +286,104 @@ def chain_poses_bfs(
     if unsolved:
         _log.warning("unsolved cameras: %s", unsolved)
     return unsolved
+
+
+def filter_sift_by_cheirality(
+    states: list[CamCalibState],
+    pair_matches: dict[tuple[str, str], PairMatch],
+    min_pos_ratio: float = 0.5,
+) -> dict[tuple[str, str], PairMatch]:
+    """Remove SIFT pairs where triangulated points mostly fail the cheirality test.
+
+    When two cameras don't actually share a view, RANSAC may still find a
+    geometrically-consistent essential matrix for visually-similar (but semantically
+    wrong) matches.  After BFS gives approximate poses, we triangulate each pair's
+    matches: if most points end up behind one of the cameras the pair is rejected.
+
+    min_pos_ratio: fraction of triangulated points that must have positive depth in
+                   BOTH cameras. Pairs below this threshold are removed.
+    """
+    state_by_id = {s.video_id: s for s in states}
+    filtered: dict[tuple[str, str], PairMatch] = {}
+
+    for (va, vb), pm in pair_matches.items():
+        sa = state_by_id[va]
+        sb = state_by_id[vb]
+        if sa.R is None or sb.R is None:
+            continue
+
+        Pa = _proj_matrix(sa)
+        Pb = _proj_matrix(sb)
+        pts4d = cv2.triangulatePoints(Pa, Pb, pm.pts_a.T, pm.pts_b.T)
+        w = pts4d[3]
+        valid = np.abs(w) > 1e-8
+        if not np.any(valid):
+            _log.info("filter_sift: reject %s↔%s — all triangulations degenerate", va, vb)
+            continue
+
+        pts3d = (pts4d[:3] / w).T
+        depth_a = (sa.R @ pts3d[valid].T + sa.t.reshape(3, 1))[2]
+        depth_b = (sb.R @ pts3d[valid].T + sb.t.reshape(3, 1))[2]
+        pos_ratio = float(((depth_a > 0) & (depth_b > 0)).sum()) / valid.sum()
+
+        if pos_ratio >= min_pos_ratio:
+            filtered[(va, vb)] = pm
+        else:
+            _log.info(
+                "filter_sift: reject %s↔%s — only %.0f%% of triangulated pts in front "
+                "(cameras likely non-overlapping)",
+                va, vb, pos_ratio * 100,
+            )
+
+    _log.info("filter_sift_by_cheirality: kept %d/%d pairs", len(filtered), len(pair_matches))
+    return filtered
+
+
+def init_poses_pnp(
+    states: list[CamCalibState],
+    control_points: list[ControlPoint],
+    min_cps: int = 4,
+) -> list[str]:
+    """Initialise camera poses via PnP for cameras with world_xyz control points.
+
+    Uses cv2.solvePnP on the undistorted CP observations.  Camera must have
+    ≥ min_cps observations of CPs that have world_xyz set.
+    Returns list of video_ids that were initialised (R, t set in-place).
+    """
+    state_by_id = {s.video_id: s for s in states}
+    initialised: list[str] = []
+
+    for s in states:
+        obj_pts: list[np.ndarray] = []
+        img_pts: list[np.ndarray] = []
+        for cp in control_points:
+            if cp.world_xyz is None or s.video_id not in cp.obs:
+                continue
+            px, py = cp.obs[s.video_id]
+            undist = _undistort_pts(np.array([[px, py]], dtype=np.float32), s)
+            obj_pts.append(cp.world_xyz.astype(np.float64))
+            img_pts.append(undist[0])
+
+        if len(obj_pts) < min_cps:
+            continue
+
+        ok, rvec, tvec, _ = cv2.solvePnPRansac(
+            np.array(obj_pts, dtype=np.float64),
+            np.array(img_pts, dtype=np.float32),
+            s.K, np.zeros(4),
+            iterationsCount=1000, reprojectionError=8.0,
+        )
+        if not ok:
+            _log.warning("init_poses_pnp: PnP failed for %s", s.label)
+            continue
+
+        R, _ = cv2.Rodrigues(rvec)
+        s.R = R
+        s.t = tvec.reshape(3, 1)
+        initialised.append(s.video_id)
+        _log.info("init_poses_pnp: initialised %s from %d world CPs", s.label, len(obj_pts))
+
+    return initialised
 
 
 # ---------------------------------------------------------------------------
@@ -365,28 +486,44 @@ def run_bundle_adjustment(
     states: list[CamCalibState],
     points_3d: list[tuple[np.ndarray, dict[str, tuple[float, float]]]],
     control_points: list[ControlPoint] | None = None,
-    fixed_point_weight: float = 10.0,
+    fixed_cp_weight: float = 1000.0,
+    unfixed_cp_weight: float = 100.0,
     max_nfev: int = 2000,
+    max_sift_pts: int = 300,
+    progress_cb=None,
+    cancel_event=None,
 ) -> list[tuple[np.ndarray, dict[str, tuple[float, float]]]]:
     """Jointly optimise camera poses and free 3D points.
 
     Modifies state.R / state.t in place on each solved camera.
     Returns refined points_3d list.
-    Control points with world_xyz are held fixed (heavy residual weight).
+
+    Fixed CPs (world_xyz set) are NOT part of the parameter vector — their
+    world position is used directly as a constant with weight=fixed_cp_weight.
+    Free CPs (no world_xyz) are triangulated from current camera estimates and
+    added to the parameter vector with weight=unfixed_cp_weight.
+
+    Uses loss='linear' (no robust kernel). Large CP weights (1000×/100×)
+    relative to SIFT (1×) give CPs strong priority without fighting a robust
+    loss that would down-weight them.
     """
     solved = [s for s in states if s.R is not None]
     if not solved:
         return points_3d
+
+    if control_points and len(points_3d) > max_sift_pts:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(points_3d), size=max_sift_pts, replace=False)
+        points_3d = [points_3d[i] for i in sorted(idx)]
+        _log.info("BA: subsampled SIFT points to %d", max_sift_pts)
 
     state_by_id = {s.video_id: s for s in states}
     cam_ids = [s.video_id for s in solved]
     n_cams = len(cam_ids)
     cam_idx = {v: i for i, v in enumerate(cam_ids)}
 
-    # --------------- build parameter vector ---------------
-    # [rvec0(3), tvec0(3), ..., point0(3), point1(3), ..., fixed points NOT included]
+    # --- Camera params [rvec(3), tvec(3)] per camera ---
     params: list[float] = []
-
     cam_param_start: dict[str, int] = {}
     for s in solved:
         cam_param_start[s.video_id] = len(params)
@@ -394,39 +531,77 @@ def run_bundle_adjustment(
         params.extend(rvec.flatten())
         params.extend(s.t.flatten())
 
+    # --- Free SIFT 3D points ---
     free_point_start: list[int] = []
     for xyz, _ in points_3d:
         free_point_start.append(len(params))
         params.extend(xyz.tolist())
 
-    params_arr = np.array(params, dtype=np.float64)
-
-    # --------------- build observations ---------------
-    obs_list: list[tuple[str, np.ndarray, str, bool]] = []
-    # (video_id, obs_pixel (2,), point_id_or_idx, is_fixed)
-
-    # Free triangulated points
-    for pt_idx, (_, obs_dict) in enumerate(points_3d):
-        for vid, (px, py) in obs_dict.items():
-            if vid in cam_idx:
-                obs_list.append((vid, np.array([px, py]), f"free_{pt_idx}", False))
-
-    # Control points
-    fixed_pts: dict[str, np.ndarray] = {}  # cp.name → world_xyz
+    # --- Control points ---
+    # Fixed (world_xyz set): constant, not in param vector.
+    # Free (no world_xyz): DLT-triangulate from current poses and add to param vector.
+    fixed_pts: dict[str, np.ndarray] = {}   # cp.name → constant world position
+    free_cp_start: dict[str, int] = {}       # cp.name → index into params
     cp_obs_undist: list[tuple[str, dict]] = []
+
     if control_points:
         for cp in control_points:
             undist = _undistort_control_obs(cp, state_by_id)
+            cp_obs_undist.append((cp.name, undist))
             if cp.world_xyz is not None:
                 fixed_pts[cp.name] = cp.world_xyz.astype(np.float64)
-            cp_obs_undist.append((cp.name, undist))
+            else:
+                solved_obs = [(v, pt) for v, pt in undist.items() if v in cam_idx]
+                if len(solved_obs) >= 2:
+                    A_rows = []
+                    for v, (px, py) in solved_obs:
+                        P = _proj_matrix(state_by_id[v])
+                        A_rows.append(px * P[2] - P[0])
+                        A_rows.append(py * P[2] - P[1])
+                    A = np.array(A_rows, dtype=np.float64)
+                    _, _, Vt = np.linalg.svd(A)
+                    h = Vt[-1]
+                    if abs(h[3]) > 1e-10:
+                        xyz_init = h[:3] / h[3]
+                        free_cp_start[cp.name] = len(params)
+                        params.extend(xyz_init.tolist())
+
+    params_arr = np.array(params, dtype=np.float64)
+
+    # --- Build observation list ---
+    obs_list: list[tuple[str, np.ndarray, str, float]] = []
+
+    for pt_idx, (_, obs_dict) in enumerate(points_3d):
+        for vid, (px, py) in obs_dict.items():
+            if vid in cam_idx:
+                obs_list.append((vid, np.array([px, py]), f"free_{pt_idx}", 1.0))
+
+    if control_points:
+        for cp_name, undist in cp_obs_undist:
+            if cp_name in fixed_pts:
+                weight = fixed_cp_weight
+            elif cp_name in free_cp_start:
+                weight = unfixed_cp_weight
+            else:
+                continue  # couldn't triangulate — skip
             for vid, (px, py) in undist.items():
                 if vid in cam_idx:
-                    obs_list.append((vid, np.array([px, py]), f"cp_{cp.name}", cp.world_xyz is not None))
+                    obs_list.append((vid, np.array([px, py]), f"cp_{cp_name}", weight))
 
     n_obs = len(obs_list)
-    _log.info("BA: %d cameras, %d free points, %d fixed points, %d observations",
-              n_cams, len(points_3d), len(fixed_pts), n_obs)
+    _log.info(
+        "BA: %d cameras, %d SIFT pts, %d fixed CPs, %d free CPs, %d observations",
+        n_cams, len(points_3d), len(fixed_pts), len(free_cp_start), n_obs,
+    )
+    if progress_cb:
+        progress_cb(
+            f"Bundle adjustment: {n_cams} cameras, {len(points_3d)} SIFT pts, "
+            f"{len(fixed_pts)} fixed CPs, {len(free_cp_start)} free CPs, "
+            f"{n_obs} observations…"
+        )
+
+    if cancel_event is not None and cancel_event.is_set():
+        raise _Cancelled()
 
     if n_obs < 6:
         _log.warning("BA: too few observations (%d), skipping", n_obs)
@@ -434,19 +609,20 @@ def run_bundle_adjustment(
 
     def _get_point_3d(pt_key: str, x: np.ndarray) -> np.ndarray:
         if pt_key.startswith("free_"):
-            idx = int(pt_key[5:])
-            start = free_point_start[idx]
+            start = free_point_start[int(pt_key[5:])]
             return x[start:start + 3]
-        # control point (cp_<name>)
-        name = pt_key[3:]
+        name = pt_key[3:]  # strip "cp_"
         if name in fixed_pts:
             return fixed_pts[name]
-        # free control point — not yet supported (treat as free using first obs mean)
-        return np.zeros(3)
+        if name in free_cp_start:
+            return x[free_cp_start[name]:free_cp_start[name] + 3]
+        return np.zeros(3)  # shouldn't happen; obs_list filters these out
 
     def residuals(x: np.ndarray) -> np.ndarray:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _Cancelled()
         res = np.empty(n_obs * 2)
-        for i, (vid, obs_px, pt_key, is_fixed) in enumerate(obs_list):
+        for i, (vid, obs_px, pt_key, weight) in enumerate(obs_list):
             ci = cam_param_start[vid]
             rvec = x[ci:ci + 3]
             tvec = x[ci + 3:ci + 6]
@@ -455,39 +631,34 @@ def run_bundle_adjustment(
             proj, _ = cv2.projectPoints(
                 pt3d.reshape(1, 3), rvec, tvec, K, np.zeros(4)
             )
-            r = (proj.reshape(2) - obs_px)
-            weight = fixed_point_weight if is_fixed else 1.0
-            res[2 * i: 2 * i + 2] = r * weight
+            res[2 * i: 2 * i + 2] = (proj.reshape(2) - obs_px) * weight
         return res
 
-    result = least_squares(
-        residuals, params_arr,
-        method="trf", loss="huber",
-        ftol=1e-6, xtol=1e-6,
-        max_nfev=max_nfev,
-        verbose=0,
-    )
-    _log.info("BA done: cost %.4f → %.4f (%d iters)",
-              0.5 * np.sum(residuals(params_arr) ** 2),
-              result.cost, result.nfev)
+    try:
+        result = least_squares(
+            residuals, params_arr,
+            method="trf", loss="linear",
+            ftol=1e-6, xtol=1e-6,
+            max_nfev=max_nfev,
+            verbose=0,
+        )
+    except _Cancelled:
+        _log.info("BA cancelled by user")
+        raise
 
+    _log.info("BA done: cost=%.4f (%d iters)", result.cost, result.nfev)
     x = result.x
 
-    # Update camera poses
     for s in solved:
         ci = cam_param_start[s.video_id]
-        rvec = x[ci:ci + 3]
-        tvec = x[ci + 3:ci + 6]
-        R, _ = cv2.Rodrigues(rvec)
+        R, _ = cv2.Rodrigues(x[ci:ci + 3])
         s.R = R
-        s.t = tvec.reshape(3, 1)
+        s.t = x[ci + 3:ci + 6].reshape(3, 1)
 
-    # Update free points
     refined: list[tuple[np.ndarray, dict]] = []
     for idx, (_, obs_dict) in enumerate(points_3d):
         start = free_point_start[idx]
-        xyz = x[start:start + 3].copy()
-        refined.append((xyz, obs_dict))
+        refined.append((x[start:start + 3].copy(), obs_dict))
 
     return refined
 
@@ -608,6 +779,61 @@ def compute_reprojection_errors(
     return result
 
 
+def compute_cp_errors(
+    states: list[CamCalibState],
+    control_points: list[ControlPoint],
+) -> dict[str, dict]:
+    """Per-camera reprojection errors for control points.
+
+    For each CP with ≥2 observations in solved cameras, the 3D position is either
+    taken from world_xyz (if set) or triangulated via DLT from all observations.
+    The projected position is then compared to the observed (undistorted) position.
+    """
+    state_by_id = {s.video_id: s for s in states}
+    per_cam: dict[str, list[float]] = defaultdict(list)
+
+    for cp in control_points:
+        undist = _undistort_control_obs(cp, state_by_id)
+        solved_obs = {v: pt for v, pt in undist.items()
+                      if v in state_by_id and state_by_id[v].R is not None}
+        if len(solved_obs) < 2:
+            continue
+
+        if cp.world_xyz is not None:
+            xyz = cp.world_xyz.astype(np.float64)
+        else:
+            # DLT triangulate: stack two rows per observation: [px*P[2]-P[0]; py*P[2]-P[1]]
+            A_rows = []
+            for v, (px, py) in solved_obs.items():
+                P = _proj_matrix(state_by_id[v])
+                A_rows.append(px * P[2] - P[0])
+                A_rows.append(py * P[2] - P[1])
+            A = np.array(A_rows, dtype=np.float64)
+            _, _, Vt = np.linalg.svd(A)
+            h = Vt[-1]
+            if abs(h[3]) < 1e-10:
+                continue
+            xyz = (h[:3] / h[3]).astype(np.float64)
+
+        for vid, (px, py) in undist.items():
+            s = state_by_id.get(vid)
+            if s is None or s.R is None:
+                continue
+            rvec, _ = cv2.Rodrigues(s.R)
+            proj, _ = cv2.projectPoints(
+                xyz.reshape(1, 3), rvec, s.t.reshape(3, 1), s.K, np.zeros(4)
+            )
+            err = float(np.linalg.norm(proj.reshape(2) - np.array([px, py])))
+            per_cam[vid].append(err)
+
+    result = {}
+    for vid, errs in per_cam.items():
+        e = np.array(errs)
+        result[vid] = {"mean": float(e.mean()), "std": float(e.std()),
+                       "max": float(e.max()), "n": len(e)}
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Top-level entry point
 # ---------------------------------------------------------------------------
@@ -619,18 +845,87 @@ def run_calibration(
     sift_ratio: float = 0.75,
     sift_min_inliers: int = 20,
     ba_max_nfev: int = 2000,
+    progress_cb=None,
+    cancel_event=None,
 ) -> CalibResult:
-    """Run the full pipeline.  states[*].image must be loaded before calling."""
-    pair_matches = match_all_pairs(states, ratio=sift_ratio, min_inliers=sift_min_inliers)
+    """Run the full pipeline.  states[*].image must be loaded before calling.
+
+    Pipeline:
+    1. PnP-initialise cameras that have ≥4 world-xyz control point observations.
+    2. SIFT match all pairs; BFS from a PnP-initialised root where possible.
+    3. Cheirality filter: remove SIFT pairs where most triangulated points lie
+       behind a camera (indicates cameras without real scene overlap).
+    4. Re-triangulate with filtered pairs.
+    5. Bundle adjustment with high CP weights (1000× for world-xyz, 100× for free).
+       SIFT points subsampled to ≤ 300 when CPs are present.
+
+    Raises _Cancelled if cancel_event is set mid-run.
+    """
+    def _prog(msg: str) -> None:
+        _log.info(msg)
+        if progress_cb:
+            progress_cb(msg)
+
+    def _check_cancel() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _Cancelled()
+
+    n = len(states)
+
+    # --- Stage 0: PnP initialisation from world-xyz CPs ---
+    if control_points:
+        _prog("Initialising cameras from control points (PnP)…")
+        pnp_ids = init_poses_pnp(states, control_points)
+        if pnp_ids:
+            _log.info("PnP pre-initialised %d cameras: %s", len(pnp_ids), pnp_ids)
+
+    _check_cancel()
+
+    # --- Stage 1-2: SIFT matching + BFS pose chain ---
+    n_pairs = n * (n - 1) // 2
+    _prog(f"SIFT matching {n} cameras ({n_pairs} pairs)…")
+    pair_matches = match_all_pairs(
+        states, ratio=sift_ratio, min_inliers=sift_min_inliers,
+        progress_cb=progress_cb, cancel_event=cancel_event,
+    )
+    _prog(f"Chaining poses from {len(pair_matches)} matched pairs…")
     unsolved = chain_poses_bfs(states, pair_matches)
-    points_3d = triangulate_all_pairs(states, pair_matches)
-    points_3d = run_bundle_adjustment(states, points_3d, control_points, max_nfev=ba_max_nfev)
+
+    _check_cancel()
+
+    # --- Stage 2b: Cheirality filter (remove non-overlapping camera pairs) ---
+    _prog("Filtering non-overlapping camera pairs (cheirality check)…")
+    pair_matches_filtered = filter_sift_by_cheirality(states, pair_matches)
+    removed = len(pair_matches) - len(pair_matches_filtered)
+    if removed:
+        _log.info("Cheirality filter removed %d spurious SIFT pairs", removed)
+
+    _check_cancel()
+
+    # --- Stage 3: Triangulate with filtered pairs ---
+    _prog(f"Triangulating points from {len(pair_matches_filtered)} verified pairs…")
+    points_3d = triangulate_all_pairs(states, pair_matches_filtered)
+
+    _check_cancel()
+
+    # --- Stage 4: Bundle adjustment ---
+    points_3d = run_bundle_adjustment(
+        states, points_3d, control_points,
+        max_nfev=ba_max_nfev,
+        progress_cb=progress_cb,
+        cancel_event=cancel_event,
+    )
+
+    _prog("Computing reprojection errors…")
     errors = compute_reprojection_errors(states, points_3d)
+    cp_errors = compute_cp_errors(states, control_points) if control_points else {}
     return CalibResult(
         cameras={s.video_id: s for s in states},
         points_3d=points_3d,
         reprojection_errors=errors,
         unsolved=unsolved,
+        pair_matches=pair_matches_filtered,
+        cp_reprojection_errors=cp_errors,
     )
 
 

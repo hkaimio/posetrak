@@ -35,7 +35,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PySide6.QtCore import QRect, QThread, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -229,31 +229,75 @@ def _write_extrinsics_to_db(
 
 
 # ---------------------------------------------------------------------------
-# Clickable camera thumbnail widget
+# Clickable camera thumbnail with zoom-on-drag
 # ---------------------------------------------------------------------------
 
 
 class _ClickableImageWidget(QWidget):
-    """Displays a camera image scaled to fit; emits click coords in image space."""
+    """Camera image widget with zoom-on-drag for precise control-point placement.
 
-    clicked_at = Signal(float, float)  # original image coords (px)
+    Press-drag-release workflow
+    ---------------------------
+    Mouse press  → enter zoom mode (image shown at 1:1 pixel ratio, clicked
+                   image coordinate stays under cursor)
+    Mouse drag   → move placement crosshair; image pans if point goes near edge
+    Mouse release→ finalise point, emit ``point_set``, return to fit view
+
+    Any press on the image records/updates the point for the currently selected
+    control point (managed by the parent dialog).  Right-click has no effect.
+
+    After calibration, call ``set_calib_status`` to show a per-camera badge.
+    """
+
+    point_set = Signal(float, float)   # original image coords on mouse release
 
     def __init__(self, cam_label: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._cam_label = cam_label
         self._img_bgr: np.ndarray | None = None
         self._markers: list[tuple[float, float, QColor, str]] = []
-        self._display_rect = QRect()
-        self._cached_size: tuple[int, int] | None = None
-        self._cached_data: np.ndarray | None = None
-        self._cached_qimage: QImage | None = None
-        self.setMinimumSize(240, 170)
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        self.setCursor(Qt.CursorShape.CrossCursor)
+
+        # Fit-mode display rect (set during paintEvent, used for coord mapping)
+        self._fit_rect = QRect()
+        self._fit_scale: float = 1.0
+
+        # Full-res image cache (kept alive so QImage data pointer stays valid)
+        self._full_rgb: np.ndarray | None = None
+        self._full_qimage: QImage | None = None
+
+        # Fit-scale thumbnail cache
+        self._thumb_size: tuple[int, int] | None = None
+        self._thumb_data: np.ndarray | None = None
+        self._thumb_qimage: QImage | None = None
+
+        # Zoom-on-drag state
+        self._zoom_active: bool = False
+        self._zoom_scale: float = 1.0
+        self._zoom_ox: float = 0.0   # image-space origin of display_rect top-left
+        self._zoom_oy: float = 0.0
+        self._drag_img: tuple[float, float] | None = None  # current drag position
+
+        # Calibration status badge
+        self._status_text: str | None = None
+        self._status_error: bool = False
+
+        self.setMinimumSize(200, 150)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMouseTracking(True)  # needed for smooth drag
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def set_image(self, img_bgr: np.ndarray) -> None:
         self._img_bgr = img_bgr
-        self._cached_size = None  # invalidate cache
+        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        self._full_rgb = np.ascontiguousarray(rgb)
+        h, w = img_bgr.shape[:2]
+        self._full_qimage = QImage(
+            self._full_rgb.data, w, h, w * 3, QImage.Format.Format_RGB888
+        )
+        self._thumb_size = None  # invalidate thumbnail cache
         self.update()
 
     def add_marker(self, x: float, y: float, color: QColor, label: str = "") -> None:
@@ -264,25 +308,48 @@ class _ClickableImageWidget(QWidget):
         self._markers.clear()
         self.update()
 
-    def _img_rect(self) -> QRect:
-        return self._display_rect
+    def set_calib_status(self, text: str | None, error: bool = False) -> None:
+        self._status_text = text
+        self._status_error = error
+        self.update()
+
+    # ------------------------------------------------------------------
+    # Coordinate conversion
+    # ------------------------------------------------------------------
 
     def _widget_to_img(self, wx: float, wy: float) -> tuple[float, float]:
-        r = self._display_rect
+        if self._zoom_active:
+            return (
+                self._zoom_ox + wx / self._zoom_scale,
+                self._zoom_oy + wy / self._zoom_scale,
+            )
+        r = self._fit_rect
+        if r.width() <= 0 or self._img_bgr is None:
+            return 0.0, 0.0
         h, w = self._img_bgr.shape[:2]
-        return (wx - r.x()) / r.width() * w, (wy - r.y()) / r.height() * h
+        return (wx - r.x()) * w / r.width(), (wy - r.y()) * h / r.height()
 
     def _img_to_widget(self, ix: float, iy: float) -> tuple[float, float]:
-        r = self._display_rect
+        if self._zoom_active:
+            return (
+                (ix - self._zoom_ox) * self._zoom_scale,
+                (iy - self._zoom_oy) * self._zoom_scale,
+            )
+        r = self._fit_rect
+        if r.width() <= 0 or self._img_bgr is None:
+            return 0.0, 0.0
         h, w = self._img_bgr.shape[:2]
         return r.x() + ix / w * r.width(), r.y() + iy / h * r.height()
+
+    # ------------------------------------------------------------------
+    # Paint
+    # ------------------------------------------------------------------
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         ww, wh = self.width(), self.height()
-
-        label_h = 20
+        label_h = 22
         avail_h = wh - label_h
 
         if self._img_bgr is None:
@@ -292,40 +359,13 @@ class _ClickableImageWidget(QWidget):
                 Qt.AlignmentFlag.AlignCenter,
                 self._cam_label + "\n(no image)",
             )
+        elif self._zoom_active:
+            self._paint_zoomed(painter, ww, avail_h)
         else:
-            h, w = self._img_bgr.shape[:2]
-            scale = min(ww / w, avail_h / h)
-            dw, dh = max(1, int(w * scale)), max(1, int(h * scale))
-            x0 = (ww - dw) // 2
-            y0 = (avail_h - dh) // 2
-            self._display_rect = QRect(x0, y0, dw, dh)
+            self._paint_fit(painter, ww, avail_h)
 
-            # Re-scale only when display size changes
-            if (dw, dh) != self._cached_size:
-                rgb = cv2.cvtColor(self._img_bgr, cv2.COLOR_BGR2RGB)
-                self._cached_data = np.ascontiguousarray(
-                    cv2.resize(rgb, (dw, dh), interpolation=cv2.INTER_AREA)
-                )
-                self._cached_qimage = QImage(
-                    self._cached_data.data, dw, dh, dw * 3, QImage.Format.Format_RGB888
-                )
-                self._cached_size = (dw, dh)
-
-            painter.drawImage(x0, y0, self._cached_qimage)
-
-            # Draw markers
-            for mx, my, color, mlabel in self._markers:
-                wx, wy = self._img_to_widget(mx, my)
-                painter.setBrush(color)
-                painter.setPen(QPen(QColor(255, 255, 255), 1.5))
-                r = 7
-                painter.drawEllipse(int(wx) - r, int(wy) - r, r * 2, r * 2)
-                if mlabel:
-                    painter.setPen(QColor(255, 255, 255))
-                    painter.drawText(int(wx) + r + 3, int(wy) + 5, mlabel)
-
-        # Camera label bar at bottom
-        painter.fillRect(0, wh - label_h, ww, label_h, QColor(0, 0, 0, 180))
+        # Camera label bar
+        painter.fillRect(0, wh - label_h, ww, label_h, QColor(0, 0, 0, 200))
         painter.setPen(QColor(240, 240, 240))
         painter.drawText(
             QRect(0, wh - label_h, ww, label_h),
@@ -333,15 +373,185 @@ class _ClickableImageWidget(QWidget):
             self._cam_label,
         )
 
+        # Calibration status badge (top-right)
+        if self._status_text:
+            badge_w, badge_h = 110, 20
+            bx = ww - badge_w
+            color = QColor(180, 40, 40) if self._status_error else QColor(40, 160, 60)
+            painter.fillRect(bx, 0, badge_w, badge_h, color)
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(
+                QRect(bx, 0, badge_w, badge_h),
+                Qt.AlignmentFlag.AlignCenter,
+                self._status_text,
+            )
+            if self._status_error:
+                painter.setPen(QPen(QColor(200, 40, 40), 3))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(2, 2, ww - 4, wh - 4)
+
+    def _paint_fit(self, painter: QPainter, ww: int, avail_h: int) -> None:
+        """Draw image scaled to fit, update _fit_rect and thumbnail cache."""
+        h, w = self._img_bgr.shape[:2]
+        scale = min(ww / w, avail_h / h)
+        self._fit_scale = scale
+        dw, dh = max(1, int(w * scale)), max(1, int(h * scale))
+        x0 = (ww - dw) // 2
+        y0 = (avail_h - dh) // 2
+        self._fit_rect = QRect(x0, y0, dw, dh)
+
+        if (dw, dh) != self._thumb_size:
+            self._thumb_data = np.ascontiguousarray(
+                cv2.resize(self._full_rgb, (dw, dh), interpolation=cv2.INTER_AREA)
+            )
+            self._thumb_qimage = QImage(
+                self._thumb_data.data, dw, dh, dw * 3, QImage.Format.Format_RGB888
+            )
+            self._thumb_size = (dw, dh)
+
+        painter.drawImage(x0, y0, self._thumb_qimage)
+        self._draw_markers(painter)
+
+    def _paint_zoomed(self, painter: QPainter, ww: int, avail_h: int) -> None:
+        """Draw image at zoom scale, showing the region around the drag point."""
+        h_img, w_img = self._img_bgr.shape[:2]
+        scale = self._zoom_scale
+
+        # Visible region in image coordinates
+        src_x0 = max(0.0, self._zoom_ox)
+        src_y0 = max(0.0, self._zoom_oy)
+        src_x1 = min(float(w_img), self._zoom_ox + ww / scale)
+        src_y1 = min(float(h_img), self._zoom_oy + avail_h / scale)
+        if src_x1 <= src_x0 or src_y1 <= src_y0:
+            return
+
+        src_rect = QRect(
+            int(src_x0), int(src_y0),
+            int(src_x1 - src_x0), int(src_y1 - src_y0),
+        )
+        dst_x = int((src_x0 - self._zoom_ox) * scale)
+        dst_y = int((src_y0 - self._zoom_oy) * scale)
+        dst_rect = QRect(
+            dst_x, dst_y,
+            int((src_x1 - src_x0) * scale),
+            int((src_y1 - src_y0) * scale),
+        )
+        painter.drawImage(dst_rect, self._full_qimage, src_rect)
+
+        # Permanent markers
+        self._draw_markers(painter)
+
+        # Drag crosshair
+        if self._drag_img is not None:
+            ix, iy = self._drag_img
+            wx, wy = self._img_to_widget(ix, iy)
+            arm = 16
+            painter.setPen(QPen(QColor(255, 255, 0), 2))
+            painter.drawLine(int(wx) - arm, int(wy), int(wx) + arm, int(wy))
+            painter.drawLine(int(wx), int(wy) - arm, int(wx), int(wy) + arm)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(255, 255, 0), 2))
+            painter.drawEllipse(int(wx) - 9, int(wy) - 9, 18, 18)
+
+        # Zoom indicator
+        painter.fillRect(0, 0, 52, 18, QColor(0, 0, 0, 160))
+        painter.setPen(QColor(255, 220, 0))
+        pct = int(round(scale * 100))
+        painter.drawText(2, 13, f"{pct}%")
+
+    def _draw_markers(self, painter: QPainter) -> None:
+        for mx, my, color, mlabel in self._markers:
+            wx, wy = self._img_to_widget(mx, my)
+            painter.setBrush(color)
+            painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+            r = 7
+            painter.drawEllipse(int(wx) - r, int(wy) - r, r * 2, r * 2)
+            if mlabel:
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(int(wx) + r + 3, int(wy) + 5, mlabel)
+
+    # ------------------------------------------------------------------
+    # Mouse events
+    # ------------------------------------------------------------------
+
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and self._img_bgr is not None:
-            pos = event.position()
-            pt = pos.toPoint()
-            if self._display_rect.contains(pt):
-                ix, iy = self._widget_to_img(pos.x(), pos.y())
-                h, w = self._img_bgr.shape[:2]
-                if 0 <= ix < w and 0 <= iy < h:
-                    self.clicked_at.emit(float(ix), float(iy))
+        if event.button() != Qt.MouseButton.LeftButton or self._img_bgr is None:
+            return
+        pos = event.position()
+        wx, wy = pos.x(), pos.y()
+
+        # Convert click from fit view to image coords
+        ix, iy = self._widget_to_img(wx, wy)
+        h_img, w_img = self._img_bgr.shape[:2]
+        if not (0 <= ix < w_img and 0 <= iy < h_img):
+            return
+
+        # Enter zoom mode: compute scale and pan so clicked point stays fixed
+        ww, wh = self.width(), self.height()
+        avail_h = wh - 22
+        fit_scale = min(ww / w_img, avail_h / h_img)
+        # Zoom to 1:1 for large images, 2× for smaller images
+        self._zoom_scale = max(1.0, fit_scale * 2.0)
+        # Pan: set origin so img coord (ix, iy) maps to widget coord (wx, wy)
+        self._zoom_ox = ix - wx / self._zoom_scale
+        self._zoom_oy = iy - wy / self._zoom_scale
+        self._clamp_zoom_origin()
+
+        self._zoom_active = True
+        self._drag_img = (ix, iy)
+        self.setCursor(Qt.CursorShape.BlankCursor)
+        self.update()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if not self._zoom_active or self._img_bgr is None:
+            return
+        pos = event.position()
+        ix, iy = self._widget_to_img(pos.x(), pos.y())
+        h_img, w_img = self._img_bgr.shape[:2]
+        ix = max(0.0, min(float(w_img - 1), ix))
+        iy = max(0.0, min(float(h_img - 1), iy))
+
+        # Pan when point approaches widget edge (keep crosshair within 20% of edges)
+        ww, wh = self.width(), self.height()
+        avail_h = wh - 22
+        margin = 0.2
+        wx_cur = (ix - self._zoom_ox) * self._zoom_scale
+        wy_cur = (iy - self._zoom_oy) * self._zoom_scale
+        if wx_cur < ww * margin:
+            self._zoom_ox = ix - ww * margin / self._zoom_scale
+        elif wx_cur > ww * (1 - margin):
+            self._zoom_ox = ix - ww * (1 - margin) / self._zoom_scale
+        if wy_cur < avail_h * margin:
+            self._zoom_oy = iy - avail_h * margin / self._zoom_scale
+        elif wy_cur > avail_h * (1 - margin):
+            self._zoom_oy = iy - avail_h * (1 - margin) / self._zoom_scale
+        self._clamp_zoom_origin()
+
+        self._drag_img = (ix, iy)
+        self.update()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton or not self._zoom_active:
+            return
+        final = self._drag_img
+        self._zoom_active = False
+        self._drag_img = None
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.update()
+        if final is not None:
+            self.point_set.emit(float(final[0]), float(final[1]))
+
+    def _clamp_zoom_origin(self) -> None:
+        """Keep zoom pan within image bounds."""
+        if self._img_bgr is None:
+            return
+        h_img, w_img = self._img_bgr.shape[:2]
+        ww, wh = self.width(), self.height()
+        avail_h = wh - 22
+        max_ox = w_img - ww / self._zoom_scale
+        max_oy = h_img - avail_h / self._zoom_scale
+        self._zoom_ox = max(0.0, min(max_ox, self._zoom_ox))
+        self._zoom_oy = max(0.0, min(max_oy, self._zoom_oy))
 
 
 # ---------------------------------------------------------------------------
@@ -379,9 +589,10 @@ class _SolveThread(QThread):
 class ExtrinsicsAutoCalibDialog(QDialog):
     """Semi-automatic extrinsics calibration dialog.
 
-    Shows camera thumbnails, lets the user optionally add manual control
-    points, runs SIFT matching + BA in a background thread, and on Accept
-    writes the result to the session DB.
+    Shows camera thumbnails (with zoom-on-drag for precise control point
+    placement), runs SIFT matching + BA in a background thread, shows per-
+    camera reprojection error / disconnection badges, and writes the result
+    to the session DB on Accept.
     """
 
     imported = Signal(str)  # extrinsic_calibration_id
@@ -405,17 +616,16 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._selected_cp_idx: int | None = None
 
         self.setWindowTitle("Auto Extrinsics Calibration")
-        self.setMinimumSize(900, 580)
-        self.resize(1100, 680)
+        self.setMinimumSize(960, 640)
+        self.resize(1200, 760)
 
         self._cam_widgets: dict[str, _ClickableImageWidget] = {}
         for state in states:
             w = _ClickableImageWidget(state.label)
             if state.image is not None:
                 w.set_image(state.image)
-            # Capture vid in closure
             vid = state.video_id
-            w.clicked_at.connect(lambda x, y, v=vid: self._on_cam_click(v, x, y))
+            w.point_set.connect(lambda x, y, v=vid: self._on_cam_click(v, x, y))
             self._cam_widgets[state.video_id] = w
 
         self._build_ui()
@@ -425,36 +635,35 @@ class ExtrinsicsAutoCalibDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        # Camera thumbnails in a horizontal scroll area
+        # Camera grid — fills available space
+        n = len(self._cam_widgets)
+        ncols = 1 if n == 1 else (2 if n <= 4 else 3)
+
         cam_container = QWidget()
-        cam_layout = QHBoxLayout(cam_container)
-        cam_layout.setContentsMargins(4, 4, 4, 4)
-        cam_layout.setSpacing(4)
-        for w in self._cam_widgets.values():
-            w.setFixedSize(320, 220)
-            cam_layout.addWidget(w)
-        cam_layout.addStretch()
+        from PySide6.QtWidgets import QGridLayout
+        grid = QGridLayout(cam_container)
+        grid.setSpacing(4)
+        grid.setContentsMargins(4, 4, 4, 4)
+        for col in range(ncols):
+            grid.setColumnStretch(col, 1)
+        for i, (vid, w) in enumerate(self._cam_widgets.items()):
+            row, col = divmod(i, ncols)
+            grid.addWidget(w, row, col)
+            grid.setRowStretch(row, 1)
 
         cam_scroll = QScrollArea()
         cam_scroll.setWidget(cam_container)
-        cam_scroll.setWidgetResizable(False)
-        cam_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        cam_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        cam_scroll.setFixedHeight(240)
+        cam_scroll.setWidgetResizable(True)
+        cam_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         # Right panel: control points
         cp_panel = self._build_cp_panel()
 
-        # Splitter: cameras + cp panel
+        # Splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(cam_scroll)
-        left_layout.addStretch()
-        splitter.addWidget(left)
+        splitter.addWidget(cam_scroll)
         splitter.addWidget(cp_panel)
-        splitter.setSizes([780, 280])
+        splitter.setSizes([900, 280])
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
 
@@ -462,10 +671,10 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._solve_btn = QPushButton("Match && Solve")
         self._solve_btn.clicked.connect(self._on_solve)
         self._status_label = QLabel(
-            "Click 'Match & Solve' to run SIFT matching and bundle adjustment."
+            "Click 'Match & Solve' to run SIFT matching and bundle adjustment.  "
+            "Optionally add control points first (press a camera image to place one)."
         )
         self._status_label.setWordWrap(True)
-        self._status_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
         solve_row = QHBoxLayout()
         solve_row.addWidget(self._solve_btn)
@@ -493,8 +702,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         cp_layout = QVBoxLayout(cp_group)
 
         hint = QLabel(
-            "Select a point then click camera thumbnails to record observations. "
-            "Set World position to fix scale / origin."
+            "Select a point, then press and drag on camera images to place it precisely. "
+            "Set World position to fix scale / origin in BA."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666; font-size: 10px;")
@@ -580,10 +789,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             cp = self._control_points[row]
             fixed = cp.world_xyz is not None
             self._xyz_enabled.setChecked(fixed)
-            xyz_editable = fixed
             for sb in (self._xyz_x, self._xyz_y, self._xyz_z):
-                sb.setEnabled(xyz_editable)
-            self._xyz_apply_btn.setEnabled(xyz_editable)
+                sb.setEnabled(fixed)
+            self._xyz_apply_btn.setEnabled(fixed)
             if fixed:
                 self._xyz_x.setValue(float(cp.world_xyz[0]))
                 self._xyz_y.setValue(float(cp.world_xyz[1]))
@@ -630,10 +838,10 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         for i, cp in enumerate(self._control_points):
             color = _CP_COLORS[i % len(_CP_COLORS)]
             is_selected = (i == self._selected_cp_idx)
-            label = cp.name if is_selected else ""
+            mlabel = cp.name if is_selected else ""
             for vid, (x, y) in cp.obs.items():
                 if vid in self._cam_widgets:
-                    self._cam_widgets[vid].add_marker(x, y, color, label)
+                    self._cam_widgets[vid].add_marker(x, y, color, mlabel)
 
     # ------------------------------------------------------------------
     # Solve
@@ -642,10 +850,11 @@ class ExtrinsicsAutoCalibDialog(QDialog):
     def _on_solve(self) -> None:
         if self._solve_thread and self._solve_thread.isRunning():
             return
-        # Reset poses for a fresh solve
         for s in self._states:
             s.R = None
             s.t = None
+        for w in self._cam_widgets.values():
+            w.set_calib_status(None)
 
         self._solve_btn.setEnabled(False)
         self._accept_btn.setEnabled(False)
@@ -661,6 +870,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._solve_btn.setEnabled(True)
         n_total = len(result.cameras)
         n_solved = n_total - len(result.unsolved)
+
         lines = [f"Solved: {n_solved}/{n_total} cameras"]
         for vid, stats in result.reprojection_errors.items():
             s = result.cameras[vid]
@@ -669,9 +879,26 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 f"  (max {stats['max']:.1f}, n={stats['n']})"
             )
         if result.unsolved:
-            lines.append(f"  Unsolved: {', '.join(result.unsolved)}")
+            lines.append(
+                f"  Disconnected: {', '.join(result.unsolved)}"
+                f" — add control points shared with a solved camera to connect them."
+            )
         self._status_label.setText("\n".join(lines))
         self._accept_btn.setEnabled(n_solved > 0)
+
+        # Update per-camera badges
+        for state in self._states:
+            vid = state.video_id
+            if vid not in self._cam_widgets:
+                continue
+            w = self._cam_widgets[vid]
+            if vid in result.unsolved:
+                w.set_calib_status("Disconnected", error=True)
+            elif vid in result.reprojection_errors:
+                err = result.reprojection_errors[vid]["mean"]
+                w.set_calib_status(f"err {err:.2f} px", error=err > 5.0)
+            else:
+                w.set_calib_status(None)
 
     def _on_solve_error(self, msg: str) -> None:
         self._solve_btn.setEnabled(True)
@@ -1017,7 +1244,6 @@ class ExtrinsicsImportWidget(QWidget):
         if not candidates:
             return None
 
-        # Match by name substring (bidirectional)
         if toml_name:
             name_lower = toml_name.lower()
             matches = [
@@ -1027,7 +1253,6 @@ class ExtrinsicsImportWidget(QWidget):
             if len(matches) == 1:
                 return matches[0]["id"]
 
-        # Match cam1→first instance by position only when counts are equal
         if len(self._cam_keys) == len(self._instances):
             pos = self._cam_keys.index(cam_key)
             if pos < len(candidates):
@@ -1085,7 +1310,7 @@ class ExtrinsicsPage(QWizardPage):
             )
 
     def isComplete(self) -> bool:  # noqa: N802
-        return True  # extrinsics are optional; never block progression
+        return True
 
 
 # ---------------------------------------------------------------------------

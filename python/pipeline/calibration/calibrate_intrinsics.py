@@ -63,7 +63,9 @@ def find_sharp_frames(
     window: int = 10,
     threshold: float = 0.8,
     skip: int = 1,
-    use_global_metric: bool = False
+    use_global_metric: bool = False,
+    log_fn=None,
+    save_debug: bool = False,
 ) -> List[int]:
     """Find frames in a video that are sharp enough for calibration.
 
@@ -84,6 +86,7 @@ def find_sharp_frames(
     Raises:
         IOError: If video file cannot be opened
     """
+    log = log_fn or print
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise IOError(f"Cannot open video file: {video_path}")
@@ -104,7 +107,7 @@ def find_sharp_frames(
             frame_indices.append(frame_count)
 
             if len(frame_indices) % 100 == 0:
-                print(f"Processed {len(frame_indices)} frames (total: {frame_count})")
+                log(f"Processed {len(frame_indices)} frames (total: {frame_count})")
 
         frame_count += 1
 
@@ -113,17 +116,15 @@ def find_sharp_frames(
     laplacians_array = np.array(laplacians)
 
     if use_global_metric:
-        # Normalize sharpness metric across entire video
         metric = (laplacians_array - np.mean(laplacians_array)) / np.std(laplacians_array)
-        print(f"Using global sharpness metric based on image Laplacians: (mean={np.mean(laplacians_array):.2f}, std={np.std(laplacians_array):.2f})")
+        log(f"Global sharpness metric: mean={np.mean(laplacians_array):.2f}, std={np.std(laplacians_array):.2f}")
     else:
-        # Use raw Laplacian values
         metric = laplacians_array
-        print(f"Using raw Laplacian values as sharpness metric: (mean={np.mean(laplacians_array):.2f}, max={np.max(laplacians_array):.2f})")
+        log(f"Raw Laplacian metric: mean={np.mean(laplacians_array):.2f}, max={np.max(laplacians_array):.2f}")
 
-    np.savez('laplacians.npz', laplacians_array=laplacians_array, metric=metric)
+    if save_debug:
+        np.savez('laplacians.npz', laplacians_array=laplacians_array, metric=metric)
 
-    # Find local maxima above threshold
     maxima = []
     for i in range(window, len(metric) - window):
         window_slice = metric[i - window:i + window + 1]
@@ -131,8 +132,7 @@ def find_sharp_frames(
             if np.sum(window_slice == metric[i]) == 1:
                 maxima.append(frame_indices[i])
 
-    print(f"Found {len(maxima)} sharp frames out of {len(frame_indices)} analyzed frames ({frame_count} total)")
-    print(f"Threshold used: {threshold}, window size: {window}, skip: {skip}, global metric: {use_global_metric}")
+    log(f"Found {len(maxima)} sharp frames out of {len(frame_indices)} analyzed ({frame_count} total)")
     return maxima
 
 
@@ -174,7 +174,8 @@ def process_video_for_checkerboards(
     window: int = 10,
     threshold: float = 0.8,
     skip: int = 1,
-    use_global_metric: bool = False
+    use_global_metric: bool = False,
+    log_fn=None,
 ) -> List[Tuple[int, np.ndarray, np.ndarray]]:
     """Extract checkerboard frames and corners from a video.
 
@@ -193,7 +194,8 @@ def process_video_for_checkerboards(
     Raises:
         IOError: If video file cannot be opened
     """
-    sharp_frames = find_sharp_frames(video_path, window, threshold, skip, use_global_metric)
+    log = log_fn or print
+    sharp_frames = find_sharp_frames(video_path, window, threshold, skip, use_global_metric, log_fn=log_fn)
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -205,12 +207,12 @@ def process_video_for_checkerboards(
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = cap.read()
         if not ret:
-            print(f"Warning: Failed to read frame {frame_idx}")
+            log(f"Warning: Failed to read frame {frame_idx}")
             continue
 
         corners = extract_checkerboard_corners(frame, rows, cols)
         if corners is not None:
-            print(f"Found checkerboard in frame {frame_idx}")
+            log(f"Checkerboard detected in frame {frame_idx}")
             checkerboards.append((frame_idx, frame, corners))
 
     cap.release()
@@ -220,7 +222,8 @@ def process_video_for_checkerboards(
 def process_images_for_checkerboards(
     image_dir: Path,
     rows: int,
-    cols: int
+    cols: int,
+    log_fn=None,
 ) -> List[Tuple[str, np.ndarray, np.ndarray]]:
     """Extract checkerboards from images in a directory.
 
@@ -232,6 +235,7 @@ def process_images_for_checkerboards(
     Returns:
         List of tuples (filename, image, corners) for each detected checkerboard
     """
+    log = log_fn or print
     image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff'}
     image_files = [f for f in image_dir.iterdir()
                    if f.suffix.lower() in image_extensions]
@@ -244,12 +248,12 @@ def process_images_for_checkerboards(
     for img_path in sorted(image_files):
         image = cv2.imread(str(img_path))
         if image is None:
-            print(f"Warning: Failed to read {img_path}")
+            log(f"Warning: Failed to read {img_path}")
             continue
 
         corners = extract_checkerboard_corners(image, rows, cols)
         if corners is not None:
-            print(f"Found checkerboard in {img_path.name}")
+            log(f"Checkerboard detected in {img_path.name}")
             checkerboards.append((img_path.name, image, corners))
 
     return checkerboards
@@ -259,7 +263,8 @@ def calibrate_camera(
     image_points: List[np.ndarray],
     object_points: List[np.ndarray],
     image_size: Tuple[int, int],
-    use_fisheye: bool = False
+    use_fisheye: bool = False,
+    log_fn=None,
 ) -> Tuple[CalibrationResult, UndistortionMaps]:
     """Perform camera calibration using detected checkerboard corners.
 
@@ -343,8 +348,8 @@ def calibrate_camera(
 
     calib_result = CalibrationResult(
         error=float(ret),
-        matrix=original_mtx,  # Original camera matrix from calibration
-        matrix_undistorted=newcameramat,  # New camera matrix for undistorted images
+        matrix=original_mtx,
+        matrix_undistorted=newcameramat,
         distortion=dist,
         size=image_size,
         model_type=model_type
@@ -352,7 +357,8 @@ def calibrate_camera(
 
     undistort_maps = UndistortionMaps(mapx=mapx, mapy=mapy)
 
-    print(f"Calibration successful ({model_type} model): error = {ret:.3f} pixels")
+    log = log_fn or print
+    log(f"Calibration done ({model_type}): RMS error = {ret:.3f} px")
 
     return calib_result, undistort_maps
 
@@ -493,6 +499,322 @@ def save_calibration_h5(
 
     print(f"Calibration results saved to {output_path}")
     print(f"Use h5py or HDFView to inspect the file contents")
+
+
+# ---------------------------------------------------------------------------
+# ChArUco board detection
+# ---------------------------------------------------------------------------
+
+#: Mapping from human-readable name to cv2.aruco dictionary constant.
+#: Built lazily so importing this module does not fail if cv2.aruco is absent.
+def _aruco_dicts() -> dict[str, int]:
+    try:
+        d = cv2.aruco
+        return {
+            "DICT_4X4_50":  d.DICT_4X4_50,
+            "DICT_4X4_100": d.DICT_4X4_100,
+            "DICT_5X5_50":  d.DICT_5X5_50,
+            "DICT_6X6_50":  d.DICT_6X6_50,
+            "DICT_6X6_250": d.DICT_6X6_250,
+            "DICT_7X7_250": d.DICT_7X7_250,
+        }
+    except AttributeError:
+        return {}
+
+
+def charuco_available() -> bool:
+    """Return True if cv2.aruco is present."""
+    return hasattr(cv2, "aruco") and hasattr(cv2.aruco, "CharucoBoard")
+
+
+def create_charuco_board(
+    rows: int,
+    cols: int,
+    square_length: float,
+    marker_length: float,
+    dict_name: str = "DICT_6X6_250",
+):
+    """Create a cv2.aruco.CharucoBoard.
+
+    Args:
+        rows: Number of squares in the vertical direction.
+        cols: Number of squares in the horizontal direction.
+        square_length: Physical side length of a chessboard square.
+        marker_length: Physical side length of an ArUco marker (must be < square_length).
+        dict_name: Name key from _aruco_dicts() (default DICT_6X6_250).
+
+    Returns:
+        cv2.aruco.CharucoBoard instance.
+    """
+    dicts = _aruco_dicts()
+    if dict_name not in dicts:
+        raise ValueError(f"Unknown ArUco dictionary '{dict_name}'. "
+                         f"Choose from: {list(dicts)}")
+    aruco_dict = cv2.aruco.getPredefinedDictionary(dicts[dict_name])
+    # OpenCV 4.7+ uses tuple constructor; older builds use CharucoBoard_create
+    try:
+        board = cv2.aruco.CharucoBoard((cols, rows), square_length, marker_length, aruco_dict)
+    except TypeError:
+        board = cv2.aruco.CharucoBoard_create(cols, rows, square_length, marker_length, aruco_dict)
+    return board
+
+
+def extract_charuco_corners(
+    image: np.ndarray,
+    board,
+    min_corners: int = 4,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Detect ChArUco corners in *image*.
+
+    Returns:
+        (charuco_corners, charuco_ids) or (None, None) if detection fails.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+
+    try:
+        # OpenCV 4.7+ new API
+        detector = cv2.aruco.CharucoDetector(board)
+        corners, ids, _, _ = detector.detectBoard(gray)
+    except AttributeError:
+        # Older API
+        aruco_dict = board.getDictionary() if hasattr(board, "getDictionary") else board.dictionary
+        marker_corners, marker_ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict)
+        if marker_ids is None or len(marker_ids) == 0:
+            return None, None
+        _, corners, ids = cv2.aruco.interpolateCornersCharuco(
+            marker_corners, marker_ids, gray, board
+        )
+
+    if corners is None or ids is None or len(ids) < min_corners:
+        return None, None
+    return corners, ids
+
+
+def process_video_for_charuco(
+    video_path: Path,
+    board,
+    window: int = 10,
+    threshold: float = 0.8,
+    skip: int = 1,
+    use_global_metric: bool = False,
+    min_corners: int = 6,
+    log_fn=None,
+) -> List[Tuple[int, np.ndarray, np.ndarray, np.ndarray]]:
+    """Extract ChArUco frames from *video_path*.
+
+    Returns:
+        List of (frame_idx, frame, charuco_corners, charuco_ids).
+    """
+    log = log_fn or print
+    sharp_frames = find_sharp_frames(
+        video_path, window, threshold, skip, use_global_metric, log_fn=log_fn
+    )
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise IOError(f"Cannot open video file: {video_path}")
+
+    results = []
+    for frame_idx in sharp_frames:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        if not ret:
+            log(f"Warning: Failed to read frame {frame_idx}")
+            continue
+        corners, ids = extract_charuco_corners(frame, board, min_corners)
+        if corners is not None:
+            log(f"ChArUco detected in frame {frame_idx} ({len(ids)} corners)")
+            results.append((frame_idx, frame, corners, ids))
+
+    cap.release()
+    return results
+
+
+def process_images_for_charuco(
+    image_dir: Path,
+    board,
+    min_corners: int = 6,
+    log_fn=None,
+) -> List[Tuple[str, np.ndarray, np.ndarray, np.ndarray]]:
+    """Detect ChArUco corners in images from a directory.
+
+    Returns:
+        List of (filename, image, charuco_corners, charuco_ids).
+    """
+    log = log_fn or print
+    extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff'}
+    files = [f for f in image_dir.iterdir() if f.suffix.lower() in extensions]
+    if not files:
+        raise ValueError(f"No image files found in {image_dir}")
+
+    results = []
+    for img_path in sorted(files):
+        img = cv2.imread(str(img_path))
+        if img is None:
+            log(f"Warning: Failed to read {img_path}")
+            continue
+        corners, ids = extract_charuco_corners(img, board, min_corners)
+        if corners is not None:
+            log(f"ChArUco detected in {img_path.name} ({len(ids)} corners)")
+            results.append((img_path.name, img, corners, ids))
+
+    return results
+
+
+def calibrate_camera_charuco(
+    all_corners: List[np.ndarray],
+    all_ids: List[np.ndarray],
+    board,
+    image_size: Tuple[int, int],
+    use_fisheye: bool = False,
+    log_fn=None,
+) -> Tuple[CalibrationResult, UndistortionMaps]:
+    """Run camera calibration from ChArUco corner detections.
+
+    Args:
+        all_corners: List of charuco_corners arrays (one per image).
+        all_ids:     List of charuco_ids arrays (one per image).
+        board:       The cv2.aruco.CharucoBoard used for detection.
+        image_size:  (width, height) of the images.
+        use_fisheye: Use fisheye calibration model.
+
+    Returns:
+        (CalibrationResult, UndistortionMaps)
+    """
+    log = log_fn or print
+    if use_fisheye:
+        raise NotImplementedError("Fisheye + ChArUco calibration is not yet supported; "
+                                  "use the standard (pinhole) model with ChArUco boards.")
+
+    ret, K, dist, rvecs, tvecs = cv2.aruco.calibrateCameraCharuco(
+        all_corners, all_ids, board, image_size, None, None
+    )
+
+    K_new, _ = cv2.getOptimalNewCameraMatrix(K, dist, image_size, 0, image_size)
+    mapx, mapy = cv2.initUndistortRectifyMap(K, dist, None, K_new, image_size, cv2.CV_32FC1)
+
+    result = CalibrationResult(
+        error=float(ret),
+        matrix=K.copy(),
+        matrix_undistorted=K_new,
+        distortion=dist,
+        size=image_size,
+        model_type="standard",
+    )
+    log(f"ChArUco calibration done: RMS error = {ret:.3f} px")
+    return result, UndistortionMaps(mapx=mapx, mapy=mapy)
+
+
+# ---------------------------------------------------------------------------
+# Unified pipeline (callable from CLI and from UI thread)
+# ---------------------------------------------------------------------------
+
+def run_intrinsics_pipeline(
+    input_path: Path,
+    rows: int,
+    cols: int,
+    pattern: str = "checkerboard",
+    square_size: float = 1.0,
+    marker_size_ratio: float = 0.75,
+    aruco_dict_name: str = "DICT_6X6_250",
+    use_fisheye: bool = False,
+    window: int = 10,
+    threshold: float = 0.8,
+    skip: int = 1,
+    use_global_metric: bool = False,
+    log_fn=None,
+) -> Tuple[CalibrationResult, UndistortionMaps]:
+    """Run the full intrinsics calibration pipeline.
+
+    Detects calibration pattern corners from *input_path* (video file or image
+    directory), calibrates the camera, and returns the result.
+
+    Args:
+        input_path:        Video file or directory of images.
+        rows:              Number of internal corners (rows) for checkerboard,
+                           or number of squares (rows) for ChArUco.
+        cols:              Columns counterpart.
+        pattern:           "checkerboard" or "charuco".
+        square_size:       Physical square size (arbitrary units for checkerboard;
+                           metres recommended for ChArUco so scale is meaningful).
+        marker_size_ratio: ChArUco only — marker side as a fraction of square_size.
+        aruco_dict_name:   ChArUco only — dictionary name from _aruco_dicts().
+        use_fisheye:       Use OpenCV fisheye model (checkerboard only).
+        window, threshold, skip, use_global_metric:
+                           Passed to find_sharp_frames (video mode only).
+        log_fn:            Optional callable for progress messages.  Defaults to print.
+
+    Returns:
+        (CalibrationResult, UndistortionMaps)
+    """
+    log = log_fn or print
+    input_path = Path(input_path)
+
+    if pattern == "charuco":
+        if not charuco_available():
+            raise RuntimeError("cv2.aruco is not available in this OpenCV build.")
+        board = create_charuco_board(
+            rows, cols,
+            square_length=square_size,
+            marker_length=square_size * marker_size_ratio,
+            dict_name=aruco_dict_name,
+        )
+        if input_path.is_file():
+            log("Scanning video for ChArUco boards…")
+            detections = process_video_for_charuco(
+                input_path, board, window, threshold, skip, use_global_metric, log_fn=log_fn
+            )
+        else:
+            log("Scanning image directory for ChArUco boards…")
+            detections = process_images_for_charuco(input_path, board, log_fn=log_fn)
+
+        if not detections:
+            raise ValueError("No ChArUco boards detected. "
+                             "Check pattern settings and sharpness threshold.")
+        log(f"Found {len(detections)} usable frames.")
+
+        all_corners = [d[2] for d in detections]
+        all_ids = [d[3] for d in detections]
+        first_img = detections[0][1]
+        image_size = (first_img.shape[1], first_img.shape[0])
+
+        return calibrate_camera_charuco(
+            all_corners, all_ids, board, image_size, use_fisheye=use_fisheye, log_fn=log_fn
+        )
+
+    else:  # checkerboard
+        if input_path.is_file():
+            log("Scanning video for checkerboard corners…")
+            detections = process_video_for_checkerboards(
+                input_path, rows, cols, window, threshold, skip, use_global_metric, log_fn=log_fn
+            )
+        else:
+            log("Scanning image directory for checkerboard corners…")
+            detections = process_images_for_checkerboards(
+                input_path, rows, cols, log_fn=log_fn
+            )
+
+        if not detections:
+            raise ValueError("No checkerboards detected. "
+                             "Check rows/cols settings and sharpness threshold.")
+        log(f"Found {len(detections)} usable frames.")
+
+        if len(detections) < 10:
+            log(f"WARNING: Only {len(detections)} frames — at least 10 recommended.")
+
+        first_img = detections[0][1]
+        image_size = (first_img.shape[1], first_img.shape[0])
+
+        objp = np.zeros((rows * cols, 3), np.float32)
+        objp[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * square_size
+        object_points = [objp for _ in detections]
+        image_points = [d[2] for d in detections]
+
+        log("Running camera calibration…")
+        return calibrate_camera(
+            image_points, object_points, image_size,
+            use_fisheye=use_fisheye, log_fn=log_fn,
+        )
 
 
 @click.command()

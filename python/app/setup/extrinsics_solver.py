@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 from scipy.optimize import least_squares
+from scipy.sparse import lil_matrix
 
 _log = logging.getLogger(__name__)
 
@@ -607,32 +608,98 @@ def run_bundle_adjustment(
         _log.warning("BA: too few observations (%d), skipping", n_obs)
         return points_3d
 
-    def _get_point_3d(pt_key: str, x: np.ndarray) -> np.ndarray:
-        if pt_key.startswith("free_"):
-            start = free_point_start[int(pt_key[5:])]
-            return x[start:start + 3]
-        name = pt_key[3:]  # strip "cp_"
-        if name in fixed_pts:
-            return fixed_pts[name]
-        if name in free_cp_start:
-            return x[free_cp_start[name]:free_cp_start[name] + 3]
-        return np.zeros(3)  # shouldn't happen; obs_list filters these out
+    # --- Precompute per-camera projection data (done once, reused every evaluation) ---
+    # For each camera: fixed 3D positions (constants) and free 3D param start indices
+    # (indices into x), plus observed pixels and weights as contiguous numpy arrays.
+    # This lets residuals() do one matmul per camera instead of N cv2.projectPoints calls.
+    _cam_obs: dict[str, list] = defaultdict(list)
+    for i, (vid, obs_px, pt_key, weight) in enumerate(obs_list):
+        _cam_obs[vid].append((i, obs_px, pt_key, weight))
+
+    cam_proj_data: list[tuple] = []
+    for vid, entries in _cam_obs.items():
+        n_e = len(entries)
+        obs_px_arr = np.array([e[1] for e in entries], dtype=np.float64)   # (N, 2)
+        weights_arr = np.array([e[3] for e in entries], dtype=np.float64)  # (N,)
+        res_ridx = np.array([e[0] for e in entries], dtype=int)            # (N,)
+
+        fixed_mask = np.zeros(n_e, bool)
+        fixed_xyz_arr = np.zeros((n_e, 3), dtype=np.float64)
+        param_starts_arr = np.zeros(n_e, int)
+
+        for k, (_, _, pt_key, _) in enumerate(entries):
+            if pt_key.startswith("free_"):
+                param_starts_arr[k] = free_point_start[int(pt_key[5:])]
+            else:
+                name = pt_key[3:]
+                if name in fixed_pts:
+                    fixed_mask[k] = True
+                    fixed_xyz_arr[k] = fixed_pts[name]
+                elif name in free_cp_start:
+                    param_starts_arr[k] = free_cp_start[name]
+
+        K = state_by_id[vid].K
+        cam_proj_data.append((
+            cam_param_start[vid],             # ci: start of [rvec, tvec] in x
+            K[0, 0], K[1, 1], K[0, 2], K[1, 2],  # fx, fy, cx, cy
+            obs_px_arr, weights_arr, res_ridx,
+            fixed_mask, fixed_xyz_arr, param_starts_arr,
+        ))
 
     def residuals(x: np.ndarray) -> np.ndarray:
         if cancel_event is not None and cancel_event.is_set():
             raise _Cancelled()
         res = np.empty(n_obs * 2)
-        for i, (vid, obs_px, pt_key, weight) in enumerate(obs_list):
-            ci = cam_param_start[vid]
-            rvec = x[ci:ci + 3]
-            tvec = x[ci + 3:ci + 6]
-            pt3d = _get_point_3d(pt_key, x)
-            K = state_by_id[vid].K
-            proj, _ = cv2.projectPoints(
-                pt3d.reshape(1, 3), rvec, tvec, K, np.zeros(4)
-            )
-            res[2 * i: 2 * i + 2] = (proj.reshape(2) - obs_px) * weight
+        for (ci, fx, fy, cx, cy,
+             obs_px, weights, res_ridx,
+             fixed_mask, fixed_xyz, param_starts) in cam_proj_data:
+            R, _ = cv2.Rodrigues(x[ci:ci + 3])
+            tvec = x[ci + 3:ci + 6].reshape(3, 1)
+
+            # Build Nx3 3D-point array using vectorised numpy indexing
+            # Fixed CPs: constant positions already in fixed_xyz
+            # Free SIFT/CP points: positions read from x via fancy indexing
+            if fixed_mask.all():
+                pts3d = fixed_xyz
+            elif (~fixed_mask).all():
+                # All free — vectorised slice: x[param_starts[k] : param_starts[k]+3] for all k
+                pts3d = x[param_starts[:, None] + np.arange(3)]  # (N, 3)
+            else:
+                pts3d = fixed_xyz.copy()
+                fs = param_starts[~fixed_mask]
+                pts3d[~fixed_mask] = x[fs[:, None] + np.arange(3)]
+
+            # Project all N points for this camera in one matmul
+            pts_cam = R @ pts3d.T + tvec   # (3, N)
+            z = pts_cam[2]
+            proj_x = fx * pts_cam[0] / z + cx
+            proj_y = fy * pts_cam[1] / z + cy
+
+            rx = (proj_x - obs_px[:, 0]) * weights
+            ry = (proj_y - obs_px[:, 1]) * weights
+            res[2 * res_ridx]     = rx
+            res[2 * res_ridx + 1] = ry
         return res
+
+    # --- Jacobian sparsity pattern ---
+    # Each residual row (obs_i, component 0 or 1) depends only on:
+    #   • 6 camera params for that observation's camera
+    #   • 3 point params for that observation's 3D point (if free; fixed CPs have none)
+    # Without sparsity, scipy needs 849 evaluations per Jacobian; with it, ~n_cams+n_colors.
+    n_params = len(params_arr)
+    jac_sp = lil_matrix((n_obs * 2, n_params), dtype=np.int8)
+    for i, (vid, _, pt_key, _) in enumerate(obs_list):
+        ci = cam_param_start[vid]
+        jac_sp[2 * i, ci:ci + 6] = 1
+        jac_sp[2 * i + 1, ci:ci + 6] = 1
+        if pt_key.startswith("free_"):
+            ps = free_point_start[int(pt_key[5:])]
+            jac_sp[2 * i, ps:ps + 3] = 1
+            jac_sp[2 * i + 1, ps:ps + 3] = 1
+        elif pt_key[3:] in free_cp_start:
+            ps = free_cp_start[pt_key[3:]]
+            jac_sp[2 * i, ps:ps + 3] = 1
+            jac_sp[2 * i + 1, ps:ps + 3] = 1
 
     try:
         result = least_squares(
@@ -640,6 +707,7 @@ def run_bundle_adjustment(
             method="trf", loss="linear",
             ftol=1e-6, xtol=1e-6,
             max_nfev=max_nfev,
+            jac_sparsity=jac_sp.tocsc(),
             verbose=0,
         )
     except _Cancelled:

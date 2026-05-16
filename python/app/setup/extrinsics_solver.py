@@ -42,9 +42,10 @@ class CamCalibState:
     K_orig: np.ndarray   # K_original — needed to undistort raw frames
     dist: np.ndarray     # original distortion coefficients
     fisheye: bool
-    image: np.ndarray | None = None  # BGR full-res; None until loaded
-    R: np.ndarray | None = None      # world→cam rotation (3×3)
-    t: np.ndarray | None = None      # world→cam translation (3×1)
+    image: np.ndarray | None = None   # BGR full-res; None until loaded
+    R: np.ndarray | None = None       # world→cam rotation (3×3)
+    t: np.ndarray | None = None       # world→cam translation (3×1)
+    calib_id: str | None = None       # intrinsics_calibrations.id currently in use
 
 
 @dataclass

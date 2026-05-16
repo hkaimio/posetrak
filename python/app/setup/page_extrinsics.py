@@ -249,6 +249,7 @@ def _load_states_from_images(
             dist=intr["dist"],
             fisheye=intr["fisheye"],
             image=img,
+            calib_id=final_calib.get(db_label),
         ))
         print(f"  LOAD {db_label} ({img.shape[1]}×{img.shape[0]}) from {png.name}")
     return states
@@ -872,6 +873,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._solve_thread: _SolveThread | None = None
         self._control_points: list[ControlPoint] = []
         self._selected_cp_idx: int | None = None
+        self._intrinsics_combos: dict[str, QComboBox] = {}
 
         self.setWindowTitle("Auto Extrinsics Calibration")
         self.setMinimumSize(960, 640)
@@ -1087,7 +1089,101 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         v.setContentsMargins(0, 0, 0, 0)
         v.addWidget(cp_group, 1)
         v.addWidget(xyz_group)
+        v.addWidget(self._build_intrinsics_group())
         return panel
+
+    def _build_intrinsics_group(self) -> QGroupBox:
+        group = QGroupBox("Camera Intrinsics")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(2)
+
+        for state in self._states:
+            row = QHBoxLayout()
+            row.setSpacing(4)
+            lbl = QLabel(state.label)
+            lbl.setFixedWidth(80)
+            lbl.setToolTip(state.label)
+            combo = QComboBox()
+            combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self._populate_intrinsics_combo(state, combo)
+            vid = state.video_id
+            combo.currentIndexChanged.connect(
+                lambda _idx, v=vid, c=combo: self._on_intrinsics_changed(v, c.currentData())
+            )
+            self._intrinsics_combos[state.video_id] = combo
+            row.addWidget(lbl)
+            row.addWidget(combo, 1)
+            layout.addLayout(row)
+
+        return group
+
+    def _populate_intrinsics_combo(self, state: CamCalibState, combo: QComboBox) -> None:
+        old_factory = self._conn.row_factory
+        self._conn.row_factory = sqlite3.Row
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT ic.id, ic.calibrated_at, ic.rms_error, ic.distortion_model,
+                       (cm.default_intrinsics_calibration_id = ic.id) AS is_default
+                FROM intrinsics_calibrations ic
+                JOIN camera_modes cm ON cm.id = ic.camera_mode_id
+                JOIN camera_instances ci ON ci.camera_model_id = cm.camera_model_id
+                WHERE ci.label = ?
+                ORDER BY is_default DESC, ic.calibrated_at DESC
+                """,
+                (state.label,),
+            ).fetchall()
+        finally:
+            self._conn.row_factory = old_factory
+
+        combo.blockSignals(True)
+        combo.clear()
+        for r in rows:
+            date = (r["calibrated_at"] or "")[:10]
+            rms = f"{r['rms_error']:.2f}px" if r["rms_error"] is not None else "?"
+            model = r["distortion_model"] or "standard"
+            star = "★ " if r["is_default"] else ""
+            text = f"{star}{date}  {rms}  {model}"
+            combo.addItem(text, userData=r["id"])
+            if r["id"] == state.calib_id:
+                combo.setCurrentIndex(combo.count() - 1)
+        combo.blockSignals(False)
+
+    def _on_intrinsics_changed(self, video_id: str, calib_id: str | None) -> None:
+        if not calib_id:
+            return
+        state = self._states_by_id.get(video_id)
+        if state is None:
+            return
+        old_factory = self._conn.row_factory
+        self._conn.row_factory = sqlite3.Row
+        try:
+            ic = self._conn.execute(
+                "SELECT * FROM intrinsics_calibrations WHERE id = ?", (calib_id,)
+            ).fetchone()
+        finally:
+            self._conn.row_factory = old_factory
+        if ic is None:
+            return
+
+        fx, fy, cx, cy = ic["fx"], ic["fy"], ic["cx"], ic["cy"]
+        K_new = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+        K_orig = K_new.copy()
+        if ic["matrix_original"]:
+            vals = struct.unpack("<9d", bytes(ic["matrix_original"]))
+            K_orig = np.array(vals).reshape(3, 3)
+        if ic["dist_coeffs"]:
+            n = len(bytes(ic["dist_coeffs"])) // 8
+            dist = np.array(struct.unpack(f"<{n}d", bytes(ic["dist_coeffs"]))).reshape(1, -1)
+        else:
+            dist = np.zeros((1, 4))
+
+        state.K = K_new
+        state.K_orig = K_orig
+        state.dist = dist
+        state.fisheye = ic["distortion_model"] == "fisheye"
+        state.calib_id = calib_id
 
     # ------------------------------------------------------------------
     # Control-point slots
@@ -1710,6 +1806,21 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                     "UPDATE captures SET extrinsic_calibration_id = ? WHERE id = ?",
                     [(calib_id, sid) for sid in self._shot_ids],
                 )
+                # Persist any per-camera intrinsics selection changes.
+                for state in self._states:
+                    combo = self._intrinsics_combos.get(state.video_id)
+                    if combo is None:
+                        continue
+                    selected_calib_id = combo.currentData()
+                    if not selected_calib_id:
+                        continue
+                    for shot_id in self._shot_ids:
+                        self._conn.execute(
+                            "UPDATE capture_videos SET intrinsics_calibration_id = ?"
+                            " WHERE shot_id = ? AND camera_instance_id = ("
+                            "  SELECT id FROM camera_instances WHERE label = ?)",
+                            (selected_calib_id, shot_id, state.label),
+                        )
 
         self.imported.emit(calib_id)
         self.accept()

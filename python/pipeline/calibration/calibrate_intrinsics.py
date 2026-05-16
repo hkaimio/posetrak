@@ -682,9 +682,62 @@ def calibrate_camera_charuco(
         (CalibrationResult, UndistortionMaps)
     """
     log = log_fn or print
+
     if use_fisheye:
-        raise NotImplementedError("Fisheye + ChArUco calibration is not yet supported; "
-                                  "use the standard (pinhole) model with ChArUco boards.")
+        # cv2.aruco.calibrateCameraCharuco doesn't support fisheye, so we extract
+        # the 3D-2D correspondences manually and call cv2.fisheye.calibrate directly.
+        object_points: List[np.ndarray] = []
+        image_points: List[np.ndarray] = []
+        for corners, ids in zip(all_corners, all_ids):
+            try:
+                # OpenCV 4.7+ Board.matchImagePoints
+                obj_pts, img_pts = board.matchImagePoints(corners, ids)
+            except AttributeError:
+                # Older API: index chessboardCorners by detected id
+                flat_ids = ids.flatten()
+                obj_pts = board.chessboardCorners[flat_ids]          # (N, 3)
+                img_pts = corners.reshape(-1, 2)                      # (N, 2)
+            if obj_pts is None or len(obj_pts) < 4:
+                continue
+            object_points.append(obj_pts.reshape(-1, 3).astype(np.float64))
+            image_points.append(img_pts.reshape(-1, 2).astype(np.float64))
+
+        if not object_points:
+            raise RuntimeError("No valid ChArUco frames for fisheye calibration.")
+
+        calibration_flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC + cv2.fisheye.CALIB_FIX_SKEW
+        obj_fe = [np.ascontiguousarray(p.reshape(-1, 1, 3), dtype=np.float64) for p in object_points]
+        img_fe = [np.ascontiguousarray(p.reshape(-1, 1, 2), dtype=np.float64) for p in image_points]
+
+        f_init = max(image_size)
+        cx, cy = image_size[0] / 2.0, image_size[1] / 2.0
+        K = np.array([[f_init, 0, cx], [0, f_init, cy], [0, 0, 1]], dtype=np.float64)
+        D = np.zeros((4, 1), dtype=np.float64)
+        rvecs = [np.zeros((1, 1, 3), dtype=np.float64) for _ in obj_fe]
+        tvecs = [np.zeros((1, 1, 3), dtype=np.float64) for _ in obj_fe]
+
+        ret, K, dist, rvecs, tvecs = cv2.fisheye.calibrate(
+            obj_fe, img_fe, image_size, K, D, rvecs, tvecs,
+            calibration_flags,
+            (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
+        )
+
+        newcameramat = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+            K, dist, image_size, np.eye(3), balance=0.0
+        )
+        mapx, mapy = cv2.fisheye.initUndistortRectifyMap(
+            K, dist, np.eye(3), newcameramat, image_size, cv2.CV_32FC1
+        )
+        result = CalibrationResult(
+            error=float(ret),
+            matrix=K.copy(),
+            matrix_undistorted=newcameramat,
+            distortion=dist,
+            size=image_size,
+            model_type="fisheye",
+        )
+        log(f"ChArUco fisheye calibration done: RMS error = {ret:.3f} px")
+        return result, UndistortionMaps(mapx=mapx, mapy=mapy)
 
     ret, K, dist, rvecs, tvecs = cv2.aruco.calibrateCameraCharuco(
         all_corners, all_ids, board, image_size, None, None
@@ -739,7 +792,7 @@ def run_intrinsics_pipeline(
                            metres recommended for ChArUco so scale is meaningful).
         marker_size_ratio: ChArUco only — marker side as a fraction of square_size.
         aruco_dict_name:   ChArUco only — dictionary name from _aruco_dicts().
-        use_fisheye:       Use OpenCV fisheye model (checkerboard only).
+        use_fisheye:       Use OpenCV fisheye model (checkerboard and ChArUco).
         window, threshold, skip, use_global_metric:
                            Passed to find_sharp_frames (video mode only).
         log_fn:            Optional callable for progress messages.  Defaults to print.

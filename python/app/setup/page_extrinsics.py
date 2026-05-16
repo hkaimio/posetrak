@@ -68,6 +68,7 @@ from PySide6.QtWidgets import (
 from app.setup.extrinsics_solver import (
     CalibResult,
     CamCalibState,
+    CamPosObs,
     ControlPoint,
     _Cancelled,
     _proj_matrix,
@@ -312,9 +313,10 @@ class _ClickableImageWidget(QWidget):
     After calibration, call ``set_calib_status`` to show a per-camera badge.
     """
 
-    point_set = Signal(float, float)   # original image coords on mouse release
-    hovered = Signal(bool)             # True = mouse entered, False = left
-    sift_feature_hovered = Signal(int) # index in _sift_pts nearest mouse, -1 = none
+    point_set = Signal(float, float)        # original image coords on mouse release
+    cam_pos_set = Signal(str, float, float) # subject_label, image_x, image_y on cam-marker drag
+    hovered = Signal(bool)                  # True = mouse entered, False = left
+    sift_feature_hovered = Signal(int)      # index in _sift_pts nearest mouse, -1 = none
 
     def __init__(self, cam_label: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -360,8 +362,12 @@ class _ClickableImageWidget(QWidget):
         # Reprojection markers for control points (open circle+cross, same color as CP)
         self._proj_markers: list[tuple[float, float, QColor]] = []
 
-        # Camera-position markers: projected world position of other cameras
+        # Camera-position markers: projected world position of other cameras (auto, gold)
         self._cam_pos_markers: list[tuple[float, float, str]] = []  # x, y, label
+        # User-placed camera-position markers (cyan) — persists across solves
+        self._user_cam_pos_markers: dict[str, tuple[float, float]] = {}  # label → (x, y)
+        # Label of camera currently being dragged (None = normal CP drag)
+        self._dragging_cam: str | None = None
 
         self.setMinimumSize(200, 150)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -398,6 +404,15 @@ class _ClickableImageWidget(QWidget):
 
     def add_cam_pos_marker(self, x: float, y: float, label: str) -> None:
         self._cam_pos_markers.append((x, y, label))
+        self.update()
+
+    def set_user_cam_pos_marker(self, label: str, x: float, y: float) -> None:
+        """Record a user-placed camera-position marker (cyan).  Persists across solves."""
+        self._user_cam_pos_markers[label] = (x, y)
+        self.update()
+
+    def clear_user_cam_pos_markers(self) -> None:
+        self._user_cam_pos_markers.clear()
         self.update()
 
     def clear_markers(self) -> None:
@@ -635,27 +650,37 @@ class _ClickableImageWidget(QWidget):
             painter.drawLine(int(wx) - arm, int(wy), int(wx) + arm, int(wy))
             painter.drawLine(int(wx), int(wy) - arm, int(wx), int(wy) + arm)
 
-        # Camera-position markers: small filled square + label (yellow/gold)
-        cam_color = QColor(255, 210, 0)
+        # Camera-position markers: small camera-body icon + label
         cam_bg = QColor(0, 0, 0, 160)
         painter.setFont(painter.font())
-        for mx, my, clabel in self._cam_pos_markers:
-            wx, wy = self._img_to_widget(mx, my)
-            # Draw a small camera-body icon: filled rect + viewfinder notch
+
+        def _draw_cam_icon(wx, wy, color, clabel):
             r = 6
-            painter.setBrush(cam_color)
+            painter.setBrush(color)
             painter.setPen(QPen(QColor(0, 0, 0), 1))
             painter.drawRect(int(wx) - r, int(wy) - r + 2, r * 2, r * 2 - 2)
             painter.drawRect(int(wx) - r // 2, int(wy) - r, r, 3)
-            # Label with contrasting background
             fm = painter.fontMetrics()
             tw = fm.horizontalAdvance(clabel)
             lx, ly = int(wx) + r + 3, int(wy) + 4
             painter.setBrush(cam_bg)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRect(lx - 1, ly - fm.ascent(), tw + 2, fm.height())
-            painter.setPen(cam_color)
+            painter.setPen(color)
             painter.drawText(lx, ly, clabel)
+
+        # Auto-computed (gold) — drawn first (below user markers)
+        for mx, my, clabel in self._cam_pos_markers:
+            wx, wy = self._img_to_widget(mx, my)
+            _draw_cam_icon(wx, wy, QColor(255, 210, 0), clabel)
+
+        # User-placed (cyan) — drawn on top with a white ring to distinguish
+        for clabel, (mx, my) in self._user_cam_pos_markers.items():
+            wx, wy = self._img_to_widget(mx, my)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+            painter.drawEllipse(int(wx) - 10, int(wy) - 10, 20, 20)
+            _draw_cam_icon(wx, wy, QColor(0, 220, 220), clabel)
 
         # Manual control point markers (solid colored circles) — drawn on top
         for mx, my, color, mlabel, is_sel in self._markers:
@@ -689,6 +714,22 @@ class _ClickableImageWidget(QWidget):
         if not (0 <= ix < w_img and 0 <= iy < h_img):
             return
 
+        # Check if press is within HIT_RADIUS (widget pixels) of any camera marker.
+        # User-placed markers take priority over auto-computed ones.
+        _HIT_RADIUS_W = 18.0  # widget pixels
+        self._dragging_cam = None
+        cam_drag_start: tuple[float, float] | None = None
+        all_cam_markers: list[tuple[float, float, str]] = [
+            (mx, my, lbl)
+            for lbl, (mx, my) in self._user_cam_pos_markers.items()
+        ] + self._cam_pos_markers
+        for mx, my, clabel in all_cam_markers:
+            mwx, mwy = self._img_to_widget(mx, my)
+            if ((mwx - wx) ** 2 + (mwy - wy) ** 2) ** 0.5 <= _HIT_RADIUS_W:
+                self._dragging_cam = clabel
+                cam_drag_start = (mx, my)
+                break
+
         # Enter zoom mode: compute scale and pan so clicked point stays fixed
         ww, wh = self.width(), self.height()
         avail_h = wh - 22
@@ -701,9 +742,13 @@ class _ClickableImageWidget(QWidget):
         self._clamp_zoom_origin()
 
         self._zoom_active = True
-        # If an existing CP observation is recorded for this camera, start the drag
-        # from that position so releasing immediately leaves the point unchanged.
-        self._drag_img = self._selected_marker_pos if self._selected_marker_pos is not None else (ix, iy)
+        if self._dragging_cam is not None:
+            # Camera-marker drag: start from the marker's current position so a
+            # release without movement leaves it in the original spot.
+            self._drag_img = cam_drag_start
+        else:
+            # Normal CP drag: start from existing observation or click position.
+            self._drag_img = self._selected_marker_pos if self._selected_marker_pos is not None else (ix, iy)
         self.setCursor(Qt.CursorShape.BlankCursor)
         self.update()
 
@@ -756,12 +801,17 @@ class _ClickableImageWidget(QWidget):
         if event.button() != Qt.MouseButton.LeftButton or not self._zoom_active:
             return
         final = self._drag_img
+        dragging_cam = self._dragging_cam
         self._zoom_active = False
         self._drag_img = None
+        self._dragging_cam = None
         self.unsetCursor()
         self.update()
         if final is not None:
-            self.point_set.emit(float(final[0]), float(final[1]))
+            if dragging_cam is not None:
+                self.cam_pos_set.emit(dragging_cam, float(final[0]), float(final[1]))
+            else:
+                self.point_set.emit(float(final[0]), float(final[1]))
 
     def enterEvent(self, event) -> None:  # noqa: N802
         self.hovered.emit(True)
@@ -800,6 +850,7 @@ class _SolveThread(QThread):
         self,
         states: list[CamCalibState],
         control_points: list[ControlPoint],
+        cam_pos_obs: list[CamPosObs] | None = None,
         cp_only: bool = False,
         pnp_ransac_px: float = 8.0,
         parent: QWidget | None = None,
@@ -807,6 +858,7 @@ class _SolveThread(QThread):
         super().__init__(parent)
         self._states = states
         self._control_points = control_points
+        self._cam_pos_obs = cam_pos_obs or []
         self._cp_only = cp_only
         self._pnp_ransac_px = pnp_ransac_px
         self._cancel_event = threading.Event()
@@ -818,6 +870,7 @@ class _SolveThread(QThread):
         try:
             result = run_calibration(
                 self._states, self._control_points,
+                cam_pos_obs=self._cam_pos_obs or None,
                 progress_cb=lambda msg: self.progress.emit(msg),
                 cancel_event=self._cancel_event,
                 cp_only=self._cp_only,
@@ -874,6 +927,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._control_points: list[ControlPoint] = []
         self._selected_cp_idx: int | None = None
         self._intrinsics_combos: dict[str, QComboBox] = {}
+        self._cam_pos_obs: list[CamPosObs] = []
 
         self.setWindowTitle("Auto Extrinsics Calibration")
         self.setMinimumSize(960, 640)
@@ -893,6 +947,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 w.set_image(state.image)
             vid = state.video_id
             w.point_set.connect(lambda x, y, v=vid: self._on_cam_click(v, x, y))
+            w.cam_pos_set.connect(lambda lbl, x, y, v=vid: self._on_cam_pos_set(v, lbl, x, y))
             w.hovered.connect(lambda entered, v=vid: self._on_cam_hover(v, entered))
             w.sift_feature_hovered.connect(
                 lambda idx, v=vid: self._on_sift_feature_hovered(v, idx)
@@ -1329,6 +1384,20 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._refresh_cp_list_labels()
         self._refresh_markers()
 
+    def _on_cam_pos_set(self, observer_vid: str, subject_label: str, x: float, y: float) -> None:
+        """Called when the user drags a camera-position marker in observer_vid's view."""
+        # Update or create a CamPosObs for this (observer, subject) pair.
+        for obs in self._cam_pos_obs:
+            if obs.observer == observer_vid and obs.subject == subject_label:
+                obs.pixel = (x, y)
+                break
+        else:
+            self._cam_pos_obs.append(CamPosObs(observer=observer_vid, subject=subject_label, pixel=(x, y)))
+        # Show a cyan user-placed marker on the observer's widget.
+        w = self._cam_widgets.get(observer_vid)
+        if w is not None:
+            w.set_user_cam_pos_marker(subject_label, x, y)
+
     def _on_cam_context_menu(self, vid: str, pos) -> None:
         if self._selected_cp_idx is None or self._selected_cp_idx >= len(self._control_points):
             return
@@ -1402,8 +1471,11 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         cp_only = not self._sift_check.isChecked()
         self._solve_thread = _SolveThread(
-            self._states, self._control_points, cp_only=cp_only,
-            pnp_ransac_px=self._ransac_px_spin.value(), parent=self,
+            self._states, self._control_points,
+            cam_pos_obs=self._cam_pos_obs or None,
+            cp_only=cp_only,
+            pnp_ransac_px=self._ransac_px_spin.value(),
+            parent=self,
         )
         self._solve_thread.finished.connect(self._on_solve_done)
         self._solve_thread.error_occurred.connect(self._on_solve_error)

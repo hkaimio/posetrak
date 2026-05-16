@@ -58,6 +58,19 @@ class ControlPoint:
 
 
 @dataclass
+class CamPosObs:
+    """User-placed observation of one camera's world position in another camera's view.
+
+    Pixel is in distorted image space (same convention as ControlPoint.obs).
+    The BA adds a residual: projection of subject's world center into observer's
+    image should match this pixel.  Residual Jacobian touches both cameras' 6 pose DOFs.
+    """
+    observer: str               # video_id of the camera whose view we're looking at
+    subject: str                # video_id of the camera whose position is being observed
+    pixel: tuple[float, float]  # observed pixel in observer's (distorted) image
+
+
+@dataclass
 class PairMatch:
     vid_a: str
     vid_b: str
@@ -629,8 +642,10 @@ def run_bundle_adjustment(
     states: list[CamCalibState],
     points_3d: list[tuple[np.ndarray, dict[str, tuple[float, float]]]],
     control_points: list[ControlPoint] | None = None,
+    cam_pos_obs: list[CamPosObs] | None = None,
     fixed_cp_weight: float = 1000.0,
     unfixed_cp_weight: float = 100.0,
+    cam_pos_weight: float = 500.0,
     max_nfev: int = 2000,
     max_sift_pts: int = 300,
     progress_cb=None,
@@ -735,22 +750,49 @@ def run_bundle_adjustment(
                     obs_list.append((vid, np.array([px, py]), f"cp_{cp_name}", weight))
 
     n_obs = len(obs_list)
+
+    # --- Camera-position observations (user-placed markers in camera views) ---
+    # Each CamPosObs contributes 2 residuals: projection of subject's world center
+    # into observer's image.  Residuals depend on both cameras' 6 pose DOFs.
+    cam_pos_data: list[tuple[str, str, np.ndarray, np.ndarray]] = []
+    # (observer_vid, subject_vid, undistorted pixel (2,), K_observer (3x3))
+    if cam_pos_obs:
+        for cpo in cam_pos_obs:
+            if cpo.observer not in cam_param_start or cpo.subject not in cam_param_start:
+                _log.debug("BA: cam_pos_obs %s→%s skipped (camera not solved)",
+                           cpo.observer, cpo.subject)
+                continue
+            s_obs = state_by_id[cpo.observer]
+            px_u = _undistort_pts(
+                np.array([[cpo.pixel[0], cpo.pixel[1]]], dtype=np.float32), s_obs
+            )
+            cam_pos_data.append((
+                cpo.observer, cpo.subject,
+                px_u[0].astype(np.float64),
+                s_obs.K.copy(),
+            ))
+
+    n_cam_pos = len(cam_pos_data)
+    n_total_obs = n_obs + n_cam_pos
+
     _log.info(
-        "BA: %d cameras, %d SIFT pts, %d fixed CPs, %d free CPs, %d observations",
-        n_cams, len(points_3d), len(fixed_pts), len(free_cp_start), n_obs,
+        "BA: %d cameras, %d SIFT pts, %d fixed CPs, %d free CPs, "
+        "%d observations, %d cam-pos constraints",
+        n_cams, len(points_3d), len(fixed_pts), len(free_cp_start),
+        n_obs, n_cam_pos,
     )
     if progress_cb:
         progress_cb(
             f"Bundle adjustment: {n_cams} cameras, {len(points_3d)} SIFT pts, "
             f"{len(fixed_pts)} fixed CPs, {len(free_cp_start)} free CPs, "
-            f"{n_obs} observations…"
+            f"{n_cam_pos} cam-pos constraints…"
         )
 
     if cancel_event is not None and cancel_event.is_set():
         raise _Cancelled()
 
-    if n_obs < 6:
-        _log.warning("BA: too few observations (%d), skipping", n_obs)
+    if n_total_obs < 6:
+        _log.warning("BA: too few observations (%d), skipping", n_total_obs)
         return points_3d
 
     # --- Precompute per-camera projection data (done once, reused every evaluation) ---
@@ -794,7 +836,7 @@ def run_bundle_adjustment(
     def residuals(x: np.ndarray) -> np.ndarray:
         if cancel_event is not None and cancel_event.is_set():
             raise _Cancelled()
-        res = np.empty(n_obs * 2)
+        res = np.empty(n_total_obs * 2)
         for (ci, fx, fy, cx, cy,
              obs_px, weights, res_ridx,
              fixed_mask, fixed_xyz, param_starts) in cam_proj_data:
@@ -824,15 +866,31 @@ def run_bundle_adjustment(
             ry = (proj_y - obs_px[:, 1]) * weights
             res[2 * res_ridx]     = rx
             res[2 * res_ridx + 1] = ry
+
+        # Camera-position residuals: project subject camera's world center into observer
+        for k, (vid_i, vid_j, px_u, K_i) in enumerate(cam_pos_data):
+            ri = n_obs + k
+            ci_i = cam_param_start[vid_i]
+            ci_j = cam_param_start[vid_j]
+            R_i, _ = cv2.Rodrigues(x[ci_i:ci_i + 3])
+            tvec_i = x[ci_i + 3:ci_i + 6]
+            R_j, _ = cv2.Rodrigues(x[ci_j:ci_j + 3])
+            tvec_j = x[ci_j + 3:ci_j + 6]
+            C_j = -(R_j.T @ tvec_j)          # subject world center
+            p_cam = R_i @ C_j + tvec_i       # in observer camera frame
+            if abs(p_cam[2]) < 1e-9:
+                res[2 * ri] = res[2 * ri + 1] = 0.0
+                continue
+            res[2 * ri]     = (K_i[0, 0] * p_cam[0] / p_cam[2] + K_i[0, 2] - px_u[0]) * cam_pos_weight
+            res[2 * ri + 1] = (K_i[1, 1] * p_cam[1] / p_cam[2] + K_i[1, 2] - px_u[1]) * cam_pos_weight
+
         return res
 
     # --- Jacobian sparsity pattern ---
-    # Each residual row (obs_i, component 0 or 1) depends only on:
-    #   • 6 camera params for that observation's camera
-    #   • 3 point params for that observation's 3D point (if free; fixed CPs have none)
-    # Without sparsity, scipy needs 849 evaluations per Jacobian; with it, ~n_cams+n_colors.
+    # SIFT/CP residuals: each depends on 1 camera (6 DOF) + optionally 3 point DOFs.
+    # Cam-pos residuals: each depends on 2 cameras (observer + subject, 6 DOF each).
     n_params = len(params_arr)
-    jac_sp = lil_matrix((n_obs * 2, n_params), dtype=np.int8)
+    jac_sp = lil_matrix((n_total_obs * 2, n_params), dtype=np.int8)
     for i, (vid, _, pt_key, _) in enumerate(obs_list):
         ci = cam_param_start[vid]
         jac_sp[2 * i, ci:ci + 6] = 1
@@ -845,6 +903,14 @@ def run_bundle_adjustment(
             ps = free_cp_start[pt_key[3:]]
             jac_sp[2 * i, ps:ps + 3] = 1
             jac_sp[2 * i + 1, ps:ps + 3] = 1
+    for k, (vid_i, vid_j, _, _) in enumerate(cam_pos_data):
+        ri = n_obs + k
+        ci_i = cam_param_start[vid_i]
+        ci_j = cam_param_start[vid_j]
+        jac_sp[2 * ri, ci_i:ci_i + 6] = 1
+        jac_sp[2 * ri + 1, ci_i:ci_i + 6] = 1
+        jac_sp[2 * ri, ci_j:ci_j + 6] = 1
+        jac_sp[2 * ri + 1, ci_j:ci_j + 6] = 1
 
     # Validate initial params — non-finite values (e.g. from a degenerate PnP
     # rotation matrix) cause scipy to raise "Initial guess is outside of bounds".
@@ -1075,6 +1141,7 @@ def compute_cp_errors(
 def run_calibration(
     states: list[CamCalibState],
     control_points: list[ControlPoint] | None = None,
+    cam_pos_obs: list[CamPosObs] | None = None,
     sift_ratio: float = 0.75,
     sift_min_inliers: int = 20,
     ba_max_nfev: int = 2000,
@@ -1173,6 +1240,7 @@ def run_calibration(
     # --- Stage 4: Bundle adjustment ---
     points_3d = run_bundle_adjustment(
         states, points_3d, control_points,
+        cam_pos_obs=cam_pos_obs,
         max_nfev=ba_max_nfev,
         progress_cb=progress_cb,
         cancel_event=cancel_event,

@@ -937,6 +937,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._refine_intrinsics: set[str] = set()
         self._locked_cameras: set[str] = set()
         self._lock_cbs: dict[str, QCheckBox] = {}
+        self._excluded_cameras: set[str] = set()
 
         self.setWindowTitle("Auto Extrinsics Calibration")
         self.setMinimumSize(960, 640)
@@ -1194,10 +1195,19 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 )
             )
             self._lock_cbs[vid] = lock_cb
+            excl_cb = QCheckBox("Excl")
+            excl_cb.setToolTip("Exclude this camera from the next solve entirely")
+            excl_cb.toggled.connect(
+                lambda checked, v=vid: (
+                    self._excluded_cameras.add(v) if checked
+                    else self._excluded_cameras.discard(v)
+                )
+            )
             row.addWidget(lbl)
             row.addWidget(combo, 1)
             row.addWidget(refine_cb)
             row.addWidget(lock_cb)
+            row.addWidget(excl_cb)
             layout.addLayout(row)
 
         return group
@@ -1485,7 +1495,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         if self._solve_thread and self._solve_thread.isRunning():
             return
         for s in self._states:
-            if s.video_id not in self._locked_cameras:
+            if s.video_id not in self._locked_cameras and s.video_id not in self._excluded_cameras:
                 s.R = None
                 s.t = None
         for w in self._cam_widgets.values():
@@ -1500,8 +1510,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._status_label.setText("Starting…")
 
         cp_only = not self._sift_check.isChecked()
+        active_states = [s for s in self._states if s.video_id not in self._excluded_cameras]
         self._solve_thread = _SolveThread(
-            self._states, self._control_points,
+            active_states, self._control_points,
             cam_pos_obs=self._cam_pos_obs or None,
             refine_intrinsics=self._refine_intrinsics or None,
             locked_cameras=self._locked_cameras or None,
@@ -1553,6 +1564,10 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             )
         self._status_label.setText("\n".join(lines))
         self._accept_btn.setEnabled(n_solved > 0)
+
+        for vid in self._excluded_cameras:
+            if vid in self._cam_widgets:
+                self._cam_widgets[vid].set_calib_status("Excluded")
 
         for vid, cb in self._lock_cbs.items():
             s = result.cameras.get(vid)

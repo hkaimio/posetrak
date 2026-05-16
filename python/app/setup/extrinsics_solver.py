@@ -644,6 +644,7 @@ def run_bundle_adjustment(
     control_points: list[ControlPoint] | None = None,
     cam_pos_obs: list[CamPosObs] | None = None,
     refine_intrinsics: set[str] | None = None,
+    locked_cameras: set[str] | None = None,
     fixed_cp_weight: float = 1000.0,
     unfixed_cp_weight: float = 100.0,
     cam_pos_weight: float = 500.0,
@@ -670,6 +671,8 @@ def run_bundle_adjustment(
     if not solved:
         return points_3d
 
+    locked = locked_cameras or set()
+
     if control_points and len(points_3d) > max_sift_pts:
         rng = np.random.default_rng(42)
         idx = rng.choice(len(points_3d), size=max_sift_pts, replace=False)
@@ -685,6 +688,8 @@ def run_bundle_adjustment(
     params: list[float] = []
     cam_param_start: dict[str, int] = {}
     for s in solved:
+        if s.video_id in locked:
+            continue
         cam_param_start[s.video_id] = len(params)
         rvec, _ = cv2.Rodrigues(s.R)
         params.extend(rvec.flatten())
@@ -773,7 +778,9 @@ def run_bundle_adjustment(
     # (observer_vid, subject_vid, undistorted pixel (2,), K_observer (3x3))
     if cam_pos_obs:
         for cpo in cam_pos_obs:
-            if cpo.observer not in cam_param_start or cpo.subject not in cam_param_start:
+            obs_solved = cpo.observer in cam_param_start or cpo.observer in {s.video_id for s in solved}
+            sub_solved = cpo.subject in cam_param_start or cpo.subject in {s.video_id for s in solved}
+            if not obs_solved or not sub_solved:
                 _log.debug("BA: cam_pos_obs %s→%s skipped (camera not solved)",
                            cpo.observer, cpo.subject)
                 continue
@@ -781,10 +788,18 @@ def run_bundle_adjustment(
             px_u = _undistort_pts(
                 np.array([[cpo.pixel[0], cpo.pixel[1]]], dtype=np.float32), s_obs
             )
+            ci_obs = cam_param_start.get(cpo.observer)
+            ci_sub = cam_param_start.get(cpo.subject)
+            s_sub = state_by_id[cpo.subject]
             cam_pos_data.append((
-                cpo.observer, cpo.subject,
+                ci_obs, ci_sub,
                 px_u[0].astype(np.float64),
                 s_obs.K.copy(),
+                s_obs.R.copy() if ci_obs is None else None,
+                s_obs.t.flatten().copy() if ci_obs is None else None,
+                s_sub.R.copy() if ci_sub is None else None,
+                s_sub.t.flatten().copy() if ci_sub is None else None,
+                intr_param_start.get(cpo.observer),
             ))
 
     n_cam_pos = len(cam_pos_data)
@@ -840,9 +855,14 @@ def run_bundle_adjustment(
                 elif name in free_cp_start:
                     param_starts_arr[k] = free_cp_start[name]
 
-        K = state_by_id[vid].K
+        s_cam = state_by_id[vid]
+        K = s_cam.K
+        ci = cam_param_start.get(vid)   # None for locked cameras
+        R_fixed = s_cam.R.copy() if ci is None else None
+        tvec_fixed = s_cam.t.flatten().copy() if ci is None else None
         cam_proj_data.append((
-            cam_param_start[vid],                  # ci: start of [rvec, tvec] in x
+            ci,                                    # None if locked
+            R_fixed, tvec_fixed,                   # pre-computed for locked cameras
             K[0, 0], K[1, 1], K[0, 2], K[1, 2],   # fx0, fy0, cx, cy (initial)
             obs_px_arr, weights_arr, res_ridx,
             fixed_mask, fixed_xyz_arr, param_starts_arr,
@@ -853,11 +873,14 @@ def run_bundle_adjustment(
         if cancel_event is not None and cancel_event.is_set():
             raise _Cancelled()
         res = np.empty(n_total_obs * 2)
-        for (ci, fx0, fy0, cx, cy,
+        for (ci, R_fixed, tvec_fixed, fx0, fy0, cx, cy,
              obs_px, weights, res_ridx,
              fixed_mask, fixed_xyz, param_starts, intr_start) in cam_proj_data:
-            R, _ = cv2.Rodrigues(x[ci:ci + 3])
-            tvec = x[ci + 3:ci + 6].reshape(3, 1)
+            if ci is not None:
+                R, _ = cv2.Rodrigues(x[ci:ci + 3])
+                tvec = x[ci + 3:ci + 6].reshape(3, 1)
+            else:
+                R, tvec = R_fixed, tvec_fixed.reshape(3, 1)
             fx = x[intr_start] if intr_start is not None else fx0
             fy = x[intr_start + 1] if intr_start is not None else fy0
 
@@ -886,20 +909,23 @@ def run_bundle_adjustment(
             res[2 * res_ridx + 1] = ry
 
         # Camera-position residuals: project subject camera's world center into observer
-        for k, (vid_i, vid_j, px_u, K_i) in enumerate(cam_pos_data):
+        for k, (ci_i, ci_j, px_u, K_i, R_i_fx, t_i_fx, R_j_fx, t_j_fx, intr_s_i) in enumerate(cam_pos_data):
             ri = n_obs + k
-            ci_i = cam_param_start[vid_i]
-            ci_j = cam_param_start[vid_j]
-            R_i, _ = cv2.Rodrigues(x[ci_i:ci_i + 3])
-            tvec_i = x[ci_i + 3:ci_i + 6]
-            R_j, _ = cv2.Rodrigues(x[ci_j:ci_j + 3])
-            tvec_j = x[ci_j + 3:ci_j + 6]
-            C_j = -(R_j.T @ tvec_j)          # subject world center
-            p_cam = R_i @ C_j + tvec_i       # in observer camera frame
+            if ci_i is not None:
+                R_i, _ = cv2.Rodrigues(x[ci_i:ci_i + 3])
+                tvec_i = x[ci_i + 3:ci_i + 6]
+            else:
+                R_i, tvec_i = R_i_fx, t_i_fx
+            if ci_j is not None:
+                R_j, _ = cv2.Rodrigues(x[ci_j:ci_j + 3])
+                tvec_j = x[ci_j + 3:ci_j + 6]
+            else:
+                R_j, tvec_j = R_j_fx, t_j_fx
+            C_j = -(R_j.T @ tvec_j)
+            p_cam = R_i @ C_j + tvec_i
             if abs(p_cam[2]) < 1e-9:
                 res[2 * ri] = res[2 * ri + 1] = 0.0
                 continue
-            intr_s_i = intr_param_start.get(vid_i)
             fx_i = x[intr_s_i] if intr_s_i is not None else K_i[0, 0]
             fy_i = x[intr_s_i + 1] if intr_s_i is not None else K_i[1, 1]
             res[2 * ri]     = (fx_i * p_cam[0] / p_cam[2] + K_i[0, 2] - px_u[0]) * cam_pos_weight
@@ -928,18 +954,17 @@ def run_bundle_adjustment(
             is_ = intr_param_start[vid]
             jac_sp[2 * i, is_:is_ + 2] = 1
             jac_sp[2 * i + 1, is_:is_ + 2] = 1
-    for k, (vid_i, vid_j, _, _) in enumerate(cam_pos_data):
+    for k, (ci_i, ci_j, _, _, _, _, _, _, intr_s_i) in enumerate(cam_pos_data):
         ri = n_obs + k
-        ci_i = cam_param_start[vid_i]
-        ci_j = cam_param_start[vid_j]
-        jac_sp[2 * ri, ci_i:ci_i + 6] = 1
-        jac_sp[2 * ri + 1, ci_i:ci_i + 6] = 1
-        jac_sp[2 * ri, ci_j:ci_j + 6] = 1
-        jac_sp[2 * ri + 1, ci_j:ci_j + 6] = 1
-        if vid_i in intr_param_start:
-            is_ = intr_param_start[vid_i]
-            jac_sp[2 * ri, is_:is_ + 2] = 1
-            jac_sp[2 * ri + 1, is_:is_ + 2] = 1
+        if ci_i is not None:
+            jac_sp[2 * ri, ci_i:ci_i + 6] = 1
+            jac_sp[2 * ri + 1, ci_i:ci_i + 6] = 1
+            if intr_s_i is not None:
+                jac_sp[2 * ri, intr_s_i:intr_s_i + 2] = 1
+                jac_sp[2 * ri + 1, intr_s_i:intr_s_i + 2] = 1
+        if ci_j is not None:
+            jac_sp[2 * ri, ci_j:ci_j + 6] = 1
+            jac_sp[2 * ri + 1, ci_j:ci_j + 6] = 1
 
     # Validate initial params — non-finite values (e.g. from a degenerate PnP
     # rotation matrix) cause scipy to raise "Initial guess is outside of bounds".
@@ -984,6 +1009,8 @@ def run_bundle_adjustment(
     x = result.x
 
     for s in solved:
+        if s.video_id in locked:
+            continue
         ci = cam_param_start[s.video_id]
         R, _ = cv2.Rodrigues(x[ci:ci + 3])
         s.R = R
@@ -1193,6 +1220,7 @@ def run_calibration(
     control_points: list[ControlPoint] | None = None,
     cam_pos_obs: list[CamPosObs] | None = None,
     refine_intrinsics: set[str] | None = None,
+    locked_cameras: set[str] | None = None,
     sift_ratio: float = 0.75,
     sift_min_inliers: int = 20,
     ba_max_nfev: int = 2000,
@@ -1228,6 +1256,7 @@ def run_calibration(
             raise _Cancelled()
 
     n = len(states)
+    locked = locked_cameras or set()
 
     # --- Debug dump: CP and camera inventory ---
     if control_points and _log.isEnabledFor(logging.DEBUG):
@@ -1244,7 +1273,8 @@ def run_calibration(
     # --- Stage 0: PnP initialisation from world-xyz CPs ---
     if control_points:
         _prog("Initialising cameras from control points (PnP)…")
-        pnp_ids = init_poses_pnp(states, control_points, pnp_ransac_px=pnp_ransac_px)
+        unlocked = [s for s in states if s.video_id not in locked]
+        pnp_ids = init_poses_pnp(unlocked, control_points, pnp_ransac_px=pnp_ransac_px)
         if pnp_ids:
             _log.info("PnP pre-initialised %d cameras: %s", len(pnp_ids), pnp_ids)
 
@@ -1293,6 +1323,7 @@ def run_calibration(
         states, points_3d, control_points,
         cam_pos_obs=cam_pos_obs,
         refine_intrinsics=refine_intrinsics,
+        locked_cameras=locked_cameras,
         max_nfev=ba_max_nfev,
         progress_cb=progress_cb,
         cancel_event=cancel_event,
@@ -1311,7 +1342,8 @@ def run_calibration(
             C = -s.R.T @ s.t.flatten()
             err = cp_errors.get(s.video_id)
             err_str = f"  CP err {err['mean']:.1f}±{err['std']:.1f}px (max {err['max']:.1f}px)" if err else ""
-            _log.info("  %-30s  (%.3f, %.3f, %.3f)%s", s.label, C[0], C[1], C[2], err_str)
+            lock_str = "  [LOCKED]" if s.video_id in locked else ""
+            _log.info("  %-30s  (%.3f, %.3f, %.3f)%s%s", s.label, C[0], C[1], C[2], err_str, lock_str)
 
     if control_points and _log.isEnabledFor(logging.DEBUG):
         state_by_id = {s.video_id: s for s in states}

@@ -54,6 +54,7 @@ from calibrate_intrinsics import (
     UndistortionMaps,
     _aruco_dicts,
     charuco_available,
+    collect_sharp_frames,
     run_intrinsics_pipeline,
 )
 
@@ -67,19 +68,36 @@ from posetrak.db.db import generate_id
 
 class _CalibThread(QThread):
     log_line = Signal(str)
+    frames_collected = Signal(list)   # emitted after video scan, before detection
     succeeded = Signal(object, object)   # (CalibrationResult, UndistortionMaps)
     failed = Signal(str)
 
-    def __init__(self, config: dict, parent=None) -> None:
+    def __init__(self, config: dict, preloaded_frames=None, parent=None) -> None:
         super().__init__(parent)
         self._config = config
+        self._preloaded_frames = preloaded_frames
 
     def run(self) -> None:
         def log(msg: str) -> None:
             self.log_line.emit(msg)
 
         try:
-            result, maps = run_intrinsics_pipeline(**self._config, log_fn=log)
+            config = self._config
+            input_path = config["input_path"]
+            frames = self._preloaded_frames
+
+            if frames is None and input_path.is_file():
+                frames = collect_sharp_frames(
+                    input_path,
+                    window=config["window"],
+                    threshold=config["threshold"],
+                    skip=config["skip"],
+                    use_global_metric=config["use_global_metric"],
+                    log_fn=log,
+                )
+                self.frames_collected.emit(list(frames))
+
+            result, maps = run_intrinsics_pipeline(**config, preloaded_frames=frames, log_fn=log)
             self.succeeded.emit(result, maps)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
@@ -225,6 +243,7 @@ class IntrinsicsCalibDialog(QDialog):
         self._result: CalibrationResult | None = None
         self._maps: UndistortionMaps | None = None
         self._thread: _CalibThread | None = None
+        self._frame_cache: dict[str, list] = {}
 
         self.setWindowTitle(f"Calibrate Intrinsics — {mode_label}")
         self.setMinimumWidth(560)
@@ -367,6 +386,19 @@ class IntrinsicsCalibDialog(QDialog):
         run_row.addWidget(self._progress_bar, 1)
 
         root.addLayout(run_row)
+
+        cache_row = QHBoxLayout()
+        self._cache_label = QLabel()
+        self._cache_label.setVisible(False)
+        self._clear_cache_btn = QPushButton("Clear")
+        self._clear_cache_btn.setVisible(False)
+        self._clear_cache_btn.setFlat(True)
+        self._clear_cache_btn.clicked.connect(self._on_clear_cache)
+        cache_row.addWidget(self._cache_label)
+        cache_row.addWidget(self._clear_cache_btn)
+        cache_row.addStretch()
+        root.addLayout(cache_row)
+
         root.addWidget(self._log)
 
         # ---- Result summary ----
@@ -397,6 +429,7 @@ class IntrinsicsCalibDialog(QDialog):
         # Initial state
         self._on_pattern_changed()
         self._input_path.textChanged.connect(self._update_run_enabled)
+        self._input_path.textChanged.connect(self._update_cache_ui)
 
     # ------------------------------------------------------------------
     # Slots
@@ -456,14 +489,51 @@ class IntrinsicsCalibDialog(QDialog):
             "use_global_metric": False,
         }
 
-        self._thread = _CalibThread(config, parent=self)
+        video_path = self._input_path.text().strip()
+        preloaded: list | None = None
+        if video_path and Path(video_path).is_file():
+            key = str(Path(video_path).resolve())
+            preloaded = self._frame_cache.get(key)
+            if preloaded:
+                self._append_log(f"Using {len(preloaded)} cached frames (skipping video scan)…")
+
+        self._thread = _CalibThread(config, preloaded_frames=preloaded, parent=self)
         self._thread.log_line.connect(self._append_log)
+        self._thread.frames_collected.connect(self._on_frames_collected)
         self._thread.succeeded.connect(self._on_succeeded)
         self._thread.failed.connect(self._on_failed)
         self._thread.start()
 
     def _append_log(self, msg: str) -> None:
         self._log.appendPlainText(msg)
+
+    def _on_frames_collected(self, frames: list) -> None:
+        video_path = self._input_path.text().strip()
+        if video_path and Path(video_path).is_file():
+            self._frame_cache[str(Path(video_path).resolve())] = frames
+            self._update_cache_ui()
+
+    def _update_cache_ui(self) -> None:
+        video_path = self._input_path.text().strip()
+        if not video_path or not Path(video_path).is_file():
+            self._cache_label.setVisible(False)
+            self._clear_cache_btn.setVisible(False)
+            return
+        key = str(Path(video_path).resolve())
+        cached = self._frame_cache.get(key)
+        if cached:
+            self._cache_label.setText(f"{len(cached)} frames cached")
+            self._cache_label.setVisible(True)
+            self._clear_cache_btn.setVisible(True)
+        else:
+            self._cache_label.setVisible(False)
+            self._clear_cache_btn.setVisible(False)
+
+    def _on_clear_cache(self) -> None:
+        video_path = self._input_path.text().strip()
+        if video_path and Path(video_path).is_file():
+            self._frame_cache.pop(str(Path(video_path).resolve()), None)
+        self._update_cache_ui()
 
     def _on_succeeded(self, result: CalibrationResult, maps: UndistortionMaps) -> None:
         self._result = result

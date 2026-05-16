@@ -762,6 +762,73 @@ def calibrate_camera_charuco(
 # Unified pipeline (callable from CLI and from UI thread)
 # ---------------------------------------------------------------------------
 
+def collect_sharp_frames(
+    video_path: Path,
+    window: int = 10,
+    threshold: float = 0.8,
+    skip: int = 1,
+    use_global_metric: bool = False,
+    log_fn=None,
+) -> List[np.ndarray]:
+    """Scan *video_path* for sharp frames and return them as BGR arrays.
+
+    This is the slow step (reads every frame to compute sharpness).
+    Cache the result and pass as *preloaded_frames* to
+    :func:`run_intrinsics_pipeline` to skip video scanning on re-runs
+    with changed board or model parameters.
+    """
+    log = log_fn or print
+    sharp_indices = find_sharp_frames(
+        video_path, window, threshold, skip, use_global_metric, log_fn=log_fn
+    )
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise IOError(f"Cannot open video file: {video_path}")
+    frames: List[np.ndarray] = []
+    for frame_idx in sharp_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        if ret:
+            frames.append(frame)
+        else:
+            log(f"Warning: Failed to read frame {frame_idx}")
+    cap.release()
+    log(f"Loaded {len(frames)} sharp frames.")
+    return frames
+
+
+def _detect_checkerboard_in_frames(
+    frames: List[np.ndarray],
+    rows: int,
+    cols: int,
+    log_fn=None,
+) -> List[Tuple[int, np.ndarray, np.ndarray]]:
+    log = log_fn or print
+    results = []
+    for i, frame in enumerate(frames):
+        corners = extract_checkerboard_corners(frame, rows, cols)
+        if corners is not None:
+            log(f"Checkerboard detected in frame {i}")
+            results.append((i, frame, corners))
+    return results
+
+
+def _detect_charuco_in_frames(
+    frames: List[np.ndarray],
+    board,
+    min_corners: int = 6,
+    log_fn=None,
+) -> List[Tuple[int, np.ndarray, np.ndarray, np.ndarray]]:
+    log = log_fn or print
+    results = []
+    for i, frame in enumerate(frames):
+        corners, ids = extract_charuco_corners(frame, board, min_corners)
+        if corners is not None:
+            log(f"ChArUco detected in frame {i} ({len(ids)} corners)")
+            results.append((i, frame, corners, ids))
+    return results
+
+
 def run_intrinsics_pipeline(
     input_path: Path,
     rows: int,
@@ -775,6 +842,7 @@ def run_intrinsics_pipeline(
     threshold: float = 0.8,
     skip: int = 1,
     use_global_metric: bool = False,
+    preloaded_frames: Optional[List[np.ndarray]] = None,
     log_fn=None,
 ) -> Tuple[CalibrationResult, UndistortionMaps]:
     """Run the full intrinsics calibration pipeline.
@@ -812,7 +880,10 @@ def run_intrinsics_pipeline(
             marker_length=square_size * marker_size_ratio,
             dict_name=aruco_dict_name,
         )
-        if input_path.is_file():
+        if preloaded_frames is not None:
+            log(f"Detecting ChArUco patterns in {len(preloaded_frames)} cached frames…")
+            detections = _detect_charuco_in_frames(preloaded_frames, board, log_fn=log_fn)
+        elif input_path.is_file():
             log("Scanning video for ChArUco boards…")
             detections = process_video_for_charuco(
                 input_path, board, window, threshold, skip, use_global_metric, log_fn=log_fn
@@ -836,7 +907,10 @@ def run_intrinsics_pipeline(
         )
 
     else:  # checkerboard
-        if input_path.is_file():
+        if preloaded_frames is not None:
+            log(f"Detecting checkerboard patterns in {len(preloaded_frames)} cached frames…")
+            detections = _detect_checkerboard_in_frames(preloaded_frames, rows, cols, log_fn=log_fn)
+        elif input_path.is_file():
             log("Scanning video for checkerboard corners…")
             detections = process_video_for_checkerboards(
                 input_path, rows, cols, window, threshold, skip, use_global_metric, log_fn=log_fn

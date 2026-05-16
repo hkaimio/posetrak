@@ -852,6 +852,7 @@ class _SolveThread(QThread):
         control_points: list[ControlPoint],
         cam_pos_obs: list[CamPosObs] | None = None,
         refine_intrinsics: set[str] | None = None,
+        locked_cameras: set[str] | None = None,
         cp_only: bool = False,
         pnp_ransac_px: float = 8.0,
         parent: QWidget | None = None,
@@ -861,6 +862,7 @@ class _SolveThread(QThread):
         self._control_points = control_points
         self._cam_pos_obs = cam_pos_obs or []
         self._refine_intrinsics = refine_intrinsics or set()
+        self._locked_cameras = locked_cameras or set()
         self._cp_only = cp_only
         self._pnp_ransac_px = pnp_ransac_px
         self._cancel_event = threading.Event()
@@ -874,6 +876,7 @@ class _SolveThread(QThread):
                 self._states, self._control_points,
                 cam_pos_obs=self._cam_pos_obs or None,
                 refine_intrinsics=self._refine_intrinsics or None,
+                locked_cameras=self._locked_cameras or None,
                 progress_cb=lambda msg: self.progress.emit(msg),
                 cancel_event=self._cancel_event,
                 cp_only=self._cp_only,
@@ -932,6 +935,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._intrinsics_combos: dict[str, QComboBox] = {}
         self._cam_pos_obs: list[CamPosObs] = []
         self._refine_intrinsics: set[str] = set()
+        self._locked_cameras: set[str] = set()
+        self._lock_cbs: dict[str, QCheckBox] = {}
 
         self.setWindowTitle("Auto Extrinsics Calibration")
         self.setMinimumSize(960, 640)
@@ -1179,9 +1184,20 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                     else self._refine_intrinsics.discard(v)
                 )
             )
+            lock_cb = QCheckBox("Lock")
+            lock_cb.setToolTip("Keep this camera's pose fixed in the next solve")
+            lock_cb.setEnabled(state.R is not None)
+            lock_cb.toggled.connect(
+                lambda checked, v=vid: (
+                    self._locked_cameras.add(v) if checked
+                    else self._locked_cameras.discard(v)
+                )
+            )
+            self._lock_cbs[vid] = lock_cb
             row.addWidget(lbl)
             row.addWidget(combo, 1)
             row.addWidget(refine_cb)
+            row.addWidget(lock_cb)
             layout.addLayout(row)
 
         return group
@@ -1469,8 +1485,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         if self._solve_thread and self._solve_thread.isRunning():
             return
         for s in self._states:
-            s.R = None
-            s.t = None
+            if s.video_id not in self._locked_cameras:
+                s.R = None
+                s.t = None
         for w in self._cam_widgets.values():
             w.set_calib_status(None)
         self._cp_3d = {}
@@ -1487,6 +1504,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             self._states, self._control_points,
             cam_pos_obs=self._cam_pos_obs or None,
             refine_intrinsics=self._refine_intrinsics or None,
+            locked_cameras=self._locked_cameras or None,
             cp_only=cp_only,
             pnp_ransac_px=self._ransac_px_spin.value(),
             parent=self,
@@ -1535,6 +1553,16 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             )
         self._status_label.setText("\n".join(lines))
         self._accept_btn.setEnabled(n_solved > 0)
+
+        for vid, cb in self._lock_cbs.items():
+            s = result.cameras.get(vid)
+            has_pose = s is not None and s.R is not None
+            cb.setEnabled(has_pose)
+            if not has_pose:
+                cb.blockSignals(True)
+                cb.setChecked(False)
+                cb.blockSignals(False)
+                self._locked_cameras.discard(vid)
 
         # Compute triangulated 3D positions for all CPs (for reprojection markers)
         self._cp_3d = {}

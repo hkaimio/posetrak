@@ -851,6 +851,7 @@ class _SolveThread(QThread):
         states: list[CamCalibState],
         control_points: list[ControlPoint],
         cam_pos_obs: list[CamPosObs] | None = None,
+        refine_intrinsics: set[str] | None = None,
         cp_only: bool = False,
         pnp_ransac_px: float = 8.0,
         parent: QWidget | None = None,
@@ -859,6 +860,7 @@ class _SolveThread(QThread):
         self._states = states
         self._control_points = control_points
         self._cam_pos_obs = cam_pos_obs or []
+        self._refine_intrinsics = refine_intrinsics or set()
         self._cp_only = cp_only
         self._pnp_ransac_px = pnp_ransac_px
         self._cancel_event = threading.Event()
@@ -871,6 +873,7 @@ class _SolveThread(QThread):
             result = run_calibration(
                 self._states, self._control_points,
                 cam_pos_obs=self._cam_pos_obs or None,
+                refine_intrinsics=self._refine_intrinsics or None,
                 progress_cb=lambda msg: self.progress.emit(msg),
                 cancel_event=self._cancel_event,
                 cp_only=self._cp_only,
@@ -928,6 +931,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._selected_cp_idx: int | None = None
         self._intrinsics_combos: dict[str, QComboBox] = {}
         self._cam_pos_obs: list[CamPosObs] = []
+        self._refine_intrinsics: set[str] = set()
 
         self.setWindowTitle("Auto Extrinsics Calibration")
         self.setMinimumSize(960, 640)
@@ -1167,8 +1171,17 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 lambda _idx, v=vid, c=combo: self._on_intrinsics_changed(v, c.currentData())
             )
             self._intrinsics_combos[state.video_id] = combo
+            refine_cb = QCheckBox("Refine")
+            refine_cb.setToolTip("Optimise fx/fy for this camera during bundle adjustment")
+            refine_cb.toggled.connect(
+                lambda checked, v=vid: (
+                    self._refine_intrinsics.add(v) if checked
+                    else self._refine_intrinsics.discard(v)
+                )
+            )
             row.addWidget(lbl)
             row.addWidget(combo, 1)
+            row.addWidget(refine_cb)
             layout.addLayout(row)
 
         return group
@@ -1473,6 +1486,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._solve_thread = _SolveThread(
             self._states, self._control_points,
             cam_pos_obs=self._cam_pos_obs or None,
+            refine_intrinsics=self._refine_intrinsics or None,
             cp_only=cp_only,
             pnp_ransac_px=self._ransac_px_spin.value(),
             parent=self,

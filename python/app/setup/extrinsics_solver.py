@@ -643,6 +643,7 @@ def run_bundle_adjustment(
     points_3d: list[tuple[np.ndarray, dict[str, tuple[float, float]]]],
     control_points: list[ControlPoint] | None = None,
     cam_pos_obs: list[CamPosObs] | None = None,
+    refine_intrinsics: set[str] | None = None,
     fixed_cp_weight: float = 1000.0,
     unfixed_cp_weight: float = 100.0,
     cam_pos_weight: float = 500.0,
@@ -688,6 +689,20 @@ def run_bundle_adjustment(
         rvec, _ = cv2.Rodrigues(s.R)
         params.extend(rvec.flatten())
         params.extend(s.t.flatten())
+
+    # --- Per-camera intrinsics refinement: [fx, fy] appended after pose params ---
+    # Only cameras in refine_intrinsics have these extra DOFs.
+    intr_param_start: dict[str, int] = {}
+    if refine_intrinsics:
+        for s in solved:
+            if s.video_id in refine_intrinsics:
+                intr_param_start[s.video_id] = len(params)
+                params.append(s.K[0, 0])   # fx
+                params.append(s.K[1, 1])   # fy
+                _log.info(
+                    "BA: refining intrinsics for %s — initial fx=%.1f fy=%.1f",
+                    s.label, s.K[0, 0], s.K[1, 1],
+                )
 
     # --- Free SIFT 3D points ---
     free_point_start: list[int] = []
@@ -827,21 +842,24 @@ def run_bundle_adjustment(
 
         K = state_by_id[vid].K
         cam_proj_data.append((
-            cam_param_start[vid],             # ci: start of [rvec, tvec] in x
-            K[0, 0], K[1, 1], K[0, 2], K[1, 2],  # fx, fy, cx, cy
+            cam_param_start[vid],                  # ci: start of [rvec, tvec] in x
+            K[0, 0], K[1, 1], K[0, 2], K[1, 2],   # fx0, fy0, cx, cy (initial)
             obs_px_arr, weights_arr, res_ridx,
             fixed_mask, fixed_xyz_arr, param_starts_arr,
+            intr_param_start.get(vid),             # intr_start: None or param index of fx
         ))
 
     def residuals(x: np.ndarray) -> np.ndarray:
         if cancel_event is not None and cancel_event.is_set():
             raise _Cancelled()
         res = np.empty(n_total_obs * 2)
-        for (ci, fx, fy, cx, cy,
+        for (ci, fx0, fy0, cx, cy,
              obs_px, weights, res_ridx,
-             fixed_mask, fixed_xyz, param_starts) in cam_proj_data:
+             fixed_mask, fixed_xyz, param_starts, intr_start) in cam_proj_data:
             R, _ = cv2.Rodrigues(x[ci:ci + 3])
             tvec = x[ci + 3:ci + 6].reshape(3, 1)
+            fx = x[intr_start] if intr_start is not None else fx0
+            fy = x[intr_start + 1] if intr_start is not None else fy0
 
             # Build Nx3 3D-point array using vectorised numpy indexing
             # Fixed CPs: constant positions already in fixed_xyz
@@ -881,8 +899,11 @@ def run_bundle_adjustment(
             if abs(p_cam[2]) < 1e-9:
                 res[2 * ri] = res[2 * ri + 1] = 0.0
                 continue
-            res[2 * ri]     = (K_i[0, 0] * p_cam[0] / p_cam[2] + K_i[0, 2] - px_u[0]) * cam_pos_weight
-            res[2 * ri + 1] = (K_i[1, 1] * p_cam[1] / p_cam[2] + K_i[1, 2] - px_u[1]) * cam_pos_weight
+            intr_s_i = intr_param_start.get(vid_i)
+            fx_i = x[intr_s_i] if intr_s_i is not None else K_i[0, 0]
+            fy_i = x[intr_s_i + 1] if intr_s_i is not None else K_i[1, 1]
+            res[2 * ri]     = (fx_i * p_cam[0] / p_cam[2] + K_i[0, 2] - px_u[0]) * cam_pos_weight
+            res[2 * ri + 1] = (fy_i * p_cam[1] / p_cam[2] + K_i[1, 2] - px_u[1]) * cam_pos_weight
 
         return res
 
@@ -903,6 +924,10 @@ def run_bundle_adjustment(
             ps = free_cp_start[pt_key[3:]]
             jac_sp[2 * i, ps:ps + 3] = 1
             jac_sp[2 * i + 1, ps:ps + 3] = 1
+        if vid in intr_param_start:
+            is_ = intr_param_start[vid]
+            jac_sp[2 * i, is_:is_ + 2] = 1
+            jac_sp[2 * i + 1, is_:is_ + 2] = 1
     for k, (vid_i, vid_j, _, _) in enumerate(cam_pos_data):
         ri = n_obs + k
         ci_i = cam_param_start[vid_i]
@@ -911,6 +936,10 @@ def run_bundle_adjustment(
         jac_sp[2 * ri + 1, ci_i:ci_i + 6] = 1
         jac_sp[2 * ri, ci_j:ci_j + 6] = 1
         jac_sp[2 * ri + 1, ci_j:ci_j + 6] = 1
+        if vid_i in intr_param_start:
+            is_ = intr_param_start[vid_i]
+            jac_sp[2 * ri, is_:is_ + 2] = 1
+            jac_sp[2 * ri + 1, is_:is_ + 2] = 1
 
     # Validate initial params — non-finite values (e.g. from a degenerate PnP
     # rotation matrix) cause scipy to raise "Initial guess is outside of bounds".
@@ -929,6 +958,14 @@ def run_bundle_adjustment(
             "check camera poses (coplanar PnP may have returned a reflection matrix)"
         )
 
+    lb = np.full(len(params_arr), -np.inf)
+    ub = np.full(len(params_arr), np.inf)
+    for vid, is_ in intr_param_start.items():
+        lb[is_]     = params_arr[is_]     * 0.3
+        ub[is_]     = params_arr[is_]     * 3.0
+        lb[is_ + 1] = params_arr[is_ + 1] * 0.3
+        ub[is_ + 1] = params_arr[is_ + 1] * 3.0
+
     try:
         result = least_squares(
             residuals, params_arr,
@@ -936,6 +973,7 @@ def run_bundle_adjustment(
             ftol=1e-6, xtol=1e-6,
             max_nfev=max_nfev,
             jac_sparsity=jac_sp.tocsc(),
+            bounds=(lb, ub),
             verbose=0,
         )
     except _Cancelled:
@@ -950,6 +988,18 @@ def run_bundle_adjustment(
         R, _ = cv2.Rodrigues(x[ci:ci + 3])
         s.R = R
         s.t = x[ci + 3:ci + 6].reshape(3, 1)
+
+    for s in solved:
+        if s.video_id in intr_param_start:
+            is_ = intr_param_start[s.video_id]
+            new_fx, new_fy = float(x[is_]), float(x[is_ + 1])
+            _log.info(
+                "BA: refined intrinsics for %s — fx %.1f→%.1f  fy %.1f→%.1f",
+                s.label, s.K[0, 0], new_fx, s.K[1, 1], new_fy,
+            )
+            s.K = s.K.copy()
+            s.K[0, 0] = new_fx
+            s.K[1, 1] = new_fy
 
     refined: list[tuple[np.ndarray, dict]] = []
     for idx, (_, obs_dict) in enumerate(points_3d):
@@ -1142,6 +1192,7 @@ def run_calibration(
     states: list[CamCalibState],
     control_points: list[ControlPoint] | None = None,
     cam_pos_obs: list[CamPosObs] | None = None,
+    refine_intrinsics: set[str] | None = None,
     sift_ratio: float = 0.75,
     sift_min_inliers: int = 20,
     ba_max_nfev: int = 2000,
@@ -1241,6 +1292,7 @@ def run_calibration(
     points_3d = run_bundle_adjustment(
         states, points_3d, control_points,
         cam_pos_obs=cam_pos_obs,
+        refine_intrinsics=refine_intrinsics,
         max_nfev=ba_max_nfev,
         progress_cb=progress_cb,
         cancel_event=cancel_event,

@@ -344,6 +344,7 @@ def init_poses_pnp(
     states: list[CamCalibState],
     control_points: list[ControlPoint],
     min_cps: int = 4,
+    pnp_ransac_px: float = 8.0,
 ) -> list[str]:
     """Initialise camera poses via PnP for cameras with world_xyz control points.
 
@@ -351,38 +352,178 @@ def init_poses_pnp(
     ≥ min_cps observations of CPs that have world_xyz set.
     Returns list of video_ids that were initialised (R, t set in-place).
     """
-    state_by_id = {s.video_id: s for s in states}
     initialised: list[str] = []
 
     for s in states:
         obj_pts: list[np.ndarray] = []
         img_pts: list[np.ndarray] = []
+        cp_names: list[str] = []
         for cp in control_points:
             if cp.world_xyz is None or s.video_id not in cp.obs:
                 continue
             px, py = cp.obs[s.video_id]
             undist = _undistort_pts(np.array([[px, py]], dtype=np.float32), s)
+            _log.debug(
+                "init_poses_pnp: %s / %s  world=(%.3f, %.3f, %.3f)  "
+                "px_raw=(%.1f, %.1f)  px_undist=(%.1f, %.1f)  finite=%s",
+                s.label, cp.name,
+                cp.world_xyz[0], cp.world_xyz[1], cp.world_xyz[2],
+                px, py,
+                float(undist[0, 0]), float(undist[0, 1]),
+                np.isfinite(undist).all(),
+            )
             obj_pts.append(cp.world_xyz.astype(np.float64))
             img_pts.append(undist[0])
+            cp_names.append(cp.name)
 
         if len(obj_pts) < min_cps:
+            _log.debug(
+                "init_poses_pnp: skip %s — only %d world CPs (need %d): observed=%s",
+                s.label, len(obj_pts), min_cps, cp_names,
+            )
             continue
 
-        ok, rvec, tvec, _ = cv2.solvePnPRansac(
-            np.array(obj_pts, dtype=np.float64),
-            np.array(img_pts, dtype=np.float32),
-            s.K, np.zeros(4),
-            iterationsCount=1000, reprojectionError=8.0,
-        )
+        obj_arr = np.array(obj_pts, dtype=np.float64)
+        img_arr = np.array(img_pts, dtype=np.float32)
+
+        # Check for non-finite undistorted pixels (would silently corrupt PnP).
+        if not np.isfinite(img_arr).all():
+            _log.warning(
+                "init_poses_pnp: %s — non-finite undistorted pixels for CPs %s; "
+                "check intrinsics / distortion model",
+                s.label, cp_names,
+            )
+            continue
+
+        # Check world-point geometry: coplanar (sv[2]≈0) and co-linear (sv[1]≈0).
+        centred = obj_arr - obj_arr.mean(axis=0)
+        _, sv, _ = np.linalg.svd(centred)
+        cond = float(sv[0] / sv[-1]) if sv[-1] > 1e-9 else float("inf")
+        cond12 = float(sv[0] / sv[1]) if sv[1] > 1e-9 else float("inf")
+        if sv[1] < 1e-6 or cond12 > 1e4:
+            _log.warning(
+                "init_poses_pnp: %s — world CPs appear co-linear (σ[0]/σ[1]=%.1f); "
+                "PnP is underdetermined — add CPs not on the same line",
+                s.label, cond12,
+            )
+        elif cond > 1e6:
+            _log.warning(
+                "init_poses_pnp: %s — world CPs are coplanar (all z=0); "
+                "PnP has two valid solutions (above/below floor)",
+                s.label,
+            )
+        else:
+            _log.debug("init_poses_pnp: %s — world CP σ ratios (%.1f, %.1f) — ok",
+                       s.label, cond, cond12)
+
+        try:
+            ok, rvec, tvec, inliers = cv2.solvePnPRansac(
+                obj_arr, img_arr, s.K, np.zeros(4),
+                iterationsCount=1000, reprojectionError=pnp_ransac_px,
+            )
+        except cv2.error as exc:
+            _log.warning("init_poses_pnp: PnP raised cv2.error for %s: %s", s.label, exc)
+            continue
+
         if not ok:
-            _log.warning("init_poses_pnp: PnP failed for %s", s.label)
+            # Diagnostic: try EPNP without RANSAC to get reprojection errors.
+            try:
+                _, rvec_d, tvec_d = cv2.solvePnP(
+                    obj_arr, img_arr, s.K, np.zeros(4), flags=cv2.SOLVEPNP_EPNP,
+                )
+                proj, _ = cv2.projectPoints(obj_arr, rvec_d, tvec_d, s.K, np.zeros(4))
+                proj = proj.reshape(-1, 2)
+                errs = np.linalg.norm(proj - img_arr, axis=1)
+                err_info = "  ".join(
+                    f"{cp_names[i]}:{errs[i]:.1f}px" for i in range(len(cp_names))
+                )
+                _log.warning(
+                    "init_poses_pnp: RANSAC failed for %s (EPNP reprojection errors: %s)",
+                    s.label, err_info,
+                )
+            except cv2.error as exc2:
+                _log.warning(
+                    "init_poses_pnp: RANSAC failed for %s; EPNP diagnostic also failed: %s",
+                    s.label, exc2,
+                )
             continue
 
+        n_inliers = len(inliers) if inliers is not None else len(obj_pts)
         R, _ = cv2.Rodrigues(rvec)
+
+        # Validate rotation matrix: det≈-1 (reflection) or NaN tvec both indicate
+        # a degenerate PnP result (common with coplanar/colinear points).
+        det = float(np.linalg.det(R))
+        if abs(det - 1.0) > 0.05:
+            _log.warning(
+                "init_poses_pnp: %s — RANSAC returned non-rotation (det=%.4f); skipping",
+                s.label, det,
+            )
+            continue
+        if not np.isfinite(tvec).all():
+            _log.warning(
+                "init_poses_pnp: %s — RANSAC returned non-finite tvec %s; skipping "
+                "(likely co-linear world points — add CPs not on the same line)",
+                s.label, tvec.flatten().tolist(),
+            )
+            continue
+
+        # For coplanar configurations PnP has two valid solutions (camera above
+        # and below the reference plane).  Prefer camera above (C_z > 0).
+        # If RANSAC picked the below-floor solution, try IPPE to get the other.
+        cam_center = -R.T @ tvec.flatten()
+        if cam_center[2] < 0 and cond > 1e4:
+            _log.debug(
+                "init_poses_pnp: %s — camera below floor (C_z=%.3f); trying IPPE",
+                s.label, float(cam_center[2]),
+            )
+            try:
+                n_sol, rvecs_i, tvecs_i, _ = cv2.solvePnPGeneric(
+                    obj_arr, img_arr, s.K, np.zeros(4),
+                    flags=cv2.SOLVEPNP_IPPE,
+                )
+                _log.debug(
+                    "init_poses_pnp: %s — IPPE returned %d solutions",
+                    s.label, n_sol,
+                )
+                for k, (rv_i, tv_i) in enumerate(zip(rvecs_i, tvecs_i)):
+                    R_i, _ = cv2.Rodrigues(rv_i)
+                    det_i = float(np.linalg.det(R_i))
+                    finite_i = np.isfinite(tv_i).all()
+                    C_i = -R_i.T @ tv_i.flatten() if finite_i else np.full(3, float("nan"))
+                    _log.debug(
+                        "init_poses_pnp: %s — IPPE sol %d: C_z=%.3f det=%.4f finite=%s",
+                        s.label, k, float(C_i[2]), det_i, finite_i,
+                    )
+                    if C_i[2] > 0 and abs(det_i - 1.0) < 0.05 and finite_i:
+                        rvec, tvec = rv_i, tv_i
+                        R = R_i
+                        cam_center = C_i
+                        _log.debug(
+                            "init_poses_pnp: %s — switched to IPPE sol %d (C_z=%.3f)",
+                            s.label, k, float(cam_center[2]),
+                        )
+                        break
+                else:
+                    _log.debug(
+                        "init_poses_pnp: %s — no IPPE solution with C_z>0; keeping RANSAC result",
+                        s.label,
+                    )
+            except cv2.error as exc_ippe:
+                _log.debug("init_poses_pnp: %s — IPPE raised: %s", s.label, exc_ippe)
+
+        _log.debug(
+            "init_poses_pnp: %s — camera center (%.3f, %.3f, %.3f) det=%.4f",
+            s.label, float(cam_center[0]), float(cam_center[1]), float(cam_center[2]), det,
+        )
+
         s.R = R
         s.t = tvec.reshape(3, 1)
         initialised.append(s.video_id)
-        _log.info("init_poses_pnp: initialised %s from %d world CPs", s.label, len(obj_pts))
+        _log.info(
+            "init_poses_pnp: initialised %s from %d world CPs (%d RANSAC inliers, C_z=%.3f)",
+            s.label, len(obj_pts), n_inliers, float(cam_center[2]),
+        )
 
     return initialised
 
@@ -560,6 +701,9 @@ def run_bundle_adjustment(
                         A_rows.append(px * P[2] - P[0])
                         A_rows.append(py * P[2] - P[1])
                     A = np.array(A_rows, dtype=np.float64)
+                    if not np.isfinite(A).all():
+                        _log.warning("BA: free CP '%s' has non-finite DLT matrix — skipping", cp.name)
+                        continue
                     _, _, Vt = np.linalg.svd(A)
                     h = Vt[-1]
                     if abs(h[3]) > 1e-10:
@@ -700,6 +844,23 @@ def run_bundle_adjustment(
             ps = free_cp_start[pt_key[3:]]
             jac_sp[2 * i, ps:ps + 3] = 1
             jac_sp[2 * i + 1, ps:ps + 3] = 1
+
+    # Validate initial params — non-finite values (e.g. from a degenerate PnP
+    # rotation matrix) cause scipy to raise "Initial guess is outside of bounds".
+    non_finite = ~np.isfinite(params_arr)
+    if non_finite.any():
+        bad = np.where(non_finite)[0].tolist()
+        for idx in bad[:10]:
+            for vid, start in cam_param_start.items():
+                if start <= idx < start + 6:
+                    _log.error(
+                        "BA: non-finite param at idx=%d (camera %s, offset %d, val=%g)",
+                        idx, vid, idx - start, params_arr[idx],
+                    )
+        raise ValueError(
+            f"BA: {non_finite.sum()} non-finite values in initial params — "
+            "check camera poses (coplanar PnP may have returned a reflection matrix)"
+        )
 
     try:
         result = least_squares(
@@ -877,6 +1038,9 @@ def compute_cp_errors(
                 A_rows.append(px * P[2] - P[0])
                 A_rows.append(py * P[2] - P[1])
             A = np.array(A_rows, dtype=np.float64)
+            if not np.isfinite(A).all():
+                _log.warning("CP error: free CP '%s' has non-finite DLT matrix — skipping", cp.name)
+                continue
             _, _, Vt = np.linalg.svd(A)
             h = Vt[-1]
             if abs(h[3]) < 1e-10:
@@ -916,6 +1080,7 @@ def run_calibration(
     progress_cb=None,
     cancel_event=None,
     cp_only: bool = False,
+    pnp_ransac_px: float = 8.0,
 ) -> CalibResult:
     """Run the full pipeline.  states[*].image must be loaded before calling.
 
@@ -945,10 +1110,22 @@ def run_calibration(
 
     n = len(states)
 
+    # --- Debug dump: CP and camera inventory ---
+    if control_points and _log.isEnabledFor(logging.DEBUG):
+        _log.debug("run_calibration: %d cameras: %s",
+                   n, [s.label for s in states])
+        for cp in control_points:
+            xyz_str = (f"world=({cp.world_xyz[0]:.3f},{cp.world_xyz[1]:.3f},"
+                       f"{cp.world_xyz[2]:.3f})" if cp.world_xyz is not None else "free")
+            obs_str = ", ".join(
+                f"{vid}=({px:.1f},{py:.1f})" for vid, (px, py) in cp.obs.items()
+            )
+            _log.debug("  CP %s [%s]  obs: %s", cp.name, xyz_str, obs_str or "(none)")
+
     # --- Stage 0: PnP initialisation from world-xyz CPs ---
     if control_points:
         _prog("Initialising cameras from control points (PnP)…")
-        pnp_ids = init_poses_pnp(states, control_points)
+        pnp_ids = init_poses_pnp(states, control_points, pnp_ransac_px=pnp_ransac_px)
         if pnp_ids:
             _log.info("PnP pre-initialised %d cameras: %s", len(pnp_ids), pnp_ids)
 
@@ -1003,6 +1180,42 @@ def run_calibration(
     _prog("Computing reprojection errors…")
     errors = compute_reprojection_errors(states, points_3d)
     cp_errors = compute_cp_errors(states, control_points) if control_points else {}
+
+    # Log solved camera world positions and per-CP residuals for debugging.
+    _log.info("Solved camera positions (world XYZ):")
+    for s in states:
+        if s.R is None:
+            _log.info("  %-30s  unsolved", s.label)
+        else:
+            C = -s.R.T @ s.t.flatten()
+            err = cp_errors.get(s.video_id)
+            err_str = f"  CP err {err['mean']:.1f}±{err['std']:.1f}px (max {err['max']:.1f}px)" if err else ""
+            _log.info("  %-30s  (%.3f, %.3f, %.3f)%s", s.label, C[0], C[1], C[2], err_str)
+
+    if control_points and _log.isEnabledFor(logging.DEBUG):
+        state_by_id = {s.video_id: s for s in states}
+        _log.debug("Per-CP reprojection errors after BA:")
+        for cp in control_points:
+            parts = []
+            for vid, (px, py) in cp.obs.items():
+                s = state_by_id.get(vid)
+                if s is None or s.R is None:
+                    continue
+                pts_u = _undistort_pts(np.array([[px, py]], dtype=np.float32), s)
+                rvec, _ = cv2.Rodrigues(s.R)
+                xyz = cp.world_xyz if cp.world_xyz is not None else None
+                if xyz is None:
+                    continue
+                proj, _ = cv2.projectPoints(
+                    xyz.reshape(1, 3), rvec, s.t.reshape(3, 1), s.K, np.zeros(4)
+                )
+                err = float(np.linalg.norm(proj.reshape(2) - pts_u[0]))
+                parts.append(f"{s.label}:{err:.1f}px")
+            if parts:
+                _log.debug("  %s [%s]: %s", cp.name,
+                           "fixed" if cp.world_xyz is not None else "free",
+                           "  ".join(parts))
+
     return CalibResult(
         cameras={s.video_id: s for s in states},
         points_3d=points_3d,
@@ -1043,3 +1256,71 @@ def to_toml_string(result: CalibResult) -> str:
         ]
     lines += ["[metadata]", "adjusted = true", "error = 0.0", ""]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Control-point file I/O (JSON)
+# ---------------------------------------------------------------------------
+
+def save_control_points(
+    control_points: list[ControlPoint],
+    states: list[CamCalibState],
+    path: str,
+) -> None:
+    """Write control points to a JSON file.
+
+    Observations are stored by camera label (not video_id) so the file is
+    portable across sessions.  video_id is stored alongside for reference.
+    """
+    import json
+
+    label_by_id = {s.video_id: s.label for s in states}
+    data = {
+        "version": 1,
+        "control_points": [
+            {
+                "name": cp.name,
+                "world_xyz": cp.world_xyz.tolist() if cp.world_xyz is not None else None,
+                "obs": {
+                    label_by_id.get(vid, vid): [px, py]
+                    for vid, (px, py) in cp.obs.items()
+                },
+            }
+            for cp in control_points
+        ],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def load_control_points(
+    path: str,
+    states: list[CamCalibState],
+) -> list[ControlPoint]:
+    """Load control points from a JSON file saved by save_control_points.
+
+    Observations are matched to current cameras by label; unmatched labels are
+    silently skipped so files can be shared across sessions with different
+    camera subsets.
+    """
+    import json
+
+    id_by_label = {s.label: s.video_id for s in states}
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    version = data.get("version", 1)
+    if version != 1:
+        raise ValueError(f"Unsupported control-point file version: {version}")
+
+    result: list[ControlPoint] = []
+    for rec in data.get("control_points", []):
+        cp = ControlPoint(name=rec["name"])
+        if rec.get("world_xyz") is not None:
+            cp.world_xyz = np.array(rec["world_xyz"], dtype=np.float64)
+        for label, (px, py) in rec.get("obs", {}).items():
+            vid = id_by_label.get(label)
+            if vid is not None:
+                cp.obs[vid] = (float(px), float(py))
+        result.append(cp)
+    return result

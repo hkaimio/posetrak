@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "_note": "Extrinsics CP session from 2026-05-16. 6 cameras, all CPs on z=0 plane (floor markers). gopro-11_mini_01 and insta_ace2_pro fail PnP — observations likely wrong. Use as GUI starting point: load via 'Load...' in the Extrinsics dialog.",
+  "control_points": [
+    {
+      "name": "CP1",
+      "world_xyz": [0.0, 0.0, 0.0],
+      "obs": {
+        "gopro-11_mini_03": [802.0, 1210.1],
+        "insta_ace2_pro": [3117.9, 1022.4],
+        "gopro-11_mini_02": [2094.8, 925.4],
+        "pixel7": [1805.0, 625.9]
+      }
+    },
+    {
+      "name": "CP2",
+      "world_xyz": [4.0, 0.0, 0.0],
+      "obs": {
+        "insta_ace2_pro": [2437.3, 757.2],
+        "gopro-11_mini_02": [1552.8, 1005.1],
+        "gopro-11_mini_01": [2936.2, 1374.6],
+        "pixel7": [1104.2, 560.4],
+        "pixel9": [1821.8, 727.7],
+        "gopro-11_mini_03": [1021.8, 1483.7]
+      }
+    },
+    {
+      "name": "CP3",
+      "world_xyz": [7.0, 0.0, 0.0],
+      "obs": {
+        "gopro-11_mini_01": [3105.2, 1178.2],
+        "gopro-11_mini_02": [902.6, 1099.0],
+        "insta_ace2_pro": [2170.4, 663.7]
+      }
+    },
+    {
+      "name": "CP4",
+      "world_xyz": [7.0, 7.0, 0.0],
+      "obs": {
+        "gopro-11_mini_02": [2488.0, 1912.1],
+        "insta_ace2_pro": [1130.1, 673.2],
+        "gopro-11_mini_03": [3733.0, 1236.6],
+        "gopro-11_mini_01": [1800.7, 1141.0]
+      }
+    },
+    {
+      "name": "CP5",
+      "world_xyz": [0.0, 7.0, 0.0],
+      "obs": {
+        "insta_ace2_pro": [822.0, 1380.8],
+        "gopro-11_mini_02": [3498.0, 1063.2],
+        "gopro-11_mini_01": [367.0, 1466.9],
+        "pixel9": [290.2, 618.8],
+        "gopro-11_mini_03": [2160.4, 1038.1]
+      }
+    },
+    {
+      "name": "CP6",
+      "world_xyz": [4.0, 7.0, 0.0],
+      "obs": {
+        "pixel9": [200.8, 662.2],
+        "insta_ace2_pro": [2265.6, 1163.5],
+        "gopro-11_mini_01": [650.3, 1630.9]
+      }
+    },
+    {
+      "name": "CP7",
+      "world_xyz": [2.0, 0.0, 0.0],
+      "obs": {
+        "pixel9": [994.5, 797.6],
+        "pixel7": [1426.3, 593.1],
+        "gopro-11_mini_01": [2680.3, 1661.1],
+        "insta_ace2_pro": [2711.0, 862.5]
+      }
+    },
+    {
+      "name": "CP8",
+      "world_xyz": [4.0, 7.0, 0.0],
+      "obs": {
+        "pixel7": [202.6, 1034.9]
+      }
+    }
+  ]
+}

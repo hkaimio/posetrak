@@ -72,7 +72,9 @@ from app.setup.extrinsics_solver import (
     _Cancelled,
     _proj_matrix,
     _undistort_pts,
+    load_control_points,
     run_calibration,
+    save_control_points,
 )
 from posetrak.db.db import generate_id as _generate_id
 from posetrak.db.import_extrinsics import import_extrinsics
@@ -317,7 +319,10 @@ class _ClickableImageWidget(QWidget):
         super().__init__(parent)
         self._cam_label = cam_label
         self._img_bgr: np.ndarray | None = None
-        self._markers: list[tuple[float, float, QColor, str]] = []
+        self._markers: list[tuple[float, float, QColor, str, bool]] = []  # x,y,color,label,selected
+        # Image-space position of the currently-selected CP in this camera (if any).
+        # Used to initialise _drag_img on press so releasing immediately keeps old position.
+        self._selected_marker_pos: tuple[float, float] | None = None
 
         # Fit-mode display rect (set during paintEvent, used for coord mapping)
         self._fit_rect = QRect()
@@ -354,6 +359,9 @@ class _ClickableImageWidget(QWidget):
         # Reprojection markers for control points (open circle+cross, same color as CP)
         self._proj_markers: list[tuple[float, float, QColor]] = []
 
+        # Camera-position markers: projected world position of other cameras
+        self._cam_pos_markers: list[tuple[float, float, str]] = []  # x, y, label
+
         self.setMinimumSize(200, 150)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)  # needed for smooth drag
@@ -373,18 +381,29 @@ class _ClickableImageWidget(QWidget):
         self._thumb_size = None  # invalidate thumbnail cache
         self.update()
 
-    def add_marker(self, x: float, y: float, color: QColor, label: str = "") -> None:
-        self._markers.append((x, y, color, label))
+    def add_marker(self, x: float, y: float, color: QColor, label: str = "",
+                   selected: bool = False) -> None:
+        self._markers.append((x, y, color, label, selected))
         self.update()
+
+    def set_selected_marker(self, pos: tuple[float, float] | None) -> None:
+        """Set existing image-space position of the selected CP for this camera."""
+        self._selected_marker_pos = pos
 
     def add_proj_marker(self, x: float, y: float, color: QColor) -> None:
         """Add a reprojection marker (open circle + crosshair) at image position (x, y)."""
         self._proj_markers.append((x, y, color))
         self.update()
 
+    def add_cam_pos_marker(self, x: float, y: float, label: str) -> None:
+        self._cam_pos_markers.append((x, y, label))
+        self.update()
+
     def clear_markers(self) -> None:
         self._markers.clear()
         self._proj_markers.clear()
+        self._cam_pos_markers.clear()
+        self._selected_marker_pos = None
         self.update()
 
     def set_calib_status(self, text: str | None, error: bool = False) -> None:
@@ -615,12 +634,39 @@ class _ClickableImageWidget(QWidget):
             painter.drawLine(int(wx) - arm, int(wy), int(wx) + arm, int(wy))
             painter.drawLine(int(wx), int(wy) - arm, int(wx), int(wy) + arm)
 
-        # Manual control point markers (solid colored circles) — drawn on top
-        for mx, my, color, mlabel in self._markers:
+        # Camera-position markers: small filled square + label (yellow/gold)
+        cam_color = QColor(255, 210, 0)
+        cam_bg = QColor(0, 0, 0, 160)
+        painter.setFont(painter.font())
+        for mx, my, clabel in self._cam_pos_markers:
             wx, wy = self._img_to_widget(mx, my)
+            # Draw a small camera-body icon: filled rect + viewfinder notch
+            r = 6
+            painter.setBrush(cam_color)
+            painter.setPen(QPen(QColor(0, 0, 0), 1))
+            painter.drawRect(int(wx) - r, int(wy) - r + 2, r * 2, r * 2 - 2)
+            painter.drawRect(int(wx) - r // 2, int(wy) - r, r, 3)
+            # Label with contrasting background
+            fm = painter.fontMetrics()
+            tw = fm.horizontalAdvance(clabel)
+            lx, ly = int(wx) + r + 3, int(wy) + 4
+            painter.setBrush(cam_bg)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRect(lx - 1, ly - fm.ascent(), tw + 2, fm.height())
+            painter.setPen(cam_color)
+            painter.drawText(lx, ly, clabel)
+
+        # Manual control point markers (solid colored circles) — drawn on top
+        for mx, my, color, mlabel, is_sel in self._markers:
+            wx, wy = self._img_to_widget(mx, my)
+            if is_sel:
+                # White outer ring to make selected CP visually distinct
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(255, 255, 255), 2.5))
+                painter.drawEllipse(int(wx) - 12, int(wy) - 12, 24, 24)
+            r = 9 if is_sel else 7
             painter.setBrush(color)
             painter.setPen(QPen(QColor(255, 255, 255), 1.5))
-            r = 7
             painter.drawEllipse(int(wx) - r, int(wy) - r, r * 2, r * 2)
             if mlabel:
                 painter.setPen(QColor(255, 255, 255))
@@ -654,7 +700,9 @@ class _ClickableImageWidget(QWidget):
         self._clamp_zoom_origin()
 
         self._zoom_active = True
-        self._drag_img = (ix, iy)
+        # If an existing CP observation is recorded for this camera, start the drag
+        # from that position so releasing immediately leaves the point unchanged.
+        self._drag_img = self._selected_marker_pos if self._selected_marker_pos is not None else (ix, iy)
         self.setCursor(Qt.CursorShape.BlankCursor)
         self.update()
 
@@ -752,12 +800,14 @@ class _SolveThread(QThread):
         states: list[CamCalibState],
         control_points: list[ControlPoint],
         cp_only: bool = False,
+        pnp_ransac_px: float = 8.0,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._states = states
         self._control_points = control_points
         self._cp_only = cp_only
+        self._pnp_ransac_px = pnp_ransac_px
         self._cancel_event = threading.Event()
 
     def cancel(self) -> None:
@@ -770,11 +820,14 @@ class _SolveThread(QThread):
                 progress_cb=lambda msg: self.progress.emit(msg),
                 cancel_event=self._cancel_event,
                 cp_only=self._cp_only,
+                pnp_ransac_px=self._pnp_ransac_px,
             )
         except _Cancelled:
             self.cancelled.emit()
             return
         except Exception as exc:  # noqa: BLE001
+            import traceback
+            _log.error("Calibration failed: %s\n%s", exc, traceback.format_exc())
             if not self._cancel_event.is_set():
                 self.error_occurred.emit(str(exc))
             else:
@@ -893,12 +946,27 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._cancel_btn = QPushButton("Cancel")
         self._cancel_btn.clicked.connect(self._on_cancel_solve)
         self._cancel_btn.setVisible(False)
+        self._load_db_btn = QPushButton("Load from DB…")
+        self._load_db_btn.clicked.connect(self._on_load_from_db)
+        self._load_db_btn.setToolTip("Load a previously saved calibration to inspect camera positions and CP errors.")
         self._sift_check = QCheckBox("SIFT matching")
         self._sift_check.setChecked(True)
         self._sift_check.setToolTip(
             "Use SIFT feature matching to initialise camera poses.\n"
             "Uncheck to use only control points (requires ≥4 world-xyz CPs per camera)."
         )
+        self._ransac_px_spin = QDoubleSpinBox()
+        self._ransac_px_spin.setRange(1.0, 500.0)
+        self._ransac_px_spin.setSingleStep(1.0)
+        self._ransac_px_spin.setValue(8.0)
+        self._ransac_px_spin.setDecimals(1)
+        self._ransac_px_spin.setSuffix(" px")
+        self._ransac_px_spin.setToolTip(
+            "PnP RANSAC reprojection error threshold.\n"
+            "Increase if cameras with bad intrinsics or coplanar CPs fail to solve.\n"
+            "Large values allow wrong poses — use only for diagnosis."
+        )
+        self._ransac_px_spin.setMaximumWidth(90)
         self._status_label = QLabel(
             "Click 'Match & Solve' to run SIFT matching and bundle adjustment.  "
             "Optionally add control points first (press a camera image to place one)."
@@ -908,8 +976,29 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         solve_row = QHBoxLayout()
         solve_row.addWidget(self._solve_btn)
         solve_row.addWidget(self._cancel_btn)
+        solve_row.addWidget(self._load_db_btn)
         solve_row.addWidget(self._sift_check)
+        solve_row.addWidget(QLabel("RANSAC:"))
+        solve_row.addWidget(self._ransac_px_spin)
         solve_row.addWidget(self._status_label, 1)
+
+        # Camera positions table (shown after solve or DB load)
+        self._cam_pos_table = QTableWidget(0, 5)
+        self._cam_pos_table.setHorizontalHeaderLabels(
+            ["Camera", "X (m)", "Y (m)", "Z (m)", "CP error"]
+        )
+        self._cam_pos_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        for col in range(1, 5):
+            self._cam_pos_table.horizontalHeader().setSectionResizeMode(
+                col, QHeaderView.ResizeMode.ResizeToContents
+            )
+        self._cam_pos_table.setMaximumHeight(140)
+        self._cam_pos_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._cam_pos_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self._cam_pos_table.setAlternatingRowColors(True)
+        self._cam_pos_table.setVisible(False)
 
         # Dialog buttons
         btn_box = QDialogButtonBox()
@@ -922,6 +1011,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         root = QVBoxLayout(self)
         root.addWidget(splitter, 1)
         root.addLayout(solve_row)
+        root.addWidget(self._cam_pos_table)
         root.addWidget(btn_box)
 
     def _build_cp_panel(self) -> QWidget:
@@ -948,10 +1038,17 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         add_del = QHBoxLayout()
         add_btn = QPushButton("Add")
         del_btn = QPushButton("Delete")
+        load_btn = QPushButton("Load…")
+        save_btn = QPushButton("Save…")
         add_btn.clicked.connect(self._add_control_point)
         del_btn.clicked.connect(self._delete_control_point)
+        load_btn.clicked.connect(self._load_cp_file)
+        save_btn.clicked.connect(self._save_cp_file)
         add_del.addWidget(add_btn)
         add_del.addWidget(del_btn)
+        add_del.addStretch()
+        add_del.addWidget(load_btn)
+        add_del.addWidget(save_btn)
 
         cp_layout.addWidget(hint)
         cp_layout.addWidget(self._cp_list, 1)
@@ -996,11 +1093,21 @@ class ExtrinsicsAutoCalibDialog(QDialog):
     # Control-point slots
     # ------------------------------------------------------------------
 
+    def _cp_list_label(self, cp: "ControlPoint") -> str:
+        kind = "fixed" if cp.world_xyz is not None else "free"
+        return f"{cp.name}  ({kind}, {len(cp.obs)} cam{'s' if len(cp.obs) != 1 else ''})"
+
+    def _refresh_cp_list_labels(self) -> None:
+        for row, cp in enumerate(self._control_points):
+            item = self._cp_list.item(row)
+            if item is not None:
+                item.setText(self._cp_list_label(cp))
+
     def _add_control_point(self) -> None:
         name = f"CP{len(self._control_points) + 1}"
         cp = ControlPoint(name=name)
         self._control_points.append(cp)
-        self._cp_list.addItem(name)
+        self._cp_list.addItem(self._cp_list_label(cp))
         self._cp_list.setCurrentRow(len(self._control_points) - 1)
 
     def _rename_control_point(self, item) -> None:
@@ -1011,7 +1118,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         name, ok = QInputDialog.getText(self, "Rename Control Point", "Name:", text=cp.name)
         if ok and name.strip():
             cp.name = name.strip()
-            item.setText(name.strip())
+            item.setText(self._cp_list_label(cp))
 
     def _delete_control_point(self) -> None:
         row = self._cp_list.currentRow()
@@ -1021,6 +1128,56 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._cp_list.takeItem(row)
         self._selected_cp_idx = None
         self._refresh_markers()
+
+    def _load_cp_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Control Points", "", "CP files (*.json);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            cps = load_control_points(path, self._states)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Load failed", str(exc))
+            return
+        if not cps:
+            QMessageBox.information(self, "Load", "No control points found in file.")
+            return
+        reply = QMessageBox.question(
+            self, "Load Control Points",
+            f"Replace existing {len(self._control_points)} CP(s) with "
+            f"{len(cps)} loaded from file?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._control_points = cps
+        self._cp_list.clear()
+        for cp in cps:
+            self._cp_list.addItem(self._cp_list_label(cp))
+        self._selected_cp_idx = None
+        self._refresh_markers()
+        # Report how many observations matched current cameras
+        matched = sum(len(cp.obs) for cp in cps)
+        _log.info("Loaded %d CPs from %s (%d observations matched)", len(cps), path, matched)
+
+    def _save_cp_file(self) -> None:
+        if not self._control_points:
+            QMessageBox.information(self, "Save", "No control points to save.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Control Points", "", "CP files (*.json);;All files (*)"
+        )
+        if not path:
+            return
+        if not path.endswith(".json"):
+            path += ".json"
+        try:
+            save_control_points(self._control_points, self._states, path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Save failed", str(exc))
+            return
+        _log.info("Saved %d CPs to %s", len(self._control_points), path)
 
     def _on_cp_selected(self, row: int) -> None:
         self._selected_cp_idx = row if row >= 0 else None
@@ -1051,6 +1208,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._xyz_apply_btn.setEnabled(enabled)
         if not enabled and self._selected_cp_idx is not None:
             self._control_points[self._selected_cp_idx].world_xyz = None
+            self._refresh_cp_list_labels()
 
     def _apply_xyz(self) -> None:
         if self._selected_cp_idx is None:
@@ -1061,6 +1219,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             self._xyz_y.value(),
             self._xyz_z.value(),
         ])
+        self._refresh_cp_list_labels()
 
     # ------------------------------------------------------------------
     # Camera click → record observation
@@ -1071,6 +1230,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             return
         cp = self._control_points[self._selected_cp_idx]
         cp.obs[vid] = (x, y)
+        self._refresh_cp_list_labels()
         self._refresh_markers()
 
     def _on_cam_context_menu(self, vid: str, pos) -> None:
@@ -1093,6 +1253,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             return
         cp = self._control_points[self._selected_cp_idx]
         cp.obs.pop(vid, None)
+        self._refresh_cp_list_labels()
         self._refresh_markers()
 
     def _refresh_markers(self) -> None:
@@ -1104,7 +1265,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             mlabel = cp.name if is_selected else ""
             for vid, (x, y) in cp.obs.items():
                 if vid in self._cam_widgets:
-                    self._cam_widgets[vid].add_marker(x, y, color, mlabel)
+                    self._cam_widgets[vid].add_marker(x, y, color, mlabel, selected=is_selected)
+                    if is_selected:
+                        self._cam_widgets[vid].set_selected_marker((x, y))
             # Reprojection marker (open circle+cross) if we have a 3D position
             xyz = self._cp_3d.get(cp.name)
             if xyz is None or self._result is None:
@@ -1143,7 +1306,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         cp_only = not self._sift_check.isChecked()
         self._solve_thread = _SolveThread(
-            self._states, self._control_points, cp_only=cp_only, parent=self
+            self._states, self._control_points, cp_only=cp_only,
+            pnp_ransac_px=self._ransac_px_spin.value(), parent=self,
         )
         self._solve_thread.finished.connect(self._on_solve_done)
         self._solve_thread.error_occurred.connect(self._on_solve_error)
@@ -1218,6 +1382,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 self._cp_3d[cp.name] = (h[:3] / h[3]).astype(np.float64)
 
         self._refresh_markers()
+        self._refresh_cam_pos_table()
+        self._refresh_cam_pos_markers()
 
         # Update per-camera badges; clear any stale SIFT overlays and highlights
         self._hov_vid = None
@@ -1237,6 +1403,173 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 w.set_calib_status(f"err {err:.2f} px", error=err > 5.0)
             else:
                 w.set_calib_status(None)
+
+    def _refresh_cam_pos_table(self) -> None:
+        """Populate the camera-positions table from current state R/t values."""
+        cp_errors = self._result.cp_reprojection_errors if self._result else {}
+        self._cam_pos_table.setRowCount(len(self._states))
+        for row, s in enumerate(self._states):
+            name_item = QTableWidgetItem(s.label)
+            if s.R is None:
+                self._cam_pos_table.setItem(row, 0, name_item)
+                for col in range(1, 5):
+                    item = QTableWidgetItem("—")
+                    item.setForeground(QColor(150, 150, 150))
+                    self._cam_pos_table.setItem(row, col, item)
+                continue
+            C = -s.R.T @ s.t.flatten()
+            z_ok = C[2] > -0.1
+            color = QColor(30, 140, 30) if z_ok else QColor(180, 40, 40)
+            name_item.setForeground(color)
+            self._cam_pos_table.setItem(row, 0, name_item)
+            for col, val in enumerate([C[0], C[1], C[2]], start=1):
+                item = QTableWidgetItem(f"{val:.3f}")
+                item.setForeground(color)
+                self._cam_pos_table.setItem(row, col, item)
+            err = cp_errors.get(s.video_id)
+            if err:
+                err_item = QTableWidgetItem(
+                    f"{err['mean']:.1f} ± {err['std']:.1f} px  (max {err['max']:.0f})"
+                )
+                err_item.setForeground(QColor(180, 40, 40) if err["mean"] > 5.0 else QColor(30, 140, 30))
+            else:
+                err_item = QTableWidgetItem("—")
+                err_item.setForeground(QColor(150, 150, 150))
+            self._cam_pos_table.setItem(row, 4, err_item)
+        self._cam_pos_table.setVisible(True)
+
+    def _refresh_cam_pos_markers(self) -> None:
+        """Project each solved camera's world position into every other camera's view."""
+        solved = [(s, -s.R.T @ s.t.flatten()) for s in self._states if s.R is not None]
+        for s in self._states:
+            w = self._cam_widgets.get(s.video_id)
+            if w is None or s.R is None:
+                continue
+            rvec, _ = cv2.Rodrigues(s.R)
+            h_img, w_img = s.image.shape[:2] if s.image is not None else (0, 0)
+            for other, C in solved:
+                if other.video_id == s.video_id:
+                    continue
+                # Check camera is in front (positive z in this camera's frame)
+                p_cam = s.R @ C + s.t.flatten()
+                if p_cam[2] <= 0:
+                    continue
+                proj, _ = cv2.projectPoints(
+                    C.reshape(1, 3), rvec, s.t.reshape(3, 1), s.K, np.zeros(4)
+                )
+                px, py = proj.reshape(2)
+                if not (np.isfinite(px) and np.isfinite(py)):
+                    continue
+                if w_img > 0 and not (0 <= px < w_img and 0 <= py < h_img):
+                    continue
+                w.add_cam_pos_marker(float(px), float(py), other.label)
+
+    def _on_load_from_db(self) -> None:
+        """Pick an existing calibration from the DB and load it into the current states."""
+        rows = self._conn.execute(
+            "SELECT id, calibrated_at, method, rms_error"
+            " FROM extrinsic_calibrations"
+            " WHERE session_id = ?"
+            " ORDER BY calibrated_at DESC",
+            (self._session_id,),
+        ).fetchall()
+        if not rows:
+            QMessageBox.information(self, "Load from DB", "No calibrations found for this session.")
+            return
+
+        # Picker dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Select Calibration")
+        dlg.setMinimumWidth(420)
+        combo = QComboBox()
+        for r in rows:
+            rms = f"  rms={r['rms_error']:.3f}" if r["rms_error"] is not None else ""
+            combo.addItem(
+                f"{r['calibrated_at']}  [{r['method'] or '?'}]{rms}  ({r['id'][:8]}…)",
+                r["id"],
+            )
+        btn_ok = QPushButton("Load")
+        btn_cancel = QPushButton("Cancel")
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+        dlg_btns = QHBoxLayout()
+        dlg_btns.addWidget(btn_ok)
+        dlg_btns.addWidget(btn_cancel)
+        dlg_lay = QVBoxLayout(dlg)
+        dlg_lay.addWidget(QLabel("Choose calibration to inspect:"))
+        dlg_lay.addWidget(combo)
+        dlg_lay.addLayout(dlg_btns)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        calib_id = combo.currentData()
+        entries = self._conn.execute(
+            "SELECT ci.label, ee.R, ee.t"
+            " FROM extrinsic_entries ee"
+            " JOIN camera_instances ci ON ci.id = ee.camera_instance_id"
+            " WHERE ee.extrinsic_calibration_id = ?",
+            (calib_id,),
+        ).fetchall()
+
+        label_to_state = {s.label: s for s in self._states}
+        loaded = 0
+        for entry in entries:
+            s = label_to_state.get(entry["label"])
+            if s is None:
+                continue
+            R = np.array(struct.unpack("<9d", entry["R"])).reshape(3, 3)
+            t = np.array(struct.unpack("<3d", entry["t"])).reshape(3, 1)
+            s.R = R
+            s.t = t
+            loaded += 1
+
+        if loaded == 0:
+            QMessageBox.warning(self, "Load from DB", "No cameras matched the stored calibration.")
+            return
+
+        # Clear unsolved cameras if they weren't in this calibration
+        calib_labels = {e["label"] for e in entries}
+        for s in self._states:
+            if s.label not in calib_labels:
+                s.R = None
+                s.t = None
+
+        # Recompute CP 3D positions so reprojection markers appear
+        if self._control_points:
+            self._cp_3d = {}
+            for cp in self._control_points:
+                if cp.world_xyz is not None:
+                    self._cp_3d[cp.name] = cp.world_xyz.astype(np.float64)
+
+        self._refresh_markers()
+        self._refresh_cam_pos_table()
+        self._refresh_cam_pos_markers()
+
+        # Update per-camera error badges using CP errors only
+        from app.setup.extrinsics_solver import compute_cp_errors
+        cp_errs = compute_cp_errors(self._states, self._control_points) if self._control_points else {}
+        for s in self._states:
+            w = self._cam_widgets.get(s.video_id)
+            if w is None:
+                continue
+            if s.R is None:
+                w.set_calib_status("Disconnected", error=True)
+            elif s.video_id in cp_errs:
+                err = cp_errs[s.video_id]["mean"]
+                w.set_calib_status(f"err {err:.2f} px", error=err > 5.0)
+            else:
+                w.set_calib_status(None)
+
+        # Refresh the stored result's cp errors so the table has data
+        if self._result is not None:
+            self._result.cp_reprojection_errors.update(cp_errs)
+            self._refresh_cam_pos_table()
+
+        self._status_label.setText(
+            f"Loaded calibration from DB: {loaded}/{len(self._states)} cameras.  "
+            f"CP reprojection errors shown in table."
+        )
+        _log.info("Loaded calibration %s from DB (%d cameras)", calib_id[:8], loaded)
 
     def _on_cam_hover(self, vid: str, entered: bool) -> None:
         """Show/hide SIFT feature overlay when hovering over a camera image.

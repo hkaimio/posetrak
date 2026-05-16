@@ -285,22 +285,33 @@ class DetectionPipeline:
             stream.thread_type = "AUTO"
             time_base = float(stream.time_base)
 
-            # Seek slightly before the target to land on a keyframe
+            # Seek slightly before the target to land on a keyframe.
+            # fps here is used only for seek estimation — it may not match the
+            # container's reported fps (e.g. slow-motion videos stored at 30fps
+            # container but representing 120fps content).  We count frames
+            # sequentially after the seek rather than deriving index from pts,
+            # so any mismatch between fps and container metadata is harmless.
             if first_frame > 0:
                 seek_s = max(0.0, (first_frame - 1) / fps)
                 seek_pts = int(seek_s / time_base)
                 container.seek(seek_pts, stream=stream, backward=True, any_frame=False)
 
+            frame_idx: int | None = None
             for av_frame in container.decode(stream):
                 if av_frame.pts is None:
                     continue
-                frame_s = float(av_frame.pts) * time_base
-                frame_idx = round(frame_s * fps)
-                if frame_idx < first_frame:
-                    continue
+                if frame_idx is None:
+                    # Use pts only to skip frames before first_frame, then
+                    # anchor sequential counting at first_frame.
+                    frame_s = float(av_frame.pts) * time_base
+                    pts_idx = round(frame_s * fps)
+                    if pts_idx < first_frame:
+                        continue
+                    frame_idx = first_frame
                 if frame_idx >= last_frame:
                     break
                 yield frame_idx, av_frame.to_ndarray(format="bgr24")
+                frame_idx += 1
 
     @staticmethod
     def _iter_frames_cv2(path: str, first_frame: int, last_frame: int):

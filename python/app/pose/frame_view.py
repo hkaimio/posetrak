@@ -276,14 +276,15 @@ class FrameViewWidget(QWidget):
     ) -> None:
         """Load a single camera (legacy call path, still used from the stitcher click handler)."""
         label = camera_instance_id[:12]
+        existing = self._cameras.get(shot_video_id)
         cam = _CameraInfo(
             shot_video_id=shot_video_id,
             file_path=file_path,
             camera_instance_id=camera_instance_id,
             label=label,
             fps=fps,
-            ref_frame=ref_frame,
-            ref_timestamp_s=ref_timestamp_s,
+            ref_frame=existing.ref_frame if existing else ref_frame,
+            ref_timestamp_s=existing.ref_timestamp_s if existing else ref_timestamp_s,
         )
         if shot_video_id not in self._cameras:
             self._cameras[shot_video_id] = cam

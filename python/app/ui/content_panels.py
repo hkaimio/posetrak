@@ -347,12 +347,11 @@ class DetectionRunPanel(QWidget):
 
     def _open_pose_extraction(self) -> None:
         from app.pose.main import PoseExtractionWindow
-        win = PoseExtractionWindow(
+        self._pose_win = PoseExtractionWindow(
             session_db=str(self._session_path),
             parent=None,
         )
-        win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        win.show()
+        self._pose_win.show()
 
 
 # ---------------------------------------------------------------------------

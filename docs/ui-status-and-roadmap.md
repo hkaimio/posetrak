@@ -1,6 +1,6 @@
 # Posetrak UI — Status and Roadmap
 
-**Last updated:** 2026-04-26
+**Last updated:** 2026-05-16
 
 ---
 
@@ -42,6 +42,7 @@ tracker, exporting BVH — is CLI-only.
 | Shot / sync / detection-run selectors | Done |
 | Time-range marking (Mark Start / Mark End) | Done |
 | Background detection pipeline (YOLO + RTMPose → DB) | Done |
+| Frame range via SyncTable (piecewise-linear, not single-anchor fps extrapolation) | Done |
 | Stitcher timeline with person assignment | Done |
 | Assignment conflict detection + resolution dialog | Done |
 | Frame view with skeleton overlay | Done |
@@ -51,6 +52,50 @@ tracker, exporting BVH — is CLI-only.
 | PersonPreviewWidget | Done |
 | Confidence sparkline | Postponed (Phase C) |
 | Manual bbox correction + partial re-run | Postponed (Phase C) |
+
+### Known issues in posetrak-pose
+
+#### High-frame-rate video decode rate (Pixel 9 / 120 fps cameras)
+
+`_iter_frames_av` in `detection_pipeline.py` seeks to the correct time position (using
+`actual_fps` to convert frame index → seconds) but PyAV's decode loop delivers frames at
+the *container's* PTS cadence.  For Pixel 9 recordings the container declares 30 fps in
+its stream headers while the video content is 120 fps; PyAV therefore yields only ≈25 %
+of expected frames (every 4th frame index).  Symptoms: `_process_camera` logs
+`4457 total` frames but completes after `1114 frames`.
+
+The frame *range* calculation was fixed (2026-05-16) to use `SyncTable.lookup()` instead
+of single-anchor fps extrapolation, so start/end frames are now correct.  The sparse
+decode cadence is a separate, unresolved issue:
+
+- Root cause: the MP4 container's `stream.avg_frame_rate` / `r_frame_rate` is 30 fps
+  even though actual frame pts advance at 120 fps resolution.  Possible explanations:
+  (a) the Pixel 9 high-speed mode stores pts at 30 fps and duplicates/interpolates on
+  playback; (b) PyAV only decodes reference frames for this codec profile.
+- **Workaround:** None yet.  Pending diagnostic — log consecutive pts deltas and
+  compare to `time_base` to distinguish cases (a) and (b).
+- **Impact:** Detections are sparse (every 4th frame); stitcher timeline is correct
+  (pts-based) but frame-view seeks land between detected frames.
+
+#### pose-extraction window UI structure
+
+The current window conflates four concerns in one screen:
+
+1. **Navigation** — shot, sync config, detection run selectors at the top.
+2. **Trial definition** — "Mark Start / Mark End" sets the time range for a new run.
+3. **Run parameters** — detector model, confidence threshold, "Run detection" button.
+4. **Results review** — stitcher timeline + frame view for the selected detection run.
+
+This makes it unclear which detection run the stitcher is showing, and mixes the
+"what to detect" (trial concept) with the "how to detect" (run parameters).  See
+section 4.1 for the target architecture.  The long-term fix is part of Phase 3
+(merge into single app with session tree), but the following interim improvements
+are worth making before then:
+
+- The stitcher should always label which detection run it is showing.
+- "Mark Start / Mark End" should be labelled as defining a *trial*, not a run.
+- The shot/sync selectors should be read-only once a detection run is selected
+  (they are navigation, not parameters).
 
 ### Backend readiness for distorted-pixel pipeline
 

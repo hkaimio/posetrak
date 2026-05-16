@@ -315,7 +315,7 @@ class StitcherWidget(QGraphicsView):
             return
 
         run_row = session.execute(
-            "SELECT sync_config_id, time_start_s, time_end_s FROM detection_runs WHERE id = ?",
+            "SELECT shot_id, sync_config_id, time_start_s, time_end_s FROM detection_runs WHERE id = ?",
             (detection_run_id,),
         ).fetchone()
         if run_row is None:
@@ -328,11 +328,10 @@ class StitcherWidget(QGraphicsView):
         )
 
         rows = session.execute(
-            "SELECT DISTINCT shot_video_id FROM person_tracks "
-            "WHERE detection_run_id = ? ORDER BY shot_video_id",
-            (detection_run_id,),
+            "SELECT id FROM capture_videos WHERE shot_id = ? ORDER BY id",
+            (run_row["shot_id"],),
         ).fetchall()
-        svids = [r["shot_video_id"] for r in rows]
+        svids = [r["id"] for r in rows]
 
         self._anchors = _build_frame_to_time(session, sync_config_id, svids)
 
@@ -354,21 +353,24 @@ class StitcherWidget(QGraphicsView):
             label_item.setPos(0, y)
             label_item.setDefaultTextColor(QColor(220, 220, 220))
 
-            for span in db_spans:
-                tid = span["track_id"]
-                first = span["first_frame"]
-                last = span["last_frame"]
-                det_key = (svid, tid)
+            if db_spans:
+                for span in db_spans:
+                    tid = span["track_id"]
+                    first = span["first_frame"]
+                    last = span["last_frame"]
+                    det_key = (svid, tid)
 
-                if det_key not in self._segments:
-                    # Fresh load — initialise as one segment covering the full track
-                    self._segments[det_key] = [(first, last)]
+                    if det_key not in self._segments:
+                        # Fresh load — initialise as one segment covering the full track
+                        self._segments[det_key] = [(first, last)]
 
-                self._row_y[det_key] = y
-                for seg_first, seg_last in self._segments[det_key]:
-                    self._draw_segment(svid, tid, seg_first, seg_last, y)
+                    self._row_y[det_key] = y
+                    for seg_first, seg_last in self._segments[det_key]:
+                        self._draw_segment(svid, tid, seg_first, seg_last, y)
 
-                y += ROW_HEIGHT + 2
+                    y += ROW_HEIGHT + 2
+            else:
+                y += ROW_HEIGHT
 
             y += ROW_GAP
 

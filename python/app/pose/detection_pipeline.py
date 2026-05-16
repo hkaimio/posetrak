@@ -22,6 +22,7 @@ import cv2
 
 from app.pose.backends import PersonDetector, PoseEstimator
 from app.pose.db_cache import DetectionBatchWriter, create_detection_run, mark_run_complete
+from app.setup.db_context import SyncPoint, SyncTable
 
 ProgressCallback = Callable[[int, int, str], None]  # done, total, camera_id
 
@@ -74,7 +75,7 @@ class DetectionPipeline:
         self._estimator = estimator
         self._thumbnail_every_s = thumbnail_every_s
         self._stop_event = stop_event or threading.Event()
-        self._cameras = self._load_cameras()
+        self._cameras, self._sync_table = self._load_cameras()
 
     # ------------------------------------------------------------------
     # Public
@@ -129,41 +130,61 @@ class DetectionPipeline:
     # Private
     # ------------------------------------------------------------------
 
-    def _load_cameras(self) -> list[CameraInfo]:
-        """Load shot videos with sync anchor for each camera."""
-        # Use one anchor sync point per camera (the lowest video_frame).
-        rows = self._session.execute(
-            "WITH anchor AS ("
-            "    SELECT shot_video_id, MIN(video_frame) AS first_frame"
-            "    FROM sync_points WHERE sync_config_id = ? GROUP BY shot_video_id"
-            ")"
-            "SELECT sv.id, sv.camera_instance_id, sv.file_path, sv.actual_fps,"
-            "       sp.video_frame, sp.timestamp_s "
+    def _load_cameras(self) -> tuple[list[CameraInfo], SyncTable]:
+        """Load shot videos and build a SyncTable from all sync points."""
+        sp_rows = self._session.execute(
+            "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, sv.actual_fps "
+            "FROM sync_points sp "
+            "JOIN capture_videos sv ON sv.id = sp.shot_video_id "
+            "WHERE sp.sync_config_id = ? AND sv.shot_id = ? "
+            "ORDER BY sp.shot_video_id, sp.video_frame",
+            (self._sync_config_id, self._shot_id),
+        ).fetchall()
+
+        sync_points: list[SyncPoint] = []
+        fps_by_video: dict[str, float] = {}
+        # First sync point per video used as the single-anchor fallback in CameraInfo
+        anchor_by_video: dict[str, tuple[int, float]] = {}
+        for r in sp_rows:
+            svid = r["shot_video_id"]
+            sync_points.append(SyncPoint(
+                camera_instance_id=svid,
+                shot_video_id=svid,
+                video_frame=int(r["video_frame"]),
+                timestamp_s=float(r["timestamp_s"]),
+            ))
+            fps_by_video.setdefault(svid, float(r["actual_fps"] or 30.0))
+            if svid not in anchor_by_video:
+                anchor_by_video[svid] = (int(r["video_frame"]), float(r["timestamp_s"]))
+
+        sync_table = SyncTable(sync_points, fps_by_video)
+
+        cam_rows = self._session.execute(
+            "SELECT sv.id, sv.camera_instance_id, sv.file_path, sv.actual_fps "
             "FROM capture_videos sv "
-            "JOIN anchor a ON a.shot_video_id = sv.id "
-            "JOIN sync_points sp "
-            "    ON sp.shot_video_id = sv.id "
-            "    AND sp.sync_config_id = ? "
-            "    AND sp.video_frame = a.first_frame "
-            "WHERE sv.shot_id = ? "
+            "WHERE sv.id IN (SELECT DISTINCT shot_video_id FROM sync_points WHERE sync_config_id = ?) "
+            "  AND sv.shot_id = ? "
             "ORDER BY sv.camera_instance_id",
-            (self._sync_config_id, self._sync_config_id, self._shot_id),
+            (self._sync_config_id, self._shot_id),
         ).fetchall()
 
         cameras = []
-        for row in rows:
+        for row in cam_rows:
+            svid = row["id"]
             fps = float(row["actual_fps"] or 30.0)
+            ref_frame, ref_ts = anchor_by_video.get(svid, (0, 0.0))
             cameras.append(CameraInfo(
-                shot_video_id=row["id"],
+                shot_video_id=svid,
                 camera_instance_id=row["camera_instance_id"],
                 file_path=row["file_path"],
                 actual_fps=fps,
-                ref_frame=int(row["video_frame"]),
-                ref_timestamp_s=float(row["timestamp_s"]),
+                ref_frame=ref_frame,
+                ref_timestamp_s=ref_ts,
             ))
+
         _log.info(
-            "_load_cameras: shot=%s sync=%s → %d cameras (query returned %d rows)",
-            self._shot_id, self._sync_config_id, len(cameras), len(rows),
+            "_load_cameras: shot=%s sync=%s → %d cameras, %d sync points",
+            self._shot_id, self._sync_config_id, len(cameras), len(sp_rows),
         )
         if not cameras:
             _log.warning(
@@ -171,13 +192,25 @@ class DetectionPipeline:
                 "for sync_config_id=%s and shot_id=%s",
                 self._sync_config_id, self._shot_id,
             )
-        return cameras
+        return cameras, sync_table
 
     def _frame_range(self, cam: CameraInfo) -> tuple[int, int]:
-        """Convert global time range to (first_frame, last_frame_exclusive)."""
-        fps = cam.actual_fps
-        first = cam.ref_frame + int((self._time_start_s - cam.ref_timestamp_s) * fps)
-        last = cam.ref_frame + int((self._time_end_s - cam.ref_timestamp_s) * fps)
+        """Convert global time range to (first_frame, last_frame_exclusive).
+
+        Uses the SyncTable (piecewise-linear interpolation through all sync
+        points) when available; falls back to single-anchor + fps extrapolation
+        only when the SyncTable has no data for this camera.
+        """
+        first = self._sync_table.lookup(self._time_start_s, cam.shot_video_id)
+        last = self._sync_table.lookup(self._time_end_s, cam.shot_video_id)
+        if first is None or last is None:
+            _log.warning(
+                "_frame_range: no sync data for %s — falling back to fps extrapolation",
+                cam.shot_video_id,
+            )
+            fps = cam.actual_fps
+            first = cam.ref_frame + int((self._time_start_s - cam.ref_timestamp_s) * fps)
+            last = cam.ref_frame + int((self._time_end_s - cam.ref_timestamp_s) * fps)
         first = max(0, first)
         return first, last
 

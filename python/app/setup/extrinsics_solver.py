@@ -939,9 +939,10 @@ def run_bundle_adjustment(
     n_params = len(params_arr)
     jac_sp = lil_matrix((n_total_obs * 2, n_params), dtype=np.int8)
     for i, (vid, _, pt_key, _) in enumerate(obs_list):
-        ci = cam_param_start[vid]
-        jac_sp[2 * i, ci:ci + 6] = 1
-        jac_sp[2 * i + 1, ci:ci + 6] = 1
+        ci = cam_param_start.get(vid)   # None for locked cameras — no Jacobian cols
+        if ci is not None:
+            jac_sp[2 * i, ci:ci + 6] = 1
+            jac_sp[2 * i + 1, ci:ci + 6] = 1
         if pt_key.startswith("free_"):
             ps = free_point_start[int(pt_key[5:])]
             jac_sp[2 * i, ps:ps + 3] = 1

@@ -360,7 +360,7 @@ class _ClickableImageWidget(QWidget):
         self._sift_hi_proj: np.ndarray | None = None  # (1, 2) projected position
 
         # Reprojection markers for control points (open circle+cross, same color as CP)
-        self._proj_markers: list[tuple[float, float, QColor]] = []
+        self._proj_markers: list[tuple[float, float, QColor, bool]] = []
 
         # Camera-position markers: projected world position of other cameras (auto, gold)
         self._cam_pos_markers: list[tuple[float, float, str]] = []  # x, y, label
@@ -397,9 +397,9 @@ class _ClickableImageWidget(QWidget):
         """Set existing image-space position of the selected CP for this camera."""
         self._selected_marker_pos = pos
 
-    def add_proj_marker(self, x: float, y: float, color: QColor) -> None:
+    def add_proj_marker(self, x: float, y: float, color: QColor, selected: bool = False) -> None:
         """Add a reprojection marker (open circle + crosshair) at image position (x, y)."""
-        self._proj_markers.append((x, y, color))
+        self._proj_markers.append((x, y, color, selected))
         self.update()
 
     def add_cam_pos_marker(self, x: float, y: float, label: str) -> None:
@@ -640,12 +640,15 @@ class _ClickableImageWidget(QWidget):
             painter.drawLine(int(wx_o), int(wy_o), int(wx_p), int(wy_p))
 
         # Reprojection markers (open circle + inner crosshair, same CP colour)
-        for mx, my, color in self._proj_markers:
+        for mx, my, color, sel in self._proj_markers:
             wx, wy = self._img_to_widget(mx, my)
-            r = 8
-            arm = 5
-            painter.setPen(QPen(color, 1.5))
+            r = 10 if sel else 8
+            arm = 6 if sel else 5
             painter.setBrush(Qt.BrushStyle.NoBrush)
+            if sel:
+                painter.setPen(QPen(QColor(255, 255, 255), 3.0))
+                painter.drawEllipse(int(wx) - r, int(wy) - r, r * 2, r * 2)
+            painter.setPen(QPen(color, 2.0 if sel else 1.5))
             painter.drawEllipse(int(wx) - r, int(wy) - r, r * 2, r * 2)
             painter.drawLine(int(wx) - arm, int(wy), int(wx) + arm, int(wy))
             painter.drawLine(int(wx), int(wy) - arm, int(wx), int(wy) + arm)
@@ -1480,12 +1483,15 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 state = self._result.cameras.get(vid)
                 if state is None or state.R is None:
                     continue
+                pt_cam = state.R @ xyz + state.t.flatten()
+                if pt_cam[2] <= 0:
+                    continue  # behind this camera
                 rvec, _ = cv2.Rodrigues(state.R)
                 proj, _ = cv2.projectPoints(
                     xyz.reshape(1, 3), rvec, state.t.reshape(3, 1), state.K, np.zeros(4)
                 )
                 px_, py_ = proj.reshape(2)
-                w.add_proj_marker(float(px_), float(py_), color)
+                w.add_proj_marker(float(px_), float(py_), color, selected=is_selected)
 
     # ------------------------------------------------------------------
     # Solve

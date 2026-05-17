@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 5
-SESSION_SCHEMA_VERSION: Final[int] = 14
+SESSION_SCHEMA_VERSION: Final[int] = 15
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -529,6 +529,18 @@ def _migrate_session_v13_to_v14(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v14_to_v15(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 14 to 15.
+
+    v15 adds detection_track_assignments: records the explicit track_id →
+    person_name mapping from the pose extraction UI so assignments can be
+    restored without ambiguous joins through pose_observations.
+    """
+    sql = (_DB_DIR / "migrations" / "014_detection_track_assignments.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -591,6 +603,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 13
     if actual == 13:
         _migrate_session_v13_to_v14(conn)
+        actual = 14
+    if actual == 14:
+        _migrate_session_v14_to_v15(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

@@ -130,5 +130,20 @@ def finalise_to_db(
         [(seq_id, pid, name) for name, pid in name_to_pid.items()],
     )
 
+    session.execute(
+        "DELETE FROM detection_track_assignments WHERE detection_run_id = ?",
+        (detection_run_id,),
+    )
+    session.executemany(
+        "INSERT INTO detection_track_assignments "
+        "(detection_run_id, shot_video_id, track_id, person_name, first_frame, last_frame) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (detection_run_id, a.shot_video_id, a.track_id,
+             a.person_name, a.first_frame, a.last_frame)
+            for a in assignments
+        ],
+    )
+
     session.commit()
     return seq_id

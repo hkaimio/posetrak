@@ -545,42 +545,27 @@ class PoseExtractionWindow(QMainWindow):
         self._restore_finalised_assignments(run_id)
 
     def _restore_finalised_assignments(self, run_id: str) -> None:
-        """Re-colour segments whose detections have already been finalised.
+        """Restore track→person assignments saved at finalise time.
 
-        If a detection run has been finalised into a pose_observation_sequence,
-        reconstruct which track segments were assigned to which person and
-        restore those coloured assignments so the stitcher doesn't show all
-        bars as gray.
+        Reads from detection_track_assignments, which is written by
+        finalise_to_db.  Each row records one contiguous segment of a track
+        assigned to a named person, so splits and assignments are restored
+        exactly as the user left them.
         """
         if self._session is None:
             return
 
         rows = self._session.execute(
-            "SELECT dk.shot_video_id, dk.track_id, po.person_id,"
-            "       COALESCE(sp.person_name, 'person_' || po.person_id) AS person_name,"
-            "       MIN(po.video_frame) AS min_frame"
-            " FROM pose_observation_sequences pos"
-            " JOIN pose_observations po ON po.sequence_id = pos.id"
-            " LEFT JOIN sequence_persons sp"
-            "     ON sp.sequence_id = pos.id AND sp.person_id = po.person_id"
-            " JOIN capture_videos sv"
-            "     ON sv.camera_instance_id = po.camera_instance_id"
-            "     AND sv.shot_id = pos.shot_id"
-            " JOIN detection_keypoints dk"
-            "     ON dk.detection_run_id = pos.detection_run_id"
-            "     AND dk.shot_video_id = sv.id"
-            "     AND dk.video_frame = po.video_frame"
-            "     AND dk.region_type = 'full_body'"
-            " WHERE pos.detection_run_id = ?"
-            " GROUP BY dk.shot_video_id, dk.track_id, po.person_id"
-            " ORDER BY dk.shot_video_id, dk.track_id, min_frame",
+            "SELECT shot_video_id, track_id, person_name, first_frame, last_frame"
+            " FROM detection_track_assignments"
+            " WHERE detection_run_id = ?"
+            " ORDER BY shot_video_id, track_id, first_frame",
             (run_id,),
         ).fetchall()
 
         if not rows:
             return
 
-        # Group by (svid, tid) — each track may map to multiple persons if it was split
         from collections import defaultdict
         by_track: dict[tuple[str, int], list] = defaultdict(list)
         for r in rows:
@@ -594,18 +579,15 @@ class PoseExtractionWindow(QMainWindow):
             if seg_first is None:
                 continue
 
-            sorted_rows = sorted(track_rows, key=lambda r: r["min_frame"])
             cur_seg_first = seg_first
-
-            for i, r in enumerate(sorted_rows):
-                person_name = r["person_name"]
-                if i < len(sorted_rows) - 1:
-                    split_frame = sorted_rows[i + 1]["min_frame"]
+            for i, r in enumerate(track_rows):
+                if i < len(track_rows) - 1:
+                    split_frame = track_rows[i + 1]["first_frame"]
                     self._stitcher.split_segment(svid, tid, cur_seg_first, split_frame)
-                    self._apply_assignment(svid, tid, cur_seg_first, person_name)
+                    self._apply_assignment(svid, tid, cur_seg_first, r["person_name"])
                     cur_seg_first = split_frame
                 else:
-                    self._apply_assignment(svid, tid, cur_seg_first, person_name)
+                    self._apply_assignment(svid, tid, cur_seg_first, r["person_name"])
 
     # ------------------------------------------------------------------
     # Detection job

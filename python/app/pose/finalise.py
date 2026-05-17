@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass
-
-import numpy as np
 
 from posetrak.db.db import generate_id
 from app.setup.db_context import SyncPoint, SyncTable
@@ -27,10 +26,13 @@ def finalise_to_db(
     assignments: list[TrackAssignment],
     pose_model: str,
     notes: str = "",
-) -> str:
+) -> list[str]:
     """Write pose_observation_sequences + pose_observations from detection_keypoints.
 
-    Returns the new sequence ID.
+    Creates one sequence per person.  Replaces any existing sequences for this
+    detection run (including their tracking runs and results).
+
+    Returns the list of new sequence IDs (one per person).
     """
     # Build SyncTable from DB
     rows = session.execute(
@@ -43,7 +45,7 @@ def finalise_to_db(
 
     points = [
         SyncPoint(
-            camera_instance_id="",  # not needed for frame_to_global_time
+            camera_instance_id="",
             shot_video_id=r["shot_video_id"],
             video_frame=r["video_frame"],
             timestamp_s=r["timestamp_s"],
@@ -68,68 +70,97 @@ def finalise_to_db(
     time_start_s = float(run_row["time_start_s"])
     time_end_s = float(run_row["time_end_s"])
 
-    # Assign stable person_id per person_name
-    name_to_pid: dict[str, int] = {}
-    for asgn in assignments:
-        if asgn.person_name not in name_to_pid:
-            name_to_pid[asgn.person_name] = len(name_to_pid)
-
-    seq_id = generate_id()
+    # Delete existing sequences for this detection run (cascade manually)
+    existing_ids = [
+        r[0] for r in session.execute(
+            "SELECT id FROM pose_observation_sequences WHERE detection_run_id = ?",
+            (detection_run_id,),
+        )
+    ]
+    for sid in existing_ids:
+        session.execute(
+            "DELETE FROM tracking_results WHERE run_id IN "
+            "(SELECT id FROM tracking_runs WHERE observation_sequence_id = ?)", (sid,)
+        )
+        session.execute(
+            "DELETE FROM tracking_obs_results WHERE run_id IN "
+            "(SELECT id FROM tracking_runs WHERE observation_sequence_id = ?)", (sid,)
+        )
+        session.execute(
+            "DELETE FROM tracking_runs WHERE observation_sequence_id = ?", (sid,)
+        )
+        session.execute("DELETE FROM sequence_persons WHERE sequence_id = ?", (sid,))
+        session.execute("DELETE FROM pose_observations WHERE sequence_id = ?", (sid,))
     session.execute(
-        "INSERT INTO pose_observation_sequences "
-        "(id, shot_id, sync_config_id, time_start_s, time_end_s, pose_model, notes, "
-        " pixels_are_undistorted, detection_run_id) "
-        "VALUES (?,?,?,?,?,?,?,0,?)",
-        (seq_id, shot_id, sync_config_id, time_start_s, time_end_s,
-         pose_model, notes, detection_run_id),
+        "DELETE FROM pose_observation_sequences WHERE detection_run_id = ?",
+        (detection_run_id,),
     )
 
-    obs_rows = []
+    # Group assignments by person name
+    by_person: dict[str, list[TrackAssignment]] = defaultdict(list)
     for asgn in assignments:
-        camera_instance_id = camera_by_svid.get(asgn.shot_video_id)
-        if camera_instance_id is None:
-            continue
+        by_person[asgn.person_name].append(asgn)
 
-        person_id = name_to_pid[asgn.person_name]
+    seq_ids: list[str] = []
 
-        kp_rows = session.execute(
-            "SELECT video_frame, keypoints, noise_scale "
-            "FROM detection_keypoints "
-            "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? "
-            "AND video_frame BETWEEN ? AND ? "
-            "AND region_type='full_body' "
-            "ORDER BY video_frame",
-            (detection_run_id, asgn.shot_video_id, asgn.track_id,
-             asgn.first_frame, asgn.last_frame),
-        ).fetchall()
+    for person_name, person_assignments in by_person.items():
+        seq_id = generate_id()
+        seq_ids.append(seq_id)
 
-        for kp_row in kp_rows:
-            frame_idx = int(kp_row["video_frame"])
-            timestamp_s = sync_table.frame_to_global_time(frame_idx, asgn.shot_video_id)
-            if timestamp_s is None:
-                continue
-            kp_bytes = bytes(kp_row["keypoints"])
-            noise_scale = kp_row["noise_scale"]
-            obs_rows.append((
-                seq_id, camera_instance_id, frame_idx,
-                timestamp_s, person_id, kp_bytes, noise_scale,
-            ))
-
-    if obs_rows:
-        session.executemany(
-            "INSERT INTO pose_observations "
-            "(sequence_id, camera_instance_id, video_frame, timestamp_s, "
-            " person_id, kp_blob, noise_scale) "
-            "VALUES (?,?,?,?,?,?,?)",
-            obs_rows,
+        session.execute(
+            "INSERT INTO pose_observation_sequences "
+            "(id, shot_id, sync_config_id, time_start_s, time_end_s, pose_model, notes, "
+            " pixels_are_undistorted, detection_run_id) "
+            "VALUES (?,?,?,?,?,?,?,0,?)",
+            (seq_id, shot_id, sync_config_id, time_start_s, time_end_s,
+             pose_model, notes, detection_run_id),
         )
 
-    session.executemany(
-        "INSERT OR IGNORE INTO sequence_persons (sequence_id, person_id, person_name) "
-        "VALUES (?, ?, ?)",
-        [(seq_id, pid, name) for name, pid in name_to_pid.items()],
-    )
+        # One person per sequence — person_id is always 0 within the sequence
+        session.execute(
+            "INSERT OR IGNORE INTO sequence_persons (sequence_id, person_id, person_name) "
+            "VALUES (?, 0, ?)",
+            (seq_id, person_name),
+        )
 
+        obs_rows = []
+        for asgn in person_assignments:
+            camera_instance_id = camera_by_svid.get(asgn.shot_video_id)
+            if camera_instance_id is None:
+                continue
+
+            kp_rows = session.execute(
+                "SELECT video_frame, keypoints, noise_scale "
+                "FROM detection_keypoints "
+                "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? "
+                "AND video_frame BETWEEN ? AND ? "
+                "AND region_type='full_body' "
+                "ORDER BY video_frame",
+                (detection_run_id, asgn.shot_video_id, asgn.track_id,
+                 asgn.first_frame, asgn.last_frame),
+            ).fetchall()
+
+            for kp_row in kp_rows:
+                frame_idx = int(kp_row["video_frame"])
+                timestamp_s = sync_table.frame_to_global_time(frame_idx, asgn.shot_video_id)
+                if timestamp_s is None:
+                    continue
+                obs_rows.append((
+                    seq_id, camera_instance_id, frame_idx,
+                    timestamp_s, 0,  # person_id=0, single person per sequence
+                    bytes(kp_row["keypoints"]), kp_row["noise_scale"],
+                ))
+
+        if obs_rows:
+            session.executemany(
+                "INSERT INTO pose_observations "
+                "(sequence_id, camera_instance_id, video_frame, timestamp_s, "
+                " person_id, kp_blob, noise_scale) "
+                "VALUES (?,?,?,?,?,?,?)",
+                obs_rows,
+            )
+
+    # Persist the track→person mapping for future restore
     session.execute(
         "DELETE FROM detection_track_assignments WHERE detection_run_id = ?",
         (detection_run_id,),
@@ -146,4 +177,4 @@ def finalise_to_db(
     )
 
     session.commit()
-    return seq_id
+    return seq_ids

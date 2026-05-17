@@ -67,6 +67,9 @@ class MainWindow(QMainWindow):
     # Public
     # ------------------------------------------------------------------
 
+    def reload_tree(self) -> None:
+        self._tree.reload()
+
     @property
     def registry_conn(self) -> sqlite3.Connection:
         return self._registry_conn

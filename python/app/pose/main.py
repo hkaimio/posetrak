@@ -142,6 +142,8 @@ class DetectionJob(BackgroundJob):
 
 
 class PoseExtractionWindow(QMainWindow):
+    data_changed = Signal()  # emitted after successful finalization
+
     def __init__(self, session_db: str | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Pose Extraction")
@@ -1024,7 +1026,7 @@ class PoseExtractionWindow(QMainWindow):
         pose_model = run_row["pose_model"] if run_row else ""
 
         try:
-            seq_id = finalise_to_db(
+            seq_ids = finalise_to_db(
                 session=self._session,
                 detection_run_id=self._current_run_id,
                 shot_id=self._shot_id,
@@ -1036,8 +1038,9 @@ class PoseExtractionWindow(QMainWindow):
             QMessageBox.critical(self, "Finalise Error", str(e))
             return
 
+        self.data_changed.emit()
         QMessageBox.information(
             self,
             "Finalised",
-            f"pose_observation_sequence created:\n{seq_id}",
+            f"Created {len(seq_ids)} person sequence(s):\n" + "\n".join(seq_ids),
         )

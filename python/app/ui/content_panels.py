@@ -199,7 +199,11 @@ class CapturePanel(QWidget):
 
     def _open_pose_extraction(self) -> None:
         from app.pose.main import PoseExtractionWindow
+        from app.ui.main_window import MainWindow
         self._pose_win = PoseExtractionWindow(session_db=str(self._session_path), parent=None)
+        main = self.window()
+        if isinstance(main, MainWindow):
+            self._pose_win.data_changed.connect(main.reload_tree)
         self._pose_win.show()
 
 
@@ -349,10 +353,14 @@ class DetectionRunPanel(QWidget):
 
     def _open_pose_extraction(self) -> None:
         from app.pose.main import PoseExtractionWindow
+        from app.ui.main_window import MainWindow
         self._pose_win = PoseExtractionWindow(
             session_db=str(self._session_path),
             parent=None,
         )
+        main = self.window()
+        if isinstance(main, MainWindow):
+            self._pose_win.data_changed.connect(main.reload_tree)
         self._pose_win.show()
 
 

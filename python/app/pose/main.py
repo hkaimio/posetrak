@@ -29,7 +29,7 @@ from app.pose.assignment import find_assignment_conflicts
 from app.pose.person_preview import PersonPreviewWidget
 from app.pose.db_cache import list_detection_runs
 from app.pose.finalise import TrackAssignment, finalise_to_db
-from app.pose.frame_view import FrameViewWidget, _CameraInfo
+from app.pose.frame_view import CameraInfo, FrameViewWidget
 from app.pose.stitcher import StitcherWidget
 from app.setup.db_context import SyncPoint, SyncTable
 from app.setup.job_runner import BackgroundJob
@@ -695,10 +695,10 @@ class PoseExtractionWindow(QMainWindow):
                 if svid not in anchors:
                     anchors[svid] = (int(sp["video_frame"]), float(sp["timestamp_s"]))
 
-        cameras: list[_CameraInfo] = []
+        cameras: list[CameraInfo] = []
         for r in rows:
             ref_frame, ref_ts = anchors.get(r["id"], (0, 0.0))
-            cameras.append(_CameraInfo(
+            cameras.append(CameraInfo(
                 shot_video_id=r["id"],
                 file_path=r["file_path"] or "",
                 camera_instance_id=r["id"],

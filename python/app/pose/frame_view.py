@@ -45,7 +45,8 @@ COCO_SKELETON = [
 
 
 @dataclass
-class _CameraInfo:
+class CameraInfo:
+    """Public dataclass describing one camera video for FrameViewWidget.load_cameras()."""
     shot_video_id: str
     file_path: str
     camera_instance_id: str
@@ -98,6 +99,7 @@ class SkeletonDetectionOverlay:
         sx = cell_w / max(frame_w, 1)
         sy = cell_h / max(frame_h, 1)
 
+        drawn_tids: set[int] = set()
         for det in self._detections:
             # bbox is centre-format xywh
             cx = det["bbox_x"] * sx
@@ -108,6 +110,7 @@ class SkeletonDetectionOverlay:
             y1 = int(cy - bh / 2)
 
             tid = det["track_id"]
+            drawn_tids.add(tid)
             person = self._assignments.get(tid)
             box_color = person_color(person) if person else UNASSIGNED_COLOR
             is_selected = (tid == self._selected_track_id)
@@ -119,36 +122,45 @@ class SkeletonDetectionOverlay:
             painter.drawText(x1 + 2, y1 - 4, f"t{tid}")
 
             kp = self._keypoints.get(tid)
-            if kp is None:
+            if kp is not None:
+                self._draw_skeleton(painter, kp, sx, sy)
+
+        # Draw keypoints for tracks not covered by a detection bbox
+        # (used for pose_observations displayed in PersonPanel)
+        for tid, kp in self._keypoints.items():
+            if tid not in drawn_tids:
+                self._draw_skeleton(painter, kp, sx, sy)
+
+    def _draw_skeleton(
+        self,
+        painter: QPainter,
+        kp: np.ndarray,
+        sx: float,
+        sy: float,
+    ) -> None:
+        n_kp = kp.shape[0]
+        painter.setPen(QPen(QColor(255, 255, 255, 160), 1))
+        for a, b in COCO_SKELETON:
+            if a >= n_kp or b >= n_kp:
                 continue
-
-            n_kp = kp.shape[0]
-
-            # Draw sticks
-            painter.setPen(QPen(QColor(255, 255, 255, 160), 1))
-            for a, b in COCO_SKELETON:
-                if a >= n_kp or b >= n_kp:
-                    continue
-                if kp[a, 2] < 0.1 or kp[b, 2] < 0.1:
-                    continue
-                xa, ya = int(kp[a, 0] * sx), int(kp[a, 1] * sy)
-                xb, yb = int(kp[b, 0] * sx), int(kp[b, 1] * sy)
-                painter.drawLine(xa, ya, xb, yb)
-
-            # Draw keypoint dots
-            for i in range(n_kp):
-                x = int(kp[i, 0] * sx)
-                y = int(kp[i, 1] * sy)
-                conf = float(kp[i, 2])
-                if conf > 0.5:
-                    color = QColor(0, 220, 60)
-                elif conf > 0.3:
-                    color = QColor(255, 200, 0)
-                else:
-                    color = QColor(220, 40, 40)
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(color)
-                painter.drawEllipse(x - 3, y - 3, 6, 6)
+            if kp[a, 2] < 0.1 or kp[b, 2] < 0.1:
+                continue
+            xa, ya = int(kp[a, 0] * sx), int(kp[a, 1] * sy)
+            xb, yb = int(kp[b, 0] * sx), int(kp[b, 1] * sy)
+            painter.drawLine(xa, ya, xb, yb)
+        for i in range(n_kp):
+            x = int(kp[i, 0] * sx)
+            y = int(kp[i, 1] * sy)
+            conf = float(kp[i, 2])
+            if conf > 0.5:
+                color = QColor(0, 220, 60)
+            elif conf > 0.3:
+                color = QColor(255, 200, 0)
+            else:
+                color = QColor(220, 40, 40)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color)
+            painter.drawEllipse(x - 3, y - 3, 6, 6)
 
     def mouse_press(self, x_px: int, y_px: int) -> None:
         pass
@@ -184,7 +196,7 @@ class FrameViewWidget(QWidget):
         super().__init__(parent)
 
         # Per-camera metadata, keyed by shot_video_id
-        self._cameras: dict[str, _CameraInfo] = {}
+        self._cameras: dict[str, CameraInfo] = {}
         self._sync_table: SyncTable | None = None
 
         self._shot_video_id: str | None = None
@@ -201,6 +213,8 @@ class FrameViewWidget(QWidget):
         # Per-frame detections loaded from DB
         self._det_by_frame: dict[int, list[dict]] = {}
         self._kp_by_frame: dict[int, dict[int, np.ndarray]] = {}
+        # Per-frame keypoints from pose_observations (PersonPanel use; track_id=0)
+        self._obs_kp_by_frame: dict[int, np.ndarray] = {}
 
         self._overlay = SkeletonDetectionOverlay()
         self._cell = CameraCell(parent=self)
@@ -248,7 +262,7 @@ class FrameViewWidget(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def load_cameras(self, cameras: list[_CameraInfo]) -> None:
+    def load_cameras(self, cameras: list[CameraInfo]) -> None:
         """Populate the camera dropdown from a list of shot videos.
 
         Replaces any previously loaded cameras. Selects the first camera.
@@ -277,7 +291,7 @@ class FrameViewWidget(QWidget):
         """Load a single camera (legacy call path, still used from the stitcher click handler)."""
         label = camera_instance_id[:12]
         existing = self._cameras.get(shot_video_id)
-        cam = _CameraInfo(
+        cam = CameraInfo(
             shot_video_id=shot_video_id,
             file_path=file_path,
             camera_instance_id=camera_instance_id,
@@ -417,6 +431,18 @@ class FrameViewWidget(QWidget):
         self._overlay.set_selected_track(track_id)
         self._update_overlay(self._current_frame)
 
+    def set_observation_keypoints(self, obs_kp_by_frame: dict[int, np.ndarray]) -> None:
+        """Set per-frame keypoints from pose_observations for the current camera.
+
+        obs_kp_by_frame: {video_frame: kp_array [N, 3] float32 (x, y, confidence)}
+
+        Call after load_cameras() / camera_switched signal to supply finalized
+        keypoints from pose_observations for overlay without a detection run.
+        Replaces any previously set observation keypoints.
+        """
+        self._obs_kp_by_frame = obs_kp_by_frame
+        self._update_overlay(self._current_frame)
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -437,6 +463,7 @@ class FrameViewWidget(QWidget):
         self._ref_timestamp_s = cam.ref_timestamp_s
         self._det_by_frame.clear()
         self._kp_by_frame.clear()
+        self._obs_kp_by_frame.clear()
         self._overlay.clear()
 
         cap = cv2.VideoCapture(cam.file_path)
@@ -466,6 +493,9 @@ class FrameViewWidget(QWidget):
     def _update_overlay(self, frame_idx: int) -> None:
         dets = self._det_by_frame.get(frame_idx, [])
         kps = self._kp_by_frame.get(frame_idx, {})
+        obs_kp = self._obs_kp_by_frame.get(frame_idx)
+        if obs_kp is not None and 0 not in kps:
+            kps = {**kps, 0: obs_kp}
         self._overlay.set_detections(dets, kps)
         self._cell.update()
 

@@ -464,9 +464,118 @@ class PersonPanel(QWidget):
         btn_row.addStretch()
         vbox.addLayout(btn_row)
 
-        self.setLayout(QVBoxLayout())
-        self.layout().setContentsMargins(0, 0, 0, 0)
-        self.layout().addWidget(_scrollable(inner))
+        scroll = _scrollable(inner)
+        scroll.setMaximumHeight(320)
+
+        frame_box = self._build_frame_view()
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(4)
+        root.addWidget(scroll)
+        root.addWidget(frame_box, stretch=1)
+
+    # ------------------------------------------------------------------
+    # Frame view
+    # ------------------------------------------------------------------
+
+    def _build_frame_view(self) -> QWidget:
+        import numpy as np
+        from app.pose.frame_view import CameraInfo, FrameViewWidget
+        from app.setup.db_context import SyncPoint, SyncTable
+
+        box = _section("Detection frames")
+        self._frame_view = FrameViewWidget()
+        box.layout().addWidget(self._frame_view)
+
+        seq = self._conn.execute(
+            "SELECT shot_id, sync_config_id, time_start_s "
+            "FROM pose_observation_sequences WHERE id = ?",
+            (self._sequence_id,),
+        ).fetchone()
+        if seq is None:
+            return box
+
+        # Capture videos for this shot
+        videos = self._conn.execute(
+            "SELECT cv.id, cv.file_path, cv.actual_fps, cv.camera_instance_id, "
+            "       COALESCE(ci.label, cv.camera_instance_id) AS cam_label "
+            "FROM capture_videos cv "
+            "LEFT JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
+            "WHERE cv.shot_id = ? ORDER BY ci.label",
+            (seq["shot_id"],),
+        ).fetchall()
+        if not videos:
+            return box
+
+        # Sync table
+        sp_rows = self._conn.execute(
+            "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, cv.actual_fps "
+            "FROM sync_points sp "
+            "JOIN capture_videos cv ON cv.id = sp.shot_video_id "
+            "WHERE sp.sync_config_id = ?",
+            (seq["sync_config_id"],),
+        ).fetchall()
+        if sp_rows:
+            points = [
+                SyncPoint(
+                    camera_instance_id="",
+                    shot_video_id=r["shot_video_id"],
+                    video_frame=r["video_frame"],
+                    timestamp_s=r["timestamp_s"],
+                )
+                for r in sp_rows
+            ]
+            fps_by_video = {r["shot_video_id"]: float(r["actual_fps"]) for r in sp_rows}
+            self._frame_view.set_sync_table(SyncTable(points, fps_by_video))
+
+        # Observation keypoints: {shot_video_id: {video_frame: kp [N,3]}}
+        self._obs_kp: dict[str, dict[int, np.ndarray]] = {}
+        svid_by_cam = {v["camera_instance_id"]: v["id"] for v in videos}
+        for row in self._conn.execute(
+            "SELECT camera_instance_id, video_frame, kp_blob "
+            "FROM pose_observations WHERE sequence_id = ? AND person_id = 0",
+            (self._sequence_id,),
+        ):
+            svid = svid_by_cam.get(row["camera_instance_id"])
+            if svid is None:
+                continue
+            raw = bytes(row["kp_blob"])
+            n = len(raw) // 12  # 3 × float32
+            kp = np.frombuffer(raw, dtype=np.float32).reshape(n, 3)
+            self._obs_kp.setdefault(svid, {})[row["video_frame"]] = kp
+
+        cameras = [
+            CameraInfo(
+                shot_video_id=v["id"],
+                file_path=v["file_path"],
+                camera_instance_id=v["camera_instance_id"],
+                label=v["cam_label"] or v["id"][:8],
+                fps=float(v["actual_fps"]),
+                ref_frame=0,
+                ref_timestamp_s=0.0,
+            )
+            for v in videos
+        ]
+
+        self._frame_view.load_cameras(cameras)
+        # Set keypoints for the initially selected camera before connecting
+        # camera_switched so the initial seek already has overlay data
+        if cameras:
+            self._frame_view.set_observation_keypoints(
+                self._obs_kp.get(cameras[0].shot_video_id, {})
+            )
+        self._frame_view.camera_switched.connect(self._on_camera_switched)
+
+        if seq["time_start_s"] is not None:
+            self._frame_view.seek_global_time(float(seq["time_start_s"]))
+
+        return box
+
+    def _on_camera_switched(self, shot_video_id: str) -> None:
+        self._frame_view.set_observation_keypoints(
+            self._obs_kp.get(shot_video_id, {})
+        )
 
     # ------------------------------------------------------------------
     # Tracking runs list

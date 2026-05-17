@@ -128,6 +128,13 @@ consistent with `compute_state_error` in `ukf.cpp` (`q_ref⁻¹ * q_state`).
 
 ## Active
 
+- **Frame number consistency between OpenCV seeking and ffmpeg sequential decode** (2026-05-17)
+  - The system defines "frame N" as the Nth frame in the video container, counted from 0. Two different code paths assign frame numbers: OpenCV (`CAP_PROP_POS_FRAMES`) for UI/sync-point marking, and the external ffmpeg pipe in `led_sync._brightness_via_ffmpeg` which counts frames sequentially from 0 as bytes arrive.
+  - These two counting methods agree as long as every frame in the container has a unique, monotonically increasing pts. If any frames are dropped, duplicated, or have non-monotonic pts (possible with some camera firmware or re-muxed files), the two counters will diverge, causing LED-detected sync events to be attributed to the wrong frame numbers in the sync_points table.
+  - Detection pipeline (`_iter_frames_av`, `_iter_frames_cv2`) also counts sequentially from `first_frame` after a pts-based seek; this matches the OpenCV convention provided the seek lands on the correct keyframe. Whether it also matches the ffmpeg pipe's count is untested.
+  - Possible fix: standardise all frame-number assignment on a single decode path (e.g. always ffmpeg pipe from frame 0, counting sequentially). This would require changing how the sync-point UI marks frames and how `_iter_frames_*` seeks, so the scope is significant.
+  - Until verified, treat LED sync frame numbers as potentially off-by-N for any video with dropped or out-of-order frames.
+
 - **LED pairwise sync less accurate than manual sync in practice** (2026-05-15)
   - The pairwise LED sync (`run_led_sync_pairwise`) was tested on a real multi-camera session and produced sync that was less accurate than the existing manual sync, despite passing regression tests on synthetic data.
   - Root cause not yet identified. Possible causes: event detection parameters (prominence, smooth_win) tuned for synthetic blinks do not generalise to real LED signals; RANSAC inlier threshold too tight or too loose; `_build_combined_observations` incorrectly excluding useful manual anchors when LED pairs report nominal success.

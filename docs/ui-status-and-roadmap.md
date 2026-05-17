@@ -1,6 +1,6 @@
 # Posetrak UI — Status and Roadmap
 
-**Last updated:** 2026-05-17
+**Last updated:** 2026-05-17 (session 2)
 
 ---
 
@@ -10,12 +10,14 @@ Three separate entry points today:
 
 | Entry point | Description |
 |---|---|
-| `posetrak-setup` | Qt wizard: session DB, shots, camera sync |
+| `posetrak-setup` | Qt wizard: session DB, captures, camera sync |
 | `posetrak-pose` | Qt window: pose detection, stitching, finalise |
-| `posetrak-db` | CLI: all remaining steps (extrinsics, skeleton, config, run tracker, export) |
+| `posetrak-ui` | Unified shell (Phase 1 in progress): session tree + content panels |
+| `posetrak-db` | CLI: extrinsics, skeleton, config, run tracker, export |
 
-Everything downstream of pose finalisation — extrinsics import, skeleton setup, running the
-tracker, exporting BVH — is CLI-only.
+`posetrak-ui` now covers: run tracker (via dialog), BVH export, skeleton manager — all
+formerly CLI-only.  Extrinsics import, tracker config editing, and the merge of
+`posetrak-setup`/`posetrak-pose` into the shell remain as future work.
 
 ---
 
@@ -47,11 +49,33 @@ tracker, exporting BVH — is CLI-only.
 | Assignment conflict detection + resolution dialog | Done |
 | Frame view with skeleton overlay | Done |
 | Person preview panel (live bbox crop) | Done |
-| Finalise → `pose_observation_sequences` + `pose_observations` | Done |
-| Assignment state persisted to DB via `detection_track_assignments` (survives restart) | Done |
-| PersonPreviewWidget | Done |
+| Finalise → one `pose_observation_sequences` row per person | Done |
+| Assignment state persisted via `detection_track_assignments` (survives restart) | Done |
+| Re-finalize replaces sequences (cascade delete + recreate) | Done |
+| `data_changed` signal → main window tree auto-reloads after finalize | Done |
+| Detection pipeline stores JPEG person crops in `frame_cache_entries` | Done |
 | Confidence sparkline | Postponed (Phase C) |
 | Manual bbox correction + partial re-run | Postponed (Phase C) |
+
+### posetrak-ui shell (Phase 1, in progress)
+
+| Feature | Status |
+|---|---|
+| Shell window: File menu, registry auto-open, recent files | Done |
+| Session tree: Capture → Trial → Detection run → Person → Tracking run | Done |
+| Context menus: rename trial, rename person | Done |
+| Skeleton manager dialog (import YAML, rename, delete, scale dimensions) | Done |
+| CapturePanel: capture metadata, video list, open pose extraction | Done |
+| TrialPanel: trial metadata | Done |
+| DetectionRunPanel: run metadata, open pose extraction | Done |
+| PersonPanel: person info, tracking runs list with stats | Done |
+| PersonPanel: Run tracker dialog (pre-selects sequence, person 0) | Done |
+| PersonPanel: Export BVH via `export_bvh.py` subprocess | Done |
+| PersonPanel: Delete tracking run (cascade) | Done |
+| PersonPanel: multi-camera crop grid with time scrubber | Done |
+| PersonPanel: pose_observations skeleton overlay on crop grid | Done |
+| PersonPanel: 3D view placeholder cell | Done |
+| TrackingRunPanel: run stats summary | Done |
 
 ### Known issues in posetrak-pose
 
@@ -423,7 +447,7 @@ Capture → Trial → Detection Run → Person → Tracking Run
 - Context menus: Trial (rename), Person (rename), Tracking Run (view stats, export BVH,
   delete).
 
-No schema changes required — all tables exist (v15).
+No schema changes required — all tables exist (v15 and later).
 
 #### Step 3 — Person panel: tracker control (3.6, parts 1–4)
 
@@ -435,26 +459,39 @@ New `PersonPanel` replacing `PersonTrackPanel`:
   tree — no combo needed.
 - Tracking runs list (previous runs; click to select as active).
 
-#### Step 4 — Person panel: frame display strip (3.6, parts 5–6)
+#### Step 4 — Person panel: frame display strip (3.6, parts 5–6) — Done
 
-- Time scrubber on the global timeline.
-- Per-camera detection images at the scrubbed time (embed `FrameViewWidget`).
-- 3D skeleton view: placeholder (`QLabel("3D view — coming in Phase 5")`).
+- Time scrubber spanning only the sequence time range (not the full capture).
+- All cameras simultaneously in a grid (one cell per camera + one 3D placeholder cell).
+- Camera name label at top of each cell; empty cell if no detection for this person at that frame.
+- Crops served from `frame_cache_entries` (JPEG bbox crops stored during detection, keyed by
+  detection_run_id so multiple runs on the same capture coexist).
+- `pose_observations` skeleton overlaid at display time (not baked into stored JPEG).
+- 3D skeleton view: placeholder cell reserved.
 
-| # | Task | Effort |
-|---|---|---|
-| T1.0 | Skeleton manager dialog + SkeletonScaleDialog extraction | S |
-| T1.1a | Tree: Trial nodes, Person rename, Tracking Run nodes | S |
-| T1.1b | PersonPanel: skeleton picker, params form, run tracker, tracking runs list | M |
-| T1.1c | PersonPanel: time scrubber + FrameViewWidget embed | M |
-| T1.2 | Extrinsics import dialog (3.1) | S |
-| T1.3 | Tracker config form improvements (3.3) | S |
-| T1.4 | Fix manual calibration: distortion model selector + `matrix_original` (4.2 partial) | S |
+Note: `frame_cache_entries` PK was extended to include `detection_run_id` (schema v17) to
+support this.  Previously the PK was `(shot_video_id, frame_idx, cache_type, track_id,
+region_type, width_px)`; `detection_run_id TEXT NOT NULL DEFAULT ''` was added so PERSON_CROP
+entries from different detection runs coexist, while non-crop entries use `''`.
+
+| # | Task | Effort | Status |
+|---|---|---|---|
+| T1.0 | Skeleton manager dialog + SkeletonScaleDialog extraction | S | Done |
+| T1.1a | Tree: Trial nodes, Person rename, Tracking Run nodes | S | Done |
+| T1.1b | PersonPanel: tracker control, tracking runs list, BVH export | M | Done |
+| T1.1c | PersonPanel: multi-camera crop grid + time scrubber | M | Done |
+| T1.2 | Extrinsics import dialog (3.1) | S | — |
+| T1.3 | Tracker config form improvements (3.3) | S | — |
+| T1.4 | Fix manual calibration: distortion model selector + `matrix_original` (4.2 partial) | S | — |
 
 `S` = 1–2 days, `M` = 2–4 days.
 
 **Deliverable:** A practitioner can go from raw videos to BVH using only the Qt apps;
 the CLI remains available but is no longer required for the tracker workflow.
+
+**Current schema version:** v17 (`SESSION_SCHEMA_VERSION = 17`).  Migration chain:
+v14 (sync anchors) → v15 (detection_track_assignments) → v16 (detection_crops, superseded) →
+v17 (frame_cache_entries gains detection_run_id in PK; detection_crops removed).
 
 ### Phase 2 — Skeleton scaling from tracking run (integrated)
 

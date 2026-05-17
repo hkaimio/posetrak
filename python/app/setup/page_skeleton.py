@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -185,8 +186,16 @@ class SkeletonSetupWidget(QWidget):
         self._copy_btn = QPushButton("Copy from registry…")
         self._copy_btn.setEnabled(False)
         self._copy_btn.clicked.connect(self._copy_from_registry)
+        self._rename_btn = QPushButton("Rename…")
+        self._rename_btn.setEnabled(False)
+        self._rename_btn.clicked.connect(self._rename_skeleton)
+        self._delete_btn = QPushButton("Delete")
+        self._delete_btn.setEnabled(False)
+        self._delete_btn.clicked.connect(self._delete_skeleton)
         btn_row.addWidget(self._import_btn)
         btn_row.addWidget(self._copy_btn)
+        btn_row.addWidget(self._rename_btn)
+        btn_row.addWidget(self._delete_btn)
         btn_row.addStretch()
 
         # ---- Scaling panel ----
@@ -302,13 +311,58 @@ class SkeletonSetupWidget(QWidget):
             self._selected_id = None
             self._selected_yaml = None
             self._scale_box.setVisible(False)
+            self._rename_btn.setEnabled(False)
+            self._delete_btn.setEnabled(False)
             return
         row_idx = self._table.currentRow()
         self._selected_id = self._table.item(row_idx, 0).data(Qt.ItemDataRole.UserRole)
         self._selected_yaml = self._table.item(row_idx, 0).data(Qt.ItemDataRole.UserRole + 1)
+        self._rename_btn.setEnabled(True)
+        self._delete_btn.setEnabled(True)
         self._rebuild_scale_panel()
         default_name = (self._table.item(row_idx, 0).text() or "") + "-scaled"
         self._new_name_edit.setText(default_name)
+
+    def _rename_skeleton(self) -> None:
+        if self._selected_id is None or self._conn is None:
+            return
+        row_idx = self._table.currentRow()
+        current_name = self._table.item(row_idx, 0).text()
+        new_name, ok = QInputDialog.getText(
+            self, "Rename skeleton", "New name:", text=current_name
+        )
+        if not ok or not new_name.strip():
+            return
+        new_name = new_name.strip()
+        self._conn.execute("UPDATE skeletons SET name = ? WHERE id = ?", (new_name, self._selected_id))
+        self._conn.commit()
+        self._refresh_list()
+        self._select_by_name(new_name)
+
+    def _delete_skeleton(self) -> None:
+        if self._selected_id is None or self._conn is None:
+            return
+        row_idx = self._table.currentRow()
+        name = self._table.item(row_idx, 0).text()
+        reply = QMessageBox.question(
+            self, "Delete skeleton",
+            f"Delete '{name}'?\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._conn.execute("DELETE FROM skeletons WHERE id = ?", (self._selected_id,))
+            self._conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Delete failed", str(exc))
+            return
+        self._selected_id = None
+        self._selected_yaml = None
+        self._scale_box.setVisible(False)
+        self._rename_btn.setEnabled(False)
+        self._delete_btn.setEnabled(False)
+        self._refresh_list()
 
     def _save_scaled(self) -> None:
         self._set_status(None)

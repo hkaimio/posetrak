@@ -178,6 +178,11 @@ class MainWindow(QMainWindow):
         self._new_capture_act.triggered.connect(self._launch_capture_wizard)
         session_menu.addAction(self._new_capture_act)
 
+        self._manage_skeletons_act = QAction("Manage &skeletons…", self)
+        self._manage_skeletons_act.setEnabled(False)
+        self._manage_skeletons_act.triggered.connect(self._on_manage_skeletons)
+        session_menu.addAction(self._manage_skeletons_act)
+
         session_menu.addSeparator()
 
         reload_act = QAction("&Reload tree", self)
@@ -262,6 +267,7 @@ class MainWindow(QMainWindow):
         self._restore_tree_selection(path)
         self._reload_act.setEnabled(True)
         self._new_capture_act.setEnabled(True)
+        self._manage_skeletons_act.setEnabled(True)
         self._show_placeholder()
 
     def auto_open_last_session(self) -> None:
@@ -282,6 +288,18 @@ class MainWindow(QMainWindow):
 
     def _show_placeholder(self) -> None:
         self._content.setCurrentIndex(0)
+
+    def _on_manage_skeletons(self) -> None:
+        if self._session_conn is None or self._session_id is None:
+            return
+        from app.setup.page_skeleton import SkeletonSetupDialog
+        dlg = SkeletonSetupDialog(
+            conn=self._session_conn,
+            session_id=self._session_id,
+            registry_conn=self._registry_conn,
+            parent=self,
+        )
+        dlg.exec()
 
     def _on_manage_cameras(self) -> None:
         from app.setup.camera_registry import CameraRegistryWidget

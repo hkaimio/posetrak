@@ -1,6 +1,6 @@
 # Posetrak UI — Status and Roadmap
 
-**Last updated:** 2026-05-16
+**Last updated:** 2026-05-17
 
 ---
 
@@ -48,34 +48,28 @@ tracker, exporting BVH — is CLI-only.
 | Frame view with skeleton overlay | Done |
 | Person preview panel (live bbox crop) | Done |
 | Finalise → `pose_observation_sequences` + `pose_observations` | Done |
-| Assignment state persisted to DB (survives restart) | Done |
+| Assignment state persisted to DB via `detection_track_assignments` (survives restart) | Done |
 | PersonPreviewWidget | Done |
 | Confidence sparkline | Postponed (Phase C) |
 | Manual bbox correction + partial re-run | Postponed (Phase C) |
 
 ### Known issues in posetrak-pose
 
-#### High-frame-rate video decode rate (Pixel 9 / 120 fps cameras)
+#### High-frame-rate video decode (Pixel 9 / 120 fps cameras) — FIXED 2026-05-17
 
-`_iter_frames_av` in `detection_pipeline.py` seeks to the correct time position (using
-`actual_fps` to convert frame index → seconds) but PyAV's decode loop delivers frames at
-the *container's* PTS cadence.  For Pixel 9 recordings the container declares 30 fps in
-its stream headers while the video content is 120 fps; PyAV therefore yields only ≈25 %
-of expected frames (every 4th frame index).  Symptoms: `_process_camera` logs
-`4457 total` frames but completes after `1114 frames`.
+Two bugs were fixed in `_iter_frames_av` (`detection_pipeline.py`):
 
-The frame *range* calculation was fixed (2026-05-16) to use `SyncTable.lookup()` instead
-of single-anchor fps extrapolation, so start/end frames are now correct.  The sparse
-decode cadence is a separate, unresolved issue:
+1. **Frame range** (fixed 2026-05-16): the range calculation now uses `SyncTable.lookup()`
+   (piecewise-linear interpolation through all sync points) instead of single-anchor fps
+   extrapolation.  Frame numbers come from the sync configuration; `actual_fps` is no
+   longer used for range math.
 
-- Root cause: the MP4 container's `stream.avg_frame_rate` / `r_frame_rate` is 30 fps
-  even though actual frame pts advance at 120 fps resolution.  Possible explanations:
-  (a) the Pixel 9 high-speed mode stores pts at 30 fps and duplicates/interpolates on
-  playback; (b) PyAV only decodes reference frames for this codec profile.
-- **Workaround:** None yet.  Pending diagnostic — log consecutive pts deltas and
-  compare to `time_base` to distinguish cases (a) and (b).
-- **Impact:** Detections are sparse (every 4th frame); stitcher timeline is correct
-  (pts-based) but frame-view seeks land between detected frames.
+2. **Decode cadence / wrong frames** (fixed 2026-05-17): PyAV `pts`-derived `frame_idx`
+   jumped by 4 for the Pixel 9 (120 fps content in a 30 fps container) — only 25 % of
+   frames were yielded.  Fix: `_iter_frames_av` now reads `container_fps` from
+   `stream.average_rate` (the container's own metadata, independent of `actual_fps`)
+   and uses sequential counting from `first_frame` after the initial pts-based seek.
+   `actual_fps` is no longer referenced inside `_iter_frames_av` at all.
 
 #### pose-extraction window UI structure
 
@@ -189,7 +183,56 @@ implemented.
 **Backend:** The C++ CLI, `tracking_runs` schema, and `run_project.py` (batch script)
 all exist.  This is purely a Qt wrapper.
 
-### 3.5 Results viewer and BVH export
+### 3.5 Skeleton manager dialog
+
+**What:** A standalone `SkeletonManagerDialog` accessible from the main window menu
+(Tools → Manage skeletons…).  Replaces the skeleton-management UI that currently lives
+only inside the New Capture wizard.
+
+**Operations:**
+- List skeletons in the session DB (name, parent, joint count, created date).
+- **Import YAML** — browse for a `.yaml` file; validates the `joints` key; imports via
+  `manage_skeleton.import_skeleton_str`.
+- **Rename** selected skeleton — updates the `name` column in place.
+- **Delete** selected skeleton — guarded by a confirmation dialog.
+- **Scale dimensions…** — opens `SkeletonScaleDialog` (extracted from the wizard's
+  `SkeletonSetupWidget` scaling panel) for the selected skeleton.
+
+**Backend:** `manage_skeleton.py` (import, rename, delete) and `scale_skeleton.py`
+(scaling) — all implemented.
+
+**Note:** Skeletons are stored in the session DB (the `skeletons` table), not the
+registry.  The dialog works with the session connection only; registry copy is deferred.
+
+### 3.6 Person panel
+
+**What:** The main panel shown when a *Person* node is selected in the session tree.
+Replaces the thin `PersonTrackPanel` and consolidates everything needed to run and
+iterate on the tracker for one person.
+
+**Layout (top to bottom):**
+
+1. **Header** — person name, time range, observation count.
+2. **Skeleton & parameters** — always visible:
+   - Skeleton picker (dropdown from session DB `skeletons`).
+   - "Adjust dimensions…" button → opens `SkeletonScaleDialog`.
+   - Collapsible "Tracker parameters" section (UKF noise values, fps, outlier threshold).
+3. **Run control** — "Run tracker" button; progress bar + log output while running;
+   summary stats (inlier %, avg observations) after completion.
+4. **Tracking runs list** — previous runs for this person (skeleton, timestamp, stats);
+   selecting one makes it the active result shown in the views below.
+5. **Frame display strip** — time scrubber on the global timeline; per-camera images
+   showing detections at the scrubbed time (reuses `FrameViewWidget`).
+6. **3D skeleton view** *(deferred, Phase 5)* — stick-figure skeleton drawn from
+   `tracking_results` at the scrubbed time; placeholder until Phase 5.
+
+**One person at a time:** the panel runs a single tracker invocation with a specific
+person_id.  Multi-person orchestration is deferred.
+
+**Sequence pre-selection:** the panel opens with its `sequence_id` already resolved from
+the tree selection, so the user never picks it from a combo.
+
+### 3.7 Results viewer and BVH export
 
 **What:** A read-only panel showing the selected tracking run:
 - Summary stats (frames tracked, inlier %, per-camera breakdown).
@@ -201,6 +244,10 @@ all exist.  This is purely a Qt wrapper.
 The overlay rendering for tracked results is currently only in `visualize_tracking.py`
 (Rerun-based); a Qt equivalent needs to be written or the Rerun viewer launched as a
 subprocess.
+
+**Note:** Summary stats and BVH export are included in the Person panel (section 3.6)
+since they belong to the same workflow.  This section covers only the video overlay
+(Phase 5 work).
 
 ---
 
@@ -348,24 +395,66 @@ Agreed order: Phase 1 → Phase 3 → Phase 5 → Phase 2 → Phase 4.
 Phase 2 (skeleton scaling) fits naturally inside the merged shell; Phase 4 (calibration
 UIs) is deferred as it is self-contained and not on the critical path.
 
-### Phase 1 — Complete the e2e pipeline in the current two-app structure
+### Phase 1 — Complete the e2e pipeline (tracker workflow unblocked)
 
-Priority: unblock full end-to-end runs without touching the CLI.
+Priority: a practitioner can go from finalised person tracks to a tracker result without
+touching the CLI.  The tree restructure (formerly Phase 3 work) is pulled forward because
+the new Person panel needs to live in the right place from the start.
+
+#### Step 1 — Skeleton manager dialog (3.5)
+
+`SkeletonManagerDialog`: standalone dialog (Tools → Manage skeletons…) wrapping
+`SkeletonSetupWidget` and adding rename/delete.  Also extracts the scaling panel into a
+reusable `SkeletonScaleDialog`.
+
+#### Step 2 — Session tree restructure (partial pull-forward from Phase 3 T3.3)
+
+Surface the existing `trials` and `pose_observation_sequences` data in the session tree
+with the correct hierarchy:
+
+```
+Capture → Trial → Detection Run → Person → Tracking Run
+```
+
+- Add Trial nodes (between Capture and Detection Run).  Detection runs with
+  `trial_id = NULL` appear under a grey "(no trial)" grouping.
+- Rename "Person track" → "Person" at tree and panel level.
+- Add Tracking Run nodes under each Person node.
+- Context menus: Trial (rename), Person (rename), Tracking Run (view stats, export BVH,
+  delete).
+
+No schema changes required — all tables exist (v15).
+
+#### Step 3 — Person panel: tracker control (3.6, parts 1–4)
+
+New `PersonPanel` replacing `PersonTrackPanel`:
+- Skeleton picker pre-wired to the session's skeleton list; "Adjust dimensions…" opens
+  `SkeletonScaleDialog`.
+- Collapsible tracker parameters form (reuses `RunTrackerWidget` internals).
+- "Run tracker" button with progress bar + log.  Sequence is pre-selected from the
+  tree — no combo needed.
+- Tracking runs list (previous runs; click to select as active).
+
+#### Step 4 — Person panel: frame display strip (3.6, parts 5–6)
+
+- Time scrubber on the global timeline.
+- Per-camera detection images at the scrubbed time (embed `FrameViewWidget`).
+- 3D skeleton view: placeholder (`QLabel("3D view — coming in Phase 5")`).
 
 | # | Task | Effort |
 |---|---|---|
-| T1.1 | Extrinsics import dialog (3.1) | S |
-| T1.2 | Skeleton pick / import page (3.2 — pick from registry + import YAML) | S |
-| T1.3 | Rough scaling UI before first run (3.2 — scale sliders + save) | M |
-| T1.4 | Tracker config form (3.3) | M |
-| T1.5 | Run tracker + progress panel (3.4) | M |
-| T1.6 | Tracking run summary + BVH export (3.5 — stats + export button) | M |
-| T1.7 | Fix manual calibration: distortion model selector + `matrix_original` (4.2 partial) | S |
+| T1.0 | Skeleton manager dialog + SkeletonScaleDialog extraction | S |
+| T1.1a | Tree: Trial nodes, Person rename, Tracking Run nodes | S |
+| T1.1b | PersonPanel: skeleton picker, params form, run tracker, tracking runs list | M |
+| T1.1c | PersonPanel: time scrubber + FrameViewWidget embed | M |
+| T1.2 | Extrinsics import dialog (3.1) | S |
+| T1.3 | Tracker config form improvements (3.3) | S |
+| T1.4 | Fix manual calibration: distortion model selector + `matrix_original` (4.2 partial) | S |
 
 `S` = 1–2 days, `M` = 2–4 days.
 
 **Deliverable:** A practitioner can go from raw videos to BVH using only the Qt apps;
-the CLI remains available but is no longer required for any step.
+the CLI remains available but is no longer required for the tracker workflow.
 
 ### Phase 2 — Skeleton scaling from tracking run (integrated)
 

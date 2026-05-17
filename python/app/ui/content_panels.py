@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QProcess, Qt
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -369,6 +372,9 @@ class DetectionRunPanel(QWidget):
 # ---------------------------------------------------------------------------
 
 
+_EXPORT_BVH_SCRIPT = Path(__file__).resolve().parents[3] / "python" / "tools" / "export_bvh.py"
+
+
 class PersonPanel(QWidget):
     """Person panel: info, tracking history, and tracker launcher."""
 
@@ -378,6 +384,7 @@ class PersonPanel(QWidget):
         self._conn = conn
         self._sequence_id = sequence_id
         self._session_path = session_path
+        self._bvh_proc: QProcess | None = None
         self._build()
 
     def _build(self) -> None:
@@ -419,10 +426,33 @@ class PersonPanel(QWidget):
         form_box.layout().addLayout(form)
         vbox.addWidget(form_box)
 
+        # --- Tracking runs section ---
         self._run_box = _section("Tracking runs (0)")
+        box_vbox = self._run_box.layout()
+
         self._run_list = QListWidget()
-        self._run_list.setFixedHeight(120)
-        self._run_box.layout().addWidget(self._run_list)
+        self._run_list.setMaximumHeight(110)
+        self._run_list.currentItemChanged.connect(self._on_run_selected)
+        box_vbox.addWidget(self._run_list)
+
+        self._run_detail = QLabel("")
+        self._run_detail.setWordWrap(True)
+        self._run_detail.setVisible(False)
+        box_vbox.addWidget(self._run_detail)
+
+        run_act_row = QHBoxLayout()
+        run_act_row.setContentsMargins(0, 2, 0, 0)
+        self._export_bvh_btn = QPushButton("Export BVH…")
+        self._export_bvh_btn.setEnabled(False)
+        self._export_bvh_btn.clicked.connect(self._export_bvh)
+        self._delete_run_btn = QPushButton("Delete run")
+        self._delete_run_btn.setEnabled(False)
+        self._delete_run_btn.clicked.connect(self._delete_run)
+        run_act_row.addStretch()
+        run_act_row.addWidget(self._export_bvh_btn)
+        run_act_row.addWidget(self._delete_run_btn)
+        box_vbox.addLayout(run_act_row)
+
         vbox.addWidget(self._run_box)
 
         self._refresh_runs()
@@ -438,8 +468,16 @@ class PersonPanel(QWidget):
         self.layout().setContentsMargins(0, 0, 0, 0)
         self.layout().addWidget(_scrollable(inner))
 
+    # ------------------------------------------------------------------
+    # Tracking runs list
+    # ------------------------------------------------------------------
+
     def _refresh_runs(self) -> None:
         self._run_list.clear()
+        self._run_detail.setVisible(False)
+        self._export_bvh_btn.setEnabled(False)
+        self._delete_run_btn.setEnabled(False)
+
         runs = self._conn.execute(
             "SELECT tr.id, tr.ran_at, s.name AS skel_name "
             "FROM tracking_runs tr "
@@ -450,13 +488,142 @@ class PersonPanel(QWidget):
         self._run_box.setTitle(f"Tracking runs ({len(runs)})")
         if not runs:
             self._run_list.addItem("No tracking runs yet.")
-        else:
-            for r in runs:
-                item = QListWidgetItem(
-                    f"[{r['skel_name'] or '?'}]  {_fmt_ts(r['ran_at'])}"
+            return
+        for r in runs:
+            stats = self._conn.execute(
+                "SELECT COUNT(*) AS total, "
+                "       SUM(CASE WHEN tracking_lost=0 THEN 1 ELSE 0 END) AS tracked "
+                "FROM tracking_results WHERE run_id=? AND person_id=0 AND is_smoothed=0",
+                (r["id"],),
+            ).fetchone()
+            label = f"[{r['skel_name'] or '?'}]  {_fmt_ts(r['ran_at'])}"
+            if stats and stats["total"]:
+                pct = 100.0 * (stats["tracked"] or 0) / stats["total"]
+                label += f"  —  {stats['tracked']}/{stats['total']} frames ({pct:.0f}%)"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, r["id"])
+            self._run_list.addItem(item)
+
+    def _on_run_selected(self, current: QListWidgetItem, _prev) -> None:
+        run_id = current.data(Qt.ItemDataRole.UserRole) if current else None
+        if not run_id:
+            self._run_detail.setVisible(False)
+            self._export_bvh_btn.setEnabled(False)
+            self._delete_run_btn.setEnabled(False)
+            return
+
+        run = self._conn.execute(
+            "SELECT tr.ran_at, tr.notes, s.name AS skel_name "
+            "FROM tracking_runs tr "
+            "LEFT JOIN skeletons s ON s.id = tr.skeleton_id "
+            "WHERE tr.id = ?",
+            (run_id,),
+        ).fetchone()
+        stats = self._conn.execute(
+            "SELECT COUNT(*) AS total, "
+            "       SUM(CASE WHEN tracking_lost=0 THEN 1 ELSE 0 END) AS tracked, "
+            "       AVG(COALESCE(n_inlier_observations, 0)) AS avg_inliers "
+            "FROM tracking_results WHERE run_id=? AND person_id=0 AND is_smoothed=0",
+            (run_id,),
+        ).fetchone()
+
+        if run:
+            if stats and stats["total"]:
+                total = stats["total"]
+                tracked = stats["tracked"] or 0
+                pct = 100.0 * tracked / total
+                avg = stats["avg_inliers"] or 0.0
+                stat_line = f"{tracked}/{total} frames ({pct:.1f}%)  —  avg inliers: {avg:.1f}"
+            else:
+                stat_line = "no frame stats"
+            self._run_detail.setText(
+                f"<b>{run['skel_name'] or '?'}</b>  {_fmt_ts(run['ran_at'])}<br>"
+                f"Frames: {stat_line}<br>"
+                f"Notes: {run['notes'] or '—'}"
+            )
+            self._run_detail.setVisible(True)
+
+        self._export_bvh_btn.setEnabled(True)
+        self._delete_run_btn.setEnabled(True)
+
+    # ------------------------------------------------------------------
+    # BVH export
+    # ------------------------------------------------------------------
+
+    def _export_bvh(self) -> None:
+        item = self._run_list.currentItem()
+        run_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not run_id:
+            return
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save BVH file", "", "BVH files (*.bvh)"
+        )
+        if not out_path:
+            return
+
+        self._bvh_proc = QProcess(self)
+        self._bvh_proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self._export_bvh_btn.setEnabled(False)
+
+        proc = self._bvh_proc
+
+        def _done(code: int, _status) -> None:
+            self._export_bvh_btn.setEnabled(True)
+            if code == 0:
+                QMessageBox.information(
+                    self, "Export complete", f"BVH written to:\n{out_path}"
                 )
-                item.setData(Qt.ItemDataRole.UserRole, r["id"])
-                self._run_list.addItem(item)
+            else:
+                output = bytes(proc.readAllStandardOutput()).decode("utf-8", errors="replace")
+                QMessageBox.critical(
+                    self, "Export failed",
+                    f"export_bvh.py exited with code {code}.\n\n{output[-800:]}",
+                )
+
+        self._bvh_proc.finished.connect(_done)
+        self._bvh_proc.start(
+            sys.executable,
+            [
+                str(_EXPORT_BVH_SCRIPT),
+                "--session-db", str(self._session_path),
+                "--run-id",     run_id,
+                "--person-id",  "0",
+                "--smoothed",
+                "--output",     out_path,
+            ],
+        )
+
+    # ------------------------------------------------------------------
+    # Delete run
+    # ------------------------------------------------------------------
+
+    def _delete_run(self) -> None:
+        item = self._run_list.currentItem()
+        run_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not run_id:
+            return
+        if QMessageBox.question(
+            self,
+            "Delete tracking run",
+            "Delete this tracking run and all its results?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM tracking_results WHERE run_id = ?", (run_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM tracking_obs_results WHERE run_id = ?", (run_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM tracking_runs WHERE id = ?", (run_id,)
+            )
+        self._refresh_runs()
+
+    # ------------------------------------------------------------------
+    # Tracker dialog
+    # ------------------------------------------------------------------
 
     def _open_run_tracker(self) -> None:
         from app.pose.run_tracker import RunTrackerDialog

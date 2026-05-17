@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 5
-SESSION_SCHEMA_VERSION: Final[int] = 16
+SESSION_SCHEMA_VERSION: Final[int] = 17
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -544,11 +544,22 @@ def _migrate_session_v14_to_v15(conn: sqlite3.Connection) -> None:
 def _migrate_session_v15_to_v16(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 15 to 16.
 
-    v16 adds detection_crops: JPEG-encoded person bounding-box crops stored
-    during detection for fast preview in the PersonPanel without re-reading
-    video files.
+    v16 adds the detection_crops table (superseded by v17).
     """
     sql = (_DB_DIR / "migrations" / "015_detection_crops.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+    conn.commit()
+
+
+def _migrate_session_v16_to_v17(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 16 to 17.
+
+    v17 adds detection_run_id to the frame_cache_entries primary key so that
+    PERSON_CROP entries from multiple detection runs on the same shot coexist.
+    Non-crop entries use detection_run_id = ''.  Also removes detection_crops
+    (its purpose is now covered by frame_cache_entries).
+    """
+    sql = (_DB_DIR / "migrations" / "016_frame_cache_detection_run.sql").read_text(encoding="utf-8")
     conn.executescript(sql)
     conn.commit()
 
@@ -621,6 +632,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 15
     if actual == 15:
         _migrate_session_v15_to_v16(conn)
+        actual = 16
+    if actual == 16:
+        _migrate_session_v16_to_v17(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

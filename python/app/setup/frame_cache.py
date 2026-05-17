@@ -42,14 +42,17 @@ class CacheKey:
 
     ``track_id`` and ``region_type`` are required for ``PERSON_CROP``.
     ``width_px`` and ``height_px`` are required for ``THUMB``.
+    ``detection_run_id`` is required for ``PERSON_CROP`` (use the detection run
+    that produced the crop); leave as ``''`` for non-run-linked entry types.
     """
-    shot_video_id: str
-    frame_idx:     int
-    cache_type:    CacheType
-    track_id:      int | None = None
-    region_type:   str | None = None
-    width_px:      int | None = None
-    height_px:     int | None = None
+    shot_video_id:    str
+    frame_idx:        int
+    cache_type:       CacheType
+    track_id:         int | None = None
+    region_type:      str | None = None
+    width_px:         int | None = None
+    height_px:        int | None = None
+    detection_run_id: str = ''
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +87,7 @@ def _db_key(key: CacheKey) -> tuple:
         key.track_id if key.track_id is not None else -1,
         key.region_type if key.region_type is not None else "",
         key.width_px if key.width_px is not None else 0,
+        key.detection_run_id,
     )
 
 
@@ -208,12 +212,12 @@ class FrameCache:
     def _read_from_db(self, key: CacheKey) -> np.ndarray | None:
         if self._conn is None:
             return None
-        svid, fidx, ctype, tid, rtype, wpx = _db_key(key)
+        svid, fidx, ctype, tid, rtype, wpx, run_id = _db_key(key)
         row = self._conn.execute(
             "SELECT image_data FROM frame_cache_entries "
             "WHERE shot_video_id=? AND frame_idx=? AND cache_type=? "
-            "AND track_id=? AND region_type=? AND width_px=?",
-            (svid, fidx, ctype, tid, rtype, wpx),
+            "AND track_id=? AND region_type=? AND width_px=? AND detection_run_id=?",
+            (svid, fidx, ctype, tid, rtype, wpx, run_id),
         ).fetchone()
         if row is None:
             return None
@@ -264,16 +268,16 @@ class FrameCache:
             key, img = item
             if self._conn is None:
                 continue
-            svid, fidx, ctype, tid, rtype, wpx = _db_key(key)
+            svid, fidx, ctype, tid, rtype, wpx, run_id = _db_key(key)
             hpx = key.height_px or 0
             try:
                 jpeg = _encode_jpeg(img)
                 self._conn.execute(
                     "INSERT OR REPLACE INTO frame_cache_entries "
                     "(shot_video_id, frame_idx, cache_type, track_id, "
-                    "region_type, width_px, height_px, image_data) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (svid, fidx, ctype, tid, rtype, wpx, hpx, jpeg),
+                    "region_type, width_px, height_px, image_data, detection_run_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (svid, fidx, ctype, tid, rtype, wpx, hpx, jpeg, run_id),
                 )
                 self._conn.commit()
             except Exception:  # noqa: BLE001

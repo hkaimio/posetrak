@@ -319,22 +319,24 @@ CREATE TABLE IF NOT EXISTS person_tracks (
 );
 
 -- Frame cache: stores decoded/cropped image data for fast UI access.
--- cache_type: 'THUMB' | 'PERSON_CROP'
--- track_id:   -1 for cache types that do not require a person track (e.g. THUMB)
--- region_type: '' (empty) for THUMB; 'full_body'/'face'/'hand_l'/'hand_r' for PERSON_CROP
--- width_px / height_px: output image dimensions.
--- detection_run_id: optional link to the detection run that produced this crop.
+-- cache_type: 'full_frame' | 'thumb' | 'person_crop'  (CacheType.value)
+-- track_id:   -1 for cache types that do not require a person track (e.g. thumb)
+-- region_type: '' for thumb/full_frame; 'full_body'/'face'/'hand_l'/'hand_r' for person_crop
+-- width_px / height_px: output image dimensions (0 if not applicable).
+-- detection_run_id: '' for non-run-linked entries; run ID for person_crop entries.
+--   Included in the PK so crops from multiple detection runs on the same shot
+--   coexist without conflict.
 CREATE TABLE IF NOT EXISTS frame_cache_entries (
     shot_video_id       TEXT    NOT NULL REFERENCES capture_videos(id),
     frame_idx           INTEGER NOT NULL,
     cache_type          TEXT    NOT NULL,
     track_id            INTEGER NOT NULL DEFAULT -1,
     region_type         TEXT    NOT NULL DEFAULT '',
-    width_px            INTEGER NOT NULL,
-    height_px           INTEGER NOT NULL,
+    width_px            INTEGER NOT NULL DEFAULT 0,
+    height_px           INTEGER NOT NULL DEFAULT 0,
     image_data          BLOB    NOT NULL,
-    detection_run_id    TEXT    REFERENCES detection_runs(id),
-    PRIMARY KEY (shot_video_id, frame_idx, cache_type, track_id, region_type, width_px)
+    detection_run_id    TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (shot_video_id, frame_idx, cache_type, track_id, region_type, width_px, detection_run_id)
 );
 
 -- Explicit track_id → person_name assignments from the pose extraction UI.
@@ -348,17 +350,3 @@ CREATE TABLE IF NOT EXISTS detection_track_assignments (
     last_frame       INTEGER NOT NULL,
     PRIMARY KEY (detection_run_id, shot_video_id, track_id, first_frame)
 );
-
--- JPEG-encoded person bounding-box crops stored during detection.
--- Enables fast scrub preview in PersonPanel without re-reading video files.
-CREATE TABLE IF NOT EXISTS detection_crops (
-    detection_run_id TEXT    NOT NULL REFERENCES detection_runs(id),
-    shot_video_id    TEXT    NOT NULL REFERENCES capture_videos(id),
-    video_frame      INTEGER NOT NULL,
-    track_id         INTEGER NOT NULL,
-    jpeg_data        BLOB    NOT NULL,
-    PRIMARY KEY (detection_run_id, shot_video_id, video_frame, track_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_detection_crops_lookup
-    ON detection_crops (detection_run_id, shot_video_id, track_id, video_frame);

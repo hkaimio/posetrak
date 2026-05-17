@@ -99,8 +99,8 @@ def list_detection_runs(
 _BATCH_SIZE = 200
 
 
-def _encode_crop(img: "np.ndarray", bbox: tuple) -> bytes | None:
-    """Crop *img* by *bbox* (x, y, w, h) and return JPEG bytes, or None on failure."""
+def _encode_crop(img: "np.ndarray", bbox: tuple) -> "tuple[bytes, int, int] | None":
+    """Crop *img* by *bbox* (x, y, w, h) and return (jpeg, width_px, height_px)."""
     x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
     x1, y1 = max(0, x), max(0, y)
     x2, y2 = min(img.shape[1], x + w), min(img.shape[0], y + h)
@@ -111,7 +111,9 @@ def _encode_crop(img: "np.ndarray", bbox: tuple) -> bytes | None:
         scale = _CROP_TARGET_HEIGHT / crop.shape[0]
         crop = cv2.resize(crop, (int(crop.shape[1] * scale), _CROP_TARGET_HEIGHT))
     ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, _CROP_JPEG_QUALITY])
-    return buf.tobytes() if ok else None
+    if not ok:
+        return None
+    return buf.tobytes(), crop.shape[1], crop.shape[0]
 
 
 class DetectionBatchWriter:
@@ -167,11 +169,12 @@ class DetectionBatchWriter:
                 ))
 
             if img is not None:
-                jpeg = _encode_crop(img, det.bbox)
-                if jpeg is not None:
+                result = _encode_crop(img, det.bbox)
+                if result is not None:
+                    jpeg, wpx, hpx = result
                     self._crop_rows.append((
-                        self._run_id, self._svid, video_frame,
-                        det.track_id, jpeg,
+                        self._svid, video_frame, "person_crop",
+                        det.track_id, "full_body", wpx, hpx, jpeg, self._run_id,
                     ))
 
             first, last = self._track_spans.get(det.track_id, (video_frame, video_frame))
@@ -201,9 +204,10 @@ class DetectionBatchWriter:
             self._kp_rows.clear()
         if self._crop_rows:
             self._session.executemany(
-                "INSERT OR REPLACE INTO detection_crops "
-                "(detection_run_id, shot_video_id, video_frame, track_id, jpeg_data) "
-                "VALUES (?,?,?,?,?)",
+                "INSERT OR REPLACE INTO frame_cache_entries "
+                "(shot_video_id, frame_idx, cache_type, track_id, region_type, "
+                " width_px, height_px, image_data, detection_run_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 self._crop_rows,
             )
             self._crop_rows.clear()

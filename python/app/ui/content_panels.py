@@ -580,18 +580,19 @@ class PersonCropGridWidget(QWidget):
                 cell.show_empty()
                 continue
             row = self._conn.execute(
-                "SELECT jpeg_data FROM detection_crops "
-                "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? "
-                "AND video_frame BETWEEN ? AND ? "
-                "ORDER BY ABS(video_frame - ?) LIMIT 1",
-                (self._det_run_id, svid, track_id,
+                "SELECT image_data FROM frame_cache_entries "
+                "WHERE shot_video_id=? AND cache_type='person_crop' AND track_id=? "
+                "AND region_type='full_body' AND detection_run_id=? "
+                "AND frame_idx BETWEEN ? AND ? "
+                "ORDER BY ABS(frame_idx - ?) LIMIT 1",
+                (svid, track_id, self._det_run_id,
                  frame_idx - 3, frame_idx + 3,
                  frame_idx),
             ).fetchone()
             if row is None:
                 cell.show_empty()
             else:
-                cell.show_jpeg(bytes(row["jpeg_data"]))
+                cell.show_jpeg(bytes(row["image_data"]))
 
 
 # ---------------------------------------------------------------------------

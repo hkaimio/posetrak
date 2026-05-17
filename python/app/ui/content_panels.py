@@ -7,10 +7,14 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from math import ceil
+
 from PySide6.QtCore import QProcess, Qt
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -20,6 +24,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -368,6 +373,228 @@ class DetectionRunPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# PersonCropGridWidget — multi-camera crop preview for PersonPanel
+# ---------------------------------------------------------------------------
+
+
+class _CropCell(QWidget):
+    """One camera cell in the crop grid: name label + JPEG image."""
+
+    _IMG_H = 240
+
+    def __init__(self, label: str, parent=None) -> None:
+        super().__init__(parent)
+        name_lbl = QLabel(label)
+        name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_lbl.setStyleSheet("font-size: 10px; font-weight: bold;")
+        name_lbl.setMaximumHeight(18)
+
+        self._img = QLabel()
+        self._img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._img.setMinimumHeight(self._IMG_H)
+        self._img.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._img.setStyleSheet("background: #222;")
+
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(2, 2, 2, 2)
+        vbox.setSpacing(1)
+        vbox.addWidget(name_lbl)
+        vbox.addWidget(self._img, stretch=1)
+
+        self.show_empty()
+
+    def show_empty(self) -> None:
+        self._img.clear()
+        self._img.setText("—")
+        self._img.setStyleSheet("background: #222; color: #666;")
+
+    def show_jpeg(self, data: bytes) -> None:
+        qimg = QImage.fromData(data)
+        if qimg.isNull():
+            self.show_empty()
+            return
+        pix = QPixmap.fromImage(qimg)
+        scaled = pix.scaled(self._img.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._img.setPixmap(scaled)
+        self._img.setStyleSheet("background: #222;")
+
+
+class PersonCropGridWidget(QWidget):
+    """Grid of per-camera person crop images with a time scrubber.
+
+    Reads JPEG crops from the detection_crops table (populated during
+    detection).  Shows an empty cell when no crop is available for a camera
+    at the current time.  One extra placeholder cell is reserved for a future
+    3D tracking view.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, sequence_id: str, parent=None) -> None:
+        super().__init__(parent)
+        self._conn = conn
+        self._sequence_id = sequence_id
+        self._cells: list[_CropCell] = []
+        self._cameras: list[dict] = []
+        self._sync_table = None
+        self._det_run_id: str | None = None
+        self._t_start: float = 0.0
+        self._t_end: float = 0.0
+        self._slider: QSlider | None = None
+        self._time_label: QLabel | None = None
+        self._build()
+
+    def _build(self) -> None:
+        from app.setup.db_context import SyncPoint, SyncTable
+
+        seq = self._conn.execute(
+            "SELECT detection_run_id, shot_id, sync_config_id, time_start_s, time_end_s "
+            "FROM pose_observation_sequences WHERE id = ?",
+            (self._sequence_id,),
+        ).fetchone()
+        if seq is None:
+            QVBoxLayout(self).addWidget(QLabel("Sequence not found."))
+            return
+
+        self._det_run_id = seq["detection_run_id"]
+        self._t_start = float(seq["time_start_s"])
+        self._t_end = float(seq["time_end_s"])
+
+        prow = self._conn.execute(
+            "SELECT person_name FROM sequence_persons WHERE sequence_id = ? AND person_id = 0",
+            (self._sequence_id,),
+        ).fetchone()
+        person_name = prow["person_name"] if prow else None
+
+        track_by_svid: dict[str, int] = {}
+        if person_name and self._det_run_id:
+            for r in self._conn.execute(
+                "SELECT shot_video_id, track_id FROM detection_track_assignments "
+                "WHERE detection_run_id = ? AND person_name = ?",
+                (self._det_run_id, person_name),
+            ):
+                track_by_svid[r["shot_video_id"]] = r["track_id"]
+
+        cam_rows = self._conn.execute(
+            "SELECT cv.id, COALESCE(ci.label, cv.camera_instance_id) AS label "
+            "FROM capture_videos cv "
+            "LEFT JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
+            "WHERE cv.shot_id = ? ORDER BY label",
+            (seq["shot_id"],),
+        ).fetchall()
+
+        sp_rows = self._conn.execute(
+            "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, cv.actual_fps "
+            "FROM sync_points sp "
+            "JOIN capture_videos cv ON cv.id = sp.shot_video_id "
+            "WHERE sp.sync_config_id = ?",
+            (seq["sync_config_id"],),
+        ).fetchall()
+        if sp_rows:
+            points = [
+                SyncPoint(
+                    camera_instance_id="",
+                    shot_video_id=r["shot_video_id"],
+                    video_frame=r["video_frame"],
+                    timestamp_s=r["timestamp_s"],
+                )
+                for r in sp_rows
+            ]
+            fps_by_video = {r["shot_video_id"]: float(r["actual_fps"]) for r in sp_rows}
+            self._sync_table = SyncTable(points, fps_by_video)
+
+        self._cameras = [
+            {
+                "shot_video_id": r["id"],
+                "label": r["label"],
+                "track_id": track_by_svid.get(r["id"]),
+            }
+            for r in cam_rows
+        ]
+
+        n_cells = len(self._cameras) + 1  # +1 for 3D placeholder
+        ncols = max(2, min(n_cells, 4))
+
+        grid = QGridLayout()
+        grid.setSpacing(4)
+
+        for i, cam in enumerate(self._cameras):
+            row, col = divmod(i, ncols)
+            cell = _CropCell(cam["label"])
+            self._cells.append(cell)
+            grid.addWidget(cell, row, col)
+            grid.setColumnStretch(col, 1)
+
+        r3d, c3d = divmod(len(self._cameras), ncols)
+        ph = QLabel("3D view\n(coming soon)")
+        ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ph.setStyleSheet("color: #888; border: 1px dashed #555;")
+        ph.setMinimumHeight(_CropCell._IMG_H)
+        grid.addWidget(ph, r3d, c3d)
+        grid.setColumnStretch(c3d, 1)
+
+        nrows = ceil(n_cells / ncols)
+        for r in range(nrows):
+            grid.setRowStretch(r, 1)
+
+        dur_ms = max(1, int((self._t_end - self._t_start) * 1000))
+        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setMinimum(0)
+        self._slider.setMaximum(dur_ms)
+        self._slider.setValue(0)
+        self._slider.valueChanged.connect(self._on_slider)
+
+        self._time_label = QLabel(_fmt_time(self._t_start))
+        self._time_label.setMinimumWidth(70)
+
+        slider_row = QHBoxLayout()
+        slider_row.addWidget(self._slider)
+        slider_row.addWidget(self._time_label)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+        layout.addLayout(grid, stretch=1)
+        layout.addLayout(slider_row)
+
+        self._load_frame(self._t_start)
+
+    def _on_slider(self, value: int) -> None:
+        t = self._t_start + value / 1000.0
+        if self._time_label is not None:
+            self._time_label.setText(_fmt_time(t))
+        self._load_frame(t)
+
+    def _load_frame(self, global_time: float) -> None:
+        if not self._det_run_id or not self._sync_table:
+            for cell in self._cells:
+                cell.show_empty()
+            return
+        for i, cam in enumerate(self._cameras):
+            svid = cam["shot_video_id"]
+            track_id = cam["track_id"]
+            cell = self._cells[i]
+            if track_id is None:
+                cell.show_empty()
+                continue
+            frame_idx = self._sync_table.lookup(global_time, svid)
+            if frame_idx is None:
+                cell.show_empty()
+                continue
+            row = self._conn.execute(
+                "SELECT jpeg_data FROM detection_crops "
+                "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? "
+                "AND video_frame BETWEEN ? AND ? "
+                "ORDER BY ABS(video_frame - ?) LIMIT 1",
+                (self._det_run_id, svid, track_id,
+                 frame_idx - 3, frame_idx + 3,
+                 frame_idx),
+            ).fetchone()
+            if row is None:
+                cell.show_empty()
+            else:
+                cell.show_jpeg(bytes(row["jpeg_data"]))
+
+
+# ---------------------------------------------------------------------------
 # PersonPanel
 # ---------------------------------------------------------------------------
 
@@ -467,115 +694,13 @@ class PersonPanel(QWidget):
         scroll = _scrollable(inner)
         scroll.setMaximumHeight(320)
 
-        frame_box = self._build_frame_view()
+        crop_grid = PersonCropGridWidget(self._conn, self._sequence_id)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
         root.addWidget(scroll)
-        root.addWidget(frame_box, stretch=1)
-
-    # ------------------------------------------------------------------
-    # Frame view
-    # ------------------------------------------------------------------
-
-    def _build_frame_view(self) -> QWidget:
-        import numpy as np
-        from app.pose.frame_view import CameraInfo, FrameViewWidget
-        from app.setup.db_context import SyncPoint, SyncTable
-
-        box = _section("Detection frames")
-        self._frame_view = FrameViewWidget()
-        box.layout().addWidget(self._frame_view)
-
-        seq = self._conn.execute(
-            "SELECT shot_id, sync_config_id, time_start_s "
-            "FROM pose_observation_sequences WHERE id = ?",
-            (self._sequence_id,),
-        ).fetchone()
-        if seq is None:
-            return box
-
-        # Capture videos for this shot
-        videos = self._conn.execute(
-            "SELECT cv.id, cv.file_path, cv.actual_fps, cv.camera_instance_id, "
-            "       COALESCE(ci.label, cv.camera_instance_id) AS cam_label "
-            "FROM capture_videos cv "
-            "LEFT JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
-            "WHERE cv.shot_id = ? ORDER BY ci.label",
-            (seq["shot_id"],),
-        ).fetchall()
-        if not videos:
-            return box
-
-        # Sync table
-        sp_rows = self._conn.execute(
-            "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, cv.actual_fps "
-            "FROM sync_points sp "
-            "JOIN capture_videos cv ON cv.id = sp.shot_video_id "
-            "WHERE sp.sync_config_id = ?",
-            (seq["sync_config_id"],),
-        ).fetchall()
-        if sp_rows:
-            points = [
-                SyncPoint(
-                    camera_instance_id="",
-                    shot_video_id=r["shot_video_id"],
-                    video_frame=r["video_frame"],
-                    timestamp_s=r["timestamp_s"],
-                )
-                for r in sp_rows
-            ]
-            fps_by_video = {r["shot_video_id"]: float(r["actual_fps"]) for r in sp_rows}
-            self._frame_view.set_sync_table(SyncTable(points, fps_by_video))
-
-        # Observation keypoints: {shot_video_id: {video_frame: kp [N,3]}}
-        self._obs_kp: dict[str, dict[int, np.ndarray]] = {}
-        svid_by_cam = {v["camera_instance_id"]: v["id"] for v in videos}
-        for row in self._conn.execute(
-            "SELECT camera_instance_id, video_frame, kp_blob "
-            "FROM pose_observations WHERE sequence_id = ? AND person_id = 0",
-            (self._sequence_id,),
-        ):
-            svid = svid_by_cam.get(row["camera_instance_id"])
-            if svid is None:
-                continue
-            raw = bytes(row["kp_blob"])
-            n = len(raw) // 12  # 3 × float32
-            kp = np.frombuffer(raw, dtype=np.float32).reshape(n, 3)
-            self._obs_kp.setdefault(svid, {})[row["video_frame"]] = kp
-
-        cameras = [
-            CameraInfo(
-                shot_video_id=v["id"],
-                file_path=v["file_path"],
-                camera_instance_id=v["camera_instance_id"],
-                label=v["cam_label"] or v["id"][:8],
-                fps=float(v["actual_fps"]),
-                ref_frame=0,
-                ref_timestamp_s=0.0,
-            )
-            for v in videos
-        ]
-
-        self._frame_view.load_cameras(cameras)
-        # Set keypoints for the initially selected camera before connecting
-        # camera_switched so the initial seek already has overlay data
-        if cameras:
-            self._frame_view.set_observation_keypoints(
-                self._obs_kp.get(cameras[0].shot_video_id, {})
-            )
-        self._frame_view.camera_switched.connect(self._on_camera_switched)
-
-        if seq["time_start_s"] is not None:
-            self._frame_view.seek_global_time(float(seq["time_start_s"]))
-
-        return box
-
-    def _on_camera_switched(self, shot_video_id: str) -> None:
-        self._frame_view.set_observation_keypoints(
-            self._obs_kp.get(shot_video_id, {})
-        )
+        root.addWidget(crop_grid, stretch=1)
 
     # ------------------------------------------------------------------
     # Tracking runs list

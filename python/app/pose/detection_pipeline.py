@@ -250,7 +250,7 @@ class DetectionPipeline:
                         video_frame, img.shape, len(detections), len(pose_results),
                     )
 
-                writer.add_frame(video_frame, detections, pose_results, self._detector.name)
+                writer.add_frame(video_frame, detections, pose_results, self._detector.name, img)
                 frames_done += 1
 
                 if on_progress:

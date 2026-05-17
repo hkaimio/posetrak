@@ -336,3 +336,29 @@ CREATE TABLE IF NOT EXISTS frame_cache_entries (
     detection_run_id    TEXT    REFERENCES detection_runs(id),
     PRIMARY KEY (shot_video_id, frame_idx, cache_type, track_id, region_type, width_px)
 );
+
+-- Explicit track_id → person_name assignments from the pose extraction UI.
+-- Allows restoring assignments when a detection run is reopened.
+CREATE TABLE IF NOT EXISTS detection_track_assignments (
+    detection_run_id TEXT    NOT NULL REFERENCES detection_runs(id),
+    shot_video_id    TEXT    NOT NULL,
+    track_id         INTEGER NOT NULL,
+    person_name      TEXT    NOT NULL,
+    first_frame      INTEGER NOT NULL,
+    last_frame       INTEGER NOT NULL,
+    PRIMARY KEY (detection_run_id, shot_video_id, track_id, first_frame)
+);
+
+-- JPEG-encoded person bounding-box crops stored during detection.
+-- Enables fast scrub preview in PersonPanel without re-reading video files.
+CREATE TABLE IF NOT EXISTS detection_crops (
+    detection_run_id TEXT    NOT NULL REFERENCES detection_runs(id),
+    shot_video_id    TEXT    NOT NULL REFERENCES capture_videos(id),
+    video_frame      INTEGER NOT NULL,
+    track_id         INTEGER NOT NULL,
+    jpeg_data        BLOB    NOT NULL,
+    PRIMARY KEY (detection_run_id, shot_video_id, video_frame, track_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_detection_crops_lookup
+    ON detection_crops (detection_run_id, shot_video_id, track_id, video_frame);

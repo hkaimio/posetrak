@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 5
-SESSION_SCHEMA_VERSION: Final[int] = 15
+SESSION_SCHEMA_VERSION: Final[int] = 16
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -541,6 +541,18 @@ def _migrate_session_v14_to_v15(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v15_to_v16(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 15 to 16.
+
+    v16 adds detection_crops: JPEG-encoded person bounding-box crops stored
+    during detection for fast preview in the PersonPanel without re-reading
+    video files.
+    """
+    sql = (_DB_DIR / "migrations" / "015_detection_crops.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -606,6 +618,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 14
     if actual == 14:
         _migrate_session_v14_to_v15(conn)
+        actual = 15
+    if actual == 15:
+        _migrate_session_v15_to_v16(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

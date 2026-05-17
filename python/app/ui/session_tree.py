@@ -8,6 +8,7 @@ from enum import Enum
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QInputDialog,
     QMessageBox,
     QMenu,
     QTreeWidget,
@@ -164,7 +165,7 @@ class SessionTreeWidget(QTreeWidget):
             (detection_run_id,),
         ).fetchall()
         for row in rows:
-            label = row["person_names"] or row["name"] or "Person track"
+            label = row["person_names"] or row["name"] or "Person"
             seq_item = _make_item(ItemKind.PERSON_TRACK, row["id"], label)
             seq_item.setExpanded(True)
             self._add_tracking_runs(seq_item, row["id"])
@@ -257,7 +258,9 @@ class SessionTreeWidget(QTreeWidget):
 
     def _trial_menu(self, menu: QMenu, trial_id: str) -> None:
         menu.addAction("Run detection…").setEnabled(False)
-        menu.addAction("Edit name & notes…").setEnabled(False)
+        menu.addAction("Rename…").triggered.connect(
+            lambda: self._rename_trial(trial_id)
+        )
         menu.addSeparator()
         menu.addAction("Delete trial").triggered.connect(
             lambda: self._confirm_delete("trials", trial_id)
@@ -272,9 +275,11 @@ class SessionTreeWidget(QTreeWidget):
 
     def _person_track_menu(self, menu: QMenu, seq_id: str) -> None:
         menu.addAction("Run tracker…").setEnabled(False)
-        menu.addAction("Rename…").setEnabled(False)
+        menu.addAction("Rename…").triggered.connect(
+            lambda: self._rename_person(seq_id)
+        )
         menu.addSeparator()
-        menu.addAction("Delete track").triggered.connect(
+        menu.addAction("Delete person").triggered.connect(
             lambda: self._confirm_delete("pose_observation_sequences", seq_id)
         )
 
@@ -285,6 +290,37 @@ class SessionTreeWidget(QTreeWidget):
         menu.addAction("Delete run").triggered.connect(
             lambda: self._confirm_delete("tracking_runs", run_id)
         )
+
+    # ------------------------------------------------------------------
+    # Private — rename helpers
+    # ------------------------------------------------------------------
+
+    def _rename_trial(self, trial_id: str) -> None:
+        current = self._conn.execute(
+            "SELECT name FROM trials WHERE id = ?", (trial_id,)
+        ).fetchone()
+        current_name = current["name"] if current else ""
+        name, ok = QInputDialog.getText(self, "Rename trial", "Trial name:", text=current_name or "")
+        if not ok:
+            return
+        self._conn.execute("UPDATE trials SET name = ? WHERE id = ?", (name.strip(), trial_id))
+        self._conn.commit()
+        self.reload()
+
+    def _rename_person(self, seq_id: str) -> None:
+        current = self._conn.execute(
+            "SELECT name FROM pose_observation_sequences WHERE id = ?", (seq_id,)
+        ).fetchone()
+        current_name = current["name"] if current else ""
+        name, ok = QInputDialog.getText(self, "Rename person", "Person name:", text=current_name or "")
+        if not ok:
+            return
+        self._conn.execute(
+            "UPDATE pose_observation_sequences SET name = ? WHERE id = ?",
+            (name.strip(), seq_id),
+        )
+        self._conn.commit()
+        self.reload()
 
     # ------------------------------------------------------------------
     # Private — delete helpers

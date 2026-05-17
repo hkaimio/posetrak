@@ -389,10 +389,10 @@ class PersonTrackPanel(QWidget):
         vbox = QVBoxLayout(inner)
         vbox.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        title = seq["person_names"] or seq["name"] or "Person track"
+        title = seq["person_names"] or seq["name"] or "Person"
         vbox.addWidget(QLabel(f"<h2>{title}</h2>"))
 
-        form_box = _section("Track info")
+        form_box = _section("Person info")
         form = QFormLayout()
         form.addRow("Persons:", QLabel(seq["person_names"] or "—"))
         form.addRow("Time range:", QLabel(

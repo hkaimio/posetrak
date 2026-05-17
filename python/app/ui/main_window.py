@@ -371,8 +371,8 @@ class MainWindow(QMainWindow):
         self._swap_content(panel)
 
     def _show_person_track(self, sequence_id: str) -> None:
-        from app.ui.content_panels import PersonTrackPanel
-        panel = PersonTrackPanel(self._session_conn, sequence_id, self._session_path)
+        from app.ui.content_panels import PersonPanel
+        panel = PersonPanel(self._session_conn, sequence_id, self._session_path)
         self._swap_content(panel)
 
     def _show_tracking_run(self, run_id: str) -> None:

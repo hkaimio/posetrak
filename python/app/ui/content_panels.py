@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -355,12 +357,12 @@ class DetectionRunPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# PersonTrackPanel
+# PersonPanel
 # ---------------------------------------------------------------------------
 
 
-class PersonTrackPanel(QWidget):
-    """Detail view for a person track (pose_observation_sequences row)."""
+class PersonPanel(QWidget):
+    """Person panel: info, tracking history, and tracker launcher."""
 
     def __init__(self, conn: sqlite3.Connection, sequence_id: str,
                  session_path: Path, parent=None) -> None:
@@ -372,54 +374,50 @@ class PersonTrackPanel(QWidget):
 
     def _build(self) -> None:
         seq = self._conn.execute(
-            "SELECT pos.id, pos.name, pos.time_start_s, pos.time_end_s, pos.pose_model, "
-            "       pos.notes, "
-            "       GROUP_CONCAT(sp.person_name, ', ') AS person_names, "
-            "       COUNT(DISTINCT po.video_frame || po.camera_instance_id) AS n_obs "
-            "FROM pose_observation_sequences pos "
-            "LEFT JOIN sequence_persons sp ON sp.sequence_id = pos.id "
-            "LEFT JOIN pose_observations po ON po.sequence_id = pos.id "
-            "WHERE pos.id = ? GROUP BY pos.id",
+            "SELECT id, name, time_start_s, time_end_s, pose_model, notes "
+            "FROM pose_observation_sequences WHERE id = ?",
             (self._sequence_id,),
         ).fetchone()
         if seq is None:
             return
 
+        person_names = self._conn.execute(
+            "SELECT GROUP_CONCAT(person_name, ', ') AS names "
+            "FROM sequence_persons WHERE sequence_id = ?",
+            (self._sequence_id,),
+        ).fetchone()["names"]
+
+        n_obs = self._conn.execute(
+            "SELECT COUNT(DISTINCT video_frame || camera_instance_id) "
+            "FROM pose_observations WHERE sequence_id = ?",
+            (self._sequence_id,),
+        ).fetchone()[0]
+
         inner = QWidget()
         vbox = QVBoxLayout(inner)
         vbox.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        title = seq["person_names"] or seq["name"] or "Person"
+        title = person_names or seq["name"] or "Person"
         vbox.addWidget(QLabel(f"<h2>{title}</h2>"))
 
         form_box = _section("Person info")
         form = QFormLayout()
-        form.addRow("Persons:", QLabel(seq["person_names"] or "—"))
+        form.addRow("Persons:", QLabel(person_names or "—"))
         form.addRow("Time range:", QLabel(
             f"{_fmt_time(seq['time_start_s'])}  →  {_fmt_time(seq['time_end_s'])}"
         ))
-        form.addRow("Observations:", QLabel(str(seq["n_obs"] or 0)))
+        form.addRow("Observations:", QLabel(str(n_obs)))
         form.addRow("Pose model:", QLabel(seq["pose_model"] or "—"))
-        form.addRow("Notes:", QLabel(seq["notes"] or "—"))
         form_box.layout().addLayout(form)
         vbox.addWidget(form_box)
 
-        # Tracking runs for this sequence
-        runs = self._conn.execute(
-            "SELECT tr.id, tr.ran_at, tr.notes, s.name AS skel_name "
-            "FROM tracking_runs tr "
-            "LEFT JOIN skeletons s ON s.id = tr.skeleton_id "
-            "WHERE tr.observation_sequence_id = ? ORDER BY tr.ran_at",
-            (self._sequence_id,),
-        ).fetchall()
-        run_box = _section(f"Tracking runs ({len(runs)})")
-        for r in runs:
-            run_box.layout().addWidget(
-                QLabel(f"[{r['skel_name'] or '?'}]  {_fmt_ts(r['ran_at'])}")
-            )
-        if not runs:
-            run_box.layout().addWidget(QLabel("No tracking runs yet."))
-        vbox.addWidget(run_box)
+        self._run_box = _section("Tracking runs (0)")
+        self._run_list = QListWidget()
+        self._run_list.setFixedHeight(120)
+        self._run_box.layout().addWidget(self._run_list)
+        vbox.addWidget(self._run_box)
+
+        self._refresh_runs()
 
         btn_row = QHBoxLayout()
         run_btn = _action_btn("Run tracker…")
@@ -432,14 +430,36 @@ class PersonTrackPanel(QWidget):
         self.layout().setContentsMargins(0, 0, 0, 0)
         self.layout().addWidget(_scrollable(inner))
 
+    def _refresh_runs(self) -> None:
+        self._run_list.clear()
+        runs = self._conn.execute(
+            "SELECT tr.id, tr.ran_at, s.name AS skel_name "
+            "FROM tracking_runs tr "
+            "LEFT JOIN skeletons s ON s.id = tr.skeleton_id "
+            "WHERE tr.observation_sequence_id = ? ORDER BY tr.ran_at DESC",
+            (self._sequence_id,),
+        ).fetchall()
+        self._run_box.setTitle(f"Tracking runs ({len(runs)})")
+        if not runs:
+            self._run_list.addItem("No tracking runs yet.")
+        else:
+            for r in runs:
+                item = QListWidgetItem(
+                    f"[{r['skel_name'] or '?'}]  {_fmt_ts(r['ran_at'])}"
+                )
+                item.setData(Qt.ItemDataRole.UserRole, r["id"])
+                self._run_list.addItem(item)
+
     def _open_run_tracker(self) -> None:
         from app.pose.run_tracker import RunTrackerDialog
         dlg = RunTrackerDialog(
             conn=self._conn,
             session_path=str(self._session_path),
+            sequence_id=self._sequence_id,
             parent=self,
         )
         dlg.exec()
+        self._refresh_runs()
 
 
 # ---------------------------------------------------------------------------

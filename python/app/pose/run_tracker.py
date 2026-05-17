@@ -7,7 +7,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, Qt
+from PySide6.QtCore import QProcess, Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
@@ -36,6 +36,8 @@ _DEFAULT_BINARY = _REPO_ROOT / "optbuild" / "cli" / "posetrak"
 
 class RunTrackerWidget(QWidget):
     """Configure and run the posetrak tracker against an open session database."""
+
+    run_finished = Signal(str)  # emits tracking_run_id on successful completion
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -163,6 +165,23 @@ class RunTrackerWidget(QWidget):
         self._refresh_skeletons()
         self._refresh_sequences()
         self._update_run_btn()
+
+    def preselect_sequence(self, seq_id: str) -> None:
+        """Pre-select and lock the sequence combo to *seq_id*.
+
+        Call after set_session().  The combo is disabled so the user cannot
+        change the sequence when this widget is embedded in a PersonPanel.
+        """
+        for i in range(self._sequence_combo.count()):
+            if self._sequence_combo.itemData(i) == seq_id:
+                self._sequence_combo.setCurrentIndex(i)
+                break
+        self._sequence_combo.setEnabled(False)
+        self._update_run_btn()
+
+    def set_person_id(self, person_id: int) -> None:
+        """Pre-fill the person ID spinner."""
+        self._person_id_spin.setValue(person_id)
 
     # ------------------------------------------------------------------
     # Data refresh
@@ -411,6 +430,8 @@ class RunTrackerWidget(QWidget):
         self._progress_bar.setValue(100)
         self._status_label.setText("Tracking complete.")
         self._show_results()
+        if self._run_id:
+            self.run_finished.emit(self._run_id)
 
     # ------------------------------------------------------------------
     # Results
@@ -502,6 +523,7 @@ class RunTrackerDialog(QDialog):
         self,
         conn: sqlite3.Connection,
         session_path: str,
+        sequence_id: str | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -511,6 +533,9 @@ class RunTrackerDialog(QDialog):
 
         self._widget = RunTrackerWidget()
         self._widget.set_session(conn, session_path)
+        if sequence_id is not None:
+            self._widget.preselect_sequence(sequence_id)
+            self._widget.set_person_id(0)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)

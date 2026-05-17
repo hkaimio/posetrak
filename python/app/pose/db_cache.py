@@ -100,10 +100,10 @@ _BATCH_SIZE = 200
 
 
 def _encode_crop(img: "np.ndarray", bbox: tuple) -> "tuple[bytes, int, int] | None":
-    """Crop *img* by *bbox* (x, y, w, h) and return (jpeg, width_px, height_px)."""
-    x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
-    x1, y1 = max(0, x), max(0, y)
-    x2, y2 = min(img.shape[1], x + w), min(img.shape[0], y + h)
+    """Crop *img* by *bbox* (cx, cy, w, h) and return (jpeg, width_px, height_px)."""
+    cx, cy, w, h = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+    x1, y1 = max(0, int(cx - w / 2)), max(0, int(cy - h / 2))
+    x2, y2 = min(img.shape[1], int(cx + w / 2)), min(img.shape[0], int(cy + h / 2))
     if x2 <= x1 or y2 <= y1:
         return None
     crop = img[y1:y2, x1:x2]

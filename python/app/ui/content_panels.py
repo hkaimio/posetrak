@@ -378,7 +378,7 @@ class DetectionRunPanel(QWidget):
 
 
 class _CropCell(QWidget):
-    """One camera cell in the crop grid: name label + JPEG image."""
+    """One camera cell in the crop grid: name label + image."""
 
     _IMG_H = 240
 
@@ -408,11 +408,12 @@ class _CropCell(QWidget):
         self._img.setText("—")
         self._img.setStyleSheet("background: #222; color: #666;")
 
-    def show_jpeg(self, data: bytes) -> None:
-        qimg = QImage.fromData(data)
-        if qimg.isNull():
-            self.show_empty()
-            return
+    def show_bgr(self, bgr) -> None:
+        """Display a BGR numpy array, scaling to fit the cell."""
+        import cv2
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        h, w = rgb.shape[:2]
+        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
         pix = QPixmap.fromImage(qimg)
         scaled = pix.scaled(self._img.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._img.setPixmap(scaled)
@@ -422,10 +423,9 @@ class _CropCell(QWidget):
 class PersonCropGridWidget(QWidget):
     """Grid of per-camera person crop images with a time scrubber.
 
-    Reads JPEG crops from the detection_crops table (populated during
-    detection).  Shows an empty cell when no crop is available for a camera
-    at the current time.  One extra placeholder cell is reserved for a future
-    3D tracking view.
+    Reads JPEG crops from frame_cache_entries, overlays pose_observations
+    keypoints, and shows all cameras simultaneously.  One extra placeholder
+    cell is reserved for a future 3D tracking view.
     """
 
     def __init__(self, conn: sqlite3.Connection, sequence_id: str, parent=None) -> None:
@@ -440,9 +440,13 @@ class PersonCropGridWidget(QWidget):
         self._t_end: float = 0.0
         self._slider: QSlider | None = None
         self._time_label: QLabel | None = None
+        # Pre-loaded per-camera data (indexed by shot_video_id or camera_instance_id)
+        self._obs_kp: dict[str, dict[int, object]] = {}   # cam_instance_id→frame→kp
+        self._det_bboxes: dict[str, dict[int, tuple]] = {}  # svid→frame→(cx,cy,w,h)
         self._build()
 
     def _build(self) -> None:
+        import numpy as np
         from app.setup.db_context import SyncPoint, SyncTable
 
         seq = self._conn.execute(
@@ -474,7 +478,8 @@ class PersonCropGridWidget(QWidget):
                 track_by_svid[r["shot_video_id"]] = r["track_id"]
 
         cam_rows = self._conn.execute(
-            "SELECT cv.id, COALESCE(ci.label, cv.camera_instance_id) AS label "
+            "SELECT cv.id, cv.camera_instance_id, "
+            "       COALESCE(ci.label, cv.camera_instance_id) AS label "
             "FROM capture_videos cv "
             "LEFT JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
             "WHERE cv.shot_id = ? ORDER BY label",
@@ -504,11 +509,41 @@ class PersonCropGridWidget(QWidget):
         self._cameras = [
             {
                 "shot_video_id": r["id"],
+                "camera_instance_id": r["camera_instance_id"],
                 "label": r["label"],
                 "track_id": track_by_svid.get(r["id"]),
             }
             for r in cam_rows
         ]
+
+        # Pre-load pose_observations keypoints: camera_instance_id → frame → kp
+        for r in self._conn.execute(
+            "SELECT camera_instance_id, video_frame, kp_blob "
+            "FROM pose_observations WHERE sequence_id = ? AND person_id = 0",
+            (self._sequence_id,),
+        ):
+            raw = bytes(r["kp_blob"])
+            n = len(raw) // 12
+            kp = np.frombuffer(raw, dtype=np.float32).reshape(n, 3)
+            self._obs_kp.setdefault(r["camera_instance_id"], {})[r["video_frame"]] = kp
+
+        # Pre-load detection bboxes: svid → frame → (cx, cy, w, h)
+        if self._det_run_id:
+            for cam in self._cameras:
+                svid = cam["shot_video_id"]
+                tid = cam["track_id"]
+                if tid is None:
+                    continue
+                for r in self._conn.execute(
+                    "SELECT video_frame, bbox_x, bbox_y, bbox_w, bbox_h "
+                    "FROM person_detections "
+                    "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? "
+                    "AND region_type='full_body'",
+                    (self._det_run_id, svid, tid),
+                ):
+                    self._det_bboxes.setdefault(svid, {})[r["video_frame"]] = (
+                        r["bbox_x"], r["bbox_y"], r["bbox_w"], r["bbox_h"]
+                    )
 
         n_cells = len(self._cameras) + 1  # +1 for 3D placeholder
         ncols = max(2, min(n_cells, 4))
@@ -564,14 +599,21 @@ class PersonCropGridWidget(QWidget):
         self._load_frame(t)
 
     def _load_frame(self, global_time: float) -> None:
+        import cv2
+        import numpy as np
+        from app.pose.person_preview import draw_skeleton_on_crop
+
         if not self._det_run_id or not self._sync_table:
             for cell in self._cells:
                 cell.show_empty()
             return
+
         for i, cam in enumerate(self._cameras):
             svid = cam["shot_video_id"]
+            cam_id = cam["camera_instance_id"]
             track_id = cam["track_id"]
             cell = self._cells[i]
+
             if track_id is None:
                 cell.show_empty()
                 continue
@@ -579,20 +621,42 @@ class PersonCropGridWidget(QWidget):
             if frame_idx is None:
                 cell.show_empty()
                 continue
+
             row = self._conn.execute(
-                "SELECT image_data FROM frame_cache_entries "
+                "SELECT image_data, height_px FROM frame_cache_entries "
                 "WHERE shot_video_id=? AND cache_type='person_crop' AND track_id=? "
                 "AND region_type='full_body' AND detection_run_id=? "
                 "AND frame_idx BETWEEN ? AND ? "
                 "ORDER BY ABS(frame_idx - ?) LIMIT 1",
                 (svid, track_id, self._det_run_id,
-                 frame_idx - 3, frame_idx + 3,
-                 frame_idx),
+                 frame_idx - 3, frame_idx + 3, frame_idx),
             ).fetchone()
             if row is None:
                 cell.show_empty()
-            else:
-                cell.show_jpeg(bytes(row["image_data"]))
+                continue
+
+            buf = np.frombuffer(bytes(row["image_data"]), dtype=np.uint8)
+            crop_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if crop_bgr is None:
+                cell.show_empty()
+                continue
+
+            # Overlay pose_observations keypoints if available
+            kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
+            bbox = self._det_bboxes.get(svid, {}).get(frame_idx)
+            if kp is not None and bbox is not None:
+                cx, cy, bw, bh = bbox
+                x1 = cx - bw / 2
+                y1 = cy - bh / 2
+                # Scale factor: JPEG may be resized to _CROP_TARGET_HEIGHT
+                jpeg_h = row["height_px"] or crop_bgr.shape[0]
+                scale = jpeg_h / bh if bh > 0 else 1.0
+                kp_s = kp.copy()
+                kp_s[:, 0] = kp[:, 0] * scale
+                kp_s[:, 1] = kp[:, 1] * scale
+                draw_skeleton_on_crop(crop_bgr, kp_s, int(x1 * scale), int(y1 * scale))
+
+            cell.show_bgr(crop_bgr)
 
 
 # ---------------------------------------------------------------------------

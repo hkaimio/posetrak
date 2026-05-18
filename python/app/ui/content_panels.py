@@ -12,6 +12,7 @@ from math import ceil
 from PySide6.QtCore import QProcess, Qt
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -377,6 +378,79 @@ class DetectionRunPanel(QWidget):
 # ---------------------------------------------------------------------------
 
 
+def _parse_skeleton_bones(yaml_text: str, marker_names: list[str]) -> list[tuple[int, int]]:
+    """Return (idx_a, idx_b) bone pairs for the ordered marker_names list.
+
+    Connects the first marker of each parent joint to the first marker of each
+    child joint, giving one line per bone in the kinematic tree.
+    """
+    import yaml
+    data = yaml.safe_load(yaml_text)
+    joint_parent: dict[str, str | None] = {
+        j["name"]: j.get("parent") for j in data.get("joints", [])
+    }
+    marker_joint: dict[str, str] = {
+        m["name"]: m.get("parent", "") for m in data.get("markers", [])
+    }
+    name_to_idx = {name: i for i, name in enumerate(marker_names)}
+    joint_markers: dict[str, list[int]] = {}
+    for mname, jname in marker_joint.items():
+        idx = name_to_idx.get(mname)
+        if idx is not None and jname:
+            joint_markers.setdefault(jname, []).append(idx)
+    bones: list[tuple[int, int]] = []
+    for jname, parent in joint_parent.items():
+        if not parent:
+            continue
+        c = joint_markers.get(jname, [])
+        p = joint_markers.get(parent, [])
+        if c and p:
+            bones.append((p[0], c[0]))
+    return bones
+
+
+def _nearest_tracker_step(t: float, timestamps: list[tuple[float, int]]) -> int:
+    """Binary-search timestamps (sorted list of (timestamp_s, tracker_step)) for closest step."""
+    import bisect
+    ts_vals = [ts for ts, _ in timestamps]
+    i = bisect.bisect_left(ts_vals, t)
+    if i == 0:
+        return timestamps[0][1]
+    if i >= len(timestamps):
+        return timestamps[-1][1]
+    before, after = timestamps[i - 1], timestamps[i]
+    return before[1] if abs(before[0] - t) <= abs(after[0] - t) else after[1]
+
+
+def _draw_tracking_overlay(
+    img,
+    proj_xy,           # np.ndarray (n_markers, 2) full-frame predicted positions
+    bones: list[tuple[int, int]],
+    x1: float, y1: float, scale: float,
+) -> None:
+    import cv2, math
+    color = (0, 210, 210)  # distinct cyan — different from keypoint green
+    n = proj_xy.shape[0]
+
+    def to_crop(px: float, py: float) -> tuple[int, int]:
+        return (int((px - x1) * scale), int((py - y1) * scale))
+
+    for a_idx, b_idx in bones:
+        if a_idx >= n or b_idx >= n:
+            continue
+        ax, ay = float(proj_xy[a_idx, 0]), float(proj_xy[a_idx, 1])
+        bx, by = float(proj_xy[b_idx, 0]), float(proj_xy[b_idx, 1])
+        if math.isnan(ax) or math.isnan(bx):
+            continue
+        cv2.line(img, to_crop(ax, ay), to_crop(bx, by), color, 1, cv2.LINE_AA)
+
+    for i in range(n):
+        px, py = float(proj_xy[i, 0]), float(proj_xy[i, 1])
+        if math.isnan(px) or math.isnan(py):
+            continue
+        cv2.circle(img, to_crop(px, py), 3, color, -1, cv2.LINE_AA)
+
+
 class _CropCell(QWidget):
     """One camera cell in the crop grid: name label + image."""
 
@@ -438,11 +512,18 @@ class PersonCropGridWidget(QWidget):
         self._det_run_id: str | None = None
         self._t_start: float = 0.0
         self._t_end: float = 0.0
+        self._current_t: float = 0.0
         self._slider: QSlider | None = None
         self._time_label: QLabel | None = None
+        self._tracking_combo: QComboBox | None = None
         # Pre-loaded per-camera data (indexed by shot_video_id or camera_instance_id)
         self._obs_kp: dict[str, dict[int, object]] = {}   # cam_instance_id→frame→kp
         self._det_bboxes: dict[str, dict[int, tuple]] = {}  # svid→frame→(cx,cy,w,h)
+        # Tracking overlay data
+        # cam_instance_id → tracker_step → (n_markers, 2) predicted pixel positions
+        self._tracking_proj: dict[str, dict[int, object]] = {}
+        self._tracking_bones: list[tuple[int, int]] = []
+        self._tracking_timestamps: list[tuple[float, int]] = []  # sorted (ts, step)
         self._build()
 
     def _build(self) -> None:
@@ -584,19 +665,122 @@ class PersonCropGridWidget(QWidget):
         slider_row.addWidget(self._slider)
         slider_row.addWidget(self._time_label)
 
+        # Tracking overlay selector
+        self._tracking_combo = QComboBox()
+        self._tracking_combo.addItem("No tracking overlay", None)
+        run_rows = self._conn.execute(
+            "SELECT tr.id, s.name AS skel_name, tr.ran_at "
+            "FROM tracking_runs tr "
+            "LEFT JOIN skeletons s ON s.id = tr.skeleton_id "
+            "WHERE tr.observation_sequence_id = ? ORDER BY tr.ran_at DESC",
+            (self._sequence_id,),
+        ).fetchall()
+        for r in run_rows:
+            label = f"{r['skel_name'] or '?'}  {_fmt_ts(r['ran_at'])}"
+            self._tracking_combo.addItem(label, r["id"])
+        self._tracking_combo.currentIndexChanged.connect(self._on_tracking_changed)
+
+        tracking_row = QHBoxLayout()
+        tracking_row.addWidget(QLabel("Tracking overlay:"))
+        tracking_row.addWidget(self._tracking_combo, stretch=1)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
         layout.addLayout(grid, stretch=1)
+        layout.addLayout(tracking_row)
         layout.addLayout(slider_row)
 
+        self._current_t = self._t_start
         self._load_frame(self._t_start)
 
     def _on_slider(self, value: int) -> None:
-        t = self._t_start + value / 1000.0
+        self._current_t = self._t_start + value / 1000.0
         if self._time_label is not None:
-            self._time_label.setText(_fmt_time(t))
-        self._load_frame(t)
+            self._time_label.setText(_fmt_time(self._current_t))
+        self._load_frame(self._current_t)
+
+    def _on_tracking_changed(self, _index: int) -> None:
+        run_id = self._tracking_combo.currentData() if self._tracking_combo else None
+        self._load_tracking_run(run_id)
+
+    def _load_tracking_run(self, run_id: str | None) -> None:
+        import json
+        import numpy as np
+
+        self._tracking_proj.clear()
+        self._tracking_bones.clear()
+        self._tracking_timestamps.clear()
+
+        if not run_id:
+            self._load_frame(self._current_t)
+            return
+
+        run = self._conn.execute(
+            "SELECT active_camera_ids, marker_names, skeleton_id "
+            "FROM tracking_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+        if run is None:
+            self._load_frame(self._current_t)
+            return
+
+        cam_labels: list[str] = json.loads(run["active_camera_ids"] or "[]")
+        marker_names: list[str] = json.loads(run["marker_names"] or "[]")
+        n_cams, n_markers = len(cam_labels), len(marker_names)
+        if n_cams == 0 or n_markers == 0:
+            self._load_frame(self._current_t)
+            return
+
+        # Map camera_instance label → camera_instance_id
+        placeholders = ",".join("?" * n_cams)
+        label_to_cam_id: dict[str, str] = {}
+        for r in self._conn.execute(
+            f"SELECT id, label FROM camera_instances WHERE label IN ({placeholders})",
+            cam_labels,
+        ):
+            label_to_cam_id[r["label"]] = r["id"]
+
+        # Load timestamps for nearest-step lookup
+        ts_rows = self._conn.execute(
+            "SELECT tracker_step, timestamp_s FROM tracking_results "
+            "WHERE run_id=? AND person_id=0 AND is_smoothed=0 ORDER BY tracker_step",
+            (run_id,),
+        ).fetchall()
+        step_to_ts = {r["tracker_step"]: r["timestamp_s"] for r in ts_rows}
+        self._tracking_timestamps = sorted(
+            (ts, step) for step, ts in step_to_ts.items()
+        )
+
+        # Load and parse all obs blobs
+        obs_rows = self._conn.execute(
+            "SELECT tracker_step, obs_blob FROM tracking_obs_results "
+            "WHERE run_id=? AND person_id=0 ORDER BY tracker_step",
+            (run_id,),
+        ).fetchall()
+        expected = n_cams * n_markers * 8
+        for obs_row in obs_rows:
+            step = obs_row["tracker_step"]
+            blob = np.frombuffer(bytes(obs_row["obs_blob"]), dtype="<f4")
+            if len(blob) != expected:
+                continue
+            obs = blob.reshape(n_cams, n_markers, 8)
+            for ci, label in enumerate(cam_labels):
+                cam_id = label_to_cam_id.get(label)
+                if cam_id is None:
+                    continue
+                pred_xy = obs[ci, :, 2:4].copy()  # (n_markers, 2) predicted positions
+                self._tracking_proj.setdefault(cam_id, {})[step] = pred_xy
+
+        # Parse skeleton YAML for bone connectivity
+        skel = self._conn.execute(
+            "SELECT yaml_content FROM skeletons WHERE id=?",
+            (run["skeleton_id"],),
+        ).fetchone()
+        if skel and skel["yaml_content"]:
+            self._tracking_bones = _parse_skeleton_bones(skel["yaml_content"], marker_names)
+
+        self._load_frame(self._current_t)
 
     def _load_frame(self, global_time: float) -> None:
         import cv2
@@ -655,6 +839,20 @@ class PersonCropGridWidget(QWidget):
                 kp_s[:, 0] = kp[:, 0] * scale
                 kp_s[:, 1] = kp[:, 1] * scale
                 draw_skeleton_on_crop(crop_bgr, kp_s, int(x1 * scale), int(y1 * scale))
+
+            # Overlay tracking solution projected markers (cyan)
+            if self._tracking_timestamps and bbox is not None:
+                step = _nearest_tracker_step(global_time, self._tracking_timestamps)
+                proj = self._tracking_proj.get(cam_id, {}).get(step)
+                if proj is not None:
+                    cx, cy, bw, bh = bbox
+                    x1 = cx - bw / 2
+                    y1 = cy - bh / 2
+                    jpeg_h = row["height_px"] or crop_bgr.shape[0]
+                    scale = jpeg_h / bh if bh > 0 else 1.0
+                    _draw_tracking_overlay(
+                        crop_bgr, proj, self._tracking_bones, x1, y1, scale
+                    )
 
             cell.show_bgr(crop_bgr)
 

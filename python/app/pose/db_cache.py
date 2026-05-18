@@ -12,6 +12,7 @@ from posetrak.db.db import generate_id
 
 _CROP_JPEG_QUALITY = 75
 _CROP_TARGET_HEIGHT = 240
+_CROP_MARGIN = 0.20  # fraction of bbox dimension added on each side
 
 
 # ---------------------------------------------------------------------------
@@ -99,21 +100,30 @@ def list_detection_runs(
 _BATCH_SIZE = 200
 
 
-def _encode_crop(img: "np.ndarray", bbox: tuple) -> "tuple[bytes, int, int] | None":
-    """Crop *img* by *bbox* (cx, cy, w, h) and return (jpeg, width_px, height_px)."""
+def _encode_crop(img: "np.ndarray", bbox: tuple) -> "tuple[bytes, int, int, int, int, int, int] | None":
+    """Crop *img* by *bbox* (cx, cy, w, h) with margin and return
+    (jpeg, jpeg_w, jpeg_h, src_x, src_y, src_w, src_h).
+
+    src_* are the crop coordinates in the original full-resolution frame
+    before any JPEG downscale.
+    """
     cx, cy, w, h = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
-    x1, y1 = max(0, int(cx - w / 2)), max(0, int(cy - h / 2))
-    x2, y2 = min(img.shape[1], int(cx + w / 2)), min(img.shape[0], int(cy + h / 2))
+    mx, my = w * _CROP_MARGIN, h * _CROP_MARGIN
+    x1 = max(0, int(cx - w / 2 - mx))
+    y1 = max(0, int(cy - h / 2 - my))
+    x2 = min(img.shape[1], int(cx + w / 2 + mx))
+    y2 = min(img.shape[0], int(cy + h / 2 + my))
     if x2 <= x1 or y2 <= y1:
         return None
     crop = img[y1:y2, x1:x2]
+    src_w, src_h = x2 - x1, y2 - y1
     if crop.shape[0] > _CROP_TARGET_HEIGHT:
         scale = _CROP_TARGET_HEIGHT / crop.shape[0]
         crop = cv2.resize(crop, (int(crop.shape[1] * scale), _CROP_TARGET_HEIGHT))
     ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, _CROP_JPEG_QUALITY])
     if not ok:
         return None
-    return buf.tobytes(), crop.shape[1], crop.shape[0]
+    return buf.tobytes(), crop.shape[1], crop.shape[0], x1, y1, src_w, src_h
 
 
 class DetectionBatchWriter:
@@ -171,10 +181,11 @@ class DetectionBatchWriter:
             if img is not None:
                 result = _encode_crop(img, det.bbox)
                 if result is not None:
-                    jpeg, wpx, hpx = result
+                    jpeg, wpx, hpx, src_x, src_y, src_w, src_h = result
                     self._crop_rows.append((
                         self._svid, video_frame, "person_crop",
                         det.track_id, "full_body", wpx, hpx, jpeg, self._run_id,
+                        src_x, src_y, src_w, src_h,
                     ))
 
             first, last = self._track_spans.get(det.track_id, (video_frame, video_frame))
@@ -206,8 +217,9 @@ class DetectionBatchWriter:
             self._session.executemany(
                 "INSERT OR REPLACE INTO frame_cache_entries "
                 "(shot_video_id, frame_idx, cache_type, track_id, region_type, "
-                " width_px, height_px, image_data, detection_run_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+                " width_px, height_px, image_data, detection_run_id, "
+                " src_x, src_y, src_w, src_h) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 self._crop_rows,
             )
             self._crop_rows.clear()

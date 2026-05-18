@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 5
-SESSION_SCHEMA_VERSION: Final[int] = 17
+SESSION_SCHEMA_VERSION: Final[int] = 18
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -564,6 +564,20 @@ def _migrate_session_v16_to_v17(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v17_to_v18(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 17 to 18.
+
+    v18 adds src_x, src_y, src_w, src_h columns to frame_cache_entries so
+    that the exact crop rectangle (in original-frame pixels, before JPEG
+    downscale) is stored alongside PERSON_CROP entries.  This lets overlay
+    code derive the correct coordinate transform without re-reading the
+    detection bounding box.  Existing rows get NULL for all four columns.
+    """
+    sql = (_DB_DIR / "migrations" / "017_frame_cache_src_rect.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -635,6 +649,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 16
     if actual == 16:
         _migrate_session_v16_to_v17(conn)
+        actual = 17
+    if actual == 17:
+        _migrate_session_v17_to_v18(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

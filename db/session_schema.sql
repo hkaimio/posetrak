@@ -336,6 +336,13 @@ CREATE TABLE IF NOT EXISTS frame_cache_entries (
     height_px           INTEGER NOT NULL DEFAULT 0,
     image_data          BLOB    NOT NULL,
     detection_run_id    TEXT    NOT NULL DEFAULT '',
+    -- Source rectangle in original full-resolution frame (pixels).
+    -- Set for PERSON_CROP; NULL for FULL_FRAME and THUMB.
+    -- src_w/src_h are the crop dimensions BEFORE any JPEG downscale.
+    src_x               INTEGER,
+    src_y               INTEGER,
+    src_w               INTEGER,
+    src_h               INTEGER,
     PRIMARY KEY (shot_video_id, frame_idx, cache_type, track_id, region_type, width_px, detection_run_id)
 );
 

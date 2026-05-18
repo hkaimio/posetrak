@@ -807,7 +807,8 @@ class PersonCropGridWidget(QWidget):
                 continue
 
             row = self._conn.execute(
-                "SELECT image_data, height_px FROM frame_cache_entries "
+                "SELECT image_data, height_px, src_x, src_y, src_w, src_h "
+                "FROM frame_cache_entries "
                 "WHERE shot_video_id=? AND cache_type='person_crop' AND track_id=? "
                 "AND region_type='full_body' AND detection_run_id=? "
                 "AND frame_idx BETWEEN ? AND ? "
@@ -825,31 +826,35 @@ class PersonCropGridWidget(QWidget):
                 cell.show_empty()
                 continue
 
-            # Overlay pose_observations keypoints if available
-            kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
+            # Resolve crop-to-frame transform: prefer stored src_* (exact),
+            # fall back to bbox (old thumbnails without margin stored).
             bbox = self._det_bboxes.get(svid, {}).get(frame_idx)
-            if kp is not None and bbox is not None:
+            if row["src_x"] is not None:
+                x1, y1 = float(row["src_x"]), float(row["src_y"])
+                src_h = float(row["src_h"])
+            elif bbox is not None:
                 cx, cy, bw, bh = bbox
-                x1 = cx - bw / 2
-                y1 = cy - bh / 2
-                # Scale factor: JPEG may be resized to _CROP_TARGET_HEIGHT
-                jpeg_h = row["height_px"] or crop_bgr.shape[0]
-                scale = jpeg_h / bh if bh > 0 else 1.0
+                x1, y1 = cx - bw / 2, cy - bh / 2
+                src_h = bh
+            else:
+                x1 = y1 = 0.0
+                src_h = float(crop_bgr.shape[0])
+            jpeg_h = float(row["height_px"] or crop_bgr.shape[0])
+            scale = jpeg_h / src_h if src_h > 0 else 1.0
+
+            # Overlay pose_observations keypoints
+            kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
+            if kp is not None:
                 kp_s = kp.copy()
                 kp_s[:, 0] = kp[:, 0] * scale
                 kp_s[:, 1] = kp[:, 1] * scale
                 draw_skeleton_on_crop(crop_bgr, kp_s, int(x1 * scale), int(y1 * scale))
 
             # Overlay tracking solution projected markers (cyan)
-            if self._tracking_timestamps and bbox is not None:
+            if self._tracking_timestamps:
                 step = _nearest_tracker_step(global_time, self._tracking_timestamps)
                 proj = self._tracking_proj.get(cam_id, {}).get(step)
                 if proj is not None:
-                    cx, cy, bw, bh = bbox
-                    x1 = cx - bw / 2
-                    y1 = cy - bh / 2
-                    jpeg_h = row["height_px"] or crop_bgr.shape[0]
-                    scale = jpeg_h / bh if bh > 0 else 1.0
                     _draw_tracking_overlay(
                         crop_bgr, proj, self._tracking_bones, x1, y1, scale
                     )

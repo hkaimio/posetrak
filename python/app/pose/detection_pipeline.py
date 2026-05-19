@@ -27,6 +27,31 @@ from app.setup.db_context import SyncPoint, SyncTable
 ProgressCallback = Callable[[int, int, str], None]  # done, total, camera_id
 
 
+def _stream_rotation(stream) -> int:
+    """Return clockwise rotation degrees (0/90/180/270) from a PyAV video stream.
+
+    Android and iPhone cameras embed a 'rotate' tag in the container when the
+    physical sensor orientation differs from the recording orientation.  PyAV
+    exposes this in stream.metadata but does NOT apply it in to_ndarray().
+    """
+    rotate_str = (stream.metadata or {}).get("rotate", "0") or "0"
+    try:
+        return int(rotate_str) % 360
+    except (ValueError, TypeError):
+        return 0
+
+
+def _apply_rotation(img: np.ndarray, degrees: int) -> np.ndarray:
+    """Rotate *img* clockwise by *degrees* (must be 0/90/180/270)."""
+    if degrees == 90:
+        return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    if degrees == 180:
+        return cv2.rotate(img, cv2.ROTATE_180)
+    if degrees == 270:
+        return cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return img
+
+
 @dataclass
 class CameraInfo:
     shot_video_id: str
@@ -287,6 +312,13 @@ class DetectionPipeline:
             # (e.g. 120 for slow-motion) rather than the container's pts cadence.
             container_fps = float(stream.average_rate)
 
+            # Respect container rotation metadata.  PyAV does not apply it
+            # automatically in to_ndarray(); video players do — that is why
+            # the display view looks correct while decoded frames are not.
+            rotation = _stream_rotation(stream)
+            if rotation:
+                _log.info("_iter_frames_av: %s rotate=%d° from metadata", path, rotation)
+
             if first_frame > 0:
                 seek_s = max(0.0, (first_frame - 1) / container_fps)
                 seek_pts = int(seek_s / time_base)
@@ -304,18 +336,28 @@ class DetectionPipeline:
                     frame_idx = first_frame
                 if frame_idx >= last_frame:
                     break
-                yield frame_idx, av_frame.to_ndarray(format="bgr24")
+                img = av_frame.to_ndarray(format="bgr24")
+                if rotation:
+                    img = _apply_rotation(img, rotation)
+                yield frame_idx, img
                 frame_idx += 1
 
     @staticmethod
     def _iter_frames_cv2(path: str, first_frame: int, last_frame: int):
         cap = cv2.VideoCapture(path)
+        # cv2 does not auto-rotate on most backends; read the orientation flag
+        # and apply it manually so the fallback path behaves the same as av.
+        rotation = int(cap.get(cv2.CAP_PROP_ORIENTATION_META) or 0) % 360
+        if rotation:
+            _log.info("_iter_frames_cv2: %s rotate=%d° from metadata", path, rotation)
         cap.set(cv2.CAP_PROP_POS_FRAMES, first_frame)
         frame_idx = first_frame
         while frame_idx < last_frame:
             ok, img = cap.read()
             if not ok:
                 break
+            if rotation:
+                img = _apply_rotation(img, rotation)
             yield frame_idx, img
             frame_idx += 1
         cap.release()

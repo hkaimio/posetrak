@@ -298,6 +298,7 @@ class StitcherPanel(QWidget):
                 ref_timestamp_s=ref_ts,
             ))
         self._frame_view.load_cameras(cameras)
+        self._frame_view.set_pose_data(self._conn, self._run_id, None)
 
     def _restore_assignments(self) -> None:
         rows = self._conn.execute(

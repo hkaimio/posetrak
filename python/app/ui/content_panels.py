@@ -13,7 +13,6 @@ from PySide6.QtCore import QProcess, Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -82,7 +81,7 @@ def _fmt_time(s: float | None) -> str:
 
 
 class CapturePanel(QWidget):
-    """Detail view for a capture (captures row)."""
+    """Sync scrubber + pose detection launcher for a capture."""
 
     data_changed = Signal()  # emitted after a new trial+detection run is created
 
@@ -92,120 +91,138 @@ class CapturePanel(QWidget):
         self._conn = conn
         self._capture_id = capture_id
         self._session_path = session_path
-        self._start_spin: QDoubleSpinBox | None = None
-        self._end_spin: QDoubleSpinBox | None = None
+        self._scrubber = None
+        self._start_s: float = 0.0
+        self._end_s: float = 0.0
+        self._start_label: QLabel | None = None
+        self._end_label: QLabel | None = None
+        self._detect_btn: QPushButton | None = None
         self._build()
 
+    def shutdown(self) -> None:
+        if self._scrubber is not None:
+            self._scrubber.shutdown()
+
     def _build(self) -> None:
-        conn = self._conn
-        cap = conn.execute(
-            "SELECT id, label, capture_number, notes, extrinsic_calibration_id "
-            "FROM captures WHERE id = ?", (self._capture_id,)
-        ).fetchone()
-        if cap is None:
-            return
+        from app.setup.db_context import SyncPoint, SyncTable
+        from app.setup.frame_cache import FrameCache
+        from app.setup.multi_video_scrubber import CellInfo, MultiVideoScrubber
 
-        inner = QWidget()
-        vbox = QVBoxLayout(inner)
-        vbox.setAlignment(Qt.AlignmentFlag.AlignTop)
-
-        title = cap["label"] or f"Capture {cap['capture_number']}"
-        lbl = QLabel(f"<h2>{title}</h2>")
-        vbox.addWidget(lbl)
-
-        # Basic info
-        info = _section("Capture info")
-        form = QFormLayout()
-        form.addRow("Number:", QLabel(str(cap["capture_number"])))
-        form.addRow("Notes:", QLabel(cap["notes"] or "—"))
-        ext_id = cap["extrinsic_calibration_id"]
-        ext_label = "✓ set" if ext_id else "✗ not set"
-        form.addRow("Extrinsics:", QLabel(ext_label))
-        info.layout().addLayout(form)
-        vbox.addWidget(info)
-
-        # Videos
-        videos = conn.execute(
-            "SELECT cv.file_path, cv.actual_fps, cv.first_video_frame, cv.last_video_frame, "
-            "       ci.label AS cam_label "
+        videos = self._conn.execute(
+            "SELECT cv.id, cv.file_path, cv.actual_fps, "
+            "       cv.first_video_frame, cv.last_video_frame, "
+            "       COALESCE(ci.label, cv.id) AS cam_label "
             "FROM capture_videos cv "
             "LEFT JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
-            "WHERE cv.shot_id = ? ORDER BY ci.label",
+            "WHERE cv.shot_id = ? ORDER BY cam_label",
             (self._capture_id,),
         ).fetchall()
-        vid_box = _section(f"Videos ({len(videos)})")
-        for v in videos:
-            cam = v["cam_label"] or "unknown camera"
-            n_frames = (v["last_video_frame"] or 0) - (v["first_video_frame"] or 0) + 1
-            lbl_text = (
-                f"<b>{cam}</b>  {v['actual_fps']:.2f} fps  "
-                f"{n_frames} frames<br>"
-                f"<small>{v['file_path']}</small>"
-            )
-            lbl = QLabel(lbl_text)
-            lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            vid_box.layout().addWidget(lbl)
-        if not videos:
-            vid_box.layout().addWidget(QLabel("No videos attached."))
-        vbox.addWidget(vid_box)
 
-        # Sync configs
-        syncs = conn.execute(
+        syncs = self._conn.execute(
             "SELECT id, created_by, notes FROM sync_configs WHERE shot_id = ? ORDER BY rowid",
             (self._capture_id,),
         ).fetchall()
-        sync_box = _section(f"Sync configs ({len(syncs)})")
-        for s in syncs:
-            sync_box.layout().addWidget(
-                QLabel(f"<b>{s['created_by'] or '—'}</b>  {s['notes'] or ''}")
-            )
-        if not syncs:
-            sync_box.layout().addWidget(QLabel("No sync config — set one up before running detection."))
-        vbox.addWidget(sync_box)
-
-        # Detection time range + launch
-        detect_box = _section("Detect Pose")
-        range_row = QHBoxLayout()
-        range_row.addWidget(QLabel("Start:"))
-        self._start_spin = QDoubleSpinBox()
-        self._start_spin.setRange(0.0, 100_000.0)
-        self._start_spin.setDecimals(2)
-        self._start_spin.setSuffix(" s")
-        range_row.addWidget(self._start_spin)
-        range_row.addSpacing(8)
-        range_row.addWidget(QLabel("End:"))
-        self._end_spin = QDoubleSpinBox()
-        self._end_spin.setRange(0.0, 100_000.0)
-        self._end_spin.setDecimals(2)
-        self._end_spin.setSuffix(" s")
-        range_row.addWidget(self._end_spin)
-        range_row.addStretch()
-        detect_box.layout().addLayout(range_row)
-        detect_btn = _action_btn("Detect Pose…")
-        detect_btn.clicked.connect(self._open_detection_dialog)
         has_sync = bool(syncs)
-        detect_btn.setEnabled(has_sync)
-        if not has_sync:
-            detect_btn.setToolTip("Set up sync first")
-        detect_box.layout().addWidget(detect_btn)
-        vbox.addWidget(detect_box)
 
-        # Utility actions
-        btn_row = QHBoxLayout()
-        sync_btn = _action_btn("Set up sync…")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        if videos:
+            cells = []
+            for v in videos:
+                first = v["first_video_frame"] or 0
+                last = v["last_video_frame"] or 0
+                total = max(1, last - first + 1)
+                cells.append(CellInfo(
+                    shot_video_id=v["id"],
+                    file_path=v["file_path"] or "",
+                    total_frames=total,
+                    fps=float(v["actual_fps"] or 30.0),
+                    label=v["cam_label"],
+                ))
+
+            cache = FrameCache(self._conn)
+            self._scrubber = MultiVideoScrubber(cells, cache)
+
+            # Load sync table into the scrubber so global time slider appears
+            if has_sync:
+                sync_id = syncs[0]["id"]
+                sp_rows = self._conn.execute(
+                    "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, cv.actual_fps "
+                    "FROM sync_points sp "
+                    "JOIN capture_videos cv ON cv.id = sp.shot_video_id "
+                    "WHERE sp.sync_config_id = ? ORDER BY sp.shot_video_id, sp.video_frame",
+                    (sync_id,),
+                ).fetchall()
+                if sp_rows:
+                    fps_by_video = {r["shot_video_id"]: float(r["actual_fps"] or 30.0)
+                                    for r in sp_rows}
+                    sync_pts = [
+                        SyncPoint(
+                            camera_instance_id=r["shot_video_id"],
+                            shot_video_id=r["shot_video_id"],
+                            video_frame=int(r["video_frame"]),
+                            timestamp_s=float(r["timestamp_s"]),
+                        )
+                        for r in sp_rows
+                    ]
+                    self._scrubber.reload_sync(SyncTable(sync_pts, fps_by_video))
+
+            root.addWidget(self._scrubber, 1)
+        else:
+            root.addWidget(QLabel("No videos attached to this capture."), 1)
+
+        # Bottom toolbar
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(6, 4, 6, 4)
+        toolbar.setSpacing(6)
+
+        self._start_label = QLabel("Start: —")
+        mark_start_btn = QPushButton("Mark Start")
+        mark_start_btn.setMaximumWidth(90)
+        mark_start_btn.clicked.connect(self._mark_start)
+
+        self._end_label = QLabel("End: —")
+        mark_end_btn = QPushButton("Mark End")
+        mark_end_btn.setMaximumWidth(90)
+        mark_end_btn.clicked.connect(self._mark_end)
+
+        sync_btn = QPushButton("Set up sync…")
         sync_btn.clicked.connect(self._open_sync)
-        btn_row.addWidget(sync_btn)
 
-        ext_btn = _action_btn("Import extrinsics…")
+        ext_btn = QPushButton("Extrinsics…")
         ext_btn.clicked.connect(self._open_extrinsics)
-        btn_row.addWidget(ext_btn)
 
-        btn_row.addStretch()
-        vbox.addLayout(btn_row)
+        self._detect_btn = QPushButton("Detect Pose…")
+        self._detect_btn.clicked.connect(self._open_detection_dialog)
+        self._detect_btn.setEnabled(has_sync and bool(videos))
+        if not has_sync:
+            self._detect_btn.setToolTip("Set up sync first")
 
-        self.setLayout(QVBoxLayout())
-        self.layout().setContentsMargins(0, 0, 0, 0)
-        self.layout().addWidget(_scrollable(inner))
+        toolbar.addWidget(self._start_label)
+        toolbar.addWidget(mark_start_btn)
+        toolbar.addSpacing(12)
+        toolbar.addWidget(self._end_label)
+        toolbar.addWidget(mark_end_btn)
+        toolbar.addStretch()
+        toolbar.addWidget(sync_btn)
+        toolbar.addWidget(ext_btn)
+        toolbar.addWidget(self._detect_btn)
+
+        root.addLayout(toolbar)
+
+    def _mark_start(self) -> None:
+        if self._scrubber is not None:
+            self._start_s = self._scrubber.current_timestamp
+            if self._start_label is not None:
+                self._start_label.setText(f"Start: {self._start_s:.3f} s")
+
+    def _mark_end(self) -> None:
+        if self._scrubber is not None:
+            self._end_s = self._scrubber.current_timestamp
+            if self._end_label is not None:
+                self._end_label.setText(f"End: {self._end_s:.3f} s")
 
     def _open_sync(self) -> None:
         from app.setup.db_context import DBContext
@@ -218,6 +235,40 @@ class CapturePanel(QWidget):
         ctx = DBContext(self._conn, session_row["id"])
         dlg = SyncDialog(ctx, self._capture_id, parent=self)
         dlg.exec()
+        self._refresh_sync()
+
+    def _refresh_sync(self) -> None:
+        from app.setup.db_context import SyncPoint, SyncTable
+        syncs = self._conn.execute(
+            "SELECT id FROM sync_configs WHERE shot_id = ? ORDER BY rowid",
+            (self._capture_id,),
+        ).fetchall()
+        has_sync = bool(syncs)
+        if self._detect_btn is not None:
+            self._detect_btn.setEnabled(has_sync and self._scrubber is not None)
+        if not has_sync or self._scrubber is None:
+            return
+        sync_id = syncs[0]["id"]
+        sp_rows = self._conn.execute(
+            "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, cv.actual_fps "
+            "FROM sync_points sp "
+            "JOIN capture_videos cv ON cv.id = sp.shot_video_id "
+            "WHERE sp.sync_config_id = ? ORDER BY sp.shot_video_id, sp.video_frame",
+            (sync_id,),
+        ).fetchall()
+        if not sp_rows:
+            return
+        fps_by_video = {r["shot_video_id"]: float(r["actual_fps"] or 30.0) for r in sp_rows}
+        sync_pts = [
+            SyncPoint(
+                camera_instance_id=r["shot_video_id"],
+                shot_video_id=r["shot_video_id"],
+                video_frame=int(r["video_frame"]),
+                timestamp_s=float(r["timestamp_s"]),
+            )
+            for r in sp_rows
+        ]
+        self._scrubber.reload_sync(SyncTable(sync_pts, fps_by_video))
 
     def _open_extrinsics(self) -> None:
         from app.setup.page_extrinsics import ExtrinsicsImportDialog
@@ -231,19 +282,16 @@ class CapturePanel(QWidget):
             shot_ids=[self._capture_id],
             parent=self,
         )
-        if dlg.exec():
-            pass  # tree reloads when user returns to main window
+        dlg.exec()
 
     def _open_detection_dialog(self) -> None:
         from app.pose.run_detection_dialog import RunDetectionDialog
-        start_s = self._start_spin.value() if self._start_spin is not None else None
-        end_s = self._end_spin.value() if self._end_spin is not None else None
         dlg = RunDetectionDialog(
             conn=self._conn,
             session_path=self._session_path,
             capture_id=self._capture_id,
-            time_start_s=start_s,
-            time_end_s=end_s,
+            time_start_s=self._start_s if self._start_s > 0 else None,
+            time_end_s=self._end_s if self._end_s > 0 else None,
             parent=self,
         )
         dlg.detection_finished.connect(lambda _tid, _rid: self.data_changed.emit())
@@ -283,6 +331,11 @@ class TrialPanel(QWidget):
 
     def has_unsaved_changes(self) -> bool:
         return self._stitcher_panel is not None and self._stitcher_panel.is_dirty
+
+    def save_changes(self) -> bool:
+        if self._stitcher_panel is not None:
+            return self._stitcher_panel.apply()
+        return True
 
     # ------------------------------------------------------------------
 
@@ -473,6 +526,55 @@ class DetectionRunPanel(QWidget):
         if isinstance(main, MainWindow):
             self._pose_win.data_changed.connect(main.reload_tree)
         self._pose_win.show()
+
+
+# ---------------------------------------------------------------------------
+# StandaloneRunPanel — stitcher for a detection run not linked to a trial
+# ---------------------------------------------------------------------------
+
+
+class StandaloneRunPanel(QWidget):
+    """Stitcher wrapper for a detection run that isn't associated with a trial."""
+
+    data_changed = Signal()
+
+    def __init__(self, conn: sqlite3.Connection, run_id: str, parent=None) -> None:
+        super().__init__(parent)
+        self._conn = conn
+        self._run_id = run_id
+        self._stitcher_panel = None
+        self._build()
+
+    def has_unsaved_changes(self) -> bool:
+        return self._stitcher_panel is not None and self._stitcher_panel.is_dirty
+
+    def save_changes(self) -> bool:
+        if self._stitcher_panel is not None:
+            return self._stitcher_panel.apply()
+        return True
+
+    def _build(self) -> None:
+        from app.pose.stitcher_panel import StitcherPanel
+
+        run = self._conn.execute(
+            "SELECT detector_model, pose_model, created_at FROM detection_runs WHERE id = ?",
+            (self._run_id,),
+        ).fetchone()
+
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(4, 4, 4, 4)
+        vbox.setSpacing(4)
+
+        if run:
+            vbox.addWidget(QLabel(
+                f"Detection run: {run['detector_model']}+{run['pose_model']}"
+                f"  ({_fmt_ts(run['created_at'])})  — not linked to a trial"
+            ))
+
+        panel = StitcherPanel(self._conn, self._run_id, parent=self)
+        panel.applied.connect(self.data_changed)
+        self._stitcher_panel = panel
+        vbox.addWidget(panel, 1)
 
 
 # ---------------------------------------------------------------------------

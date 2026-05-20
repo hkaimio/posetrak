@@ -371,20 +371,18 @@ class MainWindow(QMainWindow):
         self._swap_content(panel)
 
     def _show_detection_run(self, run_id: str) -> None:
-        # Show the parent trial's stitcher panel with this run pre-selected
-        from app.ui.content_panels import TrialPanel
         row = self._session_conn.execute(
             "SELECT trial_id FROM detection_runs WHERE id = ?", (run_id,)
         ).fetchone()
         trial_id = row["trial_id"] if row else None
         if trial_id:
+            from app.ui.content_panels import TrialPanel
             panel = TrialPanel(self._session_conn, trial_id, preselect_run_id=run_id)
-            panel.data_changed.connect(self.reload_tree)
-            self._swap_content(panel)
         else:
-            from app.ui.content_panels import DetectionRunPanel
-            panel = DetectionRunPanel(self._session_conn, run_id, self._session_path)
-            self._swap_content(panel)
+            from app.ui.content_panels import StandaloneRunPanel
+            panel = StandaloneRunPanel(self._session_conn, run_id)
+        panel.data_changed.connect(self.reload_tree)
+        self._swap_content(panel)
 
     def _show_person_track(self, sequence_id: str) -> None:
         from app.ui.content_panels import PersonPanel
@@ -396,26 +394,35 @@ class MainWindow(QMainWindow):
         panel = TrackingRunPanel(self._session_conn, run_id)
         self._swap_content(panel)
 
-    def _swap_content(self, widget: QWidget) -> None:
+    def _swap_content(self, widget) -> None:
         """Replace the content panel, removing the previous non-placeholder widget."""
         # Prompt if the outgoing panel has unsaved changes (e.g. TrialPanel dirty).
         if self._content.count() > 1:
             current = self._content.widget(1)
             if (hasattr(current, "has_unsaved_changes")
                     and current.has_unsaved_changes()):
-                ans = QMessageBox.question(
-                    self,
-                    "Unsaved changes",
-                    "You have unapplied assignments. Navigate away and discard them?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                )
-                if ans != QMessageBox.StandardButton.Yes:
-                    return
+                msg = QMessageBox(self)
+                msg.setWindowTitle("Unsaved changes")
+                msg.setText("You have unapplied assignments.")
+                apply_btn = msg.addButton("Apply & Leave", QMessageBox.ButtonRole.AcceptRole)
+                discard_btn = msg.addButton("Discard", QMessageBox.ButtonRole.DestructiveRole)
+                msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+                msg.exec()
+                clicked = msg.clickedButton()
+                if clicked is apply_btn:
+                    if hasattr(current, "save_changes") and not current.save_changes():
+                        return  # apply failed — stay on the panel
+                elif clicked is discard_btn:
+                    pass  # fall through to swap
+                else:
+                    return  # cancel
 
         # Index 0 is always the permanent placeholder; everything else is transient.
         while self._content.count() > 1:
             old = self._content.widget(1)
             self._content.removeWidget(old)
+            if hasattr(old, "shutdown"):
+                old.shutdown()
             old.deleteLater()
         self._content.addWidget(widget)
         self._content.setCurrentIndex(1)

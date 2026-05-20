@@ -256,61 +256,129 @@ class CapturePanel(QWidget):
 
 
 class TrialPanel(QWidget):
-    """Detail view for a trial (trials row)."""
+    """Stitcher + assignment panel for a trial.
 
-    def __init__(self, conn: sqlite3.Connection, trial_id: str, parent=None) -> None:
+    Shows a compact header (trial name, time range, run selector) then embeds
+    StitcherPanel for the selected detection run.  Exposes has_unsaved_changes()
+    so the main window can prompt before navigating away.
+    """
+
+    data_changed = Signal()  # forwarded from StitcherPanel.applied
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        trial_id: str,
+        preselect_run_id: str | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._conn = conn
         self._trial_id = trial_id
+        self._preselect_run_id = preselect_run_id
+        self._stitcher_panel: "StitcherPanel | None" = None
         self._build()
 
+    # ------------------------------------------------------------------
+
+    def has_unsaved_changes(self) -> bool:
+        return self._stitcher_panel is not None and self._stitcher_panel.is_dirty
+
+    # ------------------------------------------------------------------
+
     def _build(self) -> None:
+        from app.pose.stitcher_panel import StitcherPanel
+
         trial = self._conn.execute(
-            "SELECT id, name, time_start_s, time_end_s, notes "
-            "FROM trials WHERE id = ?", (self._trial_id,)
+            "SELECT id, name, time_start_s, time_end_s FROM trials WHERE id = ?",
+            (self._trial_id,),
         ).fetchone()
         if trial is None:
+            self.setLayout(QVBoxLayout())
+            self.layout().addWidget(QLabel("Trial not found."))
             return
 
-        inner = QWidget()
-        vbox = QVBoxLayout(inner)
-        vbox.setAlignment(Qt.AlignmentFlag.AlignTop)
-
-        title = trial["name"] or "Unnamed trial"
-        vbox.addWidget(QLabel(f"<h2>{title}</h2>"))
-
-        form_box = _section("Trial info")
-        form = QFormLayout()
-        form.addRow("Start:", QLabel(_fmt_time(trial["time_start_s"])))
-        form.addRow("End:", QLabel(_fmt_time(trial["time_end_s"])))
-        form.addRow("Notes:", QLabel(trial["notes"] or "—"))
-        form_box.layout().addLayout(form)
-        vbox.addWidget(form_box)
-
-        # Detection runs in this trial
         runs = self._conn.execute(
-            "SELECT id, detector_model, status, created_at "
-            "FROM detection_runs WHERE trial_id = ? ORDER BY created_at",
+            "SELECT id, detector_model, pose_model, status, created_at "
+            "FROM detection_runs WHERE trial_id = ? ORDER BY created_at DESC",
             (self._trial_id,),
         ).fetchall()
-        dr_box = _section(f"Detection runs ({len(runs)})")
+
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(4, 4, 4, 4)
+        vbox.setSpacing(4)
+
+        # --- Header row ---
+        header = QHBoxLayout()
+        title = trial["name"] or "Unnamed trial"
+        start_s = trial["time_start_s"]
+        end_s = trial["time_end_s"]
+        time_str = (
+            f"  {_fmt_time(start_s)} – {_fmt_time(end_s)}"
+            if start_s is not None and end_s is not None else ""
+        )
+        header.addWidget(QLabel(f"<b>{title}</b>{time_str}"))
+        header.addStretch()
+
+        self._run_combo = QComboBox()
         for r in runs:
-            dr_box.layout().addWidget(
-                QLabel(f"[{r['detector_model']}]  {_fmt_ts(r['created_at'])}  ({r['status']})")
+            label = (
+                f"{r['detector_model']}+{r['pose_model']}"
+                f"  {_fmt_ts(r['created_at'])}"
+                f"  ({r['status']})"
             )
-        if not runs:
-            dr_box.layout().addWidget(QLabel("No detection runs yet."))
-        vbox.addWidget(dr_box)
+            self._run_combo.addItem(label, r["id"])
+        header.addWidget(QLabel("Run:"))
+        header.addWidget(self._run_combo)
+        vbox.addLayout(header)
 
-        btn_row = QHBoxLayout()
-        run_det_btn = _action_btn("Run detection…", enabled=False)  # T3.4 future
-        btn_row.addWidget(run_det_btn)
-        btn_row.addStretch()
-        vbox.addLayout(btn_row)
+        # --- Stitcher area (fills remaining space) ---
+        self._stitcher_container = QVBoxLayout()
+        self._stitcher_container.setContentsMargins(0, 0, 0, 0)
+        vbox.addLayout(self._stitcher_container, 1)
 
-        self.setLayout(QVBoxLayout())
-        self.layout().setContentsMargins(0, 0, 0, 0)
-        self.layout().addWidget(_scrollable(inner))
+        # Pre-select run if specified (e.g. clicked on Detection Run node)
+        if self._preselect_run_id:
+            idx = self._run_combo.findData(self._preselect_run_id)
+            if idx >= 0:
+                self._run_combo.setCurrentIndex(idx)
+
+        self._run_combo.currentIndexChanged.connect(self._on_run_changed)
+        self._load_stitcher(self._run_combo.currentData())
+
+    def _load_stitcher(self, run_id: str | None) -> None:
+        from app.pose.stitcher_panel import StitcherPanel
+
+        # Clear previous panel
+        while self._stitcher_container.count():
+            item = self._stitcher_container.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._stitcher_panel = None
+
+        if not run_id:
+            self._stitcher_container.addWidget(QLabel("No detection run selected."))
+            return
+
+        panel = StitcherPanel(self._conn, run_id, parent=self)
+        panel.applied.connect(self.data_changed)
+        self._stitcher_panel = panel
+        self._stitcher_container.addWidget(panel)
+
+    def _on_run_changed(self, index: int) -> None:
+        if self._stitcher_panel is not None and self._stitcher_panel.is_dirty:
+            ans = QMessageBox.question(
+                self, "Unsaved changes",
+                "You have unapplied assignments. Discard and switch run?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if ans != QMessageBox.Yes:
+                # Revert combo to the current panel's run
+                run_id = self._run_combo.findData(
+                    self._run_combo.currentData()
+                )
+                return
+        self._load_stitcher(self._run_combo.itemData(index))
 
 
 # ---------------------------------------------------------------------------

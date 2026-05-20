@@ -367,12 +367,24 @@ class MainWindow(QMainWindow):
     def _show_trial(self, trial_id: str) -> None:
         from app.ui.content_panels import TrialPanel
         panel = TrialPanel(self._session_conn, trial_id)
+        panel.data_changed.connect(self.reload_tree)
         self._swap_content(panel)
 
     def _show_detection_run(self, run_id: str) -> None:
-        from app.ui.content_panels import DetectionRunPanel
-        panel = DetectionRunPanel(self._session_conn, run_id, self._session_path)
-        self._swap_content(panel)
+        # Show the parent trial's stitcher panel with this run pre-selected
+        from app.ui.content_panels import TrialPanel
+        row = self._session_conn.execute(
+            "SELECT trial_id FROM detection_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        trial_id = row["trial_id"] if row else None
+        if trial_id:
+            panel = TrialPanel(self._session_conn, trial_id, preselect_run_id=run_id)
+            panel.data_changed.connect(self.reload_tree)
+            self._swap_content(panel)
+        else:
+            from app.ui.content_panels import DetectionRunPanel
+            panel = DetectionRunPanel(self._session_conn, run_id, self._session_path)
+            self._swap_content(panel)
 
     def _show_person_track(self, sequence_id: str) -> None:
         from app.ui.content_panels import PersonPanel
@@ -386,6 +398,20 @@ class MainWindow(QMainWindow):
 
     def _swap_content(self, widget: QWidget) -> None:
         """Replace the content panel, removing the previous non-placeholder widget."""
+        # Prompt if the outgoing panel has unsaved changes (e.g. TrialPanel dirty).
+        if self._content.count() > 1:
+            current = self._content.widget(1)
+            if (hasattr(current, "has_unsaved_changes")
+                    and current.has_unsaved_changes()):
+                ans = QMessageBox.question(
+                    self,
+                    "Unsaved changes",
+                    "You have unapplied assignments. Navigate away and discard them?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if ans != QMessageBox.StandardButton.Yes:
+                    return
+
         # Index 0 is always the permanent placeholder; everything else is transient.
         while self._content.count() > 1:
             old = self._content.widget(1)

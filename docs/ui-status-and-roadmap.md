@@ -1,6 +1,6 @@
 # Posetrak UI — Status and Roadmap
 
-**Last updated:** 2026-05-17 (session 2)
+**Last updated:** 2026-05-20 (session 3)
 
 ---
 
@@ -74,10 +74,19 @@ formerly CLI-only.  Extrinsics import, tracker config editing, and the merge of
 | PersonPanel: Delete tracking run (cascade) | Done |
 | PersonPanel: multi-camera crop grid with time scrubber | Done |
 | PersonPanel: pose_observations skeleton overlay on crop grid | Done |
+| PersonPanel: tracking solution projected overlay (cyan, FK-derived) | Done |
 | PersonPanel: 3D view placeholder cell | Done |
 | TrackingRunPanel: run stats summary | Done |
 
 ### Known issues in posetrak-pose
+
+#### Video rotation for modern Android (Pixel 7+) — FIXED 2026-05-20
+
+`stream.metadata['rotate']` is empty on Pixel 7+ phones, which store rotation as a
+DISPLAYMATRIX side-data entry on video frames.  `_parse_displaymatrix()` now reads the
+36-byte 3×3 fixed-point matrix from the first decoded frame's `side_data` and extracts
+the clockwise rotation via atan2.  Applied in both `detection_pipeline.py` and
+`tools/detect_aruco.py`.
 
 #### High-frame-rate video decode (Pixel 9 / 120 fps cameras) — FIXED 2026-05-17
 
@@ -313,21 +322,21 @@ A single `posetrak-ui` shell replaces both `posetrak-setup` and `posetrak-pose`.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ File   Session   Cameras   Help                       [status bar]   │
+│ File   Session   Tools   Help                         [status bar]   │
 ├──────────────────┬───────────────────────────────────────────────────┤
 │ Session tree     │  Main panel (stacked/content area)                │
 │                  │                                                    │
 │ ▼ Capture "morning"         • Nothing selected: welcome / empty      │
-│   ▼ Trial "shomen take 1"   • Capture selected: capture detail,      │
-│     ▼ Detection [yolo11x]     video files, sync status               │
-│       Harri                 • Trial selected: trial metadata,        │
-│         Tracking run 1        list of detection runs                 │
-│       Sensei                • Detection run selected:                │
-│     Detection [yolo8n]        PoseExtractionWindow panel             │
-│   ▼ Trial "shomen take 2"   • Person track selected:                 │
-│     ▼ Detection [yolo11x]     finalised track view (same panel)      │
-│       Harri                 • Tracking run selected:                 │
-│         Tracking run 1        tracking summary (Phase 5: visualizer) │
+│   ▼ Trial "shomen take 1"   • Capture selected: CapturePanel         │
+│     ▼ Detection [yolo11x]   • Trial selected: TrialPanel             │
+│       Harri                 • Detection run selected: TrialPanel      │
+│         Tracking run 1        (same panel, that run pre-selected)    │
+│       Sensei                • Person selected: PersonPanel           │
+│     Detection [yolo8n]      • Tracking run selected: PersonPanel     │
+│   ▼ Trial "shomen take 2"     (that run pre-selected)                │
+│     ▼ Detection [yolo11x]                                            │
+│       Harri                                                           │
+│         Tracking run 1                                                │
 └──────────────────┴───────────────────────────────────────────────────┘
 ```
 
@@ -335,8 +344,34 @@ Tree hierarchy:
 - **Capture** (label, sync status indicator)
   - **Trial** (user name; time range shown as subtitle)
     - **Detection run** (model name + timestamp)
-      - **Person track** (performer name; one per `pose_observation_sequences` row)
+      - **Person** (performer name; one per `pose_observation_sequences` row)
         - **Tracking run** (skeleton name + `ran_at` + notes tooltip)
+
+#### Panel responsibilities
+
+**CapturePanel** (Capture node selected):
+- Sync status summary + "Set up sync…" button (existing, from current CapturePanel)
+- Start / End time pickers (global seconds on the sync timeline)
+- **"Detect Pose…"** button → opens `RunDetectionDialog` with those times pre-filled
+- Video list + camera assignments (existing)
+
+**RunDetectionDialog** (modal, opened from CapturePanel or Trial context menu):
+- Shows pre-filled time range (editable)
+- Trial name field (pre-filled "Trial N"; user can rename now or later)
+- Sync config selector
+- Model + confidence controls (extracted from `PoseExtractionWindow` top)
+- Progress bar + log output while running
+- On accept: creates `trials` row + runs detection pipeline + refreshes tree
+
+**TrialPanel** (Trial or Detection run node selected):
+- Header: trial name, time range, detection run selector (if multiple runs exist)
+- Stitcher timeline + person assignment view (extracted from `PoseExtractionWindow` bottom)
+- **"Apply"** button (formerly "Finalise") — writes `pose_observation_sequences`
+- Dirty-state tracking: shell intercepts tree navigation and prompts "Save changes?" if
+  assignments have been modified since last Apply
+
+**PersonPanel** (Person or Tracking run node selected):
+- Unchanged from Phase 1 implementation
 
 #### Session DB and registry
 
@@ -356,18 +391,23 @@ Launching the wizard: **Session → New Capture…** (menu or toolbar button).
 The wizard creates the capture, attaches video files, sets up sync and extrinsics,
 and picks a skeleton.  When it finishes the new capture appears in the tree.
 
-Trials are created inside the pose extraction panel (by marking a time range and
-naming it), or via "New Trial…" from the capture's context menu.
+#### Trial lifecycle
+
+Trials are auto-named ("Trial 1", "Trial 2", …) when created from "Detect Pose…".
+The user renames them in the tree or via the TrialPanel header at any time.
+Re-running detection on an existing trial is done via **context menu → Run detection
+again…** on the Trial node, which opens `RunDetectionDialog` with the trial's time
+range pre-filled and adds a second Detection run under that trial.
 
 #### Context-menu actions per tree level
 
 | Selected item | Context-menu actions |
 |---|---|
-| Capture | New trial… / Set up sync… / Import extrinsics… / Edit metadata… / Delete capture |
-| Trial | Run detection… / Edit name & notes / Delete trial |
-| Detection run | Assign persons / Finalise → person tracks / Delete run |
-| Person track | Rename / Run tracker… / Delete track |
-| Tracking run | View results (Phase 5) / Export BVH… / Edit notes / Delete run |
+| Capture | New Capture… (wizard) / Set up sync… / Import extrinsics… / Delete capture |
+| Trial | Run detection again… / Rename / Delete trial |
+| Detection run | Delete run |
+| Person | Rename / Delete person |
+| Tracking run | Export BVH… / Edit notes / Delete run |
 
 #### Schema changes required (migrations)
 
@@ -489,9 +529,10 @@ entries from different detection runs coexist, while non-crop entries use `''`.
 **Deliverable:** A practitioner can go from raw videos to BVH using only the Qt apps;
 the CLI remains available but is no longer required for the tracker workflow.
 
-**Current schema version:** v17 (`SESSION_SCHEMA_VERSION = 17`).  Migration chain:
+**Current schema version:** v18 (`SESSION_SCHEMA_VERSION = 18`).  Migration chain:
 v14 (sync anchors) → v15 (detection_track_assignments) → v16 (detection_crops, superseded) →
-v17 (frame_cache_entries gains detection_run_id in PK; detection_crops removed).
+v17 (frame_cache_entries gains detection_run_id in PK; detection_crops removed) →
+v18 (frame_cache_entries gains src_x/y/w/h for crop source rect).
 
 ### Phase 2 — Skeleton scaling from tracking run (integrated)
 
@@ -510,14 +551,20 @@ Phase 1 (needs at least one tracking run in the DB).
 
 Combines the two Qt entry points into one unified shell.  Design spec in section 4.1.
 
-| # | Task | Effort |
-|---|---|---|
-| T3.1 | Schema migrations: rename `shots`→`captures`; new `trials` table; `trial_id` on `detection_runs`; `name` on `pose_observation_sequences`; `notes` on `tracking_runs` | M |
-| T3.2 | Shell window: File menu (open/new session DB), registry auto-open, recent files | S |
-| T3.3 | Session tree widget (captures → trials → detection runs → person tracks → tracking runs) with context menus | M |
-| T3.4 | Stacked content area: wire tree selection to embed existing widgets (PoseExtractionWindow, SyncPage, ExtrinsicsImportDialog) | M |
-| T3.5 | Strip session-open page from wizard; launch wizard from "New Capture…" action | S |
-| T3.6 | Session persistence — remember last-opened DB, restore tree selection | S |
+| # | Task | Effort | Status |
+|---|---|---|---|
+| T3.1 | Schema migrations: rename `shots`→`captures`; new `trials` table; `trial_id` on `detection_runs`; `name` on `pose_observation_sequences`; `notes` on `tracking_runs` | M | — |
+| T3.2 | Shell window: File menu (open/new session DB), registry auto-open, recent files | S | Partial (shell exists; wizard launch missing) |
+| T3.3 | Session tree: complete context menus (Trial rename/delete/run-again, Detection run delete) | S | — |
+| T3.4a | `RunDetectionDialog`: extract model/conf/progress from `PoseExtractionWindow` top; on accept create Trial + run pipeline | M | — |
+| T3.4b | `CapturePanel`: add start/end time pickers + "Detect Pose…" button wired to `RunDetectionDialog` | S | — |
+| T3.4c | `TrialPanel`: move stitcher + assignment view from `PoseExtractionWindow`; add dirty-state + "Apply" | M | — |
+| T3.4d | Shell: intercept tree navigation with unsaved-changes prompt | S | — |
+| T3.5 | Strip session-open page from wizard; launch wizard from "New Capture…" action | S | — |
+| T3.6 | Session persistence — remember last-opened DB, restore tree selection | S | — |
+
+**Implementation order:** T3.1 → T3.4a → T3.4b → T3.4c → T3.4d → T3.3 → T3.5 → T3.6.
+T3.2 shell polish can happen alongside any step.
 
 **Deliverable:** `posetrak-setup` and `posetrak-pose` replaced by a single `posetrak-ui`
 entry point; old entry points kept as thin aliases for backwards compatibility.

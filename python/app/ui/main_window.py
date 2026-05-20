@@ -361,6 +361,7 @@ class MainWindow(QMainWindow):
     def _show_capture(self, capture_id: str) -> None:
         from app.ui.content_panels import CapturePanel
         panel = CapturePanel(self._session_conn, capture_id, self._session_path)
+        panel.data_changed.connect(self.reload_tree)
         self._swap_content(panel)
 
     def _show_trial(self, trial_id: str) -> None:

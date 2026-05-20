@@ -9,10 +9,11 @@ from pathlib import Path
 
 from math import ceil
 
-from PySide6.QtCore import QProcess, Qt
+from PySide6.QtCore import QProcess, Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -83,12 +84,16 @@ def _fmt_time(s: float | None) -> str:
 class CapturePanel(QWidget):
     """Detail view for a capture (captures row)."""
 
+    data_changed = Signal()  # emitted after a new trial+detection run is created
+
     def __init__(self, conn: sqlite3.Connection, capture_id: str,
                  session_path: Path, parent=None) -> None:
         super().__init__(parent)
         self._conn = conn
         self._capture_id = capture_id
         self._session_path = session_path
+        self._start_spin: QDoubleSpinBox | None = None
+        self._end_spin: QDoubleSpinBox | None = None
         self._build()
 
     def _build(self) -> None:
@@ -158,7 +163,34 @@ class CapturePanel(QWidget):
             sync_box.layout().addWidget(QLabel("No sync config — set one up before running detection."))
         vbox.addWidget(sync_box)
 
-        # Actions
+        # Detection time range + launch
+        detect_box = _section("Detect Pose")
+        range_row = QHBoxLayout()
+        range_row.addWidget(QLabel("Start:"))
+        self._start_spin = QDoubleSpinBox()
+        self._start_spin.setRange(0.0, 100_000.0)
+        self._start_spin.setDecimals(2)
+        self._start_spin.setSuffix(" s")
+        range_row.addWidget(self._start_spin)
+        range_row.addSpacing(8)
+        range_row.addWidget(QLabel("End:"))
+        self._end_spin = QDoubleSpinBox()
+        self._end_spin.setRange(0.0, 100_000.0)
+        self._end_spin.setDecimals(2)
+        self._end_spin.setSuffix(" s")
+        range_row.addWidget(self._end_spin)
+        range_row.addStretch()
+        detect_box.layout().addLayout(range_row)
+        detect_btn = _action_btn("Detect Pose…")
+        detect_btn.clicked.connect(self._open_detection_dialog)
+        has_sync = bool(syncs)
+        detect_btn.setEnabled(has_sync)
+        if not has_sync:
+            detect_btn.setToolTip("Set up sync first")
+        detect_box.layout().addWidget(detect_btn)
+        vbox.addWidget(detect_box)
+
+        # Utility actions
         btn_row = QHBoxLayout()
         sync_btn = _action_btn("Set up sync…")
         sync_btn.clicked.connect(self._open_sync)
@@ -167,10 +199,6 @@ class CapturePanel(QWidget):
         ext_btn = _action_btn("Import extrinsics…")
         ext_btn.clicked.connect(self._open_extrinsics)
         btn_row.addWidget(ext_btn)
-
-        pose_btn = _action_btn("Open in Pose Extraction…")
-        pose_btn.clicked.connect(self._open_pose_extraction)
-        btn_row.addWidget(pose_btn)
 
         btn_row.addStretch()
         vbox.addLayout(btn_row)
@@ -206,14 +234,20 @@ class CapturePanel(QWidget):
         if dlg.exec():
             pass  # tree reloads when user returns to main window
 
-    def _open_pose_extraction(self) -> None:
-        from app.pose.main import PoseExtractionWindow
-        from app.ui.main_window import MainWindow
-        self._pose_win = PoseExtractionWindow(session_db=str(self._session_path), parent=None)
-        main = self.window()
-        if isinstance(main, MainWindow):
-            self._pose_win.data_changed.connect(main.reload_tree)
-        self._pose_win.show()
+    def _open_detection_dialog(self) -> None:
+        from app.pose.run_detection_dialog import RunDetectionDialog
+        start_s = self._start_spin.value() if self._start_spin is not None else None
+        end_s = self._end_spin.value() if self._end_spin is not None else None
+        dlg = RunDetectionDialog(
+            conn=self._conn,
+            session_path=self._session_path,
+            capture_id=self._capture_id,
+            time_start_s=start_s,
+            time_end_s=end_s,
+            parent=self,
+        )
+        dlg.detection_finished.connect(lambda _tid, _rid: self.data_changed.emit())
+        dlg.exec()
 
 
 # ---------------------------------------------------------------------------

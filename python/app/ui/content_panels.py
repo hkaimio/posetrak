@@ -142,7 +142,7 @@ class CapturePanel(QWidget):
                     label=v["cam_label"],
                 ))
 
-            cache = FrameCache(self._conn)
+            cache = FrameCache(conn=None)
             self._scrubber = MultiVideoScrubber(cells, cache)
 
             # Load sync table into the scrubber so global time slider appears

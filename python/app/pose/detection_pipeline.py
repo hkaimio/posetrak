@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
+import struct
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,17 +30,29 @@ ProgressCallback = Callable[[int, int, str], None]  # done, total, camera_id
 
 
 def _stream_rotation(stream) -> int:
-    """Return clockwise rotation degrees (0/90/180/270) from a PyAV video stream.
-
-    Android and iPhone cameras embed a 'rotate' tag in the container when the
-    physical sensor orientation differs from the recording orientation.  PyAV
-    exposes this in stream.metadata but does NOT apply it in to_ndarray().
-    """
+    """Return clockwise rotation degrees from stream metadata (older cameras)."""
     rotate_str = (stream.metadata or {}).get("rotate", "0") or "0"
     try:
         return int(rotate_str) % 360
     except (ValueError, TypeError):
         return 0
+
+
+def _parse_displaymatrix(data: bytes) -> int:
+    """Parse clockwise rotation from a DISPLAYMATRIX side-data blob.
+
+    Modern Android phones (Pixel 7+) store rotation as a 3×3 fixed-point
+    matrix in frame side data rather than a plain 'rotate' metadata tag.
+    The blob is 36 bytes: nine 32-bit little-endian integers (16.16 fixed).
+    """
+    if len(data) < 36:
+        return 0
+    m = struct.unpack("<9i", data[:36])
+    scale_x = math.hypot(m[0], m[3])
+    scale_y = math.hypot(m[1], m[4])
+    if scale_x == 0 or scale_y == 0:
+        return 0
+    return round(-math.atan2(m[1] / scale_y, m[0] / scale_x) * 180 / math.pi) % 360
 
 
 def _apply_rotation(img: np.ndarray, degrees: int) -> np.ndarray:
@@ -312,12 +326,21 @@ class DetectionPipeline:
             # (e.g. 120 for slow-motion) rather than the container's pts cadence.
             container_fps = float(stream.average_rate)
 
-            # Respect container rotation metadata.  PyAV does not apply it
-            # automatically in to_ndarray(); video players do — that is why
-            # the display view looks correct while decoded frames are not.
+            # Rotation correction: PyAV does not apply container rotation
+            # automatically in to_ndarray().  Try stream metadata first (older
+            # cameras); fall back to DISPLAYMATRIX in frame side data (Pixel 7+).
             rotation = _stream_rotation(stream)
+            rotation_source = "metadata"
+            if rotation == 0:
+                for probe_frame in container.decode(stream):
+                    for sd in (probe_frame.side_data or []):
+                        if "DISPLAYMATRIX" in str(sd.type).upper():
+                            rotation = _parse_displaymatrix(bytes(sd))
+                            rotation_source = "DISPLAYMATRIX"
+                    break
+                container.seek(0, stream=stream, backward=True, any_frame=False)
             if rotation:
-                _log.info("_iter_frames_av: %s rotate=%d° from metadata", path, rotation)
+                _log.info("_iter_frames_av: %s rotate=%d° from %s", path, rotation, rotation_source)
 
             if first_frame > 0:
                 seek_s = max(0.0, (first_frame - 1) / container_fps)

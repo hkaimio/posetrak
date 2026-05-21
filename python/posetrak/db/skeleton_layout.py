@@ -331,6 +331,27 @@ class SkeletonLayout:
         return [j for j in self._joints if j.joint_type not in ("root", "fixed")]
 
     @property
+    def bone_pairs(self) -> list[tuple[str, str]]:
+        """Return (parent_name, child_name) joint pairs for skeleton line drawing.
+
+        Prismatic joints (bone-length scale groups) are skipped; their children
+        connect directly to the nearest non-prismatic ancestor.
+        """
+        pairs = []
+        for ji in self._joints:
+            if ji.parent is None or ji.joint_type == "prismatic":
+                continue
+            parent_name = ji.parent
+            while parent_name:
+                p_ji = self._joint_by_name.get(parent_name)
+                if p_ji is None or p_ji.joint_type != "prismatic":
+                    break
+                parent_name = p_ji.parent
+            if parent_name and parent_name in self._joint_by_name:
+                pairs.append((parent_name, ji.name))
+        return pairs
+
+    @property
     def markers(self) -> list:
         return [
             {"name": m.name, "parent": m.parent, "local_pos": m.local_pos,

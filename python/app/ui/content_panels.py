@@ -591,6 +591,74 @@ _BODY_SKELETON = [
 ]
 
 
+def _project_point_distorted(
+    p_world: "np.ndarray",
+    R: "np.ndarray",
+    t: "np.ndarray",
+    K_orig: "np.ndarray",
+    dist: "np.ndarray",
+) -> "tuple[float, float] | None":
+    """Project a 3D world point to distorted pixel coords using K_original + radtan model.
+
+    Supports both standard (k1,k2,p1,p2,k3) and rational (k1-k6,p1,p2) layouts as
+    stored by OpenCV (14-element dist_coeffs with trailing zeros).
+    Returns None if the point is behind the camera.
+    """
+    import numpy as np
+    p_cam = R @ p_world + t
+    if p_cam[2] <= 1e-3:
+        return None
+    x = p_cam[0] / p_cam[2]
+    y = p_cam[1] / p_cam[2]
+    r2 = x * x + y * y
+    r4, r6 = r2 * r2, r2 * r2 * r2
+    k1, k2 = float(dist[0]), float(dist[1])
+    p1, p2 = float(dist[2]), float(dist[3])
+    k3 = float(dist[4]) if len(dist) > 4 else 0.0
+    k4 = float(dist[5]) if len(dist) > 5 else 0.0
+    k5 = float(dist[6]) if len(dist) > 6 else 0.0
+    k6 = float(dist[7]) if len(dist) > 7 else 0.0
+    numer = 1.0 + k1 * r2 + k2 * r4 + k3 * r6
+    denom = 1.0 + k4 * r2 + k5 * r4 + k6 * r6
+    radial = numer / denom if denom != 0.0 else numer
+    dx = 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
+    dy = p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y
+    xd = x * radial + dx
+    yd = y * radial + dy
+    u = K_orig[0, 0] * xd + K_orig[0, 2]
+    v = K_orig[1, 1] * yd + K_orig[1, 2]
+    return u, v
+
+
+def _undistorted_to_distorted(
+    u_n: float,
+    v_n: float,
+    K_new: "np.ndarray",
+    K_orig: "np.ndarray",
+    dist: "np.ndarray",
+) -> "tuple[float, float]":
+    """Forward-distort an undistorted (K_new) pixel to distorted (K_orig) pixel coords."""
+    import numpy as np
+    x = (u_n - K_new[0, 2]) / K_new[0, 0]
+    y = (v_n - K_new[1, 2]) / K_new[1, 1]
+    r2 = x * x + y * y
+    r4, r6 = r2 * r2, r2 * r2 * r2
+    k1, k2 = float(dist[0]), float(dist[1])
+    p1, p2 = float(dist[2]), float(dist[3])
+    k3 = float(dist[4]) if len(dist) > 4 else 0.0
+    k4 = float(dist[5]) if len(dist) > 5 else 0.0
+    k5 = float(dist[6]) if len(dist) > 6 else 0.0
+    k6 = float(dist[7]) if len(dist) > 7 else 0.0
+    numer = 1.0 + k1 * r2 + k2 * r4 + k3 * r6
+    denom = 1.0 + k4 * r2 + k5 * r4 + k6 * r6
+    radial = numer / denom if denom != 0.0 else numer
+    dx = 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
+    dy = p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y
+    xd = x * radial + dx
+    yd = y * radial + dy
+    return K_orig[0, 0] * xd + K_orig[0, 2], K_orig[1, 1] * yd + K_orig[1, 2]
+
+
 def _nearest_tracker_step(t: float, timestamps: list[tuple[float, int]]) -> int:
     """Binary-search timestamps (sorted list of (timestamp_s, tracker_step)) for closest step."""
     import bisect
@@ -1100,14 +1168,22 @@ class PersonCropGridWidget(QWidget):
         cam_intrinsics: dict[str, dict] = {}
         if seq:
             for r in self._conn.execute(
-                "SELECT cv.camera_instance_id, ic.fx, ic.fy, ic.cx, ic.cy "
+                "SELECT cv.camera_instance_id, ic.fx, ic.fy, ic.cx, ic.cy, "
+                "       ic.dist_coeffs, ic.matrix_original "
                 "FROM capture_videos cv "
                 "JOIN intrinsics_calibrations ic ON ic.id = cv.intrinsics_calibration_id "
                 "WHERE cv.shot_id = ?",
                 (seq["shot_id"],),
             ):
+                K_orig = None
+                dist = None
+                if r["matrix_original"]:
+                    K_orig = np.frombuffer(bytes(r["matrix_original"]), dtype="<f8").reshape(3, 3)
+                if r["dist_coeffs"]:
+                    dist = np.frombuffer(bytes(r["dist_coeffs"]), dtype="<f8")
                 cam_intrinsics[r["camera_instance_id"]] = {
                     "fx": r["fx"], "fy": r["fy"], "cx": r["cx"], "cy": r["cy"],
+                    "K_orig": K_orig, "dist": dist,
                 }
 
         # Load obs blobs for marker dots (predicted positions from tracker output)
@@ -1127,7 +1203,21 @@ class PersonCropGridWidget(QWidget):
                 cam_id = label_to_cam_id.get(label)
                 if cam_id is None:
                     continue
-                pred_xy = obs[ci, :, 2:4].copy()  # columns 2:4 = predicted 2D positions
+                pred_xy = obs[ci, :, 2:4].copy()  # undistorted predicted positions
+                intr = cam_intrinsics.get(cam_id)
+                if intr is not None:
+                    K_orig = intr.get("K_orig")
+                    dist = intr.get("dist")
+                    if K_orig is not None and dist is not None:
+                        fx_n = intr["fx"]; fy_n = intr["fy"]
+                        cx_n = intr["cx"]; cy_n = intr["cy"]
+                        K_new = np.array([[fx_n, 0, cx_n], [0, fy_n, cy_n], [0, 0, 1]])
+                        for mi in range(pred_xy.shape[0]):
+                            u_n, v_n = float(pred_xy[mi, 0]), float(pred_xy[mi, 1])
+                            if np.isfinite(u_n) and np.isfinite(v_n):
+                                u_d, v_d = _undistorted_to_distorted(u_n, v_n, K_new, K_orig, dist)
+                                pred_xy[mi, 0] = u_d
+                                pred_xy[mi, 1] = v_d
                 self._marker_proj.setdefault(cam_id, {})[step] = pred_xy
 
         # Compute joint projections via FK from state blobs
@@ -1152,14 +1242,24 @@ class PersonCropGridWidget(QWidget):
                 if ext is None or intr is None:
                     continue
                 R, t = ext
+                K_orig = intr.get("K_orig")
+                dist = intr.get("dist")
                 fx, fy, cx_k, cy_k = intr["fx"], intr["fy"], intr["cx"], intr["cy"]
+                use_distortion = K_orig is not None and dist is not None
                 joint_xy: dict[str, np.ndarray] = {}
                 for jname, T in transforms.items():
-                    p_cam = R @ T[:3, 3] + t
-                    if p_cam[2] <= 1e-3:
-                        continue
-                    u = fx * p_cam[0] / p_cam[2] + cx_k
-                    v = fy * p_cam[1] / p_cam[2] + cy_k
+                    p_world = T[:3, 3]
+                    if use_distortion:
+                        uv = _project_point_distorted(p_world, R, t, K_orig, dist)
+                        if uv is None:
+                            continue
+                        u, v = uv
+                    else:
+                        p_cam = R @ p_world + t
+                        if p_cam[2] <= 1e-3:
+                            continue
+                        u = fx * p_cam[0] / p_cam[2] + cx_k
+                        v = fy * p_cam[1] / p_cam[2] + cy_k
                     joint_xy[jname] = np.array([u, v])
                 self._joint_proj.setdefault(cam_id, {})[step] = joint_xy
 

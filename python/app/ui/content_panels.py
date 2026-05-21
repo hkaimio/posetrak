@@ -9,8 +9,8 @@ from pathlib import Path
 
 from math import ceil
 
-from PySide6.QtCore import QProcess, Qt, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import QPointF, QProcess, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -582,6 +582,14 @@ class StandaloneRunPanel(QWidget):
 # PersonCropGridWidget — multi-camera crop preview for PersonPanel
 # ---------------------------------------------------------------------------
 
+# COCO-17 skeleton connections (mirrored from person_preview.py)
+_BODY_SKELETON = [
+    (0, 1), (0, 2), (1, 3), (2, 4),
+    (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
+    (5, 11), (6, 12), (11, 12),
+    (11, 13), (13, 15), (12, 14), (14, 16),
+]
+
 
 def _nearest_tracker_step(t: float, timestamps: list[tuple[float, int]]) -> int:
     """Binary-search timestamps (sorted list of (timestamp_s, tracker_step)) for closest step."""
@@ -596,51 +604,171 @@ def _nearest_tracker_step(t: float, timestamps: list[tuple[float, int]]) -> int:
     return before[1] if abs(before[0] - t) <= abs(after[0] - t) else after[1]
 
 
-def _draw_skeleton_lines(
-    img,
-    joint_xy: dict,     # joint_name → np.ndarray([u, v]) in full-frame coordinates
-    bone_pairs: list,   # list of (parent_name, child_name)
-    x1: float, y1: float, scale: float,
-) -> None:
-    import cv2, math
-    color = (0, 210, 210)  # cyan
+class _ImageCanvas(QWidget):
+    """Custom painting widget: image + vector overlays drawn with QPainter.
 
-    def to_crop(px: float, py: float) -> tuple[int, int]:
-        return (int((px - x1) * scale), int((py - y1) * scale))
+    All overlay coordinates are stored in full-frame pixel space.  The
+    coordinate transform (full-frame → JPEG crop → display) is computed
+    at paint time so overlays stay sharp regardless of zoom level.
+    """
 
-    for parent_name, child_name in bone_pairs:
-        pxy = joint_xy.get(parent_name)
-        cxy = joint_xy.get(child_name)
-        if pxy is None or cxy is None:
-            continue
-        px, py = float(pxy[0]), float(pxy[1])
-        cx, cy = float(cxy[0]), float(cxy[1])
-        if math.isnan(px) or math.isnan(cx):
-            continue
-        cv2.line(img, to_crop(px, py), to_crop(cx, cy), color, 1, cv2.LINE_AA)
+    def __init__(self, min_h: int = 240, parent=None) -> None:
+        super().__init__(parent)
+        self.setMinimumHeight(min_h)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setStyleSheet("background: #222;")
+        self._pixmap: QPixmap | None = None
+        # Crop-to-full-frame transform
+        self._x1: float = 0.0
+        self._y1: float = 0.0
+        self._src_scale: float = 1.0   # full-frame pixels → JPEG crop pixels
+        # Detection overlay: (N, 3) float32 — x, y, conf in full-frame pixels
+        self._obs_kp = None
+        # Tracking overlay
+        self._joint_xy: dict | None = None    # joint_name → [u, v] full-frame
+        self._bone_pairs: list = []
+        self._marker_xy = None                 # (N, 2) float32 full-frame
+        # Visibility flags
+        self._show_detected: bool = True
+        self._show_tracked: bool = True
 
+    def show_empty(self) -> None:
+        self._pixmap = None
+        self._obs_kp = None
+        self._joint_xy = None
+        self._marker_xy = None
+        self.update()
 
-def _draw_marker_dots(
-    img,
-    marker_xy,          # np.ndarray (n_markers, 2) full-frame predicted positions
-    x1: float, y1: float, scale: float,
-) -> None:
-    import cv2, math
-    color = (0, 220, 255)  # yellow
-    n = marker_xy.shape[0]
+    def show_image(self, pixmap: QPixmap, x1: float, y1: float, src_scale: float) -> None:
+        self._pixmap = pixmap
+        self._x1 = x1
+        self._y1 = y1
+        self._src_scale = src_scale
+        self.update()
 
-    def to_crop(px: float, py: float) -> tuple[int, int]:
-        return (int((px - x1) * scale), int((py - y1) * scale))
+    def set_overlay(
+        self,
+        obs_kp,
+        joint_xy,
+        bone_pairs: list,
+        marker_xy,
+        show_detected: bool,
+        show_tracked: bool,
+    ) -> None:
+        self._obs_kp = obs_kp
+        self._joint_xy = joint_xy
+        self._bone_pairs = bone_pairs
+        self._marker_xy = marker_xy
+        self._show_detected = show_detected
+        self._show_tracked = show_tracked
+        self.update()
 
-    for i in range(n):
-        px, py = float(marker_xy[i, 0]), float(marker_xy[i, 1])
-        if math.isnan(px) or math.isnan(py):
-            continue
-        cv2.circle(img, to_crop(px, py), 3, color, -1, cv2.LINE_AA)
+    def _image_rect(self) -> tuple[int, int, int, int, float]:
+        """Return (off_x, off_y, disp_w, disp_h, disp_scale) for the current pixmap."""
+        cw, ch = self.width(), self.height()
+        if self._pixmap is None or self._pixmap.width() == 0:
+            return 0, 0, cw, ch, 1.0
+        px_w, px_h = self._pixmap.width(), self._pixmap.height()
+        disp_scale = min(cw / px_w, ch / px_h)
+        disp_w = int(px_w * disp_scale)
+        disp_h = int(px_h * disp_scale)
+        off_x = (cw - disp_w) // 2
+        off_y = (ch - disp_h) // 2
+        return off_x, off_y, disp_w, disp_h, disp_scale
+
+    def paintEvent(self, _event) -> None:
+        from math import isnan
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        cw, ch = self.width(), self.height()
+        painter.fillRect(0, 0, cw, ch, QColor("#222"))
+
+        if self._pixmap is None:
+            painter.setPen(QColor("#666"))
+            painter.drawText(QRectF(0, 0, cw, ch), Qt.AlignmentFlag.AlignCenter, "—")
+            painter.end()
+            return
+
+        off_x, off_y, disp_w, disp_h, disp_scale = self._image_rect()
+        scaled_pix = self._pixmap.scaled(
+            disp_w, disp_h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        painter.drawPixmap(off_x, off_y, scaled_pix)
+
+        # Combined scale: full-frame pixels → display pixels
+        combined = self._src_scale * disp_scale
+
+        def to_pt(u: float, v: float) -> QPointF:
+            return QPointF(
+                (u - self._x1) * combined + off_x,
+                (v - self._y1) * combined + off_y,
+            )
+
+        # ---- Detected keypoints (white connections, colour-coded dots) ----
+        if self._show_detected and self._obs_kp is not None:
+            kp = self._obs_kp
+            n_kp = kp.shape[0]
+
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(210, 210, 210), 1.0))
+            for a, b in _BODY_SKELETON:
+                if a >= n_kp or b >= n_kp:
+                    continue
+                if float(kp[a, 2]) < 0.3 or float(kp[b, 2]) < 0.3:
+                    continue
+                painter.drawLine(
+                    to_pt(float(kp[a, 0]), float(kp[a, 1])),
+                    to_pt(float(kp[b, 0]), float(kp[b, 1])),
+                )
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            for i in range(n_kp):
+                conf = float(kp[i, 2])
+                if conf < 0.1:
+                    continue
+                if conf >= 0.5:
+                    painter.setBrush(QColor(0, 220, 60))    # green
+                elif conf >= 0.3:
+                    painter.setBrush(QColor(255, 200, 0))   # yellow
+                else:
+                    painter.setBrush(QColor(220, 40, 40))   # red
+                painter.drawEllipse(to_pt(float(kp[i, 0]), float(kp[i, 1])), 3.0, 3.0)
+
+        # ---- Tracked skeleton (cyan lines + yellow dots) ----
+        if self._show_tracked:
+            if self._joint_xy is not None and self._bone_pairs:
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(0, 210, 210), 1.5))  # cyan
+                for parent_name, child_name in self._bone_pairs:
+                    pxy = self._joint_xy.get(parent_name)
+                    cxy = self._joint_xy.get(child_name)
+                    if pxy is None or cxy is None:
+                        continue
+                    if isnan(float(pxy[0])) or isnan(float(cxy[0])):
+                        continue
+                    painter.drawLine(
+                        to_pt(float(pxy[0]), float(pxy[1])),
+                        to_pt(float(cxy[0]), float(cxy[1])),
+                    )
+
+            if self._marker_xy is not None:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(255, 220, 0))  # yellow
+                for i in range(self._marker_xy.shape[0]):
+                    mu, mv = float(self._marker_xy[i, 0]), float(self._marker_xy[i, 1])
+                    if isnan(mu) or isnan(mv):
+                        continue
+                    painter.drawEllipse(to_pt(mu, mv), 3.0, 3.0)
+
+        painter.end()
 
 
 class _CropCell(QWidget):
-    """One camera cell in the crop grid: name label + image."""
+    """One camera cell in the crop grid: name label + image canvas."""
 
     _IMG_H = 240
 
@@ -651,35 +779,34 @@ class _CropCell(QWidget):
         name_lbl.setStyleSheet("font-size: 10px; font-weight: bold;")
         name_lbl.setMaximumHeight(18)
 
-        self._img = QLabel()
-        self._img.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._img.setMinimumHeight(self._IMG_H)
-        self._img.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._img.setStyleSheet("background: #222;")
+        self._canvas = _ImageCanvas(min_h=self._IMG_H)
 
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(2, 2, 2, 2)
         vbox.setSpacing(1)
         vbox.addWidget(name_lbl)
-        vbox.addWidget(self._img, stretch=1)
+        vbox.addWidget(self._canvas, stretch=1)
 
         self.show_empty()
 
     def show_empty(self) -> None:
-        self._img.clear()
-        self._img.setText("—")
-        self._img.setStyleSheet("background: #222; color: #666;")
+        self._canvas.show_empty()
 
-    def show_bgr(self, bgr) -> None:
-        """Display a BGR numpy array, scaling to fit the cell."""
-        import cv2
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        h, w = rgb.shape[:2]
-        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-        pix = QPixmap.fromImage(qimg)
-        scaled = pix.scaled(self._img.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self._img.setPixmap(scaled)
-        self._img.setStyleSheet("background: #222;")
+    def show_image(self, pixmap: QPixmap, x1: float, y1: float, src_scale: float) -> None:
+        self._canvas.show_image(pixmap, x1, y1, src_scale)
+
+    def set_overlay(
+        self,
+        obs_kp,
+        joint_xy,
+        bone_pairs: list,
+        marker_xy,
+        show_detected: bool,
+        show_tracked: bool,
+    ) -> None:
+        self._canvas.set_overlay(
+            obs_kp, joint_xy, bone_pairs, marker_xy, show_detected, show_tracked
+        )
 
 
 class PersonCropGridWidget(QWidget):
@@ -1041,12 +1168,18 @@ class PersonCropGridWidget(QWidget):
     def _load_frame(self, global_time: float) -> None:
         import cv2
         import numpy as np
-        from app.pose.person_preview import draw_skeleton_on_crop
 
         if not self._det_run_id or not self._sync_table:
             for cell in self._cells:
                 cell.show_empty()
             return
+
+        show_detected = self._show_detected is None or self._show_detected.isChecked()
+        show_tracked = self._show_tracked is None or self._show_tracked.isChecked()
+
+        tracking_step: int | None = None
+        if self._tracking_timestamps:
+            tracking_step = _nearest_tracker_step(global_time, self._tracking_timestamps)
 
         for i, cam in enumerate(self._cameras):
             svid = cam["shot_video_id"]
@@ -1082,8 +1215,7 @@ class PersonCropGridWidget(QWidget):
                 cell.show_empty()
                 continue
 
-            # Resolve crop-to-frame transform: prefer stored src_* (exact),
-            # fall back to bbox (old thumbnails without margin stored).
+            # Crop-to-full-frame transform
             bbox = self._det_bboxes.get(svid, {}).get(frame_idx)
             if row["src_x"] is not None:
                 x1, y1 = float(row["src_x"]), float(row["src_y"])
@@ -1096,32 +1228,34 @@ class PersonCropGridWidget(QWidget):
                 x1 = y1 = 0.0
                 src_h = float(crop_bgr.shape[0])
             jpeg_h = float(row["height_px"] or crop_bgr.shape[0])
-            scale = jpeg_h / src_h if src_h > 0 else 1.0
+            src_scale = jpeg_h / src_h if src_h > 0 else 1.0
 
-            # Overlay pose-detection keypoints (green)
-            if self._show_detected is None or self._show_detected.isChecked():
-                kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
-                if kp is not None:
-                    kp_s = kp.copy()
-                    kp_s[:, 0] = kp[:, 0] * scale
-                    kp_s[:, 1] = kp[:, 1] * scale
-                    draw_skeleton_on_crop(crop_bgr, kp_s, int(x1 * scale), int(y1 * scale))
+            # Convert image to QPixmap (no overlays drawn into the image)
+            crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+            h_img, w_img = crop_rgb.shape[:2]
+            qimg = QImage(
+                crop_rgb.data, w_img, h_img, 3 * w_img, QImage.Format.Format_RGB888
+            )
+            cell.show_image(QPixmap.fromImage(qimg), x1, y1, src_scale)
 
-            # Overlay tracked skeleton (FK lines + predicted marker dots)
-            if self._tracking_timestamps and (
-                self._show_tracked is None or self._show_tracked.isChecked()
-            ):
-                step = _nearest_tracker_step(global_time, self._tracking_timestamps)
-                joint_xy = self._joint_proj.get(cam_id, {}).get(step)
-                if joint_xy is not None:
-                    _draw_skeleton_lines(
-                        crop_bgr, joint_xy, self._bone_pairs, x1, y1, scale
-                    )
-                marker_xy = self._marker_proj.get(cam_id, {}).get(step)
-                if marker_xy is not None:
-                    _draw_marker_dots(crop_bgr, marker_xy, x1, y1, scale)
-
-            cell.show_bgr(crop_bgr)
+            # Pass overlay data — canvas draws everything at display resolution
+            obs_kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
+            joint_xy = (
+                self._joint_proj.get(cam_id, {}).get(tracking_step)
+                if tracking_step is not None else None
+            )
+            marker_xy = (
+                self._marker_proj.get(cam_id, {}).get(tracking_step)
+                if tracking_step is not None else None
+            )
+            cell.set_overlay(
+                obs_kp=obs_kp,
+                joint_xy=joint_xy,
+                bone_pairs=self._bone_pairs,
+                marker_xy=marker_xy,
+                show_detected=show_detected,
+                show_tracked=show_tracked,
+            )
 
 
 # ---------------------------------------------------------------------------

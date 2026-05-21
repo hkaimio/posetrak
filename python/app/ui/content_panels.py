@@ -626,7 +626,7 @@ def _draw_marker_dots(
     x1: float, y1: float, scale: float,
 ) -> None:
     import cv2, math
-    color = (0, 210, 210)  # cyan
+    color = (0, 220, 255)  # yellow
     n = marker_xy.shape[0]
 
     def to_crop(px: float, py: float) -> tuple[int, int]:
@@ -703,8 +703,8 @@ class PersonCropGridWidget(QWidget):
         self._current_t: float = 0.0
         self._slider: QSlider | None = None
         self._time_label: QLabel | None = None
-        self._show_skeleton: QCheckBox | None = None
-        self._show_keypoints: QCheckBox | None = None
+        self._show_detected: QCheckBox | None = None   # green pose-detection keypoints
+        self._show_tracked: QCheckBox | None = None    # FK skeleton lines + predicted dots
         # Pre-loaded per-camera data (indexed by shot_video_id or camera_instance_id)
         self._obs_kp: dict[str, dict[int, object]] = {}   # cam_instance_id→frame→kp
         self._det_bboxes: dict[str, dict[int, tuple]] = {}  # svid→frame→(cx,cy,w,h)
@@ -856,17 +856,17 @@ class PersonCropGridWidget(QWidget):
         slider_row.addWidget(self._slider)
         slider_row.addWidget(self._time_label)
 
-        self._show_skeleton = QCheckBox("Skeleton")
-        self._show_skeleton.setChecked(True)
-        self._show_skeleton.stateChanged.connect(lambda _: self._load_frame(self._current_t))
-        self._show_keypoints = QCheckBox("Keypoints")
-        self._show_keypoints.setChecked(True)
-        self._show_keypoints.stateChanged.connect(lambda _: self._load_frame(self._current_t))
+        self._show_detected = QCheckBox("Detected keypoints")
+        self._show_detected.setChecked(True)
+        self._show_detected.stateChanged.connect(lambda _: self._load_frame(self._current_t))
+        self._show_tracked = QCheckBox("Tracked skeleton")
+        self._show_tracked.setChecked(True)
+        self._show_tracked.stateChanged.connect(lambda _: self._load_frame(self._current_t))
 
         overlay_row = QHBoxLayout()
-        overlay_row.addWidget(QLabel("Tracking overlay:"))
-        overlay_row.addWidget(self._show_skeleton)
-        overlay_row.addWidget(self._show_keypoints)
+        overlay_row.addWidget(QLabel("Show:"))
+        overlay_row.addWidget(self._show_detected)
+        overlay_row.addWidget(self._show_tracked)
         overlay_row.addStretch()
 
         layout = QVBoxLayout(self)
@@ -1098,27 +1098,28 @@ class PersonCropGridWidget(QWidget):
             jpeg_h = float(row["height_px"] or crop_bgr.shape[0])
             scale = jpeg_h / src_h if src_h > 0 else 1.0
 
-            # Overlay pose_observations keypoints
-            kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
-            if kp is not None:
-                kp_s = kp.copy()
-                kp_s[:, 0] = kp[:, 0] * scale
-                kp_s[:, 1] = kp[:, 1] * scale
-                draw_skeleton_on_crop(crop_bgr, kp_s, int(x1 * scale), int(y1 * scale))
+            # Overlay pose-detection keypoints (green)
+            if self._show_detected is None or self._show_detected.isChecked():
+                kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
+                if kp is not None:
+                    kp_s = kp.copy()
+                    kp_s[:, 0] = kp[:, 0] * scale
+                    kp_s[:, 1] = kp[:, 1] * scale
+                    draw_skeleton_on_crop(crop_bgr, kp_s, int(x1 * scale), int(y1 * scale))
 
-            # Overlay tracking solution (skeleton lines + marker dots)
-            if self._tracking_timestamps:
+            # Overlay tracked skeleton (FK lines + predicted marker dots)
+            if self._tracking_timestamps and (
+                self._show_tracked is None or self._show_tracked.isChecked()
+            ):
                 step = _nearest_tracker_step(global_time, self._tracking_timestamps)
-                if self._show_skeleton and self._show_skeleton.isChecked():
-                    joint_xy = self._joint_proj.get(cam_id, {}).get(step)
-                    if joint_xy is not None:
-                        _draw_skeleton_lines(
-                            crop_bgr, joint_xy, self._bone_pairs, x1, y1, scale
-                        )
-                if self._show_keypoints and self._show_keypoints.isChecked():
-                    marker_xy = self._marker_proj.get(cam_id, {}).get(step)
-                    if marker_xy is not None:
-                        _draw_marker_dots(crop_bgr, marker_xy, x1, y1, scale)
+                joint_xy = self._joint_proj.get(cam_id, {}).get(step)
+                if joint_xy is not None:
+                    _draw_skeleton_lines(
+                        crop_bgr, joint_xy, self._bone_pairs, x1, y1, scale
+                    )
+                marker_xy = self._marker_proj.get(cam_id, {}).get(step)
+                if marker_xy is not None:
+                    _draw_marker_dots(crop_bgr, marker_xy, x1, y1, scale)
 
             cell.show_bgr(crop_bgr)
 

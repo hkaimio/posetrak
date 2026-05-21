@@ -198,16 +198,82 @@ TEST_CASE("Camera distortion", "[camera]") {
     }
 }
 
+TEST_CASE("Camera distortion rational model", "[camera]") {
+    SECTION("Rational model with k4/k5/k6 matches expected formula") {
+        // Coefficients: k1,k2,p1,p2,k3,k4,k5,k6
+        std::vector<double> const coeffs = {0.3, -0.1, 0.0, 0.0, 0.05, 0.2, -0.05, 0.01};
+        auto const intr = make_test_intrinsics(800.0, 800.0, 320.0, 240.0, 640, 480, coeffs);
+        Camera const cam = make_test_camera("cam1", intr);
+
+        Eigen::Vector2d const p(0.3, 0.2);
+        Eigen::Vector2d const got = cam.distort(p);
+
+        double const r2 = 0.3 * 0.3 + 0.2 * 0.2;
+        double const r4 = r2 * r2;
+        double const r6 = r4 * r2;
+        double const numer = 1.0 + 0.3 * r2 + (-0.1) * r4 + 0.05 * r6;
+        double const denom = 1.0 + 0.2 * r2 + (-0.05) * r4 + 0.01 * r6;
+        double const radial = numer / denom;
+        double const expected_x = p.x() * radial;
+        double const expected_y = p.y() * radial;
+
+        REQUIRE_THAT(got.x(), Catch::Matchers::WithinAbs(expected_x, 1e-10));
+        REQUIRE_THAT(got.y(), Catch::Matchers::WithinAbs(expected_y, 1e-10));
+    }
+
+    SECTION("Rational model degenerates to polynomial when k4=k5=k6=0") {
+        std::vector<double> const poly = {0.3, -0.1, 0.01, 0.02, 0.05};
+        std::vector<double> const ratio = {0.3, -0.1, 0.01, 0.02, 0.05, 0.0, 0.0, 0.0};
+        auto const intr_poly = make_test_intrinsics(800.0, 800.0, 320.0, 240.0, 640, 480, poly);
+        auto const intr_ratio = make_test_intrinsics(800.0, 800.0, 320.0, 240.0, 640, 480, ratio);
+        Camera const cam_poly = make_test_camera("p", intr_poly);
+        Camera const cam_ratio = make_test_camera("r", intr_ratio);
+
+        Eigen::Vector2d const p(0.3, 0.2);
+        REQUIRE(cam_poly.distort(p).isApprox(cam_ratio.distort(p), 1e-12));
+    }
+
+    SECTION("Realistic GoPro 11 mini rational coefficients — distort/undistort roundtrip") {
+        // Coefficients from actual camera calibration (rational model, nearly-cancelling terms)
+        std::vector<double> const coeffs = {-2.49055232, -0.52732380, 1.96701588e-3, 1.63309190e-3,
+                                            4.56096122,  -2.48739746, -0.53610768,   4.56835348};
+        // K_orig: fx=1999.89, cx=1928.68, cy=1093.89  K_new: fx=2002.34, cx=1938.60, cy=1100.48
+        auto intr = make_test_intrinsics(2002.34, 2005.89, 1938.60, 1100.48, 3840, 2160, coeffs);
+        Camera cam = make_test_camera("gopro", intr);
+        // Set K_orig so undistort() normalises with the right matrix
+        Eigen::Matrix3d K_orig;
+        K_orig << 1999.89, 0.0, 1928.68, 0.0, 2000.72, 1093.89, 0.0, 0.0, 1.0;
+        cam.set_K_original(K_orig);
+
+        // A pixel in the distorted frame (leg region from real data)
+        Eigen::Vector2d const distorted_px(2165.2, 1424.8);
+
+        // Undistort then distort back must recover the original pixel
+        Eigen::Vector2d const undistorted_px = cam.undistort(distorted_px);
+        // Re-distort: normalise with K_new, apply distortion, apply K_orig
+        double const x_n = (undistorted_px.x() - 1938.60) / 2002.34;
+        double const y_n = (undistorted_px.y() - 1100.48) / 2005.89;
+        Eigen::Vector2d const dist_norm = cam.distort(Eigen::Vector2d(x_n, y_n));
+        Eigen::Vector2d const recovered(1999.89 * dist_norm.x() + 1928.68,
+                                        2000.72 * dist_norm.y() + 1093.89);
+
+        // Should recover the original distorted pixel to sub-pixel accuracy
+        REQUIRE_THAT(recovered.x(), Catch::Matchers::WithinAbs(distorted_px.x(), 0.1));
+        REQUIRE_THAT(recovered.y(), Catch::Matchers::WithinAbs(distorted_px.y(), 0.1));
+
+        // The undistorted pixel must differ noticeably from the distorted one
+        // (confirms the rational model actually shifts, not just ≈identity)
+        REQUIRE((undistorted_px - distorted_px).norm() > 5.0);
+    }
+}
+
 TEST_CASE("Camera undistortion", "[camera]") {
-    SECTION("Undistort-distort roundtrip") {
+    SECTION("Undistort-distort roundtrip (polynomial model)") {
         auto const intr = make_test_intrinsics(800.0, 800.0, 320.0, 240.0, 640, 480,
                                                {0.15, -0.08, 0.01, 0.02, 0.03});
         Camera const cam = make_test_camera("cam1", intr);
 
-        // Test pixel coordinates
         Eigen::Vector2d const original_pixel(500.0, 350.0);
-
-        // Undistort
         Eigen::Vector2d const undistorted_pixel = cam.undistort(original_pixel);
 
         // Distort back by extracting normalized coordinates and applying distortion manually
@@ -217,6 +283,22 @@ TEST_CASE("Camera undistortion", "[camera]") {
         Eigen::Vector2d reconstructed(800.0 * dist_norm.x() + 320.0, 800.0 * dist_norm.y() + 240.0);
 
         REQUIRE(reconstructed.isApprox(original_pixel, 0.01));  // 0.01 pixel tolerance
+    }
+
+    SECTION("Undistort-distort roundtrip (rational model)") {
+        std::vector<double> const coeffs = {0.3, -0.1, 0.005, 0.003, 0.05, 0.2, -0.05, 0.01};
+        auto const intr = make_test_intrinsics(800.0, 800.0, 320.0, 240.0, 640, 480, coeffs);
+        Camera const cam = make_test_camera("cam1", intr);
+
+        for (auto const& px : {Eigen::Vector2d(500.0, 350.0), Eigen::Vector2d(100.0, 400.0),
+                               Eigen::Vector2d(600.0, 100.0)}) {
+            Eigen::Vector2d const undistorted = cam.undistort(px);
+            Eigen::Vector2d norm((undistorted.x() - 320.0) / 800.0,
+                                 (undistorted.y() - 240.0) / 800.0);
+            Eigen::Vector2d dist_norm = cam.distort(norm);
+            Eigen::Vector2d recovered(800.0 * dist_norm.x() + 320.0, 800.0 * dist_norm.y() + 240.0);
+            REQUIRE(recovered.isApprox(px, 0.01));
+        }
     }
 }
 

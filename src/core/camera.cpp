@@ -458,19 +458,24 @@ Eigen::Vector2d Camera::apply_distortion(Eigen::Vector2d const& point_norm) cons
         double const r6 = r4 * r2;
 
         // Extract coefficients (with defaults)
-        double const k1 =
-            intrinsics_.distortion_coeffs.size() > 0 ? intrinsics_.distortion_coeffs[0] : 0.0;
-        double const k2 =
-            intrinsics_.distortion_coeffs.size() > 1 ? intrinsics_.distortion_coeffs[1] : 0.0;
-        double const p1 =
-            intrinsics_.distortion_coeffs.size() > 2 ? intrinsics_.distortion_coeffs[2] : 0.0;
-        double const p2 =
-            intrinsics_.distortion_coeffs.size() > 3 ? intrinsics_.distortion_coeffs[3] : 0.0;
-        double const k3 =
-            intrinsics_.distortion_coeffs.size() > 4 ? intrinsics_.distortion_coeffs[4] : 0.0;
+        auto coeff = [&](size_t i) {
+            return intrinsics_.distortion_coeffs.size() > i ? intrinsics_.distortion_coeffs[i]
+                                                            : 0.0;
+        };
+        double const k1 = coeff(0);
+        double const k2 = coeff(1);
+        double const p1 = coeff(2);
+        double const p2 = coeff(3);
+        double const k3 = coeff(4);
+        // Rational denominator coefficients (OpenCV rational model, dist_coeffs[5..7])
+        double const k4 = coeff(5);
+        double const k5 = coeff(6);
+        double const k6 = coeff(7);
 
-        // Radial distortion
-        double const radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
+        // Radial distortion — rational model (reduces to polynomial when k4=k5=k6=0)
+        double const numer = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
+        double const denom = 1.0 + k4 * r2 + k5 * r4 + k6 * r6;
+        double const radial = numer / denom;
 
         // Tangential distortion
         double const dx = 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x);

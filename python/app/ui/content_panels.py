@@ -1038,9 +1038,12 @@ class PersonCropGridWidget(QWidget):
             grid.setRowStretch(r, 1)
 
         dur_ms = max(1, int((self._t_end - self._t_start) * 1000))
+        _fps_vals = [float(r["actual_fps"]) for r in sp_rows if r["actual_fps"]]
+        frame_step_ms = max(1, round(1000.0 / max(_fps_vals))) if _fps_vals else 8
         self._slider = QSlider(Qt.Orientation.Horizontal)
         self._slider.setMinimum(0)
         self._slider.setMaximum(dur_ms)
+        self._slider.setSingleStep(frame_step_ms)
         self._slider.setValue(0)
         self._slider.valueChanged.connect(self._on_slider)
 

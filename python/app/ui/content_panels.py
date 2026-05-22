@@ -1658,10 +1658,17 @@ class PersonPanel(QWidget):
 class TrackingRunPanel(QWidget):
     """Detail view for a tracking run."""
 
-    def __init__(self, conn: sqlite3.Connection, run_id: str, parent=None) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        run_id: str,
+        session_path: Path | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._conn = conn
         self._run_id = run_id
+        self._session_path = session_path
         self._build()
 
     def _build(self) -> None:
@@ -1713,9 +1720,25 @@ class TrackingRunPanel(QWidget):
         export_btn.setToolTip("Not yet wired in this UI")
         btn_row.addWidget(export_btn)
 
+        scale_btn = _action_btn("Scale skeleton…", enabled=bool(self._session_path))
+        scale_btn.setToolTip("Measure bone lengths from inlier observations and scale the skeleton")
+        scale_btn.clicked.connect(self._open_scaling)
+        btn_row.addWidget(scale_btn)
+
         btn_row.addStretch()
         vbox.addLayout(btn_row)
 
         self.setLayout(QVBoxLayout())
         self.layout().setContentsMargins(0, 0, 0, 0)
         self.layout().addWidget(_scrollable(inner))
+
+    def _open_scaling(self) -> None:
+        from app.ui.skeleton_scaling_panel import SkeletonScalingPanel
+
+        dlg = SkeletonScalingPanel(
+            self._conn,
+            str(self._session_path),
+            self._run_id,
+            parent=self,
+        )
+        dlg.show()

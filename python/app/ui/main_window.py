@@ -391,7 +391,7 @@ class MainWindow(QMainWindow):
 
     def _show_tracking_run(self, run_id: str) -> None:
         from app.ui.content_panels import TrackingRunPanel
-        panel = TrackingRunPanel(self._session_conn, run_id)
+        panel = TrackingRunPanel(self._session_conn, run_id, self._session_path)
         self._swap_content(panel)
 
     def _swap_content(self, widget) -> None:

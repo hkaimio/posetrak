@@ -44,6 +44,7 @@ setup-app = [
     "PySide6>=6.7",
     "pyexiftool>=0.5",
     "matplotlib>=3.8",
+    "plotly>=5.0",
 ]
 pipeline = [
     "ultralytics",

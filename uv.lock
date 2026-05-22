@@ -1252,6 +1252,7 @@ pose-app = [
 ]
 setup-app = [
     { name = "matplotlib" },
+    { name = "plotly" },
     { name = "pyexiftool" },
     { name = "pyside6" },
 ]
@@ -1289,6 +1290,7 @@ pose-app = [
 ]
 setup-app = [
     { name = "matplotlib", specifier = ">=3.8" },
+    { name = "plotly", specifier = ">=5.0" },
     { name = "pyexiftool", specifier = ">=0.5" },
     { name = "pyside6", specifier = ">=6.7" },
 ]

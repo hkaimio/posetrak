@@ -692,6 +692,7 @@ class _ImageCanvas(QWidget):
         self._src_scale: float = 1.0   # full-frame pixels → JPEG crop pixels
         # Detection overlay: (N, 3) float32 — x, y, conf in full-frame pixels
         self._obs_kp = None
+        self._outlier_kp_mask = None           # bool array indexed by COCO keypoint ID
         # Tracking overlay
         self._joint_xy: dict | None = None    # joint_name → [u, v] full-frame
         self._bone_pairs: list = []
@@ -703,6 +704,7 @@ class _ImageCanvas(QWidget):
     def show_empty(self) -> None:
         self._pixmap = None
         self._obs_kp = None
+        self._outlier_kp_mask = None
         self._joint_xy = None
         self._marker_xy = None
         self.update()
@@ -722,6 +724,7 @@ class _ImageCanvas(QWidget):
         marker_xy,
         show_detected: bool,
         show_tracked: bool,
+        outlier_mask=None,
     ) -> None:
         self._obs_kp = obs_kp
         self._joint_xy = joint_xy
@@ -729,6 +732,7 @@ class _ImageCanvas(QWidget):
         self._marker_xy = marker_xy
         self._show_detected = show_detected
         self._show_tracked = show_tracked
+        self._outlier_kp_mask = outlier_mask
         self.update()
 
     def _image_rect(self) -> tuple[int, int, int, int, float]:
@@ -798,7 +802,11 @@ class _ImageCanvas(QWidget):
                 conf = float(kp[i, 2])
                 if conf < 0.1:
                     continue
-                if conf >= 0.5:
+                if (self._outlier_kp_mask is not None
+                        and i < len(self._outlier_kp_mask)
+                        and self._outlier_kp_mask[i]):
+                    painter.setBrush(QColor(120, 120, 120))  # grey — rejected outlier
+                elif conf >= 0.5:
                     painter.setBrush(QColor(0, 220, 60))    # green
                 elif conf >= 0.3:
                     painter.setBrush(QColor(255, 200, 0))   # yellow
@@ -871,9 +879,11 @@ class _CropCell(QWidget):
         marker_xy,
         show_detected: bool,
         show_tracked: bool,
+        outlier_mask=None,
     ) -> None:
         self._canvas.set_overlay(
-            obs_kp, joint_xy, bone_pairs, marker_xy, show_detected, show_tracked
+            obs_kp, joint_xy, bone_pairs, marker_xy, show_detected, show_tracked,
+            outlier_mask=outlier_mask,
         )
 
 
@@ -912,6 +922,8 @@ class PersonCropGridWidget(QWidget):
         self._joint_proj: dict[str, dict[int, dict]] = {}
         self._bone_pairs: list[tuple[str, str]] = []
         self._tracking_timestamps: list[tuple[float, int]] = []  # sorted (ts, step)
+        # cam_instance_id → tracker_step → bool array indexed by COCO keypoint ID
+        self._outlier_masks: dict[str, dict[int, object]] = {}
         self._build()
 
     def _build(self) -> None:
@@ -1135,6 +1147,7 @@ class PersonCropGridWidget(QWidget):
         self._joint_proj.clear()
         self._bone_pairs.clear()
         self._tracking_timestamps.clear()
+        self._outlier_masks.clear()
 
         if not run_id:
             self._load_frame(self._current_t)
@@ -1187,6 +1200,19 @@ class PersonCropGridWidget(QWidget):
             return
         layout = SkeletonLayout(skel["yaml_content"])
         self._bone_pairs = layout.bone_pairs
+
+        # marker index → COCO keypoint index (for outlier colouring)
+        marker_to_coco = {
+            m["name"]: m["openpose_keypoint"]
+            for m in layout.markers()
+            if m["openpose_keypoint"] is not None
+        }
+        mi_to_coco: dict[int, int] = {
+            mi: marker_to_coco[name]
+            for mi, name in enumerate(marker_names)
+            if name in marker_to_coco
+        }
+        n_coco_kp = max((c + 1 for c in mi_to_coco.values()), default=17)
 
         # Load extrinsics: cam_instance_id → (R 3×3, t 3-vector)
         ext_id = run["extrinsic_calibration_id"]
@@ -1261,6 +1287,14 @@ class PersonCropGridWidget(QWidget):
                                 pred_xy[mi, 0] = u_d
                                 pred_xy[mi, 1] = v_d
                 self._marker_proj.setdefault(cam_id, {})[step] = pred_xy
+
+                if mi_to_coco:
+                    mask = np.zeros(n_coco_kp, dtype=bool)
+                    for mi, coco_id in mi_to_coco.items():
+                        is_out = obs[ci, mi, 6]
+                        if np.isfinite(is_out) and is_out != 0.0:
+                            mask[coco_id] = True
+                    self._outlier_masks.setdefault(cam_id, {})[step] = mask
 
         # Compute joint projections via FK from state blobs
         state_rows = self._conn.execute(
@@ -1390,11 +1424,16 @@ class PersonCropGridWidget(QWidget):
                 self._marker_proj.get(cam_id, {}).get(tracking_step)
                 if tracking_step is not None else None
             )
+            outlier_mask = (
+                self._outlier_masks.get(cam_id, {}).get(tracking_step)
+                if tracking_step is not None else None
+            )
             cell.set_overlay(
                 obs_kp=obs_kp,
                 joint_xy=joint_xy,
                 bone_pairs=self._bone_pairs,
                 marker_xy=marker_xy,
+                outlier_mask=outlier_mask,
                 show_detected=show_detected,
                 show_tracked=show_tracked,
             )

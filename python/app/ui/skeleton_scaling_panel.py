@@ -12,24 +12,20 @@ Workflow
 
 Video scrubber
 --------------
-The left panel shows full video frames via FrameReader.  Clicking any point on
-the matplotlib plots seeks the video to that timestamp; the time slider in the
-video panel is bi-directionally linked to a vertical cursor line on all plots.
+The left panel reuses PersonCropGridWidget (same as the tracking run view) so
+person crops and tracking overlay are available.  Clicking any point on the
+matplotlib plots seeks the video; the widget's time_changed signal drives the
+cursor line across all plots.
 """
 
 from __future__ import annotations
 
-import json
 import sqlite3
-from pathlib import Path
 
-import cv2
 import numpy as np
 import yaml
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QDoubleSpinBox,
     QHBoxLayout,
@@ -38,7 +34,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
-    QSlider,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -47,8 +42,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from matplotlib.widgets import SpanSelector
 
-from app.setup.db_context import SyncPoint, SyncTable
-from app.setup.video_reader import FrameReader
+from app.ui.content_panels import PersonCropGridWidget
 from posetrak.db.manage_skeleton import import_skeleton_str
 from posetrak.db.scale_skeleton import scale_skeleton_yaml, template_measurements
 
@@ -266,6 +260,9 @@ class _PlotCanvas(QWidget):
         self._selectors.clear()
 
         ts = meas_df["timestamp_s"].values if not meas_df.empty else np.array([])
+        t_min = float(ts.min()) if ts.size else 0.0
+        t_max = float(ts.max()) if ts.size else 1.0
+        t_margin = (t_max - t_min) * 0.01
 
         for i, key in enumerate(MEAS_KEYS):
             ax = self._axes[i]
@@ -288,10 +285,13 @@ class _PlotCanvas(QWidget):
                            label=f"tmpl {v:.1f} cm")
                 ax.legend(fontsize=7, loc="upper right", framealpha=0.5)
 
-            # Span and cursor placeholders (invisible until used)
-            patch = ax.axvspan(0, 0, alpha=0.2, color="gold", visible=False, zorder=0)
+            # Fix x-axis to actual tracking data range (before adding invisible artists)
+            ax.set_xlim(t_min - t_margin, t_max + t_margin)
+
+            # Span and cursor (added after xlim so they don't expand the axis)
+            patch = ax.axvspan(t_min, t_min, alpha=0.2, color="gold", visible=False, zorder=0)
             self._span_patches.append(patch)
-            cursor = ax.axvline(0, color="crimson", lw=1, alpha=0.7, visible=False)
+            cursor = ax.axvline(t_min, color="crimson", lw=1, alpha=0.7, visible=False)
             self._cursor_lines.append(cursor)
 
             sel = SpanSelector(
@@ -342,199 +342,6 @@ class _PlotCanvas(QWidget):
         if event.button != 1:
             return
         self.time_clicked.emit(float(event.xdata))
-
-
-# ---------------------------------------------------------------------------
-# Video panel (single camera, full frames)
-# ---------------------------------------------------------------------------
-
-
-class _VideoPanel(QWidget):
-    """Camera selector + full-frame video display driven by timestamp."""
-
-    time_changed = Signal(float)
-
-    def __init__(
-        self, conn: sqlite3.Connection, run_id: str, parent=None
-    ) -> None:
-        super().__init__(parent)
-        self._conn = conn
-        self._run_id = run_id
-        self._sync_table: SyncTable | None = None
-        self._readers: dict[str, FrameReader] = {}   # svid → reader
-        self._svid_map: dict[str, str] = {}           # label → svid
-        self._current_svid: str | None = None
-        self._t_start = 0.0
-
-        # --- Widgets ---
-        self._cam_combo = QComboBox()
-        self._cam_combo.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-
-        self._frame_lbl = QLabel("Loading…")
-        self._frame_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._frame_lbl.setStyleSheet("background: #111; color: #555;")
-        self._frame_lbl.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
-        self._frame_lbl.setMinimumSize(300, 200)
-
-        self._slider = QSlider(Qt.Orientation.Horizontal)
-        self._time_lbl = QLabel("—")
-        self._time_lbl.setMinimumWidth(60)
-
-        slider_row = QHBoxLayout()
-        slider_row.addWidget(self._slider)
-        slider_row.addWidget(self._time_lbl)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(4)
-        layout.addWidget(self._cam_combo)
-        layout.addWidget(self._frame_lbl, stretch=1)
-        layout.addLayout(slider_row)
-
-        self._cam_combo.currentIndexChanged.connect(self._on_cam_changed)
-        self._slider.valueChanged.connect(self._on_slider_moved)
-
-        self._populate()
-
-    # ------------------------------------------------------------------
-    # Initialisation
-
-    def _populate(self) -> None:
-        run = self._conn.execute(
-            "SELECT observation_sequence_id FROM tracking_runs WHERE id=?",
-            (self._run_id,),
-        ).fetchone()
-        if not run:
-            return
-
-        seq = self._conn.execute(
-            "SELECT shot_id, time_start_s, time_end_s, sync_config_id "
-            "FROM pose_observation_sequences WHERE id=?",
-            (run["observation_sequence_id"],),
-        ).fetchone()
-        if not seq:
-            return
-
-        self._t_start = float(seq["time_start_s"])
-        t_end = float(seq["time_end_s"])
-        dur_ms = max(1, int((t_end - self._t_start) * 1000))
-
-        # Sync table
-        sp_rows = self._conn.execute(
-            "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, cv.actual_fps "
-            "FROM sync_points sp "
-            "JOIN capture_videos cv ON cv.id = sp.shot_video_id "
-            "WHERE sp.sync_config_id=?",
-            (seq["sync_config_id"],),
-        ).fetchall()
-        if sp_rows:
-            pts = [
-                SyncPoint("", r["shot_video_id"], r["video_frame"], r["timestamp_s"])
-                for r in sp_rows
-            ]
-            fps_map = {r["shot_video_id"]: float(r["actual_fps"]) for r in sp_rows}
-            self._sync_table = SyncTable(pts, fps_map)
-            max_fps = max(fps_map.values()) if fps_map else 30.0
-        else:
-            max_fps = 30.0
-
-        self._slider.setMinimum(0)
-        self._slider.setMaximum(dur_ms)
-        self._slider.setSingleStep(max(1, round(1000.0 / max_fps)))
-
-        # Cameras
-        cam_rows = self._conn.execute(
-            "SELECT cv.id, COALESCE(ci.label, cv.camera_instance_id) AS label "
-            "FROM capture_videos cv "
-            "LEFT JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
-            "WHERE cv.shot_id=? ORDER BY label",
-            (seq["shot_id"],),
-        ).fetchall()
-        self._cam_combo.blockSignals(True)
-        for row in cam_rows:
-            self._svid_map[row["label"]] = row["id"]
-            self._cam_combo.addItem(row["label"])
-        self._cam_combo.blockSignals(False)
-        if cam_rows:
-            self._on_cam_changed(0)
-
-    # ------------------------------------------------------------------
-    # Slots
-
-    def _on_cam_changed(self, idx: int) -> None:
-        label = self._cam_combo.itemText(idx)
-        svid = self._svid_map.get(label)
-        if svid == self._current_svid:
-            return
-        # Stop old reader
-        if self._current_svid in self._readers:
-            self._readers[self._current_svid].shutdown()
-        self._current_svid = svid
-        if svid and svid not in self._readers:
-            fp_row = self._conn.execute(
-                "SELECT file_path FROM capture_videos WHERE id=?", (svid,)
-            ).fetchone()
-            if fp_row and Path(fp_row["file_path"]).exists():
-                reader = FrameReader(fp_row["file_path"], parent=self)
-                reader.frame_ready.connect(self._on_frame)
-                reader.start()
-                self._readers[svid] = reader
-            else:
-                self._frame_lbl.setText("Video file not found")
-                return
-        self._seek_t(self._t_start + self._slider.value() / 1000.0)
-
-    def _on_slider_moved(self, ms: int) -> None:
-        t = self._t_start + ms / 1000.0
-        self._time_lbl.setText(f"{t:.2f} s")
-        self._seek_t(t)
-        self.time_changed.emit(t)
-
-    def _on_frame(self, _frame_idx: int, frame_bgr: object) -> None:
-        if not isinstance(frame_bgr, np.ndarray):
-            return
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        h, w = rgb.shape[:2]
-        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimg)
-        sz = self._frame_lbl.size()
-        self._frame_lbl.setPixmap(
-            pixmap.scaled(sz, Qt.AspectRatioMode.KeepAspectRatio,
-                          Qt.TransformationMode.SmoothTransformation)
-        )
-
-    # ------------------------------------------------------------------
-    # Public API
-
-    def seek(self, t: float) -> None:
-        """External seek (plot click): move slider, request frame, no re-emit."""
-        ms = int((t - self._t_start) * 1000)
-        ms = max(0, min(ms, self._slider.maximum()))
-        self._slider.blockSignals(True)
-        self._slider.setValue(ms)
-        self._slider.blockSignals(False)
-        self._time_lbl.setText(f"{t:.2f} s")
-        self._seek_t(t)
-
-    def shutdown(self) -> None:
-        for reader in self._readers.values():
-            reader.shutdown()
-        self._readers.clear()
-
-    def _seek_t(self, t: float) -> None:
-        svid = self._current_svid
-        if not svid or not self._sync_table:
-            return
-        reader = self._readers.get(svid)
-        if not reader:
-            return
-        frame_idx = self._sync_table.lookup(t, svid)
-        if frame_idx is not None:
-            reader.request(frame_idx)
 
 
 # ---------------------------------------------------------------------------
@@ -644,9 +451,18 @@ class SkeletonScalingPanel(QDialog):
         # ── Main split: video ← | → plots ──────────────────────────────
         main_split = QSplitter(Qt.Orientation.Horizontal)
 
-        self._video = _VideoPanel(self._conn, self._run_id)
-        self._video.setMaximumWidth(480)
-        main_split.addWidget(self._video)
+        seq_row = self._conn.execute(
+            "SELECT observation_sequence_id FROM tracking_runs WHERE id=?",
+            (self._run_id,),
+        ).fetchone()
+        seq_id = seq_row["observation_sequence_id"] if seq_row else None
+
+        self._video: PersonCropGridWidget | None = None
+        if seq_id:
+            self._video = PersonCropGridWidget(self._conn, seq_id)
+            self._video.set_tracking_run(self._run_id)
+            self._video.setMaximumWidth(480)
+            main_split.addWidget(self._video)
 
         self._plot = _PlotCanvas()
         main_split.addWidget(self._plot)
@@ -656,8 +472,9 @@ class SkeletonScalingPanel(QDialog):
         root.addWidget(main_split, stretch=1)
 
         # Wire video ↔ plot
-        self._video.time_changed.connect(self._plot.move_cursor)
-        self._plot.time_clicked.connect(self._video.seek)
+        if self._video is not None:
+            self._video.time_changed.connect(self._plot.move_cursor)
+            self._plot.time_clicked.connect(self._video.seek)
         self._plot.time_clicked.connect(self._plot.move_cursor)
         self._plot.span_changed.connect(self._on_span_changed)
 
@@ -797,5 +614,4 @@ class SkeletonScalingPanel(QDialog):
         if self._worker and self._worker.isRunning():
             self._worker.quit()
             self._worker.wait(2000)
-        self._video.shutdown()
         super().closeEvent(event)

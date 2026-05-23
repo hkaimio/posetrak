@@ -885,6 +885,8 @@ class PersonCropGridWidget(QWidget):
     cell is reserved for a future 3D tracking view.
     """
 
+    time_changed = Signal(float)  # emitted on every slider move (absolute timestamp_s)
+
     def __init__(self, conn: sqlite3.Connection, sequence_id: str, parent=None) -> None:
         super().__init__(parent)
         self._conn = conn
@@ -1082,6 +1084,21 @@ class PersonCropGridWidget(QWidget):
         if self._time_label is not None:
             self._time_label.setText(_fmt_time(self._current_t))
         self._load_frame(self._current_t)
+        self.time_changed.emit(self._current_t)
+
+    def seek(self, t: float) -> None:
+        """Seek to an absolute timestamp without re-emitting time_changed."""
+        if self._slider is None:
+            return
+        ms = int((t - self._t_start) * 1000)
+        ms = max(0, min(ms, self._slider.maximum()))
+        self._slider.blockSignals(True)
+        self._slider.setValue(ms)
+        self._slider.blockSignals(False)
+        self._current_t = t
+        if self._time_label is not None:
+            self._time_label.setText(_fmt_time(t))
+        self._load_frame(t)
 
     def set_tracking_run(self, run_id: str | None) -> None:
         """Load tracking run overlay data; called by PersonPanel when run selection changes."""
@@ -1675,6 +1692,7 @@ class TrackingRunPanel(QWidget):
         run = self._conn.execute(
             "SELECT tr.id, tr.ran_at, tr.notes, tr.posetrak_version, "
             "       tr.active_camera_ids, tr.marker_names, "
+            "       tr.observation_sequence_id, "
             "       s.name AS skel_name "
             "FROM tracking_runs tr "
             "LEFT JOIN skeletons s ON s.id = tr.skeleton_id "
@@ -1689,48 +1707,58 @@ class TrackingRunPanel(QWidget):
             (self._run_id,),
         ).fetchone()[0]
 
-        inner = QWidget()
-        vbox = QVBoxLayout(inner)
-        vbox.setAlignment(Qt.AlignmentFlag.AlignTop)
-
         skel = run["skel_name"] or "?"
-        vbox.addWidget(QLabel(f"<h2>Tracking run  [{skel}]</h2>"))
 
-        form_box = _section("Run info")
+        # Compact header + buttons (non-scrolling top strip)
+        header = QWidget()
+        header_v = QVBoxLayout(header)
+        header_v.setContentsMargins(6, 4, 6, 2)
+        header_v.setSpacing(2)
+
+        title_row = QHBoxLayout()
+        title_row.addWidget(QLabel(f"<b>Tracking run</b> [{skel}]"))
+        title_row.addStretch()
+
         form = QFormLayout()
-        form.addRow("Skeleton:", QLabel(skel))
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(1)
         form.addRow("Ran at:", QLabel(_fmt_ts(run["ran_at"])))
-        form.addRow("Version:", QLabel(run["posetrak_version"] or "—"))
-        form.addRow("Frames:", QLabel(str(n_frames)))
+        form.addRow("Frames:", QLabel(f"{n_frames}  |  version {run['posetrak_version'] or '—'}"))
         try:
             cam_ids = json.loads(run["active_camera_ids"] or "[]")
             form.addRow("Cameras:", QLabel(", ".join(cam_ids) or "—"))
         except Exception:
             pass
-        form.addRow("Notes:", QLabel(run["notes"] or "—"))
-        form_box.layout().addLayout(form)
-        vbox.addWidget(form_box)
+        if run["notes"]:
+            form.addRow("Notes:", QLabel(run["notes"]))
 
         btn_row = QHBoxLayout()
-        view_btn = _action_btn("View results…", enabled=False)
-        view_btn.setToolTip("Phase 5: results visualiser")
-        btn_row.addWidget(view_btn)
-
         export_btn = _action_btn("Export BVH…", enabled=False)
         export_btn.setToolTip("Not yet wired in this UI")
         btn_row.addWidget(export_btn)
-
         scale_btn = _action_btn("Scale skeleton…", enabled=bool(self._session_path))
         scale_btn.setToolTip("Measure bone lengths from inlier observations and scale the skeleton")
         scale_btn.clicked.connect(self._open_scaling)
         btn_row.addWidget(scale_btn)
-
         btn_row.addStretch()
-        vbox.addLayout(btn_row)
 
-        self.setLayout(QVBoxLayout())
-        self.layout().setContentsMargins(0, 0, 0, 0)
-        self.layout().addWidget(_scrollable(inner))
+        header_v.addLayout(title_row)
+        header_v.addLayout(form)
+        header_v.addLayout(btn_row)
+
+        # Video crop grid fills the rest of the panel
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(header)
+
+        seq_id = run["observation_sequence_id"]
+        if seq_id:
+            crop_grid = PersonCropGridWidget(self._conn, seq_id)
+            crop_grid.set_tracking_run(self._run_id)
+            root.addWidget(crop_grid, stretch=1)
+        else:
+            root.addStretch(1)
 
     def _open_scaling(self) -> None:
         from app.ui.skeleton_scaling_panel import SkeletonScalingPanel

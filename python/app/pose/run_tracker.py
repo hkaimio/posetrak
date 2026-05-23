@@ -173,7 +173,8 @@ class RunTrackerWidget(QWidget):
         change the sequence when this widget is embedded in a PersonPanel.
         """
         for i in range(self._sequence_combo.count()):
-            if self._sequence_combo.itemData(i) == seq_id:
+            item_seq_id, _, _ = self._sequence_combo.itemData(i)
+            if item_seq_id == seq_id:
                 self._sequence_combo.setCurrentIndex(i)
                 break
         self._sequence_combo.setEnabled(False)
@@ -220,7 +221,9 @@ class RunTrackerWidget(QWidget):
                 missing.append("no extrinsics")
             if missing:
                 label += f"  ⚠ {', '.join(missing)}"
-            self._sequence_combo.addItem(label, r["seq_id"])
+            self._sequence_combo.addItem(
+                label, (r["seq_id"], r["time_start_s"], r["time_end_s"])
+            )
 
     def _update_run_btn(self) -> None:
         ok = (
@@ -263,7 +266,7 @@ class RunTrackerWidget(QWidget):
             )
             return
 
-        seq_id = self._sequence_combo.currentData()
+        seq_id, time_start_s, time_end_s = self._sequence_combo.currentData()
         skel_id = self._skeleton_combo.currentData()
         person_id = self._person_id_spin.value()
 
@@ -286,6 +289,8 @@ class RunTrackerWidget(QWidget):
             "--skeleton",       skel_id,
             "--tracker-config", config_id,
             "--person-id",      str(person_id),
+            "--start-time",     str(time_start_s),
+            "--end-time",       str(time_end_s),
             "--output-dir",     str(out_dir),
             "--smooth",
         ]

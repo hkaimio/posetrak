@@ -1137,13 +1137,17 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
 
             double seq_start = seq_info.time_start_s;
             if (static_cast<int>(cam_starts.size()) >= n_needed) {
-                // Nth smallest start time gives earliest point where N cameras are active.
-                // Round up to the nearest tracker step boundary relative to seq_start.
+                // Nth smallest start time: earliest point where N cameras have at least one
+                // observation.  Find which tracker step window [seq_start + k*dt, seq_start +
+                // (k+1)*dt) contains that observation using floor(), not ceil().  ceil() would
+                // advance start_time by a full extra step for cameras whose first observation
+                // falls anywhere inside the first window (e.g. 0.5 ms after seq_start), even
+                // though those observations ARE available for initialization at seq_start.
                 double t_n = cam_starts[static_cast<size_t>(n_needed - 1)];
                 if (t_n > seq_start) {
-                    int steps_ahead = static_cast<int>(std::ceil((t_n - seq_start) / dt));
+                    int steps_ahead = static_cast<int>(std::floor((t_n - seq_start) / dt));
                     start_time = seq_start + steps_ahead * dt;
-                    if (!quiet && start_time > seq_start + dt) {
+                    if (!quiet && start_time > seq_start) {
                         fmt::print(
                             "  Auto-detected start time: {:.4f}s (sequence start {:.4f}s; "
                             "waiting for {} cameras)\n",

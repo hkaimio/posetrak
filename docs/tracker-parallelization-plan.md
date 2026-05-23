@@ -6,103 +6,142 @@
 
 ## Context and Motivation
 
-The tracker processes real-time mocap at roughly one pose per camera frame.  For a
-4-camera 60 fps session, the wall budget per frame is ~16 ms.  On a typical desktop
-(Ryzen 9 / Core i9 class) the tracker currently runs well above that.  This doc records
-the plan, measurements before and after each optimization attempt, and lessons learned.
+The tracker currently runs at roughly 3–4 tracker steps per second on the full
+whole-body+hands skeleton.  The goal is not strict real-time but to reduce per-step
+wall time enough to make iterative workflow practical: shorter experiment turn-around,
+the ability to re-track a 30-second clip in reasonable time, and headroom for future
+skeleton or camera count growth.
+
+**Benchmark dataset**: "Trial 1" in `ukemi-tommi-20260509.db`, `time_start_s=250`,
+`time_end_s=252` (2-second clip, 5 cameras, full whole-body+hands skeleton).
+This clip is short enough for rapid iteration but long enough to be representative.
+
+---
+
+## Actual Problem Dimensions
+
+The production skeleton (`Harri scaling 1 20260523`, SHA prefix `bcffc4b`) has:
+
+| Quantity | Value |
+|---|---|
+| Ball joints | 51 |
+| Active joint DOF | 153 (51 × 3) |
+| Error-state dim | 318 — `2 × (6 root + 153 joint)` |
+| **n\_sigma** | **637** — `2 × 318 + 1` |
+| Cameras (current runs) | 5 |
+| Tracked markers | 61 |
+| **measurement\_dim** | **610** — `5 cams × 61 markers × 2` |
+
+These are substantially larger than the body-only estimates in earlier planning.
+637 sigma points each requiring a full 52-joint FK call (plus 5-camera projection)
+explains why the tracker sits at 3–4 steps/s today.
 
 ---
 
 ## UKF Cost Structure
 
-### Sigma points
-
-For a full-body skeleton the error-state dimension is
-
-```
-error_state_dim = 2 × (root_error_dof + joint_active_dof)
-                = 2 × (6 + joint_active_dof)
-```
-
-With a 23-active-DOF skeleton this is 58; with a fuller skeleton (e.g., hands + face)
-it could reach 150+.  The number of sigma points is `n_sigma = 2 × error_state_dim + 1`.
-For the standard body-only skeleton used in current tests, `n_sigma = 117`.
-
 ### Where time is spent
 
-Each call to `UnscentedKalmanFilter::update()` does:
+Each `UnscentedKalmanFilter::update()` call does:
 
-1. **Sigma generation** — Cholesky of the covariance matrix, then perturbation arithmetic.
-   Cost: O(n³) for the Cholesky, dominated by matrix size.
+**1. Sigma generation** — Cholesky of the 318×318 covariance matrix.
+Cost: O(n³) ≈ O(318³) ≈ 32M flops.  Runs once per step.
 
-2. **FK projection loop** (dominant) — For each of the `n_sigma` sigma points:
-   - `pinocchio::forwardKinematics(model, data, q)` — full kinematic tree traversal
-   - `pinocchio::updateFramePlacements(model, data)` — frame transform propagation
-   - camera projection + distortion for every marker and camera
+**2. FK + projection loop** — For each of the 637 sigma points:
+- `pinocchio::forwardKinematics(model, data, q)` — 52-joint tree traversal
+- `pinocchio::updateFramePlacements(model, data)` — frame transform propagation
+- Project all 61 markers into all 5 cameras (with distortion)
 
-   These calls are currently serial.  Each FK call is independent of all others, making
-   this loop the primary parallelization target.
+  Each point is independent → primary parallelisation target.
+  Total: 637 calls, each touching ~52 joints × 5 cameras × 61 markers.
 
-3. **Weighted mean + covariance** — O(n_sigma × measurement_dim²) matrix algebra.
-   Eigen already uses SIMD; the matrices are small enough that threading overhead
-   would dominate.  Leave single-threaded.
+**3. Weighted mean of measurements** — O(n\_sigma × measurement\_dim) = O(637 × 610) ≈ 390K ops.
+  Fast.
 
-4. **Kalman gain + state update** — O(n³) for matrix inversion.  Same reasoning as
-   above; leave single-threaded.
+**4. Innovation covariance S** — outer-product accumulation:
+O(n\_sigma × measurement\_dim²) = O(637 × 610²) ≈ 237M flops.
+S is 610×610; this is non-trivial even with SIMD.
 
-The predict step also loops over sigma points (for the constant-velocity process model),
-but the process model is pure arithmetic with no FK — it is fast and not a bottleneck.
+**5. Cross-covariance Pxy** — O(n\_sigma × state\_dim × measurement\_dim)
+= O(637 × 318 × 610) ≈ 123M flops.  Pxy is 318×610.
+
+**6. Kalman gain K = Pxy × S⁻¹** — S inversion is O(610³) ≈ 227M flops.
+Then K × innovation is O(318 × 610) ≈ 194K ops.
+
+Steps 4–6 are pure Eigen matrix algebra on matrices too large to dismiss but
+too small for multi-threaded BLAS to be efficient (thread-launch overhead dominates
+for matrices under ~500×500 in practice).  They will be addressed after step 2 is
+profiled.
+
+### How camera count scales
+
+Adding a camera increases `measurement_dim` by `n_markers × 2`:
+
+| Cost component | Scaling with cameras (C) |
+|---|---|
+| FK + projection | O(C) — one more projection per sigma point |
+| Weighted mean | O(C) |
+| Innovation covariance S | O(C²) — S is (C×M)×(C×M) |
+| S inversion | O(C³) |
+| Cross-covariance Pxy | O(C) |
+
+Going from 4 → 5 cameras is a 25% increase in FK/projection work but a 56% increase
+in S computation and 95% increase in S inversion.  At 5 cameras and 61 markers the
+610×610 S matrix is already the second most expensive operation after the FK loop.
+If camera count grows further, S and the Kalman gain will become the bottleneck.
 
 ---
 
-## Parallelization Strategy
+## Parallelization and Optimization Strategy
 
 ### Option A — OpenMP sigma point parallelization (primary plan)
 
 Parallelize the FK projection loop in `update()` with `#pragma omp parallel for`.
-Pinocchio's `pinocchio::Data` is **not thread-safe** (it stores intermediate results
-`oMi`, `oMf`, joint Jacobians, etc. directly in the struct), but `pinocchio::Model`
-is read-only and safe.
+`pinocchio::Data` is **not thread-safe** (it stores intermediate results `oMi`, `oMf`,
+etc. in-place), but `pinocchio::Model` is read-only and safe to share.
 
-**Implementation**: maintain a `std::vector<pinocchio::Data>` pool, one per thread,
-each constructed from the model (`pinocchio::Data(model)`).  Threads pick their own
-copy via `omp_get_thread_num()`.
+**Implementation**: a `std::vector<pinocchio::Data>` pool, one per thread, each
+constructed with `pinocchio::Data(model)`.  Threads index by `omp_get_thread_num()`.
 
-Relevant loops and their data dependencies:
+Relevant loops in `ukf.cpp`:
 
-| Loop | File / line | FK? | Can parallelize? |
-|------|-------------|-----|-----------------|
-| Predict: process model propagation (`sigma_points`) | `ukf.cpp:270` | No | Yes — trivial |
-| Update: FK projection (`predicted_measurements`) | `ukf.cpp:819` | Yes | Yes — with Data pool |
-| Update: inlier re-projection (after outlier rejection) | `ukf.cpp:932` | Yes | Yes — same pool |
-| Update: weighted mean computation | `ukf.cpp:833` | No | Marginal gain |
-| Update: cross-covariance Pxy | `ukf.cpp:993` | No | Marginal gain |
-| RTS smoother: FK projection | `ukf.cpp:1722` | Yes | Yes — with Data pool |
+| Loop | Line | FK? | Parallelize? |
+|------|------|-----|--------------|
+| Predict: process model propagation | 270 | No | Easy, small gain |
+| Update: FK projection (first pass) | 819 | Yes | **Primary target** |
+| Update: inlier re-projection | 932 | Yes | Same pool |
+| Update: weighted mean | 833 | No | Marginal |
+| Update: cross-covariance Pxy | 993 | No | Marginal |
+| RTS smoother: FK projection | 1722 | Yes | Same pool |
 
-The three FK loops (819, 932, 1722) are the valuable targets.
+With 637 sigma points and 8–16 physical cores the FK loop alone should yield
+5–10× speedup (realistic: 4–8× after overhead and memory contention).
 
-### Option B — Per-frame pipeline parallelism
+### Option B — Reduce S matrix cost (secondary plan)
 
-If multiple persons are tracked simultaneously, each `Tracker` instance is independent.
-This is already implicitly supported by having separate `Tracker` objects.  The
-`posetrak track` CLI currently runs persons sequentially; a simple `std::async` or
-thread-pool wrapper could run them concurrently.  Not useful for single-person sessions.
+Once the FK loop is parallelised, S and its inversion may become the new bottleneck.
+Options:
+- **Woodbury / reduced-rank update**: if most markers are outliers per frame, do the
+  Kalman gain computation only in the inlier subspace (already partially done by the
+  outlier rejection path at line 932, but the first S computation still uses full dim).
+- **Structured S**: diagonal + low-rank approximation.  Requires a model assumption
+  that per-marker noise is independent (already assumed in the current diagonal R).
+- **Blocked Cholesky on S**: split S into camera-sized blocks and solve in parallel.
+  Camera blocks are independent except for the cross-camera correlations introduced by
+  shared marker visibility, which are small and can be ignored for a Cholesky.
 
-### Option C — Eigen threading (already available)
+### Option C — Spherical simplex sigma points (sigma count reduction)
 
-Eigen uses BLAS/LAPACK for large matrix ops.  With OpenBLAS linked, matrix multiply and
-Cholesky automatically go multi-threaded for matrices above a threshold.  For the current
-~58×58 matrices the single-threaded path is likely faster due to launch overhead.
-**No action needed** — just ensure `OPENBLAS_NUM_THREADS` is not pinned to 1 in the
-environment.
+The standard formulation uses `n_sigma = 2n+1 = 637`.  The spherical-simplex
+formulation needs only `n+2 = 320`, halving FK work at the cost of higher-order
+approximation error.  This is a correctness trade-off — evaluate only after the FK
+loop is parallelised and profiled.
 
-### Option D — Reduce sigma point count
+### Option D — Per-person parallelism
 
-Reduce `alpha` such that a smaller spread is acceptable, or use the minimal-sigma-point
-formulation (spherical simplex, `n_sigma = n+2` instead of `2n+1`).  Spherical simplex
-cuts sigma count from 117 to 60 for a 58-DOF system at the cost of higher-order error.
-This is a correctness trade-off, not just an engineering one — evaluate only after
-profiling shows the sigma count itself (not the per-point cost) is the bottleneck.
+Each `Tracker` instance is independent.  For multi-person sessions, a thread pool
+wrapping the CLI would give free parallelism.  Not useful for single-person sessions
+(which is the current use case).
 
 ---
 
@@ -110,40 +149,42 @@ profiling shows the sigma count itself (not the per-point cost) is the bottlenec
 
 ### Step 0 — Establish baseline measurements
 
-Before any changes, measure wall time per `track_frame()` on a representative sequence:
+Instrument `Tracker::track_frame()` with `std::chrono::steady_clock` around:
+- `ukf_.predict()` — predict step only
+- `ukf_.update()` — update step only
+- full `track_frame()` — including any overhead
 
-- Instrument `Tracker::track_frame()` with `std::chrono::steady_clock` timers around
-  `ukf_.predict()`, `ukf_.update()`, and the full call.
-- Run `optbuild/cli/posetrak track` on a 30-second clip; report mean, p50, p95, p99.
-- Record hardware: CPU model, core count, frequency, OS.
-- Output goes to `tracking_stats.csv` (add timing columns) or a separate timing file.
+Run on the benchmark clip (Trial 1, 2 s) with `optbuild/cli/posetrak track`.
+Report: mean, p50, p95 ms/step.  Also report `OMP_NUM_THREADS` and CPU info.
+
+Output: add `predict_ms`, `update_ms`, `total_ms` columns to `tracking_stats.csv`
+or a companion `timing.csv`.
 
 ### Step 1 — Enable OpenMP in meson.build
 
 ```meson
 openmp_dep = dependency('openmp', required: true)
-# Add openmp_dep to tracker library link_with / dependencies
 ```
 
-The line is already present but commented out (`meson.build:106`).  Verify it links
-correctly with GCC/Clang on WSL2 (`-fopenmp`).
+Already commented out at `meson.build:106` — uncomment and wire into the tracker
+library's `dependencies`.  Confirm `-fopenmp` appears in the compile/link commands.
 
 ### Step 2 — Data pool in UnscentedKalmanFilter
 
-Add to `UnscentedKalmanFilter` (private member):
+Add private member:
 
 ```cpp
-// One pinocchio::Data per OMP thread; initialized lazily from the model.
 mutable std::vector<pinocchio::Data> data_pool_;
 ```
 
-Initialization helper (called in the update body or on first use):
+Initialization helper (call before each parallel region):
 
 ```cpp
-void ensure_data_pool(pinocchio::Model const& model, int n_threads) {
-    if (static_cast<int>(data_pool_.size()) < n_threads) {
+void ensure_data_pool(pinocchio::Model const& model) {
+    int const n = omp_get_max_threads();
+    if (static_cast<int>(data_pool_.size()) < n) {
         data_pool_.clear();
-        for (int t = 0; t < n_threads; ++t)
+        for (int t = 0; t < n; ++t)
             data_pool_.emplace_back(model);
     }
 }
@@ -151,7 +192,7 @@ void ensure_data_pool(pinocchio::Model const& model, int n_threads) {
 
 ### Step 3 — Parallelize the FK projection loop
 
-Replace the serial update loop at `ukf.cpp:819`:
+Replace the serial loop at `ukf.cpp:819`:
 
 ```cpp
 // Before:
@@ -161,76 +202,109 @@ for (int i = 0; i < n_sigma; ++i) {
 }
 
 // After:
-#pragma omp parallel for schedule(dynamic, 4)
+ensure_data_pool(model_);
+#pragma omp parallel for schedule(static)
 for (int i = 0; i < n_sigma; ++i) {
-    int const tid = omp_get_thread_num();
-    ForwardKinematics fk_local(model_, data_pool_[tid], fk.marker_frame_map(), layout_);
+    ForwardKinematics fk_local(model_, data_pool_[omp_get_thread_num()],
+                               fk.marker_frame_map(), layout_);
     predicted_measurements.col(i) =
         predict_measurements(sigma_points[i], observations, cameras, fk_local);
 }
 ```
 
-Same pattern for the inlier re-projection loop at line 932.
+Apply the same pattern to the inlier re-projection loop at line 932 and the RTS
+smoother loop at line 1722.
 
-`schedule(dynamic, 4)` is suggested because FK cost per sigma point varies slightly
-with joint configuration; dynamic scheduling avoids idle threads at the tail.
+Use `schedule(static)` first (evenly divides 637 points); switch to `dynamic` if
+profiling shows significant load imbalance.
 
-### Step 4 — Measure after OpenMP
+### Step 4 — Measure and decide next step
 
-Same benchmark as Step 0.  Expected speedup: roughly `min(n_threads, n_sigma / overhead)`.
-For 8 physical cores and 117 sigma points, ideal is ~8×; realistic with scheduling and
-memory bandwidth contention is 3–5×.
+Same benchmark as Step 0.  If update time is now dominated by S computation (steps 4–6
+in the cost breakdown), proceed to Option B.  If the FK loop is still dominant,
+increase thread count or investigate per-FK cache behaviour.
 
-### Step 5 (optional) — Parallelize predict loop
+### Step 5 (optional) — Measure S matrix dominance
 
-The predict step's process-model loop has no FK; parallelizing it is simple but likely
-yields only a small win since it's already fast.  Measure before implementing.
+If S cost is the bottleneck after FK parallelisation, first instrument to confirm:
+add a `steady_clock` timer around just the S accumulation loop.  Then choose between
+the Woodbury / structured-S approaches in Option B.
 
-### Step 6 (optional) — Profile remaining bottlenecks
+---
 
-If FK parallelization does not reach the 16 ms budget, profile with `perf stat` or
-`valgrind --tool=callgrind` to identify the next target.  Candidates:
+## Environment: WSL2 vs Native Windows
 
-- Cholesky in sigma generation (can use Eigen `LLT` with custom allocator)
-- Covariance weighted sum (can use `Eigen::setFromTriplets` or blocked computation)
-- Memory allocation inside the FK loop (pre-allocate `marker_positions` map)
+**Short answer**: WSL2 is fine for this work.  Do not switch environments.
+
+WSL2 (since Windows 11 / Win10 21H1) exposes all physical CPU cores and hardware
+threads to the Linux kernel — `nproc` and `omp_get_max_threads()` see the full
+hardware count, the same as a bare-metal Linux install.
+
+The practical differences are:
+
+| Factor | WSL2 | Native Windows |
+|---|---|---|
+| Thread count visible | All HW threads ✓ | All HW threads ✓ |
+| Compute throughput | ~95–98% of native Linux | — |
+| Memory bandwidth | Slight hypervisor overhead | — |
+| L3 cache sharing | Shared with Windows processes | Shared with Windows processes |
+| Build toolchain | GCC/Clang, full OpenMP support | MSVC (OpenMP limited), complex Pinocchio build |
+| Profiling tools | `perf`, `callgrind` — both work | Intel VTune works natively |
+| Scheduler preemption | Hyper-V can pause the VM briefly | No VM overhead |
+
+The hypervisor overhead is real but small for CPU-bound workloads.  The bigger issue
+is that porting the Meson + Pinocchio build to native Windows MSVC would be a
+significant one-time investment for marginal throughput gain.
+
+**Recommendation**: profile and optimise in WSL2.  If final measurements show a 5–10%
+gap worth closing and the build can be done (e.g., with Clang-cl or LLVM on Windows),
+re-benchmark natively at that point.  For now the measurement environment is WSL2,
+and all log entries should note this.
 
 ---
 
 ## Measurements Log
 
-*(Fill in as work progresses.  Each entry: date, code state/commit, hardware, result.)*
+*(Fill in as work progresses.  Each entry: date, commit, hardware, result.)*
+*(Benchmark: Trial 1, `time_start_s=250`, `time_end_s=252`, `ukemi-tommi-20260509.db`.)*
 
-### Baseline
+### Baseline (serial, pre-OpenMP)
 
-| Date | Commit | Hardware | mean ms/frame | p95 ms/frame | Notes |
-|------|--------|----------|--------------|-------------|-------|
-| — | — | — | — | — | Not yet measured |
+| Date | Commit | Hardware | mean ms/step | p95 ms/step | predict ms | update ms | Notes |
+|------|--------|----------|-------------|-------------|-----------|----------|-------|
+| — | — | — | — | — | — | — | Not yet measured |
 
-### After OpenMP sigma parallelization
+### After OpenMP FK parallelisation
 
-| Date | Commit | Hardware | mean ms/frame | p95 ms/frame | Speedup | Notes |
-|------|--------|----------|--------------|-------------|---------|-------|
+| Date | Commit | Hardware | OMP_THREADS | mean ms/step | p95 ms/step | Speedup | Notes |
+|------|--------|----------|-------------|-------------|-------------|---------|-------|
+| — | — | — | — | — | — | — | — |
+
+### After S matrix optimisation (if pursued)
+
+| Date | Commit | Hardware | mean ms/step | p95 ms/step | Speedup vs serial | Notes |
+|------|--------|----------|-------------|-------------|------------------|-------|
 | — | — | — | — | — | — | — |
 
 ---
 
 ## Risks and Constraints
 
-**Pinocchio Data pool correctness**: each `pinocchio::Data` must be fully independent.
-The constructor `pinocchio::Data(model)` allocates and initializes all internal buffers;
-do not share or copy a `Data` after it has been used by `forwardKinematics()`.
+**Pinocchio Data pool correctness**: `pinocchio::Data(model)` allocates and
+initialises all internal buffers independently.  Never copy a `Data` that has been
+used by `forwardKinematics()` — the copy will contain stale intermediate state that
+causes subtle numerical errors.
 
-**WSL2 thread count**: `omp_get_max_threads()` on WSL2 sees all logical processors
-including SMT siblings.  For the FK workload (compute-bound, moderate cache pressure)
-binding to physical cores may outperform using all logical cores.  Test with
-`OMP_NUM_THREADS=N` for N in {4, 8, 16} and pick empirically.
+**Eigen + OpenMP interaction**: Eigen's internal BLAS parallelism can conflict with
+outer OpenMP regions, causing thread over-subscription.  If throughput is worse than
+expected with OpenMP enabled, add `Eigen::setNbThreads(1)` at the start of the
+parallel region as a diagnostic step.
 
-**Eigen + OpenMP interaction**: Eigen's internal parallelism (`EIGEN_DONT_PARALLELIZE`
-not set) can conflict with outer OpenMP loops on some BLAS builds, causing thread
-over-subscription.  Set `Eigen::setNbThreads(1)` inside the parallel region if
-performance degrades unexpectedly.
+**ForwardKinematics construction inside the loop**: constructing `fk_local` per
+iteration is cheap (it copies three pointers and builds a small `joint_id_map_`), but
+if profiling shows this as significant, pre-allocate one `ForwardKinematics` per
+thread outside the loop (as a `thread_local` or via the pool).
 
-**Numerical equivalence**: the parallel and serial implementations must produce
-bit-identical results for the same input (column writes to `predicted_measurements` are
-non-overlapping).  Add a regression test that runs both and compares outputs.
+**Numerical equivalence**: column writes to `predicted_measurements` are non-overlapping
+so results must be bit-identical to the serial version.  Add a regression test that
+runs both paths on the same input and asserts zero difference.

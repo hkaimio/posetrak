@@ -1651,6 +1651,8 @@ class PersonPanel(QWidget):
         )
         if not out_path:
             return
+        if not out_path.endswith(".bvh"):
+            out_path += ".bvh"
 
         self._bvh_proc = QProcess(self)
         self._bvh_proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)

@@ -103,7 +103,7 @@ pinocchio_dep = declare_dependency(
 #                        modules: ['core', 'imgproc', 'videoio', 'calib3d'],
 #                        required: false)
 # archive_dep = dependency('libarchive', required: false)
-# openmp_dep = dependency('openmp', required: false)
+openmp_dep = dependency('openmp', required: true)
 
 # Testing dependency (optional, selected by user preference)
 if get_option('enable_tests')

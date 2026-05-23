@@ -369,6 +369,10 @@ class UnscentedKalmanFilter {
     Eigen::Vector3d fixed_root_pos_ = Eigen::Vector3d::Zero();
     Eigen::Quaterniond fixed_root_ori_ = Eigen::Quaterniond::Identity();
 
+    // Per-thread pinocchio Data pool for parallel FK evaluation
+    mutable std::vector<pinocchio::Data> data_pool_;
+    void ensure_data_pool(ForwardKinematics const& fk) const;
+
     // Debug state
     bool debug_enabled_ = false;  ///< Debug mode flag
     std::string debug_dir_;       ///< Debug output directory

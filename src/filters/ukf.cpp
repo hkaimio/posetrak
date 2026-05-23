@@ -7,6 +7,8 @@
 
 #include <fmt/core.h>
 
+#include <omp.h>
+
 #include "posetrak/core/skeleton_layout.hpp"
 #include <cmath>
 #include <filesystem>
@@ -792,6 +794,16 @@ Eigen::VectorXd UnscentedKalmanFilter::compute_state_error(State const& state,
     return error;
 }
 
+void UnscentedKalmanFilter::ensure_data_pool(ForwardKinematics const& fk) const {
+    int const n = omp_get_max_threads();
+    if (static_cast<int>(data_pool_.size()) < n) {
+        data_pool_.clear();
+        data_pool_.reserve(n);
+        for (int t = 0; t < n; ++t)
+            data_pool_.emplace_back(fk.model());
+    }
+}
+
 UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& observations,
                                            std::unordered_map<int, Camera> const& cameras,
                                            ForwardKinematics& fk, double measurement_noise_std,
@@ -814,11 +826,15 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         write_sigma_points_csv(sigma_points);
     }
 
-    // Step 2: Predict measurements for each sigma point
+    // Step 2: Predict measurements for each sigma point (parallelized over sigma points)
     Eigen::MatrixXd predicted_measurements(measurement_dim, n_sigma);
+    ensure_data_pool(fk);
+#pragma omp parallel for schedule(static)
     for (int i = 0; i < n_sigma; ++i) {
+        ForwardKinematics fk_local(fk.model(), data_pool_[omp_get_thread_num()],
+                                   fk.marker_frame_map(), fk.fk_layout());
         predicted_measurements.col(i) =
-            predict_measurements(sigma_points[i], observations, cameras, fk);
+            predict_measurements(sigma_points[i], observations, cameras, fk_local);
     }
 
     // Step 3: Compute mean predicted measurement (using nanmean to ignore NaN)
@@ -846,41 +862,41 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         }
     }
 
-    // Step 4: Compute innovation covariance S = Pyy + R
-    // Handle NaN: skip dimensions where measurement_mean is NaN (all sigma points failed)
+    // Step 4: Compute innovation covariance S = Pyy + R via batched DGEMM.
+    // Build Z_full: NaN-safe centered innovations matrix (measurement_dim × n_sigma).
+    // NaN predictions (marker behind camera) → 0, so they contribute nothing to S.
     Eigen::VectorXd const weights_cov = sigma_gen_.get_covariance_weights();
-    Eigen::MatrixXd innovation_cov = Eigen::MatrixXd::Zero(measurement_dim, measurement_dim);
-
+    Eigen::MatrixXd Z_full(measurement_dim, n_sigma);
     for (int i = 0; i < n_sigma; ++i) {
-        Eigen::VectorXd pred_safe = predicted_measurements.col(i);
-
-        // Replace NaN with mean (contributes zero to innovation covariance)
-        // But if mean itself is NaN, skip that dimension entirely
-        for (int dim = 0; dim < measurement_dim; ++dim) {
-            if (!std::isfinite(pred_safe(dim))) {
-                pred_safe(dim) = measurement_mean(dim);
-            }
-        }
-
-        Eigen::VectorXd innovation = pred_safe - measurement_mean;
-
-        // Zero out NaN innovations (where mean was NaN)
-        for (int dim = 0; dim < measurement_dim; ++dim) {
-            if (!std::isfinite(innovation(dim))) {
-                innovation(dim) = 0.0;
-            }
-        }
-
-        innovation_cov += weights_cov(i) * (innovation * innovation.transpose());
+        Z_full.col(i) = predicted_measurements.col(i) - measurement_mean;
+        for (int d = 0; d < measurement_dim; ++d)
+            if (!std::isfinite(Z_full(d, i)))
+                Z_full(d, i) = 0.0;
     }
+    // ZW_full[:,i] = weights_cov[i] * Z_full[:,i]. S = ZW_full * Z_full^T (DGEMM).
+    Eigen::MatrixXd ZW_full = Z_full;
+    for (int i = 0; i < n_sigma; ++i)
+        ZW_full.col(i) *= weights_cov(i);
+    Eigen::MatrixXd innovation_cov(measurement_dim, measurement_dim);
+    innovation_cov.noalias() = ZW_full * Z_full.transpose();
 
-    // Add measurement noise R (diagonal, same noise for all observations)
+    // Add measurement noise R (diagonal)
     for (int i = 0; i < n_obs; ++i) {
         double noise_std = observations[i].measurement_noise_std(measurement_noise_std);
         double variance = noise_std * noise_std;
-        innovation_cov(2 * i, 2 * i) += variance;          // x coordinate
-        innovation_cov(2 * i + 1, 2 * i + 1) += variance;  // y coordinate
+        innovation_cov(2 * i, 2 * i) += variance;
+        innovation_cov(2 * i + 1, 2 * i + 1) += variance;
     }
+
+    // Precompute state error matrix E (error_dim × n_sigma) used in Pxy.
+    // compute_state_error is a pure const function — safe to run in parallel.
+    Eigen::MatrixXd E(error_dim(), n_sigma);
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < n_sigma; ++i)
+        E.col(i) = compute_state_error(sigma_points[i], state_);
+    Eigen::MatrixXd EW = E;
+    for (int i = 0; i < n_sigma; ++i)
+        EW.col(i) *= weights_cov(i);
 
     // Step 4.5: Perform outlier rejection if enabled
     std::vector<Observation> inlier_observations;
@@ -924,14 +940,17 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
             return result;
         }
 
-        // Recompute predictions with only inliers
+        // Recompute predictions with only inliers (parallel FK)
         int const n_inliers = static_cast<int>(inlier_observations.size());
         int const inlier_dim = 2 * n_inliers;
 
         Eigen::MatrixXd inlier_predictions(inlier_dim, n_sigma);
+#pragma omp parallel for schedule(static)
         for (int i = 0; i < n_sigma; ++i) {
+            ForwardKinematics fk_local(fk.model(), data_pool_[omp_get_thread_num()],
+                                       fk.marker_frame_map(), fk.fk_layout());
             inlier_predictions.col(i) =
-                predict_measurements(sigma_points[i], inlier_observations, cameras, fk);
+                predict_measurements(sigma_points[i], inlier_observations, cameras, fk_local);
         }
 
         // Recompute mean predicted measurement for inliers (NaN-safe)
@@ -956,29 +975,19 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
             }
         }
 
-        // Recompute innovation covariance for inliers (NaN-safe)
-        innovation_cov = Eigen::MatrixXd::Zero(inlier_dim, inlier_dim);
+        // Build Z_inlier and recompute S for inliers via DGEMM
+        Eigen::MatrixXd Z_inlier(inlier_dim, n_sigma);
         for (int i = 0; i < n_sigma; ++i) {
-            Eigen::VectorXd pred_safe = inlier_predictions.col(i);
-
-            // Replace NaN with mean
-            for (int dim = 0; dim < inlier_dim; ++dim) {
-                if (!std::isfinite(pred_safe(dim))) {
-                    pred_safe(dim) = measurement_mean(dim);
-                }
-            }
-
-            Eigen::VectorXd innovation = pred_safe - measurement_mean;
-
-            // Zero out any remaining NaN innovations
-            for (int dim = 0; dim < inlier_dim; ++dim) {
-                if (!std::isfinite(innovation(dim))) {
-                    innovation(dim) = 0.0;
-                }
-            }
-
-            innovation_cov += weights_cov(i) * (innovation * innovation.transpose());
+            Z_inlier.col(i) = inlier_predictions.col(i) - measurement_mean;
+            for (int d = 0; d < inlier_dim; ++d)
+                if (!std::isfinite(Z_inlier(d, i)))
+                    Z_inlier(d, i) = 0.0;
         }
+        Eigen::MatrixXd ZW_inlier = Z_inlier;
+        for (int i = 0; i < n_sigma; ++i)
+            ZW_inlier.col(i) *= weights_cov(i);
+        innovation_cov.resize(inlier_dim, inlier_dim);
+        innovation_cov.noalias() = ZW_inlier * Z_inlier.transpose();
 
         // Add measurement noise for inliers
         for (int i = 0; i < n_inliers; ++i) {
@@ -988,22 +997,9 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
             innovation_cov(2 * i + 1, 2 * i + 1) += variance;
         }
 
-        // Recompute cross-covariance with inliers
-        cross_cov = Eigen::MatrixXd::Zero(error_dim(), inlier_dim);
-        for (int i = 0; i < n_sigma; ++i) {
-            Eigen::VectorXd state_error = compute_state_error(sigma_points[i], state_);
-
-            // Handle NaN in predicted measurements
-            Eigen::VectorXd pred_safe = inlier_predictions.col(i);
-            for (int dim = 0; dim < inlier_dim; ++dim) {
-                if (!std::isfinite(pred_safe(dim))) {
-                    pred_safe(dim) = measurement_mean(dim);
-                }
-            }
-
-            Eigen::VectorXd measurement_error = pred_safe - measurement_mean;
-            cross_cov += weights_cov(i) * (state_error * measurement_error.transpose());
-        }
+        // Cross-covariance Pxy = EW * Z_inlier^T (DGEMM)
+        cross_cov.resize(error_dim(), inlier_dim);
+        cross_cov.noalias() = EW * Z_inlier.transpose();
 
         // Update observed vector to use inliers
         observed = observations_to_vector(inlier_observations);
@@ -1082,24 +1078,11 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     // Debug export moved to Tracker::track_frame to ensure it runs even when all observations are
     // outliers
 
-    // Step 5: Compute cross-covariance Pxy (already computed if outlier rejection enabled)
+    // Step 5: Compute cross-covariance Pxy = EW * Z^T (DGEMM).
+    // If outlier rejection ran, Z_inlier and cross_cov are already set above.
     if (outlier_threshold_mahalanobis <= 0.0) {
-        // Cross-covariance not yet computed (no outlier rejection)
-        cross_cov = Eigen::MatrixXd::Zero(error_dim(), measurement_dim);
-        for (int i = 0; i < n_sigma; ++i) {
-            Eigen::VectorXd state_error = compute_state_error(sigma_points[i], state_);
-
-            // Handle NaN in predicted measurements (replace with mean for zero innovation)
-            Eigen::VectorXd pred_safe = predicted_measurements.col(i);
-            for (int dim = 0; dim < measurement_dim; ++dim) {
-                if (!std::isfinite(pred_safe(dim))) {
-                    pred_safe(dim) = measurement_mean(dim);
-                }
-            }
-
-            Eigen::VectorXd measurement_error = pred_safe - measurement_mean;
-            cross_cov += weights_cov(i) * (state_error * measurement_error.transpose());
-        }
+        cross_cov.resize(error_dim(), measurement_dim);
+        cross_cov.noalias() = EW * Z_full.transpose();
     }
 
     // Step 6: Compute Kalman gain K = Pxy * S^-1

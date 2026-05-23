@@ -119,6 +119,13 @@ class ForwardKinematics {
     std::pair<Eigen::Vector3d, Eigen::Quaterniond>
     world_transform(std::string const& joint_name) const;
 
+    // Accessors for constructing thread-local copies with a separate Data
+    pinocchio::Model const& model() const { return model_; }
+    std::map<std::string, pinocchio::FrameIndex> const& marker_frame_map() const {
+        return marker_frame_map_;
+    }
+    std::shared_ptr<const SkeletonLayout> fk_layout() const { return layout_; }
+
    private:
     pinocchio::Model const& model_;
     pinocchio::Data& data_;

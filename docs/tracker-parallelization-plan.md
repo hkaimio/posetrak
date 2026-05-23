@@ -352,17 +352,23 @@ and all log entries should note this.
 |------|--------|----------|-------------|-------------|----------------------|---------------------|-------|
 | 2026-05-23 | 3e564ed | Ryzen 9 9900X (12c/24t), WSL2 | 298 | 315 | 55 / 58 | 243 / 259 | serial, no OpenMP; 238 frames, 5 cams, 61 markers, n_sigma=637 |
 
-### After OpenMP FK parallelisation
+### After OpenMP FK parallelisation (Steps 1–3)
+
+FK parallel loop only added no measurable speedup (update 246 ms vs 243 ms baseline).
+FK is not the bottleneck; S and Pxy accumulation dominate.
 
 | Date | Commit | Hardware | OMP_THREADS | mean ms/step | p95 ms/step | Speedup | Notes |
 |------|--------|----------|-------------|-------------|-------------|---------|-------|
-| — | — | — | — | — | — | — | — |
+| 2026-05-23 | (unreleased) | Ryzen 9 9900X, WSL2 | 12 | 301 | 316 | 1.0× | FK parallel only; S/Pxy still sequential rank-1 loops |
 
-### After S matrix optimisation (if pursued)
+### After S/Pxy DGEMM refactor (Option B)
 
-| Date | Commit | Hardware | mean ms/step | p95 ms/step | Speedup vs serial | Notes |
-|------|--------|----------|-------------|-------------|------------------|-------|
-| — | — | — | — | — | — | — |
+S accumulation and Pxy replaced with batched DGEMM (Z matrix build + Eigen matrix multiply).
+Eigen/OpenBLAS parallelizes the resulting (610×637)×(637×610) multiply across all 12 cores.
+
+| Date | Commit | Hardware | OMP_THREADS | mean ms/step | p95 ms/step | predict (mean/p95) | update (mean/p95) | Speedup vs serial |
+|------|--------|----------|-------------|-------------|-------------|-------------------|--------------------|------------------|
+| 2026-05-23 | 068cb48 | Ryzen 9 9900X (12c/24t), WSL2 | 12 | 152 | 164 | 57 / 61 ms | 95 / 104 ms | **2.0×** |
 
 ---
 

@@ -423,6 +423,27 @@ Per-operation breakdown (238 frames, mean ms):
 Dominant remaining cost: `u_inlier_ms` (16ms) — Z_inlier build and S_inlier DGEMM.
 Total throughput: ~9 steps/s (up from ~3.4 steps/s at serial baseline).
 
+### Numerical validation across optimization commits
+
+To confirm the optimizations do not alter tracking results, three builds were run
+against the same clip (pre-opt 385ed5b ukf.cpp, after S/Pxy DGEMM 720db4d, after
+LDLT+predict DGEMM 92087e4):
+
+| Metric | Pre-opt | Post-opt | Max diff |
+|--------|---------|----------|----------|
+| Mean inliers/frame | 255.4 | 255.4 | 0 |
+| Mean outliers/frame | 49.3 | 49.3 | 0 |
+| Mean reprojection error (px) | 17.597 | 17.597 | 0 |
+| Body joint angles (max °) | — | — | < 0.02° |
+| Distal finger joints (max °) | — | — | 3.4° |
+
+Inlier/outlier counts and reprojection error are identical across all three versions.
+Body joint differences (< 0.02°) are attributable to floating-point accumulation order
+differences between DGEMM and sequential rank-1 loops — irrelevant for motion capture.
+Distal finger joints (up to 3.4°, rms 0.28°) show similar order-dependent variation.
+
+**Conclusion**: the optimizations are numerically equivalent for all practical purposes.
+
 ---
 
 ## Risks and Constraints

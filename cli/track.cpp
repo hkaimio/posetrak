@@ -879,7 +879,8 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
 
             if (stats_tracker) {
                 stats_tracker->add_frame_stats(step, t_effective, result.update_info,
-                                               result.covariance, result.tracking_lost);
+                                               result.covariance, result.tracking_lost,
+                                               result.predict_ms, result.update_ms);
             }
 
             // Progress indicator
@@ -1344,7 +1345,8 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                 result_writer.write_obs_results(step, result.update_info.observations);
 
             stats_tracker->add_frame_stats(step, t_effective, result.update_info, result.covariance,
-                                           result.tracking_lost);
+                                           result.tracking_lost, result.predict_ms,
+                                           result.update_ms);
 
             if (!quiet && !verbose && step % 10 == 0) {
                 double percent = 100.0 * step / num_steps;

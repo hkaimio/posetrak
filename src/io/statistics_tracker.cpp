@@ -10,7 +10,8 @@ namespace posetrak {
 
 void StatisticsTracker::add_frame_stats(int frame, double timestamp,
                                         UpdateResult const& update_result,
-                                        Eigen::MatrixXd const& covariance, bool tracking_lost) {
+                                        Eigen::MatrixXd const& covariance, bool tracking_lost,
+                                        double predict_ms, double update_ms) {
     FrameStatistics stats;
     stats.frame = frame;
     stats.timestamp = timestamp;
@@ -49,6 +50,9 @@ void StatisticsTracker::add_frame_stats(int frame, double timestamp,
     // NIS value
     stats.nis_value = update_result.nis;
 
+    stats.predict_ms = predict_ms;
+    stats.update_ms = update_ms;
+
     frame_stats_.push_back(stats);
 }
 
@@ -62,15 +66,16 @@ void StatisticsTracker::write_frame_stats(std::filesystem::path const& output_pa
     file << "frame,timestamp,num_observations,num_inliers,num_outliers,"
             "mean_reprojection_error,max_reprojection_error,"
             "covariance_min_eigenvalue,covariance_condition_number,"
-            "nis_value,tracking_lost\n";
+            "nis_value,tracking_lost,predict_ms,update_ms\n";
 
     // Write data rows
     for (auto const& stats : frame_stats_) {
-        file << fmt::format("{},{},{},{},{},{},{},{},{},{},{}\n", stats.frame, stats.timestamp,
-                            stats.num_observations, stats.num_inliers, stats.num_outliers,
-                            stats.mean_reprojection_error, stats.max_reprojection_error,
-                            stats.covariance_min_eigenvalue, stats.covariance_condition_number,
-                            stats.nis_value, stats.tracking_lost ? "true" : "false");
+        file << fmt::format(
+            "{},{},{},{},{},{},{},{},{},{},{},{},{}\n", stats.frame, stats.timestamp,
+            stats.num_observations, stats.num_inliers, stats.num_outliers,
+            stats.mean_reprojection_error, stats.max_reprojection_error,
+            stats.covariance_min_eigenvalue, stats.covariance_condition_number, stats.nis_value,
+            stats.tracking_lost ? "true" : "false", stats.predict_ms, stats.update_ms);
     }
 }
 

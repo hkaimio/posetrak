@@ -44,6 +44,8 @@ struct TrackingResult {
     int num_observations_used;   ///< Number of observations that passed filtering
     bool tracking_lost;          ///< True if tracking failed (no observations, etc.)
     std::string failure_reason;  ///< Reason for failure if tracking_lost=true
+    double predict_ms = 0.0;     ///< Wall time for ukf_.predict() in milliseconds
+    double update_ms = 0.0;      ///< Wall time for ukf_.update() in milliseconds
 };
 
 /**

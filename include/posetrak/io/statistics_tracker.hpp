@@ -26,6 +26,8 @@ struct FrameStatistics {
     double covariance_condition_number;  ///< Condition number (max/min eigenvalue)
     double nis_value;                    ///< Normalized Innovation Squared
     bool tracking_lost;                  ///< Whether tracking was lost this frame
+    double predict_ms = 0.0;             ///< Wall time for predict step (ms)
+    double update_ms = 0.0;              ///< Wall time for update step (ms)
 };
 
 /**
@@ -47,7 +49,8 @@ class StatisticsTracker {
      * @param tracking_lost Whether tracking was lost
      */
     void add_frame_stats(int frame, double timestamp, UpdateResult const& update_result,
-                         Eigen::MatrixXd const& covariance, bool tracking_lost);
+                         Eigen::MatrixXd const& covariance, bool tracking_lost,
+                         double predict_ms = 0.0, double update_ms = 0.0);
 
     /**
      * @brief Write per-frame statistics to CSV

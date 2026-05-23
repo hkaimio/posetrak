@@ -11,6 +11,7 @@
 
 #include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/kinematics/pinocchio_model_builder.hpp"
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -421,8 +422,14 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
 
 TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observations, double dt,
                                         double timestamp) {
+    using Clock = std::chrono::steady_clock;
+    using Ms = std::chrono::duration<double, std::milli>;
+
     // Step 1: Predict
+    auto t0 = Clock::now();
     auto predict_result = ukf_->predict(dt);
+    double const predict_ms = Ms(Clock::now() - t0).count();
+
     State const prior_state = ukf_->state();
     Eigen::MatrixXd const prior_cov = ukf_->covariance();
 
@@ -433,8 +440,10 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
     }
 
     // Step 3: Update
+    auto t1 = Clock::now();
     auto update_info = ukf_->update(observations, cameras_, *fk_, config_.measurement_noise_std,
                                     config_.outlier_threshold);
+    double const update_ms = Ms(Clock::now() - t1).count();
 
     // Debug: Export observation results (all frames) — runs even when all observations are outliers
     if (ukf_->is_debug_enabled()) {
@@ -479,9 +488,9 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
         });
     }
 
-    return TrackingResult{timestamp,   ukf_->state(),           ukf_->covariance(),
-                          update_info, update_info.num_inliers, false,
-                          ""};
+    return TrackingResult{
+        timestamp, ukf_->state(), ukf_->covariance(), update_info, update_info.num_inliers, false,
+        "",        predict_ms,    update_ms};
 }
 
 void Tracker::run_child_step(ChildFilter& /*child*/,

@@ -533,31 +533,37 @@ PredictResult UnscentedKalmanFilter::predict(double dt) {
         write_matrix_csv(covariance_, "prior_covariance.csv");
     }
 
-    // ── RTS smoother cross-covariance ─────────────────────────────────────────
+    // ── RTS smoother cross-covariance (async) ────────────────────────────────
     // D = Σ_i W_c^i * e_pre_i * e_prop_i^T
     // e_pre_i  = tangent error of sigma_points[i]     wrt posterior x_{k|k}
     // e_prop_i = tangent error of propagated_points[i] wrt predicted mean x_{k+1|k}
-    // Both computed in error-state space so manifold geometry is respected.
+    //
+    // Launched as std::async so that this ~16ms computation runs in parallel with
+    // the caller's update() step (~56ms).  sigma_points and propagated_points are
+    // moved into the lambda; compute_state_error only reads layout_ (const) so
+    // there is no data race with concurrent update() access to state_/covariance_.
     {
         auto t3 = Clock::now();
-        int const n_sigma = static_cast<int>(sigma_points.size());
-        auto const& wc = sigma_gen_.get_covariance_weights();
+        Eigen::VectorXd wc = sigma_gen_.get_covariance_weights();
         int const edim = error_dim();
-
-        // Build E_pre and E_prop (edim × n_sigma), then cross_cov = EW_pre * E_prop^T (DGEMM).
-        Eigen::MatrixXd E_pre(edim, n_sigma), E_prop(edim, n_sigma);
-        for (int i = 0; i < n_sigma; ++i) {
-            E_pre.col(i) = compute_state_error(sigma_points[i], posterior_state);
-            E_prop.col(i) = compute_state_error(propagated_points[i], state_);
-        }
-        Eigen::MatrixXd EW_pre = E_pre;
-        for (int i = 0; i < n_sigma; ++i)
-            EW_pre.col(i) *= wc(i);
-        Eigen::MatrixXd cross_cov(edim, edim);
-        cross_cov.noalias() = EW_pre * E_prop.transpose();
-
+        result.cross_cov_future =
+            std::async(std::launch::async,
+                       [this, sp = std::move(sigma_points), pp = std::move(propagated_points),
+                        post = posterior_state, pred = state_, wc = std::move(wc), edim]() mutable {
+                           int const n_sigma = static_cast<int>(sp.size());
+                           Eigen::MatrixXd E_pre(edim, n_sigma), E_prop(edim, n_sigma);
+                           for (int i = 0; i < n_sigma; ++i) {
+                               E_pre.col(i) = compute_state_error(sp[i], post);
+                               E_prop.col(i) = compute_state_error(pp[i], pred);
+                           }
+                           Eigen::MatrixXd EW_pre = E_pre;
+                           for (int i = 0; i < n_sigma; ++i)
+                               EW_pre.col(i) *= wc(i);
+                           Eigen::MatrixXd cross_cov(edim, edim);
+                           cross_cov.noalias() = EW_pre * E_prop.transpose();
+                           return cross_cov;
+                       });
         result.rts_ms = Ms(Clock::now() - t3).count();
-        result.cross_covariance = std::move(cross_cov);
         return result;
     }
 }

@@ -477,15 +477,21 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
     fk_->compute(ukf_->state());
 
     // Accumulate RTS smoother data if enabled (only for successful frames).
+    // Resolve the async cross-covariance future here: update() (~56ms) has fully overlapped
+    // with the async computation (~16ms), so get() should return immediately.
     if (smoothing_enabled_) {
         smoother_cache_.push_back(FrameSmootherData{
             timestamp,
             ukf_->state(),
             ukf_->covariance(),  // posterior
             prior_state,
-            prior_cov,                        // prior
-            predict_result.cross_covariance,  // D_{k-1,k}
+            prior_cov,                              // prior
+            predict_result.cross_cov_future.get(),  // D_{k-1,k}: already done
         });
+    } else {
+        // Future destructor blocks until complete; get() here keeps it explicit and cheap
+        // since the async work finished during update().
+        predict_result.cross_cov_future.get();
     }
 
     return TrackingResult{

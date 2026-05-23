@@ -500,18 +500,28 @@ while the filter converges. `u_cov_update_ms` drops from ~24ms to ~7ms (70% redu
 |------|--------|----------|--------------------|-------------|---------------------|-----------|-----------------|
 | 2026-05-23 | — | Ryzen 9 9900X (12c/24t), WSL2 | 87 ms | — | 7.3 ms | 3/239 | **1.6×** |
 
-### Parallel predict state-error loops (p_rts + p_mean_cov) — attempted, abandoned
+### After async RTS cross-covariance (p_rts off critical path)
 
-Adding `#pragma omp parallel for` to the p_rts and p_mean_cov loops caused severe
-thread oversubscription. OMP and BLAS each maintain their own thread pools; the
-extra predict-phase OMP activations interleaved with update-phase BLAS calls,
-increasing all update timings by ~2×. Net effect: step time increased from ~87ms
-to ~123ms. The predict loops remain sequential.
+The RTS cross-covariance computation (637 state-error calls + 318×318 DGEMM, ~16ms) is
+launched as `std::async` at the end of `predict()`, overlapping it with `update()` (~56ms).
+sigma_points and propagated_points are moved into the lambda; `compute_state_error` only
+reads the const `layout_` shared_ptr so there is no data race with concurrent `update()`.
+The caller resolves the future after `update()` returns.
 
-Root cause: OMP parallel for wakes the OMP thread pool in predict; those threads sleep
-but remain alive; BLAS then competes with them during update DGEMM calls. The wake/sleep/
-compete cycle adds cache-line invalidation overhead that outweighs the loop parallelism gain.
-The loop work per iteration (~50µs) is too short to amortise thread-launch costs at N=12.
+Result: `p_rts_ms` drops from ~11ms to ~0.1ms (thread-launch time only). However, the
+background thread competes with OpenBLAS for one CPU core, adding ~13ms to update DGEMM
+operations. On this fully-utilised 24-thread machine the saving is approximately cancelled.
+
+| Date | Commit | Hardware | mean ms/step (CSV) | p_rts (mean) | update overhead | Net |
+|------|--------|----------|--------------------|--------------|-----------------|-----|
+| 2026-05-23 | — | Ryzen 9 9900X (12c/24t), WSL2 | 89 ms | 0.1 ms | +13 ms | ~neutral |
+
+Architecture is cleaner (predict no longer blocks on RTS). On machines with spare CPU
+headroom the full 16ms saving would materialise; on this hardware the benefit requires
+reducing BLAS thread count by 1 to free a core for the background task.
+
+Previous attempt: `#pragma omp parallel for` on the same loops caused severe thread
+oversubscription (step time 87ms → 123ms) — abandoned.
 
 ---
 

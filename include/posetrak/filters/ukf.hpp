@@ -16,6 +16,7 @@
 #include "posetrak/filters/sigma_points.hpp"
 #include "posetrak/filters/update_result.hpp"
 #include "posetrak/kinematics/forward_kinematics.hpp"
+#include <future>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -30,15 +31,16 @@ namespace posetrak {
  * x_{k|k} and the prior x_{k+1|k}.  Required by the RTS smoother.
  */
 struct PredictResult {
-    /// D = sum_i W_c^i * e_pre_i * e_prop_i^T  (error/tangent space)
-    /// Shape: error_dim x error_dim.
-    Eigen::MatrixXd cross_covariance;
+    /// Async computation of D = sum_i W_c^i * e_pre_i * e_prop_i^T (error/tangent space).
+    /// Shape: error_dim x error_dim.  Launched as std::async in predict(); resolve with get()
+    /// after update() has run so the 16ms computation overlaps with the 56ms update step.
+    std::future<Eigen::MatrixXd> cross_cov_future;
 
     // Per-operation wall times (milliseconds)
     double sigma_gen_ms = 0.0;  ///< Cholesky + sigma point generation
     double propagate_ms = 0.0;  ///< Process model propagation (n_sigma calls)
     double mean_cov_ms = 0.0;   ///< compute_state_mean + compute_state_covariance
-    double rts_ms = 0.0;        ///< RTS cross-covariance rank-1 accumulation
+    double rts_ms = 0.0;        ///< time to launch the async cross-cov task
 };
 
 /**

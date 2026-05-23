@@ -161,6 +161,31 @@ def copy_skeleton_to_session(
     _copy_rows_if_missing(registry, session, "skeletons", [skeleton_id])
 
 
+def copy_skeleton(
+    src: sqlite3.Connection,
+    dst: sqlite3.Connection,
+    skeleton_id: str,
+) -> None:
+    """Copy a skeleton row from *src* to *dst* (INSERT OR IGNORE, idempotent).
+
+    Parameters
+    ----------
+    src:
+        Source database connection.
+    dst:
+        Destination database connection.
+    skeleton_id:
+        ``skeletons.id`` (SHA-256 hex) to copy.
+
+    Raises
+    ------
+    ValueError
+        If *skeleton_id* does not exist in *src*.
+    """
+    from posetrak.db.db import _copy_rows_if_missing
+    _copy_rows_if_missing(src, dst, "skeletons", [skeleton_id])
+
+
 def list_skeletons(registry: sqlite3.Connection) -> list[sqlite3.Row]:
     """Return all skeleton rows from the registry, ordered by creation time.
 

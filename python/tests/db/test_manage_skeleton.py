@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 
-from posetrak.db.manage_skeleton import copy_skeleton_to_session, import_skeleton, list_skeletons
+from posetrak.db.manage_skeleton import copy_skeleton, copy_skeleton_to_session, import_skeleton, list_skeletons
 from posetrak.db.db import create_session
 
 
@@ -172,3 +172,85 @@ def test_skeleton_copy_to_session(
     session.close()
     assert row is not None
     assert row["name"] == "reg_skel"
+
+
+def test_copy_skeleton_session_to_registry(
+    registry_db: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """copy_skeleton() works from session → registry (the missing direction)."""
+    sess_path = tmp_path / "src_session.db"
+    session = create_session(sess_path)
+    yaml_path = _write_yaml(tmp_path, content="joints: [hip]\n")
+    skeleton_id = import_skeleton(session, yaml_path, name="sess_skel")
+
+    copy_skeleton(session, registry_db, skeleton_id)
+
+    row = registry_db.execute(
+        "SELECT name FROM skeletons WHERE id = ?", (skeleton_id,)
+    ).fetchone()
+    session.close()
+    assert row is not None
+    assert row["name"] == "sess_skel"
+
+
+def test_import_with_parent_in_session_only(tmp_path: Path) -> None:
+    """Regression: importing to both registry and session with --parent-id where parent
+    exists only in the session DB must succeed (parent is copied to registry first)."""
+    from posetrak.db.db import create_registry
+    from posetrak.db.cli import _cmd_skeleton_import
+    import argparse
+
+    reg_path = tmp_path / "reg.db"
+    sess_path = tmp_path / "sess.db"
+
+    registry = create_registry(reg_path)
+    session = create_session(sess_path)
+
+    # Import parent into session only (simulates a skeleton used for a tracking run)
+    parent_yaml = _write_yaml(tmp_path, name="parent.yaml", content="joints: []\n")
+    parent_id = import_skeleton(session, parent_yaml, name="parent_skel")
+    session.close()
+    registry.close()
+
+    child_yaml = _write_yaml(tmp_path, name="child.yaml", content="joints: [hip]\n")
+
+    args = argparse.Namespace(
+        file=str(child_yaml),
+        session_db=str(sess_path),
+        global_registry=True,
+        registry=str(reg_path),
+        name="child_skel",
+        person_label=None,
+        source=None,
+        parent_id=parent_id,
+        notes=None,
+    )
+
+    rc = _cmd_skeleton_import(args)
+    assert rc == 0, "import should succeed when parent exists only in session DB"
+
+    # Verify child is in both DBs with correct parent_id
+    registry = create_registry.__wrapped__(reg_path) if hasattr(create_registry, "__wrapped__") else None
+    import sqlite3 as _sqlite3
+    reg_conn = _sqlite3.connect(str(reg_path))
+    reg_conn.row_factory = _sqlite3.Row
+    child_in_reg = reg_conn.execute(
+        "SELECT parent_id FROM skeletons WHERE name = ?", ("child_skel",)
+    ).fetchone()
+    reg_conn.close()
+
+    sess_conn = _sqlite3.connect(str(sess_path))
+    sess_conn.row_factory = _sqlite3.Row
+    child_in_sess = sess_conn.execute(
+        "SELECT parent_id FROM skeletons WHERE name = ?", ("child_skel",)
+    ).fetchone()
+    parent_in_reg = sess_conn.execute(
+        "SELECT id FROM skeletons WHERE id = ?", (parent_id,)
+    ).fetchone()
+    sess_conn.close()
+
+    assert child_in_reg is not None, "child must exist in registry"
+    assert child_in_reg["parent_id"] == parent_id
+    assert child_in_sess is not None, "child must exist in session"
+    assert child_in_sess["parent_id"] == parent_id
+    assert parent_in_reg is not None, "parent must exist in session"

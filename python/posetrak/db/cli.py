@@ -89,6 +89,7 @@ from posetrak.db.import_calib_toml import import_calib_toml
 from posetrak.db.import_calib_h5 import import_calib_h5
 from posetrak.db.import_session_yaml import import_session_yaml
 from posetrak.db.manage_skeleton import (
+    copy_skeleton,
     copy_skeleton_to_session,
     import_skeleton,
     import_skeleton_str,
@@ -618,57 +619,94 @@ def _cmd_skeleton_import(args: argparse.Namespace) -> int:
     yaml_path = Path(args.file)
     session_db_path = Path(args.session_db) if args.session_db else None
     use_global = args.global_registry
+    parent_id = args.parent_id or None
 
     if session_db_path is None and not use_global:
         print("Error: specify --session-db, --global, or both", file=sys.stderr)
         return 1
 
+    registry = None
+    session = None
     skeleton_id = None
 
-    if use_global:
-        try:
-            registry = open_registry(Path(args.registry))
-        except (FileNotFoundError, ValueError) as exc:
-            print(f"Error opening registry: {exc}", file=sys.stderr)
-            return 1
-        try:
-            skeleton_id = import_skeleton(
-                registry,
-                yaml_path,
-                name=args.name or None,
-                person_label=args.person_label or None,
-                source=args.source or None,
-                parent_id=args.parent_id or None,
-                notes=args.notes or None,
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"Error importing skeleton: {exc}", file=sys.stderr)
-            registry.close()
-            return 1
-        finally:
-            registry.close()
+    try:
+        if use_global:
+            try:
+                registry = open_registry(Path(args.registry))
+            except (FileNotFoundError, ValueError) as exc:
+                print(f"Error opening registry: {exc}", file=sys.stderr)
+                return 1
 
-    if session_db_path is not None:
-        try:
-            session = open_session(session_db_path)
-        except (FileNotFoundError, ValueError) as exc:
-            print(f"Error opening session db: {exc}", file=sys.stderr)
-            return 1
-        try:
-            skeleton_id = import_skeleton(
-                session,
-                yaml_path,
-                name=args.name or None,
-                person_label=args.person_label or None,
-                source=args.source or None,
-                parent_id=args.parent_id or None,
-                notes=args.notes or None,
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"Error importing skeleton to session: {exc}", file=sys.stderr)
-            session.close()
-            return 1
-        finally:
+        if session_db_path is not None:
+            try:
+                session = open_session(session_db_path)
+            except (FileNotFoundError, ValueError) as exc:
+                print(f"Error opening session db: {exc}", file=sys.stderr)
+                return 1
+
+        # When parent_id is given, ensure it exists in each target DB.
+        # The parent may live in only one of the two DBs (e.g. in the session DB
+        # after a tracking run, but not yet in the registry), so copy it across.
+        if parent_id is not None:
+            for target, other, target_label in [
+                (registry, session, "registry"),
+                (session, registry, "session db"),
+            ]:
+                if target is None:
+                    continue
+                exists = target.execute(
+                    "SELECT 1 FROM skeletons WHERE id = ?", (parent_id,)
+                ).fetchone()
+                if exists is None:
+                    if other is None:
+                        print(
+                            f"Error: parent skeleton '{parent_id[:12]}…' not found in {target_label}",
+                            file=sys.stderr,
+                        )
+                        return 1
+                    try:
+                        copy_skeleton(other, target, parent_id)
+                    except ValueError:
+                        print(
+                            f"Error: parent skeleton '{parent_id[:12]}…' not found in either db",
+                            file=sys.stderr,
+                        )
+                        return 1
+
+        if registry is not None:
+            try:
+                skeleton_id = import_skeleton(
+                    registry,
+                    yaml_path,
+                    name=args.name or None,
+                    person_label=args.person_label or None,
+                    source=args.source or None,
+                    parent_id=parent_id,
+                    notes=args.notes or None,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"Error importing skeleton: {exc}", file=sys.stderr)
+                return 1
+
+        if session is not None:
+            try:
+                skeleton_id = import_skeleton(
+                    session,
+                    yaml_path,
+                    name=args.name or None,
+                    person_label=args.person_label or None,
+                    source=args.source or None,
+                    parent_id=parent_id,
+                    notes=args.notes or None,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"Error importing skeleton to session: {exc}", file=sys.stderr)
+                return 1
+
+    finally:
+        if registry is not None:
+            registry.close()
+        if session is not None:
             session.close()
 
     print(f"skeleton_id: {skeleton_id}")

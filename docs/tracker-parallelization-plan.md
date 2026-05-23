@@ -40,12 +40,16 @@ explains why the tracker sits at 3–4 steps/s today.
 
 ## UKF Cost Structure
 
-### Where time is spent
+### Where time is spent — analytical estimates only
+
+The following estimates are based on FLOP counts and code inspection.
+**They are not measured.** Profiling is mandatory before starting optimisation
+(see Implementation Plan Step 0).
 
 Each `UnscentedKalmanFilter::update()` call does:
 
 **1. Sigma generation** — Cholesky of the 318×318 covariance matrix.
-Cost: O(n³) ≈ O(318³) ≈ 32M flops.  Runs once per step.
+Cost: O(n³/3) ≈ O(318³/3) ≈ 11M flops.  Runs once per step.
 
 **2. FK + projection loop** — For each of the 637 sigma points:
 - `pinocchio::forwardKinematics(model, data, q)` — 52-joint tree traversal
@@ -53,25 +57,51 @@ Cost: O(n³) ≈ O(318³) ≈ 32M flops.  Runs once per step.
 - Project all 61 markers into all 5 cameras (with distortion)
 
   Each point is independent → primary parallelisation target.
-  Total: 637 calls, each touching ~52 joints × 5 cameras × 61 markers.
+  Raw FLOP count is modest (~10K per point, ~6M total), but FK is
+  **latency-bound, not compute-bound**: the kinematic tree is a pointer-chasing
+  traversal with sequential data dependencies between parent and child joints.
+  Neither SIMD nor out-of-order execution helps much.  637 serial calls of
+  non-vectorisable code is why this dominates despite low FLOP count.
 
-**3. Weighted mean of measurements** — O(n\_sigma × measurement\_dim) = O(637 × 610) ≈ 390K ops.
-  Fast.
+**3. Weighted mean of measurements** — O(n\_sigma × measurement\_dim) ≈ 390K ops.  Fast.
 
-**4. Innovation covariance S** — outer-product accumulation:
-O(n\_sigma × measurement\_dim²) = O(637 × 610²) ≈ 237M flops.
-S is 610×610; this is non-trivial even with SIMD.
+**4. Innovation covariance S accumulation** — 637 iterations of:
+```cpp
+innovation_cov += weights_cov(i) * (innovation * innovation.transpose());
+```
+Each outer product is 610×610 ≈ 372K elements.
+Total: 637 × 372K ≈ **237M element-wise operations**.
+The 610×610 matrix is large enough that multi-threaded BLAS *could* help, but
+the current implementation issues sequential rank-1 `+=` updates — Eigen never
+sees a large enough single operation to dispatch to parallel BLAS.
+Restructuring to a single batched `DSYRK` call (compute all innovations as a
+matrix, then call `selfadjointView().rankUpdate(Z, w)`) would let BLAS
+parallelize the whole accumulation in one shot.
 
-**5. Cross-covariance Pxy** — O(n\_sigma × state\_dim × measurement\_dim)
-= O(637 × 318 × 610) ≈ 123M flops.  Pxy is 318×610.
+**5. Cross-covariance Pxy** — same pattern, O(637 × 318 × 610) ≈ **123M ops**.
+Same missed-BLAS issue as S.
 
-**6. Kalman gain K = Pxy × S⁻¹** — S inversion is O(610³) ≈ 227M flops.
-Then K × innovation is O(318 × 610) ≈ 194K ops.
+**6. Kalman gain K = Pxy × S⁻¹** — currently uses `.inverse()` on the 610×610 S
+matrix, which is O(610³) ≈ **226M flops** via full LU decomposition.
+Eigen's `llt().solve()` (Cholesky, S is symmetric positive definite) would be
+2× faster and numerically better.  The subsequent matrix multiply Pxy × S⁻¹ is
+O(318 × 610²) ≈ 118M flops — this IS a standard DGEMM that Eigen parallelises
+via BLAS.
 
-Steps 4–6 are pure Eigen matrix algebra on matrices too large to dismiss but
-too small for multi-threaded BLAS to be efficient (thread-launch overhead dominates
-for matrices under ~500×500 in practice).  They will be addressed after step 2 is
-profiled.
+**Summary of analytical estimates:**
+
+| Step | Estimated cost | Parallelisable as-is? |
+|------|---------------|----------------------|
+| 1. Sigma generation (Cholesky 318×318) | ~11M flops | No (sequential) |
+| 2. FK + projection loop (637 points) | ~6M flops, latency-bound | Yes — OpenMP Data pool |
+| 3. Weighted measurement mean | ~390K ops | Trivial; not worth it |
+| 4. S accumulation (637 rank-1 updates to 610×610) | ~237M ops | Needs DSYRK refactor |
+| 5. Pxy accumulation (637 outer products 318×610) | ~123M ops | Needs DGEMM refactor |
+| 6. Kalman gain (610×610 inverse + 318×610² multiply) | ~344M flops | Partial (DGEMM is parallel) |
+
+Steps 4–6 together exceed step 2 in raw FLOP count by ~10×.  Whether they exceed it
+in wall time depends on vectorisation and BLAS efficiency — which is why profiling
+comes first.
 
 ### How camera count scales
 
@@ -142,6 +172,52 @@ loop is parallelised and profiled.
 Each `Tracker` instance is independent.  For multi-person sessions, a thread pool
 wrapping the CLI would give free parallelism.  Not useful for single-person sessions
 (which is the current use case).
+
+---
+
+## MSVC OpenMP Compatibility
+
+Native Windows builds use MSVC.  Understanding its OpenMP support up front avoids
+writing code that has to be rewritten for Windows.
+
+### What MSVC supports
+
+| Feature | OpenMP version | MSVC `/openmp` | MSVC `/openmp:llvm` |
+|---------|----------------|----------------|----------------------|
+| `parallel for` | 2.0 | ✓ | ✓ |
+| `schedule(static/dynamic/guided)` | 2.0 | ✓ | ✓ |
+| `omp_get_thread_num()` | 2.0 | ✓ | ✓ |
+| `omp_get_max_threads()` | 2.0 | ✓ | ✓ |
+| `reduction` on built-in types | 2.0 | ✓ | ✓ |
+| `critical`, `atomic` | 2.0 | ✓ | ✓ |
+| Loop variable must be signed `int` | 2.0 restriction | required | required |
+| `task`, `taskwait` | 3.0 | ✗ | ✓ |
+| `collapse(N)` | 3.0 | ✗ | ✓ |
+| `schedule(auto)` | 3.0 | ✗ | ✓ |
+| `#pragma omp simd` | 4.0 | ✗ | ✓ |
+
+`/openmp:llvm` requires VS 2019 16.9+ and links the LLVM OpenMP runtime instead of
+Microsoft's.  It is production-quality but adds a runtime DLL dependency.
+
+### Impact on our plan
+
+The FK loop parallelisation (Step 3) uses only OpenMP 2.0 features and is fully
+MSVC-compatible as written:
+
+```cpp
+#pragma omp parallel for schedule(static)
+for (int i = 0; i < n_sigma; ++i) {   // signed int: required by MSVC 2.0
+    ForwardKinematics fk_local(...);
+    predicted_measurements.col(i) = predict_measurements(..., fk_local);
+}
+```
+
+The only code-level constraint to maintain for MSVC: keep loop variables as `int`
+(not `size_t` or `auto`), and avoid `collapse`, `task`, and `schedule(auto)`.
+None of the plans in this document require those features.
+
+For the DSYRK/DGEMM refactors (steps 4–6), parallelism comes from BLAS, not OpenMP
+pragmas — those are MSVC-compatible regardless of OpenMP version.
 
 ---
 
@@ -220,9 +296,11 @@ profiling shows significant load imbalance.
 
 ### Step 4 — Measure and decide next step
 
-Same benchmark as Step 0.  If update time is now dominated by S computation (steps 4–6
-in the cost breakdown), proceed to Option B.  If the FK loop is still dominant,
-increase thread count or investigate per-FK cache behaviour.
+Same benchmark as Step 0.  With 637 sigma points, ideal speedup on 8 physical cores
+is ~8×; realistic is 4–6× after memory bandwidth contention and thread overhead.
+If profiling shows S/Pxy/Kalman gain together still dominate after FK parallelisation,
+proceed to Option B (DSYRK/DGEMM refactor + Cholesky solve).  If the FK loop is
+still dominant, investigate per-FK cache behaviour or increase thread count.
 
 ### Step 5 (optional) — Measure S matrix dominance
 

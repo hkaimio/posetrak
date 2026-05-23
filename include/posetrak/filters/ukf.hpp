@@ -379,6 +379,12 @@ class UnscentedKalmanFilter {
     mutable std::vector<pinocchio::Data> data_pool_;
     void ensure_data_pool(ForwardKinematics const& fk) const;
 
+    // PSD fix statistics
+    mutable int psd_fix_count_ = 0;  ///< Frames where LLT failed and eigensolver was needed
+   public:
+    int psd_fix_count() const { return psd_fix_count_; }
+
+   private:
     // Debug state
     bool debug_enabled_ = false;  ///< Debug mode flag
     std::string debug_dir_;       ///< Debug output directory

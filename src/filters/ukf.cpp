@@ -1153,26 +1153,24 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
 
     // Step 10: Project covariance to nearest PSD matrix by clipping negative eigenvalues.
     //
-    // We use eigenvalue clipping rather than the scalar epsilon*I shift that was here
-    // before. The scalar shift uniformly bloats all dimensions (including velocities)
-    // and accumulates over time; clipping only lifts directions that went negative,
-    // preserving the shape of the distribution in well-constrained directions.
+    // Fast path: attempt Cholesky (LLT). After a few frames the covariance converges and
+    // stays positive-definite, so LLT almost always succeeds — O(n³/3) ≈ 1ms vs 24ms for
+    // SelfAdjointEigenSolver. Only fall through to the eigensolver when LLT fails (i.e.,
+    // when a direction genuinely went negative).
     {
-        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen_solver(covariance_);
-        if (eigen_solver.info() != Eigen::Success) {
-            throw std::runtime_error("Failed to compute eigenvalues for covariance conditioning");
-        }
-
-        const double min_eig_floor = 1e-6;
-        Eigen::VectorXd eigenvalues = eigen_solver.eigenvalues();
-        double min_eigenvalue = eigenvalues.minCoeff();
-
-        if (min_eigenvalue < min_eig_floor) {
-            // Clip negative (and near-zero) eigenvalues to floor, reconstruct matrix
-            eigenvalues = eigenvalues.cwiseMax(min_eig_floor);
+        Eigen::LLT<Eigen::MatrixXd> llt_check(covariance_);
+        if (llt_check.info() != Eigen::Success) {
+            ++psd_fix_count_;
+            // Covariance is not PD — clip negative eigenvalues to floor.
+            Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen_solver(covariance_);
+            if (eigen_solver.info() != Eigen::Success) {
+                throw std::runtime_error(
+                    "Failed to compute eigenvalues for covariance conditioning");
+            }
+            const double min_eig_floor = 1e-6;
+            Eigen::VectorXd eigenvalues = eigen_solver.eigenvalues().cwiseMax(min_eig_floor);
             covariance_ = eigen_solver.eigenvectors() * eigenvalues.asDiagonal() *
                           eigen_solver.eigenvectors().transpose();
-            // Re-enforce symmetry after reconstruction
             covariance_ = 0.5 * (covariance_ + covariance_.transpose());
         }
     }

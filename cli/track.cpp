@@ -1012,6 +1012,11 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
                 fmt::print("  Outlier rate: {:.1f}%\n", stats_tracker->outlier_rate() * 100.0);
             }
 
+            if (auto* ukf = tracker.get_ukf()) {
+                fmt::print("  PSD eigensolver fired: {}/{} frames\n", ukf->psd_fix_count(),
+                           frames_tracked);
+            }
+
             fmt::print("\nResults exported to: {}\n", config.output_dir.string());
             if (config.export_tracking_results) {
                 fmt::print("  - tracking_results.csv\n");
@@ -1461,6 +1466,10 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
             fmt::print("  Lost: {} steps\n", frames_lost);
             fmt::print("  Average rate: {:.1f} steps/s\n", frames_tracked / total_sec);
             fmt::print("  Total time: {:.1f}s\n", total_sec);
+            if (auto* ukf = tracker.get_ukf()) {
+                fmt::print("  PSD eigensolver fired: {}/{} frames\n", ukf->psd_fix_count(),
+                           frames_tracked);
+            }
             fmt::print("\nResults exported to: {}\n", output_dir);
         }
 

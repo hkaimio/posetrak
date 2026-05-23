@@ -423,6 +423,49 @@ Per-operation breakdown (238 frames, mean ms):
 Dominant remaining cost: `u_inlier_ms` (16ms) — Z_inlier build and S_inlier DGEMM.
 Total throughput: ~9 steps/s (up from ~3.4 steps/s at serial baseline).
 
+### Fine-grained timing baseline (post-LDLT)
+
+Fine-grained per-operation timers (238 frames, skipping init frame):
+
+| Operation | Mean ms | P50 ms | P95 ms | % of step |
+|-----------|---------|--------|--------|-----------|
+| predict total | 39.7 | 39.1 | 57.8 | 29% |
+| &nbsp;&nbsp;p_sigma_gen_ms | 3.5 | 3.4 | 4.0 | 2.6% |
+| &nbsp;&nbsp;p_propagate_ms | 2.6 | 2.6 | 3.0 | 1.9% |
+| &nbsp;&nbsp;p_mean_cov_ms | 17.0 | 15.8 | 29.8 | 13% |
+| &nbsp;&nbsp;p_rts_ms | 16.0 | 15.4 | 28.0 | 12% |
+| update total | 95.7 | 91.4 | 149.3 | 71% |
+| &nbsp;&nbsp;u_fk1_ms | 3.6 | 1.7 | 9.8 | 2.6% |
+| &nbsp;&nbsp;u_s_ms | 18.6 | 17.3 | 36.2 | 14% |
+| &nbsp;&nbsp;u_fk2_ms | 3.7 | 1.6 | 12.4 | 2.7% |
+| &nbsp;&nbsp;u_inlier_ms | 24.6 | 23.6 | 47.1 | 18% |
+| &nbsp;&nbsp;u_kalman_ms | 13.9 | 12.2 | 21.0 | 10% |
+| &nbsp;&nbsp;u_cov_update_ms | 24.2 | 23.0 | 37.5 | 18% |
+| **TOTAL step** | **135** | **131** | **198** | — |
+
+CPU utilization: ~15% across 24 threads (Ryzen 9 9900X). Amdahl bottleneck: ~52ms is
+parallel BLAS (u_s, u_inlier, p_propagate, FKs) and ~83ms is sequential. With BLAS
+averaging ~8 threads during bursts: (52ms×8 + 83ms×1) / 135ms / 24 = ~16% — matches
+observed utilization.
+
+**Top three remaining bottlenecks:**
+
+1. **u_cov_update_ms (24ms, 18%)** — `SelfAdjointEigenSolver` on the 318×318 posterior
+   covariance runs every frame to clip negative eigenvalues (PSD fix). After convergence the
+   covariance stays PD; the solver fires unconditionally. A Cholesky fast-path (LLT,
+   O(n³/3) ≈ ~1ms vs ~24ms for eigensolver) can gate the expensive path so it only runs on
+   failure. Expected savings: ~23ms on nearly all post-convergence frames.
+
+2. **p_rts_ms (16ms, 12%) + p_mean_cov_ms (17ms, 13%)** — Both are sequential loops over
+   637 sigma points computing `compute_state_error()`, followed by a DGEMM. The state-error
+   function is a pure const operation (reads sigma points + reference state, writes to a
+   distinct matrix column) — the same `#pragma omp parallel for` pattern used in the update's
+   E-matrix build (line 923) applies directly. Parallelizing both loops saves ~29ms combined.
+
+3. **Spherical simplex sigma points (deferred)** — Reducing n_sigma from 637 to 320 would
+   halve u_fk1, u_s, and the predict loops. Left for separate analysis/experimentation as it
+   changes filter numerics and requires validation.
+
 ### Numerical validation across optimization commits
 
 To confirm the optimizations do not alter tracking results, three builds were run
@@ -443,6 +486,25 @@ differences between DGEMM and sequential rank-1 loops — irrelevant for motion 
 Distal finger joints (up to 3.4°, rms 0.28°) show similar order-dependent variation.
 
 **Conclusion**: the optimizations are numerically equivalent for all practical purposes.
+
+### After LLT-gated PSD fix (u_cov_update)
+
+`SelfAdjointEigenSolver` replaced with `LLT` (Cholesky) as a fast PD check. The eigensolver
+now only fires when LLT fails (covariance genuinely not PD). After convergence the covariance
+stays PD so LLT succeeds on 236/239 frames; the eigensolver only fires on the first 3 frames
+while the filter converges. `u_cov_update_ms` drops from ~24ms to ~7ms (70% reduction).
+
+| Date | Commit | Hardware | mean ms/step (CSV) | p95 ms/step | u_cov_update (mean) | PSD fires | Speedup vs prev |
+|------|--------|----------|--------------------|-------------|---------------------|-----------|-----------------|
+| 2026-05-23 | — | Ryzen 9 9900X (12c/24t), WSL2 | 87 ms | — | 7.3 ms | 3/239 | **1.6×** |
+
+### After parallel predict state-error loops (p_rts + p_mean_cov)
+
+*(to be filled after implementation)*
+
+| Date | Commit | Hardware | mean ms/step | p95 ms/step | p_rts (mean) | p_mean_cov (mean) | Speedup vs prev |
+|------|--------|----------|-------------|-------------|--------------|-------------------|-----------------|
+| — | — | — | — | — | — | — | — |
 
 ---
 

@@ -389,7 +389,39 @@ Eigen/OpenBLAS parallelizes the resulting (610×637)×(637×610) multiply across
 
 | Date | Commit | Hardware | OMP_THREADS | mean ms/step | p95 ms/step | predict (mean/p95) | update (mean/p95) | Speedup vs serial |
 |------|--------|----------|-------------|-------------|-------------|-------------------|--------------------|------------------|
-| 2026-05-23 | 068cb48 | Ryzen 9 9900X (12c/24t), WSL2 | 12 | 152 | 164 | 57 / 61 ms | 95 / 104 ms | **2.0×** |
+| 2026-05-23 | 720db4d | Ryzen 9 9900X (12c/24t), WSL2 | 12 | 152 | 164 | 57 / 61 ms | 95 / 104 ms | **2.0×** |
+
+Note: the 95ms update figure was a coarse measurement. Fine-grained instrumentation
+(added in commit 385ed5b) later revealed that `u_kalman_ms` alone was 133ms — three
+`.inverse()` calls on the ~511×511 inlier innovation covariance dominated. The 95ms
+estimate is believed to have been taken under lighter system load or with a different
+CPU boost state; the instrumented baseline with the same code measures ~500ms update.
+
+### After LDLT factorization + predict DGEMM refactor
+
+Three O(n³) inversions of the ~511×511 inlier innovation covariance replaced with a
+single LDLT factorization reused for Kalman gain, covariance update, and NIS.
+`compute_state_covariance` and RTS cross-covariance rank-1 loops replaced with DGEMM
+(same pattern as the earlier S/Pxy refactor).
+
+Per-operation breakdown (238 frames, mean ms):
+
+| Operation | Before | After | Speedup |
+|-----------|--------|-------|---------|
+| predict total | 57.2 | 35.3 | 1.6× |
+| &nbsp;&nbsp;p_mean_cov_ms | 26.0 | 15.6 | 1.7× |
+| &nbsp;&nbsp;p_rts_ms | 24.5 | 12.6 | 1.9× |
+| update total | 500 | 74.5 | 6.7× |
+| &nbsp;&nbsp;u_inlier_ms | 33.9 | 16.4 | 2.1× |
+| &nbsp;&nbsp;u_kalman_ms | 132.8 | 14.6 | 9.1× |
+| &nbsp;&nbsp;u_cov_update_ms | 179.2 | 21.6 | 8.3× |
+
+| Date | Commit | Hardware | OMP_THREADS | mean ms/step | p95 ms/step | predict (mean/p95) | update (mean/p95) | Speedup vs serial |
+|------|--------|----------|-------------|-------------|-------------|-------------------|--------------------|------------------|
+| 2026-05-23 | 92087e4 | Ryzen 9 9900X (12c/24t), WSL2 | 12 | 110 | 113 | 35 / 57 ms | 75 / 113 ms | **2.7×** |
+
+Dominant remaining cost: `u_inlier_ms` (16ms) — Z_inlier build and S_inlier DGEMM.
+Total throughput: ~9 steps/s (up from ~3.4 steps/s at serial baseline).
 
 ---
 

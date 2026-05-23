@@ -5,17 +5,18 @@ Workflow
 1.  Dialog opens from TrackingRunPanel → loads skeleton template measurements.
 2.  Background worker: load inlier obs from DB → DLT triangulate → per-step
     distances between marker pairs (femur, shin, upper_arm, …).
-3.  Matplotlib canvas shows time series for each measurement (6 plots).
-    User drags a SpanSelector band on any plot to pick the "good pose" range.
-4.  Medians over the selected span populate editable spinboxes.
+3.  Six measurement cards each show a time series.  The user drags a
+    SpanSelector band on each graph independently to pick a "good pose" range.
+4.  Span median, original template, and editable "new value" are shown inline
+    below each graph.  "Use this" copies the span median; "Reset" restores the
+    template value.  The current new value is also shown as a dotted line.
 5.  "Save scaled skeleton" calls scale_skeleton_yaml() + import_skeleton_str().
 
 Video scrubber
 --------------
-The left panel reuses PersonCropGridWidget (same as the tracking run view) so
-person crops and tracking overlay are available.  Clicking any point on the
-matplotlib plots seeks the video; the widget's time_changed signal drives the
-cursor line across all plots.
+Left panel: QComboBox to pick one camera + PersonCropGridWidget showing that
+camera's person crop with tracking overlay.  Clicking any point in a plot seeks
+the video; the widget's time_changed signal moves the cursor line across all plots.
 """
 
 from __future__ import annotations
@@ -26,13 +27,16 @@ import numpy as np
 import yaml
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDoubleSpinBox,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QVBoxLayout,
@@ -63,8 +67,6 @@ MEAS_LABELS = {
     "shoulder_width": "Shoulder width  (L → R)",
 }
 
-# Marker-pair distances that define each measurement.
-# For bilateral pairs (L+R) both contribute and we take the mean.
 _MEAS_PAIRS: dict[str, list[tuple[str, str]]] = {
     "femur":          [("MRK-hip.L",      "MRK-knee.L"),
                        ("MRK-hip.R",      "MRK-knee.R")],
@@ -75,7 +77,6 @@ _MEAS_PAIRS: dict[str, list[tuple[str, str]]] = {
     "lower_arm":      [("MRK-elbow.L",    "MRK-wrist.L"),
                        ("MRK-elbow.R",    "MRK-wrist.R")],
     "shoulder_width": [("MRK-shoulder.L", "MRK-shoulder.R")],
-    # "torso_height": computed from midpoints, handled separately
 }
 
 # ---------------------------------------------------------------------------
@@ -108,7 +109,6 @@ class _MeasWorker(QThread):
                 self.finished.emit(None, "No inlier observations found.")
                 return
 
-            # Camera projection matrices
             conn = sqlite3.connect(self._db_path)
             conn.row_factory = sqlite3.Row
             run = conn.execute(
@@ -131,7 +131,6 @@ class _MeasWorker(QThread):
                 c.get("instance_label") or c["label"]: c["P"] for c in cam_list
             }
 
-            # DLT triangulate each (tracker_step, marker_name)
             tri: dict[tuple, np.ndarray] = {}
             step_ts: dict[int, float] = {}
             for (step, mname), grp in obs_df.groupby(["tracker_step", "marker_name"]):
@@ -154,13 +153,11 @@ class _MeasWorker(QThread):
                 self.finished.emit(None, "DLT triangulation yielded no valid results.")
                 return
 
-            # Aggregate positions per step
             pos_by_step: dict[int, dict] = {}
             for (step, mname), pos in tri.items():
                 pos_by_step.setdefault(step, {})
                 pos_by_step[step][mname] = pos
 
-            # Compute measurement distances per step
             records = []
             for step in sorted(pos_by_step):
                 data = pos_by_step[step]
@@ -173,7 +170,6 @@ class _MeasWorker(QThread):
                             dists.append(float(np.linalg.norm(data[m1] - data[m2])))
                     rec[key] = float(np.mean(dists)) if dists else float("nan")
 
-                # torso_height via midpoints
                 sl, sr = data.get("MRK-shoulder.L"), data.get("MRK-shoulder.R")
                 hl, hr = data.get("MRK-hip.L"), data.get("MRK-hip.R")
                 if all(v is not None for v in (sl, sr, hl, hr)):
@@ -209,181 +205,181 @@ def _dlt(
 
 
 # ---------------------------------------------------------------------------
-# Matplotlib plot canvas
+# Per-measurement card: one subplot + inline controls
 # ---------------------------------------------------------------------------
 
 
-class _PlotCanvas(QWidget):
-    """Six measurement time series with linked SpanSelector and cursor line."""
+class _MeasCard(QWidget):
+    """One measurement: subplot + controls (orig | span median | new value | buttons)."""
 
-    span_changed = Signal(float, float)   # (t_lo_s, t_hi_s)
-    time_clicked = Signal(float)          # plot click → seek video
+    time_clicked = Signal(float)
 
-    _NCOLS = 2
-    _NROWS = 3  # ceil(6/2)
-
-    def __init__(self, parent=None) -> None:
+    def __init__(self, key: str, parent=None) -> None:
         super().__init__(parent)
-        self._meas_df = None
-        self._span_lo: float | None = None
-        self._span_hi: float | None = None
-        self._cursor_lines: list = []
-        self._span_patches: list = []
-        self._selectors: list[SpanSelector] = []
+        self._key = key
+        self._tmpl_m: float = 0.0
+        self._ts: np.ndarray = np.array([])
+        self._vals_m: np.ndarray = np.array([])
+        self._span_median_m: float | None = None
+        self._cursor = None
+        self._new_val_line = None
+        self._selector: SpanSelector | None = None
 
-        fig = Figure(figsize=(9, 7))
+        fig = Figure(figsize=(4, 2))
         fig.set_tight_layout(True)
         self._canvas = FigureCanvasQTAgg(fig)
         self._canvas.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self._axes = fig.subplots(self._NROWS, self._NCOLS).flatten()
+        self._ax = fig.add_subplot(111)
+        self._canvas.mpl_connect("button_press_event", self._on_click)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._canvas)
+        self._lbl_tmpl = QLabel("—")
+        self._lbl_median = QLabel("—")
+        self._lbl_median.setStyleSheet("color: #7af;")
 
-        self._canvas.mpl_connect("button_press_event", self._on_plot_click)
-
-    # ------------------------------------------------------------------
-    # Public API
-
-    def load_data(self, meas_df, tmpl: dict[str, float]) -> None:
-        """Draw (or redraw) all subplots with measurement data."""
-        import pandas as pd
-
-        self._meas_df = meas_df
-        self._cursor_lines.clear()
-        self._span_patches.clear()
-        for sel in self._selectors:
-            sel.set_visible(False)
-        self._selectors.clear()
-
-        ts = meas_df["timestamp_s"].values if not meas_df.empty else np.array([])
-        t_min = float(ts.min()) if ts.size else 0.0
-        t_max = float(ts.max()) if ts.size else 1.0
-        t_margin = (t_max - t_min) * 0.01
-
-        for i, key in enumerate(MEAS_KEYS):
-            ax = self._axes[i]
-            ax.clear()
-            ax.set_title(MEAS_LABELS[key], fontsize=8, pad=2)
-            ax.set_ylabel("cm", fontsize=7)
-            ax.tick_params(labelsize=7)
-
-            if not meas_df.empty and key in meas_df.columns:
-                vals = meas_df[key].values * 100  # m → cm
-                ax.plot(ts, vals, color="lightsteelblue", lw=0.7, alpha=0.7)
-                smoothed = (
-                    pd.Series(vals).rolling(15, center=True, min_periods=1).median()
-                )
-                ax.plot(ts, smoothed.values, color="steelblue", lw=1.5)
-
-            if key in tmpl:
-                v = tmpl[key] * 100
-                ax.axhline(v, color="#888", lw=1, ls="--", alpha=0.8,
-                           label=f"tmpl {v:.1f} cm")
-                ax.legend(fontsize=7, loc="upper right", framealpha=0.5)
-
-            # Fix x-axis to actual tracking data range (before adding invisible artists)
-            ax.set_xlim(t_min - t_margin, t_max + t_margin)
-
-            # Span and cursor (added after xlim so they don't expand the axis)
-            patch = ax.axvspan(t_min, t_min, alpha=0.2, color="gold", visible=False, zorder=0)
-            self._span_patches.append(patch)
-            cursor = ax.axvline(t_min, color="crimson", lw=1, alpha=0.7, visible=False)
-            self._cursor_lines.append(cursor)
-
-            sel = SpanSelector(
-                ax, self._on_span, "horizontal",
-                useblit=True, interactive=True,
-                drag_from_anywhere=True,
-                props=dict(alpha=0.25, facecolor="gold"),
-                handle_props=dict(alpha=0.6),
-            )
-            self._selectors.append(sel)
-
-        for j in range(len(MEAS_KEYS), len(self._axes)):
-            self._axes[j].set_visible(False)
-
-        self._canvas.draw_idle()
-
-    def move_cursor(self, t: float) -> None:
-        for line in self._cursor_lines:
-            line.set_xdata([t, t])
-            line.set_visible(True)
-        self._canvas.draw_idle()
-
-    def current_span(self) -> tuple[float, float] | None:
-        if self._span_lo is None:
-            return None
-        return self._span_lo, self._span_hi
-
-    # ------------------------------------------------------------------
-    # Internal callbacks
-
-    def _on_span(self, xmin: float, xmax: float) -> None:
-        if xmax - xmin < 0.05:
-            return
-        self._span_lo, self._span_hi = xmin, xmax
-        # Synchronise gold band across all axes
-        for patch in self._span_patches:
-            patch.set_visible(True)
-            # axvspan xy is [[x0,0],[x0,1],[x1,1],[x1,0],[x0,0]]
-            patch.set_xy([
-                [xmin, 0], [xmin, 1], [xmax, 1], [xmax, 0], [xmin, 0],
-            ])
-        self._canvas.draw_idle()
-        self.span_changed.emit(xmin, xmax)
-
-    def _on_plot_click(self, event) -> None:
-        if event.inaxes is None or event.xdata is None:
-            return
-        if event.button != 1:
-            return
-        self.time_clicked.emit(float(event.xdata))
-
-
-# ---------------------------------------------------------------------------
-# Summary row widget (one measurement)
-# ---------------------------------------------------------------------------
-
-
-class _MeasRow(QWidget):
-    """One row: label | template | measured median | override spinbox."""
-
-    def __init__(self, key: str, tmpl_m: float, parent=None) -> None:
-        super().__init__(parent)
-        self._key = key
-        self._tmpl_m = tmpl_m
-
-        self._lbl_tmpl = QLabel(f"{tmpl_m * 100:.1f} cm" if tmpl_m else "—")
-        self._lbl_med = QLabel("—")
         self._spin = QDoubleSpinBox()
         self._spin.setRange(1.0, 300.0)
         self._spin.setDecimals(1)
         self._spin.setSuffix(" cm")
         self._spin.setSingleStep(0.5)
+        self._spin.setMaximumWidth(95)
+        self._spin.valueChanged.connect(self._on_new_val_changed)
+
+        self._reset_btn = QPushButton("Reset")
+        self._reset_btn.setMaximumWidth(55)
+        self._reset_btn.clicked.connect(self._on_reset)
+
+        self._use_btn = QPushButton("Use this")
+        self._use_btn.setMaximumWidth(70)
+        self._use_btn.setEnabled(False)
+        self._use_btn.clicked.connect(self._on_use_this)
+
+        ctrl = QHBoxLayout()
+        ctrl.setContentsMargins(4, 0, 4, 4)
+        ctrl.setSpacing(4)
+        ctrl.addWidget(QLabel("Orig:"))
+        ctrl.addWidget(self._lbl_tmpl)
+        ctrl.addWidget(QLabel("  Span median:"))
+        ctrl.addWidget(self._lbl_median)
+        ctrl.addWidget(QLabel("  New:"))
+        ctrl.addWidget(self._spin)
+        ctrl.addWidget(self._reset_btn)
+        ctrl.addWidget(self._use_btn)
+        ctrl.addStretch()
+
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(2, 2, 2, 2)
+        vbox.setSpacing(2)
+        vbox.addWidget(self._canvas, stretch=1)
+        vbox.addLayout(ctrl)
+
+    # ------------------------------------------------------------------
+    # Public API
+
+    def load_data(self, ts: np.ndarray, vals_m: np.ndarray, tmpl_m: float) -> None:
+        import pandas as pd
+
+        self._ts = ts
+        self._vals_m = vals_m
+        self._tmpl_m = tmpl_m
+        self._span_median_m = None
+        self._new_val_line = None
+
+        self._use_btn.setEnabled(False)
+        self._lbl_median.setText("—")
+        self._lbl_tmpl.setText(f"{tmpl_m * 100:.1f} cm" if tmpl_m else "—")
+
         if tmpl_m:
+            self._spin.blockSignals(True)
             self._spin.setValue(round(tmpl_m * 100, 1))
+            self._spin.blockSignals(False)
 
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(QLabel(MEAS_LABELS[key]), stretch=3)
-        row.addWidget(self._lbl_tmpl, stretch=1)
-        row.addWidget(self._lbl_med, stretch=1)
-        row.addWidget(self._spin, stretch=1)
+        ax = self._ax
+        ax.clear()
+        ax.set_title(MEAS_LABELS[self._key], fontsize=8, pad=2)
+        ax.set_ylabel("cm", fontsize=7)
+        ax.tick_params(labelsize=7)
 
-    def set_median(self, median_m: float) -> None:
-        if np.isfinite(median_m):
-            self._lbl_med.setText(f"{median_m * 100:.1f} cm")
-            self._spin.setValue(round(median_m * 100, 1))
-        else:
-            self._lbl_med.setText("—")
+        t_min = float(ts.min()) if ts.size else 0.0
+        t_max = float(ts.max()) if ts.size else 1.0
+        t_margin = max((t_max - t_min) * 0.01, 0.1)
+
+        if ts.size > 0:
+            vals_cm = vals_m * 100
+            ax.plot(ts, vals_cm, color="lightsteelblue", lw=0.7, alpha=0.7)
+            smoothed = (
+                pd.Series(vals_cm).rolling(15, center=True, min_periods=1).median()
+            )
+            ax.plot(ts, smoothed.values, color="steelblue", lw=1.5)
+
+        ax.set_xlim(t_min - t_margin, t_max + t_margin)
+
+        if tmpl_m:
+            ax.axhline(tmpl_m * 100, color="#888", lw=1, ls="--", alpha=0.8)
+
+        new_v = self._spin.value()
+        self._new_val_line = ax.axhline(
+            new_v, color="#f90", lw=1.5, ls=":", alpha=0.9
+        )
+
+        self._cursor = ax.axvline(
+            t_min, color="crimson", lw=1, alpha=0.7, visible=False
+        )
+
+        if self._selector is not None:
+            self._selector.set_visible(False)
+        self._selector = SpanSelector(
+            ax, self._on_span, "horizontal",
+            useblit=True, interactive=True,
+            drag_from_anywhere=True,
+            props=dict(alpha=0.25, facecolor="gold"),
+            handle_props=dict(alpha=0.6),
+        )
+
+        self._canvas.draw_idle()
+
+    def move_cursor(self, t: float) -> None:
+        if self._cursor is not None:
+            self._cursor.set_xdata([t, t])
+            self._cursor.set_visible(True)
+            self._canvas.draw_idle()
 
     @property
     def value_m(self) -> float:
         return self._spin.value() / 100.0
+
+    # ------------------------------------------------------------------
+    # Internal
+
+    def _on_span(self, xmin: float, xmax: float) -> None:
+        if xmax - xmin < 0.05:
+            return
+        if self._ts.size > 0 and self._vals_m.size > 0:
+            mask = (self._ts >= xmin) & (self._ts <= xmax) & np.isfinite(self._vals_m)
+            sub = self._vals_m[mask]
+            if sub.size > 0:
+                self._span_median_m = float(np.nanmedian(sub))
+                self._lbl_median.setText(f"{self._span_median_m * 100:.1f} cm")
+                self._use_btn.setEnabled(True)
+
+    def _on_click(self, event) -> None:
+        if event.inaxes is None or event.xdata is None or event.button != 1:
+            return
+        self.time_clicked.emit(float(event.xdata))
+
+    def _on_reset(self) -> None:
+        if self._tmpl_m:
+            self._spin.setValue(round(self._tmpl_m * 100, 1))
+
+    def _on_use_this(self) -> None:
+        if self._span_median_m is not None:
+            self._spin.setValue(round(self._span_median_m * 100, 1))
+
+    def _on_new_val_changed(self, v_cm: float) -> None:
+        if self._new_val_line is not None:
+            self._new_val_line.set_ydata([v_cm, v_cm])
+            self._canvas.draw_idle()
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +404,7 @@ class SkeletonScalingPanel(QDialog):
         self._meas_df = None
         self._skel_yaml: str | None = None
         self._tmpl: dict[str, float] = {}
-        self._rows: dict[str, _MeasRow] = {}
+        self._cards: dict[str, _MeasCard] = {}
         self._worker: _MeasWorker | None = None
 
         self.setWindowTitle("Skeleton Scaling")
@@ -443,13 +439,18 @@ class SkeletonScalingPanel(QDialog):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
-        # Status bar
         self._status = QLabel("Triangulating inlier observations…  (this may take a moment)")
         self._status.setStyleSheet("color: #aaa; font-style: italic;")
         root.addWidget(self._status)
 
-        # ── Main split: video ← | → plots ──────────────────────────────
+        # ── Main split ──────────────────────────────────────────────────
         main_split = QSplitter(Qt.Orientation.Horizontal)
+
+        # Left: camera selector + crop grid
+        left_panel = QWidget()
+        left_v = QVBoxLayout(left_panel)
+        left_v.setContentsMargins(0, 0, 0, 0)
+        left_v.setSpacing(2)
 
         seq_row = self._conn.execute(
             "SELECT observation_sequence_id FROM tracking_runs WHERE id=?",
@@ -461,63 +462,80 @@ class SkeletonScalingPanel(QDialog):
         if seq_id:
             self._video = PersonCropGridWidget(self._conn, seq_id)
             self._video.set_tracking_run(self._run_id)
-            self._video.setMaximumWidth(480)
-            main_split.addWidget(self._video)
 
-        self._plot = _PlotCanvas()
-        main_split.addWidget(self._plot)
+            cam_labels = self._video.camera_labels()
+            if cam_labels:
+                self._cam_combo = QComboBox()
+                for lbl in cam_labels:
+                    self._cam_combo.addItem(lbl)
+                self._video.set_camera_filter(cam_labels[0])
+                self._cam_combo.currentTextChanged.connect(self._video.set_camera_filter)
+
+                cam_row = QHBoxLayout()
+                cam_row.setContentsMargins(4, 0, 4, 0)
+                cam_row.addWidget(QLabel("Camera:"))
+                cam_row.addWidget(self._cam_combo)
+                cam_row.addStretch()
+                left_v.addLayout(cam_row)
+
+            self._video.time_changed.connect(self._on_time_changed)
+            left_v.addWidget(self._video, stretch=1)
+
+        main_split.addWidget(left_panel)
+
+        # Right: 2-column grid of measurement cards in a scroll area
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_content = QWidget()
+        cards_grid = QGridLayout(right_content)
+        cards_grid.setSpacing(6)
+        cards_grid.setContentsMargins(4, 4, 4, 4)
+
+        for i, key in enumerate(MEAS_KEYS):
+            row, col = divmod(i, 2)
+            card = _MeasCard(key)
+            card.time_clicked.connect(self._on_time_clicked)
+            self._cards[key] = card
+            cards_grid.addWidget(card, row, col)
+            cards_grid.setColumnStretch(col, 1)
+
+        for r in range(3):
+            cards_grid.setRowStretch(r, 1)
+
+        right_scroll.setWidget(right_content)
+        main_split.addWidget(right_scroll)
 
         main_split.setStretchFactor(0, 0)
         main_split.setStretchFactor(1, 1)
         root.addWidget(main_split, stretch=1)
 
-        # Wire video ↔ plot
-        if self._video is not None:
-            self._video.time_changed.connect(self._plot.move_cursor)
-            self._plot.time_clicked.connect(self._video.seek)
-        self._plot.time_clicked.connect(self._plot.move_cursor)
-        self._plot.span_changed.connect(self._on_span_changed)
-
-        # ── Summary table ───────────────────────────────────────────────
-        summary_widget = QWidget()
-        summary_layout = QVBoxLayout(summary_widget)
-        summary_layout.setContentsMargins(4, 4, 4, 4)
-        summary_layout.setSpacing(2)
-
-        # Header row
-        header = QHBoxLayout()
-        for text, stretch in [
-            ("Measurement", 3), ("Template", 1), ("Span median", 1), ("Override", 1),
-        ]:
-            lbl = QLabel(f"<b>{text}</b>")
-            header.addWidget(lbl, stretch=stretch)
-        summary_layout.addLayout(header)
-
-        for key in MEAS_KEYS:
-            tmpl_val = self._tmpl.get(key, 0.0)
-            row_widget = _MeasRow(key, tmpl_val)
-            self._rows[key] = row_widget
-            summary_layout.addWidget(row_widget)
-
-        # Buttons
+        # ── Bottom bar ──────────────────────────────────────────────────
         btn_row = QHBoxLayout()
-        self._recompute_btn = QPushButton("Recompute from span")
-        self._recompute_btn.setEnabled(False)
-        self._recompute_btn.clicked.connect(self._recompute_medians)
-        btn_row.addWidget(self._recompute_btn)
         btn_row.addStretch()
         self._save_btn = QPushButton("Save scaled skeleton…")
         self._save_btn.setEnabled(False)
         self._save_btn.clicked.connect(self._save_skeleton)
         btn_row.addWidget(self._save_btn)
-        summary_layout.addLayout(btn_row)
-
-        root.addWidget(summary_widget)
+        root.addLayout(btn_row)
 
     def _start_worker(self) -> None:
         self._worker = _MeasWorker(self._db_path, self._run_id, parent=self)
         self._worker.finished.connect(self._on_data_ready)
         self._worker.start()
+
+    # ------------------------------------------------------------------
+    # Signals
+
+    def _on_time_clicked(self, t: float) -> None:
+        if self._video is not None:
+            self._video.seek(t)
+        for card in self._cards.values():
+            card.move_cursor(t)
+
+    def _on_time_changed(self, t: float) -> None:
+        for card in self._cards.values():
+            card.move_cursor(t)
 
     # ------------------------------------------------------------------
     # Data ready
@@ -532,37 +550,16 @@ class SkeletonScalingPanel(QDialog):
         n = len(meas_df) if meas_df is not None and not meas_df.empty else 0
         self._status.setText(
             f"Loaded {n} tracker steps.  "
-            "Drag the gold band on any plot to select the frame range for medians."
+            "Drag the gold band on any graph to pick a range; span median fills in automatically."
         )
         self._status.setStyleSheet("color: #ccc;")
         self._save_btn.setEnabled(bool(self._skel_yaml))
 
         if meas_df is not None and not meas_df.empty:
-            self._plot.load_data(meas_df, self._tmpl)
-            self._recompute_btn.setEnabled(True)
-
-    # ------------------------------------------------------------------
-    # Span / median
-
-    def _on_span_changed(self, t_lo: float, t_hi: float) -> None:
-        self._update_medians(t_lo, t_hi)
-
-    def _recompute_medians(self) -> None:
-        span = self._plot.current_span()
-        if span:
-            self._update_medians(*span)
-
-    def _update_medians(self, t_lo: float, t_hi: float) -> None:
-        if self._meas_df is None or self._meas_df.empty:
-            return
-        sel = self._meas_df[
-            (self._meas_df["timestamp_s"] >= t_lo)
-            & (self._meas_df["timestamp_s"] <= t_hi)
-        ]
-        for key, row_widget in self._rows.items():
-            if key in sel.columns:
-                med = float(sel[key].median())
-                row_widget.set_median(med)
+            ts = meas_df["timestamp_s"].values
+            for key, card in self._cards.items():
+                vals = meas_df[key].values if key in meas_df.columns else np.full(len(ts), float("nan"))
+                card.load_data(ts, vals, self._tmpl.get(key, 0.0))
 
     # ------------------------------------------------------------------
     # Save
@@ -572,7 +569,7 @@ class SkeletonScalingPanel(QDialog):
             QMessageBox.warning(self, "No skeleton", "No skeleton YAML loaded for this run.")
             return
 
-        measurements = {key: row.value_m for key, row in self._rows.items()}
+        measurements = {key: card.value_m for key, card in self._cards.items()}
 
         name, ok = QInputDialog.getText(
             self, "Skeleton name",
@@ -583,7 +580,6 @@ class SkeletonScalingPanel(QDialog):
             return
         name = name.strip()
 
-        # Get parent skeleton id
         parent_id_row = self._conn.execute(
             "SELECT skeleton_id FROM tracking_runs WHERE id=?", (self._run_id,)
         ).fetchone()

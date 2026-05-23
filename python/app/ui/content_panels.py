@@ -1016,9 +1016,11 @@ class PersonCropGridWidget(QWidget):
 
         n_cells = len(self._cameras) + 1  # +1 for 3D placeholder
         ncols = max(2, min(n_cells, 4))
+        self._ncols = ncols
 
         grid = QGridLayout()
         grid.setSpacing(4)
+        self._grid = grid
 
         for i, cam in enumerate(self._cameras):
             row, col = divmod(i, ncols)
@@ -1034,6 +1036,7 @@ class PersonCropGridWidget(QWidget):
         ph.setMinimumHeight(_CropCell._IMG_H)
         grid.addWidget(ph, r3d, c3d)
         grid.setColumnStretch(c3d, 1)
+        self._3d_ph = ph
 
         nrows = ceil(n_cells / ncols)
         for r in range(nrows):
@@ -1103,6 +1106,25 @@ class PersonCropGridWidget(QWidget):
     def set_tracking_run(self, run_id: str | None) -> None:
         """Load tracking run overlay data; called by PersonPanel when run selection changes."""
         self._load_tracking_run(run_id)
+
+    def camera_labels(self) -> list[str]:
+        return [c["label"] for c in self._cameras]
+
+    def set_camera_filter(self, label: str | None) -> None:
+        """Show only the camera with the given label; pass None to show all."""
+        visible_cols: set[int] = set()
+        for i, cam in enumerate(self._cameras):
+            show = label is None or cam["label"] == label
+            self._cells[i].setVisible(show)
+            if show:
+                visible_cols.add(i % self._ncols)
+        show_3d = label is None
+        self._3d_ph.setVisible(show_3d)
+        if show_3d:
+            visible_cols.add(len(self._cameras) % self._ncols)
+        for col in range(self._ncols):
+            self._grid.setColumnStretch(col, 1 if col in visible_cols else 0)
+            self._grid.setColumnMinimumWidth(col, 0)
 
     def _load_tracking_run(self, run_id: str | None) -> None:
         import json

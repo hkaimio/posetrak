@@ -457,10 +457,12 @@ observed utilization.
    failure. Expected savings: ~23ms on nearly all post-convergence frames.
 
 2. **p_rts_ms (16ms, 12%) + p_mean_cov_ms (17ms, 13%)** — Both are sequential loops over
-   637 sigma points computing `compute_state_error()`, followed by a DGEMM. The state-error
-   function is a pure const operation (reads sigma points + reference state, writes to a
-   distinct matrix column) — the same `#pragma omp parallel for` pattern used in the update's
-   E-matrix build (line 923) applies directly. Parallelizing both loops saves ~29ms combined.
+   637 sigma points computing `compute_state_error()`, followed by a DGEMM. Superficially
+   the same `#pragma omp parallel for` pattern as the update's E-matrix build (line 923)
+   should apply. However, parallelizing these loops caused thread oversubscription: OMP wakes
+   thread pools in predict, they sleep, then BLAS wakes separate threads in update — the
+   competing wake/sleep/compete cycle increased update DGEMM times by 2×, net result was
+   slower than serial. These loops remain sequential.
 
 3. **Spherical simplex sigma points (deferred)** — Reducing n_sigma from 637 to 320 would
    halve u_fk1, u_s, and the predict loops. Left for separate analysis/experimentation as it
@@ -498,13 +500,18 @@ while the filter converges. `u_cov_update_ms` drops from ~24ms to ~7ms (70% redu
 |------|--------|----------|--------------------|-------------|---------------------|-----------|-----------------|
 | 2026-05-23 | — | Ryzen 9 9900X (12c/24t), WSL2 | 87 ms | — | 7.3 ms | 3/239 | **1.6×** |
 
-### After parallel predict state-error loops (p_rts + p_mean_cov)
+### Parallel predict state-error loops (p_rts + p_mean_cov) — attempted, abandoned
 
-*(to be filled after implementation)*
+Adding `#pragma omp parallel for` to the p_rts and p_mean_cov loops caused severe
+thread oversubscription. OMP and BLAS each maintain their own thread pools; the
+extra predict-phase OMP activations interleaved with update-phase BLAS calls,
+increasing all update timings by ~2×. Net effect: step time increased from ~87ms
+to ~123ms. The predict loops remain sequential.
 
-| Date | Commit | Hardware | mean ms/step | p95 ms/step | p_rts (mean) | p_mean_cov (mean) | Speedup vs prev |
-|------|--------|----------|-------------|-------------|--------------|-------------------|-----------------|
-| — | — | — | — | — | — | — | — |
+Root cause: OMP parallel for wakes the OMP thread pool in predict; those threads sleep
+but remain alive; BLAS then competes with them during update DGEMM calls. The wake/sleep/
+compete cycle adds cache-line invalidation overhead that outweighs the loop parallelism gain.
+The loop work per iteration (~50µs) is too short to amortise thread-launch costs at N=12.
 
 ---
 

@@ -348,9 +348,9 @@ and all log entries should note this.
 
 ### Baseline (serial, pre-OpenMP)
 
-| Date | Commit | Hardware | mean ms/step | p95 ms/step | predict ms | update ms | Notes |
-|------|--------|----------|-------------|-------------|-----------|----------|-------|
-| — | — | — | — | — | — | — | Not yet measured |
+| Date | Commit | Hardware | mean ms/step | p95 ms/step | predict ms (mean/p95) | update ms (mean/p95) | Notes |
+|------|--------|----------|-------------|-------------|----------------------|---------------------|-------|
+| 2026-05-23 | 3e564ed | Ryzen 9 9900X (12c/24t), WSL2 | 298 | 315 | 55 / 58 | 243 / 259 | serial, no OpenMP; 238 frames, 5 cams, 61 markers, n_sigma=637 |
 
 ### After OpenMP FK parallelisation
 

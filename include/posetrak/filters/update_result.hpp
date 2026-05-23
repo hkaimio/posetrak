@@ -38,9 +38,15 @@ struct UpdateResult {
     double nis;                                   ///< Normalized Innovation Squared
     int nis_dof;                                  ///< Degrees of freedom for NIS
 
-    /**
-     * @brief Default constructor
-     */
+    // Per-operation wall times (milliseconds)
+    double fk1_ms = 0.0;         ///< First FK parallel loop (all sigma points)
+    double s_ms = 0.0;           ///< Z build + S DGEMM + E matrix
+    double outlier_ms = 0.0;     ///< Outlier rejection
+    double fk2_ms = 0.0;         ///< Inlier FK parallel loop (0 if no rejection)
+    double inlier_ms = 0.0;      ///< Z_inlier + S_inlier + Pxy DGEMMs
+    double kalman_ms = 0.0;      ///< Kalman gain (inverse + multiply)
+    double cov_update_ms = 0.0;  ///< Covariance update (KSK^T + eigendecomp)
+
     UpdateResult() : num_observations(0), num_outliers(0), num_inliers(0), nis(0.0), nis_dof(0) {}
 };
 

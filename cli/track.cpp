@@ -878,9 +878,12 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
             }
 
             if (stats_tracker) {
-                stats_tracker->add_frame_stats(step, t_effective, result.update_info,
-                                               result.covariance, result.tracking_lost,
-                                               result.predict_ms, result.update_ms);
+                stats_tracker->add_frame_stats(
+                    step, t_effective, result.update_info, result.covariance, result.tracking_lost,
+                    result.predict_ms, result.update_ms, result.p_sigma_gen_ms,
+                    result.p_propagate_ms, result.p_mean_cov_ms, result.p_rts_ms, result.u_fk1_ms,
+                    result.u_s_ms, result.u_outlier_ms, result.u_fk2_ms, result.u_inlier_ms,
+                    result.u_kalman_ms, result.u_cov_update_ms);
             }
 
             // Progress indicator
@@ -1344,9 +1347,12 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
             if (!result.update_info.observations.empty())
                 result_writer.write_obs_results(step, result.update_info.observations);
 
-            stats_tracker->add_frame_stats(step, t_effective, result.update_info, result.covariance,
-                                           result.tracking_lost, result.predict_ms,
-                                           result.update_ms);
+            stats_tracker->add_frame_stats(
+                step, t_effective, result.update_info, result.covariance, result.tracking_lost,
+                result.predict_ms, result.update_ms, result.p_sigma_gen_ms, result.p_propagate_ms,
+                result.p_mean_cov_ms, result.p_rts_ms, result.u_fk1_ms, result.u_s_ms,
+                result.u_outlier_ms, result.u_fk2_ms, result.u_inlier_ms, result.u_kalman_ms,
+                result.u_cov_update_ms);
 
             if (!quiet && !verbose && step % 10 == 0) {
                 double percent = 100.0 * step / num_steps;

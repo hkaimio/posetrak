@@ -489,8 +489,27 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
     }
 
     return TrackingResult{
-        timestamp, ukf_->state(), ukf_->covariance(), update_info, update_info.num_inliers, false,
-        "",        predict_ms,    update_ms};
+        timestamp,
+        ukf_->state(),
+        ukf_->covariance(),
+        update_info,
+        update_info.num_inliers,
+        false,
+        "",
+        predict_ms,
+        update_ms,
+        predict_result.sigma_gen_ms,
+        predict_result.propagate_ms,
+        predict_result.mean_cov_ms,
+        predict_result.rts_ms,
+        update_info.fk1_ms,
+        update_info.s_ms,
+        update_info.outlier_ms,
+        update_info.fk2_ms,
+        update_info.inlier_ms,
+        update_info.kalman_ms,
+        update_info.cov_update_ms,
+    };
 }
 
 void Tracker::run_child_step(ChildFilter& /*child*/,

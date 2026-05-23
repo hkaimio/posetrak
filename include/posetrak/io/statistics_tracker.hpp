@@ -28,6 +28,21 @@ struct FrameStatistics {
     bool tracking_lost;                  ///< Whether tracking was lost this frame
     double predict_ms = 0.0;             ///< Wall time for predict step (ms)
     double update_ms = 0.0;              ///< Wall time for update step (ms)
+
+    // Predict sub-step timings
+    double p_sigma_gen_ms = 0.0;
+    double p_propagate_ms = 0.0;
+    double p_mean_cov_ms = 0.0;
+    double p_rts_ms = 0.0;
+
+    // Update sub-step timings
+    double u_fk1_ms = 0.0;
+    double u_s_ms = 0.0;
+    double u_outlier_ms = 0.0;
+    double u_fk2_ms = 0.0;
+    double u_inlier_ms = 0.0;
+    double u_kalman_ms = 0.0;
+    double u_cov_update_ms = 0.0;
 };
 
 /**
@@ -50,7 +65,12 @@ class StatisticsTracker {
      */
     void add_frame_stats(int frame, double timestamp, UpdateResult const& update_result,
                          Eigen::MatrixXd const& covariance, bool tracking_lost,
-                         double predict_ms = 0.0, double update_ms = 0.0);
+                         double predict_ms = 0.0, double update_ms = 0.0,
+                         double p_sigma_gen_ms = 0.0, double p_propagate_ms = 0.0,
+                         double p_mean_cov_ms = 0.0, double p_rts_ms = 0.0, double u_fk1_ms = 0.0,
+                         double u_s_ms = 0.0, double u_outlier_ms = 0.0, double u_fk2_ms = 0.0,
+                         double u_inlier_ms = 0.0, double u_kalman_ms = 0.0,
+                         double u_cov_update_ms = 0.0);
 
     /**
      * @brief Write per-frame statistics to CSV

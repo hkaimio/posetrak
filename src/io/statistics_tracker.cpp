@@ -11,7 +11,11 @@ namespace posetrak {
 void StatisticsTracker::add_frame_stats(int frame, double timestamp,
                                         UpdateResult const& update_result,
                                         Eigen::MatrixXd const& covariance, bool tracking_lost,
-                                        double predict_ms, double update_ms) {
+                                        double predict_ms, double update_ms, double p_sigma_gen_ms,
+                                        double p_propagate_ms, double p_mean_cov_ms,
+                                        double p_rts_ms, double u_fk1_ms, double u_s_ms,
+                                        double u_outlier_ms, double u_fk2_ms, double u_inlier_ms,
+                                        double u_kalman_ms, double u_cov_update_ms) {
     FrameStatistics stats;
     stats.frame = frame;
     stats.timestamp = timestamp;
@@ -52,6 +56,17 @@ void StatisticsTracker::add_frame_stats(int frame, double timestamp,
 
     stats.predict_ms = predict_ms;
     stats.update_ms = update_ms;
+    stats.p_sigma_gen_ms = p_sigma_gen_ms;
+    stats.p_propagate_ms = p_propagate_ms;
+    stats.p_mean_cov_ms = p_mean_cov_ms;
+    stats.p_rts_ms = p_rts_ms;
+    stats.u_fk1_ms = u_fk1_ms;
+    stats.u_s_ms = u_s_ms;
+    stats.u_outlier_ms = u_outlier_ms;
+    stats.u_fk2_ms = u_fk2_ms;
+    stats.u_inlier_ms = u_inlier_ms;
+    stats.u_kalman_ms = u_kalman_ms;
+    stats.u_cov_update_ms = u_cov_update_ms;
 
     frame_stats_.push_back(stats);
 }
@@ -66,16 +81,23 @@ void StatisticsTracker::write_frame_stats(std::filesystem::path const& output_pa
     file << "frame,timestamp,num_observations,num_inliers,num_outliers,"
             "mean_reprojection_error,max_reprojection_error,"
             "covariance_min_eigenvalue,covariance_condition_number,"
-            "nis_value,tracking_lost,predict_ms,update_ms\n";
+            "nis_value,tracking_lost,predict_ms,update_ms,"
+            "p_sigma_gen_ms,p_propagate_ms,p_mean_cov_ms,p_rts_ms,"
+            "u_fk1_ms,u_s_ms,u_outlier_ms,u_fk2_ms,u_inlier_ms,u_kalman_ms,u_cov_update_ms\n";
 
     // Write data rows
     for (auto const& stats : frame_stats_) {
         file << fmt::format(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{}\n", stats.frame, stats.timestamp,
-            stats.num_observations, stats.num_inliers, stats.num_outliers,
-            stats.mean_reprojection_error, stats.max_reprojection_error,
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},"
+            "{},{},{},{},"
+            "{},{},{},{},{},{},{}\n",
+            stats.frame, stats.timestamp, stats.num_observations, stats.num_inliers,
+            stats.num_outliers, stats.mean_reprojection_error, stats.max_reprojection_error,
             stats.covariance_min_eigenvalue, stats.covariance_condition_number, stats.nis_value,
-            stats.tracking_lost ? "true" : "false", stats.predict_ms, stats.update_ms);
+            stats.tracking_lost ? "true" : "false", stats.predict_ms, stats.update_ms,
+            stats.p_sigma_gen_ms, stats.p_propagate_ms, stats.p_mean_cov_ms, stats.p_rts_ms,
+            stats.u_fk1_ms, stats.u_s_ms, stats.u_outlier_ms, stats.u_fk2_ms, stats.u_inlier_ms,
+            stats.u_kalman_ms, stats.u_cov_update_ms);
     }
 }
 

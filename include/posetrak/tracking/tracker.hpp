@@ -46,6 +46,21 @@ struct TrackingResult {
     std::string failure_reason;  ///< Reason for failure if tracking_lost=true
     double predict_ms = 0.0;     ///< Wall time for ukf_.predict() in milliseconds
     double update_ms = 0.0;      ///< Wall time for ukf_.update() in milliseconds
+
+    // Predict sub-step timings (from PredictResult)
+    double p_sigma_gen_ms = 0.0;
+    double p_propagate_ms = 0.0;
+    double p_mean_cov_ms = 0.0;
+    double p_rts_ms = 0.0;
+
+    // Update sub-step timings (from UpdateResult)
+    double u_fk1_ms = 0.0;
+    double u_s_ms = 0.0;
+    double u_outlier_ms = 0.0;
+    double u_fk2_ms = 0.0;
+    double u_inlier_ms = 0.0;
+    double u_kalman_ms = 0.0;
+    double u_cov_update_ms = 0.0;
 };
 
 /**

@@ -33,6 +33,12 @@ struct PredictResult {
     /// D = sum_i W_c^i * e_pre_i * e_prop_i^T  (error/tangent space)
     /// Shape: error_dim x error_dim.
     Eigen::MatrixXd cross_covariance;
+
+    // Per-operation wall times (milliseconds)
+    double sigma_gen_ms = 0.0;  ///< Cholesky + sigma point generation
+    double propagate_ms = 0.0;  ///< Process model propagation (n_sigma calls)
+    double mean_cov_ms = 0.0;   ///< compute_state_mean + compute_state_covariance
+    double rts_ms = 0.0;        ///< RTS cross-covariance rank-1 accumulation
 };
 
 /**

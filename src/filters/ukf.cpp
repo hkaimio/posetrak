@@ -147,12 +147,18 @@ void UnscentedKalmanFilter::set_root_transform(Eigen::Vector3d const& position,
 }
 
 PredictResult UnscentedKalmanFilter::predict(double dt) {
+    using Clock = std::chrono::steady_clock;
+    using Ms = std::chrono::duration<double, std::milli>;
+    PredictResult result;
+
     // Save posterior state x_{k|k} before anything modifies state_.
     // Needed to compute the cross-covariance for the RTS smoother.
     State const posterior_state = state_;
 
     // Generate sigma points
+    auto t0 = Clock::now();
     auto sigma_points = sigma_gen_.generate_sigma_points(state_, covariance_);
+    result.sigma_gen_ms = Ms(Clock::now() - t0).count();
 
     // Debug: Export generated sigma points (frame 0 - Python matching format)
     if (debug_enabled_ && frame_number_ == 0) {
@@ -266,6 +272,7 @@ PredictResult UnscentedKalmanFilter::predict(double dt) {
     }
 
     // Propagate sigma points through process model
+    auto t1 = Clock::now();
     std::vector<State> propagated_points;
     propagated_points.reserve(sigma_points.size());
 
@@ -401,7 +408,10 @@ PredictResult UnscentedKalmanFilter::predict(double dt) {
                   << "/frame_0001/sigma_points_after.csv\n";
     }
 
+    result.propagate_ms = Ms(Clock::now() - t1).count();
+
     // Compute predicted mean
+    auto t2 = Clock::now();
     state_ = compute_state_mean(propagated_points, sigma_gen_.get_mean_weights());
 
     // Enforce joint limits on mean state (CRITICAL: must be done before computing covariance!)
@@ -496,6 +506,8 @@ PredictResult UnscentedKalmanFilter::predict(double dt) {
         std::cout << "DEBUG: Exported covariance before process noise\n";
     }
 
+    result.mean_cov_ms = Ms(Clock::now() - t2).count();
+
     // Add process noise
     covariance_ += process_noise_ * dt;
 
@@ -527,16 +539,26 @@ PredictResult UnscentedKalmanFilter::predict(double dt) {
     // e_prop_i = tangent error of propagated_points[i] wrt predicted mean x_{k+1|k}
     // Both computed in error-state space so manifold geometry is respected.
     {
+        auto t3 = Clock::now();
         int const n_sigma = static_cast<int>(sigma_points.size());
         auto const& wc = sigma_gen_.get_covariance_weights();
         int const edim = error_dim();
-        Eigen::MatrixXd cross_cov = Eigen::MatrixXd::Zero(edim, edim);
+
+        // Build E_pre and E_prop (edim × n_sigma), then cross_cov = EW_pre * E_prop^T (DGEMM).
+        Eigen::MatrixXd E_pre(edim, n_sigma), E_prop(edim, n_sigma);
         for (int i = 0; i < n_sigma; ++i) {
-            Eigen::VectorXd const e_pre = compute_state_error(sigma_points[i], posterior_state);
-            Eigen::VectorXd const e_prop = compute_state_error(propagated_points[i], state_);
-            cross_cov += wc(i) * e_pre * e_prop.transpose();
+            E_pre.col(i) = compute_state_error(sigma_points[i], posterior_state);
+            E_prop.col(i) = compute_state_error(propagated_points[i], state_);
         }
-        return PredictResult{std::move(cross_cov)};
+        Eigen::MatrixXd EW_pre = E_pre;
+        for (int i = 0; i < n_sigma; ++i)
+            EW_pre.col(i) *= wc(i);
+        Eigen::MatrixXd cross_cov(edim, edim);
+        cross_cov.noalias() = EW_pre * E_prop.transpose();
+
+        result.rts_ms = Ms(Clock::now() - t3).count();
+        result.cross_covariance = std::move(cross_cov);
+        return result;
     }
 }
 
@@ -702,11 +724,13 @@ UnscentedKalmanFilter::compute_state_covariance(std::vector<State> const& states
         std::cout << "DEBUG: Exported error vectors\n";
     }
 
-    // Compute weighted covariance: Σ wc[i] * error[i] * error[i]^T
-    Eigen::MatrixXd cov = Eigen::MatrixXd::Zero(n, n);
-    for (int i = 0; i < n_sigma; ++i) {
-        cov += weights(i) * error_vectors.row(i).transpose() * error_vectors.row(i);
-    }
+    // Weighted covariance via DGEMM: P = error_vectors^T * EW
+    // where EW = diag(weights) * error_vectors. Same pattern as S/Pxy refactor.
+    Eigen::MatrixXd EW = error_vectors;
+    for (int i = 0; i < n_sigma; ++i)
+        EW.row(i) *= weights(i);
+    Eigen::MatrixXd cov(n, n);
+    cov.noalias() = error_vectors.transpose() * EW;
 
     return cov;
 }
@@ -808,6 +832,8 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
                                            std::unordered_map<int, Camera> const& cameras,
                                            ForwardKinematics& fk, double measurement_noise_std,
                                            double outlier_threshold_mahalanobis) {
+    using Clock = std::chrono::steady_clock;
+    using Ms = std::chrono::duration<double, std::milli>;
     UpdateResult result;
 
     if (observations.empty()) {
@@ -827,6 +853,7 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     }
 
     // Step 2: Predict measurements for each sigma point (parallelized over sigma points)
+    auto t_fk1 = Clock::now();
     Eigen::MatrixXd predicted_measurements(measurement_dim, n_sigma);
     ensure_data_pool(fk);
 #pragma omp parallel for schedule(static)
@@ -836,6 +863,7 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         predicted_measurements.col(i) =
             predict_measurements(sigma_points[i], observations, cameras, fk_local);
     }
+    result.fk1_ms = Ms(Clock::now() - t_fk1).count();
 
     // Step 3: Compute mean predicted measurement (using nanmean to ignore NaN)
     // For each measurement dimension, compute weighted mean of non-NaN values
@@ -865,6 +893,7 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     // Step 4: Compute innovation covariance S = Pyy + R via batched DGEMM.
     // Build Z_full: NaN-safe centered innovations matrix (measurement_dim × n_sigma).
     // NaN predictions (marker behind camera) → 0, so they contribute nothing to S.
+    auto t_s = Clock::now();
     Eigen::VectorXd const weights_cov = sigma_gen_.get_covariance_weights();
     Eigen::MatrixXd Z_full(measurement_dim, n_sigma);
     for (int i = 0; i < n_sigma; ++i) {
@@ -897,6 +926,7 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     Eigen::MatrixXd EW = E;
     for (int i = 0; i < n_sigma; ++i)
         EW.col(i) *= weights_cov(i);
+    result.s_ms = Ms(Clock::now() - t_s).count();
 
     // Step 4.5: Perform outlier rejection if enabled
     std::vector<Observation> inlier_observations;
@@ -906,11 +936,13 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
 
     if (outlier_threshold_mahalanobis > 0.0) {
         // Perform outlier rejection
+        auto t_outlier = Clock::now();
         auto [inliers, results] =
             reject_outliers(observations, predicted_measurements, measurement_mean, innovation_cov,
                             outlier_threshold_mahalanobis);
         inlier_observations = inliers;
         observation_results = results;
+        result.outlier_ms = Ms(Clock::now() - t_outlier).count();
 
         // Debug: log outlier counts
         if (debug_enabled_ && frame_number_ == 0) {
@@ -941,6 +973,7 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         }
 
         // Recompute predictions with only inliers (parallel FK)
+        auto t_fk2 = Clock::now();
         int const n_inliers = static_cast<int>(inlier_observations.size());
         int const inlier_dim = 2 * n_inliers;
 
@@ -952,6 +985,7 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
             inlier_predictions.col(i) =
                 predict_measurements(sigma_points[i], inlier_observations, cameras, fk_local);
         }
+        result.fk2_ms = Ms(Clock::now() - t_fk2).count();
 
         // Recompute mean predicted measurement for inliers (NaN-safe)
         measurement_mean = Eigen::VectorXd::Zero(inlier_dim);
@@ -976,6 +1010,7 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         }
 
         // Build Z_inlier and recompute S for inliers via DGEMM
+        auto t_inlier = Clock::now();
         Eigen::MatrixXd Z_inlier(inlier_dim, n_sigma);
         for (int i = 0; i < n_sigma; ++i) {
             Z_inlier.col(i) = inlier_predictions.col(i) - measurement_mean;
@@ -1000,6 +1035,7 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         // Cross-covariance Pxy = EW * Z_inlier^T (DGEMM)
         cross_cov.resize(error_dim(), inlier_dim);
         cross_cov.noalias() = EW * Z_inlier.transpose();
+        result.inlier_ms = Ms(Clock::now() - t_inlier).count();
 
         // Update observed vector to use inliers
         observed = observations_to_vector(inlier_observations);
@@ -1085,39 +1121,32 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         cross_cov.noalias() = EW * Z_full.transpose();
     }
 
-    // Step 6: Compute Kalman gain K = Pxy * S^-1
-    Eigen::MatrixXd kalman_gain = cross_cov * innovation_cov.inverse();
+    // Step 6–9: Factorize S (innovation_cov) once via LDLT; reuse for Kalman gain,
+    // covariance update, and NIS — replacing three O(n³) inversions with one factorization.
+    //
+    // K = Pxy * S^-1  →  K^T = S^-1 * Pxy^T  →  solve S * K_T = Pxy^T
+    // State correction: K * z = K_T^T * z
+    // Covariance update: P - K*S*K^T = P - Pxy * S^-1 * Pxy^T = P - Pxy * K_T
+    auto t_kalman = Clock::now();
+    Eigen::LDLT<Eigen::MatrixXd> const S_ldlt(innovation_cov);
 
     // Step 7: Compute innovation (observed - predicted)
     Eigen::VectorXd innovation = observed - measurement_mean;
 
-    // Step 8: Update state in error space
-    Eigen::VectorXd state_correction = kalman_gain * innovation;
+    // Step 8: K_T = S^-1 * Pxy^T; state_correction = K * innovation = K_T^T * innovation
+    Eigen::MatrixXd const K_T = S_ldlt.solve(cross_cov.transpose());
+    Eigen::VectorXd const state_correction = K_T.transpose() * innovation;
 
-    // Apply error correction using sigma point generator (handles active DOFs correctly)
     state_ = sigma_gen_.apply_error_to_state(state_, state_correction);
 
     // Step 8b: Enforce joint limits and zero velocities for constrained joints
     State prev_state = state_;  // Save state before limit enforcement
     enforce_joint_limits();
+    result.kalman_ms = Ms(Clock::now() - t_kalman).count();
 
-    // Step 9: Update covariance — standard UKF update P' = P - K*S*K^T
-    // where S = innovation_cov (already includes measurement noise R).
-    //
-    // Note: K = Pxy * S^-1, so K*S*K^T = Pxy * S^-1 * Pxy^T, which is the
-    // information gained from the measurement. Subtracting it reduces uncertainty
-    // in the directions constrained by the observations.
-    //
-    // The previous "Joseph form" here was incorrect: it computed
-    //   P' = P - K*(S-R)*K^T + K*R*K^T = P - K*S*K^T + 2*K*R*K^T
-    // which double-counted K*R*K^T and inflated the covariance erroneously.
-
-    // Recompute Kalman gain using (possibly regularised) innovation covariance
-    // (innovation_cov may have been regularised for the outlier-rejection inversion above)
-    kalman_gain = cross_cov * innovation_cov.inverse();
-
-    // Standard UKF covariance update
-    covariance_ = covariance_ - kalman_gain * innovation_cov * kalman_gain.transpose();
+    // Step 9: Covariance update P' = P - Pxy * K_T  (equivalent to P - K*S*K^T).
+    auto t_cov = Clock::now();
+    covariance_.noalias() -= cross_cov * K_T;
 
     // Enforce symmetry (floating-point arithmetic can break it slightly)
     covariance_ = 0.5 * (covariance_ + covariance_.transpose());
@@ -1150,18 +1179,12 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
 
     // Step 11: Damp velocity covariance for joints that hit limits
     damp_velocity_covariance_at_limits(prev_state, state_);
+    result.cov_update_ms = Ms(Clock::now() - t_cov).count();
 
-    // Step 12: Compute Normalized Innovation Squared (NIS) for filter validation
-    // NIS = innovation^T * S^-1 * innovation (should follow chi-squared distribution)
+    // Step 12: NIS = innovation^T * S^-1 * innovation — reuse LDLT factorization (vector solve)
     double nis = 0.0;
-    try {
-        Eigen::MatrixXd innovation_cov_inv = innovation_cov.inverse();
-        nis = innovation.transpose() * innovation_cov_inv * innovation;
-    } catch (...) {
-        // If inversion fails, use pseudo-inverse
-        Eigen::MatrixXd innovation_cov_pinv =
-            innovation_cov.completeOrthogonalDecomposition().pseudoInverse();
-        nis = innovation.transpose() * innovation_cov_pinv * innovation;
+    if (S_ldlt.info() == Eigen::Success) {
+        nis = innovation.dot(S_ldlt.solve(innovation));
     }
 
     // Fill in result

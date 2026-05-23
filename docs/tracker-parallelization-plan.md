@@ -12,9 +12,30 @@ wall time enough to make iterative workflow practical: shorter experiment turn-a
 the ability to re-track a 30-second clip in reasonable time, and headroom for future
 skeleton or camera count growth.
 
-**Benchmark dataset**: "Trial 1" in `ukemi-tommi-20260509.db`, `time_start_s=250`,
-`time_end_s=252` (2-second clip, 5 cameras, full whole-body+hands skeleton).
+**Benchmark dataset**: "Trial 1" in capture "bokken 20260518",
+database `/home/harri/projects/mocap_videos/ukemi-tommi-20260509.db`,
+sequence `2ec9c1a3-85ae-40fa-bd63-20c454902f46` (`time_start_s=250`, `time_end_s=252`),
+skeleton `bcffc4b0cf41dce1e372817aa4bc567bac8ae1dec19f172415d1a0fe3dfbba69` ("Harri scaling 1 20260523"),
+tracker config `438acd86-c413-492e-94a8-24555515044d` ("ui-run").
+2-second clip, 5 cameras, full whole-body+hands skeleton.
 This clip is short enough for rapid iteration but long enough to be representative.
+
+**Benchmark command** (run from repo root with `optbuild`):
+
+```bash
+DB=/home/harri/projects/mocap_videos/ukemi-tommi-20260509.db
+SEQ=2ec9c1a3-85ae-40fa-bd63-20c454902f46
+SKEL=bcffc4b0cf41dce1e372817aa4bc567bac8ae1dec19f172415d1a0fe3dfbba69
+CFG=438acd86-c413-492e-94a8-24555515044d
+optbuild/cli/posetrak track \
+  --session-db "$DB" \
+  --sequence "$SEQ" \
+  --skeleton "$SKEL" \
+  --tracker-config "$CFG" \
+  --start-time 250.0 \
+  --end-time 252.0 \
+  --output-dir /tmp/bench_timing
+```
 
 ---
 

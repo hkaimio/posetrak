@@ -10,7 +10,7 @@ from pathlib import Path
 from math import ceil
 
 from PySide6.QtCore import QPointF, QProcess, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -25,8 +25,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QShortcut,
     QSizePolicy,
     QSlider,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -1440,6 +1442,312 @@ class PersonCropGridWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# _LineChart — small metric time-series widget with a cursor line
+# ---------------------------------------------------------------------------
+
+
+class _LineChart(QWidget):
+    """Compact line chart for a single metric over tracker steps.
+
+    Renders a data line and an optional vertical cursor marking the current
+    step.  Y axis auto-scales to the data range; no axes or tick labels are
+    drawn to keep the widget compact.
+    """
+
+    _PAD_L = 4
+    _PAD_R = 4
+    _PAD_T = 18   # space for title text
+    _PAD_B = 4
+
+    def __init__(self, title: str, parent=None) -> None:
+        super().__init__(parent)
+        self._title = title
+        self._steps: list[int] = []
+        self._values: list[float | None] = []
+        self._cursor_step: int | None = None
+        self.setMinimumHeight(80)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_data(self, steps: list[int], values: list[float | None]) -> None:
+        self._steps = steps
+        self._values = values
+        self._cursor_step = None
+        self.update()
+
+    def set_cursor(self, step: int | None) -> None:
+        if step != self._cursor_step:
+            self._cursor_step = step
+            self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        pl, pr, pt, pb = self._PAD_L, self._PAD_R, self._PAD_T, self._PAD_B
+
+        bg = self.palette().color(self.backgroundRole())
+        painter.fillRect(0, 0, w, h, bg)
+
+        text_color = self.palette().color(self.foregroundRole())
+        painter.setPen(text_color)
+        painter.drawText(pl, pt - 4, self._title)
+
+        vals = [v for v in self._values if v is not None and v == v]  # skip None/NaN
+        if not self._steps or not vals:
+            return
+
+        y_min, y_max = min(vals), max(vals)
+        if y_min == y_max:
+            y_min -= 1.0
+            y_max += 1.0
+        x_min, x_max = self._steps[0], self._steps[-1]
+        if x_min == x_max:
+            x_max += 1
+
+        cw = w - pl - pr
+        ch = h - pt - pb
+
+        def sx(step: int) -> float:
+            return pl + (step - x_min) / (x_max - x_min) * cw
+
+        def sy(val: float) -> float:
+            return pt + ch - (val - y_min) / (y_max - y_min) * ch
+
+        # Data line
+        path = QPainterPath()
+        started = False
+        for step, val in zip(self._steps, self._values):
+            if val is None or val != val:
+                started = False
+                continue
+            x, y = sx(step), sy(val)
+            if not started:
+                path.moveTo(x, y)
+                started = True
+            else:
+                path.lineTo(x, y)
+        painter.setPen(QPen(QColor(60, 140, 240), 1.5))
+        painter.drawPath(path)
+
+        # Cursor
+        if self._cursor_step is not None and x_min <= self._cursor_step <= x_max:
+            cx = sx(self._cursor_step)
+            painter.setPen(QPen(QColor(255, 120, 0), 1.5))
+            painter.drawLine(QPointF(cx, pt), QPointF(cx, h - pb))
+
+
+# ---------------------------------------------------------------------------
+# _RunInfoPane — right-side collapsible info pane
+# ---------------------------------------------------------------------------
+
+
+class _RunInfoPane(QWidget):
+    """Collapsible right-side pane showing metadata and per-frame stats for a
+    tracking run.
+
+    Top section:  static run metadata (skeleton, person, date, config params).
+    Middle section: per-frame live stats updated as the scrubber moves.
+    Bottom:        NIS/DOF and covariance condition number charts.
+    """
+
+    _MIN_WIDTH = 260
+
+    def __init__(self, conn: sqlite3.Connection, parent=None) -> None:
+        super().__init__(parent)
+        self._conn = conn
+        self._tracking_timestamps: list[tuple[float, int]] = []
+        self._step_stats: dict[int, sqlite3.Row] = {}   # step → tracking_results row
+        self._nis_dof_steps: list[int] = []
+        self._nis_dof_vals: list[float | None] = []
+        self._cov_steps: list[int] = []
+        self._cov_vals: list[float | None] = []
+        self.setMinimumWidth(self._MIN_WIDTH)
+        self._build()
+
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
+
+        # --- Run info ---
+        run_box = QGroupBox("Run info")
+        run_form = QFormLayout(run_box)
+        run_form.setHorizontalSpacing(6)
+        run_form.setVerticalSpacing(2)
+        self._ri_skeleton = QLabel("—")
+        self._ri_person = QLabel("—")
+        self._ri_ran_at = QLabel("—")
+        self._ri_frames = QLabel("—")
+        self._ri_cfg = QLabel("—")
+        self._ri_cfg.setWordWrap(True)
+        run_form.addRow("Skeleton:", self._ri_skeleton)
+        run_form.addRow("Person:", self._ri_person)
+        run_form.addRow("Tracked at:", self._ri_ran_at)
+        run_form.addRow("Frames:", self._ri_frames)
+        run_form.addRow("Config:", self._ri_cfg)
+        root.addWidget(run_box)
+
+        # --- Current frame ---
+        frame_box = QGroupBox("Current frame")
+        frame_form = QFormLayout(frame_box)
+        frame_form.setHorizontalSpacing(6)
+        frame_form.setVerticalSpacing(2)
+        self._fi_step = QLabel("—")
+        self._fi_time = QLabel("—")
+        self._fi_inliers = QLabel("—")
+        self._fi_nis = QLabel("—")
+        self._fi_cov = QLabel("—")
+        frame_form.addRow("Step:", self._fi_step)
+        frame_form.addRow("Time:", self._fi_time)
+        frame_form.addRow("Inliers:", self._fi_inliers)
+        frame_form.addRow("NIS / DOF:", self._fi_nis)
+        frame_form.addRow("Cov cond #:", self._fi_cov)
+        root.addWidget(frame_box)
+
+        # --- Charts ---
+        charts_box = QGroupBox("Metrics")
+        charts_v = QVBoxLayout(charts_box)
+        charts_v.setSpacing(4)
+        self._nis_chart = _LineChart("NIS / DOF")
+        self._cov_chart = _LineChart("Covariance condition #")
+        charts_v.addWidget(self._nis_chart)
+        charts_v.addWidget(self._cov_chart)
+        root.addWidget(charts_box)
+
+        root.addStretch(1)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def load_run(self, run_id: str | None) -> None:
+        """Populate static run info and load chart time-series data."""
+        self._tracking_timestamps.clear()
+        self._step_stats.clear()
+        self._nis_dof_steps.clear()
+        self._nis_dof_vals.clear()
+        self._cov_steps.clear()
+        self._cov_vals.clear()
+
+        # Clear labels
+        for lbl in (self._ri_skeleton, self._ri_person, self._ri_ran_at,
+                    self._ri_frames, self._ri_cfg):
+            lbl.setText("—")
+        for lbl in (self._fi_step, self._fi_time, self._fi_inliers,
+                    self._fi_nis, self._fi_cov):
+            lbl.setText("—")
+        self._nis_chart.set_data([], [])
+        self._cov_chart.set_data([], [])
+
+        if not run_id:
+            return
+
+        run = self._conn.execute(
+            "SELECT tr.ran_at, tr.posetrak_version, tr.tracker_config_id, "
+            "       s.name AS skel_name, "
+            "       (SELECT GROUP_CONCAT(sp.person_name, ', ') "
+            "        FROM sequence_persons sp "
+            "        WHERE sp.sequence_id = tr.observation_sequence_id) AS person_names "
+            "FROM tracking_runs tr "
+            "LEFT JOIN skeletons s ON s.id = tr.skeleton_id "
+            "WHERE tr.id = ?",
+            (run_id,),
+        ).fetchone()
+        if not run:
+            return
+
+        n_frames = self._conn.execute(
+            "SELECT COUNT(*) FROM tracking_results "
+            "WHERE run_id=? AND person_id=0 AND is_smoothed=0",
+            (run_id,),
+        ).fetchone()[0]
+
+        self._ri_skeleton.setText(run["skel_name"] or "—")
+        self._ri_person.setText(run["person_names"] or "—")
+        self._ri_ran_at.setText(_fmt_ts(run["ran_at"]))
+        self._ri_frames.setText(str(n_frames))
+
+        # Try to load tracker config params
+        cfg_id = run["tracker_config_id"]
+        cfg = self._conn.execute(
+            "SELECT name, process_noise_std, process_noise_vel_std, "
+            "       measurement_noise_std, outlier_threshold, tracker_fps "
+            "FROM tracker_configs WHERE id=?",
+            (cfg_id,),
+        ).fetchone() if cfg_id else None
+        if cfg:
+            parts = [cfg["name"] or cfg_id[:8]]
+            if cfg["process_noise_std"] is not None:
+                parts.append(f"Q={cfg['process_noise_std']}")
+            if cfg["measurement_noise_std"] is not None:
+                parts.append(f"R={cfg['measurement_noise_std']}")
+            if cfg["outlier_threshold"] is not None:
+                parts.append(f"thr={cfg['outlier_threshold']}")
+            self._ri_cfg.setText("  ".join(parts))
+        else:
+            self._ri_cfg.setText(cfg_id[:12] + "…" if cfg_id else "—")
+
+        # Load per-frame stats
+        rows = self._conn.execute(
+            "SELECT tracker_step, timestamp_s, n_inlier_observations, "
+            "       nis_value, nis_dof, cov_condition_number "
+            "FROM tracking_results "
+            "WHERE run_id=? AND person_id=0 AND is_smoothed=0 "
+            "ORDER BY tracker_step",
+            (run_id,),
+        ).fetchall()
+
+        for row in rows:
+            step = row["tracker_step"]
+            self._tracking_timestamps.append((row["timestamp_s"], step))
+            self._step_stats[step] = row
+
+            nis = row["nis_value"]
+            dof = row["nis_dof"]
+            nis_norm = (nis / dof) if (nis is not None and dof and dof > 0) else None
+            self._nis_dof_steps.append(step)
+            self._nis_dof_vals.append(nis_norm)
+
+            self._cov_steps.append(step)
+            self._cov_vals.append(row["cov_condition_number"])
+
+        self._nis_chart.set_data(self._nis_dof_steps, self._nis_dof_vals)
+        self._cov_chart.set_data(self._cov_steps, self._cov_vals)
+
+    def on_time_changed(self, t: float) -> None:
+        """Update current-frame labels and chart cursors for timestamp *t*."""
+        if not self._tracking_timestamps:
+            return
+        step = _nearest_tracker_step(t, self._tracking_timestamps)
+        row = self._step_stats.get(step)
+        if row is None:
+            return
+
+        self._fi_step.setText(str(step))
+        self._fi_time.setText(f"{row['timestamp_s']:.3f} s")
+
+        n_in = row["n_inlier_observations"]
+        self._fi_inliers.setText(str(n_in) if n_in is not None else "—")
+
+        nis = row["nis_value"]
+        dof = row["nis_dof"]
+        if nis is not None and dof:
+            self._fi_nis.setText(f"{nis:.2f} / {dof}  ({nis/dof:.2f} norm)")
+        else:
+            self._fi_nis.setText("—")
+
+        cov = row["cov_condition_number"]
+        self._fi_cov.setText(f"{cov:.1f}" if cov is not None else "—")
+
+        self._nis_chart.set_cursor(step)
+        self._cov_chart.set_cursor(step)
+
+
+# ---------------------------------------------------------------------------
 # PersonPanel
 # ---------------------------------------------------------------------------
 
@@ -1458,6 +1766,7 @@ class PersonPanel(QWidget):
         self._session_path = session_path
         self._bvh_proc: QProcess | None = None
         self._crop_grid: PersonCropGridWidget | None = None
+        self._info_pane: _RunInfoPane | None = None
         self._build()
 
     def _build(self) -> None:
@@ -1521,7 +1830,13 @@ class PersonPanel(QWidget):
         self._delete_run_btn = QPushButton("Delete run")
         self._delete_run_btn.setEnabled(False)
         self._delete_run_btn.clicked.connect(self._delete_run)
+        self._info_toggle_btn = QPushButton("Info")
+        self._info_toggle_btn.setCheckable(True)
+        self._info_toggle_btn.setChecked(False)
+        self._info_toggle_btn.setToolTip("Show / hide run info pane  (I)")
+        self._info_toggle_btn.toggled.connect(self._toggle_info_pane)
         run_act_row.addStretch()
+        run_act_row.addWidget(self._info_toggle_btn)
         run_act_row.addWidget(self._export_bvh_btn)
         run_act_row.addWidget(self._delete_run_btn)
         box_vbox.addLayout(run_act_row)
@@ -1541,12 +1856,26 @@ class PersonPanel(QWidget):
         scroll.setMaximumHeight(320)
 
         self._crop_grid = PersonCropGridWidget(self._conn, self._sequence_id)
+        self._info_pane = _RunInfoPane(self._conn)
+        self._info_pane.setVisible(False)
+        self._crop_grid.time_changed.connect(self._info_pane.on_time_changed)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._crop_grid)
+        splitter.addWidget(self._info_pane)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setSizes([700, 280])
+
+        # Keyboard shortcut: I toggles the info pane
+        info_shortcut = QShortcut(QKeySequence("I"), self)
+        info_shortcut.activated.connect(self._info_toggle_btn.toggle)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
         root.addWidget(scroll)
-        root.addWidget(self._crop_grid, stretch=1)
+        root.addWidget(splitter, stretch=1)
 
         # Auto-select the most recent tracking run so the overlay loads immediately
         if self._run_list.count() > 0 and self._run_list.item(0).data(
@@ -1598,6 +1927,8 @@ class PersonPanel(QWidget):
             self._delete_run_btn.setEnabled(False)
             if self._crop_grid is not None:
                 self._crop_grid.set_tracking_run(None)
+            if self._info_pane is not None:
+                self._info_pane.load_run(None)
             return
 
         run = self._conn.execute(
@@ -1636,6 +1967,12 @@ class PersonPanel(QWidget):
 
         if self._crop_grid is not None:
             self._crop_grid.set_tracking_run(run_id)
+        if self._info_pane is not None:
+            self._info_pane.load_run(run_id)
+
+    def _toggle_info_pane(self, checked: bool) -> None:
+        if self._info_pane is not None:
+            self._info_pane.setVisible(checked)
 
     # ------------------------------------------------------------------
     # BVH export

@@ -1204,7 +1204,7 @@ class PersonCropGridWidget(QWidget):
         # marker index → COCO keypoint index (for outlier colouring)
         marker_to_coco = {
             m["name"]: m["openpose_keypoint"]
-            for m in layout.markers()
+            for m in layout.markers
             if m["openpose_keypoint"] is not None
         }
         mi_to_coco: dict[int, int] = {

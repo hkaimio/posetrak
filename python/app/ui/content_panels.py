@@ -10,7 +10,7 @@ from pathlib import Path
 from math import ceil
 
 from PySide6.QtCore import QPointF, QProcess, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QShortcut,
     QSizePolicy,
     QSlider,
     QSplitter,

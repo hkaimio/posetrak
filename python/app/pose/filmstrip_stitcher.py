@@ -2,18 +2,17 @@
 from __future__ import annotations
 
 import sqlite3
+from collections import defaultdict
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QPen, QPixmap
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QPen, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsLineItem,
     QGraphicsScene,
     QGraphicsTextItem,
     QGraphicsView,
     QInputDialog,
-    QLabel,
     QMenu,
-    QSizePolicy,
 )
 
 from app.pose.filmstrip_bar import FilmstripBarItem, decode_jpeg_to_pixmap, LABEL_H
@@ -29,8 +28,9 @@ ROW_H_DEFAULT: int = 56          # default bar height in pixels
 ROW_H_MIN: int = 28
 ROW_H_MAX: int = 120
 LABEL_WIDTH: int = 90            # camera-label column width
-ROW_GAP: int = 5                 # gap between camera groups
+ROW_GAP: int = 5                 # gap between camera/person groups
 TRACK_GAP: int = 2               # gap between tracks within a camera
+PERSON_GAP: int = 12             # extra gap between person sections (by-person view)
 
 _PX_PER_SEC_MIN: float = 5.0
 _PX_PER_SEC_MAX: float = 500.0
@@ -39,6 +39,8 @@ _PX_PER_SEC_MAX: float = 500.0
 MAX_THUMBS_PER_BAR: int = 120
 
 _PLAYHEAD_PEN = QPen(QColor(220, 40, 40), 2)
+_SECTION_LABEL_COLOR = QColor(30, 30, 30)
+_PERSON_LABEL_COLOR = QColor(10, 60, 120)
 
 
 def _build_frame_to_time(
@@ -77,9 +79,17 @@ class FilmstripStitcherWidget(QGraphicsView):
 
     * ``segment_selected`` — 6-argument signal including the user's selected
       sub-range within the bar (for partial-range assignment / auto-split).
+    * ``bar_hovered`` — emitted on mouse-move over a bar (drives side crop panel).
     * ``time_hovered`` — emitted on mouse-move for the status bar.
     * ``merge_segments()`` — merge two adjacent segments (used by auto-merge).
     * ``set_conflict_segments()`` — highlight overlap-conflict bars.
+
+    View modes
+    ----------
+    ``"detection"`` (default): one row per track, grouped by camera.
+    ``"person"``: only assigned segments, grouped by person name then camera.
+        Non-overlapping segments within the same person+camera are packed onto
+        a single row using a greedy interval scheduling algorithm.
 
     Signals
     -------
@@ -88,6 +98,8 @@ class FilmstripStitcherWidget(QGraphicsView):
         selected frame sub-range (equal to seg_first/seg_last on a plain click).
     assignment_changed(svid, tid, seg_first, person_or_None):
         User assigns or detaches a segment via the context menu.
+    bar_hovered(svid, tid, seg_first, frame_idx):
+        Emitted on every mouse-move over a bar (for the side crop preview panel).
     time_hovered(global_s):
         Emitted on every mouse-move (for status bar updates).
     time_clicked(global_s):
@@ -96,6 +108,7 @@ class FilmstripStitcherWidget(QGraphicsView):
 
     segment_selected = Signal(str, int, int, int, int, int)
     assignment_changed = Signal(str, int, int, object)
+    bar_hovered = Signal(str, int, int, int)   # svid, tid, seg_first, frame_idx
     time_hovered = Signal(float)
     time_clicked = Signal(float)
 
@@ -118,8 +131,8 @@ class FilmstripStitcherWidget(QGraphicsView):
         self._seg_assignments: dict[tuple[str, int, int], str] = {}
         # (svid, tid, seg_first) → FilmstripBarItem
         self._items: dict[tuple[str, int, int], FilmstripBarItem] = {}
-        # (svid, tid) → y coordinate in scene
-        self._row_y: dict[tuple[str, int], float] = {}
+        # (svid, tid, seg_first) → y coordinate in scene (per-segment, for split/merge)
+        self._bar_row_y: dict[tuple[str, int, int], float] = {}
         # svid → (ref_frame, ref_ts, fps)
         self._anchors: dict[str, tuple[int, float, float]] = {}
         self._sync_table: SyncTable | None = None
@@ -136,6 +149,13 @@ class FilmstripStitcherWidget(QGraphicsView):
         self._last_session: sqlite3.Connection | None = None
         self._last_run_id: str | None = None
 
+        # --- View mode ---
+        self._view_mode: str = "detection"   # "detection" or "person"
+
+        # --- Thumbnail cache: survives view-mode switches and rebuilds ---
+        # (svid, tid, seg_first) → {frame_idx: QPixmap}
+        self._thumb_cache: dict[tuple[str, int, int], dict[int, QPixmap]] = {}
+
         # --- Drag-to-select state ---
         self._drag_active: bool = False
         self._drag_bar: FilmstripBarItem | None = None
@@ -143,21 +163,6 @@ class FilmstripStitcherWidget(QGraphicsView):
         self._drag_start_pos: QPointF | None = None
         self._drag_sel_first: int | None = None
         self._drag_sel_last: int | None = None
-
-        # --- Hover tooltip ---
-        self._tooltip = QLabel(self.viewport())
-        self._tooltip.setWindowFlags(Qt.WindowType.ToolTip)
-        self._tooltip.setStyleSheet(
-            "background: #111; border: 1px solid #555; padding: 2px;"
-        )
-        self._tooltip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self._tooltip.hide()
-        self._tooltip_timer = QTimer(self)
-        self._tooltip_timer.setSingleShot(True)
-        self._tooltip_timer.setInterval(120)
-        self._tooltip_timer.timeout.connect(self._show_tooltip_for_cursor)
-        self._tooltip_frame: int | None = None   # frame shown in current tooltip
-        self._tooltip_bar: FilmstripBarItem | None = None
 
     # ------------------------------------------------------------------
     # Public API (compatible with StitcherWidget)
@@ -229,7 +234,9 @@ class FilmstripStitcherWidget(QGraphicsView):
                 return
 
             old_key = (svid, tid, sf)
+            old_y = self._bar_row_y.get(old_key, 0.0)
             old_bar = self._items.pop(old_key, None)
+            self._bar_row_y.pop(old_key, None)
             if old_bar is not None:
                 self._scene.removeItem(old_bar)
 
@@ -237,9 +244,8 @@ class FilmstripStitcherWidget(QGraphicsView):
             segs.insert(i + 1, (split_frame, sl))
 
             # Right half is unassigned
-            y = self._row_y.get(key, 0.0)
-            self._draw_bar(svid, tid, sf, split_frame - 1, y)
-            self._draw_bar(svid, tid, split_frame, sl, y)
+            self._draw_bar(svid, tid, sf, split_frame - 1, old_y)
+            self._draw_bar(svid, tid, split_frame, sl, old_y)
 
             # Restore left-half assignment
             left_person = self._seg_assignments.get(old_key)
@@ -269,9 +275,13 @@ class FilmstripStitcherWidget(QGraphicsView):
         if sl1 + 1 != sf2:
             return
 
+        # Remember y before removing
+        y = self._bar_row_y.get((svid, tid, sf1), 0.0)
+
         # Remove both bar items
         for sf in (sf1, sf2):
             bar = self._items.pop((svid, tid, sf), None)
+            self._bar_row_y.pop((svid, tid, sf), None)
             if bar is not None:
                 self._scene.removeItem(bar)
 
@@ -279,8 +289,14 @@ class FilmstripStitcherWidget(QGraphicsView):
         segs[idx1] = (sf1, sl2)
         del segs[idx2]
 
+        # Merge thumbnail caches
+        cache1 = self._thumb_cache.pop((svid, tid, sf1), {})
+        cache2 = self._thumb_cache.pop((svid, tid, sf2), {})
+        merged_cache = {**cache1, **cache2}
+        if merged_cache:
+            self._thumb_cache[(svid, tid, sf1)] = merged_cache
+
         # Redraw merged bar
-        y = self._row_y.get(key, 0.0)
         self._draw_bar(svid, tid, sf1, sl2, y)
 
         # Restore assignment on merged bar
@@ -303,17 +319,31 @@ class FilmstripStitcherWidget(QGraphicsView):
         self._last_run_id = detection_run_id
         self._segments.clear()
         self._seg_assignments.clear()
+        self._thumb_cache.clear()
         self._selected_key = None
         self._rebuild(session, detection_run_id)
 
     def clear(self) -> None:
         self._scene.clear()
         self._items.clear()
-        self._row_y.clear()
+        self._bar_row_y.clear()
         self._time_line = None
 
     def set_row_height(self, row_h: int) -> None:
         self._row_h = max(ROW_H_MIN, min(ROW_H_MAX, row_h))
+        if self._last_session and self._last_run_id:
+            self._rebuild(self._last_session, self._last_run_id)
+
+    def set_view_mode(self, mode: str) -> None:
+        """Switch between 'detection' and 'person' view modes.
+
+        In 'detection' mode bars are grouped by camera then track.
+        In 'person' mode only assigned segments are shown, grouped by person
+        name then camera, with greedy row packing to minimise overlap rows.
+        """
+        if mode == self._view_mode:
+            return
+        self._view_mode = mode
         if self._last_session and self._last_run_id:
             self._rebuild(self._last_session, self._last_run_id)
 
@@ -338,6 +368,7 @@ class FilmstripStitcherWidget(QGraphicsView):
     def _rebuild(
         self, session: sqlite3.Connection, detection_run_id: str
     ) -> None:
+        """Rebuild the entire scene from current segment state."""
         self.clear()
 
         run_row = session.execute(
@@ -372,38 +403,24 @@ class FilmstripStitcherWidget(QGraphicsView):
             ).fetchone()
             cam_labels[svid] = row["label"] if row and row["label"] else svid[:8]
 
-        y = 0.0
+        # Ensure segment state is initialised from DB for any tracks not yet split
         for svid in svids:
             db_spans = read_track_spans(session, detection_run_id, svid)
+            for span in db_spans:
+                tid = span["track_id"]
+                det_key = (svid, tid)
+                if det_key not in self._segments:
+                    self._segments[det_key] = [
+                        (span["first_frame"], span["last_frame"])
+                    ]
 
-            lbl = self._scene.addText(cam_labels[svid])
-            lbl.setPos(0, y)
-            lbl.setDefaultTextColor(QColor(0, 0, 0))
-
-            if db_spans:
-                for span in db_spans:
-                    tid = span["track_id"]
-                    first = span["first_frame"]
-                    last = span["last_frame"]
-                    det_key = (svid, tid)
-                    if det_key not in self._segments:
-                        self._segments[det_key] = [(first, last)]
-                    self._row_y[det_key] = y
-                    for seg_first, seg_last in self._segments[det_key]:
-                        self._draw_bar(svid, tid, seg_first, seg_last, y)
-                    y += self._row_h + TRACK_GAP
-            else:
-                y += self._row_h
-
-            y += ROW_GAP
+        # Dispatch to view-specific layout
+        if self._view_mode == "person":
+            self._rebuild_by_person(session, detection_run_id, svids, cam_labels)
+        else:
+            self._rebuild_by_detection(session, detection_run_id, svids, cam_labels)
 
         self._scene.setSceneRect(self._scene.itemsBoundingRect())
-
-        # Restore assignment colours
-        for (svid, tid, sf), name in self._seg_assignments.items():
-            bar = self._items.get((svid, tid, sf))
-            if bar is not None:
-                bar.set_assignment(name)
 
         # Restore conflict highlights
         for key in self._conflict_keys:
@@ -419,9 +436,154 @@ class FilmstripStitcherWidget(QGraphicsView):
         )
         self._time_line.setZValue(20)
 
-        # Load thumbnails for all bars
-        for bar in list(self._items.values()):
+        # Load thumbnails for all bars (uses cache to avoid DB round-trips)
+        for (seg_key, bar) in list(self._items.items()):
             self._load_thumbnails(bar, session, detection_run_id)
+
+    def _rebuild_by_detection(
+        self,
+        session: sqlite3.Connection,
+        detection_run_id: str,
+        svids: list[str],
+        cam_labels: dict[str, str],
+    ) -> None:
+        """Draw bars grouped by camera then track (default view)."""
+        y = 0.0
+        for svid in svids:
+            lbl = self._scene.addText(cam_labels[svid])
+            lbl.setPos(0, y)
+            lbl.setDefaultTextColor(_SECTION_LABEL_COLOR)
+
+            # Collect all tracks for this camera from current segment state
+            track_keys = sorted(
+                {tid for (s, tid) in self._segments if s == svid}
+            )
+            if track_keys:
+                for tid in track_keys:
+                    segs = self._segments.get((svid, tid), [])
+                    for seg_first, seg_last in segs:
+                        self._draw_bar(svid, tid, seg_first, seg_last, y)
+                    y += self._row_h + TRACK_GAP
+            else:
+                y += self._row_h
+
+            y += ROW_GAP
+
+        # Restore assignment colours
+        for (svid, tid, sf), name in self._seg_assignments.items():
+            bar = self._items.get((svid, tid, sf))
+            if bar is not None:
+                bar.set_assignment(name)
+
+    def _rebuild_by_person(
+        self,
+        session: sqlite3.Connection,
+        detection_run_id: str,
+        svids: list[str],
+        cam_labels: dict[str, str],
+    ) -> None:
+        """Draw only assigned segments, grouped by person name then camera.
+
+        Non-overlapping segments within a person+camera group are packed onto
+        the same row; overlapping ones use extra rows (greedy scheduling).
+        """
+        if not self._seg_assignments:
+            lbl = self._scene.addText("No assignments yet")
+            lbl.setPos(LABEL_WIDTH, 0)
+            lbl.setDefaultTextColor(_SECTION_LABEL_COLOR)
+            return
+
+        # Group assigned keys: person → svid → [seg_key]
+        person_cam: dict[str, dict[str, list[tuple[str, int, int]]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        for key, person in self._seg_assignments.items():
+            svid = key[0]
+            person_cam[person][svid].append(key)
+
+        y = 0.0
+        for person in sorted(person_cam):
+            # Person header
+            person_lbl = self._scene.addText(f"▶ {person}")
+            font = person_lbl.font()
+            font.setBold(True)
+            person_lbl.setFont(font)
+            person_lbl.setPos(0, y)
+            person_lbl.setDefaultTextColor(_PERSON_LABEL_COLOR)
+            y += self._row_h
+
+            for svid in svids:
+                seg_keys = person_cam[person].get(svid)
+                if not seg_keys:
+                    continue
+
+                # Camera sub-label
+                cam_lbl = self._scene.addText(f"  {cam_labels[svid]}")
+                cam_lbl.setPos(0, y)
+                cam_lbl.setDefaultTextColor(_SECTION_LABEL_COLOR)
+
+                # Pack segments onto rows using greedy interval scheduling
+                rows = self._pack_into_rows(seg_keys)
+                for row_keys in rows:
+                    for seg_key in row_keys:
+                        svid_k, tid, sf = seg_key
+                        # Look up seg_last from current segment state
+                        sl = next(
+                            (sl_ for (sf_, sl_) in self._segments.get((svid_k, tid), [])
+                             if sf_ == sf),
+                            sf,
+                        )
+                        bar = self._draw_bar(svid_k, tid, sf, sl, y)
+                        bar.set_assignment(person)
+                    y += self._row_h + TRACK_GAP
+
+                y += ROW_GAP
+
+            y += PERSON_GAP
+
+    def _pack_into_rows(
+        self, seg_keys: list[tuple[str, int, int]]
+    ) -> list[list[tuple[str, int, int]]]:
+        """Greedy interval scheduling: pack seg_keys into rows so that
+        non-overlapping segments share a row.
+
+        Returns a list of rows, each row being a list of seg_keys.
+        """
+        def start_time(key: tuple[str, int, int]) -> float:
+            svid, tid, sf = key
+            segs = self._segments.get((svid, tid), [])
+            sf_range = next((r for r in segs if r[0] == sf), None)
+            if sf_range is None:
+                return float(sf)
+            return self._seg_time_range(svid, sf_range[0], sf_range[1])[0]
+
+        def end_time(key: tuple[str, int, int]) -> float:
+            svid, tid, sf = key
+            segs = self._segments.get((svid, tid), [])
+            sf_range = next((r for r in segs if r[0] == sf), None)
+            if sf_range is None:
+                return float(sf)
+            return self._seg_time_range(svid, sf_range[0], sf_range[1])[1]
+
+        sorted_keys = sorted(seg_keys, key=start_time)
+        rows: list[list[tuple[str, int, int]]] = []
+        row_end_times: list[float] = []
+
+        for key in sorted_keys:
+            t0 = start_time(key)
+            t1 = end_time(key)
+            placed = False
+            for i, row_end in enumerate(row_end_times):
+                if t0 >= row_end:
+                    rows[i].append(key)
+                    row_end_times[i] = t1
+                    placed = True
+                    break
+            if not placed:
+                rows.append([key])
+                row_end_times.append(t1)
+
+        return rows
 
     def _draw_bar(
         self,
@@ -448,6 +610,7 @@ class FilmstripStitcherWidget(QGraphicsView):
 
         self._scene.addItem(bar)
         self._items[seg_key] = bar
+        self._bar_row_y[seg_key] = y
         return bar
 
     def _seg_time_range(self, svid: str, seg_first: int, seg_last: int) -> tuple[float, float]:
@@ -471,10 +634,19 @@ class FilmstripStitcherWidget(QGraphicsView):
         session: sqlite3.Connection,
         detection_run_id: str,
     ) -> None:
-        """Query frame_cache_entries and populate bar with scaled thumbnails."""
+        """Populate bar thumbnails from cache (or DB on first load)."""
+        seg_key = (bar.svid, bar.tid, bar.seg_first)
+        cached = self._thumb_cache.get(seg_key)
+        if cached is not None:
+            # Filter to frames within current bar range (in case of split)
+            relevant = {f: p for f, p in cached.items()
+                        if bar.seg_first <= f <= bar.seg_last}
+            if relevant:
+                bar.set_thumbnails(relevant)
+            return
+
         film_h = max(1, bar._row_h - LABEL_H)
         bar_w = max(1, int(bar._width))
-        # Estimate how many thumbnails fit (assuming average aspect ~0.5 width/height)
         N = max(4, bar_w // max(1, film_h // 2))
         N = min(N, MAX_THUMBS_PER_BAR)
 
@@ -489,6 +661,7 @@ class FilmstripStitcherWidget(QGraphicsView):
         ).fetchall()
 
         if not rows:
+            self._thumb_cache[seg_key] = {}
             return
 
         step = max(1, len(rows) // N)
@@ -500,6 +673,7 @@ class FilmstripStitcherWidget(QGraphicsView):
             if pix is not None:
                 thumbs[row["frame_idx"]] = pix
 
+        self._thumb_cache[seg_key] = thumbs
         if thumbs:
             bar.set_thumbnails(thumbs)
 
@@ -514,17 +688,12 @@ class FilmstripStitcherWidget(QGraphicsView):
         return self._time_origin + (scene_x - LABEL_WIDTH) / max(self._px_per_sec, 1e-6)
 
     def _frame_at_scene_pos(self, bar: FilmstripBarItem, scene_pos: QPointF) -> int:
-        """Map scene_pos.x to the nearest frame index within bar.
-
-        Uses SyncTable when available; otherwise falls back to linear
-        interpolation between seg_first and seg_last.
-        """
+        """Map scene_pos.x to the nearest frame index within bar."""
         global_t = self._scene_x_to_global_time(scene_pos.x())
         if self._sync_table is not None:
             frame = self._sync_table.lookup(global_t, bar.svid)
             if frame is not None:
                 return max(bar.seg_first, min(bar.seg_last, frame))
-        # Fallback: linear interpolation via bar coordinates
         local_x = scene_pos.x() - bar.pos().x()
         return bar.local_x_to_frame(local_x)
 
@@ -580,15 +749,11 @@ class FilmstripStitcherWidget(QGraphicsView):
     def mouseMoveEvent(self, event) -> None:
         scene_pos = self.mapToScene(event.pos())
 
-        # --- Hover tooltip debounce ---
+        # --- Bar hover: emit bar_hovered for side crop panel ---
         bar = self._bar_at_scene_pos(scene_pos)
         if bar is not None:
-            self._tooltip_bar = bar
-            self._tooltip_timer.start()  # restart debounce
-        else:
-            self._tooltip_timer.stop()
-            self._tooltip.hide()
-            self._tooltip_bar = None
+            frame = self._frame_at_scene_pos(bar, scene_pos)
+            self.bar_hovered.emit(bar.svid, bar.tid, bar.seg_first, frame)
 
         # --- Status bar ---
         global_t = self._scene_x_to_global_time(scene_pos.x())
@@ -646,57 +811,6 @@ class FilmstripStitcherWidget(QGraphicsView):
             self._drag_sel_last = None
 
         super().mouseReleaseEvent(event)
-
-    def leaveEvent(self, event) -> None:
-        self._tooltip_timer.stop()
-        self._tooltip.hide()
-        super().leaveEvent(event)
-
-    # ------------------------------------------------------------------
-    # Hover tooltip
-    # ------------------------------------------------------------------
-
-    def _show_tooltip_for_cursor(self) -> None:
-        """Called by debounce timer; loads exact frame and shows tooltip."""
-        if self._tooltip_bar is None or self._last_session is None:
-            self._tooltip.hide()
-            return
-
-        bar = self._tooltip_bar
-        cursor_scene = self.mapToScene(self.viewport().mapFromGlobal(QCursor.pos()))
-        frame = self._frame_at_scene_pos(bar, cursor_scene)
-
-        # Check if we already have this frame in the thumbnail cache
-        pix = bar._thumbs.get(frame)
-        if pix is None:
-            # Fetch from DB (fast — single row lookup)
-            row = self._last_session.execute(
-                "SELECT image_data FROM frame_cache_entries "
-                "WHERE shot_video_id=? AND cache_type='person_crop' "
-                "  AND track_id=? AND detection_run_id=? "
-                "  AND frame_idx BETWEEN ? AND ? "
-                "ORDER BY ABS(frame_idx - ?) LIMIT 1",
-                (bar.svid, bar.tid, self._last_run_id,
-                 frame - 3, frame + 3, frame),
-            ).fetchone()
-            if row is not None:
-                pix = decode_jpeg_to_pixmap(bytes(row["image_data"]), 160)
-
-        if pix is None:
-            self._tooltip.hide()
-            return
-
-        self._tooltip.setPixmap(pix)
-        self._tooltip.adjustSize()
-
-        # Position tooltip above the bar in viewport coords
-        vp_pos = self.viewport().mapFromGlobal(QCursor.pos())
-        tip_x = max(0, min(vp_pos.x() - pix.width() // 2,
-                           self.viewport().width() - pix.width() - 4))
-        tip_y = max(0, vp_pos.y() - pix.height() - 6)
-        self._tooltip.move(tip_x, tip_y)
-        self._tooltip.show()
-        self._tooltip.raise_()
 
     # ------------------------------------------------------------------
     # Context menu

@@ -4,8 +4,8 @@ Used by TrialPanel in the unified shell.  Exposes is_dirty / apply() for
 prompt-on-leave and the Apply button.
 
 Uses FilmstripStitcherWidget as its timeline.  FrameViewWidget and
-PersonPreviewWidget are not used here; they remain available in
-PoseExtractionWindow (main.py).
+PersonPreviewWidget are not used here; crop preview is handled by the
+SegmentCropPanel on the right side of the splitter.
 """
 from __future__ import annotations
 
@@ -13,7 +13,10 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 
+import cv2
+import numpy as np
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
@@ -22,11 +25,12 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
-from app.pose.db_cache import list_detection_runs
 from app.pose.finalise import TrackAssignment, finalise_to_db
 from app.pose.filmstrip_stitcher import (
     FilmstripStitcherWidget,
@@ -34,6 +38,7 @@ from app.pose.filmstrip_stitcher import (
     ROW_H_MIN,
     ROW_H_MAX,
 )
+from app.pose.person_preview import draw_skeleton_on_crop
 from app.setup.db_context import SyncPoint, SyncTable
 
 
@@ -69,8 +74,148 @@ def _load_sync_table(conn: sqlite3.Connection, sync_config_id: str) -> SyncTable
     return SyncTable(sync_points, fps_by_video)
 
 
+# ---------------------------------------------------------------------------
+# SegmentCropPanel — right-side preview of the hovered bar frame
+# ---------------------------------------------------------------------------
+
+class SegmentCropPanel(QWidget):
+    """Displays the person crop for the frame currently under the mouse cursor.
+
+    Reads ``frame_cache_entries`` (JPEG crop) and ``detection_keypoints``
+    (float32 blob) from the DB and draws the skeleton overlay using
+    ``draw_skeleton_on_crop`` before displaying in a QLabel.
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        run_id: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._conn = conn
+        self._run_id = run_id
+
+        self.setMinimumWidth(160)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+
+        self._image_label = QLabel()
+        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self._image_label.setMinimumSize(140, 120)
+        self._image_label.setStyleSheet("background: #1a1a1a;")
+
+        self._info_label = QLabel()
+        self._info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._info_label.setStyleSheet("font-size: 9px; color: #888;")
+        self._info_label.setMaximumHeight(16)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
+        layout.addWidget(self._image_label, stretch=1)
+        layout.addWidget(self._info_label)
+
+        self._show_empty()
+
+    def _show_empty(self, msg: str = "Hover over a bar") -> None:
+        self._image_label.clear()
+        self._image_label.setText(msg)
+        self._image_label.setStyleSheet("background: #1a1a1a; color: #555;")
+        self._info_label.setText("")
+
+    def show_frame(
+        self,
+        svid: str,
+        tid: int,
+        frame_idx: int,
+        person_name: str | None = None,
+    ) -> None:
+        """Load and display the crop for (svid, tid, frame_idx) with skeleton overlay."""
+        # Fetch the closest cached crop (±3 frames for tolerance)
+        row = self._conn.execute(
+            "SELECT image_data, height_px, src_x, src_y, src_h "
+            "FROM frame_cache_entries "
+            "WHERE shot_video_id = ? AND cache_type = 'person_crop' "
+            "  AND track_id = ? AND detection_run_id = ? "
+            "  AND frame_idx BETWEEN ? AND ? "
+            "ORDER BY ABS(frame_idx - ?) LIMIT 1",
+            (svid, tid, self._run_id,
+             frame_idx - 3, frame_idx + 3, frame_idx),
+        ).fetchone()
+
+        if row is None:
+            self._show_empty("No crop available")
+            return
+
+        buf = np.frombuffer(bytes(row["image_data"]), dtype=np.uint8)
+        crop_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if crop_bgr is None:
+            self._show_empty("Decode failed")
+            return
+
+        # Compute scale from stored JPEG height vs original crop height in frame.
+        # These are often equal (1:1 scale); the formula handles downscaled crops.
+        src_x = float(row["src_x"] or 0.0)
+        src_y = float(row["src_y"] or 0.0)
+        src_h = float(row["src_h"] or crop_bgr.shape[0])
+        jpeg_h = float(row["height_px"] or crop_bgr.shape[0])
+        scale = jpeg_h / src_h if src_h > 0 else 1.0
+
+        # Fetch keypoints for this exact frame (no tolerance here)
+        kp_row = self._conn.execute(
+            "SELECT keypoints FROM detection_keypoints "
+            "WHERE detection_run_id = ? AND shot_video_id = ? "
+            "  AND track_id = ? AND video_frame = ?",
+            (self._run_id, svid, tid, frame_idx),
+        ).fetchone()
+
+        if kp_row is not None and kp_row["keypoints"]:
+            kp_bytes = bytes(kp_row["keypoints"])
+            n = len(kp_bytes) // (3 * 4)   # float32, 3 values per keypoint
+            kp = np.frombuffer(kp_bytes, dtype=np.float32).reshape(n, 3).copy()
+            # Transform from full-frame coordinates to JPEG-crop coordinates
+            kp[:, 0] = (kp[:, 0] - src_x) * scale
+            kp[:, 1] = (kp[:, 1] - src_y) * scale
+            draw_skeleton_on_crop(crop_bgr, kp, 0, 0)
+
+        # Convert BGR → QPixmap
+        crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+        h_img, w_img = crop_rgb.shape[:2]
+        qimg = QImage(
+            crop_rgb.data, w_img, h_img, 3 * w_img,
+            QImage.Format.Format_RGB888,
+        )
+        pix = QPixmap.fromImage(qimg)
+
+        # Scale to fit label while keeping aspect ratio
+        label_size = self._image_label.size()
+        if label_size.width() > 4 and label_size.height() > 4:
+            pix = pix.scaled(
+                label_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+        self._image_label.setPixmap(pix)
+        self._image_label.setStyleSheet("background: #1a1a1a;")
+        cam_short = svid[:8]
+        person_str = f" · {person_name}" if person_name else ""
+        self._info_label.setText(f"{cam_short} t{tid} f{frame_idx}{person_str}")
+
+
+# ---------------------------------------------------------------------------
+# StitcherPanel
+# ---------------------------------------------------------------------------
+
 class StitcherPanel(QWidget):
     """Filmstrip timeline + assignment panel for one detection run.
+
+    Layout: splitter with FilmstripStitcherWidget on the left and
+    SegmentCropPanel on the right.  Above the splitter is a header row
+    with the view-mode selector; below is the status bar and assign group.
 
     Signals
     -------
@@ -196,12 +341,33 @@ class StitcherPanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(2)
 
-        # Filmstrip timeline
+        # --- Header row: view mode selector ---
+        header_row = QHBoxLayout()
+        header_row.addWidget(QLabel("View:"))
+        self._view_combo = QComboBox()
+        self._view_combo.addItem("By Detection", userData="detection")
+        self._view_combo.addItem("By Person", userData="person")
+        self._view_combo.currentIndexChanged.connect(self._on_view_mode_changed)
+        header_row.addWidget(self._view_combo)
+        header_row.addStretch()
+        root.addLayout(header_row)
+
+        # --- Splitter: filmstrip on left, crop preview on right ---
         self._stitcher = FilmstripStitcherWidget(row_h=ROW_H_DEFAULT)
         self._stitcher.segment_selected.connect(self._on_segment_selected)
         self._stitcher.assignment_changed.connect(self._on_assignment_changed)
         self._stitcher.time_hovered.connect(self._on_time_hovered)
-        root.addWidget(self._stitcher, 1)
+        self._stitcher.bar_hovered.connect(self._on_bar_hovered)
+
+        self._crop_panel = SegmentCropPanel(self._conn, self._run_id)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._stitcher)
+        splitter.addWidget(self._crop_panel)
+        splitter.setSizes([700, 200])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        root.addWidget(splitter, stretch=1)
 
         # Status bar
         self._status_label = QLabel("")
@@ -322,6 +488,14 @@ class StitcherPanel(QWidget):
                     self._apply_assignment(svid, tid, cur_seg_first, r["person_name"])
 
     # ------------------------------------------------------------------
+    # View mode
+    # ------------------------------------------------------------------
+
+    def _on_view_mode_changed(self, index: int) -> None:
+        mode = self._view_combo.itemData(index)
+        self._stitcher.set_view_mode(mode)
+
+    # ------------------------------------------------------------------
     # Status bar
     # ------------------------------------------------------------------
 
@@ -341,6 +515,13 @@ class StitcherPanel(QWidget):
     # ------------------------------------------------------------------
     # Signal handlers
     # ------------------------------------------------------------------
+
+    def _on_bar_hovered(
+        self, svid: str, tid: int, seg_first: int, frame_idx: int
+    ) -> None:
+        """Forward bar-hover events to the side crop panel."""
+        person_name = self._assignments.get((svid, tid, seg_first))
+        self._crop_panel.show_frame(svid, tid, frame_idx, person_name)
 
     def _on_segment_selected(
         self,
@@ -367,6 +548,8 @@ class StitcherPanel(QWidget):
         person_name = self._assignments.get((svid, tid, seg_first))
         if person_name and self._person_combo.findText(person_name) >= 0:
             self._person_combo.setCurrentText(person_name)
+        # Show first frame of selection in crop panel
+        self._crop_panel.show_frame(svid, tid, sel_first, person_name)
 
     def _on_assignment_changed(
         self, svid: str, tid: int, seg_first: int, person_name: object
@@ -511,7 +694,6 @@ class StitcherPanel(QWidget):
     def _compute_conflicts(self) -> set[tuple[str, int, int]]:
         """Return the set of seg_keys that overlap with another seg in the same camera
         and share the same person assignment."""
-        from app.setup.db_context import SyncTable
         time_spans = self._stitcher.get_time_spans()
         # person+svid → [(t0, t1, key)]
         by_person_cam: dict[tuple[str, str], list] = defaultdict(list)

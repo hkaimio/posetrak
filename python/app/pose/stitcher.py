@@ -351,7 +351,7 @@ class StitcherWidget(QGraphicsView):
 
             label_item = self._scene.addText(cam_labels[svid])
             label_item.setPos(0, y)
-            label_item.setDefaultTextColor(QColor(220, 220, 220))
+            label_item.setDefaultTextColor(QColor(0, 0, 0))
 
             if db_spans:
                 for span in db_spans:
@@ -473,6 +473,9 @@ class StitcherWidget(QGraphicsView):
                 name_item = QGraphicsSimpleTextItem()
                 name_item.setFont(_NAME_FONT)
                 name_item.setBrush(QBrush(QColor(255, 255, 255)))
+                # Don't intercept mouse events — let them fall through to the
+                # rect item below so clicking on the name still selects the bar.
+                name_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
                 self._scene.addItem(name_item)
                 self._name_items[seg_key] = name_item
             name_item.setText(person_name)
@@ -489,32 +492,40 @@ class StitcherWidget(QGraphicsView):
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             scene_pos = self.mapToScene(event.pos())
-            item = self._scene.itemAt(scene_pos, self.transform())
-            if isinstance(item, QGraphicsRectItem):
-                svid = item.data(0)
-                tid = item.data(1)
-                seg_first = item.data(2)
-                seg_last = item.data(3)
-                if svid is not None:
-                    self._set_selected(svid, tid, seg_first)
-                    pps = self._px_per_sec
-                    global_s = self._time_origin + (scene_pos.x() - LABEL_WIDTH) / max(pps, 1e-6)
-                    # segment_clicked must fire before time_clicked so that
-                    # main.py sets the preview track_id before seek_frame()
-                    # triggers update_frame().
-                    self.segment_clicked.emit(svid, tid, seg_first, seg_last)
-                    self.time_clicked.emit(global_s)
+            # Iterate all items under the cursor so that clicking a name text
+            # label (which sits on top) still falls through to the rect below.
+            for item in self._scene.items(scene_pos):
+                if isinstance(item, QGraphicsRectItem):
+                    svid = item.data(0)
+                    tid = item.data(1)
+                    seg_first = item.data(2)
+                    seg_last = item.data(3)
+                    if svid is not None:
+                        self._set_selected(svid, tid, seg_first)
+                        pps = self._px_per_sec
+                        global_s = self._time_origin + (scene_pos.x() - LABEL_WIDTH) / max(pps, 1e-6)
+                        # segment_clicked must fire before time_clicked so that
+                        # main.py sets the preview track_id before seek_frame()
+                        # triggers update_frame().
+                        self.segment_clicked.emit(svid, tid, seg_first, seg_last)
+                        self.time_clicked.emit(global_s)
+                    break
         super().mousePressEvent(event)
 
     def _on_context_menu(self, pos) -> None:
         scene_pos = self.mapToScene(pos)
-        item = self._scene.itemAt(scene_pos, self.transform())
-        if not isinstance(item, QGraphicsRectItem):
+        # Use items() so that right-clicking a name text label finds the rect.
+        rect_item = None
+        for item in self._scene.items(scene_pos):
+            if isinstance(item, QGraphicsRectItem):
+                rect_item = item
+                break
+        if rect_item is None:
             return
-        svid = item.data(0)
-        tid = item.data(1)
-        seg_first = item.data(2)
-        seg_last = item.data(3)
+        svid = rect_item.data(0)
+        tid = rect_item.data(1)
+        seg_first = rect_item.data(2)
+        seg_last = rect_item.data(3)
         if svid is None:
             return
 

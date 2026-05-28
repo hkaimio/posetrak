@@ -913,6 +913,8 @@ class PersonCropGridWidget(QWidget):
         self._time_label: QLabel | None = None
         self._show_detected: QCheckBox | None = None   # green pose-detection keypoints
         self._show_tracked: QCheckBox | None = None    # FK skeleton lines + predicted dots
+        # Per-camera track segments: svid → [(track_id, first_frame, last_frame)] sorted by first_frame
+        self._track_segs: dict[str, list[tuple[int, int, int]]] = {}
         # Pre-loaded per-camera data (indexed by shot_video_id or camera_instance_id)
         self._obs_kp: dict[str, dict[int, object]] = {}   # cam_instance_id→frame→kp
         self._det_bboxes: dict[str, dict[int, tuple]] = {}  # svid→frame→(cx,cy,w,h)
@@ -950,17 +952,25 @@ class PersonCropGridWidget(QWidget):
         ).fetchone()
         person_name = prow["person_name"] if prow else None
 
-        track_by_svid: dict[str, int] = {}
+        # Collect ALL (track_id, first_frame, last_frame) segments per camera for this person.
+        # A person may be assigned to multiple tracks in the same camera (e.g. after a track
+        # split), so we must not overwrite — store them as an ordered list and look up
+        # the correct track by frame range at display time.
+        self._track_segs = {}
         if person_name and self._det_run_id:
             for r in self._conn.execute(
-                "SELECT shot_video_id, track_id FROM detection_track_assignments "
-                "WHERE detection_run_id = ? AND person_name = ?",
+                "SELECT shot_video_id, track_id, first_frame, last_frame "
+                "FROM detection_track_assignments "
+                "WHERE detection_run_id = ? AND person_name = ? "
+                "ORDER BY first_frame",
                 (self._det_run_id, person_name),
             ):
-                track_by_svid[r["shot_video_id"]] = r["track_id"]
+                self._track_segs.setdefault(r["shot_video_id"], []).append(
+                    (r["track_id"], r["first_frame"], r["last_frame"])
+                )
 
         cam_rows = self._conn.execute(
-            "SELECT cv.id, cv.camera_instance_id, "
+            "SELECT cv.id, cv.camera_instance_id, cv.file_path, "
             "       COALESCE(ci.label, cv.camera_instance_id) AS label "
             "FROM capture_videos cv "
             "LEFT JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
@@ -993,7 +1003,7 @@ class PersonCropGridWidget(QWidget):
                 "shot_video_id": r["id"],
                 "camera_instance_id": r["camera_instance_id"],
                 "label": r["label"],
-                "track_id": track_by_svid.get(r["id"]),
+                "file_path": r["file_path"] or "",
             }
             for r in cam_rows
         ]
@@ -1010,22 +1020,20 @@ class PersonCropGridWidget(QWidget):
             self._obs_kp.setdefault(r["camera_instance_id"], {})[r["video_frame"]] = kp
 
         # Pre-load detection bboxes: svid → frame → (cx, cy, w, h)
+        # Load for every track_id that is assigned to the person in each camera.
         if self._det_run_id:
-            for cam in self._cameras:
-                svid = cam["shot_video_id"]
-                tid = cam["track_id"]
-                if tid is None:
-                    continue
-                for r in self._conn.execute(
-                    "SELECT video_frame, bbox_x, bbox_y, bbox_w, bbox_h "
-                    "FROM person_detections "
-                    "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? "
-                    "AND region_type='full_body'",
-                    (self._det_run_id, svid, tid),
-                ):
-                    self._det_bboxes.setdefault(svid, {})[r["video_frame"]] = (
-                        r["bbox_x"], r["bbox_y"], r["bbox_w"], r["bbox_h"]
-                    )
+            for svid, segs in self._track_segs.items():
+                for track_id, _first, _last in segs:
+                    for r in self._conn.execute(
+                        "SELECT video_frame, bbox_x, bbox_y, bbox_w, bbox_h "
+                        "FROM person_detections "
+                        "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? "
+                        "AND region_type='full_body'",
+                        (self._det_run_id, svid, track_id),
+                    ):
+                        self._det_bboxes.setdefault(svid, {})[r["video_frame"]] = (
+                            r["bbox_x"], r["bbox_y"], r["bbox_w"], r["bbox_h"]
+                        )
 
         n_cells = len(self._cameras) + 1  # +1 for 3D placeholder
         ncols = max(2, min(n_cells, 4))
@@ -1138,6 +1146,17 @@ class PersonCropGridWidget(QWidget):
         for col in range(self._ncols):
             self._grid.setColumnStretch(col, 1 if col in visible_cols else 0)
             self._grid.setColumnMinimumWidth(col, 0)
+
+    def _track_id_at_frame(self, svid: str, frame_idx: int) -> int | None:
+        """Return the track_id assigned to the person at *frame_idx* in camera *svid*.
+
+        Searches _track_segs for a segment whose [first_frame, last_frame] range
+        covers frame_idx.  Returns None if no assignment exists for that frame.
+        """
+        for track_id, first_frame, last_frame in self._track_segs.get(svid, []):
+            if first_frame <= frame_idx <= last_frame:
+                return track_id
+        return None
 
     def _load_tracking_run(self, run_id: str | None) -> None:
         import json
@@ -1361,14 +1380,16 @@ class PersonCropGridWidget(QWidget):
         for i, cam in enumerate(self._cameras):
             svid = cam["shot_video_id"]
             cam_id = cam["camera_instance_id"]
-            track_id = cam["track_id"]
             cell = self._cells[i]
 
-            if track_id is None:
-                cell.show_empty()
-                continue
             frame_idx = self._sync_table.lookup(global_time, svid)
             if frame_idx is None:
+                cell.show_empty()
+                continue
+
+            # Find which track covers this frame for this camera.
+            track_id = self._track_id_at_frame(svid, frame_idx)
+            if track_id is None:
                 cell.show_empty()
                 continue
 
@@ -1382,17 +1403,19 @@ class PersonCropGridWidget(QWidget):
                 (svid, track_id, self._det_run_id,
                  frame_idx - 3, frame_idx + 3, frame_idx),
             ).fetchone()
+
             if row is None:
                 cell.show_empty()
                 continue
 
             buf = np.frombuffer(bytes(row["image_data"]), dtype=np.uint8)
             crop_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
             if crop_bgr is None:
                 cell.show_empty()
                 continue
 
-            # Crop-to-full-frame transform
+            # Compute crop-to-full-frame transform for overlay coordinate mapping.
             bbox = self._det_bboxes.get(svid, {}).get(frame_idx)
             if row["src_x"] is not None:
                 x1, y1 = float(row["src_x"]), float(row["src_y"])
@@ -1402,7 +1425,7 @@ class PersonCropGridWidget(QWidget):
                 x1, y1 = cx - bw / 2, cy - bh / 2
                 src_h = bh
             else:
-                x1 = y1 = 0.0
+                x1, y1 = 0.0, 0.0
                 src_h = float(crop_bgr.shape[0])
             jpeg_h = float(row["height_px"] or crop_bgr.shape[0])
             src_scale = jpeg_h / src_h if src_h > 0 else 1.0

@@ -367,6 +367,7 @@ class StitcherPanel(QWidget):
         self._frame_view.load_camera(
             shot_video_id=shot_video_id,
             file_path=row["file_path"] or "",
+            camera_instance_id=row["camera_instance_id"] or shot_video_id,
             fps=float(row["actual_fps"] or 30.0),
         )
         self._frame_view.set_pose_data(self._conn, self._run_id, track_id)

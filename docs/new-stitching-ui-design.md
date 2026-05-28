@@ -91,7 +91,7 @@ the *interaction* layer (drag selection, auto-split/merge).
 
 ```
 ┌─────────────────────────────────────────────────────────────┐  ← height = ROW_H (default 48 px)
-│  [crop t0] [crop t1] [crop t2] [crop t3] [crop t4  ···      │  ← filmstrip
+│  [crop t0] [t1] [crop t2 ] [t3] [crop t4    ] ···           │  ← filmstrip (variable-width thumbs)
 │ ─────────────────────────────────────────────────────────── │
 │ ████████████████  Roosa                                      │  ← person colour strip + name (3 px)
 └─────────────────────────────────────────────────────────────┘
@@ -100,11 +100,21 @@ the *interaction* layer (drag selection, auto-split/merge).
  ↑ when overlap conflict: semi-transparent red overlay on conflicting frames
 ```
 
-The leftmost thumbnail is for the bar's first frame; thumbnails tile leftward
-with a step equal to `bar_width_px / n_thumbnails` where `n_thumbnails` is
-chosen so thumbnails are roughly square given `ROW_H`.  The rightmost thumbnail
-is cropped at the bar's right edge.  Only thumbnails for frames currently
-visible in the viewport are loaded.
+Each cached JPEG is scaled to exactly `ROW_H` pixels tall, preserving aspect
+ratio.  Because source crops vary in aspect ratio (e.g. a wide full-body crop
+vs a narrow profile view), the rendered width of each thumbnail varies.
+Thumbnails are placed consecutively left-to-right from the bar's left edge
+with no inter-thumbnail gap; the last thumbnail is clipped at the bar's right
+edge.
+
+**Frame sampling**: the bar selects `N ≈ bar_width_px / ROW_H` frames to
+display (treating `ROW_H` as a nominal average thumbnail width).  Frames are
+sampled uniformly across the track's cached frame indices:
+`step = max(1, len(cached_frames) // N)`.  This keeps the number of loaded
+images roughly constant regardless of bar width or track length.
+
+When the user zooms the bar height (changing `ROW_H`) or the viewport is
+resized, `N` is recalculated and the filmstrip is refilled.
 
 ### 4.2 Constants and configuration
 
@@ -145,16 +155,31 @@ ORDER BY frame_idx
 Loaded `QPixmap` objects are stored in a `dict[int, QPixmap]` on the bar item.
 They are discarded when the bar scrolls out of the viewport.
 
-### 4.4 Hover tooltip
+### 4.4 Hover tooltip and frame-accurate selection
 
-`QGraphicsView.mouseMoveEvent` maps the cursor x to a global timestamp →
-per-camera frame index.  For the bar under the cursor, query
-`frame_cache_entries` for the nearest cached frame (±3 frames, same query as
-`_load_frame` in `PersonCropGridWidget`).  Show the JPEG as a `QToolTip`-style
-floating widget (a `QLabel` inside a frameless `QWidget` parented to the
-viewport) positioned just above or below the bar.  Update it as the cursor
-moves along the bar.  The tooltip widget is `hide()`d when the cursor leaves
-the bar.
+**Tooltip image** — `QGraphicsView.mouseMoveEvent` maps the cursor x to a
+global timestamp → per-camera frame index.  A `QTimer` (debounce ~150 ms,
+restarted on every mouse-move event) fires when the cursor has been still long
+enough.  On the timer callback, the exact frame under the cursor is computed
+and looked up:
+
+1. If that frame is already in the in-memory thumbnail cache → show immediately.
+2. Otherwise → fetch from `frame_cache_entries` (nearest ±3 frames) in a
+   `QRunnable` worker; on completion, post a signal back to the main thread to
+   update the tooltip.
+
+The tooltip itself is a frameless `QLabel` parented to the viewport, positioned
+above or below the bar, and `hide()`d when the cursor leaves the bar or the
+widget.
+
+**Selection boundary precision** — when the user clicks or releases a drag, the
+selection frame boundary is computed from the cursor's x position via
+`SyncTable.lookup(global_t, svid)`.  This lookup is always frame-accurate; it
+does not depend on which thumbnail happens to be loaded in the filmstrip.  The
+filmstrip thumbnails are purely decorative; the frame index reported in
+`segment_selected` always equals `SyncTable.lookup` output, not an index
+snapped to a loaded thumbnail.
+
 
 ### 4.5 Signals
 
@@ -386,14 +411,14 @@ main thread during paint/mouse events.  No async plumbing needed.
 
 ---
 
-## 10. Open questions / decisions needed
+## 10. Design decisions
 
-| # | Question | Recommendation |
-|---|----------|----------------|
-| 1 | Should drag selection work across multiple bars (multi-bar multi-camera)? | **No for Phase 1** — single bar only. Cross-bar multi-select adds complexity without clear use case. |
-| 2 | What happens if the user drags across a split point within a bar? | Select from drag-start to drag-end frame regardless; when assigned, the two resulting sub-segments get the same name and are immediately merged by auto-merge. |
-| 3 | Should "By Person" show unassigned tracks? | **No** — only tracks with at least one assigned segment are shown. Unassigned tracks remain visible only in "By Detection" mode. |
-| 4 | Bar height slider: global or per-camera? | **Global** for Phase 1. Per-camera zoom is a useful later addition. |
-| 5 | Should the hover tooltip disappear immediately on mouse-leave or fade? | Immediate hide for simplicity. |
-| 6 | Apply button conflict badge vs blocking dialog? | Non-blocking badge (described in §5.4) is preferred. Keeps the user unblocked while resolving overlaps. |
-| 7 | Do we keep `split_requested` signal for backward compatibility with `PoseExtractionWindow`? | `StitcherWidget` keeps `split_requested` unchanged. `FilmstripStitcherWidget` never emits it. |
+| # | Decision |
+|---|----------|
+| 1 | Drag selection works within a single bar only. Cross-bar multi-select is not in scope for Phase 1. |
+| 2 | Dragging across a split point within a bar selects the full dragged frame range; auto-merge collapses the resulting two sub-segments back into one if they receive the same assignment. |
+| 3 | "By Person" shows only tracks with at least one assigned segment. Fully unassigned tracks appear only in "By Detection" mode. |
+| 4 | Bar height is a single global setting (slider or spinner). Per-camera zoom deferred to a later release. |
+| 5 | Hover tooltip hides immediately on mouse-leave. No fade animation. |
+| 6 | Overlap conflicts are non-blocking. The Apply button shows a conflict badge; clicking Apply while conflicts exist shows a summary dialog. The user is never blocked from continuing to assign while conflicts are present. |
+| 7 | `StitcherWidget` keeps its `split_requested` signal unchanged (used by `PoseExtractionWindow`). `FilmstripStitcherWidget` never emits it. |

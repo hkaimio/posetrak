@@ -1465,6 +1465,8 @@ class SyncWidget(QWidget):
         self._tree.setAlternatingRowColors(True)
         self._tree.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self._tree.itemClicked.connect(self._on_tree_item_clicked)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
 
         self._delete_btn = QPushButton("Delete selected anchor")
         self._delete_btn.setEnabled(False)
@@ -1789,6 +1791,29 @@ class SyncWidget(QWidget):
         self._status_label.setStyleSheet("font-size: 11px; color: grey;")
         self._reload_tree()
         self._solve_and_refresh()
+
+    def _on_tree_context_menu(self, pos) -> None:
+        """Show a context menu for anchor-pair tree items.
+
+        Right-clicking a child node (sync pair observation) offers "Delete sync
+        pair".  Right-clicking a camera top-level node produces no menu.
+        """
+        from PySide6.QtWidgets import QMenu
+
+        item = self._tree.itemAt(pos)
+        if item is None:
+            return
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data is None:
+            return  # top-level camera node — no actions
+
+        menu = QMenu(self)
+        delete_action = menu.addAction("Delete sync pair")
+        action = menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+        if action is delete_action:
+            self._current_anchor_id = data["anchor_id"]
+            self._on_delete_anchor()
 
     def _maybe_prompt_fps_correction(
         self,

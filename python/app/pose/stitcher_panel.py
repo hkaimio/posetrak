@@ -634,6 +634,8 @@ class StitcherPanel(QWidget):
         self._apply_assignment(svid, tid, target_sf, name)
         self._auto_merge(svid, tid)
         self._refresh_conflicts(svid)
+        # Rebuild by-person layout to reflect the changed assignment grouping
+        self._stitcher.refresh_person_view()
 
     def _detach(self, svid: str, tid: int, seg_first: int) -> None:
         self._assignments.pop((svid, tid, seg_first), None)
@@ -644,6 +646,7 @@ class StitcherPanel(QWidget):
             pass  # selection label stays; user can re-assign
         self._auto_merge(svid, tid)
         self._refresh_conflicts(svid)
+        self._stitcher.refresh_person_view()
         self._emit_dirty()
 
     def _apply_assignment(self, svid: str, tid: int, seg_first: int, name: str) -> None:
@@ -691,11 +694,19 @@ class StitcherPanel(QWidget):
     # Conflict detection
     # ------------------------------------------------------------------
 
-    def _compute_conflicts(self) -> set[tuple[str, int, int]]:
-        """Return the set of seg_keys that overlap with another seg in the same camera
-        and share the same person assignment."""
+    def _compute_conflicts(
+        self,
+    ) -> dict[tuple[str, int, int], list[tuple[int, int]]]:
+        """Return per-bar conflict frame ranges.
+
+        For each bar whose time range overlaps another bar assigned to the same
+        person in the same camera, returns the exact overlapping frame ranges
+        within that bar (using SyncTable lookup or linear interpolation).
+        """
         time_spans = self._stitcher.get_time_spans()
-        # person+svid → [(t0, t1, key)]
+        frame_spans = self._stitcher.get_spans()
+        sync_table = self._stitcher._sync_table
+
         by_person_cam: dict[tuple[str, str], list] = defaultdict(list)
         for key, person in self._assignments.items():
             ts = time_spans.get(key)
@@ -704,23 +715,65 @@ class StitcherPanel(QWidget):
             svid = key[0]
             by_person_cam[(person, svid)].append((ts[0], ts[1], key))
 
-        conflict_keys: set[tuple[str, int, int]] = set()
+        def _t_to_frame(
+            t: float,
+            svid: str,
+            seg_first: int,
+            seg_last: int,
+            seg_t0: float,
+            seg_t1: float,
+        ) -> int:
+            if sync_table is not None:
+                f = sync_table.lookup(t, svid)
+                if f is not None:
+                    return max(seg_first, min(seg_last, f))
+            span = max(1e-6, seg_t1 - seg_t0)
+            frac = (t - seg_t0) / span
+            return max(seg_first, min(seg_last,
+                       seg_first + round(frac * (seg_last - seg_first))))
+
+        conflict_ranges: dict[tuple[str, int, int], list[tuple[int, int]]] = {}
+
         for intervals in by_person_cam.values():
             intervals.sort()
             for i, (t0a, t1a, ka) in enumerate(intervals):
                 for t0b, t1b, kb in intervals[i + 1:]:
                     if t0b >= t1a:
                         break
-                    # Overlap
-                    conflict_keys.add(ka)
-                    conflict_keys.add(kb)
-        return conflict_keys
+                    t_over_s = max(t0a, t0b)
+                    t_over_e = min(t1a, t1b)
+                    for key, seg_t0, seg_t1 in [(ka, t0a, t1a), (kb, t0b, t1b)]:
+                        svid = key[0]
+                        fs = frame_spans.get(key)
+                        if fs is None:
+                            continue
+                        seg_first, seg_last = fs
+                        f_s = _t_to_frame(t_over_s, svid, seg_first, seg_last,
+                                          seg_t0, seg_t1)
+                        f_e = _t_to_frame(t_over_e, svid, seg_first, seg_last,
+                                          seg_t0, seg_t1)
+                        if f_e >= f_s:
+                            conflict_ranges.setdefault(key, []).append((f_s, f_e))
+
+        # Merge overlapping ranges within each bar
+        for key in conflict_ranges:
+            sorted_r = sorted(conflict_ranges[key])
+            merged: list[list[int]] = []
+            for r in sorted_r:
+                if merged and r[0] <= merged[-1][1]:
+                    merged[-1][1] = max(merged[-1][1], r[1])
+                else:
+                    merged.append([r[0], r[1]])
+            conflict_ranges[key] = [(r[0], r[1]) for r in merged]
+
+        return conflict_ranges
 
     def _refresh_conflicts(self, _svid: str | None = None) -> None:
-        conflicts = self._compute_conflicts()
-        self._stitcher.set_conflict_segments(conflicts)
-        if conflicts:
-            self._conflict_label.setText(f"⚠ {len(conflicts)} conflict(s)")
+        conflict_ranges = self._compute_conflicts()
+        self._stitcher.set_conflict_segments(conflict_ranges)
+        n = len(conflict_ranges)
+        if n:
+            self._conflict_label.setText(f"⚠ {n} conflict(s)")
         else:
             self._conflict_label.setText("")
 

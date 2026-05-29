@@ -5,9 +5,10 @@ import sqlite3
 from collections import defaultdict
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QFont, QPen, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsLineItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsTextItem,
     QGraphicsView,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 
+from app.pose.colors import person_color
 from app.pose.filmstrip_bar import FilmstripBarItem, decode_jpeg_to_pixmap, LABEL_H
 from app.pose.db_cache import read_track_spans
 from app.setup.db_context import SyncTable
@@ -39,8 +41,13 @@ _PX_PER_SEC_MAX: float = 500.0
 MAX_THUMBS_PER_BAR: int = 120
 
 _PLAYHEAD_PEN = QPen(QColor(220, 40, 40), 2)
+_CAM_SEP_PEN = QPen(QColor(120, 120, 120, 100), 1, Qt.PenStyle.SolidLine)
+_PERSON_SEP_PEN = QPen(QColor(80, 80, 80, 120), 1, Qt.PenStyle.DashLine)
 _SECTION_LABEL_COLOR = QColor(30, 30, 30)
 _PERSON_LABEL_COLOR = QColor(10, 60, 120)
+_PERSON_LABEL_FONT = QFont()
+
+_PERSON_BG_ALPHA = 35  # opacity of the person section tint (0–255)
 
 
 def _build_frame_to_time(
@@ -83,27 +90,22 @@ class FilmstripStitcherWidget(QGraphicsView):
     * ``time_hovered`` — emitted on mouse-move for the status bar.
     * ``merge_segments()`` — merge two adjacent segments (used by auto-merge).
     * ``set_conflict_segments()`` — highlight overlap-conflict bars.
+    * ``refresh_person_view()`` — rebuild scene if currently in person view mode.
 
     View modes
     ----------
     ``"detection"`` (default): one row per track, grouped by camera.
+        Camera groups are separated by horizontal lines.
     ``"person"``: only assigned segments, grouped by person name then camera.
-        Non-overlapping segments within the same person+camera are packed onto
-        a single row using a greedy interval scheduling algorithm.
+        Each person section has a tinted background.  Non-overlapping segments
+        within a person+camera group are packed onto a single row using a greedy
+        interval scheduling algorithm.
 
-    Signals
-    -------
-    segment_selected(svid, tid, seg_first, seg_last, sel_first, sel_last):
-        Left-click or drag-release on a bar.  *sel_first/sel_last* are the
-        selected frame sub-range (equal to seg_first/seg_last on a plain click).
-    assignment_changed(svid, tid, seg_first, person_or_None):
-        User assigns or detaches a segment via the context menu.
-    bar_hovered(svid, tid, seg_first, frame_idx):
-        Emitted on every mouse-move over a bar (for the side crop preview panel).
-    time_hovered(global_s):
-        Emitted on every mouse-move (for status bar updates).
-    time_clicked(global_s):
-        Emitted on left-press (for playhead sync).
+    Conflict highlights
+    -------------------
+    Only the *overlapping time ranges* within each conflicted bar are highlighted
+    red (via ``FilmstripBarItem.set_conflict_ranges``).  This is more precise than
+    highlighting the entire bar.
     """
 
     segment_selected = Signal(str, int, int, int, int, int)
@@ -136,8 +138,11 @@ class FilmstripStitcherWidget(QGraphicsView):
         # svid → (ref_frame, ref_ts, fps)
         self._anchors: dict[str, tuple[int, float, float]] = {}
         self._sync_table: SyncTable | None = None
-        # Set of seg_keys with overlap conflicts
+
+        # Conflict state: both the set of keys and the exact per-bar ranges
         self._conflict_keys: set[tuple[str, int, int]] = set()
+        # (svid, tid, seg_first) → [(frame_first, frame_last), ...]
+        self._conflict_ranges_data: dict[tuple[str, int, int], list[tuple[int, int]]] = {}
 
         self._selected_key: tuple[str, int, int] | None = None
         self._current_time_s: float = 0.0
@@ -243,7 +248,6 @@ class FilmstripStitcherWidget(QGraphicsView):
             segs[i] = (sf, split_frame - 1)
             segs.insert(i + 1, (split_frame, sl))
 
-            # Right half is unassigned
             self._draw_bar(svid, tid, sf, split_frame - 1, old_y)
             self._draw_bar(svid, tid, split_frame, sl, old_y)
 
@@ -255,12 +259,7 @@ class FilmstripStitcherWidget(QGraphicsView):
             break
 
     def merge_segments(self, svid: str, tid: int, sf1: int, sf2: int) -> None:
-        """Merge two adjacent segments where sf2 == sl1 + 1.
-
-        The merged segment keeps the key (svid, tid, sf1) and the assignment
-        of the first segment.  The second segment's assignment entry must be
-        removed by the caller before calling this.
-        """
+        """Merge two adjacent segments where sf2 == sl1 + 1."""
         key = (svid, tid)
         segs = self._segments.get(key, [])
         idx1 = next((i for i, (sf, _) in enumerate(segs) if sf == sf1), None)
@@ -271,21 +270,17 @@ class FilmstripStitcherWidget(QGraphicsView):
         _, sl1 = segs[idx1]
         _, sl2 = segs[idx2]
 
-        # Validate adjacency
         if sl1 + 1 != sf2:
             return
 
-        # Remember y before removing
         y = self._bar_row_y.get((svid, tid, sf1), 0.0)
 
-        # Remove both bar items
         for sf in (sf1, sf2):
             bar = self._items.pop((svid, tid, sf), None)
             self._bar_row_y.pop((svid, tid, sf), None)
             if bar is not None:
                 self._scene.removeItem(bar)
 
-        # Merge in segment list
         segs[idx1] = (sf1, sl2)
         del segs[idx2]
 
@@ -296,23 +291,41 @@ class FilmstripStitcherWidget(QGraphicsView):
         if merged_cache:
             self._thumb_cache[(svid, tid, sf1)] = merged_cache
 
-        # Redraw merged bar
         self._draw_bar(svid, tid, sf1, sl2, y)
 
-        # Restore assignment on merged bar
         person = self._seg_assignments.get((svid, tid, sf1))
         bar = self._items.get((svid, tid, sf1))
         if bar is not None:
             bar.set_assignment(person)
 
-    def set_conflict_segments(self, conflict_keys: set[tuple[str, int, int]]) -> None:
-        """Mark/unmark bars as overlap-conflict based on the provided key set."""
-        changed = conflict_keys.symmetric_difference(self._conflict_keys)
-        self._conflict_keys = set(conflict_keys)
-        for key in changed:
+    def set_conflict_segments(
+        self,
+        conflict_ranges: dict[tuple[str, int, int], list[tuple[int, int]]],
+    ) -> None:
+        """Update per-bar conflict highlights.
+
+        Args:
+            conflict_ranges: mapping from seg_key to a list of (frame_first, frame_last)
+                ranges that overlap another assignment for the same person and camera.
+                Only those ranges are highlighted red within each bar.
+                Pass an empty dict to clear all conflicts.
+        """
+        new_keys = set(conflict_ranges.keys())
+
+        # Clear bars that are no longer conflicted
+        for key in self._conflict_keys - new_keys:
             bar = self._items.get(key)
             if bar is not None:
-                bar.set_conflict(key in self._conflict_keys)
+                bar.set_conflict_ranges([])
+
+        # Set/update conflicted bars
+        for key, ranges in conflict_ranges.items():
+            bar = self._items.get(key)
+            if bar is not None:
+                bar.set_conflict_ranges(ranges)
+
+        self._conflict_keys = new_keys
+        self._conflict_ranges_data = dict(conflict_ranges)
 
     def load_run(self, session: sqlite3.Connection, detection_run_id: str) -> None:
         self._last_session = session
@@ -320,10 +333,13 @@ class FilmstripStitcherWidget(QGraphicsView):
         self._segments.clear()
         self._seg_assignments.clear()
         self._thumb_cache.clear()
+        self._conflict_ranges_data.clear()
+        self._conflict_keys.clear()
         self._selected_key = None
         self._rebuild(session, detection_run_id)
 
     def clear(self) -> None:
+        """Clear scene items and visual lookup dicts; preserves logical state."""
         self._scene.clear()
         self._items.clear()
         self._bar_row_y.clear()
@@ -335,16 +351,16 @@ class FilmstripStitcherWidget(QGraphicsView):
             self._rebuild(self._last_session, self._last_run_id)
 
     def set_view_mode(self, mode: str) -> None:
-        """Switch between 'detection' and 'person' view modes.
-
-        In 'detection' mode bars are grouped by camera then track.
-        In 'person' mode only assigned segments are shown, grouped by person
-        name then camera, with greedy row packing to minimise overlap rows.
-        """
+        """Switch between 'detection' and 'person' view modes."""
         if mode == self._view_mode:
             return
         self._view_mode = mode
         if self._last_session and self._last_run_id:
+            self._rebuild(self._last_session, self._last_run_id)
+
+    def refresh_person_view(self) -> None:
+        """Rebuild scene if in 'person' view mode (called after assignment changes)."""
+        if self._view_mode == "person" and self._last_session and self._last_run_id:
             self._rebuild(self._last_session, self._last_run_id)
 
     def resizeEvent(self, event) -> None:
@@ -414,19 +430,42 @@ class FilmstripStitcherWidget(QGraphicsView):
                         (span["first_frame"], span["last_frame"])
                     ]
 
-        # Dispatch to view-specific layout
+        # Estimated scene width (used for backgrounds and separators)
+        scene_w = LABEL_WIDTH + max(1.0, self._total_duration_s) * self._px_per_sec + 20.0
+
+        # Dispatch to view-specific layout, collecting decoration positions
         if self._view_mode == "person":
-            self._rebuild_by_person(session, detection_run_id, svids, cam_labels)
+            sep_ys, person_bg_sections = self._rebuild_by_person(
+                session, detection_run_id, svids, cam_labels
+            )
         else:
-            self._rebuild_by_detection(session, detection_run_id, svids, cam_labels)
+            sep_ys, person_bg_sections = self._rebuild_by_detection(
+                session, detection_run_id, svids, cam_labels
+            )
+
+        # Draw person-section backgrounds (z = -1, behind bars)
+        for y_start, y_end, pname in person_bg_sections:
+            c = person_color(pname)
+            bg = QColor(c.red(), c.green(), c.blue(), _PERSON_BG_ALPHA)
+            ri = QGraphicsRectItem(QRectF(0, y_start, scene_w, y_end - y_start))
+            ri.setBrush(QBrush(bg))
+            ri.setPen(QPen(Qt.PenStyle.NoPen))
+            ri.setZValue(-1)
+            self._scene.addItem(ri)
+
+        # Draw camera separator lines (z = 0.5, above backgrounds, below bars)
+        for sep_y, sep_style in sep_ys:
+            pen = _CAM_SEP_PEN if sep_style == "camera" else _PERSON_SEP_PEN
+            line = self._scene.addLine(0, sep_y, scene_w, sep_y, pen)
+            line.setZValue(0.5)
 
         self._scene.setSceneRect(self._scene.itemsBoundingRect())
 
-        # Restore conflict highlights
-        for key in self._conflict_keys:
+        # Restore conflict highlights from stored range data
+        for key, ranges in self._conflict_ranges_data.items():
             bar = self._items.get(key)
             if bar is not None:
-                bar.set_conflict(True)
+                bar.set_conflict_ranges(ranges)
 
         # Playhead
         scene_h = max(self._scene.sceneRect().height(), 1)
@@ -437,7 +476,7 @@ class FilmstripStitcherWidget(QGraphicsView):
         self._time_line.setZValue(20)
 
         # Load thumbnails for all bars (uses cache to avoid DB round-trips)
-        for (seg_key, bar) in list(self._items.items()):
+        for bar in list(self._items.values()):
             self._load_thumbnails(bar, session, detection_run_id)
 
     def _rebuild_by_detection(
@@ -446,15 +485,25 @@ class FilmstripStitcherWidget(QGraphicsView):
         detection_run_id: str,
         svids: list[str],
         cam_labels: dict[str, str],
-    ) -> None:
-        """Draw bars grouped by camera then track (default view)."""
+    ) -> tuple[list[tuple[float, str]], list[tuple[float, float, str]]]:
+        """Draw bars grouped by camera then track (default view).
+
+        Returns (sep_ys, person_bg_sections).  sep_ys is a list of
+        (y, style) tuples; style is 'camera' for camera boundaries.
+        """
+        sep_ys: list[tuple[float, str]] = []
         y = 0.0
+        first_cam = True
+
         for svid in svids:
+            if not first_cam:
+                sep_ys.append((y - ROW_GAP * 0.5, "camera"))
+            first_cam = False
+
             lbl = self._scene.addText(cam_labels[svid])
             lbl.setPos(0, y)
             lbl.setDefaultTextColor(_SECTION_LABEL_COLOR)
 
-            # Collect all tracks for this camera from current segment state
             track_keys = sorted(
                 {tid for (s, tid) in self._segments if s == svid}
             )
@@ -475,36 +524,42 @@ class FilmstripStitcherWidget(QGraphicsView):
             if bar is not None:
                 bar.set_assignment(name)
 
+        return sep_ys, []  # no person backgrounds in detection view
+
     def _rebuild_by_person(
         self,
         session: sqlite3.Connection,
         detection_run_id: str,
         svids: list[str],
         cam_labels: dict[str, str],
-    ) -> None:
+    ) -> tuple[list[tuple[float, str]], list[tuple[float, float, str]]]:
         """Draw only assigned segments, grouped by person name then camera.
 
-        Non-overlapping segments within a person+camera group are packed onto
-        the same row; overlapping ones use extra rows (greedy scheduling).
+        Returns (sep_ys, person_bg_sections).
         """
+        sep_ys: list[tuple[float, str]] = []
+        person_bg_sections: list[tuple[float, float, str]] = []
+
         if not self._seg_assignments:
             lbl = self._scene.addText("No assignments yet")
             lbl.setPos(LABEL_WIDTH, 0)
             lbl.setDefaultTextColor(_SECTION_LABEL_COLOR)
-            return
+            return sep_ys, person_bg_sections
 
         # Group assigned keys: person → svid → [seg_key]
         person_cam: dict[str, dict[str, list[tuple[str, int, int]]]] = defaultdict(
             lambda: defaultdict(list)
         )
-        for key, person in self._seg_assignments.items():
+        for key, pname in self._seg_assignments.items():
             svid = key[0]
-            person_cam[person][svid].append(key)
+            person_cam[pname][svid].append(key)
 
         y = 0.0
-        for person in sorted(person_cam):
+        for pname in sorted(person_cam):
+            y_person_start = y
+
             # Person header
-            person_lbl = self._scene.addText(f"▶ {person}")
+            person_lbl = self._scene.addText(f"▶ {pname}")
             font = person_lbl.font()
             font.setBold(True)
             person_lbl.setFont(font)
@@ -512,10 +567,15 @@ class FilmstripStitcherWidget(QGraphicsView):
             person_lbl.setDefaultTextColor(_PERSON_LABEL_COLOR)
             y += self._row_h
 
+            first_cam_for_person = True
             for svid in svids:
-                seg_keys = person_cam[person].get(svid)
+                seg_keys = person_cam[pname].get(svid)
                 if not seg_keys:
                     continue
+
+                if not first_cam_for_person:
+                    sep_ys.append((y - ROW_GAP * 0.5, "camera"))
+                first_cam_for_person = False
 
                 # Camera sub-label
                 cam_lbl = self._scene.addText(f"  {cam_labels[svid]}")
@@ -527,28 +587,31 @@ class FilmstripStitcherWidget(QGraphicsView):
                 for row_keys in rows:
                     for seg_key in row_keys:
                         svid_k, tid, sf = seg_key
-                        # Look up seg_last from current segment state
                         sl = next(
                             (sl_ for (sf_, sl_) in self._segments.get((svid_k, tid), [])
                              if sf_ == sf),
                             sf,
                         )
                         bar = self._draw_bar(svid_k, tid, sf, sl, y)
-                        bar.set_assignment(person)
+                        bar.set_assignment(pname)
                     y += self._row_h + TRACK_GAP
 
                 y += ROW_GAP
 
+            y_person_end = y
+            person_bg_sections.append((y_person_start, y_person_end, pname))
+
+            # Separator between person sections
+            sep_ys.append((y - PERSON_GAP * 0.5, "person"))
             y += PERSON_GAP
+
+        return sep_ys, person_bg_sections
 
     def _pack_into_rows(
         self, seg_keys: list[tuple[str, int, int]]
     ) -> list[list[tuple[str, int, int]]]:
         """Greedy interval scheduling: pack seg_keys into rows so that
-        non-overlapping segments share a row.
-
-        Returns a list of rows, each row being a list of seg_keys.
-        """
+        non-overlapping segments share a row."""
         def start_time(key: tuple[str, int, int]) -> float:
             svid, tid, sf = key
             segs = self._segments.get((svid, tid), [])
@@ -606,7 +669,11 @@ class FilmstripStitcherWidget(QGraphicsView):
         seg_key = (svid, tid, seg_first)
         is_sel = (seg_key == self._selected_key)
         bar.set_selection(None, None, is_sel)
-        bar.set_conflict(seg_key in self._conflict_keys)
+
+        # Restore conflict ranges for this bar (if any)
+        ranges = self._conflict_ranges_data.get(seg_key, [])
+        if ranges:
+            bar.set_conflict_ranges(ranges)
 
         self._scene.addItem(bar)
         self._items[seg_key] = bar
@@ -638,7 +705,6 @@ class FilmstripStitcherWidget(QGraphicsView):
         seg_key = (bar.svid, bar.tid, bar.seg_first)
         cached = self._thumb_cache.get(seg_key)
         if cached is not None:
-            # Filter to frames within current bar range (in case of split)
             relevant = {f: p for f, p in cached.items()
                         if bar.seg_first <= f <= bar.seg_last}
             if relevant:
@@ -784,13 +850,11 @@ class FilmstripStitcherWidget(QGraphicsView):
             scene_pos = self.mapToScene(event.pos())
 
             if self._drag_active:
-                # Drag-to-select: emit sub-range
                 sf = self._drag_sel_first or bar.seg_first
                 sl = self._drag_sel_last or bar.seg_last
                 sel_first = min(sf, sl)
                 sel_last = max(sf, sl)
             else:
-                # Plain click: full bar
                 sel_first = bar.seg_first
                 sel_last = bar.seg_last
 
@@ -802,7 +866,6 @@ class FilmstripStitcherWidget(QGraphicsView):
             )
             self._emit_segment_selected(bar, sel_first, sel_last, scene_pos)
 
-            # Reset drag state
             self._drag_active = False
             self._drag_bar = None
             self._drag_seg_key = None

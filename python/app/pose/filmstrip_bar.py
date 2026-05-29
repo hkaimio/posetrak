@@ -63,7 +63,9 @@ class FilmstripBarItem(QGraphicsObject):
         self._thumb_order: list[int] = []
 
         self._person_name: str | None = None
-        self._is_conflict: bool = False
+        # List of (frame_first, frame_last) ranges with conflict overlaps.
+        # Only those ranges are highlighted; the rest of the bar is unaffected.
+        self._conflict_ranges: list[tuple[int, int]] = []
 
         # Sub-range selection (None when full bar is selected or nothing selected)
         self._sel_first: int | None = None
@@ -101,8 +103,18 @@ class FilmstripBarItem(QGraphicsObject):
         self._thumb_order = sorted(thumbs.keys())
         self.update()
 
+    def set_conflict_ranges(self, ranges: list[tuple[int, int]]) -> None:
+        """Set the frame ranges within this bar that have conflict overlaps.
+
+        Only these ranges are highlighted red; the remainder of the bar is
+        unaffected.  Pass an empty list to clear all conflict highlights.
+        """
+        self._conflict_ranges = list(ranges)
+        self.update()
+
     def set_conflict(self, is_conflict: bool) -> None:
-        self._is_conflict = is_conflict
+        """Convenience: mark the whole bar or clear all conflict ranges."""
+        self._conflict_ranges = [(self.seg_first, self.seg_last)] if is_conflict else []
         self.update()
 
     def set_selection(
@@ -202,9 +214,12 @@ class FilmstripBarItem(QGraphicsObject):
                     self._person_name,
                 )
 
-        # 4. Conflict overlay
-        if self._is_conflict:
-            painter.fillRect(QRectF(0.0, 0.0, w, h), _CONFLICT_FILL)
+        # 4. Conflict overlay — drawn only over the actual conflicting frame ranges
+        for cf, cl in self._conflict_ranges:
+            x1 = self.frame_to_local_x(cf)
+            x2 = self.frame_to_local_x(cl)
+            if x2 > x1:
+                painter.fillRect(QRectF(x1, 0.0, x2 - x1, h), _CONFLICT_FILL)
 
         # 5. Sub-range selection overlay (only when both bounds are set)
         if self._sel_first is not None and self._sel_last is not None:

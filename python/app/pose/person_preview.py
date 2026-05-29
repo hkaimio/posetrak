@@ -4,7 +4,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from app.pose.colors import person_color
@@ -156,6 +156,69 @@ def draw_skeleton_on_crop(
         cv2.circle(crop_bgr, (x, y), 3, color, -1, cv2.LINE_AA)
 
     return crop_bgr
+
+
+def draw_skeleton_qt(
+    painter: QPainter,
+    kp: np.ndarray,
+    offset_x: float,
+    offset_y: float,
+    scale: float,
+) -> None:
+    """Draw skeleton keypoints and connections using Qt's QPainter.
+
+    Maps keypoints from full-frame pixel coordinates into the display surface
+    described by *offset_x*, *offset_y*, and *scale*::
+
+        display_x = (frame_x - offset_x) * scale
+        display_y = (frame_y - offset_y) * scale
+
+    This is the Qt equivalent of :func:`draw_skeleton_on_crop` and matches the
+    style used in ``SkeletonDetectionOverlay._draw_skeleton()`` (frame_view.py).
+
+    Args:
+        painter: An active QPainter targeting the destination QPixmap / widget.
+        kp: float32 array ``(N, 3)`` — ``(x, y, conf)`` in full-frame pixel coords.
+        offset_x: x coordinate of the crop's top-left corner in frame space.
+        offset_y: y coordinate of the crop's top-left corner in frame space.
+        scale: Uniform scale factor mapping crop-space pixels to display pixels.
+    """
+    if kp is None or kp.shape[0] == 0:
+        return
+
+    n_kp = kp.shape[0]
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    # Skeleton connections
+    painter.setPen(QPen(QColor(255, 255, 255, 160), 1))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    for a, b in _BODY_SKELETON:
+        if a >= n_kp or b >= n_kp:
+            continue
+        if kp[a, 2] < _CONF_MED or kp[b, 2] < _CONF_MED:
+            continue
+        xa = int((kp[a, 0] - offset_x) * scale)
+        ya = int((kp[a, 1] - offset_y) * scale)
+        xb = int((kp[b, 0] - offset_x) * scale)
+        yb = int((kp[b, 1] - offset_y) * scale)
+        painter.drawLine(xa, ya, xb, yb)
+
+    # Keypoint dots — colour-coded by confidence
+    painter.setPen(Qt.PenStyle.NoPen)
+    for i in range(n_kp):
+        conf = float(kp[i, 2])
+        if conf < 0.1:
+            continue
+        x = int((kp[i, 0] - offset_x) * scale)
+        y = int((kp[i, 1] - offset_y) * scale)
+        if conf >= _CONF_HIGH:
+            color = QColor(0, 220, 60)    # green  — high confidence
+        elif conf >= _CONF_MED:
+            color = QColor(255, 200, 0)   # yellow — medium confidence
+        else:
+            color = QColor(220, 40, 40)   # red    — low confidence
+        painter.setBrush(color)
+        painter.drawEllipse(x - 3, y - 3, 6, 6)
 
 
 # ---------------------------------------------------------------------------

@@ -13,10 +13,9 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 
-import cv2
 import numpy as np
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import QByteArray, Qt, Signal
+from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
@@ -38,7 +37,7 @@ from app.pose.filmstrip_stitcher import (
     ROW_H_MIN,
     ROW_H_MAX,
 )
-from app.pose.person_preview import draw_skeleton_on_crop
+from app.pose.person_preview import draw_skeleton_qt
 from app.setup.db_context import SyncPoint, SyncTable
 
 
@@ -133,7 +132,11 @@ class SegmentCropPanel(QWidget):
         frame_idx: int,
         person_name: str | None = None,
     ) -> None:
-        """Load and display the crop for (svid, tid, frame_idx) with skeleton overlay."""
+        """Load and display the crop for (svid, tid, frame_idx) with skeleton overlay.
+
+        The JPEG is decoded directly into a QPixmap; keypoints are then drawn
+        on top using QPainter (no OpenCV round-trip needed).
+        """
         # Fetch the closest cached crop (±3 frames for tolerance)
         row = self._conn.execute(
             "SELECT image_data, height_px, src_x, src_y, src_h "
@@ -150,21 +153,33 @@ class SegmentCropPanel(QWidget):
             self._show_empty("No crop available")
             return
 
-        buf = np.frombuffer(bytes(row["image_data"]), dtype=np.uint8)
-        crop_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-        if crop_bgr is None:
+        # Decode JPEG directly to QPixmap — no OpenCV / numpy needed for the image
+        pix = QPixmap()
+        if not pix.loadFromData(QByteArray(bytes(row["image_data"]))) or pix.isNull():
             self._show_empty("Decode failed")
             return
 
-        # Compute scale from stored JPEG height vs original crop height in frame.
-        # These are often equal (1:1 scale); the formula handles downscaled crops.
+        # src_h: height of the source crop region in original frame space.
+        # The JPEG may be downscaled; scale = jpeg_h / src_h converts from frame
+        # space to JPEG-pixel space.  After display scaling the combined factor is
+        # simply disp_h / src_h.
         src_x = float(row["src_x"] or 0.0)
         src_y = float(row["src_y"] or 0.0)
-        src_h = float(row["src_h"] or crop_bgr.shape[0])
-        jpeg_h = float(row["height_px"] or crop_bgr.shape[0])
-        scale = jpeg_h / src_h if src_h > 0 else 1.0
+        src_h = float(row["src_h"] or pix.height())
 
-        # Fetch keypoints for this exact frame (no tolerance here)
+        # Scale to fit label while keeping aspect ratio
+        label_size = self._image_label.size()
+        if label_size.width() > 4 and label_size.height() > 4:
+            pix = pix.scaled(
+                label_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+        # Uniform scale from original-frame-crop coords to displayed pixels
+        total_scale = pix.height() / src_h if src_h > 0 else 1.0
+
+        # Fetch keypoints for this exact frame and overlay with QPainter
         kp_row = self._conn.execute(
             "SELECT keypoints FROM detection_keypoints "
             "WHERE detection_run_id = ? AND shot_video_id = ? "
@@ -175,29 +190,10 @@ class SegmentCropPanel(QWidget):
         if kp_row is not None and kp_row["keypoints"]:
             kp_bytes = bytes(kp_row["keypoints"])
             n = len(kp_bytes) // (3 * 4)   # float32, 3 values per keypoint
-            kp = np.frombuffer(kp_bytes, dtype=np.float32).reshape(n, 3).copy()
-            # Transform from full-frame coordinates to JPEG-crop coordinates
-            kp[:, 0] = (kp[:, 0] - src_x) * scale
-            kp[:, 1] = (kp[:, 1] - src_y) * scale
-            draw_skeleton_on_crop(crop_bgr, kp, 0, 0)
-
-        # Convert BGR → QPixmap
-        crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-        h_img, w_img = crop_rgb.shape[:2]
-        qimg = QImage(
-            crop_rgb.data, w_img, h_img, 3 * w_img,
-            QImage.Format.Format_RGB888,
-        )
-        pix = QPixmap.fromImage(qimg)
-
-        # Scale to fit label while keeping aspect ratio
-        label_size = self._image_label.size()
-        if label_size.width() > 4 and label_size.height() > 4:
-            pix = pix.scaled(
-                label_size,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+            kp = np.frombuffer(kp_bytes, dtype=np.float32).reshape(n, 3)
+            painter = QPainter(pix)
+            draw_skeleton_qt(painter, kp, src_x, src_y, total_scale)
+            painter.end()
 
         self._image_label.setPixmap(pix)
         self._image_label.setStyleSheet("background: #1a1a1a;")

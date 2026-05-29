@@ -54,6 +54,11 @@ from posetrak.db.scale_skeleton import scale_skeleton_yaml, template_measurement
 # Constants
 # ---------------------------------------------------------------------------
 
+# Hard cap on the Y-axis maximum for all measurement graphs (cm).
+# A single DLT outlier can produce values of hundreds of cm; capping at this
+# value keeps the scale readable while still showing all realistic bone lengths.
+Y_AXIS_HARD_CAP_CM: float = 100.0
+
 MEAS_KEYS = [
     "femur", "shin", "upper_arm", "lower_arm", "torso_height", "shoulder_width",
 ]
@@ -305,8 +310,8 @@ class _MeasCard(QWidget):
         t_max = float(ts.max()) if ts.size else 1.0
         t_margin = max((t_max - t_min) * 0.01, 0.1)
 
+        vals_cm = vals_m * 100
         if ts.size > 0:
-            vals_cm = vals_m * 100
             ax.plot(ts, vals_cm, color="lightsteelblue", lw=0.7, alpha=0.7)
             smoothed = (
                 pd.Series(vals_cm).rolling(15, center=True, min_periods=1).median()
@@ -314,6 +319,19 @@ class _MeasCard(QWidget):
             ax.plot(ts, smoothed.values, color="steelblue", lw=1.5)
 
         ax.set_xlim(t_min - t_margin, t_max + t_margin)
+
+        # Y-axis: cap at Y_AXIS_HARD_CAP_CM so a single DLT outlier cannot
+        # blow up the scale.  Natural upper bound = 99th-percentile of valid
+        # data + 10 % headroom; also keep the template and new-value lines
+        # in view.  Never show less than 10 cm of range.
+        valid_cm = vals_cm[np.isfinite(vals_cm)] if ts.size > 0 else np.array([])
+        data_hi = float(np.percentile(valid_cm, 99)) * 1.1 if valid_cm.size > 0 else 0.0
+        ref_hi = max(
+            tmpl_m * 100 * 1.25 if tmpl_m else 0.0,
+            self._spin.value() * 1.25,
+        )
+        y_max = min(Y_AXIS_HARD_CAP_CM, max(data_hi, ref_hi, 10.0))
+        ax.set_ylim(0.0, y_max)
 
         if tmpl_m:
             ax.axhline(tmpl_m * 100, color="#888", lw=1, ls="--", alpha=0.8)

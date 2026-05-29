@@ -1852,12 +1852,19 @@ class PersonPanel(QWidget):
         self._delete_run_btn = QPushButton("Delete run")
         self._delete_run_btn.setEnabled(False)
         self._delete_run_btn.clicked.connect(self._delete_run)
+        self._scale_btn = QPushButton("Scale skeleton…")
+        self._scale_btn.setEnabled(False)
+        self._scale_btn.setToolTip(
+            "Measure bone lengths from inlier observations and scale the skeleton"
+        )
+        self._scale_btn.clicked.connect(self._open_scaling)
         self._info_toggle_btn = QPushButton("Info")
         self._info_toggle_btn.setCheckable(True)
         self._info_toggle_btn.setChecked(False)
         self._info_toggle_btn.setToolTip("Show / hide run info pane  (I)")
         self._info_toggle_btn.toggled.connect(self._toggle_info_pane)
         run_act_row.addStretch()
+        run_act_row.addWidget(self._scale_btn)
         run_act_row.addWidget(self._info_toggle_btn)
         run_act_row.addWidget(self._export_bvh_btn)
         run_act_row.addWidget(self._delete_run_btn)
@@ -1914,6 +1921,7 @@ class PersonPanel(QWidget):
         self._run_detail.setVisible(False)
         self._export_bvh_btn.setEnabled(False)
         self._delete_run_btn.setEnabled(False)
+        self._scale_btn.setEnabled(False)
 
         runs = self._conn.execute(
             "SELECT tr.id, tr.ran_at, s.name AS skel_name "
@@ -1947,6 +1955,7 @@ class PersonPanel(QWidget):
             self._run_detail.setVisible(False)
             self._export_bvh_btn.setEnabled(False)
             self._delete_run_btn.setEnabled(False)
+            self._scale_btn.setEnabled(False)
             if self._crop_grid is not None:
                 self._crop_grid.set_tracking_run(None)
             if self._info_pane is not None:
@@ -1986,6 +1995,7 @@ class PersonPanel(QWidget):
 
         self._export_bvh_btn.setEnabled(True)
         self._delete_run_btn.setEnabled(True)
+        self._scale_btn.setEnabled(bool(self._session_path))
 
         if self._crop_grid is not None:
             self._crop_grid.set_tracking_run(run_id)
@@ -2087,6 +2097,20 @@ class PersonPanel(QWidget):
         )
         dlg.exec()
         self._refresh_runs()
+
+    def _open_scaling(self) -> None:
+        item = self._run_list.currentItem()
+        run_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not run_id or not self._session_path:
+            return
+        from app.ui.skeleton_scaling_panel import SkeletonScalingPanel
+        dlg = SkeletonScalingPanel(
+            self._conn,
+            str(self._session_path),
+            run_id,
+            parent=self,
+        )
+        dlg.show()
 
 
 # ---------------------------------------------------------------------------

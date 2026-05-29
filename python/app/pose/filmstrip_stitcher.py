@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from app.pose.colors import person_color
 from app.pose.filmstrip_bar import FilmstripBarItem, decode_jpeg_to_pixmap, LABEL_H
 from app.pose.db_cache import read_track_spans
+from app.pose.segment_ops import split as _ops_split, merge as _ops_merge
 from app.setup.db_context import SyncTable
 
 
@@ -41,7 +42,7 @@ _PX_PER_SEC_MAX: float = 500.0
 MAX_THUMBS_PER_BAR: int = 120
 
 _PLAYHEAD_PEN = QPen(QColor(220, 40, 40), 2)
-_CAM_SEP_PEN = QPen(QColor(120, 120, 120, 100), 1, Qt.PenStyle.SolidLine)
+_CAM_SEP_PEN = QPen(QColor(120, 120, 120, 100), 2, Qt.PenStyle.SolidLine)
 _PERSON_SEP_PEN = QPen(QColor(80, 80, 80, 120), 1, Qt.PenStyle.DashLine)
 _SECTION_LABEL_COLOR = QColor(30, 30, 30)
 _PERSON_LABEL_COLOR = QColor(10, 60, 120)
@@ -227,36 +228,38 @@ class FilmstripStitcherWidget(QGraphicsView):
     def split_segment(self, svid: str, tid: int, seg_first: int, split_frame: int) -> None:
         """Split segment [seg_first, seg_last] at split_frame.
 
-        Left half [seg_first, split_frame-1] inherits the existing assignment.
-        Right half [split_frame, seg_last] is unassigned.
+        Both halves inherit the original assignment; the caller only needs to
+        overwrite the target half.  Uses segment_ops.split() so that
+        _seg_assignments is kept consistent for both halves.
         """
         key = (svid, tid)
         segs = self._segments.get(key, [])
-        for i, (sf, sl) in enumerate(segs):
-            if sf != seg_first:
-                continue
-            if not (sf < split_frame <= sl):
-                return
+        # Pre-validate and capture sl before mutating
+        sl_orig = next((sl for sf, sl in segs if sf == seg_first), None)
+        if sl_orig is None:
+            return
+        if not (seg_first < split_frame <= sl_orig):
+            return
 
-            old_key = (svid, tid, sf)
-            old_y = self._bar_row_y.get(old_key, 0.0)
-            old_bar = self._items.pop(old_key, None)
-            self._bar_row_y.pop(old_key, None)
-            if old_bar is not None:
-                self._scene.removeItem(old_bar)
+        old_key = (svid, tid, seg_first)
+        old_y = self._bar_row_y.get(old_key, 0.0)
+        old_bar = self._items.pop(old_key, None)
+        self._bar_row_y.pop(old_key, None)
+        if old_bar is not None:
+            self._scene.removeItem(old_bar)
 
-            segs[i] = (sf, split_frame - 1)
-            segs.insert(i + 1, (split_frame, sl))
+        # Mutate _segments and propagate assignment to both halves in _seg_assignments
+        _ops_split(self._segments, self._seg_assignments, svid, tid, seg_first, split_frame)
 
-            self._draw_bar(svid, tid, sf, split_frame - 1, old_y)
-            self._draw_bar(svid, tid, split_frame, sl, old_y)
+        self._draw_bar(svid, tid, seg_first, split_frame - 1, old_y)
+        self._draw_bar(svid, tid, split_frame, sl_orig, old_y)
 
-            # Restore left-half assignment
-            left_person = self._seg_assignments.get(old_key)
-            bar = self._items.get(old_key)
+        # Restore assignment colours on both new bars
+        for sf_new in (seg_first, split_frame):
+            person = self._seg_assignments.get((svid, tid, sf_new))
+            bar = self._items.get((svid, tid, sf_new))
             if bar is not None:
-                bar.set_assignment(left_person)
-            break
+                bar.set_assignment(person)
 
     def merge_segments(self, svid: str, tid: int, sf1: int, sf2: int) -> None:
         """Merge two adjacent segments where sf2 == sl1 + 1."""
@@ -281,15 +284,15 @@ class FilmstripStitcherWidget(QGraphicsView):
             if bar is not None:
                 self._scene.removeItem(bar)
 
-        segs[idx1] = (sf1, sl2)
-        del segs[idx2]
-
-        # Merge thumbnail caches
+        # Merge thumbnail caches before mutating segment list
         cache1 = self._thumb_cache.pop((svid, tid, sf1), {})
         cache2 = self._thumb_cache.pop((svid, tid, sf2), {})
         merged_cache = {**cache1, **cache2}
         if merged_cache:
             self._thumb_cache[(svid, tid, sf1)] = merged_cache
+
+        # Mutate _segments and keep sf1's assignment, remove sf2's
+        _ops_merge(self._segments, self._seg_assignments, svid, tid, sf1, sf2)
 
         self._draw_bar(svid, tid, sf1, sl2, y)
 
@@ -540,22 +543,22 @@ class FilmstripStitcherWidget(QGraphicsView):
         sep_ys: list[tuple[float, str]] = []
         person_bg_sections: list[tuple[float, float, str]] = []
 
-        if not self._seg_assignments:
-            lbl = self._scene.addText("No assignments yet")
-            lbl.setPos(LABEL_WIDTH, 0)
-            lbl.setDefaultTextColor(_SECTION_LABEL_COLOR)
-            return sep_ys, person_bg_sections
-
         # Group assigned keys: person → svid → [seg_key]
         person_cam: dict[str, dict[str, list[tuple[str, int, int]]]] = defaultdict(
             lambda: defaultdict(list)
         )
         for key, pname in self._seg_assignments.items():
-            svid = key[0]
-            person_cam[pname][svid].append(key)
+            svid_k = key[0]
+            person_cam[pname][svid_k].append(key)
 
         y = 0.0
+        first_section = True
+
         for pname in sorted(person_cam):
+            if not first_section:
+                sep_ys.append((y - PERSON_GAP * 0.5, "person"))
+                y += PERSON_GAP
+            first_section = False
             y_person_start = y
 
             # Person header
@@ -601,9 +604,64 @@ class FilmstripStitcherWidget(QGraphicsView):
             y_person_end = y
             person_bg_sections.append((y_person_start, y_person_end, pname))
 
-            # Separator between person sections
-            sep_ys.append((y - PERSON_GAP * 0.5, "person"))
-            y += PERSON_GAP
+        # ------------------------------------------------------------------
+        # Unassigned section — all segments that have no assignment entry
+        # ------------------------------------------------------------------
+        assigned_keys = set(self._seg_assignments.keys())
+        unassigned_by_cam: dict[str, list[tuple[str, int, int]]] = defaultdict(list)
+        for (svid_k, tid), segs in self._segments.items():
+            for sf, _sl in segs:
+                if (svid_k, tid, sf) not in assigned_keys:
+                    unassigned_by_cam[svid_k].append((svid_k, tid, sf))
+
+        if unassigned_by_cam:
+            if not first_section:
+                sep_ys.append((y - PERSON_GAP * 0.5, "person"))
+                y += PERSON_GAP
+            first_section = False  # noqa: F841
+
+            unassigned_lbl = self._scene.addText("▶ Unassigned")
+            font = unassigned_lbl.font()
+            font.setBold(True)
+            unassigned_lbl.setFont(font)
+            unassigned_lbl.setPos(0, y)
+            unassigned_lbl.setDefaultTextColor(_SECTION_LABEL_COLOR)
+            y += self._row_h
+
+            first_cam_for_unassigned = True
+            for svid in svids:
+                seg_keys = unassigned_by_cam.get(svid)
+                if not seg_keys:
+                    continue
+
+                if not first_cam_for_unassigned:
+                    sep_ys.append((y - ROW_GAP * 0.5, "camera"))
+                first_cam_for_unassigned = False
+
+                cam_lbl = self._scene.addText(f"  {cam_labels[svid]}")
+                cam_lbl.setPos(0, y)
+                cam_lbl.setDefaultTextColor(_SECTION_LABEL_COLOR)
+
+                rows = self._pack_into_rows(seg_keys)
+                for row_keys in rows:
+                    for seg_key in row_keys:
+                        svid_k, tid, sf = seg_key
+                        sl = next(
+                            (sl_ for (sf_, sl_) in self._segments.get((svid_k, tid), [])
+                             if sf_ == sf),
+                            sf,
+                        )
+                        bar = self._draw_bar(svid_k, tid, sf, sl, y)
+                        bar.set_assignment(None)
+                    y += self._row_h + TRACK_GAP
+
+                y += ROW_GAP
+
+        if first_section:
+            # Nothing at all — empty segments dict
+            lbl = self._scene.addText("No segments loaded")
+            lbl.setPos(LABEL_WIDTH, 0)
+            lbl.setDefaultTextColor(_SECTION_LABEL_COLOR)
 
         return sep_ys, person_bg_sections
 

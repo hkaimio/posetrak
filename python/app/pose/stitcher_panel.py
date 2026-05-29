@@ -619,17 +619,27 @@ class StitcherPanel(QWidget):
         sel_first = max(sel_first, cur_first)
         sel_last = min(sel_last, cur_last)
 
-        # Split left edge if selection starts inside the segment
+        # Split left edge if selection starts inside the segment.
+        # The widget propagates the original assignment to both halves via
+        # segment_ops.split(); we mirror that into self._assignments here.
         target_sf = seg_first
         if sel_first > cur_first:
+            orig = self._assignments.get((svid, tid, cur_first))
             self._stitcher.split_segment(svid, tid, cur_first, sel_first)
+            if orig is not None:
+                # Right half [sel_first, ...] inherits original assignment
+                self._assignments[(svid, tid, sel_first)] = orig
             target_sf = sel_first
 
-        # Split right edge if selection ends inside the segment
+        # Split right edge if selection ends inside the segment.
         spans = self._stitcher.get_spans()
         target_range = spans.get((svid, tid, target_sf))
         if target_range and sel_last < target_range[1]:
+            orig = self._assignments.get((svid, tid, target_sf))
             self._stitcher.split_segment(svid, tid, target_sf, sel_last + 1)
+            if orig is not None:
+                # Right half [sel_last+1, ...] inherits the assignment
+                self._assignments[(svid, tid, sel_last + 1)] = orig
 
         self._apply_assignment(svid, tid, target_sf, name)
         self._auto_merge(svid, tid)
@@ -638,12 +648,56 @@ class StitcherPanel(QWidget):
         self._stitcher.refresh_person_view()
 
     def _detach(self, svid: str, tid: int, seg_first: int) -> None:
-        self._assignments.pop((svid, tid, seg_first), None)
-        self._stitcher.set_segment_assignment(svid, tid, seg_first, None)
-        if self._selection and (svid, tid, seg_first) == (
-            self._selection.svid, self._selection.tid, self._selection.seg_first
+        """Remove the person assignment for the active sub-range (or full bar).
+
+        If the user dragged a sub-range selection before detaching, only that
+        portion is detached; the rest of the bar retains its original assignment.
+        Mirrors the same split logic used by _do_assign().
+        """
+        spans = self._stitcher.get_spans()
+        seg_range = spans.get((svid, tid, seg_first))
+        if seg_range is None:
+            self._emit_dirty()
+            return
+        cur_first, cur_last = seg_range
+
+        # Determine which frame range to detach
+        if (
+            self._selection is not None
+            and self._selection.svid == svid
+            and self._selection.tid == tid
+            and self._selection.seg_first == seg_first
         ):
-            pass  # selection label stays; user can re-assign
+            sel_first = self._selection.sel_first
+            sel_last = self._selection.sel_last
+        else:
+            sel_first, sel_last = cur_first, cur_last
+
+        sel_first = max(sel_first, cur_first)
+        sel_last = min(sel_last, cur_last)
+
+        # Left split: carve off [cur_first, sel_first-1]
+        target_sf = seg_first
+        if sel_first > cur_first:
+            orig = self._assignments.get((svid, tid, cur_first))
+            self._stitcher.split_segment(svid, tid, cur_first, sel_first)
+            if orig is not None:
+                self._assignments[(svid, tid, sel_first)] = orig
+            target_sf = sel_first
+
+        # Right split: carve off [sel_last+1, cur_last]
+        spans = self._stitcher.get_spans()
+        target_range = spans.get((svid, tid, target_sf))
+        if target_range is not None and sel_last < target_range[1]:
+            orig = self._assignments.get((svid, tid, target_sf))
+            self._stitcher.split_segment(svid, tid, target_sf, sel_last + 1)
+            if orig is not None:
+                self._assignments[(svid, tid, sel_last + 1)] = orig
+
+        # Detach only the target range
+        self._assignments.pop((svid, tid, target_sf), None)
+        self._stitcher.set_segment_assignment(svid, tid, target_sf, None)
+
         self._auto_merge(svid, tid)
         self._refresh_conflicts(svid)
         self._stitcher.refresh_person_view()

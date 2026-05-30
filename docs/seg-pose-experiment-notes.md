@@ -197,10 +197,24 @@ cross-person contamination is significantly reduced.
 8. **Integration architecture: Cutie pipeline as an optional quality tier.**  YOLO+RTMPose
    should remain the default detection backend (lightweight, no heavy torch/Cutie
    dependencies).  `cutie-sam2` is an opt-in tier for sessions where tracking quality during
-   contact is critical.  The primary UX for Cutie initialisation should be manual (user
-   picks an init frame and clicks on each person; SAM converts to a labeled mask) with
-   YOLO-bootstrapped init as a convenience path.  A minimal PySide6 click-on-person widget
-   is the main UI work required.
+   contact is critical.
+
+   The all-camera Phase 3 run confirmed that automatic YOLO+SAM init is unreliable: person
+   identity switching and incorrect mask boundaries were observed on 4 of 5 cameras; only
+   pixel7 (best angle, unambiguous persons at the init frame) initialised cleanly.
+   Segmentation quality is therefore gated primarily on init quality, not Cutie propagation.
+
+   The primary UX must be **manual interactive initialisation**: a PySide6 widget modelled
+   on the Cutie `interactive_demo.py` (which is already PySide6 — `gui/interactive_utils.py`,
+   `gui/reader.py`, and the canvas coordinate transform code are directly reusable).  The
+   workflow is: scrub to a clean frame → left-click to assign pixels to a person (SAM2 prompt,
+   ~200 ms) → Track Forward / Track Backward → Stop at any frame → scrub and correct →
+   re-track from the corrected frame.  Masks are stored as indexed PNG blobs in a new
+   `seg_masks` DB table.  YOLO-bootstrapped auto-init remains available as a convenience
+   shortcut but must be verified before tracking.
+
+   Pose estimation (RTMPose) runs as a separate post-step batch over the stored masks, not
+   interactively, keeping the segmentation loop fast.
 
 ## Next Steps
 
@@ -215,7 +229,11 @@ cross-person contamination is significantly reduced.
    `keypoint_obs_quality` and inflate `measurement_noise_std` per keypoint rather than
    zeroing confidence (smoother degradation, avoids the all-or-nothing problem seen here).
 4. **Scale Tommi and Roosa skeletons** — needed to run the multi-person tracker comparison.
-5. **Cutie integration into the app as an optional module** — manual init UX (click on
-   persons in init frame), optional-dependency packaging, pipeline UI changes.
+5. **Cutie interactive init widget** (`app/pose/cutie_init_widget.py`) — PySide6 widget
+   with click-to-SAM2-prompt, Track Forward/Backward/Stop, scrub-and-correct workflow.
+   Cutie worker in QThread; masks persisted to `seg_masks` DB table (indexed PNG blobs);
+   frame thumbnails from temp-file LRU cache.  Reuse `gui/interactive_utils.py`,
+   `gui/reader.py`, and coordinate transform code from the Cutie demo repo.
+   YOLO auto-init available as a shortcut; RTMPose runs as separate post-step batch.
 
 See also `segmentation-keypoint-weighting-design.md` for the detailed integration design.

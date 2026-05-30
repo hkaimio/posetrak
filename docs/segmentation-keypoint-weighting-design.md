@@ -68,26 +68,54 @@ YOLO has already detected and RTMPose has already processed.
 
 Cutie requires one labeled segmentation mask at the start of the clip (or segment).  The mask is
 a `(H, W)` uint8 image where each pixel value is 0 (background) or an object ID (1 = person 0,
-2 = person 1, …).  This init mask is generated automatically:
+2 = person 1, …).  After seeding with `processor.step(image, init_mask, objects=[1..N])`, Cutie
+propagates the masks for all subsequent frames purely from memory — no further prompts are needed.
 
-1. YOLO detects persons in the init frame → bounding boxes sorted by x-centre
-2. SAM (single-image mode) produces a silhouette mask for each bbox
-3. The per-person masks are merged into a single labeled mask
+**Primary path: manual interactive initialisation**
 
-After seeding with `processor.step(image, init_mask, objects=[1..N])`, Cutie propagates the masks
-for all subsequent frames purely from memory — no further prompts are needed.
+Automatic YOLO+SAM init (see below) proved unreliable on several cameras in the ukemi test run:
+person identity switching and incorrect mask boundaries were observed on 4 of 5 cameras.  The
+pixel7 camera (best angle, least occlusion at the init frame) was the only one that initialised
+cleanly.  Segmentation quality is therefore bottlenecked by the init frame and the init mask
+quality, not by Cutie's propagation.
 
-The natural unit of Cutie initialisation is the **tracking segment** from the stitcher.  A new
-segment always triggers re-initialisation from a fresh YOLO+SAM init mask.
+The primary UX is a PySide6 interactive widget modelled on the Cutie `interactive_demo.py`
+(already PySide6, with reusable components in `gui/`):
+
+- User scrubs to a clean init frame for the camera.
+- Left-click assigns pixels to the currently selected person; right-click removes.  SAM2
+  generates the mask from clicks interactively (~200 ms, acceptable synchronous latency).
+- "Track forward" / "Track backward" buttons start Cutie propagation in a background QThread;
+  the UI updates per-frame via a `mask_ready` signal.
+- "Stop" button pauses propagation after the current frame.  User can scrub, inspect, and click
+  to correct the mask in any already-tracked frame.  Clicking in frame M invalidates all stored
+  masks after M and re-runs Cutie from M.
+- "Run pose estimation" button fires RTMPose as a post-step batch over all stored masks —
+  separate from the interactive segmentation step.
+
+Masks are stored as indexed PNG blobs in a new `seg_masks` DB table (see §3d).  Frame thumbnails
+are served from a temp-file LRU cache (lazy decode, ~500 frames at proc resolution).
+
+**Convenience path: YOLO-bootstrapped automatic init**
+
+For non-contact segments or sessions where person identity is unambiguous:
+
+1. YOLO detects persons in the init frame → bounding boxes sorted by x-centre.
+2. SAM2 (single-image mode) produces a silhouette mask for each bbox.
+3. The per-person masks are merged into a single labeled mask.
+
+This path is available as a one-click shortcut inside the interactive widget ("Auto-init from
+YOLO") but the user should verify the result before tracking.
 
 **Re-initialisation within a segment**
 
-Cutie is robust enough that periodic forced re-init is not expected to be necessary.  If mask
-degeneration is detected (mask area falls below ~20 % of running average), a corrective re-init
-from the current YOLO bbox can be applied before the next frame.
+If mask degeneration is detected mid-clip (mask area falls below ~20 % of running average),
+a corrective re-init from the current YOLO bbox is applied before the next frame.  In practice
+this has not been needed — Cutie's memory is robust through throws and occlusions.  The
+interactive correction path (stop → click → re-track) is the preferred recovery mechanism.
 
 For multi-person scenes, all persons are tracked as separate objects within a single Cutie
-`InferenceCore` instance.  Cutie handles the multi-object assignment internally.
+`InferenceCore` instance.  Cutie handles multi-object assignment internally.
 
 ---
 
@@ -188,6 +216,30 @@ keypoint".
 Each source can carry its own inflation factor in the tracker config (see §7), allowing them to
 be tuned independently.  The C++ reader combines multiple sources per keypoint using `min()` by
 default (most pessimistic quality signal wins).
+
+### 3d. New table: `seg_masks`
+
+Stores the labeled mask for every tracked frame so that the interactive widget can restore state
+and so that reprocessing is possible without re-running Cutie.
+
+```sql
+CREATE TABLE seg_masks (
+    seg_quality_run_id TEXT    NOT NULL,
+    shot_video_id      TEXT    NOT NULL,
+    frame_idx          INTEGER NOT NULL,
+    -- Indexed PNG: uint8 per pixel, value 0=background, 1..N=person label
+    -- (label→person_name mapping from seg_quality_runs / persons_ordered).
+    -- Typical size at 1080p: 5–15 KB per frame.
+    mask_blob          BLOB    NOT NULL,
+    PRIMARY KEY (seg_quality_run_id, shot_video_id, frame_idx)
+);
+```
+
+At 3 400 frames × 5 cameras × ~10 KB ≈ 170 MB per run — acceptable for SQLite.  Masks are the
+ground truth; `keypoint_obs_quality` and detection ROIs are derived and can be recomputed.
+
+When the user re-tracks from frame M, all rows with `frame_idx > M` for that
+`(seg_quality_run_id, shot_video_id)` are deleted before the new tracking pass begins.
 
 ### 3b. Relationship to `yolo_detections`
 
@@ -388,14 +440,23 @@ Being source-agnostic, `keypoint_obs_quality` stores optical-flow scores under
 ## 9. Implementation order
 
 1. **`segmentation.py`**: SAM2 wrapper; test on `test.mp4` to verify mask quality on contact frames.
-2. **DB migration**: create `keypoint_obs_quality` table.
-3. **`pose_extraction.py`**: populate `keypoint_obs_quality` with `source='sam2'` during export.
-4. **`Observation` struct**: add `obs_quality` field; update `measurement_noise_std()`.
-5. **`session_reader.cpp`**: join `keypoint_obs_quality` and fill `obs_quality` at load time.
-6. **Tracker config**: expose `quality_inflation` and `quality_threshold` parameters.
-7. **Validation**: re-run on the ukemi session; compare `tracking_stats.csv` with and without
+2. **DB migration**: create `keypoint_obs_quality` and `seg_masks` tables.
+3. **Interactive init widget** (`app/pose/cutie_init_widget.py`):
+   - PySide6 widget: video canvas + mask overlay, scrubber, click-to-SAM2-prompt.
+   - CutieWorker QThread: forward/backward propagation with `mask_ready` signal and
+     `stop_requested` flag.
+   - FrameCache: temp-file LRU (~500 frames at proc resolution), background pre-fetch.
+   - Persist masks to `seg_masks` table; invalidate-forward on correction.
+   - "Run pose estimation" button as a post-step batch (RTMPose over stored masks).
+   - Reuse `gui/interactive_utils.py`, `gui/reader.py`, coordinate transform code from
+     the Cutie `interactive_demo.py` (already PySide6).
+4. **`pose_extraction.py`**: populate `keypoint_obs_quality` with `source='sam2'` during export.
+5. **`Observation` struct**: add `obs_quality` field; update `measurement_noise_std()`.
+6. **`session_reader.cpp`**: join `keypoint_obs_quality` and fill `obs_quality` at load time.
+7. **Tracker config**: expose `quality_inflation` and `quality_threshold` parameters.
+8. **Validation**: re-run on the ukemi session; compare `tracking_stats.csv` with and without
    quality weighting on the contact frames.
 
-Steps 1–3 (Python-only) can be prototyped without touching the C++ codebase.
-Steps 4–6 require the per-observation noise vector from `per-frame-measurement-noise-design.md`
+Steps 1–4 (Python-only) can be prototyped without touching the C++ codebase.
+Steps 5–7 require the per-observation noise vector from `per-frame-measurement-noise-design.md`
 for full effect, but the Phase A path (scalar noise modified per observation) works immediately.

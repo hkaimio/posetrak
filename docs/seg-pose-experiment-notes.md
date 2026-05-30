@@ -55,9 +55,12 @@ person) and survive the UKF's Mahalanobis gate, causing the filter to slowly dri
    keypoint falls inside the person's silhouette.  Keypoints outside the mask get inflated noise
    in the UKF update; the filter naturally down-weights them without hard rejection.
 
-3. **SAM2 preferred over SAM3 for this use case.** SAM2 has frame-to-frame memory that propagates
-   a person's segmentation identity through transient occlusions.  SAM3 adds open-vocabulary text
-   prompting but is stateless per-frame — it will fail on the same contact frames as YOLO-seg.
+3. **Cutie (XMem++) preferred for video segmentation.** Three approaches were tested
+   (SAM2VideoPredictor, per-frame SAM + YOLO BoTSORT, Cutie).  Cutie produced excellent results:
+   all three persons tracked correctly through close contact and throws, with errors only at the
+   boundary frames of deep mutual occlusions.  SAM2VideoPredictor suffered identity collapse in
+   multi-person scenes; per-frame SAM lost identity at every crossing because it has no temporal
+   memory.
 
 4. **Optical flow as a complementary signal.** Dense optical flow (RAFT or Lucas-Kanade on keypoint
    neighbourhoods) can provide predicted keypoint positions between frames.  Keypoints that deviate

@@ -34,37 +34,60 @@ unaffected by the RTMPose choice.
 
 ---
 
-## 1. Segmentation model: SAM2
+## 1. Segmentation model: Cutie (XMem++)
 
-**Why SAM2 over YOLO-seg / SAM3:**
+**Prototyping history**
 
-- SAM2 has a temporal memory bank that propagates each person's segmentation identity across
-  frames.  Once person A and person B are correctly separated in a clean frame, SAM2 can maintain
-  that separation through brief occlusions.  YOLO-seg and SAM3 are stateless per-frame and fail
-  on exactly the contact frames we care about.
-- SAM3 adds open-vocabulary text prompting but does not have the temporal memory architecture.
-- SAM2 is available in Ultralytics as `sam2.1_l.pt` (or smaller `sam2.1_b.pt`).
+Three approaches were tested on a 3-person aikido/bokken clip (3435 frames, 30 fps):
+
+| Approach | Identity through crossings | Notes |
+|---|---|---|
+| SAM2VideoPredictor (video mode) | ✗ — all masks collapse to same person | Gradual drift undetectable by IoU |
+| YOLO BoTSORT + per-frame SAM | ✗ — loses identity at crossings | No temporal memory between frames |
+| **Cutie (XMem++)** | ✓ — excellent, rare errors only at deep occlusions | Chosen approach |
+
+**Why Cutie**
+
+Cutie ([hkchengrex/Cutie](https://github.com/hkchengrex/Cutie)) is a video object segmentation
+model based on XMem++.  It maintains a compressed long-term memory store per tracked object so
+that each person's segmentation identity is preserved through the entire clip, including during
+close contact, throws, and brief mutual occlusion.  Errors were observed only at the boundary
+frames of deep occlusions — exactly where any mask-based method will struggle.
+
+Stateless per-frame models (YOLO-seg, SAM single-image mode) fail on the contact frames that
+motivated this work.  SAM2VideoPredictor showed identity collapse in multi-person scenes.
 
 **Relationship to YOLO tracking**
 
 YOLO remains the **primary person tracker** throughout the pipeline — nothing changes there.  The
 stitcher assigns YOLO track IDs to persons and produces contiguous *tracking segments* (time
-ranges).  SAM2's sole responsibility is providing a per-frame silhouette mask for keypoints that
+ranges).  Cutie's sole responsibility is providing a per-frame silhouette mask for keypoints that
 YOLO has already detected and RTMPose has already processed.
 
-**Initialisation and re-initialisation**
+**Initialisation**
 
-The natural unit of SAM2 initialisation is the **tracking segment** from the stitcher.  SAM2 is
-initialised from the YOLO bounding box at the start of each segment and tracks forward until the
-segment ends.  Gaps and re-entries are already managed by the stitcher, so a new segment always
-triggers a SAM2 re-init from the fresh YOLO bbox — no extra gap-detection logic is needed.
+Cutie requires one labeled segmentation mask at the start of the clip (or segment).  The mask is
+a `(H, W)` uint8 image where each pixel value is 0 (background) or an object ID (1 = person 0,
+2 = person 1, …).  This init mask is generated automatically:
 
-Within a segment a periodic re-init every ~30–60 frames is recommended to prevent mask drift.
-An additional trigger is mask degeneration: if the SAM2 mask area falls below e.g. 20 % of the
-running-average area the tracker has probably lost the person, and a re-init from the current
-YOLO bbox is warranted before the next few frames are processed.
+1. YOLO detects persons in the init frame → bounding boxes sorted by x-centre
+2. SAM (single-image mode) produces a silhouette mask for each bbox
+3. The per-person masks are merged into a single labeled mask
 
-For multi-person scenes, each person is tracked as a separate SAM2 "object" with its own memory.
+After seeding with `processor.step(image, init_mask, objects=[1..N])`, Cutie propagates the masks
+for all subsequent frames purely from memory — no further prompts are needed.
+
+The natural unit of Cutie initialisation is the **tracking segment** from the stitcher.  A new
+segment always triggers re-initialisation from a fresh YOLO+SAM init mask.
+
+**Re-initialisation within a segment**
+
+Cutie is robust enough that periodic forced re-init is not expected to be necessary.  If mask
+degeneration is detected (mask area falls below ~20 % of running average), a corrective re-init
+from the current YOLO bbox can be applied before the next frame.
+
+For multi-person scenes, all persons are tracked as separate objects within a single Cutie
+`InferenceCore` instance.  Cutie handles the multi-object assignment internally.
 
 ---
 
@@ -74,31 +97,34 @@ For multi-person scenes, each person is tracked as a separate SAM2 "object" with
 
 Responsible for:
 
-1. Loading SAM2 and running it on a video clip.
-2. For a given frame and person, returning the binary mask (or soft probability mask) at full
-   frame resolution.
+1. Loading Cutie and running it on a video clip.
+2. For a given frame and person, returning the binary mask at full frame resolution.
 3. Given a set of keypoints `(N, 2)` and a mask `(H, W)`, returning a per-keypoint
    `in_mask_score` vector of shape `(N,)` with values in `[0, 1]`.
+
+The existing `SAM2Segmentor` prototype in this file will be superseded by a `CutieSegmentor`
+once the Cutie approach is validated.  The public interface remains the same.
 
 Key functions:
 
 ```python
-class SAM2Segmentor:
-    """Tracks persons across a video clip using SAM2."""
+class CutieSegmentor:
+    """Tracks persons across a video clip using Cutie (XMem++)."""
 
-    def __init__(self, model_name: str = "sam2.1_l.pt", device: str = "cuda"):
+    def __init__(self, device: str = "cuda", max_internal_size: int = 480):
         ...
 
-    def initialize(
+    def process_video(
         self,
         video_path: str,
-        start_frame: int,
-        persons: dict[str, np.ndarray],   # person_id -> bbox xyxy at start_frame
+        persons: dict[str, tuple[int, np.ndarray]],  # person_id -> (init_frame, bbox_xyxy)
+        start_frame: int = 0,
+        end_frame: int | None = None,
     ) -> None:
-        """Prompt SAM2 with one bbox per person at start_frame."""
+        """Seed Cutie with YOLO+SAM init mask, propagate masks for all frames."""
 
-    def get_mask(self, frame_idx: int, person_id: str) -> np.ndarray:
-        """(H, W) float32 probability mask for person at frame_idx."""
+    def get_mask(self, frame_idx: int, person_id: str) -> np.ndarray | None:
+        """(H, W) bool mask for person at frame_idx, or None."""
 
     def get_keypoint_scores(
         self,
@@ -116,7 +142,7 @@ confidently labelled as "in" or "out".
 
 ### 2b. Changes to `poseanalysis.py` and `pose_extraction.py`
 
-- `VideoData` (or a new `VideoDataWithSeg` subclass) stores the SAM2 segmentor alongside the
+- `VideoData` (or a new `VideoDataWithSeg` subclass) stores the Cutie segmentor alongside the
   RTMPose results.
 - After RTMPose keypoints are extracted for person P at frame F in camera C, call
   `segmentor.get_keypoint_scores(F, P, kpts_xy)` to get `in_mask_scores` of shape `(133,)`.

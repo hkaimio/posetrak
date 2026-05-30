@@ -225,7 +225,7 @@ class SAM2Segmentor:
             conf=0.25,
             task="segment",
             mode="predict",
-            imgsz=1024,
+            imgsz=512,
             model=self._model_name,
             save=False,
             verbose=verbose,
@@ -424,7 +424,7 @@ class SAM2Segmentor:
             cap.release()
 
         overrides = dict(
-            conf=0.25, task="segment", mode="predict", imgsz=1024,
+            conf=0.25, task="segment", mode="predict", imgsz=512,
             model=self._model_name, save=False, verbose=verbose,
             device=self._device,
         )

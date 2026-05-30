@@ -310,8 +310,10 @@ def process(
         target_h = max(right.shape[0], 1)
         left = resize_to_height(overview, target_h)
         left = column_header(left, "SAM2 masks (overview)")
-
-        sep  = np.full((target_h, 3, 3), 50, dtype=np.uint8)
+        # column_header added 18 px; resize right and sep to match left
+        if right.shape[0] != left.shape[0]:
+            right = resize_to_height(right, left.shape[0])
+        sep  = np.full((left.shape[0], 3, 3), 50, dtype=np.uint8)
         comp = np.concatenate([left, sep, right], axis=1)
 
         bar_text = (

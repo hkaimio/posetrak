@@ -1,59 +1,95 @@
-"""segmentation.py — SAM2-based per-person segmentation for keypoint quality scoring.
+"""segmentation.py — Cutie-based per-person segmentation for keypoint quality scoring.
 
 This module is part of the pipeline described in
 docs/segmentation-keypoint-weighting-design.md.
 
 Overview
 --------
-``SAM2Segmentor`` wraps the Ultralytics SAM2VideoPredictor.  It accepts a video
-path and initial per-person bounding boxes, streams SAM2 through the clip, and
-returns a per-keypoint quality score (float32 in [0, 1]) for every frame.
+``CutieSegmentor`` wraps Cutie (XMem++ successor) for video object segmentation.
+It accepts a video path, a single initialization frame, and per-person bounding
+boxes (or a pre-built labeled mask for manual workflows), then propagates masks
+**bidirectionally** — forward to end_frame and backward to start_frame — so that
+the full clip is covered from a single init point.
 
-The quality score is:
+Quality scores
+--------------
+The quality score is a float32 value in ``{1.0, 0.5, 0.0, -1.0}``:
+
   1.0  — keypoint is clearly inside the person mask (after erosion)
-  0.5  — keypoint is in the eroded boundary zone (inside raw mask but outside
-          eroded mask) — uncertain; partial inflation
+  0.5  — keypoint is in the eroded boundary zone — uncertain; partial inflation
   0.0  — keypoint is outside the person mask
+ -1.0  — sentinel: no mask data available for this frame/person
 
-A score of -1.0 is the sentinel "no data available for this frame/person".
+Initialization
+--------------
+Two modes are supported:
 
-Typical usage
--------------
+**Automatic (default):**
+  YOLO detects persons in the init frame; SAM generates per-person masks from
+  those bboxes; the masks are merged into a Cutie-format labeled init mask.
+  Requires ``ultralytics`` to be installed.
+
+**Manual:**
+  The caller provides a pre-built ``(H, W)`` uint8 labeled mask directly via
+  the ``init_mask`` parameter.  Pixel value 0 = background; value *k* = the
+  *k*-th person in the ``persons`` dict (insertion order, 1-indexed).  This
+  supports the UI workflow where the user clicks on each person once — faster
+  than stitching and eliminates the need for YOLO or SAM at runtime.
+
+Typical usage — automatic init
+-------------------------------
 ::
 
-    from pipeline.pose.segmentation import SAM2Segmentor
+    from pipeline.pose.segmentation import CutieSegmentor
 
-    # one entry per person: person_id -> (init_frame_idx, bbox_xyxy)
     persons = {
-        "Harri": (0, np.array([554, 194, 754, 748])),
-        "Tommi": (0, np.array([783, 105, 1080, 779])),
+        "Harri": np.array([554, 194, 754, 748]),   # bbox xyxy
+        "Tommi": np.array([783, 105, 1080, 779]),
     }
 
-    seg = SAM2Segmentor(model_name="sam2.1_b.pt", device="cuda")
-    seg.process_video("path/to/video.mp4", persons)
+    seg = CutieSegmentor(device="cuda")
+    seg.process_video(
+        "path/to/video.mp4",
+        init_frame=270,
+        persons=persons,
+    )
 
-    # After processing, query any frame
-    scores = seg.get_keypoint_scores(42, "Harri", keypoints_xy)  # (133,)
+    scores = seg.get_keypoint_scores(300, "Harri", keypoints_xy)  # (133,)
 
-Re-initialisation
------------------
-SAM2 is initialised once per call to ``process_video``.  For multi-segment
-workflows, call ``process_video`` again with a different start frame and bbox.
-Scores from multiple calls are merged into the same internal store.
+Typical usage — manual init
+----------------------------
+::
 
-Limitations (prototype)
------------------------
-* Full video is processed in one streaming pass — no mid-video re-init yet.
-* Masks are binary (Ultralytics SAM2 postprocessing thresholds the logits).
-  A three-level score (1.0 / 0.5 / 0.0) approximates the probability gradient
-  at the silhouette boundary via the erosion zone.
-* Only forward propagation is supported.  RTS-style backward pass is a TODO.
+    # UI supplies a labeled uint8 (H, W) mask for frame 270
+    seg.process_video(
+        "path/to/video.mp4",
+        init_frame=270,
+        persons={"Harri": ..., "Tommi": ...},
+        init_mask=labeled_mask_from_ui,   # bypasses YOLO + SAM
+    )
+
+Cutie dependency
+----------------
+Cutie is expected at the path given by the ``CUTIE_DIR`` environment variable,
+or auto-detected relative to this project at ``../../tests/Cutie`` (i.e.
+``/home/harri/projects/tests/Cutie`` by default).  It must be a clone of
+https://github.com/hkchengrex/Cutie with ``cutie-base-mega.pth`` in
+``weights/``.  The Cutie venv (``<CUTIE_DIR>/venv/``) must have
+``ultralytics`` and ``rtmlib`` installed if automatic init is used.
+
+Legacy class
+------------
+``SAM2Segmentor`` (SAM2VideoPredictor-based) is retained at the bottom of this
+file for reference.  It is superseded by ``CutieSegmentor`` and should not be
+used in new code.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import struct
+import sys
 from pathlib import Path
 from typing import Iterator
 
@@ -64,20 +100,49 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Cutie directory resolution
+# ---------------------------------------------------------------------------
+
+def _find_cutie_dir() -> Path:
+    """Return the Cutie project directory.
+
+    Checks ``CUTIE_DIR`` env var first; falls back to the sibling
+    ``tests/Cutie`` directory next to this project's root.
+    """
+    env = os.environ.get("CUTIE_DIR")
+    if env:
+        p = Path(env)
+        if p.is_dir():
+            return p
+        raise EnvironmentError(f"CUTIE_DIR={env!r} is not a directory")
+
+    # python/pipeline/pose/segmentation.py → 3 parents → python/ → 1 more → project root
+    # project root's parent → tests/Cutie
+    project_root = Path(__file__).parents[3]
+    candidate = project_root.parent / "tests" / "Cutie"
+    if candidate.is_dir():
+        return candidate
+
+    raise EnvironmentError(
+        "Cannot find Cutie directory.  Set the CUTIE_DIR environment variable "
+        "to the path of a Cutie clone (https://github.com/hkchengrex/Cutie)."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 #: Score returned when a keypoint is clearly inside the (eroded) person mask.
 SCORE_INSIDE: float = 1.0
 
-#: Score returned when a keypoint is in the boundary zone (inside raw mask but
-#: outside eroded mask).  Triggers partial inflation.
+#: Score returned when a keypoint is in the boundary zone.
 SCORE_BOUNDARY: float = 0.5
 
 #: Score returned when a keypoint is outside the person mask.
 SCORE_OUTSIDE: float = 0.0
 
-#: Sentinel value meaning "no SAM2 data available for this frame/person".
+#: Sentinel value meaning "no mask data available for this frame/person".
 SCORE_UNAVAILABLE: float = -1.0
 
 #: Number of RTMPose-133 wholebody keypoints stored per frame.
@@ -85,75 +150,61 @@ N_KEYPOINTS: int = 133
 
 
 # ---------------------------------------------------------------------------
-# Blob encode / decode helpers
+# Blob encode / decode helpers  (unchanged from SAM2Segmentor)
 # ---------------------------------------------------------------------------
 
 def encode_scores(scores: np.ndarray) -> bytes:
-    """Encode an (N,) float32 array as little-endian bytes for DB storage.
-
-    Args:
-        scores: 1-D float32 array of length N_KEYPOINTS.
-
-    Returns:
-        Raw bytes (N * 4 bytes, little-endian float32).
-    """
-    arr = np.asarray(scores, dtype="<f4")  # little-endian float32
-    return arr.tobytes()
+    """Encode an (N,) float32 array as little-endian bytes for DB storage."""
+    return np.asarray(scores, dtype="<f4").tobytes()
 
 
 def decode_scores(blob: bytes, n: int = N_KEYPOINTS) -> np.ndarray:
-    """Decode little-endian float32 bytes back to an (n,) float32 array.
-
-    Args:
-        blob: Raw bytes from the DB.
-        n: Expected number of values (default: N_KEYPOINTS = 133).
-
-    Returns:
-        float32 array of shape (n,).
-    """
+    """Decode little-endian float32 bytes back to an (n,) float32 array."""
     return np.frombuffer(blob, dtype="<f4").copy()
 
 
 # ---------------------------------------------------------------------------
-# Core class
+# CutieSegmentor
 # ---------------------------------------------------------------------------
 
-class SAM2Segmentor:
-    """Tracks persons through a video clip using SAM2 and scores keypoints.
+class CutieSegmentor:
+    """Tracks persons through a video clip using Cutie (XMem++) segmentation.
+
+    Bidirectional propagation from a single initialization frame:
+
+    - **Forward pass**: ``init_frame`` → ``end_frame``
+    - **Backward pass**: ``init_frame`` → ``start_frame`` (frames fed in
+      reverse temporal order to a fresh Cutie InferenceCore)
+
+    Both passes are seeded from the same labeled init mask, giving complete
+    coverage of the clip without UKF warm-up penalties at either end.
 
     Parameters
     ----------
-    model_name:
-        Ultralytics model weight filename, e.g. ``"sam2.1_b.pt"`` (fast) or
-        ``"sam2.1_l.pt"`` (accurate).  Auto-downloaded on first use.
     device:
         Torch device string: ``"cuda"``, ``"cuda:1"``, ``"cpu"``.
+    max_internal_size:
+        Cutie's internal processing resolution (shorter edge in pixels).
+        480 is a good balance; reduce to 360 for a ~30 % speedup at some
+        quality cost.
     erosion_px:
-        Pixels to erode from the binary mask before scoring keypoints.  Points
-        in the eroded zone receive ``SCORE_BOUNDARY`` rather than
-        ``SCORE_INSIDE``, signalling silhouette-boundary uncertainty.
-    reinit_interval:
-        Re-initialise SAM2 tracking from the current YOLO bbox every N frames.
-        0 disables periodic re-init (only segment-boundary re-init applies).
-        Not yet implemented — placeholder for future work.
+        Pixels to erode from the binary mask before scoring keypoints.
+        Points in the eroded zone receive ``SCORE_BOUNDARY`` rather than
+        ``SCORE_INSIDE``.  Use 3–5 px for typical 1080p footage.
     """
 
     def __init__(
         self,
-        model_name: str = "sam2.1_b.pt",
         device: str = "cuda",
+        max_internal_size: int = 480,
         erosion_px: int = 5,
-        reinit_interval: int = 60,
     ) -> None:
-        self._model_name = model_name
         self._device = device
+        self._max_internal_size = max_internal_size
         self._erosion_px = erosion_px
-        self._reinit_interval = reinit_interval
 
-        # Stores: frame_idx -> person_id -> (H, W) bool mask (raw, not eroded)
+        # frame_idx → person_id → (H, W) bool mask
         self._masks: dict[int, dict[str, np.ndarray]] = {}
-
-        # Ordered list of person IDs, matching SAM2 object indices
         self._person_ids: list[str] = []
 
     # ------------------------------------------------------------------
@@ -163,122 +214,199 @@ class SAM2Segmentor:
     def process_video(
         self,
         video_path: str | Path,
-        persons: dict[str, tuple[int, np.ndarray]],
+        init_frame: int,
+        persons: dict[str, np.ndarray],
+        init_mask: np.ndarray | None = None,
         start_frame: int = 0,
         end_frame: int | None = None,
         verbose: bool = False,
     ) -> None:
-        """Run SAM2 on a video segment and store per-frame masks.
-
-        Existing masks in ``self._masks`` are preserved; new frames are added.
-        Call this method once per tracking segment (each segment corresponds to
-        a contiguous assignment in the stitcher).
+        """Run Cutie bidirectionally and store per-frame masks.
 
         Parameters
         ----------
         video_path:
             Path to the video file.
+        init_frame:
+            Frame index (0-based) used to seed Cutie.  Should be a "clean"
+            frame where all persons are clearly visible and well-separated.
         persons:
-            Mapping from person ID to ``(init_frame_relative, bbox_xyxy)``.
-            ``init_frame_relative`` is the frame index *within the segment*
-            (usually 0) where the bbox is valid.  ``bbox_xyxy`` is an
-            ``(4,)`` float array ``[x1, y1, x2, y2]`` in original video
-            pixels.
+            Ordered mapping from person ID to ``(4,)`` xyxy bbox in video
+            pixels.  Used for automatic YOLO+SAM init when ``init_mask`` is
+            ``None``.  When ``init_mask`` is provided, the dict keys define
+            the person IDs and their order must match mask label indices
+            (first key → label 1, second key → label 2, …).
+        init_mask:
+            Optional pre-built ``(H, W)`` uint8 labeled mask for
+            ``init_frame``.  Pixel value 0 = background; value *k* = the
+            *k*-th entry in ``persons`` (1-indexed).  Pass this from the UI
+            when the user has already annotated the init frame; skips YOLO
+            and SAM entirely.
         start_frame:
-            First frame of the segment (0-based, inclusive) in video-file
-            coordinates.  Frames before this are skipped.
+            First frame of the segment (0-based, inclusive).
         end_frame:
-            Last frame of the segment (exclusive).  ``None`` means process to
-            end of video.
+            Last frame of the segment (exclusive).  ``None`` = end of video.
         verbose:
-            Print progress every 100 frames.
+            Print per-300-frame progress.
         """
-        try:
-            from ultralytics.models.sam import SAM2VideoPredictor
-        except ImportError as exc:
-            raise ImportError(
-                "ultralytics >= 8.3 is required for SAM2.  "
-                "Install with: pip install ultralytics"
-            ) from exc
+        import torch
+        from PIL import Image
+        from torchvision.transforms.functional import to_tensor
 
-        video_path = str(video_path)
+        cutie_dir = _find_cutie_dir()
+        if str(cutie_dir) not in sys.path:
+            sys.path.insert(0, str(cutie_dir))
+
+        from cutie.inference.inference_core import InferenceCore
+        from cutie.utils.get_default_model import get_default_model
+
+        video_path = Path(video_path)
         self._person_ids = list(persons.keys())
+        n = len(self._person_ids)
+        objects_list = list(range(1, n + 1))
 
-        # Build the initial bbox array in the order of self._person_ids
-        # (object index 0..N-1 in SAM2 matches this order)
-        init_bboxes = np.array(
-            [persons[pid][1] for pid in self._person_ids], dtype=float
-        )
-
-        cap = cv2.VideoCapture(video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # ── Video metadata ────────────────────────────────────────────────
+        cap = cv2.VideoCapture(str(video_path))
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
         if end_frame is None:
-            end_frame = total_frames
+            end_frame = total
 
         logger.info(
-            "SAM2: processing %s frames [%d, %d) for %d persons",
-            Path(video_path).name, start_frame, end_frame, len(self._person_ids),
+            "CutieSegmentor: %s  segment [%d, %d)  init_frame=%d  %d persons",
+            video_path.name, start_frame, end_frame, init_frame, n,
         )
 
-        overrides = dict(
-            conf=0.25,
-            task="segment",
-            mode="predict",
-            imgsz=512,
-            model=self._model_name,
-            save=False,
-            verbose=verbose,
-            device=self._device,
-        )
-        predictor = SAM2VideoPredictor(overrides=overrides)
+        # ── Load Cutie model ──────────────────────────────────────────────
+        logger.debug("Loading Cutie model…")
+        cutie_model = get_default_model()
 
-        # SAM2VideoPredictor requires the full video as source.
-        # We seek to start_frame using vid_stride trick: not straightforward,
-        # so for the prototype we stream from 0 and skip early frames.
-        # TODO: use av or ffmpeg-based seeking for large offsets.
-        abs_frame = 0
-        for result in predictor(
-            source=video_path,
-            bboxes=init_bboxes,
-            stream=True,
-        ):
-            if abs_frame < start_frame:
-                abs_frame += 1
-                continue
-            if abs_frame >= end_frame:
-                break
+        # ── Build or validate init mask ───────────────────────────────────
+        if init_mask is None:
+            logger.debug("Building init mask via YOLO + SAM…")
+            cap = cv2.VideoCapture(str(video_path))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, init_frame)
+            ret, init_frame_img = cap.read()
+            cap.release()
+            if not ret:
+                raise ValueError(
+                    f"Cannot read init frame {init_frame} from {video_path}"
+                )
+            init_mask = self._build_init_mask(
+                init_frame_img, persons, video_path
+            )
+        else:
+            init_mask = np.asarray(init_mask, dtype=np.uint8)
 
-            if verbose and abs_frame % 100 == 0:
-                logger.info("  SAM2 frame %d / %d", abs_frame, end_frame)
+        init_mask_tensor = torch.from_numpy(init_mask).to(self._device)
 
-            if result.masks is not None and len(result.masks) > 0:
-                masks_hw = result.masks.data.cpu().numpy()  # (N, H, W) bool
-                frame_masks: dict[str, np.ndarray] = {}
-                for obj_idx, pid in enumerate(self._person_ids):
-                    if obj_idx < len(masks_hw):
-                        frame_masks[pid] = masks_hw[obj_idx].astype(bool)
-                self._masks[abs_frame] = frame_masks
+        # ── Helper: frame → tensor ────────────────────────────────────────
+        def frame_to_tensor(bgr: np.ndarray) -> torch.Tensor:
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            return to_tensor(Image.fromarray(rgb)).to(self._device).float()
 
-            abs_frame += 1
+        # ── Helper: labeled mask → per-person bool masks ──────────────────
+        def store_labeled(fi: int, labeled: np.ndarray) -> None:
+            frame_masks: dict[str, np.ndarray] = {}
+            for idx, pid in enumerate(self._person_ids):
+                m = labeled == (idx + 1)
+                if m.any():
+                    frame_masks[pid] = m
+            if frame_masks:
+                self._masks[fi] = frame_masks
+
+        # ── Forward pass: init_frame → end_frame ─────────────────────────
+        logger.info("CutieSegmentor: forward pass [%d, %d)…", init_frame, end_frame)
+        fwd_processor = InferenceCore(cutie_model, cfg=cutie_model.cfg)
+        fwd_processor.max_internal_size = self._max_internal_size
+
+        cap = cv2.VideoCapture(str(video_path))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, init_frame)
+        initialized = False
+
+        with torch.inference_mode(), torch.amp.autocast(self._device):
+            for fi in range(init_frame, end_frame):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                img_t = frame_to_tensor(frame)
+
+                if not initialized:
+                    out = fwd_processor.step(img_t, init_mask_tensor,
+                                             objects=objects_list)
+                    initialized = True
+                else:
+                    out = fwd_processor.step(img_t)
+
+                labeled = fwd_processor.output_prob_to_mask(out).cpu().numpy()
+                store_labeled(fi, labeled)
+
+                if verbose and fi % 300 == 0 and fi > init_frame:
+                    logger.info("  fwd %d / %d", fi, end_frame)
+
+        cap.release()
+        logger.info("  forward pass done — %d frames stored", end_frame - init_frame)
+
+        # ── Backward pass: init_frame-1 → start_frame ────────────────────
+        if init_frame > start_frame:
+            logger.info(
+                "CutieSegmentor: backward pass [%d, %d)…",
+                start_frame, init_frame,
+            )
+            bwd_processor = InferenceCore(cutie_model, cfg=cutie_model.cfg)
+            bwd_processor.max_internal_size = self._max_internal_size
+
+            # Read the backward-range frames into memory, then iterate reversed.
+            # For typical init_frame ~ a few hundred this is small (<1 GB).
+            logger.debug(
+                "  reading %d frames for backward pass…",
+                init_frame - start_frame,
+            )
+            bwd_frames: list[tuple[int, np.ndarray]] = []
+            cap = cv2.VideoCapture(str(video_path))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            for fi in range(start_frame, init_frame):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                bwd_frames.append((fi, frame))
+            cap.release()
+
+            with torch.inference_mode(), torch.amp.autocast(self._device):
+                # Seed backward processor with init_mask (same as forward)
+                cap2 = cv2.VideoCapture(str(video_path))
+                cap2.set(cv2.CAP_PROP_POS_FRAMES, init_frame)
+                ret, init_frame_img = cap2.read()
+                cap2.release()
+
+                img_t = frame_to_tensor(init_frame_img)
+                bwd_processor.step(img_t, init_mask_tensor, objects=objects_list)
+
+                # Process backward range in reverse temporal order
+                for fi, frame in reversed(bwd_frames):
+                    img_t = frame_to_tensor(frame)
+                    out = bwd_processor.step(img_t)
+                    labeled = bwd_processor.output_prob_to_mask(out).cpu().numpy()
+                    store_labeled(fi, labeled)
+
+                    if verbose and fi % 300 == 0:
+                        logger.info("  bwd %d / %d", fi, start_frame)
+
+            logger.info(
+                "  backward pass done — %d frames stored",
+                init_frame - start_frame,
+            )
 
         logger.info(
-            "SAM2: stored masks for %d frames", len(self._masks)
+            "CutieSegmentor: total masks stored: %d frames", len(self._masks)
         )
+
+    # ------------------------------------------------------------------
 
     def get_mask(self, frame_idx: int, person_id: str) -> np.ndarray | None:
-        """Return the (H, W) bool mask for a person at a given frame.
+        """Return the ``(H, W)`` bool mask for a person at a given frame.
 
-        Parameters
-        ----------
-        frame_idx:
-            Absolute frame index in the video file.
-        person_id:
-            Person identifier as passed to :meth:`process_video`.
-
-        Returns
-        -------
-        bool array of shape ``(H, W)``, or ``None`` if no data is available.
+        Returns ``None`` if no data is available.
         """
         frame_data = self._masks.get(frame_idx)
         if frame_data is None:
@@ -294,28 +422,22 @@ class SAM2Segmentor:
     ) -> np.ndarray:
         """Compute per-keypoint quality scores for a person at a frame.
 
-        For each keypoint, checks whether its pixel coordinate falls inside the
-        SAM2 person mask.  The mask is eroded by ``erosion_px`` pixels first to
-        flag silhouette-boundary points as uncertain.
-
         Parameters
         ----------
         frame_idx:
-            Absolute frame index.
+            Absolute frame index in the video file.
         person_id:
-            Person identifier.
+            Person identifier as passed to :meth:`process_video`.
         keypoints_xy:
-            ``(N, 2)`` float array of pixel coordinates ``[x, y]`` in the
-            original (undistorted) video frame.  Typically the 133 RTMPose
-            wholebody keypoints.
+            ``(N, 2)`` float array of pixel coordinates ``[x, y]``.
         erosion_px:
             Override the instance-level ``erosion_px``.
 
         Returns
         -------
         float32 array of shape ``(N,)``.
-        Values: ``SCORE_INSIDE`` (1.0), ``SCORE_BOUNDARY`` (0.5),
-        ``SCORE_OUTSIDE`` (0.0), or ``SCORE_UNAVAILABLE`` (-1.0).
+        Values: ``SCORE_INSIDE``, ``SCORE_BOUNDARY``, ``SCORE_OUTSIDE``,
+        or ``SCORE_UNAVAILABLE``.
         """
         erosion_px = erosion_px if erosion_px is not None else self._erosion_px
         mask = self.get_mask(frame_idx, person_id)
@@ -324,38 +446,14 @@ class SAM2Segmentor:
         if mask is None:
             return np.full(n, SCORE_UNAVAILABLE, dtype=np.float32)
 
-        h, w = mask.shape
-        scores = np.full(n, SCORE_OUTSIDE, dtype=np.float32)
-
-        # Erode the mask to detect the boundary zone
-        if erosion_px > 0:
-            kernel = cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE, (2 * erosion_px + 1, 2 * erosion_px + 1)
-            )
-            mask_eroded = cv2.erode(mask.astype(np.uint8), kernel).astype(bool)
-        else:
-            mask_eroded = mask
-
-        for i, (x, y) in enumerate(keypoints_xy):
-            xi, yi = int(round(x)), int(round(y))
-            if not (0 <= xi < w and 0 <= yi < h):
-                # Out of frame — treat as unavailable
-                scores[i] = SCORE_UNAVAILABLE
-                continue
-            if mask_eroded[yi, xi]:
-                scores[i] = SCORE_INSIDE
-            elif mask[yi, xi]:
-                scores[i] = SCORE_BOUNDARY
-            # else stays SCORE_OUTSIDE
-
-        return scores
+        return _score_keypoints(mask, keypoints_xy, erosion_px)
 
     def get_all_scores_for_frame(
         self,
         frame_idx: int,
         keypoints_per_person: dict[str, np.ndarray],
     ) -> dict[str, np.ndarray]:
-        """Convenience wrapper: score all persons in one frame.
+        """Score all persons in one frame.
 
         Parameters
         ----------
@@ -374,8 +472,230 @@ class SAM2Segmentor:
         }
 
     # ------------------------------------------------------------------
-    # Streaming generator (for memory-efficient processing)
+    # Internal helpers
     # ------------------------------------------------------------------
+
+    def _build_init_mask(
+        self,
+        frame: np.ndarray,
+        persons: dict[str, np.ndarray],
+        video_path: Path,
+    ) -> np.ndarray:
+        """Run YOLO + SAM on *frame* to produce a labeled init mask.
+
+        Persons are ordered by x-centre of their YOLO-detected bbox so that
+        left-to-right order is preserved regardless of the YOLO output order.
+        The ``persons`` dict provides a fallback: if YOLO finds fewer persons
+        than the dict has entries, the provided bboxes are used directly for
+        the missing ones.
+
+        Returns
+        -------
+        ``(H, W)`` uint8 array, values 0..N (0 = background).
+        """
+        try:
+            from ultralytics import YOLO, SAM
+        except ImportError as exc:
+            raise ImportError(
+                "ultralytics is required for automatic init.  "
+                "Install with: pip install ultralytics\n"
+                "Alternatively, pass init_mask= for manual initialisation."
+            ) from exc
+
+        h, w = frame.shape[:2]
+        n_persons = len(persons)
+
+        # YOLO detection
+        yolo = YOLO("yolo11x.pt")
+        det = yolo(frame, classes=[0], conf=0.30, verbose=False)
+
+        if det and det[0].boxes is not None and len(det[0].boxes) >= n_persons:
+            bboxes = det[0].boxes.xyxy.cpu().numpy()
+            x_centers = (bboxes[:, 0] + bboxes[:, 2]) / 2
+            bboxes = bboxes[np.argsort(x_centers)[:n_persons]]
+        else:
+            # Fall back to the bboxes supplied by the caller
+            logger.warning(
+                "YOLO found fewer than %d persons; using provided bboxes", n_persons
+            )
+            bboxes = np.array(list(persons.values()), dtype=float)
+
+        # SAM single-frame masks
+        sam = SAM("sam2.1_b.pt")
+        sam_res = sam(frame, bboxes=bboxes, imgsz=512, verbose=False)
+
+        init_mask = np.zeros((h, w), dtype=np.uint8)
+        if sam_res and sam_res[0].masks is not None:
+            masks_raw = sam_res[0].masks.data.cpu().numpy()
+            for j in range(min(n_persons, len(masks_raw))):
+                m = masks_raw[j] > 0.5
+                if m.shape != (h, w):
+                    m = cv2.resize(
+                        m.astype(np.uint8), (w, h),
+                        interpolation=cv2.INTER_NEAREST,
+                    ).astype(bool)
+                init_mask[m] = j + 1   # higher index overwrites in overlap zone
+
+        return init_mask
+
+
+# ---------------------------------------------------------------------------
+# Shared scoring helper (used by both CutieSegmentor and SAM2Segmentor)
+# ---------------------------------------------------------------------------
+
+def _score_keypoints(
+    mask: np.ndarray,
+    keypoints_xy: np.ndarray,
+    erosion_px: int,
+) -> np.ndarray:
+    """Core keypoint scoring logic (erosion-based boundary zone).
+
+    Parameters
+    ----------
+    mask: (H, W) bool
+    keypoints_xy: (N, 2) float [x, y]
+    erosion_px: erosion kernel radius in pixels
+
+    Returns
+    -------
+    float32 (N,) with values SCORE_INSIDE / SCORE_BOUNDARY / SCORE_OUTSIDE /
+    SCORE_UNAVAILABLE.
+    """
+    h, w = mask.shape
+    n = len(keypoints_xy)
+    scores = np.full(n, SCORE_OUTSIDE, dtype=np.float32)
+
+    if erosion_px > 0:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * erosion_px + 1, 2 * erosion_px + 1)
+        )
+        mask_eroded = cv2.erode(mask.astype(np.uint8), kernel).astype(bool)
+    else:
+        mask_eroded = mask
+
+    for i, (x, y) in enumerate(keypoints_xy):
+        xi, yi = int(round(x)), int(round(y))
+        if not (0 <= xi < w and 0 <= yi < h):
+            scores[i] = SCORE_UNAVAILABLE
+        elif mask_eroded[yi, xi]:
+            scores[i] = SCORE_INSIDE
+        elif mask[yi, xi]:
+            scores[i] = SCORE_BOUNDARY
+        # else stays SCORE_OUTSIDE
+
+    return scores
+
+
+# ---------------------------------------------------------------------------
+# Legacy: SAM2Segmentor (superseded by CutieSegmentor)
+# ---------------------------------------------------------------------------
+
+class SAM2Segmentor:
+    """**Deprecated** — use :class:`CutieSegmentor` instead.
+
+    SAM2VideoPredictor-based segmentor.  Retained for reference only.
+    Known issues: identity collapse in multi-person scenes; gradual drift
+    undetectable by consecutive-frame IoU.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "sam2.1_b.pt",
+        device: str = "cuda",
+        erosion_px: int = 5,
+        reinit_interval: int = 60,
+    ) -> None:
+        self._model_name = model_name
+        self._device = device
+        self._erosion_px = erosion_px
+        self._reinit_interval = reinit_interval
+        self._masks: dict[int, dict[str, np.ndarray]] = {}
+        self._person_ids: list[str] = []
+
+    def process_video(
+        self,
+        video_path: str | Path,
+        persons: dict[str, tuple[int, np.ndarray]],
+        start_frame: int = 0,
+        end_frame: int | None = None,
+        verbose: bool = False,
+    ) -> None:
+        try:
+            from ultralytics.models.sam import SAM2VideoPredictor
+        except ImportError as exc:
+            raise ImportError(
+                "ultralytics >= 8.3 is required for SAM2.  "
+                "Install with: pip install ultralytics"
+            ) from exc
+
+        video_path = str(video_path)
+        self._person_ids = list(persons.keys())
+        init_bboxes = np.array(
+            [persons[pid][1] for pid in self._person_ids], dtype=float
+        )
+
+        cap = cv2.VideoCapture(video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        if end_frame is None:
+            end_frame = total_frames
+
+        overrides = dict(
+            conf=0.25, task="segment", mode="predict", imgsz=512,
+            model=self._model_name, save=False, verbose=verbose,
+            device=self._device,
+        )
+        predictor = SAM2VideoPredictor(overrides=overrides)
+
+        abs_frame = 0
+        for result in predictor(
+            source=video_path, bboxes=init_bboxes, stream=True,
+        ):
+            if abs_frame < start_frame:
+                abs_frame += 1
+                continue
+            if abs_frame >= end_frame:
+                break
+
+            if result.masks is not None and len(result.masks) > 0:
+                masks_hw = result.masks.data.cpu().numpy()
+                frame_masks: dict[str, np.ndarray] = {}
+                for obj_idx, pid in enumerate(self._person_ids):
+                    if obj_idx < len(masks_hw):
+                        frame_masks[pid] = masks_hw[obj_idx].astype(bool)
+                self._masks[abs_frame] = frame_masks
+
+            abs_frame += 1
+
+    def get_mask(self, frame_idx: int, person_id: str) -> np.ndarray | None:
+        frame_data = self._masks.get(frame_idx)
+        if frame_data is None:
+            return None
+        return frame_data.get(person_id)
+
+    def get_keypoint_scores(
+        self,
+        frame_idx: int,
+        person_id: str,
+        keypoints_xy: np.ndarray,
+        erosion_px: int | None = None,
+    ) -> np.ndarray:
+        erosion_px = erosion_px if erosion_px is not None else self._erosion_px
+        mask = self.get_mask(frame_idx, person_id)
+        n = len(keypoints_xy)
+        if mask is None:
+            return np.full(n, SCORE_UNAVAILABLE, dtype=np.float32)
+        return _score_keypoints(mask, keypoints_xy, erosion_px)
+
+    def get_all_scores_for_frame(
+        self,
+        frame_idx: int,
+        keypoints_per_person: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        return {
+            pid: self.get_keypoint_scores(frame_idx, pid, kpts)
+            for pid, kpts in keypoints_per_person.items()
+        }
 
     def iter_scores(
         self,
@@ -386,25 +706,6 @@ class SAM2Segmentor:
         end_frame: int | None = None,
         verbose: bool = False,
     ) -> Iterator[tuple[int, dict[str, np.ndarray]]]:
-        """Stream (frame_idx, scores_per_person) without storing full masks.
-
-        Use this when memory is a concern (long videos).  Masks are computed
-        and discarded frame-by-frame; only the scores for the provided
-        keypoints are returned.
-
-        Parameters
-        ----------
-        video_path, persons, start_frame, end_frame, verbose:
-            Same as :meth:`process_video`.
-        keypoints_fn:
-            Callable ``(frame_idx) -> dict[person_id, np.ndarray]`` returning
-            ``(N, 2)`` keypoint arrays for the frame, or an empty dict if no
-            pose data is available.
-
-        Yields
-        ------
-        ``(frame_idx, {person_id: scores_array})``
-        """
         try:
             from ultralytics.models.sam import SAM2VideoPredictor
         except ImportError as exc:
@@ -439,12 +740,10 @@ class SAM2Segmentor:
                 break
 
             kpts_dict = keypoints_fn(abs_frame)
-
             scores_dict: dict[str, np.ndarray] = {}
+
             if result.masks is not None and len(result.masks) > 0:
                 masks_hw = result.masks.data.cpu().numpy()
-                h, w = masks_hw.shape[1], masks_hw.shape[2]
-
                 for obj_idx, pid in enumerate(person_ids):
                     if obj_idx >= len(masks_hw):
                         continue
@@ -452,37 +751,12 @@ class SAM2Segmentor:
                     kpts = kpts_dict.get(pid)
                     if kpts is None:
                         continue
-
-                    # Erode
-                    if self._erosion_px > 0:
-                        kernel = cv2.getStructuringElement(
-                            cv2.MORPH_ELLIPSE,
-                            (2 * self._erosion_px + 1, 2 * self._erosion_px + 1),
-                        )
-                        mask_eroded = cv2.erode(
-                            mask.astype(np.uint8), kernel
-                        ).astype(bool)
-                    else:
-                        mask_eroded = mask
-
-                    n = len(kpts)
-                    scores = np.full(n, SCORE_OUTSIDE, dtype=np.float32)
-                    for i, (x, y) in enumerate(kpts):
-                        xi, yi = int(round(x)), int(round(y))
-                        if not (0 <= xi < w and 0 <= yi < h):
-                            scores[i] = SCORE_UNAVAILABLE
-                        elif mask_eroded[yi, xi]:
-                            scores[i] = SCORE_INSIDE
-                        elif mask[yi, xi]:
-                            scores[i] = SCORE_BOUNDARY
-                    scores_dict[pid] = scores
+                    scores_dict[pid] = _score_keypoints(
+                        mask, kpts, self._erosion_px
+                    )
 
             yield abs_frame, scores_dict
             abs_frame += 1
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _erode_mask(self, mask: np.ndarray, erosion_px: int) -> np.ndarray:
         if erosion_px <= 0:

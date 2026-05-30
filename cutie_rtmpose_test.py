@@ -93,7 +93,7 @@ BODY_SKEL = [
     (5,11),(6,12),(11,12),(11,13),(13,15),(12,14),(14,16),
 ]
 
-DEFAULT_VIDEO = Path.home() / "projects/mocap_videos/20260524-bokken/test.mp4"
+DEFAULT_VIDEO = Path.home() / "projects/mocap_videos/test.mp4"
 DEFAULT_OUT   = Path.home() / "projects/mocap_videos/cutie_rtmpose.mp4"
 
 
@@ -439,6 +439,21 @@ def process(
             ret, frame = cap.read()
             if not ret:
                 break
+
+            # ── Pre-init frames: write bare overview, skip Cutie ───────────
+            if fi < init_frame_idx:
+                overview = make_overview(frame, {}, {}, person_labels,
+                                         init_frame_idx, fi)
+                blank_row = np.zeros((PERSON_ROW_H, OUTPUT_W, 3), np.uint8)
+                cv2.putText(
+                    blank_row,
+                    f"waiting for init at frame {init_frame_idx}…",
+                    (20, PERSON_ROW_H // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (80, 80, 80), 1, cv2.LINE_AA,
+                )
+                writer.write(np.concatenate([overview, blank_row], axis=0))
+                fi += 1
+                continue
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             image_tensor = to_tensor(Image.fromarray(rgb)).to(device).float()

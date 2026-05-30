@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from PySide6.QtCore import QByteArray, Qt, Signal
-from PySide6.QtGui import QKeySequence, QPainter, QPixmap
+from PySide6.QtGui import QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
-    QShortcut,
     QSizePolicy,
     QSplitter,
     QVBoxLayout,

@@ -120,6 +120,34 @@ The relevant video frames are approx:
 
 ---
 
+## Phase 3 — Cutie ROI pipeline (May 2026)
+
+**Tool:** `python/tools/run_cutie_pose.py`
+**Status:** All-camera run in progress at time of writing.
+
+Implements the preferred architecture from Phase 2 conclusion 4: Cutie masks drive the
+detection ROI fed to RTMPose, rather than using YOLO bounding boxes.
+
+### Approach
+
+Per frame, per camera:
+1. Cutie propagates labeled per-person masks (bidirectional from SAM2-initialised seed).
+2. Tight bounding box derived from each person's mask pixels.
+3. Smart asymmetric padding: each side expanded up to `--max-padding` px, stopping before
+   any pixel belonging to another person's mask — maximises background context while
+   preventing cross-person overlap.
+4. RTMPose runs on the padded crop (batch over all persons).
+5. Resulting keypoints scored against the Cutie mask using the same erosion-based quality
+   scoring as Phase 2.
+
+All results written as a new `detection_run` (detector_model=`cutie-sam2`) plus a
+`seg_quality_run`, so the C++ tracker and existing tooling can consume them unchanged.
+Pixel-7 debug video confirms substantially improved person association; hip throws remain
+the most challenging moment for RTMPose (near-zero confidence on airborne limbs) but
+cross-person contamination is significantly reduced.
+
+---
+
 ## Conclusions
 
 1. **Pre-hoc masking does not help.** Feeding a masked crop to the pose model degrades
@@ -134,32 +162,60 @@ The relevant video frames are approx:
    person-identity tracks through close contact and throws; errors appear only at the
    boundary frames of deep mutual occlusions.
 
-4. **Preferred end-to-end architecture (not yet implemented):**
+4. **Preferred end-to-end architecture (implemented in Phase 3):**
    Run Cutie first → derive tight mask-aligned bounding boxes → feed to RTMPose as
    detection ROI → score resulting keypoints against the mask.  This is better than the
-   current approach (YOLO bbox → RTMPose → score against Cutie) because the ROI fed to the
+   Phase 2 approach (YOLO bbox → RTMPose → score against Cutie) because the ROI fed to the
    pose estimator already excludes the adjacent person's body, reducing the chance of
    cross-person keypoints being generated in the first place.  Post-hoc scoring then acts
    as a second line of defence for boundary cases.
 
-5. **Optical flow as a complementary signal** (not tested).  Dense optical flow on keypoint
-   neighbourhoods could flag keypoints that deviate strongly from predicted motion as likely
-   cross-person contamination.  Simpler than full SAM2 integration and may catch cases where
-   the segmentation mask itself is uncertain.
+5. **RTMPose accuracy on airborne/rotating limbs is a residual bottleneck.**  Even with a
+   clean Cutie ROI, hip throws produce near-zero RTMPose confidence on the airborne person's
+   extremities.  This is an inherent limitation of 2D pose models on fast-rotating,
+   partially occluded bodies, not a cross-person contamination problem.  Two complementary
+   mitigations are worth exploring:
+   - *VITpose++ comparison* — different transformer architecture; may handle fast motion
+     better, and the rtmlib wrapper makes the swap straightforward.
+   - *Optical flow interpolation* — during frames where per-keypoint quality is low,
+     propagate the last reliable keypoint position using sparse Lucas-Kanade flow on the
+     Cutie mask region around that joint, with proportionally inflated measurement noise.
+     Simpler than a full new model and likely captures the residual motion well enough for
+     the 2–5 frames a throw lasts.
 
-6. **The UKF infrastructure is ready for per-observation noise.** The correct long-term
+6. **VLM / part-detection approaches are not worth pursuing at this stage.**  Models that
+   return pixel coordinates (Grounding DINO + SAM centroid, etc.) lack the sub-centimetre
+   precision required for joint-angle tracking, and rebuilding a part detector for a handful
+   of joints carries a poor effort/payoff ratio compared to the flow interpolation idea.
+
+7. **The UKF infrastructure is ready for per-observation noise.** The correct long-term
    implementation is noise inflation (not hard zeroing): inflate measurement noise for
    outside-mask keypoints proportional to their distance from the mask, rather than zeroing
    confidence.  This is a natural extension of the per-observation noise mechanism already
    proposed in `per-frame-measurement-noise-design.md`.
 
+8. **Integration architecture: Cutie pipeline as an optional quality tier.**  YOLO+RTMPose
+   should remain the default detection backend (lightweight, no heavy torch/Cutie
+   dependencies).  `cutie-sam2` is an opt-in tier for sessions where tracking quality during
+   contact is critical.  The primary UX for Cutie initialisation should be manual (user
+   picks an init frame and clicks on each person; SAM converts to a labeled mask) with
+   YOLO-bootstrapped init as a convenience path.  A minimal PySide6 click-on-person widget
+   is the main UI work required.
+
 ## Next Steps
 
-1. **RTMPose with Cutie ROI** — implement the preferred architecture (conclusion 4 above):
-   Cutie masks → tight bounding boxes → RTMPose re-detection → score against masks.
-2. **Per-observation noise inflation in C++** — modify `session_reader.cpp` to read
+1. **VITpose++ vs RTMPose comparison** — swap the pose estimator in `run_cutie_pose.py`
+   (rtmlib already wraps VITpose with the same interface) and compare keypoint quality on
+   the hip-throw frames.  Answers whether the residual failure is architecture-specific.
+2. **Optical flow interpolation in C++ tracker** — when `keypoint_obs_quality` drops sharply
+   for a joint, propagate its last reliable position forward via sparse Lucas-Kanade flow
+   (within the Cutie mask region) with inflated `measurement_noise_std`, rather than losing
+   the observation entirely.
+3. **Per-observation noise inflation in C++** — modify `session_reader.cpp` to read
    `keypoint_obs_quality` and inflate `measurement_noise_std` per keypoint rather than
    zeroing confidence (smoother degradation, avoids the all-or-nothing problem seen here).
-3. **Scale Tommi and Roosa skeletons** — needed to run the multi-person comparison.
+4. **Scale Tommi and Roosa skeletons** — needed to run the multi-person tracker comparison.
+5. **Cutie integration into the app as an optional module** — manual init UX (click on
+   persons in init frame), optional-dependency packaging, pipeline UI changes.
 
 See also `segmentation-keypoint-weighting-design.md` for the detailed integration design.

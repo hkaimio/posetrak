@@ -123,7 +123,9 @@ def finalise_to_db(
             (seq_id, person_name),
         )
 
-        obs_rows = []
+        # Keyed by (camera_instance_id, video_frame) so that adjacent segments
+        # sharing a boundary frame don't produce duplicates — later segment wins.
+        obs_by_key: dict[tuple, tuple] = {}
         for asgn in person_assignments:
             camera_instance_id = camera_by_svid.get(asgn.shot_video_id)
             if camera_instance_id is None:
@@ -145,19 +147,19 @@ def finalise_to_db(
                 timestamp_s = sync_table.frame_to_global_time(frame_idx, asgn.shot_video_id)
                 if timestamp_s is None:
                     continue
-                obs_rows.append((
+                obs_by_key[(camera_instance_id, frame_idx)] = (
                     seq_id, camera_instance_id, frame_idx,
                     timestamp_s, 0,  # person_id=0, single person per sequence
                     bytes(kp_row["keypoints"]), kp_row["noise_scale"],
-                ))
+                )
 
-        if obs_rows:
+        if obs_by_key:
             session.executemany(
                 "INSERT INTO pose_observations "
                 "(sequence_id, camera_instance_id, video_frame, timestamp_s, "
                 " person_id, kp_blob, noise_scale) "
                 "VALUES (?,?,?,?,?,?,?)",
-                obs_rows,
+                obs_by_key.values(),
             )
 
     # Persist the track→person mapping for future restore

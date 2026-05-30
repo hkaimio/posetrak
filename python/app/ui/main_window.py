@@ -154,6 +154,11 @@ class MainWindow(QMainWindow):
         open_act.triggered.connect(self._on_open_session)
         file_menu.addAction(open_act)
 
+        save_act = QAction("&Save", self)
+        save_act.setShortcut(QKeySequence.StandardKey.Save)
+        save_act.triggered.connect(self._on_save)
+        file_menu.addAction(save_act)
+
         file_menu.addSeparator()
 
         self._recent_menu = QMenu("Open &recent", self)
@@ -212,6 +217,16 @@ class MainWindow(QMainWindow):
         self.setStatusBar(bar)
         self._status_label = QLabel("No session open")
         bar.addWidget(self._status_label)
+
+    # ------------------------------------------------------------------
+    # Private — save
+    # ------------------------------------------------------------------
+
+    def _on_save(self) -> None:
+        if self._content.count() > 1:
+            current = self._content.widget(1)
+            if hasattr(current, "save_changes"):
+                current.save_changes()
 
     # ------------------------------------------------------------------
     # Private — session management

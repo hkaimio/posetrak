@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from PySide6.QtCore import QByteArray, Qt, Signal
-from PySide6.QtGui import QPainter, QPixmap
+from PySide6.QtGui import QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QShortcut,
     QSizePolicy,
     QSplitter,
     QVBoxLayout,
@@ -404,13 +405,15 @@ class StitcherPanel(QWidget):
 
         self._apply_btn = QPushButton("Apply")
         self._apply_btn.setToolTip(
-            "Finalise person assignments and create person sequences"
+            "Finalise person assignments and create person sequences (Ctrl+S)"
         )
         self._apply_btn.clicked.connect(self.apply)
         btn_row.addWidget(self._apply_btn)
         assign_layout.addLayout(btn_row)
 
         root.addWidget(assign_group)
+
+        QShortcut(QKeySequence.StandardKey.Save, self).activated.connect(self.apply)
 
     # ------------------------------------------------------------------
     # Run loading
@@ -466,22 +469,36 @@ class StitcherPanel(QWidget):
         for r in rows:
             by_track[(r["shot_video_id"], r["track_id"])].append(r)
 
-        spans = self._stitcher.get_spans()
         for (svid, tid), track_rows in by_track.items():
+            spans = self._stitcher.get_spans()
             seg_first = next(
                 (sf for (s, t, sf) in spans if s == svid and t == tid), None
             )
             if seg_first is None:
                 continue
-            cur_seg_first = seg_first
-            for i, r in enumerate(track_rows):
-                if i < len(track_rows) - 1:
-                    split_frame = track_rows[i + 1]["first_frame"]
-                    self._stitcher.split_segment(svid, tid, cur_seg_first, split_frame)
-                    self._apply_assignment(svid, tid, cur_seg_first, r["person_name"])
-                    cur_seg_first = split_frame
-                else:
-                    self._apply_assignment(svid, tid, cur_seg_first, r["person_name"])
+            cur_sf = seg_first
+            for r in track_rows:
+                row_first = int(r["first_frame"])
+                row_last = int(r["last_frame"])
+
+                # Gap before this assigned row — split to leave it unassigned
+                if row_first > cur_sf:
+                    self._stitcher.split_segment(svid, tid, cur_sf, row_first)
+                    cur_sf = row_first
+
+                # Find where the current segment ends
+                spans = self._stitcher.get_spans()
+                seg_end = spans.get((svid, tid, cur_sf))
+                if seg_end is None:
+                    cur_sf = row_last + 1
+                    continue
+
+                # Split after this row if segment extends beyond row_last
+                if row_last < seg_end[1]:
+                    self._stitcher.split_segment(svid, tid, cur_sf, row_last + 1)
+
+                self._apply_assignment(svid, tid, cur_sf, r["person_name"])
+                cur_sf = row_last + 1
 
     # ------------------------------------------------------------------
     # View mode

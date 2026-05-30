@@ -307,6 +307,34 @@ CREATE TABLE IF NOT EXISTS person_detections (
 CREATE INDEX IF NOT EXISTS idx_person_detections_run_video
     ON person_detections(detection_run_id, shot_video_id, video_frame);
 
+-- Segmentation quality run: parameters and provenance for one add_seg_quality execution.
+-- mask_dir: optional path to a directory containing per-video NPZ debug mask files.
+CREATE TABLE IF NOT EXISTS seg_quality_runs (
+    id               TEXT PRIMARY KEY,
+    detection_run_id TEXT NOT NULL,  -- references detection_runs(id)
+    created_at       TEXT NOT NULL,
+    quality_source   TEXT NOT NULL DEFAULT 'cutie',
+    erosion_px       INTEGER NOT NULL DEFAULT 5,
+    mask_dir         TEXT,
+    notes            TEXT
+);
+
+-- Per-keypoint segmentation quality scores, aligned with detection_keypoints.
+-- quality_blob: little-endian float32 array of length N_KEYPOINTS (133).
+-- Values: 1.0=inside, 0.5=boundary, 0.0=outside, -1.0=unavailable.
+-- One row per (seg_run, video, frame, track_id); mirrors detection_keypoints PK.
+CREATE TABLE IF NOT EXISTS keypoint_obs_quality (
+    seg_run_id    TEXT    NOT NULL,  -- references seg_quality_runs(id)
+    shot_video_id TEXT    NOT NULL,  -- references capture_videos(id)
+    video_frame   INTEGER NOT NULL,
+    track_id      INTEGER NOT NULL,
+    quality_blob  BLOB    NOT NULL,
+    PRIMARY KEY (seg_run_id, shot_video_id, video_frame, track_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_keypoint_obs_quality_video_frame
+    ON keypoint_obs_quality (shot_video_id, video_frame);
+
 -- Person tracks: one row per continuous track span within a detection run.
 CREATE TABLE IF NOT EXISTS person_tracks (
     id                  TEXT PRIMARY KEY,

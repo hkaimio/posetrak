@@ -193,9 +193,16 @@ class VideoCanvas(QLabel):
             self.setPixmap(canvas)
             return
 
+        import cv2
         frame = self._frame
-        if self._mask is not None and self._mask.shape[:2] == frame.shape[:2]:
-            frame = blend_mask(frame, self._mask)
+        if self._mask is not None:
+            mask = self._mask
+            if mask.shape[:2] != frame.shape[:2]:
+                mask = cv2.resize(
+                    mask, (frame.shape[1], frame.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            frame = blend_mask(frame, mask)
 
         # Scale to fit the widget while preserving aspect ratio.
         fh, fw = frame.shape[:2]
@@ -209,7 +216,6 @@ class VideoCanvas(QLabel):
         self._offset_x = (ww - dw) // 2
         self._offset_y = (wh - dh) // 2
 
-        import cv2
         display = cv2.resize(frame, (dw, dh), interpolation=cv2.INTER_LINEAR)
 
         # Convert BGR → RGB for QImage.  Use bytes() to ensure QImage owns

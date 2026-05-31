@@ -44,13 +44,14 @@ class CutieWorker(QThread):
         self,
         video_path: str,
         init_frame: int,
-        init_mask: np.ndarray,          # (H, W) uint8 labeled mask
+        init_mask: np.ndarray,          # (H, W) uint8 labeled mask at max_dim resolution
         persons_ordered: list[str],     # label 1..N → person name (for logging)
         first_frame: int,               # inclusive track range start
         last_frame: int,                # inclusive track range end
         direction: str,                 # "forward" or "backward"
         device: str = "cuda",
         max_internal_size: int = 480,
+        max_dim: int = 1920,            # downscale video to this before Cutie; must match FrameCache
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -63,6 +64,7 @@ class CutieWorker(QThread):
         self._direction = direction
         self._device = device
         self._max_internal_size = max_internal_size
+        self._max_dim = max_dim
         self._stop_requested = False
 
     def stop(self) -> None:
@@ -109,10 +111,15 @@ class CutieWorker(QThread):
         return proc
 
     @staticmethod
-    def _to_tensor(bgr: np.ndarray, device: str):
+    def _to_tensor(bgr: np.ndarray, device: str, max_dim: int = 0):
         import torch
         from PIL import Image
         from torchvision.transforms.functional import to_tensor
+        if max_dim > 0:
+            h, w = bgr.shape[:2]
+            if max(h, w) > max_dim:
+                scale = max_dim / max(h, w)
+                bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)))
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         return to_tensor(Image.fromarray(rgb)).to(device).float()
 
@@ -145,7 +152,7 @@ class CutieWorker(QThread):
                     ret, frame = cap.read()
                     if not ret:
                         break
-                    img_t = self._to_tensor(frame, self._device)
+                    img_t = self._to_tensor(frame, self._device, self._max_dim)
                     if not initialized:
                         out = proc.step(img_t, init_t, objects=objects)
                         initialized = True
@@ -210,7 +217,7 @@ class CutieWorker(QThread):
                 for fi, frame in reversed(bwd_frames):
                     if self._stop_requested:
                         break
-                    img_t = self._to_tensor(frame, self._device)
+                    img_t = self._to_tensor(frame, self._device, self._max_dim)
                     out = proc.step(img_t)
                     labeled = proc.output_prob_to_mask(out).cpu().numpy()
                     self.mask_ready.emit(fi, labeled)

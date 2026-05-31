@@ -585,6 +585,7 @@ class CutieInitPanel(QWidget):
             first_frame=cam["track_first"],
             last_frame=cam["track_last"],
             direction=direction,
+            max_dim=self._frame_cache._max_dim,
         )
         self._worker.mask_ready.connect(
             lambda fi, m, svid=cam["id"]: self._on_mask_ready(svid, fi, m)
@@ -634,8 +635,15 @@ class CutieInitPanel(QWidget):
         self._flush_masks()
         self._conn.commit()
         self._set_tracking_ui(False)
-        self._set_status("Tracking complete.")
-        # Refresh to show stored masks
+        # Clear stale SAM2 click state so _show_frame uses stored DB masks.
+        if self._controller:
+            self._controller.clear_all()
+        self._encoded_frame_idx = -1
+        n = self._conn.execute(
+            "SELECT COUNT(*) FROM seg_masks WHERE seg_quality_run_id=?",
+            (self._seg_init_run_id,),
+        ).fetchone()[0]
+        self._set_status(f"Tracking complete — {n} masks saved.")
         cam = self._cam_combo.currentData()
         if cam:
             self._show_frame(self._scrubber.value())

@@ -94,15 +94,21 @@ class CutieWorker(QThread):
     def _load_cutie(self):
         """Import Cutie (via sys.path) and return a loaded model."""
         import sys
-        from pathlib import Path
         from pipeline.pose.segmentation import _find_cutie_dir
         cutie_dir = _find_cutie_dir()
         if str(cutie_dir) not in sys.path:
             sys.path.insert(0, str(cutie_dir))
 
+        # get_default_model() calls hydra.initialize(), which fails if
+        # GlobalHydra is already initialised from a previous tracking pass.
+        try:
+            from hydra.core.global_hydra import GlobalHydra
+            GlobalHydra.instance().clear()
+        except Exception:
+            pass
+
         from cutie.utils.get_default_model import get_default_model
-        model = get_default_model()
-        return model
+        return get_default_model()
 
     def _new_processor(self, model):
         from cutie.inference.inference_core import InferenceCore

@@ -407,23 +407,27 @@ class CutieInitPanel(QWidget):
         self._refresh_overlay(cam, frame_idx, mask)
 
     def _on_clear_person(self) -> None:
+        """Remove live SAM2 clicks for the selected person on the current frame.
+
+        Does NOT touch stored DB masks — after clearing, the display falls back
+        to the stored mask (if any) so the user can re-draw just that person.
+        """
         if self._controller is None or self._selected_label == 0:
             return
-        cam = self._cam_combo.currentData()
-        frame_idx = self._scrubber.value()
-        mask = self._controller.clear_person(self._selected_label)
-        self._set_status(f"Cleared person {self._selected_label}")
-        self._refresh_overlay(cam, frame_idx, mask)
+        self._controller.clear_person(self._selected_label)
+        self._set_status(f"Cleared live clicks for person {self._selected_label}")
+        self._show_frame(self._scrubber.value())
 
     def _on_clear_all(self) -> None:
+        """Remove all live SAM2 clicks for the current frame.
+
+        Does NOT touch stored DB masks.
+        """
         if self._controller is None:
             return
-        cam = self._cam_combo.currentData()
-        frame_idx = self._scrubber.value()
         self._controller.clear_all()
-        self._set_status("Cleared all clicks")
-        frame = self._frame_cache.get_frame(cam["file_path"], frame_idx) if cam else None
-        self._canvas.display(frame)
+        self._set_status("Cleared all live clicks")
+        self._show_frame(self._scrubber.value())
 
     # ------------------------------------------------------------------
     # Interaction — scrubbing

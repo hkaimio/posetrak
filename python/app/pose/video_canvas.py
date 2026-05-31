@@ -106,6 +106,13 @@ class VideoCanvas(QLabel):
         self._mask: np.ndarray | None = None
         self._message: str | None = None
         self._skeleton_overlay = None   # SkeletonDetectionOverlay | None
+        # Native video resolution for the skeleton overlay.  Keypoints are stored
+        # at native resolution (4K) but the display frame from FrameCache is at
+        # max_dim=1920p.  The overlay's paint() needs the native dimensions so it
+        # can compute the correct scale factors from keypoint px → display px.
+        # 0 means "not set; fall back to display frame dimensions".
+        self._kp_frame_w: int = 0
+        self._kp_frame_h: int = 0
 
         # Transform state: image_coord = (canvas_coord - offset) / scale
         self._scale: float = 1.0
@@ -131,6 +138,17 @@ class VideoCanvas(QLabel):
         self._mask = mask_labeled
         self._message = message
         self._render()
+
+    def set_keypoint_resolution(self, w: int, h: int) -> None:
+        """Set the native video resolution used to scale keypoint overlay coordinates.
+
+        Keypoints are stored at the original video resolution (e.g. 4K) while
+        the display frame comes from FrameCache at max_dim=1920p.  Call this
+        whenever the active camera changes so the overlay uses the correct
+        scale factors.
+        """
+        self._kp_frame_w = w
+        self._kp_frame_h = h
 
     def set_skeleton_overlay(self, overlay) -> None:
         """Attach a SkeletonDetectionOverlay to be painted over every frame.
@@ -240,10 +258,13 @@ class VideoCanvas(QLabel):
         painter = QPainter(canvas)
         painter.drawPixmap(self._offset_x, self._offset_y, pixmap)
         if self._skeleton_overlay is not None:
-            fh, fw = frame.shape[:2]
+            # Use the native video resolution if set (keypoints stored at 4K);
+            # fall back to the display frame dimensions if not yet probed.
+            kp_w = self._kp_frame_w if self._kp_frame_w > 0 else fw
+            kp_h = self._kp_frame_h if self._kp_frame_h > 0 else fh
             painter.save()
             painter.translate(self._offset_x, self._offset_y)
-            self._skeleton_overlay.paint(painter, fw, fh, dw, dh)
+            self._skeleton_overlay.paint(painter, kp_w, kp_h, dw, dh)
             painter.restore()
         painter.end()
         self.setPixmap(canvas)

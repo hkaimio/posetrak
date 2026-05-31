@@ -698,6 +698,18 @@ class CutieInitPanel(QWidget):
         if self._controller:
             self._controller.clear_all()
 
+        # Probe native video resolution so the skeleton overlay scales keypoints
+        # (stored at 4K) correctly over the 1920p FrameCache display frames.
+        try:
+            _cap = cv2.VideoCapture(cam["file_path"])
+            _w = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            _h = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            _cap.release()
+            if _w > 0 and _h > 0:
+                self._canvas.set_keypoint_resolution(_w, _h)
+        except Exception:
+            pass
+
         self._scrubber.blockSignals(True)
         self._scrubber.setMinimum(cam["track_first"])
         self._scrubber.setMaximum(cam["track_last"])
@@ -1052,7 +1064,6 @@ class CutieInitPanel(QWidget):
                 first_frame=cam["track_first"],
                 last_frame=cam["track_last"],
                 pose_model=pose_model,
-                max_dim=self._frame_cache._max_dim,
                 overwrite_range=True,
             )
             self._runner.enqueue(job)

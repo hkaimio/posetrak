@@ -1,0 +1,288 @@
+"""pose_worker.py — Segmentation-driven pose extraction as a queued job.
+
+Reads Cutie seg masks from the DB per frame, derives per-person tight
+bounding boxes, runs RTMPose or VITpose via rtmlib, and writes results
+directly to the DB via DetectionBatchWriter — the same schema used by
+the YOLO-based pipeline.
+
+The worker opens its own SQLite connection so DB writes happen in the
+worker thread, avoiding the main-thread signal queue problems entirely.
+Only progress and tracking_done signals cross the thread boundary.
+"""
+from __future__ import annotations
+
+import logging
+import sqlite3
+import time
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+from PySide6.QtCore import QThread, Signal
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class PoseExtractionJob:
+    job_id: str
+    camera_label: str
+    shot_video_id: str
+    video_path: str
+    detection_run_id: str       # write into this run (created by caller before enqueue)
+    seg_quality_run_id: str     # read masks from this run
+    persons_ordered: list[str]  # index i → label i+1 = track_id
+    first_frame: int
+    last_frame: int
+    pose_model: str = "rtmpose-l-133kp"
+    overwrite_range: bool = True    # delete existing keypoints in range first
+    status: str = "pending"
+    keypoints_written: int = 0
+    error: str = ""
+
+    @property
+    def summary(self) -> str:
+        model_short = self.pose_model.split("-")[0].upper()
+        return f"🎯 {self.camera_label}  {self.first_frame}–{self.last_frame}  [{model_short}]"
+
+
+class PoseWorker(QThread):
+    """Runs pose estimation for one camera over a mask-covered frame range.
+
+    Signals
+    -------
+    progress(done, total):
+        Emitted every 50 frames.
+    tracking_done():
+        Emitted when the pass completes or is stopped.
+    error(message):
+        Emitted on unrecoverable failure.
+    """
+
+    progress      = Signal(int, int)
+    tracking_done = Signal()
+    error         = Signal(str)
+
+    def __init__(
+        self,
+        job: PoseExtractionJob,
+        db_path: str,
+        device: str = "cuda",
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._job = job
+        self._db_path = db_path
+        self._device = device
+        self._stop_requested = False
+        self._keypoints_written = 0
+
+    def get_keypoints_written(self) -> int:
+        return self._keypoints_written
+
+    def stop(self) -> None:
+        self._stop_requested = True
+
+    def run(self) -> None:
+        try:
+            self._run_pose()
+        except Exception:
+            log.exception("PoseWorker error")
+            self.error.emit("Pose extraction failed — see console for details.")
+        finally:
+            log.info("PoseWorker: emitting tracking_done  t=%.3f", time.monotonic())
+            self.tracking_done.emit()
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _run_pose(self) -> None:
+        from app.pose.backends_rtmpose import RTMPoseEstimator
+        from app.pose.db_cache import DetectionBatchWriter, mark_run_complete
+
+        job = self._job
+        t0 = time.monotonic()
+        log.info("PoseWorker: start  %s  frames %d-%d  model=%s  t=%.3f",
+                 job.camera_label, job.first_frame, job.last_frame, job.pose_model, t0)
+
+        conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
+
+        try:
+            if job.overwrite_range:
+                _delete_range(conn, job)
+
+            estimator = RTMPoseEstimator(job.pose_model, device=self._device)
+            pose_input_w = estimator.input_size[1]   # input_size is (height, width)
+
+            writer = DetectionBatchWriter(
+                conn, job.detection_run_id, job.shot_video_id, pose_input_w,
+            )
+
+            total = job.last_frame - job.first_frame + 1
+            done = 0
+            frames_with_kp = 0
+
+            cap = cv2.VideoCapture(job.video_path)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, job.first_frame)
+
+            try:
+                for frame_idx in range(job.first_frame, job.last_frame + 1):
+                    if self._stop_requested:
+                        break
+                    ret, frame_bgr = cap.read()
+                    if not ret:
+                        log.warning("PoseWorker: video read failed at frame %d", frame_idx)
+                        break
+
+                    mask = _load_mask(conn, job.seg_quality_run_id,
+                                     job.shot_video_id, frame_idx)
+                    if mask is None:
+                        done += 1
+                        continue
+
+                    # Resize mask to match frame if needed (seg stored at max_dim).
+                    fh, fw = frame_bgr.shape[:2]
+                    if mask.shape != (fh, fw):
+                        mask = cv2.resize(mask, (fw, fh), interpolation=cv2.INTER_NEAREST)
+
+                    detections = _bboxes_from_mask(mask, job.persons_ordered)
+                    if detections:
+                        results = estimator.estimate(frame_bgr, detections)
+                        writer.add_frame(frame_idx, detections, results,
+                                        job.pose_model, img=frame_bgr)
+                        self._keypoints_written += len(results)
+                        frames_with_kp += 1
+
+                    done += 1
+                    if done % 50 == 0:
+                        self.progress.emit(done, total)
+                        log.debug("PoseWorker: %d/%d frames  kp_frames=%d  t=%.3f",
+                                  done, total, frames_with_kp, time.monotonic() - t0)
+            finally:
+                cap.release()
+
+            writer.finalise()
+            # Recompute person_track spans from full person_detections — handles
+            # partial re-runs where overwrite_range covered only part of the video.
+            _update_track_spans(conn, job.detection_run_id, job.shot_video_id)
+            mark_run_complete(conn, job.detection_run_id)
+
+            log.info("PoseWorker: done  %d frames  %d kp_frames  %.2fs",
+                     done, frames_with_kp, time.monotonic() - t0)
+
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _load_mask(
+    conn: sqlite3.Connection,
+    seg_quality_run_id: str,
+    shot_video_id: str,
+    frame_idx: int,
+) -> np.ndarray | None:
+    """Return (H, W) uint8 labeled mask, or None if not stored."""
+    row = conn.execute(
+        "SELECT mask_blob FROM seg_masks "
+        "WHERE seg_quality_run_id=? AND shot_video_id=? AND frame_idx=?",
+        (seg_quality_run_id, shot_video_id, frame_idx),
+    ).fetchone()
+    if row is None:
+        return None
+    buf = np.frombuffer(bytes(row["mask_blob"]), dtype=np.uint8)
+    mask = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
+    if mask is None:
+        return None
+    if mask.ndim == 3:
+        mask = mask[:, :, 0]
+    return mask
+
+
+def _bboxes_from_mask(
+    mask: np.ndarray,
+    persons_ordered: list[str],
+) -> list:
+    """Return PersonDetection list from a labeled mask.
+
+    Uses tight pixel bboxes in centre-format (cx, cy, w, h).
+    DetectionBatchWriter._encode_crop adds the 20% margin when storing
+    person crop images, matching the YOLO-based pipeline exactly.
+    """
+    from app.pose.backends import PersonDetection
+
+    detections = []
+    for i, _name in enumerate(persons_ordered):
+        label = i + 1
+        ys, xs = np.where(mask == label)
+        if len(xs) == 0:
+            continue
+        x1, x2 = int(xs.min()), int(xs.max())
+        y1, y2 = int(ys.min()), int(ys.max())
+        w, h = x2 - x1, y2 - y1
+        if w < 4 or h < 4:
+            continue
+        cx = (x1 + x2) / 2.0
+        cy = (y1 + y2) / 2.0
+        detections.append(PersonDetection(
+            track_id=label,
+            bbox=np.array([cx, cy, float(w), float(h)], dtype=np.float32),
+            confidence=1.0,
+        ))
+    return detections
+
+
+def _delete_range(conn: sqlite3.Connection, job: PoseExtractionJob) -> None:
+    """Delete existing detection data for this camera + frame range."""
+    params = (job.detection_run_id, job.shot_video_id, job.first_frame, job.last_frame)
+    conn.execute(
+        "DELETE FROM person_detections "
+        "WHERE detection_run_id=? AND shot_video_id=? AND video_frame BETWEEN ? AND ?",
+        params,
+    )
+    conn.execute(
+        "DELETE FROM detection_keypoints "
+        "WHERE detection_run_id=? AND shot_video_id=? AND video_frame BETWEEN ? AND ?",
+        params,
+    )
+    conn.execute(
+        "DELETE FROM frame_cache_entries "
+        "WHERE detection_run_id=? AND shot_video_id=? AND frame_idx BETWEEN ? AND ?",
+        params,
+    )
+    conn.commit()
+    log.info("PoseWorker: deleted existing data  svid=%s  frames %d-%d",
+             job.shot_video_id, job.first_frame, job.last_frame)
+
+
+def _update_track_spans(
+    conn: sqlite3.Connection,
+    detection_run_id: str,
+    shot_video_id: str,
+) -> None:
+    """Recompute person_track first/last spans from person_detections.
+
+    DetectionBatchWriter.finalise() writes spans only for frames seen in
+    the current job.  For partial re-runs this overwrites the full span
+    with only the partial range.  This function corrects by querying all
+    detections for the run+camera.
+    """
+    spans = conn.execute(
+        "SELECT track_id, MIN(video_frame) AS first_f, MAX(video_frame) AS last_f "
+        "FROM person_detections "
+        "WHERE detection_run_id=? AND shot_video_id=? "
+        "GROUP BY track_id",
+        (detection_run_id, shot_video_id),
+    ).fetchall()
+    for row in spans:
+        conn.execute(
+            "UPDATE person_tracks "
+            "SET first_frame=?, last_frame=? "
+            "WHERE detection_run_id=? AND shot_video_id=? AND track_id=?",
+            (row["first_f"], row["last_f"], detection_run_id, shot_video_id, row["track_id"]),
+        )
+    conn.commit()

@@ -181,9 +181,25 @@ class CutieInitPanel(QWidget):
         self._mark_start: int = 0
         self._mark_end: int   = 0
 
+        # DB path for PoseWorker (needs its own connection for thread-safe writes)
+        _db_path = ""
+        for row in self._conn.execute("PRAGMA database_list"):
+            if row[1] == "main":
+                _db_path = row[2]
+                break
+
         # Tracking state
         from app.pose.job_queue_runner import JobQueueRunner
-        self._runner = JobQueueRunner(self)
+        self._runner = JobQueueRunner(db_path=_db_path, parent=self)
+
+        # Pose overlay
+        self._pose_detection_run_id: str | None = None
+        self._skeleton_overlay = None
+        try:
+            from app.pose.frame_view import SkeletonDetectionOverlay
+            self._skeleton_overlay = SkeletonDetectionOverlay()
+        except Exception:
+            pass
         self._runner.mask_ready.connect(self._on_batch_ready)
         self._runner.progress.connect(self._on_track_progress)
         self._runner.job_started.connect(self._on_job_started)
@@ -198,6 +214,8 @@ class CutieInitPanel(QWidget):
         self._t_job_recv_start: float = 0.0
 
         self._build_ui()
+        if self._skeleton_overlay is not None:
+            self._canvas.set_skeleton_overlay(self._skeleton_overlay)
         self._load_run()
 
     # ------------------------------------------------------------------
@@ -281,8 +299,12 @@ class CutieInitPanel(QWidget):
 
         # --- Tracking controls ---
         track_group = QGroupBox("Tracking  (seed from current mask, add to queue)")
-        track_layout = QHBoxLayout(track_group)
-        track_layout.setContentsMargins(4, 2, 4, 2)
+        track_vbox = QVBoxLayout(track_group)
+        track_vbox.setContentsMargins(4, 2, 4, 4)
+        track_vbox.setSpacing(4)
+        track_layout = QHBoxLayout()
+        track_vbox.addLayout(track_layout)
+        track_layout.setContentsMargins(0, 0, 0, 0)
 
         self._track_bwd_btn = QPushButton("◀ Queue Backward")
         self._track_bwd_btn.setToolTip(
@@ -315,6 +337,36 @@ class CutieInitPanel(QWidget):
         self._progress_bar.setTextVisible(True)
         self._progress_bar.setVisible(False)
         track_layout.addWidget(self._progress_bar)
+
+        # --- Pose extraction row ---
+        pose_row = QHBoxLayout()
+        pose_row.setContentsMargins(0, 0, 0, 0)
+
+        pose_row.addWidget(QLabel("Pose model:"))
+        self._pose_model_combo = QComboBox()
+        self._pose_model_combo.addItem("RTMPose-L 133kp", "rtmpose-l-133kp")
+        self._pose_model_combo.addItem("VITpose-L 133kp", "vitpose-l-133kp")
+        self._pose_model_combo.setToolTip("Pose estimator model for queued pose extraction")
+        pose_row.addWidget(self._pose_model_combo)
+
+        self._queue_pose_btn = QPushButton("🎯 Queue Pose")
+        self._queue_pose_btn.setToolTip(
+            "Queue pose extraction for the current camera using stored seg masks"
+        )
+        self._queue_pose_btn.clicked.connect(self._on_queue_pose_current)
+        self._queue_pose_btn.setEnabled(False)
+        pose_row.addWidget(self._queue_pose_btn)
+
+        self._queue_pose_all_btn = QPushButton("🎯 Queue Pose — All Cameras")
+        self._queue_pose_all_btn.setToolTip(
+            "Queue pose extraction for all cameras using their stored seg masks"
+        )
+        self._queue_pose_all_btn.clicked.connect(self._on_queue_pose_all)
+        self._queue_pose_all_btn.setEnabled(False)
+        pose_row.addWidget(self._queue_pose_all_btn)
+
+        pose_row.addStretch()
+        track_vbox.addLayout(pose_row)    # second row inside the group box
 
         root.addWidget(track_group)
 
@@ -536,10 +588,12 @@ class CutieInitPanel(QWidget):
         except Exception as e:
             self._sam_status_label.setText(f"SAM2 error: {e}")
 
-        # Enable track buttons if there are persons to track
+        # Enable track / pose buttons if there are persons to track
         can_track = bool(self._persons)
         self._track_fwd_btn.setEnabled(can_track)
         self._track_bwd_btn.setEnabled(can_track)
+        self._queue_pose_btn.setEnabled(can_track)
+        self._queue_pose_all_btn.setEnabled(can_track)
 
     # ------------------------------------------------------------------
     # Interaction — person selector
@@ -768,6 +822,9 @@ class CutieInitPanel(QWidget):
         else:
             mask = self._load_stored_mask(cam["id"], frame_idx)
 
+        # Update skeleton overlay before display so it paints in the same render call.
+        self._update_skeleton_overlay(cam, frame_idx)
+
         if frame is None:
             import os
             msg = (
@@ -821,6 +878,43 @@ class CutieInitPanel(QWidget):
                 buf = np.frombuffer(bytes(row["mask_blob"]), dtype=np.uint8)
                 return _decode_mask_png(buf)
         return None
+
+    def _update_skeleton_overlay(self, cam: dict, frame_idx: int) -> None:
+        """Load pose keypoints from DB and update the canvas skeleton overlay."""
+        if self._skeleton_overlay is None or self._pose_detection_run_id is None:
+            if self._skeleton_overlay is not None:
+                self._skeleton_overlay.clear()
+            return
+
+        run_id = self._pose_detection_run_id
+        svid   = cam["id"]
+
+        dets = self._conn.execute(
+            "SELECT track_id, bbox_x, bbox_y, bbox_w, bbox_h "
+            "FROM person_detections "
+            "WHERE detection_run_id=? AND shot_video_id=? AND video_frame=? "
+            "AND region_type='full_body' ORDER BY track_id",
+            (run_id, svid, frame_idx),
+        ).fetchall()
+
+        kp_dict: dict[int, np.ndarray] = {}
+        for det in dets:
+            row = self._conn.execute(
+                "SELECT keypoints FROM detection_keypoints "
+                "WHERE detection_run_id=? AND shot_video_id=? "
+                "AND video_frame=? AND track_id=? AND region_type='full_body'",
+                (run_id, svid, frame_idx, det["track_id"]),
+            ).fetchone()
+            if row:
+                kp_bytes = bytes(row["keypoints"])
+                n = len(kp_bytes) // (3 * 4)
+                kp_dict[det["track_id"]] = np.frombuffer(
+                    kp_bytes, dtype=np.float32
+                ).reshape(n, 3)
+
+        assignments = {i + 1: name for i, name in enumerate(self._persons)}
+        self._skeleton_overlay.set_detections([dict(d) for d in dets], kp_dict)
+        self._skeleton_overlay.set_assignments(assignments)
 
     def _read_run_ids(self) -> list[str]:
         """Ordered list of seg_quality_run IDs to try when reading masks.
@@ -910,6 +1004,145 @@ class CutieInitPanel(QWidget):
         self._refresh_queue_list()
         self._set_status("Queue cancelled.")
 
+    def _on_queue_pose_current(self) -> None:
+        cam = self._cam_combo.currentData()
+        if cam is None:
+            return
+        self._queue_pose_jobs([cam])
+
+    def _on_queue_pose_all(self) -> None:
+        self._queue_pose_jobs(self._cameras)
+
+    def _queue_pose_jobs(self, cameras: list[dict]) -> None:
+        """Create and enqueue PoseExtractionJobs for the given cameras."""
+        pose_model = self._pose_model_combo.currentData()
+        detection_run_id = self._resolve_or_create_detection_run(pose_model)
+        if detection_run_id is None:
+            return  # user cancelled
+
+        from app.pose.pose_worker import PoseExtractionJob
+        import uuid
+
+        queued = 0
+        for cam in cameras:
+            run_ids = self._read_run_ids()
+            if not run_ids:
+                continue
+            # Check masks exist for this camera in any relevant run.
+            placeholders = ",".join("?" * len(run_ids))
+            count = self._conn.execute(
+                f"SELECT COUNT(*) FROM seg_masks "
+                f"WHERE seg_quality_run_id IN ({placeholders}) AND shot_video_id=?",
+                [*run_ids, cam["id"]],
+            ).fetchone()[0]
+            if count == 0:
+                continue
+
+            # Prefer the interactive run; fall back to original batch run.
+            seg_run_id = run_ids[0]
+
+            job = PoseExtractionJob(
+                job_id=str(uuid.uuid4())[:8],
+                camera_label=cam["label"],
+                shot_video_id=cam["id"],
+                video_path=cam["file_path"],
+                detection_run_id=detection_run_id,
+                seg_quality_run_id=seg_run_id,
+                persons_ordered=list(self._persons),
+                first_frame=cam["track_first"],
+                last_frame=cam["track_last"],
+                pose_model=pose_model,
+                overwrite_range=True,
+            )
+            self._runner.enqueue(job)
+            queued += 1
+
+        if queued > 0:
+            self._refresh_queue_list()
+            self._set_status(f"Queued {queued} pose job(s) — {pose_model}.")
+        else:
+            self._set_status("No seg masks found for any camera. Run segmentation first.")
+
+    def _resolve_or_create_detection_run(self, pose_model: str) -> str | None:
+        """Return a detection_run_id to write pose results into, or None if cancelled.
+
+        Creates a new run silently if none exists; asks the user what to do
+        if a run with the same pose_model already exists for this shot.
+        """
+        from app.pose.db_cache import create_detection_run
+        from PySide6.QtWidgets import QMessageBox
+
+        row = self._conn.execute(
+            "SELECT shot_id, sync_config_id, time_start_s, time_end_s "
+            "FROM detection_runs WHERE id=?",
+            (self._run_id,),
+        ).fetchone()
+        if row is None:
+            self._set_status("Could not find parent detection run.")
+            return None
+
+        shot_id       = row["shot_id"]
+        sync_cfg_id   = row["sync_config_id"]
+        time_start_s  = row["time_start_s"]
+        time_end_s    = row["time_end_s"]
+
+        existing = self._conn.execute(
+            "SELECT id, created_at FROM detection_runs "
+            "WHERE shot_id=? AND pose_model=? AND status != 'failed' "
+            "ORDER BY created_at DESC",
+            (shot_id, pose_model),
+        ).fetchall()
+
+        if not existing:
+            try:
+                import rtmlib
+                pose_ver = getattr(rtmlib, "__version__", "")
+            except ImportError:
+                pose_ver = ""
+            return create_detection_run(
+                self._conn, shot_id, sync_cfg_id,
+                time_start_s or 0.0, time_end_s or 0.0,
+                detector_model="cutie-interactive",
+                pose_model=pose_model,
+                pose_version=pose_ver,
+            )
+
+        # Ask user: update existing or create new
+        run = existing[0]
+        created = str(run["created_at"])[:19].replace("T", " ")
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Pose Extraction")
+        msg.setText(
+            f"A <b>{pose_model}</b> detection run already exists<br>"
+            f"(created {created}).<br><br>"
+            f"<b>Update existing</b> — overwrites keypoints for the queued cameras/frames<br>"
+            f"<b>Create new</b> — adds a separate detection run for this trial"
+        )
+        update_btn = msg.addButton("Update existing", QMessageBox.ButtonRole.AcceptRole)
+        new_btn    = msg.addButton("Create new run",  QMessageBox.ButtonRole.ActionRole)
+        cancel_btn = msg.addButton("Cancel",          QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked is cancel_btn:
+            return None
+        if clicked is update_btn:
+            return run["id"]
+
+        # Create new
+        try:
+            import rtmlib
+            pose_ver = getattr(rtmlib, "__version__", "")
+        except ImportError:
+            pose_ver = ""
+        return create_detection_run(
+            self._conn, shot_id, sync_cfg_id,
+            time_start_s or 0.0, time_end_s or 0.0,
+            detector_model="cutie-interactive",
+            pose_model=pose_model,
+            pose_version=pose_ver,
+        )
+
     # ------------------------------------------------------------------
     # Runner signal handlers
     # ------------------------------------------------------------------
@@ -923,16 +1156,20 @@ class CutieInitPanel(QWidget):
         log.info("Panel: job_started  job_id=%s  t=%.3f", job_id, self._t_job_recv_start)
         for job in self._runner.jobs:
             if job.job_id == job_id:
-                arrow = "▶" if job.direction == "forward" else "◀"
-                summary = (
-                    f"{arrow} {job.direction.capitalize()}  {job.camera_label}  "
-                    f"frames {job.first_frame}–{job.last_frame}"
-                )
+                from app.pose.pose_worker import PoseExtractionJob as _PoseJob
+                if isinstance(job, _PoseJob):
+                    summary = f"🎯 Pose  {job.camera_label}  {job.first_frame}–{job.last_frame}"
+                    status_txt = f"🎯 Pose extraction {job.camera_label}…"
+                else:
+                    arrow = "▶" if job.direction == "forward" else "◀"
+                    summary = (f"{arrow} {job.direction.capitalize()}  {job.camera_label}  "
+                               f"frames {job.first_frame}–{job.last_frame}")
+                    status_txt = f"{arrow} Tracking {job.camera_label}…"
                 self._now_running_label.setText(f"Running: {summary}")
                 self._now_running_label.setStyleSheet(
                     "font-size: 10px; color: #4af; padding: 0px 0px 2px 0px;"
                 )
-                self._set_status(f"{arrow} Tracking {job.camera_label}…")
+                self._set_status(status_txt)
                 break
         self._refresh_queue_list()
 
@@ -971,23 +1208,43 @@ class CutieInitPanel(QWidget):
         self._progress_bar.setMaximum(total)
         self._progress_bar.setValue(done)
 
-    def _on_job_finished(self, job_id: str, masks_written: int) -> None:
+    def _on_job_finished(self, job_id: str, units_written: int) -> None:
         t = time.monotonic()
-        log.info("Panel: _on_job_finished  job_id=%s  masks_written=%d  "
+        log.info("Panel: _on_job_finished  job_id=%s  units_written=%d  "
                  "batches_received=%d  buffer_pending=%d  t=%.3f",
-                 job_id, masks_written, self._batch_recv_count,
+                 job_id, units_written, self._batch_recv_count,
                  len(self._db_flush_buffer), t)
-        self._flush_masks()
-        self._conn.commit()  # no-op if _flush_masks already committed everything
-        if self._controller:
-            self._controller.clear_all()
-        self._encoded_frame_idx = -1
-        cam = self._cam_combo.currentData()
-        if cam:
-            self._refresh_coverage_bar(cam)
-            self._show_frame(self._scrubber.value())
-        self._refresh_queue_list()
-        self._set_status(f"Job done — {masks_written} masks written.")
+
+        # Determine whether this was a pose job or segmentation job.
+        from app.pose.pose_worker import PoseExtractionJob as _PoseJob
+        is_pose = any(
+            isinstance(j, _PoseJob) and j.job_id == job_id
+            for j in self._runner.jobs
+        )
+
+        if is_pose:
+            # Find the detection_run_id so we can show the overlay.
+            for j in self._runner.jobs:
+                if j.job_id == job_id:
+                    self._pose_detection_run_id = j.detection_run_id
+                    break
+            self._refresh_queue_list()
+            cam = self._cam_combo.currentData()
+            if cam:
+                self._show_frame(self._scrubber.value())
+            self._set_status(f"Pose done — {units_written} frames with keypoints.")
+        else:
+            self._flush_masks()
+            self._conn.commit()  # no-op if _flush_masks already committed everything
+            if self._controller:
+                self._controller.clear_all()
+            self._encoded_frame_idx = -1
+            cam = self._cam_combo.currentData()
+            if cam:
+                self._refresh_coverage_bar(cam)
+                self._show_frame(self._scrubber.value())
+            self._refresh_queue_list()
+            self._set_status(f"Segmentation done — {units_written} masks written.")
 
     def _on_job_failed(self, job_id: str, error: str) -> None:
         self._flush_masks()
@@ -1019,15 +1276,24 @@ class CutieInitPanel(QWidget):
             "failed":    "✗",
             "cancelled": "—",
         }
+        from app.pose.pose_worker import PoseExtractionJob as _PoseJob
         pending = running = done = 0
         running_item = None
         for job in self._runner.jobs:
-            icon  = status_icons.get(job.status, "?")
-            arrow = "▶" if job.direction == "forward" else "◀"
-            extra = f"  ({job.masks_written} masks)" if job.status == "done" else ""
-            if job.status == "failed":
-                extra = f"  {job.error[:24]}"
-            text = f"{icon} {arrow} {job.camera_label}  {job.first_frame}–{job.last_frame}{extra}"
+            icon = status_icons.get(job.status, "?")
+            if isinstance(job, _PoseJob):
+                model_short = job.pose_model.split("-")[0].upper()
+                extra = f"  ({job.keypoints_written} kp)" if job.status == "done" else ""
+                if job.status == "failed":
+                    extra = f"  {job.error[:24]}"
+                text = (f"{icon} 🎯 {job.camera_label}  "
+                        f"{job.first_frame}–{job.last_frame}  [{model_short}]{extra}")
+            else:
+                arrow = "▶" if job.direction == "forward" else "◀"
+                extra = f"  ({job.masks_written} masks)" if job.status == "done" else ""
+                if job.status == "failed":
+                    extra = f"  {job.error[:24]}"
+                text = f"{icon} {arrow} {job.camera_label}  {job.first_frame}–{job.last_frame}{extra}"
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, job.job_id)
             if job.status == "running":

@@ -65,15 +65,16 @@ class JobQueueRunner(QObject):
     job_failed   = Signal(str, str)         # job_id, error_message
     queue_done   = Signal()                 # all jobs complete/cancelled
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(self, db_path: str = "", parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._jobs: list[TrackingJob] = []
+        self._db_path = db_path
+        self._jobs: list = []           # TrackingJob | PoseExtractionJob
         self._worker = None
-        self._current: TrackingJob | None = None
+        self._current = None
         self._masks_this_job: int = 0
         self._batch_count: int = 0
         self._t_job_start: float = 0.0
-        self._cutie_model = None        # cached after first job; avoids Hydra re-init
+        self._cutie_model = None        # cached after first Cutie job; avoids Hydra re-init
 
     # ------------------------------------------------------------------
     # Public API
@@ -133,7 +134,14 @@ class JobQueueRunner(QObject):
             return
         self._run_job(pending[0])
 
-    def _run_job(self, job: TrackingJob) -> None:
+    def _run_job(self, job) -> None:
+        from app.pose.pose_worker import PoseExtractionJob
+        if isinstance(job, PoseExtractionJob):
+            self._run_pose_job(job)
+        else:
+            self._run_tracking_job(job)
+
+    def _run_tracking_job(self, job: TrackingJob) -> None:
         from app.pose.cutie_worker import CutieWorker
 
         buf = np.frombuffer(job.init_mask_png, dtype=np.uint8)
@@ -177,6 +185,27 @@ class JobQueueRunner(QObject):
         )
         self._worker.start()
 
+    def _run_pose_job(self, job) -> None:
+        from app.pose.pose_worker import PoseWorker
+
+        job.status = "running"
+        self._current = job
+        self._masks_this_job = 0
+        self._batch_count = 0
+        self._t_job_start = time.monotonic()
+        log.info("JobQueueRunner: starting pose job %s  %s  frames %d-%d  model=%s  t=%.3f",
+                 job.job_id, job.camera_label, job.first_frame, job.last_frame,
+                 job.pose_model, self._t_job_start)
+        self.job_started.emit(job.job_id)
+
+        self._worker = PoseWorker(job, self._db_path)
+        self._worker.progress.connect(self.progress)
+        self._worker.tracking_done.connect(self._on_worker_finished)
+        self._worker.error.connect(
+            lambda msg, jid=job.job_id: self._on_worker_error(jid, msg)
+        )
+        self._worker.start()
+
     def _on_batch_ready(self, svid: str, batch: list) -> None:
         self._masks_this_job += len(batch)
         self._batch_count += 1
@@ -195,8 +224,16 @@ class JobQueueRunner(QObject):
         job = self._current
         if job is not None and job.status == "running":
             job.status = "done"
-            job.masks_written = self._masks_this_job
-            self.job_finished.emit(job.job_id, self._masks_this_job)
+            # For PoseWorker, get the count from the worker itself (it writes to DB
+            # directly and doesn't use batch signals).  For CutieWorker, _masks_this_job
+            # is populated by _on_batch_ready.
+            if hasattr(self._worker, "get_keypoints_written"):
+                count = self._worker.get_keypoints_written() if self._worker else 0
+                job.keypoints_written = count
+            else:
+                count = self._masks_this_job
+                job.masks_written = count
+            self.job_finished.emit(job.job_id, count)
 
         # Cache the loaded Cutie model so subsequent workers skip Hydra re-init.
         if self._worker is not None:

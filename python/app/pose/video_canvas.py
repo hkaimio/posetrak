@@ -105,6 +105,7 @@ class VideoCanvas(QLabel):
         self._frame: np.ndarray | None = None
         self._mask: np.ndarray | None = None
         self._message: str | None = None
+        self._skeleton_overlay = None   # SkeletonDetectionOverlay | None
 
         # Transform state: image_coord = (canvas_coord - offset) / scale
         self._scale: float = 1.0
@@ -129,6 +130,16 @@ class VideoCanvas(QLabel):
         self._frame = frame_bgr
         self._mask = mask_labeled
         self._message = message
+        self._render()
+
+    def set_skeleton_overlay(self, overlay) -> None:
+        """Attach a SkeletonDetectionOverlay to be painted over every frame.
+
+        Pass None to remove the overlay.  The overlay is not owned by the
+        canvas — the caller is responsible for calling set_detections() on
+        it before each display() to update the painted data.
+        """
+        self._skeleton_overlay = overlay
         self._render()
 
     def clear(self) -> None:
@@ -228,5 +239,11 @@ class VideoCanvas(QLabel):
 
         painter = QPainter(canvas)
         painter.drawPixmap(self._offset_x, self._offset_y, pixmap)
+        if self._skeleton_overlay is not None:
+            fh, fw = frame.shape[:2]
+            painter.save()
+            painter.translate(self._offset_x, self._offset_y)
+            self._skeleton_overlay.paint(painter, fw, fh, dw, dh)
+            painter.restore()
         painter.end()
         self.setPixmap(canvas)

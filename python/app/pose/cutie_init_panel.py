@@ -23,10 +23,13 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QProgressBar,
     QPushButton,
     QSizePolicy,
     QSlider,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -178,9 +181,16 @@ class CutieInitPanel(QWidget):
         self._mark_end: int   = 0
 
         # Tracking state
-        self._worker = None                 # CutieWorker QThread
+        from app.pose.job_queue_runner import JobQueueRunner
+        self._runner = JobQueueRunner(self)
+        self._runner.mask_ready.connect(self._on_mask_ready)
+        self._runner.progress.connect(self._on_track_progress)
+        self._runner.job_started.connect(self._on_job_started)
+        self._runner.job_finished.connect(self._on_job_finished)
+        self._runner.job_failed.connect(self._on_job_failed)
+        self._runner.queue_done.connect(self._on_queue_done)
+
         self._seg_init_run_id: str | None = None   # seg_quality_run created for this session
-        self._init_frame_idx: int = -1      # frame used as Cutie seed
         self._db_flush_buffer: list[tuple] = []    # buffered (svid, frame_idx, blob) rows
         self._DB_FLUSH_EVERY = 50           # write to DB every N frames
         self._canvas_update_counter: int = 0       # throttle live canvas redraws
@@ -194,9 +204,7 @@ class CutieInitPanel(QWidget):
 
     def shutdown(self) -> None:
         self._encode_timer.stop()
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.stop()
-            self._worker.wait(3000)
+        self._runner.shutdown()
         self._frame_cache.close()
 
     # ------------------------------------------------------------------
@@ -204,8 +212,14 @@ class CutieInitPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(4, 4, 4, 4)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(4)
+
+        # Left: video + controls
+        left_widget = QWidget()
+        root = QVBoxLayout(left_widget)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
 
         # --- Top bar: camera selector + frame info ---
@@ -264,28 +278,30 @@ class CutieInitPanel(QWidget):
         root.addLayout(edit_row)
 
         # --- Tracking controls ---
-        track_group = QGroupBox("Tracking  (seed from current mask, then propagate)")
+        track_group = QGroupBox("Tracking  (seed from current mask, add to queue)")
         track_layout = QHBoxLayout(track_group)
         track_layout.setContentsMargins(4, 2, 4, 2)
 
-        self._track_bwd_btn = QPushButton("◀ Track Backward")
+        self._track_bwd_btn = QPushButton("◀ Queue Backward")
         self._track_bwd_btn.setToolTip(
-            "Propagate Cutie from current frame backward to start of track range"
+            "Add a backward tracking job to the queue (current frame → mark start)"
         )
         self._track_bwd_btn.clicked.connect(self._on_track_backward)
         self._track_bwd_btn.setEnabled(False)
         track_layout.addWidget(self._track_bwd_btn)
 
-        self._track_fwd_btn = QPushButton("▶ Track Forward")
+        self._track_fwd_btn = QPushButton("▶ Queue Forward")
         self._track_fwd_btn.setToolTip(
-            "Propagate Cutie from current frame to end of track range"
+            "Add a forward tracking job to the queue (current frame → mark end)"
         )
         self._track_fwd_btn.clicked.connect(self._on_track_forward)
         self._track_fwd_btn.setEnabled(False)
         track_layout.addWidget(self._track_fwd_btn)
 
-        self._stop_btn = QPushButton("■ Stop")
-        self._stop_btn.setToolTip("Stop tracking after the current frame")
+        self._stop_btn = QPushButton("■ Stop Current")
+        self._stop_btn.setToolTip(
+            "Stop the running job after the current frame; queue continues"
+        )
         self._stop_btn.clicked.connect(self._on_stop_tracking)
         self._stop_btn.setEnabled(False)
         track_layout.addWidget(self._stop_btn)
@@ -304,6 +320,10 @@ class CutieInitPanel(QWidget):
         self._status_label = QLabel("")
         self._status_label.setStyleSheet("font-size: 10px; color: #555;")
         root.addWidget(self._status_label)
+
+        # --- Assemble outer layout ---
+        outer.addWidget(left_widget, stretch=1)
+        outer.addWidget(self._build_queue_panel(), stretch=0)
 
     def _make_scrubber_row(self) -> QVBoxLayout:
         vbox = QVBoxLayout()
@@ -340,6 +360,42 @@ class CutieInitPanel(QWidget):
         vbox.addLayout(mark_row)
 
         return vbox
+
+    def _build_queue_panel(self) -> QWidget:
+        w = QWidget()
+        w.setFixedWidth(240)
+        vbox = QVBoxLayout(w)
+        vbox.setContentsMargins(2, 4, 2, 4)
+        vbox.setSpacing(4)
+
+        vbox.addWidget(QLabel("<b>Job Queue</b>"))
+
+        self._job_list = QListWidget()
+        self._job_list.setAlternatingRowColors(True)
+        self._job_list.setSelectionMode(
+            QListWidget.SelectionMode.SingleSelection
+        )
+        vbox.addWidget(self._job_list, stretch=1)
+
+        self._queue_status_label = QLabel("")
+        self._queue_status_label.setStyleSheet("font-size: 10px; color: #666;")
+        vbox.addWidget(self._queue_status_label)
+
+        btn_row = QHBoxLayout()
+        remove_btn = QPushButton("Remove")
+        remove_btn.setToolTip("Remove selected pending job from queue")
+        remove_btn.clicked.connect(self._on_remove_job)
+        btn_row.addWidget(remove_btn)
+
+        cancel_all_btn = QPushButton("Cancel All")
+        cancel_all_btn.setToolTip(
+            "Stop current job and cancel all pending jobs"
+        )
+        cancel_all_btn.clicked.connect(self._on_cancel_all)
+        btn_row.addWidget(cancel_all_btn)
+        vbox.addLayout(btn_row)
+
+        return w
 
     # ------------------------------------------------------------------
     # Data loading
@@ -770,17 +826,18 @@ class CutieInitPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _on_track_forward(self) -> None:
-        self._start_tracking("forward")
+        self._queue_tracking("forward")
 
     def _on_track_backward(self) -> None:
-        self._start_tracking("backward")
+        self._queue_tracking("backward")
 
-    def _start_tracking(self, direction: str) -> None:
+    def _queue_tracking(self, direction: str) -> None:
+        """Create a TrackingJob from the current UI state and enqueue it."""
         cam = self._cam_combo.currentData()
         if cam is None or not self._persons:
             return
 
-        # The current mask (from ClickController or stored) is the seed.
+        # Seed mask: live SAM2 result or stored DB mask.
         seed_mask = None
         if self._controller and np.any(self._controller.get_mask()):
             seed_mask = self._controller.get_mask().copy()
@@ -791,51 +848,79 @@ class CutieInitPanel(QWidget):
             self._set_status("No mask on current frame — click to create one first.")
             return
 
-        init_frame_idx = self._scrubber.value()
-        self._init_frame_idx = init_frame_idx
         self._ensure_seg_run()
 
-        from app.pose.cutie_worker import CutieWorker
-        self._worker = CutieWorker(
+        # PNG-encode the seed mask so the job is fully self-contained.
+        ok, buf = cv2.imencode(".png", seed_mask.astype(np.uint8))
+        if not ok:
+            self._set_status("Failed to encode seed mask.")
+            return
+
+        from app.pose.job_queue_runner import TrackingJob
+        import uuid
+        job = TrackingJob(
+            job_id=str(uuid.uuid4())[:8],
+            camera_label=cam["label"],
+            shot_video_id=cam["id"],
             video_path=cam["file_path"],
-            init_frame=init_frame_idx,
-            init_mask=seed_mask,
-            persons_ordered=self._persons,
+            init_frame=self._scrubber.value(),
+            init_mask_png=buf.tobytes(),
+            persons_ordered=list(self._persons),
             first_frame=self._mark_start,
             last_frame=self._mark_end,
             direction=direction,
             max_dim=self._frame_cache._max_dim,
         )
-        self._worker.mask_ready.connect(
-            lambda fi, m, svid=cam["id"]: self._on_mask_ready(svid, fi, m)
-        )
-        self._worker.progress.connect(self._on_track_progress)
-        self._worker.finished.connect(self._on_tracking_finished)
-        self._worker.error.connect(self._on_tracking_error)
-
-        self._set_tracking_ui(True)
-        self._set_status(
-            f"Tracking {direction} from frame {init_frame_idx}…"
-        )
-        self._worker.start()
+        self._runner.enqueue(job)
+        self._refresh_queue_list()
+        self._set_status(f"Queued {direction} job for {cam['label']}.")
 
     def _on_stop_tracking(self) -> None:
-        if self._worker is not None:
-            self._worker.stop()
-            self._set_status("Stopping…")
+        self._runner.stop_current()
+        self._set_status("Stopping current job…")
+
+    def _on_remove_job(self) -> None:
+        item = self._job_list.currentItem()
+        if item is None:
+            return
+        job_id = item.data(Qt.ItemDataRole.UserRole)
+        if self._runner.remove_pending(job_id):
+            self._refresh_queue_list()
+
+    def _on_cancel_all(self) -> None:
+        self._runner.cancel_all()
+        self._refresh_queue_list()
+        self._set_status("Queue cancelled.")
+
+    # ------------------------------------------------------------------
+    # Runner signal handlers
+    # ------------------------------------------------------------------
+
+    def _on_job_started(self, job_id: str) -> None:
+        self._stop_btn.setEnabled(True)
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setValue(0)
+        self._canvas_update_counter = 0
+        for job in self._runner.jobs:
+            if job.job_id == job_id:
+                arrow = "▶" if job.direction == "forward" else "◀"
+                self._set_status(
+                    f"{arrow} Tracking {job.direction} | {job.camera_label} "
+                    f"({job.first_frame}–{job.last_frame})…"
+                )
+                break
+        self._refresh_queue_list()
 
     def _on_mask_ready(self, svid: str, frame_idx: int, mask: np.ndarray) -> None:
-        """Slot called in UI thread for each tracked frame."""
-        # output_prob_to_mask returns int64; PNG encoder requires uint8.
+        """DB write + live canvas update for each tracked frame."""
         mask_u8 = mask.astype(np.uint8)
-        ok, buf = cv2.imencode(".png", mask_u8)
+        ok, png = cv2.imencode(".png", mask_u8)
         if ok:
-            self._db_flush_buffer.append((svid, frame_idx, buf.tobytes()))
+            self._db_flush_buffer.append((svid, frame_idx, png.tobytes()))
         if len(self._db_flush_buffer) >= self._DB_FLUSH_EVERY:
             self._flush_masks()
 
-        # Live canvas update: advance scrubber; throttle redraws to every 10 frames
-        # so that queued signals don't cause excessive repaints.
+        # Update canvas only if the displayed camera matches the running job.
         cam = self._cam_combo.currentData()
         if cam and svid == cam["id"]:
             self._scrubber.blockSignals(True)
@@ -851,43 +936,67 @@ class CutieInitPanel(QWidget):
         self._progress_bar.setMaximum(total)
         self._progress_bar.setValue(done)
 
-    def _on_tracking_finished(self) -> None:
+    def _on_job_finished(self, job_id: str, masks_written: int) -> None:
         self._flush_masks()
         self._conn.commit()
-        self._set_tracking_ui(False)
-        # Clear stale SAM2 click state so _show_frame uses stored DB masks.
         if self._controller:
             self._controller.clear_all()
         self._encoded_frame_idx = -1
-        n = self._conn.execute(
-            "SELECT COUNT(*) FROM seg_masks WHERE seg_quality_run_id=?",
-            (self._seg_init_run_id,),
-        ).fetchone()[0]
-        self._set_status(f"Tracking complete — {n} masks saved.")
         cam = self._cam_combo.currentData()
         if cam:
             self._refresh_coverage_bar(cam)
             self._show_frame(self._scrubber.value())
+        self._refresh_queue_list()
+        self._set_status(f"Job done — {masks_written} masks written.")
 
-    def _on_tracking_error(self, message: str) -> None:
+    def _on_job_failed(self, job_id: str, error: str) -> None:
         self._flush_masks()
-        self._set_tracking_ui(False)
-        self._set_status(f"Error: {message}")
+        self._conn.commit()
+        self._refresh_queue_list()
+        self._set_status(f"Job failed: {error}")
 
-    def _set_tracking_ui(self, tracking: bool) -> None:
-        """Enable/disable controls appropriately during tracking."""
-        self._track_fwd_btn.setEnabled(not tracking)
-        self._track_bwd_btn.setEnabled(not tracking)
-        self._stop_btn.setEnabled(tracking)
-        self._cam_combo.setEnabled(not tracking)
-        self._scrubber.setEnabled(not tracking)
-        for btn in self._person_btn_group.buttons():
-            btn.setEnabled(not tracking)
-        self._clear_person_btn.setEnabled(not tracking)
-        self._clear_all_btn.setEnabled(not tracking)
-        self._progress_bar.setVisible(tracking)
-        if not tracking:
-            self._progress_bar.setValue(0)
+    def _on_queue_done(self) -> None:
+        self._stop_btn.setEnabled(False)
+        self._progress_bar.setVisible(False)
+        self._progress_bar.setValue(0)
+        self._refresh_queue_list()
+
+    # ------------------------------------------------------------------
+    # Queue list widget helpers
+    # ------------------------------------------------------------------
+
+    def _refresh_queue_list(self) -> None:
+        self._job_list.clear()
+        status_icons = {
+            "pending":   "⏳",
+            "running":   "▶",
+            "done":      "✓",
+            "failed":    "✗",
+            "cancelled": "—",
+        }
+        pending = running = done = 0
+        for job in self._runner.jobs:
+            icon  = status_icons.get(job.status, "?")
+            arrow = "▶" if job.direction == "forward" else "◀"
+            extra = f"  ({job.masks_written} masks)" if job.status == "done" else ""
+            if job.status == "failed":
+                extra = f"  {job.error[:24]}"
+            text = f"{icon} {arrow} {job.camera_label}  {job.first_frame}–{job.last_frame}{extra}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, job.job_id)
+            if job.status == "running":
+                item.setBackground(QColor(30, 60, 100))
+            elif job.status == "done":
+                item.setForeground(QColor(100, 200, 100))
+            elif job.status in ("failed", "cancelled"):
+                item.setForeground(QColor(150, 150, 150))
+            self._job_list.addItem(item)
+            if job.status == "pending":   pending  += 1
+            elif job.status == "running": running  += 1
+            elif job.status == "done":    done     += 1
+        self._queue_status_label.setText(
+            f"{pending} pending  {running} running  {done} done"
+        )
 
     # ------------------------------------------------------------------
     # DB helpers

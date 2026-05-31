@@ -1,7 +1,7 @@
 """cutie_init_panel.py — Interactive Cutie segmentation initialisation panel.
 
 Phase 1: video scrubber, camera selector, mask overlay from stored seg_masks.
-Phase 2: click-to-SAM2 interaction (ClickController, not yet implemented).
+Phase 2: click-to-SAM2 interaction — PersonSelector buttons, ClickController.
 Phase 3: Cutie worker thread, Track/Stop buttons, mask persistence.
 Phase 4: correction workflow, RTMPose post-step.
 """
@@ -10,8 +10,10 @@ from __future__ import annotations
 import sqlite3
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QGroupBox,
     QHBoxLayout,
@@ -28,11 +30,14 @@ from app.pose.video_canvas import VideoCanvas, label_to_color
 
 
 class CutieInitPanel(QWidget):
-    """Video scrubber with mask overlay for interactive Cutie initialisation.
+    """Video scrubber + click-based SAM2 segmentation init panel.
 
-    Takes a detection_run_id to know which cameras, persons, and frame range
-    to work with.  In Phase 1 it displays video frames and any seg_masks
-    already stored in the DB; editing controls are added in later phases.
+    Camera selector → frame scrubber → VideoCanvas with mask overlay.
+    PersonSelector buttons let the user choose which person label to assign
+    to each click.  Left-click = positive (foreground), right-click = negative.
+
+    SAM2 encoding is lazy: the image encoder runs on the first click on a frame
+    (or immediately when a person button is selected and the video is accessible).
     """
 
     closed = Signal()
@@ -49,9 +54,21 @@ class CutieInitPanel(QWidget):
         self._frame_cache = FrameCache(max_frames=300, max_dim=1920)
 
         # Populated by _load_run()
-        self._cameras: list[dict] = []          # [{id, label, file_path, first, last, fps, track_first, track_last}]
-        self._seg_run_id: str | None = None     # most recent seg_quality_run for this run
-        self._persons: list[str] = []           # person names in label order
+        self._cameras: list[dict] = []
+        self._seg_run_id: str | None = None
+        self._persons: list[str] = []       # person names, index+1 = SAM label
+
+        # Click interaction state
+        self._controller = None             # ClickController; created lazily
+        self._selected_label: int = 0       # 0 = no person selected
+        self._encoded_frame_idx: int = -1   # frame that _controller has encoded
+        self._encoded_svid: str = ""        # camera id for encoded frame
+
+        # Debounce timer: encode image 300 ms after last scrub event when
+        # a person button is active (pre-warm the encoder for fast first click).
+        self._encode_timer = QTimer(self)
+        self._encode_timer.setSingleShot(True)
+        self._encode_timer.timeout.connect(self._encode_current_frame)
 
         self._build_ui()
         self._load_run()
@@ -61,6 +78,7 @@ class CutieInitPanel(QWidget):
     # ------------------------------------------------------------------
 
     def shutdown(self) -> None:
+        self._encode_timer.stop()
         self._frame_cache.close()
 
     # ------------------------------------------------------------------
@@ -87,27 +105,55 @@ class CutieInitPanel(QWidget):
 
         # --- Video canvas ---
         self._canvas = VideoCanvas()
+        self._canvas.left_clicked.connect(self._on_left_click)
+        self._canvas.right_clicked.connect(self._on_right_click)
         root.addWidget(self._canvas, stretch=1)
 
         # --- Scrubber ---
-        scrubber_row = QHBoxLayout()
         self._scrubber = QSlider(Qt.Orientation.Horizontal)
         self._scrubber.setMinimum(0)
         self._scrubber.setMaximum(0)
         self._scrubber.valueChanged.connect(self._on_frame_changed)
-        scrubber_row.addWidget(self._scrubber, 1)
-        root.addLayout(scrubber_row)
+        root.addLayout(self._make_scrubber_row())
 
-        # --- Person legend (populated once seg run is known) ---
-        self._legend_group = QGroupBox("Persons")
-        self._legend_layout = QHBoxLayout(self._legend_group)
-        self._legend_layout.setContentsMargins(4, 2, 4, 2)
-        root.addWidget(self._legend_group)
+        # --- Person selector (populated after _load_run) ---
+        self._person_group = QGroupBox("Person  (click to select, then click on canvas)")
+        self._person_layout = QHBoxLayout(self._person_group)
+        self._person_layout.setContentsMargins(4, 2, 4, 2)
+        self._person_layout.setSpacing(4)
+        self._person_btn_group = QButtonGroup(self)
+        self._person_btn_group.setExclusive(False)
+        root.addWidget(self._person_group)
+
+        # --- Edit action buttons ---
+        edit_row = QHBoxLayout()
+        self._clear_person_btn = QPushButton("Clear person")
+        self._clear_person_btn.setToolTip("Remove all clicks for the selected person")
+        self._clear_person_btn.clicked.connect(self._on_clear_person)
+        self._clear_person_btn.setEnabled(False)
+        edit_row.addWidget(self._clear_person_btn)
+
+        self._clear_all_btn = QPushButton("Clear all")
+        self._clear_all_btn.setToolTip("Remove all clicks for all persons")
+        self._clear_all_btn.clicked.connect(self._on_clear_all)
+        self._clear_all_btn.setEnabled(False)
+        edit_row.addWidget(self._clear_all_btn)
+        edit_row.addStretch()
+
+        self._sam_status_label = QLabel("")
+        self._sam_status_label.setStyleSheet("font-size: 10px; color: #666;")
+        edit_row.addWidget(self._sam_status_label)
+        root.addLayout(edit_row)
 
         # --- Status bar ---
         self._status_label = QLabel("")
         self._status_label.setStyleSheet("font-size: 10px; color: #555;")
         root.addWidget(self._status_label)
+
+    def _make_scrubber_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addWidget(self._scrubber, 1)
+        return row
 
     # ------------------------------------------------------------------
     # Data loading
@@ -147,14 +193,12 @@ class CutieInitPanel(QWidget):
                 "first": int(r["first_video_frame"]),
                 "last": int(r["last_video_frame"]),
                 "fps": float(r["actual_fps"] or 30.0),
-                # Scrubber bounds: use track range when available, else full video.
                 "track_first": int(r["track_first"]) if r["track_first"] is not None else int(r["first_video_frame"]),
                 "track_last":  int(r["track_last"])  if r["track_last"]  is not None else int(r["last_video_frame"]),
             }
             for r in cam_rows
         ]
 
-        # Find most recent seg_quality_run for this detection run.
         seg_row = self._conn.execute(
             "SELECT id FROM seg_quality_runs "
             "WHERE detection_run_id = ? ORDER BY created_at DESC LIMIT 1",
@@ -163,7 +207,6 @@ class CutieInitPanel(QWidget):
         if seg_row:
             self._seg_run_id = seg_row["id"]
 
-        # Derive person list from track assignments (distinct names, sorted).
         person_rows = self._conn.execute(
             "SELECT DISTINCT person_name FROM detection_track_assignments "
             "WHERE detection_run_id = ? ORDER BY person_name",
@@ -172,7 +215,8 @@ class CutieInitPanel(QWidget):
         self._persons = [r["person_name"] for r in person_rows]
 
         self._rebuild_camera_combo()
-        self._rebuild_legend()
+        self._rebuild_person_selector()
+        self._init_controller()
 
     def _rebuild_camera_combo(self) -> None:
         self._cam_combo.blockSignals(True)
@@ -183,51 +227,208 @@ class CutieInitPanel(QWidget):
         if self._cameras:
             self._on_camera_changed(0)
 
-    def _rebuild_legend(self) -> None:
-        while self._legend_layout.count():
-            item = self._legend_layout.takeAt(0)
+    def _rebuild_person_selector(self) -> None:
+        # Clear old buttons
+        for btn in self._person_btn_group.buttons():
+            self._person_btn_group.removeButton(btn)
+            btn.deleteLater()
+        while self._person_layout.count():
+            item = self._person_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
         if not self._persons:
-            self._legend_group.setVisible(False)
+            self._person_group.setVisible(False)
             return
 
-        self._legend_group.setVisible(True)
+        self._person_group.setVisible(True)
         for i, name in enumerate(self._persons):
-            r, g, b = label_to_color(i + 1)
-            swatch = QLabel("  ")
-            swatch.setStyleSheet(
-                f"background-color: rgb({r},{g},{b}); border: 1px solid #888; min-width:16px;"
+            label = i + 1  # 1-based SAM label
+            r, g, b = label_to_color(label)
+            luma = 0.299 * r + 0.587 * g + 0.114 * b
+            text_color = "#000" if luma > 140 else "#fff"
+            btn = QPushButton(f"{label}: {name}")
+            btn.setCheckable(True)
+            btn.setProperty("person_label", label)
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: rgb({r},{g},{b}); color: {text_color};"
+                f" border: 2px solid transparent; padding: 3px 8px; }}"
+                f"QPushButton:checked {{ border: 2px solid #000; font-weight: bold; }}"
             )
-            swatch.setMaximumWidth(20)
-            self._legend_layout.addWidget(swatch)
-            self._legend_layout.addWidget(QLabel(name))
-            if i < len(self._persons) - 1:
-                sep = QLabel("|")
-                sep.setStyleSheet("color: #aaa; padding: 0 4px;")
-                self._legend_layout.addWidget(sep)
-        self._legend_layout.addStretch()
+            # Keyboard shortcut 1..9
+            if label <= 9:
+                QShortcut(QKeySequence(str(label)), self).activated.connect(
+                    lambda checked=False, b=btn: self._toggle_person_btn(b)
+                )
+            btn.clicked.connect(lambda checked, b=btn: self._on_person_btn_clicked(b))
+            self._person_btn_group.addButton(btn, label)
+            self._person_layout.addWidget(btn)
+
+        self._person_layout.addStretch()
+
+    def _init_controller(self) -> None:
+        """Create the ClickController lazily (imports SAM2 if available)."""
+        try:
+            from app.pose.cutie_click_controller import ClickController
+            self._controller = ClickController()
+            if self._controller.available:
+                self._sam_status_label.setText("SAM2 ready")
+                self._sam_status_label.setStyleSheet("font-size: 10px; color: #080;")
+            else:
+                self._sam_status_label.setText("SAM2 not available — install ultralytics")
+                self._sam_status_label.setStyleSheet("font-size: 10px; color: #c60;")
+        except Exception as e:
+            self._sam_status_label.setText(f"SAM2 error: {e}")
 
     # ------------------------------------------------------------------
-    # Interaction
+    # Interaction — person selector
+    # ------------------------------------------------------------------
+
+    def _toggle_person_btn(self, btn: QPushButton) -> None:
+        btn.setChecked(not btn.isChecked())
+        self._on_person_btn_clicked(btn)
+
+    def _on_person_btn_clicked(self, clicked_btn: QPushButton) -> None:
+        label = clicked_btn.property("person_label")
+        if clicked_btn.isChecked():
+            # Deselect all others (manual exclusivity so clicking same btn toggles off)
+            for btn in self._person_btn_group.buttons():
+                if btn is not clicked_btn:
+                    btn.setChecked(False)
+            self._selected_label = label
+            self._canvas.setCursor(Qt.CursorShape.CrossCursor)
+            # Pre-warm encoder when person is selected and frame is accessible
+            self._schedule_encode()
+        else:
+            self._selected_label = 0
+            self._canvas.setCursor(Qt.CursorShape.ArrowCursor)
+            self._encode_timer.stop()
+
+        self._update_edit_buttons()
+
+    def _update_edit_buttons(self) -> None:
+        has_controller = self._controller is not None
+        has_selection = self._selected_label > 0
+        self._clear_person_btn.setEnabled(has_controller and has_selection)
+        self._clear_all_btn.setEnabled(has_controller)
+
+    # ------------------------------------------------------------------
+    # Interaction — canvas clicks
+    # ------------------------------------------------------------------
+
+    def _on_left_click(self, x: int, y: int) -> None:
+        self._handle_click(x, y, positive=True)
+
+    def _on_right_click(self, x: int, y: int) -> None:
+        self._handle_click(x, y, positive=False)
+
+    def _handle_click(self, x: int, y: int, positive: bool) -> None:
+        if self._selected_label == 0:
+            self._set_status("Select a person button first, then click on the frame.")
+            return
+        if self._controller is None or not self._controller.available:
+            self._set_status("SAM2 not available.")
+            return
+
+        cam = self._cam_combo.currentData()
+        frame_idx = self._scrubber.value()
+        if cam is None:
+            return
+
+        # Encode if needed (lazy, also handles first click after scrub)
+        self._ensure_encoded(cam, frame_idx)
+
+        self._set_status("Running SAM2…")
+        mask = self._controller.push_point(self._selected_label, x, y, positive)
+        self._set_status(
+            f"Person {self._selected_label}: "
+            f"{self._controller.click_count(self._selected_label)} click(s)"
+        )
+        self._refresh_overlay(cam, frame_idx, mask)
+
+    def _on_clear_person(self) -> None:
+        if self._controller is None or self._selected_label == 0:
+            return
+        cam = self._cam_combo.currentData()
+        frame_idx = self._scrubber.value()
+        mask = self._controller.clear_person(self._selected_label)
+        self._set_status(f"Cleared person {self._selected_label}")
+        self._refresh_overlay(cam, frame_idx, mask)
+
+    def _on_clear_all(self) -> None:
+        if self._controller is None:
+            return
+        cam = self._cam_combo.currentData()
+        frame_idx = self._scrubber.value()
+        self._controller.clear_all()
+        self._set_status("Cleared all clicks")
+        frame = self._frame_cache.get_frame(cam["file_path"], frame_idx) if cam else None
+        self._canvas.display(frame)
+
+    # ------------------------------------------------------------------
+    # Interaction — scrubbing
     # ------------------------------------------------------------------
 
     def _on_camera_changed(self, index: int) -> None:
         cam = self._cam_combo.itemData(index)
         if cam is None:
             return
-        first = cam["track_first"]
-        last = cam["track_last"]
+        # Camera switch invalidates the encoded frame
+        self._encoded_frame_idx = -1
+        self._encoded_svid = ""
+        if self._controller:
+            self._controller.clear_all()
+
         self._scrubber.blockSignals(True)
-        self._scrubber.setMinimum(first)
-        self._scrubber.setMaximum(last)
-        self._scrubber.setValue(first)
+        self._scrubber.setMinimum(cam["track_first"])
+        self._scrubber.setMaximum(cam["track_last"])
+        self._scrubber.setValue(cam["track_first"])
         self._scrubber.blockSignals(False)
-        self._show_frame(first)
+        self._show_frame(cam["track_first"])
 
     def _on_frame_changed(self, frame_idx: int) -> None:
+        # Frame changed: clear click state, show new frame.
+        if self._controller:
+            self._controller.clear_all()
+        self._encoded_frame_idx = -1
         self._show_frame(frame_idx)
+        # If a person is selected, pre-warm encoder after scrubbing stops.
+        if self._selected_label > 0:
+            self._schedule_encode()
+
+    def _schedule_encode(self) -> None:
+        """Start/restart the debounce timer to encode the current frame."""
+        self._encode_timer.start(300)
+
+    def _encode_current_frame(self) -> None:
+        """Called by debounce timer: encode current frame if accessible."""
+        cam = self._cam_combo.currentData()
+        frame_idx = self._scrubber.value()
+        if cam is not None:
+            self._ensure_encoded(cam, frame_idx)
+
+    def _ensure_encoded(self, cam: dict, frame_idx: int) -> None:
+        """Encode the frame for SAM2 if not already done for this frame."""
+        if (
+            self._controller is None
+            or not self._controller.available
+            or (self._encoded_frame_idx == frame_idx and self._encoded_svid == cam["id"])
+        ):
+            return
+
+        frame = self._frame_cache.get_frame(cam["file_path"], frame_idx)
+        if frame is None:
+            return
+
+        self._set_status("Encoding frame for SAM2…")
+        self._controller.set_image(frame)
+        self._encoded_frame_idx = frame_idx
+        self._encoded_svid = cam["id"]
+        self._set_status("Ready — click to segment")
+
+    # ------------------------------------------------------------------
+    # Display helpers
+    # ------------------------------------------------------------------
 
     def _show_frame(self, frame_idx: int) -> None:
         cam = self._cam_combo.currentData()
@@ -235,7 +436,12 @@ class CutieInitPanel(QWidget):
             return
 
         frame = self._frame_cache.get_frame(cam["file_path"], frame_idx)
-        mask = self._load_mask(cam["id"], frame_idx)
+        # Prefer live controller mask; fall back to stored DB mask.
+        mask = None
+        if self._controller and np.any(self._controller.get_mask()):
+            mask = self._controller.get_mask()
+        else:
+            mask = self._load_stored_mask(cam["id"], frame_idx)
 
         if frame is None:
             import os
@@ -248,7 +454,6 @@ class CutieInitPanel(QWidget):
         else:
             self._canvas.display(frame, mask)
 
-        # Update frame label: show frame index and time relative to track start.
         t = (frame_idx - cam["track_first"]) / cam["fps"]
         mm, ss = divmod(t, 60)
         seg_indicator = " [mask]" if mask is not None else ""
@@ -256,8 +461,19 @@ class CutieInitPanel(QWidget):
             f"Frame {frame_idx}  ({int(mm):02d}:{ss:05.2f}){seg_indicator}"
         )
 
-    def _load_mask(self, shot_video_id: str, frame_idx: int) -> np.ndarray | None:
-        """Load stored seg_mask from DB, or None if not available."""
+    def _refresh_overlay(
+        self, cam: dict | None, frame_idx: int, mask: np.ndarray
+    ) -> None:
+        """Redraw the canvas with *mask* without reloading the frame."""
+        if cam is None:
+            return
+        frame = self._frame_cache.get_frame(cam["file_path"], frame_idx)
+        self._canvas.display(frame, mask if np.any(mask) else None)
+
+    def _load_stored_mask(
+        self, shot_video_id: str, frame_idx: int
+    ) -> np.ndarray | None:
+        """Load a previously saved seg_mask blob from the DB."""
         if self._seg_run_id is None:
             return None
         row = self._conn.execute(
@@ -268,8 +484,7 @@ class CutieInitPanel(QWidget):
         if row is None:
             return None
         buf = np.frombuffer(bytes(row["mask_blob"]), dtype=np.uint8)
-        mask = _decode_mask_png(buf)
-        return mask
+        return _decode_mask_png(buf)
 
     def _set_status(self, text: str) -> None:
         self._status_label.setText(text)
@@ -282,6 +497,5 @@ def _decode_mask_png(buf: np.ndarray) -> np.ndarray | None:
     if decoded is None:
         return None
     if decoded.ndim == 3:
-        # Shouldn't happen for indexed PNG but handle gracefully.
         decoded = decoded[:, :, 0]
     return decoded

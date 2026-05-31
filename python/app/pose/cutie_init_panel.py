@@ -83,6 +83,7 @@ class CutieInitPanel(QWidget):
         self._init_frame_idx: int = -1      # frame used as Cutie seed
         self._db_flush_buffer: list[tuple] = []    # buffered (svid, frame_idx, blob) rows
         self._DB_FLUSH_EVERY = 50           # write to DB every N frames
+        self._canvas_update_counter: int = 0       # throttle live canvas redraws
 
         self._build_ui()
         self._load_run()
@@ -613,15 +614,17 @@ class CutieInitPanel(QWidget):
         if len(self._db_flush_buffer) >= self._DB_FLUSH_EVERY:
             self._flush_masks()
 
-        # Live canvas update: advance scrubber to current tracking frame
-        # (blocked so it doesn't trigger _on_frame_changed / re-decode).
+        # Live canvas update: advance scrubber; throttle redraws to every 10 frames
+        # so that queued signals don't cause excessive repaints.
         cam = self._cam_combo.currentData()
         if cam and svid == cam["id"]:
             self._scrubber.blockSignals(True)
             self._scrubber.setValue(frame_idx)
             self._scrubber.blockSignals(False)
-            frame = self._frame_cache.get_frame(cam["file_path"], frame_idx)
-            self._canvas.display(frame, mask_u8 if np.any(mask_u8) else None)
+            self._canvas_update_counter += 1
+            if self._canvas_update_counter % 10 == 0:
+                frame = self._frame_cache.get_frame(cam["file_path"], frame_idx)
+                self._canvas.display(frame, mask_u8 if np.any(mask_u8) else None)
 
     def _on_track_progress(self, done: int, total: int) -> None:
         self._progress_bar.setMaximum(total)

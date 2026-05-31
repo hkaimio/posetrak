@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
+from collections import OrderedDict
 from pathlib import Path
 
 import cv2
@@ -37,8 +38,8 @@ class FrameCache:
         self._max_dim = max_dim
         self._lock = threading.Lock()
         self._tmp_dir = tempfile.mkdtemp(prefix="posetrak_frames_")
-        # OrderedDict maintains insertion order; move-to-end on access for LRU.
-        self._lru: dict[tuple[str, int], Path] = {}
+        # OrderedDict: insertion order == LRU order; popitem(last=False) removes oldest.
+        self._lru: OrderedDict[tuple[str, int], Path] = OrderedDict()
         # Cache of open VideoCapture objects keyed by video path.
         self._caps: dict[str, cv2.VideoCapture] = {}
 

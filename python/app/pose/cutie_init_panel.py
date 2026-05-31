@@ -921,7 +921,14 @@ class CutieInitPanel(QWidget):
         self._refresh_queue_list()
 
     def _on_mask_ready(self, svid: str, frame_idx: int, mask: np.ndarray) -> None:
-        """DB write + live canvas update for each tracked frame."""
+        """DB write + scrubber position update for each tracked frame.
+
+        Cross-thread Qt signals batch up in the event queue: thousands of
+        mask_ready calls can arrive all at once after the worker finishes.
+        Any disk I/O here (get_frame, video seek) causes a read storm that
+        freezes the UI.  Keep this slot to memory-only operations only;
+        the canvas refreshes once in _on_job_finished.
+        """
         mask_u8 = mask.astype(np.uint8)
         ok, png = cv2.imencode(".png", mask_u8)
         if ok:
@@ -929,17 +936,16 @@ class CutieInitPanel(QWidget):
         if len(self._db_flush_buffer) >= self._DB_FLUSH_EVERY:
             self._flush_masks()
 
-        # Update canvas only if the displayed camera matches the running job.
+        # Advance scrubber + range bar every 30 frames (throttled to keep
+        # Qt repaint coalescing from becoming a bottleneck).
         cam = self._cam_combo.currentData()
         if cam and svid == cam["id"]:
-            self._scrubber.blockSignals(True)
-            self._scrubber.setValue(frame_idx)
-            self._scrubber.blockSignals(False)
-            self._range_bar.set_position(frame_idx)
             self._canvas_update_counter += 1
-            if self._canvas_update_counter % 10 == 0:
-                frame = self._frame_cache.get_frame(cam["file_path"], frame_idx)
-                self._canvas.display(frame, mask_u8 if np.any(mask_u8) else None)
+            if self._canvas_update_counter % 30 == 0:
+                self._scrubber.blockSignals(True)
+                self._scrubber.setValue(frame_idx)
+                self._scrubber.blockSignals(False)
+                self._range_bar.set_position(frame_idx)
 
     def _on_track_progress(self, done: int, total: int) -> None:
         self._progress_bar.setMaximum(total)

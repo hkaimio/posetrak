@@ -385,3 +385,12 @@ CREATE TABLE IF NOT EXISTS detection_track_assignments (
     last_frame       INTEGER NOT NULL,
     PRIMARY KEY (detection_run_id, shot_video_id, track_id, first_frame)
 );
+-- Segmentation masks for interactive Cutie init widget.
+-- One row per (seg_quality_run, camera, frame).  Indexed PNG blob, label 0=bg, 1..N=person.
+CREATE TABLE IF NOT EXISTS seg_masks (
+    seg_quality_run_id TEXT    NOT NULL REFERENCES seg_quality_runs(id),
+    shot_video_id      TEXT    NOT NULL REFERENCES capture_videos(id),
+    frame_idx          INTEGER NOT NULL,
+    mask_blob          BLOB    NOT NULL,
+    PRIMARY KEY (seg_quality_run_id, shot_video_id, frame_idx)
+);

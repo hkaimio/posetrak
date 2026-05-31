@@ -385,6 +385,15 @@ class TrialPanel(QWidget):
             self._run_combo.addItem(label, r["id"])
         header.addWidget(QLabel("Run:"))
         header.addWidget(self._run_combo)
+
+        self._seg_init_btn = QPushButton("Segmentation…")
+        self._seg_init_btn.setToolTip(
+            "Open interactive Cutie segmentation initialisation for this detection run"
+        )
+        self._seg_init_btn.clicked.connect(self._on_open_seg_init)
+        self._seg_init_btn.setEnabled(bool(runs))
+        header.addWidget(self._seg_init_btn)
+
         vbox.addLayout(header)
 
         # --- Stitcher area (fills remaining space) ---
@@ -428,12 +437,24 @@ class TrialPanel(QWidget):
                 QMessageBox.Yes | QMessageBox.No,
             )
             if ans != QMessageBox.Yes:
-                # Revert combo to the current panel's run
-                run_id = self._run_combo.findData(
-                    self._run_combo.currentData()
-                )
                 return
         self._load_stitcher(self._run_combo.itemData(index))
+
+    def _on_open_seg_init(self) -> None:
+        run_id = self._run_combo.currentData()
+        if not run_id:
+            return
+        from app.pose.cutie_init_panel import CutieInitPanel
+        win = QWidget(self, Qt.WindowType.Window)
+        win.setWindowTitle("Cutie Segmentation Init")
+        win.resize(1200, 750)
+        layout = QVBoxLayout(win)
+        layout.setContentsMargins(0, 0, 0, 0)
+        panel = CutieInitPanel(self._conn, run_id, parent=win)
+        layout.addWidget(panel)
+        win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        win.destroyed.connect(panel.shutdown)
+        win.show()
 
 
 # ---------------------------------------------------------------------------

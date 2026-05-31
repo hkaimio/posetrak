@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 5
-SESSION_SCHEMA_VERSION: Final[int] = 18
+SESSION_SCHEMA_VERSION: Final[int] = 19
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -578,6 +578,18 @@ def _migrate_session_v17_to_v18(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v18_to_v19(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 18 to 19.
+
+    v19 adds the seg_masks table for the interactive Cutie init widget.
+    Each row stores one labeled segmentation mask (indexed PNG blob) per
+    (seg_quality_run_id, shot_video_id, frame_idx).
+    """
+    sql = (_DB_DIR / "migrations" / "018_seg_masks.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -652,6 +664,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 17
     if actual == 17:
         _migrate_session_v17_to_v18(conn)
+        actual = 18
+    if actual == 18:
+        _migrate_session_v18_to_v19(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

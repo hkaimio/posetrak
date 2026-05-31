@@ -79,8 +79,14 @@ class ClickController:
         try:
             pred = self._get_predictor()
             pred.set_image(frame_bgr)
-            # Cache the preprocessed tensor so prompt_inference can skip re-encoding.
+            # Cache the preprocessed tensor AND fix self.batch so that
+            # prompt_inference uses the correct original-image dimensions
+            # (orig_hw).  set_image() does not set self.batch — only the
+            # full stream_inference path does — so without this fix,
+            # prompt_inference would scale point coords against the dummy
+            # 64×64 image used to initialise the predictor.
             for batch in pred.dataset:
+                pred.batch = batch
                 self._cached_im = pred.preprocess(batch[1])
                 break
         except Exception:
@@ -171,8 +177,13 @@ class ClickController:
         try:
             if self._cached_im is not None and self._predictor is not None:
                 # Fast path: reuse cached image encoder output.
+                # Wrap points/labels as (1, N, 2) / (1, N) numpy arrays so
+                # torch.as_tensor() receives a single ndarray, not a list of
+                # ndarrays (which triggers a slow-path warning).
+                pts_3d = points[np.newaxis]        # (1, N, 2)
+                lbl_2d = labels[np.newaxis]        # (1, N)
                 masks, _scores, _logits = self._predictor.prompt_inference(
-                    self._cached_im, points=[points], labels=[labels]
+                    self._cached_im, points=pts_3d, labels=lbl_2d
                 )
                 return masks[0].cpu().numpy().astype(bool)
             else:

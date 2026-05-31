@@ -192,16 +192,27 @@ class CutieWorker(QThread):
         objects = list(range(1, len(self._persons) + 1))
         init_t = torch.from_numpy(self._init_mask).to(self._device)
 
-        # Read backward-range frames into memory first (sequential read is faster).
-        bwd_frames: list[tuple[int, np.ndarray]] = []
+        # Read backward-range frames into memory, scale + JPEG-compress immediately.
+        # Raw 4K ndarray per frame is ~24 MB; JPEG at 1920p is ~150 KB — 100× smaller.
+        # Without this, a 1700-frame backward pass on a 4K gopro would consume ~40 GB.
+        bwd_frames: list[tuple[int, bytes]] = []
         cap = cv2.VideoCapture(self._video_path)
         cap.set(cv2.CAP_PROP_POS_FRAMES, self._first)
         for fi in range(self._first, self._init_frame):
             ret, frame = cap.read()
             if not ret:
                 break
-            bwd_frames.append((fi, frame))
+            h, w = frame.shape[:2]
+            if self._max_dim > 0 and max(h, w) > self._max_dim:
+                scale = self._max_dim / max(h, w)
+                frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok:
+                bwd_frames.append((fi, buf.tobytes()))
         cap.release()
+        n_bwd = len(bwd_frames)
+        log.info("CutieWorker: backward buffer — %d frames, ~%.0f MB",
+                 n_bwd, n_bwd * 150 / 1024)
 
         total = len(bwd_frames)
         done = 0
@@ -214,23 +225,23 @@ class CutieWorker(QThread):
             self.error.emit(f"Cannot read init frame {self._init_frame}")
             return
 
-        try:
-            with torch.inference_mode(), torch.amp.autocast(self._device):
-                # Seed with the init frame mask.
-                img_t = self._to_tensor(init_img, self._device)
-                proc.step(img_t, init_t, objects=objects)
+        with torch.inference_mode(), torch.amp.autocast(self._device):
+            # Seed with the init frame mask.
+            img_t = self._to_tensor(init_img, self._device, self._max_dim)
+            proc.step(img_t, init_t, objects=objects)
 
-                for fi, frame in reversed(bwd_frames):
-                    if self._stop_requested:
-                        break
-                    img_t = self._to_tensor(frame, self._device, self._max_dim)
-                    out = proc.step(img_t)
-                    labeled = proc.output_prob_to_mask(out).cpu().numpy()
-                    self.mask_ready.emit(fi, labeled)
-                    done += 1
-                    if done % 50 == 0:
-                        self.progress.emit(done, total)
-        finally:
-            pass
+            for fi, jpeg_bytes in reversed(bwd_frames):
+                if self._stop_requested:
+                    break
+                frame = cv2.imdecode(
+                    np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR
+                )
+                img_t = self._to_tensor(frame, self._device, self._max_dim)
+                out = proc.step(img_t)
+                labeled = proc.output_prob_to_mask(out).cpu().numpy()
+                self.mask_ready.emit(fi, labeled)
+                done += 1
+                if done % 50 == 0:
+                    self.progress.emit(done, total)
 
         log.info("CutieWorker: backward done — %d frames", done)

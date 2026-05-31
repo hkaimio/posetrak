@@ -70,6 +70,7 @@ class JobQueueRunner(QObject):
         self._worker = None
         self._current: TrackingJob | None = None
         self._masks_this_job: int = 0
+        self._cutie_model = None        # cached after first job; avoids Hydra re-init
 
     # ------------------------------------------------------------------
     # Public API
@@ -84,8 +85,11 @@ class JobQueueRunner(QObject):
         return self._worker is not None and self._worker.isRunning()
 
     def enqueue(self, job: TrackingJob) -> None:
-        """Add *job* to the queue and start executing if idle."""
+        """Add *job* to the queue.  Does NOT auto-start — call start() to run."""
         self._jobs.append(job)
+
+    def start(self) -> None:
+        """Begin executing pending jobs (no-op if already running)."""
         if not self.is_running:
             self._start_next()
 
@@ -152,6 +156,7 @@ class JobQueueRunner(QObject):
             last_frame=job.last_frame,
             direction=job.direction,
             max_dim=job.max_dim,
+            model=self._cutie_model,    # None on first job; cached thereafter
         )
         svid = job.shot_video_id
         self._worker.mask_ready.connect(
@@ -174,6 +179,17 @@ class JobQueueRunner(QObject):
             job.status = "done"
             job.masks_written = self._masks_this_job
             self.job_finished.emit(job.job_id, self._masks_this_job)
+
+        # Cache the loaded Cutie model so subsequent workers skip Hydra re-init.
+        if self._worker is not None:
+            loaded = self._worker.get_loaded_model()
+            if loaded is not None:
+                self._cutie_model = loaded
+            # Wait for the OS thread to fully exit before releasing the worker.
+            # Dropping the Python reference before the thread exits can cause
+            # a SIGABRT in native (CUDA/Hydra) cleanup code.
+            self._worker.wait()
+
         self._worker  = None
         self._current = None
         self._start_next()
@@ -185,4 +201,5 @@ class JobQueueRunner(QObject):
                 job.error  = error
                 self.job_failed.emit(job_id, error)
                 break
-        # _on_worker_finished will still fire and call _start_next()
+        # CutieWorker.run() emits error then finished, so _on_worker_finished
+        # will fire next and call _start_next().

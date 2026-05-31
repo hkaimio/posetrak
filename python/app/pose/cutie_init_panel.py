@@ -381,6 +381,11 @@ class CutieInitPanel(QWidget):
         self._queue_status_label.setStyleSheet("font-size: 10px; color: #666;")
         vbox.addWidget(self._queue_status_label)
 
+        self._run_queue_btn = QPushButton("▶  Run Queue")
+        self._run_queue_btn.setToolTip("Start executing all pending jobs")
+        self._run_queue_btn.clicked.connect(self._on_run_queue)
+        vbox.addWidget(self._run_queue_btn)
+
         btn_row = QHBoxLayout()
         remove_btn = QPushButton("Remove")
         remove_btn.setToolTip("Remove selected pending job from queue")
@@ -879,6 +884,10 @@ class CutieInitPanel(QWidget):
         self._runner.stop_current()
         self._set_status("Stopping current job…")
 
+    def _on_run_queue(self) -> None:
+        self._runner.start()
+        self._refresh_queue_list()
+
     def _on_remove_job(self) -> None:
         item = self._job_list.currentItem()
         if item is None:
@@ -997,6 +1006,9 @@ class CutieInitPanel(QWidget):
         self._queue_status_label.setText(
             f"{pending} pending  {running} running  {done} done"
         )
+        # Run Queue enabled only when there are pending jobs and queue is idle.
+        has_pending = pending > 0
+        self._run_queue_btn.setEnabled(has_pending and not self._runner.is_running)
 
     # ------------------------------------------------------------------
     # DB helpers

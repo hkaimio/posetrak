@@ -52,6 +52,7 @@ class CutieWorker(QThread):
         device: str = "cuda",
         max_internal_size: int = 480,
         max_dim: int = 1920,            # downscale video to this before Cutie; must match FrameCache
+        model=None,                     # pre-loaded Cutie model; if None, loaded in thread
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -65,7 +66,13 @@ class CutieWorker(QThread):
         self._device = device
         self._max_internal_size = max_internal_size
         self._max_dim = max_dim
+        self._preloaded_model = model   # provided by runner on 2nd+ jobs
+        self._loaded_model = None       # set during run(); retrieved by runner after finish
         self._stop_requested = False
+
+    def get_loaded_model(self):
+        """Return the Cutie model after run() has completed (None if not loaded)."""
+        return self._loaded_model or self._preloaded_model
 
     def stop(self) -> None:
         """Request the worker to stop after the current frame."""
@@ -92,15 +99,22 @@ class CutieWorker(QThread):
     # ------------------------------------------------------------------
 
     def _load_cutie(self):
-        """Import Cutie (via sys.path) and return a loaded model."""
+        """Return the Cutie model, using the pre-loaded one if available.
+
+        Loading the model calls hydra.initialize() which is not safe to call
+        from a background thread more than once per process.  The runner
+        caches the model after the first job and passes it here so that Hydra
+        is only ever initialised once.
+        """
+        if self._preloaded_model is not None:
+            return self._preloaded_model
+
         import sys
         from pipeline.pose.segmentation import _find_cutie_dir
         cutie_dir = _find_cutie_dir()
         if str(cutie_dir) not in sys.path:
             sys.path.insert(0, str(cutie_dir))
 
-        # get_default_model() calls hydra.initialize(), which fails if
-        # GlobalHydra is already initialised from a previous tracking pass.
         try:
             from hydra.core.global_hydra import GlobalHydra
             GlobalHydra.instance().clear()
@@ -108,7 +122,9 @@ class CutieWorker(QThread):
             pass
 
         from cutie.utils.get_default_model import get_default_model
-        return get_default_model()
+        model = get_default_model()
+        self._loaded_model = model   # runner retrieves this after finish
+        return model
 
     def _new_processor(self, model):
         from cutie.inference.inference_core import InferenceCore

@@ -601,14 +601,17 @@ class CutieInitPanel(QWidget):
             self._schedule_encode()
 
     def _refresh_coverage_bar(self, cam: dict) -> None:
-        """Query seg_masks for covered frames and update the range bar."""
-        if self._seg_run_id is None:
+        """Query seg_masks across all relevant runs and update the range bar."""
+        run_ids = self._read_run_ids()
+        if not run_ids:
             self._range_bar.set_covered_frames([])
             return
+        placeholders = ",".join("?" * len(run_ids))
         rows = self._conn.execute(
-            "SELECT frame_idx FROM seg_masks "
-            "WHERE seg_quality_run_id=? AND shot_video_id=? ORDER BY frame_idx",
-            (self._seg_run_id, cam["id"]),
+            f"SELECT DISTINCT frame_idx FROM seg_masks "
+            f"WHERE seg_quality_run_id IN ({placeholders}) AND shot_video_id=? "
+            f"ORDER BY frame_idx",
+            [*run_ids, cam["id"]],
         ).fetchall()
         self._range_bar.set_covered_frames([r["frame_idx"] for r in rows])
 
@@ -731,18 +734,36 @@ class CutieInitPanel(QWidget):
     def _load_stored_mask(
         self, shot_video_id: str, frame_idx: int
     ) -> np.ndarray | None:
-        """Load a previously saved seg_mask blob from the DB."""
-        if self._seg_run_id is None:
-            return None
-        row = self._conn.execute(
-            "SELECT mask_blob FROM seg_masks "
-            "WHERE seg_quality_run_id = ? AND shot_video_id = ? AND frame_idx = ?",
-            (self._seg_run_id, shot_video_id, frame_idx),
-        ).fetchone()
-        if row is None:
-            return None
-        buf = np.frombuffer(bytes(row["mask_blob"]), dtype=np.uint8)
-        return _decode_mask_png(buf)
+        """Load a previously saved seg_mask blob from the DB.
+
+        Tries the interactive run first (most recent edits), then falls back
+        to the original batch/prior run so frames outside the tracked range
+        remain visible.
+        """
+        run_ids = self._read_run_ids()
+        for run_id in run_ids:
+            row = self._conn.execute(
+                "SELECT mask_blob FROM seg_masks "
+                "WHERE seg_quality_run_id = ? AND shot_video_id = ? AND frame_idx = ?",
+                (run_id, shot_video_id, frame_idx),
+            ).fetchone()
+            if row is not None:
+                buf = np.frombuffer(bytes(row["mask_blob"]), dtype=np.uint8)
+                return _decode_mask_png(buf)
+        return None
+
+    def _read_run_ids(self) -> list[str]:
+        """Ordered list of seg_quality_run IDs to try when reading masks.
+
+        Interactive run (if started) takes priority; original batch run is
+        the fallback so untracked frames remain visible.
+        """
+        ids: list[str] = []
+        if self._seg_init_run_id is not None:
+            ids.append(self._seg_init_run_id)
+        if self._seg_run_id is not None and self._seg_run_id != self._seg_init_run_id:
+            ids.append(self._seg_run_id)
+        return ids
 
     # ------------------------------------------------------------------
     # Tracking
@@ -886,10 +907,11 @@ class CutieInitPanel(QWidget):
         )
         self._conn.commit()
         self._seg_init_run_id = run_id
-        # Switch mask reads to the new run so scrubbing shows new masks.
-        self._seg_run_id = run_id
+        # _seg_run_id intentionally left unchanged — it is the original batch/prior
+        # run and serves as a fallback in _load_stored_mask for frames not yet
+        # covered by the new interactive run.
         log.debug("Created seg_quality_run %s for interactive init", run_id)
-        # Coverage bar now shows the new (empty) run; will fill in as tracking runs.
+        # Coverage bar now shows both runs; will fill in as tracking runs.
         cam = self._cam_combo.currentData()
         if cam:
             self._refresh_coverage_bar(cam)

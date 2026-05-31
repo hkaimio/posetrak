@@ -104,6 +104,7 @@ class VideoCanvas(QLabel):
 
         self._frame: np.ndarray | None = None
         self._mask: np.ndarray | None = None
+        self._message: str | None = None
 
         # Transform state: image_coord = (canvas_coord - offset) / scale
         self._scale: float = 1.0
@@ -118,16 +119,23 @@ class VideoCanvas(QLabel):
         self,
         frame_bgr: np.ndarray | None,
         mask_labeled: np.ndarray | None = None,
+        message: str | None = None,
     ) -> None:
-        """Update the displayed frame and optional mask overlay."""
+        """Update the displayed frame and optional mask overlay.
+
+        If *frame_bgr* is None and *message* is set, the message is shown
+        centred on the black canvas (e.g. "Video unavailable").
+        """
         self._frame = frame_bgr
         self._mask = mask_labeled
+        self._message = message
         self._render()
 
     def clear(self) -> None:
         """Show a blank black canvas."""
         self._frame = None
         self._mask = None
+        self._message = None
         self.setPixmap(QPixmap())
 
     def canvas_to_image(self, cx: int, cy: int) -> tuple[int, int] | None:
@@ -169,7 +177,20 @@ class VideoCanvas(QLabel):
     # ------------------------------------------------------------------
 
     def _render(self) -> None:
+        ww, wh = self.width(), self.height()
+        if ww == 0 or wh == 0:
+            return
+
+        canvas = QPixmap(ww, wh)
+        canvas.fill(QColor(0, 0, 0))
+
         if self._frame is None:
+            if self._message:
+                painter = QPainter(canvas)
+                painter.setPen(QColor(160, 160, 160))
+                painter.drawText(canvas.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
+                painter.end()
+            self.setPixmap(canvas)
             return
 
         frame = self._frame
@@ -177,9 +198,8 @@ class VideoCanvas(QLabel):
             frame = blend_mask(frame, self._mask)
 
         # Scale to fit the widget while preserving aspect ratio.
-        ww, wh = self.width(), self.height()
         fh, fw = frame.shape[:2]
-        if fw == 0 or fh == 0 or ww == 0 or wh == 0:
+        if fw == 0 or fh == 0:
             return
 
         scale = min(ww / fw, wh / fh)
@@ -192,15 +212,14 @@ class VideoCanvas(QLabel):
         import cv2
         display = cv2.resize(frame, (dw, dh), interpolation=cv2.INTER_LINEAR)
 
-        # Convert BGR → RGB for QImage.
+        # Convert BGR → RGB for QImage.  Use bytes() to ensure QImage owns
+        # the buffer — rgb.data is a memoryview that may be freed before
+        # QPixmap.fromImage() copies the pixels.
         rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
-        qimg = QImage(rgb.data, w, h, w * ch, QImage.Format.Format_RGB888)
+        qimg = QImage(bytes(rgb), w, h, w * ch, QImage.Format.Format_RGB888)
         pixmap = QPixmap.fromImage(qimg)
 
-        # Compose onto black background to fill the full widget area.
-        canvas = QPixmap(ww, wh)
-        canvas.fill(QColor(0, 0, 0))
         painter = QPainter(canvas)
         painter.drawPixmap(self._offset_x, self._offset_y, pixmap)
         painter.end()

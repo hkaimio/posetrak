@@ -7,7 +7,6 @@ Phase 4: correction workflow, RTMPose post-step.
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 
 import numpy as np
@@ -50,7 +49,7 @@ class CutieInitPanel(QWidget):
         self._frame_cache = FrameCache(max_frames=300, max_dim=1920)
 
         # Populated by _load_run()
-        self._cameras: list[dict] = []          # [{id, label, file_path, first, last, fps}]
+        self._cameras: list[dict] = []          # [{id, label, file_path, first, last, fps, track_first, track_last}]
         self._seg_run_id: str | None = None     # most recent seg_quality_run for this run
         self._persons: list[str] = []           # person names in label order
 
@@ -127,11 +126,17 @@ class CutieInitPanel(QWidget):
         cam_rows = self._conn.execute(
             "SELECT cv.id, cv.file_path, cv.first_video_frame, cv.last_video_frame, "
             "       cv.actual_fps, "
-            "       COALESCE(ci.label, cv.camera_instance_id) AS label "
+            "       COALESCE(ci.label, cv.camera_instance_id) AS label, "
+            "       MIN(pt.first_frame) AS track_first, "
+            "       MAX(pt.last_frame)  AS track_last "
             "FROM capture_videos cv "
             "LEFT JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
-            "WHERE cv.shot_id = ? ORDER BY label",
-            (shot_id,),
+            "LEFT JOIN person_tracks pt "
+            "       ON pt.shot_video_id = cv.id AND pt.detection_run_id = ? "
+            "WHERE cv.shot_id = ? "
+            "GROUP BY cv.id "
+            "ORDER BY label",
+            (self._run_id, shot_id),
         ).fetchall()
 
         self._cameras = [
@@ -142,22 +147,29 @@ class CutieInitPanel(QWidget):
                 "first": int(r["first_video_frame"]),
                 "last": int(r["last_video_frame"]),
                 "fps": float(r["actual_fps"] or 30.0),
+                # Scrubber bounds: use track range when available, else full video.
+                "track_first": int(r["track_first"]) if r["track_first"] is not None else int(r["first_video_frame"]),
+                "track_last":  int(r["track_last"])  if r["track_last"]  is not None else int(r["last_video_frame"]),
             }
             for r in cam_rows
         ]
 
         # Find most recent seg_quality_run for this detection run.
         seg_row = self._conn.execute(
-            "SELECT id, persons_ordered FROM seg_quality_runs "
+            "SELECT id FROM seg_quality_runs "
             "WHERE detection_run_id = ? ORDER BY created_at DESC LIMIT 1",
             (self._run_id,),
         ).fetchone()
         if seg_row:
             self._seg_run_id = seg_row["id"]
-            try:
-                self._persons = json.loads(seg_row["persons_ordered"] or "[]")
-            except (json.JSONDecodeError, TypeError):
-                self._persons = []
+
+        # Derive person list from track assignments (distinct names, sorted).
+        person_rows = self._conn.execute(
+            "SELECT DISTINCT person_name FROM detection_track_assignments "
+            "WHERE detection_run_id = ? ORDER BY person_name",
+            (self._run_id,),
+        ).fetchall()
+        self._persons = [r["person_name"] for r in person_rows]
 
         self._rebuild_camera_combo()
         self._rebuild_legend()
@@ -205,8 +217,8 @@ class CutieInitPanel(QWidget):
         cam = self._cam_combo.itemData(index)
         if cam is None:
             return
-        first = cam["first"]
-        last = cam["last"]
+        first = cam["track_first"]
+        last = cam["track_last"]
         self._scrubber.blockSignals(True)
         self._scrubber.setMinimum(first)
         self._scrubber.setMaximum(last)
@@ -225,10 +237,19 @@ class CutieInitPanel(QWidget):
         frame = self._frame_cache.get_frame(cam["file_path"], frame_idx)
         mask = self._load_mask(cam["id"], frame_idx)
 
-        self._canvas.display(frame, mask)
+        if frame is None:
+            import os
+            msg = (
+                f"Video not accessible:\n{cam['file_path']}"
+                if not os.path.exists(cam["file_path"])
+                else f"Could not decode frame {frame_idx}"
+            )
+            self._canvas.display(None, message=msg)
+        else:
+            self._canvas.display(frame, mask)
 
-        # Update frame label: show frame index and time.
-        t = (frame_idx - cam["first"]) / cam["fps"]
+        # Update frame label: show frame index and time relative to track start.
+        t = (frame_idx - cam["track_first"]) / cam["fps"]
         mm, ss = divmod(t, 60)
         seg_indicator = " [mask]" if mask is not None else ""
         self._frame_label.setText(

@@ -7,8 +7,13 @@ Phase 4: correction workflow, RTMPose post-step.
 """
 from __future__ import annotations
 
+import datetime
+import logging
 import sqlite3
 
+log = logging.getLogger(__name__)
+
+import cv2
 import numpy as np
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QShortcut, QKeySequence
@@ -18,6 +23,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QSlider,
@@ -27,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from app.pose.frame_cache import FrameCache
 from app.pose.video_canvas import VideoCanvas, label_to_color
+from posetrak.db.db import generate_id
 
 
 class CutieInitPanel(QWidget):
@@ -70,6 +77,13 @@ class CutieInitPanel(QWidget):
         self._encode_timer.setSingleShot(True)
         self._encode_timer.timeout.connect(self._encode_current_frame)
 
+        # Tracking state
+        self._worker = None                 # CutieWorker QThread
+        self._seg_init_run_id: str | None = None   # seg_quality_run created for this session
+        self._init_frame_idx: int = -1      # frame used as Cutie seed
+        self._db_flush_buffer: list[tuple] = []    # buffered (svid, frame_idx, blob) rows
+        self._DB_FLUSH_EVERY = 50           # write to DB every N frames
+
         self._build_ui()
         self._load_run()
 
@@ -79,6 +93,9 @@ class CutieInitPanel(QWidget):
 
     def shutdown(self) -> None:
         self._encode_timer.stop()
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.stop()
+            self._worker.wait(3000)
         self._frame_cache.close()
 
     # ------------------------------------------------------------------
@@ -144,6 +161,43 @@ class CutieInitPanel(QWidget):
         self._sam_status_label.setStyleSheet("font-size: 10px; color: #666;")
         edit_row.addWidget(self._sam_status_label)
         root.addLayout(edit_row)
+
+        # --- Tracking controls ---
+        track_group = QGroupBox("Tracking  (seed from current mask, then propagate)")
+        track_layout = QHBoxLayout(track_group)
+        track_layout.setContentsMargins(4, 2, 4, 2)
+
+        self._track_fwd_btn = QPushButton("▶ Track Forward")
+        self._track_fwd_btn.setToolTip(
+            "Propagate Cutie from current frame to end of track range"
+        )
+        self._track_fwd_btn.clicked.connect(self._on_track_forward)
+        self._track_fwd_btn.setEnabled(False)
+        track_layout.addWidget(self._track_fwd_btn)
+
+        self._track_bwd_btn = QPushButton("◀ Track Backward")
+        self._track_bwd_btn.setToolTip(
+            "Propagate Cutie from current frame backward to start of track range"
+        )
+        self._track_bwd_btn.clicked.connect(self._on_track_backward)
+        self._track_bwd_btn.setEnabled(False)
+        track_layout.addWidget(self._track_bwd_btn)
+
+        self._stop_btn = QPushButton("■ Stop")
+        self._stop_btn.setToolTip("Stop tracking after the current frame")
+        self._stop_btn.clicked.connect(self._on_stop_tracking)
+        self._stop_btn.setEnabled(False)
+        track_layout.addWidget(self._stop_btn)
+
+        track_layout.addStretch()
+
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setMaximumWidth(160)
+        self._progress_bar.setTextVisible(True)
+        self._progress_bar.setVisible(False)
+        track_layout.addWidget(self._progress_bar)
+
+        root.addWidget(track_group)
 
         # --- Status bar ---
         self._status_label = QLabel("")
@@ -279,6 +333,11 @@ class CutieInitPanel(QWidget):
                 self._sam_status_label.setStyleSheet("font-size: 10px; color: #c60;")
         except Exception as e:
             self._sam_status_label.setText(f"SAM2 error: {e}")
+
+        # Enable track buttons if there are persons to track
+        can_track = bool(self._persons)
+        self._track_fwd_btn.setEnabled(can_track)
+        self._track_bwd_btn.setEnabled(can_track)
 
     # ------------------------------------------------------------------
     # Interaction — person selector
@@ -485,6 +544,152 @@ class CutieInitPanel(QWidget):
             return None
         buf = np.frombuffer(bytes(row["mask_blob"]), dtype=np.uint8)
         return _decode_mask_png(buf)
+
+    # ------------------------------------------------------------------
+    # Tracking
+    # ------------------------------------------------------------------
+
+    def _on_track_forward(self) -> None:
+        self._start_tracking("forward")
+
+    def _on_track_backward(self) -> None:
+        self._start_tracking("backward")
+
+    def _start_tracking(self, direction: str) -> None:
+        cam = self._cam_combo.currentData()
+        if cam is None or not self._persons:
+            return
+
+        # The current mask (from ClickController or stored) is the seed.
+        seed_mask = None
+        if self._controller and np.any(self._controller.get_mask()):
+            seed_mask = self._controller.get_mask().copy()
+        else:
+            seed_mask = self._load_stored_mask(cam["id"], self._scrubber.value())
+
+        if seed_mask is None or not np.any(seed_mask):
+            self._set_status("No mask on current frame — click to create one first.")
+            return
+
+        init_frame_idx = self._scrubber.value()
+        self._init_frame_idx = init_frame_idx
+        self._ensure_seg_run()
+
+        from app.pose.cutie_worker import CutieWorker
+        self._worker = CutieWorker(
+            video_path=cam["file_path"],
+            init_frame=init_frame_idx,
+            init_mask=seed_mask,
+            persons_ordered=self._persons,
+            first_frame=cam["track_first"],
+            last_frame=cam["track_last"],
+            direction=direction,
+        )
+        self._worker.mask_ready.connect(
+            lambda fi, m, svid=cam["id"]: self._on_mask_ready(svid, fi, m)
+        )
+        self._worker.progress.connect(self._on_track_progress)
+        self._worker.finished.connect(self._on_tracking_finished)
+        self._worker.error.connect(self._on_tracking_error)
+
+        self._set_tracking_ui(True)
+        self._set_status(
+            f"Tracking {direction} from frame {init_frame_idx}…"
+        )
+        self._worker.start()
+
+    def _on_stop_tracking(self) -> None:
+        if self._worker is not None:
+            self._worker.stop()
+            self._set_status("Stopping…")
+
+    def _on_mask_ready(self, svid: str, frame_idx: int, mask: np.ndarray) -> None:
+        """Slot called in UI thread for each tracked frame."""
+        # Encode mask as PNG blob and buffer for DB write.
+        ok, buf = cv2.imencode(".png", mask)
+        if ok:
+            self._db_flush_buffer.append((svid, frame_idx, buf.tobytes()))
+        if len(self._db_flush_buffer) >= self._DB_FLUSH_EVERY:
+            self._flush_masks()
+
+        # Update scrubber range indicator (track is extending)
+        cam = self._cam_combo.currentData()
+        if cam and svid == cam["id"]:
+            # Update canvas if this is the currently displayed frame.
+            if frame_idx == self._scrubber.value():
+                frame = self._frame_cache.get_frame(cam["file_path"], frame_idx)
+                self._canvas.display(frame, mask if np.any(mask) else None)
+
+    def _on_track_progress(self, done: int, total: int) -> None:
+        self._progress_bar.setMaximum(total)
+        self._progress_bar.setValue(done)
+
+    def _on_tracking_finished(self) -> None:
+        self._flush_masks()
+        self._conn.commit()
+        self._set_tracking_ui(False)
+        self._set_status("Tracking complete.")
+        # Refresh to show stored masks
+        cam = self._cam_combo.currentData()
+        if cam:
+            self._show_frame(self._scrubber.value())
+
+    def _on_tracking_error(self, message: str) -> None:
+        self._flush_masks()
+        self._set_tracking_ui(False)
+        self._set_status(f"Error: {message}")
+
+    def _set_tracking_ui(self, tracking: bool) -> None:
+        """Enable/disable controls appropriately during tracking."""
+        self._track_fwd_btn.setEnabled(not tracking)
+        self._track_bwd_btn.setEnabled(not tracking)
+        self._stop_btn.setEnabled(tracking)
+        self._cam_combo.setEnabled(not tracking)
+        self._scrubber.setEnabled(not tracking)
+        for btn in self._person_btn_group.buttons():
+            btn.setEnabled(not tracking)
+        self._clear_person_btn.setEnabled(not tracking)
+        self._clear_all_btn.setEnabled(not tracking)
+        self._progress_bar.setVisible(tracking)
+        if not tracking:
+            self._progress_bar.setValue(0)
+
+    # ------------------------------------------------------------------
+    # DB helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_seg_run(self) -> None:
+        """Create a seg_quality_run for this session if not already done."""
+        if self._seg_init_run_id is not None:
+            return
+        run_id = generate_id()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self._conn.execute(
+            "INSERT INTO seg_quality_runs "
+            "(id, detection_run_id, created_at, quality_source, erosion_px) "
+            "VALUES (?, ?, ?, 'cutie-interactive', 5)",
+            (run_id, self._run_id, now),
+        )
+        self._conn.commit()
+        self._seg_init_run_id = run_id
+        # Switch mask reads to the new run so scrubbing shows new masks.
+        self._seg_run_id = run_id
+        log.debug("Created seg_quality_run %s for interactive init", run_id)
+
+    def _flush_masks(self) -> None:
+        """Write buffered mask blobs to the seg_masks table."""
+        if not self._db_flush_buffer or self._seg_init_run_id is None:
+            return
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO seg_masks "
+            "(seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                (self._seg_init_run_id, svid, fi, blob)
+                for svid, fi, blob in self._db_flush_buffer
+            ],
+        )
+        self._db_flush_buffer.clear()
 
     def _set_status(self, text: str) -> None:
         self._status_label.setText(text)

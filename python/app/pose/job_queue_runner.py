@@ -12,6 +12,7 @@ can handle DB writes and UI updates without knowing which job is running.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 
 import cv2
@@ -54,8 +55,8 @@ class JobQueueRunner(QObject):
     jobs as cancelled.
     """
 
-    # Forwarded from CutieWorker per-frame
-    mask_ready = Signal(str, int, object)   # svid, frame_idx, np.ndarray
+    # Forwarded from CutieWorker — batch of (frame_idx, png_bytes) tuples
+    mask_ready = Signal(str, object)        # svid, list[tuple[int, bytes]]
     progress   = Signal(int, int)           # done, total
 
     # Job lifecycle
@@ -70,6 +71,8 @@ class JobQueueRunner(QObject):
         self._worker = None
         self._current: TrackingJob | None = None
         self._masks_this_job: int = 0
+        self._batch_count: int = 0
+        self._t_job_start: float = 0.0
         self._cutie_model = None        # cached after first job; avoids Hydra re-init
 
     # ------------------------------------------------------------------
@@ -145,6 +148,11 @@ class JobQueueRunner(QObject):
         job.status = "running"
         self._current = job
         self._masks_this_job = 0
+        self._batch_count = 0
+        self._t_job_start = time.monotonic()
+        log.info("JobQueueRunner: starting job %s  %s %s  frames %d-%d  t=%.3f",
+                 job.job_id, job.direction, job.camera_label,
+                 job.first_frame, job.last_frame, self._t_job_start)
         self.job_started.emit(job.job_id)
 
         self._worker = CutieWorker(
@@ -160,20 +168,30 @@ class JobQueueRunner(QObject):
         )
         svid = job.shot_video_id
         self._worker.mask_ready.connect(
-            lambda fi, m, s=svid: self._on_mask_ready(s, fi, m)
+            lambda batch, s=svid: self._on_batch_ready(s, batch)
         )
         self._worker.progress.connect(self.progress)
-        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.tracking_done.connect(self._on_worker_finished)
         self._worker.error.connect(
             lambda msg, jid=job.job_id: self._on_worker_error(jid, msg)
         )
         self._worker.start()
 
-    def _on_mask_ready(self, svid: str, frame_idx: int, mask: np.ndarray) -> None:
-        self._masks_this_job += 1
-        self.mask_ready.emit(svid, frame_idx, mask)
+    def _on_batch_ready(self, svid: str, batch: list) -> None:
+        self._masks_this_job += len(batch)
+        self._batch_count += 1
+        t = time.monotonic() - self._t_job_start
+        if self._batch_count == 1:
+            log.info("JobQueueRunner: first batch received  masks=%d  t=%.3f", len(batch), t)
+        elif self._batch_count % 10 == 0:
+            log.debug("JobQueueRunner: batch %d received  total_masks=%d  t=%.3f",
+                      self._batch_count, self._masks_this_job, t)
+        self.mask_ready.emit(svid, batch)
 
     def _on_worker_finished(self) -> None:
+        t = time.monotonic() - self._t_job_start
+        log.info("JobQueueRunner: _on_worker_finished  batches=%d  masks=%d  t=%.3f",
+                 self._batch_count, self._masks_this_job, t)
         job = self._current
         if job is not None and job.status == "running":
             job.status = "done"

@@ -11,6 +11,7 @@ Requires:
 from __future__ import annotations
 
 import logging
+import time
 
 import cv2
 import numpy as np
@@ -35,10 +36,17 @@ class CutieWorker(QThread):
         Emitted if an unrecoverable error occurs.
     """
 
-    mask_ready = Signal(int, object)   # frame_idx, np.ndarray
-    progress   = Signal(int, int)      # frames_done, total_frames
-    finished   = Signal()
-    error      = Signal(str)
+    # Emitted in batches rather than per-frame to avoid flooding the main thread's
+    # event queue.  Each payload is a list of (frame_idx, png_bytes) tuples.
+    mask_ready    = Signal(object)     # list[tuple[int, bytes]]
+    progress      = Signal(int, int)   # frames_done, total_frames
+    # Named tracking_done (not "finished") to avoid shadowing ambiguity with
+    # QThread::finished, which Qt emits via its own internal mechanism after
+    # run() returns.  Using the same name risks the connection binding to
+    # QThread::finished, which is posted to the event queue through a different
+    # path and can arrive before our batch signals.
+    tracking_done = Signal()
+    error         = Signal(str)
 
     def __init__(
         self,
@@ -92,7 +100,8 @@ class CutieWorker(QThread):
             log.exception("CutieWorker error")
             self.error.emit("Cutie tracking failed — see console for details.")
         finally:
-            self.finished.emit()
+            log.info("CutieWorker: emitting tracking_done  t=%.3f", time.monotonic())
+            self.tracking_done.emit()
 
     # ------------------------------------------------------------------
     # Internal — Cutie setup
@@ -149,18 +158,27 @@ class CutieWorker(QThread):
     # Forward pass: init_frame → last_frame
     # ------------------------------------------------------------------
 
+    # Number of frames to accumulate before emitting a batch signal.
+    # Fewer, larger signals prevent flooding the main thread's event queue.
+    _BATCH = 50
+
     def _run_forward(self) -> None:
         import torch
 
-        log.info("CutieWorker: forward  [%d, %d]  init=%d",
-                 self._init_frame, self._last, self._init_frame)
+        t0 = time.monotonic()
+        log.info("CutieWorker: forward  [%d, %d]  init=%d  t=%.3f",
+                 self._init_frame, self._last, self._init_frame, t0)
         model = self._load_cutie()
+        log.info("CutieWorker: model ready  t=%.3f  (%.2fs to load)",
+                 time.monotonic(), time.monotonic() - t0)
         proc = self._new_processor(model)
         objects = list(range(1, len(self._persons) + 1))
         init_t = torch.from_numpy(self._init_mask).to(self._device)
 
         total = self._last - self._init_frame + 1
         done = 0
+        batch_num = 0
+        batch: list[tuple[int, bytes]] = []
 
         cap = cv2.VideoCapture(self._video_path)
         cap.set(cv2.CAP_PROP_POS_FRAMES, self._init_frame)
@@ -175,20 +193,51 @@ class CutieWorker(QThread):
                     if not ret:
                         break
                     img_t = self._to_tensor(frame, self._device, self._max_dim)
+                    del frame
                     if not initialized:
                         out = proc.step(img_t, init_t, objects=objects)
                         initialized = True
                     else:
                         out = proc.step(img_t)
-                    labeled = proc.output_prob_to_mask(out).cpu().numpy()
-                    self.mask_ready.emit(fi, labeled)
+                    del img_t
+                    labeled = proc.output_prob_to_mask(out).cpu().numpy().astype(np.uint8)
+                    del out
+                    ok, png_buf = cv2.imencode(".png", labeled)
+                    del labeled
+                    if ok:
+                        batch.append((fi, bytes(png_buf)))
                     done += 1
-                    if done % 50 == 0:
+                    if len(batch) >= self._BATCH:
+                        batch_num += 1
+                        log.debug("CutieWorker: emitting batch %d  frames=%d-%d  done=%d/%d  t=%.3f",
+                                  batch_num, batch[0][0], batch[-1][0], done, total, time.monotonic() - t0)
+                        self.mask_ready.emit(batch)
+                        batch = []
                         self.progress.emit(done, total)
+            if batch:
+                batch_num += 1
+                log.debug("CutieWorker: emitting final batch %d  frames=%d-%d  done=%d/%d  t=%.3f",
+                          batch_num, batch[0][0], batch[-1][0], done, total, time.monotonic() - t0)
+                self.mask_ready.emit(batch)
+                batch = []
         finally:
             cap.release()
 
-        log.info("CutieWorker: forward done — %d frames", done)
+        log.info("CutieWorker: inference done — %d frames in %.2fs  (%d batches)  t=%.3f",
+                 done, time.monotonic() - t0, batch_num, time.monotonic())
+
+        # Explicitly free InferenceCore and flush CUDA memory before thread exits so the
+        # next job starts with a clean GPU state and doesn't double-count live tensors.
+        del proc
+        try:
+            if torch.cuda.is_available():
+                log.debug("CutieWorker: CUDA sync+empty_cache  t=%.3f", time.monotonic() - t0)
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+        log.info("CutieWorker: forward complete — %d frames  total=%.2fs", done, time.monotonic() - t0)
 
     # ------------------------------------------------------------------
     # Backward pass: init_frame → first_frame
@@ -201,8 +250,9 @@ class CutieWorker(QThread):
             log.info("CutieWorker: nothing to track backward (init == first frame)")
             return
 
-        log.info("CutieWorker: backward  [%d, %d]  init=%d",
-                 self._first, self._init_frame - 1, self._init_frame)
+        t0 = time.monotonic()
+        log.info("CutieWorker: backward  [%d, %d]  init=%d  t=%.3f",
+                 self._first, self._init_frame - 1, self._init_frame, t0)
         model = self._load_cutie()
         proc = self._new_processor(model)
         objects = list(range(1, len(self._persons) + 1))
@@ -211,7 +261,10 @@ class CutieWorker(QThread):
         # Read backward-range frames into memory, scale + JPEG-compress immediately.
         # Raw 4K ndarray per frame is ~24 MB; JPEG at 1920p is ~150 KB — 100× smaller.
         # Without this, a 1700-frame backward pass on a 4K gopro would consume ~40 GB.
-        bwd_frames: list[tuple[int, bytes]] = []
+        # Use a deque so frames are popped and freed as they are processed (right-to-left
+        # gives highest frame first, matching the reverse-chronological processing order).
+        from collections import deque
+        bwd_deque: deque[tuple[int, bytes]] = deque()
         cap = cv2.VideoCapture(self._video_path)
         cap.set(cv2.CAP_PROP_POS_FRAMES, self._first)
         for fi in range(self._first, self._init_frame):
@@ -223,14 +276,15 @@ class CutieWorker(QThread):
                 scale = self._max_dim / max(h, w)
                 frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
             ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            del frame
             if ok:
-                bwd_frames.append((fi, buf.tobytes()))
+                bwd_deque.append((fi, buf.tobytes()))
         cap.release()
-        n_bwd = len(bwd_frames)
+        n_bwd = len(bwd_deque)
         log.info("CutieWorker: backward buffer — %d frames, ~%.0f MB",
                  n_bwd, n_bwd * 150 / 1024)
 
-        total = len(bwd_frames)
+        total = n_bwd
         done = 0
 
         cap2 = cv2.VideoCapture(self._video_path)
@@ -241,23 +295,61 @@ class CutieWorker(QThread):
             self.error.emit(f"Cannot read init frame {self._init_frame}")
             return
 
+        batch: list[tuple[int, bytes]] = []
+        batch_num = 0
+
         with torch.inference_mode(), torch.amp.autocast(self._device):
             # Seed with the init frame mask.
             img_t = self._to_tensor(init_img, self._device, self._max_dim)
+            del init_img
             proc.step(img_t, init_t, objects=objects)
+            del img_t
 
-            for fi, jpeg_bytes in reversed(bwd_frames):
+            while bwd_deque:
                 if self._stop_requested:
                     break
+                fi, jpeg_bytes = bwd_deque.pop()   # pop from right = highest frame first
                 frame = cv2.imdecode(
                     np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR
                 )
+                del jpeg_bytes
                 img_t = self._to_tensor(frame, self._device, self._max_dim)
+                del frame
                 out = proc.step(img_t)
-                labeled = proc.output_prob_to_mask(out).cpu().numpy()
-                self.mask_ready.emit(fi, labeled)
+                del img_t
+                labeled = proc.output_prob_to_mask(out).cpu().numpy().astype(np.uint8)
+                del out
+                ok, png_buf = cv2.imencode(".png", labeled)
+                del labeled
+                if ok:
+                    batch.append((fi, bytes(png_buf)))
                 done += 1
-                if done % 50 == 0:
+                if len(batch) >= self._BATCH:
+                    batch_num += 1
+                    log.debug("CutieWorker: emitting batch %d  frames=%d-%d  done=%d/%d  t=%.3f",
+                              batch_num, batch[0][0], batch[-1][0], done, total, time.monotonic() - t0)
+                    self.mask_ready.emit(batch)
+                    batch = []
                     self.progress.emit(done, total)
+        if batch:
+            batch_num += 1
+            log.debug("CutieWorker: emitting final batch %d  frames=%d-%d  done=%d/%d  t=%.3f",
+                      batch_num, batch[0][0], batch[-1][0], done, total, time.monotonic() - t0)
+            self.mask_ready.emit(batch)
+            batch = []
 
-        log.info("CutieWorker: backward done — %d frames", done)
+        log.info("CutieWorker: inference done — %d frames in %.2fs  (%d batches)  t=%.3f",
+                 done, time.monotonic() - t0, batch_num, time.monotonic())
+
+        # Explicitly free InferenceCore and flush CUDA memory before thread exits.
+        del proc
+        del bwd_deque
+        try:
+            if torch.cuda.is_available():
+                log.debug("CutieWorker: CUDA sync+empty_cache  t=%.3f", time.monotonic() - t0)
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+        log.info("CutieWorker: backward complete — %d frames  total=%.2fs", done, time.monotonic() - t0)

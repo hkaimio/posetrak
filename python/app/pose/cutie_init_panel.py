@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import logging
 import sqlite3
+import time
 
 log = logging.getLogger(__name__)
 
@@ -183,7 +184,7 @@ class CutieInitPanel(QWidget):
         # Tracking state
         from app.pose.job_queue_runner import JobQueueRunner
         self._runner = JobQueueRunner(self)
-        self._runner.mask_ready.connect(self._on_mask_ready)
+        self._runner.mask_ready.connect(self._on_batch_ready)
         self._runner.progress.connect(self._on_track_progress)
         self._runner.job_started.connect(self._on_job_started)
         self._runner.job_finished.connect(self._on_job_finished)
@@ -192,8 +193,9 @@ class CutieInitPanel(QWidget):
 
         self._seg_init_run_id: str | None = None   # seg_quality_run created for this session
         self._db_flush_buffer: list[tuple] = []    # buffered (svid, frame_idx, blob) rows
-        self._DB_FLUSH_EVERY = 50           # write to DB every N frames
-        self._canvas_update_counter: int = 0       # throttle live canvas redraws
+        self._DB_FLUSH_EVERY = 50           # flush to DB every N frames
+        self._batch_recv_count: int = 0     # batches received for current job (for logging)
+        self._t_job_recv_start: float = 0.0
 
         self._build_ui()
         self._load_run()
@@ -369,6 +371,13 @@ class CutieInitPanel(QWidget):
         vbox.setSpacing(4)
 
         vbox.addWidget(QLabel("<b>Job Queue</b>"))
+
+        self._now_running_label = QLabel("Idle")
+        self._now_running_label.setStyleSheet(
+            "font-size: 10px; color: #888; padding: 0px 0px 2px 0px;"
+        )
+        self._now_running_label.setWordWrap(True)
+        vbox.addWidget(self._now_running_label)
 
         self._job_list = QListWidget()
         self._job_list.setAlternatingRowColors(True)
@@ -909,51 +918,67 @@ class CutieInitPanel(QWidget):
         self._stop_btn.setEnabled(True)
         self._progress_bar.setVisible(True)
         self._progress_bar.setValue(0)
-        self._canvas_update_counter = 0
+        self._batch_recv_count = 0
+        self._t_job_recv_start = time.monotonic()
+        log.info("Panel: job_started  job_id=%s  t=%.3f", job_id, self._t_job_recv_start)
         for job in self._runner.jobs:
             if job.job_id == job_id:
                 arrow = "▶" if job.direction == "forward" else "◀"
-                self._set_status(
-                    f"{arrow} Tracking {job.direction} | {job.camera_label} "
-                    f"({job.first_frame}–{job.last_frame})…"
+                summary = (
+                    f"{arrow} {job.direction.capitalize()}  {job.camera_label}  "
+                    f"frames {job.first_frame}–{job.last_frame}"
                 )
+                self._now_running_label.setText(f"Running: {summary}")
+                self._now_running_label.setStyleSheet(
+                    "font-size: 10px; color: #4af; padding: 0px 0px 2px 0px;"
+                )
+                self._set_status(f"{arrow} Tracking {job.camera_label}…")
                 break
         self._refresh_queue_list()
 
-    def _on_mask_ready(self, svid: str, frame_idx: int, mask: np.ndarray) -> None:
-        """DB write + scrubber position update for each tracked frame.
+    def _on_batch_ready(self, svid: str, batch: list) -> None:
+        """Process a batch of tracked frames from the worker.
 
-        Cross-thread Qt signals batch up in the event queue: thousands of
-        mask_ready calls can arrive all at once after the worker finishes.
-        Any disk I/O here (get_frame, video seek) causes a read storm that
-        freezes the UI.  Keep this slot to memory-only operations only;
-        the canvas refreshes once in _on_job_finished.
+        The worker accumulates masks in batches of ~50 frames before emitting,
+        so at most ~60 signals are queued for a 3000-frame job — regardless of
+        GIL contention between the worker and main threads.  Each signal carries
+        PNG-encoded masks (~50–150 KB each) to keep per-signal memory small.
         """
-        mask_u8 = mask.astype(np.uint8)
-        ok, png = cv2.imencode(".png", mask_u8)
-        if ok:
-            self._db_flush_buffer.append((svid, frame_idx, png.tobytes()))
+        self._batch_recv_count += 1
+        t = time.monotonic()
+        if self._batch_recv_count == 1:
+            self._t_job_recv_start = t
+            log.info("Panel: first batch received  svid=%s  frames=%d  t=%.3f", svid, len(batch), t)
+        elif self._batch_recv_count % 10 == 0:
+            log.debug("Panel: batch %d received  svid=%s  t=%.3f  (+%.3fs since first)",
+                      self._batch_recv_count, svid, t, t - self._t_job_recv_start)
+
+        for frame_idx, mask_png in batch:
+            self._db_flush_buffer.append((svid, frame_idx, mask_png))
         if len(self._db_flush_buffer) >= self._DB_FLUSH_EVERY:
             self._flush_masks()
 
-        # Advance scrubber + range bar every 30 frames (throttled to keep
-        # Qt repaint coalescing from becoming a bottleneck).
+        # Advance scrubber to the last frame in the batch.
         cam = self._cam_combo.currentData()
-        if cam and svid == cam["id"]:
-            self._canvas_update_counter += 1
-            if self._canvas_update_counter % 30 == 0:
-                self._scrubber.blockSignals(True)
-                self._scrubber.setValue(frame_idx)
-                self._scrubber.blockSignals(False)
-                self._range_bar.set_position(frame_idx)
+        if cam and svid == cam["id"] and batch:
+            last_fi = batch[-1][0]
+            self._scrubber.blockSignals(True)
+            self._scrubber.setValue(last_fi)
+            self._scrubber.blockSignals(False)
+            self._range_bar.set_position(last_fi)
 
     def _on_track_progress(self, done: int, total: int) -> None:
         self._progress_bar.setMaximum(total)
         self._progress_bar.setValue(done)
 
     def _on_job_finished(self, job_id: str, masks_written: int) -> None:
+        t = time.monotonic()
+        log.info("Panel: _on_job_finished  job_id=%s  masks_written=%d  "
+                 "batches_received=%d  buffer_pending=%d  t=%.3f",
+                 job_id, masks_written, self._batch_recv_count,
+                 len(self._db_flush_buffer), t)
         self._flush_masks()
-        self._conn.commit()
+        self._conn.commit()  # no-op if _flush_masks already committed everything
         if self._controller:
             self._controller.clear_all()
         self._encoded_frame_idx = -1
@@ -974,6 +999,10 @@ class CutieInitPanel(QWidget):
         self._stop_btn.setEnabled(False)
         self._progress_bar.setVisible(False)
         self._progress_bar.setValue(0)
+        self._now_running_label.setText("Idle")
+        self._now_running_label.setStyleSheet(
+            "font-size: 10px; color: #888; padding: 0px 0px 2px 0px;"
+        )
         self._refresh_queue_list()
 
     # ------------------------------------------------------------------
@@ -981,6 +1010,7 @@ class CutieInitPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _refresh_queue_list(self) -> None:
+        from PySide6.QtGui import QFont
         self._job_list.clear()
         status_icons = {
             "pending":   "⏳",
@@ -990,6 +1020,7 @@ class CutieInitPanel(QWidget):
             "cancelled": "—",
         }
         pending = running = done = 0
+        running_item = None
         for job in self._runner.jobs:
             icon  = status_icons.get(job.status, "?")
             arrow = "▶" if job.direction == "forward" else "◀"
@@ -1000,15 +1031,26 @@ class CutieInitPanel(QWidget):
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, job.job_id)
             if job.status == "running":
-                item.setBackground(QColor(30, 60, 100))
+                item.setBackground(QColor(50, 100, 180))
+                item.setForeground(QColor(220, 240, 255))
+                font = QFont()
+                font.setBold(True)
+                item.setFont(font)
+                running_item = item
             elif job.status == "done":
                 item.setForeground(QColor(100, 200, 100))
+            elif job.status == "pending":
+                item.setForeground(QColor(200, 200, 200))
             elif job.status in ("failed", "cancelled"):
-                item.setForeground(QColor(150, 150, 150))
+                item.setForeground(QColor(120, 120, 120))
             self._job_list.addItem(item)
             if job.status == "pending":   pending  += 1
             elif job.status == "running": running  += 1
             elif job.status == "done":    done     += 1
+
+        if running_item is not None:
+            self._job_list.scrollToItem(running_item)
+
         self._queue_status_label.setText(
             f"{pending} pending  {running} running  {done} done"
         )
@@ -1044,9 +1086,18 @@ class CutieInitPanel(QWidget):
             self._refresh_coverage_bar(cam)
 
     def _flush_masks(self) -> None:
-        """Write buffered mask blobs to the seg_masks table."""
+        """Write buffered mask blobs to the seg_masks table and commit immediately.
+
+        Committing here (not only in _on_job_finished) ensures masks are durable
+        even if tracking_done is somehow processed before all batch signals, or if
+        _on_job_finished is called with an already-empty buffer.
+        """
         if not self._db_flush_buffer or self._seg_init_run_id is None:
+            log.debug("Panel: _flush_masks skipped  buffer=%d  run_id=%s",
+                      len(self._db_flush_buffer), self._seg_init_run_id)
             return
+        n = len(self._db_flush_buffer)
+        t0 = time.monotonic()
         self._conn.executemany(
             "INSERT OR REPLACE INTO seg_masks "
             "(seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
@@ -1056,7 +1107,9 @@ class CutieInitPanel(QWidget):
                 for svid, fi, blob in self._db_flush_buffer
             ],
         )
+        self._conn.commit()
         self._db_flush_buffer.clear()
+        log.debug("Panel: flushed %d masks to DB  %.1fms", n, (time.monotonic() - t0) * 1000)
 
     def _set_status(self, text: str) -> None:
         self._status_label.setText(text)

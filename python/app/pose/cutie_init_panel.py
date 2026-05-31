@@ -486,6 +486,8 @@ class CutieInitPanel(QWidget):
 
         self._set_status("Encoding frame for SAM2…")
         self._controller.set_image(frame)
+        # Load stored mask as base so other persons are preserved during editing.
+        self._controller.set_base_mask(self._load_stored_mask(cam["id"], frame_idx))
         self._encoded_frame_idx = frame_idx
         self._encoded_svid = cam["id"]
         self._set_status("Ready — click to segment")

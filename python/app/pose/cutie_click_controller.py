@@ -46,6 +46,10 @@ class ClickController:
         # label (1-based int) → [(x, y, is_positive)]
         self._clicks: dict[int, list[tuple[int, int, bool]]] = {}
         self._mask: np.ndarray = np.zeros((0, 0), dtype=np.uint8)
+        # Base mask loaded from the DB for the current frame.  Persons without
+        # live clicks show their base pixels; persons with live clicks have their
+        # SAM2 result painted over their base region.
+        self._base_mask: np.ndarray | None = None
 
         if _AVAILABLE:
             try:
@@ -62,11 +66,34 @@ class ClickController:
         return self._sam is not None
 
     def set_image(self, frame_bgr: np.ndarray) -> None:
-        """Register a new frame and clear all click state."""
+        """Register a new frame and clear all click and base-mask state."""
         self._image_bgr = frame_bgr
         self._h, self._w = frame_bgr.shape[:2]
         self._clicks.clear()
+        self._base_mask = None
         self._mask = np.zeros((self._h, self._w), dtype=np.uint8)
+
+    def set_base_mask(self, labeled: np.ndarray | None) -> np.ndarray:
+        """Load a stored labeled mask as the base layer for this frame.
+
+        Persons that have no live SAM2 clicks keep their base pixels.
+        Persons that do have live clicks have their SAM2 result painted
+        over their base region (the old base pixels for that label are
+        discarded before the SAM2 mask is applied).
+
+        Call after set_image() whenever a stored mask exists for the frame.
+        Returns the updated display mask.
+        """
+        import cv2
+        if labeled is None:
+            self._base_mask = None
+        else:
+            if labeled.shape[:2] != (self._h, self._w):
+                labeled = cv2.resize(
+                    labeled, (self._w, self._h), interpolation=cv2.INTER_NEAREST
+                )
+            self._base_mask = labeled.astype(np.uint8)
+        return self._run_predictions()
 
     def push_point(
         self, label: int, x: int, y: int, positive: bool = True
@@ -84,8 +111,9 @@ class ClickController:
         return self._run_predictions()
 
     def clear_all(self) -> None:
-        """Remove all clicks for all persons and reset the mask."""
+        """Remove all live clicks and the base mask; reset to blank."""
         self._clicks.clear()
+        self._base_mask = None
         self._mask = np.zeros((self._h, self._w), dtype=np.uint8)
 
     def get_mask(self) -> np.ndarray:
@@ -101,7 +129,12 @@ class ClickController:
     def _run_predictions(self) -> np.ndarray:
         import cv2
 
-        combined = np.zeros((self._h, self._w), dtype=np.uint8)
+        # Start from the base mask so persons without live clicks are preserved.
+        if self._base_mask is not None and self._base_mask.shape == (self._h, self._w):
+            combined = self._base_mask.copy()
+        else:
+            combined = np.zeros((self._h, self._w), dtype=np.uint8)
+
         if self._image_bgr is None:
             self._mask = combined
             return combined
@@ -111,6 +144,11 @@ class ClickController:
                 continue
             points = [[x, y] for x, y, _ in clicks]
             labels = [1 if pos else 0 for _, _, pos in clicks]
+
+            # Clear this person's base pixels before applying SAM2 result
+            # so the SAM2 mask fully replaces their old region.
+            combined[combined == label] = 0
+
             m = self._predict(points, labels)
             if m is not None:
                 if m.shape != (self._h, self._w):

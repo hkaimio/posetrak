@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 import cv2
 import numpy as np
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -34,6 +34,73 @@ from PySide6.QtWidgets import (
 from app.pose.frame_cache import FrameCache
 from app.pose.video_canvas import VideoCanvas, label_to_color
 from posetrak.db.db import generate_id
+
+
+class RangeBar(QWidget):
+    """Thin horizontal bar that shows the tracking range selection.
+
+    Full track range is drawn as a dark background.  The user-selected
+    range (mark_start..mark_end) is shown as a steel-blue highlight.
+    The current frame position is a white tick.
+    """
+
+    HEIGHT = 10
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(self.HEIGHT)
+        self._first = 0
+        self._last  = 1
+        self._sel_start = 0
+        self._sel_end   = 1
+        self._pos = 0
+
+    def set_range(self, first: int, last: int) -> None:
+        self._first = first
+        self._last  = max(last, first + 1)
+        self._sel_start = first
+        self._sel_end   = self._last
+        self._pos = first
+        self.update()
+
+    def set_selection(self, start: int, end: int) -> None:
+        self._sel_start = start
+        self._sel_end   = end
+        self.update()
+
+    def set_position(self, frame: int) -> None:
+        self._pos = frame
+        self.update()
+
+    def _to_x(self, frame: int) -> int:
+        w = self.width()
+        span = self._last - self._first
+        if span <= 0:
+            return 0
+        return int((frame - self._first) / span * w)
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+
+        # Background — full track range
+        p.fillRect(0, 0, w, h, QColor(55, 55, 55))
+
+        # Selected range — steel blue
+        x1 = self._to_x(self._sel_start)
+        x2 = self._to_x(self._sel_end)
+        if x2 > x1:
+            p.fillRect(x1, 0, x2 - x1, h, QColor(70, 130, 180))
+
+        # Start / end tick marks — brighter blue
+        for xm in (x1, x2):
+            p.fillRect(max(0, xm - 1), 0, 2, h, QColor(120, 180, 240))
+
+        # Current position — white tick
+        xp = self._to_x(self._pos)
+        p.fillRect(xp, 0, 2, h, QColor(255, 255, 255))
+
+        p.end()
 
 
 class CutieInitPanel(QWidget):
@@ -76,6 +143,10 @@ class CutieInitPanel(QWidget):
         self._encode_timer = QTimer(self)
         self._encode_timer.setSingleShot(True)
         self._encode_timer.timeout.connect(self._encode_current_frame)
+
+        # Tracking range (frame indices; set via Mark Start / Mark End buttons)
+        self._mark_start: int = 0
+        self._mark_end: int   = 0
 
         # Tracking state
         self._worker = None                 # CutieWorker QThread
@@ -205,10 +276,41 @@ class CutieInitPanel(QWidget):
         self._status_label.setStyleSheet("font-size: 10px; color: #555;")
         root.addWidget(self._status_label)
 
-    def _make_scrubber_row(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.addWidget(self._scrubber, 1)
-        return row
+    def _make_scrubber_row(self) -> QVBoxLayout:
+        vbox = QVBoxLayout()
+        vbox.setSpacing(2)
+        vbox.setContentsMargins(0, 0, 0, 0)
+
+        slider_row = QHBoxLayout()
+        slider_row.addWidget(self._scrubber, 1)
+        vbox.addLayout(slider_row)
+
+        self._range_bar = RangeBar()
+        vbox.addWidget(self._range_bar)
+
+        mark_row = QHBoxLayout()
+        mark_row.setSpacing(4)
+
+        self._mark_start_btn = QPushButton("Mark Start")
+        self._mark_start_btn.setMaximumWidth(90)
+        self._mark_start_btn.setToolTip("Set track-from to current frame")
+        self._mark_start_btn.clicked.connect(self._on_mark_start)
+        self._mark_start_label = QLabel("Start: —")
+
+        self._mark_end_btn = QPushButton("Mark End")
+        self._mark_end_btn.setMaximumWidth(90)
+        self._mark_end_btn.setToolTip("Set track-to to current frame")
+        self._mark_end_btn.clicked.connect(self._on_mark_end)
+        self._mark_end_label = QLabel("End: —")
+
+        mark_row.addWidget(self._mark_start_btn)
+        mark_row.addWidget(self._mark_start_label)
+        mark_row.addStretch()
+        mark_row.addWidget(self._mark_end_label)
+        mark_row.addWidget(self._mark_end_btn)
+        vbox.addLayout(mark_row)
+
+        return vbox
 
     # ------------------------------------------------------------------
     # Data loading
@@ -448,6 +550,13 @@ class CutieInitPanel(QWidget):
         self._scrubber.setMaximum(cam["track_last"])
         self._scrubber.setValue(cam["track_first"])
         self._scrubber.blockSignals(False)
+
+        # Reset marks to full track range for the new camera
+        self._mark_start = cam["track_first"]
+        self._mark_end   = cam["track_last"]
+        self._range_bar.set_range(cam["track_first"], cam["track_last"])
+        self._update_mark_labels(cam)
+
         self._show_frame(cam["track_first"])
 
     def _on_frame_changed(self, frame_idx: int) -> None:
@@ -455,10 +564,45 @@ class CutieInitPanel(QWidget):
         if self._controller:
             self._controller.clear_all()
         self._encoded_frame_idx = -1
+        self._range_bar.set_position(frame_idx)
         self._show_frame(frame_idx)
         # If a person is selected, pre-warm encoder after scrubbing stops.
         if self._selected_label > 0:
             self._schedule_encode()
+
+    def _on_mark_start(self) -> None:
+        cam = self._cam_combo.currentData()
+        if cam is None:
+            return
+        self._mark_start = self._scrubber.value()
+        if self._mark_start > self._mark_end:
+            self._mark_end = self._mark_start
+        self._range_bar.set_selection(self._mark_start, self._mark_end)
+        self._update_mark_labels(cam)
+
+    def _on_mark_end(self) -> None:
+        cam = self._cam_combo.currentData()
+        if cam is None:
+            return
+        self._mark_end = self._scrubber.value()
+        if self._mark_end < self._mark_start:
+            self._mark_start = self._mark_end
+        self._range_bar.set_selection(self._mark_start, self._mark_end)
+        self._update_mark_labels(cam)
+
+    def _update_mark_labels(self, cam: dict) -> None:
+        fps = cam.get("fps", 1) or 1
+        first = cam["track_first"]
+        ts = (self._mark_start - first) / fps
+        te = (self._mark_end   - first) / fps
+        ms_mm, ms_ss = divmod(ts, 60)
+        me_mm, me_ss = divmod(te, 60)
+        self._mark_start_label.setText(
+            f"Start: {self._mark_start} ({int(ms_mm):02d}:{ms_ss:05.2f})"
+        )
+        self._mark_end_label.setText(
+            f"End: {self._mark_end} ({int(me_mm):02d}:{me_ss:05.2f})"
+        )
 
     def _schedule_encode(self) -> None:
         """Start/restart the debounce timer to encode the current frame."""
@@ -594,8 +738,8 @@ class CutieInitPanel(QWidget):
             init_frame=init_frame_idx,
             init_mask=seed_mask,
             persons_ordered=self._persons,
-            first_frame=cam["track_first"],
-            last_frame=cam["track_last"],
+            first_frame=self._mark_start,
+            last_frame=self._mark_end,
             direction=direction,
             max_dim=self._frame_cache._max_dim,
         )
@@ -634,6 +778,7 @@ class CutieInitPanel(QWidget):
             self._scrubber.blockSignals(True)
             self._scrubber.setValue(frame_idx)
             self._scrubber.blockSignals(False)
+            self._range_bar.set_position(frame_idx)
             self._canvas_update_counter += 1
             if self._canvas_update_counter % 10 == 0:
                 frame = self._frame_cache.get_frame(cam["file_path"], frame_idx)

@@ -167,14 +167,6 @@ class CutieInitPanel(QWidget):
         track_layout = QHBoxLayout(track_group)
         track_layout.setContentsMargins(4, 2, 4, 2)
 
-        self._track_fwd_btn = QPushButton("▶ Track Forward")
-        self._track_fwd_btn.setToolTip(
-            "Propagate Cutie from current frame to end of track range"
-        )
-        self._track_fwd_btn.clicked.connect(self._on_track_forward)
-        self._track_fwd_btn.setEnabled(False)
-        track_layout.addWidget(self._track_fwd_btn)
-
         self._track_bwd_btn = QPushButton("◀ Track Backward")
         self._track_bwd_btn.setToolTip(
             "Propagate Cutie from current frame backward to start of track range"
@@ -182,6 +174,14 @@ class CutieInitPanel(QWidget):
         self._track_bwd_btn.clicked.connect(self._on_track_backward)
         self._track_bwd_btn.setEnabled(False)
         track_layout.addWidget(self._track_bwd_btn)
+
+        self._track_fwd_btn = QPushButton("▶ Track Forward")
+        self._track_fwd_btn.setToolTip(
+            "Propagate Cutie from current frame to end of track range"
+        )
+        self._track_fwd_btn.clicked.connect(self._on_track_forward)
+        self._track_fwd_btn.setEnabled(False)
+        track_layout.addWidget(self._track_fwd_btn)
 
         self._stop_btn = QPushButton("■ Stop")
         self._stop_btn.setToolTip("Stop tracking after the current frame")
@@ -605,20 +605,23 @@ class CutieInitPanel(QWidget):
 
     def _on_mask_ready(self, svid: str, frame_idx: int, mask: np.ndarray) -> None:
         """Slot called in UI thread for each tracked frame."""
-        # Encode mask as PNG blob and buffer for DB write.
-        ok, buf = cv2.imencode(".png", mask)
+        # output_prob_to_mask returns int64; PNG encoder requires uint8.
+        mask_u8 = mask.astype(np.uint8)
+        ok, buf = cv2.imencode(".png", mask_u8)
         if ok:
             self._db_flush_buffer.append((svid, frame_idx, buf.tobytes()))
         if len(self._db_flush_buffer) >= self._DB_FLUSH_EVERY:
             self._flush_masks()
 
-        # Update scrubber range indicator (track is extending)
+        # Live canvas update: advance scrubber to current tracking frame
+        # (blocked so it doesn't trigger _on_frame_changed / re-decode).
         cam = self._cam_combo.currentData()
         if cam and svid == cam["id"]:
-            # Update canvas if this is the currently displayed frame.
-            if frame_idx == self._scrubber.value():
-                frame = self._frame_cache.get_frame(cam["file_path"], frame_idx)
-                self._canvas.display(frame, mask if np.any(mask) else None)
+            self._scrubber.blockSignals(True)
+            self._scrubber.setValue(frame_idx)
+            self._scrubber.blockSignals(False)
+            frame = self._frame_cache.get_frame(cam["file_path"], frame_idx)
+            self._canvas.display(frame, mask_u8 if np.any(mask_u8) else None)
 
     def _on_track_progress(self, done: int, total: int) -> None:
         self._progress_bar.setMaximum(total)

@@ -37,14 +37,15 @@ from posetrak.db.db import generate_id
 
 
 class RangeBar(QWidget):
-    """Thin horizontal bar that shows the tracking range selection.
+    """Horizontal timeline bar combining three layers of information:
 
-    Full track range is drawn as a dark background.  The user-selected
-    range (mark_start..mark_end) is shown as a steel-blue highlight.
-    The current frame position is a white tick.
+    1. Mask coverage (lower 5 px) — teal segments where frames have stored masks.
+    2. Selected tracking range (full height) — steel-blue fill between Mark Start/End.
+    3. Mark boundary ticks — bright blue.
+    4. Current frame position — white tick.
     """
 
-    HEIGHT = 10
+    HEIGHT = 14
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -54,6 +55,8 @@ class RangeBar(QWidget):
         self._sel_start = 0
         self._sel_end   = 1
         self._pos = 0
+        # List of (first_frame, last_frame) contiguous covered runs.
+        self._coverage_runs: list[tuple[int, int]] = []
 
     def set_range(self, first: int, last: int) -> None:
         self._first = first
@@ -61,6 +64,7 @@ class RangeBar(QWidget):
         self._sel_start = first
         self._sel_end   = self._last
         self._pos = first
+        self._coverage_runs = []
         self.update()
 
     def set_selection(self, start: int, end: int) -> None:
@@ -70,6 +74,22 @@ class RangeBar(QWidget):
 
     def set_position(self, frame: int) -> None:
         self._pos = frame
+        self.update()
+
+    def set_covered_frames(self, frame_indices: list[int]) -> None:
+        """Compute contiguous runs from *frame_indices* and repaint."""
+        if not frame_indices:
+            self._coverage_runs = []
+            self.update()
+            return
+        import numpy as np
+        arr = np.array(sorted(frame_indices), dtype=np.int32)
+        breaks = np.where(np.diff(arr) > 1)[0]
+        starts = np.concatenate([[0], breaks + 1])
+        ends   = np.concatenate([breaks + 1, [len(arr)]])
+        self._coverage_runs = [
+            (int(arr[s]), int(arr[e - 1])) for s, e in zip(starts, ends)
+        ]
         self.update()
 
     def _to_x(self, frame: int) -> int:
@@ -82,21 +102,30 @@ class RangeBar(QWidget):
     def paintEvent(self, _event) -> None:
         p = QPainter(self)
         w, h = self.width(), self.height()
+        cov_h = 5   # pixels reserved for coverage band at bottom
 
         # Background — full track range
         p.fillRect(0, 0, w, h, QColor(55, 55, 55))
 
-        # Selected range — steel blue
+        # Mask coverage — teal band in lower cov_h px
+        cov_color = QColor(56, 168, 120)
+        for run_first, run_last in self._coverage_runs:
+            x1 = self._to_x(run_first)
+            x2 = self._to_x(run_last) + 1
+            p.fillRect(x1, h - cov_h, max(1, x2 - x1), cov_h, cov_color)
+
+        # Selected range — steel blue, upper portion only
+        sel_h = h - cov_h
         x1 = self._to_x(self._sel_start)
         x2 = self._to_x(self._sel_end)
         if x2 > x1:
-            p.fillRect(x1, 0, x2 - x1, h, QColor(70, 130, 180))
+            p.fillRect(x1, 0, x2 - x1, sel_h, QColor(70, 130, 180))
 
-        # Start / end tick marks — brighter blue
+        # Start / end tick marks — brighter blue, full height
         for xm in (x1, x2):
             p.fillRect(max(0, xm - 1), 0, 2, h, QColor(120, 180, 240))
 
-        # Current position — white tick
+        # Current position — white tick, full height
         xp = self._to_x(self._pos)
         p.fillRect(xp, 0, 2, h, QColor(255, 255, 255))
 
@@ -556,6 +585,7 @@ class CutieInitPanel(QWidget):
         self._mark_end   = cam["track_last"]
         self._range_bar.set_range(cam["track_first"], cam["track_last"])
         self._update_mark_labels(cam)
+        self._refresh_coverage_bar(cam)
 
         self._show_frame(cam["track_first"])
 
@@ -569,6 +599,18 @@ class CutieInitPanel(QWidget):
         # If a person is selected, pre-warm encoder after scrubbing stops.
         if self._selected_label > 0:
             self._schedule_encode()
+
+    def _refresh_coverage_bar(self, cam: dict) -> None:
+        """Query seg_masks for covered frames and update the range bar."""
+        if self._seg_run_id is None:
+            self._range_bar.set_covered_frames([])
+            return
+        rows = self._conn.execute(
+            "SELECT frame_idx FROM seg_masks "
+            "WHERE seg_quality_run_id=? AND shot_video_id=? ORDER BY frame_idx",
+            (self._seg_run_id, cam["id"]),
+        ).fetchall()
+        self._range_bar.set_covered_frames([r["frame_idx"] for r in rows])
 
     def _on_mark_start(self) -> None:
         cam = self._cam_combo.currentData()
@@ -803,6 +845,7 @@ class CutieInitPanel(QWidget):
         self._set_status(f"Tracking complete — {n} masks saved.")
         cam = self._cam_combo.currentData()
         if cam:
+            self._refresh_coverage_bar(cam)
             self._show_frame(self._scrubber.value())
 
     def _on_tracking_error(self, message: str) -> None:
@@ -846,6 +889,10 @@ class CutieInitPanel(QWidget):
         # Switch mask reads to the new run so scrubbing shows new masks.
         self._seg_run_id = run_id
         log.debug("Created seg_quality_run %s for interactive init", run_id)
+        # Coverage bar now shows the new (empty) run; will fill in as tracking runs.
+        cam = self._cam_combo.currentData()
+        if cam:
+            self._refresh_coverage_bar(cam)
 
     def _flush_masks(self) -> None:
         """Write buffered mask blobs to the seg_masks table."""

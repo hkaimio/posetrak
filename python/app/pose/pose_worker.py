@@ -35,6 +35,7 @@ class PoseExtractionJob:
     first_frame: int
     last_frame: int
     pose_model: str = "rtmpose-l-133kp"
+    max_dim: int = 1920             # downscale video to this before inference; must match FrameCache
     overwrite_range: bool = True    # delete existing keypoints in range first
     status: str = "pending"
     keypoints_written: int = 0
@@ -136,13 +137,22 @@ class PoseWorker(QThread):
                         log.warning("PoseWorker: video read failed at frame %d", frame_idx)
                         break
 
+                    # Downscale to max_dim so stored keypoints are in the same coordinate
+                    # space as FrameCache frames and the seg masks (both at max_dim=1920).
+                    fh, fw = frame_bgr.shape[:2]
+                    if job.max_dim > 0 and max(fh, fw) > job.max_dim:
+                        scale = job.max_dim / max(fh, fw)
+                        frame_bgr = cv2.resize(
+                            frame_bgr, (int(fw * scale), int(fh * scale))
+                        )
+
                     mask = _load_mask(conn, job.seg_quality_run_id,
                                      job.shot_video_id, frame_idx)
                     if mask is None:
                         done += 1
                         continue
 
-                    # Resize mask to match frame if needed (seg stored at max_dim).
+                    # Resize mask to match the (now potentially downscaled) frame.
                     fh, fw = frame_bgr.shape[:2]
                     if mask.shape != (fh, fw):
                         mask = cv2.resize(mask, (fw, fh), interpolation=cv2.INTER_NEAREST)

@@ -235,8 +235,9 @@ class JobQueueRunner(QObject):
                 job.masks_written = count
             self.job_finished.emit(job.job_id, count)
 
-        # Cache the loaded Cutie model so subsequent workers skip Hydra re-init.
-        if self._worker is not None:
+        # Cache the loaded Cutie model so subsequent Cutie workers skip Hydra re-init.
+        # PoseWorker has no get_loaded_model(); only CutieWorker does.
+        if self._worker is not None and hasattr(self._worker, "get_loaded_model"):
             loaded = self._worker.get_loaded_model()
             if loaded is not None:
                 self._cutie_model = loaded

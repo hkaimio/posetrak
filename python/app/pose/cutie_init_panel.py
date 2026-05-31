@@ -1052,6 +1052,7 @@ class CutieInitPanel(QWidget):
                 first_frame=cam["track_first"],
                 last_frame=cam["track_last"],
                 pose_model=pose_model,
+                max_dim=self._frame_cache._max_dim,
                 overwrite_range=True,
             )
             self._runner.enqueue(job)

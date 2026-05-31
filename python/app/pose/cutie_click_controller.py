@@ -122,6 +122,10 @@ class ClickController:
     def click_count(self, label: int) -> int:
         return len(self._clicks.get(label, []))
 
+    def get_all_clicks(self) -> dict[int, list[tuple[int, int, bool]]]:
+        """Return {label: [(x, y, positive), ...]} for all persons."""
+        return {lbl: list(pts) for lbl, pts in self._clicks.items() if pts}
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------

@@ -518,7 +518,9 @@ class CutieInitPanel(QWidget):
             )
             self._canvas.display(None, message=msg)
         else:
-            self._canvas.display(frame, mask)
+            clicks = self._controller.get_all_clicks() if self._controller else {}
+            display_frame = _draw_click_markers(frame, clicks) if clicks else frame
+            self._canvas.display(display_frame, mask)
 
         t = (frame_idx - cam["track_first"]) / cam["fps"]
         mm, ss = divmod(t, 60)
@@ -530,10 +532,14 @@ class CutieInitPanel(QWidget):
     def _refresh_overlay(
         self, cam: dict | None, frame_idx: int, mask: np.ndarray
     ) -> None:
-        """Redraw the canvas with *mask* without reloading the frame."""
+        """Redraw the canvas with *mask* and click markers."""
         if cam is None:
             return
         frame = self._frame_cache.get_frame(cam["file_path"], frame_idx)
+        if frame is not None:
+            frame = _draw_click_markers(
+                frame, self._controller.get_all_clicks() if self._controller else {}
+            )
         self._canvas.display(frame, mask if np.any(mask) else None)
 
     def _load_stored_mask(
@@ -713,6 +719,32 @@ class CutieInitPanel(QWidget):
 
     def _set_status(self, text: str) -> None:
         self._status_label.setText(text)
+
+
+def _draw_click_markers(
+    frame_bgr: np.ndarray,
+    clicks: dict[int, list[tuple[int, int, bool]]],
+) -> np.ndarray:
+    """Return a copy of *frame_bgr* with click point markers drawn.
+
+    Positive clicks: filled circle in person colour with white border.
+    Negative clicks: filled circle in red with white border.
+    """
+    from app.pose.video_canvas import label_to_color
+    out = frame_bgr.copy()
+    for label, pts in clicks.items():
+        r, g, b = label_to_color(label)
+        person_bgr = (b, g, r)
+        neg_bgr = (40, 40, 220)   # red-ish for negative
+        for x, y, positive in pts:
+            fill = person_bgr if positive else neg_bgr
+            cv2.circle(out, (x, y), 7, (255, 255, 255), -1)   # white border
+            cv2.circle(out, (x, y), 5, fill, -1)               # person colour
+            # Cross for negative points
+            if not positive:
+                cv2.line(out, (x - 4, y - 4), (x + 4, y + 4), (255, 255, 255), 1)
+                cv2.line(out, (x + 4, y - 4), (x - 4, y + 4), (255, 255, 255), 1)
+    return out
 
 
 def _decode_mask_png(buf: np.ndarray) -> np.ndarray | None:

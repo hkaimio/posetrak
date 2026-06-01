@@ -47,6 +47,7 @@ def create_detection_run(
     time_end_s: float,
     detector_model: str,
     pose_model: str,
+    trial_id: str | None = None,
     detector_version: str = "",
     pose_version: str = "",
     detector_conf: float = 0.3,
@@ -58,12 +59,12 @@ def create_detection_run(
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     session.execute(
         "INSERT INTO detection_runs "
-        "(id, shot_id, sync_config_id, time_start_s, time_end_s, "
+        "(id, shot_id, sync_config_id, trial_id, time_start_s, time_end_s, "
         " detector_model, pose_model, detector_version, pose_version, "
         " detector_conf, pose_conf_threshold, "
         " pose_input_width, pose_input_height, status, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'running',?)",
-        (run_id, shot_id, sync_config_id, time_start_s, time_end_s,
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'running',?)",
+        (run_id, shot_id, sync_config_id, trial_id, time_start_s, time_end_s,
          detector_model, pose_model, detector_version, pose_version,
          detector_conf, pose_conf_threshold,
          pose_input_width, pose_input_height, now),

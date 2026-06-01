@@ -1085,7 +1085,7 @@ class CutieInitPanel(QWidget):
         from PySide6.QtWidgets import QMessageBox
 
         row = self._conn.execute(
-            "SELECT shot_id, sync_config_id, time_start_s, time_end_s "
+            "SELECT shot_id, sync_config_id, trial_id, time_start_s, time_end_s "
             "FROM detection_runs WHERE id=?",
             (self._run_id,),
         ).fetchone()
@@ -1095,6 +1095,7 @@ class CutieInitPanel(QWidget):
 
         shot_id       = row["shot_id"]
         sync_cfg_id   = row["sync_config_id"]
+        trial_id      = row["trial_id"]       # propagate so new run sits under same trial
         time_start_s  = row["time_start_s"]
         time_end_s    = row["time_end_s"]
 
@@ -1116,6 +1117,7 @@ class CutieInitPanel(QWidget):
                 time_start_s or 0.0, time_end_s or 0.0,
                 detector_model="cutie-interactive",
                 pose_model=pose_model,
+                trial_id=trial_id,
                 pose_version=pose_ver,
             )
 
@@ -1152,6 +1154,7 @@ class CutieInitPanel(QWidget):
             time_start_s or 0.0, time_end_s or 0.0,
             detector_model="cutie-interactive",
             pose_model=pose_model,
+            trial_id=trial_id,
             pose_version=pose_ver,
         )
 

@@ -1106,12 +1106,16 @@ class CutieInitPanel(QWidget):
             (shot_id, pose_model),
         ).fetchall()
 
+        try:
+            import rtmlib
+            pose_ver = getattr(rtmlib, "__version__", "")
+        except ImportError:
+            pose_ver = ""
+        from app.pose.backends_rtmpose import _KNOWN_MODELS as _PM
+        _pm_hw = _PM.get(pose_model, (None, (0, 0), None))[1]  # (H, W)
+        pose_w, pose_h = _pm_hw[1], _pm_hw[0]
+
         if not existing:
-            try:
-                import rtmlib
-                pose_ver = getattr(rtmlib, "__version__", "")
-            except ImportError:
-                pose_ver = ""
             return create_detection_run(
                 self._conn, shot_id, sync_cfg_id,
                 time_start_s or 0.0, time_end_s or 0.0,
@@ -1119,6 +1123,8 @@ class CutieInitPanel(QWidget):
                 pose_model=pose_model,
                 trial_id=trial_id,
                 pose_version=pose_ver,
+                pose_input_width=pose_w,
+                pose_input_height=pose_h,
             )
 
         # Ask user: update existing or create new
@@ -1143,12 +1149,6 @@ class CutieInitPanel(QWidget):
         if clicked is update_btn:
             return run["id"]
 
-        # Create new
-        try:
-            import rtmlib
-            pose_ver = getattr(rtmlib, "__version__", "")
-        except ImportError:
-            pose_ver = ""
         return create_detection_run(
             self._conn, shot_id, sync_cfg_id,
             time_start_s or 0.0, time_end_s or 0.0,
@@ -1156,6 +1156,8 @@ class CutieInitPanel(QWidget):
             pose_model=pose_model,
             trial_id=trial_id,
             pose_version=pose_ver,
+            pose_input_width=pose_w,
+            pose_input_height=pose_h,
         )
 
     # ------------------------------------------------------------------

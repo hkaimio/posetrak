@@ -15,21 +15,29 @@ except ImportError:
 
 from app.pose.backends import PersonDetection, PoseResult, register_estimator
 
-# Known model configs: name → (url, input_size HxW, backend_class)
-# RTMPose uses SimCC heads (two outputs: simcc_x, simcc_y).
-# ViTPose uses heatmap heads (one output) — requires the ViTPose backend class.
-_KNOWN_MODELS: dict[str, tuple[str, tuple[int, int], str]] = {
+# Known model configs: name → (url, input_size HxW, backend_class, conf_scale)
+#
+# conf_scale normalises per-keypoint confidence values before they are written to
+# pose_observations, so the C++ UKF's measurement_noise_std = base_noise/confidence
+# formula yields comparable effective noise regardless of model backend.
+#
+# RTMPose outputs SimCC logit scores (typically 3–8 for clearly-visible joints).
+# ViTPose outputs normalised heatmap peak values (0–1).  A conf_scale of ~5 on
+# ViTPose brings its effective pixel noise into the same ballpark as RTMPose.
+_KNOWN_MODELS: dict[str, tuple[str, tuple[int, int], str, float]] = {
     "rtmpose-l-133kp": (
         "https://download.openmmlab.com/mmpose/v1/projects/rtmw/onnx_sdk/"
         "rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.zip",
         (288, 384),
         "rtmpose",
+        1.0,  # SimCC logits already in tracker-compatible range
     ),
     "vitpose-l-133kp": (
         "https://huggingface.co/JunkyByte/easy_ViTPose/resolve/main/onnx/"
         "wholebody/vitpose-l-wholebody.onnx",
         (192, 256),
         "vitpose",
+        5.0,  # heatmap peaks [0,1] → scale to match RTMPose logit range
     ),
 }
 
@@ -53,7 +61,7 @@ class RTMPoseEstimator:
             raise ValueError(
                 f"Unknown model {model_name!r}. Known: {list(_KNOWN_MODELS)}"
             )
-        url, input_size_hw, backend_cls = _KNOWN_MODELS[model_name]
+        url, input_size_hw, backend_cls, _conf_scale = _KNOWN_MODELS[model_name]
         self.name = model_name
         self.version = _RTMLIB_VERSION
         self.input_size = input_size_hw        # (height, width)

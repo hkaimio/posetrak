@@ -5,6 +5,8 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 
+import numpy as np
+
 from posetrak.db.db import generate_id
 from app.setup.db_context import SyncPoint, SyncTable
 
@@ -18,6 +20,31 @@ class TrackAssignment:
     last_frame: int    # inclusive
 
 
+def _scale_kp_confidence(kp_blob: bytes, scale: float) -> bytes:
+    """Multiply the confidence channel of a float32[N,3] keypoint blob by *scale*."""
+    arr = np.frombuffer(kp_blob, dtype="<f4").copy().reshape(-1, 3)
+    arr[:, 2] *= scale
+    return arr.tobytes()
+
+
+def conf_scale_for_model(pose_model: str) -> float:
+    """Return the confidence normalisation factor for *pose_model*.
+
+    RTMPose outputs SimCC logit scores (3–8 for well-detected joints).
+    VITpose outputs heatmap peak values (0–1).  The C++ UKF uses
+    ``measurement_noise_std = base_noise / confidence``, so a scale factor
+    is needed to bring ViTPose values into the same effective noise range.
+    """
+    try:
+        from app.pose.backends_rtmpose import _KNOWN_MODELS
+        entry = _KNOWN_MODELS.get(pose_model)
+        if entry is not None:
+            return float(entry[3])
+    except Exception:
+        pass
+    return 1.0
+
+
 def finalise_to_db(
     session: sqlite3.Connection,
     detection_run_id: str,
@@ -26,6 +53,7 @@ def finalise_to_db(
     assignments: list[TrackAssignment],
     pose_model: str,
     notes: str = "",
+    confidence_scale: float = 1.0,
 ) -> list[str]:
     """Write pose_observation_sequences + pose_observations from detection_keypoints.
 
@@ -147,10 +175,13 @@ def finalise_to_db(
                 timestamp_s = sync_table.frame_to_global_time(frame_idx, asgn.shot_video_id)
                 if timestamp_s is None:
                     continue
+                kp_blob = bytes(kp_row["keypoints"])
+                if confidence_scale != 1.0:
+                    kp_blob = _scale_kp_confidence(kp_blob, confidence_scale)
                 obs_by_key[(camera_instance_id, frame_idx)] = (
                     seq_id, camera_instance_id, frame_idx,
                     timestamp_s, 0,  # person_id=0, single person per sequence
-                    bytes(kp_row["keypoints"]), kp_row["noise_scale"],
+                    kp_blob, kp_row["noise_scale"],
                 )
 
         if obs_by_key:

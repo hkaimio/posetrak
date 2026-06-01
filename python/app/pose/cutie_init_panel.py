@@ -1112,7 +1112,7 @@ class CutieInitPanel(QWidget):
         except ImportError:
             pose_ver = ""
         from app.pose.backends_rtmpose import _KNOWN_MODELS as _PM
-        _pm_hw = _PM.get(pose_model, (None, (0, 0), None))[1]  # (H, W)
+        _pm_hw = _PM.get(pose_model, (None, (0, 0), None, 1.0))[1]  # (H, W)
         pose_w, pose_h = _pm_hw[1], _pm_hw[0]
 
         if not existing:

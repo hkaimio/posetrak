@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 from app.pose.assignment import find_assignment_conflicts
 from app.pose.person_preview import PersonPreviewWidget
 from app.pose.db_cache import list_detection_runs
-from app.pose.finalise import TrackAssignment, finalise_to_db
+from app.pose.finalise import TrackAssignment, conf_scale_for_model, finalise_to_db
 from app.pose.frame_view import CameraInfo, FrameViewWidget
 from app.pose.stitcher import StitcherWidget
 from app.setup.db_context import SyncPoint, SyncTable
@@ -1033,6 +1033,7 @@ class PoseExtractionWindow(QMainWindow):
                 sync_config_id=self._sync_config_id,
                 assignments=assignment_list,
                 pose_model=pose_model,
+                confidence_scale=conf_scale_for_model(pose_model),
             )
         except Exception as e:
             QMessageBox.critical(self, "Finalise Error", str(e))

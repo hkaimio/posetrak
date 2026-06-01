@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.pose.finalise import TrackAssignment, finalise_to_db
+from app.pose.finalise import TrackAssignment, conf_scale_for_model, finalise_to_db
 from app.pose.filmstrip_stitcher import (
     FilmstripStitcherWidget,
     ROW_H_DEFAULT,
@@ -312,6 +312,7 @@ class StitcherPanel(QWidget):
                 sync_config_id=self._sync_config_id,
                 assignments=assignment_list,
                 pose_model=pose_model,
+                confidence_scale=conf_scale_for_model(pose_model),
             )
         except Exception as e:
             QMessageBox.critical(self, "Apply Error", str(e))

@@ -2,67 +2,110 @@
 """
 visualize_tracking.py — Overlay UKF tracking results on source camera videos.
 
-Produces either:
-  - A single-camera video with tracking overlays, or
-  - A mosaic (grid) video with all cameras arranged in a grid.
+Produces a mosaic (grid) video with all cameras arranged in a grid.
+Each camera view is auto-cropped to the area containing active detections.
+Person segmentation masks (if available in the DB) are blended on each frame.
+Detected keypoints and the tracked skeleton are drawn per person, using the
+same DAVIS palette as the posetrak app.
 
-Observations (2D detections) are drawn as dots: inlier observations in the
-person colour, outlier observations in grey.  The skeleton is drawn as
-wireframe bones from each joint's origin to its bone_tip_offset endpoint
-(computed via forward kinematics from state_vectors.csv).
+Usage
+-----
+List available tracking runs in a session database::
 
-Usage:
-    python3 scripts/visualize_tracking.py \\
-        --tracking-dir tracking_tests/run1 [--tracking-dir tracking_tests/run2] \\
-        --cameras /path/to/Calib_scene.toml \\
-        --sync /path/to/sync_data.json \\
-        --video-dir /path/to/videos \\
-        [--skeleton my_skeleton.yaml]   # auto-detected from TOML if omitted \\
-        [--camera cam3]                 # single-camera mode; omit for mosaic \\
-        [--resolution 1920x1080]        \\
-        [--fps 60]                      \\
+    python3 visualize_tracking.py --session-db SESSION.db
+
+Render a tracking run (UUID prefix is accepted)::
+
+    python3 visualize_tracking.py \\
+        --session-db SESSION.db \\
+        --run-id RUN_UUID_PREFIX \\
         --output result.mp4
-"""
 
+Options::
+
+    --run-id      Tracking run UUID or prefix.  Repeat to overlay multiple
+                  runs (e.g. two persons tracked separately).
+    --camera      Render only this camera label instead of full mosaic.
+    --resolution  Output WxH (default 1920x1080).
+    --fps         Override output frame rate (default: inferred from tracker).
+    --no-masks    Skip segmentation mask overlay even if masks are available.
+    --no-bones    Skip 3-D skeleton bone overlay.
+"""
 from __future__ import annotations
 
 import argparse
 import bisect
 import json
 import math
+import sqlite3
 import sys
-import tomllib
 from pathlib import Path
 from typing import NamedTuple
 
 import cv2
 import numpy as np
-import pandas as pd
-import yaml
 
 
 # ---------------------------------------------------------------------------
-# Colours — BGR order for OpenCV
+# DAVIS palette — RGB and BGR, matching the posetrak app exactly
 # ---------------------------------------------------------------------------
 
-PERSON_BONE_COLORS_BGR: list[tuple[int, int, int]] = [
-    (  0, 220,   0),   # green
-    (139, 170, 255),   # orange
-    (200,  40,  40),   # blue
-    (  0, 200, 220),   # yellow
-    (210,   0, 210),   # magenta
-    (255, 180,   0),   # cyan
+_DAVIS_RGB: list[tuple[int, int, int]] = [
+    (0,   0,   0  ),  # 0  background (not drawn)
+    (240, 80,  80 ),  # 1  red-ish
+    (80,  200, 120),  # 2  green-ish
+    (80,  120, 240),  # 3  blue-ish
+    (240, 200, 60 ),  # 4  yellow
+    (180, 80,  240),  # 5  purple
+    (60,  220, 220),  # 6  cyan
+    (240, 140, 60 ),  # 7  orange
+    (160, 160, 160),  # 8  gray
+    (120, 240, 80 ),  # 9  lime
+    (240, 60,  160),  # 10 pink
+    (60,  160, 240),  # 11 sky blue
+    (200, 200, 60 ),  # 12 olive
+    (240, 100, 120),  # 13 salmon
+    (100, 240, 200),  # 14 aqua
+    (200, 140, 240),  # 15 lavender
 ]
-PERSON_MARKER_COLORS_BGR: list[tuple[int, int, int]] = [
-    (  33, 255,   0),   # green
-    (  0, 120, 255),   # orange
-    (200,  40,  40),   # blue
-    (  0, 200, 220),   # yellow
-    (210,   0, 210),   # magenta
-    (255, 180,   0),   # cyan
-]
-OUTLIER_COLOR_BGR: tuple[int, int, int] = (130, 130, 130)
-OVERLAY_TEXT_COLOR: tuple[int, int, int] = (255, 255, 255)
+
+_DAVIS_BGR: list[tuple[int, int, int]] = [(b, g, r) for r, g, b in _DAVIS_RGB]
+
+_MASK_ALPHA = 0.45
+_OUTLIER_BGR = (110, 110, 110)
+_TEXT_BGR    = (255, 255, 255)
+
+
+def _davis_bgr(label: int) -> tuple[int, int, int]:
+    if 1 <= label < len(_DAVIS_BGR):
+        return _DAVIS_BGR[label]
+    return (160, 160, 160)
+
+
+def _build_palette_lut() -> np.ndarray:
+    lut = np.zeros((256, 3), dtype=np.uint8)
+    for i, bgr in enumerate(_DAVIS_BGR):
+        if i >= 256:
+            break
+        lut[i] = bgr
+    return lut
+
+_PALETTE_LUT = _build_palette_lut()
+
+
+def blend_mask_davis(frame_bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Blend a labeled uint8 mask onto *frame_bgr* using the DAVIS palette."""
+    if mask.shape[:2] != frame_bgr.shape[:2]:
+        mask = cv2.resize(mask, (frame_bgr.shape[1], frame_bgr.shape[0]),
+                          interpolation=cv2.INTER_NEAREST)
+    colours = _PALETTE_LUT[mask]
+    fg = mask > 0
+    out = frame_bgr.copy()
+    out[fg] = (
+        out[fg].astype(np.float32) * (1 - _MASK_ALPHA)
+        + colours[fg].astype(np.float32) * _MASK_ALPHA
+    ).astype(np.uint8)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -70,164 +113,69 @@ OVERLAY_TEXT_COLOR: tuple[int, int, int] = (255, 255, 255)
 # ---------------------------------------------------------------------------
 
 class Camera(NamedTuple):
-    """Calibrated camera with precomputed projection matrix."""
-    csv_id: int         # 0-based camera_id used in marker_projections.csv
-    toml_name: str      # section key in the TOML (cam1, cam2, …)
-    display_name: str   # human-readable name from TOML 'name' field
-    K: np.ndarray       # 3×3 intrinsic matrix
-    R: np.ndarray       # 3×3 rotation (world → camera)
-    t: np.ndarray       # 3-vector translation (world → camera)
-    P: np.ndarray       # 3×4 projection matrix K @ [R | t]
-    dist: np.ndarray = None  # 4-vector distortion coeffs [k1,k2,p1,p2] (optional)
+    label: str
+    csv_id: int        # 0-based index matching active_camera_ids order
+    K: np.ndarray
+    R: np.ndarray
+    t: np.ndarray
+    P: np.ndarray      # K @ [R | t]
+    dist: np.ndarray | None = None
 
 
 class SyncTable:
-    """Per-camera lookup: tracker timestamp → video frame index via linear interpolation."""
+    """Tracker timestamp → video frame index per camera."""
 
     def __init__(self, sync_data: dict):
         self._tables: dict[str, tuple[list[float], list[int], float]] = {}
-        for cam_name, info in sync_data.items():
+        for cam_label, info in sync_data.items():
             pts = info.get("syncpoints", [])
-            timestamps = [sp["timestamp"] for sp in pts]
-            frames     = [sp["frame"]     for sp in pts]
-            fps        = float(info.get("fps", 0.0))
-            self._tables[cam_name] = (timestamps, frames, fps)
+            self._tables[cam_label] = (
+                [sp["timestamp"] for sp in pts],
+                [sp["frame"]     for sp in pts],
+                float(info.get("fps", 0.0)),
+            )
 
-    def lookup(self, cam_toml_name: str, tracker_timestamp: float) -> int | None:
-        """Return video frame for *tracker_timestamp* by linear interpolation/extrapolation.
-
-        With a single sync anchor, extrapolates using fps so the video advances
-        in lock-step with the tracker timeline.
-        """
-        if cam_toml_name not in self._tables:
+    def lookup(self, cam_label: str, timestamp: float) -> int | None:
+        if cam_label not in self._tables:
             return None
-        timestamps, frames, fps = self._tables[cam_toml_name]
+        timestamps, frames, fps = self._tables[cam_label]
         if not timestamps:
             return None
-
-        idx = bisect.bisect_right(timestamps, tracker_timestamp)
-
+        idx = bisect.bisect_right(timestamps, timestamp)
         if idx == 0:
-            # Before first anchor — extrapolate backward
             anchor_ts, anchor_frame = timestamps[0], frames[0]
         elif idx >= len(timestamps):
-            # After last anchor — extrapolate forward
             anchor_ts, anchor_frame = timestamps[-1], frames[-1]
         else:
-            # Between two anchors — interpolate using the earlier one
             anchor_ts, anchor_frame = timestamps[idx - 1], frames[idx - 1]
-
         if fps > 0:
-            return anchor_frame + round((tracker_timestamp - anchor_ts) * fps)
-        # No fps info: snap to nearest anchor
-        if idx == 0:
-            return frames[0]
-        if idx >= len(timestamps):
-            return frames[-1]
-        if abs(timestamps[idx] - tracker_timestamp) < abs(timestamps[idx - 1] - tracker_timestamp):
-            return frames[idx]
-        return frames[idx - 1]
+            return anchor_frame + round((timestamp - anchor_ts) * fps)
+        return frames[min(idx, len(frames) - 1)]
 
-    def camera_names(self) -> list[str]:
+    def camera_labels(self) -> list[str]:
         return list(self._tables.keys())
-
-
-# Per-frame, per-camera marker data loaded from marker_projections.csv
-MarkerFrameData = dict[int, dict[int, dict[str, tuple[float, float, float, float, bool]]]]
-
-# Tracker frame timestamps
-FrameTimestamps = dict[int, float]
-
-# FK bone positions: frame_id → joint_name → (head_world [3], tail_world [3])
-BoneWorldData = dict[int, dict[str, tuple[np.ndarray, np.ndarray]]]
-
-
-# ---------------------------------------------------------------------------
-# Camera loading
-# ---------------------------------------------------------------------------
-
-def _rodrigues(rvec: list[float]) -> np.ndarray:
-    v = np.array(rvec, dtype=float)
-    angle = float(np.linalg.norm(v))
-    if angle < 1e-10:
-        return np.eye(3)
-    ax = v / angle
-    c, s = math.cos(angle), math.sin(angle)
-    tt = 1.0 - c
-    x, y, z = ax
-    return np.array([
-        [tt*x*x+c,   tt*x*y-s*z, tt*x*z+s*y],
-        [tt*x*y+s*z, tt*y*y+c,   tt*y*z-s*x],
-        [tt*x*z-s*y, tt*y*z+s*x, tt*z*z+c  ],
-    ])
-
-
-def load_cameras(toml_path: Path) -> list[Camera]:
-    """Load cameras from a Pose2Sim TOML file.
-
-    cam1 → csv_id=0, matching the 0-based camera_id in marker_projections.csv.
-    """
-    with open(toml_path, "rb") as f:
-        data = tomllib.load(f)
-
-    cams: list[Camera] = []
-    for key, vals in data.items():
-        if not key.startswith("cam") or key == "metadata":
-            continue
-        try:
-            one_based = int(key[3:])
-        except ValueError:
-            continue
-        csv_id = one_based - 1
-        K = np.array(vals["matrix"], dtype=float)
-        R = _rodrigues(vals["rotation"])
-        t = np.array(vals["translation"], dtype=float)
-        P = K @ np.hstack([R, t.reshape(3, 1)])
-        cams.append(Camera(
-            csv_id=csv_id,
-            toml_name=key,
-            display_name=vals.get("name", key),
-            K=K, R=R, t=t, P=P,
-        ))
-
-    cams.sort(key=lambda c: c.csv_id)
-    return cams
 
 
 # ---------------------------------------------------------------------------
 # Skeleton loading and forward kinematics
 # ---------------------------------------------------------------------------
-#
-# FK implementation adapted from scripts/visualize_tracking_results.py.
-# Transform chain (non-root joints):
-#   T_world[j] = T_world[parent] @ Translation(offset) @ R_rest @ R_anim
-# where:
-#   R_rest = Rx(x) @ Ry(y) @ Rz(z)   (ZYX Euler, stored as [z, y, x])
-#   R_anim = Rodrigues(axis_angle)     for ball/spherical joints
-#          = Rodrigues(axis * angle)   for revolute joints
-#          = I                         for fixed joints
-# Root joint: T_world[root] = R_quat(state) @ R_rest, t = pos(state)
-# ---------------------------------------------------------------------------
 
 class SkeletonJoint:
-    """Represents a joint in the skeleton hierarchy."""
     def __init__(self, name: str, parent: str | None, joint_type: str,
                  offset: np.ndarray, rest_orientation: np.ndarray,
                  bone_tip_offset: np.ndarray, axis: np.ndarray | None = None):
-        self.name = name
-        self.parent = parent
-        self.joint_type = joint_type
-        self.offset = offset
-        self.rest_orientation = rest_orientation
+        self.name            = name
+        self.parent          = parent
+        self.joint_type      = joint_type
+        self.offset          = offset
+        self.rest_orientation= rest_orientation
         self.bone_tip_offset = bone_tip_offset
-        self.axis = axis if axis is not None else np.array([1.0, 0.0, 0.0])
+        self.axis            = axis if axis is not None else np.array([1.0, 0.0, 0.0])
 
 
-def load_skeleton_structure(yaml_path: Path) -> dict[str, SkeletonJoint]:
-    """Load skeleton YAML → dict[joint_name → SkeletonJoint]."""
-    with open(yaml_path) as f:
-        data = yaml.safe_load(f)
-
+def _load_skeleton_from_yaml_str(yaml_content: str) -> dict[str, SkeletonJoint]:
+    import yaml
+    data = yaml.safe_load(yaml_content)
     joints: dict[str, SkeletonJoint] = {}
     for jd in data.get("joints", []):
         name = jd["name"]
@@ -244,20 +192,18 @@ def load_skeleton_structure(yaml_path: Path) -> dict[str, SkeletonJoint]:
 
 
 def _euler_zyx_to_rot(angles: np.ndarray) -> np.ndarray:
-    """[z, y, x] → R = Rx(x) @ Ry(y) @ Rz(z)  (matches pinocchio_model_builder.cpp)."""
     z, y, x = float(angles[0]), float(angles[1]), float(angles[2])
     cx, sx = math.cos(x), math.sin(x)
     cy, sy = math.cos(y), math.sin(y)
     cz, sz = math.cos(z), math.sin(z)
     return np.array([
-        [cy*cz,             -cy*sz,              sy   ],
+        [cy*cz,             -cy*sz,              sy    ],
         [sx*sy*cz + cx*sz,  -sx*sy*sz + cx*cz,  -sx*cy],
         [-cx*sy*cz + sx*sz,  cx*sy*sz + sx*cz,   cx*cy],
     ])
 
 
 def _axis_angle_to_rot(vec: np.ndarray) -> np.ndarray:
-    """Rodrigues: vec = axis * angle."""
     angle = float(np.linalg.norm(vec))
     if angle < 1e-10:
         return np.eye(3)
@@ -270,7 +216,6 @@ def _axis_angle_to_rot(vec: np.ndarray) -> np.ndarray:
 
 
 def _quat_to_rot(w: float, x: float, y: float, z: float) -> np.ndarray:
-    """Quaternion [w, x, y, z] → 3×3 rotation matrix (normalises first)."""
     n = math.sqrt(w*w + x*x + y*y + z*z)
     if n < 1e-10:
         return np.eye(3)
@@ -284,346 +229,366 @@ def _quat_to_rot(w: float, x: float, y: float, z: float) -> np.ndarray:
 
 def _compute_joint_transforms(
     skeleton: dict[str, SkeletonJoint],
-    state_row: pd.Series,
+    state_blob: bytes,
+    layout,
 ) -> dict[str, np.ndarray]:
-    """Compute 4×4 world transforms for all joints via FK."""
-    transforms: dict[str, np.ndarray] = {}
-
-    def process(name: str) -> np.ndarray:
-        if name in transforms:
-            return transforms[name]
-        joint = skeleton[name]
-        T = np.eye(4)
-        if joint.joint_type == "root":
-            px = float(state_row.get("root_position_x", 0.0))
-            py = float(state_row.get("root_position_y", 0.0))
-            pz = float(state_row.get("root_position_z", 0.0))
-            qw = float(state_row.get("root_quaternion_w", 1.0))
-            qx = float(state_row.get("root_quaternion_x", 0.0))
-            qy = float(state_row.get("root_quaternion_y", 0.0))
-            qz = float(state_row.get("root_quaternion_z", 0.0))
-            R_rest = _euler_zyx_to_rot(joint.rest_orientation)
-            T[:3, :3] = _quat_to_rot(qw, qx, qy, qz) @ R_rest
-            T[:3, 3] = [px, py, pz]
-        else:
-            T_parent = process(joint.parent)
-            T[:3, 3] = joint.offset
-            R_rest = _euler_zyx_to_rot(joint.rest_orientation)
-            jtype = joint.joint_type.lower()
-            if jtype in ("ball", "spherical"):
-                keys = [f"joint_{name}_angle_{i}" for i in range(3)]
-                if all(k in state_row.index for k in keys):
-                    aa = np.array([float(state_row[k]) for k in keys])
-                    R_anim = _axis_angle_to_rot(aa)
-                else:
-                    R_anim = np.eye(3)
-            elif jtype == "revolute":
-                key = f"joint_{name}_angle_0"
-                if key in state_row.index:
-                    aa = joint.axis * float(state_row[key])
-                    R_anim = _axis_angle_to_rot(aa)
-                else:
-                    R_anim = np.eye(3)
-            else:
-                R_anim = np.eye(3)
-            T[:3, :3] = R_rest @ R_anim
-            T = T_parent @ T
-        transforms[name] = T
-        return T
-
-    for name in skeleton:
-        process(name)
-    return transforms
+    """Decode state blob via SkeletonLayout and run FK."""
+    try:
+        decoded = layout.decode_state_blob(state_blob)
+        return layout.compute_joint_transforms(decoded)
+    except Exception:
+        return {}
 
 
-def find_skeleton_for_tracking_dir(tdir: Path, fallback: Path | None) -> Path | None:
-    """Find skeleton YAML for a tracking dir by scanning TOML files in parent dir.
+BoneWorldData = dict[int, dict[str, tuple[np.ndarray, np.ndarray]]]
 
-    Looks for a TOML file in tdir.parent whose [output].directory equals tdir.
-    Falls back to `fallback` if not found.
+
+# ---------------------------------------------------------------------------
+# DB helpers
+# ---------------------------------------------------------------------------
+
+def _open_db(path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _list_tracking_runs(session_db: str) -> None:
+    conn = _open_db(session_db)
+    rows = conn.execute(
+        """
+        SELECT tr.id, tr.ran_at, sp.person_name,
+               dr.detector_model, dr.pose_model,
+               pos.time_start_s, pos.time_end_s,
+               cap.label AS capture_name,
+               t.name AS trial_name
+        FROM tracking_runs tr
+        JOIN pose_observation_sequences pos ON pos.id = tr.observation_sequence_id
+        JOIN sequence_persons sp ON sp.sequence_id = pos.id AND sp.person_id = 0
+        LEFT JOIN detection_runs dr ON dr.id = pos.detection_run_id
+        LEFT JOIN trials t ON t.id = dr.trial_id
+        LEFT JOIN captures cap ON cap.id = dr.shot_id
+        ORDER BY tr.ran_at DESC
+        LIMIT 40
+        """
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        print("No tracking runs found in this database.")
+        return
+
+    print(f"\n{'RUN ID (prefix)':<14}  {'Ran at':<20}  {'Person':<12}  "
+          f"{'Detector':<20}  {'Capture / Trial'}")
+    print("-" * 90)
+    for r in rows:
+        cap_trial = f"{r['capture_name'] or '?'} / {r['trial_name'] or '?'}"
+        det = f"{r['detector_model'] or ''} + {r['pose_model'] or ''}"
+        print(f"{r['id'][:13]:<14}  {str(r['ran_at'])[:19]:<20}  "
+              f"{r['person_name'] or '?':<12}  {det:<20}  {cap_trial}")
+    print(f"\n  Use --run-id <prefix> to render.  Repeat for multiple persons.")
+
+
+def _resolve_run_id(conn: sqlite3.Connection, prefix: str) -> str:
+    row = conn.execute(
+        "SELECT id FROM tracking_runs WHERE id LIKE ? ORDER BY ran_at DESC LIMIT 1",
+        (prefix + "%",)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"No tracking run found matching prefix: {prefix!r}")
+    return row["id"]
+
+
+def _load_cameras_from_db(
+    session_db: str,
+    conn: sqlite3.Connection,
+    extrinsic_id: str,
+) -> list[Camera]:
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from posetrak.db.load_session import load_cameras_from_session
+
+    ext_row = conn.execute(
+        "SELECT session_id FROM extrinsic_calibrations WHERE id = ?",
+        (extrinsic_id,)
+    ).fetchone()
+    session_id = ext_row["session_id"] if ext_row else None
+    if session_id is None:
+        raise ValueError("Cannot determine session_id from extrinsic_calibration_id")
+
+    cam_dicts = load_cameras_from_session(session_db, extrinsic_id, session_id)
+    cameras = []
+    for i, c in enumerate(cam_dicts):
+        cameras.append(Camera(
+            label=c["label"],
+            csv_id=i,
+            K=c["K"], R=c["R"], t=c["t"], P=c["P"],
+            dist=c.get("dist"),
+        ))
+    return cameras
+
+
+def _load_sync_from_db(
+    conn: sqlite3.Connection,
+    sync_config_id: str,
+) -> SyncTable:
+    """Load sync table from DB.
+
+    sync_points.shot_video_id is capture_videos.id; join through capture_videos
+    to get camera_instances.label and actual_fps.
     """
-    parent = tdir.parent
-    for toml_path in parent.glob("*.toml"):
-        try:
-            with open(toml_path, "rb") as f:
-                cfg = tomllib.load(f)
-            out_dir_str = cfg.get("output", {}).get("directory", "")
-            if not out_dir_str:
-                continue
-            out_dir = Path(out_dir_str)
-            if out_dir == tdir or out_dir.resolve() == tdir.resolve():
-                skel_rel = cfg.get("data", {}).get("skeleton")
-                if skel_rel:
-                    # Resolve relative to CWD (same as when the tracker ran)
-                    skel_path = Path(skel_rel)
-                    if not skel_path.is_absolute():
-                        skel_path = Path.cwd() / skel_path
-                    if skel_path.exists():
-                        print(f"  Auto-detected skeleton for {tdir.name}: {skel_path}")
-                        return skel_path
-        except Exception:
-            continue
-    if fallback and fallback.exists():
-        return fallback
-    return None
+    from collections import defaultdict
+    rows = conn.execute(
+        """
+        SELECT sp.video_frame, sp.timestamp_s, cv.actual_fps, ci.label
+        FROM sync_points sp
+        JOIN capture_videos cv ON cv.id = sp.shot_video_id
+        JOIN camera_instances ci ON ci.id = cv.camera_instance_id
+        WHERE sp.sync_config_id = ?
+        ORDER BY ci.label, sp.video_frame
+        """,
+        (sync_config_id,)
+    ).fetchall()
+    data: dict[str, dict] = defaultdict(lambda: {"fps": 0.0, "syncpoints": []})
+    for row in rows:
+        label = row["label"]
+        data[label]["fps"] = float(row["actual_fps"] or 0.0)
+        data[label]["syncpoints"].append({
+            "frame": int(row["video_frame"]),
+            "timestamp": float(row["timestamp_s"]),
+        })
+    return SyncTable(dict(data))
 
 
-def load_bone_world_data(
+def _load_bone_data(
+    conn: sqlite3.Connection,
+    run_id: str,
+    person_id: int,
     skeleton: dict[str, SkeletonJoint],
-    state_csv: Path,
-) -> BoneWorldData:
-    """Compute 3D bone world positions per frame using forward kinematics.
+    layout,
+) -> tuple[BoneWorldData, dict[int, float]]:
+    """Compute FK bone positions and timestamps from tracking_results."""
+    rows = conn.execute(
+        """
+        SELECT tracker_step, timestamp_s, state FROM tracking_results
+        WHERE run_id = ? AND person_id = ? AND is_smoothed = 1
+        ORDER BY tracker_step
+        """,
+        (run_id, person_id)
+    ).fetchall()
+    if not rows:
+        rows = conn.execute(
+            """
+            SELECT tracker_step, timestamp_s, state FROM tracking_results
+            WHERE run_id = ? AND person_id = ? AND is_smoothed = 0
+            ORDER BY tracker_step
+            """,
+            (run_id, person_id)
+        ).fetchall()
 
-    Uses smoothed_state_vectors.csv if present alongside state_csv.
-    Returns: dict[frame_id → dict[joint_name → (head_3d, tail_3d)]]
-    """
-    smoothed = state_csv.parent / "smoothed_state_vectors.csv"
-    csv_to_use = smoothed if smoothed.exists() else state_csv
-    if csv_to_use != state_csv:
-        print(f"    Using smoothed state vectors: {csv_to_use.name}")
+    bone_data: BoneWorldData = {}
+    timestamps: dict[int, float] = {}
 
-    df = pd.read_csv(csv_to_use)
-
-    result: BoneWorldData = {}
-    for _, row in df.iterrows():
-        frame_id = int(row["tracker_frame_idx"])
-        transforms = _compute_joint_transforms(skeleton, row)
+    for row in rows:
+        step = row["tracker_step"]
+        timestamps[step] = float(row["timestamp_s"])
+        state_blob = bytes(row["state"])
+        try:
+            transforms = _compute_joint_transforms(skeleton, state_blob, layout)
+        except Exception:
+            bone_data[step] = {}
+            continue
         bones: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         for jname, T in transforms.items():
+            if jname not in skeleton:
+                continue
             bto = skeleton[jname].bone_tip_offset
             head = T[:3, 3].copy()
             tail = head + T[:3, :3] @ bto
-            bone_len = float(np.linalg.norm(tail - head))
-            if bone_len > 0.001:  # skip < 1 mm
+            if float(np.linalg.norm(tail - head)) > 0.001:
                 bones[jname] = (head, tail)
-        result[frame_id] = bones
+        bone_data[step] = bones
 
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Tracking data loading
-# ---------------------------------------------------------------------------
-
-def load_marker_projections(csv_path: Path) -> tuple[MarkerFrameData, FrameTimestamps]:
-    """Load marker_projections.csv."""
-    from collections import defaultdict
-
-    marker_data: MarkerFrameData = defaultdict(lambda: defaultdict(dict))
-    timestamps: FrameTimestamps = {}
-
-    with open(csv_path) as f:
-        header = f.readline().rstrip().split(",")
-        col = {name: i for i, name in enumerate(header)}
-        for line in f:
-            parts = line.rstrip().split(",")
-            frame  = int(parts[col["frame"]])
-            ts     = float(parts[col["timestamp"]])
-            cam_id = int(parts[col["camera_id"]])
-            mname  = parts[col["marker_name"]]
-            px     = float(parts[col["proj_x"]])
-            py     = float(parts[col["proj_y"]])
-            ox     = float(parts[col["obs_x"]])
-            oy     = float(parts[col["obs_y"]])
-            outlier = parts[col["is_outlier"]].strip().lower() == "true"
-            marker_data[frame][cam_id][mname] = (px, py, ox, oy, outlier)
-            timestamps[frame] = ts
-
-    return (
-        {f: dict(cams) for f, cams in marker_data.items()},
-        timestamps,
-    )
+    return bone_data, timestamps
 
 
-def fill_forward_marker_observations(marker_data: MarkerFrameData) -> MarkerFrameData:
-    """For each camera, carry the last known observations forward to frames that have none.
+def _load_obs_data(
+    conn: sqlite3.Connection,
+    run_id: str,
+    person_id: int,
+    cam_label_to_csv_id: dict[str, int],
+    extrinsic_id: str,
+) -> dict[int, dict[int, dict[str, tuple]]]:
+    """Load obs from tracking_obs_results.
 
-    Cameras that capture at a lower rate than the tracker (e.g. 60 fps cameras in a
-    120 fps tracker) only have observations at every 2nd (or 4th, etc.) tracker frame.
-    Without fill-forward the visualizer shows empty dots on the in-between frames even
-    though the displayed video frame is identical.  Fill-forward makes markers visible
-    continuously, matching what is actually visible in the source image.
+    Returns step → csv_id → marker_name → (obs_x, obs_y, pred_x, pred_y, is_outlier)
     """
-    all_frames = sorted(marker_data.keys())
-    result: MarkerFrameData = {}
-    last_per_cam: dict[int, dict[str, tuple]] = {}
+    run_row = conn.execute(
+        "SELECT active_camera_ids, marker_names FROM tracking_runs WHERE id = ?",
+        (run_id,)
+    ).fetchone()
+    cam_labels: list[str] = json.loads(run_row["active_camera_ids"])
+    marker_names: list[str] = json.loads(run_row["marker_names"])
+    n_cams, n_markers = len(cam_labels), len(marker_names)
 
-    for frame in all_frames:
-        # Start from carried-forward data, then overlay this frame's actual observations
-        merged: dict[int, dict] = {cam: dict(obs) for cam, obs in last_per_cam.items()}
-        for cam, obs in marker_data[frame].items():
-            merged[cam] = dict(obs)
-            last_per_cam[cam] = obs
-        result[frame] = merged
+    ci_rows = conn.execute(
+        """
+        SELECT ci.label AS ci_label, sc.label AS sc_label
+        FROM extrinsic_entries ee
+        JOIN extrinsic_calibrations exc ON exc.id = ee.extrinsic_calibration_id
+        JOIN session_cameras sc
+            ON sc.camera_instance_id = ee.camera_instance_id
+           AND sc.session_id = exc.session_id
+        JOIN camera_instances ci ON ci.id = ee.camera_instance_id
+        WHERE ee.extrinsic_calibration_id = ?
+        """,
+        (extrinsic_id,)
+    ).fetchall()
+    ci_label_to_sc_label: dict[str, str] = {r["ci_label"]: r["sc_label"] for r in ci_rows}
 
-    return result
+    all_rows = conn.execute(
+        """
+        SELECT tracker_step, obs_blob FROM tracking_obs_results
+        WHERE run_id = ? AND person_id = ?
+        ORDER BY tracker_step
+        """,
+        (run_id, person_id)
+    ).fetchall()
 
-
-# ---------------------------------------------------------------------------
-# Video file discovery
-# ---------------------------------------------------------------------------
-
-VIDEO_EXTENSIONS = {".mp4", ".MP4", ".avi", ".AVI", ".mov", ".MOV", ".mkv", ".MKV"}
-
-
-def find_video_files(video_dir: Path, cameras: list[Camera]) -> dict[int, Path]:
-    """Match camera csv_ids to video files in video_dir."""
-    all_videos = [p for p in video_dir.iterdir() if p.suffix in VIDEO_EXTENSIONS]
-    result: dict[int, Path] = {}
-
-    for cam in cameras:
-        candidates = [cam.display_name.lower(), cam.toml_name.lower()]
-        matched = None
-        for vid in all_videos:
-            stem = vid.stem.lower()
-            if stem in candidates:
-                matched = vid
-                break
-        if matched is None:
-            for vid in all_videos:
-                stem = vid.stem.lower()
-                if any(c in stem for c in candidates):
-                    matched = vid
-                    break
-        if matched is not None:
-            result[cam.csv_id] = matched
-        else:
-            print(f"  [warn] No video file found for camera {cam.display_name} in {video_dir}",
-                  file=sys.stderr)
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Bounding box computation
-# ---------------------------------------------------------------------------
-
-def compute_sequence_bboxes(
-    all_marker_data: list[MarkerFrameData],
-    camera_csv_ids: list[int],
-    margin: float = 0.10,
-) -> dict[int, tuple[int, int, int, int]]:
-    """Compute per-camera crop boxes covering all persons' inlier observations."""
-    points: dict[int, list[tuple[float, float]]] = {cid: [] for cid in camera_csv_ids}
-
-    for marker_data in all_marker_data:
-        for frame_cams in marker_data.values():
-            for cam_id, markers in frame_cams.items():
-                if cam_id not in points:
-                    continue
-                for _mname, (px, py, ox, oy, outlier) in markers.items():
-                    if not outlier:
-                        points[cam_id].append((ox, oy))
-
-    bboxes: dict[int, tuple[int, int, int, int]] = {}
-    for cam_id, pts in points.items():
-        if not pts:
+    result: dict[int, dict[int, dict[str, tuple]]] = {}
+    expected = n_cams * n_markers * 8
+    for row in all_rows:
+        step = row["tracker_step"]
+        blob = np.frombuffer(bytes(row["obs_blob"]), dtype="<f4")
+        if len(blob) != expected:
             continue
-        arr = np.array(pts)
-        min_x, min_y = arr.min(axis=0)
-        max_x, max_y = arr.max(axis=0)
-        w = max_x - min_x
-        h = max_y - min_y
-        bboxes[cam_id] = (
-            min_x - margin * w,
-            min_y - margin * h,
-            max_x + margin * w,
-            max_y + margin * h,
-        )
-
-    return bboxes
-
-
-def adjust_bbox_to_aspect(
-    bbox: tuple[float, float, float, float],
-    target_aspect: float,
-) -> tuple[float, float, float, float]:
-    x1, y1, x2, y2 = bbox
-    w, h = x2 - x1, y2 - y1
-    if w <= 0 or h <= 0:
-        return bbox
-    current_aspect = w / h
-    if current_aspect > target_aspect:
-        new_h = w / target_aspect
-        dy = (new_h - h) / 2
-        return x1, y1 - dy, x2, y2 + dy
-    else:
-        new_w = h * target_aspect
-        dx = (new_w - w) / 2
-        return x1 - dx, y1, x2 + dx, y2
+        obs = blob.reshape(n_cams, n_markers, 8)
+        step_data: dict[int, dict[str, tuple]] = {}
+        for ci, cl in enumerate(cam_labels):
+            sc_label = ci_label_to_sc_label.get(cl) or cl
+            csv_id = cam_label_to_csv_id.get(sc_label)
+            if csv_id is None:
+                continue
+            cam_markers: dict[str, tuple] = {}
+            for mi, mname in enumerate(marker_names):
+                slot = obs[ci, mi]
+                obs_x, obs_y   = float(slot[0]), float(slot[1])
+                pred_x, pred_y = float(slot[2]), float(slot[3])
+                is_outlier = bool(slot[6] > 0.5)
+                if not math.isnan(obs_x):
+                    cam_markers[mname] = (obs_x, obs_y, pred_x, pred_y, is_outlier)
+            if cam_markers:
+                step_data[csv_id] = cam_markers
+        result[step] = step_data
+    return result
 
 
-def clamp_bbox(
-    bbox: tuple[float, float, float, float],
-    vid_w: int,
-    vid_h: int,
-) -> tuple[int, int, int, int]:
-    x1, y1, x2, y2 = bbox
-    return (
-        int(max(0, min(x1, vid_w))),
-        int(max(0, min(y1, vid_h))),
-        int(max(0, min(x2, vid_w))),
-        int(max(0, min(y2, vid_h))),
-    )
+def _get_person_track_id(
+    conn: sqlite3.Connection,
+    run_id: str,
+    person_name: str,
+) -> int | None:
+    """Return the mask label (track_id) for a person via detection_track_assignments."""
+    row = conn.execute(
+        """
+        SELECT dta.track_id
+        FROM detection_track_assignments dta
+        JOIN pose_observation_sequences pos
+            ON pos.detection_run_id = dta.detection_run_id
+        JOIN tracking_runs tr ON tr.observation_sequence_id = pos.id
+        WHERE tr.id = ? AND dta.person_name = ?
+        LIMIT 1
+        """,
+        (run_id, person_name)
+    ).fetchone()
+    return int(row["track_id"]) if row else None
+
+
+def _find_seg_source(
+    conn: sqlite3.Connection,
+    shot_video_id: str,
+    frame_range: tuple[int, int],
+) -> str | None:
+    """Return the seg_quality_run_id with the most masks covering frame_range."""
+    f0, f1 = frame_range
+    row = conn.execute(
+        """
+        SELECT seg_quality_run_id, COUNT(*) n
+        FROM seg_masks
+        WHERE shot_video_id = ? AND frame_idx BETWEEN ? AND ?
+        GROUP BY seg_quality_run_id
+        ORDER BY n DESC LIMIT 1
+        """,
+        (shot_video_id, f0, f1)
+    ).fetchone()
+    return row["seg_quality_run_id"] if row else None
+
+
+def _load_seg_mask(
+    conn: sqlite3.Connection,
+    seg_quality_run_id: str,
+    shot_video_id: str,
+    frame_idx: int,
+) -> np.ndarray | None:
+    row = conn.execute(
+        "SELECT mask_blob FROM seg_masks "
+        "WHERE seg_quality_run_id = ? AND shot_video_id = ? AND frame_idx = ?",
+        (seg_quality_run_id, shot_video_id, frame_idx)
+    ).fetchone()
+    if row is None:
+        return None
+    buf = np.frombuffer(bytes(row["mask_blob"]), dtype=np.uint8)
+    mask = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
+    if mask is None:
+        return None
+    if mask.ndim == 3:
+        mask = mask[:, :, 0]
+    return mask
+
+
+def _get_shot_video_ids(
+    conn: sqlite3.Connection,
+    shot_id: str,
+) -> dict[str, str]:
+    """Return {camera_label → shot_video_id} for a shot."""
+    rows = conn.execute(
+        """
+        SELECT ci.label, cv.id AS svid
+        FROM capture_videos cv
+        JOIN camera_instances ci ON ci.id = cv.camera_instance_id
+        WHERE cv.shot_id = ?
+        """,
+        (shot_id,)
+    ).fetchall()
+    return {r["label"]: r["svid"] for r in rows}
+
+
+def _get_video_paths(
+    conn: sqlite3.Connection,
+    shot_id: str,
+) -> dict[str, str]:
+    """Return {camera_label → file_path} for a shot."""
+    rows = conn.execute(
+        """
+        SELECT ci.label, cv.file_path
+        FROM capture_videos cv
+        JOIN camera_instances ci ON ci.id = cv.camera_instance_id
+        WHERE cv.shot_id = ?
+        """,
+        (shot_id,)
+    ).fetchall()
+    return {r["label"]: r["file_path"] for r in rows}
 
 
 # ---------------------------------------------------------------------------
-# Drawing primitives
-# ---------------------------------------------------------------------------
-
-def draw_bone(
-    img: np.ndarray,
-    head: tuple[int, int],
-    tail: tuple[int, int],
-    color: tuple[int, int, int],
-) -> None:
-    """Draw a wireframe bone: diamond outline narrow at head, widest at 30%, tapering to tail."""
-    hx, hy = head
-    tx, ty = tail
-    dx, dy = tx - hx, ty - hy
-    length = math.hypot(dx, dy)
-    if length < 2:
-        cv2.circle(img, (int(hx), int(hy)), 2, color, 1)
-        return
-
-    perp_x = -dy / length
-    perp_y =  dx / length
-
-    half_w = length * 0.12
-    wide_x = hx + 0.30 * dx
-    wide_y = hy + 0.30 * dy
-
-    left_w  = (int(wide_x + half_w * perp_x), int(wide_y + half_w * perp_y))
-    right_w = (int(wide_x - half_w * perp_x), int(wide_y - half_w * perp_y))
-
-    outline = np.array([head, left_w, (int(tx), int(ty)), right_w], dtype=np.int32)
-    cv2.polylines(img, [outline], isClosed=True, color=color, thickness=2)
-
-
-def draw_marker_dot(
-    img: np.ndarray,
-    x: int,
-    y: int,
-    color: tuple[int, int, int],
-    radius: int = 3,
-) -> None:
-    cv2.circle(img, (x, y), radius, color, -1)
-    # cv2.circle(img, (x, y), radius, (0, 0, 0), 1)
-
-
-# ---------------------------------------------------------------------------
-# Per-frame cell rendering
+# Rendering helpers
 # ---------------------------------------------------------------------------
 
 def _project_to_cell(
     p_world: np.ndarray,
     cam_P: np.ndarray,
-    x1c: float,
-    y1c: float,
-    sx: float,
-    sy: float,
+    x1c: float, y1c: float,
+    sx: float,  sy: float,
 ) -> tuple[int, int] | None:
-    """Project a 3D world point through camera P matrix, then map to cell coords."""
     q = cam_P @ np.array([p_world[0], p_world[1], p_world[2], 1.0])
     if q[2] < 0.01:
         return None
@@ -631,25 +596,39 @@ def _project_to_cell(
     return int((px - x1c) * sx), int((py - y1c) * sy)
 
 
+def _draw_bone(
+    img: np.ndarray,
+    head: tuple[int, int],
+    tail: tuple[int, int],
+    color: tuple[int, int, int],
+) -> None:
+    hx, hy = head
+    tx, ty = tail
+    dx, dy = tx - hx, ty - hy
+    length = math.hypot(dx, dy)
+    if length < 2:
+        cv2.circle(img, (int(hx), int(hy)), 2, color, 1)
+        return
+    perp_x, perp_y = -dy / length, dx / length
+    half_w = length * 0.12
+    wide_x = hx + 0.30 * dx
+    wide_y = hy + 0.30 * dy
+    left_w  = (int(wide_x + half_w * perp_x), int(wide_y + half_w * perp_y))
+    right_w = (int(wide_x - half_w * perp_x), int(wide_y - half_w * perp_y))
+    pts = np.array([head, left_w, (int(tx), int(ty)), right_w], dtype=np.int32)
+    cv2.polylines(img, [pts], isClosed=True, color=color, thickness=2)
+
+
 def render_cell(
     video_frame: np.ndarray,
-    cam_id: int,
-    frame_id: int,
-    video_frame_idx: int,
+    cam: Camera,
+    crop: tuple[int, int, int, int],
     cell_w: int,
     cell_h: int,
-    crop: tuple[int, int, int, int],
     persons: list[dict],
-    cam: Camera,
+    frame_label: str = "",
 ) -> np.ndarray:
-    """Render one camera cell.
-
-    persons: list of {
-        mdata:    dict[marker_name → (proj_x, proj_y, obs_x, obs_y, is_outlier)],
-        bones_3d: dict[joint_name → (head_world [3], tail_world [3])],
-        color:    BGR tuple,
-    }
-    """
+    """Render one camera cell with mask, bones, and observation dots."""
     x1, y1, x2, y2 = crop
     vid_h, vid_w = video_frame.shape[:2]
     x1c = max(0, min(x1, vid_w))
@@ -661,6 +640,7 @@ def render_cell(
     if cropped.size == 0:
         cropped = video_frame
         x1c, y1c = 0, 0
+        x2c, y2c = vid_w, vid_h
 
     cell = cv2.resize(cropped, (cell_w, cell_h), interpolation=cv2.INTER_LINEAR)
 
@@ -672,706 +652,311 @@ def render_cell(
     sx = cell_w / crop_w
     sy = cell_h / crop_h
 
-    def to_cell(px: float, py: float) -> tuple[int, int]:
-        return int((px - x1c) * sx), int((py - y1c) * sy)
-
-    # Draw skeleton bones for each person (from FK 3D positions)
+    # Skeleton bones (behind observations)
     for person in persons:
+        color = person["color"]
         bones_3d = person.get("bones_3d", {})
-        color = person["bone_color"]
         for _jname, (head_3d, tail_3d) in bones_3d.items():
             h2d = _project_to_cell(head_3d, cam.P, x1c, y1c, sx, sy)
             t2d = _project_to_cell(tail_3d, cam.P, x1c, y1c, sx, sy)
             if h2d is None or t2d is None:
                 continue
-            # Skip bones where both endpoints are far outside the cell
-            margin_px = max(cell_w, cell_h) * 0.5
-            if (max(h2d[0], t2d[0]) < -margin_px or
-                    min(h2d[0], t2d[0]) > cell_w + margin_px or
-                    max(h2d[1], t2d[1]) < -margin_px or
-                    min(h2d[1], t2d[1]) > cell_h + margin_px):
+            margin = max(cell_w, cell_h) * 0.5
+            if (max(h2d[0], t2d[0]) < -margin or min(h2d[0], t2d[0]) > cell_w + margin or
+                    max(h2d[1], t2d[1]) < -margin or min(h2d[1], t2d[1]) > cell_h + margin):
                 continue
-            draw_bone(cell, h2d, t2d, color)
+            _draw_bone(cell, h2d, t2d, color)
 
-    # Draw observation dots (outliers first, inliers on top)
-    for person in persons:
-        mdata = person["mdata"]
-        color = person["marker_color"]
-        for _mname, (px, py, ox, oy, outlier) in mdata.items():
-            cx, cy = to_cell(ox, oy)
-            if 0 <= cx < cell_w and 0 <= cy < cell_h:
-                dot_color = OUTLIER_COLOR_BGR if outlier else color
-                draw_marker_dot(cell, cx, cy, dot_color)
+    # Observation dots (outliers first so inliers paint on top)
+    def _to_cell(px: float, py: float) -> tuple[int, int]:
+        return int((px - x1c) * sx), int((py - y1c) * sy)
 
-    # Camera name and frame numbers
-    text = f"{cam.display_name}  vid:{video_frame_idx}  trk:{frame_id}"
-    cv2.putText(cell, text, (6, 22), cv2.FONT_HERSHEY_SIMPLEX,
-                0.55, (0, 0, 0), 3, cv2.LINE_AA)
-    cv2.putText(cell, text, (6, 22), cv2.FONT_HERSHEY_SIMPLEX,
-                0.55, OVERLAY_TEXT_COLOR, 1, cv2.LINE_AA)
+    for pass_outlier in (True, False):
+        for person in persons:
+            color = person["color"]
+            for _mname, (ox, oy, _px, _py, is_outlier) in person.get("obs", {}).items():
+                if is_outlier != pass_outlier:
+                    continue
+                cx, cy = _to_cell(ox, oy)
+                if 0 <= cx < cell_w and 0 <= cy < cell_h:
+                    dot_color = _OUTLIER_BGR if is_outlier else color
+                    cv2.circle(cell, (cx, cy), 4, dot_color, -1)
+
+    if frame_label:
+        cv2.putText(cell, frame_label, (6, 22), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(cell, frame_label, (6, 22), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55, _TEXT_BGR, 1, cv2.LINE_AA)
 
     return cell
 
 
 # ---------------------------------------------------------------------------
-# Grid layout helper
+# Crop / aspect helpers
 # ---------------------------------------------------------------------------
 
-def grid_dims(n: int) -> tuple[int, int]:
+def _compute_bboxes(
+    obs_by_step_by_cam: dict[int, dict[int, dict]],
+    cam_csv_ids: list[int],
+    margin: float = 0.12,
+) -> dict[int, tuple[float, float, float, float]]:
+    points: dict[int, list[tuple[float, float]]] = {c: [] for c in cam_csv_ids}
+    for step_cams in obs_by_step_by_cam.values():
+        for csv_id, markers in step_cams.items():
+            if csv_id not in points:
+                continue
+            for ox, oy, _px, _py, is_outlier in markers.values():
+                if not is_outlier:
+                    points[csv_id].append((ox, oy))
+    bboxes: dict[int, tuple] = {}
+    for cid, pts in points.items():
+        if not pts:
+            continue
+        arr = np.array(pts)
+        mn, mx = arr.min(axis=0), arr.max(axis=0)
+        w, h = mx[0] - mn[0], mx[1] - mn[1]
+        bboxes[cid] = (mn[0] - margin*w, mn[1] - margin*h,
+                       mx[0] + margin*w, mx[1] + margin*h)
+    return bboxes
+
+
+def _adjust_aspect(bbox: tuple, target: float) -> tuple:
+    x1, y1, x2, y2 = bbox
+    w, h = x2 - x1, y2 - y1
+    if w <= 0 or h <= 0:
+        return bbox
+    if w / h > target:
+        new_h = w / target
+        dy = (new_h - h) / 2
+        return x1, y1 - dy, x2, y2 + dy
+    new_w = h * target
+    dx = (new_w - w) / 2
+    return x1 - dx, y1, x2 + dx, y2
+
+
+def _clamp_bbox(bbox: tuple, vid_w: int, vid_h: int) -> tuple[int, int, int, int]:
+    x1, y1, x2, y2 = bbox
+    return (int(max(0, min(x1, vid_w))),
+            int(max(0, min(y1, vid_h))),
+            int(max(0, min(x2, vid_w))),
+            int(max(0, min(y2, vid_h))))
+
+
+def _infer_fps(timestamps: dict[int, float]) -> float:
+    s = sorted(timestamps.values())
+    if len(s) < 2:
+        return 60.0
+    diffs = [s[i+1] - s[i] for i in range(min(20, len(s)-1)) if s[i+1] > s[i]]
+    return round(1.0 / (sum(diffs) / len(diffs))) if diffs else 60.0
+
+
+def _grid_dims(n: int) -> tuple[int, int]:
     cols = math.ceil(math.sqrt(n))
-    rows = math.ceil(n / cols)
-    return rows, cols
+    return math.ceil(n / cols), cols
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Visualize posetrak tracking results on source camera videos."
+    )
+    p.add_argument("--session-db", required=True,
+                   help="Path to session SQLite database.")
+    p.add_argument("--run-id", action="append", default=None, dest="run_ids",
+                   metavar="RUN_ID",
+                   help="Tracking run UUID or unique prefix. "
+                        "Repeat for multiple persons. "
+                        "Omit to list available runs.")
+    p.add_argument("--output", default=None, type=Path,
+                   help="Output MP4 file path (required when --run-id is given).")
+    p.add_argument("--camera", default=None,
+                   help="Render only this camera label (default: full mosaic).")
+    p.add_argument("--resolution", default="1920x1080",
+                   help="Output WxH (default: 1920x1080).")
+    p.add_argument("--fps", type=float, default=None,
+                   help="Override output FPS.")
+    p.add_argument("--no-masks", action="store_true",
+                   help="Skip segmentation mask overlay.")
+    p.add_argument("--no-bones", action="store_true",
+                   help="Skip 3-D skeleton bone overlay.")
+    return p.parse_args()
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Visualize Posetrak tracking results on camera videos.")
-    p.add_argument("--tracking-dir", dest="tracking_dirs", action="append", default=None,
-                   metavar="DIR",
-                   help="Tracking output directory.  Repeat for multiple persons.")
-    p.add_argument("--cameras", default=None, type=Path,
-                   help="Pose2Sim camera calibration TOML (not required with --session-db).")
-    p.add_argument("--sync", default=None, type=Path,
-                   help="Sync JSON file (not required with --session-db).")
-    p.add_argument("--skeleton", default=None, type=Path,
-                   help="Skeleton YAML (fallback if auto-detection from TOML fails; "
-                        "not required with --session-db).")
-    p.add_argument("--session-db", default=None, type=str,
-                   help="Path to session SQLite database (alternative to --cameras/--sync).")
-    p.add_argument("--run-id", action="append", default=None, type=str, dest="run_ids",
-                   metavar="RUN_ID",
-                   help="Tracking run UUID (required with --session-db). "
-                        "Repeat to overlay multiple runs.")
-    p.add_argument("--person-id", action="append", default=None, type=int, dest="person_ids",
-                   metavar="PERSON_ID",
-                   help="Person ID(s) for DB mode. Repeat for multiple. "
-                        "Default: auto-detect all persons available in each run.")
-    p.add_argument("--video-dir", required=True, type=Path,
-                   help="Directory containing one video file per camera.")
-    p.add_argument("--camera", default=None,
-                   help="Render only this camera.  Omit for full mosaic.")
-    p.add_argument("--resolution", default="1920x1080",
-                   help="Output resolution WxH (default: 1920x1080).")
-    p.add_argument("--fps", type=float, default=None,
-                   help="Output frame rate.  Defaults to tracker rate.")
-    p.add_argument("--output", required=True, type=Path,
-                   help="Output MP4 file path.")
-    return p.parse_args()
-
-
-def infer_fps(timestamps: FrameTimestamps) -> float:
-    sorted_ts = sorted(timestamps.values())
-    if len(sorted_ts) < 2:
-        return 60.0
-    diffs = [sorted_ts[i+1] - sorted_ts[i] for i in range(min(20, len(sorted_ts)-1))
-             if sorted_ts[i+1] > sorted_ts[i]]
-    if not diffs:
-        return 60.0
-    return round(1.0 / (sum(diffs) / len(diffs)))
-
-
-def _load_cameras_from_db(session_db: str, run_id: str) -> list[Camera]:
-    """Load cameras from DB for a given tracking run.
-
-    Returns list of Camera namedtuples sorted by label.
-    """
-    import sqlite3 as _sqlite3
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    from posetrak.db.load_session import load_cameras_from_session
-
-    conn = _sqlite3.connect(session_db, check_same_thread=False)
-    conn.row_factory = _sqlite3.Row
-    run_row = conn.execute(
-        "SELECT extrinsic_calibration_id FROM tracking_runs WHERE id = ?", (run_id,)
-    ).fetchone()
-    if run_row is None:
-        conn.close()
-        raise ValueError(f"No tracking run found: {run_id!r}")
-    extrinsic_id = run_row["extrinsic_calibration_id"]
-    ext_row = conn.execute(
-        "SELECT session_id FROM extrinsic_calibrations WHERE id = ?", (extrinsic_id,)
-    ).fetchone()
-    session_id = ext_row["session_id"] if ext_row else None
-    conn.close()
-
-    if session_id is None:
-        raise ValueError("Cannot determine session_id from extrinsic_calibration_id")
-
-    cam_dicts = load_cameras_from_session(session_db, extrinsic_id, session_id)
-    cameras = []
-    for c in cam_dicts:
-        label = c["label"]
-        cam_id = c["camera_id"]
-        cameras.append(Camera(
-            csv_id=cam_id,
-            toml_name=label,
-            display_name=label,
-            K=c["K"],
-            R=c["R"],
-            t=c["t"],
-            P=c["P"],
-            dist=c["dist"],
-        ))
-    return cameras
-
-
-def _load_sync_from_db(session_db: str, run_id: str) -> SyncTable:
-    """Load sync table from DB for a given tracking run."""
-    import sqlite3 as _sqlite3
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    from posetrak.db.load_session import load_sync_from_session
-
-    conn = _sqlite3.connect(session_db, check_same_thread=False)
-    conn.row_factory = _sqlite3.Row
-    run_row = conn.execute(
-        "SELECT sync_config_id FROM tracking_runs WHERE id = ?", (run_id,)
-    ).fetchone()
-    conn.close()
-    if run_row is None:
-        raise ValueError(f"No tracking run found: {run_id!r}")
-    sync_raw = load_sync_from_session(session_db, run_row["sync_config_id"])
-    return SyncTable(sync_raw)
-
-
-def _load_obs_mdata_from_db(
-    session_db: str,
-    run_id: str,
-    person_id: int,
-    cameras: list,
-    skeleton_yaml: str,
-    tracker_timestamps: dict,
-    min_confidence: float = 0.1,
-) -> dict:
-    """Load 2D observations from DB, keyed by tracker step.
-
-    Returns dict[step → dict[csv_id → dict[mname → (obs_x, obs_y, pred_x, pred_y, is_outlier)]]].
-
-    Tries tracking_obs_results first (accurate pred + is_outlier).
-    Falls back to pose_observations matched by nearest timestamp (pred=obs, is_outlier=False).
-    """
-    import bisect
-    import math
-    import sqlite3 as _sqlite3
-    from collections import defaultdict
-
-    conn = _sqlite3.connect(session_db, check_same_thread=False)
-    conn.row_factory = _sqlite3.Row
-
-    run_row = conn.execute(
-        "SELECT observation_sequence_id, extrinsic_calibration_id, "
-        "       active_camera_ids, marker_names "
-        "FROM tracking_runs WHERE id = ?",
-        (run_id,),
-    ).fetchone()
-    if run_row is None:
-        conn.close()
-        return {}
-
-    # --- Try tracking_obs_results first ---
-    obs_result_row = conn.execute(
-        "SELECT obs_blob FROM tracking_obs_results "
-        "WHERE run_id = ? AND person_id = ? LIMIT 1",
-        (run_id, person_id),
-    ).fetchone()
-
-    if obs_result_row is not None:
-        # Has tracking_obs_results: load all steps from it
-        import json as _json
-        cam_labels = _json.loads(run_row["active_camera_ids"])  # sorted labels
-        marker_names = _json.loads(run_row["marker_names"])
-        n_cams = len(cam_labels)
-        n_markers = len(marker_names)
-
-        # Build ci.label → csv_id.  active_camera_ids stores camera_instances.label
-        # (the registry label the C++ tracker used), while cameras list is keyed by
-        # session_cameras.label.  Query the mapping between the two.
-        ext_id = run_row["extrinsic_calibration_id"]
-        ci_rows = conn.execute(
-            """
-            SELECT ci.label AS ci_label, sc.label AS sc_label
-            FROM extrinsic_entries ee
-            JOIN extrinsic_calibrations exc ON exc.id = ee.extrinsic_calibration_id
-            JOIN session_cameras sc
-                ON sc.camera_instance_id = ee.camera_instance_id
-               AND sc.session_id = exc.session_id
-            JOIN camera_instances ci ON ci.id = ee.camera_instance_id
-            WHERE ee.extrinsic_calibration_id = ?
-            """,
-            (ext_id,),
-        ).fetchall()
-        sc_label_to_csv_id = {c.display_name: c.csv_id for c in cameras}
-        label_to_csv_id = {
-            r["ci_label"]: sc_label_to_csv_id.get(r["sc_label"])
-            for r in ci_rows
-        }
-
-        all_rows = conn.execute(
-            "SELECT tracker_step, obs_blob FROM tracking_obs_results "
-            "WHERE run_id = ? AND person_id = ? ORDER BY tracker_step",
-            (run_id, person_id),
-        ).fetchall()
-        conn.close()
-
-        result: dict[int, dict] = {}
-        for row in all_rows:
-            step = row["tracker_step"]
-            blob = np.frombuffer(bytes(row["obs_blob"]), dtype="<f4")
-            if len(blob) != n_cams * n_markers * 8:
-                result[step] = {}
-                continue
-            obs = blob.reshape(n_cams, n_markers, 8)
-            frame_cams: dict[int, dict] = {}
-            for ci, label in enumerate(cam_labels):
-                csv_id = label_to_csv_id.get(label)
-                if csv_id is None:
-                    continue
-                cam_entry: dict[str, tuple] = {}
-                for mi, mname in enumerate(marker_names):
-                    slot = obs[ci, mi]
-                    obs_x, obs_y   = float(slot[0]), float(slot[1])  # obs.actual  — detected pixel position
-                    pred_x, pred_y = float(slot[2]), float(slot[3])  # obs.predicted — FK-projected pixel position
-                    is_outlier = bool(slot[6] > 0.5)
-                    if math.isnan(obs_x):
-                        continue  # no observation for this slot
-                    # MarkerFrameData convention: (proj_x, proj_y, obs_x, obs_y, is_outlier)
-                    # consumers unpack (px, py, ox, oy) and draw (ox, oy) = observed position
-                    cam_entry[mname] = (pred_x, pred_y, obs_x, obs_y, is_outlier)
-                if cam_entry:
-                    frame_cams[csv_id] = cam_entry
-            result[step] = frame_cams
-        return result
-
-    # --- Fallback: pose_observations matched by nearest timestamp ---
-    try:
-        import yaml as _yaml
-        _skel_data = _yaml.safe_load(skeleton_yaml)
-    except Exception:
-        conn.close()
-        return {}
-
-    coco_to_marker: dict[int, str] = {}
-    for m in _skel_data.get("markers", []):
-        kid = m.get("openpose_keypoint")
-        if kid is not None:
-            coco_to_marker[int(kid)] = m["name"]
-    if not coco_to_marker:
-        conn.close()
-        return {}
-
-    seq_id = run_row["observation_sequence_id"]
-    ext_cal_id = run_row["extrinsic_calibration_id"]
-
-    ext_rows = conn.execute(
-        "SELECT ee.camera_instance_id, sc.label "
-        "FROM extrinsic_entries ee "
-        "JOIN extrinsic_calibrations exc ON exc.id = ee.extrinsic_calibration_id "
-        "JOIN session_cameras sc "
-        "    ON sc.camera_instance_id = ee.camera_instance_id "
-        "    AND sc.session_id = exc.session_id "
-        "WHERE ee.extrinsic_calibration_id = ? "
-        "ORDER BY sc.label",
-        (ext_cal_id,),
-    ).fetchall()
-    inst_to_csv_id: dict[str, int] = {}
-    for i, r in enumerate(ext_rows):
-        inst_to_csv_id[r["camera_instance_id"]] = i
-
-    obs_rows = conn.execute(
-        "SELECT camera_instance_id, timestamp_s, kp_blob "
-        "FROM pose_observations "
-        "WHERE sequence_id = ? AND person_id = ? "
-        "ORDER BY timestamp_s",
-        (seq_id, person_id),
-    ).fetchall()
-    conn.close()
-
-    cam_ts_data: dict[str, list] = defaultdict(list)
-    for row in obs_rows:
-        inst_id = row["camera_instance_id"]
-        if inst_id not in inst_to_csv_id:
-            continue
-        ts = float(row["timestamp_s"])
-        kp_arr = np.frombuffer(bytes(row["kp_blob"]), dtype="<f4").reshape(-1, 3)
-        markers: dict[str, tuple] = {}
-        for coco_id, mname in coco_to_marker.items():
-            if coco_id < len(kp_arr):
-                x, y, conf = float(kp_arr[coco_id, 0]), float(kp_arr[coco_id, 1]), float(kp_arr[coco_id, 2])
-                if conf >= min_confidence:
-                    markers[mname] = (x, y)
-        cam_ts_data[inst_id].append((ts, markers))
-
-    cam_ts_arrays = {iid: [x[0] for x in data] for iid, data in cam_ts_data.items()}
-
-    result2: dict[int, dict] = {}
-    for step, step_ts in tracker_timestamps.items():
-        frame_cams2: dict[int, dict] = {}
-        for inst_id, csv_id in inst_to_csv_id.items():
-            data_list = cam_ts_data.get(inst_id)
-            if not data_list:
-                continue
-            ts_list = cam_ts_arrays[inst_id]
-            idx = bisect.bisect_left(ts_list, step_ts)
-            if idx == 0:
-                nearest = 0
-            elif idx >= len(ts_list):
-                nearest = len(ts_list) - 1
-            else:
-                nearest = idx if abs(ts_list[idx] - step_ts) < abs(ts_list[idx - 1] - step_ts) else idx - 1
-            _, markers = data_list[nearest]
-            if markers:
-                # pred=None signals caller to use FK projection; is_outlier unknown → False
-                frame_cams2[csv_id] = {mname: (ox, oy, None, None, False)
-                                       for mname, (ox, oy) in markers.items()}
-        result2[step] = frame_cams2
-    return result2
-
-
-def _load_skeleton_from_db(session_db: str, run_id: str) -> tuple[dict, Path]:
-    """Load skeleton from DB, write to temp file.
-
-    Returns (skeleton_dict, temp_yaml_path).
-    The caller is responsible for cleaning up temp_yaml_path.
-    """
-    import sqlite3 as _sqlite3
-    import tempfile
-
-    conn = _sqlite3.connect(session_db, check_same_thread=False)
-    conn.row_factory = _sqlite3.Row
-    row = conn.execute(
-        "SELECT s.yaml_content FROM tracking_runs tr "
-        "JOIN skeletons s ON s.id = tr.skeleton_id "
-        "WHERE tr.id = ?",
-        (run_id,),
-    ).fetchone()
-    conn.close()
-
-    if row is None or not row["yaml_content"]:
-        raise ValueError(f"No skeleton YAML for run {run_id!r}")
-
-    yaml_content = row["yaml_content"]
-    skeleton = load_skeleton_structure.__wrapped__ if hasattr(load_skeleton_structure, "__wrapped__") \
-        else load_skeleton_structure
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-        f.write(yaml_content)
-        tmp_path = Path(f.name)
-
-    skel_dict = load_skeleton_structure(tmp_path)
-    return skel_dict, tmp_path
-
-
-def _resolve_run_persons(
-    session_db: str,
-    run_id_args: list[str],
-    person_id_args: list[int] | None,
-) -> list[tuple[str, int]]:
-    """Resolve run ID prefixes and enumerate person IDs.
-
-    Returns a list of (full_run_id, person_id) pairs in the order they should
-    be rendered (run order, then person order within each run).
-    """
-    import sqlite3 as _sq3
-    conn = _sq3.connect(session_db, check_same_thread=False)
-    conn.row_factory = _sq3.Row
-    pairs: list[tuple[str, int]] = []
-    for run_arg in run_id_args:
-        row = conn.execute(
-            "SELECT id FROM tracking_runs WHERE id LIKE ? ORDER BY id LIMIT 1",
-            (run_arg + "%",),
-        ).fetchone()
-        if row is None:
-            conn.close()
-            raise ValueError(f"No tracking run found matching: {run_arg!r}")
-        run_id = row["id"]
-
-        if person_id_args:
-            pids = list(person_id_args)
-        else:
-            pid_rows = conn.execute(
-                "SELECT DISTINCT person_id FROM tracking_results "
-                "WHERE run_id = ? ORDER BY person_id",
-                (run_id,),
-            ).fetchall()
-            pids = [r["person_id"] for r in pid_rows] or [0]
-
-        for pid in pids:
-            pairs.append((run_id, pid))
-
-    conn.close()
-    return pairs
-
-
 def main() -> None:
     args = parse_args()
 
-    # Validate arguments
-    db_mode = args.session_db is not None
-    if db_mode:
-        if not args.run_ids:
-            print("Error: --run-id is required with --session-db", file=sys.stderr)
-            sys.exit(1)
-        if not (args.tracking_dirs or True):  # tracking_dirs is optional in db mode
-            pass
-    else:
-        if args.tracking_dirs is None:
-            print("Error: --tracking-dir is required without --session-db", file=sys.stderr)
-            sys.exit(1)
-        if args.cameras is None:
-            print("Error: --cameras is required without --session-db", file=sys.stderr)
-            sys.exit(1)
-        if args.sync is None:
-            print("Error: --sync is required without --session-db", file=sys.stderr)
-            sys.exit(1)
+    if not args.run_ids:
+        _list_tracking_runs(args.session_db)
+        return
+
+    if args.output is None:
+        print("Error: --output is required when --run-id is given.", file=sys.stderr)
+        sys.exit(1)
 
     try:
         out_w, out_h = [int(v) for v in args.resolution.lower().split("x")]
     except Exception:
-        print(f"Bad --resolution format: {args.resolution}  (expected WxH)", file=sys.stderr)
+        print(f"Bad --resolution: {args.resolution}", file=sys.stderr)
         sys.exit(1)
 
-    print("Loading cameras …")
-    if db_mode:
-        cameras = _load_cameras_from_db(args.session_db, args.run_ids[0])
-    else:
-        cameras = load_cameras(args.cameras)
-    cam_by_name = {c.display_name: c for c in cameras}
-    cam_by_name.update({c.toml_name: c for c in cameras})
-    print(f"  {len(cameras)} cameras: {[c.display_name for c in cameras]}")
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from posetrak.db.skeleton_layout import SkeletonLayout
 
-    if args.camera is not None:
-        if args.camera not in cam_by_name:
-            print(f"Camera '{args.camera}' not found.  Available: {list(cam_by_name)}", file=sys.stderr)
+    conn = _open_db(args.session_db)
+
+    # Resolve run IDs
+    run_ids = [_resolve_run_id(conn, r) for r in args.run_ids]
+
+    # Load metadata from first run (all runs assumed same shot/calib)
+    first_run = conn.execute(
+        "SELECT observation_sequence_id, extrinsic_calibration_id, "
+        "       sync_config_id, skeleton_id "
+        "FROM tracking_runs WHERE id = ?",
+        (run_ids[0],)
+    ).fetchone()
+    if first_run is None:
+        print(f"Run not found: {run_ids[0]}", file=sys.stderr)
+        sys.exit(1)
+
+    extrinsic_id  = first_run["extrinsic_calibration_id"]
+    sync_cfg_id   = first_run["sync_config_id"]
+
+    # Get shot_id from observation sequence
+    obs_seq = conn.execute(
+        "SELECT shot_id, detection_run_id FROM pose_observation_sequences WHERE id = ?",
+        (first_run["observation_sequence_id"],)
+    ).fetchone()
+    shot_id = obs_seq["shot_id"]
+
+    print("Loading cameras …")
+    cameras = _load_cameras_from_db(args.session_db, conn, extrinsic_id)
+    cam_by_label   = {c.label: c for c in cameras}
+    cam_label_to_csv = {c.label: c.csv_id for c in cameras}
+    print(f"  {len(cameras)} cameras: {[c.label for c in cameras]}")
+
+    if args.camera:
+        if args.camera not in cam_by_label:
+            print(f"Camera '{args.camera}' not found. Available: {list(cam_by_label)}", file=sys.stderr)
             sys.exit(1)
-        active_cameras = [cam_by_name[args.camera]]
-        print(f"  Single-camera mode: {active_cameras[0].display_name}")
+        active_cameras = [cam_by_label[args.camera]]
     else:
         active_cameras = cameras
 
     print("Loading sync …")
-    if db_mode:
-        sync = _load_sync_from_db(args.session_db, args.run_ids[0])
-    else:
-        with open(args.sync) as f:
-            sync_raw = json.load(f)
-        sync = SyncTable(sync_raw)
+    sync = _load_sync_from_db(conn, sync_cfg_id)
 
-    # Load tracking data per person
-    print("Loading tracking data …")
+    print("Loading video file paths …")
+    video_paths = _get_video_paths(conn, shot_id)
+    label_to_svid = _get_shot_video_ids(conn, shot_id)
+    for label, path in video_paths.items():
+        print(f"  {label}: {path}")
+
+    # Load skeleton (shared across runs if same skeleton_id)
+    skeleton_id = first_run["skeleton_id"]
+    skel_row = conn.execute(
+        "SELECT yaml_content FROM skeletons WHERE id = ?", (skeleton_id,)
+    ).fetchone()
+    skeleton: dict = {}
+    layout = None
+    if skel_row and skel_row["yaml_content"]:
+        skeleton = _load_skeleton_from_yaml_str(skel_row["yaml_content"])
+        layout   = SkeletonLayout(skel_row["yaml_content"])
+        print(f"  Skeleton: {len(skeleton)} joints")
+
+    # Load per-run / per-person data
+    print("\nLoading tracking data …")
     persons_data: list[dict] = []
-    all_frames: set[int] = set()
-    primary_timestamps: FrameTimestamps | None = None
+    primary_timestamps: dict[int, float] = {}
+    all_steps: set[int] = set()
 
-    # In DB mode, derive timestamps from tracking_results and use skeleton from DB.
-    if db_mode:
-        import sqlite3 as _sqlite3
-        import tempfile as _tempfile
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from posetrak.db.skeleton_layout import SkeletonLayout as _SkeletonLayout
+    for run_id in run_ids:
+        run_row = conn.execute(
+            "SELECT observation_sequence_id, extrinsic_calibration_id "
+            "FROM tracking_runs WHERE id = ?",
+            (run_id,)
+        ).fetchone()
+        seq_id = run_row["observation_sequence_id"]
 
-        run_person_pairs = _resolve_run_persons(
-            args.session_db, args.run_ids, args.person_ids
-        )
-        print(f"  DB mode: {len(run_person_pairs)} run×person pair(s): "
-              f"{[(r[:8], p) for r, p in run_person_pairs]}")
+        pid_rows = conn.execute(
+            "SELECT DISTINCT person_id FROM tracking_results WHERE run_id = ? ORDER BY person_id",
+            (run_id,)
+        ).fetchall()
+        person_ids = [r["person_id"] for r in pid_rows] or [0]
 
-        # Cache skeletons by skeleton_id to avoid reloading the same skeleton
-        _skel_dict_cache: dict[str, dict] = {}
-        _skel_yaml_cache: dict[str, str] = {}
-        _layout_cache: dict[str, object] = {}
-
-        for pair_idx, (run_id, person_id) in enumerate(run_person_pairs):
-            bone_color = PERSON_BONE_COLORS_BGR[pair_idx % len(PERSON_BONE_COLORS_BGR)]
-            marker_color = PERSON_MARKER_COLORS_BGR[pair_idx % len(PERSON_MARKER_COLORS_BGR)]
-            label = f"{run_id[:8]}/p{person_id}"
-            print(f"\n  [{pair_idx}] run={run_id[:8]}  person_id={person_id}")
-
-            _conn_db = _sqlite3.connect(args.session_db, check_same_thread=False)
-            _conn_db.row_factory = _sqlite3.Row
-
-            # Load skeleton (cached by skeleton_id)
-            _skel_meta = _conn_db.execute(
-                "SELECT tr.skeleton_id, s.yaml_content FROM tracking_runs tr "
-                "JOIN skeletons s ON s.id = tr.skeleton_id WHERE tr.id = ?",
-                (run_id,),
+        for person_id in person_ids:
+            sp_row = conn.execute(
+                "SELECT person_name FROM sequence_persons WHERE sequence_id = ? AND person_id = ?",
+                (seq_id, person_id)
             ).fetchone()
+            person_name = sp_row["person_name"] if sp_row else f"person_{person_id}"
 
-            skeleton_db: dict = {}
-            _skel_yaml = ""
-            if _skel_meta and _skel_meta["yaml_content"]:
-                skel_key = _skel_meta["skeleton_id"]
-                _skel_yaml = _skel_meta["yaml_content"]
-                if skel_key not in _skel_dict_cache:
-                    with _tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as _tf:
-                        _tf.write(_skel_yaml)
-                        _skel_tmp = Path(_tf.name)
-                    _skel_dict_cache[skel_key] = load_skeleton_structure(_skel_tmp)
-                    _skel_yaml_cache[skel_key] = _skel_yaml
-                    _skel_tmp.unlink(missing_ok=True)
-                    print(f"    Loaded skeleton {skel_key[:8]} ({len(_skel_dict_cache[skel_key])} joints)")
-                skeleton_db = _skel_dict_cache[skel_key]
-                _skel_yaml = _skel_yaml_cache[skel_key]
+            track_id = _get_person_track_id(conn, run_id, person_name)
+            color = _davis_bgr(track_id) if track_id is not None else _davis_bgr(person_id + 1)
+            print(f"  run={run_id[:8]}  person={person_name}  "
+                  f"track_id={track_id}  color={color}")
+
+            if skeleton and layout and not args.no_bones:
+                print(f"    Computing FK …")
+                bone_data, timestamps = _load_bone_data(conn, run_id, person_id, skeleton, layout)
+                print(f"    {len(bone_data)} frames with FK")
             else:
-                print(f"    [warn] No skeleton for run {run_id[:8]} — bones disabled", file=sys.stderr)
+                bone_data, timestamps = {}, {}
+                ts_rows = conn.execute(
+                    "SELECT tracker_step, timestamp_s FROM tracking_results "
+                    "WHERE run_id = ? AND person_id = ? AND is_smoothed = 0",
+                    (run_id, person_id)
+                ).fetchall()
+                for r in ts_rows:
+                    timestamps[r["tracker_step"]] = float(r["timestamp_s"])
 
-            # Load state rows (prefer smoothed)
-            _smoothed_rows = _conn_db.execute(
-                "SELECT tracker_step, timestamp_s, state FROM tracking_results "
-                "WHERE run_id = ? AND person_id = ? AND is_smoothed = 1 ORDER BY tracker_step",
-                (run_id, person_id),
-            ).fetchall()
-            _state_rows = _smoothed_rows or _conn_db.execute(
-                "SELECT tracker_step, timestamp_s, state FROM tracking_results "
-                "WHERE run_id = ? AND person_id = ? AND is_smoothed = 0 ORDER BY tracker_step",
-                (run_id, person_id),
-            ).fetchall()
-            if _smoothed_rows:
-                print(f"    Using smoothed state ({len(_smoothed_rows)} frames)")
-            elif _state_rows:
-                print(f"    Using raw state ({len(_state_rows)} frames)")
-            else:
-                print(f"    [warn] No tracking_results for run={run_id[:8]} person_id={person_id}",
-                      file=sys.stderr)
-
-            _conn_db.close()
-
-            bone_data_db: BoneWorldData = {}
-            primary_timestamps_db: FrameTimestamps = {}
-
-            if skeleton_db and _state_rows:
-                skel_key = _skel_meta["skeleton_id"]
-                if skel_key not in _layout_cache:
-                    _layout_cache[skel_key] = _SkeletonLayout(_skel_yaml)
-                _layout = _layout_cache[skel_key]
-                print(f"    Computing FK ({len(_state_rows)} frames) …")
-                for _srow in _state_rows:
-                    _step = _srow["tracker_step"]
-                    _ts = _srow["timestamp_s"]
-                    primary_timestamps_db[_step] = _ts
-                    try:
-                        _decoded = _layout.decode_state_blob(bytes(_srow["state"]))
-                        _transforms = _layout.compute_joint_transforms(_decoded)
-                        _bones: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-                        for _jname, _T in _transforms.items():
-                            if _jname not in skeleton_db:
-                                continue
-                            _bto = skeleton_db[_jname].bone_tip_offset
-                            _head = _T[:3, 3].copy()
-                            _tail = _head + _T[:3, :3] @ _bto
-                            if float(np.linalg.norm(_tail - _head)) > 0.001:
-                                _bones[_jname] = (_head, _tail)
-                        bone_data_db[_step] = _bones
-                    except Exception:
-                        pass
-                print(f"      {len(bone_data_db)} frames with FK")
-
-            # Observations from tracking_obs_results
-            _obs_by_step = _load_obs_mdata_from_db(
-                args.session_db, run_id, person_id,
-                cameras, _skel_yaml, primary_timestamps_db,
+            obs_data = _load_obs_data(
+                conn, run_id, person_id, cam_label_to_csv, extrinsic_id
             )
-            _obs_has_pred = any(
-                v[2] is not None
-                for step_cams in _obs_by_step.values()
-                for cam_markers in step_cams.values()
-                for v in cam_markers.values()
-            ) if _obs_by_step else False
-
-            mdata_db: MarkerFrameData = dict(_obs_by_step) if _obs_has_pred else {}
-            for _step in primary_timestamps_db:
-                if _step not in mdata_db:
-                    mdata_db[_step] = {}
+            print(f"    {len(obs_data)} steps with observations")
 
             persons_data.append({
-                "mdata": mdata_db,
-                "timestamps": primary_timestamps_db,
-                "bone_color": bone_color,
-                "marker_color": marker_color,
-                "label": label,
-                "bone_data": bone_data_db,
+                "person_name": person_name,
+                "color": color,
+                "bone_data": bone_data,
+                "obs_data": obs_data,
+                "timestamps": timestamps,
             })
-            all_frames |= set(mdata_db.keys())
-            if primary_timestamps is None:
-                primary_timestamps = primary_timestamps_db
+            all_steps |= set(obs_data.keys()) | set(timestamps.keys())
+            if not primary_timestamps:
+                primary_timestamps = timestamps
 
-    tracking_dirs_to_process = [] if db_mode else (args.tracking_dirs or [])
-    _dir_color_offset = len(persons_data)
+    if not primary_timestamps:
+        primary_timestamps = persons_data[0]["timestamps"] if persons_data else {}
 
-    for idx, tdir_str in enumerate(tracking_dirs_to_process):
-        tdir = Path(tdir_str)
-        color_idx = (_dir_color_offset + idx) % len(PERSON_BONE_COLORS_BGR)
-        bone_color = PERSON_BONE_COLORS_BGR[color_idx]
-        marker_color = PERSON_MARKER_COLORS_BGR[color_idx]
+    fps = args.fps or _infer_fps(primary_timestamps)
+    print(f"\nOutput FPS: {fps}")
 
-        # Load marker projections
-        proj_path = tdir / "marker_projections.csv"
-        if not proj_path.exists():
-            print(f"  [warn] {proj_path} not found — skipping", file=sys.stderr)
-            continue
-        mdata, timestamps = load_marker_projections(proj_path)
-        mdata = fill_forward_marker_observations(mdata)
-        if primary_timestamps is None:
-            primary_timestamps = timestamps
-        all_frames |= set(mdata.keys())
+    # Compute crop bboxes
+    print("Computing crop boxes …")
+    merged_obs: dict[int, dict[int, dict]] = {}
+    for p in persons_data:
+        for step, cam_data in p["obs_data"].items():
+            if step not in merged_obs:
+                merged_obs[step] = {}
+            for csv_id, markers in cam_data.items():
+                if csv_id not in merged_obs[step]:
+                    merged_obs[step][csv_id] = {}
+                merged_obs[step][csv_id].update(markers)
 
-        # Find skeleton for this tracking dir
-        # In DB mode, use bone_data already computed from the DB state blobs
-        if db_mode and bone_data_db:
-            bone_data = bone_data_db
-            if idx == 0:
-                print(f"  Using FK bone data from DB ({len(bone_data)} frames)")
-        else:
-            skel_path = find_skeleton_for_tracking_dir(tdir, args.skeleton)
-            if skel_path is None:
-                print(f"  [warn] Cannot find skeleton for {tdir.name} — bones disabled for this person",
-                      file=sys.stderr)
-                bone_data = {}
-            else:
-                skeleton = load_skeleton_structure(skel_path)
-                print(f"  Loaded skeleton: {skel_path.name} ({len(skeleton)} joints)")
-                state_csv = tdir / "state_vectors.csv"
-                if state_csv.exists():
-                    print(f"  Computing FK for {tdir.name} …")
-                    bone_data = load_bone_world_data(skeleton, state_csv)
-                    print(f"    {len(bone_data)} frames, {sum(len(v) for v in bone_data.values())} bone-frames")
-                else:
-                    print(f"  [warn] {state_csv} not found — bones disabled", file=sys.stderr)
-                    bone_data = {}
-
-        persons_data.append({
-            "mdata": mdata,
-            "timestamps": timestamps,
-            "bone_color": bone_color,
-            "marker_color": marker_color,
-            "label": tdir.name,
-            "bone_data": bone_data,
-        })
-        print(f"  Person {idx}: {tdir.name}  ({len(mdata)} frames, bone color {bone_color}, marker color {marker_color})")
-
-    if not persons_data:
-        print("No tracking data loaded.", file=sys.stderr)
-        sys.exit(1)
-
-    if primary_timestamps is None:
-        print("No timestamps available.", file=sys.stderr)
-        sys.exit(1)
-
-    fps = args.fps or infer_fps(primary_timestamps)
-    print(f"  Output FPS: {fps}")
-
-    # Compute per-camera bounding boxes
-    print("Computing bounding boxes …")
-    active_ids = [c.csv_id for c in active_cameras]
-    raw_bboxes = compute_sequence_bboxes(
-        [p["mdata"] for p in persons_data], active_ids, margin=0.10
-    )
+    active_csv_ids = [c.csv_id for c in active_cameras]
+    raw_bboxes = _compute_bboxes(merged_obs, active_csv_ids)
 
     n_cams = len(active_cameras)
-    rows, cols = (1, 1) if n_cams == 1 else grid_dims(n_cams)
-    cell_w = out_w // cols
-    cell_h = out_h // rows
+    rows_g, cols_g = (1, 1) if n_cams == 1 else _grid_dims(n_cams)
+    cell_w = out_w // cols_g
+    cell_h = out_h // rows_g
     cell_aspect = cell_w / cell_h
 
     crops: dict[int, tuple] = {}
@@ -1379,41 +964,59 @@ def main() -> None:
         cid = cam.csv_id
         bbox = raw_bboxes.get(cid)
         if bbox is None:
-            print(f"  [warn] No observations for camera {cam.display_name} — using full frame")
             crops[cid] = (0, 0, 9999, 9999)
-            continue
-        adjusted = adjust_bbox_to_aspect(bbox, cell_aspect)
-        crops[cid] = adjusted
-        w = adjusted[2] - adjusted[0]
-        h = adjusted[3] - adjusted[1]
-        print(f"  {cam.display_name}: crop ({adjusted[0]:.0f},{adjusted[1]:.0f})"
-              f"–({adjusted[2]:.0f},{adjusted[3]:.0f})  {w:.0f}×{h:.0f}px")
+            print(f"  {cam.label}: no observations — using full frame")
+        else:
+            adjusted = _adjust_aspect(bbox, cell_aspect)
+            crops[cid] = adjusted
+            print(f"  {cam.label}: crop {adjusted[0]:.0f},{adjusted[1]:.0f}"
+                  f"–{adjusted[2]:.0f},{adjusted[3]:.0f}")
 
-    print("Finding video files …")
-    video_paths = find_video_files(args.video_dir, active_cameras)
-    if not video_paths:
-        print("No video files matched — cannot continue.", file=sys.stderr)
-        sys.exit(1)
+    # Open video captures and find seg mask sources
+    print("\nOpening videos …")
+    caps: dict[str, cv2.VideoCapture] = {}
+    vid_sizes: dict[str, tuple[int, int]] = {}
+    seg_sources: dict[str, str | None] = {}  # label → seg_quality_run_id
 
-    caps: dict[int, cv2.VideoCapture] = {}
-    video_sizes: dict[int, tuple[int, int]] = {}
     for cam in active_cameras:
-        cid = cam.csv_id
-        if cid not in video_paths:
+        vpath = video_paths.get(cam.label)
+        if not vpath:
+            print(f"  [warn] no video path for {cam.label}", file=sys.stderr)
             continue
-        cap = cv2.VideoCapture(str(video_paths[cid]))
+        cap = cv2.VideoCapture(vpath)
         if not cap.isOpened():
-            print(f"  [warn] Cannot open {video_paths[cid]}", file=sys.stderr)
+            print(f"  [warn] cannot open {vpath}", file=sys.stderr)
             continue
-        caps[cid] = cap
-        vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        video_sizes[cid] = (vid_w, vid_h)
-        print(f"  {cam.display_name}: {video_paths[cid].name}  {vid_w}×{vid_h}")
+        caps[cam.label] = cap
+        vid_sizes[cam.label] = (
+            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        )
 
-    for cid, (vid_w, vid_h) in video_sizes.items():
-        bbox = crops.get(cid, (0.0, 0.0, float(vid_w), float(vid_h)))
-        crops[cid] = clamp_bbox(bbox, vid_w, vid_h)
+        # Clamp crops now that we know video dimensions
+        svid = label_to_svid.get(cam.label)
+        if cam.csv_id in crops:
+            vw, vh = vid_sizes[cam.label]
+            crops[cam.csv_id] = _clamp_bbox(crops[cam.csv_id], vw, vh)
+
+        if not args.no_masks and svid:
+            all_vid_frames = list(range(
+                int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            ))
+            f0 = all_vid_frames[0] if all_vid_frames else 0
+            f1 = all_vid_frames[-1] if all_vid_frames else 0
+            seg_src = _find_seg_source(conn, svid, (f0, f1))
+            seg_sources[cam.label] = seg_src
+            if seg_src:
+                print(f"  {cam.label}: seg masks from {seg_src[:13]}")
+            else:
+                print(f"  {cam.label}: no seg masks")
+        else:
+            seg_sources[cam.label] = None
+
+    # Write output
+    print(f"\nRendering {len(all_steps)} frames → {args.output}  "
+          f"({out_w}×{out_h} @ {fps} fps) …")
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(args.output), fourcc, fps, (out_w, out_h))
@@ -1421,78 +1024,67 @@ def main() -> None:
         print(f"Cannot open output: {args.output}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"\nRendering {len(all_frames)} frames → {args.output}  ({out_w}×{out_h} @ {fps}fps) …")
+    blank = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
 
-    blank_cell = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
-
-    for frame_id in sorted(all_frames):
-        timestamp = primary_timestamps.get(frame_id, frame_id / fps)
+    for step in sorted(all_steps):
+        timestamp = primary_timestamps.get(step, step / fps)
         grid = np.zeros((out_h, out_w, 3), dtype=np.uint8)
 
         for cam_idx, cam in enumerate(active_cameras):
-            cid = cam.csv_id
-            row_g = cam_idx // cols
-            col_g = cam_idx % cols
+            row_g  = cam_idx // cols_g
+            col_g  = cam_idx % cols_g
             y0, y1_g = row_g * cell_h, (row_g + 1) * cell_h
             x0, x1_g = col_g * cell_w, (col_g + 1) * cell_w
 
-            if cid not in caps:
-                grid[y0:y1_g, x0:x1_g] = blank_cell
+            cap = caps.get(cam.label)
+            if cap is None:
+                grid[y0:y1_g, x0:x1_g] = blank
                 continue
 
-            vid_frame_idx = sync.lookup(cam.toml_name, timestamp)
+            vid_frame_idx = sync.lookup(cam.label, timestamp)
             if vid_frame_idx is None:
                 vid_frame_idx = 0
-
-            cap = caps[cid]
             cap.set(cv2.CAP_PROP_POS_FRAMES, vid_frame_idx)
             ret, vid_frame = cap.read()
             if not ret:
-                grid[y0:y1_g, x0:x1_g] = blank_cell
+                grid[y0:y1_g, x0:x1_g] = blank
                 continue
 
-            persons_for_cell: list[dict] = []
-            for person in persons_data:
-                mdata_frame = person["mdata"].get(frame_id, {})
-                mdata_cam   = mdata_frame.get(cid, {})
-                bones_3d    = person["bone_data"].get(frame_id, {})
+            # Seg mask overlay
+            seg_src = seg_sources.get(cam.label)
+            if seg_src:
+                svid = label_to_svid.get(cam.label)
+                mask = _load_seg_mask(conn, seg_src, svid, vid_frame_idx)
+                if mask is not None:
+                    vid_frame = blend_mask_davis(vid_frame, mask)
+
+            # Assemble per-person data for this step × cam
+            persons_for_cell = []
+            for p in persons_data:
                 persons_for_cell.append({
-                    "mdata":    mdata_cam,
-                    "bones_3d": bones_3d,
-                    "bone_color":    person["bone_color"],
-                    "marker_color":  person["marker_color"],
+                    "color":    p["color"],
+                    "bones_3d": p["bone_data"].get(step, {}),
+                    "obs":      p["obs_data"].get(step, {}).get(cam.csv_id, {}),
                 })
 
-            crop = crops.get(cid, (0, 0,
-                                   video_sizes.get(cid, (1, 1))[0],
-                                   video_sizes.get(cid, (1, 1))[1]))
-            cell = render_cell(
-                video_frame=vid_frame,
-                cam_id=cid,
-                frame_id=frame_id,
-                video_frame_idx=vid_frame_idx,
-                cell_w=cell_w,
-                cell_h=cell_h,
-                crop=crop,
-                persons=persons_for_cell,
-                cam=cam,
-            )
-
+            crop = crops.get(cam.csv_id, (0, 0, *vid_sizes.get(cam.label, (1920, 1080))))
+            label = f"{cam.label}  f{vid_frame_idx}"
+            cell = render_cell(vid_frame, cam, crop, cell_w, cell_h,
+                               persons_for_cell, label)
             grid[y0:y1_g, x0:x1_g] = cell
 
-        label = f"frame {frame_id}  t={timestamp:.3f}s"
-        cv2.putText(grid, label, (10, out_h - 12), cv2.FONT_HERSHEY_SIMPLEX,
+        footer = f"step {step}  t={timestamp:.3f}s"
+        cv2.putText(grid, footer, (10, out_h - 12), cv2.FONT_HERSHEY_SIMPLEX,
                     0.65, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(grid, label, (10, out_h - 12), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65, OVERLAY_TEXT_COLOR, 1, cv2.LINE_AA)
+        cv2.putText(grid, footer, (10, out_h - 12), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65, _TEXT_BGR, 1, cv2.LINE_AA)
 
         writer.write(grid)
 
-        if frame_id % 50 == 0:
-            print(f"  frame {frame_id}/{max(all_frames)}", end="\r", flush=True)
+        if step % 50 == 0:
+            print(f"  step {step}/{max(all_steps)}", end="\r", flush=True)
 
     print()
-
     for cap in caps.values():
         cap.release()
     writer.release()

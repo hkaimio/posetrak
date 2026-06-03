@@ -299,6 +299,74 @@ def _resolve_run_id(conn: sqlite3.Connection, prefix: str) -> str:
     return row["id"]
 
 
+def _find_latest_runs_for_trial(
+    conn: sqlite3.Connection,
+    run_id: str,
+) -> list[tuple[str, str]]:
+    """Return (run_id, person_name) pairs for the latest tracking run per person
+    in the same trial as *run_id*.  The result is sorted by person_name and
+    always includes *run_id* itself.
+
+    Uses the trial of the detection run that backs the given tracking run's
+    observation sequence.  Returns [(run_id, person_name)] if no trial is set.
+    """
+    trial_row = conn.execute(
+        """
+        SELECT dr.trial_id
+        FROM tracking_runs tr
+        JOIN pose_observation_sequences pos ON pos.id = tr.observation_sequence_id
+        JOIN detection_runs dr ON dr.id = pos.detection_run_id
+        WHERE tr.id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+
+    trial_id = trial_row["trial_id"] if trial_row else None
+    if not trial_id:
+        # No trial linkage — just return the given run
+        sp = conn.execute(
+            """
+            SELECT sp.person_name FROM tracking_runs tr
+            JOIN pose_observation_sequences pos ON pos.id = tr.observation_sequence_id
+            JOIN sequence_persons sp ON sp.sequence_id = pos.id AND sp.person_id = 0
+            WHERE tr.id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        return [(run_id, sp["person_name"] if sp else "unknown")]
+
+    # For each person in the trial, pick the single latest tracking run overall
+    rows = conn.execute(
+        """
+        SELECT tr.id AS run_id, sp.person_name, tr.ran_at
+        FROM tracking_runs tr
+        JOIN pose_observation_sequences pos ON pos.id = tr.observation_sequence_id
+        JOIN sequence_persons sp ON sp.sequence_id = pos.id AND sp.person_id = 0
+        JOIN detection_runs dr ON dr.id = pos.detection_run_id
+        WHERE dr.trial_id = ?
+          AND tr.ran_at = (
+              SELECT MAX(t2.ran_at)
+              FROM tracking_runs t2
+              JOIN pose_observation_sequences p2 ON p2.id = t2.observation_sequence_id
+              JOIN sequence_persons s2 ON s2.sequence_id = p2.id AND s2.person_id = 0
+              JOIN detection_runs d2 ON d2.id = p2.detection_run_id
+              WHERE d2.trial_id = ? AND s2.person_name = sp.person_name
+          )
+        ORDER BY sp.person_name
+        """,
+        (trial_id, trial_id),
+    ).fetchall()
+
+    # Deduplicate in case of tied ran_at (keep first per person)
+    seen: set[str] = set()
+    result: list[tuple[str, str]] = []
+    for r in rows:
+        if r["person_name"] not in seen:
+            seen.add(r["person_name"])
+            result.append((r["run_id"], r["person_name"]))
+    return result
+
+
 def _load_cameras_from_db(
     session_db: str,
     conn: sqlite3.Connection,
@@ -778,6 +846,10 @@ def parse_args() -> argparse.Namespace:
                    help="Output WxH (default: 1920x1080).")
     p.add_argument("--fps", type=float, default=None,
                    help="Override output FPS.")
+    p.add_argument("--all-persons", action="store_true",
+                   help="Auto-load the latest tracking run for every person in the "
+                        "same trial as the first --run-id.  Ignored when multiple "
+                        "--run-id values are already given.")
     p.add_argument("--no-masks", action="store_true",
                    help="Skip segmentation mask overlay.")
     p.add_argument("--no-bones", action="store_true",
@@ -811,8 +883,14 @@ def main() -> None:
 
     conn = _open_db(args.session_db)
 
-    # Resolve run IDs
+    # Resolve run IDs, then optionally expand to all persons in the trial
     run_ids = [_resolve_run_id(conn, r) for r in args.run_ids]
+
+    if args.all_persons and len(run_ids) == 1:
+        pairs = _find_latest_runs_for_trial(conn, run_ids[0])
+        run_ids = [rid for rid, _name in pairs]
+        print(f"Auto-expanded to {len(run_ids)} persons: "
+              f"{[name for _, name in pairs]}")
 
     # Load metadata from first run (all runs assumed same shot/calib)
     first_run = conn.execute(

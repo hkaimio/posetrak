@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 from math import ceil
 
-from PySide6.QtCore import QPointF, QProcess, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -30,6 +31,17 @@ from PySide6.QtWidgets import (
     QSplitter,
     QVBoxLayout,
     QWidget,
+)
+
+try:
+    import pxr  # noqa: F401
+    _USD_AVAILABLE = True
+except ImportError:
+    _USD_AVAILABLE = False
+
+_USD_TOOLTIP = (
+    "USD export requires the 'usd-core' package.\n"
+    "Install with:  uv pip install usd-core"
 )
 
 
@@ -1795,11 +1807,11 @@ class _RunInfoPane(QWidget):
 # ---------------------------------------------------------------------------
 
 
-_EXPORT_BVH_SCRIPT = Path(__file__).resolve().parents[3] / "python" / "tools" / "export_bvh.py"
-
-
 class PersonPanel(QWidget):
     """Person panel: info, tracking history, and tracker launcher."""
+
+    _bvh_export_done = Signal(str, str)  # (out_path, error — empty string = success)
+    _usd_export_done = Signal(str, str)  # (out_path, error — empty string = success)
 
     def __init__(self, conn: sqlite3.Connection, sequence_id: str,
                  session_path: Path, parent=None) -> None:
@@ -1807,7 +1819,8 @@ class PersonPanel(QWidget):
         self._conn = conn
         self._sequence_id = sequence_id
         self._session_path = session_path
-        self._bvh_proc: QProcess | None = None
+        self._bvh_export_done.connect(self._on_bvh_done)
+        self._usd_export_done.connect(self._on_usd_done)
         self._crop_grid: PersonCropGridWidget | None = None
         self._info_pane: _RunInfoPane | None = None
         self._build()
@@ -1870,6 +1883,11 @@ class PersonPanel(QWidget):
         self._export_bvh_btn = QPushButton("Export BVH…")
         self._export_bvh_btn.setEnabled(False)
         self._export_bvh_btn.clicked.connect(self._export_bvh)
+        self._export_usd_btn = QPushButton("Export USD…")
+        self._export_usd_btn.setEnabled(False)
+        if not _USD_AVAILABLE:
+            self._export_usd_btn.setToolTip(_USD_TOOLTIP)
+        self._export_usd_btn.clicked.connect(self._export_usd)
         self._delete_run_btn = QPushButton("Delete run")
         self._delete_run_btn.setEnabled(False)
         self._delete_run_btn.clicked.connect(self._delete_run)
@@ -1888,6 +1906,7 @@ class PersonPanel(QWidget):
         run_act_row.addWidget(self._scale_btn)
         run_act_row.addWidget(self._info_toggle_btn)
         run_act_row.addWidget(self._export_bvh_btn)
+        run_act_row.addWidget(self._export_usd_btn)
         run_act_row.addWidget(self._delete_run_btn)
         box_vbox.addLayout(run_act_row)
 
@@ -1941,6 +1960,7 @@ class PersonPanel(QWidget):
         self._run_list.clear()
         self._run_detail.setVisible(False)
         self._export_bvh_btn.setEnabled(False)
+        self._export_usd_btn.setEnabled(False)
         self._delete_run_btn.setEnabled(False)
         self._scale_btn.setEnabled(False)
 
@@ -1975,6 +1995,7 @@ class PersonPanel(QWidget):
         if not run_id:
             self._run_detail.setVisible(False)
             self._export_bvh_btn.setEnabled(False)
+            self._export_usd_btn.setEnabled(False)
             self._delete_run_btn.setEnabled(False)
             self._scale_btn.setEnabled(False)
             if self._crop_grid is not None:
@@ -2015,6 +2036,7 @@ class PersonPanel(QWidget):
             self._run_detail.setVisible(True)
 
         self._export_bvh_btn.setEnabled(True)
+        self._export_usd_btn.setEnabled(_USD_AVAILABLE)
         self._delete_run_btn.setEnabled(True)
         self._scale_btn.setEnabled(bool(self._session_path))
 
@@ -2044,37 +2066,73 @@ class PersonPanel(QWidget):
         if not out_path.endswith(".bvh"):
             out_path += ".bvh"
 
-        self._bvh_proc = QProcess(self)
-        self._bvh_proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self._export_bvh_btn.setEnabled(False)
 
-        proc = self._bvh_proc
+        from posetrak.export.bvh import export_bvh
 
-        def _done(code: int, _status) -> None:
-            self._export_bvh_btn.setEnabled(True)
-            if code == 0:
-                QMessageBox.information(
-                    self, "Export complete", f"BVH written to:\n{out_path}"
+        def _run() -> None:
+            error = ""
+            try:
+                export_bvh(
+                    out_path,
+                    session_db=str(self._session_path),
+                    run_id=run_id,
+                    person_id=0,
+                    smoothed=True,
                 )
-            else:
-                output = bytes(proc.readAllStandardOutput()).decode("utf-8", errors="replace")
-                QMessageBox.critical(
-                    self, "Export failed",
-                    f"export_bvh.py exited with code {code}.\n\n{output[-800:]}",
-                )
+            except Exception as exc:
+                error = str(exc)
+            self._bvh_export_done.emit(out_path, error)
 
-        self._bvh_proc.finished.connect(_done)
-        self._bvh_proc.start(
-            sys.executable,
-            [
-                str(_EXPORT_BVH_SCRIPT),
-                "--session-db", str(self._session_path),
-                "--run-id",     run_id,
-                "--person-id",  "0",
-                "--smoothed",
-                "--output",     out_path,
-            ],
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_bvh_done(self, out_path: str, error: str) -> None:
+        self._export_bvh_btn.setEnabled(True)
+        if error:
+            QMessageBox.critical(self, "Export failed", f"BVH export failed:\n\n{error}")
+        else:
+            QMessageBox.information(self, "Export complete", f"BVH written to:\n{out_path}")
+
+    def _export_usd(self) -> None:
+        item = self._run_list.currentItem()
+        run_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not run_id:
+            return
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save USD file", "",
+            "USD files (*.usda *.usdc);;USDA ASCII (*.usda);;USDC binary (*.usdc)"
         )
+        if not out_path:
+            return
+        if not (out_path.endswith(".usda") or out_path.endswith(".usdc")):
+            out_path += ".usda"
+
+        self._export_usd_btn.setEnabled(False)
+
+        from posetrak.export.usd import export_usd
+
+        def _run() -> None:
+            error = ""
+            try:
+                export_usd(
+                    out_path,
+                    session_db=str(self._session_path),
+                    run_id=run_id,
+                    person_id=0,
+                    smoothed=True,
+                )
+            except Exception as exc:
+                error = str(exc)
+            self._usd_export_done.emit(out_path, error)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_usd_done(self, out_path: str, error: str) -> None:
+        self._export_usd_btn.setEnabled(True)
+        if error:
+            QMessageBox.critical(self, "Export failed", f"USD export failed:\n\n{error}")
+        else:
+            QMessageBox.information(self, "Export complete", f"USD written to:\n{out_path}")
 
     # ------------------------------------------------------------------
     # Delete run
@@ -2142,6 +2200,8 @@ class PersonPanel(QWidget):
 class TrackingRunPanel(QWidget):
     """Detail view for a tracking run."""
 
+    _export_done = Signal(str, str, str)  # (fmt, out_path, error — empty = success)
+
     def __init__(
         self,
         conn: sqlite3.Connection,
@@ -2153,6 +2213,9 @@ class TrackingRunPanel(QWidget):
         self._conn = conn
         self._run_id = run_id
         self._session_path = session_path
+        self._export_bvh_btn: QPushButton | None = None
+        self._export_usd_btn: QPushButton | None = None
+        self._export_done.connect(self._on_export_done)
         self._build()
 
     def _build(self) -> None:
@@ -2200,9 +2263,16 @@ class TrackingRunPanel(QWidget):
             form.addRow("Notes:", QLabel(run["notes"]))
 
         btn_row = QHBoxLayout()
-        export_btn = _action_btn("Export BVH…", enabled=False)
-        export_btn.setToolTip("Not yet wired in this UI")
-        btn_row.addWidget(export_btn)
+        self._export_bvh_btn = _action_btn("Export BVH…", enabled=bool(self._session_path))
+        self._export_bvh_btn.clicked.connect(self._export_bvh)
+        btn_row.addWidget(self._export_bvh_btn)
+        self._export_usd_btn = _action_btn(
+            "Export USD…", enabled=bool(self._session_path) and _USD_AVAILABLE
+        )
+        if not _USD_AVAILABLE:
+            self._export_usd_btn.setToolTip(_USD_TOOLTIP)
+        self._export_usd_btn.clicked.connect(self._export_usd)
+        btn_row.addWidget(self._export_usd_btn)
         scale_btn = _action_btn("Scale skeleton…", enabled=bool(self._session_path))
         scale_btn.setToolTip("Measure bone lengths from inlier observations and scale the skeleton")
         scale_btn.clicked.connect(self._open_scaling)
@@ -2226,6 +2296,69 @@ class TrackingRunPanel(QWidget):
             root.addWidget(crop_grid, stretch=1)
         else:
             root.addStretch(1)
+
+    def _export_bvh(self) -> None:
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save BVH file", "", "BVH files (*.bvh)"
+        )
+        if not out_path:
+            return
+        if not out_path.endswith(".bvh"):
+            out_path += ".bvh"
+        if self._export_bvh_btn:
+            self._export_bvh_btn.setEnabled(False)
+        from posetrak.export.bvh import export_bvh
+        run_id = self._run_id
+        session_db = str(self._session_path)
+
+        def _run() -> None:
+            error = ""
+            try:
+                export_bvh(out_path, session_db=session_db, run_id=run_id,
+                           person_id=0, smoothed=True)
+            except Exception as exc:
+                error = str(exc)
+            self._export_done.emit("BVH", out_path, error)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _export_usd(self) -> None:
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save USD file", "",
+            "USD files (*.usda *.usdc);;USDA ASCII (*.usda);;USDC binary (*.usdc)"
+        )
+        if not out_path:
+            return
+        if not (out_path.endswith(".usda") or out_path.endswith(".usdc")):
+            out_path += ".usda"
+        if self._export_usd_btn:
+            self._export_usd_btn.setEnabled(False)
+        from posetrak.export.usd import export_usd
+        run_id = self._run_id
+        session_db = str(self._session_path)
+
+        def _run() -> None:
+            error = ""
+            try:
+                export_usd(out_path, session_db=session_db, run_id=run_id,
+                           person_id=0, smoothed=True)
+            except Exception as exc:
+                error = str(exc)
+            self._export_done.emit("USD", out_path, error)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_export_done(self, fmt: str, out_path: str, error: str) -> None:
+        if fmt == "BVH" and self._export_bvh_btn:
+            self._export_bvh_btn.setEnabled(True)
+        elif fmt == "USD" and self._export_usd_btn:
+            self._export_usd_btn.setEnabled(True)
+        if error:
+            QMessageBox.critical(self, "Export failed",
+                                 f"{fmt} export failed:\n\n{error}")
+        else:
+            QMessageBox.information(self, "Export complete",
+                                    f"{fmt} written to:\n{out_path}")
 
     def _open_scaling(self) -> None:
         from app.ui.skeleton_scaling_panel import SkeletonScalingPanel

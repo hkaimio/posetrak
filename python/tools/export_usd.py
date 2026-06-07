@@ -1,14 +1,16 @@
 """
-Export posetrak tracking results to BVH format — CLI entry point.
+Export posetrak tracking results to USD skeletal animation format — CLI entry point.
 
-The export logic lives in posetrak.export.bvh.  Run via:
+The export logic lives in posetrak.export.usd.  Run via:
 
-    uv run python/tools/export_bvh.py <tracking_dir> --skeleton <skel.yaml>
-    uv run python/tools/export_bvh.py --session-db session.db --run-id <uuid> --output take1.bvh
+    uv run python/tools/export_usd.py <tracking_dir> --skeleton <skel.yaml> --output take1.usda
+    uv run python/tools/export_usd.py --session-db session.db --run-id <uuid> --output take1.usda
 
 To call programmatically:
 
-    from posetrak.export.bvh import export_bvh
+    from posetrak.export.usd import export_usd
+
+Requires the 'usd-core' package:  uv pip install usd-core
 """
 
 from __future__ import annotations
@@ -20,12 +22,12 @@ from pathlib import Path
 # Make the posetrak package importable when run directly (not via uv / editable install)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from posetrak.export.bvh import export_bvh  # noqa: E402
+from posetrak.export.usd import export_usd  # noqa: E402
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Export posetrak tracking results to BVH.")
+        description="Export posetrak tracking results to USD skeletal animation format.")
     parser.add_argument("tracking_dir", type=Path, nargs="?", default=None,
                         help="Directory containing root_pose.csv and joint_angles.csv "
                              "(not required when using --session-db)")
@@ -38,21 +40,19 @@ def main() -> None:
     parser.add_argument("--person-id", type=int, default=0,
                         help="Person ID to export (default: 0, used with --session-db)")
     parser.add_argument("--output", "-o", type=Path, default=None,
-                        help="Output .bvh file (default: <tracking_dir>/tracking.bvh "
-                             "or ./tracking.bvh in DB mode)")
+                        help="Output USD file: .usda (ASCII) or .usdc (binary crate). "
+                             "Default: <tracking_dir>/tracking.usda or ./tracking.usda "
+                             "in DB mode")
     parser.add_argument("--fps", type=float, default=None,
                         help="Frame rate (default: auto-detect from timestamps)")
     parser.add_argument("--units", choices=["m", "cm"], default="m",
-                        help="Position units in output BVH (m for Blender, cm for "
-                             "most other tools; default: m)")
+                        help="Position units (default: m)")
     parser.add_argument("--coord", choices=["yup", "zup"], default="yup",
                         help="Target coordinate system for the root node.  "
-                             "yup: Y-up, Z-forward (Blender, Unity, Maya default; default). "
-                             "zup: Z-up, Y-backward (unchanged tracker frame, for 3ds Max etc.). "
-                             "Only the root position and orientation are affected; "
-                             "local joint transforms are unchanged.")
+                             "yup: Y-up, Z-forward (Blender, Unity, Maya; default). "
+                             "zup: Z-up, Y-backward (unchanged tracker frame).")
     parser.add_argument("--no-rest-frame", action="store_true",
-                        help="Omit frame 0 rest pose (not recommended)")
+                        help="Omit time-code-0 rest pose frame (not recommended)")
     parser.add_argument("--smoothed", action="store_true",
                         help="Use smoothed results (--session-db) or "
                              "smoothed_joint_angles.csv / smoothed_root_pose.csv (CSV mode)")
@@ -66,7 +66,7 @@ def main() -> None:
         if args.run_id is None:
             print("Error: --run-id is required when using --session-db", file=sys.stderr)
             sys.exit(1)
-        output = args.output or Path("tracking.bvh")
+        output = args.output or Path("tracking.usda")
         print(f"Loading tracking run {args.run_id!r} from {args.session_db!r}")
     else:
         if args.tracking_dir is None:
@@ -77,13 +77,13 @@ def main() -> None:
             print("Error: --skeleton is required when not using --session-db",
                   file=sys.stderr)
             sys.exit(1)
-        output = args.output or (args.tracking_dir / "tracking.bvh")
+        output = args.output or (args.tracking_dir / "tracking.usda")
         print(f"Loading skeleton: {args.skeleton}")
 
     print(f"Writing: {output}")
 
     try:
-        export_bvh(
+        export_usd(
             output,
             session_db=args.session_db,
             run_id=args.run_id,
@@ -98,6 +98,9 @@ def main() -> None:
             start_frame=args.start_frame,
             end_frame=args.end_frame,
         )
+    except ImportError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     except (ValueError, FileNotFoundError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)

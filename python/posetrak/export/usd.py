@@ -218,8 +218,10 @@ def _write_usd(
     animation = UsdSkel.Animation.Define(stage, "/Root/Anim")
     animation.GetJointsAttr().Set(joint_tokens)
 
-    # Bind the animation to the skeleton
-    binding = UsdSkel.BindingAPI.Apply(skeleton.GetPrim())
+    # Bind skeleton + animation on the SkelRoot (most DCC tools — Blender, Cascadeur —
+    # resolve skel:animationSource from the SkelRoot scope, not from the Skeleton prim).
+    binding = UsdSkel.BindingAPI.Apply(skel_root.GetPrim())
+    binding.GetSkeletonRel().AddTarget(skeleton.GetPath())
     binding.GetAnimationSourceRel().AddTarget(animation.GetPath())
 
     # ---- Per-frame data ----
@@ -258,10 +260,16 @@ def _write_usd(
             vecs.append(Gf.Vec3f(float(pos[0]), float(pos[1]), float(pos[2])))
         return Vt.Vec3fArray(vecs)
 
+    n_joints = len(dfs_order)
+    unit_scales = Vt.Vec3hArray(
+        [Gf.Vec3h(1.0, 1.0, 1.0)] * n_joints
+    )
+
     tc = 0
     if include_rest_frame:
         animation.GetRotationsAttr().Set(_rotations(None, {}), tc)
         animation.GetTranslationsAttr().Set(_translations(None), tc)
+        animation.GetScalesAttr().Set(unit_scales, tc)
         tc += 1
 
     for frame_idx in all_frames:
@@ -269,6 +277,7 @@ def _write_usd(
         angles = joint_angles_by_frame.get(frame_idx, {})
         animation.GetRotationsAttr().Set(_rotations(rp, angles), tc)
         animation.GetTranslationsAttr().Set(_translations(rp), tc)
+        animation.GetScalesAttr().Set(unit_scales, tc)
         tc += 1
 
     stage.Save()

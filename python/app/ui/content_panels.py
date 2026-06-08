@@ -1810,8 +1810,9 @@ class _RunInfoPane(QWidget):
 class PersonPanel(QWidget):
     """Person panel: info, tracking history, and tracker launcher."""
 
-    _bvh_export_done = Signal(str, str)  # (out_path, error — empty string = success)
-    _usd_export_done = Signal(str, str)  # (out_path, error — empty string = success)
+    _bvh_export_done  = Signal(str, str)  # (out_path, error — empty string = success)
+    _usd_export_done  = Signal(str, str)
+    _gltf_export_done = Signal(str, str)
 
     def __init__(self, conn: sqlite3.Connection, sequence_id: str,
                  session_path: Path, parent=None) -> None:
@@ -1821,6 +1822,7 @@ class PersonPanel(QWidget):
         self._session_path = session_path
         self._bvh_export_done.connect(self._on_bvh_done)
         self._usd_export_done.connect(self._on_usd_done)
+        self._gltf_export_done.connect(self._on_gltf_done)
         self._crop_grid: PersonCropGridWidget | None = None
         self._info_pane: _RunInfoPane | None = None
         self._build()
@@ -1888,6 +1890,9 @@ class PersonPanel(QWidget):
         if not _USD_AVAILABLE:
             self._export_usd_btn.setToolTip(_USD_TOOLTIP)
         self._export_usd_btn.clicked.connect(self._export_usd)
+        self._export_gltf_btn = QPushButton("Export glTF…")
+        self._export_gltf_btn.setEnabled(False)
+        self._export_gltf_btn.clicked.connect(self._export_gltf)
         self._delete_run_btn = QPushButton("Delete run")
         self._delete_run_btn.setEnabled(False)
         self._delete_run_btn.clicked.connect(self._delete_run)
@@ -1907,6 +1912,7 @@ class PersonPanel(QWidget):
         run_act_row.addWidget(self._info_toggle_btn)
         run_act_row.addWidget(self._export_bvh_btn)
         run_act_row.addWidget(self._export_usd_btn)
+        run_act_row.addWidget(self._export_gltf_btn)
         run_act_row.addWidget(self._delete_run_btn)
         box_vbox.addLayout(run_act_row)
 
@@ -1961,6 +1967,7 @@ class PersonPanel(QWidget):
         self._run_detail.setVisible(False)
         self._export_bvh_btn.setEnabled(False)
         self._export_usd_btn.setEnabled(False)
+        self._export_gltf_btn.setEnabled(False)
         self._delete_run_btn.setEnabled(False)
         self._scale_btn.setEnabled(False)
 
@@ -1996,6 +2003,7 @@ class PersonPanel(QWidget):
             self._run_detail.setVisible(False)
             self._export_bvh_btn.setEnabled(False)
             self._export_usd_btn.setEnabled(False)
+            self._export_gltf_btn.setEnabled(False)
             self._delete_run_btn.setEnabled(False)
             self._scale_btn.setEnabled(False)
             if self._crop_grid is not None:
@@ -2037,6 +2045,7 @@ class PersonPanel(QWidget):
 
         self._export_bvh_btn.setEnabled(True)
         self._export_usd_btn.setEnabled(_USD_AVAILABLE)
+        self._export_gltf_btn.setEnabled(True)
         self._delete_run_btn.setEnabled(True)
         self._scale_btn.setEnabled(bool(self._session_path))
 
@@ -2134,6 +2143,41 @@ class PersonPanel(QWidget):
         else:
             QMessageBox.information(self, "Export complete", f"USD written to:\n{out_path}")
 
+    def _export_gltf(self) -> None:
+        item = self._run_list.currentItem()
+        run_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not run_id or not self._session_path:
+            return
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save glTF file", "",
+            "glTF binary (*.glb);;glTF JSON (*.gltf)"
+        )
+        if not out_path:
+            return
+        if not (out_path.endswith(".glb") or out_path.endswith(".gltf")):
+            out_path += ".glb"
+
+        self._export_gltf_btn.setEnabled(False)
+        from posetrak.export.gltf import export_gltf
+        session_db = str(self._session_path)
+
+        def _run() -> None:
+            error = ""
+            try:
+                export_gltf(out_path, session_db=session_db, run_id=run_id)
+            except Exception as exc:
+                error = str(exc)
+            self._gltf_export_done.emit(out_path, error)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_gltf_done(self, out_path: str, error: str) -> None:
+        self._export_gltf_btn.setEnabled(True)
+        if error:
+            QMessageBox.critical(self, "Export failed", f"glTF export failed:\n\n{error}")
+        else:
+            QMessageBox.information(self, "Export complete", f"glTF written to:\n{out_path}")
+
     # ------------------------------------------------------------------
     # Delete run
     # ------------------------------------------------------------------
@@ -2215,6 +2259,7 @@ class TrackingRunPanel(QWidget):
         self._session_path = session_path
         self._export_bvh_btn: QPushButton | None = None
         self._export_usd_btn: QPushButton | None = None
+        self._export_gltf_btn: QPushButton | None = None
         self._export_done.connect(self._on_export_done)
         self._build()
 
@@ -2273,6 +2318,11 @@ class TrackingRunPanel(QWidget):
             self._export_usd_btn.setToolTip(_USD_TOOLTIP)
         self._export_usd_btn.clicked.connect(self._export_usd)
         btn_row.addWidget(self._export_usd_btn)
+        self._export_gltf_btn = _action_btn(
+            "Export glTF…", enabled=bool(self._session_path)
+        )
+        self._export_gltf_btn.clicked.connect(self._export_gltf)
+        btn_row.addWidget(self._export_gltf_btn)
         scale_btn = _action_btn("Scale skeleton…", enabled=bool(self._session_path))
         scale_btn.setToolTip("Measure bone lengths from inlier observations and scale the skeleton")
         scale_btn.clicked.connect(self._open_scaling)
@@ -2322,6 +2372,31 @@ class TrackingRunPanel(QWidget):
 
         threading.Thread(target=_run, daemon=True).start()
 
+    def _export_gltf(self) -> None:
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save glTF file", "",
+            "glTF binary (*.glb);;glTF JSON (*.gltf)"
+        )
+        if not out_path:
+            return
+        if not (out_path.endswith(".glb") or out_path.endswith(".gltf")):
+            out_path += ".glb"
+        if self._export_gltf_btn:
+            self._export_gltf_btn.setEnabled(False)
+        from posetrak.export.gltf import export_gltf
+        run_id = self._run_id
+        session_db = str(self._session_path) if self._session_path else None
+
+        def _run() -> None:
+            error = ""
+            try:
+                export_gltf(out_path, session_db=session_db, run_id=run_id)
+            except Exception as exc:
+                error = str(exc)
+            self._export_done.emit("glTF", out_path, error)
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def _export_usd(self) -> None:
         out_path, _ = QFileDialog.getSaveFileName(
             self, "Save USD file", "",
@@ -2353,6 +2428,8 @@ class TrackingRunPanel(QWidget):
             self._export_bvh_btn.setEnabled(True)
         elif fmt == "USD" and self._export_usd_btn:
             self._export_usd_btn.setEnabled(True)
+        elif fmt == "glTF" and self._export_gltf_btn:
+            self._export_gltf_btn.setEnabled(True)
         if error:
             QMessageBox.critical(self, "Export failed",
                                  f"{fmt} export failed:\n\n{error}")

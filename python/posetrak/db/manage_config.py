@@ -59,6 +59,9 @@ def create_config_from_toml(
     config_id = generate_id()
     created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
+    vel_cam_ids = tracking.get("velocity_mode_camera_ids")
+    vel_cam_ids_json = __import__("json").dumps(vel_cam_ids) if vel_cam_ids is not None else None
+
     with registry:
         registry.execute(
             "INSERT INTO tracker_configs "
@@ -68,8 +71,8 @@ def create_config_from_toml(
             "tracker_fps, "
             "ik_max_iterations, ik_tolerance, "
             "init_position_std, init_orientation_std, init_joint_std, init_velocity_std, "
-            "min_cameras_for_init, notes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "min_cameras_for_init, velocity_mode_camera_ids, velocity_measurement_noise_std, notes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 config_id,
                 name,
@@ -91,6 +94,8 @@ def create_config_from_toml(
                 init.get("init_joint_std"),
                 init.get("init_velocity_std"),
                 init.get("min_cameras_for_init"),
+                vel_cam_ids_json,
+                tracking.get("velocity_measurement_noise_std"),
                 notes,
             ),
         )
@@ -118,6 +123,8 @@ def edit_config(
     init_joint_std: float | None = None,
     init_velocity_std: float | None = None,
     min_cameras_for_init: int | None = None,
+    velocity_mode_camera_ids: list[str] | None = None,
+    velocity_measurement_noise_std: float | None = None,
     notes: str | None = None,
 ) -> str:
     """Create a new tracker_configs row that overrides selected fields of an existing one.
@@ -187,8 +194,15 @@ def edit_config(
             return kwarg_val
         return row[col_name]
 
+    import json
+
     new_id = generate_id()
     created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    # velocity_mode_camera_ids is stored as JSON; convert list → JSON string before _pick logic
+    vel_cam_ids_json: str | None = None
+    if velocity_mode_camera_ids is not None:
+        vel_cam_ids_json = json.dumps(velocity_mode_camera_ids)
 
     with registry:
         registry.execute(
@@ -199,8 +213,8 @@ def edit_config(
             "tracker_fps, "
             "ik_max_iterations, ik_tolerance, "
             "init_position_std, init_orientation_std, init_joint_std, init_velocity_std, "
-            "min_cameras_for_init, notes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "min_cameras_for_init, velocity_mode_camera_ids, velocity_measurement_noise_std, notes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 new_id,
                 row["name"],
@@ -222,6 +236,9 @@ def edit_config(
                 _pick(init_joint_std, "init_joint_std"),
                 _pick(init_velocity_std, "init_velocity_std"),
                 _pick(min_cameras_for_init, "min_cameras_for_init"),
+                vel_cam_ids_json if velocity_mode_camera_ids is not None
+                    else row["velocity_mode_camera_ids"],
+                _pick(velocity_measurement_noise_std, "velocity_measurement_noise_std"),
                 _pick(notes, "notes"),
             ),
         )

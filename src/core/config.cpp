@@ -66,6 +66,14 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
             result.velocity_half_life_s = *v;
         result.measurement_noise_std = tracking["measurement_noise_std"].value_or(2.0);
         result.outlier_threshold = tracking["outlier_threshold"].value_or(4.0);
+        if (auto vel_cams = tracking["velocity_mode_camera_ids"].as_array()) {
+            for (auto&& elem : *vel_cams) {
+                if (auto v = elem.value<int64_t>())
+                    result.velocity_mode_camera_ids.push_back(static_cast<int>(*v));
+            }
+        }
+        if (auto v = tracking["velocity_measurement_noise_std"].value<double>())
+            result.velocity_measurement_noise_std = *v;
 
         // Initialization sub-section
         if (auto init = tracking["initialization"]) {

@@ -264,17 +264,17 @@ class UnscentedKalmanFilter {
     State apply_error_to_state(State const& nominal_state, Eigen::VectorXd const& error) const;
 
     /**
-     * @brief Predict measurements for a state using FK and camera projection
-     * @param state State to predict measurements for
-     * @param observations Observations to predict (defines which markers/cameras)
-     * @param cameras Map of camera_id -> Camera
-     * @param fk Forward kinematics computer
-     * @return Vector of predicted pixel measurements (x1,y1,x2,y2,...)
+     * @brief Predict measurements for a state using FK and camera projection.
+     *
+     * For VELOCITY-mode observations, the prediction is project(state) - prev_proj,
+     * where prev_proj is the pre-computed projection of the previous posterior state.
+     * prev_projections may be empty when no velocity observations are present.
      */
-    Eigen::VectorXd predict_measurements(State const& state,
-                                         std::vector<Observation> const& observations,
-                                         std::unordered_map<int, Camera> const& cameras,
-                                         ForwardKinematics& fk) const;
+    Eigen::VectorXd
+    predict_measurements(State const& state, std::vector<Observation> const& observations,
+                         std::unordered_map<int, Camera> const& cameras, ForwardKinematics& fk,
+                         std::unordered_map<int, std::unordered_map<int, Eigen::Vector2d>> const&
+                             prev_projections) const;
 
     /**
      * @brief Compute Mahalanobis distance for a 2D innovation
@@ -372,6 +372,10 @@ class UnscentedKalmanFilter {
     bool calibration_mode_ = false;        ///< Whether prismatic DOFs have active process noise
     double prismatic_noise_std_ = 0.0001;  ///< Sigma for prismatic DOFs in calibration mode
     void rebuild_process_noise();          ///< Rebuild process_noise_ matrix with per-DOF values
+
+    // Posterior state saved at the start of predict() for velocity-mode measurement prediction.
+    // Initialized to the same zero state as state_; overwritten on first predict() call.
+    State prev_posterior_state_{0};
 
     // Child-filter fixed root (only meaningful when !layout_->has_floating_root())
     Eigen::Vector3d fixed_root_pos_ = Eigen::Vector3d::Zero();

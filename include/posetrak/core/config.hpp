@@ -102,6 +102,15 @@ struct TrackerConfig {
     // Layout selection
     std::vector<std::string> active_joint_groups;  ///< Joint groups to track (empty = all)
 
+    // === Velocity-mode cameras ===
+    /// Camera IDs that use frame-to-frame pixel velocity instead of absolute position.
+    /// Useful for cameras with large systematic extrinsic or lens-distortion errors.
+    std::vector<int> velocity_mode_camera_ids;
+    /// Measurement noise std for velocity-mode cameras (pixels/frame).
+    /// Typically smaller than measurement_noise_std because the systematic bias cancels in the
+    /// diff. nullopt = use measurement_noise_std (conservative fallback).
+    std::optional<double> velocity_measurement_noise_std;
+
     // === Calibration ===
     bool calibration_mode = false;  ///< Enable bone-length calibration DOFs
     double prismatic_process_noise_std =
@@ -161,6 +170,10 @@ struct TrackerAppConfig {
     // === Hierarchical tracking ===
     HierarchicalConfig hierarchical;
 
+    // === Velocity-mode cameras ===
+    std::vector<int> velocity_mode_camera_ids;
+    std::optional<double> velocity_measurement_noise_std;
+
     // === Calibration ===
     bool calibration_mode = false;  ///< Enable bone-length calibration DOFs
     double prismatic_process_noise_std =
@@ -214,6 +227,8 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.ik_tolerance = ik_tolerance;
     tc.min_cameras_for_init = min_cameras_for_init;
     tc.active_joint_groups = active_joint_groups;
+    tc.velocity_mode_camera_ids = velocity_mode_camera_ids;
+    tc.velocity_measurement_noise_std = velocity_measurement_noise_std;
     tc.calibration_mode = calibration_mode;
     tc.prismatic_process_noise_std = prismatic_process_noise_std;
     return tc;

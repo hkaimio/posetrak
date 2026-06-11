@@ -152,8 +152,9 @@ PredictResult UnscentedKalmanFilter::predict(double dt) {
     PredictResult result;
 
     // Save posterior state x_{k|k} before anything modifies state_.
-    // Needed to compute the cross-covariance for the RTS smoother.
+    // Needed both for the RTS smoother cross-covariance and for velocity-mode measurements.
     State const posterior_state = state_;
+    prev_posterior_state_ = state_;
 
     // Generate sigma points
     auto t0 = Clock::now();
@@ -858,6 +859,32 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         write_sigma_points_csv(sigma_points);
     }
 
+    // Precompute previous-frame projections for velocity-mode observations.
+    // One FK evaluation on the saved posterior; result is read-only in the parallel loops below.
+    std::unordered_map<int, std::unordered_map<int, Eigen::Vector2d>> prev_projections;
+    {
+        bool has_velocity =
+            std::any_of(observations.begin(), observations.end(),
+                        [](Observation const& o) { return o.mode == MeasurementMode::VELOCITY; });
+        if (has_velocity) {
+            auto prev_marker_pos = fk.compute(prev_posterior_state_);
+            for (Observation const& obs : observations) {
+                if (obs.mode != MeasurementMode::VELOCITY)
+                    continue;
+                auto const& marker = layout_->skeleton()->markers()[obs.marker_id];
+                auto pos_it = prev_marker_pos.find(marker.name);
+                if (pos_it == prev_marker_pos.end())
+                    continue;
+                auto cam_it = cameras.find(obs.camera_id);
+                if (cam_it == cameras.end())
+                    continue;
+                auto proj = cam_it->second.project_undistorted(pos_it->second, false);
+                if (proj.has_value())
+                    prev_projections[obs.camera_id][obs.marker_id] = *proj;
+            }
+        }
+    }
+
     // Step 2: Predict measurements for each sigma point (parallelized over sigma points)
     auto t_fk1 = Clock::now();
     Eigen::MatrixXd predicted_measurements(measurement_dim, n_sigma);
@@ -866,8 +893,8 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     for (int i = 0; i < n_sigma; ++i) {
         ForwardKinematics fk_local(fk.model(), data_pool_[omp_get_thread_num()],
                                    fk.marker_frame_map(), fk.fk_layout());
-        predicted_measurements.col(i) =
-            predict_measurements(sigma_points[i], observations, cameras, fk_local);
+        predicted_measurements.col(i) = predict_measurements(sigma_points[i], observations, cameras,
+                                                             fk_local, prev_projections);
     }
     result.fk1_ms = Ms(Clock::now() - t_fk1).count();
 
@@ -988,8 +1015,8 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         for (int i = 0; i < n_sigma; ++i) {
             ForwardKinematics fk_local(fk.model(), data_pool_[omp_get_thread_num()],
                                        fk.marker_frame_map(), fk.fk_layout());
-            inlier_predictions.col(i) =
-                predict_measurements(sigma_points[i], inlier_observations, cameras, fk_local);
+            inlier_predictions.col(i) = predict_measurements(sigma_points[i], inlier_observations,
+                                                             cameras, fk_local, prev_projections);
         }
         result.fk2_ms = Ms(Clock::now() - t_fk2).count();
 
@@ -1209,7 +1236,9 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
 
 Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
     State const& state, std::vector<Observation> const& observations,
-    std::unordered_map<int, Camera> const& cameras, ForwardKinematics& fk) const {
+    std::unordered_map<int, Camera> const& cameras, ForwardKinematics& fk,
+    std::unordered_map<int, std::unordered_map<int, Eigen::Vector2d>> const& prev_projections)
+    const {
     // Compute forward kinematics to get marker positions
     auto marker_positions = fk.compute(state);
 
@@ -1261,7 +1290,6 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
 
         // Check if projection succeeded
         if (!projected_opt.has_value()) {
-            // Projection failed (behind camera or out of bounds) - use NaN to mark as failed
             predictions(2 * i) = std::numeric_limits<double>::quiet_NaN();
             predictions(2 * i + 1) = std::numeric_limits<double>::quiet_NaN();
             nan_count++;
@@ -1269,6 +1297,28 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
             Eigen::Vector2d const& projected = *projected_opt;
             predictions(2 * i) = projected.x();
             predictions(2 * i + 1) = projected.y();
+
+            // For velocity-mode observations, subtract the previous-frame projection.
+            // If the prev projection is missing (occluded last frame) the prediction becomes NaN
+            // and the observation is treated as an outlier for this frame.
+            if (obs.mode == MeasurementMode::VELOCITY) {
+                auto cam_it = prev_projections.find(obs.camera_id);
+                if (cam_it != prev_projections.end()) {
+                    auto marker_it = cam_it->second.find(obs.marker_id);
+                    if (marker_it != cam_it->second.end()) {
+                        predictions(2 * i) -= marker_it->second.x();
+                        predictions(2 * i + 1) -= marker_it->second.y();
+                    } else {
+                        predictions(2 * i) = std::numeric_limits<double>::quiet_NaN();
+                        predictions(2 * i + 1) = std::numeric_limits<double>::quiet_NaN();
+                        nan_count++;
+                    }
+                } else {
+                    predictions(2 * i) = std::numeric_limits<double>::quiet_NaN();
+                    predictions(2 * i + 1) = std::numeric_limits<double>::quiet_NaN();
+                    nan_count++;
+                }
+            }
         }
     }
 
@@ -1289,8 +1339,14 @@ UnscentedKalmanFilter::observations_to_vector(std::vector<Observation> const& ob
     Eigen::VectorXd measurements(2 * n_obs);
 
     for (int i = 0; i < n_obs; ++i) {
-        measurements(2 * i) = observations[i].position.x();
-        measurements(2 * i + 1) = observations[i].position.y();
+        if (observations[i].mode == MeasurementMode::VELOCITY) {
+            measurements(2 * i) = observations[i].position.x() - observations[i].prev_position.x();
+            measurements(2 * i + 1) =
+                observations[i].position.y() - observations[i].prev_position.y();
+        } else {
+            measurements(2 * i) = observations[i].position.x();
+            measurements(2 * i + 1) = observations[i].position.y();
+        }
     }
 
     return measurements;

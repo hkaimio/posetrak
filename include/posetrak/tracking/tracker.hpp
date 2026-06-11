@@ -275,6 +275,16 @@ class Tracker {
      */
     bool has_sufficient_observations(std::vector<Observation> const& observations) const;
 
+    /**
+     * @brief Annotate observations for velocity-mode cameras.
+     *
+     * For each observation whose camera_id is in config_.velocity_mode_camera_ids,
+     * sets mode=VELOCITY and fills prev_position from prev_observations_ if available.
+     * Observations with no stored previous pixel stay in POSITION mode (first frame behaviour).
+     */
+    std::vector<Observation>
+    build_annotated_observations(std::vector<Observation> const& observations) const;
+
     std::shared_ptr<const Skeleton> skeleton_;
     std::unordered_map<int, Camera> const& cameras_;
     TrackerConfig config_;
@@ -296,6 +306,10 @@ class Tracker {
     // State
     bool initialized_ = false;
     double last_timestamp_ = 0.0;
+
+    // Previous-frame undistorted pixels per camera and marker, for velocity-mode cameras.
+    // Populated at the end of each successful track_frame() call.
+    std::unordered_map<int, std::unordered_map<int, Eigen::Vector2d>> prev_observations_;
 
     // RTS smoother
     bool smoothing_enabled_ = false;

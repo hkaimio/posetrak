@@ -18,8 +18,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 5
-SESSION_SCHEMA_VERSION: Final[int] = 19
+REGISTRY_SCHEMA_VERSION: Final[int] = 6
+SESSION_SCHEMA_VERSION: Final[int] = 20
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -234,6 +234,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 4
     if actual == 4:
         _migrate_registry_v4_to_v5(conn)
+        actual = 5
+    if actual == 5:
+        _migrate_registry_v5_to_v6(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -446,6 +449,22 @@ def _migrate_registry_v4_to_v5(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_registry_v5_to_v6(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 5 to 6.
+
+    v6 adds velocity_mode_camera_ids and velocity_measurement_noise_std to
+    tracker_configs for per-camera velocity measurement mode support.
+    Both columns are NULL in existing rows (backward-compatible).
+    """
+    conn.executescript("""
+        BEGIN;
+        ALTER TABLE tracker_configs ADD COLUMN velocity_mode_camera_ids TEXT;
+        ALTER TABLE tracker_configs ADD COLUMN velocity_measurement_noise_std REAL;
+        PRAGMA user_version = 6;
+        COMMIT;
+    """)
+
+
 def _migrate_session_v9_to_v10(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 9 to 10.
 
@@ -590,6 +609,18 @@ def _migrate_session_v18_to_v19(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v19_to_v20(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 19 to 20.
+
+    v20 adds velocity_mode_camera_ids and velocity_measurement_noise_std to
+    tracker_configs (embedded registry table) for per-camera velocity measurement
+    mode support.  Both columns are NULL in existing rows (backward-compatible).
+    """
+    sql = (_DB_DIR / "migrations" / "019_tracker_velocity_mode.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -667,6 +698,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 18
     if actual == 18:
         _migrate_session_v18_to_v19(conn)
+        actual = 19
+    if actual == 19:
+        _migrate_session_v19_to_v20(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

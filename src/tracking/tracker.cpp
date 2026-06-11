@@ -17,6 +17,7 @@
 #include <iomanip>
 #include <iostream>
 #include <optional>
+#include <unordered_set>
 
 namespace posetrak {
 
@@ -387,6 +388,31 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
     last_timestamp_ = timestamp;
 }
 
+std::vector<Observation>
+Tracker::build_annotated_observations(std::vector<Observation> const& observations) const {
+    if (config_.velocity_mode_camera_ids.empty())
+        return observations;
+
+    std::unordered_set<int> vel_cams(config_.velocity_mode_camera_ids.begin(),
+                                     config_.velocity_mode_camera_ids.end());
+    std::vector<Observation> annotated = observations;
+    for (Observation& obs : annotated) {
+        if (!vel_cams.count(obs.camera_id))
+            continue;
+        auto cam_it = prev_observations_.find(obs.camera_id);
+        if (cam_it == prev_observations_.end())
+            continue;  // first frame for this camera — stay POSITION
+        auto marker_it = cam_it->second.find(obs.marker_id);
+        if (marker_it == cam_it->second.end())
+            continue;  // marker not seen last frame — stay POSITION
+        obs.mode = MeasurementMode::VELOCITY;
+        obs.prev_position = marker_it->second;
+        if (config_.velocity_measurement_noise_std.has_value())
+            obs.noise_std_override = *config_.velocity_measurement_noise_std;
+    }
+    return annotated;
+}
+
 TrackingResult Tracker::track_frame(std::vector<Observation> const& observations,
                                     double timestamp) {
     if (!initialized_) {
@@ -405,13 +431,18 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
                               "Negative dt: timestamps out of order"};
     }
 
-    auto result = run_parent_step(observations, dt, timestamp);
+    std::vector<Observation> const annotated = build_annotated_observations(observations);
+    auto result = run_parent_step(annotated, dt, timestamp);
 
     if (!result.tracking_lost) {
         for (auto& child : children_) {
-            run_child_step(child, observations, dt);
+            run_child_step(child, annotated, dt);
         }
         last_timestamp_ = timestamp;
+        // Store raw pixel positions for next frame's velocity-mode annotation
+        for (Observation const& obs : observations) {
+            prev_observations_[obs.camera_id][obs.marker_id] = obs.position;
+        }
         if (frame_callback_) {
             frame_callback_(result);
         }
@@ -534,6 +565,7 @@ void Tracker::reset() {
     last_timestamp_ = 0.0;
     ukf_.reset();
     smoother_cache_.clear();
+    prev_observations_.clear();
 }
 
 // ─── RTS smoothing ────────────────────────────────────────────────────────────

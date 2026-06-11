@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     init_orientation_std   REAL,
     init_joint_std         REAL,
     init_velocity_std      REAL,
-    min_cameras_for_init   INTEGER,
-    notes                  TEXT
+    min_cameras_for_init              INTEGER,
+    velocity_mode_camera_ids          TEXT,  -- JSON array of camera instance ID strings; NULL = all cameras use position mode
+    velocity_measurement_noise_std    REAL,  -- Measurement noise std for velocity cameras (pixels/frame); NULL = use measurement_noise_std
+    notes                             TEXT
 );

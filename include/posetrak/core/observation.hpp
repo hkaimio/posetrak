@@ -10,6 +10,14 @@
 
 namespace posetrak {
 
+/// @brief Whether an observation carries an absolute position or a frame-to-frame velocity.
+///
+/// VELOCITY mode is used for cameras with large systematic position errors (e.g. poor extrinsic
+/// calibration). The bias nearly cancels in the frame difference, leaving only the smaller random
+/// noise component. The UKF measurement function becomes h(x_t) = project(x_t) - project(x_{t-1})
+/// instead of the usual h(x_t) = project(x_t).
+enum class MeasurementMode { POSITION, VELOCITY };
+
 /// @brief Single 2D observation of a marker from a camera
 struct Observation {
     int camera_id;     ///< Camera identifier
@@ -21,11 +29,17 @@ struct Observation {
     Eigen::Vector2d position_distorted;  ///< Original distorted coordinates (for diagnostics)
     double confidence;                   ///< Detection confidence [0, 1] from pose detector
 
+    MeasurementMode mode = MeasurementMode::POSITION;
+    Eigen::Vector2d
+        prev_position;  ///< Previous frame undistorted pixel; only used when mode == VELOCITY
+    double noise_std_override = 0.0;  ///< When > 0, replaces global base noise for this observation
+
     /// @brief Get measurement noise standard deviation based on confidence
     /// @param base_noise Base noise in pixels
     /// @return Adjusted noise std (higher for low confidence)
     double measurement_noise_std(double base_noise = 5.0) const {
-        return base_noise / std::max(confidence, 0.1);
+        double effective = (noise_std_override > 0.0) ? noise_std_override : base_noise;
+        return effective / std::max(confidence, 0.1);
     }
 
     /// @brief Serialize to JSON

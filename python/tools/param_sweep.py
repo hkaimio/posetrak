@@ -41,18 +41,32 @@ import pandas as pd
 # Sweep configuration — edit these
 # ---------------------------------------------------------------------------
 
-# Axis being swept: velocity measurement noise for the bad-extrinsics camera.
-# None = baseline (no velocity mode).
-SWEEP_NOISE_VALUES: list[float | None] = [None, 10.0, 15.0, 20.0, 25.0, 35.0, 50.0, 60.0]
+# Sweep 1 (velocity noise for insta_ace2_pro):
+#   SWEEP_MODE = "velocity_noise"
+#   SWEEP_VALUES = [None, 10.0, 15.0, 20.0, 25.0, 35.0, 50.0, 60.0]
+#   → best: vel_noise=35, good_mean=21.1px, NIS=0.60
+#
+# Sweep 2 (measurement noise for good cameras, vel_noise fixed at 35):
+#   SWEEP_MODE = "measurement_noise"
+#   SWEEP_VALUES = [10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 60.0]
+
+# Which axis to sweep: "velocity_noise" or "measurement_noise"
+SWEEP_MODE: str = "measurement_noise"
+
+# Values for the swept axis.  For "velocity_noise": None = baseline (no velocity mode).
+# For "measurement_noise": all values apply velocity mode; 60.0 reproduces sweep-1 best.
+SWEEP_VALUES: list[float | None] = [10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 60.0]
 
 # Camera indices (0-based, sorted alphabetically in active_camera_ids) that
-# should use velocity measurements.  Set to [] for the baseline.
+# use velocity measurements in all runs of this sweep.
 VELOCITY_CAMERAS: list[int] = [2]  # insta_ace2_pro
+
+# Velocity noise fixed at sweep-1 best (ignored when SWEEP_MODE = "velocity_noise").
+FIXED_VELOCITY_NOISE: float = 35.0
 
 # Parameters kept fixed across all sweep runs (passed verbatim to edit_config).
 FIXED_PARAMS: dict[str, float] = {
-    "measurement_noise_std": 60.0,
-    "outlier_threshold":     4.0,
+    "outlier_threshold": 4.0,
 }
 
 # Cameras considered "good" for evaluation (mean inlier reprojection error on
@@ -103,21 +117,35 @@ def person_label(conn: sqlite3.Connection, seq_id: str) -> str:
 def create_child_config(
     conn: sqlite3.Connection,
     base_config_id: str,
-    velocity_noise: float | None,
+    sweep_value: float | None,
 ) -> str:
     """Create a child tracker_config row and return its ID."""
     from posetrak.db.manage_config import edit_config
 
-    vel_cams = VELOCITY_CAMERAS if velocity_noise is not None else []
     kwargs: dict = {**FIXED_PARAMS}
-    if velocity_noise is not None:
-        kwargs["velocity_measurement_noise_std"] = velocity_noise
-    return edit_config(
-        conn,
-        base_config_id,
-        velocity_mode_camera_ids=vel_cams if vel_cams else None,
-        **kwargs,
-    )
+
+    if SWEEP_MODE == "velocity_noise":
+        # sweep_value is velocity_measurement_noise_std; None = no velocity mode
+        vel_cams = VELOCITY_CAMERAS if sweep_value is not None else []
+        if sweep_value is not None:
+            kwargs["velocity_measurement_noise_std"] = sweep_value
+        return edit_config(
+            conn,
+            base_config_id,
+            velocity_mode_camera_ids=vel_cams if vel_cams else None,
+            **kwargs,
+        )
+    else:
+        # SWEEP_MODE == "measurement_noise": sweep_value is measurement_noise_std;
+        # velocity mode is always on with FIXED_VELOCITY_NOISE
+        kwargs["measurement_noise_std"] = sweep_value
+        kwargs["velocity_measurement_noise_std"] = FIXED_VELOCITY_NOISE
+        return edit_config(
+            conn,
+            base_config_id,
+            velocity_mode_camera_ids=VELOCITY_CAMERAS,
+            **kwargs,
+        )
 
 
 def decode_obs_blob(
@@ -339,9 +367,12 @@ def main() -> int:
     records: list[dict] = []
     run_idx = 0
 
-    for velocity_noise in SWEEP_NOISE_VALUES:
-        label = f"vel_noise={velocity_noise}" if velocity_noise is not None else "BASELINE (no velocity mode)"
-        child_id = create_child_config(conn, base_config_id, velocity_noise)
+    for sweep_value in SWEEP_VALUES:
+        if SWEEP_MODE == "velocity_noise":
+            label = f"vel_noise={sweep_value}" if sweep_value is not None else "BASELINE (no velocity mode)"
+        else:
+            label = f"meas_noise={sweep_value}  vel_noise={FIXED_VELOCITY_NOISE}(fixed)"
+        child_id = create_child_config(conn, base_config_id, sweep_value)
 
         for seq_id in sequences:
             run_idx += 1
@@ -357,16 +388,16 @@ def main() -> int:
             elapsed = time.perf_counter() - t0
 
             base_record = {
-                "run":          run_idx,
-                "velocity_noise": velocity_noise,
-                "sequence_id":  seq_id,
-                "person":       pname,
-                "config_id":    child_id,
+                "run":         run_idx,
+                "sweep_value": sweep_value,
+                "sequence_id": seq_id,
+                "person":      pname,
+                "config_id":   child_id,
             }
 
             if run_id is None:
                 print(f"FAILED ({elapsed:.1f}s)")
-                records.append({**base_record, "status": "FAILED"})
+                records.append({**base_record, "run_id": None, "status": "FAILED"})
                 continue
 
             # Re-open after tracker wrote to DB
@@ -415,15 +446,18 @@ def main() -> int:
         + 20.0 * ok["tracking_lost_pct"] / 100.0
     )
 
-    # Aggregate over persons: mean score per velocity_noise value
-    agg = ok.groupby("velocity_noise", dropna=False).agg(
+    sweep_col = "sweep_value"
+    agg_label = "vel_noise" if SWEEP_MODE == "velocity_noise" else "meas_noise"
+
+    # Aggregate over persons: mean score per sweep value
+    agg = ok.groupby(sweep_col, dropna=False).agg(
         good_mean=("good_cam_mean", "mean"),
         good_median=("good_cam_median", "mean"),
         nis_mean=("nis_mean", "mean"),
         lost_pct=("tracking_lost_pct", "mean"),
         score=("score", "mean"),
         n_persons=("person", "count"),
-    ).reset_index().sort_values("score")
+    ).reset_index().rename(columns={sweep_col: agg_label}).sort_values("score")
 
     failed = len(df) - len(ok)
     print(f"\n{'─'*90}")
@@ -433,11 +467,11 @@ def main() -> int:
     print(f"{'─'*90}")
     print(agg.to_string(index=False, float_format=lambda x: f"{x:.2f}"))
 
-    # Per-camera breakdown for best velocity_noise
-    best_noise = agg.iloc[0]["velocity_noise"]
-    best_runs  = ok[ok["velocity_noise"].isna() if pd.isna(best_noise)
-                    else ok["velocity_noise"] == best_noise]
-    print(f"\nBest setting: vel_noise={best_noise}  ({len(best_runs)} persons)")
+    # Per-camera breakdown for best sweep value
+    best_val  = agg.iloc[0][agg_label]
+    best_runs = ok[ok[sweep_col].isna() if pd.isna(best_val)
+                   else ok[sweep_col] == best_val]
+    print(f"\nBest setting: {agg_label}={best_val}  ({len(best_runs)} persons)")
     for cam in cam_labels:
         short = cam.replace("-", "_").replace(".", "_")
         mean_col = f"{short}_mean"

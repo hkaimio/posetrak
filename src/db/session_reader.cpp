@@ -3,6 +3,8 @@
 
 #include <Eigen/Geometry>
 
+#include <nlohmann/json.hpp>
+
 #include <sqlite3.h>
 
 #include <stdexcept>
@@ -149,7 +151,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
               "SELECT alpha, beta, kappa, process_noise_std, measurement_noise_std,"
               "       outlier_threshold, tracker_fps, ik_max_iterations, ik_tolerance,"
               "       init_position_std, init_orientation_std, init_joint_std, init_velocity_std,"
-              "       min_cameras_for_init, process_noise_vel_std, velocity_half_life_s"
+              "       min_cameras_for_init, process_noise_vel_std, velocity_half_life_s,"
+              "       velocity_mode_camera_ids, velocity_measurement_noise_std"
               " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -162,7 +165,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //          5=outlier_threshold, 6=tracker_fps, 7=ik_max_iterations, 8=ik_tolerance,
     //          9=init_position_std, 10=init_orientation_std, 11=init_joint_std,
     //         12=init_velocity_std, 13=min_cameras_for_init, 14=process_noise_vel_std,
-    //         15=velocity_half_life_s
+    //         15=velocity_half_life_s, 16=velocity_mode_camera_ids,
+    //         17=velocity_measurement_noise_std
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -193,6 +197,21 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_int(13, out.tracker.min_cameras_for_init);
     apply_opt_real(14, out.tracker.process_noise_vel_std);
     apply_opt_real(15, out.tracker.velocity_half_life_s);
+
+    // velocity_mode_camera_ids: stored as JSON integer array, e.g. "[2]"
+    if (sqlite3_column_type(stmt.ptr, 16) != SQLITE_NULL) {
+        char const* json_str = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 16));
+        if (json_str) {
+            auto arr = nlohmann::json::parse(json_str, nullptr, /*allow_exceptions=*/false);
+            if (arr.is_array()) {
+                for (auto const& elem : arr) {
+                    if (elem.is_number_integer())
+                        out.tracker.velocity_mode_camera_ids.push_back(elem.get<int>());
+                }
+            }
+        }
+    }
+    apply_opt_real(17, out.tracker.velocity_measurement_noise_std);
 
     return out;
 }
@@ -235,9 +254,9 @@ SequenceMetadata SessionReader::load_sequence_metadata(std::string const& sequen
     };
 
     SequenceMetadata meta;
-    meta.session_id                = col_str_or_empty(0);
-    meta.extrinsic_calibration_id  = col_str_or_empty(1);
-    meta.sync_config_id            = col_str_or_empty(2);
+    meta.session_id = col_str_or_empty(0);
+    meta.extrinsic_calibration_id = col_str_or_empty(1);
+    meta.sync_config_id = col_str_or_empty(2);
     return meta;
 }
 
@@ -264,9 +283,9 @@ SessionReader::load_cameras_for_sequence(std::string const& sequence_id) {
         return p;
     };
 
-    std::string session_id    = col_str(0, "session_id");
+    std::string session_id = col_str(0, "session_id");
     std::string extrinsics_id = col_str(1, "extrinsic_calibration_id");
-    std::string sync_id       = col_str(2, "sync_config_id");
+    std::string sync_id = col_str(2, "sync_config_id");
 
     return load_cameras(session_id, extrinsics_id, sync_id);
 }
@@ -316,7 +335,7 @@ SessionReader::load_cameras(std::string const& session_id,
     while (cam_stmt.step()) {
         CamRow row;
         row.instance_id = require_text(cam_stmt.ptr, 0, "camera_instances.id");
-        row.label       = require_text(cam_stmt.ptr, 1, "camera_instances.label");
+        row.label = require_text(cam_stmt.ptr, 1, "camera_instances.label");
         row.fx = sqlite3_column_double(cam_stmt.ptr, 2);
         row.fy = sqlite3_column_double(cam_stmt.ptr, 3);
         row.cx = sqlite3_column_double(cam_stmt.ptr, 4);

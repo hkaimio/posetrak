@@ -2,29 +2,34 @@
 """
 UKF parameter sweep for posetrak (session-DB mode).
 
-Creates child tracker_config rows from a base config, runs the tracker for
-each, and ranks results by filter consistency (NIS/dof ≈ 1), inlier rate,
-and covariance condition number.  All results are stored in the session DB.
+Creates child tracker_configs from a base config, runs the tracker for each
+combination, and collects per-camera reprojection errors plus filter-health
+metrics from the session DB.
 
 Usage
 -----
-    uv run python/tools/param_sweep.py \\
-        --session-db /mnt/d/mocap/<session>/session.db \\
+    python python/tools/param_sweep.py \\
+        --session-db /mnt/d/mocap/ukemi-tommi-20260509.db \\
         --config     <base-tracker-config-id-or-prefix> \\
-        [--sequence  <pose-observation-sequence-id>] \\
-        [--skeleton  <skeleton-id>] \\
-        [--out-dir   /tmp/posetrak_sweep]
+        --sequences  <seq-id-1> [<seq-id-2> ...]  \\
+        [--skeleton  <skeleton-id>]  \\
+        [--binary    optbuild/cli/posetrak]  \\
+        [--out-dir   /tmp/posetrak_sweep]  \\
+        [--time-start 38.08 --time-end 66.44]
 
-If --sequence / --skeleton are omitted the script finds them from the most
-recent tracking run that used the given base config.
+If --sequences is omitted the script finds the most recent run for the config
+and uses its sequence.  If --skeleton is omitted it is taken from that run.
 
-Edit SWEEP_GRID and FIXED_PARAMS below to change what is varied.
+Edit SWEEP_GRID, FIXED_PARAMS, and VELOCITY_MODE_CAMERAS below.
 """
+
+from __future__ import annotations
 
 import argparse
 import itertools
+import json
 import re
-import subprocess
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -33,55 +38,131 @@ import numpy as np
 import pandas as pd
 
 # ---------------------------------------------------------------------------
-# Parameter grid — edit these to change what is swept
+# Sweep configuration — edit these
 # ---------------------------------------------------------------------------
 
-SWEEP_GRID: dict[str, list] = {
-    "process_noise_std":     [0.05, 0.1, 0.2],
-    "process_noise_vel_std": [0.2, 0.5, 1.0],
-    "velocity_half_life_s":  [0.25, 0.5, 1.0],
-}
+# Axis being swept: velocity measurement noise for the bad-extrinsics camera.
+# None = baseline (no velocity mode).
+SWEEP_NOISE_VALUES: list[float | None] = [None, 10.0, 15.0, 20.0, 25.0, 35.0, 50.0, 60.0]
 
-FIXED_PARAMS: dict[str, float | int | None] = {
+# Camera indices (0-based, sorted alphabetically in active_camera_ids) that
+# should use velocity measurements.  Set to [] for the baseline.
+VELOCITY_CAMERAS: list[int] = [2]  # insta_ace2_pro
+
+# Parameters kept fixed across all sweep runs (passed verbatim to edit_config).
+FIXED_PARAMS: dict[str, float] = {
     "measurement_noise_std": 60.0,
     "outlier_threshold":     4.0,
 }
 
-TIME_RANGE = (0.0, 10.0)
+# Cameras considered "good" for evaluation (mean inlier reprojection error on
+# these is the primary metric).  Labels must match active_camera_ids order.
+GOOD_CAMERA_LABELS: set[str] = {"gopro-11_mini_01", "pixel7", "pixel9"}
 
 # ---------------------------------------------------------------------------
 
 
-def resolve_base_run(session, config_id: str) -> dict:
-    """Return metadata from the most recent tracking run using config_id."""
-    row = session.execute(
-        """
-        SELECT id, observation_sequence_id, skeleton_id,
-               active_camera_ids, marker_names
-        FROM tracking_runs
-        WHERE tracker_config_id = ?
-        ORDER BY ran_at DESC
-        LIMIT 1
-        """,
+def open_db(path: Path) -> sqlite3.Connection:
+    sys.path.insert(0, str(Path(__file__).parents[1]))
+    from posetrak.db.db import open_session
+    conn = open_session(path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def resolve_base_config(conn: sqlite3.Connection, prefix: str) -> str:
+    row = conn.execute(
+        "SELECT id FROM tracker_configs WHERE id LIKE ? ORDER BY created_at DESC LIMIT 1",
+        (prefix + "%",),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"No tracker_config found matching {prefix!r}")
+    return row["id"]
+
+
+def resolve_sequence_and_skeleton(conn: sqlite3.Connection, config_id: str) -> tuple[str, str]:
+    row = conn.execute(
+        """SELECT observation_sequence_id, skeleton_id
+           FROM tracking_runs WHERE tracker_config_id = ?
+           ORDER BY ran_at DESC LIMIT 1""",
         (config_id,),
     ).fetchone()
     if row is None:
         raise ValueError(f"No tracking runs found for config {config_id!r}")
-    return dict(row)
+    return row["observation_sequence_id"], row["skeleton_id"]
 
 
-def compute_metrics(session, run_id: str) -> dict | None:
-    rows = session.execute(
-        """
-        SELECT tracking_lost, n_inlier_observations,
-               cov_condition_number, nis_value, nis_dof
-        FROM tracking_results
-        WHERE run_id = ? AND person_id = 0 AND is_smoothed = 0
-        ORDER BY tracker_step
-        """,
-        (run_id,),
+def person_label(conn: sqlite3.Connection, seq_id: str) -> str:
+    row = conn.execute(
+        "SELECT person_name FROM sequence_persons WHERE sequence_id = ? LIMIT 1",
+        (seq_id,),
+    ).fetchone()
+    return row["person_name"] if row else seq_id[:8]
+
+
+def create_child_config(
+    conn: sqlite3.Connection,
+    base_config_id: str,
+    velocity_noise: float | None,
+) -> str:
+    """Create a child tracker_config row and return its ID."""
+    from posetrak.db.manage_config import edit_config
+
+    vel_cams = VELOCITY_CAMERAS if velocity_noise is not None else []
+    kwargs: dict = {**FIXED_PARAMS}
+    if velocity_noise is not None:
+        kwargs["velocity_measurement_noise_std"] = velocity_noise
+    return edit_config(
+        conn,
+        base_config_id,
+        velocity_mode_camera_ids=vel_cams if vel_cams else None,
+        **kwargs,
+    )
+
+
+def decode_obs_blob(
+    blob: bytes,
+    cam_labels: list[str],
+    marker_names: list[str],
+) -> list[dict]:
+    """Decode one obs_blob into a list of dicts (one per non-absent slot)."""
+    n_cams, n_markers = len(cam_labels), len(marker_names)
+    data = np.frombuffer(blob, dtype="<f4").reshape(n_cams, n_markers, 8)
+    records = []
+    for ci, cam in enumerate(cam_labels):
+        for mi in range(n_markers):
+            slot = data[ci, mi]
+            if not np.isfinite(slot[6]):
+                continue  # absent slot
+            obs_x, obs_y = float(slot[0]), float(slot[1])
+            pred_x, pred_y = float(slot[2]), float(slot[3])
+            is_outlier = bool(slot[6] != 0.0)
+            error = float(np.sqrt((obs_x - pred_x) ** 2 + (obs_y - pred_y) ** 2)) \
+                if np.isfinite(obs_x) and np.isfinite(pred_x) else float("nan")
+            records.append({
+                "cam": cam,
+                "is_outlier": is_outlier,
+                "error": error,
+            })
+    return records
+
+
+def compute_metrics(
+    conn: sqlite3.Connection,
+    run_id: str,
+    cam_labels: list[str],
+    marker_names: list[str],
+    person_id: int = 0,
+) -> dict | None:
+    # ── Filter-level metrics ────────────────────────────────────────────────
+    rows = conn.execute(
+        """SELECT tracking_lost, n_inlier_observations, cov_condition_number,
+                  nis_value, nis_dof
+           FROM tracking_results
+           WHERE run_id = ? AND person_id = ? AND is_smoothed = 0
+           ORDER BY tracker_step""",
+        (run_id, person_id),
     ).fetchall()
-
     if not rows:
         return None
 
@@ -89,11 +170,9 @@ def compute_metrics(session, run_id: str) -> dict | None:
         "tracking_lost", "n_inlier_observations",
         "cov_condition_number", "nis_value", "nis_dof",
     ])
-
     n_frames = len(df)
     tracking_lost_pct = 100.0 * df["tracking_lost"].mean()
 
-    # NIS / dof
     nis_rows = df[(df["nis_dof"] > 0) & df["nis_value"].notna()]
     if not nis_rows.empty:
         per_dof = nis_rows["nis_value"] / nis_rows["nis_dof"]
@@ -102,232 +181,274 @@ def compute_metrics(session, run_id: str) -> dict | None:
     else:
         nis_mean = nis_std = float("nan")
 
-    # Condition number
     cond = df["cov_condition_number"].replace(0, float("nan")).dropna()
-    if not cond.empty:
-        cond_max = float(cond.max())
-        cond_p95 = float(np.nanpercentile(cond, 95))
-    else:
-        cond_max = cond_p95 = float("nan")
+    cond_p95 = float(np.nanpercentile(cond, 95)) if not cond.empty else float("nan")
 
-    # Inlier rate (frames that had observations)
-    obs_rows = df[df["n_inlier_observations"].notna()]
-    # Approximate: need num_observations too, use inlier count as proxy for activity
-    # Use n_inlier_observations directly; normalise against max (rough inlier rate proxy)
     active = df[df["tracking_lost"] == 0]
-    if not active.empty and active["n_inlier_observations"].notna().any():
-        avg_inliers = float(active["n_inlier_observations"].mean())
-    else:
-        avg_inliers = float("nan")
+    avg_inliers = float(active["n_inlier_observations"].mean()) \
+        if not active.empty and active["n_inlier_observations"].notna().any() else float("nan")
+
+    # ── Per-camera reprojection errors ─────────────────────────────────────
+    blob_rows = conn.execute(
+        """SELECT obs_blob FROM tracking_obs_results
+           WHERE run_id = ? AND person_id = ? ORDER BY tracker_step""",
+        (run_id, person_id),
+    ).fetchall()
+
+    cam_errors: dict[str, list[float]] = {c: [] for c in cam_labels}
+    cam_outlier_counts: dict[str, int] = {c: 0 for c in cam_labels}
+    cam_total: dict[str, int] = {c: 0 for c in cam_labels}
+
+    for brow in blob_rows:
+        for rec in decode_obs_blob(bytes(brow["obs_blob"]), cam_labels, marker_names):
+            cam = rec["cam"]
+            cam_total[cam] += 1
+            if rec["is_outlier"]:
+                cam_outlier_counts[cam] += 1
+            elif np.isfinite(rec["error"]):
+                cam_errors[cam].append(rec["error"])
+
+    per_cam: dict[str, dict] = {}
+    for cam in cam_labels:
+        errs = cam_errors[cam]
+        tot  = cam_total[cam]
+        out  = cam_outlier_counts[cam]
+        per_cam[cam] = {
+            "mean":         float(np.mean(errs))       if errs else float("nan"),
+            "median":       float(np.median(errs))     if errs else float("nan"),
+            "p95":          float(np.percentile(errs, 95)) if errs else float("nan"),
+            "outlier_rate": (out / tot * 100.0)        if tot  else float("nan"),
+        }
+
+    good_errors = [e for c, es in cam_errors.items() if c in GOOD_CAMERA_LABELS for e in es]
+    good_mean   = float(np.mean(good_errors))   if good_errors else float("nan")
+    good_median = float(np.median(good_errors)) if good_errors else float("nan")
 
     return {
         "n_frames":          n_frames,
         "nis_mean":          nis_mean,
         "nis_std":           nis_std,
-        "cond_max":          cond_max,
         "cond_p95":          cond_p95,
         "avg_inliers":       avg_inliers,
         "tracking_lost_pct": tracking_lost_pct,
+        "good_cam_mean":     good_mean,
+        "good_cam_median":   good_median,
+        "per_cam":           per_cam,
     }
+
+
+def run_tracker(
+    binary: Path,
+    db_path: Path,
+    sequence_id: str,
+    skeleton_id: str,
+    config_id: str,
+    person_id: int,
+    time_start: float,
+    time_end: float,
+    out_dir: Path,
+) -> str | None:
+    """Run the tracker; return tracking_run_id or None on failure."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        str(binary), "track",
+        "--session-db",     str(db_path),
+        "--sequence",       sequence_id,
+        "--skeleton",       skeleton_id,
+        "--tracker-config", config_id,
+        "--person-id",      str(person_id),
+        "--start-time",     str(time_start),
+        "--end-time",       str(time_end),
+        "--output-dir",     str(out_dir),
+        "--quiet",
+    ]
+    import subprocess
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return None
+
+    if result.returncode != 0:
+        (out_dir / "stderr.txt").write_text(result.stderr)
+        return None
+
+    m = re.search(r"tracking_run_id:\s*(\S+)", result.stdout)
+    return m.group(1) if m else None
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--session-db", required=True,
-                    help="Path to the posetrak session DB")
-    ap.add_argument("--config", required=True, metavar="CONFIG_ID",
-                    help="Base tracker_config ID (or unique prefix)")
-    ap.add_argument("--sequence", metavar="SEQ_ID", default=None,
-                    help="Pose observation sequence ID (default: from most recent run)")
-    ap.add_argument("--skeleton", metavar="SKEL_ID", default=None,
+    ap.add_argument("--session-db", required=True)
+    ap.add_argument("--config",     required=True, metavar="CONFIG_ID",
+                    help="Base tracker_config ID or unique prefix")
+    ap.add_argument("--sequences",  nargs="+", metavar="SEQ_ID",
+                    help="Pose observation sequence IDs (default: from most recent run)")
+    ap.add_argument("--skeleton",   metavar="SKEL_ID",
                     help="Skeleton ID (default: from most recent run)")
-    ap.add_argument("--person-id", type=int, default=0,
-                    help="Person ID to track (default: 0)")
-    ap.add_argument("--binary", default="optbuild/cli/posetrak",
-                    help="Path to posetrak binary")
-    ap.add_argument("--out-dir", default="/tmp/posetrak_sweep",
-                    help="Directory for per-run CSV output")
+    ap.add_argument("--person-id",  type=int, default=0)
+    ap.add_argument("--binary",     default="optbuild/cli/posetrak")
+    ap.add_argument("--out-dir",    default="/tmp/posetrak_sweep")
+    ap.add_argument("--time-start", type=float, default=0.0)
+    ap.add_argument("--time-end",   type=float, default=-1.0)
     args = ap.parse_args()
 
-    db_path  = Path(args.session_db)
-    binary   = Path(args.binary)
-    out_dir  = Path(args.out_dir)
+    db_path = Path(args.session_db)
+    binary  = Path(args.binary)
+    out_dir = Path(args.out_dir)
 
     if not db_path.exists():
-        print(f"error: session DB not found: {db_path}", file=sys.stderr)
-        return 1
+        print(f"error: DB not found: {db_path}", file=sys.stderr); return 1
     if not binary.exists():
-        print(f"error: binary not found: {binary}", file=sys.stderr)
-        return 1
+        print(f"error: binary not found: {binary}", file=sys.stderr); return 1
 
-    # Open session DB (Python layer handles migrations)
-    import sqlite3
-    sys.path.insert(0, str(Path(__file__).parents[1]))
-    from posetrak.db.db import open_session
-    from posetrak.db.manage_config import edit_config
+    conn = open_db(db_path)
 
-    session = open_session(db_path)
-    session.row_factory = sqlite3.Row
-
-    # Resolve base config ID prefix
-    row = session.execute(
-        "SELECT id FROM tracker_configs WHERE id LIKE ? ORDER BY created_at DESC LIMIT 1",
-        (args.config + "%",),
-    ).fetchone()
-    if row is None:
-        print(f"error: tracker_config not found: {args.config!r}", file=sys.stderr)
-        return 1
-    base_config_id = row["id"]
+    base_config_id = resolve_base_config(conn, args.config)
     print(f"Base config : {base_config_id}")
 
-    # Resolve sequence and skeleton from most recent run if not supplied
-    sequence_id = args.sequence
-    skeleton_id = args.skeleton
-    if sequence_id is None or skeleton_id is None:
-        try:
-            base_run = resolve_base_run(session, base_config_id)
-            sequence_id = sequence_id or base_run["observation_sequence_id"]
-            skeleton_id = skeleton_id or base_run["skeleton_id"]
-        except ValueError as e:
-            print(f"error: {e}\n"
-                  "Provide --sequence and --skeleton explicitly.", file=sys.stderr)
-            return 1
+    sequences: list[str] = args.sequences or []
+    skeleton_id: str     = args.skeleton or ""
 
-    print(f"Sequence    : {sequence_id}")
+    if not sequences or not skeleton_id:
+        seq_fallback, skel_fallback = resolve_sequence_and_skeleton(conn, base_config_id)
+        sequences  = sequences  or [seq_fallback]
+        skeleton_id = skeleton_id or skel_fallback
+
+    print(f"Sequences   : {sequences}")
     print(f"Skeleton    : {skeleton_id}")
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    param_names  = list(SWEEP_GRID.keys())
-    param_values = list(SWEEP_GRID.values())
-    grid  = list(itertools.product(*param_values))
-    total = len(grid)
-
-    print(f"\nSweep: {total} runs  |  time range: {TIME_RANGE[0]}–{TIME_RANGE[1]} s")
-    print(f"Sweep  : {', '.join(f'{k}={v}' for k, v in SWEEP_GRID.items())}")
-    print(f"Fixed  : {', '.join(f'{k}={v}' for k, v in FIXED_PARAMS.items())}")
+    # Resolve camera labels and marker names from first sequence's run
+    seq0_run = conn.execute(
+        "SELECT active_camera_ids, marker_names FROM tracking_runs "
+        "WHERE observation_sequence_id = ? ORDER BY ran_at DESC LIMIT 1",
+        (sequences[0],),
+    ).fetchone()
+    if seq0_run is None:
+        print("error: no tracking runs for first sequence; re-order or add --skeleton",
+              file=sys.stderr); return 1
+    cam_labels:   list[str] = json.loads(seq0_run["active_camera_ids"] or "[]")
+    marker_names: list[str] = json.loads(seq0_run["marker_names"]       or "[]")
+    print(f"Cameras     : {list(enumerate(cam_labels))}")
+    print(f"Vel cameras : indices {VELOCITY_CAMERAS} "
+          f"= {[cam_labels[i] for i in VELOCITY_CAMERAS if i < len(cam_labels)]}")
+    print(f"Good cameras: {GOOD_CAMERA_LABELS & set(cam_labels)}")
     print()
 
+    out_dir.mkdir(parents=True, exist_ok=True)
     records: list[dict] = []
+    run_idx = 0
 
-    for idx, values in enumerate(grid, 1):
-        sweep_params = dict(zip(param_names, values))
-        all_params   = {**sweep_params, **FIXED_PARAMS}
+    for velocity_noise in SWEEP_NOISE_VALUES:
+        label = f"vel_noise={velocity_noise}" if velocity_noise is not None else "BASELINE (no velocity mode)"
+        child_id = create_child_config(conn, base_config_id, velocity_noise)
 
-        # Create child tracker_config row
-        child_id = edit_config(session, base_config_id, **all_params)
+        for seq_id in sequences:
+            run_idx += 1
+            pname = person_label(conn, seq_id)
+            print(f"[{run_idx:3d}] {label}  person={pname}", end="  ", flush=True)
 
-        run_out = out_dir / f"run_{idx:03d}"
-        run_out.mkdir(exist_ok=True)
-
-        label = "  ".join(f"{k}={v:g}" for k, v in sweep_params.items())
-        print(f"[{idx:3d}/{total}] {label}", end="  ", flush=True)
-
-        cmd = [
-            str(binary), "track",
-            "--session-db",    str(db_path),
-            "--sequence",      sequence_id,
-            "--skeleton",      skeleton_id,
-            "--tracker-config", child_id,
-            "--person-id",     str(args.person_id),
-            "--start-time",    str(TIME_RANGE[0]),
-            "--end-time",      str(TIME_RANGE[1]),
-            "--output-dir",    str(run_out),
-            "--quiet",
-        ]
-
-        t0 = time.perf_counter()
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            run_out = out_dir / f"run_{run_idx:03d}"
+            t0 = time.perf_counter()
+            run_id = run_tracker(
+                binary, db_path, seq_id, skeleton_id, child_id,
+                args.person_id, args.time_start, args.time_end, run_out,
+            )
             elapsed = time.perf_counter() - t0
-        except subprocess.TimeoutExpired:
-            print("TIMEOUT")
-            records.append({"run": idx, **sweep_params, **FIXED_PARAMS,
-                             "config_id": child_id, "status": "TIMEOUT"})
-            continue
 
-        if result.returncode != 0:
-            print(f"FAILED ({elapsed:.1f}s)")
-            (run_out / "stderr.txt").write_text(result.stderr)
-            records.append({"run": idx, **sweep_params, **FIXED_PARAMS,
-                             "config_id": child_id, "status": "FAILED"})
-            continue
+            base_record = {
+                "run":          run_idx,
+                "velocity_noise": velocity_noise,
+                "sequence_id":  seq_id,
+                "person":       pname,
+                "config_id":    child_id,
+            }
 
-        # Parse tracking_run_id from stdout
-        m = re.search(r"tracking_run_id:\s*(\S+)", result.stdout)
-        if not m:
-            print(f"NO_RUN_ID ({elapsed:.1f}s)")
-            records.append({"run": idx, **sweep_params, **FIXED_PARAMS,
-                             "config_id": child_id, "status": "NO_RUN_ID"})
-            continue
-        run_id = m.group(1)
+            if run_id is None:
+                print(f"FAILED ({elapsed:.1f}s)")
+                records.append({**base_record, "status": "FAILED"})
+                continue
 
-        # Re-open connection (tracker wrote to the same DB)
-        session.close()
-        session = open_session(db_path)
-        session.row_factory = sqlite3.Row
+            # Re-open after tracker wrote to DB
+            conn.close()
+            conn = open_db(db_path)
 
-        metrics = compute_metrics(session, run_id)
-        if metrics is None:
-            print(f"NO_DATA ({elapsed:.1f}s)")
-            records.append({"run": idx, **sweep_params, **FIXED_PARAMS,
-                             "config_id": child_id, "run_id": run_id, "status": "NO_DATA"})
-            continue
+            metrics = compute_metrics(conn, run_id, cam_labels, marker_names, args.person_id)
+            if metrics is None:
+                print(f"NO_DATA ({elapsed:.1f}s)")
+                records.append({**base_record, "run_id": run_id, "status": "NO_DATA"})
+                continue
 
-        m2 = metrics
-        print(
-            f"NIS={m2['nis_mean']:.2f}±{m2['nis_std']:.2f}  "
-            f"cond_p95={m2['cond_p95']:.1e}  "
-            f"inliers={m2['avg_inliers']:.0f}/frame  "
-            f"lost={m2['tracking_lost_pct']:.1f}%  "
-            f"({elapsed:.1f}s)"
-        )
-        records.append({"run": idx, **sweep_params, **FIXED_PARAMS,
-                         "config_id": child_id, "run_id": run_id, "status": "OK", **m2})
+            per_cam = metrics.pop("per_cam")
+            print(
+                f"good_mean={metrics['good_cam_mean']:.1f}px  "
+                f"good_med={metrics['good_cam_median']:.1f}px  "
+                f"NIS={metrics['nis_mean']:.2f}  "
+                f"lost={metrics['tracking_lost_pct']:.1f}%  "
+                f"({elapsed:.1f}s)"
+            )
+            cam_flat: dict[str, float] = {}
+            for cam, stats in per_cam.items():
+                short = cam.replace("-", "_").replace(".", "_")
+                for k, v in stats.items():
+                    cam_flat[f"{short}_{k}"] = v
 
-    session.close()
+            records.append({**base_record, "run_id": run_id, "status": "OK",
+                             **metrics, **cam_flat})
 
-    # -----------------------------------------------------------------------
-    # Summary
-    # -----------------------------------------------------------------------
+    conn.close()
+
+    # ── Summary ─────────────────────────────────────────────────────────────
     df = pd.DataFrame(records)
     summary_path = out_dir / "sweep_summary.csv"
     df.to_csv(summary_path, index=False)
 
     ok = df[df["status"] == "OK"].copy()
     if ok.empty:
-        print("\nNo successful runs.")
-        return 1
+        print("\nNo successful runs."); return 1
 
+    # Primary: good-camera mean reprojection error (lower is better)
+    # Tiebreak: NIS calibration (closer to 1.0), tracking lost %
     ok["score"] = (
-        (ok["nis_mean"] - 1.0).abs()
-        + 0.5  * (ok["tracking_lost_pct"] / 100.0)
-        + ok["cond_p95"].apply(
-            lambda x: max(0.0, (np.log10(x) - 6) * 0.05) if np.isfinite(x) and x > 0 else 0.0
-        )
+        ok["good_cam_mean"]
+        + 5.0 * (ok["nis_mean"] - 1.0).abs()
+        + 20.0 * ok["tracking_lost_pct"] / 100.0
     )
-    ok = ok.sort_values("score")
 
-    failed = total - len(ok)
-    print(f"\n{'─'*110}")
-    print(
-        f"Results: {len(ok)}/{total} successful"
-        + (f", {failed} failed/timeout" if failed else "")
-    )
-    print("Ranked by |NIS/dof − 1| + penalty for tracking loss and high condition number")
-    print(f"{'─'*110}")
+    # Aggregate over persons: mean score per velocity_noise value
+    agg = ok.groupby("velocity_noise", dropna=False).agg(
+        good_mean=("good_cam_mean", "mean"),
+        good_median=("good_cam_median", "mean"),
+        nis_mean=("nis_mean", "mean"),
+        lost_pct=("tracking_lost_pct", "mean"),
+        score=("score", "mean"),
+        n_persons=("person", "count"),
+    ).reset_index().sort_values("score")
 
-    display_cols = (
-        param_names
-        + list(FIXED_PARAMS.keys())
-        + ["nis_mean", "nis_std", "cond_p95", "avg_inliers",
-           "tracking_lost_pct", "score", "run_id"]
-    )
-    display_cols = [c for c in display_cols if c in ok.columns]
-    print(ok[display_cols].head(15).to_string(index=False, float_format=lambda x: f"{x:.3g}"))
-    print(f"\nFull results + run IDs: {summary_path}")
+    failed = len(df) - len(ok)
+    print(f"\n{'─'*90}")
+    print(f"Results: {len(ok)}/{len(df)} runs OK" +
+          (f", {failed} failed" if failed else ""))
+    print("Ranked by good-camera mean reprojection error (primary) + NIS calibration")
+    print(f"{'─'*90}")
+    print(agg.to_string(index=False, float_format=lambda x: f"{x:.2f}"))
 
+    # Per-camera breakdown for best velocity_noise
+    best_noise = agg.iloc[0]["velocity_noise"]
+    best_runs  = ok[ok["velocity_noise"].isna() if pd.isna(best_noise)
+                    else ok["velocity_noise"] == best_noise]
+    print(f"\nBest setting: vel_noise={best_noise}  ({len(best_runs)} persons)")
+    for cam in cam_labels:
+        short = cam.replace("-", "_").replace(".", "_")
+        mean_col = f"{short}_mean"
+        out_col  = f"{short}_outlier_rate"
+        if mean_col in best_runs.columns:
+            m = best_runs[mean_col].mean()
+            o = best_runs[out_col].mean() if out_col in best_runs.columns else float("nan")
+            tag = " ← bad cam" if cam not in GOOD_CAMERA_LABELS else ""
+            print(f"  {cam:25s}: mean={m:.1f}px  outlier={o:.1f}%{tag}")
+
+    print(f"\nFull results: {summary_path}")
     return 0
 
 

@@ -49,25 +49,30 @@ import pandas as pd
 # Sweep 2 (measurement noise for good cameras, vel_noise fixed at 35):
 #   SWEEP_MODE = "measurement_noise"
 #   SWEEP_VALUES = [10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 60.0]
+#   → best (corrected score with outlier penalty): meas_noise=40, NIS=0.90, good_out=18%
+#
+# Sweep 3 (outlier threshold, meas_noise=40 + vel_noise=35 fixed):
+#   SWEEP_MODE = "outlier_threshold"
+#   SWEEP_VALUES = [4.0, 4.5, 5.0, 5.5, 6.0]
+#   Goal: wider acceptance window during fast movements without inflating noise.
 
-# Which axis to sweep: "velocity_noise" or "measurement_noise"
-SWEEP_MODE: str = "measurement_noise"
+# Which axis to sweep: "velocity_noise", "measurement_noise", or "outlier_threshold"
+SWEEP_MODE: str = "outlier_threshold"
 
-# Values for the swept axis.  For "velocity_noise": None = baseline (no velocity mode).
-# For "measurement_noise": all values apply velocity mode; 60.0 reproduces sweep-1 best.
-SWEEP_VALUES: list[float | None] = [10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 60.0]
+# Values for the swept axis.
+SWEEP_VALUES: list[float | None] = [4.0, 4.5, 5.0, 5.5, 6.0]
 
 # Camera indices (0-based, sorted alphabetically in active_camera_ids) that
 # use velocity measurements in all runs of this sweep.
 VELOCITY_CAMERAS: list[int] = [2]  # insta_ace2_pro
 
-# Velocity noise fixed at sweep-1 best (ignored when SWEEP_MODE = "velocity_noise").
+# Fixed values from previous sweeps (ignored when they are the sweep axis).
 FIXED_VELOCITY_NOISE: float = 35.0
+FIXED_MEAS_NOISE: float     = 40.0
 
 # Parameters kept fixed across all sweep runs (passed verbatim to edit_config).
-FIXED_PARAMS: dict[str, float] = {
-    "outlier_threshold": 4.0,
-}
+# outlier_threshold is omitted here — it is either swept or set per-mode below.
+FIXED_PARAMS: dict[str, float] = {}
 
 # Cameras considered "good" for evaluation (mean inlier reprojection error on
 # these is the primary metric).  Labels must match active_camera_ids order.
@@ -129,16 +134,30 @@ def create_child_config(
         vel_cams = VELOCITY_CAMERAS if sweep_value is not None else []
         if sweep_value is not None:
             kwargs["velocity_measurement_noise_std"] = sweep_value
+        kwargs.setdefault("measurement_noise_std", FIXED_MEAS_NOISE)
+        kwargs.setdefault("outlier_threshold", 4.0)
         return edit_config(
             conn,
             base_config_id,
             velocity_mode_camera_ids=vel_cams if vel_cams else None,
             **kwargs,
         )
-    else:
-        # SWEEP_MODE == "measurement_noise": sweep_value is measurement_noise_std;
-        # velocity mode is always on with FIXED_VELOCITY_NOISE
+    elif SWEEP_MODE == "measurement_noise":
+        # sweep_value is measurement_noise_std; velocity mode on with FIXED_VELOCITY_NOISE
         kwargs["measurement_noise_std"] = sweep_value
+        kwargs["velocity_measurement_noise_std"] = FIXED_VELOCITY_NOISE
+        kwargs.setdefault("outlier_threshold", 4.0)
+        return edit_config(
+            conn,
+            base_config_id,
+            velocity_mode_camera_ids=VELOCITY_CAMERAS,
+            **kwargs,
+        )
+    else:
+        # SWEEP_MODE == "outlier_threshold": sweep_value is outlier_threshold;
+        # meas_noise and velocity mode fixed at best values from sweeps 1+2.
+        kwargs["outlier_threshold"] = sweep_value
+        kwargs["measurement_noise_std"] = FIXED_MEAS_NOISE
         kwargs["velocity_measurement_noise_std"] = FIXED_VELOCITY_NOISE
         return edit_config(
             conn,
@@ -370,8 +389,10 @@ def main() -> int:
     for sweep_value in SWEEP_VALUES:
         if SWEEP_MODE == "velocity_noise":
             label = f"vel_noise={sweep_value}" if sweep_value is not None else "BASELINE (no velocity mode)"
-        else:
+        elif SWEEP_MODE == "measurement_noise":
             label = f"meas_noise={sweep_value}  vel_noise={FIXED_VELOCITY_NOISE}(fixed)"
+        else:
+            label = f"outlier_thr={sweep_value}  meas={FIXED_MEAS_NOISE}/vel={FIXED_VELOCITY_NOISE}(fixed)"
         child_id = create_child_config(conn, base_config_id, sweep_value)
 
         for seq_id in sequences:
@@ -464,7 +485,9 @@ def main() -> int:
     )
 
     sweep_col = "sweep_value"
-    agg_label = "vel_noise" if SWEEP_MODE == "velocity_noise" else "meas_noise"
+    agg_label = {"velocity_noise": "vel_noise",
+                 "measurement_noise": "meas_noise",
+                 "outlier_threshold": "outlier_thr"}.get(SWEEP_MODE, SWEEP_MODE)
 
     # Aggregate over persons: mean score per sweep value
     agg_cols: dict = dict(

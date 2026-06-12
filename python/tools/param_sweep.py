@@ -438,11 +438,28 @@ def main() -> int:
     if ok.empty:
         print("\nNo successful runs."); return 1
 
-    # Primary: good-camera mean reprojection error (lower is better)
-    # Tiebreak: NIS calibration (closer to 1.0), tracking lost %
+    # Compute mean good-camera outlier rate across the good cameras.
+    # This is a critical penalty: low meas_noise achieves low mean reprojection errors
+    # by rejecting most observations as outliers and only averaging the easy frames.
+    good_outlier_cols = [
+        c for c in ok.columns
+        if c.endswith("_outlier_rate")
+        and any(cam.replace("-", "_").replace(".", "_") in c for cam in GOOD_CAMERA_LABELS)
+    ]
+    if good_outlier_cols:
+        ok["good_outlier_rate"] = ok[good_outlier_cols].mean(axis=1)
+    else:
+        ok["good_outlier_rate"] = float("nan")
+
+    # Score components:
+    #   good_cam_mean:    primary accuracy signal (lower is better)
+    #   |NIS/dof − 1|:   filter calibration (0 = perfect)
+    #   good_outlier_rate: penalises settings that improve mean error by rejecting data
+    #   tracking_lost_pct: hard failures
     ok["score"] = (
         ok["good_cam_mean"]
-        + 5.0 * (ok["nis_mean"] - 1.0).abs()
+        + 5.0  * (ok["nis_mean"] - 1.0).abs()
+        + 0.25 * ok["good_outlier_rate"]
         + 20.0 * ok["tracking_lost_pct"] / 100.0
     )
 
@@ -450,14 +467,18 @@ def main() -> int:
     agg_label = "vel_noise" if SWEEP_MODE == "velocity_noise" else "meas_noise"
 
     # Aggregate over persons: mean score per sweep value
-    agg = ok.groupby(sweep_col, dropna=False).agg(
+    agg_cols: dict = dict(
         good_mean=("good_cam_mean", "mean"),
         good_median=("good_cam_median", "mean"),
         nis_mean=("nis_mean", "mean"),
+        good_outlier=("good_outlier_rate", "mean"),
+        avg_inliers=("avg_inliers", "mean"),
         lost_pct=("tracking_lost_pct", "mean"),
         score=("score", "mean"),
         n_persons=("person", "count"),
-    ).reset_index().rename(columns={sweep_col: agg_label}).sort_values("score")
+    )
+    agg = ok.groupby(sweep_col, dropna=False).agg(**agg_cols).reset_index() \
+            .rename(columns={sweep_col: agg_label}).sort_values("score")
 
     failed = len(df) - len(ok)
     print(f"\n{'─'*90}")

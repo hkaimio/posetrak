@@ -313,7 +313,11 @@ class IntrinsicsCalibDialog(QDialog):
         self._aruco_dict_combo = QComboBox()
         for name in _aruco_dicts():
             self._aruco_dict_combo.addItem(name)
-        default_idx = self._aruco_dict_combo.findText("DICT_6X6_250")
+        # DICT_4X4_100 is the default: larger markers are easier to detect at distance
+        # and the 4×4 family matches the most common printed calibration boards.
+        default_idx = self._aruco_dict_combo.findText("DICT_4X4_100")
+        if default_idx < 0:
+            default_idx = self._aruco_dict_combo.findText("DICT_4X4_50")
         if default_idx >= 0:
             self._aruco_dict_combo.setCurrentIndex(default_idx)
 

@@ -282,16 +282,20 @@ def calibrate_camera(
         # Use minimal flags for better compatibility with diverse checkerboard configurations
         calibration_flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC + cv2.fisheye.CALIB_FIX_SKEW
 
-        # Reshape object_points and image_points for fisheye calibration
-        # Fisheye expects shape (N, 1, 3) for object points and (N, 1, 2) for image points
-        # Ensure all arrays are contiguous and float64
-        object_points_fisheye = [np.ascontiguousarray(pts.reshape(-1, 1, 3), dtype=np.float64) for pts in object_points]
-        image_points_fisheye = [np.ascontiguousarray(pts.reshape(-1, 1, 2), dtype=np.float64) for pts in image_points]
-
-        # Initialize camera matrix with reasonable estimate
-        # Focal length approximation: ~image_width for fisheye lenses
+        # Fisheye expects shape (N, 1, 3) for object points and (N, 1, 2) for image points.
+        # Sort each view so the corner farthest from the image centre comes first —
+        # this prevents the InitExtrinsics "fabs(norm_u1) > 0" assertion from firing
+        # when the first point normalises to (0,0) near the principal point.
         f_init = max(image_size)
         cx, cy = image_size[0] / 2.0, image_size[1] / 2.0
+        obj_sorted, img_sorted = [], []
+        for obj_p, img_p in zip(object_points, image_points):
+            img_2d = img_p.reshape(-1, 2)
+            order = np.argsort(-np.hypot(img_2d[:, 0] - cx, img_2d[:, 1] - cy))
+            obj_sorted.append(obj_p.reshape(-1, 3)[order])
+            img_sorted.append(img_2d[order])
+        object_points_fisheye = [np.ascontiguousarray(p.reshape(-1, 1, 3), dtype=np.float64) for p in obj_sorted]
+        image_points_fisheye  = [np.ascontiguousarray(p.reshape(-1, 1, 2), dtype=np.float64) for p in img_sorted]
         K = np.array([[f_init, 0, cx],
                       [0, f_init, cy],
                       [0, 0, 1]], dtype=np.float64)
@@ -706,21 +710,77 @@ def calibrate_camera_charuco(
             raise RuntimeError("No valid ChArUco frames for fisheye calibration.")
 
         calibration_flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC + cv2.fisheye.CALIB_FIX_SKEW
-        obj_fe = [np.ascontiguousarray(p.reshape(-1, 1, 3), dtype=np.float64) for p in object_points]
-        img_fe = [np.ascontiguousarray(p.reshape(-1, 1, 2), dtype=np.float64) for p in image_points]
+
+        # Sort points in each view so the corner farthest from the image centre comes
+        # first.  cv2.fisheye.calibrate calls InitExtrinsics which normalises the
+        # FIRST image point with the initial K; if that point is at or near the
+        # principal point the normalised vector is (0,0) and an assertion fires:
+        #   "fabs(norm_u1) > 0"  (fisheye.cpp)
+        # Placing the outermost corner first guarantees a non-zero norm regardless of
+        # the initial K estimate.
+        cx_est, cy_est = image_size[0] / 2.0, image_size[1] / 2.0
+        sorted_object_points = []
+        sorted_image_points = []
+        for obj_p, img_p in zip(object_points, image_points):
+            img_2d = img_p.reshape(-1, 2)
+            dists = np.hypot(img_2d[:, 0] - cx_est, img_2d[:, 1] - cy_est)
+            order = np.argsort(-dists)  # farthest first
+            sorted_object_points.append(obj_p[order])
+            sorted_image_points.append(img_2d[order])
+
+        obj_fe = [np.ascontiguousarray(p.reshape(-1, 1, 3), dtype=np.float64) for p in sorted_object_points]
+        img_fe = [np.ascontiguousarray(p.reshape(-1, 1, 2), dtype=np.float64) for p in sorted_image_points]
 
         f_init = max(image_size)
-        cx, cy = image_size[0] / 2.0, image_size[1] / 2.0
+        cx, cy = cx_est, cy_est
         K = np.array([[f_init, 0, cx], [0, f_init, cy], [0, 0, 1]], dtype=np.float64)
         D = np.zeros((4, 1), dtype=np.float64)
         rvecs = [np.zeros((1, 1, 3), dtype=np.float64) for _ in obj_fe]
         tvecs = [np.zeros((1, 1, 3), dtype=np.float64) for _ in obj_fe]
 
-        ret, K, dist, rvecs, tvecs = cv2.fisheye.calibrate(
-            obj_fe, img_fe, image_size, K, D, rvecs, tvecs,
-            calibration_flags,
-            (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
-        )
+        try:
+            ret, K, dist, rvecs, tvecs = cv2.fisheye.calibrate(
+                obj_fe, img_fe, image_size, K, D, rvecs, tvecs,
+                calibration_flags,
+                (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
+            )
+        except cv2.error as exc:
+            # If the assertion still fires for a specific view, remove it and retry.
+            # This handles frames where all detected corners happen to cluster near
+            # the principal point (degenerate view coverage for fisheye).
+            if "norm_u1" not in str(exc) or len(obj_fe) <= 6:
+                raise
+            log(f"Warning: fisheye InitExtrinsics failed — scanning for degenerate views…")
+            good_obj, good_img = [], []
+            for i, (o, im, rv, tv) in enumerate(zip(obj_fe, img_fe, rvecs, tvecs)):
+                probe_obj = good_obj + [o]
+                probe_img = good_img + [im]
+                probe_rv  = [np.zeros((1,1,3), dtype=np.float64)] * len(probe_obj)
+                probe_tv  = [np.zeros((1,1,3), dtype=np.float64)] * len(probe_obj)
+                try:
+                    cv2.fisheye.calibrate(
+                        probe_obj, probe_img, image_size,
+                        K.copy(), D.copy(), probe_rv, probe_tv,
+                        calibration_flags,
+                        (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 5, 1e-3),
+                    )
+                    good_obj.append(o)
+                    good_img.append(im)
+                except cv2.error:
+                    log(f"  Removed degenerate view {i} (kept {len(good_obj)} so far)")
+            if not good_obj:
+                raise RuntimeError("All views are degenerate for fisheye calibration — "
+                                   "check board parameters and coverage.") from exc
+            K = np.array([[f_init, 0, cx], [0, f_init, cy], [0, 0, 1]], dtype=np.float64)
+            D = np.zeros((4, 1), dtype=np.float64)
+            rv2 = [np.zeros((1,1,3), dtype=np.float64)] * len(good_obj)
+            tv2 = [np.zeros((1,1,3), dtype=np.float64)] * len(good_obj)
+            log(f"Retrying fisheye calibration with {len(good_obj)} non-degenerate views…")
+            ret, K, dist, rvecs, tvecs = cv2.fisheye.calibrate(
+                good_obj, good_img, image_size, K, D, rv2, tv2,
+                calibration_flags,
+                (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
+            )
 
         newcameramat = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
             K, dist, image_size, np.eye(3), balance=0.0

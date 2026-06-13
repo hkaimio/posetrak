@@ -237,15 +237,23 @@ def bootstrap_K(detections, board, image_size, log=print,
 
 def build_correspondences(
     detections, board, K, image_size, log=print
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, list, list]:
     """
     For every detected frame: solve PnP (zero distortion) → project corners
     through K alone → "ideal" pixel.  Return:
-      ideal      (N, 2)  — where K+pose says corner should be (ideal pinhole)
-      distorted  (N, 2)  — where corner was observed (includes lens warp)
+      ideal            (N, 2)  — where K+pose says corner should be (ideal pinhole)
+      distorted        (N, 2)  — where corner was observed (includes lens warp)
+      obj_pts_per_frame        — list of (n, 3) arrays, one per frame (for K refit)
+      ideal_per_frame          — list of (n, 2) arrays, one per frame (for K refit)
+
+    The ideal positions are already the corners as they appear in an undistorted
+    image, so K can be re-estimated from (obj_pts, ideal_pts) directly without
+    ever re-reading video frames.
     """
     W, H = image_size
     ideal_list, dist_list = [], []
+    obj_pts_per_frame: list[np.ndarray] = []
+    ideal_per_frame:   list[np.ndarray] = []
 
     n_skipped = 0
     for item in detections:
@@ -278,6 +286,8 @@ def build_correspondences(
 
         ideal_list.append(ideal[in_bounds])
         dist_list.append(img_pts[in_bounds])
+        obj_pts_per_frame.append(obj_pts[in_bounds])
+        ideal_per_frame.append(ideal[in_bounds])
 
     if not ideal_list:
         raise RuntimeError("No valid frames for correspondence building.")
@@ -286,8 +296,8 @@ def build_correspondences(
     distorted = np.vstack(dist_list)
     if n_skipped:
         log(f"  PnP: {n_skipped} frames skipped (solver failed or out-of-bounds)")
-    log(f"  Total corner pairs: {len(ideal)}")
-    return ideal, distorted
+    log(f"  Total corner pairs: {len(ideal)}  ({len(obj_pts_per_frame)} frames)")
+    return ideal, distorted, obj_pts_per_frame, ideal_per_frame
 
 
 # ---------------------------------------------------------------------------
@@ -421,44 +431,21 @@ def coverage_report(
 # ---------------------------------------------------------------------------
 
 def refit_K(
-    video_path: Path, detections, board, detector, mapx, mapy, image_size,
-    min_corners: int = 8, log=print,
+    obj_pts_per_frame: list, ideal_per_frame: list,
+    image_size: tuple[int, int], log=print,
 ) -> np.ndarray:
     """
-    Apply the current warp map to each detected frame, re-detect ChArUco corners,
-    calibrate K with a standard (no-distortion) model on the undistorted images.
-    Scans the video sequentially to avoid storing frames in RAM.
+    Re-calibrate K from per-frame (obj_pts, ideal_pts) produced by
+    build_correspondences.  No video or frames needed: the ideal_pts are
+    already the corner positions in the undistorted image (they are the
+    PnP-projected positions assuming zero distortion), so calibrateCamera
+    on them directly gives an improved K.
     """
-    det_set = {item[0] for item in detections}
-    obj_pts_list, img_pts_list = [], []
-    n_ok = 0
-
-    cap = cv2.VideoCapture(str(video_path))
-    fi = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if fi in det_set:
-            undist = cv2.remap(frame, mapx, mapy, cv2.INTER_LINEAR)
-            corners, ids = detect_corners(undist, board, detector, min_corners)
-            if corners is not None:
-                obj_pts, img_pts = match_points(corners, ids, board)
-                if obj_pts is not None:
-                    obj_pts_list.append(obj_pts)
-                    img_pts_list.append(img_pts)
-                    n_ok += 1
-        fi += 1
-    cap.release()
-
-    if not obj_pts_list:
-        raise RuntimeError("No detections in undistorted frames for K refinement.")
-
     ret, K, _dist, _rv, _tv = cv2.calibrateCamera(
-        obj_pts_list, img_pts_list, image_size, None, None,
+        obj_pts_per_frame, ideal_per_frame, image_size, None, None,
         flags=cv2.CALIB_FIX_ASPECT_RATIO,
     )
-    log(f"  Re-fit K from {n_ok} undistorted frames  (reproj error {ret:.2f} px)")
+    log(f"  Re-fit K from {len(obj_pts_per_frame)} frames  (reproj error {ret:.2f} px)")
     log(f"  fx={K[0,0]:.1f}  fy={K[1,1]:.1f}  cx={K[0,2]:.1f}  cy={K[1,2]:.1f}")
     return K
 
@@ -502,7 +489,9 @@ def build_map(args) -> None:
         log(f"\n=== Iteration {it}/{args.iterations} ===")
 
         log("Building (ideal → distorted) correspondence pairs...")
-        ideal, distorted = build_correspondences(detections, board, K, image_size, log=log)
+        ideal, distorted, obj_per_frame, ideal_per_frame = build_correspondences(
+            detections, board, K, image_size, log=log
+        )
 
         log(f"Spatial binning into {args.grid_bins}×{args.grid_bins} cells...")
         bin_ideal, bin_dist, counts = spatially_bin(
@@ -520,11 +509,8 @@ def build_map(args) -> None:
         )
 
         if it < args.iterations:
-            log("Re-fitting K on undistorted frames (sequential video scan)...")
-            K_new = refit_K(
-                video, detections, board, detector, mapx, mapy, image_size,
-                min_corners=args.min_corners, log=log,
-            )
+            log("Re-fitting K from ideal corner positions (no video re-read needed)...")
+            K_new = refit_K(obj_per_frame, ideal_per_frame, image_size, log=log)
             delta = np.abs(K_new - K) / (np.abs(K) + 1e-6)
             log(f"  K change: max {delta.max()*100:.2f}%")
             K = K_new

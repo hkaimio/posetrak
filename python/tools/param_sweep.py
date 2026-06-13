@@ -41,12 +41,14 @@ import pandas as pd
 # Sweep configuration — edit these
 # ---------------------------------------------------------------------------
 
+# Sweep history
+# ─────────────────────────────────────────────────────────────────────────────
 # Sweep 1 (velocity noise for insta_ace2_pro):
 #   SWEEP_MODE = "velocity_noise"
 #   SWEEP_VALUES = [None, 10.0, 15.0, 20.0, 25.0, 35.0, 50.0, 60.0]
 #   → best: vel_noise=35, good_mean=21.1px, NIS=0.60
 #
-# Sweep 2 (measurement noise for good cameras, vel_noise fixed at 35):
+# Sweep 2 (measurement noise for good cameras, vel_noise=35 fixed):
 #   SWEEP_MODE = "measurement_noise"
 #   SWEEP_VALUES = [10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 60.0]
 #   → best (corrected score with outlier penalty): meas_noise=40, NIS=0.90, good_out=18%
@@ -54,24 +56,49 @@ import pandas as pd
 # Sweep 3 (outlier threshold, meas_noise=40 + vel_noise=35 fixed):
 #   SWEEP_MODE = "outlier_threshold"
 #   SWEEP_VALUES = [4.0, 4.5, 5.0, 5.5, 6.0]
-#   Goal: wider acceptance window during fast movements without inflating noise.
+#   → best: thr=4.5, NIS=0.99, good_out=14.8%, good_mean=19.0px
+#
+# Sweep 4 (matrix: gopro2 velocity mode × process model, all best values fixed):
+#   SWEEP_MODE = "matrix"
+#   12 configs × 3 persons = 36 runs ≈ 3 h
+#   Axes:
+#     vel_cameras: [2] vs [1,2]   — does adding gopro2 to velocity mode help?
+#     process_noise_vel_std: 0.5, 1.0, 2.0   — faster velocity adaptation for ukemi
+#     velocity_half_life_s: 0.25, 0.5   — how quickly stale velocities decay
 
-# Which axis to sweep: "velocity_noise", "measurement_noise", or "outlier_threshold"
-SWEEP_MODE: str = "outlier_threshold"
+# Which axis to sweep: "velocity_noise" | "measurement_noise" |
+#                      "outlier_threshold" | "matrix"
+SWEEP_MODE: str = "matrix"
 
-# Values for the swept axis.
+# Single-axis sweep values (ignored when SWEEP_MODE == "matrix").
 SWEEP_VALUES: list[float | None] = [4.0, 4.5, 5.0, 5.5, 6.0]
 
-# Camera indices (0-based, sorted alphabetically in active_camera_ids) that
-# use velocity measurements in all runs of this sweep.
+# Matrix sweep: each dict is one complete parameter combination.
+# Keys must match kwargs accepted by edit_config plus the special key
+# "vel_cameras" (list of camera indices for velocity mode).
+import itertools as _it
+MATRIX_PARAMS: list[dict] = [
+    {
+        "vel_cameras":             vel_cams,
+        "process_noise_vel_std":   qv,
+        "velocity_half_life_s":    vhl,
+    }
+    for vel_cams, qv, vhl in _it.product(
+        [[2], [1, 2]],          # insta only  vs  insta + gopro2
+        [0.5, 1.0, 2.0],        # process velocity noise
+        [0.25, 0.5],            # velocity half-life (seconds)
+    )
+]
+
+# Camera indices (0-based) used for all single-axis sweeps.
 VELOCITY_CAMERAS: list[int] = [2]  # insta_ace2_pro
 
 # Fixed values from previous sweeps (ignored when they are the sweep axis).
 FIXED_VELOCITY_NOISE: float = 35.0
 FIXED_MEAS_NOISE: float     = 40.0
+FIXED_OUTLIER_THR: float    = 4.5
 
 # Parameters kept fixed across all sweep runs (passed verbatim to edit_config).
-# outlier_threshold is omitted here — it is either swept or set per-mode below.
 FIXED_PARAMS: dict[str, float] = {}
 
 # Cameras considered "good" for evaluation (mean inlier reprojection error on
@@ -122,7 +149,7 @@ def person_label(conn: sqlite3.Connection, seq_id: str) -> str:
 def create_child_config(
     conn: sqlite3.Connection,
     base_config_id: str,
-    sweep_value: float | None,
+    sweep_value: float | dict | None,
 ) -> str:
     """Create a child tracker_config row and return its ID."""
     from posetrak.db.manage_config import edit_config
@@ -130,41 +157,41 @@ def create_child_config(
     kwargs: dict = {**FIXED_PARAMS}
 
     if SWEEP_MODE == "velocity_noise":
-        # sweep_value is velocity_measurement_noise_std; None = no velocity mode
         vel_cams = VELOCITY_CAMERAS if sweep_value is not None else []
         if sweep_value is not None:
             kwargs["velocity_measurement_noise_std"] = sweep_value
         kwargs.setdefault("measurement_noise_std", FIXED_MEAS_NOISE)
-        kwargs.setdefault("outlier_threshold", 4.0)
-        return edit_config(
-            conn,
-            base_config_id,
-            velocity_mode_camera_ids=vel_cams if vel_cams else None,
-            **kwargs,
-        )
+        kwargs.setdefault("outlier_threshold", FIXED_OUTLIER_THR)
+        return edit_config(conn, base_config_id,
+                           velocity_mode_camera_ids=vel_cams or None, **kwargs)
+
     elif SWEEP_MODE == "measurement_noise":
-        # sweep_value is measurement_noise_std; velocity mode on with FIXED_VELOCITY_NOISE
         kwargs["measurement_noise_std"] = sweep_value
         kwargs["velocity_measurement_noise_std"] = FIXED_VELOCITY_NOISE
-        kwargs.setdefault("outlier_threshold", 4.0)
-        return edit_config(
-            conn,
-            base_config_id,
-            velocity_mode_camera_ids=VELOCITY_CAMERAS,
-            **kwargs,
-        )
-    else:
-        # SWEEP_MODE == "outlier_threshold": sweep_value is outlier_threshold;
-        # meas_noise and velocity mode fixed at best values from sweeps 1+2.
+        kwargs.setdefault("outlier_threshold", FIXED_OUTLIER_THR)
+        return edit_config(conn, base_config_id,
+                           velocity_mode_camera_ids=VELOCITY_CAMERAS, **kwargs)
+
+    elif SWEEP_MODE == "outlier_threshold":
         kwargs["outlier_threshold"] = sweep_value
         kwargs["measurement_noise_std"] = FIXED_MEAS_NOISE
         kwargs["velocity_measurement_noise_std"] = FIXED_VELOCITY_NOISE
-        return edit_config(
-            conn,
-            base_config_id,
-            velocity_mode_camera_ids=VELOCITY_CAMERAS,
-            **kwargs,
-        )
+        return edit_config(conn, base_config_id,
+                           velocity_mode_camera_ids=VELOCITY_CAMERAS, **kwargs)
+
+    else:
+        # SWEEP_MODE == "matrix": sweep_value is a dict from MATRIX_PARAMS
+        assert isinstance(sweep_value, dict)
+        vel_cams: list[int] = sweep_value.get("vel_cameras", VELOCITY_CAMERAS)
+        kwargs["measurement_noise_std"]          = FIXED_MEAS_NOISE
+        kwargs["outlier_threshold"]               = FIXED_OUTLIER_THR
+        kwargs["velocity_measurement_noise_std"]  = FIXED_VELOCITY_NOISE
+        # Override any keys present in the matrix entry (except vel_cameras)
+        for k, v in sweep_value.items():
+            if k != "vel_cameras":
+                kwargs[k] = v
+        return edit_config(conn, base_config_id,
+                           velocity_mode_camera_ids=vel_cams, **kwargs)
 
 
 def decode_obs_blob(
@@ -420,15 +447,25 @@ def main() -> int:
     run_idx = 0
     agg_label = {"velocity_noise": "vel_noise",
                  "measurement_noise": "meas_noise",
-                 "outlier_threshold": "outlier_thr"}.get(SWEEP_MODE, SWEEP_MODE)
+                 "outlier_threshold": "outlier_thr",
+                 "matrix": "config_key"}.get(SWEEP_MODE, SWEEP_MODE)
 
-    for sweep_value in SWEEP_VALUES:
+    sweep_iter = MATRIX_PARAMS if SWEEP_MODE == "matrix" else SWEEP_VALUES
+    for sweep_value in sweep_iter:
         if SWEEP_MODE == "velocity_noise":
             label = f"vel_noise={sweep_value}" if sweep_value is not None else "BASELINE (no velocity mode)"
         elif SWEEP_MODE == "measurement_noise":
             label = f"meas_noise={sweep_value}  vel_noise={FIXED_VELOCITY_NOISE}(fixed)"
-        else:
+        elif SWEEP_MODE == "outlier_threshold":
             label = f"outlier_thr={sweep_value}  meas={FIXED_MEAS_NOISE}/vel={FIXED_VELOCITY_NOISE}(fixed)"
+        else:
+            assert isinstance(sweep_value, dict)
+            label = "  ".join(
+                f"vel_cams={sweep_value['vel_cameras']}"
+                if k == "vel_cameras"
+                else f"{k}={v}"
+                for k, v in sweep_value.items()
+            )
         child_id = create_child_config(conn, base_config_id, sweep_value)
 
         for seq_id in sequences:
@@ -447,9 +484,21 @@ def main() -> int:
             )
             elapsed = time.perf_counter() - t0
 
+            if SWEEP_MODE == "matrix":
+                assert isinstance(sweep_value, dict)
+                sweep_cols = {
+                    ("vel_cameras" if k == "vel_cameras" else k):
+                    (str(v) if isinstance(v, list) else v)
+                    for k, v in sweep_value.items()
+                }
+                config_key = label
+            else:
+                sweep_cols = {"sweep_value": sweep_value}
+                config_key = str(sweep_value)
             base_record = {
                 "run":         run_idx,
-                "sweep_value": sweep_value,
+                "config_key":  config_key,
+                **sweep_cols,
                 "sequence_id": seq_id,
                 "person":      pname,
                 "config_id":   child_id,
@@ -463,13 +512,21 @@ def main() -> int:
             # Re-open after tracker wrote to DB and write sweep notes to the run
             conn.close()
             conn = open_db(db_path)
-            notes_str = (
-                f"param_sweep  mode={SWEEP_MODE}  {agg_label}={sweep_value}  "
-                f"meas={FIXED_MEAS_NOISE if SWEEP_MODE != 'measurement_noise' else sweep_value}  "
-                f"vel_noise={FIXED_VELOCITY_NOISE if SWEEP_MODE != 'velocity_noise' else sweep_value}  "
-                f"vel_cams={VELOCITY_CAMERAS}  thr="
-                f"{sweep_value if SWEEP_MODE == 'outlier_threshold' else 4.0}"
-            )
+            if SWEEP_MODE == "matrix":
+                assert isinstance(sweep_value, dict)
+                notes_str = (
+                    f"param_sweep  mode=matrix  {label}  "
+                    f"meas={FIXED_MEAS_NOISE}  thr={FIXED_OUTLIER_THR}  "
+                    f"insta_vel={FIXED_VELOCITY_NOISE}"
+                )
+            else:
+                notes_str = (
+                    f"param_sweep  mode={SWEEP_MODE}  {agg_label}={sweep_value}  "
+                    f"meas={FIXED_MEAS_NOISE if SWEEP_MODE != 'measurement_noise' else sweep_value}  "
+                    f"vel_noise={FIXED_VELOCITY_NOISE if SWEEP_MODE != 'velocity_noise' else sweep_value}  "
+                    f"vel_cams={VELOCITY_CAMERAS}  thr="
+                    f"{sweep_value if SWEEP_MODE == 'outlier_threshold' else FIXED_OUTLIER_THR}"
+                )
             with conn:
                 conn.execute(
                     "UPDATE tracking_runs SET notes = ? WHERE id = ?",
@@ -535,7 +592,7 @@ def main() -> int:
         + 20.0 * ok["tracking_lost_pct"] / 100.0
     )
 
-    sweep_col = "sweep_value"
+    sweep_col = "config_key" if SWEEP_MODE == "matrix" else "sweep_value"
 
     # Aggregate over persons: mean score per sweep value
     agg_cols: dict = dict(

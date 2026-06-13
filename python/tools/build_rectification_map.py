@@ -141,15 +141,20 @@ def scan_video(video_path: Path, board, detector,
     lap_arr  = np.array(lap_vals)
     log(f"Sharpness: mean={lap_arr.mean():.1f}  max={lap_arr.max():.1f}")
 
-    # Local maxima within window=8 analysed frames, above threshold
+    # Local maxima within window=8 analysed frames, above threshold.
+    # If sharpness_thresh <= 0: accept all analysed frames (no local-maxima filter).
     window = 8
-    sharp_idxs = []
-    for i in range(window, len(lap_arr) - window):
-        sl = lap_arr[i - window: i + window + 1]
-        if lap_arr[i] == sl.max() and np.sum(sl == lap_arr[i]) == 1 \
-                and lap_arr[i] > sharpness_thresh:
-            sharp_idxs.append(lap_idxs[i])
-    log(f"Sharp frames selected: {len(sharp_idxs)}")
+    if sharpness_thresh <= 0:
+        sharp_idxs = lap_idxs[:]
+        log(f"Sharp frames selected: {len(sharp_idxs)} (all analysed, no sharpness filter)")
+    else:
+        sharp_idxs = []
+        for i in range(window, len(lap_arr) - window):
+            sl = lap_arr[i - window: i + window + 1]
+            if lap_arr[i] == sl.max() and np.sum(sl == lap_arr[i]) == 1 \
+                    and lap_arr[i] > sharpness_thresh:
+                sharp_idxs.append(lap_idxs[i])
+        log(f"Sharp frames selected: {len(sharp_idxs)}")
 
     # Pass 2: detect ChArUco corners in sharp frames
     cap = cv2.VideoCapture(str(video_path))
@@ -184,7 +189,8 @@ def bootstrap_K(detections, board, image_size, log=print,
     max_dx, max_dy = W * centre_fraction, H * centre_fraction
 
     obj_pts_list, img_pts_list = [], []
-    for _fi, corners, ids in detections:
+    for item in detections:
+        corners, ids = item[1], item[2]
         board_centre = corners.reshape(-1, 2).mean(axis=0)
         if abs(board_centre[0] - cx0) > max_dx or abs(board_centre[1] - cy0) > max_dy:
             continue
@@ -196,7 +202,8 @@ def bootstrap_K(detections, board, image_size, log=print,
 
     if len(obj_pts_list) < 4:
         log("Warning: few central-board frames for bootstrap K; using all frames.")
-        for _fi, corners, ids in detections:
+        for item in detections:
+            corners, ids = item[1], item[2]
             obj_pts, img_pts = match_points(corners, ids, board)
             if obj_pts is not None:
                 obj_pts_list.append(obj_pts)
@@ -231,7 +238,8 @@ def build_correspondences(
     ideal_list, dist_list = [], []
 
     n_skipped = 0
-    for _fi, corners, ids in detections:
+    for item in detections:
+        corners, ids = item[1], item[2]
         obj_pts, img_pts = match_points(corners, ids, board)
         if obj_pts is None:
             continue

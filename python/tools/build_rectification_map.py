@@ -410,49 +410,131 @@ def spatially_bin(
 
 
 # ---------------------------------------------------------------------------
-# RBF warp map fitting
+# Warp map fitting
 # ---------------------------------------------------------------------------
+
+def _poly_features(pts: np.ndarray, degree: int, W: float, H: float) -> np.ndarray:
+    """
+    Build polynomial feature matrix for 2D points, normalised to [-1, 1].
+    Returns (N, n_features) array including the bias column.
+    """
+    x = pts[:, 0] / W * 2 - 1   # normalise to [-1, 1]
+    y = pts[:, 1] / H * 2 - 1
+    cols = [np.ones(len(pts))]
+    for d in range(1, degree + 1):
+        for i in range(d + 1):
+            cols.append((x ** (d - i)) * (y ** i))
+    return np.column_stack(cols)
+
 
 def fit_warp_map(
     ideal_pts: np.ndarray,
     distorted_pts: np.ndarray,
     image_size: tuple[int, int],
+    method: str = "poly",
+    poly_degree: int = 5,
     smoothing: float = 0.5,
     eval_scale: int = 8,
     log=print,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Fit TPS RBF:  ideal_pixel → distorted_pixel  (= inverse warp for cv2.remap).
-    Evaluates on a coarse grid (1/eval_scale of full resolution) then upsamples.
+    Fit inverse warp:  ideal_pixel → distorted_pixel  (for cv2.remap).
 
-    Returns (mapx, mapy) as float32 arrays of shape (H, W).
+    method="poly"  — polynomial least-squares (default, recommended).
+        Degree-5 polynomial has 21 parameters per axis — globally smooth,
+        immune to local oscillations, fits well when all 7000+ raw pairs
+        are used directly (no binning needed).  Ridge regularisation prevents
+        extrapolation blow-up.
+
+    method="tps"   — thin-plate spline RBF on spatially-binned points.
+        Flexible but can overfit to noisy/sparse data, producing local
+        oscillations. Use only if the polynomial residual map shows systematic
+        local structure that the polynomial can't capture.
+
+    Returns (mapx, mapy) float32 (H, W).
     """
-    from scipy.interpolate import RBFInterpolator
+    W, H = image_size
 
+    if method == "poly":
+        return _fit_poly(ideal_pts, distorted_pts, image_size, poly_degree, log)
+    else:
+        return _fit_tps(ideal_pts, distorted_pts, image_size, smoothing, eval_scale, log)
+
+
+def _fit_poly(
+    ideal_pts: np.ndarray,
+    distorted_pts: np.ndarray,
+    image_size: tuple[int, int],
+    degree: int,
+    log=print,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Polynomial warp: use ALL raw correspondence pairs (no binning) with Ridge
+    regression.  The global polynomial is inherently smooth and can't produce
+    local oscillations, so noisy individual pairs average out correctly.
+    """
+    W, H = image_size
+    N = len(ideal_pts)
+    log(f"  Fitting degree-{degree} polynomial on {N} pairs...")
+    t0 = time.perf_counter()
+
+    A = _poly_features(ideal_pts, degree, W, H)
+    # Ridge regression (alpha=1e-3 in normalised space) for numerical stability
+    ATA = A.T @ A
+    n_feat = A.shape[1]
+    ATA[np.arange(n_feat), np.arange(n_feat)] += 1e-3
+    coef_x = np.linalg.solve(ATA, A.T @ distorted_pts[:, 0])
+    coef_y = np.linalg.solve(ATA, A.T @ distorted_pts[:, 1])
+
+    resid_x = np.std(A @ coef_x - distorted_pts[:, 0])
+    resid_y = np.std(A @ coef_y - distorted_pts[:, 1])
+    log(f"  Poly fit: {time.perf_counter()-t0:.1f}s  "
+        f"residual std: x={resid_x:.2f}px  y={resid_y:.2f}px")
+
+    # Evaluate on full grid
+    log("  Evaluating polynomial on full grid...")
+    t0 = time.perf_counter()
+    gy_all = np.arange(H, dtype=np.float64)
+    mapx = np.empty((H, W), dtype=np.float32)
+    mapy = np.empty((H, W), dtype=np.float32)
+    gx_row = np.arange(W, dtype=np.float64)
+    for row in range(H):
+        pts_row = np.column_stack([gx_row, np.full(W, row, dtype=np.float64)])
+        A_row = _poly_features(pts_row, degree, W, H)
+        mapx[row] = (A_row @ coef_x).astype(np.float32)
+        mapy[row] = (A_row @ coef_y).astype(np.float32)
+    log(f"  Grid eval: {time.perf_counter()-t0:.1f}s")
+    return mapx, mapy
+
+
+def _fit_tps(
+    ideal_pts: np.ndarray,
+    distorted_pts: np.ndarray,
+    image_size: tuple[int, int],
+    smoothing: float,
+    eval_scale: int,
+    log=print,
+) -> tuple[np.ndarray, np.ndarray]:
+    """TPS RBF fallback — expects spatially-binned (not raw) points."""
+    from scipy.interpolate import RBFInterpolator
     W, H = image_size
     N = len(ideal_pts)
     log(f"  Fitting TPS RBF on {N} binned points (smoothing={smoothing})...")
     t0 = time.perf_counter()
-
     rbf_x = RBFInterpolator(ideal_pts, distorted_pts[:, 0],
                              kernel="thin_plate_spline", smoothing=smoothing)
     rbf_y = RBFInterpolator(ideal_pts, distorted_pts[:, 1],
                              kernel="thin_plate_spline", smoothing=smoothing)
     log(f"  RBF fit: {time.perf_counter()-t0:.1f}s")
-
-    # Evaluate on coarse grid
     gW, gH = W // eval_scale, H // eval_scale
     gx = np.linspace(0, W - 1, gW, dtype=np.float32)
     gy = np.linspace(0, H - 1, gH, dtype=np.float32)
     GX, GY = np.meshgrid(gx, gy)
-    grid_pts = np.stack([GX.ravel(), GY.ravel()], axis=1, dtype=np.float64)
-
+    grid_pts = np.stack([GX.ravel(), GY.ravel()], axis=1).astype(np.float64)
     t0 = time.perf_counter()
     mapx_c = rbf_x(grid_pts).reshape(gH, gW).astype(np.float32)
     mapy_c = rbf_y(grid_pts).reshape(gH, gW).astype(np.float32)
     log(f"  RBF eval on {gW}×{gH} grid: {time.perf_counter()-t0:.1f}s")
-
-    # Upsample to full resolution (distortion is smooth, so INTER_CUBIC is fine)
     mapx = cv2.resize(mapx_c, (W, H), interpolation=cv2.INTER_CUBIC)
     mapy = cv2.resize(mapy_c, (W, H), interpolation=cv2.INTER_CUBIC)
     return mapx, mapy
@@ -573,16 +655,22 @@ def build_map(args) -> None:
             detections, board, K, image_size, log=log
         )
 
-        log(f"Spatial binning into {args.grid_bins}×{args.grid_bins} cells...")
-        bin_ideal, bin_dist, counts = spatially_bin(
-            ideal, distorted, image_size, n_bins=args.grid_bins
-        )
-        log(f"  {len(bin_ideal)} occupied bins  "
-            f"(median {int(np.median(counts))} pairs/bin, max {counts.max()})")
-
         log("Fitting warp map...")
+        if args.fit_method == "poly":
+            # Polynomial uses all raw pairs directly — binning would discard data
+            fit_ideal, fit_dist = ideal, distorted
+        else:
+            # TPS needs binning to keep point count manageable
+            log(f"Spatial binning into {args.grid_bins}×{args.grid_bins} cells...")
+            fit_ideal, fit_dist, counts = spatially_bin(
+                ideal, distorted, image_size, n_bins=args.grid_bins
+            )
+            log(f"  {len(fit_ideal)} occupied bins  "
+                f"(median {int(np.median(counts))} pairs/bin, max {counts.max()})")
         mapx, mapy = fit_warp_map(
-            bin_ideal, bin_dist, image_size,
+            fit_ideal, fit_dist, image_size,
+            method=args.fit_method,
+            poly_degree=args.poly_degree,
             smoothing=args.smoothing,
             eval_scale=args.eval_scale,
             log=log,
@@ -600,7 +688,7 @@ def build_map(args) -> None:
 
     # ── 4. Coverage report ─────────────────────────────────────────────────
     log("\n=== Coverage analysis ===")
-    coverage_pct = coverage_report(bin_ideal, image_size, n_bins=24,
+    coverage_pct = coverage_report(ideal, image_size, n_bins=24,
                                    radius_px=args.coverage_radius, log=log)
 
     # ── 5. Save ────────────────────────────────────────────────────────────
@@ -651,10 +739,17 @@ def parse_args():
                    help="Number of K-refinement iterations (default 2)")
     p.add_argument("--grid-bins",  type=int, default=48,
                    help="Spatial bins per axis for averaging correspondences (default 48)")
+    p.add_argument("--fit-method", default="poly", choices=["poly", "tps"],
+                   help="Warp fitting method: poly (default) or tps. "
+                        "Polynomial is globally smooth and handles noisy correspondences "
+                        "correctly. TPS is more flexible but can oscillate with sparse data.")
+    p.add_argument("--poly-degree", type=int, default=5,
+                   help="Polynomial degree (default 5 = 21 parameters per axis). "
+                        "Increase to 6-7 if residuals show systematic structure.")
     p.add_argument("--smoothing",  type=float, default=0.5,
-                   help="TPS smoothing regularisation (smaller = tighter fit, default 0.5)")
+                   help="TPS smoothing regularisation — only used with --fit-method tps")
     p.add_argument("--eval-scale", type=int, default=8,
-                   help="Evaluate RBF at 1/N resolution then upsample (default 8)")
+                   help="TPS coarse-grid scale factor — only used with --fit-method tps")
     p.add_argument("--coverage-radius", type=int, default=200,
                    help="Pixel radius for coverage check (default 200)")
     p.add_argument("--min-marker-perim-rate", type=float, default=0.01,

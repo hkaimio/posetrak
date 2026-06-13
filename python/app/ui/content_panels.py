@@ -88,7 +88,11 @@ def _fmt_ts(ts: str | None) -> str:
 
 
 def _id_row_widget(full_id: str | None) -> QWidget:
-    """A compact widget showing an 8-char ID prefix with a clipboard copy button."""
+    """A compact widget showing an 8-char ID prefix with a clipboard copy button.
+
+    The button is always created (so _set_id_widget can show/hide it later),
+    but starts hidden when full_id is None.
+    """
     w = QWidget()
     row = QHBoxLayout(w)
     row.setContentsMargins(0, 0, 0, 0)
@@ -99,29 +103,39 @@ def _id_row_widget(full_id: str | None) -> QWidget:
     if full_id:
         lbl.setToolTip(full_id)
     row.addWidget(lbl)
+    btn = QToolButton()
+    btn.setText("⎘")
+    btn.setToolTip("Copy full ID")
+    btn.setFixedSize(18, 18)
+    btn.setStyleSheet("font-size: 10px; padding: 0;")
+    btn.setVisible(bool(full_id))
     if full_id:
-        btn = QToolButton()
-        btn.setText("⎘")
-        btn.setToolTip("Copy full ID")
-        btn.setFixedSize(18, 18)
-        btn.setStyleSheet("font-size: 10px; padding: 0;")
-        btn.clicked.connect(lambda: QApplication.clipboard().setText(full_id))
-        row.addWidget(btn)
+        btn.clicked.connect(lambda checked=False, v=full_id: QApplication.clipboard().setText(v))
+    row.addWidget(btn)
     row.addStretch()
-    w._lbl = lbl  # keep a reference so callers can update text/tooltip
+    w._lbl = lbl
+    w._btn = btn
     return w
 
 
 def _set_id_widget(w: QWidget, full_id: str | None, extra_tooltip: str = "") -> None:
     """Update an _id_row_widget in place with a new ID value."""
     lbl: QLabel = w._lbl
+    btn: QToolButton = w._btn
     if full_id:
         lbl.setText(full_id[:8] + "…")
         tip = full_id + (f"\n{extra_tooltip}" if extra_tooltip else "")
         lbl.setToolTip(tip)
+        try:
+            btn.clicked.disconnect()
+        except RuntimeError:
+            pass
+        btn.clicked.connect(lambda checked=False, v=full_id: QApplication.clipboard().setText(v))
+        btn.setVisible(True)
     else:
         lbl.setText("—")
         lbl.setToolTip("")
+        btn.setVisible(False)
 
 
 def _build_run_ids_group() -> tuple[QGroupBox, dict]:
@@ -164,6 +178,7 @@ def _populate_run_ids(
 _RUN_INFO_SQL = (
     "SELECT tr.id AS run_id, tr.ran_at, tr.posetrak_version, "
     "       tr.tracker_config_id, tr.skeleton_id, tr.notes, "
+    "       tr.observation_sequence_id, tr.active_camera_ids, "
     "       s.name AS skel_name, "
     "       (SELECT GROUP_CONCAT(sp.person_name, ', ') "
     "        FROM sequence_persons sp "

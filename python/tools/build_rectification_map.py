@@ -95,8 +95,8 @@ def match_points(corners, ids, board):
         img_pts = corners.reshape(-1, 2)
     if obj_pts is None or len(obj_pts) < 6:
         return None, None
-    return obj_pts.reshape(-1, 3).astype(np.float64), \
-           img_pts.reshape(-1, 2).astype(np.float64)
+    return obj_pts.reshape(-1, 3).astype(np.float32), \
+           img_pts.reshape(-1, 2).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -262,15 +262,17 @@ def build_correspondences(
         if obj_pts is None:
             continue
 
+        obj64 = obj_pts.astype(np.float64)
+        img64 = img_pts.astype(np.float64)
         ret, rvec, tvec = cv2.solvePnP(
-            obj_pts, img_pts, K, None, flags=cv2.SOLVEPNP_ITERATIVE
+            obj64, img64, K, None, flags=cv2.SOLVEPNP_ITERATIVE
         )
         if not ret:
             n_skipped += 1
             continue
 
         # Project with ideal K, no distortion
-        projected, _ = cv2.projectPoints(obj_pts, rvec, tvec, K, None)
+        projected, _ = cv2.projectPoints(obj64, rvec, tvec, K, None)
         ideal = projected.reshape(-1, 2)
 
         # Filter: ideal and observed must both be inside the image

@@ -427,6 +427,189 @@ def _poly_features(pts: np.ndarray, degree: int, W: float, H: float) -> np.ndarr
     return np.column_stack(cols)
 
 
+def _n_poly_features(degree: int) -> int:
+    return (degree + 1) * (degree + 2) // 2
+
+
+# ---------------------------------------------------------------------------
+# Collinearity-based warp fitting
+# ---------------------------------------------------------------------------
+
+def extract_collinearity_groups(
+    detections, board_cols: int, board_rows: int, min_pts: int = 4,
+) -> list[np.ndarray]:
+    """
+    For each detected frame, group corners by board row and column index.
+
+    ChArUco corner at board grid position (r, c) has ID = r*(board_cols-1) + c.
+    Points in the same board row (or column) must be collinear in the undistorted
+    image — they lie on a straight 3D line projected through a pinhole.
+
+    Returns list of (N≥min_pts, 2) float64 arrays of distorted pixel positions.
+    """
+    n_cc = board_cols - 1  # chess-corner columns per row
+
+    groups: list[np.ndarray] = []
+    for _fi, corners, ids in detections:
+        pts     = corners.reshape(-1, 2).astype(np.float64)
+        ids_flat = ids.flatten()
+
+        row_pts: dict[int, list] = {}
+        col_pts: dict[int, list] = {}
+        for pt, cid in zip(pts, ids_flat):
+            r = int(cid) // n_cc
+            c = int(cid) % n_cc
+            row_pts.setdefault(r, []).append(pt)
+            col_pts.setdefault(c, []).append(pt)
+
+        for bucket in (row_pts, col_pts):
+            for pts_list in bucket.values():
+                if len(pts_list) >= min_pts:
+                    groups.append(np.array(pts_list, dtype=np.float64))
+    return groups
+
+
+def fit_collinearity_poly(
+    groups: list[np.ndarray],
+    image_size: tuple[int, int],
+    degree: int = 5,
+    n_iters: int = 20,
+    lambda_reg: float = 10.0,
+    log=print,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Iterative linearised least-squares: find polynomial forward warp coefficients
+    (coef_x, coef_y) such that after applying the correction
+        corrected = observed + [poly_x(observed), poly_y(observed)]
+    every group of points is collinear.
+
+    No PnP, no K, no distortion model assumed.  The only constraint is that
+    board rows/columns are straight lines — a consequence of the flat board and
+    the pinhole projection model.
+
+    Regularisation (Tikhonov) + fixing the constant term = 0 prevents global
+    translation drift (the null space of the collinearity constraint).
+    """
+    W, H = image_size
+    n_coef = _n_poly_features(degree)
+    coef_x = np.zeros(n_coef)
+    coef_y = np.zeros(n_coef)
+
+    for iteration in range(n_iters):
+        A_parts, b_parts = [], []
+
+        for group in groups:
+            phi     = _poly_features(group, degree, W, H)    # (N, n_coef)
+            corrected = group + np.column_stack([phi @ coef_x, phi @ coef_y])
+
+            # Best-fit line direction via SVD
+            centroid  = corrected.mean(axis=0)
+            centered  = corrected - centroid
+            try:
+                _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+            except np.linalg.LinAlgError:
+                continue
+            normal = np.array([-Vt[0, 1], Vt[0, 0]])  # perpendicular to line direction
+
+            # Current collinearity residuals (signed distance from the line)
+            resid = centered @ normal   # (N,)
+
+            # Centred features: subtracting the group mean makes the centroid
+            # translation drop out of the gradient, so we don't fight the centroid
+            # drifting while fitting the shape.
+            phi_c    = phi - phi.mean(axis=0)              # (N, n_coef)
+            nx, ny   = normal
+            A_g      = np.hstack([nx * phi_c, ny * phi_c]) # (N, 2*n_coef)
+            b_g      = -resid                               # want residuals → 0
+
+            A_parts.append(A_g)
+            b_parts.append(b_g)
+
+        if not A_parts:
+            break
+
+        A   = np.vstack(A_parts)
+        b   = np.concatenate(b_parts)
+        ATA = A.T @ A + lambda_reg * np.eye(2 * n_coef)
+        delta = np.linalg.solve(ATA, A.T @ b)
+
+        coef_x += delta[:n_coef]
+        coef_y += delta[n_coef:]
+        # Zero constant term: no global translation (anchors image centre)
+        coef_x[0] = 0.0
+        coef_y[0] = 0.0
+
+        rms = np.sqrt(np.mean(b ** 2))
+        log(f"  Iter {iteration+1:2d}: RMS collinearity residual = {rms:.3f} px  "
+            f"|Δ| = {np.linalg.norm(delta):.5f}")
+        if np.linalg.norm(delta) < 1e-4:
+            log("  Converged.")
+            break
+
+    return coef_x, coef_y
+
+
+def build_inverse_map_from_forward_poly(
+    coef_x: np.ndarray, coef_y: np.ndarray,
+    image_size: tuple[int, int],
+    degree: int,
+    subsample: int = 4,
+    log=print,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Convert a forward polynomial warp (distorted→ideal) to the inverse map
+    (ideal→distorted) required by cv2.remap.
+
+    Strategy: evaluate the forward polynomial on a subsampled grid of distorted
+    coordinates to get scattered (ideal, distorted) pairs, then fit a second
+    polynomial inverse from ideal→distorted and evaluate on the full grid.
+    """
+    W, H = image_size
+
+    # --- Forward warp on subsampled distorted grid ---
+    gx = np.arange(0, W, subsample, dtype=np.float64)
+    gy = np.arange(0, H, subsample, dtype=np.float64)
+    GX, GY = np.meshgrid(gx, gy)
+    dist_pts  = np.column_stack([GX.ravel(), GY.ravel()])
+    phi       = _poly_features(dist_pts, degree, W, H)
+    ideal_pts = dist_pts + np.column_stack([phi @ coef_x, phi @ coef_y])
+
+    # Filter: keep points whose ideal position is close to the valid image area
+    margin = max(W, H) * 0.15
+    ok = (
+        (ideal_pts[:, 0] >= -margin) & (ideal_pts[:, 0] < W + margin) &
+        (ideal_pts[:, 1] >= -margin) & (ideal_pts[:, 1] < H + margin)
+    )
+    ideal_pts = ideal_pts[ok]
+    dist_pts  = dist_pts[ok]
+    log(f"  Forward warp: {ok.sum()}/{len(ok)} grid points within bounds")
+
+    # --- Fit inverse polynomial: ideal → distorted ---
+    log(f"  Fitting inverse degree-{degree} polynomial on {len(ideal_pts)} points...")
+    A     = _poly_features(ideal_pts, degree, W, H)
+    reg   = 1e-3 * np.eye(A.shape[1])
+    ATA   = A.T @ A + reg
+    ci_x  = np.linalg.solve(ATA, A.T @ dist_pts[:, 0])
+    ci_y  = np.linalg.solve(ATA, A.T @ dist_pts[:, 1])
+    rx    = np.std(A @ ci_x - dist_pts[:, 0])
+    ry    = np.std(A @ ci_y - dist_pts[:, 1])
+    log(f"  Inverse poly residual std: x={rx:.3f} px  y={ry:.3f} px")
+
+    # --- Evaluate inverse polynomial on every pixel row ---
+    log("  Building full-resolution map...")
+    t0   = time.perf_counter()
+    gx_r = np.arange(W, dtype=np.float64)
+    mapx = np.empty((H, W), dtype=np.float32)
+    mapy = np.empty((H, W), dtype=np.float32)
+    for row in range(H):
+        row_pts      = np.column_stack([gx_r, np.full(W, row, np.float64)])
+        A_r          = _poly_features(row_pts, degree, W, H)
+        mapx[row]    = (A_r @ ci_x).astype(np.float32)
+        mapy[row]    = (A_r @ ci_y).astype(np.float32)
+    log(f"  Map eval: {time.perf_counter() - t0:.1f}s")
+    return mapx, mapy
+
+
 def fit_warp_map(
     ideal_pts: np.ndarray,
     distorted_pts: np.ndarray,
@@ -645,46 +828,76 @@ def build_map(args) -> None:
     K = bootstrap_K(detections, board, image_size, log=log)
     K_init = K.copy()
 
-    # ── 3. Iterate: correspondences → warp → re-fit K ──────────────────────
-    mapx = mapy = None
-    for it in range(1, args.iterations + 1):
-        log(f"\n=== Iteration {it}/{args.iterations} ===")
-
-        log("Building (ideal → distorted) correspondence pairs...")
-        ideal, distorted, obj_per_frame, ideal_per_frame = build_correspondences(
-            detections, board, K, image_size, log=log
+    # ── 3. Fit warp ────────────────────────────────────────────────────────
+    if args.fit_method == "collinear":
+        # ── Collinearity path: no PnP, no K required ──────────────────────
+        log("\n=== Collinearity fitting (no PnP or K required) ===")
+        groups = extract_collinearity_groups(
+            detections, args.cols, args.rows, min_pts=4
         )
-
-        log("Fitting warp map...")
-        if args.fit_method == "poly":
-            # Polynomial uses all raw pairs directly — binning would discard data
-            fit_ideal, fit_dist = ideal, distorted
-        else:
-            # TPS needs binning to keep point count manageable
-            log(f"Spatial binning into {args.grid_bins}×{args.grid_bins} cells...")
-            fit_ideal, fit_dist, counts = spatially_bin(
-                ideal, distorted, image_size, n_bins=args.grid_bins
+        log(f"  {len(groups)} row/column groups from {len(detections)} frames")
+        if len(groups) < 10:
+            raise RuntimeError(
+                f"Only {len(groups)} collinearity groups — need ≥10. "
+                "Check --dict and --rows/--cols match the printed board."
             )
-            log(f"  {len(fit_ideal)} occupied bins  "
-                f"(median {int(np.median(counts))} pairs/bin, max {counts.max()})")
-        mapx, mapy = fit_warp_map(
-            fit_ideal, fit_dist, image_size,
-            method=args.fit_method,
-            poly_degree=args.poly_degree,
-            smoothing=args.smoothing,
-            eval_scale=args.eval_scale,
+
+        log("Fitting forward polynomial via collinearity constraint...")
+        coef_x, coef_y = fit_collinearity_poly(
+            groups, image_size,
+            degree=args.poly_degree,
+            n_iters=args.collinear_iters,
+            lambda_reg=args.collinear_reg,
             log=log,
         )
 
-        if it < args.iterations:
-            log("Re-fitting K from ideal corner positions (no video re-read needed)...")
-            K_new = refit_K(obj_per_frame, ideal_per_frame, image_size, log=log)
-            delta = np.abs(K_new - K) / (np.abs(K) + 1e-6)
-            log(f"  K change: max {delta.max()*100:.2f}%")
-            K = K_new
-            if delta.max() < 0.005:
-                log("  K converged (< 0.5%), stopping early.")
-                break
+        log("Building inverse remap map from forward polynomial...")
+        mapx, mapy = build_inverse_map_from_forward_poly(
+            coef_x, coef_y, image_size, args.poly_degree, subsample=4, log=log,
+        )
+
+        # Coverage: use all detected corner positions (distorted space)
+        ideal = np.vstack([g for g in groups])
+
+    else:
+        # ── PnP correspondence path (poly or tps) ─────────────────────────
+        mapx = mapy = None
+        for it in range(1, args.iterations + 1):
+            log(f"\n=== Iteration {it}/{args.iterations} ===")
+
+            log("Building (ideal → distorted) correspondence pairs...")
+            ideal, distorted, obj_per_frame, ideal_per_frame = build_correspondences(
+                detections, board, K, image_size, log=log
+            )
+
+            log("Fitting warp map...")
+            if args.fit_method == "poly":
+                fit_ideal, fit_dist = ideal, distorted
+            else:
+                log(f"Spatial binning into {args.grid_bins}×{args.grid_bins} cells...")
+                fit_ideal, fit_dist, counts = spatially_bin(
+                    ideal, distorted, image_size, n_bins=args.grid_bins
+                )
+                log(f"  {len(fit_ideal)} occupied bins  "
+                    f"(median {int(np.median(counts))} pairs/bin, max {counts.max()})")
+            mapx, mapy = fit_warp_map(
+                fit_ideal, fit_dist, image_size,
+                method=args.fit_method,
+                poly_degree=args.poly_degree,
+                smoothing=args.smoothing,
+                eval_scale=args.eval_scale,
+                log=log,
+            )
+
+            if it < args.iterations:
+                log("Re-fitting K from ideal corner positions...")
+                K_new = refit_K(obj_per_frame, ideal_per_frame, image_size, log=log)
+                delta = np.abs(K_new - K) / (np.abs(K) + 1e-6)
+                log(f"  K change: max {delta.max()*100:.2f}%")
+                K = K_new
+                if delta.max() < 0.005:
+                    log("  K converged (< 0.5%), stopping early.")
+                    break
 
     # ── 4. Coverage report ─────────────────────────────────────────────────
     log("\n=== Coverage analysis ===")
@@ -739,10 +952,18 @@ def parse_args():
                    help="Number of K-refinement iterations (default 2)")
     p.add_argument("--grid-bins",  type=int, default=48,
                    help="Spatial bins per axis for averaging correspondences (default 48)")
-    p.add_argument("--fit-method", default="poly", choices=["poly", "tps"],
-                   help="Warp fitting method: poly (default) or tps. "
-                        "Polynomial is globally smooth and handles noisy correspondences "
-                        "correctly. TPS is more flexible but can oscillate with sparse data.")
+    p.add_argument("--fit-method", default="poly", choices=["poly", "tps", "collinear"],
+                   help="Warp fitting method. "
+                        "poly (default): PnP-based correspondences + polynomial least-squares. "
+                        "collinear: no PnP — fits the warp so that board rows/columns are "
+                        "straight lines in the undistorted image. Works for large distortions "
+                        "where PnP-with-zero-distortion fails. "
+                        "tps: thin-plate spline on spatially-binned PnP correspondences.")
+    p.add_argument("--collinear-iters", type=int, default=20,
+                   help="Max iterations for collinearity optimizer (default 20)")
+    p.add_argument("--collinear-reg", type=float, default=10.0,
+                   help="Tikhonov regularisation for collinearity fit (default 10.0). "
+                        "Increase if the map drifts wildly at the edges.")
     p.add_argument("--poly-degree", type=int, default=5,
                    help="Polynomial degree (default 5 = 21 parameters per axis). "
                         "Increase to 6-7 if residuals show systematic structure.")

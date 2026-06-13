@@ -105,7 +105,8 @@ def match_points(corners, ids, board):
 
 def scan_video(video_path: Path, board, detector,
                skip: int = 4, sharpness_thresh: float = 50.0,
-               min_corners: int = 8, log=print):
+               min_corners: int = 8, dump_dir: Path | None = None,
+               dump_scale: float = 0.5, log=print):
     """
     Scan video, returning a list of (frame_idx, corners, ids) for every frame
     where corners are detected.  Uses a local-maxima sharpness filter to avoid
@@ -159,6 +160,10 @@ def scan_video(video_path: Path, board, detector,
     # Pass 2: detect ChArUco corners — scan sequentially (no random seeking).
     # Random seeking into large compressed 4K files is very slow and forces
     # decoder resets; a full sequential pass is consistently faster.
+    if dump_dir is not None:
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        log(f"Debug frames will be saved to: {dump_dir}  (scale={dump_scale})")
+
     sharp_set = set(sharp_idxs)
     cap = cv2.VideoCapture(str(video_path))
     detections: list[tuple[int, np.ndarray, np.ndarray]] = []
@@ -176,11 +181,58 @@ def scan_video(video_path: Path, board, detector,
             if n_checked % 20 == 0:
                 log(f"  detection: checked {n_checked}/{len(sharp_idxs)} candidates, "
                     f"{len(detections)} found so far")
+
+            if dump_dir is not None:
+                _dump_frame(frame, fi, corners, ids, board, dump_dir, dump_scale, min_corners)
         fi += 1
     cap.release()
 
     log(f"Frames with ≥{min_corners} ChArUco corners: {len(detections)}")
     return detections, (W, H)
+
+
+def _dump_frame(frame, fi, corners, ids, board, dump_dir, scale, min_corners):
+    """Save a debug image: sharp-frame candidate with detection result overlaid."""
+    vis = frame.copy()
+
+    if corners is not None and ids is not None:
+        # Draw detected ChArUco corners
+        cv2.aruco.drawDetectedCornersCharuco(vis, corners, ids, (0, 255, 0))
+        n = len(ids)
+        label     = f"f{fi}  OK  {n} corners"
+        bg_colour = (0, 128, 0)
+    else:
+        # Show why it failed: try to detect ArUco markers even without enough corners
+        aruco_dict = board.getDictionary() if hasattr(board, "getDictionary") else None
+        if aruco_dict is not None:
+            gray = cv2.cvtColor(vis, cv2.COLOR_BGR2GRAY)
+            det  = cv2.aruco.ArucoDetector(aruco_dict)
+            m_corners, m_ids, _ = det.detectMarkers(gray)
+            if m_ids is not None and len(m_ids):
+                cv2.aruco.drawDetectedMarkers(vis, m_corners, m_ids, (0, 165, 255))
+                label = f"f{fi}  ArUco: {len(m_ids)} markers, but <{min_corners} ChArUco corners"
+            else:
+                label = f"f{fi}  NO DETECTION (no ArUco markers found)"
+        else:
+            label = f"f{fi}  NO DETECTION"
+        bg_colour = (0, 0, 180)
+
+    # Resize before text so the text renders at a legible size
+    if scale != 1.0:
+        h, w = vis.shape[:2]
+        vis = cv2.resize(vis, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+    # Label banner at top
+    font, fscale, thick = cv2.FONT_HERSHEY_SIMPLEX, 1.2, 2
+    (tw, th), baseline = cv2.getTextSize(label, font, fscale, thick)
+    banner_h = th + baseline + 12
+    banner = np.full((banner_h, vis.shape[1], 3), bg_colour, dtype=np.uint8)
+    cv2.putText(banner, label, (8, th + 6), font, fscale, (255, 255, 255), thick, cv2.LINE_AA)
+    vis = np.vstack([banner, vis])
+
+    status = "ok" if corners is not None else "fail"
+    path   = dump_dir / f"frame_{fi:05d}_{status}.jpg"
+    cv2.imwrite(str(path), vis, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
 
 # ---------------------------------------------------------------------------
@@ -465,11 +517,14 @@ def build_map(args) -> None:
 
     # ── 1. Scan video ──────────────────────────────────────────────────────
     log("\n=== Step 1: Scanning video for ChArUco detections ===")
+    dump_dir = Path(args.dump_frames) if args.dump_frames else None
     raw_detections, image_size = scan_video(
         video, board, detector,
         skip=args.skip,
         sharpness_thresh=args.sharpness_threshold,
         min_corners=args.min_corners,
+        dump_dir=dump_dir,
+        dump_scale=args.dump_scale,
         log=log,
     )
     if len(raw_detections) < 6:
@@ -579,6 +634,12 @@ def parse_args():
                    help="Evaluate RBF at 1/N resolution then upsample (default 8)")
     p.add_argument("--coverage-radius", type=int, default=200,
                    help="Pixel radius for coverage check (default 200)")
+    p.add_argument("--dump-frames", default=None, metavar="DIR",
+                   help="Save all sharp-frame candidates as JPEG debug images in DIR. "
+                        "Detected boards are drawn in green; failed frames show any "
+                        "ArUco markers found in orange so you can diagnose dict mismatches.")
+    p.add_argument("--dump-scale", type=float, default=0.5,
+                   help="Scale factor for saved debug images (default 0.5 = half-res)")
     return p.parse_args()
 
 

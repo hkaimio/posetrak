@@ -946,6 +946,9 @@ class PersonCropGridWidget(QWidget):
         self._time_label: QLabel | None = None
         self._show_detected: QCheckBox | None = None   # green pose-detection keypoints
         self._show_tracked: QCheckBox | None = None    # FK skeleton lines + predicted dots
+        self._show_seg: QCheckBox | None = None         # segmentation mask overlay
+        # svid → seg_quality_run_id (or None when no masks are available)
+        self._seg_sources: dict[str, str | None] = {}
         # Per-camera track segments: svid → [(track_id, first_frame, last_frame)] sorted by first_frame
         self._track_segs: dict[str, list[tuple[int, int, int]]] = {}
         # Pre-loaded per-camera data (indexed by shot_video_id or camera_instance_id)
@@ -1041,6 +1044,16 @@ class PersonCropGridWidget(QWidget):
             for r in cam_rows
         ]
 
+        # Find seg_quality_run_id with the most masks for each camera
+        for cam in self._cameras:
+            svid = cam["shot_video_id"]
+            row_sq = self._conn.execute(
+                "SELECT seg_quality_run_id, COUNT(*) n FROM seg_masks "
+                "WHERE shot_video_id=? GROUP BY seg_quality_run_id ORDER BY n DESC LIMIT 1",
+                (svid,),
+            ).fetchone()
+            self._seg_sources[svid] = row_sq["seg_quality_run_id"] if row_sq else None
+
         # Pre-load pose_observations keypoints: camera_instance_id → frame → kp
         for r in self._conn.execute(
             "SELECT camera_instance_id, video_frame, kp_blob "
@@ -1119,11 +1132,17 @@ class PersonCropGridWidget(QWidget):
         self._show_tracked = QCheckBox("Tracked skeleton")
         self._show_tracked.setChecked(True)
         self._show_tracked.stateChanged.connect(lambda _: self._load_frame(self._current_t))
+        has_seg = any(v is not None for v in self._seg_sources.values())
+        self._show_seg = QCheckBox("Segmentation")
+        self._show_seg.setChecked(has_seg)
+        self._show_seg.setEnabled(has_seg)
+        self._show_seg.stateChanged.connect(lambda _: self._load_frame(self._current_t))
 
         overlay_row = QHBoxLayout()
         overlay_row.addWidget(QLabel("Show:"))
         overlay_row.addWidget(self._show_detected)
         overlay_row.addWidget(self._show_tracked)
+        overlay_row.addWidget(self._show_seg)
         overlay_row.addStretch()
 
         layout = QVBoxLayout(self)
@@ -1405,6 +1424,7 @@ class PersonCropGridWidget(QWidget):
 
         show_detected = self._show_detected is None or self._show_detected.isChecked()
         show_tracked = self._show_tracked is None or self._show_tracked.isChecked()
+        show_seg = self._show_seg is not None and self._show_seg.isChecked()
 
         tracking_step: int | None = None
         if self._tracking_timestamps:
@@ -1463,7 +1483,55 @@ class PersonCropGridWidget(QWidget):
             jpeg_h = float(row["height_px"] or crop_bgr.shape[0])
             src_scale = jpeg_h / src_h if src_h > 0 else 1.0
 
-            # Convert image to QPixmap (no overlays drawn into the image)
+            # Segmentation mask overlay (blended directly into the JPEG before Qt conversion)
+            if show_seg:
+                sqr_id = self._seg_sources.get(svid)
+                if sqr_id and track_id is not None:
+                    mask_row = self._conn.execute(
+                        "SELECT mask_blob FROM seg_masks "
+                        "WHERE seg_quality_run_id=? AND shot_video_id=? AND frame_idx=?",
+                        (sqr_id, svid, frame_idx),
+                    ).fetchone()
+                    if mask_row:
+                        mask_buf = np.frombuffer(bytes(mask_row["mask_blob"]), dtype=np.uint8)
+                        full_mask = cv2.imdecode(mask_buf, cv2.IMREAD_UNCHANGED)
+                        if full_mask is not None:
+                            if full_mask.ndim == 3:
+                                full_mask = full_mask[:, :, 0]
+                            # Crop mask to the same source region as the JPEG
+                            src_w_val = row["src_w"] if row["src_w"] is not None else (
+                                crop_bgr.shape[1] / src_scale if src_scale > 0 else crop_bgr.shape[1]
+                            )
+                            m_h, m_w = full_mask.shape[:2]
+                            mx1 = max(0, int(x1))
+                            my1 = max(0, int(y1))
+                            mx2 = max(mx1 + 1, min(m_w, int(x1 + src_w_val)))
+                            my2 = max(my1 + 1, min(m_h, int(y1 + float(row["src_h"] or src_h))))
+                            mask_crop = full_mask[my1:my2, mx1:mx2]
+                            if mask_crop.size > 0:
+                                mask_crop = cv2.resize(
+                                    mask_crop,
+                                    (crop_bgr.shape[1], crop_bgr.shape[0]),
+                                    interpolation=cv2.INTER_NEAREST,
+                                )
+                                # DAVIS palette — BGR
+                                _DAVIS_COLORS_BGR = [
+                                    (80, 80, 240), (120, 200, 80), (240, 120, 80),
+                                    (60, 200, 240), (240, 80, 180), (220, 60, 60),
+                                    (80, 240, 140), (60, 140, 240), (240, 200, 60),
+                                ]
+                                color_idx = (track_id - 1) % len(_DAVIS_COLORS_BGR)
+                                color_bgr = _DAVIS_COLORS_BGR[color_idx]
+                                fg = mask_crop == track_id
+                                if fg.any():
+                                    overlay = crop_bgr.astype(np.float32)
+                                    for c, cv_ in enumerate(color_bgr):
+                                        overlay[:, :, c][fg] = (
+                                            overlay[:, :, c][fg] * 0.55 + cv_ * 0.45
+                                        )
+                                    crop_bgr = overlay.astype(np.uint8)
+
+            # Convert image to QPixmap (no vector overlays drawn into the image)
             crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
             h_img, w_img = crop_rgb.shape[:2]
             qimg = QImage(
@@ -1623,6 +1691,16 @@ class _RunInfoPane(QWidget):
     # Construction
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _id_label(full_id: str | None) -> QLabel:
+        """Label that shows an 8-char prefix and has the full ID as tooltip + selectable."""
+        lbl = QLabel(full_id[:8] + "…" if full_id else "—")
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        if full_id:
+            lbl.setToolTip(full_id)
+        lbl.setStyleSheet("font-family: monospace; font-size: 10px;")
+        return lbl
+
     def _build(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
@@ -1639,12 +1717,32 @@ class _RunInfoPane(QWidget):
         self._ri_frames = QLabel("—")
         self._ri_cfg = QLabel("—")
         self._ri_cfg.setWordWrap(True)
+        self._ri_notes = QLabel("—")
+        self._ri_notes.setWordWrap(True)
         run_form.addRow("Skeleton:", self._ri_skeleton)
         run_form.addRow("Person:", self._ri_person)
         run_form.addRow("Tracked at:", self._ri_ran_at)
         run_form.addRow("Frames:", self._ri_frames)
         run_form.addRow("Config:", self._ri_cfg)
+        run_form.addRow("Notes:", self._ri_notes)
         root.addWidget(run_box)
+
+        # --- IDs (UUIDs / SHA for cross-referencing) ---
+        ids_box = QGroupBox("IDs")
+        ids_form = QFormLayout(ids_box)
+        ids_form.setHorizontalSpacing(6)
+        ids_form.setVerticalSpacing(1)
+        self._ri_run_id       = self._id_label(None)
+        self._ri_skel_sha     = self._id_label(None)
+        self._ri_det_run_id   = self._id_label(None)
+        self._ri_trial_id     = self._id_label(None)
+        self._ri_capture_id   = self._id_label(None)
+        ids_form.addRow("Run:", self._ri_run_id)
+        ids_form.addRow("Skeleton:", self._ri_skel_sha)
+        ids_form.addRow("Detection:", self._ri_det_run_id)
+        ids_form.addRow("Trial:", self._ri_trial_id)
+        ids_form.addRow("Capture:", self._ri_capture_id)
+        root.addWidget(ids_box)
 
         # --- Current frame ---
         frame_box = QGroupBox("Current frame")
@@ -1690,8 +1788,12 @@ class _RunInfoPane(QWidget):
 
         # Clear labels
         for lbl in (self._ri_skeleton, self._ri_person, self._ri_ran_at,
-                    self._ri_frames, self._ri_cfg):
+                    self._ri_frames, self._ri_cfg, self._ri_notes):
             lbl.setText("—")
+        for lbl in (self._ri_run_id, self._ri_skel_sha, self._ri_det_run_id,
+                    self._ri_trial_id, self._ri_capture_id):
+            lbl.setText("—")
+            lbl.setToolTip("")
         for lbl in (self._fi_step, self._fi_time, self._fi_inliers,
                     self._fi_nis, self._fi_cov):
             lbl.setText("—")
@@ -1702,13 +1804,22 @@ class _RunInfoPane(QWidget):
             return
 
         run = self._conn.execute(
-            "SELECT tr.ran_at, tr.posetrak_version, tr.tracker_config_id, "
+            "SELECT tr.id AS run_id, tr.ran_at, tr.posetrak_version, "
+            "       tr.tracker_config_id, tr.skeleton_id, tr.notes, "
             "       s.name AS skel_name, "
             "       (SELECT GROUP_CONCAT(sp.person_name, ', ') "
             "        FROM sequence_persons sp "
-            "        WHERE sp.sequence_id = tr.observation_sequence_id) AS person_names "
+            "        WHERE sp.sequence_id = tr.observation_sequence_id) AS person_names, "
+            "       dr.id AS detection_run_id, "
+            "       t.id AS trial_id, t.name AS trial_name, "
+            "       cap.id AS capture_id, cap.label AS capture_label "
             "FROM tracking_runs tr "
             "LEFT JOIN skeletons s ON s.id = tr.skeleton_id "
+            "LEFT JOIN pose_observation_sequences pos "
+            "       ON pos.id = tr.observation_sequence_id "
+            "LEFT JOIN detection_runs dr ON dr.id = pos.detection_run_id "
+            "LEFT JOIN trials t ON t.id = dr.trial_id "
+            "LEFT JOIN captures cap ON cap.id = t.capture_id "
             "WHERE tr.id = ?",
             (run_id,),
         ).fetchone()
@@ -1725,12 +1836,39 @@ class _RunInfoPane(QWidget):
         self._ri_person.setText(run["person_names"] or "—")
         self._ri_ran_at.setText(_fmt_ts(run["ran_at"]))
         self._ri_frames.setText(str(n_frames))
+        notes = run["notes"]
+        self._ri_notes.setText(notes if notes else "—")
+        self._ri_notes.setVisible(bool(notes))
+
+        # IDs
+        def _set_id(lbl: QLabel, val: str | None) -> None:
+            if val:
+                lbl.setText(val[:8] + "…")
+                lbl.setToolTip(val)
+            else:
+                lbl.setText("—")
+                lbl.setToolTip("")
+
+        _set_id(self._ri_run_id, run["run_id"])
+        _set_id(self._ri_skel_sha, run["skeleton_id"])
+        _set_id(self._ri_det_run_id, run["detection_run_id"])
+        _set_id(self._ri_trial_id, run["trial_id"])
+        _set_id(self._ri_capture_id, run["capture_id"])
+        if run["trial_name"]:
+            self._ri_trial_id.setToolTip(
+                f"{run['trial_id']}\n{run['trial_name']}"
+            )
+        if run["capture_label"]:
+            self._ri_capture_id.setToolTip(
+                f"{run['capture_id']}\n{run['capture_label']}"
+            )
 
         # Try to load tracker config params
         cfg_id = run["tracker_config_id"]
         cfg = self._conn.execute(
-            "SELECT name, process_noise_std, process_noise_vel_std, "
-            "       measurement_noise_std, outlier_threshold, tracker_fps "
+            "SELECT name, process_noise_std, process_noise_vel_std, velocity_half_life_s, "
+            "       measurement_noise_std, outlier_threshold, tracker_fps, "
+            "       velocity_mode_camera_ids, velocity_measurement_noise_std "
             "FROM tracker_configs WHERE id=?",
             (cfg_id,),
         ).fetchone() if cfg_id else None
@@ -1738,10 +1876,19 @@ class _RunInfoPane(QWidget):
             parts = [cfg["name"] or cfg_id[:8]]
             if cfg["process_noise_std"] is not None:
                 parts.append(f"Q={cfg['process_noise_std']}")
+            if cfg["process_noise_vel_std"] is not None:
+                parts.append(f"Qv={cfg['process_noise_vel_std']}")
+            if cfg["velocity_half_life_s"] is not None:
+                parts.append(f"vhl={cfg['velocity_half_life_s']}s")
             if cfg["measurement_noise_std"] is not None:
                 parts.append(f"R={cfg['measurement_noise_std']}")
             if cfg["outlier_threshold"] is not None:
                 parts.append(f"thr={cfg['outlier_threshold']}")
+            vel_cams = cfg["velocity_mode_camera_ids"]
+            if vel_cams:
+                parts.append(f"vel_cams={vel_cams}")
+            if cfg["velocity_measurement_noise_std"] is not None:
+                parts.append(f"Rvel={cfg['velocity_measurement_noise_std']}")
             self._ri_cfg.setText("  ".join(parts))
         else:
             self._ri_cfg.setText(cfg_id[:12] + "…" if cfg_id else "—")

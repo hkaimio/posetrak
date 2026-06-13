@@ -332,7 +332,11 @@ def main() -> int:
     ap.add_argument("--sequences",  nargs="+", metavar="SEQ_ID",
                     help="Pose observation sequence IDs (default: from most recent run)")
     ap.add_argument("--skeleton",   metavar="SKEL_ID",
-                    help="Skeleton ID (default: from most recent run)")
+                    help="Skeleton ID used for all persons (default: from most recent run)")
+    ap.add_argument("--skeleton-map", nargs="+", metavar="PERSON:SKEL",
+                    help="Per-person skeleton override: 'PersonName:skeleton_name_or_id_prefix'. "
+                         "E.g. 'Timo:Timo scaling attempt 1'. "
+                         "Matched by skeleton name (case-insensitive prefix) or ID prefix.")
     ap.add_argument("--person-id",  type=int, default=0)
     ap.add_argument("--binary",     default="optbuild/cli/posetrak")
     ap.add_argument("--out-dir",    default="/tmp/posetrak_sweep")
@@ -365,6 +369,35 @@ def main() -> int:
     print(f"Sequences   : {sequences}")
     print(f"Skeleton    : {skeleton_id}")
 
+    # Build per-person skeleton map from --skeleton-map args
+    # Format: "PersonName:skeleton_name_or_id_prefix"
+    person_skeleton_map: dict[str, str] = {}  # person_name → resolved skeleton_id
+    if args.skeleton_map:
+        for entry in args.skeleton_map:
+            if ":" not in entry:
+                print(f"warning: --skeleton-map entry {entry!r} has no colon, skipping",
+                      file=sys.stderr)
+                continue
+            person_name, skel_ref = entry.split(":", 1)
+            person_name = person_name.strip()
+            skel_ref = skel_ref.strip()
+            # Try ID prefix first, then name prefix (case-insensitive)
+            row = conn.execute(
+                "SELECT id FROM skeletons WHERE id LIKE ? ORDER BY rowid DESC LIMIT 1",
+                (skel_ref + "%",),
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT id FROM skeletons WHERE lower(name) LIKE lower(?) "
+                    "ORDER BY rowid DESC LIMIT 1",
+                    (skel_ref + "%",),
+                ).fetchone()
+            if row is None:
+                print(f"error: skeleton not found for map entry {entry!r}", file=sys.stderr)
+                return 1
+            person_skeleton_map[person_name] = row["id"]
+            print(f"Skeleton map: {person_name!r} → {row['id'][:12]}…")
+
     # Resolve camera labels and marker names from first sequence's run
     seq0_run = conn.execute(
         "SELECT active_camera_ids, marker_names FROM tracking_runs "
@@ -385,6 +418,9 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     records: list[dict] = []
     run_idx = 0
+    agg_label = {"velocity_noise": "vel_noise",
+                 "measurement_noise": "meas_noise",
+                 "outlier_threshold": "outlier_thr"}.get(SWEEP_MODE, SWEEP_MODE)
 
     for sweep_value in SWEEP_VALUES:
         if SWEEP_MODE == "velocity_noise":
@@ -400,10 +436,13 @@ def main() -> int:
             pname = person_label(conn, seq_id)
             print(f"[{run_idx:3d}] {label}  person={pname}", end="  ", flush=True)
 
+            # Use per-person skeleton if provided, otherwise fall back to global
+            skel_for_run = person_skeleton_map.get(pname, skeleton_id)
+
             run_out = out_dir / f"run_{run_idx:03d}"
             t0 = time.perf_counter()
             run_id = run_tracker(
-                binary, db_path, seq_id, skeleton_id, child_id,
+                binary, db_path, seq_id, skel_for_run, child_id,
                 args.person_id, args.time_start, args.time_end, run_out,
             )
             elapsed = time.perf_counter() - t0
@@ -421,9 +460,21 @@ def main() -> int:
                 records.append({**base_record, "run_id": None, "status": "FAILED"})
                 continue
 
-            # Re-open after tracker wrote to DB
+            # Re-open after tracker wrote to DB and write sweep notes to the run
             conn.close()
             conn = open_db(db_path)
+            notes_str = (
+                f"param_sweep  mode={SWEEP_MODE}  {agg_label}={sweep_value}  "
+                f"meas={FIXED_MEAS_NOISE if SWEEP_MODE != 'measurement_noise' else sweep_value}  "
+                f"vel_noise={FIXED_VELOCITY_NOISE if SWEEP_MODE != 'velocity_noise' else sweep_value}  "
+                f"vel_cams={VELOCITY_CAMERAS}  thr="
+                f"{sweep_value if SWEEP_MODE == 'outlier_threshold' else 4.0}"
+            )
+            with conn:
+                conn.execute(
+                    "UPDATE tracking_runs SET notes = ? WHERE id = ?",
+                    (notes_str, run_id),
+                )
 
             metrics = compute_metrics(conn, run_id, cam_labels, marker_names, args.person_id)
             if metrics is None:
@@ -485,9 +536,6 @@ def main() -> int:
     )
 
     sweep_col = "sweep_value"
-    agg_label = {"velocity_noise": "vel_noise",
-                 "measurement_noise": "meas_noise",
-                 "outlier_threshold": "outlier_thr"}.get(SWEEP_MODE, SWEEP_MODE)
 
     # Aggregate over persons: mean score per sweep value
     agg_cols: dict = dict(

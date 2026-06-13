@@ -457,7 +457,8 @@ def _load_frames_for_detections(detections):
 # ---------------------------------------------------------------------------
 
 def build_map(args) -> None:
-    log = print
+    def log(*a, **kw):
+        print(*a, **kw, flush=True)
     video  = Path(args.video)
     board  = make_board(args.rows, args.cols, args.square, args.marker_ratio, args.dict)
     detector = cv2.aruco.CharucoDetector(board)

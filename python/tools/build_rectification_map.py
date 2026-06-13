@@ -156,17 +156,27 @@ def scan_video(video_path: Path, board, detector,
                 sharp_idxs.append(lap_idxs[i])
         log(f"Sharp frames selected: {len(sharp_idxs)}")
 
-    # Pass 2: detect ChArUco corners in sharp frames
+    # Pass 2: detect ChArUco corners — scan sequentially (no random seeking).
+    # Random seeking into large compressed 4K files is very slow and forces
+    # decoder resets; a full sequential pass is consistently faster.
+    sharp_set = set(sharp_idxs)
     cap = cv2.VideoCapture(str(video_path))
     detections: list[tuple[int, np.ndarray, np.ndarray]] = []
-    for fi in sharp_idxs:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+    fi = 0
+    n_checked = 0
+    while True:
         ret, frame = cap.read()
         if not ret:
-            continue
-        corners, ids = detect_corners(frame, board, detector, min_corners)
-        if corners is not None:
-            detections.append((fi, corners, ids))
+            break
+        if fi in sharp_set:
+            corners, ids = detect_corners(frame, board, detector, min_corners)
+            if corners is not None:
+                detections.append((fi, corners, ids))
+            n_checked += 1
+            if n_checked % 20 == 0:
+                log(f"  detection: checked {n_checked}/{len(sharp_idxs)} candidates, "
+                    f"{len(detections)} found so far")
+        fi += 1
     cap.release()
 
     log(f"Frames with ≥{min_corners} ChArUco corners: {len(detections)}")
@@ -411,26 +421,35 @@ def coverage_report(
 # ---------------------------------------------------------------------------
 
 def refit_K(
-    detections, board, detector, mapx, mapy, image_size,
+    video_path: Path, detections, board, detector, mapx, mapy, image_size,
     min_corners: int = 8, log=print,
 ) -> np.ndarray:
     """
     Apply the current warp map to each detected frame, re-detect ChArUco corners,
     calibrate K with a standard (no-distortion) model on the undistorted images.
+    Scans the video sequentially to avoid storing frames in RAM.
     """
+    det_set = {item[0] for item in detections}
     obj_pts_list, img_pts_list = [], []
     n_ok = 0
-    for _fi, frame_or_idx, _ids in _load_frames_for_detections(detections):
-        undist = cv2.remap(frame_or_idx, mapx, mapy, cv2.INTER_LINEAR)
-        corners, ids = detect_corners(undist, board, detector, min_corners)
-        if corners is None:
-            continue
-        obj_pts, img_pts = match_points(corners, ids, board)
-        if obj_pts is None:
-            continue
-        obj_pts_list.append(obj_pts)
-        img_pts_list.append(img_pts)
-        n_ok += 1
+
+    cap = cv2.VideoCapture(str(video_path))
+    fi = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if fi in det_set:
+            undist = cv2.remap(frame, mapx, mapy, cv2.INTER_LINEAR)
+            corners, ids = detect_corners(undist, board, detector, min_corners)
+            if corners is not None:
+                obj_pts, img_pts = match_points(corners, ids, board)
+                if obj_pts is not None:
+                    obj_pts_list.append(obj_pts)
+                    img_pts_list.append(img_pts)
+                    n_ok += 1
+        fi += 1
+    cap.release()
 
     if not obj_pts_list:
         raise RuntimeError("No detections in undistorted frames for K refinement.")
@@ -442,14 +461,6 @@ def refit_K(
     log(f"  Re-fit K from {n_ok} undistorted frames  (reproj error {ret:.2f} px)")
     log(f"  fx={K[0,0]:.1f}  fy={K[1,1]:.1f}  cx={K[0,2]:.1f}  cy={K[1,2]:.1f}")
     return K
-
-
-def _load_frames_for_detections(detections):
-    """Detections are (frame_idx, corners, ids) + we stored the frame BGR alongside."""
-    for item in detections:
-        fi, corners, ids = item[:3]
-        frame = item[3] if len(item) > 3 else None
-        yield fi, frame, ids
 
 
 # ---------------------------------------------------------------------------
@@ -472,25 +483,13 @@ def build_map(args) -> None:
         min_corners=args.min_corners,
         log=log,
     )
-    if len(raw_detections) < 10:
+    if len(raw_detections) < 6:
         raise RuntimeError(
-            f"Only {len(raw_detections)} frames detected — need ≥10. "
-            "Try --sharpness-threshold 0 to accept all frames, or check --dict."
+            f"Only {len(raw_detections)} frames detected — need ≥6. "
+            "Check --dict matches the printed board, or lower --min-corners."
         )
     W, H = image_size
-
-    # Store frames alongside detections so we can re-read them for K refinement.
-    # Re-open video and read the detected frames only.
-    log("Loading detected frames into memory...")
-    cap = cv2.VideoCapture(str(video))
-    detections: list[tuple] = []
-    for fi, corners, ids in raw_detections:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
-        ret, frame = cap.read()
-        if ret:
-            detections.append((fi, corners, ids, frame))
-    cap.release()
-    log(f"  Loaded {len(detections)} frames")
+    detections = raw_detections  # list of (fi, corners, ids) — no frames stored
 
     # ── 2. Bootstrap K ─────────────────────────────────────────────────────
     log("\n=== Step 2: Bootstrap K from central-board frames ===")
@@ -521,10 +520,9 @@ def build_map(args) -> None:
         )
 
         if it < args.iterations:
-            log("Re-fitting K on undistorted frames...")
+            log("Re-fitting K on undistorted frames (sequential video scan)...")
             K_new = refit_K(
-                [(fi, frame, ids) for fi, _corners, ids, frame in detections],
-                board, detector, mapx, mapy, image_size,
+                video, detections, board, detector, mapx, mapy, image_size,
                 min_corners=args.min_corners, log=log,
             )
             delta = np.abs(K_new - K) / (np.abs(K) + 1e-6)

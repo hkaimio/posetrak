@@ -76,6 +76,26 @@ def make_board(rows: int, cols: int, square: float,
         return cv2.aruco.CharucoBoard_create(cols, rows, square, marker_len, aruco_dict)
 
 
+def make_detector(board, min_marker_perim_rate: float = 0.01):
+    """
+    Create a CharucoDetector with relaxed parameters for detecting small or
+    distant markers in wide-angle footage.
+
+    Default OpenCV minMarkerPerimeterRate=0.03 means a marker must be ≥115 px
+    perimeter in a 3840 px frame — too large when the board is far from the
+    camera.  0.01 allows markers down to ~38 px perimeter.
+    """
+    det_params = cv2.aruco.DetectorParameters()
+    det_params.minMarkerPerimeterRate  = min_marker_perim_rate
+    det_params.maxMarkerPerimeterRate  = 4.0
+    det_params.adaptiveThreshWinSizeMin  = 3
+    det_params.adaptiveThreshWinSizeMax  = 53   # larger range catches blurry markers
+    det_params.adaptiveThreshWinSizeStep = 10
+    det_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+    charuco_params = cv2.aruco.CharucoParameters()
+    return cv2.aruco.CharucoDetector(board, charuco_params, det_params)
+
+
 def detect_corners(frame: np.ndarray, board, detector,
                    min_corners: int = 8) -> tuple[np.ndarray | None, np.ndarray | None]:
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
@@ -495,8 +515,11 @@ def refit_K(
     PnP-projected positions assuming zero distortion), so calibrateCamera
     on them directly gives an improved K.
     """
+    # calibrateCamera requires float32 Point2f/Point3f
+    obj32  = [p.astype(np.float32) for p in obj_pts_per_frame]
+    img32  = [p.astype(np.float32) for p in ideal_per_frame]
     ret, K, _dist, _rv, _tv = cv2.calibrateCamera(
-        obj_pts_per_frame, ideal_per_frame, image_size, None, None,
+        obj32, img32, image_size, None, None,
         flags=cv2.CALIB_FIX_ASPECT_RATIO,
     )
     log(f"  Re-fit K from {len(obj_pts_per_frame)} frames  (reproj error {ret:.2f} px)")
@@ -512,8 +535,8 @@ def build_map(args) -> None:
     def log(*a, **kw):
         print(*a, **kw, flush=True)
     video  = Path(args.video)
-    board  = make_board(args.rows, args.cols, args.square, args.marker_ratio, args.dict)
-    detector = cv2.aruco.CharucoDetector(board)
+    board    = make_board(args.rows, args.cols, args.square, args.marker_ratio, args.dict)
+    detector = make_detector(board, min_marker_perim_rate=args.min_marker_perim_rate)
 
     # ── 1. Scan video ──────────────────────────────────────────────────────
     log("\n=== Step 1: Scanning video for ChArUco detections ===")
@@ -634,6 +657,10 @@ def parse_args():
                    help="Evaluate RBF at 1/N resolution then upsample (default 8)")
     p.add_argument("--coverage-radius", type=int, default=200,
                    help="Pixel radius for coverage check (default 200)")
+    p.add_argument("--min-marker-perim-rate", type=float, default=0.01,
+                   help="Minimum ArUco marker perimeter as fraction of image width. "
+                        "Default 0.01 (~38 px at 4K) to detect distant markers. "
+                        "OpenCV default is 0.03 (~115 px) which misses small markers.")
     p.add_argument("--dump-frames", default=None, metavar="DIR",
                    help="Save all sharp-frame candidates as JPEG debug images in DIR. "
                         "Detected boards are drawn in green; failed frames show any "

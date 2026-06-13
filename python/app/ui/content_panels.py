@@ -13,6 +13,7 @@ from math import ceil
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSplitter,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -83,6 +85,129 @@ def _scrollable(inner: QWidget) -> QScrollArea:
 
 def _fmt_ts(ts: str | None) -> str:
     return ts[:16].replace("T", " ") if ts else "—"
+
+
+def _id_row_widget(full_id: str | None) -> QWidget:
+    """A compact widget showing an 8-char ID prefix with a clipboard copy button."""
+    w = QWidget()
+    row = QHBoxLayout(w)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(2)
+    lbl = QLabel(full_id[:8] + "…" if full_id else "—")
+    lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    lbl.setStyleSheet("font-family: monospace; font-size: 10px;")
+    if full_id:
+        lbl.setToolTip(full_id)
+    row.addWidget(lbl)
+    if full_id:
+        btn = QToolButton()
+        btn.setText("⎘")
+        btn.setToolTip("Copy full ID")
+        btn.setFixedSize(18, 18)
+        btn.setStyleSheet("font-size: 10px; padding: 0;")
+        btn.clicked.connect(lambda: QApplication.clipboard().setText(full_id))
+        row.addWidget(btn)
+    row.addStretch()
+    w._lbl = lbl  # keep a reference so callers can update text/tooltip
+    return w
+
+
+def _set_id_widget(w: QWidget, full_id: str | None, extra_tooltip: str = "") -> None:
+    """Update an _id_row_widget in place with a new ID value."""
+    lbl: QLabel = w._lbl
+    if full_id:
+        lbl.setText(full_id[:8] + "…")
+        tip = full_id + (f"\n{extra_tooltip}" if extra_tooltip else "")
+        lbl.setToolTip(tip)
+    else:
+        lbl.setText("—")
+        lbl.setToolTip("")
+
+
+def _build_run_ids_group() -> tuple[QGroupBox, dict]:
+    """Build a QGroupBox with run/detection/trial/capture/skeleton IDs and return it
+    together with a dict of the id_row_widgets so callers can update them later."""
+    box = QGroupBox("IDs")
+    form = QFormLayout(box)
+    form.setHorizontalSpacing(6)
+    form.setVerticalSpacing(1)
+    widgets: dict[str, QWidget] = {
+        "run":       _id_row_widget(None),
+        "skeleton":  _id_row_widget(None),
+        "detection": _id_row_widget(None),
+        "trial":     _id_row_widget(None),
+        "capture":   _id_row_widget(None),
+    }
+    form.addRow("Run:", widgets["run"])
+    form.addRow("Skeleton:", widgets["skeleton"])
+    form.addRow("Detection:", widgets["detection"])
+    form.addRow("Trial:", widgets["trial"])
+    form.addRow("Capture:", widgets["capture"])
+    return box, widgets
+
+
+def _populate_run_ids(
+    widgets: dict[str, QWidget],
+    run: sqlite3.Row,
+) -> None:
+    """Fill ID widgets from a row that has run_id, skeleton_id, detection_run_id,
+    trial_id, trial_name, capture_id, capture_label columns."""
+    _set_id_widget(widgets["run"],       run["run_id"])
+    _set_id_widget(widgets["skeleton"],  run["skeleton_id"])
+    _set_id_widget(widgets["detection"], run["detection_run_id"])
+    _set_id_widget(widgets["trial"],     run["trial_id"],
+                   extra_tooltip=run["trial_name"] or "")
+    _set_id_widget(widgets["capture"],   run["capture_id"],
+                   extra_tooltip=run["capture_label"] or "")
+
+
+_RUN_INFO_SQL = (
+    "SELECT tr.id AS run_id, tr.ran_at, tr.posetrak_version, "
+    "       tr.tracker_config_id, tr.skeleton_id, tr.notes, "
+    "       s.name AS skel_name, "
+    "       (SELECT GROUP_CONCAT(sp.person_name, ', ') "
+    "        FROM sequence_persons sp "
+    "        WHERE sp.sequence_id = tr.observation_sequence_id) AS person_names, "
+    "       dr.id AS detection_run_id, "
+    "       t.id AS trial_id, t.name AS trial_name, "
+    "       cap.id AS capture_id, cap.label AS capture_label "
+    "FROM tracking_runs tr "
+    "LEFT JOIN skeletons s ON s.id = tr.skeleton_id "
+    "LEFT JOIN pose_observation_sequences pos "
+    "       ON pos.id = tr.observation_sequence_id "
+    "LEFT JOIN detection_runs dr ON dr.id = pos.detection_run_id "
+    "LEFT JOIN trials t ON t.id = dr.trial_id "
+    "LEFT JOIN captures cap ON cap.id = t.capture_id "
+    "WHERE tr.id = ?"
+)
+
+_CFG_SQL = (
+    "SELECT name, process_noise_std, process_noise_vel_std, velocity_half_life_s, "
+    "       measurement_noise_std, outlier_threshold, tracker_fps, "
+    "       velocity_mode_camera_ids, velocity_measurement_noise_std "
+    "FROM tracker_configs WHERE id=?"
+)
+
+
+def _cfg_text(cfg: sqlite3.Row | None, cfg_id: str | None) -> str:
+    if cfg is None:
+        return (cfg_id[:12] + "…" if cfg_id else "—")
+    parts = [cfg["name"] or (cfg_id[:8] if cfg_id else "?")]
+    if cfg["process_noise_std"] is not None:
+        parts.append(f"Q={cfg['process_noise_std']}")
+    if cfg["process_noise_vel_std"] is not None:
+        parts.append(f"Qv={cfg['process_noise_vel_std']}")
+    if cfg["velocity_half_life_s"] is not None:
+        parts.append(f"vhl={cfg['velocity_half_life_s']}s")
+    if cfg["measurement_noise_std"] is not None:
+        parts.append(f"R={cfg['measurement_noise_std']}")
+    if cfg["outlier_threshold"] is not None:
+        parts.append(f"thr={cfg['outlier_threshold']}")
+    if cfg["velocity_mode_camera_ids"]:
+        parts.append(f"vel_cams={cfg['velocity_mode_camera_ids']}")
+    if cfg["velocity_measurement_noise_std"] is not None:
+        parts.append(f"Rvel={cfg['velocity_measurement_noise_std']}")
+    return "  ".join(parts)
 
 
 def _fmt_time(s: float | None) -> str:
@@ -1044,7 +1169,10 @@ class PersonCropGridWidget(QWidget):
             for r in cam_rows
         ]
 
-        # Find seg_quality_run_id with the most masks for each camera
+        # Find seg_quality_run_id with the most masks for each camera, and store
+        # video dimensions for coordinate scaling (masks may be at a lower resolution
+        # than the video, e.g. FHD masks on 4K cameras).
+        self._video_dims: dict[str, tuple[int, int]] = {}  # svid → (w, h)
         for cam in self._cameras:
             svid = cam["shot_video_id"]
             row_sq = self._conn.execute(
@@ -1053,6 +1181,17 @@ class PersonCropGridWidget(QWidget):
                 (svid,),
             ).fetchone()
             self._seg_sources[svid] = row_sq["seg_quality_run_id"] if row_sq else None
+            dim_row = self._conn.execute(
+                "SELECT COALESCE(cm.width_px, ic.image_width) AS vw, "
+                "       COALESCE(cm.height_px, ic.image_height) AS vh "
+                "FROM capture_videos cv "
+                "LEFT JOIN camera_modes cm ON cm.id = cv.camera_mode_id "
+                "LEFT JOIN intrinsics_calibrations ic ON ic.id = cv.intrinsics_calibration_id "
+                "WHERE cv.id = ?",
+                (svid,),
+            ).fetchone()
+            if dim_row and dim_row["vw"] and dim_row["vh"]:
+                self._video_dims[svid] = (int(dim_row["vw"]), int(dim_row["vh"]))
 
         # Pre-load pose_observations keypoints: camera_instance_id → frame → kp
         for r in self._conn.execute(
@@ -1498,15 +1637,24 @@ class PersonCropGridWidget(QWidget):
                         if full_mask is not None:
                             if full_mask.ndim == 3:
                                 full_mask = full_mask[:, :, 0]
-                            # Crop mask to the same source region as the JPEG
+                            # Crop mask to the same source region as the JPEG.
+                            # Masks may be stored at a lower resolution than the video
+                            # (e.g. FHD masks on 4K cameras), so scale src coordinates.
+                            m_h, m_w = full_mask.shape[:2]
+                            vid_dims = self._video_dims.get(svid)
+                            if vid_dims and vid_dims[0] > 0 and vid_dims[1] > 0:
+                                sx_scale = m_w / vid_dims[0]
+                                sy_scale = m_h / vid_dims[1]
+                            else:
+                                sx_scale = sy_scale = 1.0
                             src_w_val = row["src_w"] if row["src_w"] is not None else (
                                 crop_bgr.shape[1] / src_scale if src_scale > 0 else crop_bgr.shape[1]
                             )
-                            m_h, m_w = full_mask.shape[:2]
-                            mx1 = max(0, int(x1))
-                            my1 = max(0, int(y1))
-                            mx2 = max(mx1 + 1, min(m_w, int(x1 + src_w_val)))
-                            my2 = max(my1 + 1, min(m_h, int(y1 + float(row["src_h"] or src_h))))
+                            src_h_val = float(row["src_h"] or src_h)
+                            mx1 = max(0, int(x1 * sx_scale))
+                            my1 = max(0, int(y1 * sy_scale))
+                            mx2 = max(mx1 + 1, min(m_w, int((x1 + src_w_val) * sx_scale)))
+                            my2 = max(my1 + 1, min(m_h, int((y1 + src_h_val) * sy_scale)))
                             mask_crop = full_mask[my1:my2, mx1:mx2]
                             if mask_crop.size > 0:
                                 mask_crop = cv2.resize(
@@ -1691,16 +1839,6 @@ class _RunInfoPane(QWidget):
     # Construction
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _id_label(full_id: str | None) -> QLabel:
-        """Label that shows an 8-char prefix and has the full ID as tooltip + selectable."""
-        lbl = QLabel(full_id[:8] + "…" if full_id else "—")
-        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        if full_id:
-            lbl.setToolTip(full_id)
-        lbl.setStyleSheet("font-family: monospace; font-size: 10px;")
-        return lbl
-
     def _build(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
@@ -1728,20 +1866,7 @@ class _RunInfoPane(QWidget):
         root.addWidget(run_box)
 
         # --- IDs (UUIDs / SHA for cross-referencing) ---
-        ids_box = QGroupBox("IDs")
-        ids_form = QFormLayout(ids_box)
-        ids_form.setHorizontalSpacing(6)
-        ids_form.setVerticalSpacing(1)
-        self._ri_run_id       = self._id_label(None)
-        self._ri_skel_sha     = self._id_label(None)
-        self._ri_det_run_id   = self._id_label(None)
-        self._ri_trial_id     = self._id_label(None)
-        self._ri_capture_id   = self._id_label(None)
-        ids_form.addRow("Run:", self._ri_run_id)
-        ids_form.addRow("Skeleton:", self._ri_skel_sha)
-        ids_form.addRow("Detection:", self._ri_det_run_id)
-        ids_form.addRow("Trial:", self._ri_trial_id)
-        ids_form.addRow("Capture:", self._ri_capture_id)
+        ids_box, self._id_widgets = _build_run_ids_group()
         root.addWidget(ids_box)
 
         # --- Current frame ---
@@ -1790,10 +1915,8 @@ class _RunInfoPane(QWidget):
         for lbl in (self._ri_skeleton, self._ri_person, self._ri_ran_at,
                     self._ri_frames, self._ri_cfg, self._ri_notes):
             lbl.setText("—")
-        for lbl in (self._ri_run_id, self._ri_skel_sha, self._ri_det_run_id,
-                    self._ri_trial_id, self._ri_capture_id):
-            lbl.setText("—")
-            lbl.setToolTip("")
+        for w in self._id_widgets.values():
+            _set_id_widget(w, None)
         for lbl in (self._fi_step, self._fi_time, self._fi_inliers,
                     self._fi_nis, self._fi_cov):
             lbl.setText("—")
@@ -1803,26 +1926,7 @@ class _RunInfoPane(QWidget):
         if not run_id:
             return
 
-        run = self._conn.execute(
-            "SELECT tr.id AS run_id, tr.ran_at, tr.posetrak_version, "
-            "       tr.tracker_config_id, tr.skeleton_id, tr.notes, "
-            "       s.name AS skel_name, "
-            "       (SELECT GROUP_CONCAT(sp.person_name, ', ') "
-            "        FROM sequence_persons sp "
-            "        WHERE sp.sequence_id = tr.observation_sequence_id) AS person_names, "
-            "       dr.id AS detection_run_id, "
-            "       t.id AS trial_id, t.name AS trial_name, "
-            "       cap.id AS capture_id, cap.label AS capture_label "
-            "FROM tracking_runs tr "
-            "LEFT JOIN skeletons s ON s.id = tr.skeleton_id "
-            "LEFT JOIN pose_observation_sequences pos "
-            "       ON pos.id = tr.observation_sequence_id "
-            "LEFT JOIN detection_runs dr ON dr.id = pos.detection_run_id "
-            "LEFT JOIN trials t ON t.id = dr.trial_id "
-            "LEFT JOIN captures cap ON cap.id = t.capture_id "
-            "WHERE tr.id = ?",
-            (run_id,),
-        ).fetchone()
+        run = self._conn.execute(_RUN_INFO_SQL, (run_id,)).fetchone()
         if not run:
             return
 
@@ -1841,57 +1945,12 @@ class _RunInfoPane(QWidget):
         self._ri_notes.setVisible(bool(notes))
 
         # IDs
-        def _set_id(lbl: QLabel, val: str | None) -> None:
-            if val:
-                lbl.setText(val[:8] + "…")
-                lbl.setToolTip(val)
-            else:
-                lbl.setText("—")
-                lbl.setToolTip("")
+        _populate_run_ids(self._id_widgets, run)
 
-        _set_id(self._ri_run_id, run["run_id"])
-        _set_id(self._ri_skel_sha, run["skeleton_id"])
-        _set_id(self._ri_det_run_id, run["detection_run_id"])
-        _set_id(self._ri_trial_id, run["trial_id"])
-        _set_id(self._ri_capture_id, run["capture_id"])
-        if run["trial_name"]:
-            self._ri_trial_id.setToolTip(
-                f"{run['trial_id']}\n{run['trial_name']}"
-            )
-        if run["capture_label"]:
-            self._ri_capture_id.setToolTip(
-                f"{run['capture_id']}\n{run['capture_label']}"
-            )
-
-        # Try to load tracker config params
+        # Tracker config params
         cfg_id = run["tracker_config_id"]
-        cfg = self._conn.execute(
-            "SELECT name, process_noise_std, process_noise_vel_std, velocity_half_life_s, "
-            "       measurement_noise_std, outlier_threshold, tracker_fps, "
-            "       velocity_mode_camera_ids, velocity_measurement_noise_std "
-            "FROM tracker_configs WHERE id=?",
-            (cfg_id,),
-        ).fetchone() if cfg_id else None
-        if cfg:
-            parts = [cfg["name"] or cfg_id[:8]]
-            if cfg["process_noise_std"] is not None:
-                parts.append(f"Q={cfg['process_noise_std']}")
-            if cfg["process_noise_vel_std"] is not None:
-                parts.append(f"Qv={cfg['process_noise_vel_std']}")
-            if cfg["velocity_half_life_s"] is not None:
-                parts.append(f"vhl={cfg['velocity_half_life_s']}s")
-            if cfg["measurement_noise_std"] is not None:
-                parts.append(f"R={cfg['measurement_noise_std']}")
-            if cfg["outlier_threshold"] is not None:
-                parts.append(f"thr={cfg['outlier_threshold']}")
-            vel_cams = cfg["velocity_mode_camera_ids"]
-            if vel_cams:
-                parts.append(f"vel_cams={vel_cams}")
-            if cfg["velocity_measurement_noise_std"] is not None:
-                parts.append(f"Rvel={cfg['velocity_measurement_noise_std']}")
-            self._ri_cfg.setText("  ".join(parts))
-        else:
-            self._ri_cfg.setText(cfg_id[:12] + "…" if cfg_id else "—")
+        cfg = self._conn.execute(_CFG_SQL, (cfg_id,)).fetchone() if cfg_id else None
+        self._ri_cfg.setText(_cfg_text(cfg, cfg_id))
 
         # Load per-frame stats
         rows = self._conn.execute(
@@ -2411,16 +2470,7 @@ class TrackingRunPanel(QWidget):
         self._build()
 
     def _build(self) -> None:
-        run = self._conn.execute(
-            "SELECT tr.id, tr.ran_at, tr.notes, tr.posetrak_version, "
-            "       tr.active_camera_ids, tr.marker_names, "
-            "       tr.observation_sequence_id, "
-            "       s.name AS skel_name "
-            "FROM tracking_runs tr "
-            "LEFT JOIN skeletons s ON s.id = tr.skeleton_id "
-            "WHERE tr.id = ?",
-            (self._run_id,),
-        ).fetchone()
+        run = self._conn.execute(_RUN_INFO_SQL, (self._run_id,)).fetchone()
         if run is None:
             return
 
@@ -2430,6 +2480,10 @@ class TrackingRunPanel(QWidget):
         ).fetchone()[0]
 
         skel = run["skel_name"] or "?"
+
+        # Tracker config
+        cfg_id = run["tracker_config_id"]
+        cfg = self._conn.execute(_CFG_SQL, (cfg_id,)).fetchone() if cfg_id else None
 
         # Compact header + buttons (non-scrolling top strip)
         header = QWidget()
@@ -2446,13 +2500,21 @@ class TrackingRunPanel(QWidget):
         form.setVerticalSpacing(1)
         form.addRow("Ran at:", QLabel(_fmt_ts(run["ran_at"])))
         form.addRow("Frames:", QLabel(f"{n_frames}  |  version {run['posetrak_version'] or '—'}"))
+        form.addRow("Person:", QLabel(run["person_names"] or "—"))
         try:
             cam_ids = json.loads(run["active_camera_ids"] or "[]")
             form.addRow("Cameras:", QLabel(", ".join(cam_ids) or "—"))
         except Exception:
             pass
+        form.addRow("Config:", QLabel(_cfg_text(cfg, cfg_id)))
         if run["notes"]:
-            form.addRow("Notes:", QLabel(run["notes"]))
+            notes_lbl = QLabel(run["notes"])
+            notes_lbl.setWordWrap(True)
+            form.addRow("Notes:", notes_lbl)
+
+        # IDs
+        ids_box, id_widgets = _build_run_ids_group()
+        _populate_run_ids(id_widgets, run)
 
         btn_row = QHBoxLayout()
         self._export_bvh_btn = _action_btn("Export BVH…", enabled=bool(self._session_path))
@@ -2478,6 +2540,7 @@ class TrackingRunPanel(QWidget):
 
         header_v.addLayout(title_row)
         header_v.addLayout(form)
+        header_v.addWidget(ids_box)
         header_v.addLayout(btn_row)
 
         # Video crop grid fills the rest of the panel

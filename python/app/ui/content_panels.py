@@ -1751,6 +1751,9 @@ class PersonCropGridWidget(QWidget):
         # Copy/paste clipboard: kp_idx → (x, y); None until first copy
         self._clipboard: dict[int, tuple[float, float]] | None = None
         self._clipboard_cam_idx: int | None = None
+        # Frame-range selection for interpolation (slider values in ms from t_start)
+        self._range_start_v: int | None = None
+        self._range_end_v: int | None = None
         self._build()
 
     def _build(self) -> None:
@@ -1989,6 +1992,8 @@ class PersonCropGridWidget(QWidget):
             self._sel_kp_indices = set()
             self._primary_kp_idx = None
             self._sel_cam_idx = None
+            self._range_start_v = None
+            self._range_end_v = None
             if self._backfill is not None:
                 self._backfill.stop()
                 self._backfill = None
@@ -2182,12 +2187,24 @@ class PersonCropGridWidget(QWidget):
     def _handle_key(self, event) -> bool:
         """Dispatch keyboard shortcuts. Returns True when the event is consumed."""
         key = event.key()
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
 
         if key == Qt.Key.Key_A and self._slider is not None:
-            self._slider.setValue(self._slider.value() - self._slider.singleStep())
+            if self._edit_mode and shift:
+                self._extend_range_left()
+            else:
+                self._range_start_v = None
+                self._range_end_v = None
+                self._slider.setValue(self._slider.value() - self._slider.singleStep())
             return True
         if key == Qt.Key.Key_D and self._slider is not None:
-            self._slider.setValue(self._slider.value() + self._slider.singleStep())
+            if self._edit_mode and shift:
+                self._extend_range_right()
+            else:
+                self._range_start_v = None
+                self._range_end_v = None
+                self._slider.setValue(self._slider.value() + self._slider.singleStep())
             return True
 
         if not self._edit_mode:
@@ -2197,12 +2214,16 @@ class PersonCropGridWidget(QWidget):
             self._sel_kp_indices = set()
             self._primary_kp_idx = None
             self._sel_cam_idx = None
+            self._range_start_v = None
+            self._range_end_v = None
             for cell in self._cells:
                 cell.set_trail(None)
                 cell.set_selection(None, frozenset())
             return True
 
-        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        if key == Qt.Key.Key_I and self._range_start_v is not None:
+            self._interpolate_range()
+            return True
         if ctrl and key == Qt.Key.Key_C:
             self._copy_keypoints()
             return True
@@ -2275,6 +2296,116 @@ class PersonCropGridWidget(QWidget):
         self._load_frame(self._current_t)
         n = len(self._clipboard)
         self.status_message.emit(f"Pasted {n} keypoint{'s' if n != 1 else ''}")
+
+    # ------------------------------------------------------------------
+    # Frame-range selection + interpolation (Phase 10)
+    # ------------------------------------------------------------------
+
+    def _extend_range_left(self) -> None:
+        if self._slider is None:
+            return
+        cur = self._slider.value()
+        step = self._slider.singleStep()
+        new_val = max(self._slider.minimum(), cur - step)
+        if self._range_start_v is None:
+            self._range_start_v = new_val
+            self._range_end_v = cur
+        else:
+            self._range_start_v = min(self._range_start_v, new_val)
+        self._slider.setValue(new_val)
+
+    def _extend_range_right(self) -> None:
+        if self._slider is None:
+            return
+        cur = self._slider.value()
+        step = self._slider.singleStep()
+        new_val = min(self._slider.maximum(), cur + step)
+        if self._range_end_v is None:
+            self._range_start_v = cur
+            self._range_end_v = new_val
+        else:
+            self._range_end_v = max(self._range_end_v, new_val)
+        self._slider.setValue(new_val)
+
+    def _interpolate_range(self) -> None:
+        """I key: linearly interpolate selected kp over the active frame range."""
+        from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit
+        if self._range_start_v is None or self._range_end_v is None:
+            return
+        if not self._sel_kp_indices or not self._sync_table or self._slider is None:
+            return
+
+        t_start_r = self._t_start + self._range_start_v / 1000.0
+        t_end_r = self._t_start + self._range_end_v / 1000.0
+        step = self._slider.singleStep()
+
+        for cam in self._cameras:
+            cam_id = cam["camera_instance_id"]
+            svid = cam["shot_video_id"]
+
+            # Enumerate all video frames in the slider range for this camera
+            range_frames: set[int] = set()
+            v = self._range_start_v
+            while v <= self._range_end_v:
+                f = self._sync_table.lookup(self._t_start + v / 1000.0, svid)
+                if f is not None:
+                    range_frames.add(f)
+                v += step
+
+            if not range_frames:
+                continue
+
+            frame_start = min(range_frames)
+            frame_end = max(range_frames)
+            kp_by_frame = self._obs_kp.get(cam_id, {})
+            sorted_frames = sorted(kp_by_frame.keys())
+
+            any_written = False
+            for kp_idx in self._sel_kp_indices:
+                # Left anchor: nearest frame before range with conf > 0
+                left_anchor = None
+                for f in reversed([fi for fi in sorted_frames if fi < frame_start]):
+                    kp = kp_by_frame[f]
+                    if kp_idx < kp.shape[0] and float(kp[kp_idx, 2]) > 0.0:
+                        left_anchor = (f, float(kp[kp_idx, 0]), float(kp[kp_idx, 1]))
+                        break
+
+                # Right anchor: nearest frame after range with conf > 0
+                right_anchor = None
+                for f in [fi for fi in sorted_frames if fi > frame_end]:
+                    kp = kp_by_frame[f]
+                    if kp_idx < kp.shape[0] and float(kp[kp_idx, 2]) > 0.0:
+                        right_anchor = (f, float(kp[kp_idx, 0]), float(kp[kp_idx, 1]))
+                        break
+
+                if left_anchor is None or right_anchor is None:
+                    continue
+
+                frame_l, x_l, y_l = left_anchor
+                frame_r, x_r, y_r = right_anchor
+                span = frame_r - frame_l
+
+                for f in sorted(range_frames):
+                    t = (f - frame_l) / span
+                    x = x_l + t * (x_r - x_l)
+                    y = y_l + t * (y_r - y_l)
+                    update_single_keypoint_edit(
+                        self._conn, self._sequence_id, cam_id, f, kp_idx, x, y
+                    )
+                    any_written = True
+
+            if any_written:
+                self._obs_kp[cam_id] = read_observations_with_edits(
+                    self._conn, self._sequence_id, cam_id
+                )
+
+        self._range_start_v = None
+        self._range_end_v = None
+        self._load_frame(self._current_t)
+        n = len(self._sel_kp_indices)
+        self.status_message.emit(
+            f"Interpolated {n} keypoint{'s' if n != 1 else ''} over range"
+        )
 
     def _nudge_keypoint(self, dx: float, dy: float) -> None:
         from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit

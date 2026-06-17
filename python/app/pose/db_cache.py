@@ -369,6 +369,54 @@ def write_observation_edit(
     session.commit()
 
 
+def update_single_keypoint_edit(
+    session: sqlite3.Connection,
+    sequence_id: str,
+    camera_instance_id: str,
+    video_frame: int,
+    kp_idx: int,
+    new_x: float,
+    new_y: float,
+    is_outlier: bool = False,
+) -> None:
+    """Update one keypoint slot in pose_observation_edits, preserving other slots.
+
+    Reads the existing edit row (if any), merges the new slot into it, and
+    writes back with an upsert.  is_outlier=True marks the slot as rejected
+    (confidence → 0); is_outlier=False sets the new x/y position (confidence → 1).
+    """
+    obs_row = session.execute(
+        "SELECT kp_blob FROM pose_observations"
+        " WHERE sequence_id = ? AND camera_instance_id = ? AND video_frame = ?",
+        (sequence_id, camera_instance_id, video_frame),
+    ).fetchone()
+    if obs_row is None:
+        return
+
+    n_kp = len(bytes(obs_row["kp_blob"])) // (3 * 4)
+    n_mask_bytes = (n_kp + 7) // 8
+
+    edit_row = session.execute(
+        "SELECT kp_blob, kp_mask FROM pose_observation_edits"
+        " WHERE sequence_id = ? AND camera_instance_id = ? AND video_frame = ?",
+        (sequence_id, camera_instance_id, video_frame),
+    ).fetchone()
+
+    if edit_row is not None:
+        edit_kp = np.frombuffer(bytes(edit_row["kp_blob"]), dtype=np.float32).reshape(-1, 3).copy()
+        mask = bytearray(bytes(edit_row["kp_mask"]))
+    else:
+        edit_kp = np.zeros((n_kp, 3), dtype=np.float32)
+        mask = bytearray(n_mask_bytes)
+
+    edit_kp[kp_idx, 0] = new_x
+    edit_kp[kp_idx, 1] = new_y
+    edit_kp[kp_idx, 2] = 1.0 if is_outlier else 0.0
+    mask[kp_idx // 8] |= 1 << (kp_idx % 8)
+
+    write_observation_edit(session, sequence_id, camera_instance_id, video_frame, edit_kp, bytes(mask))
+
+
 def read_track_spans(
     session: sqlite3.Connection,
     detection_run_id: str,

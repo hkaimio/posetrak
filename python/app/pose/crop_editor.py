@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.pose.db_cache import read_observations_with_edits
+from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit
 
 # Crop cell dimensions
 _CELL_W = 320
@@ -37,6 +37,10 @@ _KP_OUTLIER = QColor(120, 120, 120)    # grey   — outlier (confidence == 0)
 _KP_EDITED  = QColor(255, 220, 0)      # yellow — overridden by an edit
 
 _CONF_THRESHOLD = 0.01  # below this → treat as outlier for display
+
+# Mouse interaction
+_DRAG_THRESHOLD  = 5    # minimum drag distance in display pixels before a move is registered
+_HIT_RADIUS      = _KP_RADIUS + 4  # hit-test tolerance around each keypoint dot
 
 # Trail overlay
 _TRAIL_N = 10                               # default half-window in frame-slots
@@ -185,6 +189,13 @@ def compute_trail(
 class _CropCellWidget(QWidget):
     """One camera's crop image with a keypoint overlay."""
 
+    # Emitted when user clicks a keypoint dot (kp_idx)
+    keypoint_selected  = Signal(int)
+    # Emitted when user clicks empty space
+    keypoint_deselected = Signal()
+    # Emitted on drag release: (kp_idx, new_x_full, new_y_full) in full-frame pixels
+    keypoint_moved     = Signal(int, float, float)
+
     def __init__(self, label: str, parent=None):
         super().__init__(parent)
         self._label = label
@@ -197,6 +208,11 @@ class _CropCellWidget(QWidget):
         self._src_y = 0
         self._src_w = 1
         self._src_h = 1
+        # Mouse interaction state
+        self._selected_kp: int | None = None
+        self._drag_kp_idx: int | None = None
+        self._drag_start: tuple[float, float] | None = None
+        self._drag_current: tuple[float, float] | None = None
         self.setFixedSize(_CELL_W, _CELL_H + 20)  # +20 for label strip
         self.setStyleSheet("background: #1a1a1a;")
 
@@ -270,23 +286,107 @@ class _CropCellWidget(QWidget):
         painter.drawText(4, _CELL_H, _CELL_W - 8, 20, Qt.AlignLeft | Qt.AlignVCenter,
                          self._label)
 
+    def set_selected_kp(self, kp_idx: int | None) -> None:
+        """Set which keypoint index is highlighted as selected."""
+        self._selected_kp = kp_idx
+        self.update()
+
+    def _hit_kp(self, dx: float, dy: float) -> int | None:
+        """Return keypoint index if (dx, dy) hits a dot, else None."""
+        if self._kp is None:
+            return None
+        scale_x = _CELL_W / self._src_w
+        scale_y = _CELL_H / self._src_h
+        for i in range(self._kp.shape[0]):
+            x_f, y_f = float(self._kp[i, 0]), float(self._kp[i, 1])
+            if not (self._src_x <= x_f < self._src_x + self._src_w and
+                    self._src_y <= y_f < self._src_y + self._src_h):
+                continue
+            cdx = (x_f - self._src_x) * scale_x
+            cdy = (y_f - self._src_y) * scale_y
+            if (dx - cdx) ** 2 + (dy - cdy) ** 2 <= _HIT_RADIUS ** 2:
+                return i
+        return None
+
+    def _display_to_full(self, dx: float, dy: float) -> tuple[float, float]:
+        """Convert display-crop coords to full-frame pixel coords."""
+        return (
+            self._src_x + dx * self._src_w / _CELL_W,
+            self._src_y + dy * self._src_h / _CELL_H,
+        )
+
+    def mousePressEvent(self, event):  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position()
+            hit = self._hit_kp(pos.x(), pos.y())
+            if hit is not None:
+                self._drag_kp_idx = hit
+                self._drag_start   = (pos.x(), pos.y())
+                self._drag_current = (pos.x(), pos.y())
+                self.keypoint_selected.emit(hit)
+            else:
+                self._drag_kp_idx  = None
+                self._drag_start   = None
+                self._drag_current = None
+                self.keypoint_deselected.emit()
+            self.update()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):  # noqa: N802
+        if self._drag_kp_idx is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+            pos = event.position()
+            self._drag_current = (pos.x(), pos.y())
+            self.update()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_kp_idx is not None:
+            if self._drag_start is not None and self._drag_current is not None:
+                ddx = self._drag_current[0] - self._drag_start[0]
+                ddy = self._drag_current[1] - self._drag_start[1]
+                if ddx ** 2 + ddy ** 2 > _DRAG_THRESHOLD ** 2:
+                    kp = self._kp
+                    if kp is not None and self._drag_kp_idx < kp.shape[0]:
+                        orig_x = float(kp[self._drag_kp_idx, 0])
+                        orig_y = float(kp[self._drag_kp_idx, 1])
+                        new_x = orig_x + ddx * self._src_w / _CELL_W
+                        new_y = orig_y + ddy * self._src_h / _CELL_H
+                        self.keypoint_moved.emit(self._drag_kp_idx, new_x, new_y)
+            self._drag_kp_idx  = None
+            self._drag_start   = None
+            self._drag_current = None
+            self.update()
+        else:
+            super().mouseReleaseEvent(event)
+
     def _draw_keypoints(self, painter: QPainter) -> None:
         kp = self._kp
         assert kp is not None
-        # Scale from full-frame distorted coords to display coords
         scale_x = _CELL_W / self._src_w
         scale_y = _CELL_H / self._src_h
+
+        # Live drag offset in display coords
+        drag_ddx = drag_ddy = 0.0
+        if self._drag_kp_idx is not None and self._drag_start and self._drag_current:
+            drag_ddx = self._drag_current[0] - self._drag_start[0]
+            drag_ddy = self._drag_current[1] - self._drag_start[1]
 
         for i in range(kp.shape[0]):
             x_full, y_full, conf = float(kp[i, 0]), float(kp[i, 1]), float(kp[i, 2])
 
-            # Only draw if inside the crop region
             if not (self._src_x <= x_full < self._src_x + self._src_w and
                     self._src_y <= y_full < self._src_y + self._src_h):
                 continue
 
             dx = (x_full - self._src_x) * scale_x
             dy = (y_full - self._src_y) * scale_y
+
+            # Live drag preview for the dragged dot
+            if i == self._drag_kp_idx and self._drag_start is not None:
+                dx += drag_ddx
+                dy += drag_ddy
 
             edited = (self._edited_mask is not None and bool(self._edited_mask[i]))
 
@@ -299,12 +399,15 @@ class _CropCellWidget(QWidget):
             else:
                 color = _KP_LO_CONF
 
-            painter.setPen(Qt.PenStyle.NoPen)
+            selected = (i == self._selected_kp)
+            radius = _KP_RADIUS + 2 if selected else _KP_RADIUS
+
+            if selected:
+                painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+            else:
+                painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(color)
-            painter.drawEllipse(
-                int(dx) - _KP_RADIUS, int(dy) - _KP_RADIUS,
-                _KP_RADIUS * 2, _KP_RADIUS * 2,
-            )
+            painter.drawEllipse(int(dx) - radius, int(dy) - radius, radius * 2, radius * 2)
 
     def _draw_trail(self, painter: QPainter, trail: _TrailData) -> None:
         """Draw past/future trail polylines and dots for the selected keypoint."""
@@ -513,6 +616,13 @@ class PersonCropGridWidget(QWidget):
             cell = _CropCellWidget(cam.label)
             self._cells_layout.addWidget(cell)
             self._cells.append(cell)
+            cell.keypoint_selected.connect(
+                lambda idx, c=cam: self._on_cell_kp_selected(c, idx)
+            )
+            cell.keypoint_deselected.connect(self._on_cell_kp_deselected)
+            cell.keypoint_moved.connect(
+                lambda kp_idx, x, y, c=cam: self._on_cell_kp_moved(c, kp_idx, x, y)
+            )
 
         self._cells_layout.addStretch()
 
@@ -582,6 +692,39 @@ class PersonCropGridWidget(QWidget):
     def select_keypoint(self, kp_idx: int | None) -> None:
         """Set the selected keypoint index and refresh the trail display."""
         self._selected_kp = kp_idx
+        for cell in self._cells:
+            cell.set_selected_kp(kp_idx)
+        self._show_frame(self._frame_idx)
+
+    def _on_cell_kp_selected(self, cam: _CameraSlot, kp_idx: int) -> None:
+        self._selected_kp = kp_idx
+        for cell in self._cells:
+            cell.set_selected_kp(kp_idx)
+        self._show_frame(self._frame_idx)
+
+    def _on_cell_kp_deselected(self) -> None:
+        self._selected_kp = None
+        for cell in self._cells:
+            cell.set_selected_kp(None)
+        self._show_frame(self._frame_idx)
+
+    def _on_cell_kp_moved(
+        self, cam: _CameraSlot, kp_idx: int, new_x: float, new_y: float
+    ) -> None:
+        """Write a single-keypoint edit to DB and refresh the display."""
+        if self._session is None or self._sequence_id is None or not self._frames:
+            return
+        slot = self._frames[self._frame_idx]
+        video_frame = slot.per_cam.get(cam.camera_instance_id)
+        if video_frame is None:
+            return
+        update_single_keypoint_edit(
+            self._session, self._sequence_id, cam.camera_instance_id,
+            video_frame, kp_idx, new_x, new_y, is_outlier=False,
+        )
+        cam.kp_by_frame = read_observations_with_edits(
+            self._session, self._sequence_id, cam.camera_instance_id
+        )
         self._show_frame(self._frame_idx)
 
     # ------------------------------------------------------------------

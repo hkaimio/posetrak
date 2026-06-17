@@ -2584,11 +2584,7 @@ class PersonCropGridWidget(QWidget):
                 if self._sel_kp_idx is not None:
                     kp_by_frame = self._obs_kp.get(cam_id, {})
                     trail = _build_cam_trail(kp_by_frame, cam_id, frame_idx, self._sel_kp_idx)
-                    kp_name = (
-                        _COCO_KP_NAMES[self._sel_kp_idx]
-                        if self._sel_kp_idx < len(_COCO_KP_NAMES)
-                        else str(self._sel_kp_idx)
-                    )
+                    kp_name = self._pose_model.name_of(self._sel_kp_idx)
                 is_sel_cam = (i == self._sel_cam_idx)
                 cell.set_trail(trail)
                 cell.set_selected_kp(self._sel_kp_idx, show_ring=is_sel_cam, name=kp_name)

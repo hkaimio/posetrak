@@ -764,6 +764,16 @@ _BODY_SKELETON = [
     (11, 13), (13, 15), (12, 14), (14, 16),
 ]
 
+_COCO_KP_NAMES = (
+    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+    "left_shoulder", "right_shoulder",
+    "left_elbow", "right_elbow",
+    "left_wrist", "right_wrist",
+    "left_hip", "right_hip",
+    "left_knee", "right_knee",
+    "left_ankle", "right_ankle",
+)
+
 
 def _project_point_distorted(
     p_world: "np.ndarray",
@@ -919,6 +929,8 @@ class _ImageCanvas(QWidget):
         self._drag_cur_disp: tuple[float, float] | None = None
         self._drag_moved: bool = False
         self._trail = None  # _TrailData | None
+        self._show_ring: bool = True
+        self._selected_kp_name: str | None = None
 
     def show_empty(self) -> None:
         self._pixmap = None
@@ -970,8 +982,12 @@ class _ImageCanvas(QWidget):
         self._trail = trail
         self.update()
 
-    def set_selected_kp(self, idx: int | None) -> None:
+    def set_selected_kp(
+        self, idx: int | None, show_ring: bool = True, name: str | None = None
+    ) -> None:
         self._selected_kp = idx
+        self._show_ring = show_ring
+        self._selected_kp_name = name
         self.update()
 
     def _to_pt(self, u: float, v: float) -> QPointF:
@@ -1128,7 +1144,7 @@ class _ImageCanvas(QWidget):
                     painter.setBrush(QColor(255, 200, 0))   # yellow
                 else:
                     painter.setBrush(QColor(220, 40, 40))   # red
-                painter.drawEllipse(to_pt(float(kp[i, 0]), float(kp[i, 1])), 3.0, 3.0)
+                painter.drawEllipse(to_pt(float(kp[i, 0]), float(kp[i, 1])), 5.0, 5.0)
 
         # ---- Tracked skeleton (cyan lines + yellow dots) ----
         if self._show_tracked:
@@ -1154,7 +1170,7 @@ class _ImageCanvas(QWidget):
                     mu, mv = float(self._marker_xy[i, 0]), float(self._marker_xy[i, 1])
                     if isnan(mu) or isnan(mv):
                         continue
-                    painter.drawEllipse(to_pt(mu, mv), 3.0, 3.0)
+                    painter.drawEllipse(to_pt(mu, mv), 5.0, 5.0)
 
         # ---- Edit mode: trail overlay ----
         if self._edit_mode and self._trail is not None:
@@ -1178,7 +1194,7 @@ class _ImageCanvas(QWidget):
             _draw_trail_seg(trail.past, _TRAIL_PAST_COLOR)
             _draw_trail_seg(trail.future, _TRAIL_FUTURE_COLOR)
 
-        # ---- Edit mode: selection ring ----
+        # ---- Edit mode: selection ring + keypoint name ----
         if self._edit_mode and self._selected_kp is not None and self._obs_kp is not None:
             sel = self._selected_kp
             if sel < self._obs_kp.shape[0]:
@@ -1186,9 +1202,32 @@ class _ImageCanvas(QWidget):
                     pt = QPointF(self._drag_cur_disp[0], self._drag_cur_disp[1])
                 else:
                     pt = to_pt(float(self._obs_kp[sel, 0]), float(self._obs_kp[sel, 1]))
-                painter.setPen(QPen(QColor(255, 255, 255), 1.5))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawEllipse(pt, 7.0, 7.0)
+
+                if self._show_ring:
+                    painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawEllipse(pt, 9.0, 9.0)
+
+                if self._selected_kp_name:
+                    from PySide6.QtGui import QFont as _QFont
+                    lbl_font = _QFont()
+                    lbl_font.setPointSize(8)
+                    lbl_font.setBold(False)
+                    painter.setFont(lbl_font)
+                    fm = painter.fontMetrics()
+                    label = self._selected_kp_name
+                    text_w = fm.horizontalAdvance(label)
+                    text_h = fm.height()
+                    lx = pt.x() + 10
+                    ly = pt.y() - text_h / 2
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QColor(0, 0, 0, 170))
+                    painter.drawRoundedRect(
+                        QRectF(lx - 2, ly - 1, text_w + 5, text_h + 2), 2.0, 2.0
+                    )
+                    painter.setPen(QColor(255, 255, 255))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawText(QPointF(lx, ly + fm.ascent()), label)
 
         painter.end()
 
@@ -1242,8 +1281,10 @@ class _CropCell(QWidget):
     def set_trail(self, trail) -> None:
         self._canvas.set_trail(trail)
 
-    def set_selected_kp(self, idx: int | None) -> None:
-        self._canvas.set_selected_kp(idx)
+    def set_selected_kp(
+        self, idx: int | None, show_ring: bool = True, name: str | None = None
+    ) -> None:
+        self._canvas.set_selected_kp(idx, show_ring=show_ring, name=name)
 
 
 class PersonCropGridWidget(QWidget):
@@ -1520,7 +1561,7 @@ class PersonCropGridWidget(QWidget):
             cell.set_edit_mode(enabled)
             if not enabled:
                 cell.set_trail(None)
-                cell.set_selected_kp(None)
+                cell.set_selected_kp(None, show_ring=False)
 
     def _on_kp_selected(self, cam_idx: int, kp_idx: int) -> None:
         self._sel_kp_idx = kp_idx
@@ -1532,7 +1573,7 @@ class PersonCropGridWidget(QWidget):
         self._sel_cam_idx = None
         for cell in self._cells:
             cell.set_trail(None)
-            cell.set_selected_kp(None)
+            cell.set_selected_kp(None, show_ring=False)
 
     def _on_kp_moved(self, cam_idx: int, kp_idx: int, new_x: float, new_y: float) -> None:
         from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit
@@ -1586,7 +1627,7 @@ class PersonCropGridWidget(QWidget):
             self._sel_cam_idx = None
             for cell in self._cells:
                 cell.set_trail(None)
-                cell.set_selected_kp(None)
+                cell.set_selected_kp(None, show_ring=False)
             return True
 
         if self._sel_kp_idx is None or self._sel_cam_idx is None:
@@ -2077,11 +2118,18 @@ class PersonCropGridWidget(QWidget):
 
             if self._edit_mode:
                 trail = None
+                kp_name = None
                 if self._sel_kp_idx is not None:
                     kp_by_frame = self._obs_kp.get(cam_id, {})
                     trail = _build_cam_trail(kp_by_frame, cam_id, frame_idx, self._sel_kp_idx)
+                    kp_name = (
+                        _COCO_KP_NAMES[self._sel_kp_idx]
+                        if self._sel_kp_idx < len(_COCO_KP_NAMES)
+                        else str(self._sel_kp_idx)
+                    )
+                is_sel_cam = (i == self._sel_cam_idx)
                 cell.set_trail(trail)
-                cell.set_selected_kp(self._sel_kp_idx)
+                cell.set_selected_kp(self._sel_kp_idx, show_ring=is_sel_cam, name=kp_name)
 
 
 # ---------------------------------------------------------------------------

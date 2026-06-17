@@ -1247,6 +1247,7 @@ class _ImageCanvas(QWidget):
         self._trail = None  # _TrailData | None
         self._selected_kp_name: str | None = None
         self._loading: bool = False
+        self._range_pts: list[tuple[float, float]] = []  # frame-space positions to highlight
 
     def show_empty(self) -> None:
         self._loading = False
@@ -1311,6 +1312,10 @@ class _ImageCanvas(QWidget):
 
     def set_trail(self, trail) -> None:
         self._trail = trail
+        self.update()
+
+    def set_range_highlights(self, pts: list[tuple[float, float]]) -> None:
+        self._range_pts = pts
         self.update()
 
     def set_selection(
@@ -1577,6 +1582,13 @@ class _ImageCanvas(QWidget):
             _draw_trail_seg(trail.past, _TRAIL_PAST_COLOR)
             _draw_trail_seg(trail.future, _TRAIL_FUTURE_COLOR)
 
+        # ---- Edit mode: frame-range highlight rings (white, small) ----
+        if self._edit_mode and self._range_pts:
+            painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for rx, ry in self._range_pts:
+                painter.drawEllipse(to_pt(rx, ry), 7.0, 7.0)
+
         # ---- Edit mode: selection rings (all selected kp) ----
         if self._edit_mode and self._sel_kp_set and self._obs_kp is not None:
             painter.setPen(QPen(QColor(255, 255, 255), 1.5))
@@ -1685,6 +1697,9 @@ class _CropCell(QWidget):
 
     def set_trail(self, trail) -> None:
         self._canvas.set_trail(trail)
+
+    def set_range_highlights(self, pts: list[tuple[float, float]]) -> None:
+        self._canvas.set_range_highlights(pts)
 
     def set_selection(
         self, primary: int | None, sel_indices: frozenset[int], name: str | None = None
@@ -2219,6 +2234,7 @@ class PersonCropGridWidget(QWidget):
             for cell in self._cells:
                 cell.set_trail(None)
                 cell.set_selection(None, frozenset())
+                cell.set_range_highlights([])
             return True
 
         if key == Qt.Key.Key_I and self._range_start_v is not None:
@@ -2301,6 +2317,45 @@ class PersonCropGridWidget(QWidget):
     # Frame-range selection + interpolation (Phase 10)
     # ------------------------------------------------------------------
 
+    def _range_frame_set(self, svid: str) -> set[int]:
+        """Return video frames for svid that fall within the active slider range."""
+        if (self._range_start_v is None or self._range_end_v is None
+                or not self._sync_table or self._slider is None):
+            return set()
+        step = self._slider.singleStep()
+        frames: set[int] = set()
+        v = self._range_start_v
+        while v <= self._range_end_v:
+            f = self._sync_table.lookup(self._t_start + v / 1000.0, svid)
+            if f is not None:
+                frames.add(f)
+            v += step
+        return frames
+
+    def _compute_range_highlights(
+        self, cam_id: str, svid: str
+    ) -> list[tuple[float, float]]:
+        """Return frame-space (x, y) positions of selected kp within the active range."""
+        if (self._range_start_v is None or not self._sel_kp_indices
+                or not self._sync_table or self._slider is None):
+            return []
+        kp_by_frame = self._obs_kp.get(cam_id, {})
+        pts: list[tuple[float, float]] = []
+        step = self._slider.singleStep()
+        v = self._range_start_v
+        while v <= self._range_end_v:
+            f = self._sync_table.lookup(self._t_start + v / 1000.0, svid)
+            if f is not None:
+                kp = kp_by_frame.get(f)
+                if kp is not None:
+                    for kp_idx in self._sel_kp_indices:
+                        if kp_idx < kp.shape[0]:
+                            x, y = float(kp[kp_idx, 0]), float(kp[kp_idx, 1])
+                            if x != 0.0 or y != 0.0:
+                                pts.append((x, y))
+            v += step
+        return pts
+
     def _extend_range_left(self) -> None:
         if self._slider is None:
             return
@@ -2328,65 +2383,45 @@ class PersonCropGridWidget(QWidget):
         self._slider.setValue(new_val)
 
     def _interpolate_range(self) -> None:
-        """I key: linearly interpolate selected kp over the active frame range."""
+        """I key: linearly interpolate selected kp between the range endpoints."""
         from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit
         if self._range_start_v is None or self._range_end_v is None:
             return
         if not self._sel_kp_indices or not self._sync_table or self._slider is None:
             return
 
-        t_start_r = self._t_start + self._range_start_v / 1000.0
-        t_end_r = self._t_start + self._range_end_v / 1000.0
-        step = self._slider.singleStep()
-
         for cam in self._cameras:
             cam_id = cam["camera_instance_id"]
             svid = cam["shot_video_id"]
 
-            # Enumerate all video frames in the slider range for this camera
-            range_frames: set[int] = set()
-            v = self._range_start_v
-            while v <= self._range_end_v:
-                f = self._sync_table.lookup(self._t_start + v / 1000.0, svid)
-                if f is not None:
-                    range_frames.add(f)
-                v += step
-
+            range_frames = self._range_frame_set(svid)
             if not range_frames:
                 continue
 
             frame_start = min(range_frames)
             frame_end = max(range_frames)
-            kp_by_frame = self._obs_kp.get(cam_id, {})
-            sorted_frames = sorted(kp_by_frame.keys())
+            # Only write frames strictly between the endpoints; endpoints are anchors.
+            inner_frames = sorted(f for f in range_frames if frame_start < f < frame_end)
+            if not inner_frames:
+                continue
 
+            kp_by_frame = self._obs_kp.get(cam_id, {})
+            kp_l = kp_by_frame.get(frame_start)
+            kp_r = kp_by_frame.get(frame_end)
+            if kp_l is None or kp_r is None:
+                continue
+
+            span = frame_end - frame_start
             any_written = False
             for kp_idx in self._sel_kp_indices:
-                # Left anchor: nearest frame before range with conf > 0
-                left_anchor = None
-                for f in reversed([fi for fi in sorted_frames if fi < frame_start]):
-                    kp = kp_by_frame[f]
-                    if kp_idx < kp.shape[0] and float(kp[kp_idx, 2]) > 0.0:
-                        left_anchor = (f, float(kp[kp_idx, 0]), float(kp[kp_idx, 1]))
-                        break
-
-                # Right anchor: nearest frame after range with conf > 0
-                right_anchor = None
-                for f in [fi for fi in sorted_frames if fi > frame_end]:
-                    kp = kp_by_frame[f]
-                    if kp_idx < kp.shape[0] and float(kp[kp_idx, 2]) > 0.0:
-                        right_anchor = (f, float(kp[kp_idx, 0]), float(kp[kp_idx, 1]))
-                        break
-
-                if left_anchor is None or right_anchor is None:
+                if kp_idx >= kp_l.shape[0] or kp_idx >= kp_r.shape[0]:
                     continue
-
-                frame_l, x_l, y_l = left_anchor
-                frame_r, x_r, y_r = right_anchor
-                span = frame_r - frame_l
-
-                for f in sorted(range_frames):
-                    t = (f - frame_l) / span
+                if float(kp_l[kp_idx, 2]) < 0.01 or float(kp_r[kp_idx, 2]) < 0.01:
+                    continue
+                x_l, y_l = float(kp_l[kp_idx, 0]), float(kp_l[kp_idx, 1])
+                x_r, y_r = float(kp_r[kp_idx, 0]), float(kp_r[kp_idx, 1])
+                for f in inner_frames:
+                    t = (f - frame_start) / span
                     x = x_l + t * (x_r - x_l)
                     y = y_l + t * (y_r - y_l)
                     update_single_keypoint_edit(
@@ -2443,27 +2478,39 @@ class PersonCropGridWidget(QWidget):
         svid = cam["shot_video_id"]
         if not self._sync_table:
             return
+        kp_by_frame = self._obs_kp.get(cam_id, {})
+
+        # Determine new outlier state from current frame's primary kp
         frame_idx = self._sync_table.lookup(self._current_t, svid)
-        if frame_idx is None:
+        kp_cur = kp_by_frame.get(frame_idx) if frame_idx is not None else None
+        if kp_cur is None:
             return
-        kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
-        if kp is None:
-            return
-        # Determine new outlier state from primary kp; apply to all selected
         pri = self._primary_kp_idx
-        if pri is None or pri >= kp.shape[0]:
+        if pri is None or pri >= kp_cur.shape[0]:
             pri = next(iter(self._sel_kp_indices))
-        new_outlier = float(kp[pri, 2]) >= 0.01  # toggle: True means mark as outlier
-        for kp_idx in self._sel_kp_indices:
-            if kp_idx >= kp.shape[0]:
+        new_outlier = float(kp_cur[pri, 2]) >= 0.01
+
+        # Apply to all frames in range (or just current frame if no range)
+        target_frames: list[int]
+        if self._range_start_v is not None:
+            target_frames = sorted(self._range_frame_set(svid))
+        else:
+            target_frames = [frame_idx] if frame_idx is not None else []
+
+        for f in target_frames:
+            kp_f = kp_by_frame.get(f)
+            if kp_f is None:
                 continue
-            update_single_keypoint_edit(
-                self._conn, self._sequence_id, cam_id, frame_idx,
-                kp_idx,
-                float(kp[kp_idx, 0]),
-                float(kp[kp_idx, 1]),
-                is_outlier=new_outlier,
-            )
+            for kp_idx in self._sel_kp_indices:
+                if kp_idx >= kp_f.shape[0]:
+                    continue
+                update_single_keypoint_edit(
+                    self._conn, self._sequence_id, cam_id, f,
+                    kp_idx,
+                    float(kp_f[kp_idx, 0]),
+                    float(kp_f[kp_idx, 1]),
+                    is_outlier=new_outlier,
+                )
         self._obs_kp[cam_id] = read_observations_with_edits(
             self._conn, self._sequence_id, cam_id
         )
@@ -2795,6 +2842,9 @@ class PersonCropGridWidget(QWidget):
                                 frozenset(self._sel_kp_indices),
                                 name=kp_name,
                             )
+                            cell.set_range_highlights(
+                                self._compute_range_highlights(cam_id, svid)
+                            )
                     else:
                         cell.show_empty()
                     continue
@@ -2959,6 +3009,9 @@ class PersonCropGridWidget(QWidget):
                     self._primary_kp_idx,
                     frozenset(self._sel_kp_indices),
                     name=kp_name,
+                )
+                cell.set_range_highlights(
+                    self._compute_range_highlights(cam_id, svid)
                 )
 
 

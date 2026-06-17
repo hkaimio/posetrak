@@ -63,6 +63,10 @@ def _make_widget(qapp, seq_db):
     w._3d_ph = None
     w._ncols = 2
     w._grid = None
+    w._clipboard = None
+    w._clipboard_cam_idx = None
+    w._range_start_v = None
+    w._range_end_v = None
 
     # Pre-load obs_kp from DB
     from app.pose.db_cache import read_observations_with_edits

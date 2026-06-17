@@ -364,14 +364,6 @@ class PoseExtractionWindow(QMainWindow):
         btn_row.addWidget(self._finalise_btn)
         assign_layout.addLayout(btn_row)
 
-        self._edit_kp_btn = QPushButton("Edit Keypoints…")
-        self._edit_kp_btn.setEnabled(False)
-        self._edit_kp_btn.setToolTip(
-            "Open the keypoint editing view for the finalized sequences of the current run"
-        )
-        self._edit_kp_btn.clicked.connect(self._on_edit_keypoints)
-        assign_layout.addWidget(self._edit_kp_btn)
-
         right_layout.addWidget(assign_group)
         splitter.addWidget(right)
         splitter.setSizes([700, 700])
@@ -553,13 +545,6 @@ class PoseExtractionWindow(QMainWindow):
 
         self._stitcher.load_run(self._session, run_id)
         self._restore_finalised_assignments(run_id)
-
-        # Enable "Edit Keypoints" button if this run already has finalized sequences
-        has_seqs = bool(self._session.execute(
-            "SELECT 1 FROM pose_observation_sequences WHERE detection_run_id = ? LIMIT 1",
-            (run_id,),
-        ).fetchone())
-        self._edit_kp_btn.setEnabled(has_seqs)
 
     def _restore_finalised_assignments(self, run_id: str) -> None:
         """Restore track→person assignments saved at finalise time.
@@ -996,61 +981,6 @@ class PoseExtractionWindow(QMainWindow):
             if seg_range and seg_range[0] <= f <= seg_range[1]:
                 tid_to_person[tid] = person
         self._frame_view.set_track_assignments(tid_to_person)
-
-    # ------------------------------------------------------------------
-    # Keypoint editing
-    # ------------------------------------------------------------------
-
-    def _on_edit_keypoints(self) -> None:
-        if self._session is None or self._current_run_id is None:
-            return
-
-        seq_rows = self._session.execute(
-            "SELECT pos.id, sp.person_name"
-            " FROM pose_observation_sequences pos"
-            " JOIN sequence_persons sp ON sp.sequence_id = pos.id AND sp.person_id = 0"
-            " WHERE pos.detection_run_id = ?"
-            " ORDER BY sp.person_name",
-            (self._current_run_id,),
-        ).fetchall()
-        if not seq_rows:
-            QMessageBox.information(self, "No sequences", "No finalised sequences found for this run.")
-            return
-
-        from app.pose.crop_editor import PersonCropGridWidget
-        from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Edit Keypoints")
-        dlg.resize(1200, 560)
-        dlg_layout = QVBoxLayout(dlg)
-
-        # Person selector
-        sel_row = QHBoxLayout()
-        sel_row.addWidget(QLabel("Person:"))
-        person_combo = QComboBox()
-        for row in seq_rows:
-            person_combo.addItem(row["person_name"], row["id"])
-        sel_row.addWidget(person_combo, 1)
-        dlg_layout.addLayout(sel_row)
-
-        grid = PersonCropGridWidget()
-        grid.setFocusPolicy(Qt.StrongFocus)
-        dlg_layout.addWidget(grid, 1)
-
-        def _load_selected(idx: int) -> None:
-            seq_id = person_combo.itemData(idx)
-            if seq_id:
-                grid.load_sequence(self._session, seq_id)
-
-        person_combo.currentIndexChanged.connect(_load_selected)
-        _load_selected(0)
-
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        btns.rejected.connect(dlg.reject)
-        dlg_layout.addWidget(btns)
-
-        dlg.exec()
 
     # ------------------------------------------------------------------
     # Finalise

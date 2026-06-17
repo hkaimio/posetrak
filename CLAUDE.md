@@ -127,6 +127,25 @@ The `python/` directory contains the installable `posetrak` Python package:
 - `python/tests/` — pytest suite; run with `pytest python/tests/`
 - `python/pipeline/` — capture pipeline tools (calibration, pose extraction)
 
+### Python GUI applications — two separate entry points
+
+There are **two distinct GUI applications** in `python/app/`. Do not confuse them:
+
+**`python/app/pose/main.py`** — *Detection pipeline tool* (`PoseExtractionWindow`).
+Used to run YOLO+RTMPose on captured video, assign tracks to persons, and finalise
+pose observation sequences.  This window does **not** show tracking results and is
+not the place to add editing or analysis UI.
+
+**`python/app/ui/main_window.py`** — *Main posetrak viewer/editor* (`MainWindow`).
+Shows a tree view of sessions, captures, persons, and tracking runs on the right.
+Selecting a person opens `PersonPanel` (in `content_panels.py`), which contains
+`PersonCropGridWidget` — the multi-camera crop grid with keypoint overlays,
+time scrubber, and (as of the keypoint-editing feature) edit mode.  Any UI that
+lets a user inspect or correct motion capture data belongs here.
+
+When adding new UI features, always check which application context the feature
+belongs to before creating new widgets.
+
 Data lives on `/mnt/d/mocap/` (Windows drive mount).
 
 ## Code Style

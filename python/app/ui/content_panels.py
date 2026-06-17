@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import collections
 import json
+import logging
 import sqlite3
 import sys
 import threading
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 from math import ceil
 
@@ -811,9 +814,15 @@ class CropBackfillWorker(QThread):
         import cv2
         from app.pose.db_cache import _encode_crop
 
-        conn = sqlite3.connect(self._db_path)
+        _log.info("backfill worker: thread started  db=%s", self._db_path)
+        try:
+            conn = sqlite3.connect(self._db_path)
+        except Exception:
+            _log.exception("backfill worker: failed to open DB")
+            return
 
         file_map = {cam["shot_video_id"]: cam["file_path"] for cam in self._cameras}
+        _log.debug("backfill worker: video file map: %s", file_map)
 
         # Build the normal queue: all frames with a bbox that lack a cached crop.
         tasks: list[tuple] = []
@@ -821,7 +830,12 @@ class CropBackfillWorker(QThread):
             svid = cam["shot_video_id"]
             segs = self._track_segs.get(svid, [])
             bboxes = self._bboxes.get(svid, {})
+            _log.debug(
+                "backfill worker: svid=%s  segs=%d  bbox_frames=%d",
+                svid, len(segs), len(bboxes),
+            )
             if not segs or not bboxes:
+                _log.debug("backfill worker: skipping svid=%s (no segs or bboxes)", svid)
                 continue
             cached = set(
                 r[0] for r in conn.execute(
@@ -831,6 +845,8 @@ class CropBackfillWorker(QThread):
                     (svid, self._det_run_id),
                 )
             )
+            _log.debug("backfill worker: svid=%s  cached frames=%d", svid, len(cached))
+            cam_tasks = 0
             for track_id, first, last in segs:
                 for fi in range(first, last + 1):
                     if fi in cached:
@@ -839,31 +855,46 @@ class CropBackfillWorker(QThread):
                     if bbox is None:
                         continue
                     tasks.append((svid, fi, track_id, bbox))
+                    cam_tasks += 1
+            _log.info("backfill worker: svid=%s  missing crops=%d", svid, cam_tasks)
+
+        _log.info("backfill worker: total missing crops queued=%d", len(tasks))
 
         # Sort chronologically; sequential video reads are much faster than random seeks.
         tasks.sort(key=lambda t: t[1])
         with self._lock:
             self._normal.extend(tasks)
 
+        # None sentinel in caps means "video failed to open — don't retry"
         caps: dict[str, object] = {}
 
         def _get_frame(svid: str, frame_idx: int):
             if svid not in caps:
                 path = file_map.get(svid, "")
+                _log.debug("backfill worker: opening video  svid=%s  path=%s", svid, path)
                 cap = cv2.VideoCapture(path)
                 if not cap.isOpened():
+                    _log.warning("backfill worker: cannot open video  svid=%s  path=%s", svid, path)
+                    caps[svid] = None
                     return None
                 caps[svid] = cap
+                _log.info("backfill worker: opened video  svid=%s", svid)
             cap = caps[svid]
+            if cap is None:
+                return None
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ok, bgr = cap.read()
+            if not ok:
+                _log.warning("backfill worker: read failed  svid=%s  frame=%d", svid, frame_idx)
             return bgr if ok else None
 
+        n_done = 0
         try:
             while not self._stop_event.is_set():
                 with self._lock:
                     if self._priority:
                         task = self._priority.popleft()
+                        _log.debug("backfill worker: dequeued priority frame svid=%s frame=%d", task[0], task[1])
                     elif self._normal:
                         task = self._normal.popleft()
                     else:
@@ -890,6 +921,7 @@ class CropBackfillWorker(QThread):
 
                 result = _encode_crop(bgr, bbox)
                 if result is None:
+                    _log.warning("backfill worker: encode failed  svid=%s  frame=%d", svid, frame_idx)
                     continue
 
                 jpeg, wpx, hpx, src_x, src_y, src_w, src_h = result
@@ -904,10 +936,18 @@ class CropBackfillWorker(QThread):
                      src_x, src_y, src_w, src_h),
                 )
                 conn.commit()
+                n_done += 1
+                if n_done % 50 == 1:
+                    _log.info("backfill worker: progress  written=%d", n_done)
+                _log.debug("backfill worker: wrote crop  svid=%s  frame=%d", svid, frame_idx)
                 self.frame_ready.emit(svid, frame_idx)
+        except Exception:
+            _log.exception("backfill worker: unexpected error")
         finally:
+            _log.info("backfill worker: stopping  written=%d", n_done)
             for cap in caps.values():
-                cap.release()
+                if cap is not None:
+                    cap.release()
             conn.close()
 
 
@@ -1090,8 +1130,20 @@ class _ImageCanvas(QWidget):
         self._trail = None  # _TrailData | None
         self._show_ring: bool = True
         self._selected_kp_name: str | None = None
+        self._loading: bool = False
 
     def show_empty(self) -> None:
+        self._loading = False
+        self._pixmap = None
+        self._obs_kp = None
+        self._outlier_kp_mask = None
+        self._joint_xy = None
+        self._marker_xy = None
+        self.update()
+
+    def show_loading(self) -> None:
+        """Show a 'generating…' placeholder — called when backfill is in progress."""
+        self._loading = True
         self._pixmap = None
         self._obs_kp = None
         self._outlier_kp_mask = None
@@ -1250,7 +1302,8 @@ class _ImageCanvas(QWidget):
 
         if self._pixmap is None:
             painter.setPen(QColor("#666"))
-            painter.drawText(QRectF(0, 0, cw, ch), Qt.AlignmentFlag.AlignCenter, "—")
+            label = "generating…" if self._loading else "—"
+            painter.drawText(QRectF(0, 0, cw, ch), Qt.AlignmentFlag.AlignCenter, label)
             painter.end()
             return
 
@@ -1422,6 +1475,9 @@ class _CropCell(QWidget):
 
     def show_empty(self) -> None:
         self._canvas.show_empty()
+
+    def show_loading(self) -> None:
+        self._canvas.show_loading()
 
     def show_image(self, pixmap: QPixmap, x1: float, y1: float, src_scale: float) -> None:
         self._canvas.show_image(pixmap, x1, y1, src_scale)
@@ -1738,13 +1794,18 @@ class PersonCropGridWidget(QWidget):
     def _start_backfill(self) -> None:
         """Start the background crop-generation worker if there is a detection run."""
         if not self._det_run_id:
+            _log.debug("backfill: no detection run — skipping")
             return
         row = self._conn.execute("PRAGMA database_list").fetchone()
         if row is None:
+            _log.warning("backfill: PRAGMA database_list returned nothing")
             return
         db_path = row[2]
         if not db_path:
+            _log.warning("backfill: could not determine DB path (in-memory DB?)")
             return
+        _log.info("backfill: starting worker  db=%s  det_run=%s  cameras=%d",
+                  db_path, self._det_run_id, len(self._cameras))
         worker = CropBackfillWorker(
             db_path=db_path,
             det_run_id=self._det_run_id,
@@ -1758,12 +1819,14 @@ class PersonCropGridWidget(QWidget):
 
     def _on_crop_ready(self, svid: str, frame_idx: int) -> None:
         """Called on the main thread when the backfill worker writes a new crop."""
+        _log.debug("backfill: crop ready  svid=%s  frame=%d", svid, frame_idx)
         if not self._sync_table:
             return
         for cam in self._cameras:
             if cam["shot_video_id"] == svid:
                 current_fi = self._sync_table.lookup(self._current_t, svid)
                 if current_fi == frame_idx:
+                    _log.debug("backfill: refreshing display for current frame %d", frame_idx)
                     self._load_frame(self._current_t)
                 break
 
@@ -2206,9 +2269,11 @@ class PersonCropGridWidget(QWidget):
             ).fetchone()
 
             if row is None:
-                cell.show_empty()
                 if self._backfill is not None:
+                    cell.show_loading()
                     self._backfill.prioritise(svid, frame_idx)
+                else:
+                    cell.show_empty()
                 continue
 
             buf = np.frombuffer(bytes(row["image_data"]), dtype=np.uint8)

@@ -3,8 +3,7 @@
 ## Goals
 
 Allow a user to manually correct keypoint detections inside the detection UI
-(`PoseExtractionWindow`) without running a new detection pass.  The two
-fundamental operations are:
+without running a new detection pass.  The two fundamental operations are:
 
 1. **Mark as outlier / inlier** — override the automatic outlier flag on one
    or more frames of a keypoint.
@@ -14,8 +13,87 @@ fundamental operations are:
 Non-goals for the initial implementation:
 * Editing the tracker's smoothed output (only raw detections).
 * Real-time propagation of edits to the UKF (edits are written to the DB;
-  the tracker must be re-run to pick them up).
+  the tracker must be re-run to pick them up).  A future improvement would be
+  incremental re-tracking over the affected frame window to show the edit's
+  impact without a full rerun.
 * Multi-skeleton editing or re-assignment of keypoints between tracks.
+
+---
+
+## UI context
+
+The editing view is a new `PersonCropGridWidget` that becomes the central
+editing surface.  **It does not seek raw video files.**  Instead it reads JPEG
+crop blobs from `frame_cache_entries`, which makes frame scrubbing
+instantaneous.
+
+The widget is added to the existing `PoseExtractionWindow` (or to a new
+dedicated editing tab/panel in that window).  Edit mode is entered as soon as
+a detection run and a track_id are selected — no tracker run is required.
+Editing should be possible and useful before the tracker has ever been run,
+specifically to fix obvious keypoint errors that would otherwise corrupt the
+tracked result.
+
+---
+
+## `PersonCropGridWidget`
+
+The widget displays one row of camera views for the selected person + frame.
+Each cell shows the cached JPEG crop for that camera (loaded from
+`frame_cache_entries`), with the keypoint overlay drawn on top.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ Cam A │ Cam B │ Cam C │ Cam D │  ← crops at current frame   │
+│  [img]│  [img]│  [img]│  [img]│                             │
+│   ○ ○ │   ○ ○ │   ○ ○ │   ○ ○ │  ← skeleton overlay        │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Crop loading
+
+For each camera at the current frame:
+
+```sql
+SELECT image_data, width_px, height_px, src_x, src_y, src_w, src_h
+FROM frame_cache_entries
+WHERE detection_run_id = ?
+  AND shot_video_id    = ?
+  AND frame_idx        = ?
+  AND track_id         = ?
+  AND cache_type       = 'full_body'
+  AND region_type      = 'full_body'
+```
+
+`src_x, src_y, src_w, src_h` record the crop region in the original full-
+resolution frame, which is needed to:
+- draw keypoints in the correct position within the crop
+- convert mouse clicks in crop display space back to full-frame pixel
+  coordinates for storing edits
+
+### Coordinate conversion
+
+Keypoints are stored in full-frame pixel coordinates (native video
+resolution).  To draw them on a displayed crop:
+
+```python
+display_x = (frame_x - src_x) / src_w * display_w
+display_y = (frame_y - src_y) / src_h * display_h
+```
+
+Inverse (mouse click → full-frame coordinate):
+
+```python
+frame_x = src_x + click_x / display_w * src_w
+frame_y = src_y + click_y / display_h * src_h
+```
+
+### Missing crops (no detection)
+
+When no detection exists for a frame, `frame_cache_entries` has no row for
+that camera + frame + track.  The widget shows the crop from the nearest
+detected frame (±N, same camera) extended to contain the missing frame's
+region of interest.  See *Bounding box backfill* below.
 
 ---
 
@@ -23,253 +101,170 @@ Non-goals for the initial implementation:
 
 ### Design choice: edit overlay table
 
-The preferred approach from the brief is option **c** — edits form a versioned
-overlay on top of the immutable detection run, rather than overwriting it.
+Edits form a versioned overlay on top of the immutable detection run; original
+`detection_keypoints` rows are never mutated.
 
 #### New table: `keypoint_edits`
 
+The table stores one row per **frame** (not per keypoint index), matching the
+blob-per-frame structure of `detection_keypoints`.  The `kp_blob` column is a
+`float32[N, 4]` array (x, y, is_outlier, is_edited flag) in the same keypoint
+order as the source detection model.  A `kp_mask` bitmask records which
+keypoint slots are actually overridden; slots with `kp_mask[i] = 0` inherit
+the original detection value.
+
 ```sql
 CREATE TABLE keypoint_edits (
-    id              TEXT PRIMARY KEY,
-    detection_run_id TEXT NOT NULL
-                        REFERENCES detection_runs(id),
-    shot_video_id   TEXT NOT NULL,
-    track_id        INTEGER NOT NULL,
-    video_frame     INTEGER NOT NULL,
-    kp_index        INTEGER NOT NULL,   -- COCO keypoint index 0-16
-    -- Nullable fields: NULL means "keep original value from detection"
-    x               REAL,              -- pixel x (native video resolution)
-    y               REAL,              -- pixel y (native video resolution)
-    is_outlier      INTEGER,           -- 0 = forced inlier, 1 = forced outlier
-    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+    id               TEXT PRIMARY KEY,
+    detection_run_id TEXT NOT NULL REFERENCES detection_runs(id),
+    shot_video_id    TEXT NOT NULL,
+    track_id         INTEGER NOT NULL,
+    video_frame      INTEGER NOT NULL,
+    -- float32[N, 3]: x, y, is_outlier for each keypoint slot
+    -- Slots not in kp_mask are ignored (original detection value kept)
+    kp_blob          BLOB NOT NULL,
+    -- uint8[ceil(N/8)]: bitmask of which slots this row overrides
+    kp_mask          BLOB NOT NULL,
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 
 CREATE UNIQUE INDEX keypoint_edits_unique
-    ON keypoint_edits (detection_run_id, shot_video_id, track_id, video_frame, kp_index);
+    ON keypoint_edits (detection_run_id, shot_video_id, track_id, video_frame);
 ```
 
-**Rationale:**
-- Original `detection_keypoints` rows are never mutated, so any detection run
-  remains fully reproducible.
-- `UPSERT` (INSERT OR REPLACE) keeps edits instant and auto-versioned by
-  `created_at`.
-- Reading merged keypoints is a simple LEFT JOIN: detection row overridden by
-  the edit row where one exists.
-- A future "freeze" mechanism can snapshot the edit table to a named version
-  without changing the schema.
+`N` matches the number of keypoints in the source detection blob (17 for
+COCO-17, up to 133 for full-body COCO-133, depending on the pose model used
+for the run).
 
-#### Reading merged keypoints
+**Merge logic** (Python, called from `read_keypoints_with_edits()`):
 
-A helper function `read_keypoints_with_edits(session, detection_run_id,
-shot_video_id, track_id)` replaces `read_keypoints_for_run` for the editing
-view:
+1. Read the `detection_keypoints.keypoints` blob for the frame:
+   `float32[N, 3]` = (x, y, confidence).
+2. If a `keypoint_edits` row exists for this frame, unpack `kp_blob` as
+   `float32[N, 3]` = (x, y, is_outlier) and `kp_mask` as a bitmask.
+3. For each keypoint index `i` where `kp_mask[i] == 1`:
+   - Replace `x, y` with the edit values if they differ from 0 (a move edit).
+   - Replace the confidence slot with `0.0` if `is_outlier == 1` (outlier
+     suppression), or with the original confidence if `is_outlier == 0`
+     (forced inlier).
+4. Return the merged `float32[N, 3]` alongside an `is_edited` bool array
+   (True for each overridden slot) for the overlay to mark edited keypoints.
 
-```sql
-SELECT
-    dk.video_frame,
-    COALESCE(ke.x,          dk_x)   AS x,
-    COALESCE(ke.y,          dk_y)   AS y,
-    COALESCE(ke.is_outlier, 0)      AS is_outlier,
-    ke.id IS NOT NULL               AS is_edited
-FROM detection_keypoints dk
-    LEFT JOIN keypoint_edits ke
-        ON  ke.detection_run_id = dk.detection_run_id
-        AND ke.shot_video_id    = dk.shot_video_id
-        AND ke.track_id         = dk.track_id
-        AND ke.video_frame      = dk.video_frame
-        AND ke.kp_index         = ?
-WHERE dk.detection_run_id = ?
-  AND dk.shot_video_id    = ?
-  AND dk.track_id         = ?
-ORDER BY dk.video_frame
-```
+Frames with a `keypoint_edits` row but no corresponding `detection_keypoints`
+row (ghost edits — user placed a keypoint on a frame with no detection) are
+handled by a UNION query that returns the edit blob directly with all slots
+set to `is_edited=True`.
 
-(The keypoint blob must be unpacked per-index in Python as today — only the
-relevant column changes.)
+#### Why blob-per-frame instead of row-per-keypoint
 
-#### Handling frames with no detection
-
-When the user wants to place a keypoint in a frame where the detector found
-nothing (no row in `detection_keypoints`), the edit is written as a synthetic
-row:
-
-```sql
-INSERT OR REPLACE INTO keypoint_edits
-    (id, detection_run_id, shot_video_id, track_id, video_frame, kp_index, x, y, is_outlier)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0);
-```
-
-`x` and `y` are populated from the interpolated ghost position the user
-clicked on (see *Trail interpolation* below).  These rows have no
-corresponding `detection_keypoints` parent row, so the query above uses a
-UNION variant in the reader:
-
-```sql
--- ghost edits: edits with no matching detection row
-SELECT ke.video_frame, ke.x, ke.y, ke.is_outlier, 1 AS is_edited, 1 AS is_synthetic
-FROM keypoint_edits ke
-WHERE ke.detection_run_id = ?
-  AND ke.shot_video_id    = ?
-  AND ke.track_id         = ?
-  AND ke.kp_index         = ?
-  AND NOT EXISTS (
-      SELECT 1 FROM detection_keypoints dk
-      WHERE dk.detection_run_id = ke.detection_run_id
-        AND dk.shot_video_id    = ke.shot_video_id
-        AND dk.track_id         = ke.track_id
-        AND dk.video_frame      = ke.video_frame
-  )
-```
+- Matches `detection_keypoints` storage format (same deserialization path).
+- A single UPSERT covers an entire frame's edits, including cases where the
+  user adjusts several keypoints in the same frame.
+- The `kp_mask` records exactly which slots are overridden without
+  materialising unmodified keypoints.
 
 ---
 
-## UI components
+## Keypoint trail
 
-### Mode toggle
+When a keypoint is selected (by clicking a dot in any camera cell), a trail
+is drawn in that camera's crop view:
 
-A new **Edit keypoints** toggle button (or toolbar action) in
-`PoseExtractionWindow` switches the frame view between *browse mode* (existing
-behaviour) and *edit mode*.  Edit mode is only available when a detection run
-and a specific `track_id` are selected.
+- **Past N frames**: red dots connected by a polyline.
+- **Future N frames**: blue dots connected by a polyline.
+- **Ghost positions** (frames with no detection): semi-transparent grey dots,
+  linearly interpolated between the nearest known positions on each side.
+  Ghost positions are UI-only and are not stored in the DB unless the user
+  moves one or marks it as inlier.
+- **Edited keypoints**: small yellow marker overlaid on any slot overridden by
+  a `keypoint_edits` row.
 
-### `KeypointEditOverlay` (new class, `frame_view.py`)
+Trail radius N is configurable per session (default: 10 frames each
+direction).  The trail always extends all the way to the next/previous real
+detection, even if that is further than N frames, so the user can see the
+nearest anchor for interpolation.
 
-Replaces / extends `SkeletonDetectionOverlay` when edit mode is active.
-Responsibilities:
-
-| Concern | Details |
-|---|---|
-| Full skeleton | Draw all keypoints at the current frame, same colours as today. |
-| Selected keypoint | Larger dot, white ring, no confidence colour. |
-| Trail (past) | Red dots + polyline for the N preceding frames. |
-| Trail (future) | Blue dots + polyline for the N following frames. |
-| Ghost positions | Semi-transparent grey dots at interpolated positions on frames with no detection. |
-| Edited marks | Small yellow square overlaid on any keypoint whose position/outlier state has been overridden. |
-| Drag handle | Mouse hover over a keypoint shows a grab cursor; press-drag moves it. |
-
-The overlay receives a `KeypointTrailData` structure (see below) instead of
-the raw per-frame dict.
-
-#### Trail data structure
-
-```python
-@dataclass
-class KeypointTrailEntry:
-    frame: int
-    x: float
-    y: float
-    is_outlier: bool
-    is_edited: bool
-    is_synthetic: bool   # interpolated ghost; not in DB
-
-@dataclass
-class KeypointTrailData:
-    kp_index: int
-    trail: list[KeypointTrailEntry]   # sorted by frame
-    current_frame: int
-    trail_radius: int = 10            # frames each direction
-```
-
-The overlay draws `trail_radius` entries on each side of `current_frame`,
-extending further if the nearest real detection is more than `trail_radius`
-frames away.
-
-#### Trail interpolation
-
-Gaps between real detections are filled by linear interpolation in pixel
-space.  Ghost entries are marked `is_synthetic=True` and are *not* written to
-the DB.  When the user moves or marks a ghost entry as inlier, the resolved
-pixel coordinates are written as a new `keypoint_edits` row.
-
-### Keypoint selection
-
-A keypoint is identified by its COCO index (0–16).  Clicking a keypoint dot
-in any camera view selects that keypoint index globally — all camera views
-update their trails simultaneously.
-
-Selection state lives in `PoseExtractionWindow` and is propagated to each
-`FrameViewWidget`.  An "active keypoint" panel (could be a label row) shows
-the keypoint name (e.g. "Right wrist"), current pixel position, and outlier
-state.
-
-### Multi-camera synchronisation
-
-Edit mode requires all camera views to be visible simultaneously.  The current
-single `FrameViewWidget` layout is not ideal here — a follow-up task should
-introduce a tiled multi-camera view.  For the initial implementation, the
-existing single-camera view with the camera dropdown can be used; the trail is
-always computed from all cameras but only the active camera's trail is
-interactive.  Edits made in one camera view are immediately reflected when
-switching to another camera.
+A keypoint is identified by its **index in the detection blob** (0-based,
+same ordering as the pose model output).  The UI labels each index with the
+COCO keypoint name (nose, left_eye, …, right_ankle for COCO-17; full set for
+COCO-133).  A `kp_index → name` lookup table is needed; it can be derived
+from the `pose_model` field of the `detection_runs` row.
 
 ---
 
-## Frame view interaction
+## Interaction model
 
-### Mouse
+### Mouse (per camera cell in `PersonCropGridWidget`)
 
 | Event | Action |
 |---|---|
-| Click on keypoint dot | Select that keypoint index |
+| Click on keypoint dot | Select that keypoint index (trail updates all cells) |
 | Click on empty area | Deselect |
-| Drag from keypoint dot | Move keypoint; write edit on mouse-release |
-| Click on ghost dot | Select; if user drags, write a synthetic edit |
+| Drag from keypoint dot | Move keypoint; write `keypoint_edits` row on mouse-release |
+| Click on ghost dot | Select; drag or Space write a synthetic edit row |
 
-Coordinate conversion uses `VideoCanvas.canvas_to_image()` already present in
-the codebase.  The resulting image-space coordinates are stored in native
-video resolution (same convention as `detection_keypoints.keypoints` blob).
+Mouse events arrive in display-crop coordinates.  The inverse transform above
+converts them to full-frame pixel coordinates for storage.
 
 ### Keyboard
 
-All keyboard events are captured by the active `FrameViewWidget` (or by the
-main window and dispatched).
+Key events are captured by `PersonCropGridWidget` (focusable widget).
 
 | Key | Action |
 |---|---|
-| `a` | Previous frame |
+| `a` | Previous frame (loads crop from DB) |
 | `d` | Next frame |
-| `Shift+A` | Extend frame selection left (multi-frame edit range) |
-| `Shift+D` | Extend frame selection right |
-| `←` `→` `↑` `↓` | Nudge selected keypoint ±1 px |
+| `Shift+A` | Extend frame-range selection to the left |
+| `Shift+D` | Extend frame-range selection to the right |
+| `←` `→` `↑` `↓` | Nudge selected keypoint ±1 px (full-frame coords) |
 | `Shift+←/→/↑/↓` | Nudge ±10 px |
 | `Space` | Toggle outlier/inlier for the selected keypoint at the current frame |
 | `Esc` | Deselect keypoint / exit edit mode |
 
-For **frame range operations** (`Shift+A/D`): when a range `[first, last]` is
-active, `Space` and drag operations apply to all frames in the range.  A drag
-moves every keypoint in the range by the same delta (not to the same absolute
-position).
+Frame navigation loads crops from `frame_cache_entries` — no video file seek.
+
+### Frame range operations
+
+When a range `[first, last]` is active (extended via `Shift+A/D`):
+- `Space` toggles the outlier flag on every frame in the range.
+- A drag applies the same pixel delta to every frame in the range (relative
+  move, not absolute repositioning).
 
 ---
 
-## Bounding box caching for undetected frames
+## Bounding box backfill for undetected frames
 
-Currently `frame_cache_entries` only stores crops for frames where a person
-was detected.  The brief correctly notes that this prevents inspecting frames
-where detection failed.
+Keypoint editing is most useful on frames where detection failed; those frames
+currently have no crop in `frame_cache_entries`.
 
-### Solution
+### During a detection run
 
-Extend the detection pipeline post-step to write synthetic bbox crops for
-frames within the run's time range that have no detection.  The bounding box
-is chosen as the union of all real detections within ±N frames (configurable,
-default N=10), padded by 10%.  If no detection exists within ±N frames, use
-the last known bbox.
+The detection pipeline processes frames sequentially, so at the time a frame
+is written the future detections are not yet known.  The simplest approach is
+a **two-pass crop**:
 
-This crop is written to `frame_cache_entries` with `cache_type='full_body'`
-and `track_id` of the nearest detected track.  Because these rows already
-exist in the schema they require no migration.
+1. **Pass 1 (existing)**: run detector + pose estimator; write detection rows
+   and crops at the exact detected bbox per frame.
+2. **Pass 2 (new, post-run)**: for every frame in the run's time range that
+   has no crop, compute the extended bbox from the union of real detections
+   within ±N frames (configurable, default N=10), padded by 10%, and write a
+   synthetic crop to `frame_cache_entries`.  Also re-crop detected frames
+   using this wider bbox so that the displayed region is stable across frames.
 
-A one-shot backfill function `backfill_undetected_crops(session,
-detection_run_id, shot_video_id, n_context=10)` runs after the pipeline
-completes, so existing runs can also be patched.
+Pass 2 runs automatically at the end of the pipeline.  It requires re-reading
+N frames from the video around each gap, which is acceptable since it happens
+once at pipeline time, not interactively.  Existing runs can be backfilled via
+a menu action that calls the same function.
+
+The two-pass approach avoids the N-frame ring buffer during Pass 1 (which
+would complicate the hot path) at the cost of re-reading a bounded number of
+video frames in Pass 2.
 
 ---
 
 ## Schema migration
 
-Requires a new session DB migration (schema version bump to 21 or next
-available):
+New session DB migration (next available version after current):
 
 ```sql
 CREATE TABLE keypoint_edits (
@@ -278,17 +273,13 @@ CREATE TABLE keypoint_edits (
     shot_video_id    TEXT NOT NULL,
     track_id         INTEGER NOT NULL,
     video_frame      INTEGER NOT NULL,
-    kp_index         INTEGER NOT NULL,
-    x                REAL,
-    y                REAL,
-    is_outlier       INTEGER,
+    kp_blob          BLOB NOT NULL,
+    kp_mask          BLOB NOT NULL,
     created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 
 CREATE UNIQUE INDEX keypoint_edits_unique
-    ON keypoint_edits (detection_run_id, shot_video_id, track_id, video_frame, kp_index);
-
-PRAGMA user_version = 21;
+    ON keypoint_edits (detection_run_id, shot_video_id, track_id, video_frame);
 ```
 
 ---
@@ -297,57 +288,65 @@ PRAGMA user_version = 21;
 
 ### Phase 1 — data layer
 - Add `keypoint_edits` table via a DB migration.
-- Implement `read_keypoints_with_edits()` in `db_cache.py`.
-- Implement `write_keypoint_edit()` in `db_cache.py` (single-frame upsert).
-- Unit tests for the read path (merged output matches expectations for edited,
-  unedited, and ghost frames).
+- Implement `read_keypoints_with_edits(session, run_id, svid, track_id)` in
+  `db_cache.py`: reads the detection blob and applies the mask-based merge.
+- Implement `write_keypoint_edit(session, run_id, svid, track_id, frame,
+  edits: dict[int, tuple[float, float, int]])` in `db_cache.py`: packs edits
+  into the blob/mask format and upserts the row.
+- Unit tests: merge with no edits returns original; edited slots override;
+  ghost frame returns edit blob directly.
 
-### Phase 2 — overlay and trail
-- Implement `KeypointTrailData` dataclass and trail-building logic (with
-  linear interpolation for gaps).
-- Implement `KeypointEditOverlay` with trail rendering in
-  `frame_view.py`.
-- Wire overlay into `FrameViewWidget` behind the edit-mode flag.
+### Phase 2 — crop grid widget
+- Implement `PersonCropGridWidget` in `python/app/pose/`:
+  - Loads per-camera JPEG blobs from `frame_cache_entries`.
+  - Draws merged keypoints (from `read_keypoints_with_edits`) as an overlay
+    using the crop coordinate transform.
+  - Supports `a`/`d` frame navigation from cached blobs.
+- Wire into `PoseExtractionWindow` so it activates when a track segment is
+  selected in the stitcher.
 
-### Phase 3 — mouse interaction
-- Implement keypoint click-to-select (hit-test against rendered dot
-  positions).
-- Implement drag-to-move with coordinate conversion and DB write on release.
-- Add ghost-dot interaction (click/drag creates a synthetic edit row).
+### Phase 3 — trail overlay
+- Implement `KeypointTrailData` and linear interpolation for ghost positions.
+- Extend the overlay to draw past/future trails and ghost dots.
+- Update trail when keypoint selection changes.
 
-### Phase 4 — keyboard shortcuts
-- Capture key events in `FrameViewWidget` (override `keyPressEvent`).
-- Implement `a`/`d` frame navigation, cursor nudge, `Space` toggle.
-- Implement `Shift+A/D` frame range extension.
+### Phase 4 — mouse interaction
+- Click-to-select: hit-test against displayed dot positions in crop space.
+- Drag-to-move: track drag delta in crop space, convert to full-frame coords
+  on mouse-release, call `write_keypoint_edit`.
+- Ghost-dot interaction: click or drag on an interpolated position creates a
+  new `keypoint_edits` row.
 
-### Phase 5 — multi-frame operations
-- Apply Space toggle and drag delta to entire selected frame range.
-- UI indicator showing active frame range.
+### Phase 5 — keyboard shortcuts
+- Capture key events in `PersonCropGridWidget`.
+- Implement `a`/`d` frame nav, cursor nudge, `Space` toggle.
+- Implement `Shift+A/D` frame range selection.
+- Apply range operations (bulk toggle, bulk delta move) to all frames in
+  range.
 
-### Phase 6 — bounding box backfill
-- Implement `backfill_undetected_crops()` in `db_cache.py`.
+### Phase 6 — bounding box backfill (two-pass)
+- Implement `backfill_crops(session, run_id, svid, n_context=10)` in
+  `db_cache.py`: for each frame without a crop, compute the extended bbox and
+  write a synthetic `frame_cache_entries` row.
 - Call automatically at the end of the detection pipeline.
-- Expose as a menu action for existing runs.
+- Expose as a menu action in `PoseExtractionWindow` for existing runs.
 
 ---
 
 ## Open questions
 
-1. **Freeze / version management** — the brief envisions being able to mark
-   the current edit state as a named frozen version.  A `keypoint_edit_snapshots`
-   table (linking `keypoint_edits` rows to a named snapshot) could support
-   this.  Deferred to after Phase 1.
+1. **Freeze / version management** — the brief envisions marking the current
+   edit state as a named frozen version.  A `keypoint_edit_snapshots` table
+   linking edit rows to a named snapshot is the natural extension.  Deferred
+   to after Phase 1.
 
-2. **Multi-camera tiled view** — edit mode is most useful when all cameras are
-   visible at once.  A grid layout (2×2 or N×1) should be designed as a
-   separate feature but kept in mind when wiring trail synchronisation.
+2. **COCO keypoint name mapping** — the pose model name (stored in
+   `detection_runs.pose_model`) determines the keypoint count and ordering.
+   A static lookup table (`rtmpose-l-133kp` → 133-entry name list, etc.)
+   should be added to `db_cache.py` or a new `pose_models.py` module.
 
-3. **Propagation to the tracker** — after editing, the user must re-run the
-   tracker to see the effect.  A future improvement would be to let the
-   tracker read `keypoint_edits` directly so that only the affected time
-   window is re-solved.
-
-4. **COCO keypoint indexing vs. skeleton marker names** — the current skeleton
-   YAML uses named markers (e.g. `right_wrist`) while COCO uses integer
-   indices.  A mapping table (already partially implied by `skeleton_layout.py`)
-   will be needed to label keypoints in the editing UI.
+3. **Incremental re-tracking** — re-running the full tracker to see the
+   effect of edits is slow.  A future optimisation is to re-solve only the
+   affected time window by warm-starting the UKF from a checkpoint just
+   before the first edit.  This requires caching UKF state, which is a
+   significant change to the C++ tracker.

@@ -210,6 +210,40 @@ def test_update_single_kp_edit_merges_with_existing(seq_db):
     assert mask[0] & (1 << 1)   # bit 1 set
 
 
+def test_update_single_kp_edit_ghost_frame(seq_db):
+    """update_single_keypoint_edit works on a frame with no pose_observations row."""
+    ghost_frame = 99  # not in seq_db fixture
+    update_single_keypoint_edit(seq_db, "seq1", "ci1", ghost_frame, 0, 123.0, 456.0)
+
+    row = seq_db.execute(
+        "SELECT kp_blob, kp_mask FROM pose_observation_edits"
+        " WHERE sequence_id='seq1' AND camera_instance_id='ci1' AND video_frame=?",
+        (ghost_frame,),
+    ).fetchone()
+    assert row is not None
+    edit_kp = np.frombuffer(bytes(row["kp_blob"]), dtype=np.float32).reshape(-1, 3)
+    assert abs(edit_kp[0, 0] - 123.0) < 0.01
+    assert abs(edit_kp[0, 1] - 456.0) < 0.01
+    mask = bytes(row["kp_mask"])
+    assert mask[0] & 1  # bit 0 set
+
+
+def test_read_observations_with_edits_includes_ghost_frame(seq_db):
+    """Ghost-frame edits (no pose_observations row) appear in the merged result."""
+    from app.pose.db_cache import read_observations_with_edits
+    ghost_frame = 99
+    update_single_keypoint_edit(seq_db, "seq1", "ci1", ghost_frame, 1, 77.0, 88.0)
+
+    merged = read_observations_with_edits(seq_db, "seq1", "ci1")
+    assert ghost_frame in merged
+    kp = merged[ghost_frame]
+    assert abs(kp[1, 0] - 77.0) < 0.01
+    assert abs(kp[1, 1] - 88.0) < 0.01
+    assert abs(kp[1, 2] - 1.0) < 0.01   # manually placed → full confidence
+    # Unedited slots stay at zero
+    assert abs(kp[0, 2]) < 0.01
+
+
 # ---------------------------------------------------------------------------
 # Integration: PersonCropGridWidget drag writes to DB
 # ---------------------------------------------------------------------------

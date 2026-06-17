@@ -1204,6 +1204,9 @@ class _ImageCanvas(QWidget):
     keypoint_selected = Signal(int)
     keypoint_deselected = Signal()
     keypoint_moved = Signal(int, float, float)
+    # Emitted when the user clicks empty space in edit mode (no kp hit).
+    # Carries display-space coords so the widget can convert and place a kp.
+    empty_area_clicked = Signal(float, float)
 
     def __init__(self, min_h: int = 240, parent=None) -> None:
         super().__init__(parent)
@@ -1354,7 +1357,8 @@ class _ImageCanvas(QWidget):
                 self._drag_start_disp = None
                 self._drag_cur_disp = None
                 self._drag_moved = False
-                self.keypoint_deselected.emit()
+                # Let the widget decide: place a kp on a ghost frame or deselect.
+                self.empty_area_clicked.emit(dx, dy)
             self.update()
         else:
             super().mousePressEvent(event)
@@ -1817,6 +1821,9 @@ class PersonCropGridWidget(QWidget):
             cell._canvas.keypoint_moved.connect(
                 lambda idx, x, y, i=i: self._on_kp_moved(i, idx, x, y)
             )
+            cell._canvas.empty_area_clicked.connect(
+                lambda dx, dy, i=i: self._on_empty_area_clicked(i, dx, dy)
+            )
             cell._canvas.installEventFilter(self)
 
         r3d, c3d = divmod(len(self._cameras), ncols)
@@ -1950,6 +1957,23 @@ class PersonCropGridWidget(QWidget):
         for cell in self._cells:
             cell.set_trail(None)
             cell.set_selected_kp(None, show_ring=False)
+
+    def _on_empty_area_clicked(self, cam_idx: int, dx: float, dy: float) -> None:
+        """Canvas click missed all kp.  Place selected kp on ghost frames; otherwise deselect."""
+        if (self._edit_mode
+                and self._sel_kp_idx is not None
+                and self._sync_table is not None):
+            cam = self._cameras[cam_idx]
+            svid = cam["shot_video_id"]
+            cam_id = cam["camera_instance_id"]
+            frame_idx = self._sync_table.lookup(self._current_t, svid)
+            if (frame_idx is not None
+                    and self._obs_kp.get(cam_id, {}).get(frame_idx) is None):
+                # Ghost frame with a selected keypoint → place it at the click location.
+                full_x, full_y = self._cells[cam_idx]._canvas._display_to_full(dx, dy)
+                self._on_kp_moved(cam_idx, self._sel_kp_idx, full_x, full_y)
+                return
+        self._on_kp_deselected(cam_idx)
 
     def _on_kp_moved(self, cam_idx: int, kp_idx: int, new_x: float, new_y: float) -> None:
         from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit

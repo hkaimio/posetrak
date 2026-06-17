@@ -317,23 +317,35 @@ def read_observations_with_edits(
         for r in edit_rows
     }
 
+    def _apply_edit(kp: np.ndarray, edit_kp: np.ndarray, mask: bytes) -> None:
+        if edit_kp.shape[0] != kp.shape[0]:
+            return
+        for i in range(kp.shape[0]):
+            byte_idx, bit_idx = divmod(i, 8)
+            if byte_idx < len(mask) and (mask[byte_idx] >> bit_idx) & 1:
+                kp[i, 0] = edit_kp[i, 0]
+                kp[i, 1] = edit_kp[i, 1]
+                if edit_kp[i, 2] != 0.0:  # is_outlier → zero confidence
+                    kp[i, 2] = 0.0
+                else:
+                    kp[i, 2] = 1.0  # manually placed → full confidence
+
     result: dict[int, np.ndarray] = {}
     for row in obs_rows:
         frame = row["video_frame"]
         kp = np.frombuffer(bytes(row["kp_blob"]), dtype=np.float32).reshape(-1, 3).copy()
         if frame in edits:
-            edit_kp, mask = edits[frame]
-            if edit_kp.shape[0] == kp.shape[0]:
-                for i in range(kp.shape[0]):
-                    byte_idx, bit_idx = divmod(i, 8)
-                    if byte_idx < len(mask) and (mask[byte_idx] >> bit_idx) & 1:
-                        kp[i, 0] = edit_kp[i, 0]
-                        kp[i, 1] = edit_kp[i, 1]
-                        if edit_kp[i, 2] != 0.0:  # is_outlier → zero confidence
-                            kp[i, 2] = 0.0
-                        else:
-                            kp[i, 2] = 1.0  # manually placed → full confidence
+            _apply_edit(kp, *edits[frame])
         result[frame] = kp
+
+    # Include ghost frames: edit rows with no backing pose_observations row.
+    for frame, (edit_kp, mask) in edits.items():
+        if frame in result:
+            continue
+        kp = np.zeros_like(edit_kp)  # all-zero confidence base
+        _apply_edit(kp, edit_kp, mask)
+        result[frame] = kp
+
     return result
 
 
@@ -384,16 +396,29 @@ def update_single_keypoint_edit(
     Reads the existing edit row (if any), merges the new slot into it, and
     writes back with an upsert.  is_outlier=True marks the slot as rejected
     (confidence → 0); is_outlier=False sets the new x/y position (confidence → 1).
+
+    Works on ghost frames (no pose_observations row) by inferring the keypoint
+    count from any other observation in the same camera.
     """
     obs_row = session.execute(
         "SELECT kp_blob FROM pose_observations"
         " WHERE sequence_id = ? AND camera_instance_id = ? AND video_frame = ?",
         (sequence_id, camera_instance_id, video_frame),
     ).fetchone()
-    if obs_row is None:
-        return
 
-    n_kp = len(bytes(obs_row["kp_blob"])) // (3 * 4)
+    if obs_row is not None:
+        n_kp = len(bytes(obs_row["kp_blob"])) // (3 * 4)
+    else:
+        # Ghost frame: infer n_kp from any other observation in this camera.
+        any_obs = session.execute(
+            "SELECT kp_blob FROM pose_observations"
+            " WHERE sequence_id = ? AND camera_instance_id = ? LIMIT 1",
+            (sequence_id, camera_instance_id),
+        ).fetchone()
+        if any_obs is None:
+            return  # no observations at all — cannot determine keypoint count
+        n_kp = len(bytes(any_obs["kp_blob"])) // (3 * 4)
+
     n_mask_bytes = (n_kp + 7) // 8
 
     edit_row = session.execute(

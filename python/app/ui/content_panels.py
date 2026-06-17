@@ -837,17 +837,23 @@ class CropBackfillWorker(QThread):
             if not segs or not bboxes:
                 _log.debug("backfill worker: skipping svid=%s (no segs or bboxes)", svid)
                 continue
-            cached = set(
-                r[0] for r in conn.execute(
-                    "SELECT frame_idx FROM frame_cache_entries"
-                    " WHERE shot_video_id=? AND cache_type='person_crop'"
-                    " AND detection_run_id=? AND region_type='full_body'",
-                    (svid, self._det_run_id),
-                )
-            )
-            _log.debug("backfill worker: svid=%s  cached frames=%d", svid, len(cached))
             cam_tasks = 0
             for track_id, first, last in segs:
+                # Query per-track so we don't mistake another person's cached crops
+                # as covering this track's frames.
+                cached = set(
+                    r[0] for r in conn.execute(
+                        "SELECT frame_idx FROM frame_cache_entries"
+                        " WHERE shot_video_id=? AND cache_type='person_crop'"
+                        " AND detection_run_id=? AND region_type='full_body'"
+                        " AND track_id=?",
+                        (svid, self._det_run_id, track_id),
+                    )
+                )
+                _log.debug(
+                    "backfill worker: svid=%s  track=%s  cached=%d  seg=[%d,%d]",
+                    svid, track_id, len(cached), first, last,
+                )
                 for fi in range(first, last + 1):
                     if fi in cached:
                         continue

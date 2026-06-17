@@ -264,13 +264,42 @@ src/
 
 ## Coordinate spaces
 
-| Space | Units | Notes |
+| Space | Units | Where used |
 |---|---|---|
-| Full-frame distorted | pixels | Raw video frame; keypoints from YOLO/RTMPose stored here in `detection_keypoints` |
-| Full-frame undistorted (K_new) | pixels | After `camera.undistort()`; keypoints in `pose_observations` when `pixels_are_undistorted=1` |
-| Crop display space | pixels | Widget pixels after letterbox scaling; `src_x/y/w/h` from `frame_cache_entries` define the inverse transform |
+| Full-frame distorted (K_original) | pixels | Raw video frame.  **All keypoint coordinates in `detection_keypoints` and `pose_observations` (current pipeline) are stored here.** |
+| Full-frame undistorted (K_new) | pixels | The C++ tracker's working space after `camera.undistort()` is applied.  Projected-back observations in `tracking_obs_results` live here. |
+| Crop display space | pixels | Widget pixels after letterbox scaling; `src_x/y/w/h` from `frame_cache_entries` define the inverse transform back to K_original. |
 | Camera space | metres | After full projection: `x_cam = R * x_world + t` |
 | World space | metres | The common 3-D reference frame; camera positions stored as `−R^T t` |
+
+### Distorted vs undistorted — the full story
+
+The `DetectionPipeline` docstring states explicitly: *"Coordinates are in
+original (distorted) pixel space throughout."*  `finalise_to_db` writes
+`pixels_are_undistorted = 0` into every new `pose_observation_sequences` row,
+so the C++ tracker always calls `camera->undistort()` on those values before
+computing FK / reprojection.
+
+`pose_observation_sequences.pixels_are_undistorted` exists because an earlier
+version of the pipeline ran pose estimation on pre-undistorted video frames,
+producing K_new coordinates.  The column defaults to `1` in the schema (and
+the v4 migration comment says "existing rows default to 1 because all prior
+captures used undistorted video").  Those older sequences and any imported
+OpenPose JSON data may have `pixels_are_undistorted = 1`; new sequences
+produced by the integrated detection pipeline always have it set to `0`.
+
+**What this means for keypoint editing:**
+- `pose_observation_edits` must store coordinates in the same distorted pixel
+  space as `pose_observations` (K_original).
+- Clicks in the `PersonCropGridWidget` are converted to full-frame distorted
+  coordinates using `src_x/y/w/h` from `frame_cache_entries`.
+- No undistortion is applied in the editing UI; the C++ tracker handles it.
+
+**A comment to be aware of:** `load_session.py:469` says *"Pixels are in
+undistorted pixel space (K_new)"* — this refers to `tracking_obs_results`
+(the tracker's *output*, projected back from its 3-D state into camera space),
+not to `pose_observations`.  It is correct for that table but easy to
+misread as describing the input observations.
 
 The `Intrinsics::undistort()` and `camera.project()` methods handle Brown-
 Conrady (radial/tangential) and fisheye (OpenCV) distortion models.

@@ -87,8 +87,13 @@ the crop region in the original full-resolution frame.
 
 ### Coordinate conversion
 
-Keypoints in `pose_observations` are in full-frame pixel coordinates (native
-resolution of the video, post-undistortion).  To draw them on a displayed crop:
+Keypoints in `pose_observations` are in **distorted pixel space** (K_original
+— raw video frame coordinates).  `finalise_to_db` writes
+`pixels_are_undistorted = 0`; the C++ tracker undistorts them internally.
+`pose_observation_edits` must store coordinates in the same distorted space so
+the tracker applies undistortion consistently.
+
+To draw keypoints on a displayed crop:
 
 ```python
 display_x = (frame_x - src_x) / src_w * display_w
@@ -379,10 +384,29 @@ CREATE UNIQUE INDEX pose_observation_edits_unique
 - Support `a`/`d` frame navigation from cached blobs.
 - Wire into `PoseExtractionWindow` when a named person is selected.
 
+**Validation:**
+- Select a person with a known detection run; verify each camera cell shows
+  the correct JPEG crop at the correct frame and that `a`/`d` advances without
+  seeking video files (confirm via profiling or log output).
+- Verify keypoints drawn on a crop correspond to the correct pixel position:
+  place a known detection (e.g. right shoulder) and confirm the dot lands on
+  the shoulder in the displayed crop image.
+- Verify switching between frames with and without detections (ghost frames)
+  shows a placeholder / fallback crop rather than crashing.
+
 ### Phase 3 — trail overlay
 - Implement `KeypointTrailData` and linear interpolation for ghost positions.
 - Draw past/future trail polylines and ghost dots on the overlay.
 - Update trail when keypoint selection changes.
+
+**Validation:**
+- Select a keypoint at a frame in the middle of a detected run; verify that
+  red (past) and blue (future) trail dots appear at the correct positions and
+  connect with polylines.
+- Introduce a gap (frames with no detection) and verify ghost dots appear
+  at linearly interpolated positions between the flanking real detections.
+- Verify ghost dots are not written to the DB (check `pose_observation_edits`
+  remains empty until the user interacts with them).
 
 ### Phase 4 — mouse interaction
 - Click-to-select: hit-test against displayed dot positions in crop space.
@@ -391,16 +415,47 @@ CREATE UNIQUE INDEX pose_observation_edits_unique
 - Ghost-dot interaction: click or drag creates a new `pose_observation_edits`
   row.
 
+**Validation:**
+- Click a known keypoint dot; verify it is highlighted and its index / name
+  is shown in the active keypoint panel.
+- Drag a keypoint by a known pixel delta (e.g. 20 px right in crop space);
+  after release, read the `pose_observation_edits` row and verify the stored
+  `x` coordinate has changed by the expected full-frame delta (accounting for
+  the `src_w / display_w` scale factor).
+- Drag to a ghost frame position; verify a new `pose_observation_edits` row
+  is created with the correct `video_frame`.
+- Verify clicking empty space deselects the keypoint.
+
 ### Phase 5 — keyboard shortcuts
 - Capture key events in `PersonCropGridWidget`.
 - Implement `a`/`d` frame nav, cursor nudge, `Space` toggle.
 - Implement `Shift+A/D` frame range selection and bulk operations.
+
+**Validation:**
+- Press `a`/`d` and verify the displayed frame index changes by ±1 and the
+  crop updates immediately.
+- Select a keypoint, press `→` once; verify the stored x coordinate in
+  `pose_observation_edits` increases by 1 (full-frame pixel).
+- Press `Shift+→` and verify an increase of 10 px.
+- Press `Space`; verify `is_outlier = 1` is written.  Press `Space` again;
+  verify `is_outlier = 0`.
+- Extend a range with `Shift+D` over 5 frames, then press `Space`; verify
+  `pose_observation_edits` rows are written for all 5 frames with
+  `is_outlier = 1`.
 
 ### Phase 6 — bounding box backfill (two-pass)
 - `backfill_crops(session, detection_run_id, shot_video_id, n_context=10)`
   in `db_cache.py`: write synthetic crops for undetected frames.
 - Call automatically at the end of the detection pipeline.
 - Expose as a menu action for existing runs.
+
+**Validation:**
+- Run a detection over a segment where the person disappears for 3 frames;
+  after backfill, verify `frame_cache_entries` contains rows for those 3
+  frames with a crop region that encompasses the detections from ±10 frames.
+- Open the editing widget at one of those frames and verify a crop is
+  displayed rather than a placeholder.
+- Verify backfill does not overwrite existing crops for detected frames.
 
 ---
 

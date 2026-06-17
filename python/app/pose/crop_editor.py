@@ -11,8 +11,8 @@ import sqlite3
 from dataclasses import dataclass, field
 
 import numpy as np
-from PySide6.QtCore import QByteArray, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
+from PySide6.QtCore import QByteArray, QPointF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -37,6 +37,14 @@ _KP_OUTLIER = QColor(120, 120, 120)    # grey   — outlier (confidence == 0)
 _KP_EDITED  = QColor(255, 220, 0)      # yellow — overridden by an edit
 
 _CONF_THRESHOLD = 0.01  # below this → treat as outlier for display
+
+# Trail overlay
+_TRAIL_N = 10                               # default half-window in frame-slots
+_TRAIL_PAST_COLOR   = QColor(220,  60,  60)       # red   — past frames
+_TRAIL_FUTURE_COLOR = QColor( 60, 100, 220)       # blue  — future frames
+_TRAIL_GHOST_COLOR  = QColor(140, 140, 140, 160)  # grey, semi-transparent — ghost
+_TRAIL_LINE_WIDTH   = 1.5
+_TRAIL_DOT_R        = 3
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +71,113 @@ class _FrameSlot:
     per_cam: dict[str, int]  # camera_instance_id → video_frame
 
 
+@dataclass
+class _TrailPoint:
+    """One point on the keypoint trail."""
+    x: float
+    y: float
+    is_ghost: bool  # True → linearly interpolated; no real observation at this slot
+
+
+@dataclass
+class _TrailData:
+    """Trail context for one selected keypoint in one camera cell."""
+    kp_idx: int
+    past: list[_TrailPoint]    # oldest first (slots before current)
+    future: list[_TrailPoint]  # nearest first (slots after current)
+
+
+# ---------------------------------------------------------------------------
+# Trail computation (pure functions — testable without Qt)
+# ---------------------------------------------------------------------------
+
+def _slot_kp_pos(
+    slot: _FrameSlot,
+    kp_by_frame: dict[int, np.ndarray],
+    camera_id: str,
+    kp_idx: int,
+) -> tuple[float, float] | None:
+    """Return (x, y) for kp_idx at this slot if it is a real, non-outlier observation."""
+    vf = slot.per_cam.get(camera_id)
+    if vf is None:
+        return None
+    kp = kp_by_frame.get(vf)
+    if kp is None or kp_idx >= kp.shape[0] or kp[kp_idx, 2] < _CONF_THRESHOLD:
+        return None
+    return float(kp[kp_idx, 0]), float(kp[kp_idx, 1])
+
+
+def _build_trail_segment(
+    frames: list[_FrameSlot],
+    kp_by_frame: dict[int, np.ndarray],
+    camera_id: str,
+    slot_indices: list[int],
+    kp_idx: int,
+) -> list[_TrailPoint]:
+    """Build trail points for a window of slot indices, interpolating gaps."""
+    if not slot_indices:
+        return []
+
+    raw: list[tuple[float, float] | None] = [
+        _slot_kp_pos(frames[i], kp_by_frame, camera_id, kp_idx)
+        for i in slot_indices
+    ]
+    n = len(raw)
+    result: list[_TrailPoint | None] = [None] * n
+
+    for i, pos in enumerate(raw):
+        if pos is not None:
+            result[i] = _TrailPoint(pos[0], pos[1], is_ghost=False)
+
+    # Fill gaps via linear interpolation between bracketing real points
+    for i in range(n):
+        if result[i] is not None:
+            continue
+        prev_anchor: tuple[int, _TrailPoint] | None = None
+        next_anchor: tuple[int, _TrailPoint] | None = None
+        for j in range(i - 1, -1, -1):
+            if result[j] is not None and not result[j].is_ghost:
+                prev_anchor = (j, result[j])
+                break
+        for j in range(i + 1, n):
+            if result[j] is not None and not result[j].is_ghost:
+                next_anchor = (j, result[j])
+                break
+        if prev_anchor is not None and next_anchor is not None:
+            pi, pp = prev_anchor
+            ni, np_ = next_anchor
+            t = (i - pi) / (ni - pi)
+            result[i] = _TrailPoint(
+                pp.x + t * (np_.x - pp.x),
+                pp.y + t * (np_.y - pp.y),
+                is_ghost=True,
+            )
+
+    return [p for p in result if p is not None]
+
+
+def compute_trail(
+    frames: list[_FrameSlot],
+    kp_by_frame: dict[int, np.ndarray],
+    camera_id: str,
+    current_slot_idx: int,
+    kp_idx: int,
+    n: int = _TRAIL_N,
+) -> _TrailData:
+    """Compute past/future keypoint trail for the selected keypoint index.
+
+    Ghost positions (no detection or outlier) are linearly interpolated between
+    bracketing real observations.  Points with no anchors on both sides are omitted.
+    """
+    past_indices  = list(range(max(0, current_slot_idx - n), current_slot_idx))
+    future_indices = list(range(current_slot_idx + 1, min(len(frames), current_slot_idx + n + 1)))
+    return _TrailData(
+        kp_idx=kp_idx,
+        past=_build_trail_segment(frames, kp_by_frame, camera_id, past_indices, kp_idx),
+        future=_build_trail_segment(frames, kp_by_frame, camera_id, future_indices, kp_idx),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Single camera cell widget
 # ---------------------------------------------------------------------------
@@ -76,6 +191,7 @@ class _CropCellWidget(QWidget):
         self._pixmap: QPixmap | None = None
         self._kp: np.ndarray | None = None          # float32[N,3] merged
         self._edited_mask: np.ndarray | None = None  # bool[N] — edited slots
+        self._trail: _TrailData | None = None
         # Crop rect in original full-resolution frame (for coordinate transform)
         self._src_x = 0
         self._src_y = 0
@@ -93,6 +209,7 @@ class _CropCellWidget(QWidget):
         src_h: int,
         kp: np.ndarray | None,
         edited_mask: np.ndarray | None = None,
+        trail: _TrailData | None = None,
     ) -> None:
         self._src_x = src_x
         self._src_y = src_y
@@ -100,6 +217,7 @@ class _CropCellWidget(QWidget):
         self._src_h = max(src_h, 1)
         self._kp = kp
         self._edited_mask = edited_mask
+        self._trail = trail
 
         if jpeg_bytes:
             pix = QPixmap()
@@ -119,6 +237,7 @@ class _CropCellWidget(QWidget):
         self._pixmap = None
         self._kp = None
         self._edited_mask = None
+        self._trail = None
         self.update()
 
     def paintEvent(self, event):  # noqa: N802
@@ -135,6 +254,10 @@ class _CropCellWidget(QWidget):
             # No crop available — show placeholder
             painter.setPen(QColor(100, 100, 100))
             painter.drawText(0, 0, _CELL_W, _CELL_H, Qt.AlignCenter, "no crop")
+
+        # Trail (drawn under keypoint dots so dots appear on top)
+        if self._trail is not None:
+            self._draw_trail(painter, self._trail)
 
         # Keypoint overlay
         if self._kp is not None:
@@ -183,6 +306,48 @@ class _CropCellWidget(QWidget):
                 _KP_RADIUS * 2, _KP_RADIUS * 2,
             )
 
+    def _draw_trail(self, painter: QPainter, trail: _TrailData) -> None:
+        """Draw past/future trail polylines and dots for the selected keypoint."""
+        scale_x = _CELL_W / self._src_w
+        scale_y = _CELL_H / self._src_h
+
+        def to_display(tp: _TrailPoint) -> tuple[int, int] | None:
+            if not (self._src_x <= tp.x < self._src_x + self._src_w and
+                    self._src_y <= tp.y < self._src_y + self._src_h):
+                return None
+            return (
+                int((tp.x - self._src_x) * scale_x),
+                int((tp.y - self._src_y) * scale_y),
+            )
+
+        def draw_segment(points: list[_TrailPoint], color: QColor) -> None:
+            if not points:
+                return
+            display = [to_display(p) for p in points]
+
+            # Polyline through all visible display points
+            poly = [QPointF(d[0], d[1]) for d in display if d is not None]
+            if len(poly) >= 2:
+                pen = QPen(color)
+                pen.setWidthF(_TRAIL_LINE_WIDTH)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPolyline(poly)
+
+            # Individual dots (ghost in semi-transparent grey, real in segment color)
+            painter.setPen(Qt.PenStyle.NoPen)
+            for d, tp in zip(display, points):
+                if d is None:
+                    continue
+                painter.setBrush(_TRAIL_GHOST_COLOR if tp.is_ghost else color)
+                painter.drawEllipse(
+                    d[0] - _TRAIL_DOT_R, d[1] - _TRAIL_DOT_R,
+                    _TRAIL_DOT_R * 2, _TRAIL_DOT_R * 2,
+                )
+
+        draw_segment(trail.past, _TRAIL_PAST_COLOR)
+        draw_segment(trail.future, _TRAIL_FUTURE_COLOR)
+
 
 # ---------------------------------------------------------------------------
 # Main grid widget
@@ -205,7 +370,8 @@ class PersonCropGridWidget(QWidget):
         self._detection_run_id: str | None = None
         self._cameras: list[_CameraSlot] = []
         self._frames: list[_FrameSlot] = []
-        self._frame_idx: int = 0   # index into self._frames
+        self._frame_idx: int = 0        # index into self._frames
+        self._selected_kp: int | None = None
 
         self._build_ui()
 
@@ -398,9 +564,25 @@ class PersonCropGridWidget(QWidget):
             kp = cam.kp_by_frame.get(video_frame)
             edited_mask = self._edited_mask(cam.camera_instance_id, video_frame) if kp is not None else None
 
-            cell.update_frame(jpeg, src_x, src_y, src_w, src_h, kp, edited_mask)
+            trail = None
+            if self._selected_kp is not None:
+                trail = compute_trail(
+                    self._frames, cam.kp_by_frame, cam.camera_instance_id,
+                    idx, self._selected_kp,
+                )
+
+            cell.update_frame(jpeg, src_x, src_y, src_w, src_h, kp, edited_mask, trail)
 
         self.frame_changed.emit(idx, slot.timestamp_s)
+
+    # ------------------------------------------------------------------
+    # Keypoint selection
+    # ------------------------------------------------------------------
+
+    def select_keypoint(self, kp_idx: int | None) -> None:
+        """Set the selected keypoint index and refresh the trail display."""
+        self._selected_kp = kp_idx
+        self._show_frame(self._frame_idx)
 
     # ------------------------------------------------------------------
     # DB helpers

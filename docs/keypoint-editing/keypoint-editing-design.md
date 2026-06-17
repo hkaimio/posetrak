@@ -163,6 +163,84 @@ set to `is_edited=True`.
 - The `kp_mask` records exactly which slots are overridden without
   materialising unmodified keypoints.
 
+### Data pipeline and tracker integration
+
+Edits stored in `keypoint_edits` must reach the C++ UKF tracker.  The current
+pipeline is:
+
+```
+detection_keypoints  ──(finalise_to_db)──►  pose_observations  ──►  C++ SessionReader
+keypoint_edits ──┘ (not yet applied)                                 load_observations()
+```
+
+Edits must be applied at **two points** in this pipeline so that the tracker
+always uses the correct merged observations.
+
+#### Integration point 1 — `finalise_to_db` (Python, `finalise.py`)
+
+`finalise_to_db` already reads `detection_keypoints` row-by-row and writes the
+blob to `pose_observations`.  It must be extended to:
+1. Fetch the `keypoint_edits` row for the same
+   `(detection_run_id, shot_video_id, track_id, video_frame)`, if one exists.
+2. Apply the mask-based merge to the detection blob.
+3. Write the merged blob to `pose_observations`.
+
+This ensures that after the user edits and re-finalizes, the tracker always
+receives the correct merged observations.  Re-finalization is a single button
+click already in the workflow.
+
+#### Integration point 2 — `SessionReader::load_observations` (C++, `session_reader.cpp`)
+
+The C++ tracker loads observations from `pose_observations` keyed by
+`sequence_id`.  It must also apply any `keypoint_edits` that post-date the
+last finalization — otherwise the user would always have to re-finalize before
+tracking, even for quick iteration.
+
+The join chain to resolve `keypoint_edits` from a `pose_observations` row:
+
+```sql
+-- (1) From sequence_id → detection_run_id, shot_id, person_name
+SELECT pos.detection_run_id, pos.shot_id, sp.person_name
+FROM pose_observation_sequences pos
+JOIN sequence_persons sp ON sp.sequence_id = pos.id
+WHERE pos.id = :sequence_id AND sp.person_id = :person_id
+
+-- (2) From camera_instance_id → shot_video_id (within the shot)
+SELECT id AS shot_video_id
+FROM capture_videos
+WHERE camera_instance_id = :camera_instance_id AND shot_id = :shot_id
+
+-- (3) From (detection_run_id, shot_video_id, person_name) → track_id
+SELECT track_id FROM detection_track_assignments
+WHERE detection_run_id = :detection_run_id
+  AND shot_video_id    = :shot_video_id
+  AND person_name      = :person_name
+
+-- (4) Fetch edit for this frame
+SELECT kp_blob, kp_mask FROM keypoint_edits
+WHERE detection_run_id = :detection_run_id
+  AND shot_video_id    = :shot_video_id
+  AND track_id         = :track_id
+  AND video_frame      = :video_frame
+```
+
+In practice, steps (1)–(3) are resolved once per camera (precomputed into a
+lookup map before the frame loop) and step (4) is a single indexed lookup per
+frame.  If no `keypoint_edits` row exists the observation is used unmodified.
+
+The merge logic mirrors the Python version: unpack `kp_blob` and `kp_mask`,
+iterate over set bits, update `x`/`y` and clamp `confidence` to 0 for forced
+outliers.  A helper `db::apply_keypoint_edits(kp_data, kp_bytes, edit_blob,
+mask_blob)` should be added to `src/db/blob_codec.{hpp,cpp}` and used by
+both the Python binding (if any) and the C++ reader.
+
+`SessionReader` is opened `SQLITE_OPEN_READONLY`; no writes occur.  The C++
+schema version check is not enforced by the reader (it reads whatever tables
+are present), so the migration adding `keypoint_edits` does not require a
+corresponding C++ version bump — but it does require the C++ code to handle
+the absence of the table gracefully (i.e., treat a missing `keypoint_edits`
+table as "no edits").
+
 ---
 
 ## Keypoint trail
@@ -286,15 +364,42 @@ CREATE UNIQUE INDEX keypoint_edits_unique
 
 ## Implementation phases
 
-### Phase 1 — data layer
-- Add `keypoint_edits` table via a DB migration.
-- Implement `read_keypoints_with_edits(session, run_id, svid, track_id)` in
-  `db_cache.py`: reads the detection blob and applies the mask-based merge.
+### Phase 1 — data layer (Python + C++)
+
+**Schema:**
+- Add `keypoint_edits` table via a DB migration (schema version bump).
+
+**Python — `db_cache.py`:**
+- Implement `read_keypoints_with_edits(session, run_id, svid, track_id)`:
+  reads the detection blob and applies the mask-based merge.
 - Implement `write_keypoint_edit(session, run_id, svid, track_id, frame,
-  edits: dict[int, tuple[float, float, int]])` in `db_cache.py`: packs edits
-  into the blob/mask format and upserts the row.
-- Unit tests: merge with no edits returns original; edited slots override;
-  ghost frame returns edit blob directly.
+  edits: dict[int, tuple[float, float, int]])`: packs edits into the
+  blob/mask format and upserts the row.
+
+**Python — `finalise.py`:**
+- Extend `finalise_to_db` to fetch `keypoint_edits` rows per frame and
+  apply the mask merge before writing to `pose_observations`.
+
+**C++ — `src/db/blob_codec.{hpp,cpp}`:**
+- Add `apply_keypoint_edits(kp_data, kp_bytes, edit_blob, mask_blob)`
+  helper: unpacks both blobs, applies the mask, returns the merged
+  `float32[N, 3]`.
+
+**C++ — `src/db/session_reader.cpp` (`load_observations`):**
+- After resolving camera metadata, precompute the
+  `camera_instance_id → shot_video_id` and `shot_video_id → track_id`
+  mappings using `capture_videos` and `detection_track_assignments`
+  (requires `detection_run_id` and `person_name` from the sequence row).
+- For each observation frame, query `keypoint_edits` (single indexed lookup)
+  and call `apply_keypoint_edits` if a row is found.
+- Handle the case where `keypoint_edits` does not exist (pre-migration DBs):
+  catch the SQLite error and skip edit application silently.
+
+**Tests:**
+- Python unit tests: merge with no edits returns original; edited slots
+  override; ghost frame returns edit blob directly.
+- C++ unit tests: `apply_keypoint_edits` with a known blob+mask produces
+  the expected merged array; missing table does not crash `load_observations`.
 
 ### Phase 2 — crop grid widget
 - Implement `PersonCropGridWidget` in `python/app/pose/`:

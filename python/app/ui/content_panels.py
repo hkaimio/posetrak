@@ -1002,10 +1002,33 @@ class CropBackfillWorker(QThread):
                 svid, frame_idx, track_id, bbox = task
 
                 if bbox is None:
-                    # No detection for this frame — decode into memory only (not DB).
+                    # No detection for this frame — ghost crop.
                     with self._mem_lock:
                         if (svid, frame_idx) in self._mem_results:
                             continue  # already decoded by a previous priority request
+
+                    # Check if already persisted to DB from a previous session.
+                    cached = conn.execute(
+                        "SELECT image_data, width_px, height_px, src_x, src_y, src_w, src_h"
+                        " FROM frame_cache_entries"
+                        " WHERE shot_video_id=? AND cache_type='ghost_crop'"
+                        " AND track_id=-1 AND region_type='full_body' AND detection_run_id=''"
+                        " AND frame_idx=?",
+                        (svid, frame_idx),
+                    ).fetchone()
+                    if cached is not None:
+                        result = (
+                            bytes(cached["image_data"]),
+                            cached["width_px"], cached["height_px"],
+                            cached["src_x"] or 0, cached["src_y"] or 0,
+                            cached["src_w"] or 0, cached["src_h"] or 0,
+                        )
+                        with self._mem_lock:
+                            self._mem_results[(svid, frame_idx)] = result
+                        _log.debug("backfill worker: loaded ghost from DB  svid=%s  frame=%d", svid, frame_idx)
+                        self.frame_ready.emit(svid, frame_idx)
+                        continue
+
                     bgr = _get_frame(svid, frame_idx)
                     if bgr is None:
                         continue
@@ -1016,6 +1039,22 @@ class CropBackfillWorker(QThread):
                     with self._mem_lock:
                         self._mem_results[(svid, frame_idx)] = result
                     _log.debug("backfill worker: stored mem crop  svid=%s  frame=%d", svid, frame_idx)
+
+                    # Persist ghost crop to DB so it survives app restarts.
+                    jpeg, wpx, hpx, src_x, src_y, src_w, src_h = result
+                    try:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO frame_cache_entries"
+                            " (shot_video_id, frame_idx, cache_type, track_id, region_type,"
+                            "  width_px, height_px, image_data, detection_run_id,"
+                            "  src_x, src_y, src_w, src_h)"
+                            " VALUES (?,?,'ghost_crop',-1,'full_body',?,?,?,'',?,?,?,?)",
+                            (svid, frame_idx, wpx, hpx, jpeg, src_x, src_y, src_w, src_h),
+                        )
+                        conn.commit()
+                    except Exception:
+                        _log.warning("backfill worker: failed to persist ghost crop  svid=%s  frame=%d", svid, frame_idx)
+
                     self.frame_ready.emit(svid, frame_idx)
                     continue
 
@@ -2128,25 +2167,29 @@ class PersonCropGridWidget(QWidget):
         for group_name in self._pose_model.group_names:
             action = menu.addAction(f"Select {group_name}")
             action.triggered.connect(
-                lambda checked=False, g=group_name: self._select_group(g)
+                lambda checked=False, g=group_name, ci=cam_idx: self._select_group(g, ci)
             )
         menu.addSeparator()
         all_act = menu.addAction("Select all")
-        all_act.triggered.connect(lambda: self._select_all())
+        all_act.triggered.connect(lambda ci=cam_idx: self._select_all(ci))
         clear_act = menu.addAction("Deselect all")
         clear_act.triggered.connect(lambda: self._on_kp_deselected(cam_idx))
         cell = self._cells[cam_idx]
         global_pos = cell._canvas.mapToGlobal(QPoint(int(dx), int(dy)))
         menu.exec(global_pos)
 
-    def _select_group(self, group_name: str) -> None:
+    def _select_group(self, group_name: str, cam_idx: int | None = None) -> None:
         self._sel_kp_indices = set(self._pose_model.group_indices(group_name))
         self._primary_kp_idx = next(iter(self._sel_kp_indices), None)
+        if cam_idx is not None:
+            self._sel_cam_idx = cam_idx
         self._load_frame(self._current_t)
 
-    def _select_all(self) -> None:
+    def _select_all(self, cam_idx: int | None = None) -> None:
         self._sel_kp_indices = set(self._pose_model.all_indices)
         self._primary_kp_idx = next(iter(self._sel_kp_indices), None)
+        if cam_idx is not None:
+            self._sel_cam_idx = cam_idx
         self._load_frame(self._current_t)
 
     def _on_empty_area_clicked(self, cam_idx: int, dx: float, dy: float) -> None:
@@ -3414,7 +3457,7 @@ class PersonPanel(QWidget):
         self._info_toggle_btn = QPushButton("Info")
         self._info_toggle_btn.setCheckable(True)
         self._info_toggle_btn.setChecked(False)
-        self._info_toggle_btn.setToolTip("Show / hide run info pane  (I)")
+        self._info_toggle_btn.setToolTip("Show / hide run info pane")
         self._info_toggle_btn.toggled.connect(self._toggle_info_pane)
         run_act_row.addStretch()
         run_act_row.addWidget(self._scale_btn)
@@ -3450,10 +3493,6 @@ class PersonPanel(QWidget):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
         splitter.setSizes([700, 280])
-
-        # Keyboard shortcut: I toggles the info pane
-        info_shortcut = QShortcut(QKeySequence("I"), self)
-        info_shortcut.activated.connect(self._info_toggle_btn.toggle)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)

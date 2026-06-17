@@ -63,6 +63,8 @@ def _make_widget(qapp, seq_db):
     w._backfill = None
     w._clipboard = None
     w._clipboard_cam_idx = None
+    w._range_start_v = None
+    w._range_end_v = None
 
     from app.pose.db_cache import read_observations_with_edits
     for cam in w._cameras:

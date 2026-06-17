@@ -850,25 +850,49 @@ class CropBackfillWorker(QThread):
 
         file_map = {cam["shot_video_id"]: cam["file_path"] for cam in self._cameras}
 
-        # Precompute sorted bbox frame lists per svid for nearest-bbox lookup.
+        # Precompute sorted bbox frame lists per svid for window-union lookup.
         sorted_bbox_frames: dict[str, list[int]] = {
             svid: sorted(bboxes.keys())
             for svid, bboxes in self._bboxes.items()
         }
+        _UNION_N = 10   # frames on each side of the target frame to include
 
-        def _nearest_bbox(svid: str, frame_idx: int):
-            """Return the nearest available bbox to frame_idx, or None."""
+        def _union_bbox(svid: str, frame_idx: int):
+            """Return union bbox of all detections within ±N frames, or None.
+
+            The union (min x1/y1, max x2/y2) covers the person's range across
+            the context window, padded by _CROP_MARGIN on all sides via
+            _encode_crop.  Returned as (cx, cy, w, h).
+            """
             bboxes = self._bboxes.get(svid, {})
             sframes = sorted_bbox_frames.get(svid, [])
             if not sframes:
                 return None
-            pos = bisect.bisect_left(sframes, frame_idx)
-            if pos == 0:
-                return bboxes[sframes[0]]
-            if pos >= len(sframes):
-                return bboxes[sframes[-1]]
-            before, after = sframes[pos - 1], sframes[pos]
-            return bboxes[before] if frame_idx - before <= after - frame_idx else bboxes[after]
+            lo, hi = frame_idx - _UNION_N, frame_idx + _UNION_N
+            i_lo = bisect.bisect_left(sframes, lo)
+            i_hi = bisect.bisect_right(sframes, hi)
+            window = sframes[i_lo:i_hi]
+            if not window:
+                # Nothing in window — fall back to the single nearest frame.
+                pos = bisect.bisect_left(sframes, frame_idx)
+                if pos == 0:
+                    window = [sframes[0]]
+                elif pos >= len(sframes):
+                    window = [sframes[-1]]
+                else:
+                    before, after = sframes[pos - 1], sframes[pos]
+                    window = [before if frame_idx - before <= after - frame_idx else after]
+            # Compute union in (x1, y1, x2, y2) space.
+            x1 = y1 = float("inf")
+            x2 = y2 = float("-inf")
+            for fi in window:
+                cx, cy, w, h = bboxes[fi]
+                x1 = min(x1, cx - w / 2)
+                y1 = min(y1, cy - h / 2)
+                x2 = max(x2, cx + w / 2)
+                y2 = max(y2, cy + h / 2)
+            uw, uh = x2 - x1, y2 - y1
+            return (x1 + uw / 2, y1 + uh / 2, uw, uh)
 
         # Build the normal queue: frames WITH a detection bbox that lack a cached crop.
         tasks: list[tuple] = []
@@ -939,13 +963,14 @@ class CropBackfillWorker(QThread):
         def _encode_mem(bgr, svid: str, frame_idx: int):
             """Encode a crop for a frame with no detection.
 
-            Uses nearest available bbox for crop region; falls back to a
-            full-frame thumbnail when no bboxes exist for this camera.
+            Uses the union of bboxes within ±N frames as crop region so the
+            result is wide enough to contain the person even if they moved.
+            Falls back to a full-frame thumbnail when no bboxes exist.
             Returns same tuple as _encode_crop or None on failure.
             """
-            nearest = _nearest_bbox(svid, frame_idx)
-            if nearest is not None:
-                return _encode_crop(bgr, nearest)
+            union = _union_bbox(svid, frame_idx)
+            if union is not None:
+                return _encode_crop(bgr, union)
             # Full-frame fallback: downscale to target height.
             h, w = bgr.shape[:2]
             if h > _CROP_TARGET_HEIGHT:

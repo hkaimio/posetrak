@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import json
 import sqlite3
 import sys
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from math import ceil
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -753,6 +754,164 @@ class StandaloneRunPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# CropBackfillWorker — background thread to generate missing person-crop JPEGs
+# ---------------------------------------------------------------------------
+
+class CropBackfillWorker(QThread):
+    """Generate missing person-crop JPEG cache entries on a background thread.
+
+    Uses its own SQLite connection so it never contends with the main thread's
+    reads.  Emits frame_ready(svid, frame_idx) after each crop is committed.
+
+    Call prioritise(svid, frame_idx) when the user seeks — those frames are
+    decoded before the rest of the background queue.
+    """
+
+    frame_ready = Signal(str, int)
+
+    def __init__(
+        self,
+        db_path: str,
+        det_run_id: str,
+        cameras: list[dict],        # [{shot_video_id, file_path}, ...]
+        track_segs: dict,           # svid → [(track_id, first_frame, last_frame)]
+        bboxes: dict,               # svid → {frame_idx: (cx, cy, w, h)}
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._db_path = db_path
+        self._det_run_id = det_run_id
+        self._cameras = cameras
+        self._track_segs = track_segs
+        self._bboxes = bboxes
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._priority: collections.deque = collections.deque()
+        self._normal: collections.deque = collections.deque()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self.wait(3000)
+
+    def prioritise(self, svid: str, frame_idx: int) -> None:
+        """Move (svid, frame_idx) tasks to the front of the work queue."""
+        with self._lock:
+            moved = []
+            remaining = collections.deque()
+            for item in self._normal:
+                if item[0] == svid and item[1] == frame_idx:
+                    moved.append(item)
+                else:
+                    remaining.append(item)
+            if moved:
+                self._normal = remaining
+                self._priority.extendleft(reversed(moved))
+
+    def run(self) -> None:
+        import cv2
+        from app.pose.db_cache import _encode_crop
+
+        conn = sqlite3.connect(self._db_path)
+
+        file_map = {cam["shot_video_id"]: cam["file_path"] for cam in self._cameras}
+
+        # Build the normal queue: all frames with a bbox that lack a cached crop.
+        tasks: list[tuple] = []
+        for cam in self._cameras:
+            svid = cam["shot_video_id"]
+            segs = self._track_segs.get(svid, [])
+            bboxes = self._bboxes.get(svid, {})
+            if not segs or not bboxes:
+                continue
+            cached = set(
+                r[0] for r in conn.execute(
+                    "SELECT frame_idx FROM frame_cache_entries"
+                    " WHERE shot_video_id=? AND cache_type='person_crop'"
+                    " AND detection_run_id=? AND region_type='full_body'",
+                    (svid, self._det_run_id),
+                )
+            )
+            for track_id, first, last in segs:
+                for fi in range(first, last + 1):
+                    if fi in cached:
+                        continue
+                    bbox = bboxes.get(fi)
+                    if bbox is None:
+                        continue
+                    tasks.append((svid, fi, track_id, bbox))
+
+        # Sort chronologically; sequential video reads are much faster than random seeks.
+        tasks.sort(key=lambda t: t[1])
+        with self._lock:
+            self._normal.extend(tasks)
+
+        caps: dict[str, object] = {}
+
+        def _get_frame(svid: str, frame_idx: int):
+            if svid not in caps:
+                path = file_map.get(svid, "")
+                cap = cv2.VideoCapture(path)
+                if not cap.isOpened():
+                    return None
+                caps[svid] = cap
+            cap = caps[svid]
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ok, bgr = cap.read()
+            return bgr if ok else None
+
+        try:
+            while not self._stop_event.is_set():
+                with self._lock:
+                    if self._priority:
+                        task = self._priority.popleft()
+                    elif self._normal:
+                        task = self._normal.popleft()
+                    else:
+                        task = None
+
+                if task is None:
+                    self._stop_event.wait(0.05)
+                    continue
+
+                svid, frame_idx, track_id, bbox = task
+
+                already = conn.execute(
+                    "SELECT 1 FROM frame_cache_entries"
+                    " WHERE shot_video_id=? AND cache_type='person_crop'"
+                    " AND detection_run_id=? AND frame_idx=? AND region_type='full_body'",
+                    (svid, self._det_run_id, frame_idx),
+                ).fetchone()
+                if already:
+                    continue
+
+                bgr = _get_frame(svid, frame_idx)
+                if bgr is None:
+                    continue
+
+                result = _encode_crop(bgr, bbox)
+                if result is None:
+                    continue
+
+                jpeg, wpx, hpx, src_x, src_y, src_w, src_h = result
+                conn.execute(
+                    "INSERT OR REPLACE INTO frame_cache_entries"
+                    " (shot_video_id, frame_idx, cache_type, track_id, region_type,"
+                    "  width_px, height_px, image_data, detection_run_id,"
+                    "  src_x, src_y, src_w, src_h)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (svid, frame_idx, "person_crop", track_id, "full_body",
+                     wpx, hpx, jpeg, self._det_run_id,
+                     src_x, src_y, src_w, src_h),
+                )
+                conn.commit()
+                self.frame_ready.emit(svid, frame_idx)
+        finally:
+            for cap in caps.values():
+                cap.release()
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
 # PersonCropGridWidget — multi-camera crop preview for PersonPanel
 # ---------------------------------------------------------------------------
 
@@ -1341,6 +1500,7 @@ class PersonCropGridWidget(QWidget):
         self._tracking_timestamps: list[tuple[float, int]] = []  # sorted (ts, step)
         # cam_instance_id → tracker_step → bool array indexed by COCO keypoint ID
         self._outlier_masks: dict[str, dict[int, object]] = {}
+        self._backfill: CropBackfillWorker | None = None
         self._build()
 
     def _build(self) -> None:
@@ -1564,11 +1724,48 @@ class PersonCropGridWidget(QWidget):
         self._edit_mode = enabled
         if not enabled:
             self._sel_kp_idx = None
+            if self._backfill is not None:
+                self._backfill.stop()
+                self._backfill = None
+        else:
+            self._start_backfill()
         for cell in self._cells:
             cell.set_edit_mode(enabled)
             if not enabled:
                 cell.set_trail(None)
                 cell.set_selected_kp(None, show_ring=False)
+
+    def _start_backfill(self) -> None:
+        """Start the background crop-generation worker if there is a detection run."""
+        if not self._det_run_id:
+            return
+        row = self._conn.execute("PRAGMA database_list").fetchone()
+        if row is None:
+            return
+        db_path = row[2]
+        if not db_path:
+            return
+        worker = CropBackfillWorker(
+            db_path=db_path,
+            det_run_id=self._det_run_id,
+            cameras=self._cameras,
+            track_segs=self._track_segs,
+            bboxes=self._det_bboxes,
+        )
+        worker.frame_ready.connect(self._on_crop_ready)
+        self._backfill = worker
+        worker.start()
+
+    def _on_crop_ready(self, svid: str, frame_idx: int) -> None:
+        """Called on the main thread when the backfill worker writes a new crop."""
+        if not self._sync_table:
+            return
+        for cam in self._cameras:
+            if cam["shot_video_id"] == svid:
+                current_fi = self._sync_table.lookup(self._current_t, svid)
+                if current_fi == frame_idx:
+                    self._load_frame(self._current_t)
+                break
 
     def _on_kp_selected(self, cam_idx: int, kp_idx: int) -> None:
         self._sel_kp_idx = kp_idx
@@ -2010,6 +2207,8 @@ class PersonCropGridWidget(QWidget):
 
             if row is None:
                 cell.show_empty()
+                if self._backfill is not None:
+                    self._backfill.prioritise(svid, frame_idx)
                 continue
 
             buf = np.frombuffer(bytes(row["image_data"]), dtype=np.uint8)

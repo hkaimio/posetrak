@@ -327,11 +327,11 @@ def read_observations_with_edits(
                 for i in range(kp.shape[0]):
                     byte_idx, bit_idx = divmod(i, 8)
                     if byte_idx < len(mask) and (mask[byte_idx] >> bit_idx) & 1:
+                        kp[i, 0] = edit_kp[i, 0]
+                        kp[i, 1] = edit_kp[i, 1]
                         if edit_kp[i, 2] != 0.0:  # is_outlier → zero confidence
                             kp[i, 2] = 0.0
                         else:
-                            kp[i, 0] = edit_kp[i, 0]
-                            kp[i, 1] = edit_kp[i, 1]
                             kp[i, 2] = 1.0  # manually placed → full confidence
         result[frame] = kp
     return result

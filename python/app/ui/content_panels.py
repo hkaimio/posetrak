@@ -1009,7 +1009,7 @@ class _ImageCanvas(QWidget):
         combined = self._src_scale * disp_scale
         best_i, best_d2 = None, float(_KP_HIT_RADIUS ** 2)
         for i in range(self._obs_kp.shape[0]):
-            if float(self._obs_kp[i, 2]) < 0.1:
+            if float(self._obs_kp[i, 2]) < 0.1 and not self._edit_mode:
                 continue
             px = (float(self._obs_kp[i, 0]) - self._x1) * combined + off_x
             py = (float(self._obs_kp[i, 1]) - self._y1) * combined + off_y
@@ -1132,19 +1132,26 @@ class _ImageCanvas(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             for i in range(n_kp):
                 conf = float(kp[i, 2])
+                kp_x, kp_y = float(kp[i, 0]), float(kp[i, 1])
                 if conf < 0.1:
+                    if self._edit_mode and kp_x > 0.0:
+                        pt = to_pt(kp_x, kp_y)
+                        if 0 <= pt.x() <= cw and 0 <= pt.y() <= ch:
+                            painter.setBrush(QColor(80, 80, 80))
+                            painter.drawEllipse(pt, 4.0, 4.0)
                     continue
-                if (self._outlier_kp_mask is not None
+                if (not self._edit_mode
+                        and self._outlier_kp_mask is not None
                         and i < len(self._outlier_kp_mask)
                         and self._outlier_kp_mask[i]):
-                    painter.setBrush(QColor(120, 120, 120))  # grey — rejected outlier
+                    painter.setBrush(QColor(120, 120, 120))  # grey — rejected by tracker
                 elif conf >= 0.5:
                     painter.setBrush(QColor(0, 220, 60))    # green
                 elif conf >= 0.3:
                     painter.setBrush(QColor(255, 200, 0))   # yellow
                 else:
                     painter.setBrush(QColor(220, 40, 40))   # red
-                painter.drawEllipse(to_pt(float(kp[i, 0]), float(kp[i, 1])), 5.0, 5.0)
+                painter.drawEllipse(to_pt(kp_x, kp_y), 5.0, 5.0)
 
         # ---- Tracked skeleton (cyan lines + yellow dots) ----
         if self._show_tracked:

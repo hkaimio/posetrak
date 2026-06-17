@@ -175,6 +175,19 @@ def test_update_single_kp_edit_creates_new_row(seq_db):
     assert mask[0] & 1  # bit 0 set
 
 
+def test_outlier_toggle_preserves_moved_position(seq_db):
+    """Moving a kp then marking it as outlier must preserve the moved x/y in the merge."""
+    from app.pose.db_cache import read_observations_with_edits
+    video_frame = 10
+    update_single_keypoint_edit(seq_db, "seq1", "ci1", video_frame, 0, 200.0, 150.0, is_outlier=False)
+    update_single_keypoint_edit(seq_db, "seq1", "ci1", video_frame, 0, 200.0, 150.0, is_outlier=True)
+    merged = read_observations_with_edits(seq_db, "seq1", "ci1")
+    kp = merged[video_frame]
+    assert abs(kp[0, 0] - 200.0) < 0.01  # moved position preserved
+    assert abs(kp[0, 1] - 150.0) < 0.01
+    assert kp[0, 2] < 0.01                # outlier flag applied
+
+
 def test_update_single_kp_edit_merges_with_existing(seq_db):
     """A second call updates only the new slot while keeping the first slot's edit."""
     video_frame = 10

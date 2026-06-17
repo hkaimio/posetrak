@@ -1705,7 +1705,8 @@ class PersonCropGridWidget(QWidget):
     cell is reserved for a future 3D tracking view.
     """
 
-    time_changed = Signal(float)  # emitted on every slider move (absolute timestamp_s)
+    time_changed = Signal(float)    # emitted on every slider move (absolute timestamp_s)
+    status_message = Signal(str)    # short notification for the main window status bar
 
     def __init__(self, conn: sqlite3.Connection, sequence_id: str, parent=None) -> None:
         super().__init__(parent)
@@ -1747,6 +1748,9 @@ class PersonCropGridWidget(QWidget):
         self._outlier_masks: dict[str, dict[int, object]] = {}
         self._backfill: CropBackfillWorker | None = None
         self._pose_model: PoseModel = _get_pose_model(None)  # updated in _build
+        # Copy/paste clipboard: kp_idx → (x, y); None until first copy
+        self._clipboard: dict[int, tuple[float, float]] | None = None
+        self._clipboard_cam_idx: int | None = None
         self._build()
 
     def _build(self) -> None:
@@ -2198,6 +2202,14 @@ class PersonCropGridWidget(QWidget):
                 cell.set_selection(None, frozenset())
             return True
 
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        if ctrl and key == Qt.Key.Key_C:
+            self._copy_keypoints()
+            return True
+        if ctrl and key == Qt.Key.Key_V:
+            self._paste_keypoints()
+            return True
+
         if not self._sel_kp_indices or self._sel_cam_idx is None:
             return False
 
@@ -2216,6 +2228,53 @@ class PersonCropGridWidget(QWidget):
             return True
 
         return False
+
+    def _copy_keypoints(self) -> None:
+        """Ctrl+C: copy selected kp positions from current frame, primary camera."""
+        if not self._sel_kp_indices or self._sel_cam_idx is None:
+            return
+        cam = self._cameras[self._sel_cam_idx]
+        cam_id = cam["camera_instance_id"]
+        svid = cam["shot_video_id"]
+        if not self._sync_table:
+            return
+        frame_idx = self._sync_table.lookup(self._current_t, svid)
+        if frame_idx is None:
+            return
+        kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
+        if kp is None:
+            return
+        self._clipboard = {}
+        for kp_idx in self._sel_kp_indices:
+            if kp_idx < kp.shape[0]:
+                self._clipboard[kp_idx] = (float(kp[kp_idx, 0]), float(kp[kp_idx, 1]))
+        self._clipboard_cam_idx = self._sel_cam_idx
+        n = len(self._clipboard)
+        self.status_message.emit(f"Copied {n} keypoint{'s' if n != 1 else ''}")
+
+    def _paste_keypoints(self) -> None:
+        """Ctrl+V: paste clipboard kp into current frame of the clipboard's camera."""
+        from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit
+        if not self._clipboard or self._clipboard_cam_idx is None:
+            return
+        cam = self._cameras[self._clipboard_cam_idx]
+        cam_id = cam["camera_instance_id"]
+        svid = cam["shot_video_id"]
+        if not self._sync_table:
+            return
+        frame_idx = self._sync_table.lookup(self._current_t, svid)
+        if frame_idx is None:
+            return
+        for kp_idx, (x, y) in self._clipboard.items():
+            update_single_keypoint_edit(
+                self._conn, self._sequence_id, cam_id, frame_idx, kp_idx, x, y
+            )
+        self._obs_kp[cam_id] = read_observations_with_edits(
+            self._conn, self._sequence_id, cam_id
+        )
+        self._load_frame(self._current_t)
+        n = len(self._clipboard)
+        self.status_message.emit(f"Pasted {n} keypoint{'s' if n != 1 else ''}")
 
     def _nudge_keypoint(self, dx: float, dy: float) -> None:
         from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit

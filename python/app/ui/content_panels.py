@@ -1052,15 +1052,7 @@ _BODY_SKELETON = [
     (11, 13), (13, 15), (12, 14), (14, 16),
 ]
 
-_COCO_KP_NAMES = (
-    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
-    "left_shoulder", "right_shoulder",
-    "left_elbow", "right_elbow",
-    "left_wrist", "right_wrist",
-    "left_hip", "right_hip",
-    "left_knee", "right_knee",
-    "left_ankle", "right_ankle",
-)
+from app.pose.kp_models import PoseModel, get_pose_model as _get_pose_model
 
 
 def _project_point_distorted(
@@ -1647,6 +1639,7 @@ class PersonCropGridWidget(QWidget):
         # cam_instance_id → tracker_step → bool array indexed by COCO keypoint ID
         self._outlier_masks: dict[str, dict[int, object]] = {}
         self._backfill: CropBackfillWorker | None = None
+        self._pose_model: PoseModel = _get_pose_model(None)  # updated in _build
         self._build()
 
     def _build(self) -> None:
@@ -1654,7 +1647,7 @@ class PersonCropGridWidget(QWidget):
         from app.setup.db_context import SyncPoint, SyncTable
 
         seq = self._conn.execute(
-            "SELECT detection_run_id, shot_id, sync_config_id, time_start_s, time_end_s "
+            "SELECT detection_run_id, shot_id, sync_config_id, time_start_s, time_end_s, pose_model "
             "FROM pose_observation_sequences WHERE id = ?",
             (self._sequence_id,),
         ).fetchone()
@@ -1665,6 +1658,7 @@ class PersonCropGridWidget(QWidget):
         self._det_run_id = seq["detection_run_id"]
         self._t_start = float(seq["time_start_s"])
         self._t_end = float(seq["time_end_s"])
+        self._pose_model = _get_pose_model(seq["pose_model"])
 
         prow = self._conn.execute(
             "SELECT person_name FROM sequence_persons WHERE sequence_id = ? AND person_id = 0",
@@ -2376,8 +2370,8 @@ class PersonCropGridWidget(QWidget):
                                 kp_by_frame = self._obs_kp.get(cam_id, {})
                                 trail = _build_cam_trail(kp_by_frame, cam_id, frame_idx, self._sel_kp_idx)
                                 kp_name = (
-                                    _COCO_KP_NAMES[self._sel_kp_idx]
-                                    if self._sel_kp_idx < len(_COCO_KP_NAMES)
+                                    self._pose_model.name_of(self._sel_kp_idx)
+                                    if True
                                     else str(self._sel_kp_idx)
                                 )
                             is_sel_cam = (i == self._sel_cam_idx)

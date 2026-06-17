@@ -164,8 +164,8 @@ _COCO133_GROUPS: dict[str, frozenset[int]] = {
     "Right arm":   frozenset({6, 8, 10}),
     "Left hand":   _LEFT_HAND_IDX,
     "Right hand":  _RIGHT_HAND_IDX,
-    "Left leg":    frozenset({11, 13, 15}),
-    "Right leg":   frozenset({12, 14, 16}),
+    "Left leg":    frozenset({11, 13, 15}) | _LEFT_FOOT_IDX,
+    "Right leg":   frozenset({12, 14, 16}) | _RIGHT_FOOT_IDX,
     "Left foot":   _LEFT_FOOT_IDX,
     "Right foot":  _RIGHT_FOOT_IDX,
     "Body":        _BODY17_IDX,
@@ -185,8 +185,13 @@ COCO133 = PoseModel(
 # ---------------------------------------------------------------------------
 
 _REGISTRY: dict[str, PoseModel] = {
+    # canonical names
     "coco-17":          COCO17,
     "coco-133":         COCO133,
+    # legacy / alternate spellings stored in older DBs
+    "COCO17":           COCO17,
+    "COCO133":          COCO133,
+    # RTMPose model strings (as stored by the detection pipeline)
     "rtmpose-l-17kp":   COCO17,
     "rtmpose-m-17kp":   COCO17,
     "rtmpose-l-133kp":  COCO133,
@@ -200,4 +205,11 @@ def get_pose_model(model_name: str | None) -> PoseModel:
         m = _REGISTRY.get(model_name)
         if m is not None:
             return m
+        # Case-insensitive fallback: normalise to lowercase with dash
+        key = model_name.lower().replace("_", "-")
+        m = _REGISTRY.get(key)
+        if m is not None:
+            return m
+        if "133" in model_name:
+            return COCO133
     return COCO17

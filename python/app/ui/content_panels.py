@@ -1208,8 +1208,8 @@ class _ImageCanvas(QWidget):
     # Emitted when the user clicks empty space in edit mode (no kp hit).
     # Carries display-space coords so the widget can convert and place a kp.
     empty_area_clicked = Signal(float, float)
-    # Rubber-band drag completed: (x1, y1, x2, y2) in display pixels
-    rubber_band_selected = Signal(float, float, float, float)
+    # Rubber-band drag completed: (x1, y1, x2, y2) display pixels + ctrl_held bool
+    rubber_band_selected = Signal(float, float, float, float, bool)
     # Right-click: hit_kp_idx (-1 if empty), display (dx, dy)
     context_menu_requested = Signal(int, float, float)
 
@@ -1243,6 +1243,7 @@ class _ImageCanvas(QWidget):
         self._drag_cur_disp: tuple[float, float] | None = None
         self._drag_moved: bool = False
         self._rubber_band_active: bool = False
+        self._rubber_band_ctrl: bool = False   # Ctrl held at rubber-band start
         self._trail = None  # _TrailData | None
         self._selected_kp_name: str | None = None
         self._loading: bool = False
@@ -1304,6 +1305,7 @@ class _ImageCanvas(QWidget):
             self._drag_cur_disp = None
             self._drag_moved = False
             self._rubber_band_active = False
+            self._rubber_band_ctrl = False
             self._trail = None
         self.update()
 
@@ -1380,6 +1382,7 @@ class _ImageCanvas(QWidget):
                 else:
                     self._drag_kp = None
                     self._rubber_band_active = True
+                    self._rubber_band_ctrl = ctrl
                     self._drag_start_disp = (dx, dy)
                     self._drag_cur_disp = (dx, dy)
                     self._drag_moved = False
@@ -1425,11 +1428,13 @@ class _ImageCanvas(QWidget):
                     x0, y0 = self._drag_start_disp
                     x1, y1 = self._drag_cur_disp
                     self.rubber_band_selected.emit(
-                        min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+                        min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
+                        self._rubber_band_ctrl,
                     )
                 elif self._drag_start_disp:
                     self.empty_area_clicked.emit(*self._drag_start_disp)
                 self._rubber_band_active = False
+                self._rubber_band_ctrl = False
                 self._drag_start_disp = None
                 self._drag_cur_disp = None
                 self._drag_moved = False
@@ -1901,7 +1906,7 @@ class PersonCropGridWidget(QWidget):
                 lambda dx, dy, i=i: self._on_empty_area_clicked(i, dx, dy)
             )
             cell._canvas.rubber_band_selected.connect(
-                lambda x1, y1, x2, y2, i=i: self._on_rubber_band_selected(i, x1, y1, x2, y2)
+                lambda x1, y1, x2, y2, ctrl, i=i: self._on_rubber_band_selected(i, x1, y1, x2, y2, ctrl)
             )
             cell._canvas.context_menu_requested.connect(
                 lambda hit, dx, dy, i=i: self._on_context_menu_requested(i, hit, dx, dy)
@@ -2058,9 +2063,9 @@ class PersonCropGridWidget(QWidget):
             cell.set_selection(None, frozenset())
 
     def _on_rubber_band_selected(
-        self, cam_idx: int, x1: float, y1: float, x2: float, y2: float
+        self, cam_idx: int, x1: float, y1: float, x2: float, y2: float, ctrl: bool
     ) -> None:
-        """Rubber-band drag: add all kp inside the rect to the selection."""
+        """Rubber-band drag: select all kp inside rect.  Ctrl adds to selection, else replaces."""
         cell = self._cells[cam_idx]
         cam = self._cameras[cam_idx]
         cam_id = cam["camera_instance_id"]
@@ -2071,15 +2076,21 @@ class PersonCropGridWidget(QWidget):
         obs_kp = self._obs_kp.get(cam_id, {}).get(frame_idx) if frame_idx is not None else None
         if obs_kp is None:
             return
-        # Convert display rect corners to full-frame coords
         fx1, fy1 = cell._canvas._display_to_full(x1, y1)
         fx2, fy2 = cell._canvas._display_to_full(x2, y2)
+        new_hits: set[int] = set()
         for i in range(obs_kp.shape[0]):
             kx, ky = float(obs_kp[i, 0]), float(obs_kp[i, 1])
             if fx1 <= kx <= fx2 and fy1 <= ky <= fy2:
-                self._sel_kp_indices.add(i)
+                new_hits.add(i)
+        if ctrl:
+            self._sel_kp_indices |= new_hits
+        else:
+            self._sel_kp_indices = new_hits
         if self._sel_kp_indices and self._primary_kp_idx not in self._sel_kp_indices:
             self._primary_kp_idx = next(iter(self._sel_kp_indices))
+        elif not self._sel_kp_indices:
+            self._primary_kp_idx = None
         self._sel_cam_idx = cam_idx
         self._load_frame(self._current_t)
 
@@ -2235,8 +2246,7 @@ class PersonCropGridWidget(QWidget):
 
     def _toggle_outlier(self) -> None:
         from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit
-        kp_idx = self._primary_kp_idx
-        if kp_idx is None:
+        if not self._sel_kp_indices:
             return
         cam = self._cameras[self._sel_cam_idx]
         cam_id = cam["camera_instance_id"]
@@ -2247,16 +2257,23 @@ class PersonCropGridWidget(QWidget):
         if frame_idx is None:
             return
         kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
-        if kp is None or kp_idx >= kp.shape[0]:
+        if kp is None:
             return
-        currently_outlier = float(kp[kp_idx, 2]) < 0.01
-        update_single_keypoint_edit(
-            self._conn, self._sequence_id, cam_id, frame_idx,
-            kp_idx,
-            float(kp[kp_idx, 0]),
-            float(kp[kp_idx, 1]),
-            is_outlier=not currently_outlier,
-        )
+        # Determine new outlier state from primary kp; apply to all selected
+        pri = self._primary_kp_idx
+        if pri is None or pri >= kp.shape[0]:
+            pri = next(iter(self._sel_kp_indices))
+        new_outlier = float(kp[pri, 2]) >= 0.01  # toggle: True means mark as outlier
+        for kp_idx in self._sel_kp_indices:
+            if kp_idx >= kp.shape[0]:
+                continue
+            update_single_keypoint_edit(
+                self._conn, self._sequence_id, cam_id, frame_idx,
+                kp_idx,
+                float(kp[kp_idx, 0]),
+                float(kp[kp_idx, 1]),
+                is_outlier=new_outlier,
+            )
         self._obs_kp[cam_id] = read_observations_with_edits(
             self._conn, self._sequence_id, cam_id
         )

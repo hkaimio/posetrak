@@ -44,6 +44,9 @@ test_sources = files(
 
   # DB read path
   'test_session_reader.cpp',
+
+  # DB blob codec
+  'test_blob_codec.cpp',
 )
 
 test_exe = executable('test_posetrak',

@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 6
-SESSION_SCHEMA_VERSION: Final[int] = 20
+SESSION_SCHEMA_VERSION: Final[int] = 21
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -621,6 +621,17 @@ def _migrate_session_v19_to_v20(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v20_to_v21(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 20 to 21.
+
+    v21 adds the pose_observation_edits table and its unique index, providing
+    a non-destructive keypoint edit overlay on top of pose_observations.
+    """
+    sql = (_DB_DIR / "migrations" / "020_pose_observation_edits.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -701,6 +712,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 19
     if actual == 19:
         _migrate_session_v19_to_v20(conn)
+        actual = 20
+    if actual == 20:
+        _migrate_session_v20_to_v21(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

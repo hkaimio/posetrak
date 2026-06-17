@@ -74,4 +74,46 @@ inline std::vector<Keypoint> decode_keypoints(void const* data, int byte_count) 
     return result;
 }
 
+/// @brief Apply a pose_observation_edits overlay to a decoded keypoint list in-place.
+///
+/// edit_kp_data / edit_kp_bytes: float32[N,3] blob in the same format as decode_keypoints().
+///   Column 0 = x, column 1 = y, column 2 = is_outlier (0 → inlier, non-zero → outlier).
+/// mask_data / mask_bytes: uint8[ceil(N/8)] bitmask; bit i (LSB-first) means slot i is overridden.
+///
+/// For each overridden slot:
+///   - is_outlier != 0 → set kps[i].confidence = 0 (tracker will reject it)
+///   - is_outlier == 0 → replace x/y and set confidence = 1 (manually placed, trusted)
+///
+/// Silently does nothing if the table did not exist (mask_bytes == 0 or edit_kp_bytes == 0).
+inline void apply_keypoint_edits(std::vector<Keypoint>& kps, void const* edit_kp_data,
+                                 int edit_kp_bytes, void const* mask_data, int mask_bytes) {
+    if (kps.empty() || edit_kp_bytes == 0 || mask_bytes == 0)
+        return;
+
+    auto edit_kps = decode_keypoints(edit_kp_data, edit_kp_bytes);
+    int n = static_cast<int>(kps.size());
+    if (static_cast<int>(edit_kps.size()) != n)
+        throw std::runtime_error("apply_keypoint_edits: edit blob has " +
+                                 std::to_string(edit_kps.size()) + " keypoints, expected " +
+                                 std::to_string(n));
+
+    int expected_mask = (n + 7) / 8;
+    if (mask_bytes < expected_mask)
+        throw std::runtime_error("apply_keypoint_edits: mask has " + std::to_string(mask_bytes) +
+                                 " bytes, need at least " + std::to_string(expected_mask));
+
+    auto const* mask = static_cast<uint8_t const*>(mask_data);
+    for (int i = 0; i < n; ++i) {
+        if ((mask[i / 8] >> (i % 8)) & 1u) {
+            if (edit_kps[static_cast<size_t>(i)].confidence != 0.0f) {
+                kps[static_cast<size_t>(i)].confidence = 0.0f;
+            } else {
+                kps[static_cast<size_t>(i)].x = edit_kps[static_cast<size_t>(i)].x;
+                kps[static_cast<size_t>(i)].y = edit_kps[static_cast<size_t>(i)].y;
+                kps[static_cast<size_t>(i)].confidence = 1.0f;
+            }
+        }
+    }
+}
+
 }  // namespace posetrak::db

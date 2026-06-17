@@ -280,6 +280,95 @@ def read_keypoints_for_run(
     return result
 
 
+def read_observations_with_edits(
+    session: sqlite3.Connection,
+    sequence_id: str,
+    camera_instance_id: str,
+) -> dict[int, np.ndarray]:
+    """Return {video_frame: float32[N,3]} for one camera, with pose_observation_edits applied.
+
+    Each frame's keypoint array matches the float32[N,3] format used in
+    pose_observations.kp_blob.  Edited slots (bit set in kp_mask) have their
+    x/y replaced by the edit values; if the edit marks a keypoint as outlier
+    (is_outlier != 0) its confidence is zeroed.
+    """
+    obs_rows = session.execute(
+        "SELECT video_frame, kp_blob FROM pose_observations"
+        " WHERE sequence_id = ? AND camera_instance_id = ?"
+        " ORDER BY video_frame",
+        (sequence_id, camera_instance_id),
+    ).fetchall()
+    if not obs_rows:
+        return {}
+
+    n_kp = len(bytes(obs_rows[0]["kp_blob"])) // (3 * 4)  # float32, 3 values per kp
+
+    edit_rows = session.execute(
+        "SELECT video_frame, kp_blob, kp_mask FROM pose_observation_edits"
+        " WHERE sequence_id = ? AND camera_instance_id = ?"
+        " ORDER BY video_frame",
+        (sequence_id, camera_instance_id),
+    ).fetchall()
+    edits: dict[int, tuple[np.ndarray, bytes]] = {
+        r["video_frame"]: (
+            np.frombuffer(bytes(r["kp_blob"]), dtype=np.float32).reshape(-1, 3),
+            bytes(r["kp_mask"]),
+        )
+        for r in edit_rows
+    }
+
+    result: dict[int, np.ndarray] = {}
+    for row in obs_rows:
+        frame = row["video_frame"]
+        kp = np.frombuffer(bytes(row["kp_blob"]), dtype=np.float32).reshape(-1, 3).copy()
+        if frame in edits:
+            edit_kp, mask = edits[frame]
+            if edit_kp.shape[0] == kp.shape[0]:
+                for i in range(kp.shape[0]):
+                    byte_idx, bit_idx = divmod(i, 8)
+                    if byte_idx < len(mask) and (mask[byte_idx] >> bit_idx) & 1:
+                        if edit_kp[i, 2] != 0.0:  # is_outlier → zero confidence
+                            kp[i, 2] = 0.0
+                        else:
+                            kp[i, 0] = edit_kp[i, 0]
+                            kp[i, 1] = edit_kp[i, 1]
+                            kp[i, 2] = 1.0  # manually placed → full confidence
+        result[frame] = kp
+    return result
+
+
+def write_observation_edit(
+    session: sqlite3.Connection,
+    sequence_id: str,
+    camera_instance_id: str,
+    video_frame: int,
+    kp: np.ndarray,
+    kp_mask: bytes,
+) -> None:
+    """Upsert one pose_observation_edits row.
+
+    Parameters
+    ----------
+    kp:
+        float32[N,3] array (x, y, is_outlier) for all N keypoint slots.
+        Only slots with the corresponding bit set in kp_mask are applied at
+        read time; the others are stored but ignored.
+    kp_mask:
+        uint8 bytes, ceil(N/8) length.  Bit i set → slot i is overridden.
+    """
+    kp_blob = kp.astype(np.float32).tobytes()
+    edit_id = generate_id()
+    session.execute(
+        "INSERT INTO pose_observation_edits"
+        " (id, sequence_id, camera_instance_id, video_frame, kp_blob, kp_mask)"
+        " VALUES (?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(sequence_id, camera_instance_id, video_frame)"
+        " DO UPDATE SET kp_blob=excluded.kp_blob, kp_mask=excluded.kp_mask",
+        (edit_id, sequence_id, camera_instance_id, video_frame, kp_blob, kp_mask),
+    )
+    session.commit()
+
+
 def read_track_spans(
     session: sqlite3.Connection,
     detection_run_id: str,

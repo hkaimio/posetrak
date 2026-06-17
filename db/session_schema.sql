@@ -191,6 +191,22 @@ CREATE TABLE IF NOT EXISTS pose_observations (
     PRIMARY KEY (sequence_id, camera_instance_id, video_frame, person_id)
 );
 
+-- Non-destructive keypoint edits applied on top of pose_observations.
+-- kp_blob: float32[N,3] (x, y, is_outlier) — same N as pose_observations for the sequence.
+-- kp_mask: uint8[ceil(N/8)] bitmask; bit i set means slot i is overridden.
+CREATE TABLE IF NOT EXISTS pose_observation_edits (
+    id                 TEXT PRIMARY KEY,
+    sequence_id        TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+    camera_instance_id TEXT NOT NULL, -- references registry: camera_instances(id)
+    video_frame        INTEGER NOT NULL,
+    kp_blob            BLOB NOT NULL,
+    kp_mask            BLOB NOT NULL,
+    created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS pose_observation_edits_unique
+    ON pose_observation_edits (sequence_id, camera_instance_id, video_frame);
+
 -- A single tracker execution record
 -- tracker_config_id  -- references registry: tracker_configs(id)
 -- skeleton_id        -- references registry: skeletons(id)

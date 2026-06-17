@@ -502,6 +502,38 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
         }
     }
 
+    // Step 2.5: Load all edits for this sequence upfront.
+    // If pose_observation_edits does not exist (older DB schema), gracefully skip.
+    struct FrameEdit {
+        std::vector<uint8_t> kp_blob;
+        std::vector<uint8_t> mask;
+    };
+    std::unordered_map<std::string, std::unordered_map<int, FrameEdit>> edits;
+    {
+        sqlite3_stmt* edit_raw = nullptr;
+        int rc = sqlite3_prepare_v2(db_,
+                                    "SELECT camera_instance_id, video_frame, kp_blob, kp_mask"
+                                    " FROM pose_observation_edits WHERE sequence_id = ?",
+                                    -1, &edit_raw, nullptr);
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_text(edit_raw, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+            while (sqlite3_step(edit_raw) == SQLITE_ROW) {
+                std::string inst = reinterpret_cast<char const*>(sqlite3_column_text(edit_raw, 0));
+                int frame = sqlite3_column_int(edit_raw, 1);
+                auto const* kb = static_cast<uint8_t const*>(sqlite3_column_blob(edit_raw, 2));
+                int kb_n = sqlite3_column_bytes(edit_raw, 2);
+                auto const* mb = static_cast<uint8_t const*>(sqlite3_column_blob(edit_raw, 3));
+                int mb_n = sqlite3_column_bytes(edit_raw, 3);
+                FrameEdit fe;
+                fe.kp_blob.assign(kb, kb + kb_n);
+                fe.mask.assign(mb, mb + mb_n);
+                edits[inst][frame] = std::move(fe);
+            }
+            sqlite3_finalize(edit_raw);
+        }
+        // rc != SQLITE_OK means table absent — edits stays empty, silently skipped
+    }
+
     // Step 3: Fetch all observations for this sequence and person
     Stmt obs_stmt(db_,
                   "SELECT po.camera_instance_id, po.video_frame, po.timestamp_s, po.kp_blob"
@@ -534,8 +566,20 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
         }
         Camera const* camera = cam_it->second;
 
-        // Step 4: Decode keypoints and create Observation objects
+        // Step 4: Decode keypoints, apply any edits, then create Observation objects
         auto kps = db::decode_keypoints(kp_data, kp_bytes);
+        {
+            auto edit_inst_it = edits.find(inst_id);
+            if (edit_inst_it != edits.end()) {
+                auto edit_frame_it = edit_inst_it->second.find(video_frame);
+                if (edit_frame_it != edit_inst_it->second.end()) {
+                    auto const& fe = edit_frame_it->second;
+                    db::apply_keypoint_edits(kps, fe.kp_blob.data(),
+                                             static_cast<int>(fe.kp_blob.size()), fe.mask.data(),
+                                             static_cast<int>(fe.mask.size()));
+                }
+            }
+        }
         for (int i = 0; i < static_cast<int>(kps.size()); ++i) {
             if (kps[static_cast<size_t>(i)].confidence < static_cast<float>(min_confidence)) {
                 ++rows_skipped_confidence;

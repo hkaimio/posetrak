@@ -2260,6 +2260,10 @@ class PersonCropGridWidget(QWidget):
             # Find which track covers this frame for this camera.
             track_id = self._track_id_at_frame(svid, frame_idx)
             if track_id is None:
+                _log.debug(
+                    "_load_frame: no track  svid=%s  frame=%d  t=%.3f",
+                    svid[-8:], frame_idx, global_time,
+                )
                 cell.show_empty()
                 continue
 
@@ -2275,7 +2279,12 @@ class PersonCropGridWidget(QWidget):
             ).fetchone()
 
             if row is None:
-                if self._backfill is not None:
+                has_bbox = self._det_bboxes.get(svid, {}).get(frame_idx) is not None
+                _log.debug(
+                    "_load_frame: no crop  svid=%s  frame=%d  track=%s  has_bbox=%s",
+                    svid[-8:], frame_idx, track_id, has_bbox,
+                )
+                if has_bbox and self._backfill is not None:
                     cell.show_loading()
                     self._backfill.prioritise(svid, frame_idx)
                 else:

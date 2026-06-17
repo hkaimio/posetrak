@@ -791,14 +791,35 @@ class CropBackfillWorker(QThread):
         self._lock = threading.Lock()
         self._priority: collections.deque = collections.deque()
         self._normal: collections.deque = collections.deque()
+        # In-memory results for frames without a detection (no DB row written).
+        # Key: (svid, frame_idx) → (jpeg_bytes, x1, y1, src_scale)
+        self._mem_results: dict = {}
+        self._mem_lock = threading.Lock()
 
     def stop(self) -> None:
         self._stop_event.set()
         self.wait(3000)
 
+    def get_mem_result(self, svid: str, frame_idx: int):
+        """Return (jpeg_bytes, x1, y1, src_scale) for a frame decoded into memory, or None."""
+        with self._mem_lock:
+            return self._mem_results.get((svid, frame_idx))
+
     def prioritise(self, svid: str, frame_idx: int) -> None:
-        """Move (svid, frame_idx) tasks to the front of the work queue."""
+        """Ensure (svid, frame_idx) is next to be processed.
+
+        If the frame is already in the normal queue (has a detection bbox), move
+        it to the front.  If it is not in the queue at all (no bbox, or frame
+        outside detection range), add a *full-frame* task directly to the
+        priority queue so the worker still decodes and delivers the image.
+        """
         with self._lock:
+            # Check if already queued in priority (avoid duplicates)
+            for item in self._priority:
+                if item[0] == svid and item[1] == frame_idx:
+                    return
+
+            # Try to promote from normal queue
             moved = []
             remaining = collections.deque()
             for item in self._normal:
@@ -809,10 +830,16 @@ class CropBackfillWorker(QThread):
             if moved:
                 self._normal = remaining
                 self._priority.extendleft(reversed(moved))
+                return
+
+            # Frame not queued at all — add as a full-frame / nearest-bbox task.
+            # track_id=None, bbox=None signals the worker to use best-effort decode.
+            self._priority.append((svid, frame_idx, None, None))
 
     def run(self) -> None:
+        import bisect
         import cv2
-        from app.pose.db_cache import _encode_crop
+        from app.pose.db_cache import _CROP_TARGET_HEIGHT, _CROP_JPEG_QUALITY, _encode_crop
 
         _log.info("backfill worker: thread started  db=%s", self._db_path)
         try:
@@ -822,9 +849,28 @@ class CropBackfillWorker(QThread):
             return
 
         file_map = {cam["shot_video_id"]: cam["file_path"] for cam in self._cameras}
-        _log.debug("backfill worker: video file map: %s", file_map)
 
-        # Build the normal queue: all frames with a bbox that lack a cached crop.
+        # Precompute sorted bbox frame lists per svid for nearest-bbox lookup.
+        sorted_bbox_frames: dict[str, list[int]] = {
+            svid: sorted(bboxes.keys())
+            for svid, bboxes in self._bboxes.items()
+        }
+
+        def _nearest_bbox(svid: str, frame_idx: int):
+            """Return the nearest available bbox to frame_idx, or None."""
+            bboxes = self._bboxes.get(svid, {})
+            sframes = sorted_bbox_frames.get(svid, [])
+            if not sframes:
+                return None
+            pos = bisect.bisect_left(sframes, frame_idx)
+            if pos == 0:
+                return bboxes[sframes[0]]
+            if pos >= len(sframes):
+                return bboxes[sframes[-1]]
+            before, after = sframes[pos - 1], sframes[pos]
+            return bboxes[before] if frame_idx - before <= after - frame_idx else bboxes[after]
+
+        # Build the normal queue: frames WITH a detection bbox that lack a cached crop.
         tasks: list[tuple] = []
         for cam in self._cameras:
             svid = cam["shot_video_id"]
@@ -839,8 +885,6 @@ class CropBackfillWorker(QThread):
                 continue
             cam_tasks = 0
             for track_id, first, last in segs:
-                # Query per-track so we don't mistake another person's cached crops
-                # as covering this track's frames.
                 cached = set(
                     r[0] for r in conn.execute(
                         "SELECT frame_idx FROM frame_cache_entries"
@@ -862,11 +906,9 @@ class CropBackfillWorker(QThread):
                         continue
                     tasks.append((svid, fi, track_id, bbox))
                     cam_tasks += 1
-            _log.info("backfill worker: svid=%s  missing crops=%d", svid, cam_tasks)
+            _log.info("backfill worker: svid=%s  missing DB crops=%d", svid, cam_tasks)
 
-        _log.info("backfill worker: total missing crops queued=%d", len(tasks))
-
-        # Sort chronologically; sequential video reads are much faster than random seeks.
+        _log.info("backfill worker: total missing DB crops queued=%d", len(tasks))
         tasks.sort(key=lambda t: t[1])
         with self._lock:
             self._normal.extend(tasks)
@@ -894,6 +936,28 @@ class CropBackfillWorker(QThread):
                 _log.warning("backfill worker: read failed  svid=%s  frame=%d", svid, frame_idx)
             return bgr if ok else None
 
+        def _encode_mem(bgr, svid: str, frame_idx: int):
+            """Encode a crop for a frame with no detection.
+
+            Uses nearest available bbox for crop region; falls back to a
+            full-frame thumbnail when no bboxes exist for this camera.
+            Returns same tuple as _encode_crop or None on failure.
+            """
+            nearest = _nearest_bbox(svid, frame_idx)
+            if nearest is not None:
+                return _encode_crop(bgr, nearest)
+            # Full-frame fallback: downscale to target height.
+            h, w = bgr.shape[:2]
+            if h > _CROP_TARGET_HEIGHT:
+                scale = _CROP_TARGET_HEIGHT / h
+                thumb = cv2.resize(bgr, (int(w * scale), _CROP_TARGET_HEIGHT))
+            else:
+                thumb = bgr.copy()
+            ok, buf = cv2.imencode(".jpg", thumb, [cv2.IMWRITE_JPEG_QUALITY, _CROP_JPEG_QUALITY])
+            if not ok:
+                return None
+            return buf.tobytes(), thumb.shape[1], thumb.shape[0], 0, 0, w, h
+
         n_done = 0
         try:
             while not self._stop_event.is_set():
@@ -912,6 +976,25 @@ class CropBackfillWorker(QThread):
 
                 svid, frame_idx, track_id, bbox = task
 
+                if bbox is None:
+                    # No detection for this frame — decode into memory only (not DB).
+                    with self._mem_lock:
+                        if (svid, frame_idx) in self._mem_results:
+                            continue  # already decoded by a previous priority request
+                    bgr = _get_frame(svid, frame_idx)
+                    if bgr is None:
+                        continue
+                    result = _encode_mem(bgr, svid, frame_idx)
+                    if result is None:
+                        _log.warning("backfill worker: mem encode failed  svid=%s  frame=%d", svid, frame_idx)
+                        continue
+                    with self._mem_lock:
+                        self._mem_results[(svid, frame_idx)] = result
+                    _log.debug("backfill worker: stored mem crop  svid=%s  frame=%d", svid, frame_idx)
+                    self.frame_ready.emit(svid, frame_idx)
+                    continue
+
+                # Frame has a detection bbox → write to persistent DB cache.
                 already = conn.execute(
                     "SELECT 1 FROM frame_cache_entries"
                     " WHERE shot_video_id=? AND cache_type='person_crop'"
@@ -1158,6 +1241,7 @@ class _ImageCanvas(QWidget):
         self.update()
 
     def show_image(self, pixmap: QPixmap, x1: float, y1: float, src_scale: float) -> None:
+        self._loading = False
         self._pixmap = pixmap
         self._x1 = x1
         self._y1 = y1
@@ -2257,6 +2341,52 @@ class PersonCropGridWidget(QWidget):
                 cell.show_empty()
                 continue
 
+            # Check in-memory results first (frames decoded without a detection bbox).
+            if self._backfill is not None:
+                mem = self._backfill.get_mem_result(svid, frame_idx)
+                if mem is not None:
+                    jpeg, wpx, hpx, src_x, src_y, src_w, src_h = mem
+                    buf = np.frombuffer(jpeg, dtype=np.uint8)
+                    crop_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                    if crop_bgr is not None:
+                        x1 = float(src_x)
+                        y1 = float(src_y)
+                        jpeg_h = float(hpx or crop_bgr.shape[0])
+                        src_scale = jpeg_h / float(src_h) if src_h > 0 else 1.0
+                        crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+                        h_img, w_img = crop_rgb.shape[:2]
+                        qimg = QImage(
+                            crop_rgb.data, w_img, h_img, 3 * w_img, QImage.Format.Format_RGB888
+                        )
+                        cell.show_image(QPixmap.fromImage(qimg), x1, y1, src_scale)
+                        obs_kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
+                        cell.set_overlay(
+                            obs_kp=obs_kp,
+                            joint_xy=None,
+                            bone_pairs=self._bone_pairs,
+                            marker_xy=None,
+                            outlier_mask=None,
+                            show_detected=show_detected,
+                            show_tracked=False,
+                        )
+                        if self._edit_mode:
+                            trail = None
+                            kp_name = None
+                            if self._sel_kp_idx is not None:
+                                kp_by_frame = self._obs_kp.get(cam_id, {})
+                                trail = _build_cam_trail(kp_by_frame, cam_id, frame_idx, self._sel_kp_idx)
+                                kp_name = (
+                                    _COCO_KP_NAMES[self._sel_kp_idx]
+                                    if self._sel_kp_idx < len(_COCO_KP_NAMES)
+                                    else str(self._sel_kp_idx)
+                                )
+                            is_sel_cam = (i == self._sel_cam_idx)
+                            cell.set_trail(trail)
+                            cell.set_selected_kp(self._sel_kp_idx, show_ring=is_sel_cam, name=kp_name)
+                    else:
+                        cell.show_empty()
+                    continue
+
             # Find which track covers this frame for this camera.
             track_id = self._track_id_at_frame(svid, frame_idx)
             if track_id is None:
@@ -2264,7 +2394,11 @@ class PersonCropGridWidget(QWidget):
                     "_load_frame: no track  svid=%s  frame=%d  t=%.3f",
                     svid[-8:], frame_idx, global_time,
                 )
-                cell.show_empty()
+                if self._edit_mode and self._backfill is not None:
+                    cell.show_loading()
+                    self._backfill.prioritise(svid, frame_idx)
+                else:
+                    cell.show_empty()
                 continue
 
             row = self._conn.execute(
@@ -2279,12 +2413,11 @@ class PersonCropGridWidget(QWidget):
             ).fetchone()
 
             if row is None:
-                has_bbox = self._det_bboxes.get(svid, {}).get(frame_idx) is not None
                 _log.debug(
-                    "_load_frame: no crop  svid=%s  frame=%d  track=%s  has_bbox=%s",
-                    svid[-8:], frame_idx, track_id, has_bbox,
+                    "_load_frame: no crop  svid=%s  frame=%d  track=%s",
+                    svid[-8:], frame_idx, track_id,
                 )
-                if has_bbox and self._backfill is not None:
+                if self._backfill is not None:
                     cell.show_loading()
                     self._backfill.prioritise(svid, frame_idx)
                 else:

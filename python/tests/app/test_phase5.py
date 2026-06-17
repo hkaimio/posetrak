@@ -47,7 +47,8 @@ def _make_widget(qapp, seq_db):
     w._show_seg = None
     w._edit_btn = None
     w._edit_mode = False
-    w._sel_kp_idx = None
+    w._sel_kp_indices = set()
+    w._primary_kp_idx = None
     w._sel_cam_idx = None
     w._obs_kp = {}
     w._det_bboxes = {}
@@ -76,7 +77,8 @@ def _make_widget(qapp, seq_db):
     w._sync_table = mock_sync
 
     w._edit_mode = True
-    w._sel_kp_idx = 0
+    w._sel_kp_indices = {0}
+    w._primary_kp_idx = 0
     w._sel_cam_idx = 0  # ci1 / sv1
 
     return w
@@ -122,7 +124,8 @@ def test_escape_clears_selection(qapp, seq_db):
     w = _make_widget(qapp, seq_db)
     consumed = w._handle_key(_make_key_event(Qt.Key.Key_Escape))
     assert consumed is True
-    assert w._sel_kp_idx is None
+    assert w._sel_kp_indices == set()
+    assert w._primary_kp_idx is None
     assert w._sel_cam_idx is None
 
 
@@ -169,7 +172,8 @@ def test_nudge_up_writes_edit(qapp, seq_db):
 
 def test_nudge_ignored_without_selection(qapp, seq_db):
     w = _make_widget(qapp, seq_db)
-    w._sel_kp_idx = None
+    w._sel_kp_indices = set()
+    w._primary_kp_idx = None
     w._sel_cam_idx = None
     consumed = w._handle_key(_make_key_event(Qt.Key.Key_Right))
     assert consumed is False

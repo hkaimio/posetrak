@@ -1201,12 +1201,17 @@ class _ImageCanvas(QWidget):
     at paint time so overlays stay sharp regardless of zoom level.
     """
 
-    keypoint_selected = Signal(int)
+    keypoint_selected = Signal(int)          # plain left-click on dot
+    keypoint_ctrl_clicked = Signal(int)      # Ctrl+left-click on dot (toggle)
     keypoint_deselected = Signal()
     keypoint_moved = Signal(int, float, float)
     # Emitted when the user clicks empty space in edit mode (no kp hit).
     # Carries display-space coords so the widget can convert and place a kp.
     empty_area_clicked = Signal(float, float)
+    # Rubber-band drag completed: (x1, y1, x2, y2) in display pixels
+    rubber_band_selected = Signal(float, float, float, float)
+    # Right-click: hit_kp_idx (-1 if empty), display (dx, dy)
+    context_menu_requested = Signal(int, float, float)
 
     def __init__(self, min_h: int = 240, parent=None) -> None:
         super().__init__(parent)
@@ -1231,13 +1236,14 @@ class _ImageCanvas(QWidget):
         self._show_tracked: bool = True
         # Edit mode state
         self._edit_mode: bool = False
-        self._selected_kp: int | None = None
+        self._sel_kp_set: frozenset[int] = frozenset()   # all selected kp indices
+        self._primary_kp: int | None = None               # primary (name label, trail)
         self._drag_kp: int | None = None
         self._drag_start_disp: tuple[float, float] | None = None
         self._drag_cur_disp: tuple[float, float] | None = None
         self._drag_moved: bool = False
+        self._rubber_band_active: bool = False
         self._trail = None  # _TrailData | None
-        self._show_ring: bool = True
         self._selected_kp_name: str | None = None
         self._loading: bool = False
 
@@ -1291,11 +1297,13 @@ class _ImageCanvas(QWidget):
         self._edit_mode = enabled
         self.setMouseTracking(enabled)
         if not enabled:
-            self._selected_kp = None
+            self._sel_kp_set = frozenset()
+            self._primary_kp = None
             self._drag_kp = None
             self._drag_start_disp = None
             self._drag_cur_disp = None
             self._drag_moved = False
+            self._rubber_band_active = False
             self._trail = None
         self.update()
 
@@ -1303,13 +1311,18 @@ class _ImageCanvas(QWidget):
         self._trail = trail
         self.update()
 
+    def set_selection(
+        self, primary: int | None, sel_indices: frozenset[int], name: str | None = None
+    ) -> None:
+        self._primary_kp = primary
+        self._sel_kp_set = sel_indices
+        self._selected_kp_name = name
+        self.update()
+
     def set_selected_kp(
         self, idx: int | None, show_ring: bool = True, name: str | None = None
     ) -> None:
-        self._selected_kp = idx
-        self._show_ring = show_ring
-        self._selected_kp_name = name
-        self.update()
+        self.set_selection(idx, frozenset({idx}) if idx is not None else frozenset(), name)
 
     def _to_pt(self, u: float, v: float) -> QPointF:
         off_x, off_y, _, _, disp_scale = self._image_rect()
@@ -1341,25 +1354,36 @@ class _ImageCanvas(QWidget):
         return best_i
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        if self._edit_mode and event.button() == Qt.MouseButton.LeftButton:
+        if self._edit_mode:
             pos = event.position()
             dx, dy = pos.x(), pos.y()
-            hit = self._hit_kp(dx, dy)
-            if hit is not None:
-                self._drag_kp = hit
-                self._drag_start_disp = (dx, dy)
-                self._drag_cur_disp = (dx, dy)
-                self._drag_moved = False
-                self._selected_kp = hit
-                self.keypoint_selected.emit(hit)
-            else:
-                self._drag_kp = None
-                self._drag_start_disp = None
-                self._drag_cur_disp = None
-                self._drag_moved = False
-                # Let the widget decide: place a kp on a ghost frame or deselect.
-                self.empty_area_clicked.emit(dx, dy)
-            self.update()
+
+            if event.button() == Qt.MouseButton.RightButton:
+                hit = self._hit_kp(dx, dy)
+                self.context_menu_requested.emit(hit if hit is not None else -1, dx, dy)
+                return
+
+            if event.button() == Qt.MouseButton.LeftButton:
+                ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                hit = self._hit_kp(dx, dy)
+                if hit is not None:
+                    self._drag_kp = hit
+                    self._drag_start_disp = (dx, dy)
+                    self._drag_cur_disp = (dx, dy)
+                    self._drag_moved = False
+                    self._rubber_band_active = False
+                    self._primary_kp = hit
+                    if ctrl:
+                        self.keypoint_ctrl_clicked.emit(hit)
+                    else:
+                        self.keypoint_selected.emit(hit)
+                else:
+                    self._drag_kp = None
+                    self._rubber_band_active = True
+                    self._drag_start_disp = (dx, dy)
+                    self._drag_cur_disp = (dx, dy)
+                    self._drag_moved = False
+                self.update()
         else:
             super().mousePressEvent(event)
 
@@ -1373,19 +1397,43 @@ class _ImageCanvas(QWidget):
                 if ddx ** 2 + ddy ** 2 >= _KP_DRAG_THRESHOLD ** 2:
                     self._drag_moved = True
             self.update()
+        elif self._rubber_band_active and (event.buttons() & Qt.MouseButton.LeftButton):
+            pos = event.position()
+            self._drag_cur_disp = (pos.x(), pos.y())
+            if self._drag_start_disp is not None:
+                ddx = pos.x() - self._drag_start_disp[0]
+                ddy = pos.y() - self._drag_start_disp[1]
+                if ddx ** 2 + ddy ** 2 >= _KP_DRAG_THRESHOLD ** 2:
+                    self._drag_moved = True
+            self.update()
         else:
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and self._drag_kp is not None:
-            if self._drag_moved and self._drag_cur_disp is not None:
-                new_x, new_y = self._display_to_full(*self._drag_cur_disp)
-                self.keypoint_moved.emit(self._drag_kp, new_x, new_y)
-            self._drag_kp = None
-            self._drag_start_disp = None
-            self._drag_cur_disp = None
-            self._drag_moved = False
-            self.update()
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._drag_kp is not None:
+                if self._drag_moved and self._drag_cur_disp is not None:
+                    new_x, new_y = self._display_to_full(*self._drag_cur_disp)
+                    self.keypoint_moved.emit(self._drag_kp, new_x, new_y)
+                self._drag_kp = None
+                self._drag_start_disp = None
+                self._drag_cur_disp = None
+                self._drag_moved = False
+                self.update()
+            elif self._rubber_band_active:
+                if self._drag_moved and self._drag_start_disp and self._drag_cur_disp:
+                    x0, y0 = self._drag_start_disp
+                    x1, y1 = self._drag_cur_disp
+                    self.rubber_band_selected.emit(
+                        min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+                    )
+                elif self._drag_start_disp:
+                    self.empty_area_clicked.emit(*self._drag_start_disp)
+                self._rubber_band_active = False
+                self._drag_start_disp = None
+                self._drag_cur_disp = None
+                self._drag_moved = False
+                self.update()
         else:
             super().mouseReleaseEvent(event)
 
@@ -1524,40 +1572,59 @@ class _ImageCanvas(QWidget):
             _draw_trail_seg(trail.past, _TRAIL_PAST_COLOR)
             _draw_trail_seg(trail.future, _TRAIL_FUTURE_COLOR)
 
-        # ---- Edit mode: selection ring + keypoint name ----
-        if self._edit_mode and self._selected_kp is not None and self._obs_kp is not None:
-            sel = self._selected_kp
-            if sel < self._obs_kp.shape[0]:
-                if self._drag_moved and self._drag_cur_disp is not None:
+        # ---- Edit mode: selection rings (all selected kp) ----
+        if self._edit_mode and self._sel_kp_set and self._obs_kp is not None:
+            painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for sel in self._sel_kp_set:
+                if sel >= self._obs_kp.shape[0]:
+                    continue
+                if (sel == self._drag_kp and self._drag_moved
+                        and self._drag_cur_disp is not None):
                     pt = QPointF(self._drag_cur_disp[0], self._drag_cur_disp[1])
                 else:
                     pt = to_pt(float(self._obs_kp[sel, 0]), float(self._obs_kp[sel, 1]))
+                painter.drawEllipse(pt, 9.0, 9.0)
 
-                if self._show_ring:
-                    painter.setPen(QPen(QColor(255, 255, 255), 1.5))
-                    painter.setBrush(Qt.BrushStyle.NoBrush)
-                    painter.drawEllipse(pt, 9.0, 9.0)
+            # Name label for primary kp only
+            pri = self._primary_kp
+            if (pri is not None and pri < self._obs_kp.shape[0]
+                    and self._selected_kp_name):
+                if (pri == self._drag_kp and self._drag_moved
+                        and self._drag_cur_disp is not None):
+                    pt = QPointF(self._drag_cur_disp[0], self._drag_cur_disp[1])
+                else:
+                    pt = to_pt(float(self._obs_kp[pri, 0]), float(self._obs_kp[pri, 1]))
+                from PySide6.QtGui import QFont as _QFont
+                lbl_font = _QFont()
+                lbl_font.setPointSize(8)
+                lbl_font.setBold(False)
+                painter.setFont(lbl_font)
+                fm = painter.fontMetrics()
+                label = self._selected_kp_name
+                text_w = fm.horizontalAdvance(label)
+                text_h = fm.height()
+                lx = pt.x() + 10
+                ly = pt.y() - text_h / 2
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(0, 0, 0, 170))
+                painter.drawRoundedRect(
+                    QRectF(lx - 2, ly - 1, text_w + 5, text_h + 2), 2.0, 2.0
+                )
+                painter.setPen(QColor(255, 255, 255))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawText(QPointF(lx, ly + fm.ascent()), label)
 
-                if self._selected_kp_name:
-                    from PySide6.QtGui import QFont as _QFont
-                    lbl_font = _QFont()
-                    lbl_font.setPointSize(8)
-                    lbl_font.setBold(False)
-                    painter.setFont(lbl_font)
-                    fm = painter.fontMetrics()
-                    label = self._selected_kp_name
-                    text_w = fm.horizontalAdvance(label)
-                    text_h = fm.height()
-                    lx = pt.x() + 10
-                    ly = pt.y() - text_h / 2
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.setBrush(QColor(0, 0, 0, 170))
-                    painter.drawRoundedRect(
-                        QRectF(lx - 2, ly - 1, text_w + 5, text_h + 2), 2.0, 2.0
-                    )
-                    painter.setPen(QColor(255, 255, 255))
-                    painter.setBrush(Qt.BrushStyle.NoBrush)
-                    painter.drawText(QPointF(lx, ly + fm.ascent()), label)
+        # ---- Edit mode: rubber-band selection rect ----
+        if (self._edit_mode and self._rubber_band_active and self._drag_moved
+                and self._drag_start_disp and self._drag_cur_disp):
+            x0, y0 = self._drag_start_disp
+            x1, y1 = self._drag_cur_disp
+            painter.setPen(QPen(QColor(100, 180, 255), 1.0, Qt.PenStyle.DashLine))
+            painter.setBrush(QColor(100, 180, 255, 30))
+            painter.drawRect(QRectF(
+                min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0)
+            ))
 
         painter.end()
 
@@ -1614,6 +1681,11 @@ class _CropCell(QWidget):
     def set_trail(self, trail) -> None:
         self._canvas.set_trail(trail)
 
+    def set_selection(
+        self, primary: int | None, sel_indices: frozenset[int], name: str | None = None
+    ) -> None:
+        self._canvas.set_selection(primary, sel_indices, name)
+
     def set_selected_kp(
         self, idx: int | None, show_ring: bool = True, name: str | None = None
     ) -> None:
@@ -1649,8 +1721,9 @@ class PersonCropGridWidget(QWidget):
         self._edit_btn: QPushButton | None = None       # edit mode toggle
         # Edit mode state
         self._edit_mode: bool = False
-        self._sel_kp_idx: int | None = None
-        self._sel_cam_idx: int | None = None  # camera that last emitted keypoint_selected
+        self._sel_kp_indices: set[int] = set()   # all selected kp indices
+        self._primary_kp_idx: int | None = None   # primary kp (trail, nudge, toggle)
+        self._sel_cam_idx: int | None = None      # camera that last emitted keypoint_selected
         # svid → seg_quality_run_id (or None when no masks are available)
         self._seg_sources: dict[str, str | None] = {}
         # Per-camera track segments: svid → [(track_id, first_frame, last_frame)] sorted by first_frame
@@ -1815,6 +1888,9 @@ class PersonCropGridWidget(QWidget):
             cell._canvas.keypoint_selected.connect(
                 lambda idx, i=i: self._on_kp_selected(i, idx)
             )
+            cell._canvas.keypoint_ctrl_clicked.connect(
+                lambda idx, i=i: self._on_kp_ctrl_clicked(i, idx)
+            )
             cell._canvas.keypoint_deselected.connect(
                 lambda i=i: self._on_kp_deselected(i)
             )
@@ -1823,6 +1899,12 @@ class PersonCropGridWidget(QWidget):
             )
             cell._canvas.empty_area_clicked.connect(
                 lambda dx, dy, i=i: self._on_empty_area_clicked(i, dx, dy)
+            )
+            cell._canvas.rubber_band_selected.connect(
+                lambda x1, y1, x2, y2, i=i: self._on_rubber_band_selected(i, x1, y1, x2, y2)
+            )
+            cell._canvas.context_menu_requested.connect(
+                lambda hit, dx, dy, i=i: self._on_context_menu_requested(i, hit, dx, dy)
             )
             cell._canvas.installEventFilter(self)
 
@@ -1895,7 +1977,9 @@ class PersonCropGridWidget(QWidget):
     def _set_edit_mode(self, enabled: bool) -> None:
         self._edit_mode = enabled
         if not enabled:
-            self._sel_kp_idx = None
+            self._sel_kp_indices = set()
+            self._primary_kp_idx = None
+            self._sel_cam_idx = None
             if self._backfill is not None:
                 self._backfill.stop()
                 self._backfill = None
@@ -1905,7 +1989,7 @@ class PersonCropGridWidget(QWidget):
             cell.set_edit_mode(enabled)
             if not enabled:
                 cell.set_trail(None)
-                cell.set_selected_kp(None, show_ring=False)
+                cell.set_selection(None, frozenset())
 
     def _start_backfill(self) -> None:
         """Start the background crop-generation worker if there is a detection run."""
@@ -1947,21 +2031,93 @@ class PersonCropGridWidget(QWidget):
                 break
 
     def _on_kp_selected(self, cam_idx: int, kp_idx: int) -> None:
-        self._sel_kp_idx = kp_idx
+        """Plain left-click on a dot: sole selection."""
+        self._sel_kp_indices = {kp_idx}
+        self._primary_kp_idx = kp_idx
+        self._sel_cam_idx = cam_idx
+        self._load_frame(self._current_t)
+
+    def _on_kp_ctrl_clicked(self, cam_idx: int, kp_idx: int) -> None:
+        """Ctrl+click on a dot: toggle membership in selection."""
+        if kp_idx in self._sel_kp_indices:
+            self._sel_kp_indices.discard(kp_idx)
+            if kp_idx == self._primary_kp_idx:
+                self._primary_kp_idx = next(iter(self._sel_kp_indices), None)
+        else:
+            self._sel_kp_indices.add(kp_idx)
+            self._primary_kp_idx = kp_idx
         self._sel_cam_idx = cam_idx
         self._load_frame(self._current_t)
 
     def _on_kp_deselected(self, cam_idx: int) -> None:
-        self._sel_kp_idx = None
+        self._sel_kp_indices = set()
+        self._primary_kp_idx = None
         self._sel_cam_idx = None
         for cell in self._cells:
             cell.set_trail(None)
-            cell.set_selected_kp(None, show_ring=False)
+            cell.set_selection(None, frozenset())
+
+    def _on_rubber_band_selected(
+        self, cam_idx: int, x1: float, y1: float, x2: float, y2: float
+    ) -> None:
+        """Rubber-band drag: add all kp inside the rect to the selection."""
+        cell = self._cells[cam_idx]
+        cam = self._cameras[cam_idx]
+        cam_id = cam["camera_instance_id"]
+        svid = cam["shot_video_id"]
+        if not self._sync_table:
+            return
+        frame_idx = self._sync_table.lookup(self._current_t, svid)
+        obs_kp = self._obs_kp.get(cam_id, {}).get(frame_idx) if frame_idx is not None else None
+        if obs_kp is None:
+            return
+        # Convert display rect corners to full-frame coords
+        fx1, fy1 = cell._canvas._display_to_full(x1, y1)
+        fx2, fy2 = cell._canvas._display_to_full(x2, y2)
+        for i in range(obs_kp.shape[0]):
+            kx, ky = float(obs_kp[i, 0]), float(obs_kp[i, 1])
+            if fx1 <= kx <= fx2 and fy1 <= ky <= fy2:
+                self._sel_kp_indices.add(i)
+        if self._sel_kp_indices and self._primary_kp_idx not in self._sel_kp_indices:
+            self._primary_kp_idx = next(iter(self._sel_kp_indices))
+        self._sel_cam_idx = cam_idx
+        self._load_frame(self._current_t)
+
+    def _on_context_menu_requested(
+        self, cam_idx: int, hit_kp_idx: int, dx: float, dy: float
+    ) -> None:
+        """Right-click: show group-selection context menu."""
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        for group_name in self._pose_model.group_names:
+            action = menu.addAction(f"Select {group_name}")
+            action.triggered.connect(
+                lambda checked=False, g=group_name: self._select_group(g)
+            )
+        menu.addSeparator()
+        all_act = menu.addAction("Select all")
+        all_act.triggered.connect(lambda: self._select_all())
+        clear_act = menu.addAction("Deselect all")
+        clear_act.triggered.connect(lambda: self._on_kp_deselected(cam_idx))
+        cell = self._cells[cam_idx]
+        global_pos = cell._canvas.mapToGlobal(QPoint(int(dx), int(dy)))
+        menu.exec(global_pos)
+
+    def _select_group(self, group_name: str) -> None:
+        self._sel_kp_indices = set(self._pose_model.group_indices(group_name))
+        self._primary_kp_idx = next(iter(self._sel_kp_indices), None)
+        self._load_frame(self._current_t)
+
+    def _select_all(self) -> None:
+        self._sel_kp_indices = set(self._pose_model.all_indices)
+        self._primary_kp_idx = next(iter(self._sel_kp_indices), None)
+        self._load_frame(self._current_t)
 
     def _on_empty_area_clicked(self, cam_idx: int, dx: float, dy: float) -> None:
-        """Canvas click missed all kp.  Place selected kp on ghost frames; otherwise deselect."""
+        """Canvas click missed all kp.  Place primary kp on ghost frames; otherwise deselect."""
         if (self._edit_mode
-                and self._sel_kp_idx is not None
+                and self._primary_kp_idx is not None
                 and self._sync_table is not None):
             cam = self._cameras[cam_idx]
             svid = cam["shot_video_id"]
@@ -1971,7 +2127,7 @@ class PersonCropGridWidget(QWidget):
                     and self._obs_kp.get(cam_id, {}).get(frame_idx) is None):
                 # Ghost frame with a selected keypoint → place it at the click location.
                 full_x, full_y = self._cells[cam_idx]._canvas._display_to_full(dx, dy)
-                self._on_kp_moved(cam_idx, self._sel_kp_idx, full_x, full_y)
+                self._on_kp_moved(cam_idx, self._primary_kp_idx, full_x, full_y)
                 return
         self._on_kp_deselected(cam_idx)
 
@@ -2023,14 +2179,15 @@ class PersonCropGridWidget(QWidget):
             return False
 
         if key == Qt.Key.Key_Escape:
-            self._sel_kp_idx = None
+            self._sel_kp_indices = set()
+            self._primary_kp_idx = None
             self._sel_cam_idx = None
             for cell in self._cells:
                 cell.set_trail(None)
-                cell.set_selected_kp(None, show_ring=False)
+                cell.set_selection(None, frozenset())
             return True
 
-        if self._sel_kp_idx is None or self._sel_cam_idx is None:
+        if not self._sel_kp_indices or self._sel_cam_idx is None:
             return False
 
         nudge = {
@@ -2060,14 +2217,17 @@ class PersonCropGridWidget(QWidget):
         if frame_idx is None:
             return
         kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
-        if kp is None or self._sel_kp_idx >= kp.shape[0]:
+        if kp is None:
             return
-        update_single_keypoint_edit(
-            self._conn, self._sequence_id, cam_id, frame_idx,
-            self._sel_kp_idx,
-            float(kp[self._sel_kp_idx, 0]) + dx,
-            float(kp[self._sel_kp_idx, 1]) + dy,
-        )
+        for kp_idx in self._sel_kp_indices:
+            if kp_idx >= kp.shape[0]:
+                continue
+            update_single_keypoint_edit(
+                self._conn, self._sequence_id, cam_id, frame_idx,
+                kp_idx,
+                float(kp[kp_idx, 0]) + dx,
+                float(kp[kp_idx, 1]) + dy,
+            )
         self._obs_kp[cam_id] = read_observations_with_edits(
             self._conn, self._sequence_id, cam_id
         )
@@ -2075,6 +2235,9 @@ class PersonCropGridWidget(QWidget):
 
     def _toggle_outlier(self) -> None:
         from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit
+        kp_idx = self._primary_kp_idx
+        if kp_idx is None:
+            return
         cam = self._cameras[self._sel_cam_idx]
         cam_id = cam["camera_instance_id"]
         svid = cam["shot_video_id"]
@@ -2084,14 +2247,14 @@ class PersonCropGridWidget(QWidget):
         if frame_idx is None:
             return
         kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
-        if kp is None or self._sel_kp_idx >= kp.shape[0]:
+        if kp is None or kp_idx >= kp.shape[0]:
             return
-        currently_outlier = float(kp[self._sel_kp_idx, 2]) < 0.01
+        currently_outlier = float(kp[kp_idx, 2]) < 0.01
         update_single_keypoint_edit(
             self._conn, self._sequence_id, cam_id, frame_idx,
-            self._sel_kp_idx,
-            float(kp[self._sel_kp_idx, 0]),
-            float(kp[self._sel_kp_idx, 1]),
+            kp_idx,
+            float(kp[kp_idx, 0]),
+            float(kp[kp_idx, 1]),
             is_outlier=not currently_outlier,
         )
         self._obs_kp[cam_id] = read_observations_with_edits(
@@ -2415,17 +2578,16 @@ class PersonCropGridWidget(QWidget):
                         if self._edit_mode:
                             trail = None
                             kp_name = None
-                            if self._sel_kp_idx is not None:
+                            if self._primary_kp_idx is not None:
                                 kp_by_frame = self._obs_kp.get(cam_id, {})
-                                trail = _build_cam_trail(kp_by_frame, cam_id, frame_idx, self._sel_kp_idx)
-                                kp_name = (
-                                    self._pose_model.name_of(self._sel_kp_idx)
-                                    if True
-                                    else str(self._sel_kp_idx)
-                                )
-                            is_sel_cam = (i == self._sel_cam_idx)
+                                trail = _build_cam_trail(kp_by_frame, cam_id, frame_idx, self._primary_kp_idx)
+                                kp_name = self._pose_model.name_of(self._primary_kp_idx)
                             cell.set_trail(trail)
-                            cell.set_selected_kp(self._sel_kp_idx, show_ring=is_sel_cam, name=kp_name)
+                            cell.set_selection(
+                                self._primary_kp_idx,
+                                frozenset(self._sel_kp_indices),
+                                name=kp_name,
+                            )
                     else:
                         cell.show_empty()
                     continue
@@ -2581,13 +2743,16 @@ class PersonCropGridWidget(QWidget):
             if self._edit_mode:
                 trail = None
                 kp_name = None
-                if self._sel_kp_idx is not None:
+                if self._primary_kp_idx is not None:
                     kp_by_frame = self._obs_kp.get(cam_id, {})
-                    trail = _build_cam_trail(kp_by_frame, cam_id, frame_idx, self._sel_kp_idx)
-                    kp_name = self._pose_model.name_of(self._sel_kp_idx)
-                is_sel_cam = (i == self._sel_cam_idx)
+                    trail = _build_cam_trail(kp_by_frame, cam_id, frame_idx, self._primary_kp_idx)
+                    kp_name = self._pose_model.name_of(self._primary_kp_idx)
                 cell.set_trail(trail)
-                cell.set_selected_kp(self._sel_kp_idx, show_ring=is_sel_cam, name=kp_name)
+                cell.set_selection(
+                    self._primary_kp_idx,
+                    frozenset(self._sel_kp_indices),
+                    name=kp_name,
+                )
 
 
 # ---------------------------------------------------------------------------

@@ -406,7 +406,37 @@ void InverseKinematics::enforce_joint_limits(Eigen::VectorXd& q, Skeleton const&
                 q_idx++;
             }
         } else if (joint.type == JointType::SPHERICAL) {
-            // 4 DOF quaternion - skip for now (would need proper quaternion clamping)
+            // Clamp per-axis limits on the axis-angle representation, then convert back.
+            // Uses the same quaternion ↔ axis-angle convention as config_to_state().
+            if (q_idx + 3 < model_.nq && joint.num_limits > 0) {
+                Eigen::Quaterniond quat(q[q_idx + 3], q[q_idx], q[q_idx + 1], q[q_idx + 2]);
+                quat.normalize();
+                Eigen::Vector3d xyz(quat.x(), quat.y(), quat.z());
+                double sin_half = xyz.norm();
+                double ang = 2.0 * std::atan2(sin_half, quat.w());
+                Eigen::Vector3d aa = (sin_half > 1e-8) ? Eigen::Vector3d(xyz / sin_half * ang)
+                                                       : Eigen::Vector3d::Zero();
+
+                bool changed = false;
+                for (int i = 0; i < 3 && i < static_cast<int>(joint.num_limits); ++i) {
+                    double v = std::clamp(aa[i], joint.limits[i].x(), joint.limits[i].y());
+                    if (v != aa[i]) {
+                        aa[i] = v;
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    double new_ang = aa.norm();
+                    Eigen::Quaterniond nq =
+                        (new_ang > 1e-10)
+                            ? Eigen::Quaterniond(Eigen::AngleAxisd(new_ang, aa / new_ang))
+                            : Eigen::Quaterniond::Identity();
+                    q[q_idx] = nq.x();
+                    q[q_idx + 1] = nq.y();
+                    q[q_idx + 2] = nq.z();
+                    q[q_idx + 3] = nq.w();
+                }
+            }
             q_idx += 4;
         }
     }

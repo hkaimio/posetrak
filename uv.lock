@@ -1256,6 +1256,9 @@ setup-app = [
     { name = "pyexiftool" },
     { name = "pyside6" },
 ]
+usd = [
+    { name = "usd-core" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1294,6 +1297,7 @@ setup-app = [
     { name = "pyexiftool", specifier = ">=0.5" },
     { name = "pyside6", specifier = ">=6.7" },
 ]
+usd = [{ name = "usd-core", specifier = ">=24.0" }]
 
 [[package]]
 name = "protobuf"
@@ -1882,6 +1886,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c7/24/5f1b3bdffd70275f6661c76461e25f024d5a38a46f04aaca912426a2b1d3/urllib3-2.6.3.tar.gz", hash = "sha256:1b62b6884944a57dbe321509ab94fd4d3b307075e0c2eae991ac71ee15ad38ed", size = 435556 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/39/08/aaaad47bc4e9dc8c725e68f9d04865dbcb2052843ff09c97b08904852d84/urllib3-2.6.3-py3-none-any.whl", hash = "sha256:bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4", size = 131584 },
+]
+
+[[package]]
+name = "usd-core"
+version = "26.5"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2e/cd/128de2e16d597eb0868dde7cc837a908b28ec2a0d90d4697714b6770449b/usd_core-26.5-cp313-none-macosx_10_15_universal2.whl", hash = "sha256:ce5e90a6795b93d7e744694e5209ea2f1754f9d596e67a89f0cc3590e9fff578", size = 39776038 },
+    { url = "https://files.pythonhosted.org/packages/f1/10/88838fd371592cfc3d972547ab4361e2deef5891d89c22a509de0e6696ce/usd_core-26.5-cp313-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:dd4d3de388e6dfec91fa5ee9fa29800d43ebe86cbf7a10380ec02b15386fca67", size = 28743992 },
+    { url = "https://files.pythonhosted.org/packages/62/05/da8f44024e0f947c13da3bdae0d4ac6c04cb86de92a6f1b9bf03e6bb8ae8/usd_core-26.5-cp313-none-win_amd64.whl", hash = "sha256:b077ea37dfeb15ca6b24ca33b65c2fe9b1656138e1fda74e4eae9793a149a7d5", size = 13494201 },
+    { url = "https://files.pythonhosted.org/packages/3d/57/01cc4e412feaad5aaee09d09ead2afbd5b4022e3d3b5461adcbf726ca3f8/usd_core-26.5-cp314-none-macosx_10_15_universal2.whl", hash = "sha256:5b0acd9a1d804cb73d58815365ccb141727f635f4e6764609fade3bf4ef5cbba", size = 39927684 },
+    { url = "https://files.pythonhosted.org/packages/fd/0d/5b87f5d7c3501bd5296b0bba7ba8a3eaf639ded53b9a17e910ee3363dfc0/usd_core-26.5-cp314-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:755c469ec762f3b69d87f5e8af8f8098e4c107bf4c15ce570a042ac2fc2dbb76", size = 28776483 },
+    { url = "https://files.pythonhosted.org/packages/5a/48/d29a4649df00455174a5979fc8291021199bb2115d623378364b58055bb5/usd_core-26.5-cp314-none-win_amd64.whl", hash = "sha256:7654b5dfef6e7177849aa7e69962feb82a5312ad08469983214aae5821601296", size = 14043860 },
 ]
 
 [[package]]

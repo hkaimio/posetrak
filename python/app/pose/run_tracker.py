@@ -10,6 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import QProcess, Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -48,6 +49,8 @@ class RunTrackerWidget(QWidget):
         self._process: QProcess | None = None
         self._bvh_process: QProcess | None = None
         self._stdout_buf: str = ""
+        self._sequence_cameras: list[str] = []
+        self._velocity_cam_indices: set[int] = set()
 
         # ---- Configuration group ----------------------------------------
         self._skeleton_combo = QComboBox()
@@ -66,6 +69,14 @@ class RunTrackerWidget(QWidget):
         self._outlier_thresh  = _float_spin(4.0,   0.1,   50.0, 2)
         self._tracker_fps     = _float_spin(120.0, 1.0,  500.0, 1)
 
+        self._vel_cam_label = QLabel("None")
+        vel_cam_edit_btn = QPushButton("Edit…")
+        vel_cam_edit_btn.setFixedWidth(60)
+        vel_cam_edit_btn.clicked.connect(self._edit_velocity_cameras)
+        vel_cam_row = QHBoxLayout()
+        vel_cam_row.addWidget(self._vel_cam_label, 1)
+        vel_cam_row.addWidget(vel_cam_edit_btn)
+
         config_form = QFormLayout()
         config_form.addRow("Skeleton:", self._skeleton_combo)
         config_form.addRow("Person ID:", self._person_id_spin)
@@ -75,6 +86,7 @@ class RunTrackerWidget(QWidget):
         config_form.addRow("Measurement noise std:", self._meas_noise)
         config_form.addRow("Outlier threshold:", self._outlier_thresh)
         config_form.addRow("Tracker FPS:", self._tracker_fps)
+        config_form.addRow("Velocity cameras:", vel_cam_row)
 
         config_box = QGroupBox("Tracker configuration")
         config_box.setLayout(config_form)
@@ -98,6 +110,8 @@ class RunTrackerWidget(QWidget):
         bin_row = QHBoxLayout()
         bin_row.addWidget(self._binary_edit, 1)
         bin_row.addWidget(bin_browse_btn)
+
+        self._sequence_combo.currentIndexChanged.connect(self._on_sequence_changed)
 
         run_form = QFormLayout()
         run_form.addRow("Pose sequence:", self._sequence_combo)
@@ -232,6 +246,81 @@ class RunTrackerWidget(QWidget):
         )
         self._run_btn.setEnabled(ok)
 
+    def _on_sequence_changed(self) -> None:
+        data = self._sequence_combo.currentData()
+        if data is None or self._conn is None:
+            self._sequence_cameras = []
+        else:
+            seq_id, _, _ = data
+            self._sequence_cameras = self._cameras_for_sequence(seq_id)
+        self._velocity_cam_indices = set()
+        self._update_velocity_cam_label()
+
+    def _cameras_for_sequence(self, seq_id: str) -> list[str]:
+        row = self._conn.execute(
+            "SELECT pos.sync_config_id FROM pose_observation_sequences pos WHERE pos.id = ?",
+            (seq_id,),
+        ).fetchone()
+        if not row or not row["sync_config_id"]:
+            return []
+        sync_id = row["sync_config_id"]
+        rows = self._conn.execute(
+            "SELECT ci.label"
+            " FROM capture_videos sv"
+            " JOIN captures sh ON sh.id = sv.shot_id"
+            " JOIN sync_configs scfg ON scfg.shot_id = sh.id"
+            " JOIN camera_instances ci ON ci.id = sv.camera_instance_id"
+            " WHERE scfg.id = ?"
+            " ORDER BY ci.label ASC",
+            (sync_id,),
+        ).fetchall()
+        return [r["label"] for r in rows]
+
+    def _update_velocity_cam_label(self) -> None:
+        if not self._velocity_cam_indices or not self._sequence_cameras:
+            self._vel_cam_label.setText("None")
+        else:
+            names = [
+                self._sequence_cameras[i]
+                for i in sorted(self._velocity_cam_indices)
+                if i < len(self._sequence_cameras)
+            ]
+            self._vel_cam_label.setText(", ".join(names) if names else "None")
+
+    def _edit_velocity_cameras(self) -> None:
+        if not self._sequence_cameras:
+            QMessageBox.information(self, "No cameras", "Select a sequence with cameras first.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Velocity mode cameras")
+        layout = QVBoxLayout(dlg)
+        label = QLabel(
+            "Cameras in velocity mode use keypoint displacement between frames as the "
+            "measurement instead of absolute position. Select cameras with poor or "
+            "uncertain absolute calibration."
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        checkboxes: list[QCheckBox] = []
+        for i, cam_label in enumerate(self._sequence_cameras):
+            cb = QCheckBox(cam_label)
+            cb.setChecked(i in self._velocity_cam_indices)
+            checkboxes.append(cb)
+            layout.addWidget(cb)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._velocity_cam_indices = {i for i, cb in enumerate(checkboxes) if cb.isChecked()}
+            self._update_velocity_cam_label()
+
     # ------------------------------------------------------------------
     # Browse helpers
     # ------------------------------------------------------------------
@@ -357,16 +446,20 @@ class RunTrackerWidget(QWidget):
 
     def _create_config(self) -> str:
         import datetime as dt
+        import json
         from posetrak.db.db import generate_id
         config_id = generate_id()
         now = dt.datetime.now(dt.timezone.utc).isoformat()
+        vel_ids = sorted(self._velocity_cam_indices) if self._velocity_cam_indices else None
+        vel_ids_json = json.dumps(vel_ids) if vel_ids is not None else None
         with self._conn:
             self._conn.execute(
                 "INSERT INTO tracker_configs"
                 " (id, name, parent_id, created_at,"
                 "  process_noise_std, process_noise_vel_std, velocity_half_life_s,"
-                "  measurement_noise_std, outlier_threshold, tracker_fps)"
-                " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)",
+                "  measurement_noise_std, outlier_threshold, tracker_fps,"
+                "  velocity_mode_camera_ids)"
+                " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     config_id, "ui-run", now,
                     self._proc_noise_std.value(),
@@ -375,6 +468,7 @@ class RunTrackerWidget(QWidget):
                     self._meas_noise.value(),
                     self._outlier_thresh.value(),
                     self._tracker_fps.value(),
+                    vel_ids_json,
                 ),
             )
         return config_id

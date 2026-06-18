@@ -117,6 +117,49 @@ Performacne between debug & optimized builds is big; therefore before executing 
 
 The tracker writes CSV files to `output_dir/`: `state_vectors.csv`, `joint_angles.csv`, `root_pose.csv`, `marker_projections.csv`, `observations.csv`, `tracking_stats.csv`, `predicted_observations.csv`, `tracking_results.csv`.
 
+### MCP Diagnostic Server
+
+`python/app/mcp/` contains a read-only MCP server for diagnosing tracking runs. It is intended to be used with Claude Code (or any MCP-compatible client) when investigating tracking anomalies — the tools give structured access to filter statistics, camera coverage, and observation data without requiring manual SQL queries.
+
+**Running the server:**
+
+```bash
+# Install the mcp dependency group first (one-time)
+uv sync --group mcp-server
+
+# Start the server against a session database
+uv run posetrak-mcp --db-path /path/to/session.db
+```
+
+**Wiring it into Claude Code** — add to `.mcp.json` in the project root:
+
+```json
+{
+  "mcpServers": {
+    "posetrak": {
+      "command": "uv",
+      "args": ["run", "posetrak-mcp", "--db-path", "/path/to/session.db"]
+    }
+  }
+}
+```
+
+**Available tools and recommended workflow:**
+
+1. `list_tracking_runs` — see all runs in the DB with time ranges
+2. `get_run_info` — tracker config (flags large `measurement_noise_std`), camera list, marker list
+3. `get_filter_stats(run_id, start_s, end_s)` — per-step NIS/DOF and covariance condition number; anomaly summary at top
+4. `get_camera_coverage(run_id, start_s, end_s, markers)` — inlier/outlier/absent grid showing which cameras see which markers
+5. `get_observation_gaps(run_id, start_s, end_s, markers)` — actual vs predicted pixel positions; gaps ≥ 30 px flagged
+6. `get_camera_geometry(run_id)` — 3-D camera positions and pairwise parallax with GOOD/MODERATE/POOR depth quality labels
+7. `get_edit_coverage(run_id)` — which HALPE keypoints are edited per camera; flags key body landmarks left unedited
+
+**Key schema notes for server development:**
+
+- `tracking_runs.active_camera_ids` — JSON array of camera **labels** (e.g. `"gopro-11_mini_01"`), not UUIDs. `get_run_cameras()` in `db.py` resolves these to `camera_instances.id` UUIDs so they match `extrinsic_entries` and `pose_observation_edits`.
+- `tracking_obs_results.obs_blob` — `float32[n_cam, n_mrk, 8]`: fields are `[actual_x, actual_y, pred_x, pred_y, mahal_dist, used (1=inlier), is_outlier, pad]`. NaN actual_x means no observation for that camera/marker slot.
+- Always open session DBs read-only: `sqlite3.connect(f"file:{path}?mode=ro", uri=True)`.
+
 ### Python Package
 
 The `python/` directory contains the installable `posetrak` Python package:

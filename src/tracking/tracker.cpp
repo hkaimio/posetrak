@@ -194,8 +194,16 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
 
     State analytic_state = estimate_analytic_state();
 
+    // Log triangulated 3D positions (input to IK) so they can be compared to IK output.
+    fmt::print("  Triangulated markers ({}):\n", marker_positions.size());
+    for (auto const& [name, pos] : marker_positions) {
+        fmt::print("    {:30s}  ({:.3f}, {:.3f}, {:.3f})\n", name, pos.x(), pos.y(), pos.z());
+    }
+
     // Step 3: Run IK from the analytic starting state to refine joint angles.
     // Pass it as initial_guess so IK uses our root estimate instead of re-computing from scratch.
+    fmt::print("  Running IK: max_iter={} tol={:.4f}m\n", config_.ik_max_iterations,
+               config_.ik_tolerance);
     auto ik_result = ik_solver_->solve(marker_positions, *skeleton_, analytic_state,
                                        config_.ik_max_iterations, config_.ik_tolerance);
 

@@ -12,6 +12,7 @@
 
 #include <fmt/core.h>
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -171,6 +172,49 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
         q = ForwardKinematics::state_to_config(*initial_guess, *layout);
     }
 
+    // --- Diagnostic helper: print per-marker position errors at a given configuration ---
+    auto print_marker_errors = [&](Eigen::VectorXd const& q_diag, char const* label) {
+        auto fk_positions = fk_.compute(q_diag);
+        Eigen::Vector3d root_pos = q_diag.head<3>();
+        Eigen::Quaterniond root_q(q_diag[6], q_diag[3], q_diag[4], q_diag[5]);
+        fmt::print("  IK {} | root=({:.3f},{:.3f},{:.3f})  q_rot=({:.3f},{:.3f},{:.3f},{:.3f})\n",
+                   label, root_pos.x(), root_pos.y(), root_pos.z(), root_q.x(), root_q.y(),
+                   root_q.z(), root_q.w());
+
+        double sum_sq = 0.0;
+        int n = 0;
+        std::vector<std::pair<double, std::string>> per_marker;
+        for (auto const& [name, target] : target_markers) {
+            if (marker_frame_map_.count(name) == 0)
+                continue;
+            auto it = fk_positions.find(name);
+            if (it == fk_positions.end())
+                continue;
+            double err = (target - it->second).norm();
+            sum_sq += err * err;
+            ++n;
+            per_marker.emplace_back(err, name);
+        }
+        // Sort by error descending so the worst offenders appear first.
+        std::sort(per_marker.begin(), per_marker.end(),
+                  [](auto const& a, auto const& b) { return a.first > b.first; });
+        for (auto const& [err, name] : per_marker) {
+            auto it = fk_positions.find(name);
+            auto tgt = target_markers.at(name);
+            fmt::print(
+                "    {:30s}  err={:.4f}m  target=({:.3f},{:.3f},{:.3f})  "
+                "fk=({:.3f},{:.3f},{:.3f})\n",
+                name, err, tgt.x(), tgt.y(), tgt.z(), it->second.x(), it->second.y(),
+                it->second.z());
+        }
+        double rms = n > 0 ? std::sqrt(sum_sq / n) : 0.0;
+        fmt::print("  IK {} | {:d} markers  RMS={:.4f}m  worst={:.4f}m ({})\n", label, n, rms,
+                   per_marker.empty() ? 0.0 : per_marker.front().first,
+                   per_marker.empty() ? "" : per_marker.front().second);
+    };
+
+    print_marker_errors(q, "INIT ");
+
     // Open CSV file for iteration tracking
     std::ofstream csv_file("/tmp/ik_iterations.csv");
     csv_file << "iteration,rms_error,damping\n";
@@ -184,6 +228,8 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
     double rms_error = error.norm() / std::sqrt(static_cast<double>(marker_names.size()));
 
     int iter = 0;
+    int accepted_steps = 0;
+    int rejected_steps = 0;
     for (; iter < max_iterations; ++iter) {
         csv_file << iter << "," << rms_error << "," << current_damping << "\n";
 
@@ -235,9 +281,11 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
             error = error_new;
             rms_error = rms_new;
             current_damping = std::max(current_damping * 0.5, 1e-7);
+            ++accepted_steps;
         } else {
             // Reject step, increase damping (more gradient-descent-like)
             current_damping *= 4.0;
+            ++rejected_steps;
             if (current_damping > 1e8) {
                 // Truly stuck even with near-gradient-descent step sizes — give up
                 break;
@@ -248,12 +296,10 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
     csv_file.close();
 
     bool converged = rms_error < tolerance;
-    if (converged) {
-        fmt::print("IK converged after {} iterations. Final RMS: {:.4f} m\n", iter, rms_error);
-    } else {
-        fmt::print("IK did not converge after {} iterations. Final RMS: {:.4f} m (tol {:.4f} m)\n",
-                   iter, rms_error, tolerance);
-    }
+    fmt::print("  IK {}: {} iters  accepted={}  rejected={}  final_RMS={:.4f}m  tol={:.4f}m\n",
+               converged ? "CONVERGED" : "NOT CONVERGED", iter, accepted_steps, rejected_steps,
+               rms_error, tolerance);
+    print_marker_errors(q, "FINAL");
 
     State final_state = config_to_state(q, skeleton);
     return IKResult{final_state, rms_error, iter, converged};

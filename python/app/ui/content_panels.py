@@ -844,6 +844,7 @@ class CropBackfillWorker(QThread):
         _log.info("backfill worker: thread started  db=%s", self._db_path)
         try:
             conn = sqlite3.connect(self._db_path)
+            conn.row_factory = sqlite3.Row
         except Exception:
             _log.exception("backfill worker: failed to open DB")
             return
@@ -2863,14 +2864,26 @@ class PersonCropGridWidget(QWidget):
                         )
                         cell.show_image(QPixmap.fromImage(qimg), x1, y1, src_scale)
                         obs_kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
+                        joint_xy = (
+                            self._joint_proj.get(cam_id, {}).get(tracking_step)
+                            if tracking_step is not None else None
+                        )
+                        marker_xy = (
+                            self._marker_proj.get(cam_id, {}).get(tracking_step)
+                            if tracking_step is not None else None
+                        )
+                        outlier_mask = (
+                            self._outlier_masks.get(cam_id, {}).get(tracking_step)
+                            if tracking_step is not None else None
+                        )
                         cell.set_overlay(
                             obs_kp=obs_kp,
-                            joint_xy=None,
+                            joint_xy=joint_xy,
                             bone_pairs=self._bone_pairs,
-                            marker_xy=None,
-                            outlier_mask=None,
+                            marker_xy=marker_xy,
+                            outlier_mask=outlier_mask,
                             show_detected=show_detected,
-                            show_tracked=False,
+                            show_tracked=show_tracked,
                         )
                         if self._edit_mode:
                             trail = None

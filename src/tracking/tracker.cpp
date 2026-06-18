@@ -194,10 +194,96 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
 
     State analytic_state = estimate_analytic_state();
 
-    // Log triangulated 3D positions (input to IK) so they can be compared to IK output.
-    fmt::print("  Triangulated markers ({}):\n", marker_positions.size());
-    for (auto const& [name, pos] : marker_positions) {
-        fmt::print("    {:30s}  ({:.3f}, {:.3f}, {:.3f})\n", name, pos.x(), pos.y(), pos.z());
+    // Step 2.5: Analytical limb warm-start.
+    // Before running DLS IK (which finds local minima), analytically orient each major
+    // limb segment to point from its proximal to its distal triangulated marker. This
+    // replaces the T-pose starting guess with a geometry-derived pose that is much closer
+    // to the true configuration, allowing the IK to converge to the correct solution.
+    {
+        auto full_layout = SkeletonLayout::from_full_skeleton(skeleton_);
+        Eigen::VectorXd warm_angles = analytic_state.joint_angles();
+        int n = static_cast<int>(warm_angles.size());
+
+        // Compute the rotation (as an axis-angle in the joint's LOCAL frame) that aligns
+        // the bone direction from prox_mkr to dist_mkr with the triangulated target.
+        // joint_name  – spherical joint whose angle to warm-start.
+        // prox/dist   – marker names bracketing the bone.
+        // fk_markers  – current FK result (used for rest/warm direction).
+        auto align_joint = [&](std::string const& joint_name, std::string const& prox_mkr,
+                               std::string const& dist_mkr,
+                               std::unordered_map<std::string, Eigen::Vector3d> const& fk_markers) {
+            auto it_prox_fk = fk_markers.find(prox_mkr);
+            auto it_dist_fk = fk_markers.find(dist_mkr);
+            auto it_prox_tgt = marker_positions.find(prox_mkr);
+            auto it_dist_tgt = marker_positions.find(dist_mkr);
+            if (it_prox_fk == fk_markers.end() || it_dist_fk == fk_markers.end() ||
+                it_prox_tgt == marker_positions.end() || it_dist_tgt == marker_positions.end())
+                return;
+
+            Eigen::Vector3d rest_dir = (it_dist_fk->second - it_prox_fk->second).normalized();
+            Eigen::Vector3d tgt_dir = (it_dist_tgt->second - it_prox_tgt->second).normalized();
+
+            double cos_a = std::clamp(rest_dir.dot(tgt_dir), -1.0, 1.0);
+            double angle = std::acos(cos_a);
+            if (angle < 1e-4)
+                return;
+
+            Eigen::Vector3d axis_world = rest_dir.cross(tgt_dir);
+            double axis_n = axis_world.norm();
+            if (axis_n < 1e-8) {
+                axis_world = rest_dir.unitOrthogonal();
+            } else {
+                axis_world /= axis_n;
+            }
+
+            // Convert world-frame axis to joint's local frame. The joint angle is
+            // defined in the frame of the joint's fixed placement, which equals
+            // data_.oMi[jidx] evaluated with zero joint angles.
+            Eigen::Matrix3d R_joint_frame;
+            try {
+                auto [jpos, jrot] = fk_->world_transform(joint_name);
+                R_joint_frame = jrot.toRotationMatrix();
+            } catch (std::exception const&) {
+                return;  // FIXED or unknown joint – skip
+            }
+
+            Eigen::Vector3d axis_local = R_joint_frame.transpose() * axis_world;
+            Eigen::Vector3d aa_local = axis_local * angle;
+
+            auto const* desc = full_layout->get_joint(joint_name);
+            if (desc && desc->storage_dof_count == 3) {
+                int idx = static_cast<int>(desc->state_index);
+                if (idx + 2 < n) {
+                    warm_angles[idx + 0] = aa_local[0];
+                    warm_angles[idx + 1] = aa_local[1];
+                    warm_angles[idx + 2] = aa_local[2];
+                }
+            }
+        };
+
+        auto make_state = [&]() {
+            Eigen::VectorXd z = Eigen::VectorXd::Zero(n);
+            return State(analytic_state.root_position(), analytic_state.root_orientation(),
+                         warm_angles, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), z);
+        };
+
+        // Phase 1: upper arms and thighs (from T-pose rest FK).
+        auto rest_fk = fk_->compute(analytic_state);
+        align_joint("upper_arm.L", "MRK-shoulder.L", "MRK-elbow.L", rest_fk);
+        align_joint("upper_arm.R", "MRK-shoulder.R", "MRK-elbow.R", rest_fk);
+        align_joint("thigh.L", "MRK-hip.L", "MRK-knee.L", rest_fk);
+        align_joint("thigh.R", "MRK-hip.R", "MRK-knee.R", rest_fk);
+
+        // Phase 2: forearms and shins (after upper-arm/thigh angles are propagated).
+        auto warm1_fk = fk_->compute(make_state());
+        align_joint("forearm.L", "MRK-elbow.L", "MRK-wrist.L", warm1_fk);
+        align_joint("forearm.R", "MRK-elbow.R", "MRK-wrist.R", warm1_fk);
+        align_joint("shin.L", "MRK-knee.L", "MRK-Ankle.L", warm1_fk);
+        align_joint("shin.R", "MRK-knee.R", "MRK-Ankle.R", warm1_fk);
+
+        analytic_state = make_state();
+        fmt::print("  Warm-start applied: joint_angles L2 = {:.4f}\n",
+                   analytic_state.joint_angles().norm());
     }
 
     // Step 3: Run IK from the analytic starting state to refine joint angles.

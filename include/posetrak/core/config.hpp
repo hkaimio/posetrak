@@ -115,6 +115,10 @@ struct TrackerConfig {
     bool calibration_mode = false;  ///< Enable bone-length calibration DOFs
     double prismatic_process_noise_std =
         0.0001;  ///< σ for prismatic DOFs in calibration mode (m/√s)
+
+    // === Debug ===
+    /// Print per-marker 3D errors (prior and posterior vs triangulated) for the first N frames.
+    int debug_init_frames = 0;
 };
 
 /**
@@ -179,6 +183,9 @@ struct TrackerAppConfig {
     double prismatic_process_noise_std =
         0.0001;  ///< σ for prismatic DOFs in calibration mode (m/√s)
 
+    // === Debug ===
+    int debug_init_frames = 0;  ///< Print per-marker 3D errors for the first N tracked frames.
+
     /**
      * @brief Load configuration from TOML file
      *
@@ -231,6 +238,7 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.velocity_measurement_noise_std = velocity_measurement_noise_std;
     tc.calibration_mode = calibration_mode;
     tc.prismatic_process_noise_std = prismatic_process_noise_std;
+    tc.debug_init_frames = debug_init_frames;
     return tc;
 }
 

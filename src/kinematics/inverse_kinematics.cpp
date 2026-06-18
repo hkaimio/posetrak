@@ -299,6 +299,7 @@ IKResult InverseKinematics::solve(std::map<std::string, Eigen::Vector3d> const& 
     fmt::print("  IK {}: {} iters  accepted={}  rejected={}  final_RMS={:.4f}m  tol={:.4f}m\n",
                converged ? "CONVERGED" : "NOT CONVERGED", iter, accepted_steps, rejected_steps,
                rms_error, tolerance);
+    enforce_joint_limits(q, skeleton);
     print_marker_errors(q, "FINAL");
 
     State final_state = config_to_state(q, skeleton);

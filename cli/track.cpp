@@ -1046,8 +1046,9 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
 static int run_track_from_db(std::string const& db_path, std::string const& sequence_id,
                              std::string const& skeleton_id, std::string const& config_id,
                              std::string const& output_dir, bool verbose, bool quiet,
-                             bool smooth_output, bool debug_output, double min_confidence,
-                             int person_id, std::vector<std::string> const& active_joint_groups,
+                             bool smooth_output, bool debug_output, bool debug_init,
+                             double min_confidence, int person_id,
+                             std::vector<std::string> const& active_joint_groups,
                              double override_start_time = std::numeric_limits<double>::quiet_NaN(),
                              double override_end_time = std::numeric_limits<double>::quiet_NaN()) {
     try {
@@ -1082,6 +1083,9 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
         // Apply active_joint_groups override from CLI
         if (!active_joint_groups.empty()) {
             tracker_config.active_joint_groups = active_joint_groups;
+        }
+        if (debug_init) {
+            tracker_config.debug_init_frames = 1;
         }
 
         // Load sequence info
@@ -1495,6 +1499,7 @@ int main(int argc, char* argv[]) {
     bool smooth_output = false;
     bool calibrate = false;
     bool debug_output = false;
+    bool debug_init = false;
     // DB mode arguments
     std::string db_path;
     std::string db_sequence_id;
@@ -1523,6 +1528,9 @@ int main(int argc, char* argv[]) {
     track_cmd->add_flag("--debug", debug_output,
                         "Enable UKF debug output (overrides export_debug in config file). "
                         "Writes per-frame diagnostics to <output_dir>/debug/");
+    track_cmd->add_flag("--debug-init", debug_init,
+                        "Print per-marker 3D prior/posterior errors for the first tracked frame. "
+                        "Shows FK vs triangulated 3D for both the UKF prior and posterior state.");
     // DB mode options
     track_cmd->add_option("--session-db", db_path, "Session DB file (enables DB mode)");
     track_cmd->add_option("--sequence", db_sequence_id,
@@ -1573,8 +1581,8 @@ int main(int argc, char* argv[]) {
             }
             return run_track_from_db(db_path, db_sequence_id, db_skeleton_id, db_config_id,
                                      db_output_dir, verbose, quiet, smooth_output, debug_output,
-                                     db_min_confidence, db_person_id, db_active_joint_groups,
-                                     db_start_time, db_end_time);
+                                     debug_init, db_min_confidence, db_person_id,
+                                     db_active_joint_groups, db_start_time, db_end_time);
         } else {
             if (track_config.empty()) {
                 fmt::print(stderr, "Error: config file required when not using --session-db\n");

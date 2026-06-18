@@ -83,6 +83,7 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
     if (marker_positions.size() < 3) {
         return false;
     }
+    init_marker_positions_ = marker_positions;
 
     // Step 2: Analytically estimate root position + orientation from observed markers.
     // This gives us a good global pose even before IK runs.
@@ -254,9 +255,15 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
             if (desc && desc->storage_dof_count == 3) {
                 int idx = static_cast<int>(desc->state_index);
                 if (idx + 2 < n) {
-                    warm_angles[idx + 0] = aa_local[0];
-                    warm_angles[idx + 1] = aa_local[1];
-                    warm_angles[idx + 2] = aa_local[2];
+                    for (int i = 0; i < 3; ++i) {
+                        if (desc->active_dof_mask[i]) {
+                            double val = aa_local[i];
+                            if (i < desc->limit_count) {
+                                val = std::clamp(val, desc->limits[i].x(), desc->limits[i].y());
+                            }
+                            warm_angles[idx + i] = val;
+                        }
+                    }
                 }
             }
         };
@@ -507,6 +514,51 @@ Tracker::build_annotated_observations(std::vector<Observation> const& observatio
     return annotated;
 }
 
+void Tracker::print_init_debug(State const& state, std::string const& label) const {
+    auto fk_markers = fk_->compute(state);
+
+    Eigen::Quaterniond const& q = state.root_orientation();
+    fmt::print("\n=== INIT DEBUG [{}] frame={} ===\n", label, frame_count_);
+    fmt::print("  root_pos = ({:.3f}, {:.3f}, {:.3f})\n", state.root_position().x(),
+               state.root_position().y(), state.root_position().z());
+    fmt::print("  root_quat = ({:.3f}, {:.3f}, {:.3f}, {:.3f})  [x,y,z,w]\n", q.x(), q.y(), q.z(),
+               q.w());
+
+    struct MarkerError {
+        std::string name;
+        double error;
+        Eigen::Vector3d fk_pos;
+        Eigen::Vector3d tgt_pos;
+    };
+    std::vector<MarkerError> errors;
+    double rms_sq = 0.0;
+
+    for (auto const& [name, fk_pos] : fk_markers) {
+        auto it = init_marker_positions_.find(name);
+        if (it == init_marker_positions_.end())
+            continue;
+        double err = (fk_pos - it->second).norm();
+        rms_sq += err * err;
+        errors.push_back({name, err, fk_pos, it->second});
+    }
+
+    std::sort(errors.begin(), errors.end(),
+              [](MarkerError const& a, MarkerError const& b) { return a.error > b.error; });
+
+    int n = static_cast<int>(errors.size());
+    double rms = n > 0 ? std::sqrt(rms_sq / n) : 0.0;
+    int gt5cm = static_cast<int>(
+        std::count_if(errors.begin(), errors.end(), [](auto& e) { return e.error > 0.05; }));
+    fmt::print("  n={} markers  RMS={:.4f}m  >{:.0f}cm: {}\n", n, rms, 5.0, gt5cm);
+    fmt::print("  {:35s}  {:>7}  {:>25}  {:>25}\n", "marker", "err(m)", "fk(x,y,z)", "tgt(x,y,z)");
+    for (auto const& me : errors) {
+        fmt::print("  {:35s}  {:.4f}  ({:6.3f},{:6.3f},{:6.3f})  ({:6.3f},{:6.3f},{:6.3f})\n",
+                   me.name, me.error, me.fk_pos.x(), me.fk_pos.y(), me.fk_pos.z(), me.tgt_pos.x(),
+                   me.tgt_pos.y(), me.tgt_pos.z());
+    }
+    fmt::print("\n");
+}
+
 TrackingResult Tracker::track_frame(std::vector<Observation> const& observations,
                                     double timestamp) {
     if (!initialized_) {
@@ -533,6 +585,7 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
             run_child_step(child, annotated, dt);
         }
         last_timestamp_ = timestamp;
+        ++frame_count_;
         // Store raw pixel positions for next frame's velocity-mode annotation
         for (Observation const& obs : observations) {
             prev_observations_[obs.camera_id][obs.marker_id] = obs.position;
@@ -558,6 +611,10 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
     State const prior_state = ukf_->state();
     Eigen::MatrixXd const prior_cov = ukf_->covariance();
 
+    if (frame_count_ < config_.debug_init_frames) {
+        print_init_debug(prior_state, "PRIOR ");
+    }
+
     // Step 2: Check if we have observations
     if (!has_sufficient_observations(observations)) {
         return TrackingResult{timestamp, ukf_->state(), ukf_->covariance(),         {},
@@ -569,6 +626,10 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
     auto update_info = ukf_->update(observations, cameras_, *fk_, config_.measurement_noise_std,
                                     config_.outlier_threshold);
     double const update_ms = Ms(Clock::now() - t1).count();
+
+    if (frame_count_ < config_.debug_init_frames) {
+        print_init_debug(ukf_->state(), "POSTER");
+    }
 
     // Debug: Export observation results (all frames) — runs even when all observations are outliers
     if (ukf_->is_debug_enabled()) {

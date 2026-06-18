@@ -276,6 +276,14 @@ class Tracker {
     bool has_sufficient_observations(std::vector<Observation> const& observations) const;
 
     /**
+     * @brief Print per-marker 3D FK vs triangulated error for a given state.
+     *
+     * Uses init_marker_positions_ as the 3D reference (triangulated at init time).
+     * Prints root position, per-marker errors sorted descending, and RMS.
+     */
+    void print_init_debug(State const& state, std::string const& label) const;
+
+    /**
      * @brief Annotate observations for velocity-mode cameras.
      *
      * For each observation whose camera_id is in config_.velocity_mode_camera_ids,
@@ -306,6 +314,10 @@ class Tracker {
     // State
     bool initialized_ = false;
     double last_timestamp_ = 0.0;
+    int frame_count_ = 0;
+
+    // Triangulated 3-D positions from the initialization frame, used by debug output.
+    std::map<std::string, Eigen::Vector3d> init_marker_positions_;
 
     // Previous-frame undistorted pixels per camera and marker, for velocity-mode cameras.
     // Populated at the end of each successful track_frame() call.

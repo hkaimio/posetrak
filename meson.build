@@ -106,10 +106,16 @@ endif
 # host is safe and correct for the Windows target.
 pinocchio_inc = include_directories('/opt/openrobots/include', is_system: true)
 if meson.is_cross_build()
+  # Pinocchio's templates pull in Boost (math, type_traits).  The cross-compiler
+  # does not search the Linux host's /usr/include, but adding it wholesale would
+  # contaminate the build with Linux glibc headers (bits/libc-header-start.h etc).
+  # cross/include/ contains only a symlink to /usr/include/boost — the pure-C++
+  # Boost headers — so only those are exposed to the MinGW compiler.
+  # Requires: apt install libboost-dev  (symlink: cross/include/boost -> /usr/include/boost)
   pinocchio_dep = declare_dependency(
     include_directories: [
       pinocchio_inc,
-      include_directories('/usr/include', is_system: true),
+      include_directories('cross/include', is_system: true),
     ],
   )
 else

@@ -74,8 +74,14 @@ if not toml_dep.found()
   toml_dep = dependency('tomlplusplus', required: true)
 endif
 
-# SQLite3 (system library, used for session DB read/write)
-sqlite3_dep = dependency('sqlite3', required: true)
+# SQLite3 (system library with wrap fallback for cross-compilation)
+sqlite3_dep = dependency('sqlite3',
+  required: false,
+  fallback: ['sqlite3', 'sqlite3_dep'],
+)
+if not sqlite3_dep.found()
+  sqlite3_dep = dependency('sqlite3', required: true)
+endif
 
 # CLI11 (header-only, use wrap)
 cli11_dep = dependency('CLI11',
@@ -93,10 +99,24 @@ endif
 # linking is required.  The only non-Eigen dependencies (boost/math/constants and
 # boost/type_traits) are themselves header-only and present at the system include path.
 # See docs/pinocchio-header-only-analysis.md for the full rationale.
+#
+# When cross-compiling for Windows the MinGW toolchain does not search the Linux
+# host's /usr/include, but Pinocchio's Boost dependencies live there.  They are
+# pure C++ templates with no OS-specific API calls, so including them from the
+# host is safe and correct for the Windows target.
 pinocchio_inc = include_directories('/opt/openrobots/include', is_system: true)
-pinocchio_dep = declare_dependency(
-  include_directories: pinocchio_inc,
-)
+if meson.is_cross_build()
+  pinocchio_dep = declare_dependency(
+    include_directories: [
+      pinocchio_inc,
+      include_directories('/usr/include', is_system: true),
+    ],
+  )
+else
+  pinocchio_dep = declare_dependency(
+    include_directories: pinocchio_inc,
+  )
+endif
 
 # Will add these as we progress:
 # opencv_dep = dependency('opencv4', version: '>=4.5',

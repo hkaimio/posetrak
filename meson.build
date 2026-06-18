@@ -65,10 +65,14 @@ if not yaml_cpp_dep.found()
   yaml_cpp_dep = dependency('yaml-cpp', required: true)
 endif
 
-# tomlplusplus (header-only, use wrap - toml11 not in wrapdb)
+# tomlplusplus (use wrap - toml11 not in wrapdb)
+# The tomlplusplus subproject defaults to shared_library; override to static so
+# the Windows build does not produce a libtomlplusplus-3.dll that must be
+# distributed alongside the exe.
 toml_dep = dependency('tomlplusplus',
   required: false,
-  fallback: ['tomlplusplus', 'tomlplusplus_dep']
+  fallback: ['tomlplusplus', 'tomlplusplus_dep'],
+  default_options: ['default_library=static']
 )
 if not toml_dep.found()
   toml_dep = dependency('tomlplusplus', required: true)

@@ -95,7 +95,7 @@ struct TrackerConfig {
     double init_joint_std = 0.3;        ///< Initial joint angle uncertainty (radians)
     double init_velocity_std = 0.1;     ///< Initial velocity uncertainty (m/s or rad/s)
 
-    int ik_max_iterations = 50;    ///< Max IK iterations for initialization
+    int ik_max_iterations = 1000;  ///< Max IK iterations for initialization
     double ik_tolerance = 0.01;    ///< IK convergence tolerance (meters)
     int min_cameras_for_init = 2;  ///< Minimum cameras required for triangulation
 

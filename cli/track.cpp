@@ -756,8 +756,7 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
                 }
 
                 // Use window midpoint as effective timestamp
-                // double t_effective = config.start_time + dt / 2.0;
-                double t_effective = config.start_time - dt * 0.5;
+                double t_effective = config.start_time + dt * 0.5;
                 auto result = tracker.track_frame(frame_0_obs, t_effective);
 
                 // Note: Step 0 posterior not exported - tracking_results starts at frame 1 (step 1)
@@ -1276,7 +1275,7 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                 if (auto* ukf = tracker.get_ukf()) {
                     ukf->set_frame_number(0);
                 }
-                double t_effective = start_time - dt * 0.5;
+                double t_effective = start_time + dt * 0.5;
                 auto result = tracker.track_frame(frame_0_obs, t_effective);
                 if (result.tracking_lost) {
                     fmt::print(stderr, "Warning: Tracking lost on first update\n");

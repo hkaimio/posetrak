@@ -90,10 +90,16 @@ struct TrackerConfig {
     double ukf_kappa = 0.0;  ///< Secondary scaling parameter
 
     // Initialization parameters
-    double init_position_std = 0.5;     ///< Initial position uncertainty (meters)
-    double init_orientation_std = 0.5;  ///< Initial orientation uncertainty (radians)
-    double init_joint_std = 0.3;        ///< Initial joint angle uncertainty (radians)
-    double init_velocity_std = 0.1;     ///< Initial velocity uncertainty (m/s or rad/s)
+    // With n≈218 error DOFs and alpha=0.5, sigma point spread = sqrt(n+λ) ≈ 7.4 × init_std.
+    // Values must be small enough that sigma points stay in the linear regime of camera
+    // projection (sigma_spread_orient = 7.4 × 0.05 ≈ 0.37 rad ≈ 21°).
+    // Larger init_std (e.g. 0.5 rad from old defaults) causes sigma points at ±211°,
+    // corrupting the cross-covariance and producing a catastrophic first-frame update.
+    // These defaults reflect post-IK accuracy (~3 cm / ~3° root, ~3° joints).
+    double init_position_std = 0.05;     ///< Initial position uncertainty (meters)
+    double init_orientation_std = 0.05;  ///< Initial orientation uncertainty (radians)
+    double init_joint_std = 0.05;        ///< Initial joint angle uncertainty (radians)
+    double init_velocity_std = 0.01;     ///< Initial velocity uncertainty (m/s or rad/s)
 
     int ik_max_iterations = 1000;  ///< Max IK iterations for initialization
     double ik_tolerance = 0.01;    ///< IK convergence tolerance (meters)

@@ -628,6 +628,23 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
     double const update_ms = Ms(Clock::now() - t1).count();
 
     if (frame_count_ < config_.debug_init_frames) {
+        fmt::print(
+            "\n=== UPDATE OBS DEBUG frame={} n_obs={} n_inliers={} n_outliers={} "
+            "NIS={:.1f}/dof={} meas_noise_std={:.1f} outlier_thr={:.2f} ===\n",
+            frame_count_, update_info.num_observations, update_info.num_inliers,
+            update_info.num_outliers, update_info.nis, update_info.nis_dof,
+            config_.measurement_noise_std, config_.outlier_threshold);
+        fmt::print("  {:35s}  {:>4}  {:>7}  {:>14}  {:>14}  {:>14}  {:>7}\n", "marker", "cam",
+                   "inlier?", "pred(u,v)", "obs(u,v)", "innov(u,v)", "mahal");
+        for (auto const& r : update_info.observations) {
+            fmt::print(
+                "  {:35s}  {:>4}  {:>7}  ({:6.1f},{:6.1f})  ({:6.1f},{:6.1f})  "
+                "({:+6.1f},{:+6.1f})  {:6.2f}\n",
+                r.marker_name, r.camera_id, r.is_outlier ? "OUT" : "in", r.predicted.x(),
+                r.predicted.y(), r.actual.x(), r.actual.y(), r.innovation.x(), r.innovation.y(),
+                r.mahalanobis_distance);
+        }
+        fmt::print("\n");
         print_init_debug(ukf_->state(), "POSTER");
     }
 

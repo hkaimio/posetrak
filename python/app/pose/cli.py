@@ -42,9 +42,9 @@ def run(session_db, shot, sync, start, end, detector, pose_model, device, detect
         posetrak-pose run --session-db session.db --shot <id> --sync <id> \\
             --start 12 --end 105
     """
-    from app.pose.backends_yolo import YOLOv11Detector
-    from app.pose.backends_rtmpose import RTMPoseEstimator
-    from app.pose.detection_pipeline import DetectionPipeline
+    from posetrak.detection.backends_yolo import YOLOv11Detector
+    from posetrak.detection.backends_rtmpose import RTMPoseEstimator
+    from posetrak.detection.pipeline import DetectionPipeline
 
     session = open_session(Path(session_db))
     session.row_factory = __import__("sqlite3").Row

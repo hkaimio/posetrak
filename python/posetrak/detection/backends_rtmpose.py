@@ -1,11 +1,6 @@
-"""backends_rtmpose.py — RTMPose estimator backend.
-
-Implementation has moved to posetrak.detection.backends_rtmpose; this module
-re-exports for backwards compatibility.
-"""
+"""backends_rtmpose.py — RTMPose estimator backend."""
 from __future__ import annotations
 
-<<<<<<< HEAD
 import numpy as np
 
 try:
@@ -18,7 +13,7 @@ except ImportError:
     _RTMLIB_AVAILABLE = False
     _RTMLIB_VERSION = ""
 
-from app.pose.backends import PersonDetection, PoseResult, register_estimator
+from posetrak.detection.backends import PersonDetection, PoseResult, register_estimator
 
 
 def _auto_device() -> str:
@@ -27,6 +22,7 @@ def _auto_device() -> str:
         return "cuda" if torch.cuda.is_available() else "cpu"
     except ImportError:
         return "cpu"
+
 
 # Known model configs: name → (url, input_size HxW, backend_class, conf_scale)
 #
@@ -115,6 +111,3 @@ class RTMPoseEstimator:
             )  # float32[n_kp, 3]
             results.append(PoseResult(track_id=det.track_id, keypoints=kp_with_conf))
         return results
-=======
-from posetrak.detection.backends_rtmpose import RTMPoseEstimator  # noqa: F401
->>>>>>> 9abdcf8 (cli/detect: implement detect run/list/show commands)

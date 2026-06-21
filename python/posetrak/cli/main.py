@@ -14,7 +14,6 @@ Global options
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 
 import click
@@ -98,6 +97,7 @@ from posetrak.cli.session import (  # noqa: E402
 from posetrak.cli.skeleton import skeleton_group  # noqa: E402
 from posetrak.cli.config import config_group  # noqa: E402
 from posetrak.cli.pose import pose_group  # noqa: E402
+from posetrak.cli.detect import detect_group  # noqa: E402
 
 main.add_command(registry_group, "registry")
 main.add_command(camera_model_group, "camera-model")
@@ -111,3 +111,4 @@ main.add_command(capture_group, "capture")
 main.add_command(extrinsics_group, "extrinsics")
 main.add_command(sync_group, "sync")
 main.add_command(pose_group, "pose")
+main.add_command(detect_group, "detect")

@@ -73,7 +73,7 @@ def print_table(rows: list[dict], columns: list[str], *, json_mode: bool) -> Non
         sys.stdout.write(line.rstrip() + "\n")
 
 
-def print_record(record: dict, *, json_mode: bool) -> None:
+def print_record(record: dict, *, json_mode: bool = False) -> None:
     """Print a single record as a key-value table or a JSON object.
 
     Parameters
@@ -95,6 +95,18 @@ def print_record(record: dict, *, json_mode: bool) -> None:
     key_width = max(len(k) for k in record)
     for key, val in record.items():
         sys.stdout.write(f"{key:<{key_width}} : {val}\n")
+
+
+def print_jsonl(rows: list[dict]) -> None:
+    """Emit each row as a JSON line to stdout."""
+    for row in rows:
+        sys.stdout.write(json.dumps(row) + "\n")
+
+
+def fail(message: str, exit_code: int = 1) -> None:
+    """Print *message* to stderr and exit."""
+    sys.stderr.write(f"Error: {message}\n")
+    raise SystemExit(exit_code)
 
 
 # ---------------------------------------------------------------------------

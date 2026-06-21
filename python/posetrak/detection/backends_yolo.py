@@ -1,17 +1,13 @@
-"""backends_yolo.py — YOLOv11 person detector backend.
-
-Implementation has moved to posetrak.detection.backends_yolo; this module
-re-exports for backwards compatibility.
-"""
+"""backends_yolo.py — YOLOv11 person detector backend."""
 from __future__ import annotations
 
-<<<<<<< HEAD
 import os
-import numpy as np
 
 # Prevent ultralytics from auto-installing packages via pip, which can
 # silently downgrade CUDA torch to the CPU build from PyPI.
 os.environ.setdefault("YOLO_AUTOINSTALL", "false")
+
+import numpy as np
 
 try:
     from ultralytics import YOLO as _YOLO
@@ -21,7 +17,7 @@ except ImportError:
     _YOLO_AVAILABLE = False
     _ULTRALYTICS_VERSION = ""
 
-from app.pose.backends import PersonDetection, register_detector
+from posetrak.detection.backends import PersonDetection, register_detector
 
 
 def _auto_device() -> str:
@@ -65,8 +61,8 @@ class YOLOv11Detector:
             classes=[0],   # person only
             conf=self._conf,
             verbose=False,
-            device=self._device,
         )
+        kwargs["device"] = self._device
         if self._tracker_config:
             kwargs["tracker"] = self._tracker_config
 
@@ -93,6 +89,3 @@ class YOLOv11Detector:
         """Reset tracker state between cameras without reloading model weights."""
         if hasattr(self._model, "predictor") and self._model.predictor is not None:
             self._model.predictor = None
-=======
-from posetrak.detection.backends_yolo import YOLOv11Detector  # noqa: F401
->>>>>>> 9abdcf8 (cli/detect: implement detect run/list/show commands)

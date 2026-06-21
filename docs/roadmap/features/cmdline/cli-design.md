@@ -9,27 +9,68 @@ this already and will be absorbed rather than replaced.
 
 ---
 
+## Binary naming
+
+The C++ tracker executable built by Meson is currently also named `posetrak`, which conflicts with
+the Python CLI. The C++ binary should be renamed to `posetrak-tracker` (updated in
+`cli/meson.build`). The Python CLI takes the `posetrak` name. The `run_tracker()` extration (see
+Refactoring section) will need to reference the new binary name.
+
+---
+
 ## Command hierarchy
 
 The unified entry point is `posetrak` with subcommand groups matching the domain model:
 
 ```
-posetrak [--db PATH] [--session PATH] [--json] <group> <command> [args...]
+posetrak [--registry PATH] [--session PATH] [--json] [-v] <group> <command> [args...]
 
 Global options:
-  --db PATH       Registry database (default: ~/.posetrak/registry.db)
-  --session PATH  Session database; most commands require one of --db or --session
+  --registry PATH   Registry database.
+                    Default: $POSETRAK_REGISTRY or ~/.posetrak/registry.db
+  --session PATH    Session database. Most write commands require --session;
+                    read-only commands on registry data only require --registry.
 
 Output options:
-  --json          Emit JSONL instead of human-readable tables (all list/show commands)
-  -v / --verbose  Increase log verbosity
+  --json            Emit JSONL instead of human-readable tables (all list/show commands)
+  -v / --verbose    Increase log verbosity
 ```
+
+`POSETRAK_REGISTRY` env var sets the default registry path so users working with a single
+registry do not have to pass `--registry` every time.
+
+---
+
+## Data model clarification
+
+The session DB contains two levels above capture:
+
+```
+registry.db  (camera hardware, skeletons, configs)
+session.db
+  └── mocap_session  (a recording event: date, location)
+        └── capture  (one recording take: set of synchronised video files)
+              ├── capture_videos  (one per camera)
+              ├── sync_config / sync_points
+              ├── detection_run → pose_observation_sequences
+              └── tracking_run
+```
+
+The `--session` flag always refers to the **session DB file**. Within that file, a `mocap_session`
+row (created via `posetrak session create`) is the parent of one or more captures. In practice many
+projects have a single mocap_session per DB, but the model supports multiple.
+
+---
+
+## Command groups
 
 ### Registry & camera setup
 
+Commands that operate on the registry use `--registry` only; no `--session` needed.
+
 ```
-posetrak registry init [PATH]
-posetrak registry info
+posetrak registry init [PATH]          # create new registry DB
+posetrak registry info                 # print schema version, counts
 
 posetrak camera-model add --manufacturer STR --model STR [--sensor-width MM]
 posetrak camera-model list
@@ -37,30 +78,39 @@ posetrak camera-model list
 posetrak camera-mode add --model ID --width PX --height PX --fps N [--codec STR]
 posetrak camera-mode list [--model ID]
 
-posetrak camera add --mode ID --label STR [--serial STR]
-posetrak camera list
+# Camera instances live in the registry by default; pass --session to add to a session DB instead
+posetrak camera add --mode ID --label STR [--serial STR] [--session PATH]
+posetrak camera list [--session PATH]  # lists registry cameras if --session omitted
 posetrak camera show ID
 
-posetrak calib import PATH --camera-mode ID  # TOML (Pose2Sim format)
+posetrak calib import PATH --camera-mode ID   # TOML (Pose2Sim format)
 posetrak calib import-h5 PATH --camera-mode ID  # HDF5 (legacy)
 posetrak calib list [--camera ID]
 ```
 
 ### Skeleton management
 
+Skeletons live in the registry. The scaling parameters are the actual bone-length measurements
+exposed by `template_measurements()` in `scale_skeleton.py`:
+
 ```
 posetrak skeleton import PATH [--name STR]
 posetrak skeleton list
 posetrak skeleton show ID
 posetrak skeleton export ID PATH
-posetrak skeleton scale ID --height M [--arm-span M] ...
-  # Runs scale_skeleton_yaml() and prints scaling_summary(); writes scaled YAML to PATH or stdout
+
+posetrak skeleton scale ID OUTPUT_PATH \
+    [--femur M] [--shin M] [--upper-arm M] [--lower-arm M] \
+    [--torso-height M] [--shoulder-width M]
+  # All lengths in metres. Omitted measurements are left unscaled.
+  # Prints scaling_summary() table to stderr; writes scaled YAML to OUTPUT_PATH.
+  # Use OUTPUT_PATH=- to write to stdout.
 ```
 
 ### Tracker config
 
 ```
-posetrak config create PATH [--name STR]  # from TOML file
+posetrak config create PATH [--name STR]   # import from TOML file
 posetrak config list
 posetrak config show ID
 posetrak config edit ID [--alpha F] [--measurement-noise-std F] ...
@@ -74,117 +124,114 @@ posetrak session list
 posetrak session show ID
 posetrak session import-yaml PATH  # bulk import from YAML description file
 
-posetrak capture create --session ID [--label STR]
-posetrak capture list [--session ID]
+posetrak capture create --session-id ID [--label STR]
+posetrak capture list [--session-id ID]
 posetrak capture show ID
 
-posetrak capture add-video ID VIDEO_PATH --camera ID [--first-frame N] [--last-frame N]
-posetrak capture add-camera ID --camera ID
+# Cameras are linked to a capture via their videos, not separately.
+# --camera-mode is required; it records which capture mode was used for this video.
+posetrak capture add-video CAPTURE_ID VIDEO_PATH \
+    --camera ID --camera-mode ID \
+    [--first-frame N] [--last-frame N]
 
 posetrak extrinsics import PATH --capture ID [--method pose2sim]
 posetrak extrinsics list [--capture ID]
 
-posetrak sync import PATH --capture ID  # JSON sync description
+posetrak sync import PATH --capture ID
 posetrak sync list [--capture ID]
 ```
 
 ### Pose detection
 
 ```
-posetrak detect run --capture ID --sync ID --start S --end S
-                    [--detector yolo11x] [--pose-model rtmpose-l-133kp]
+posetrak detect run --capture ID --sync ID --start S --end S \
+                    [--detector yolo11x] [--pose-model rtmpose-l-133kp] \
                     [--conf 0.3]
-  # Wraps DetectionPipeline; prints progress to stderr, run-id to stdout on completion
+  # Wraps DetectionPipeline; streams progress to stderr, prints run-id to stdout.
 
 posetrak detect list [--capture ID]
 posetrak detect show ID
-
-posetrak detect finalise ID [--assignment "YOLO_TRACK_ID:PERSON_NAME" ...]
-  # Wraps finalise_to_db(); converts detection run to pose observation sequences
 ```
+
+**Note on `detect finalise`:** Converting a detection run to labelled pose sequences requires
+assigning YOLO track IDs to named persons. For single-person captures this is trivial
+(`--assign "0:Subject"`), but for multi-person captures it is inherently interactive —
+the user needs to inspect which track ID belongs to which person across cameras. The CLI
+design for this command needs more thought and is deferred to a later phase (see Phases).
 
 ### Tracking
 
 ```
-posetrak track run --sequence ID --skeleton ID --config ID [--output-dir PATH]
-                   [--person-id N] [--fps N]
-  # Invokes the C++ tracker binary as a subprocess; streams progress to stderr
+posetrak track run --sequence ID --skeleton ID --config ID \
+                   [--output-dir PATH] [--person-id N] [--fps N]
+  # Invokes posetrak-tracker binary as subprocess; streams output to stderr.
 
 posetrak track list [--sequence ID]
 posetrak track show ID
+
+posetrak track export bvh  ID OUTPUT_PATH [--smoothed]
+posetrak track export gltf ID OUTPUT_PATH [--smoothed]
+posetrak track export usd  ID OUTPUT_PATH [--smoothed]
+  # ID is a tracking-run ID.
 ```
 
-### Export
+### Trial portability
+
+A "trial" is the minimal self-contained unit for sharing: a capture + its detection + tracking
+run + all dependencies (cameras, calibrations, skeleton, config).
 
 ```
-posetrak export bvh ID OUTPUT_PATH [--smoothed]
-posetrak export gltf ID OUTPUT_PATH [--smoothed]
-posetrak export usd ID OUTPUT_PATH [--smoothed]
-  # ID is a tracking-run ID; wraps export_bvh(), export_gltf(), export_usd()
-```
+posetrak trial export ID OUTPUT_PATH
+  # Writes a new session DB containing only the specified trial and its dependencies.
 
-### Data portability
-
-```
-posetrak db export-trial ID OUTPUT_PATH
-  # Creates a self-contained session DB with the trial and all dependencies
-  # (cameras, calibrations, skeleton, tracking run, pose sequences)
-
-posetrak db import-trial PATH
-  # Merges a trial DB into the current registry/session
+posetrak trial import PATH
+  # Merges a trial DB into the current --registry and --session.
 ```
 
 ---
 
 ## Reuse of existing code
 
-Most of the required business logic exists today in well-tested, GUI-free modules. The CLI is
-primarily an argument-parsing layer over these.
+Most business logic exists today in GUI-free modules. The CLI is primarily an argument-parsing
+layer over these.
 
 ### Absorb `posetrak/db/cli.py` wholesale (2 400 lines)
 
-The existing `posetrak-db` command already implements the registry, camera, skeleton, config,
-session, capture, extrinsics, sync, pose, and tracking-run subcommands in full. The conversion plan:
+The existing `posetrak-db` argparse CLI covers registry, camera, skeleton, config, session,
+capture, extrinsics, sync, pose, and tracking-run commands. Migration plan:
 
-- Keep all existing library call sites unchanged.
-- Lift the argparse structure into Click command groups to match the new hierarchy.
-- Merge the `--db` / `--session` global option handling.
-- The current `resolve_id_prefix()` helper and interactive prompts can be reused verbatim.
-
-The only migration cost is replacing `argparse` with Click (preferred for the new CLI) or keeping
-argparse and restructuring the entry point. Click is recommended for consistency with `app/pose/cli.py`
-and better subcommand discoverability.
+- Keep all library call sites unchanged.
+- Replace argparse with Click groups matching the new command hierarchy.
+- Merge `--registry` / `--session` global option handling.
+- Reuse `resolve_id_prefix()` helper and existing interactive prompts verbatim.
 
 ### Absorb `app/pose/cli.py` (137 lines)
 
 The `run` and `list-runs` commands call `DetectionPipeline`, `YOLOv11Detector`,
-`RTMPoseEstimator`, and `list_detection_runs()` directly — no Qt. These map to
-`posetrak detect run` and `posetrak detect list` with minimal changes.
+`RTMPoseEstimator`, and `list_detection_runs()` without any Qt. These become
+`posetrak detect run` and `posetrak detect list`.
 
 ### Directly callable library functions
 
 | CLI command | Library function | Module |
 |---|---|---|
-| `skeleton import/export/scale` | `import_skeleton()`, `export_skeleton()`, `scale_skeleton_yaml()`, `scaling_summary()` | `db/manage_skeleton.py`, `db/scale_skeleton.py` |
+| `skeleton import/export/scale` | `import_skeleton()`, `scale_skeleton_yaml()`, `scaling_summary()` | `db/manage_skeleton.py`, `db/scale_skeleton.py` |
 | `config create/edit` | `create_config_from_toml()`, `edit_config()` | `db/manage_config.py` |
 | `calib import` | `import_calib_toml()`, `import_calib_h5()` | `db/import_calib_toml.py`, `db/import_calib_h5.py` |
 | `extrinsics import` | `import_extrinsics()` | `db/import_extrinsics.py` |
 | `sync import` | `import_sync_json()` | `db/import_sync_json.py` |
 | `session import-yaml` | `import_session_yaml()` | `db/import_session_yaml.py` |
-| `detect finalise` | `finalise_to_db()` | `app/pose/finalise.py` |
 | `detect run` | `DetectionPipeline.run()` | `app/pose/detection_pipeline.py` |
-| `export bvh/gltf/usd` | `export_bvh()`, `export_gltf()`, `export_usd()` | `export/bvh.py`, `export/gltf.py`, `export/usd.py` |
+| `detect finalise` | `finalise_to_db()` | `app/pose/finalise.py` |
+| `track export bvh/gltf/usd` | `export_bvh()`, `export_gltf()`, `export_usd()` | `export/bvh.py`, `export/gltf.py`, `export/usd.py` |
 
 ---
 
 ## Required refactoring (minimal)
 
-Only one meaningful piece of business logic is currently locked inside a Qt widget.
-
 ### Extract tracker subprocess invocation from `RunTrackerWidget`
 
-`app/pose/run_tracker.py` uses `QProcess` to invoke the C++ tracker binary. The process
-management logic needs to be extracted into a pure function:
+`app/pose/run_tracker.py` uses `QProcess` to invoke the C++ binary. Extract into a pure function:
 
 ```python
 # Proposed: posetrak/tracker/runner.py
@@ -195,46 +242,39 @@ def run_tracker(
     config_id: str,
     output_dir: Path,
     *,
-    binary_path: Path | None = None,
+    binary_path: Path | None = None,  # defaults to ~/.posetrak/posetrak-tracker
     person_id: int = 0,
     on_progress: Callable[[str], None] | None = None,
 ) -> int:  # returns exit code
 ```
 
-`RunTrackerWidget` is then refactored to call this function (passing a Qt signal as `on_progress`)
-rather than managing the subprocess itself. The CLI calls the same function with a stderr printer.
-This also makes the tracker invocation unit-testable with a mock binary.
+`RunTrackerWidget` is refactored to call this function with a Qt signal as `on_progress`.
+The CLI calls it with a stderr printer. Also makes tracker invocation testable with a mock binary.
 
-### Consider splitting `app/pose/detection_pipeline.py`
+### Move detection backends to `posetrak/detection/`
 
-`DetectionPipeline` is already GUI-free but lives in `app/pose/`. As the CLI grows, it may be
-cleaner to move it (and `backends.py`, `backends_yolo.py`, `backends_rtmpose.py`) to
-`posetrak/detection/` to make the library boundary explicit. This is optional and can wait until the
-CLI is otherwise working.
+`DetectionPipeline`, `backends.py`, `backends_yolo.py`, `backends_rtmpose.py` currently live in
+`app/pose/`. Moving them to `posetrak/detection/` makes the library boundary explicit and the
+import paths cleaner for both the CLI and future MCP tools. Optional; can follow once the CLI is
+otherwise working.
 
-### `detect finalise` needs an assignment input format
+### Rename C++ binary
 
-`finalise_to_db()` takes a `dict[int, str]` mapping YOLO track IDs to person names. The CLI needs
-a convention for this — proposed: `--assign "0:Alice" --assign "1:Bob"`, or a JSON file
-`--assignments assignments.json`. The UI version assigns these interactively via `StitcherPanel`.
+In `cli/meson.build`, change the executable name from `posetrak` to `posetrak-tracker`.
+Update `run_tracker()` default binary path accordingly.
 
 ---
 
 ## Entry point consolidation
 
-Replace the current scattered entry points with a single `posetrak` command:
-
 ```toml
 [project.scripts]
-posetrak    = "posetrak.cli.main:main"  # new unified entry point
-posetrak-db = "posetrak.cli.main:main"  # alias for backwards compatibility
-posetrak-mcp = "app.mcp.server:main"   # keep separate (server lifecycle is different)
-```
-
-Remove when ready (after `posetrak-ui` absorbs remaining functionality):
-```toml
-# posetrak-pose = "app.pose.cli:main"   # retire: absorbed by posetrak detect
-# posetrak-setup = "app.setup.main:main" # retire: functionality in UI
+posetrak     = "posetrak.cli.main:main"   # unified CLI
+posetrak-db  = "posetrak.cli.main:main"   # backwards-compatible alias
+posetrak-mcp = "app.mcp.server:main"      # keep separate (server lifecycle differs)
+# retire when ready:
+# posetrak-pose  = "app.pose.cli:main"
+# posetrak-setup = "app.setup.main:main"
 ```
 
 ### File layout
@@ -242,32 +282,28 @@ Remove when ready (after `posetrak-ui` absorbs remaining functionality):
 ```
 python/posetrak/cli/
     __init__.py
-    main.py          # entry point, global options, Click group wiring
-    registry.py      # registry, camera-model, camera-mode, camera commands
-    session.py       # session, capture, extrinsics, sync commands
-    skeleton.py      # skeleton commands
-    config.py        # config commands
-    detect.py        # detect run/list/finalise commands
-    track.py         # track run/list/show commands
-    export.py        # export bvh/gltf/usd commands
-    db.py            # db export-trial/import-trial commands
-    _output.py       # shared table/JSONL formatter helpers
+    main.py        # entry point, global options, Click group wiring
+    registry.py    # registry, camera-model, camera-mode, camera commands
+    session.py     # session, capture, extrinsics, sync commands
+    skeleton.py    # skeleton commands
+    config.py      # config commands
+    detect.py      # detect run/list commands
+    track.py       # track run/list/show/export commands
+    trial.py       # trial export/import commands
+    _output.py     # shared table/JSONL formatter helpers
 ```
-
-Migrate the existing `posetrak/db/cli.py` content into these modules; do not attempt to do it in
-one PR — migrate group by group.
 
 ---
 
 ## Output format
 
-All `list` and `show` commands support two output modes:
+All `list` and `show` commands support two modes:
 
-**Human-readable (default):** aligned tables, coloured status indicators, UUID abbreviations (first 8 chars with `…` suffix).
+**Human-readable (default):** aligned tables, coloured status, UUID abbreviations (first 8 chars + `…`).
 
-**JSONL (`--json`):** one JSON object per line for `list`, a single JSON object for `show`. All UUIDs are emitted in full. This is what scripts and the future MCP server will consume.
+**JSONL (`--json`):** one JSON object per line for `list`, single object for `show`. Full UUIDs.
+This is what scripts, CI pipelines, and MCP tools consume.
 
-Example:
 ```
 $ posetrak --session session.db capture list
 ID          LABEL        VIDEOS  CAMERAS  SYNC
@@ -283,68 +319,127 @@ $ posetrak --session session.db capture list --json
 
 ## Testing strategy
 
-The library layer is already well tested (`tests/db/`, `tests/app/`). CLI tests should focus on
-the argument parsing and output formatting layer, calling real library functions against in-memory
-or `tmp_path` databases — no mocking of business logic.
-
-### Fixtures (extend existing patterns)
+The library layer is already well tested (`tests/db/`, `tests/app/`). CLI tests call real library
+functions against `tmp_path` databases via Click's `CliRunner` — no mocking of business logic.
 
 ```python
 # conftest.py additions
 @pytest.fixture
 def cli_runner():
-    return CliRunner()  # Click's test runner
+    return CliRunner()
 
 @pytest.fixture
-def populated_registry(tmp_path):
-    # Reuse existing registry_db fixture; seed with camera model + mode
-    ...
+def populated_registry(tmp_path): ...   # extends existing registry_db fixture
 
 @pytest.fixture
-def populated_session(tmp_path, populated_registry):
-    # Seed session with capture, videos, sync, pose sequences
-    ...
+def populated_session(tmp_path, populated_registry): ...
 ```
-
-### Test scope per command group
 
 | Group | Test focus |
 |---|---|
-| `registry`, `camera*`, `skeleton`, `config` | Round-trip: create → list → show output format; ID prefix resolution |
+| `registry`, `camera*`, `skeleton`, `config` | Round-trip: create → list → show; ID prefix resolution |
 | `session`, `capture`, `extrinsics`, `sync` | Create then query; `--json` output is valid JSONL |
-| `detect run` | Mock `YOLOv11Detector` and `RTMPoseEstimator`; verify DB writes |
-| `track run` | Mock subprocess (replace binary path with echo script); verify output dir |
-| `export *` | Run against fixture tracking run; verify output file is valid BVH/glTF |
-| Global | `--json` flag propagation; `--db` / `--session` path resolution; error exit codes |
+| `detect run` | Mock `YOLOv11Detector` / `RTMPoseEstimator`; verify DB writes |
+| `track run` | Mock binary with echo script; verify output dir created |
+| `track export` | Run against fixture tracking run; verify output is parseable BVH/glTF |
+| Global | `--json` propagation; `--registry` / `--session` resolution; error exit codes |
 
-The tracker subprocess extraction (`run_tracker()`) is specifically designed to be testable with a
-trivial mock binary, unlike the current `QProcess`-based widget.
+---
+
+## MCP server integration (future phase)
+
+The existing MCP server (`app/mcp/server.py`) is currently read-only and diagnostic: it exposes
+filter statistics, camera coverage, and observation data for investigating tracking runs. Once the
+CLI library layer is in place, the MCP server can be extended to cover the full workflow —
+letting Claude (or any MCP client) orchestrate captures, run detection, and trigger exports through
+conversation.
+
+### Architecture
+
+Both the CLI and the MCP server are thin interface layers over the same `posetrak/` library code.
+The MCP server should call library functions directly (not shell out to the CLI), sharing the
+exact same code path:
+
+```
+posetrak/db/      ←── CLI commands (posetrak/cli/)
+posetrak/export/  ←── MCP tools   (app/mcp/tools/)
+posetrak/tracker/ ←── UI widgets  (app/pose/, app/ui/)
+```
+
+This means there is no MCP-specific business logic to maintain — any bug fixed in the library
+benefits all three consumers.
+
+### Proposed MCP tool additions
+
+**Read tools (extend existing):**
+```
+list_captures(session_path)            → capture metadata list
+list_detection_runs(session_path)      → detection run list
+list_tracking_runs(session_path)       → tracking run list
+get_capture_info(session_path, id)     → videos, cameras, sync status
+```
+
+**Write tools (new — require explicit user confirmation in the MCP client):**
+```
+run_detection(session_path, capture_id, sync_id, start_s, end_s, ...)
+  → Calls DetectionPipeline.run(); returns detection_run_id
+
+run_tracker(session_path, sequence_id, skeleton_id, config_id, output_dir)
+  → Calls posetrak/tracker/runner.run_tracker(); returns exit code + output path
+
+export_tracking_run(session_path, run_id, format, output_path)
+  → Calls export_bvh() / export_gltf() / export_usd(); returns output_path
+```
+
+**Utility tools:**
+```
+get_skeleton_template_measurements(session_path, skeleton_id)
+  → Returns the template bone lengths (useful before calling scale)
+
+describe_config(session_path, config_id)
+  → Human-readable summary of UKF parameters
+```
+
+### Phasing
+
+MCP write tools should be added after Phase 4 (tracker extraction), since `run_tracker()` is the
+shared primitive that both `posetrak track run` and the MCP `run_tracker` tool will call. The
+detection tools can be added earlier (after Phase 2) since `DetectionPipeline` is already
+GUI-free.
+
+The MCP server's read-only posture should be made explicit in the server configuration so users
+can opt in to write tools intentionally, given that they can modify session databases.
 
 ---
 
 ## Implementation phases
 
-**Phase 1 — Consolidate existing CLI (low risk)**
-Migrate `posetrak/db/cli.py` into `posetrak/cli/` with the new Click structure.
-Add `posetrak-db` as a backwards-compatible alias. No new functionality, no refactoring.
-Adds `--json` output to all existing commands.
+**Phase 1 — Consolidate existing CLI**
+Migrate `posetrak/db/cli.py` into `posetrak/cli/` with Click structure and `--registry` global.
+Add `--json` output to all commands. Keep `posetrak-db` alias. No new functionality.
+Rename C++ binary to `posetrak-tracker`.
 
 **Phase 2 — Detect commands**
-Add `posetrak detect run/list/finalise` by porting `app/pose/cli.py`.
-Define the `--assign` format for `finalise`.
+Port `app/pose/cli.py` → `posetrak detect run/list`.
+Move detection backends to `posetrak/detection/` (optional, can follow).
 
-**Phase 3 — Export commands**
-Add `posetrak export bvh/gltf/usd`. These are simple wrappers; no refactoring needed.
+**Phase 3 — Track export commands**
+Add `posetrak track export bvh/gltf/usd`. Simple wrappers; no refactoring needed.
 
 **Phase 4 — Tracker subprocess extraction**
 Extract `run_tracker()` from `RunTrackerWidget` into `posetrak/tracker/runner.py`.
-Add `posetrak track run` command.
-Add `RunTrackerWidget` refactor to call the extracted function.
+Add `posetrak track run`. Refactor `RunTrackerWidget` to call the extracted function.
+Add MCP detection tools (reads + `run_detection` write tool).
 
-**Phase 5 — Data portability**
-Implement `posetrak db export-trial` / `import-trial`. This is new functionality with no existing
-implementation; requires defining the subset-copy schema logic.
+**Phase 5 — Trial portability**
+Implement `posetrak trial export/import`. New functionality; requires subset-copy schema logic.
+Add MCP tracker and export tools.
 
-**Phase 6 — Retire old entry points**
-Remove `posetrak-pose` and `posetrak-setup` from `pyproject.toml`.
+**Phase 6 — Detect finalise**
+Design and implement `posetrak detect finalise` with a workable CLI convention for
+person assignment. Single-person case (`--assign "0:Subject"`) can ship first; multi-person
+needs more design (possibly an interactive TUI or a two-step list-then-assign flow).
+
+**Phase 7 — Retire old entry points**
+Remove `posetrak-pose`, `posetrak-setup` from `pyproject.toml`.
 Remove `app/pose/cli.py`, `app/setup/main.py`, `app/setup/page_session.py`.

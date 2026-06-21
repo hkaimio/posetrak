@@ -5,16 +5,21 @@ description = "Multi-camera skeletal motion capture tracker"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "av>=12.0",
     "click>=8.0",
     "h5py>=3.10",
-    "PySide6>=6.7",
+    "matplotlib>=3.8",
     "numpy>=1.26",
     "opencv-python>=4.13.0.92",
     "pandas>=3.0.0",
+    "PySide6>=6.7",
     "pyyaml>=6.0",
-    "rerun-sdk>=0.29.2",
+    "rtmlib>=0.0.15",
     "scipy>=1.17.1",
-    "toml>=0.10.2",
+    "ultralytics>=8.0",
+    # onnxruntime-gpu must be installed manually after sync to avoid the CPU
+    # version being reinstalled by uv as a transitive dep:
+    #   uv pip install --reinstall onnxruntime-gpu
 ]
 
 [project.scripts]
@@ -35,36 +40,36 @@ where = ["python"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
-    "marimo>=0.19.7",
+]
+segmentation = [
+    "cutie",
+    # torch is pulled transitively by cutie; the [tool.uv.sources] below
+    # routes it to the CUDA 12.4 wheel index automatically.
+    # After uv sync --group segmentation, also run:
+    #   uv pip install --reinstall onnxruntime-gpu
 ]
 analysis = [
     "marimo>=0.19",
     "plotly>=5.0",
 ]
-setup-app = [
-    "PySide6>=6.7",
-    "pyexiftool>=0.5",
-    "matplotlib>=3.8",
-    "plotly>=5.0",
-]
-pipeline = [
-    "ultralytics",
-]
-usd = [
-    "usd-core>=24.0",
-]
-pose-app = [
-    "PySide6>=6.7",
-    "ultralytics>=8.0",   # YOLOv11 tracker
-    "av>=12.0",           # PyAV for fast video decode
-    "rtmlib>=0.0.15",
-    # onnxruntime-gpu must be installed manually after sync to avoid the CPU
-    # version being reinstalled by uv as a transitive dep:
-    #   uv pip install --reinstall onnxruntime-gpu
+tools = [
+    "rerun-sdk>=0.29.2",
 ]
 mcp-server = [
     "mcp>=1.0",
 ]
+usd = [
+    "usd-core>=24.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]

@@ -99,13 +99,18 @@ posetrak skeleton list
 posetrak skeleton show ID
 posetrak skeleton export ID PATH
 
-posetrak skeleton scale ID OUTPUT_PATH \
+posetrak skeleton scale ID \
     [--femur M] [--shin M] [--upper-arm M] [--lower-arm M] \
-    [--torso-height M] [--shoulder-width M]
+    [--torso-height M] [--shoulder-width M] \
+    [--name STR | --output PATH]
   # All lengths in metres. Omitted measurements are left unscaled.
-  # Prints scaling_summary() table to stderr; writes scaled YAML to OUTPUT_PATH.
-  # Use OUTPUT_PATH=- to write to stdout.
+  # Prints scaling_summary() table to stderr.
+  #
+  # --name STR    Save scaled skeleton back to the registry DB under a new name (primary use case).
+  # --output PATH Write scaled YAML to file instead (use - for stdout).
+  # Exactly one of --name or --output must be provided.
 ```
+
 
 ### Tracker config
 
@@ -184,8 +189,9 @@ run + all dependencies (cameras, calibrations, skeleton, config).
 posetrak trial export ID OUTPUT_PATH
   # Writes a new session DB containing only the specified trial and its dependencies.
 
-posetrak trial import PATH
-  # Merges a trial DB into the current --registry and --session.
+posetrak trial import PATH [ID ...]
+  # Merges trials from the source DB into the current --registry and --session.
+  # If one or more IDs are given, imports only those trials; default is all trials in PATH.
 ```
 
 ---

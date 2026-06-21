@@ -1,7 +1,12 @@
 """backends_yolo.py — YOLOv11 person detector backend."""
 from __future__ import annotations
 
+import os
 import numpy as np
+
+# Prevent ultralytics from auto-installing packages via pip, which can
+# silently downgrade CUDA torch to the CPU build from PyPI.
+os.environ.setdefault("YOLO_AUTOINSTALL", "false")
 
 try:
     from ultralytics import YOLO as _YOLO
@@ -14,6 +19,14 @@ except ImportError:
 from app.pose.backends import PersonDetection, register_detector
 
 
+def _auto_device() -> str:
+    try:
+        import torch
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except ImportError:
+        return "cpu"
+
+
 @register_detector
 class YOLOv11Detector:
     name = "yolo11x"
@@ -21,7 +34,7 @@ class YOLOv11Detector:
     def __init__(
         self,
         model_name: str = "yolo11x.pt",
-        device: str = "cuda",
+        device: str | None = None,
         conf: float = 0.3,
         tracker_config: str | None = None,
     ) -> None:
@@ -33,7 +46,7 @@ class YOLOv11Detector:
         self.name = model_name.replace(".pt", "")
         self.version = _ULTRALYTICS_VERSION
         self._model_name = model_name
-        self._device = device
+        self._device = device or _auto_device()
         self._conf = conf
         self._tracker_config = tracker_config
         self._model = _YOLO(model_name)

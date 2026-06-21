@@ -15,6 +15,14 @@ except ImportError:
 
 from app.pose.backends import PersonDetection, PoseResult, register_estimator
 
+
+def _auto_device() -> str:
+    try:
+        import torch
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except ImportError:
+        return "cpu"
+
 # Known model configs: name → (url, input_size HxW, backend_class, conf_scale)
 #
 # conf_scale normalises per-keypoint confidence values before they are written to
@@ -49,7 +57,7 @@ class RTMPoseEstimator:
     def __init__(
         self,
         model_name: str = "rtmpose-l-133kp",
-        device: str = "cuda",
+        device: str | None = None,
         backend: str = "onnxruntime",
     ) -> None:
         if not _RTMLIB_AVAILABLE:
@@ -71,7 +79,7 @@ class RTMPoseEstimator:
             model_input_size=(input_size_hw[0], input_size_hw[1]),
             to_openpose=False,
             backend=backend,
-            device=device,
+            device=device or _auto_device(),
         )
 
     def estimate(

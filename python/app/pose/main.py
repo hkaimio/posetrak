@@ -111,10 +111,9 @@ class DetectionJob(BackgroundJob):
 
         det = YOLOv11Detector(
             model_name=f"{self._detector_name}.pt",
-            device="cuda",
             conf=self._detector_conf,
         )
-        est = RTMPoseEstimator(model_name=self._pose_model_name, device="cuda")
+        est = RTMPoseEstimator(model_name=self._pose_model_name)
 
         def on_progress(done: int, total: int, cam_id: str) -> None:
             pct = int(done / max(total, 1) * 100)

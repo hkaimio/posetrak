@@ -2,6 +2,12 @@
 
 **Status:** Research / exploratory
 **Complexity:** Medium to high depending on approach
+**Prerequisite:** `design-crop-scale-noise.md` (split noise model) should be implemented
+first. Approach 4 in particular requires `pose_noise_std` (`ep`) as a standalone parameter:
+the relative-measurement noise is `ep * sqrt(2)` — the calibration component cancels in
+the difference, so the two terms must be separable. Approaches 1–3 do not strictly require
+the split but benefit from it (bias-state process noise and GP correction both target `ec`
+specifically).
 
 ---
 
@@ -249,6 +255,8 @@ close in 3D and therefore close in image space, maximising bias cancellation.
 The skeleton YAML already encodes the kinematic parent of each joint. Extend
 `SkeletonLayout` or the observation builder to expose a `parent_marker_id(marker_id) →
 int` lookup for use in step 3.
+
+Harri: One thing to note is that a) there may be multiple markers that are attached to the same joint and b) there may be joints with no markers attahced (e.g. most spine joints). Not sure if A happens in practice in current skeelton; B certainly does (with spine joints)
 
 ### Variant A — Parent-child pairs (kinematic neighbours)
 

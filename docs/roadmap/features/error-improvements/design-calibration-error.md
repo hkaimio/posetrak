@@ -19,9 +19,22 @@ current Gaussian noise model misrepresents. Specifically:
 - The magnitude can be **comparable to, or larger than, pose estimation error** (5–30 px
   for a typical Pose2Sim calibration).
 
-The existing `velocity_measurement_noise_std` / velocity mode already addresses the
-degenerate case of a *constant* per-camera bias: differencing successive frames cancels the
-bias exactly. The goal here is to handle the more general, spatially-varying case.
+The existing velocity mode (`velocity_measurement_noise_std`) addresses a different problem:
+a *single* camera with severely bad calibration, handled by excluding it from the normal
+update and using its frame-to-frame pixel differences instead, which requires enough
+well-calibrated cameras to anchor the pose.
+
+The goal here is distinct: improving tracking quality when **all cameras have roughly
+comparable, moderate calibration error** — good enough to use normally, but with residuals
+that limit accuracy for fine motion. The primary use cases are:
+
+- Small gestures (finger movement, subtle wrist rotation)
+- Hand–object interaction (person touching or manipulating an object)
+- Two-person interaction (hands in proximity, contact between subjects)
+
+In all these cases even a few pixels of systematic calibration error can prevent the filter
+from resolving the motion correctly, or can cause model penetration when two body parts
+(e.g. both hands) should be close together.
 
 ---
 
@@ -61,6 +74,14 @@ to allow the filter to converge quickly.
 **Cons:** State size grows linearly with number of cameras (8 cameras → 16 extra DOFs on
 top of ~218 pose DOFs — manageable). If the true bias varies rapidly with 3D position, the
 random-walk model will lag. Does not model the spatial correlation directly.
+
+**Fit to the stated goal:** The random-walk process model is well matched to *temporal*
+drift (e.g. a camera nudged mid-session) but less well matched to *spatial* calibration
+error, where the bias is a fixed function of 3D position that repeats every time the
+person returns to the same region of the scene. The filter may track the spatial variation
+as apparent temporal drift, but it will converge slowly and may confuse pose with bias when
+the subject spends little time in any given region. For the fine-motion / interaction use
+cases above, Approaches 3 and 4 are better targeted.
 
 **Relationship to velocity mode:** Velocity mode is the limiting case where `sigma_bias → 0`
 and the bias is essentially constant — the difference operation eliminates it exactly.
@@ -229,34 +250,76 @@ The skeleton YAML already encodes the kinematic parent of each joint. Extend
 `SkeletonLayout` or the observation builder to expose a `parent_marker_id(marker_id) →
 int` lookup for use in step 3.
 
-### When to use relative observations
+### Variant A — Parent-child pairs (kinematic neighbours)
+
+The basic case described above: pair each keypoint with its direct parent in the skeleton
+hierarchy. Both keypoints are guaranteed to be physically close in 3D.
 
 Relative mode should be selective:
 - Only when both parent and child confidence are above a threshold (e.g. 0.5).
 - Only for kinematic neighbours (one joint apart in the skeleton hierarchy).
-- Not for the root marker (no parent) and not across body segments where the markers are
-  far apart in the image (bias cancellation degrades with image distance).
+- Not for the root marker (no parent).
+- A simple pixel-distance guard: only use RELATIVE if the expected image-distance between
+  parent and child (from the FK prior) is less than ~100 px, ensuring the calibration bias
+  at the two points is similar.
 
-A simple heuristic: use RELATIVE if the expected image-distance between parent and child
-(from the FK prior) is less than some fraction of the image width, e.g. < 100 px.
+### Variant B — Spatially-close, hierarchically-distant pairs
+
+A more powerful extension: find pairs of keypoints that are **close in image space** but
+**far apart in the skeleton hierarchy**. When such a pair appears in the same camera frame,
+their pixel difference is largely free of calibration bias (both are in the same image
+region) and carries a strong constraint on the relative pose of two body parts.
+
+**Why this matters for the stated use cases:** When both hands are close together
+(handling an object, clapping, two-person contact), the wrists of the two kinematic chains
+are spatially near in the image but separated by the full length of both arms in the
+skeleton. Adding `pixel(right_wrist) - pixel(left_wrist)` as a measurement tells the
+filter: "these two points are close together in this camera." Under the Gaussian
+calibration noise model the filter sees them as independently noisy, so they may drift
+apart or cause model penetration. The relative measurement has noise `pose_noise * sqrt(2)`
+(calibration bias cancels) and no calibration-error floor — exactly the regime that matters
+for fine hand motion.
+
+**Measurement model:** Identical to the parent-child case:
+
+```
+z     = pixel(a, cam_k) - pixel(b, cam_k)
+h(x)  = project(a, cam_k, x) - project(b, cam_k, x)
+sigma = pose_noise_std * sqrt(2)
+```
+
+**Pair selection:** At each frame, for each camera:
+1. Compute projected positions of all visible keypoints from the FK prior.
+2. Find candidate pairs with image distance < threshold (e.g. 80 px) and skeleton
+   hierarchy distance > 2 (not parent/child/grandchild — those are already handled by
+   Variant A).
+3. Rank candidates by a score: `image_closeness / skeleton_distance` — favouring pairs
+   that are very close in the image but very far in the skeleton.
+4. Take the top N pairs (e.g. N = 10) to bound the number of extra measurements per frame.
+
+**Implementation note:** Pair selection runs on the FK prior, not the observations, so it
+is computed once per frame before the UKF update. The same `MeasurementMode::RELATIVE`
+infrastructure used for Variant A applies; the only difference is that `ref_marker_id`
+points to an arbitrary marker rather than the skeleton parent.
 
 ### Pros and cons
 
 **Pros:**
-- Cancels per-camera constant biases *without* augmenting the state vector
-- Works online, no offline pass needed
-- Conceptually simple — the existing VELOCITY mode infrastructure is a template
-- Naturally handles hands and fine limb segments (where calibration error is large
-  relative to limb length)
+- Cancels per-camera calibration biases for any spatially-close pair, not just limb segments
+- Directly constrains relative pose of distant body parts when they happen to be close —
+  the primary mechanism for preventing model penetration and resolving hand interactions
+- Works online, no offline pass needed; drops gracefully when either keypoint is occluded
+- Noise floor is `pose_noise * sqrt(2)` with no calibration-error contribution
 
 **Cons:**
-- Only cancels *constant* (not spatially-varying) calibration biases within the
-  inter-keypoint image region; long limbs see less cancellation
-- Requires both parent and child to be visible; drops gracefully when parent is occluded
-  (fall back to absolute POSITION observation)
-- Noise increases by `sqrt(2)` — may require lowering `calib_noise_std` to compensate
-- Adds coupling between adjacent marker updates; the filter must correctly account for
-  the correlation between child and parent projection through the cross-covariance
+- Only cancels *approximately constant* calibration bias within the inter-keypoint image
+  region; cancellation degrades for pairs far apart in the image
+- The number of candidate pairs can be large; a selection strategy is needed to keep the
+  measurement vector manageable
+- Noise increases by `sqrt(2)` vs. absolute observations — tune `pose_noise_std` and
+  `calib_noise_std` together
+- The filter must account for correlation between child/parent projections through the
+  sigma-point cross-covariance (handled automatically if reference uses the same sigma point)
 
 ---
 
@@ -268,15 +331,24 @@ A simple heuristic: use RELATIVE if the expected image-distance between parent a
    spatial pattern, calibration error dominates. If they look like white noise, the
    current model is already adequate.
 
-2. **Try Approach 2 (robust likelihood)** — one afternoon of work, no architecture
-   changes. Does it reduce the NIS variance on sessions with known calibration problems?
+2. **Try Approach 4 Variant A (parent-child relative)** for hand/wrist/finger markers —
+   these are most affected by calibration error relative to limb length. Small
+   implementation on top of existing VELOCITY mode infrastructure. Compare NIS and visual
+   finger tracking quality before and after.
 
-3. **Try Approach 4 (relative keypoints)** for hand/wrist markers first — these are
-   most affected by calibration error relative to limb length. Compare NIS for
-   wrist/finger markers before and after.
+3. **Try Approach 4 Variant B (spatially-close pairs)** once Variant A is in place. The
+   same `MeasurementMode::RELATIVE` machinery is reused; only the pair-selection logic
+   is new. Start with two-hand interaction sequences where penetration or separation is
+   visible, and check whether the constraint prevents it.
 
-4. **Try Approach 1 (bias states)** if residual diagnostics show slow temporal drift
-   in the residuals, suggesting a poorly constrained camera.
+4. **Try Approach 2 (robust likelihood)** — one afternoon of work, no architecture
+   changes. Useful as a complement to Approach 4 for handling occasional large outliers
+   that survive the Mahalanobis gate.
 
-5. **Use Approach 3 (GP correction)** as an offline refinement step for sessions where
-   the calibration is known to be poor and re-calibration is not an option.
+5. **Try Approach 1 (bias states)** only if diagnostics show clear *temporal* drift in
+   residuals (e.g. a camera bumped mid-session). For the primary use case of spatially-
+   fixed calibration error it is less well suited than Approaches 3 and 4.
+
+6. **Use Approach 3 (GP correction)** as an offline refinement for long sessions where
+   the subject covers a wide range of the scene and the calibration error has clear spatial
+   structure. Use the GP posterior as input to an extrinsic refinement step if possible.

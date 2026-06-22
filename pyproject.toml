@@ -16,6 +16,7 @@ dependencies = [
     "pyyaml>=6.0",
     "rtmlib>=0.0.15",
     "scipy>=1.17.1",
+    "lap>=0.5.12",
     "ultralytics>=8.0",
     # onnxruntime-gpu must be installed manually after sync to avoid the CPU
     # version being reinstalled by uv as a transitive dep:

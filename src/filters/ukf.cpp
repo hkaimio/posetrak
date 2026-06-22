@@ -837,7 +837,8 @@ void UnscentedKalmanFilter::ensure_data_pool(ForwardKinematics const& fk) const 
 
 UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& observations,
                                            std::unordered_map<int, Camera> const& cameras,
-                                           ForwardKinematics& fk, double measurement_noise_std,
+                                           ForwardKinematics& fk, double pose_noise_std,
+                                           double calib_noise_std,
                                            double outlier_threshold_mahalanobis) {
     using Clock = std::chrono::steady_clock;
     using Ms = std::chrono::duration<double, std::milli>;
@@ -944,7 +945,7 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
 
     // Add measurement noise R (diagonal)
     for (int i = 0; i < n_obs; ++i) {
-        double noise_std = observations[i].measurement_noise_std(measurement_noise_std);
+        double noise_std = observations[i].measurement_noise_std(pose_noise_std, calib_noise_std);
         double variance = noise_std * noise_std;
         innovation_cov(2 * i, 2 * i) += variance;
         innovation_cov(2 * i + 1, 2 * i + 1) += variance;
@@ -1059,7 +1060,8 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
 
         // Add measurement noise for inliers
         for (int i = 0; i < n_inliers; ++i) {
-            double noise_std = inlier_observations[i].measurement_noise_std(measurement_noise_std);
+            double noise_std =
+                inlier_observations[i].measurement_noise_std(pose_noise_std, calib_noise_std);
             double variance = noise_std * noise_std;
             innovation_cov(2 * i, 2 * i) += variance;
             innovation_cov(2 * i + 1, 2 * i + 1) += variance;

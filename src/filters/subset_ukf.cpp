@@ -124,7 +124,7 @@ void SubsetUKF::predict(double dt) {
 
 UpdateResult SubsetUKF::update(std::vector<Observation> const& observations,
                                std::unordered_map<int, Camera> const& cameras,
-                               ForwardKinematics& fk, double measurement_noise_std,
+                               ForwardKinematics& fk, double pose_noise_std, double calib_noise_std,
                                double outlier_threshold) {
     sync_from_background();
 
@@ -133,7 +133,7 @@ UpdateResult SubsetUKF::update(std::vector<Observation> const& observations,
         return UpdateResult{};
     }
 
-    return ukf_->update(filtered, cameras, fk, measurement_noise_std, outlier_threshold);
+    return ukf_->update(filtered, cameras, fk, pose_noise_std, calib_noise_std, outlier_threshold);
 }
 
 // ---------------------------------------------------------------------------

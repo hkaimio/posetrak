@@ -152,7 +152,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
               "       outlier_threshold, tracker_fps, ik_max_iterations, ik_tolerance,"
               "       init_position_std, init_orientation_std, init_joint_std, init_velocity_std,"
               "       min_cameras_for_init, process_noise_vel_std, velocity_half_life_s,"
-              "       velocity_mode_camera_ids, velocity_measurement_noise_std"
+              "       velocity_mode_camera_ids, velocity_measurement_noise_std,"
+              "       COALESCE(pose_noise_std, 0.0) AS pose_noise_std"
               " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -161,12 +162,13 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     }
 
     DbTrackerConfig out;
-    // Columns: 0=alpha, 1=beta, 2=kappa, 3=process_noise_std, 4=measurement_noise_std,
+    // Columns: 0=alpha, 1=beta, 2=kappa, 3=process_noise_std,
+    //          4=measurement_noise_std (legacy → calib_noise_std),
     //          5=outlier_threshold, 6=tracker_fps, 7=ik_max_iterations, 8=ik_tolerance,
     //          9=init_position_std, 10=init_orientation_std, 11=init_joint_std,
     //         12=init_velocity_std, 13=min_cameras_for_init, 14=process_noise_vel_std,
     //         15=velocity_half_life_s, 16=velocity_mode_camera_ids,
-    //         17=velocity_measurement_noise_std
+    //         17=velocity_measurement_noise_std, 18=pose_noise_std
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -185,7 +187,7 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(1, out.tracker.ukf_beta);
     apply_real(2, out.tracker.ukf_kappa);
     apply_real(3, out.tracker.process_noise_std);
-    apply_real(4, out.tracker.measurement_noise_std);
+    apply_real(4, out.tracker.calib_noise_std);  // legacy measurement_noise_std → calib_noise_std
     apply_real(5, out.tracker.outlier_threshold);
     apply_real(6, out.tracker_fps);
     apply_int(7, out.tracker.ik_max_iterations);
@@ -212,6 +214,7 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         }
     }
     apply_opt_real(17, out.tracker.velocity_measurement_noise_std);
+    apply_real(18, out.tracker.pose_noise_std);
 
     return out;
 }
@@ -536,7 +539,8 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
 
     // Step 3: Fetch all observations for this sequence and person
     Stmt obs_stmt(db_,
-                  "SELECT po.camera_instance_id, po.video_frame, po.timestamp_s, po.kp_blob"
+                  "SELECT po.camera_instance_id, po.video_frame, po.timestamp_s, po.kp_blob,"
+                  " COALESCE(po.noise_scale, 1.0) AS crop_scale"
                   " FROM pose_observations po"
                   " WHERE po.sequence_id = ? AND po.person_id = ?"
                   " ORDER BY po.camera_instance_id, po.video_frame");
@@ -556,6 +560,7 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
         double timestamp_s = sqlite3_column_double(obs_stmt.ptr, 2);
         void const* kp_data = sqlite3_column_blob(obs_stmt.ptr, 3);
         int kp_bytes = sqlite3_column_bytes(obs_stmt.ptr, 3);
+        double crop_scale = sqlite3_column_double(obs_stmt.ptr, 4);
         ++rows_total;
 
         // Skip rows whose camera instance is not in the camera map
@@ -603,6 +608,7 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
             obs.position = pixels_are_undistorted ? obs.position_distorted
                                                   : camera->undistort(obs.position_distorted);
             obs.confidence = kps[static_cast<size_t>(i)].confidence;
+            obs.crop_scale = crop_scale;
             seq_observations[inst_id].push_back(obs);
         }
     }

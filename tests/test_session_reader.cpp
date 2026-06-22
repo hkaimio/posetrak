@@ -148,6 +148,7 @@ static void create_fixture_db() {
             kappa REAL,
             process_noise_std REAL,
             measurement_noise_std REAL,
+            pose_noise_std REAL,
             outlier_threshold REAL,
             tracker_fps REAL,
             ik_max_iterations INTEGER,
@@ -257,6 +258,7 @@ static void create_fixture_db() {
             timestamp_s REAL NOT NULL,
             person_id INTEGER NOT NULL,
             kp_blob BLOB NOT NULL,
+            noise_scale REAL,
             PRIMARY KEY (sequence_id, camera_instance_id, video_frame, person_id)
         );
     )");
@@ -403,7 +405,7 @@ TEST_CASE("SessionReader load_tracker_config", "[session_reader]") {
     REQUIRE(cfg.tracker.ukf_alpha == Catch::Approx(0.5));
     REQUIRE(cfg.tracker.ukf_beta == Catch::Approx(2.0));
     REQUIRE(cfg.tracker.process_noise_std == Catch::Approx(0.15));
-    REQUIRE(cfg.tracker.measurement_noise_std == Catch::Approx(20.0));
+    REQUIRE(cfg.tracker.calib_noise_std == Catch::Approx(20.0));
 
     // Columns not set should keep TrackerConfig defaults
     REQUIRE(cfg.tracker.ukf_kappa == Catch::Approx(TrackerConfig{}.ukf_kappa));

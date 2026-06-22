@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 6
-SESSION_SCHEMA_VERSION: Final[int] = 21
+SESSION_SCHEMA_VERSION: Final[int] = 22
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -632,6 +632,18 @@ def _migrate_session_v20_to_v21(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v21_to_v22(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 21 to 22.
+
+    v22 adds pose_noise_std to tracker_configs for the split noise model:
+    total_noise = (pose_noise_std * crop_scale + calib_noise_std) / max(conf, 0.1).
+    NULL / 0.0 means use calibration-only formula (backward-compatible).
+    """
+    sql = (_DB_DIR / "migrations" / "021_split_noise_model.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -715,6 +727,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 20
     if actual == 20:
         _migrate_session_v20_to_v21(conn)
+        actual = 21
+    if actual == 21:
+        _migrate_session_v21_to_v22(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

@@ -85,22 +85,19 @@ class UnscentedKalmanFilter {
      * @param observations Marker observations from cameras
      * @param cameras Map of camera_id -> Camera
      * @param fk Forward kinematics computer
-     * @param measurement_noise_std Measurement noise standard deviation (pixels)
+     * @param pose_noise_std Pose estimation error (pixels in model input image; scaled by
+     *        obs.crop_scale to original video pixels)
+     * @param calib_noise_std Calibration error (pixels in original video)
      * @param outlier_threshold_mahalanobis Mahalanobis distance threshold for outlier rejection
      *        (0.0 = disabled). Recommended: 5.991 (95% confidence, 2-DOF chi-squared)
      *
-     * Updates state and covariance using unscented transform:
-     * 1. For each sigma point: FK → camera projection
-     * 2. Compute predicted measurements and innovation covariance
-     * 3. Perform outlier rejection (if threshold > 0)
-     * 4. Compute Kalman gain
-     * 5. Update state and covariance
+     * Per-observation noise: (pose_noise_std * crop_scale + calib_noise_std) / max(conf, 0.1)
      *
      * @return UpdateResult with diagnostics (inliers, outliers, Mahalanobis distances)
      */
     UpdateResult update(std::vector<Observation> const& observations,
                         std::unordered_map<int, Camera> const& cameras, ForwardKinematics& fk,
-                        double measurement_noise_std = 5.0,
+                        double pose_noise_std = 0.0, double calib_noise_std = 5.0,
                         double outlier_threshold_mahalanobis = 0.0);
 
     /**

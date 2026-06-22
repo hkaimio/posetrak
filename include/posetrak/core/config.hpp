@@ -25,9 +25,10 @@ struct ChildFilterConfig {
     /// Typically matches joint_groups but may differ when marker naming diverges.
     std::vector<std::string> observation_groups;
 
-    double process_noise_std = 0.3;      ///< Process noise std for child joints.
-    double measurement_noise_std = 2.0;  ///< Pixel measurement noise std.
-    double outlier_threshold = 4.0;      ///< Chi-squared outlier rejection threshold.
+    double process_noise_std = 0.3;  ///< Process noise std for child joints.
+    double pose_noise_std = 0.0;     ///< Pose estimation error (pixels in model input).
+    double calib_noise_std = 2.0;    ///< Calibration error (pixels in original video).
+    double outlier_threshold = 4.0;  ///< Chi-squared outlier rejection threshold.
 
     /// Reject update if fewer than this fraction of expected markers are inliers.
     double min_inliers_ratio = 0.3;
@@ -64,7 +65,8 @@ struct HierarchicalConfig {
     std::vector<std::string> parent_observation_groups;
 
     double parent_process_noise_std = 0.5;
-    double parent_measurement_noise_std = 2.0;
+    double parent_pose_noise_std = 0.0;
+    double parent_calib_noise_std = 2.0;
     double parent_outlier_threshold = 4.0;
 
     /// One entry per child filter, processed in order after the parent step.
@@ -80,9 +82,10 @@ struct TrackerConfig {
     std::optional<double>
         process_noise_vel_std;  ///< Process noise std for velocity DOFs (nullopt = same as pos)
     std::optional<double>
-        velocity_half_life_s;  ///< Velocity decay half-life in seconds (nullopt = no decay)
-    double measurement_noise_std = 5.0;  ///< Measurement noise std (pixels)
-    double outlier_threshold = 5.991;    ///< Chi-squared threshold (95% for 2-DOF)
+        velocity_half_life_s;          ///< Velocity decay half-life in seconds (nullopt = no decay)
+    double pose_noise_std = 0.0;       ///< Pose estimation error (pixels in model input image)
+    double calib_noise_std = 5.0;      ///< Calibration error (pixels in original video)
+    double outlier_threshold = 5.991;  ///< Chi-squared threshold (95% for 2-DOF)
 
     // UKF sigma point parameters
     double ukf_alpha = 0.5;  ///< Sigma point spread (0.001 for Python compatibility)
@@ -113,8 +116,8 @@ struct TrackerConfig {
     /// Useful for cameras with large systematic extrinsic or lens-distortion errors.
     std::vector<int> velocity_mode_camera_ids;
     /// Measurement noise std for velocity-mode cameras (pixels/frame).
-    /// Typically smaller than measurement_noise_std because the systematic bias cancels in the
-    /// diff. nullopt = use measurement_noise_std (conservative fallback).
+    /// Typically smaller than calib_noise_std because the systematic bias cancels in the diff.
+    /// nullopt = use calib_noise_std (conservative fallback).
     std::optional<double> velocity_measurement_noise_std;
 
     // === Calibration ===
@@ -147,8 +150,9 @@ struct TrackerAppConfig {
     std::optional<double>
         process_noise_vel_std;  ///< Velocity DOF noise std (nullopt = same as pos)
     std::optional<double>
-        velocity_half_life_s;  ///< Velocity decay half-life in seconds (nullopt = no decay)
-    double measurement_noise_std = 2.0;
+        velocity_half_life_s;      ///< Velocity decay half-life in seconds (nullopt = no decay)
+    double pose_noise_std = 0.0;   ///< Pose estimation error (pixels in model input image)
+    double calib_noise_std = 2.0;  ///< Calibration error (pixels in original video)
     double outlier_threshold = 4.0;
 
     // === Initialization ===
@@ -227,7 +231,8 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.process_noise_std = process_noise_std;
     tc.process_noise_vel_std = process_noise_vel_std;
     tc.velocity_half_life_s = velocity_half_life_s;
-    tc.measurement_noise_std = measurement_noise_std;
+    tc.pose_noise_std = pose_noise_std;
+    tc.calib_noise_std = calib_noise_std;
     tc.outlier_threshold = outlier_threshold;
     tc.ukf_alpha = ukf_alpha;
     tc.ukf_beta = ukf_beta;

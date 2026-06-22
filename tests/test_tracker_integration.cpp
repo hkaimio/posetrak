@@ -260,12 +260,12 @@ TEST_CASE("End-to-end tracking of synthetic sequence", "[tracker][integration]")
     TrackerConfig config;
     config.process_noise_std =
         0.5;  // Higher process noise for sinusoidal motion (not constant velocity)
-    config.measurement_noise_std = 2.0;  // 2 pixels
-    config.outlier_threshold = 4.0;      // Mahalanobis distance
-    config.init_position_std = 0.1;      // 10 cm
-    config.init_orientation_std = 0.1;   // ~5 degrees
-    config.init_joint_std = 0.1;         // ~5 degrees
-    config.init_velocity_std = 0.1;      // Velocity uncertainty
+    config.calib_noise_std = 2.0;       // 2 pixels
+    config.outlier_threshold = 4.0;     // Mahalanobis distance
+    config.init_position_std = 0.1;     // 10 cm
+    config.init_orientation_std = 0.1;  // ~5 degrees
+    config.init_joint_std = 0.1;        // ~5 degrees
+    config.init_velocity_std = 0.1;     // Velocity uncertainty
     config.min_cameras_for_init = 2;
     config.ik_max_iterations = 1000;  // Many iterations
     config.ik_tolerance = 0.02;       // Very relaxed tolerance (20 cm)

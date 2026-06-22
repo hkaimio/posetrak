@@ -202,7 +202,7 @@ _RUN_INFO_SQL = (
 
 _CFG_SQL = (
     "SELECT name, process_noise_std, process_noise_vel_std, velocity_half_life_s, "
-    "       measurement_noise_std, outlier_threshold, tracker_fps, "
+    "       measurement_noise_std, pose_noise_std, outlier_threshold, tracker_fps, "
     "       velocity_mode_camera_ids, velocity_measurement_noise_std "
     "FROM tracker_configs WHERE id=?"
 )
@@ -218,8 +218,10 @@ def _cfg_text(cfg: sqlite3.Row | None, cfg_id: str | None) -> str:
         parts.append(f"Qv={cfg['process_noise_vel_std']}")
     if cfg["velocity_half_life_s"] is not None:
         parts.append(f"vhl={cfg['velocity_half_life_s']}s")
+    if cfg["pose_noise_std"] is not None and cfg["pose_noise_std"] != 0.0:
+        parts.append(f"Rp={cfg['pose_noise_std']}")
     if cfg["measurement_noise_std"] is not None:
-        parts.append(f"R={cfg['measurement_noise_std']}")
+        parts.append(f"Rc={cfg['measurement_noise_std']}")
     if cfg["outlier_threshold"] is not None:
         parts.append(f"thr={cfg['outlier_threshold']}")
     if cfg["velocity_mode_camera_ids"]:

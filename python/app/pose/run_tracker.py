@@ -65,7 +65,8 @@ class RunTrackerWidget(QWidget):
         self._proc_noise_std  = _float_spin(0.1,   0.0, 1000.0, 4)
         self._proc_vel_noise  = _float_spin(0.5,   0.0, 1000.0, 4)
         self._vel_half_life   = _float_spin(0.25,  0.0,   10.0, 4)
-        self._meas_noise      = _float_spin(60.0,  0.0, 1.0e6,  2)
+        self._pose_noise      = _float_spin(0.0,   0.0, 1.0e6,  2)
+        self._calib_noise     = _float_spin(60.0,  0.0, 1.0e6,  2)
         self._outlier_thresh  = _float_spin(4.0,   0.1,   50.0, 2)
         self._tracker_fps     = _float_spin(120.0, 1.0,  500.0, 1)
 
@@ -83,7 +84,8 @@ class RunTrackerWidget(QWidget):
         config_form.addRow("Process noise std:", self._proc_noise_std)
         config_form.addRow("Velocity noise std:", self._proc_vel_noise)
         config_form.addRow("Velocity half-life (s):", self._vel_half_life)
-        config_form.addRow("Measurement noise std:", self._meas_noise)
+        config_form.addRow("Pose noise std (px in model):", self._pose_noise)
+        config_form.addRow("Calib noise std (px in video):", self._calib_noise)
         config_form.addRow("Outlier threshold:", self._outlier_thresh)
         config_form.addRow("Tracker FPS:", self._tracker_fps)
         config_form.addRow("Velocity cameras:", vel_cam_row)
@@ -457,15 +459,16 @@ class RunTrackerWidget(QWidget):
                 "INSERT INTO tracker_configs"
                 " (id, name, parent_id, created_at,"
                 "  process_noise_std, process_noise_vel_std, velocity_half_life_s,"
-                "  measurement_noise_std, outlier_threshold, tracker_fps,"
+                "  measurement_noise_std, pose_noise_std, outlier_threshold, tracker_fps,"
                 "  velocity_mode_camera_ids)"
-                " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     config_id, "ui-run", now,
                     self._proc_noise_std.value(),
                     self._proc_vel_noise.value(),
                     self._vel_half_life.value(),
-                    self._meas_noise.value(),
+                    self._calib_noise.value(),   # stored in legacy column for compat
+                    self._pose_noise.value(),
                     self._outlier_thresh.value(),
                     self._tracker_fps.value(),
                     vel_ids_json,

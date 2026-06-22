@@ -64,7 +64,10 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
             result.process_noise_vel_std = *v;
         if (auto v = tracking["velocity_half_life_s"].value<double>())
             result.velocity_half_life_s = *v;
-        result.measurement_noise_std = tracking["measurement_noise_std"].value_or(2.0);
+        // New keys take precedence; fall back to legacy measurement_noise_std → calib_noise_std.
+        double legacy_noise = tracking["measurement_noise_std"].value_or(2.0);
+        result.calib_noise_std = tracking["calib_noise_std"].value_or(legacy_noise);
+        result.pose_noise_std = tracking["pose_noise_std"].value_or(0.0);
         result.outlier_threshold = tracking["outlier_threshold"].value_or(4.0);
         if (auto vel_cams = tracking["velocity_mode_camera_ids"].as_array()) {
             for (auto&& elem : *vel_cams) {
@@ -133,8 +136,10 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
 
         result.hierarchical.parent_process_noise_std =
             hier["parent_process_noise_std"].value_or(0.5);
-        result.hierarchical.parent_measurement_noise_std =
-            hier["parent_measurement_noise_std"].value_or(2.0);
+        double parent_legacy = hier["parent_measurement_noise_std"].value_or(2.0);
+        result.hierarchical.parent_calib_noise_std =
+            hier["parent_calib_noise_std"].value_or(parent_legacy);
+        result.hierarchical.parent_pose_noise_std = hier["parent_pose_noise_std"].value_or(0.0);
         result.hierarchical.parent_outlier_threshold =
             hier["parent_outlier_threshold"].value_or(4.0);
 
@@ -150,7 +155,9 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
                 load_string_array(child_view["joint_groups"], child.joint_groups);
                 load_string_array(child_view["observation_groups"], child.observation_groups);
                 child.process_noise_std = child_view["process_noise_std"].value_or(0.3);
-                child.measurement_noise_std = child_view["measurement_noise_std"].value_or(2.0);
+                double child_legacy = child_view["measurement_noise_std"].value_or(2.0);
+                child.calib_noise_std = child_view["calib_noise_std"].value_or(child_legacy);
+                child.pose_noise_std = child_view["pose_noise_std"].value_or(0.0);
                 child.outlier_threshold = child_view["outlier_threshold"].value_or(4.0);
                 child.min_inliers_ratio = child_view["min_inliers_ratio"].value_or(0.3);
                 child.max_innovation_norm = child_view["max_innovation_norm"].value_or(200.0);
@@ -214,9 +221,12 @@ void TrackerAppConfig::validate() const {
             fmt::format("Invalid process_noise_std: {} (must be > 0)", process_noise_std));
     }
 
-    if (measurement_noise_std <= 0.0) {
+    if (pose_noise_std < 0.0 || calib_noise_std < 0.0 ||
+        (pose_noise_std == 0.0 && calib_noise_std <= 0.0)) {
         throw std::runtime_error(
-            fmt::format("Invalid measurement_noise_std: {} (must be > 0)", measurement_noise_std));
+            fmt::format("Invalid noise parameters: pose_noise_std={}, calib_noise_std={} "
+                        "(both must be >= 0, at least one > 0)",
+                        pose_noise_std, calib_noise_std));
     }
 
     if (outlier_threshold <= 0.0) {

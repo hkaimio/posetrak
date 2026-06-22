@@ -28,7 +28,7 @@ static TrackerAppConfig make_valid_base_config() {
     cfg.observations_dir = "tests/data/openpose";
     cfg.python_state_path = std::nullopt;
     cfg.process_noise_std = 0.5;
-    cfg.measurement_noise_std = 2.0;
+    cfg.calib_noise_std = 2.0;
     cfg.outlier_threshold = 4.0;
     cfg.ukf_alpha = 0.5;
     cfg.ukf_beta = 2.0;
@@ -62,7 +62,7 @@ TEST_CASE("TrackerAppConfig load minimal config applies defaults", "[config]") {
 
     // Tracking defaults
     REQUIRE(cfg.process_noise_std == Approx(0.5));
-    REQUIRE(cfg.measurement_noise_std == Approx(2.0));
+    REQUIRE(cfg.calib_noise_std == Approx(2.0));
     REQUIRE(cfg.outlier_threshold == Approx(4.0));
 
     // UKF defaults
@@ -86,7 +86,7 @@ TEST_CASE("TrackerAppConfig loads hierarchical section", "[config]") {
         REQUIRE(cfg.person_id == 1);
         REQUIRE(cfg.active_joint_groups == std::vector<std::string>{"main", "HandL", "HandR"});
         REQUIRE(cfg.process_noise_std == Approx(0.4));
-        REQUIRE(cfg.measurement_noise_std == Approx(3.0));
+        REQUIRE(cfg.calib_noise_std == Approx(3.0));
         REQUIRE(cfg.outlier_threshold == Approx(5.0));
     }
 
@@ -107,7 +107,7 @@ TEST_CASE("TrackerAppConfig loads hierarchical section", "[config]") {
         REQUIRE(cfg.hierarchical.parent_joint_groups == std::vector<std::string>{"main"});
         REQUIRE(cfg.hierarchical.parent_observation_groups == std::vector<std::string>{"main"});
         REQUIRE(cfg.hierarchical.parent_process_noise_std == Approx(0.5));
-        REQUIRE(cfg.hierarchical.parent_measurement_noise_std == Approx(2.0));
+        REQUIRE(cfg.hierarchical.parent_calib_noise_std == Approx(2.0));
         REQUIRE(cfg.hierarchical.parent_outlier_threshold == Approx(4.0));
     }
 
@@ -119,7 +119,7 @@ TEST_CASE("TrackerAppConfig loads hierarchical section", "[config]") {
         REQUIRE(handR.joint_groups == std::vector<std::string>{"HandR"});
         REQUIRE(handR.observation_groups == std::vector<std::string>{"HandR"});
         REQUIRE(handR.process_noise_std == Approx(0.1));
-        REQUIRE(handR.measurement_noise_std == Approx(1.5));
+        REQUIRE(handR.calib_noise_std == Approx(1.5));
         REQUIRE(handR.outlier_threshold == Approx(3.5));
         REQUIRE(handR.min_inliers_ratio == Approx(0.4));
         REQUIRE(handR.max_innovation_norm == Approx(150.0));
@@ -140,7 +140,7 @@ TEST_CASE("TrackerAppConfig hierarchical child defaults", "[config]") {
 
     // Verify struct defaults without touching the parser
     REQUIRE(child.process_noise_std == Approx(0.3));
-    REQUIRE(child.measurement_noise_std == Approx(2.0));
+    REQUIRE(child.calib_noise_std == Approx(2.0));
     REQUIRE(child.outlier_threshold == Approx(4.0));
     REQUIRE(child.min_inliers_ratio == Approx(0.3));
     REQUIRE(child.max_innovation_norm == Approx(200.0));
@@ -159,7 +159,7 @@ TEST_CASE("HierarchicalConfig struct defaults", "[config]") {
     REQUIRE(h.parent_joint_groups.empty());
     REQUIRE(h.parent_observation_groups.empty());
     REQUIRE(h.parent_process_noise_std == Approx(0.5));
-    REQUIRE(h.parent_measurement_noise_std == Approx(2.0));
+    REQUIRE(h.parent_calib_noise_std == Approx(2.0));
     REQUIRE(h.parent_outlier_threshold == Approx(4.0));
     REQUIRE(h.children.empty());
 }

@@ -31,15 +31,24 @@ struct Observation {
 
     MeasurementMode mode = MeasurementMode::POSITION;
     Eigen::Vector2d
-        prev_position;  ///< Previous frame undistorted pixel; only used when mode == VELOCITY
-    double noise_std_override = 0.0;  ///< When > 0, replaces global base noise for this observation
+        prev_position;        ///< Previous frame undistorted pixel; only used when mode == VELOCITY
+    double crop_scale = 1.0;  ///< bbox_width / pose_input_width from detection pipeline.
+                              ///< 1.0 = unknown (calibration-only noise formula).
+    double noise_std_override = 0.0;  ///< When > 0, replaces computed noise for this observation.
 
-    /// @brief Get measurement noise standard deviation based on confidence
-    /// @param base_noise Base noise in pixels
-    /// @return Adjusted noise std (higher for low confidence)
+    /// @brief Compute measurement noise std from split pose + calibration error model.
+    /// @param ep Pose estimation error (pixels in model input image)
+    /// @param ec Calibration error (pixels in original video)
+    /// @return Confidence-scaled noise std: (ep * crop_scale + ec) / max(confidence, 0.1)
+    double measurement_noise_std(double ep, double ec) const {
+        if (noise_std_override > 0.0)
+            return noise_std_override / std::max(confidence, 0.1);
+        return (ep * crop_scale + ec) / std::max(confidence, 0.1);
+    }
+
+    /// @brief Convenience overload for calibration-only noise (ep = 0).
     double measurement_noise_std(double base_noise = 5.0) const {
-        double effective = (noise_std_override > 0.0) ? noise_std_override : base_noise;
-        return effective / std::max(confidence, 0.1);
+        return measurement_noise_std(0.0, base_noise);
     }
 
     /// @brief Serialize to JSON

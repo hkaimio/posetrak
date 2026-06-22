@@ -982,7 +982,8 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
             metadata["tracker_fps"] = config.tracker_fps;
             metadata["config"] = {
                 {"process_noise_std", config.process_noise_std},
-                {"measurement_noise_std", config.measurement_noise_std},
+                {"pose_noise_std", config.pose_noise_std},
+                {"calib_noise_std", config.calib_noise_std},
                 {"outlier_threshold", config.outlier_threshold},
                 {"ukf_alpha", config.ukf_alpha},
             };

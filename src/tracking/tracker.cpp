@@ -623,8 +623,8 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
 
     // Step 3: Update
     auto t1 = Clock::now();
-    auto update_info = ukf_->update(observations, cameras_, *fk_, config_.measurement_noise_std,
-                                    config_.outlier_threshold);
+    auto update_info = ukf_->update(observations, cameras_, *fk_, config_.pose_noise_std,
+                                    config_.calib_noise_std, config_.outlier_threshold);
     double const update_ms = Ms(Clock::now() - t1).count();
 
     if (frame_count_ < config_.debug_init_frames) {

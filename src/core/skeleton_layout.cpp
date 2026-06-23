@@ -146,6 +146,36 @@ SkeletonLayout::build(std::shared_ptr<const Skeleton> skeleton, bool include_all
             fmt::format("SkeletonLayout::from_groups: no joints matched the provided groups"));
     }
 
+    // Build marker → parent-marker map.
+    // For each marker, traverse up the joint hierarchy to find the nearest ancestor joint
+    // that also has a marker attached. This supports RELATIVE measurement mode.
+    {
+        auto const& markers = skeleton->markers();
+        auto const& joints = skeleton->joints();
+
+        // joint_index → first marker_index attached to that joint
+        std::unordered_map<uint32_t, int> joint_to_first_marker;
+        for (int i = 0; i < static_cast<int>(markers.size()); ++i) {
+            auto key = markers[static_cast<size_t>(i)].joint_index;
+            if (joint_to_first_marker.find(key) == joint_to_first_marker.end())
+                joint_to_first_marker[key] = i;
+        }
+
+        for (int i = 0; i < static_cast<int>(markers.size()); ++i) {
+            int parent_marker = -1;
+            auto opt_parent = joints[markers[static_cast<size_t>(i)].joint_index].parent_index;
+            while (opt_parent.has_value()) {
+                auto it = joint_to_first_marker.find(*opt_parent);
+                if (it != joint_to_first_marker.end()) {
+                    parent_marker = it->second;
+                    break;
+                }
+                opt_parent = joints[*opt_parent].parent_index;
+            }
+            layout->marker_to_parent_marker_[i] = parent_marker;
+        }
+    }
+
     return layout;
 }
 
@@ -199,6 +229,13 @@ std::vector<int> SkeletonLayout::build_index_map_from(SkeletonLayout const& subs
         }
     }
     return map;
+}
+
+int SkeletonLayout::parent_marker_id(int marker_id) const {
+    auto it = marker_to_parent_marker_.find(marker_id);
+    if (it == marker_to_parent_marker_.end())
+        return -1;
+    return it->second;
 }
 
 State SkeletonLayout::slice_state(State const& full_state) const {

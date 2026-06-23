@@ -1108,8 +1108,10 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
         if (!quiet) {
             fmt::print("Loading observations from sequence '{}'\n", full_sequence_id);
         }
-        auto observations_set = reader.load_observations(full_sequence_id, cameras_by_name,
-                                                         skeleton, min_confidence, person_id);
+        auto observations_set = reader.load_observations(
+            full_sequence_id, cameras_by_name, skeleton, min_confidence, person_id,
+            tracker_config.use_relative_observations, tracker_config.relative_min_confidence,
+            tracker_config.pose_noise_std);
 
         if (observations_set.empty()) {
             throw std::runtime_error("No observations found in sequence");

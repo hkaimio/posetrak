@@ -147,6 +147,11 @@ class SkeletonLayout {
     /// Guaranteed non-null after construction via any factory function.
     std::shared_ptr<const Skeleton> const& skeleton() const { return skeleton_; }
 
+    /// @brief Find the parent marker ID for a given marker.
+    /// Traverses the joint parent chain to find the nearest ancestor joint with a marker.
+    /// @return Parent marker index, or -1 for root markers or markers with no ancestor marker.
+    int parent_marker_id(int marker_id) const;
+
     // -------------------------------------------------------------------------
     // Index mapping (for extract / merge between subset and full layouts)
     // -------------------------------------------------------------------------
@@ -204,6 +209,8 @@ class SkeletonLayout {
     int total_storage_dof_count_ = 0;
     int joint_active_dof_count_ = 0;
     bool has_floating_root_ = false;
+    std::unordered_map<int, int>
+        marker_to_parent_marker_;  ///< marker_id → parent_marker_id (-1 for root)
 };
 
 }  // namespace posetrak

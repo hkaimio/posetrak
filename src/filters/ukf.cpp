@@ -1320,6 +1320,27 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
                     predictions(2 * i + 1) = std::numeric_limits<double>::quiet_NaN();
                     nan_count++;
                 }
+            } else if (obs.mode == MeasurementMode::RELATIVE) {
+                // Subtract the current-frame projection of the reference (parent) marker.
+                // Both are from the same sigma point, so calibration error cancels.
+                auto const& ref_marker = layout_->skeleton()->markers()[obs.ref_marker_id];
+                auto ref_it = marker_positions.find(ref_marker.name);
+                if (ref_it == marker_positions.end()) {
+                    predictions(2 * i) = std::numeric_limits<double>::quiet_NaN();
+                    predictions(2 * i + 1) = std::numeric_limits<double>::quiet_NaN();
+                    nan_count++;
+                } else {
+                    auto ref_proj_opt =
+                        camera.project_undistorted(ref_it->second, /*clip_to_bounds=*/false);
+                    if (!ref_proj_opt.has_value()) {
+                        predictions(2 * i) = std::numeric_limits<double>::quiet_NaN();
+                        predictions(2 * i + 1) = std::numeric_limits<double>::quiet_NaN();
+                        nan_count++;
+                    } else {
+                        predictions(2 * i) -= ref_proj_opt->x();
+                        predictions(2 * i + 1) -= ref_proj_opt->y();
+                    }
+                }
             }
         }
     }

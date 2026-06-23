@@ -120,6 +120,14 @@ struct TrackerConfig {
     /// nullopt = use calib_noise_std (conservative fallback).
     std::optional<double> velocity_measurement_noise_std;
 
+    // === Relative observations (Phase 3) ===
+    /// When true, a RELATIVE observation is emitted for each (child, parent) marker pair
+    /// visible in the same frame/camera with sufficient confidence. Calibration error cancels
+    /// in the pixel difference, leaving only pose estimation noise (pose_noise_std * sqrt(2)).
+    bool use_relative_observations = false;
+    /// Minimum keypoint confidence for both child and parent to form a RELATIVE pair.
+    double relative_min_confidence = 0.5;
+
     // === Calibration ===
     bool calibration_mode = false;  ///< Enable bone-length calibration DOFs
     double prismatic_process_noise_std =
@@ -188,6 +196,10 @@ struct TrackerAppConfig {
     std::vector<int> velocity_mode_camera_ids;
     std::optional<double> velocity_measurement_noise_std;
 
+    // === Relative observations (Phase 3) ===
+    bool use_relative_observations = false;
+    double relative_min_confidence = 0.5;
+
     // === Calibration ===
     bool calibration_mode = false;  ///< Enable bone-length calibration DOFs
     double prismatic_process_noise_std =
@@ -247,6 +259,8 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.active_joint_groups = active_joint_groups;
     tc.velocity_mode_camera_ids = velocity_mode_camera_ids;
     tc.velocity_measurement_noise_std = velocity_measurement_noise_std;
+    tc.use_relative_observations = use_relative_observations;
+    tc.relative_min_confidence = relative_min_confidence;
     tc.calibration_mode = calibration_mode;
     tc.prismatic_process_noise_std = prismatic_process_noise_std;
     tc.debug_init_frames = debug_init_frames;

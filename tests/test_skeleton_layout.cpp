@@ -407,3 +407,52 @@ TEST_CASE("JointDesc is_floating_root is always false in joints() list", "[skele
         REQUIRE(desc.is_floating_root == false);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests: parent_marker_id()
+// ---------------------------------------------------------------------------
+
+TEST_CASE("parent_marker_id: root marker has no parent (-1)", "[skeleton_layout]") {
+    Skeleton skel;
+    uint32_t root =
+        skel.add_joint("root", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "main");
+    skel.add_marker("hip_mrk", root, Eigen::Vector3d::Zero());
+
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    REQUIRE(layout->parent_marker_id(0) == -1);
+}
+
+TEST_CASE("parent_marker_id: direct child marker points to parent joint's marker",
+          "[skeleton_layout]") {
+    // root → child, both have markers
+    Skeleton skel;
+    uint32_t root =
+        skel.add_joint("root", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "main");
+    uint32_t child =
+        skel.add_joint("child", root, JointType::REVOLUTE, Eigen::Vector3d(0.3, 0, 0), "main");
+    // marker 0 on root, marker 1 on child
+    skel.add_marker("root_mrk", root, Eigen::Vector3d::Zero());
+    skel.add_marker("child_mrk", child, Eigen::Vector3d::Zero());
+
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    REQUIRE(layout->parent_marker_id(0) == -1);  // root marker has no parent
+    REQUIRE(layout->parent_marker_id(1) == 0);   // child's parent marker is root_mrk
+}
+
+TEST_CASE("parent_marker_id: skips intermediate joint with no marker", "[skeleton_layout]") {
+    // root (marker) → mid (no marker) → leaf (marker)
+    // leaf's parent marker should be root's marker, skipping mid
+    Skeleton skel;
+    uint32_t root =
+        skel.add_joint("root", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "main");
+    uint32_t mid =
+        skel.add_joint("mid", root, JointType::REVOLUTE, Eigen::Vector3d(0.2, 0, 0), "main");
+    uint32_t leaf =
+        skel.add_joint("leaf", mid, JointType::REVOLUTE, Eigen::Vector3d(0.2, 0, 0), "main");
+    skel.add_marker("root_mrk", root, Eigen::Vector3d::Zero());  // marker 0
+    skel.add_marker("leaf_mrk", leaf, Eigen::Vector3d::Zero());  // marker 1, mid has no marker
+
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    REQUIRE(layout->parent_marker_id(0) == -1);  // root marker: no parent
+    REQUIRE(layout->parent_marker_id(1) == 0);   // leaf skips mid, reaches root_mrk
+}

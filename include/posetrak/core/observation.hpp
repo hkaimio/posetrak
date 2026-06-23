@@ -10,13 +10,17 @@
 
 namespace posetrak {
 
-/// @brief Whether an observation carries an absolute position or a frame-to-frame velocity.
+/// @brief Whether an observation carries an absolute position, a frame-to-frame velocity, or a
+/// relative offset from a parent marker.
 ///
-/// VELOCITY mode is used for cameras with large systematic position errors (e.g. poor extrinsic
-/// calibration). The bias nearly cancels in the frame difference, leaving only the smaller random
-/// noise component. The UKF measurement function becomes h(x_t) = project(x_t) - project(x_{t-1})
-/// instead of the usual h(x_t) = project(x_t).
-enum class MeasurementMode { POSITION, VELOCITY };
+/// VELOCITY mode: bias nearly cancels in the frame difference.
+/// h(x_t) = project(x_t) - project(x_{t-1})
+///
+/// RELATIVE mode: calibration error cancels between parent and child projections from the same
+/// camera. h(x_t) = project(child, x_t) - project(parent, x_t). Observed measurement stored in
+/// obs.position = child_pixel - parent_pixel. Noise set via noise_std_override = pose_noise_std *
+/// sqrt(2) * crop_scale.
+enum class MeasurementMode { POSITION, VELOCITY, RELATIVE };
 
 /// @brief Single 2D observation of a marker from a camera
 struct Observation {
@@ -32,6 +36,7 @@ struct Observation {
     MeasurementMode mode = MeasurementMode::POSITION;
     Eigen::Vector2d
         prev_position;        ///< Previous frame undistorted pixel; only used when mode == VELOCITY
+    int ref_marker_id = -1;   ///< Parent marker index for RELATIVE mode; -1 otherwise
     double crop_scale = 1.0;  ///< bbox_width / pose_input_width from detection pipeline.
                               ///< 1.0 = unknown (calibration-only noise formula).
     double noise_std_override = 0.0;  ///< When > 0, replaces computed noise for this observation.

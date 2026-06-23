@@ -7,6 +7,7 @@
 
 #include <sqlite3.h>
 
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -459,7 +460,8 @@ SessionReader::load_cameras(std::string const& session_id,
 ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                                                 std::map<std::string, Camera> const& cameras,
                                                 Skeleton const& skeleton, double min_confidence,
-                                                int person_id) {
+                                                int person_id, bool use_relative_obs,
+                                                double relative_min_conf, double pose_noise_std) {
     // Step 0: Read pixels_are_undistorted flag for this sequence
     bool pixels_are_undistorted = true;  // default: assume undistorted (safe for existing data)
     {
@@ -502,6 +504,33 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
     for (size_t i = 0; i < markers.size(); ++i) {
         if (markers[i].coco_id.has_value()) {
             coco_to_marker_idx[markers[i].coco_id.value()] = static_cast<int>(i);
+        }
+    }
+
+    // Step 2.6: Build marker parent map for RELATIVE observations.
+    // For each marker, find the nearest ancestor joint that also has a marker attached.
+    std::unordered_map<int, int> marker_parent_map;  // marker_id → parent_marker_id (-1 = none)
+    if (use_relative_obs) {
+        auto const& joints = skeleton.joints();
+        // joint_index → first marker_idx attached to it
+        std::unordered_map<uint32_t, int> joint_to_first_marker;
+        for (int i = 0; i < static_cast<int>(markers.size()); ++i) {
+            auto key = markers[static_cast<size_t>(i)].joint_index;
+            if (joint_to_first_marker.find(key) == joint_to_first_marker.end())
+                joint_to_first_marker[key] = i;
+        }
+        for (int i = 0; i < static_cast<int>(markers.size()); ++i) {
+            int parent_marker = -1;
+            auto opt_parent = joints[markers[static_cast<size_t>(i)].joint_index].parent_index;
+            while (opt_parent.has_value()) {
+                auto it = joint_to_first_marker.find(*opt_parent);
+                if (it != joint_to_first_marker.end()) {
+                    parent_marker = it->second;
+                    break;
+                }
+                opt_parent = joints[*opt_parent].parent_index;
+            }
+            marker_parent_map[i] = parent_marker;
         }
     }
 
@@ -585,6 +614,9 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                 }
             }
         }
+
+        // Collect POSITION observations for this frame/camera first, then generate RELATIVE pairs.
+        std::vector<Observation> frame_obs;
         for (int i = 0; i < static_cast<int>(kps.size()); ++i) {
             if (kps[static_cast<size_t>(i)].confidence < static_cast<float>(min_confidence)) {
                 ++rows_skipped_confidence;
@@ -609,7 +641,51 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                                                   : camera->undistort(obs.position_distorted);
             obs.confidence = kps[static_cast<size_t>(i)].confidence;
             obs.crop_scale = crop_scale;
-            seq_observations[inst_id].push_back(obs);
+            frame_obs.push_back(obs);
+        }
+
+        auto& dest = seq_observations[inst_id];
+        dest.insert(dest.end(), frame_obs.begin(), frame_obs.end());
+
+        // Generate RELATIVE observations: one per (child, parent) pair visible in this frame.
+        if (use_relative_obs && pose_noise_std > 0.0 && !frame_obs.empty()) {
+            // Build marker_id → observation index for this frame
+            std::unordered_map<int, int> marker_to_frame_idx;
+            for (int i = 0; i < static_cast<int>(frame_obs.size()); ++i)
+                marker_to_frame_idx[frame_obs[i].marker_id] = i;
+
+            for (auto const& child_obs : frame_obs) {
+                if (child_obs.confidence < static_cast<float>(relative_min_conf))
+                    continue;
+                auto parent_it = marker_parent_map.find(child_obs.marker_id);
+                if (parent_it == marker_parent_map.end() || parent_it->second < 0)
+                    continue;
+                int parent_marker_id = parent_it->second;
+                auto parent_idx_it = marker_to_frame_idx.find(parent_marker_id);
+                if (parent_idx_it == marker_to_frame_idx.end())
+                    continue;
+                auto const& parent_obs = frame_obs[parent_idx_it->second];
+                if (parent_obs.confidence < static_cast<float>(relative_min_conf))
+                    continue;
+
+                Observation rel;
+                rel.camera_id = child_obs.camera_id;
+                rel.marker_id = child_obs.marker_id;
+                rel.ref_marker_id = parent_marker_id;
+                rel.frame_idx = child_obs.frame_idx;
+                rel.timestamp = child_obs.timestamp;
+                // Observed measurement = child_pixel - parent_pixel
+                rel.position = child_obs.position - parent_obs.position;
+                rel.position_distorted =
+                    child_obs.position_distorted - parent_obs.position_distorted;
+                rel.confidence = std::min(child_obs.confidence, parent_obs.confidence);
+                rel.mode = MeasurementMode::RELATIVE;
+                rel.crop_scale = child_obs.crop_scale;
+                // Noise = pose_noise_std * sqrt(2) * crop_scale (calib error cancels in diff).
+                // Baked into noise_std_override so the confidence scaling still applies.
+                rel.noise_std_override = pose_noise_std * std::sqrt(2.0) * crop_scale;
+                dest.push_back(rel);
+            }
         }
     }
 

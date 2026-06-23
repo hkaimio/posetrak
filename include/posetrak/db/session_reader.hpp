@@ -106,11 +106,15 @@ class SessionReader {
     /// @param skeleton Skeleton whose markers have COCO IDs to map keypoints
     /// @param min_confidence Minimum keypoint confidence to include (default 0.1)
     /// @param person_id Person index within each frame blob (default 0)
+    /// @param use_relative_obs Emit RELATIVE (child-minus-parent) observations alongside POSITION
+    /// @param relative_min_conf Minimum confidence for both markers of a RELATIVE pair
+    /// @param pose_noise_std Pose estimation error std (pixels); sets RELATIVE noise_std_override
     /// @return ObservationSet ready for the tracker
     ObservationSet load_observations(std::string const& sequence_id,
                                      std::map<std::string, Camera> const& cameras,
                                      Skeleton const& skeleton, double min_confidence = 0.1,
-                                     int person_id = 0);
+                                     int person_id = 0, bool use_relative_obs = false,
+                                     double relative_min_conf = 0.5, double pose_noise_std = 0.0);
 
    private:
     sqlite3* db_{};

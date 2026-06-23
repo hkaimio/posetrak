@@ -517,7 +517,8 @@ TEST_CASE("UKF update with outlier rejection", "[ukf][update][outlier]") {
 
     // Update with outlier rejection (chi-squared threshold for 2-DOF at 95% confidence is 5.991)
     double threshold = 4.0;  // Lower threshold to reject the outlier
-    UpdateResult result = ukf.update(observations, cameras, fk, 5.0, threshold);
+    // Args: pose_noise_std=0.0, calib_noise_std=5.0, outlier_threshold=threshold
+    UpdateResult result = ukf.update(observations, cameras, fk, 0.0, 5.0, threshold);
 
     // Check that outlier was detected
     REQUIRE(result.num_observations == 2);
@@ -742,6 +743,81 @@ TEST_CASE("Child UKF: predict keeps root fixed despite large root velocity",
     REQUIRE_THAT(ukf.state().root_position().z(), WithinAbs(injected_pos.z(), 1e-6));
     REQUIRE_THAT(ukf.state().root_orientation().w(),
                  WithinAbs(injected_ori.normalized().w(), 1e-6));
+}
+
+TEST_CASE("UKF RELATIVE mode: predict_measurements returns child minus parent projection",
+          "[ukf][update][relative]") {
+    // Skeleton: root (SPHERICAL) → arm (REVOLUTE)
+    // marker0 on root at local_pos (-0.3, 0, 0) → world (-0.3, 0, 0) at identity state
+    // marker1 on arm at local_pos (0.3, 0, 0) → world (0.3, 0, 0) at identity state
+    Skeleton skeleton;
+    skeleton.add_joint("root", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "main");
+    uint32_t arm_idx =
+        skeleton.add_joint("arm", 0, JointType::REVOLUTE, Eigen::Vector3d::Zero(), "main");
+    skeleton.add_marker("parent_mrk", 0, Eigen::Vector3d(-0.3, 0, 0));      // marker 0
+    skeleton.add_marker("child_mrk", arm_idx, Eigen::Vector3d(0.3, 0, 0));  // marker 1
+
+    pinocchio::Model model;
+    pinocchio::Data data;
+    PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
+    auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+    ForwardKinematics fk(model, data, marker_frame_map, fk_layout);
+
+    Intrinsics intr;
+    intr.fx = 500.0;
+    intr.fy = 500.0;
+    intr.cx = 320.0;
+    intr.cy = 240.0;
+    intr.width = 640;
+    intr.height = 480;
+    intr.model = Intrinsics::DistortionModel::BrownConrady;
+    intr.distortion_coeffs = {0.0, 0.0, 0.0, 0.0, 0.0};
+    Extrinsics extr;
+    extr.position = Eigen::Vector3d(0, 0, -2.0);
+    extr.orientation = Eigen::Quaterniond::Identity();
+    Camera camera(0, "cam0", intr, extr);
+    std::unordered_map<int, Camera> cameras;
+    cameras.emplace(0, camera);
+
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+    UnscentedKalmanFilter ukf(layout, 0.01);
+
+    // State: root at origin, arm angle=0 → both markers at their local_pos world positions
+    Eigen::VectorXd angles = Eigen::VectorXd::Zero(1);  // one REVOLUTE DOF
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), angles,
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), Eigen::VectorXd::Zero(1));
+    ukf.set_state(state);
+    ukf.set_covariance(Eigen::MatrixXd::Identity(14, 14) * 0.1);
+
+    // Camera at (0,0,-2) looking +Z. Pin-hole projection:
+    //   u = cx + fx * Xc / Zc  where Xc = world_x, Zc = 2 (distance along camera z)
+    //   parent_mrk (-0.3, 0, 0): u = 320 + 500*(-0.3)/2 = 245, v = 240
+    //   child_mrk  ( 0.3, 0, 0): u = 320 + 500*(0.3)/2  = 395, v = 240
+    // RELATIVE observation: child - parent = (395-245, 0) = (150, 0)
+    Observation rel_obs;
+    rel_obs.camera_id = 0;
+    rel_obs.marker_id = 1;      // child_mrk index
+    rel_obs.ref_marker_id = 0;  // parent_mrk index
+    rel_obs.position = Eigen::Vector2d(150.0, 0.0);
+    rel_obs.confidence = 0.9;
+    rel_obs.mode = MeasurementMode::RELATIVE;
+    rel_obs.noise_std_override = 5.0 * std::sqrt(2.0);
+
+    std::vector<Observation> observations = {rel_obs};
+    // No outlier rejection (threshold=0): just check the update runs and produces finite state.
+    UpdateResult result = ukf.update(observations, cameras, fk, 0.0, 5.0, 0.0);
+
+    // Innovation is near zero (predicted ≈ observed), so state barely changes.
+    REQUIRE(result.num_observations == 1);
+    REQUIRE(result.num_inliers == 1);
+    REQUIRE(result.num_outliers == 0);
+    State const& post = ukf.state();
+    REQUIRE(std::isfinite(post.root_position().x()));
+    REQUIRE(std::isfinite(post.root_position().y()));
+    REQUIRE(std::isfinite(post.root_position().z()));
+    REQUIRE_THAT(post.root_position().x(), WithinAbs(0.0, 0.05));
+    REQUIRE_THAT(post.root_position().y(), WithinAbs(0.0, 0.05));
 }
 
 TEST_CASE("Child UKF: set_root_transform is no-op on parent filter", "[ukf][child_filter]") {

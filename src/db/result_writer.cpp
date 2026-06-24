@@ -1,4 +1,5 @@
 #include <posetrak/db/result_writer.hpp>
+#include <posetrak/version.hpp>
 
 #include <fmt/chrono.h>
 #include <fmt/core.h>
@@ -122,7 +123,8 @@ ResultWriter::ResultWriter(std::string const& db_path, std::string const& sequen
     sqlite3_bind_text(stmt, 5, extrinsic_calibration_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 6, sync_config_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 7, ran_at.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 8, "dev", -1, SQLITE_STATIC);
+    std::string const ver = version_string();
+    sqlite3_bind_text(stmt, 8, ver.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 9, active_camera_ids.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 10, marker_names.c_str(), -1, SQLITE_TRANSIENT);
 

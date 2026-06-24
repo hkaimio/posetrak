@@ -1,5 +1,14 @@
 subdir('db')
 
+# Generated version header — rebuilt on every compile to capture current git state.
+# Including it as a source makes Meson add its output dir to the compiler include path,
+# so src/version.cpp can #include "posetrak_build_version.hpp" without an explicit -I flag.
+build_version_h = custom_target('build_version_h',
+  command: [find_program('python3'), meson.project_source_root() / 'scripts/gen_version.py', '@OUTPUT@'],
+  output: 'posetrak_build_version.hpp',
+  build_always_stale: true,
+)
+
 # Core library source files
 posetrak_sources = files(
   # Core models (Phase 1)
@@ -29,6 +38,9 @@ posetrak_sources = files(
   # Tracking (Phase 4)
   'tracking/tracker.cpp',
 
+  # Build metadata
+  'version.cpp',
+
   # Calibration (CP3)
   'calibration/scale_calibration.cpp',
 
@@ -46,7 +58,7 @@ posetrak_sources += db_sources
 
 # Build core library
 libposetrak = library('posetrak',
-  posetrak_sources,
+  posetrak_sources + [build_version_h],
   include_directories: posetrak_inc,
   dependencies: [
     eigen_dep,

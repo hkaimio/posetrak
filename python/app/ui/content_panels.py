@@ -3218,6 +3218,8 @@ class _RunInfoPane(QWidget):
         self._ri_skeleton = QLabel("—")
         self._ri_person = QLabel("—")
         self._ri_ran_at = QLabel("—")
+        self._ri_version = QLabel("—")
+        self._ri_version.setWordWrap(True)
         self._ri_frames = QLabel("—")
         self._ri_cfg = QLabel("—")
         self._ri_cfg.setWordWrap(True)
@@ -3226,6 +3228,7 @@ class _RunInfoPane(QWidget):
         run_form.addRow("Skeleton:", self._ri_skeleton)
         run_form.addRow("Person:", self._ri_person)
         run_form.addRow("Tracked at:", self._ri_ran_at)
+        run_form.addRow("Binary:", self._ri_version)
         run_form.addRow("Frames:", self._ri_frames)
         run_form.addRow("Config:", self._ri_cfg)
         run_form.addRow("Notes:", self._ri_notes)
@@ -3279,7 +3282,7 @@ class _RunInfoPane(QWidget):
 
         # Clear labels
         for lbl in (self._ri_skeleton, self._ri_person, self._ri_ran_at,
-                    self._ri_frames, self._ri_cfg, self._ri_notes):
+                    self._ri_version, self._ri_frames, self._ri_cfg, self._ri_notes):
             lbl.setText("—")
         for w in self._id_widgets.values():
             _set_id_widget(w, None)
@@ -3305,6 +3308,7 @@ class _RunInfoPane(QWidget):
         self._ri_skeleton.setText(run["skel_name"] or "—")
         self._ri_person.setText(run["person_names"] or "—")
         self._ri_ran_at.setText(_fmt_ts(run["ran_at"]))
+        self._ri_version.setText(run["posetrak_version"] or "—")
         self._ri_frames.setText(str(n_frames))
         notes = run["notes"]
         self._ri_notes.setText(notes if notes else "—")

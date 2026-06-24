@@ -154,7 +154,9 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
               "       init_position_std, init_orientation_std, init_joint_std, init_velocity_std,"
               "       min_cameras_for_init, process_noise_vel_std, velocity_half_life_s,"
               "       velocity_mode_camera_ids, velocity_measurement_noise_std,"
-              "       COALESCE(pose_noise_std, 0.0) AS pose_noise_std"
+              "       COALESCE(pose_noise_std, 0.0) AS pose_noise_std,"
+              "       COALESCE(use_relative_observations, 0) AS use_relative_observations,"
+              "       COALESCE(relative_min_confidence, 0.5) AS relative_min_confidence"
               " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -169,7 +171,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //          9=init_position_std, 10=init_orientation_std, 11=init_joint_std,
     //         12=init_velocity_std, 13=min_cameras_for_init, 14=process_noise_vel_std,
     //         15=velocity_half_life_s, 16=velocity_mode_camera_ids,
-    //         17=velocity_measurement_noise_std, 18=pose_noise_std
+    //         17=velocity_measurement_noise_std, 18=pose_noise_std,
+    //         19=use_relative_observations, 20=relative_min_confidence
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -216,6 +219,10 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     }
     apply_opt_real(17, out.tracker.velocity_measurement_noise_std);
     apply_real(18, out.tracker.pose_noise_std);
+    // col 19: use_relative_observations (INTEGER 0/1)
+    if (sqlite3_column_type(stmt.ptr, 19) != SQLITE_NULL)
+        out.tracker.use_relative_observations = (sqlite3_column_int(stmt.ptr, 19) != 0);
+    apply_real(20, out.tracker.relative_min_confidence);
 
     return out;
 }

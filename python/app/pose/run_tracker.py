@@ -78,6 +78,19 @@ class RunTrackerWidget(QWidget):
         vel_cam_row.addWidget(self._vel_cam_label, 1)
         vel_cam_row.addWidget(vel_cam_edit_btn)
 
+        self._use_relative = QCheckBox()
+        self._use_relative.setChecked(False)
+        self._use_relative.setToolTip(
+            "Emit child-minus-parent pixel observations alongside absolute positions.\n"
+            "Calibration error cancels in the difference; requires pose_noise_std > 0."
+        )
+        self._relative_min_conf = _float_spin(0.5, 0.0, 1.0, 2)
+        self._relative_min_conf.setToolTip(
+            "Minimum keypoint confidence for both child and parent to form a relative pair."
+        )
+        self._use_relative.toggled.connect(self._relative_min_conf.setEnabled)
+        self._relative_min_conf.setEnabled(False)
+
         config_form = QFormLayout()
         config_form.addRow("Skeleton:", self._skeleton_combo)
         config_form.addRow("Person ID:", self._person_id_spin)
@@ -89,6 +102,8 @@ class RunTrackerWidget(QWidget):
         config_form.addRow("Outlier threshold:", self._outlier_thresh)
         config_form.addRow("Tracker FPS:", self._tracker_fps)
         config_form.addRow("Velocity cameras:", vel_cam_row)
+        config_form.addRow("Relative observations:", self._use_relative)
+        config_form.addRow("Relative min confidence:", self._relative_min_conf)
 
         config_box = QGroupBox("Tracker configuration")
         config_box.setLayout(config_form)
@@ -454,14 +469,17 @@ class RunTrackerWidget(QWidget):
         now = dt.datetime.now(dt.timezone.utc).isoformat()
         vel_ids = sorted(self._velocity_cam_indices) if self._velocity_cam_indices else None
         vel_ids_json = json.dumps(vel_ids) if vel_ids is not None else None
+        use_rel = 1 if self._use_relative.isChecked() else 0
+        rel_min_conf = self._relative_min_conf.value() if use_rel else None
         with self._conn:
             self._conn.execute(
                 "INSERT INTO tracker_configs"
                 " (id, name, parent_id, created_at,"
                 "  process_noise_std, process_noise_vel_std, velocity_half_life_s,"
                 "  measurement_noise_std, pose_noise_std, outlier_threshold, tracker_fps,"
-                "  velocity_mode_camera_ids)"
-                " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  velocity_mode_camera_ids,"
+                "  use_relative_observations, relative_min_confidence)"
+                " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     config_id, "ui-run", now,
                     self._proc_noise_std.value(),
@@ -472,6 +490,8 @@ class RunTrackerWidget(QWidget):
                     self._outlier_thresh.value(),
                     self._tracker_fps.value(),
                     vel_ids_json,
+                    use_rel,
+                    rel_min_conf,
                 ),
             )
         return config_id

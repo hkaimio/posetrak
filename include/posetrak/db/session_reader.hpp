@@ -109,12 +109,15 @@ class SessionReader {
     /// @param use_relative_obs Emit RELATIVE (child-minus-parent) observations alongside POSITION
     /// @param relative_min_conf Minimum confidence for both markers of a RELATIVE pair
     /// @param pose_noise_std Pose estimation error std (pixels); sets RELATIVE noise_std_override
+    /// @param cross_pair_max_px Pixel radius for spatial cross-pair RELATIVE obs (0 = disabled)
+    /// @param cross_pair_max_n  Max cross-pairs per frame per camera (sorted by proximity)
     /// @return ObservationSet ready for the tracker
     ObservationSet load_observations(std::string const& sequence_id,
                                      std::map<std::string, Camera> const& cameras,
                                      Skeleton const& skeleton, double min_confidence = 0.1,
                                      int person_id = 0, bool use_relative_obs = false,
-                                     double relative_min_conf = 0.5, double pose_noise_std = 0.0);
+                                     double relative_min_conf = 0.5, double pose_noise_std = 0.0,
+                                     double cross_pair_max_px = 0.0, int cross_pair_max_n = 10);
 
    private:
     sqlite3* db_{};

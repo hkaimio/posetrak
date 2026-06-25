@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 6
-SESSION_SCHEMA_VERSION: Final[int] = 23
+SESSION_SCHEMA_VERSION: Final[int] = 24
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -656,6 +656,18 @@ def _migrate_session_v22_to_v23(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v23_to_v24(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 23 to 24.
+
+    v24 adds cross_pair_max_px and cross_pair_max_n to tracker_configs,
+    enabling spatial cross-pair RELATIVE observations (Phase 4).
+    NULL means disabled / 10 respectively (backward-compatible with v23 configs).
+    """
+    sql = (_DB_DIR / "migrations" / "023_cross_pair_observations.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -745,6 +757,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 22
     if actual == 22:
         _migrate_session_v22_to_v23(conn)
+        actual = 23
+    if actual == 23:
+        _migrate_session_v23_to_v24(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

@@ -79,6 +79,8 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
             result.velocity_measurement_noise_std = *v;
         result.use_relative_observations = tracking["use_relative_observations"].value_or(false);
         result.relative_min_confidence = tracking["relative_min_confidence"].value_or(0.5);
+        result.cross_pair_max_px = tracking["cross_pair_max_px"].value_or(0.0);
+        result.cross_pair_max_n = tracking["cross_pair_max_n"].value_or(10);
 
         // Initialization sub-section
         if (auto init = tracking["initialization"]) {

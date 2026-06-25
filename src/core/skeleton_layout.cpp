@@ -2,6 +2,8 @@
 
 #include <fmt/format.h>
 
+#include <limits>
+#include <queue>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -176,6 +178,54 @@ SkeletonLayout::build(std::shared_ptr<const Skeleton> skeleton, bool include_all
         }
     }
 
+    // Build all-pairs marker distance matrix via BFS on the joint tree.
+    // Distance = number of joint edges between the joints each marker is attached to.
+    {
+        auto const& markers = skeleton->markers();
+        auto const& joints = skeleton->joints();
+        int const n_joints = static_cast<int>(joints.size());
+        int const n_markers = static_cast<int>(markers.size());
+
+        // Bidirectional adjacency: parent ↔ child for all joints
+        std::vector<std::vector<int>> adj(n_joints);
+        for (int j = 0; j < n_joints; ++j) {
+            if (joints[j].parent_index.has_value()) {
+                int p = static_cast<int>(*joints[j].parent_index);
+                adj[j].push_back(p);
+                adj[p].push_back(j);
+            }
+        }
+
+        // BFS from each joint → all-pairs shortest distance
+        constexpr int INF = std::numeric_limits<int>::max();
+        std::vector<std::vector<int>> joint_dist(n_joints, std::vector<int>(n_joints, INF));
+        for (int src = 0; src < n_joints; ++src) {
+            joint_dist[src][src] = 0;
+            std::queue<int> q;
+            q.push(src);
+            while (!q.empty()) {
+                int cur = q.front();
+                q.pop();
+                for (int nb : adj[cur]) {
+                    if (joint_dist[src][nb] == INF) {
+                        joint_dist[src][nb] = joint_dist[src][cur] + 1;
+                        q.push(nb);
+                    }
+                }
+            }
+        }
+
+        // Map to marker pairs
+        layout->marker_dist_matrix_.assign(n_markers, std::vector<int>(n_markers, INF));
+        for (int a = 0; a < n_markers; ++a) {
+            int ja = static_cast<int>(markers[a].joint_index);
+            for (int b = 0; b < n_markers; ++b) {
+                int jb = static_cast<int>(markers[b].joint_index);
+                layout->marker_dist_matrix_[a][b] = joint_dist[ja][jb];
+            }
+        }
+    }
+
     return layout;
 }
 
@@ -236,6 +286,13 @@ int SkeletonLayout::parent_marker_id(int marker_id) const {
     if (it == marker_to_parent_marker_.end())
         return -1;
     return it->second;
+}
+
+int SkeletonLayout::hierarchy_distance(int marker_a, int marker_b) const {
+    auto const n = static_cast<int>(marker_dist_matrix_.size());
+    if (marker_a < 0 || marker_b < 0 || marker_a >= n || marker_b >= n)
+        return std::numeric_limits<int>::max();
+    return marker_dist_matrix_[marker_a][marker_b];
 }
 
 State SkeletonLayout::slice_state(State const& full_state) const {

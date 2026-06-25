@@ -152,6 +152,11 @@ class SkeletonLayout {
     /// @return Parent marker index, or -1 for root markers or markers with no ancestor marker.
     int parent_marker_id(int marker_id) const;
 
+    /// @brief Skeleton-tree distance between two markers in joint hops.
+    /// Distance is the number of joint edges on the shortest path between the joints
+    /// that the two markers are attached to. Returns INT_MAX for invalid indices.
+    int hierarchy_distance(int marker_a, int marker_b) const;
+
     // -------------------------------------------------------------------------
     // Index mapping (for extract / merge between subset and full layouts)
     // -------------------------------------------------------------------------
@@ -211,6 +216,8 @@ class SkeletonLayout {
     bool has_floating_root_ = false;
     std::unordered_map<int, int>
         marker_to_parent_marker_;  ///< marker_id → parent_marker_id (-1 for root)
+    std::vector<std::vector<int>>
+        marker_dist_matrix_;  ///< [n_markers][n_markers] shortest joint-hop distance
 };
 
 }  // namespace posetrak

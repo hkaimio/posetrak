@@ -120,13 +120,21 @@ struct TrackerConfig {
     /// nullopt = use calib_noise_std (conservative fallback).
     std::optional<double> velocity_measurement_noise_std;
 
-    // === Relative observations (Phase 3) ===
+    // === Relative observations (Phase 3 — hierarchical pairs) ===
     /// When true, a RELATIVE observation is emitted for each (child, parent) marker pair
     /// visible in the same frame/camera with sufficient confidence. Calibration error cancels
     /// in the pixel difference, leaving only pose estimation noise (pose_noise_std * sqrt(2)).
     bool use_relative_observations = false;
     /// Minimum keypoint confidence for both child and parent to form a RELATIVE pair.
     double relative_min_confidence = 0.5;
+
+    // === Relative observations (Phase 4 — spatial cross-pairs) ===
+    /// When > 0, emit RELATIVE observations for marker pairs visible in the same frame/camera
+    /// whose image-space distance (px) is below this threshold AND whose skeleton-tree distance
+    /// is > 2 joint hops. Targets interactions like hands touching. 0 = disabled.
+    double cross_pair_max_px = 0.0;
+    /// Maximum number of spatial cross-pairs to emit per frame per camera (sorted by proximity).
+    int cross_pair_max_n = 10;
 
     // === Calibration ===
     bool calibration_mode = false;  ///< Enable bone-length calibration DOFs
@@ -196,9 +204,13 @@ struct TrackerAppConfig {
     std::vector<int> velocity_mode_camera_ids;
     std::optional<double> velocity_measurement_noise_std;
 
-    // === Relative observations (Phase 3) ===
+    // === Relative observations (Phase 3 — hierarchical pairs) ===
     bool use_relative_observations = false;
     double relative_min_confidence = 0.5;
+
+    // === Relative observations (Phase 4 — spatial cross-pairs) ===
+    double cross_pair_max_px = 0.0;
+    int cross_pair_max_n = 10;
 
     // === Calibration ===
     bool calibration_mode = false;  ///< Enable bone-length calibration DOFs
@@ -261,6 +273,8 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.velocity_measurement_noise_std = velocity_measurement_noise_std;
     tc.use_relative_observations = use_relative_observations;
     tc.relative_min_confidence = relative_min_confidence;
+    tc.cross_pair_max_px = cross_pair_max_px;
+    tc.cross_pair_max_n = cross_pair_max_n;
     tc.calibration_mode = calibration_mode;
     tc.prismatic_process_noise_std = prismatic_process_noise_std;
     tc.debug_init_frames = debug_init_frames;

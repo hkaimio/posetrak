@@ -91,6 +91,23 @@ class RunTrackerWidget(QWidget):
         self._use_relative.toggled.connect(self._relative_min_conf.setEnabled)
         self._relative_min_conf.setEnabled(False)
 
+        self._cross_pair_max_px = _float_spin(0.0, 0.0, 9999.0, 1)
+        self._cross_pair_max_px.setToolTip(
+            "Pixel radius for spatial cross-pair relative observations.\n"
+            "Pairs of visible markers within this distance and > 2 skeleton hops apart\n"
+            "emit an additional RELATIVE observation. 0 = disabled (Phase 4)."
+        )
+        self._cross_pair_max_n = QSpinBox()
+        self._cross_pair_max_n.setRange(1, 999)
+        self._cross_pair_max_n.setValue(10)
+        self._cross_pair_max_n.setToolTip(
+            "Maximum spatial cross-pairs per frame per camera (closest pairs kept)."
+        )
+        self._cross_pair_max_px.valueChanged.connect(
+            lambda v: self._cross_pair_max_n.setEnabled(v > 0.0)
+        )
+        self._cross_pair_max_n.setEnabled(False)
+
         config_form = QFormLayout()
         config_form.addRow("Skeleton:", self._skeleton_combo)
         config_form.addRow("Person ID:", self._person_id_spin)
@@ -104,6 +121,8 @@ class RunTrackerWidget(QWidget):
         config_form.addRow("Velocity cameras:", vel_cam_row)
         config_form.addRow("Relative observations:", self._use_relative)
         config_form.addRow("Relative min confidence:", self._relative_min_conf)
+        config_form.addRow("Cross-pair radius (px):", self._cross_pair_max_px)
+        config_form.addRow("Cross-pair max count:", self._cross_pair_max_n)
 
         config_box = QGroupBox("Tracker configuration")
         config_box.setLayout(config_form)
@@ -471,6 +490,9 @@ class RunTrackerWidget(QWidget):
         vel_ids_json = json.dumps(vel_ids) if vel_ids is not None else None
         use_rel = 1 if self._use_relative.isChecked() else 0
         rel_min_conf = self._relative_min_conf.value() if use_rel else None
+        cross_px = self._cross_pair_max_px.value()
+        cross_n = self._cross_pair_max_n.value() if cross_px > 0.0 else None
+        cross_px_val = cross_px if cross_px > 0.0 else None
         with self._conn:
             self._conn.execute(
                 "INSERT INTO tracker_configs"
@@ -478,8 +500,9 @@ class RunTrackerWidget(QWidget):
                 "  process_noise_std, process_noise_vel_std, velocity_half_life_s,"
                 "  measurement_noise_std, pose_noise_std, outlier_threshold, tracker_fps,"
                 "  velocity_mode_camera_ids,"
-                "  use_relative_observations, relative_min_confidence)"
-                " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  use_relative_observations, relative_min_confidence,"
+                "  cross_pair_max_px, cross_pair_max_n)"
+                " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     config_id, "ui-run", now,
                     self._proc_noise_std.value(),
@@ -492,6 +515,8 @@ class RunTrackerWidget(QWidget):
                     vel_ids_json,
                     use_rel,
                     rel_min_conf,
+                    cross_px_val,
+                    cross_n,
                 ),
             )
         return config_id

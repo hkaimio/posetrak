@@ -7,7 +7,10 @@
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
+#include <queue>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -156,7 +159,9 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
               "       velocity_mode_camera_ids, velocity_measurement_noise_std,"
               "       COALESCE(pose_noise_std, 0.0) AS pose_noise_std,"
               "       COALESCE(use_relative_observations, 0) AS use_relative_observations,"
-              "       COALESCE(relative_min_confidence, 0.5) AS relative_min_confidence"
+              "       COALESCE(relative_min_confidence, 0.5) AS relative_min_confidence,"
+              "       COALESCE(cross_pair_max_px, 0.0) AS cross_pair_max_px,"
+              "       COALESCE(cross_pair_max_n, 10) AS cross_pair_max_n"
               " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -223,6 +228,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     if (sqlite3_column_type(stmt.ptr, 19) != SQLITE_NULL)
         out.tracker.use_relative_observations = (sqlite3_column_int(stmt.ptr, 19) != 0);
     apply_real(20, out.tracker.relative_min_confidence);
+    apply_real(21, out.tracker.cross_pair_max_px);
+    apply_int(22, out.tracker.cross_pair_max_n);
 
     return out;
 }
@@ -468,7 +475,8 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                                                 std::map<std::string, Camera> const& cameras,
                                                 Skeleton const& skeleton, double min_confidence,
                                                 int person_id, bool use_relative_obs,
-                                                double relative_min_conf, double pose_noise_std) {
+                                                double relative_min_conf, double pose_noise_std,
+                                                double cross_pair_max_px, int cross_pair_max_n) {
     // Step 0: Read pixels_are_undistorted flag for this sequence
     bool pixels_are_undistorted = true;  // default: assume undistorted (safe for existing data)
     {
@@ -514,10 +522,13 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
         }
     }
 
-    // Step 2.6: Build marker parent map for RELATIVE observations.
+    // Step 2.6: Build marker parent map (hierarchical RELATIVE pairs, Phase 3) and
+    // all-pairs distance matrix (spatial cross-pairs, Phase 4).
     // For each marker, find the nearest ancestor joint that also has a marker attached.
     std::unordered_map<int, int> marker_parent_map;  // marker_id → parent_marker_id (-1 = none)
-    if (use_relative_obs) {
+    // marker_dist_matrix[a][b] = joint-hop distance between marker a and marker b.
+    std::vector<std::vector<int>> marker_dist_matrix;
+    if (use_relative_obs || cross_pair_max_px > 0.0) {
         auto const& joints = skeleton.joints();
         // joint_index → first marker_idx attached to it
         std::unordered_map<uint32_t, int> joint_to_first_marker;
@@ -538,6 +549,48 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                 opt_parent = joints[*opt_parent].parent_index;
             }
             marker_parent_map[i] = parent_marker;
+        }
+
+        // Build all-pairs joint-hop distance matrix for spatial cross-pair selection.
+        if (cross_pair_max_px > 0.0) {
+            int const n_joints = static_cast<int>(joints.size());
+            int const n_markers_i = static_cast<int>(markers.size());
+            constexpr int INF = std::numeric_limits<int>::max();
+
+            std::vector<std::vector<int>> adj(n_joints);
+            for (int j = 0; j < n_joints; ++j) {
+                if (joints[j].parent_index.has_value()) {
+                    int p = static_cast<int>(*joints[j].parent_index);
+                    adj[j].push_back(p);
+                    adj[p].push_back(j);
+                }
+            }
+
+            std::vector<std::vector<int>> joint_dist(n_joints, std::vector<int>(n_joints, INF));
+            for (int src = 0; src < n_joints; ++src) {
+                joint_dist[src][src] = 0;
+                std::queue<int> q;
+                q.push(src);
+                while (!q.empty()) {
+                    int cur = q.front();
+                    q.pop();
+                    for (int nb : adj[cur]) {
+                        if (joint_dist[src][nb] == INF) {
+                            joint_dist[src][nb] = joint_dist[src][cur] + 1;
+                            q.push(nb);
+                        }
+                    }
+                }
+            }
+
+            marker_dist_matrix.assign(n_markers_i, std::vector<int>(n_markers_i, INF));
+            for (int a = 0; a < n_markers_i; ++a) {
+                int ja = static_cast<int>(markers[a].joint_index);
+                for (int b = 0; b < n_markers_i; ++b) {
+                    int jb = static_cast<int>(markers[b].joint_index);
+                    marker_dist_matrix[a][b] = joint_dist[ja][jb];
+                }
+            }
         }
     }
 
@@ -691,6 +744,57 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                 // Noise = pose_noise_std * sqrt(2) * crop_scale (calib error cancels in diff).
                 // Baked into noise_std_override so the confidence scaling still applies.
                 rel.noise_std_override = pose_noise_std * std::sqrt(2.0) * crop_scale;
+                dest.push_back(rel);
+            }
+        }
+
+        // Generate SPATIAL cross-pair RELATIVE observations (Phase 4):
+        // pairs of visible markers close in image space but far in the skeleton tree.
+        // Calibration error cancels (same camera, same frame) → noise = ep * sqrt(2) * scale.
+        if (cross_pair_max_px > 0.0 && pose_noise_std > 0.0 && frame_obs.size() >= 2) {
+            struct Candidate {
+                int ai, bi;
+                double dist_px;
+            };
+            std::vector<Candidate> candidates;
+            int const n_fo = static_cast<int>(frame_obs.size());
+            for (int ai = 0; ai < n_fo; ++ai) {
+                for (int bi = ai + 1; bi < n_fo; ++bi) {
+                    double d = (frame_obs[ai].position - frame_obs[bi].position).norm();
+                    if (d >= cross_pair_max_px)
+                        continue;
+                    int ma = frame_obs[ai].marker_id;
+                    int mb = frame_obs[bi].marker_id;
+                    int hdist = (!marker_dist_matrix.empty() &&
+                                 ma < static_cast<int>(marker_dist_matrix.size()) &&
+                                 mb < static_cast<int>(marker_dist_matrix.size()))
+                                    ? marker_dist_matrix[ma][mb]
+                                    : std::numeric_limits<int>::max();
+                    if (hdist <= 2)
+                        continue;
+                    candidates.push_back({ai, bi, d});
+                }
+            }
+            std::sort(candidates.begin(), candidates.end(),
+                      [](Candidate const& a, Candidate const& b) { return a.dist_px < b.dist_px; });
+            if (cross_pair_max_n > 0 && static_cast<int>(candidates.size()) > cross_pair_max_n)
+                candidates.resize(static_cast<size_t>(cross_pair_max_n));
+
+            for (auto const& c : candidates) {
+                auto const& oa = frame_obs[c.ai];
+                auto const& ob = frame_obs[c.bi];
+                Observation rel;
+                rel.camera_id = oa.camera_id;
+                rel.marker_id = oa.marker_id;
+                rel.ref_marker_id = ob.marker_id;
+                rel.frame_idx = oa.frame_idx;
+                rel.timestamp = oa.timestamp;
+                rel.position = oa.position - ob.position;
+                rel.position_distorted = oa.position_distorted - ob.position_distorted;
+                rel.confidence = std::min(oa.confidence, ob.confidence);
+                rel.mode = MeasurementMode::RELATIVE;
+                rel.crop_scale = oa.crop_scale;
+                rel.noise_std_override = pose_noise_std * std::sqrt(2.0) * oa.crop_scale;
                 dest.push_back(rel);
             }
         }

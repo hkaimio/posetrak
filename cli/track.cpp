@@ -1111,7 +1111,8 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
         auto observations_set = reader.load_observations(
             full_sequence_id, cameras_by_name, skeleton, min_confidence, person_id,
             tracker_config.use_relative_observations, tracker_config.relative_min_confidence,
-            tracker_config.pose_noise_std);
+            tracker_config.pose_noise_std, tracker_config.cross_pair_max_px,
+            tracker_config.cross_pair_max_n);
 
         if (observations_set.empty()) {
             throw std::runtime_error("No observations found in sequence");

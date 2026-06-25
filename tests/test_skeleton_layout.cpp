@@ -10,6 +10,7 @@
 
 #include "posetrak/core/skeleton.hpp"
 #include "posetrak/core/skeleton_layout.hpp"
+#include <limits>
 
 using namespace posetrak;
 
@@ -455,4 +456,87 @@ TEST_CASE("parent_marker_id: skips intermediate joint with no marker", "[skeleto
     auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
     REQUIRE(layout->parent_marker_id(0) == -1);  // root marker: no parent
     REQUIRE(layout->parent_marker_id(1) == 0);   // leaf skips mid, reaches root_mrk
+}
+
+// ---------------------------------------------------------------------------
+// Tests: hierarchy_distance()
+// ---------------------------------------------------------------------------
+
+TEST_CASE("hierarchy_distance: same marker is distance 0", "[skeleton_layout]") {
+    Skeleton skel;
+    uint32_t root =
+        skel.add_joint("root", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "main");
+    uint32_t child =
+        skel.add_joint("child", root, JointType::REVOLUTE, Eigen::Vector3d(0.3, 0, 0), "main");
+    skel.add_marker("root_mrk", root, Eigen::Vector3d::Zero());    // 0
+    skel.add_marker("child_mrk", child, Eigen::Vector3d::Zero());  // 1
+
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    REQUIRE(layout->hierarchy_distance(0, 0) == 0);
+    REQUIRE(layout->hierarchy_distance(1, 1) == 0);
+}
+
+TEST_CASE("hierarchy_distance: adjacent markers (parent-child) are distance 1",
+          "[skeleton_layout]") {
+    // root → child; direct joint edge → distance 1
+    Skeleton skel;
+    uint32_t root =
+        skel.add_joint("root", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "main");
+    uint32_t child =
+        skel.add_joint("child", root, JointType::REVOLUTE, Eigen::Vector3d(0.3, 0, 0), "main");
+    skel.add_marker("root_mrk", root, Eigen::Vector3d::Zero());    // 0
+    skel.add_marker("child_mrk", child, Eigen::Vector3d::Zero());  // 1
+
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    REQUIRE(layout->hierarchy_distance(0, 1) == 1);
+    REQUIRE(layout->hierarchy_distance(1, 0) == 1);  // symmetric
+}
+
+TEST_CASE("hierarchy_distance: linear chain root→mid→leaf gives correct distances",
+          "[skeleton_layout]") {
+    // root → mid → leaf; markers on all three joints
+    Skeleton skel;
+    uint32_t root =
+        skel.add_joint("root", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "main");
+    uint32_t mid =
+        skel.add_joint("mid", root, JointType::REVOLUTE, Eigen::Vector3d(0.2, 0, 0), "main");
+    uint32_t leaf =
+        skel.add_joint("leaf", mid, JointType::REVOLUTE, Eigen::Vector3d(0.2, 0, 0), "main");
+    skel.add_marker("root_mrk", root, Eigen::Vector3d::Zero());  // 0
+    skel.add_marker("mid_mrk", mid, Eigen::Vector3d::Zero());    // 1
+    skel.add_marker("leaf_mrk", leaf, Eigen::Vector3d::Zero());  // 2
+
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    REQUIRE(layout->hierarchy_distance(0, 1) == 1);  // root ↔ mid
+    REQUIRE(layout->hierarchy_distance(1, 2) == 1);  // mid ↔ leaf
+    REQUIRE(layout->hierarchy_distance(0, 2) == 2);  // root ↔ leaf (through mid)
+    REQUIRE(layout->hierarchy_distance(2, 0) == 2);  // symmetric
+}
+
+TEST_CASE("hierarchy_distance: siblings share parent, distance 2", "[skeleton_layout]") {
+    // root → left, root → right; both siblings → distance 2 (left→root→right)
+    Skeleton skel;
+    uint32_t root =
+        skel.add_joint("root", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "main");
+    uint32_t left =
+        skel.add_joint("left", root, JointType::REVOLUTE, Eigen::Vector3d(-0.2, 0, 0), "main");
+    uint32_t right =
+        skel.add_joint("right", root, JointType::REVOLUTE, Eigen::Vector3d(0.2, 0, 0), "main");
+    skel.add_marker("left_mrk", left, Eigen::Vector3d::Zero());    // 0
+    skel.add_marker("right_mrk", right, Eigen::Vector3d::Zero());  // 1
+
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    REQUIRE(layout->hierarchy_distance(0, 1) == 2);
+    REQUIRE(layout->hierarchy_distance(1, 0) == 2);
+}
+
+TEST_CASE("hierarchy_distance: out-of-range marker returns INT_MAX", "[skeleton_layout]") {
+    Skeleton skel;
+    uint32_t root =
+        skel.add_joint("root", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "main");
+    skel.add_marker("root_mrk", root, Eigen::Vector3d::Zero());
+
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    REQUIRE(layout->hierarchy_distance(-1, 0) == std::numeric_limits<int>::max());
+    REQUIRE(layout->hierarchy_distance(0, 99) == std::numeric_limits<int>::max());
 }

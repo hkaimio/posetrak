@@ -96,7 +96,7 @@ class RunDetectionDialog(QDialog):
         form.addRow("Detector:", self._detector_combo)
 
         self._pose_combo = QComboBox()
-        self._pose_combo.addItems(["rtmpose-l-133kp", "rtmpose-l-17kp", "rtmpose-m-17kp"])
+        self._pose_combo.addItems(["rtmpose-l-133kp", "vitpose-l-133kp"])
         form.addRow("Pose model:", self._pose_combo)
 
         self._conf_spin = QDoubleSpinBox()

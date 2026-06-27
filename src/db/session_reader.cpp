@@ -739,7 +739,7 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                 rel.position_distorted =
                     child_obs.position_distorted - parent_obs.position_distorted;
                 rel.confidence = std::min(child_obs.confidence, parent_obs.confidence);
-                rel.mode = MeasurementMode::RELATIVE;
+                rel.mode = MeasurementMode::PAIR_DIFF;
                 rel.crop_scale = child_obs.crop_scale;
                 // Noise = pose_noise_std * sqrt(2) * crop_scale (calib error cancels in diff).
                 // Baked into noise_std_override so the confidence scaling still applies.
@@ -792,7 +792,7 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                 rel.position = oa.position - ob.position;
                 rel.position_distorted = oa.position_distorted - ob.position_distorted;
                 rel.confidence = std::min(oa.confidence, ob.confidence);
-                rel.mode = MeasurementMode::RELATIVE;
+                rel.mode = MeasurementMode::PAIR_DIFF;
                 rel.crop_scale = oa.crop_scale;
                 rel.noise_std_override = pose_noise_std * std::sqrt(2.0) * oa.crop_scale;
                 dest.push_back(rel);

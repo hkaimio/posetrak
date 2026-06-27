@@ -16,11 +16,12 @@ namespace posetrak {
 /// VELOCITY mode: bias nearly cancels in the frame difference.
 /// h(x_t) = project(x_t) - project(x_{t-1})
 ///
-/// RELATIVE mode: calibration error cancels between parent and child projections from the same
+/// PAIR_DIFF mode: calibration error cancels between parent and child projections from the same
 /// camera. h(x_t) = project(child, x_t) - project(parent, x_t). Observed measurement stored in
 /// obs.position = child_pixel - parent_pixel. Noise set via noise_std_override = pose_noise_std *
 /// sqrt(2) * crop_scale.
-enum class MeasurementMode { POSITION, VELOCITY, RELATIVE };
+// NOTE: RELATIVE is #define'd to 2 in wingdi.h on Windows — PAIR_DIFF avoids the macro clash.
+enum class MeasurementMode { POSITION, VELOCITY, PAIR_DIFF };
 
 /// @brief Single 2D observation of a marker from a camera
 struct Observation {

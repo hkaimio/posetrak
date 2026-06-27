@@ -1320,7 +1320,7 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
                     predictions(2 * i + 1) = std::numeric_limits<double>::quiet_NaN();
                     nan_count++;
                 }
-            } else if (obs.mode == MeasurementMode::RELATIVE) {
+            } else if (obs.mode == MeasurementMode::PAIR_DIFF) {
                 // Subtract the current-frame projection of the reference (parent) marker.
                 // Both are from the same sigma point, so calibration error cancels.
                 auto const& ref_marker = layout_->skeleton()->markers()[obs.ref_marker_id];

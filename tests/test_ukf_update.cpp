@@ -801,7 +801,7 @@ TEST_CASE("UKF RELATIVE mode: predict_measurements returns child minus parent pr
     rel_obs.ref_marker_id = 0;  // parent_mrk index
     rel_obs.position = Eigen::Vector2d(150.0, 0.0);
     rel_obs.confidence = 0.9;
-    rel_obs.mode = MeasurementMode::RELATIVE;
+    rel_obs.mode = MeasurementMode::PAIR_DIFF;
     rel_obs.noise_std_override = 5.0 * std::sqrt(2.0);
 
     std::vector<Observation> observations = {rel_obs};

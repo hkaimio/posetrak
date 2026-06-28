@@ -97,7 +97,13 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     init_joint_std         REAL,
     init_velocity_std      REAL,
     min_cameras_for_init              INTEGER,
-    velocity_mode_camera_ids          TEXT,  -- JSON array of camera instance ID strings; NULL = all cameras use position mode
+    velocity_mode_camera_ids          TEXT,  -- JSON array of integer camera indices; NULL = all cameras use position mode
     velocity_measurement_noise_std    REAL,  -- Measurement noise std for velocity cameras (pixels/frame); NULL = use measurement_noise_std
-    notes                             TEXT
+    notes                             TEXT,
+    -- Added in schema migration v22 (pose_noise_std), v23 (relative obs), v24 (cross-pair obs):
+    pose_noise_std                    REAL,  -- Pose estimation noise std in model-input pixels
+    use_relative_observations         INTEGER, -- 0/1 flag for child-minus-parent pixel observations
+    relative_min_confidence           REAL,  -- Min keypoint confidence for relative pairs
+    cross_pair_max_px                 REAL,  -- Pixel radius for spatial cross-pair observations; NULL = disabled
+    cross_pair_max_n                  INTEGER -- Max cross-pairs per frame per camera
 );

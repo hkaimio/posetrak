@@ -7,7 +7,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, Qt, Signal
+from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -30,9 +30,61 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from posetrak.tracker.runner import TrackerResult, default_binary_path
+from posetrak.tracker.runner import run_tracker as _run_tracker
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _TOOLS_DIR = _REPO_ROOT / "python" / "tools"
-_DEFAULT_BINARY = _REPO_ROOT / "optbuild" / "cli" / "posetrak"
+_DEFAULT_BINARY = default_binary_path()
+
+
+# ---------------------------------------------------------------------------
+# Background thread
+# ---------------------------------------------------------------------------
+
+
+class _TrackerThread(QThread):
+    """Runs run_tracker() in a background thread and emits Qt signals."""
+
+    line_output = Signal(str)
+    tracking_finished = Signal(int, str)  # exit_code, run_id (empty str if None)
+
+    def __init__(
+        self,
+        *,
+        session_path: str,
+        sequence_id: str,
+        skeleton_id: str,
+        config_id: str,
+        output_dir: Path,
+        binary_path: Path,
+        person_id: int,
+        start_time: float,
+        end_time: float,
+        smooth: bool,
+    ) -> None:
+        super().__init__()
+        self._kwargs = dict(
+            session_path=Path(session_path),
+            sequence_id=sequence_id,
+            skeleton_id=skeleton_id,
+            config_id=config_id,
+            output_dir=output_dir,
+            binary_path=binary_path,
+            person_id=person_id,
+            start_time=start_time,
+            end_time=end_time,
+            smooth=smooth,
+        )
+
+    def run(self) -> None:
+        result: TrackerResult = _run_tracker(**self._kwargs, on_progress=self.line_output.emit)
+        self.tracking_finished.emit(result.exit_code, result.run_id or "")
+
+
+# ---------------------------------------------------------------------------
+# Widget
+# ---------------------------------------------------------------------------
 
 
 class RunTrackerWidget(QWidget):
@@ -46,9 +98,8 @@ class RunTrackerWidget(QWidget):
         self._session_path: str | None = None
         self._run_id: str | None = None
         self._person_id: int = 0
-        self._process: QProcess | None = None
-        self._bvh_process: QProcess | None = None
-        self._stdout_buf: str = ""
+        self._thread: _TrackerThread | None = None
+        self._bvh_process = None
         self._sequence_cameras: list[str] = []
         self._velocity_cam_indices: set[int] = set()
 
@@ -407,33 +458,29 @@ class RunTrackerWidget(QWidget):
         self._person_id = person_id
         self._run_id = None
 
-        cmd_args = [
-            "track",
-            "--session-db",     self._session_path,
-            "--sequence",       seq_id,
-            "--skeleton",       skel_id,
-            "--tracker-config", config_id,
-            "--person-id",      str(person_id),
-            "--start-time",     str(time_start_s),
-            "--end-time",       str(time_end_s),
-            "--output-dir",     str(out_dir),
-            "--smooth",
-        ]
-
         self._progress_bar.setValue(0)
         self._status_label.setText("Starting…")
         self._log.clear()
         self._prog_box.setVisible(True)
         self._results_box.setVisible(False)
         self._run_btn.setEnabled(False)
-        self._stdout_buf = ""
 
-        proc = QProcess(self)
-        proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        proc.readyReadStandardOutput.connect(lambda: self._on_output(proc))
-        proc.finished.connect(lambda code, st: self._on_finished(proc, code))
-        proc.start(str(binary), cmd_args)
-        self._process = proc
+        thread = _TrackerThread(
+            session_path=self._session_path,
+            sequence_id=seq_id,
+            skeleton_id=skel_id,
+            config_id=config_id,
+            output_dir=out_dir,
+            binary_path=binary,
+            person_id=person_id,
+            start_time=time_start_s,
+            end_time=time_end_s,
+            smooth=True,
+        )
+        thread.line_output.connect(self._on_output)
+        thread.tracking_finished.connect(self._on_finished)
+        thread.start()
+        self._thread = thread
 
     def _check_sequence_ready(self, seq_id: str) -> str | None:
         """Return an error message if the sequence is missing sync or extrinsics, else None."""
@@ -521,52 +568,17 @@ class RunTrackerWidget(QWidget):
             )
         return config_id
 
-    def _on_output(self, proc: QProcess) -> None:
-        raw = bytes(proc.readAllStandardOutput()).decode("utf-8", errors="replace")
-        self._stdout_buf += raw
-
-        # Process all complete lines; \r means in-place progress update.
-        parts = re.split(r"(\r|\n)", self._stdout_buf)
-        complete: list[str] = []
-        current = ""
-        for tok in parts:
-            if tok == "\n":
-                complete.append(current)
-                current = ""
-            elif tok == "\r":
-                if current:
-                    complete.append(current)
-                current = ""
-            else:
-                current += tok
-        self._stdout_buf = current  # trailing partial line
-
-        for line in complete:
-            line = line.rstrip()
-            if not line:
-                continue
-            m = re.match(r"\s*Progress:\s*(\d+)/(\d+)\s*\(([0-9.]+)%\)", line)
-            if m:
-                self._progress_bar.setValue(int(float(m.group(3))))
-                self._status_label.setText(line.strip())
-            else:
-                self._log.appendPlainText(line)
-                m2 = re.match(r"tracking_run_id:\s*(\S+)", line)
-                if m2:
-                    self._run_id = m2.group(1)
-
-    def _on_finished(self, proc: QProcess, exit_code: int) -> None:
-        # Flush remaining buffer
-        for line in self._stdout_buf.splitlines():
-            line = line.rstrip()
-            if not line:
-                continue
-            m2 = re.match(r"tracking_run_id:\s*(\S+)", line)
-            if m2:
-                self._run_id = m2.group(1)
+    def _on_output(self, line: str) -> None:
+        m = re.match(r"\s*Progress:\s*(\d+)/(\d+)\s*\(([0-9.]+)%\)", line)
+        if m:
+            self._progress_bar.setValue(int(float(m.group(3))))
+            self._status_label.setText(line)
+        else:
             self._log.appendPlainText(line)
-        self._stdout_buf = ""
-        self._process = None
+
+    def _on_finished(self, exit_code: int, run_id: str) -> None:
+        self._run_id = run_id or None
+        self._thread = None
         self._run_btn.setEnabled(True)
 
         if exit_code != 0:

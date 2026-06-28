@@ -31,6 +31,7 @@ from app.mcp.tools import coverage as _coverage
 from app.mcp.tools import diagnostics as _diag
 from app.mcp.tools import geometry as _geo
 from app.mcp.tools import runs as _runs
+from app.mcp.tools import workflow as _workflow
 
 # ---------------------------------------------------------------------------
 # Server instance
@@ -50,14 +51,25 @@ mcp = FastMCP(
     ),
 )
 
-# Module-level DB path set at startup
+# Module-level state set at startup
 _db_path: Path | None = None
+_allow_write: bool = False
 
 
 def _conn():
     if _db_path is None:
         raise RuntimeError("Server started without --db-path.")
     return _db.connect_readonly(_db_path)
+
+
+def _require_write() -> str | None:
+    """Return an error string if write tools are not enabled, else None."""
+    if not _allow_write:
+        return (
+            "Write tools are disabled. Restart the MCP server with --mcp-allow-write "
+            "to enable run_detection and run_tracking."
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -185,25 +197,136 @@ def get_edit_coverage(run_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Workflow read tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def list_captures() -> str:
+    """List all captures in the session database.
+
+    Shows capture label, video count, and whether sync and extrinsics are
+    configured. Use capture IDs from this list with get_capture_info or
+    list_detection_runs.
+    """
+    with _conn() as conn:
+        return _workflow.list_captures(conn)
+
+
+@mcp.tool()
+def list_detection_runs() -> str:
+    """List all detection (YOLO + RTMPose) runs in the session database.
+
+    Shows detection run ID, capture label, models used, time range, and
+    status. Use run IDs from this list with run_tracking.
+    """
+    with _conn() as conn:
+        return _workflow.list_detection_runs(conn)
+
+
+@mcp.tool()
+def get_capture_info(capture_id: str) -> str:
+    """Get detailed info about a single capture.
+
+    Returns the camera list with video file paths, frame counts, and frame
+    rates, plus sync config and extrinsics status.
+    """
+    with _conn() as conn:
+        return _workflow.get_capture_info(conn, capture_id)
+
+
+# ---------------------------------------------------------------------------
+# Workflow write tools (require --mcp-allow-write)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def run_detection(
+    capture_id: str,
+    sync_id: str,
+    start_s: float,
+    end_s: float,
+    detector_model: str = "yolo11x",
+    pose_model: str = "rtmpose-l-133kp",
+    conf: float = 0.3,
+) -> str:
+    """Run YOLO person detection + RTMPose pose estimation on a capture.
+
+    WRITE OPERATION — requires the server to be started with --mcp-allow-write.
+
+    Processes the time range [start_s, end_s] for all cameras in the sync
+    config. Returns the detection_run_id on completion. This may take several
+    minutes depending on the length of the sequence.
+
+    Use list_captures to find capture_id and sync_id.
+    """
+    err = _require_write()
+    if err:
+        return err
+    assert _db_path is not None
+    return _workflow.run_detection(
+        _db_path, capture_id, sync_id, start_s, end_s, detector_model, pose_model, conf
+    )
+
+
+@mcp.tool()
+def run_tracking(
+    sequence_id: str,
+    skeleton_id: str,
+    config_id: str,
+    output_dir: str,
+    person_id: int = 0,
+) -> str:
+    """Invoke the posetrak-tracker binary on a pose observation sequence.
+
+    WRITE OPERATION — requires the server to be started with --mcp-allow-write.
+
+    Runs synchronously and blocks until tracking completes (may take several
+    minutes). Returns tracking_run_id on success.
+
+    Use list_tracking_runs to list existing runs, and list_detection_runs to
+    find the sequence_id that was produced by run_detection.
+    """
+    err = _require_write()
+    if err:
+        return err
+    assert _db_path is not None
+    return _workflow.run_tracking(
+        _db_path, sequence_id, skeleton_id, config_id, output_dir, person_id
+    )
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Posetrak MCP diagnostic server (read-only)"
+        description="Posetrak MCP server (read-only by default)"
     )
     parser.add_argument(
         "--db-path",
         required=True,
         help="Path to a posetrak session .db file",
     )
+    parser.add_argument(
+        "--mcp-allow-write",
+        action="store_true",
+        default=False,
+        help="Enable write tools (run_detection, run_tracking). Off by default.",
+    )
     args, _ = parser.parse_known_args()
 
-    global _db_path
+    global _db_path, _allow_write
     _db_path = Path(args.db_path)
+    _allow_write = args.mcp_allow_write
+
     if not _db_path.exists():
         print(f"Error: database not found: {_db_path}", file=sys.stderr)
         sys.exit(1)
+
+    if _allow_write:
+        print("Write tools enabled (--mcp-allow-write).", file=sys.stderr)
 
     mcp.run()
 

@@ -170,3 +170,141 @@ class TestTrackExport:
     def test_export_no_session(self, tmp_path: Path) -> None:
         result = _invoke(["track", "export", "bvh", "abc123", str(tmp_path / "out.bvh")])
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# track run
+# ---------------------------------------------------------------------------
+
+
+def _seed_run_prerequisites(db_path: Path) -> tuple[str, str]:
+    """Seed a skeleton and a pose_observation_sequence; return (seq_id, skel_id)."""
+    import datetime as dt
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+
+    skel_id = generate_id()
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    conn.execute(
+        "INSERT OR IGNORE INTO skeletons (id, name, yaml_content, created_at)"
+        " VALUES (?, 'TestSkel', '{}', ?)",
+        (skel_id, now),
+    )
+
+    # Re-use the capture and sync_config seeded by the fixture
+    capture_row = conn.execute("SELECT id FROM captures LIMIT 1").fetchone()
+    sync_row = conn.execute("SELECT id FROM sync_configs LIMIT 1").fetchone()
+
+    seq_id = generate_id()
+    conn.execute(
+        "INSERT INTO pose_observation_sequences"
+        " (id, shot_id, sync_config_id, time_start_s, time_end_s)"
+        " VALUES (?, ?, ?, 0.0, 10.0)",
+        (seq_id, capture_row["id"], sync_row["id"]),
+    )
+    conn.commit()
+    conn.close()
+    return seq_id, skel_id
+
+
+class TestTrackRun:
+    @patch("posetrak.cli.track.run_tracker")
+    def test_run_basic(self, mock_run, seeded_session_db_path: Path, tmp_path: Path) -> None:
+        from posetrak.tracker.runner import TrackerResult
+        run_id = generate_id()
+        mock_run.return_value = TrackerResult(exit_code=0, run_id=run_id)
+
+        fake_binary = tmp_path / "fake-binary"
+        fake_binary.touch()
+
+        seq_id, skel_id = _seed_run_prerequisites(seeded_session_db_path)
+        result = _invoke(
+            [
+                "track", "run",
+                "--sequence", seq_id[:8],
+                "--skeleton", skel_id[:8],
+                "--output-dir", str(tmp_path / "out"),
+                "--binary", str(fake_binary),
+            ],
+            seeded_session_db_path,
+        )
+        assert result.exit_code == 0, result.output
+        mock_run.assert_called_once()
+        call_kwargs = mock_run.call_args
+        # sequence_id and skeleton_id are positional args 1 and 2
+        assert call_kwargs.args[1] == seq_id
+        assert call_kwargs.args[2] == skel_id
+
+    @patch("posetrak.cli.track.run_tracker")
+    @patch("posetrak.cli.track.default_binary_path")
+    def test_run_creates_config_row(
+        self, mock_bin, mock_run, seeded_session_db_path: Path, tmp_path: Path
+    ) -> None:
+        from posetrak.tracker.runner import TrackerResult
+        mock_bin.return_value = tmp_path / "fake"
+        (tmp_path / "fake").touch()
+        mock_run.return_value = TrackerResult(exit_code=0, run_id=generate_id())
+
+        seq_id, skel_id = _seed_run_prerequisites(seeded_session_db_path)
+        result = _invoke(
+            [
+                "track", "run",
+                "--sequence", seq_id,
+                "--skeleton", skel_id,
+                "--output-dir", str(tmp_path / "out"),
+                "--calib-noise-std", "42.0",
+            ],
+            seeded_session_db_path,
+        )
+        assert result.exit_code == 0, result.output
+
+        conn = sqlite3.connect(str(seeded_session_db_path))
+        conn.row_factory = sqlite3.Row
+        cfg = conn.execute(
+            "SELECT * FROM tracker_configs WHERE name = 'cli-run' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert cfg is not None
+        assert cfg["measurement_noise_std"] == pytest.approx(42.0)
+
+    @patch("posetrak.cli.track.run_tracker")
+    @patch("posetrak.cli.track.default_binary_path")
+    def test_run_prints_run_id(
+        self, mock_bin, mock_run, seeded_session_db_path: Path, tmp_path: Path
+    ) -> None:
+        from posetrak.tracker.runner import TrackerResult
+        mock_bin.return_value = tmp_path / "fake"
+        (tmp_path / "fake").touch()
+        expected_run_id = generate_id()
+        mock_run.return_value = TrackerResult(exit_code=0, run_id=expected_run_id)
+
+        seq_id, skel_id = _seed_run_prerequisites(seeded_session_db_path)
+        result = _invoke(
+            ["track", "run", "--sequence", seq_id, "--skeleton", skel_id,
+             "--output-dir", str(tmp_path / "out")],
+            seeded_session_db_path,
+        )
+        assert result.exit_code == 0, result.output
+        assert expected_run_id in result.output
+
+    @patch("posetrak.cli.track.run_tracker")
+    @patch("posetrak.cli.track.default_binary_path")
+    def test_run_nonzero_exit(
+        self, mock_bin, mock_run, seeded_session_db_path: Path, tmp_path: Path
+    ) -> None:
+        from posetrak.tracker.runner import TrackerResult
+        mock_bin.return_value = tmp_path / "fake"
+        (tmp_path / "fake").touch()
+        mock_run.return_value = TrackerResult(exit_code=1, run_id=None)
+
+        seq_id, skel_id = _seed_run_prerequisites(seeded_session_db_path)
+        result = _invoke(
+            ["track", "run", "--sequence", seq_id, "--skeleton", skel_id,
+             "--output-dir", str(tmp_path / "out")],
+            seeded_session_db_path,
+        )
+        assert result.exit_code == 1
+
+    def test_run_no_session(self) -> None:
+        result = _invoke(["track", "run", "--sequence", "abc", "--skeleton", "def"])
+        assert result.exit_code != 0

@@ -632,6 +632,11 @@ def _migrate_session_v20_to_v21(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _tracker_config_columns(conn: sqlite3.Connection) -> set[str]:
+    """Return the set of column names currently in tracker_configs."""
+    return {row[1] for row in conn.execute("PRAGMA table_info(tracker_configs)")}
+
+
 def _migrate_session_v21_to_v22(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 21 to 22.
 
@@ -639,8 +644,10 @@ def _migrate_session_v21_to_v22(conn: sqlite3.Connection) -> None:
     total_noise = (pose_noise_std * crop_scale + calib_noise_std) / max(conf, 0.1).
     NULL / 0.0 means use calibration-only formula (backward-compatible).
     """
-    sql = (_DB_DIR / "migrations" / "021_split_noise_model.sql").read_text(encoding="utf-8")
-    conn.executescript(sql)
+    existing = _tracker_config_columns(conn)
+    if "pose_noise_std" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN pose_noise_std REAL")
+    _set_schema_version(conn, 22)
     conn.commit()
 
 
@@ -651,8 +658,12 @@ def _migrate_session_v22_to_v23(conn: sqlite3.Connection) -> None:
     enabling the RELATIVE measurement mode (child-minus-parent pixel differences).
     NULL means disabled / 0.5 respectively (backward-compatible with v22 configs).
     """
-    sql = (_DB_DIR / "migrations" / "022_relative_observations.sql").read_text(encoding="utf-8")
-    conn.executescript(sql)
+    existing = _tracker_config_columns(conn)
+    if "use_relative_observations" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN use_relative_observations INTEGER")
+    if "relative_min_confidence" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN relative_min_confidence REAL")
+    _set_schema_version(conn, 23)
     conn.commit()
 
 
@@ -660,11 +671,15 @@ def _migrate_session_v23_to_v24(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 23 to 24.
 
     v24 adds cross_pair_max_px and cross_pair_max_n to tracker_configs,
-    enabling spatial cross-pair RELATIVE observations (Phase 4).
+    enabling spatial cross-pair RELATIVE observations.
     NULL means disabled / 10 respectively (backward-compatible with v23 configs).
     """
-    sql = (_DB_DIR / "migrations" / "023_cross_pair_observations.sql").read_text(encoding="utf-8")
-    conn.executescript(sql)
+    existing = _tracker_config_columns(conn)
+    if "cross_pair_max_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN cross_pair_max_px REAL")
+    if "cross_pair_max_n" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN cross_pair_max_n INTEGER")
+    _set_schema_version(conn, 24)
     conn.commit()
 
 

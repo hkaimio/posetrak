@@ -1,7 +1,22 @@
 """backends_rtmpose.py — RTMPose estimator backend."""
 from __future__ import annotations
 
+import os
+import sys
 import numpy as np
+
+# On Windows, onnxruntime-gpu's CUDA provider DLL looks for CUDA libraries
+# (cublasLt64_12.dll etc.) on the system PATH.  PyTorch bundles those DLLs
+# in its own lib/ directory, so we register that directory before rtmlib
+# (and thus onnxruntime) is first imported.
+if sys.platform == "win32":
+    try:
+        import torch as _torch
+        _torch_lib = os.path.join(os.path.dirname(_torch.__file__), "lib")
+        if os.path.isdir(_torch_lib):
+            os.add_dll_directory(_torch_lib)
+    except (ImportError, OSError, AttributeError):
+        pass
 
 try:
     from rtmlib.tools.pose_estimation import RTMPose as _RTMPose
@@ -19,9 +34,18 @@ from posetrak.detection.backends import PersonDetection, PoseResult, register_es
 def _auto_device() -> str:
     try:
         import torch
-        return "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            return "cuda"
     except ImportError:
-        return "cpu"
+        pass
+    # Torch absent or CPU-only: check onnxruntime directly.
+    try:
+        import onnxruntime as ort
+        if "CUDAExecutionProvider" in ort.get_available_providers():
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
 
 
 # Known model configs: name → (url, input_size HxW, backend_class, conf_scale)

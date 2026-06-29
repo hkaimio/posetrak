@@ -18,9 +18,10 @@ dependencies = [
     "scipy>=1.17.1",
     "lap>=0.5.12",
     "ultralytics>=8.0",
-    # onnxruntime-gpu must be installed manually after sync to avoid the CPU
-    # version being reinstalled by uv as a transitive dep:
-    #   uv pip install --reinstall onnxruntime-gpu
+    # onnxruntime-gpu satisfies rtmlib's onnxruntime requirement at runtime
+    # (same import namespace). Pin to <1.26 while the system has CUDA 12.x;
+    # 1.26+ requires CUDA 13 (cublasLt64_13.dll).
+    "onnxruntime-gpu>=1.19,<1.26",
 ]
 
 [project.scripts]
@@ -45,10 +46,10 @@ dev = [
 ]
 segmentation = [
     "cutie",
-    # torch is pulled transitively by cutie; the [tool.uv.sources] below
-    # routes it to the CUDA 12.4 wheel index automatically.
-    # After uv sync --group segmentation, also run:
-    #   uv pip install --reinstall onnxruntime-gpu
+    # Pin torch so uv picks the CUDA 12.6 wheel via [tool.uv.sources] above
+    # instead of pulling 2.10.0+cpu from PyPI as a cutie transitive dep.
+    "torch>=2.7,<2.10",
+    "torchvision",
 ]
 analysis = [
     "marimo>=0.19",
@@ -65,13 +66,13 @@ usd = [
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu124" }
-torchvision = { index = "pytorch-cu124" }
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]

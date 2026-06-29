@@ -310,6 +310,26 @@ class TestVideoRelocate:
         ])
         assert result.exit_code == 0, result.output
 
+    def test_trailing_slash_normalised(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+        """Trailing slash on --from or --to must not cause path concatenation."""
+        import sqlite3 as _sqlite3
+        db = tmp_path / "s.db"
+        _make_session(db)
+
+        result = cli_runner.invoke(main, [
+            "--session", str(db), "video", "relocate",
+            "--from", "/old/mount/",   # trailing slash
+            "--to", "/new/mount",      # no trailing slash
+        ])
+        assert result.exit_code == 0, result.output
+
+        conn = _sqlite3.connect(db)
+        rows = conn.execute("SELECT file_path FROM capture_videos").fetchall()
+        conn.close()
+        for (fp,) in rows:
+            # separator must be preserved — no concatenation like /new/mountcap1/...
+            assert fp.startswith("/new/mount/"), repr(fp)
+
 
 # ---------------------------------------------------------------------------
 # capture show — videos section

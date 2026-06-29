@@ -222,12 +222,20 @@ def cmd_relocate(
         conn.close()
         fail(str(exc))
 
-    # Find rows whose file_path starts with old_prefix
-    to_update = [
-        (r["id"], r["file_path"])
-        for r in rows
-        if r["file_path"].startswith(old_prefix)
-    ]
+    # Normalise: strip trailing separators so the original path's separator
+    # is always preserved in the suffix, regardless of whether the user
+    # included a trailing slash on --from or --to.
+    old_norm = old_prefix.rstrip("/\\")
+    new_norm = new_prefix.rstrip("/\\")
+
+    def _matches(fp: str) -> bool:
+        return (
+            fp == old_norm
+            or fp.startswith(old_norm + "/")
+            or fp.startswith(old_norm + "\\")
+        )
+
+    to_update = [(r["id"], r["file_path"]) for r in rows if _matches(r["file_path"])]
 
     if not to_update:
         conn.close()
@@ -236,7 +244,8 @@ def cmd_relocate(
 
     records = []
     for vid_id, old_fp in to_update:
-        new_fp = new_prefix + old_fp[len(old_prefix):]
+        suffix = old_fp[len(old_norm):]   # retains leading sep from original path
+        new_fp = new_norm + suffix
         records.append({"id": vid_id, "old_path": old_fp, "new_path": new_fp})
 
     if dry_run:

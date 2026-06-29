@@ -42,6 +42,59 @@ def _open_registry(path: str) -> sqlite3.Connection:
         raise click.ClickException(f"Error opening registry: {exc}") from exc
 
 
+def _open_source(obj: dict) -> tuple[sqlite3.Connection, str]:
+    """Return (conn, label) — session DB if --session is set, else registry."""
+    session = obj.get("session")
+    if session:
+        from posetrak.db.db import open_session
+        try:
+            return open_session(Path(session)), "session"
+        except (FileNotFoundError, ValueError, sqlite3.DatabaseError) as exc:
+            raise click.ClickException(f"Error opening session: {exc}") from exc
+    return _open_registry(obj["registry"]), "registry"
+
+
+def _import_table(
+    src: sqlite3.Connection,
+    dst: sqlite3.Connection,
+    table: str,
+    *,
+    dry_run: bool,
+) -> tuple[int, int]:
+    """Copy rows from src table into dst using INSERT OR IGNORE.
+
+    Returns (imported, skipped) counts.  Columns present in src but absent
+    from dst are silently dropped so schema-version differences don't abort
+    the whole import.
+    """
+    try:
+        src_rows = src.execute(f"SELECT * FROM {table}").fetchall()  # noqa: S608
+    except sqlite3.DatabaseError as exc:
+        raise click.ClickException(f"Cannot read {table} from session: {exc}") from exc
+
+    if not src_rows:
+        return 0, 0
+
+    src_cols = list(src_rows[0].keys())
+    dst_cols = {row[1] for row in dst.execute(f"PRAGMA table_info({table})")}
+    use_cols = [c for c in src_cols if c in dst_cols]
+
+    placeholders = ", ".join("?" for _ in use_cols)
+    col_names = ", ".join(use_cols)
+    insert_sql = f"INSERT OR IGNORE INTO {table} ({col_names}) VALUES ({placeholders})"  # noqa: S608
+
+    imported = skipped = 0
+    existing_ids = {r[0] for r in dst.execute(f"SELECT id FROM {table}")}  # noqa: S608
+    for row in src_rows:
+        if row["id"] in existing_ids:
+            skipped += 1
+            continue
+        if not dry_run:
+            dst.execute(insert_sql, tuple(row[c] for c in use_cols))
+        imported += 1
+    return imported, skipped
+
+
 def _resolve(conn: sqlite3.Connection, table: str, prefix: str | None) -> str | None:
     """Resolve a UUID prefix; returns None if prefix is None."""
     if prefix is None:
@@ -195,12 +248,12 @@ def camera_model_add(
 @camera_model_group.command("list")
 @click.pass_obj
 def camera_model_list(obj: dict) -> None:
-    """List camera models registered in the registry."""
-    registry = _open_registry(obj["registry"])
+    """List camera models (registry, or session DB if --session is given)."""
+    conn, _src = _open_source(obj)
     try:
-        rows = list_camera_models(registry)
+        rows = list_camera_models(conn)
     finally:
-        registry.close()
+        conn.close()
 
     if not rows:
         if not obj["json_mode"]:
@@ -270,12 +323,12 @@ def camera_mode_add(
               help="Filter by camera model ID")
 @click.pass_obj
 def camera_mode_list(obj: dict, model_id: str) -> None:
-    """List camera modes registered in the registry."""
-    registry = _open_registry(obj["registry"])
+    """List camera modes (registry, or session DB if --session is given)."""
+    conn, _src = _open_source(obj)
     try:
-        rows = list_camera_modes(registry, camera_model_id=model_id or None)
+        rows = list_camera_modes(conn, camera_model_id=model_id or None)
     finally:
-        registry.close()
+        conn.close()
 
     if not rows:
         if not obj["json_mode"]:
@@ -331,16 +384,16 @@ def camera_add(obj: dict, model_id: str, label: str, serial: str) -> None:
               help="Filter by camera model ID (or unique prefix)")
 @click.pass_obj
 def camera_list(obj: dict, model_id: str) -> None:
-    """List camera instances registered in the registry."""
-    registry = _open_registry(obj["registry"])
+    """List camera instances (registry, or session DB if --session is given)."""
+    conn, _src = _open_source(obj)
     try:
-        rows = list_camera_instances(registry, camera_model_id=model_id or None)
+        rows = list_camera_instances(conn, camera_model_id=model_id or None)
         models = {
             r["id"]: f"{r['manufacturer'] or ''} {r['model_name'] or ''}".strip()
-            for r in registry.execute("SELECT * FROM camera_models").fetchall()
+            for r in conn.execute("SELECT * FROM camera_models").fetchall()
         }
     finally:
-        registry.close()
+        conn.close()
 
     if not rows:
         if not obj["json_mode"]:
@@ -358,6 +411,66 @@ def camera_list(obj: dict, model_id: str) -> None:
         columns=["id", "label", "serial_number", "camera_model_id", "model"],
         json_mode=obj["json_mode"],
     )
+
+
+@camera_group.command("import-session")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Show what would be imported without writing anything.")
+@click.pass_obj
+def camera_import_session(obj: dict, dry_run: bool) -> None:
+    """Copy camera data from a session DB into the registry.
+
+    Reads camera_models, camera_modes, camera_instances, and
+    intrinsics_calibrations from the session DB (--session required) and
+    inserts any rows not already present in the registry.  Existing rows
+    (matched by UUID) are left unchanged, so the command is safe to re-run
+    and handles the case where a model already exists but some of its modes
+    or calibrations are missing.
+    """
+    session_path = obj.get("session")
+    if not session_path:
+        raise click.ClickException("--session is required for 'camera import-session'.")
+
+    # Open source read-only to avoid running migrations on a potentially
+    # corrupted session DB.
+    try:
+        src = sqlite3.connect(f"file:{Path(session_path)}?mode=ro", uri=True)
+        src.row_factory = sqlite3.Row
+    except sqlite3.DatabaseError as exc:
+        raise click.ClickException(f"Cannot open session: {exc}") from exc
+
+    dst = _open_registry(obj["registry"])
+
+    if dry_run:
+        click.echo("Dry run — nothing will be written.")
+
+    tables = [
+        "camera_models",
+        "camera_modes",
+        "camera_instances",
+        "intrinsics_calibrations",
+    ]
+    total_imported = 0
+    try:
+        for table in tables:
+            try:
+                n_imp, n_skip = _import_table(src, dst, table, dry_run=dry_run)
+            except click.ClickException as exc:
+                click.echo(f"  WARNING: {exc.format_message()}", err=True)
+                n_imp, n_skip = 0, 0
+            verb = "would import" if dry_run else "imported"
+            click.echo(
+                f"  {table:<30} {n_imp:>4} {verb},  {n_skip:>4} already present"
+            )
+            total_imported += n_imp
+        if not dry_run:
+            dst.commit()
+    finally:
+        src.close()
+        dst.close()
+
+    if not dry_run and total_imported == 0:
+        click.echo("Nothing to import — registry is already up to date.")
 
 
 @camera_group.command("show")

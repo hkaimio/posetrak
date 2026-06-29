@@ -320,13 +320,14 @@ def camera_mode_add(
 
 @camera_mode_group.command("list")
 @click.option("--model-id", default="", metavar="UUID",
-              help="Filter by camera model ID")
+              help="Filter by camera model ID (or unique prefix)")
 @click.pass_obj
 def camera_mode_list(obj: dict, model_id: str) -> None:
     """List camera modes (registry, or session DB if --session is given)."""
     conn, _src = _open_source(obj)
     try:
-        rows = list_camera_modes(conn, camera_model_id=model_id or None)
+        resolved_model_id = _resolve(conn, "camera_models", model_id or None)
+        rows = list_camera_modes(conn, camera_model_id=resolved_model_id)
     finally:
         conn.close()
 

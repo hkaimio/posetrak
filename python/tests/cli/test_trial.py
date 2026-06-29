@@ -397,11 +397,11 @@ class TestTrialList:
 
 
 # ---------------------------------------------------------------------------
-# CLI: trial export
+# CLI: export
 # ---------------------------------------------------------------------------
 
 
-class TestTrialExport:
+class TestExportCommand:
     def test_export_capture(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         src = tmp_path / "src.db"
         ids = _make_full_session(src)
@@ -409,7 +409,7 @@ class TestTrialExport:
 
         result = cli_runner.invoke(main, [
             "--session", str(src),
-            "trial", "export", str(out),
+            "export", str(out),
             "--capture", ids["capture"],
             "--scope", "capture-only",
         ])
@@ -421,6 +421,23 @@ class TestTrialExport:
         assert conn.execute("SELECT COUNT(*) FROM trials").fetchone()[0] == 0
         conn.close()
 
+    def test_export_capture_prefix(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+        """Abbreviated capture ID (8-char prefix) should be accepted."""
+        src = tmp_path / "src.db"
+        ids = _make_full_session(src)
+        out = tmp_path / "out.db"
+
+        result = cli_runner.invoke(main, [
+            "--session", str(src),
+            "export", str(out),
+            "--capture", ids["capture"][:8],   # prefix only
+            "--scope", "capture-only",
+        ])
+        assert result.exit_code == 0, result.output
+        conn = sqlite3.connect(out)
+        assert conn.execute("SELECT COUNT(*) FROM captures").fetchone()[0] == 1
+        conn.close()
+
     def test_export_trial_detection_scope(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         src = tmp_path / "src.db"
         ids = _make_full_session(src)
@@ -428,7 +445,7 @@ class TestTrialExport:
 
         result = cli_runner.invoke(main, [
             "--session", str(src),
-            "trial", "export", str(out),
+            "export", str(out),
             "--trial", ids["trial"],
             "--scope", "detection-only",
         ])
@@ -445,7 +462,7 @@ class TestTrialExport:
 
         result = cli_runner.invoke(main, [
             "--session", str(src),
-            "trial", "export", str(out),
+            "export", str(out),
             "--tracking-run", ids["tracking_run"],
         ])
         assert result.exit_code == 0, result.output
@@ -460,7 +477,7 @@ class TestTrialExport:
 
         result = cli_runner.invoke(main, [
             "--session", str(src),
-            "trial", "export", str(out),
+            "export", str(out),
             "--capture", ids["capture"],
             "--dry-run",
         ])
@@ -472,11 +489,11 @@ class TestTrialExport:
         src = tmp_path / "src.db"
         ids = _make_full_session(src)
         out = tmp_path / "out.db"
-        out.write_text("")  # create a file
+        out.write_text("")
 
         result = cli_runner.invoke(main, [
             "--session", str(src),
-            "trial", "export", str(out),
+            "export", str(out),
             "--capture", ids["capture"],
         ])
         assert result.exit_code != 0
@@ -488,7 +505,7 @@ class TestTrialExport:
 
         result = cli_runner.invoke(main, [
             "--session", str(src),
-            "trial", "export", str(out),
+            "export", str(out),
             "--capture", ids["capture"],
             "--scope", "detection-only",
             "--skip-tables", "pose_observation_edits",
@@ -505,7 +522,7 @@ class TestTrialExport:
 
         result = cli_runner.invoke(main, [
             "--session", str(src),
-            "trial", "export", str(out),
+            "export", str(out),
             "--scope", "full",
         ])
         assert result.exit_code == 0, result.output
@@ -513,13 +530,23 @@ class TestTrialExport:
         assert conn.execute("SELECT COUNT(*) FROM captures").fetchone()[0] == 1
         conn.close()
 
+    def test_export_requires_session(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+        registry = tmp_path / "reg.db"
+        from posetrak.db.db import create_registry
+        create_registry(registry).close()
+        result = cli_runner.invoke(main, [
+            "--registry", str(registry),
+            "export", str(tmp_path / "out.db"),
+        ])
+        assert result.exit_code != 0
+
 
 # ---------------------------------------------------------------------------
-# CLI: trial import
+# CLI: import
 # ---------------------------------------------------------------------------
 
 
-class TestTrialImport:
+class TestImportCommand:
     def _export_full(self, src_path: Path, export_path: Path) -> None:
         src = open_source_readonly(src_path)
         dst = create_session(export_path)
@@ -537,13 +564,33 @@ class TestTrialImport:
 
         result = cli_runner.invoke(main, [
             "--session", str(target),
-            "trial", "import", str(export_path),
+            "import", str(export_path),
         ])
         assert result.exit_code == 0, result.output
 
         conn = open_session(target)
         assert conn.execute("SELECT COUNT(*) FROM captures").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM tracking_runs").fetchone()[0] == 1
+        conn.close()
+
+    def test_import_capture_prefix(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+        """Abbreviated capture ID prefix should be resolved from the source DB."""
+        src = tmp_path / "src.db"
+        ids = _make_full_session(src)
+        export_path = tmp_path / "export.db"
+        self._export_full(src, export_path)
+
+        target = tmp_path / "target.db"
+        create_session(target).close()
+
+        result = cli_runner.invoke(main, [
+            "--session", str(target),
+            "import", str(export_path),
+            "--capture", ids["capture"][:8],
+        ])
+        assert result.exit_code == 0, result.output
+        conn = open_session(target)
+        assert conn.execute("SELECT COUNT(*) FROM captures").fetchone()[0] == 1
         conn.close()
 
     def test_import_dry_run(self, cli_runner: CliRunner, tmp_path: Path) -> None:
@@ -557,7 +604,7 @@ class TestTrialImport:
 
         result = cli_runner.invoke(main, [
             "--session", str(target),
-            "trial", "import", str(export_path),
+            "import", str(export_path),
             "--dry-run",
         ])
         assert result.exit_code == 0, result.output
@@ -578,7 +625,7 @@ class TestTrialImport:
         for _ in range(2):
             result = cli_runner.invoke(main, [
                 "--session", str(target),
-                "trial", "import", str(export_path),
+                "import", str(export_path),
             ])
             assert result.exit_code == 0, result.output
 
@@ -597,12 +644,12 @@ class TestTrialImport:
 
         result = cli_runner.invoke(main, [
             "--session", str(target),
-            "trial", "import", str(export_path),
+            "import", str(export_path),
             "--skip-tables", "pose_observation_edits",
         ])
         assert result.exit_code == 0, result.output
 
-    def test_requires_session(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+    def test_import_requires_session(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         src = tmp_path / "src.db"
         _make_full_session(src)
         registry = tmp_path / "reg.db"
@@ -611,6 +658,6 @@ class TestTrialImport:
 
         result = cli_runner.invoke(main, [
             "--registry", str(registry),
-            "trial", "import", str(src),
+            "import", str(src),
         ])
         assert result.exit_code != 0

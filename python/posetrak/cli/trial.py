@@ -1,4 +1,11 @@
-"""trial.py — CLI commands for trial export, import, and listing."""
+"""trial.py — Trial management, export, and import commands.
+
+Commands
+--------
+trial list          List trials in the session DB (group with one sub-command).
+export OUTPUT.db    Export data from the current session to a new DB.
+import SOURCE.db    Import data from an exported DB into the current session.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +15,7 @@ from pathlib import Path
 import click
 
 from posetrak.cli._output import fail, print_table
-from posetrak.db.db import create_session, open_session
+from posetrak.db.db import create_session, open_session, resolve_id_prefix
 from posetrak.db.trial_export import (
     AnchorSpec,
     ExportScope,
@@ -19,18 +26,13 @@ from posetrak.db.trial_export import (
 
 
 # ---------------------------------------------------------------------------
-# Group
+# trial list
 # ---------------------------------------------------------------------------
 
 
 @click.group("trial")
 def trial_group() -> None:
-    """List, export, and import trials."""
-
-
-# ---------------------------------------------------------------------------
-# trial list
-# ---------------------------------------------------------------------------
+    """Manage trials."""
 
 
 @trial_group.command("list")
@@ -52,7 +54,7 @@ def cmd_list(ctx: click.Context) -> None:
 
     try:
         conn = open_session(Path(session_path))
-    except (FileNotFoundError, ValueError, Exception) as exc:
+    except Exception as exc:
         fail(str(exc))
 
     rows = conn.execute("""
@@ -76,7 +78,6 @@ def cmd_list(ctx: click.Context) -> None:
     """).fetchall()
 
     if not rows:
-        # Fall back to capture listing when no trials are defined
         cap_rows = conn.execute("""
             SELECT
                 c.id,
@@ -111,7 +112,7 @@ def cmd_list(ctx: click.Context) -> None:
 
 
 # ---------------------------------------------------------------------------
-# trial export
+# Shared helpers for export / import
 # ---------------------------------------------------------------------------
 
 
@@ -123,12 +124,43 @@ def _default_scope(anchor: AnchorSpec) -> ExportScope:
     return ExportScope.CAPTURE_ONLY
 
 
-@trial_group.command("export")
+def _resolve_anchors(
+    conn,
+    trial_ids: tuple[str, ...],
+    capture_ids: tuple[str, ...],
+    detection_ids: tuple[str, ...],
+    tracking_run_ids: tuple[str, ...],
+) -> AnchorSpec:
+    """Resolve ID prefixes to full UUIDs; fail loudly if ambiguous or missing."""
+
+    def resolve(table: str, ids: tuple[str, ...]) -> list[str]:
+        result = []
+        for id_ in ids:
+            try:
+                result.append(resolve_id_prefix(conn, table, id_))
+            except ValueError as exc:
+                fail(str(exc))
+        return result
+
+    return AnchorSpec(
+        trial_ids=resolve("trials", trial_ids),
+        capture_ids=resolve("captures", capture_ids),
+        detection_ids=resolve("detection_runs", detection_ids),
+        tracking_run_ids=resolve("tracking_runs", tracking_run_ids),
+    )
+
+
+# ---------------------------------------------------------------------------
+# export
+# ---------------------------------------------------------------------------
+
+
+@click.command("export")
 @click.argument("output", metavar="OUTPUT.db")
-@click.option("--trial",        "trial_ids",        multiple=True, metavar="ID", help="Trial ID to export (repeatable).")
-@click.option("--capture",      "capture_ids",      multiple=True, metavar="ID", help="Capture ID to export (repeatable).")
-@click.option("--detection",    "detection_ids",    multiple=True, metavar="ID", help="Detection run ID to export (repeatable).")
-@click.option("--tracking-run", "tracking_run_ids", multiple=True, metavar="ID", help="Tracking run ID to export (repeatable).")
+@click.option("--trial",        "trial_ids",        multiple=True, metavar="ID", help="Trial ID or prefix (repeatable).")
+@click.option("--capture",      "capture_ids",      multiple=True, metavar="ID", help="Capture ID or prefix (repeatable).")
+@click.option("--detection",    "detection_ids",    multiple=True, metavar="ID", help="Detection run ID or prefix (repeatable).")
+@click.option("--tracking-run", "tracking_run_ids", multiple=True, metavar="ID", help="Tracking run ID or prefix (repeatable).")
 @click.option(
     "--scope",
     type=click.Choice([s.value for s in ExportScope], case_sensitive=False),
@@ -157,10 +189,11 @@ def cmd_export(
     skip_tables: str,
     dry_run: bool,
 ) -> None:
-    """Export trials and their dependencies to a new session database.
+    """Export session data to a new portable database.
 
-    At least one anchor (--trial, --capture, --detection, --tracking-run) is
-    required; if none are given, all captures in the session are exported.
+    At least one anchor flag (--trial, --capture, --detection, --tracking-run)
+    selects what to export. Without any anchor, all captures are exported.
+    Anchor IDs accept a unique prefix (first 8 characters suffice).
 
     Scope controls how much data is included:
 
@@ -173,28 +206,19 @@ def cmd_export(
     Default scope: capture → capture-only; trial/detection → detection-only;
     tracking-run → full.
 
-    Example:
+    Examples:
 
-        posetrak --session session.db trial export backup.db --trial <id> --dry-run
+        posetrak -s session.db export backup.db --capture 13af67f5 --scope full
+        posetrak -s session.db export backup.db --trial <id> --dry-run
+        posetrak -s session.db export backup.db --skip-tables pose_observation_edits
     """
     session_path: str | None = ctx.obj.get("session")
     if session_path is None:
-        fail("--session / POSETRAK_SESSION_DB is required for 'trial export'.")
+        fail("--session / POSETRAK_SESSION_DB is required for 'export'.")
 
     output_path = Path(output)
     if output_path.exists() and not dry_run:
         fail(f"Output already exists: {output_path}  (delete it first or use --dry-run)")
-
-    anchor = AnchorSpec(
-        trial_ids=list(trial_ids),
-        capture_ids=list(capture_ids),
-        detection_ids=list(detection_ids),
-        tracking_run_ids=list(tracking_run_ids),
-    )
-
-    resolved_scope = (
-        ExportScope(scope) if scope else _default_scope(anchor)
-    )
 
     skip_set = {t.strip() for t in skip_tables.split(",") if t.strip()}
 
@@ -202,6 +226,11 @@ def cmd_export(
         src = open_source_readonly(Path(session_path))
     except Exception as exc:
         fail(f"Cannot open source session: {exc}")
+
+    # Resolve prefixes against the source DB
+    anchor = _resolve_anchors(src, trial_ids, capture_ids, detection_ids, tracking_run_ids)
+
+    resolved_scope = ExportScope(scope) if scope else _default_scope(anchor)
 
     click.echo(f"Source:  {session_path}", err=True)
     click.echo(f"Output:  {output_path}", err=True)
@@ -245,15 +274,15 @@ def cmd_export(
 
 
 # ---------------------------------------------------------------------------
-# trial import
+# import
 # ---------------------------------------------------------------------------
 
 
-@trial_group.command("import")
+@click.command("import")
 @click.argument("source", metavar="SOURCE.db")
-@click.option("--trial",        "trial_ids",     multiple=True, metavar="ID", help="Trial ID to import (repeatable; default: all).")
-@click.option("--capture",      "capture_ids",   multiple=True, metavar="ID", help="Capture ID to import (repeatable; default: all).")
-@click.option("--detection",    "detection_ids", multiple=True, metavar="ID", help="Detection run ID to import (repeatable; default: all).")
+@click.option("--trial",     "trial_ids",     multiple=True, metavar="ID", help="Trial ID or prefix to import (default: all).")
+@click.option("--capture",   "capture_ids",   multiple=True, metavar="ID", help="Capture ID or prefix to import (default: all).")
+@click.option("--detection", "detection_ids", multiple=True, metavar="ID", help="Detection run ID or prefix to import (default: all).")
 @click.option("--sync-registry", is_flag=True, default=False,
               help="Also copy camera/skeleton/config data to --registry.")
 @click.option("--skip-tables", default="", metavar="TABLE,...",
@@ -271,32 +300,32 @@ def cmd_import(
     skip_tables: str,
     dry_run: bool,
 ) -> None:
-    """Import trials from SOURCE.db into the current session.
+    """Import data from SOURCE.db into the current session.
 
-    SOURCE.db is typically a file produced by 'trial export'.  All data in
-    SOURCE.db is imported (full scope) unless anchor flags narrow the selection.
+    SOURCE.db is typically a file produced by 'export'. All data in SOURCE.db
+    is imported (full scope) unless anchor flags narrow the selection.
+    Anchor IDs accept a unique prefix (first 8 characters suffice).
 
-    Example:
+    Examples:
 
-        posetrak --session session.db trial import backup.db --dry-run
-        posetrak --session session.db trial import backup.db --trial <id>
+        posetrak -s session.db import backup.db --dry-run
+        posetrak -s session.db import backup.db --trial <id>
+        posetrak -s session.db import backup.db --skip-tables pose_observation_edits
     """
     session_path: str | None = ctx.obj.get("session")
     if session_path is None:
-        fail("--session / POSETRAK_SESSION_DB is required for 'trial import'.")
+        fail("--session / POSETRAK_SESSION_DB is required for 'import'.")
 
     registry_path: str = ctx.obj["registry"]
-    anchor = AnchorSpec(
-        trial_ids=list(trial_ids),
-        capture_ids=list(capture_ids),
-        detection_ids=list(detection_ids),
-    )
     skip_set = {t.strip() for t in skip_tables.split(",") if t.strip()}
 
     try:
         src = open_source_readonly(Path(source))
     except Exception as exc:
         fail(f"Cannot open source: {exc}")
+
+    # Resolve prefixes against the source DB
+    anchor = _resolve_anchors(src, trial_ids, capture_ids, detection_ids, ())
 
     try:
         dst_session = open_session(Path(session_path))

@@ -95,11 +95,12 @@ All items complete:
 - `python/posetrak/cli/trial.py` — CLI commands:
   - `trial list` — shows trials with capture label, detection count, tracking run count;
     falls back to capture list when no trials exist
-  - `trial export OUTPUT.db [--trial|--capture|--detection|--tracking-run ID]... [--scope ...]
-    [--include-cache] [--skip-tables T,...] [--dry-run]`
-  - `trial import SRC.db [--trial|--capture|--detection ID]... [--sync-registry] [--skip-tables T,...]
-    [--dry-run]`
-- 26 new tests in `python/tests/cli/test_trial.py` covering library and CLI (total CLI tests: 101)
+  - `export OUTPUT.db [--trial|--capture|--detection|--tracking-run ID]... [--scope ...]
+    [--include-cache] [--skip-tables T,...] [--dry-run]` — top-level command
+  - `import SRC.db [--trial|--capture|--detection ID]... [--sync-registry] [--skip-tables T,...]
+    [--dry-run]` — top-level command
+  - All anchor IDs accept unique prefix (8 chars); resolved via `resolve_id_prefix` before export/import
+- 29 new tests in `python/tests/cli/test_trial.py` covering library and CLI (total CLI tests: 104)
 
 ### Phase 6 — `detect finalise`
 
@@ -119,4 +120,4 @@ Delete: `app/pose/cli.py`, `app/setup/main.py`, `app/setup/page_session.py`
 
 - `pose list/import` commands exist in `python/posetrak/cli/pose.py` as a carry-over from
   the old CLI. These are not in the design doc and should be reviewed before Phase 7 retirement.
-- Tests live in `python/tests/cli/`; all 101 tests pass as of Phase 5 completion.
+- Tests live in `python/tests/cli/`; all 104 tests pass as of Phase 5 completion.

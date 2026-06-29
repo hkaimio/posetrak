@@ -9,7 +9,7 @@ See [cli-design.md](cli-design.md) for the full requirements and design.
 | 1 | Consolidate existing CLI into Click | ✅ Done |
 | 2 | `detect run/list/show` commands | ✅ Done |
 | 3 | `track list/show` and `track export bvh/gltf/usd` | ✅ Done |
-| 4 | Extract `run_tracker()`; add `track run`; MCP detection tools | ⬜ Not started |
+| 4 | Extract `run_tracker()`; add `track run`; MCP workflow tools | ✅ Done |
 | 5 | `trial export/import` | ⬜ Not started |
 | 6 | `detect finalise` (person assignment) | ⬜ Not started |
 | 7 | Retire old entry points (`posetrak-pose`, `posetrak-setup`) | ⬜ Not started |
@@ -22,7 +22,7 @@ See [cli-design.md](cli-design.md) for the full requirements and design.
 registry init/info
 camera-model add/list
 camera-mode add/list
-camera add/list/show
+camera add/list/show/import-session
 calib import/import-h5/list
 skeleton import/list/show/export/scale
 config create/list/show/edit
@@ -57,19 +57,25 @@ track export usd        ID OUTPUT [--smoothed] [--fps N] [--units m|cm] [--coord
 
 ## Pending work
 
-### Phase 4 — tracker subprocess extraction
+### Phase 4 — tracker subprocess extraction ✅
 
-- Rename C++ binary to `posetrak-tracker` in `cli/meson.build`
-- Extract subprocess logic from `app/pose/run_tracker.py` (`RunTrackerWidget`) into
-  `posetrak/tracker/runner.py`:
-  ```python
-  def run_tracker(session_path, sequence_id, skeleton_id, config_id, output_dir, *,
-                  binary_path=None, person_id=0, on_progress=None) -> int
-  ```
-- Refactor `RunTrackerWidget` to call `run_tracker()` with a Qt signal as `on_progress`
-- Add `posetrak track run --sequence ID --skeleton ID --config ID [--output-dir PATH] [--person-id N] [--fps N]`
-- Add MCP detection read tools (`list_captures`, `list_detection_runs`, `list_tracking_runs`,
-  `get_capture_info`) and `run_detection` write tool
+All items complete:
+
+- `posetrak/tracker/runner.py` — `run_tracker()` / `TrackerResult`; `RunTrackerWidget`
+  refactored to use `_TrackerThread(QThread)` calling the extracted function
+- `track run` — inline config overrides on the command line; inserts a `cli-run` config row;
+  prints `tracking_run_id` on success
+- MCP workflow read tools: `list_captures`, `list_detection_runs`, `get_capture_info`
+- MCP workflow write tools (`--mcp-allow-write` opt-in): `run_detection`, `run_tracking`
+
+Also added outside the original Phase 4 scope (prompted by session DB portability need):
+
+- `camera list`, `camera-model list`, `camera-mode list` are session-aware: pass `--session`
+  to read from a session DB instead of the registry
+- `camera import-session` — copies `camera_models`, `camera_modes`, `camera_instances`, and
+  `intrinsics_calibrations` from a session DB into the registry; INSERT OR IGNORE so re-runs
+  and partial states (model present, modes/calibrations missing) are handled correctly;
+  `--dry-run` flag available
 
 ### Phase 5 — trial portability
 
@@ -96,4 +102,4 @@ Delete: `app/pose/cli.py`, `app/setup/main.py`, `app/setup/page_session.py`
 
 - `pose list/import` commands exist in `python/posetrak/cli/pose.py` as a carry-over from
   the old CLI. These are not in the design doc and should be reviewed before Phase 7 retirement.
-- Tests live in `python/tests/cli/`; all 60 tests pass as of Phase 3 completion.
+- Tests live in `python/tests/cli/`; all 75 tests pass as of Phase 4 completion.

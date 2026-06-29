@@ -291,7 +291,7 @@ def capture_list(obj: dict, session: str | None) -> None:
 @click.argument("capture_id", metavar="ID_OR_PREFIX")
 @click.pass_obj
 def capture_show(obj: dict, capture_id: str) -> None:
-    """Show details for one capture."""
+    """Show details for one capture, including its video files."""
     conn = _open_session_required(obj)
     try:
         resolved = _resolve(conn, "captures", capture_id)
@@ -300,26 +300,68 @@ def capture_show(obj: dict, capture_id: str) -> None:
             "FROM captures WHERE id = ?",
             (resolved,),
         ).fetchone()
+        if row is None:
+            raise click.ClickException(f"Capture not found: {capture_id}")
+
+        video_rows = conn.execute(
+            """
+            SELECT cv.id, ci.label AS camera_label, cv.file_path, cv.actual_fps
+            FROM capture_videos cv
+            JOIN camera_instances ci ON ci.id = cv.camera_instance_id
+            WHERE cv.shot_id = ?
+            ORDER BY ci.label
+            """,
+            (resolved,),
+        ).fetchall()
     except sqlite3.Error as exc:
         conn.close()
         raise click.ClickException(str(exc)) from exc
     finally:
         conn.close()
 
-    if row is None:
-        raise click.ClickException(f"Capture not found: {capture_id}")
-
-    print_record(
+    videos = [
         {
-            "id": row[0],
-            "session_id": row[1],
-            "capture_number": row[2],
-            "label": row[3] or "",
-            "extrinsic_calibration_id": row[4] or "",
-            "notes": row[5] or "",
-        },
-        json_mode=obj["json_mode"],
-    )
+            "id":         r["id"],
+            "camera":     r["camera_label"] or "",
+            "file_path":  r["file_path"],
+            "fps":        r["actual_fps"],
+            "exists":     Path(r["file_path"]).exists(),
+        }
+        for r in video_rows
+    ]
+
+    json_mode: bool = obj["json_mode"]
+    record = {
+        "id": row[0],
+        "session_id": row[1],
+        "capture_number": row[2],
+        "label": row[3] or "",
+        "extrinsic_calibration_id": row[4] or "",
+        "notes": row[5] or "",
+    }
+
+    if json_mode:
+        record["videos"] = videos
+        print_record(record, json_mode=True)
+    else:
+        print_record(record, json_mode=False)
+        if videos:
+            click.echo("")
+            click.echo("Videos:")
+            print_table(
+                [
+                    {
+                        "id":        v["id"],
+                        "camera":    v["camera"],
+                        "file_path": v["file_path"],
+                        "fps":       str(v["fps"]),
+                        "exists":    "yes" if v["exists"] else "NO",
+                    }
+                    for v in videos
+                ],
+                columns=["id", "camera", "file_path", "fps", "exists"],
+                json_mode=False,
+            )
 
 
 @capture_group.command("create")

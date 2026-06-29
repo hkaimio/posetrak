@@ -100,6 +100,7 @@ from posetrak.cli.pose import pose_group  # noqa: E402
 from posetrak.cli.detect import detect_group  # noqa: E402
 from posetrak.cli.track import track_group  # noqa: E402
 from posetrak.cli.trial import trial_group, cmd_export, cmd_import  # noqa: E402
+from posetrak.cli.video import video_group  # noqa: E402
 
 main.add_command(registry_group, "registry")
 main.add_command(camera_model_group, "camera-model")
@@ -118,3 +119,4 @@ main.add_command(track_group, "track")
 main.add_command(trial_group, "trial")
 main.add_command(cmd_export, "export")
 main.add_command(cmd_import, "import")
+main.add_command(video_group, "video")

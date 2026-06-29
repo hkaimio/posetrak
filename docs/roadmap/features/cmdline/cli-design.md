@@ -441,6 +441,8 @@ Add MCP detection tools (reads + `run_detection` write tool).
 Implement `posetrak trial export/import`. New functionality; requires subset-copy schema logic.
 Add MCP tracker and export tools.
 
+See [Phase 5 detailed design](#phase-5-detailed-design) below.
+
 **Phase 6 — Detect finalise**
 Design and implement `posetrak detect finalise` with a workable CLI convention for
 person assignment. Single-person case (`--assign "0:Subject"`) can ship first; multi-person
@@ -449,3 +451,160 @@ needs more design (possibly an interactive TUI or a two-step list-then-assign fl
 **Phase 7 — Retire old entry points**
 Remove `posetrak-pose`, `posetrak-setup` from `pyproject.toml`.
 Remove `app/pose/cli.py`, `app/setup/main.py`, `app/setup/page_session.py`.
+
+---
+
+## Phase 5 detailed design
+
+### What "trial" means for export
+
+The `trials` table is optional metadata (named time windows within a capture). The real
+portable unit of work is a **tracking run** and everything it depends on. All three Phase 5
+commands anchor on `tracking_run_id`.
+
+### CLI interface
+
+```bash
+# Browse what's exportable (tracking runs with full context)
+posetrak --session SRC.db trial list
+
+# Export one tracking run to a portable, standalone DB file
+posetrak --session SRC.db trial export TRACKING_RUN_ID OUTPUT.db
+    [--skip-tables TABLE,...]    # explicitly exclude known-corrupted tables
+    [--no-raw-detections]        # omit detection_keypoints / person_detections (raw YOLO output)
+    [--dry-run]                  # report what would be written without writing
+
+# Import from an exported (or any) session DB into --session + --registry
+posetrak --session DST.db trial import SRC.db [RUN_ID ...]
+    [--dry-run]
+```
+
+Typical recovery workflow for a corrupted source DB:
+
+```bash
+# 1. See what tracking runs are present
+posetrak --session corrupted.db trial list
+
+# 2. Dry-run to see which tables are readable
+posetrak --session corrupted.db trial export abc12345 /dev/null --dry-run
+
+# 3. Export, skipping the corrupted table
+posetrak --session corrupted.db trial export abc12345 clean.db \
+    --skip-tables pose_observation_edits
+
+# 4. Import clean.db on the target machine
+posetrak --session new.db trial import clean.db
+```
+
+### Dependency graph
+
+Everything a tracking run pulls in, in copy order:
+
+```
+Registry tables (embedded in session DB — copy only referenced rows):
+  camera_models
+  camera_modes
+  camera_instances
+  intrinsics_calibrations
+  skeletons
+  tracker_configs
+
+Session tables (in dependency order):
+  mocap_sessions
+  extrinsic_calibrations
+  extrinsic_entries
+  captures
+  capture_videos
+  sync_configs
+  sync_points
+  sync_anchors                      (optional metadata)
+  sync_anchor_observations          (optional metadata)
+  trials                            (rows matching capture_id, if any)
+  detection_runs
+  detection_keypoints               [excluded with --no-raw-detections]
+  person_detections                 [excluded with --no-raw-detections]
+  person_tracks
+  detection_track_assignments
+  pose_observation_sequences
+  sequence_persons
+  pose_observations
+  pose_observation_edits            [skippable — was corrupted in real-world case]
+  tracking_runs
+  tracking_run_persons
+  tracking_results
+  tracking_obs_results
+```
+
+Tables **always excluded** (UI cache / segmentation data — large blobs, not needed for analysis):
+`frame_cache_entries`, `seg_quality_runs`, `keypoint_obs_quality`, `seg_masks`
+
+### Robustness requirements
+
+1. **Source opened read-only** via URI (`?mode=ro`) — migrations never run on a potentially
+   corrupted source DB.
+2. **Per-table error handling** — each table copy is wrapped independently; a failure emits a
+   warning and continues rather than aborting the whole export.
+3. **`--skip-tables`** — explicit opt-out for known-bad tables by name.
+4. **`--dry-run`** — traces the dependency walk and reports row counts per table without writing
+   anything; safe to run against a corrupted DB.
+5. **FK enforcement OFF** on destination during import (same pattern as `camera import-session`).
+6. **Progress output** — for large tables (pose_observations, tracking_results) print a one-line
+   summary so the user can see the export is making progress.
+
+### Library layer
+
+New module `python/posetrak/db/trial_export.py` (CLI is a thin wrapper over this):
+
+```python
+@dataclass
+class TableResult:
+    table: str
+    rows_copied: int
+    error: str | None          # None = success
+
+@dataclass
+class ExportResult:
+    tracking_run_id: str
+    tables: list[TableResult]
+
+def export_trial(
+    src: sqlite3.Connection,   # read-only source
+    dst: sqlite3.Connection,   # fresh session DB created by caller
+    tracking_run_id: str,
+    *,
+    skip_tables: set[str] = frozenset(),
+    include_raw_detections: bool = True,
+    on_progress: Callable[[str], None] | None = None,
+) -> ExportResult: ...
+
+def import_trial(
+    src: sqlite3.Connection,              # read-only exported DB
+    dst_session: sqlite3.Connection,
+    dst_registry: sqlite3.Connection | None,   # None = skip registry sync
+    tracking_run_ids: list[str] | None,        # None = all runs in src
+    *,
+    skip_tables: set[str] = frozenset(),
+    dry_run: bool = False,
+    on_progress: Callable[[str], None] | None = None,
+) -> list[ExportResult]: ...
+```
+
+### `trial list` output
+
+```
+RUN_ID      CAPTURE          SEQUENCE             SKELETON          RAN_AT
+----------  ---------------  -------------------  ----------------  ----------
+abc12345…   ukemi-2026-05    tommi / person-0     body26-scaled     2026-05-09
+def89abc…   ukemi-2026-05    tommi / person-0     body26-scaled     2026-05-10
+```
+
+### Open questions
+
+- **`--no-raw-detections` default** — include raw detections by default (complete export), skip
+  with opt-out flag for speed/recovery. Detection keypoints can be tens of millions of rows.
+- **`trial import` and registry** — `trial import` syncs camera/skeleton/config data to
+  `--registry` as well as `--session`, so the imported trial is immediately usable on a fresh
+  machine without a separate `camera import-session` step.
+- **`trial list`** — distinct from `track list`: shows capture label, sequence name, skeleton
+  name, and run timestamp in one line, giving enough context to identify which run to export
+  without needing `track show`.

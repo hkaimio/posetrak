@@ -477,13 +477,14 @@ trial's `[time_start_s, time_end_s]` window and the capture's observation sequen
 
 ### Export scopes
 
-Three useful levels of export, controlled by flags:
+Four levels, named to indicate "up to and including this level":
 
-| Scope | What's included | Use case |
-|-------|-----------------|----------|
-| `--scope capture` | capture + calibrations + sync only | Archive raw recording; re-detect later |
-| `--scope detection` (default) | above + detection runs + pose observations + edits | Share pose data for analysis; no tracking |
-| `--scope full` | above + tracking runs + results | Full portable trial for reproduction |
+| Scope | What's included | Default when anchor is |
+|-------|-----------------|------------------------|
+| `capture-only` | capture + videos + calibrations + sync | `--capture` |
+| `trial-only` | above + trial time-window rows | — |
+| `detection-only` | above + detection runs + pose observations + edits + seg data | `--trial`, `--detection` |
+| `full` | above + tracking runs + results | `--tracking-run` |
 
 Detections without their keypoint blobs are not useful — if a detection run is included,
 all of `detection_keypoints`, `person_detections`, and `pose_observations` travel with it.
@@ -494,20 +495,32 @@ all of `detection_keypoints`, `person_detections`, and `pose_observations` trave
 # Browse trials and their detection/tracking status
 posetrak --session SRC.db trial list
 
-# Export one trial (and its detections + tracking runs) to a standalone DB
-posetrak --session SRC.db trial export TRIAL_ID OUTPUT.db
-    [--scope capture|detection|full]   # default: detection
-    [--skip-tables TABLE,...]          # exclude known-corrupted tables by name
-    [--dry-run]                        # report row counts without writing
+# Export by anchor type; --scope overrides the default for that anchor
+posetrak --session SRC.db trial export OUTPUT.db
+    (--trial ID | --capture ID | --detection ID | --tracking-run ID)  # one or more
+    [--scope capture-only|trial-only|detection-only|full]
+    [--include-cache]              # include frame_cache_entries (excluded by default)
+    [--skip-tables TABLE,...]      # exclude known-corrupted tables by name
+    [--dry-run]                    # report row counts without writing
 
-# Import trials from an exported (or any) session DB
-posetrak --session DST.db trial import SRC.db [TRIAL_ID ...]
+# Import from an exported (or any) session DB
+posetrak --session DST.db trial import SRC.db
+    [--trial ID | --capture ID ...]   # subset; default: everything in SRC.db
     [--dry-run]
 ```
 
-`TRIAL_ID` resolves against the `trials` table. If a DB has no `trials` rows (older workflow),
-`trial list` falls back to listing tracking runs; `trial export` also accepts a `tracking_run_id`
-as the anchor in that case, collecting its full dependency set.
+Each anchor flag can be repeated to export multiple items in one output DB:
+
+```bash
+# Export two specific trials
+posetrak --session src.db trial export out.db --trial ab12cd34 --trial ef56gh78
+
+# Export a whole capture (infrastructure only, no detections)
+posetrak --session src.db trial export out.db --capture a3f7b2c1 --scope capture-only
+```
+
+If a DB has no `trials` rows (older workflow), `trial list` falls back to listing tracking
+runs and captures; `trial export` accepts `--tracking-run ID` or `--capture ID` directly.
 
 Recovery workflow for a corrupted source DB:
 
@@ -515,12 +528,13 @@ Recovery workflow for a corrupted source DB:
 # 1. See what trials / tracking runs are present
 posetrak --session corrupted.db trial list
 
-# 2. Dry-run to see which tables are readable and how many rows each has
-posetrak --session corrupted.db trial export TRIAL_ID /dev/null --scope full --dry-run
+# 2. Dry-run to assess what is readable
+posetrak --session corrupted.db trial export /dev/null \
+    --trial TRIAL_ID --scope full --dry-run
 
 # 3. Export, skipping the corrupted table
-posetrak --session corrupted.db trial export TRIAL_ID clean.db \
-    --scope full --skip-tables pose_observation_edits
+posetrak --session corrupted.db trial export clean.db \
+    --trial TRIAL_ID --scope full --skip-tables pose_observation_edits
 
 # 4. Import on the target machine
 posetrak --session new.db trial import clean.db
@@ -569,10 +583,12 @@ Session tables (dependency order):
 Note on segmentation tables (`seg_quality_runs`, `keypoint_obs_quality`, `seg_masks`):
 these feed keypoint confidence weighting in tracking — excluding them produces a valid but
 lower-fidelity export. They are included by default in detection and full scopes because
-stripping them silently degrades tracking reproducibility. Excluded with `--scope capture`.
+stripping them silently degrades tracking reproducibility. Excluded with `--scope capture-only`
+or `--scope trial-only`.
 
-Always excluded (UI-only cache, no analysis value):
-`frame_cache_entries`
+`frame_cache_entries` — excluded by default (large JPEG blobs, can be regenerated by the UI
+from the original video files), but included when `--include-cache` is given. Needed if
+the exported DB will be used on a machine without access to the original video files.
 
 ### Robustness requirements
 
@@ -595,42 +611,52 @@ New module `python/posetrak/db/trial_export.py` (CLI is a thin wrapper over this
 from enum import Enum
 
 class ExportScope(Enum):
-    CAPTURE   = "capture"    # capture + calibrations + sync only
-    DETECTION = "detection"  # above + detections + pose observations
-    FULL      = "full"       # above + tracking runs + results
+    CAPTURE_ONLY   = "capture-only"    # capture + calibrations + sync
+    TRIAL_ONLY     = "trial-only"      # above + trial time-window rows
+    DETECTION_ONLY = "detection-only"  # above + detections + pose observations + seg data
+    FULL           = "full"            # above + tracking runs + results
+
+@dataclass
+class AnchorSpec:
+    """What to export: one or more items identified by type + ID."""
+    trial_ids:        list[str] = field(default_factory=list)
+    capture_ids:      list[str] = field(default_factory=list)
+    detection_ids:    list[str] = field(default_factory=list)
+    tracking_run_ids: list[str] = field(default_factory=list)
+    # Empty lists mean "all" for the corresponding type.
 
 @dataclass
 class TableResult:
     table: str
     rows_copied: int
-    error: str | None     # None = success
+    error: str | None    # None = success
 
 @dataclass
 class ExportResult:
-    trial_id: str         # trials.id, or tracking_run_id if no trials table
+    anchor: AnchorSpec
     tables: list[TableResult]
 
-def export_trial(
+def export_trials(
     src: sqlite3.Connection,   # read-only source
     dst: sqlite3.Connection,   # fresh session DB created by caller
-    trial_id: str,             # trials.id; fallback: tracking_run_id
+    anchor: AnchorSpec,
     *,
-    scope: ExportScope = ExportScope.DETECTION,
+    scope: ExportScope,
+    include_cache: bool = False,
     skip_tables: set[str] = frozenset(),
     on_progress: Callable[[str], None] | None = None,
 ) -> ExportResult: ...
 
-def import_trial(
+def import_trials(
     src: sqlite3.Connection,
     dst_session: sqlite3.Connection,
     dst_registry: sqlite3.Connection | None,  # None = skip registry sync
-    trial_ids: list[str] | None,              # None = all trials in src
+    anchor: AnchorSpec,                        # empty = all trials in src
     *,
-    scope: ExportScope = ExportScope.FULL,    # import always attempts full
     skip_tables: set[str] = frozenset(),
     dry_run: bool = False,
     on_progress: Callable[[str], None] | None = None,
-) -> list[ExportResult]: ...
+) -> ExportResult: ...
 ```
 
 ### `trial list` output

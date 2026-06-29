@@ -10,7 +10,7 @@ See [cli-design.md](cli-design.md) for the full requirements and design.
 | 2 | `detect run/list/show` commands | ✅ Done |
 | 3 | `track list/show` and `track export bvh/gltf/usd` | ✅ Done |
 | 4 | Extract `run_tracker()`; add `track run`; MCP workflow tools | ✅ Done |
-| 5 | `trial export/import` | ⬜ Not started |
+| 5 | `trial export/import` | ✅ Done |
 | 6 | `detect finalise` (person assignment) | ⬜ Not started |
 | 7 | Retire old entry points (`posetrak-pose`, `posetrak-setup`) | ⬜ Not started |
 
@@ -77,12 +77,29 @@ Also added outside the original Phase 4 scope (prompted by session DB portabilit
   and partial states (model present, modes/calibrations missing) are handled correctly;
   `--dry-run` flag available
 
-### Phase 5 — trial portability
+### Phase 5 — trial portability ✅
 
-- `posetrak trial export ID OUTPUT_PATH` — write a new session DB with only the specified trial
-  and its dependencies (cameras, calibrations, skeleton, config)
-- `posetrak trial import PATH [ID ...]` — merge trials into `--registry` and `--session`
-- Add MCP tracker and export tools
+All items complete:
+
+- `python/posetrak/db/trial_export.py` — library layer:
+  - `ExportScope` enum: `capture-only | trial-only | detection-only | full`
+  - `AnchorSpec` dataclass: `trial_ids`, `capture_ids`, `detection_ids`, `tracking_run_ids` lists
+  - `export_trials(src, dst, anchor, *, scope, include_cache, skip_tables, dry_run)` — two-phase
+    dependency resolution (walk UP for ancestors, walk DOWN for descendants) then ordered INSERT OR IGNORE copy
+  - `import_trials(src, dst_session, dst_registry, anchor, *, skip_tables, dry_run)` — full-scope
+    import; optionally mirrors registry tables to a separate registry DB
+  - `open_source_readonly(path)` — URI mode open (`?mode=ro`) so corrupted or foreign DBs are
+    safe to read without triggering migrations
+  - Per-table error resilience: each table copy catches `sqlite3.DatabaseError` and returns a
+    `TableResult` with an error string rather than aborting the whole run
+- `python/posetrak/cli/trial.py` — CLI commands:
+  - `trial list` — shows trials with capture label, detection count, tracking run count;
+    falls back to capture list when no trials exist
+  - `trial export OUTPUT.db [--trial|--capture|--detection|--tracking-run ID]... [--scope ...]
+    [--include-cache] [--skip-tables T,...] [--dry-run]`
+  - `trial import SRC.db [--trial|--capture|--detection ID]... [--sync-registry] [--skip-tables T,...]
+    [--dry-run]`
+- 26 new tests in `python/tests/cli/test_trial.py` covering library and CLI (total CLI tests: 101)
 
 ### Phase 6 — `detect finalise`
 
@@ -102,4 +119,4 @@ Delete: `app/pose/cli.py`, `app/setup/main.py`, `app/setup/page_session.py`
 
 - `pose list/import` commands exist in `python/posetrak/cli/pose.py` as a carry-over from
   the old CLI. These are not in the design doc and should be reviewed before Phase 7 retirement.
-- Tests live in `python/tests/cli/`; all 75 tests pass as of Phase 4 completion.
+- Tests live in `python/tests/cli/`; all 101 tests pass as of Phase 5 completion.

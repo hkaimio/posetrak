@@ -443,6 +443,11 @@ def camera_import_session(obj: dict, dry_run: bool) -> None:
 
     if dry_run:
         click.echo("Dry run — nothing will be written.")
+    else:
+        # Disable FK checks for the import so we can insert camera_modes
+        # (which reference intrinsics_calibrations) before the calibrations
+        # themselves are inserted.
+        dst.execute("PRAGMA foreign_keys = OFF")
 
     tables = [
         "camera_models",
@@ -465,6 +470,7 @@ def camera_import_session(obj: dict, dry_run: bool) -> None:
             total_imported += n_imp
         if not dry_run:
             dst.commit()
+            dst.execute("PRAGMA foreign_keys = ON")
     finally:
         src.close()
         dst.close()

@@ -102,6 +102,16 @@ All items complete:
   - All anchor IDs accept unique prefix (8 chars); resolved via `resolve_id_prefix` before export/import
 - 29 new tests in `python/tests/cli/test_trial.py` covering library and CLI (total CLI tests: 104)
 
+Also added outside the original Phase 5 scope:
+
+- `python/posetrak/cli/video.py` — `video` command group for managing stale video paths after
+  moving a session DB between machines:
+  - `video list [--capture ID]` — lists all video records with an `exists` column
+  - `video locate ID NEW_PATH` — updates a single video's file path; shows old→new diff
+  - `video relocate --from PREFIX --to PREFIX [--capture ID] [--dry-run]` — bulk prefix replace
+  - `capture show` updated to display attached Videos sub-table (human mode) or `"videos"` list (JSON)
+  - All anchor IDs accept UUID prefixes; 18 new tests (total CLI tests: 122)
+
 ### Phase 6 — `detect finalise`
 
 Design is deferred. Single-person case (`--assign "0:Subject"`) can ship first; multi-person

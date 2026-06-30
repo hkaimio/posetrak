@@ -61,11 +61,46 @@ _TARGET_CELL_W = 220
 # ---------------------------------------------------------------------------
 
 
-def _section(title: str) -> QGroupBox:
-    box = QGroupBox(title)
-    box.setLayout(QVBoxLayout())
-    box.layout().setSpacing(2)
-    return box
+class _CollapsibleBox(QWidget):
+    """Section widget with a clickable title bar that toggles visibility of content."""
+
+    def __init__(self, title: str, expanded: bool = True, parent=None) -> None:
+        super().__init__(parent)
+        self._btn = QToolButton()
+        self._btn.setCheckable(True)
+        self._btn.setChecked(expanded)
+        self._btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._btn.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        self._btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._btn.setStyleSheet("QToolButton { border: none; font-weight: bold; padding: 2px; }")
+        self._btn.setText(title)
+        self._btn.toggled.connect(self._on_toggle)
+
+        self._body = QWidget()
+        self._inner = QVBoxLayout(self._body)
+        self._inner.setContentsMargins(4, 2, 4, 4)
+        self._inner.setSpacing(2)
+        self._body.setVisible(expanded)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 2, 0, 2)
+        root.setSpacing(0)
+        root.addWidget(self._btn)
+        root.addWidget(self._body)
+
+    def _on_toggle(self, checked: bool) -> None:
+        self._body.setVisible(checked)
+        self._btn.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
+
+    def inner_layout(self) -> QVBoxLayout:
+        return self._inner
+
+    def setTitle(self, title: str) -> None:
+        self._btn.setText(title)
+
+
+def _section(title: str, expanded: bool = True) -> _CollapsibleBox:
+    return _CollapsibleBox(title, expanded=expanded)
 
 
 def _form_row(label: str, value: str) -> tuple[QLabel, QLabel]:
@@ -147,11 +182,10 @@ def _set_id_widget(w: QWidget, full_id: str | None, extra_tooltip: str = "") -> 
         btn.setVisible(False)
 
 
-def _build_run_ids_group() -> tuple[QGroupBox, dict]:
-    """Build a QGroupBox with run/detection/trial/capture/skeleton IDs and return it
-    together with a dict of the id_row_widgets so callers can update them later."""
-    box = QGroupBox("IDs")
-    form = QFormLayout(box)
+def _build_run_ids_group() -> tuple["_CollapsibleBox", dict]:
+    """Build a collapsible IDs section and return it with the id_row_widgets dict."""
+    box = _CollapsibleBox("IDs", expanded=False)  # collapsed by default — rarely needed
+    form = QFormLayout()
     form.setHorizontalSpacing(6)
     form.setVerticalSpacing(1)
     widgets: dict[str, QWidget] = {
@@ -166,6 +200,7 @@ def _build_run_ids_group() -> tuple[QGroupBox, dict]:
     form.addRow("Detection:", widgets["detection"])
     form.addRow("Trial:", widgets["trial"])
     form.addRow("Capture:", widgets["capture"])
+    box.inner_layout().addLayout(form)
     return box, widgets
 
 
@@ -671,7 +706,7 @@ class DetectionRunPanel(QWidget):
         ))
         form.addRow("Started:", QLabel(_fmt_ts(run["created_at"])))
         form.addRow("Completed:", QLabel(_fmt_ts(run["completed_at"])))
-        form_box.layout().addLayout(form)
+        form_box.inner_layout().addLayout(form)
         vbox.addWidget(form_box)
 
         # Person tracks produced by this run
@@ -684,9 +719,9 @@ class DetectionRunPanel(QWidget):
         ).fetchall()
         tr_box = _section(f"Person tracks ({len(tracks)})")
         for t in tracks:
-            tr_box.layout().addWidget(QLabel(t["names"] or "Unnamed track"))
+            tr_box.inner_layout().addWidget(QLabel(t["names"] or "Unnamed track"))
         if not tracks:
-            tr_box.layout().addWidget(QLabel(
+            tr_box.inner_layout().addWidget(QLabel(
                 "No person tracks yet — finalise to assign persons."
             ))
         vbox.addWidget(tr_box)
@@ -1272,9 +1307,7 @@ class _ImageCanvas(QWidget):
 
     def __init__(self, min_h: int = 240, parent=None) -> None:
         super().__init__(parent)
-        self._min_h = min_h
         self.setMinimumHeight(min_h)
-        self._content_aspect: float | None = None  # w/h of last displayed image
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setStyleSheet("background: #222;")
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
@@ -1333,20 +1366,7 @@ class _ImageCanvas(QWidget):
         self._x1 = x1
         self._y1 = y1
         self._src_scale = src_scale
-        if pixmap and pixmap.height() > 0:
-            new_aspect = pixmap.width() / pixmap.height()
-            if new_aspect != self._content_aspect:
-                self._content_aspect = new_aspect
-                self.updateGeometry()
         self.update()
-
-    def hasHeightForWidth(self) -> bool:
-        return self._content_aspect is not None
-
-    def heightForWidth(self, w: int) -> int:
-        if self._content_aspect and self._content_aspect > 0:
-            return max(self._min_h, int(w / self._content_aspect))
-        return self._min_h
 
     def set_overlay(
         self,
@@ -1758,13 +1778,6 @@ class _CropCell(QWidget):
 
     def set_is_maximized(self, maximized: bool) -> None:
         self._max_btn.setText("⤡" if maximized else "⤢")
-
-    def hasHeightForWidth(self) -> bool:
-        return self._canvas.hasHeightForWidth()
-
-    def heightForWidth(self, w: int) -> int:
-        h = self._canvas.heightForWidth(w)
-        return h + 20  # title row overhead
 
     def show_empty(self) -> None:
         self._canvas.show_empty()
@@ -3263,9 +3276,10 @@ class _LineChart(QWidget):
     _PAD_T = 18   # space for title text
     _PAD_B = 4
 
-    def __init__(self, title: str, parent=None) -> None:
+    def __init__(self, title: str, reference_y: float | None = None, parent=None) -> None:
         super().__init__(parent)
         self._title = title
+        self._reference_y = reference_y
         self._steps: list[int] = []
         self._values: list[float | None] = []
         self._cursor_step: int | None = None
@@ -3301,6 +3315,10 @@ class _LineChart(QWidget):
             return
 
         y_min, y_max = min(vals), max(vals)
+        # Extend range to keep reference_y visible even if data is all above/below it
+        if self._reference_y is not None:
+            y_min = min(y_min, self._reference_y)
+            y_max = max(y_max, self._reference_y)
         if y_min == y_max:
             y_min -= 1.0
             y_max += 1.0
@@ -3332,6 +3350,12 @@ class _LineChart(QWidget):
                 path.lineTo(x, y)
         painter.setPen(QPen(QColor(60, 140, 240), 1.5))
         painter.drawPath(path)
+
+        # Reference line (e.g. NIS/DOF = 1 indicating well-calibrated filter)
+        if self._reference_y is not None and y_min <= self._reference_y <= y_max:
+            ry = sy(self._reference_y)
+            painter.setPen(QPen(QColor(220, 50, 50), 1.0, Qt.PenStyle.DashLine))
+            painter.drawLine(QPointF(pl, ry), QPointF(w - pr, ry))
 
         # Cursor
         if self._cursor_step is not None and x_min <= self._cursor_step <= x_max:
@@ -3375,11 +3399,11 @@ class _RunInfoPane(QWidget):
     def _build(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
-        root.setSpacing(6)
+        root.setSpacing(4)
 
         # --- Run info ---
-        run_box = QGroupBox("Run info")
-        run_form = QFormLayout(run_box)
+        run_box = _CollapsibleBox("Run info")
+        run_form = QFormLayout()
         run_form.setHorizontalSpacing(6)
         run_form.setVerticalSpacing(2)
         self._ri_skeleton = QLabel("—")
@@ -3399,6 +3423,7 @@ class _RunInfoPane(QWidget):
         run_form.addRow("Frames:", self._ri_frames)
         run_form.addRow("Config:", self._ri_cfg)
         run_form.addRow("Notes:", self._ri_notes)
+        run_box.inner_layout().addLayout(run_form)
         root.addWidget(run_box)
 
         # --- IDs (UUIDs / SHA for cross-referencing) ---
@@ -3406,8 +3431,8 @@ class _RunInfoPane(QWidget):
         root.addWidget(ids_box)
 
         # --- Current frame ---
-        frame_box = QGroupBox("Current frame")
-        frame_form = QFormLayout(frame_box)
+        frame_box = _CollapsibleBox("Current frame")
+        frame_form = QFormLayout()
         frame_form.setHorizontalSpacing(6)
         frame_form.setVerticalSpacing(2)
         self._fi_step = QLabel("—")
@@ -3420,16 +3445,15 @@ class _RunInfoPane(QWidget):
         frame_form.addRow("Inliers:", self._fi_inliers)
         frame_form.addRow("NIS / DOF:", self._fi_nis)
         frame_form.addRow("Cov cond #:", self._fi_cov)
+        frame_box.inner_layout().addLayout(frame_form)
         root.addWidget(frame_box)
 
         # --- Charts ---
-        charts_box = QGroupBox("Metrics")
-        charts_v = QVBoxLayout(charts_box)
-        charts_v.setSpacing(4)
-        self._nis_chart = _LineChart("NIS / DOF")
+        charts_box = _CollapsibleBox("Metrics")
+        self._nis_chart = _LineChart("NIS / DOF", reference_y=1.0)
         self._cov_chart = _LineChart("Covariance condition #")
-        charts_v.addWidget(self._nis_chart)
-        charts_v.addWidget(self._cov_chart)
+        charts_box.inner_layout().addWidget(self._nis_chart)
+        charts_box.inner_layout().addWidget(self._cov_chart)
         root.addWidget(charts_box)
 
         root.addStretch(1)
@@ -3616,11 +3640,11 @@ class PersonPanel(QWidget):
         ))
         form.addRow("Observations:", QLabel(str(n_obs)))
         form.addRow("Pose model:", QLabel(seq["pose_model"] or "—"))
-        form_box.layout().addLayout(form)
+        form_box.inner_layout().addLayout(form)
 
         # --- Tracking runs section ---
         self._run_box = _section("Tracking runs (0)")
-        box_vbox = self._run_box.layout()
+        box_vbox = self._run_box.inner_layout()
 
         self._run_list = QListWidget()
         self._run_list.setMaximumHeight(130)
@@ -4038,6 +4062,9 @@ class TrackingRunPanel(QWidget):
         self._export_bvh_btn: QPushButton | None = None
         self._export_usd_btn: QPushButton | None = None
         self._export_gltf_btn: QPushButton | None = None
+        self._nis_chart: _LineChart | None = None
+        self._cov_chart: _LineChart | None = None
+        self._trp_tracking_timestamps: list[tuple[float, int]] = []
         self._export_done.connect(self._on_export_done)
         self._build()
 
@@ -4123,7 +4150,35 @@ class TrackingRunPanel(QWidget):
         info_v.addWidget(self._export_usd_btn)
         info_v.addWidget(self._export_gltf_btn)
         info_v.addWidget(scale_btn)
+
+        # --- Metrics charts ---
+        self._nis_chart = _LineChart("NIS / DOF", reference_y=1.0)
+        self._cov_chart = _LineChart("Covariance condition #")
+        charts_box = _CollapsibleBox("Metrics")
+        charts_box.inner_layout().addWidget(self._nis_chart)
+        charts_box.inner_layout().addWidget(self._cov_chart)
+        info_v.addWidget(charts_box)
         info_v.addStretch()
+
+        # Load chart data
+        rows = self._conn.execute(
+            "SELECT tracker_step, timestamp_s, nis_value, nis_dof, cov_condition_number "
+            "FROM tracking_results "
+            "WHERE run_id=? AND person_id=0 AND is_smoothed=0 "
+            "ORDER BY tracker_step",
+            (self._run_id,),
+        ).fetchall()
+        nis_steps, nis_vals, cov_steps, cov_vals = [], [], [], []
+        for row in rows:
+            step = row["tracker_step"]
+            self._trp_tracking_timestamps.append((row["timestamp_s"], step))
+            nis, dof = row["nis_value"], row["nis_dof"]
+            nis_steps.append(step)
+            nis_vals.append((nis / dof) if (nis is not None and dof and dof > 0) else None)
+            cov_steps.append(step)
+            cov_vals.append(row["cov_condition_number"])
+        self._nis_chart.set_data(nis_steps, nis_vals)
+        self._cov_chart.set_data(cov_steps, cov_vals)
 
         info_scroll = QScrollArea()
         info_scroll.setWidget(info_content)
@@ -4171,6 +4226,7 @@ class TrackingRunPanel(QWidget):
         if seq_id:
             crop_grid = PersonCropGridWidget(self._conn, seq_id)
             crop_grid.set_tracking_run(self._run_id)
+            crop_grid.time_changed.connect(self._on_time_changed)
             left_v.addWidget(crop_grid, stretch=1)
         else:
             left_v.addStretch(1)
@@ -4187,6 +4243,15 @@ class TrackingRunPanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         root.addWidget(self._splitter)
+
+    def _on_time_changed(self, t: float) -> None:
+        if not self._trp_tracking_timestamps:
+            return
+        step = _nearest_tracker_step(t, self._trp_tracking_timestamps)
+        if self._nis_chart:
+            self._nis_chart.set_cursor(step)
+        if self._cov_chart:
+            self._cov_chart.set_cursor(step)
 
     def _export_bvh(self) -> None:
         out_path, _ = QFileDialog.getSaveFileName(

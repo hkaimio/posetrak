@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSplitter,
+    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -49,6 +50,9 @@ _USD_TOOLTIP = (
     "USD export requires the 'usd-core' package.\n"
     "Install with:  uv pip install usd-core"
 )
+
+# Target pixel width per camera cell — used to auto-compute column count on resize.
+_TARGET_CELL_W = 340
 
 
 # ---------------------------------------------------------------------------
@@ -1702,23 +1706,42 @@ class _CropCell(QWidget):
     """One camera cell in the crop grid: name label + image canvas."""
 
     _IMG_H = 240
+    maximize_requested = Signal()
 
     def __init__(self, label: str, parent=None) -> None:
         super().__init__(parent)
         name_lbl = QLabel(label)
-        name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         name_lbl.setStyleSheet("font-size: 10px; font-weight: bold;")
-        name_lbl.setMaximumHeight(18)
+
+        self._max_btn = QToolButton()
+        self._max_btn.setText("⤢")
+        self._max_btn.setFixedSize(16, 16)
+        self._max_btn.setStyleSheet("font-size: 9px; border: none; padding: 0;")
+        self._max_btn.setToolTip("Maximize / restore this camera view")
+        self._max_btn.clicked.connect(self.maximize_requested)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(2)
+        title_row.addWidget(name_lbl, stretch=1)
+        title_row.addWidget(self._max_btn)
+
+        title_w = QWidget()
+        title_w.setMaximumHeight(18)
+        title_w.setLayout(title_row)
 
         self._canvas = _ImageCanvas(min_h=self._IMG_H)
 
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(2, 2, 2, 2)
         vbox.setSpacing(1)
-        vbox.addWidget(name_lbl)
+        vbox.addWidget(title_w)
         vbox.addWidget(self._canvas, stretch=1)
 
         self.show_empty()
+
+    def set_is_maximized(self, maximized: bool) -> None:
+        self._max_btn.setText("⤡" if maximized else "⤢")
 
     def show_empty(self) -> None:
         self._canvas.show_empty()
@@ -1814,6 +1837,7 @@ class PersonCropGridWidget(QWidget):
         # cam_instance_id → tracker_step → bool array indexed by COCO keypoint ID
         self._outlier_masks: dict[str, dict[int, object]] = {}
         self._backfill: CropBackfillWorker | None = None
+        self._maximized_idx: int | None = None
         self._pose_model: PoseModel = _get_pose_model(None)  # updated in _build
         # Copy/paste clipboard: kp_idx → (x, y); None until first copy
         self._clipboard: dict[int, tuple[float, float]] | None = None
@@ -1951,19 +1975,20 @@ class PersonCropGridWidget(QWidget):
                         )
 
         n_cells = len(self._cameras) + 1  # +1 for 3D placeholder
-        ncols = max(2, min(n_cells, 4))
-        self._ncols = ncols
+        # Start with 3 columns; resizeEvent adjusts when the widget is shown.
+        self._ncols = max(2, min(n_cells, 3))
+        ncols = self._ncols
 
-        grid = QGridLayout()
-        grid.setSpacing(4)
-        self._grid = grid
+        self._grid_container = QWidget()
+        self._grid = QGridLayout(self._grid_container)
+        self._grid.setSpacing(4)
 
         for i, cam in enumerate(self._cameras):
             row, col = divmod(i, ncols)
             cell = _CropCell(cam["label"])
             self._cells.append(cell)
-            grid.addWidget(cell, row, col)
-            grid.setColumnStretch(col, 1)
+            self._grid.addWidget(cell, row, col)
+            self._grid.setColumnStretch(col, 1)
             cell._canvas.keypoint_selected.connect(
                 lambda idx, i=i: self._on_kp_selected(i, idx)
             )
@@ -1986,19 +2011,20 @@ class PersonCropGridWidget(QWidget):
                 lambda hit, dx, dy, i=i: self._on_context_menu_requested(i, hit, dx, dy)
             )
             cell._canvas.installEventFilter(self)
+            cell.maximize_requested.connect(lambda i=i: self._on_maximize_requested(i))
 
         r3d, c3d = divmod(len(self._cameras), ncols)
         ph = QLabel("3D view\n(coming soon)")
         ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ph.setStyleSheet("color: #888; border: 1px dashed #555;")
         ph.setMinimumHeight(_CropCell._IMG_H)
-        grid.addWidget(ph, r3d, c3d)
-        grid.setColumnStretch(c3d, 1)
+        self._grid.addWidget(ph, r3d, c3d)
+        self._grid.setColumnStretch(c3d, 1)
         self._3d_ph = ph
 
         nrows = ceil(n_cells / ncols)
         for r in range(nrows):
-            grid.setRowStretch(r, 1)
+            self._grid.setRowStretch(r, 1)
 
         dur_ms = max(1, int((self._t_end - self._t_start) * 1000))
         _fps_vals = [float(r["actual_fps"]) for r in sp_rows if r["actual_fps"]]
@@ -2043,15 +2069,126 @@ class PersonCropGridWidget(QWidget):
         overlay_row.addStretch()
         overlay_row.addWidget(self._edit_btn)
 
+        # Maximized-view container: big cell on left, thumbnail strip on right.
+        self._max_placeholder = QWidget()  # occupies left slot when not maximized
+        self._thumb_container = QWidget()
+        self._thumb_layout = QVBoxLayout(self._thumb_container)
+        self._thumb_layout.setSpacing(4)
+        self._thumb_layout.setContentsMargins(0, 0, 0, 0)
+        thumb_scroll = QScrollArea()
+        thumb_scroll.setWidget(self._thumb_container)
+        thumb_scroll.setWidgetResizable(True)
+        self._max_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._max_splitter.addWidget(self._max_placeholder)
+        self._max_splitter.addWidget(thumb_scroll)
+        self._max_splitter.setStretchFactor(0, 3)
+        self._max_splitter.setStretchFactor(1, 1)
+        max_container = QWidget()
+        max_h = QHBoxLayout(max_container)
+        max_h.setContentsMargins(0, 0, 0, 0)
+        max_h.addWidget(self._max_splitter)
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._grid_container)  # page 0: normal grid
+        self._stack.addWidget(max_container)          # page 1: maximized view
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
-        layout.addLayout(grid, stretch=1)
+        layout.addWidget(self._stack, stretch=1)
         layout.addLayout(overlay_row)
         layout.addLayout(slider_row)
 
         self._current_t = self._t_start
         self._load_frame(self._t_start)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._maximized_idx is not None or not self._cells:
+            return
+        new_ncols = max(2, min(len(self._cameras) + 1, self.width() // _TARGET_CELL_W))
+        if new_ncols != self._ncols:
+            self._ncols = new_ncols
+            self._repopulate_grid()
+
+    def _repopulate_grid(self) -> None:
+        """Re-insert all cells into the grid with the current column count."""
+        for cell in self._cells:
+            self._grid.removeWidget(cell)
+        self._grid.removeWidget(self._3d_ph)
+
+        # Reset all column/row stretches in a safe range.
+        for c in range(8):
+            self._grid.setColumnStretch(c, 0)
+        for r in range(8):
+            self._grid.setRowStretch(r, 0)
+
+        ncols = self._ncols
+        for i, cell in enumerate(self._cells):
+            row, col = divmod(i, ncols)
+            self._grid.addWidget(cell, row, col)
+            self._grid.setColumnStretch(col, 1)
+            cell.show()
+
+        n_cells = len(self._cameras) + 1
+        r3d, c3d = divmod(len(self._cameras), ncols)
+        self._grid.addWidget(self._3d_ph, r3d, c3d)
+        self._grid.setColumnStretch(c3d, 1)
+        self._3d_ph.show()
+
+        nrows = ceil(n_cells / ncols)
+        for r in range(nrows):
+            self._grid.setRowStretch(r, 1)
+
+    def _on_maximize_requested(self, idx: int) -> None:
+        if self._maximized_idx == idx:
+            self._leave_maximized()
+        elif self._maximized_idx is not None:
+            self._leave_maximized()
+            self._enter_maximized(idx)
+        else:
+            self._enter_maximized(idx)
+
+    def _enter_maximized(self, idx: int) -> None:
+        self._maximized_idx = idx
+        big_cell = self._cells[idx]
+        big_cell.set_is_maximized(True)
+
+        # Remove all cells and 3D placeholder from grid.
+        for cell in self._cells:
+            self._grid.removeWidget(cell)
+        self._grid.removeWidget(self._3d_ph)
+
+        # Big cell → left pane of splitter.
+        self._max_splitter.replaceWidget(0, big_cell)
+        big_cell.show()
+
+        # Remaining cells → thumbnail strip.
+        for i, cell in enumerate(self._cells):
+            if i == idx:
+                continue
+            self._thumb_layout.addWidget(cell)
+            cell.show()
+        self._thumb_layout.addWidget(self._3d_ph)
+        self._3d_ph.show()
+
+        self._stack.setCurrentIndex(1)
+
+    def _leave_maximized(self) -> None:
+        if self._maximized_idx is None:
+            return
+        self._cells[self._maximized_idx].set_is_maximized(False)
+        self._maximized_idx = None
+
+        # Restore placeholder to left pane (removes big cell from splitter).
+        self._max_splitter.replaceWidget(0, self._max_placeholder)
+
+        # Drain thumbnail strip without destroying widgets.
+        while self._thumb_layout.count():
+            self._thumb_layout.takeAt(0)
+
+        self._stack.setCurrentIndex(0)
+        self._repopulate_grid()
 
     def _set_edit_mode(self, enabled: bool) -> None:
         self._edit_mode = enabled
@@ -3856,25 +3993,32 @@ class TrackingRunPanel(QWidget):
         cfg_id = run["tracker_config_id"]
         cfg = self._conn.execute(_CFG_SQL, (cfg_id,)).fetchone() if cfg_id else None
 
-        # Compact header + buttons (non-scrolling top strip)
-        header = QWidget()
-        header_v = QVBoxLayout(header)
-        header_v.setContentsMargins(6, 4, 6, 2)
-        header_v.setSpacing(2)
+        # ------------------------------------------------------------------
+        # Info sidebar (right pane of the splitter)
+        # ------------------------------------------------------------------
+        info_title = QLabel(f"<b>Tracking run</b>  [{skel}]")
+        info_title.setWordWrap(True)
+
+        hide_btn = QToolButton()
+        hide_btn.setText("✕")
+        hide_btn.setToolTip("Hide info panel")
+        hide_btn.setFixedSize(20, 20)
 
         title_row = QHBoxLayout()
-        title_row.addWidget(QLabel(f"<b>Tracking run</b> [{skel}]"))
-        title_row.addStretch()
+        title_row.addWidget(info_title, stretch=1)
+        title_row.addWidget(hide_btn)
 
         form = QFormLayout()
         form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(1)
+        form.setVerticalSpacing(2)
         form.addRow("Ran at:", QLabel(_fmt_ts(run["ran_at"])))
-        form.addRow("Frames:", QLabel(f"{n_frames}  |  version {run['posetrak_version'] or '—'}"))
+        form.addRow("Frames:", QLabel(f"{n_frames}  |  ver. {run['posetrak_version'] or '—'}"))
         form.addRow("Person:", QLabel(run["person_names"] or "—"))
         try:
             cam_ids = json.loads(run["active_camera_ids"] or "[]")
-            form.addRow("Cameras:", QLabel(", ".join(cam_ids) or "—"))
+            cam_lbl = QLabel(", ".join(cam_ids) or "—")
+            cam_lbl.setWordWrap(True)
+            form.addRow("Cameras:", cam_lbl)
         except Exception:
             pass
         form.addRow("Config:", QLabel(_cfg_text(cfg, cfg_id)))
@@ -3883,50 +4027,100 @@ class TrackingRunPanel(QWidget):
             notes_lbl.setWordWrap(True)
             form.addRow("Notes:", notes_lbl)
 
-        # IDs
         ids_box, id_widgets = _build_run_ids_group()
         _populate_run_ids(id_widgets, run)
 
-        btn_row = QHBoxLayout()
         self._export_bvh_btn = _action_btn("Export BVH…", enabled=bool(self._session_path))
         self._export_bvh_btn.clicked.connect(self._export_bvh)
-        btn_row.addWidget(self._export_bvh_btn)
         self._export_usd_btn = _action_btn(
             "Export USD…", enabled=bool(self._session_path) and _USD_AVAILABLE
         )
         if not _USD_AVAILABLE:
             self._export_usd_btn.setToolTip(_USD_TOOLTIP)
         self._export_usd_btn.clicked.connect(self._export_usd)
-        btn_row.addWidget(self._export_usd_btn)
         self._export_gltf_btn = _action_btn(
             "Export glTF…", enabled=bool(self._session_path)
         )
         self._export_gltf_btn.clicked.connect(self._export_gltf)
-        btn_row.addWidget(self._export_gltf_btn)
         scale_btn = _action_btn("Scale skeleton…", enabled=bool(self._session_path))
         scale_btn.setToolTip("Measure bone lengths from inlier observations and scale the skeleton")
         scale_btn.clicked.connect(self._open_scaling)
-        btn_row.addWidget(scale_btn)
-        btn_row.addStretch()
 
-        header_v.addLayout(title_row)
-        header_v.addLayout(form)
-        header_v.addWidget(ids_box)
-        header_v.addLayout(btn_row)
+        info_content = QWidget()
+        info_v = QVBoxLayout(info_content)
+        info_v.setContentsMargins(6, 4, 6, 4)
+        info_v.setSpacing(6)
+        info_v.addLayout(title_row)
+        info_v.addLayout(form)
+        info_v.addWidget(ids_box)
+        info_v.addWidget(self._export_bvh_btn)
+        info_v.addWidget(self._export_usd_btn)
+        info_v.addWidget(self._export_gltf_btn)
+        info_v.addWidget(scale_btn)
+        info_v.addStretch()
 
-        # Video crop grid fills the rest of the panel
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        root.addWidget(header)
+        info_scroll = QScrollArea()
+        info_scroll.setWidget(info_content)
+        info_scroll.setWidgetResizable(True)
+        info_scroll.setMinimumWidth(180)
 
+        # "Show info" button — visible only while the panel is hidden.
+        show_btn = QToolButton()
+        show_btn.setText("ℹ")
+        show_btn.setToolTip("Show run info panel")
+        show_btn.setVisible(False)
+
+        # Thin bar at top of the camera area that hosts the show button.
+        top_bar = QWidget()
+        top_bar.setMaximumHeight(24)
+        top_bar_h = QHBoxLayout(top_bar)
+        top_bar_h.setContentsMargins(0, 2, 4, 0)
+        top_bar_h.addStretch()
+        top_bar_h.addWidget(show_btn)
+        top_bar.setVisible(False)  # hidden while panel is expanded
+
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._info_scroll = info_scroll
+
+        def _toggle_info() -> None:
+            visible = not info_scroll.isVisible()
+            info_scroll.setVisible(visible)
+            top_bar.setVisible(not visible)
+            if visible:
+                w = self._splitter.width()
+                self._splitter.setSizes([w - 260, 260])
+
+        hide_btn.clicked.connect(_toggle_info)
+        show_btn.clicked.connect(_toggle_info)
+
+        # ------------------------------------------------------------------
+        # Left pane: camera grid (wrapped so top_bar sits above it)
+        # ------------------------------------------------------------------
         seq_id = run["observation_sequence_id"]
+        left_w = QWidget()
+        left_v = QVBoxLayout(left_w)
+        left_v.setContentsMargins(0, 0, 0, 0)
+        left_v.setSpacing(0)
+        left_v.addWidget(top_bar)
         if seq_id:
             crop_grid = PersonCropGridWidget(self._conn, seq_id)
             crop_grid.set_tracking_run(self._run_id)
-            root.addWidget(crop_grid, stretch=1)
+            left_v.addWidget(crop_grid, stretch=1)
         else:
-            root.addStretch(1)
+            left_v.addStretch(1)
+
+        self._splitter.addWidget(left_w)
+        self._splitter.addWidget(info_scroll)
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 0)
+        self._splitter.setCollapsible(0, False)
+        self._splitter.setCollapsible(1, True)
+        self._splitter.setSizes([800, 260])
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self._splitter)
 
     def _export_bvh(self) -> None:
         out_path, _ = QFileDialog.getSaveFileName(

@@ -4074,6 +4074,12 @@ class TrackingRunPanel(QWidget):
         self._nis_chart: _LineChart | None = None
         self._cov_chart: _LineChart | None = None
         self._trp_tracking_timestamps: list[tuple[float, int]] = []
+        self._trp_step_stats: dict[int, object] = {}
+        self._trp_fi_step: QLabel | None = None
+        self._trp_fi_time: QLabel | None = None
+        self._trp_fi_inliers: QLabel | None = None
+        self._trp_fi_nis: QLabel | None = None
+        self._trp_fi_cov: QLabel | None = None
         self._export_done.connect(self._on_export_done)
         self._build()
 
@@ -4160,6 +4166,24 @@ class TrackingRunPanel(QWidget):
         info_v.addWidget(self._export_gltf_btn)
         info_v.addWidget(scale_btn)
 
+        # --- Current frame ---
+        frame_box = _CollapsibleBox("Current frame")
+        frame_form = QFormLayout()
+        frame_form.setHorizontalSpacing(6)
+        frame_form.setVerticalSpacing(2)
+        self._trp_fi_step     = QLabel("—")
+        self._trp_fi_time     = QLabel("—")
+        self._trp_fi_inliers  = QLabel("—")
+        self._trp_fi_nis      = QLabel("—")
+        self._trp_fi_cov      = QLabel("—")
+        frame_form.addRow("Step:",       self._trp_fi_step)
+        frame_form.addRow("Time:",       self._trp_fi_time)
+        frame_form.addRow("Inliers:",    self._trp_fi_inliers)
+        frame_form.addRow("NIS / DOF:",  self._trp_fi_nis)
+        frame_form.addRow("Cov cond #:", self._trp_fi_cov)
+        frame_box.inner_layout().addLayout(frame_form)
+        info_v.addWidget(frame_box)
+
         # --- Metrics charts ---
         self._nis_chart = _LineChart("NIS / DOF", reference_y=1.0)
         self._cov_chart = _LineChart("Covariance condition #")
@@ -4169,9 +4193,10 @@ class TrackingRunPanel(QWidget):
         info_v.addWidget(charts_box)
         info_v.addStretch()
 
-        # Load chart data
+        # Load per-frame stats (used by Current frame labels and chart cursors)
         rows = self._conn.execute(
-            "SELECT tracker_step, timestamp_s, nis_value, nis_dof, cov_condition_number "
+            "SELECT tracker_step, timestamp_s, n_inlier_observations, "
+            "       nis_value, nis_dof, cov_condition_number "
             "FROM tracking_results "
             "WHERE run_id=? AND person_id=0 AND is_smoothed=0 "
             "ORDER BY tracker_step",
@@ -4181,6 +4206,7 @@ class TrackingRunPanel(QWidget):
         for row in rows:
             step = row["tracker_step"]
             self._trp_tracking_timestamps.append((row["timestamp_s"], step))
+            self._trp_step_stats[step] = row
             nis, dof = row["nis_value"], row["nis_dof"]
             nis_steps.append(step)
             nis_vals.append((nis / dof) if (nis is not None and dof and dof > 0) else None)
@@ -4261,6 +4287,25 @@ class TrackingRunPanel(QWidget):
             self._nis_chart.set_cursor(step)
         if self._cov_chart:
             self._cov_chart.set_cursor(step)
+        row = self._trp_step_stats.get(step)
+        if row is None:
+            return
+        if self._trp_fi_step:
+            self._trp_fi_step.setText(str(step))
+        if self._trp_fi_time:
+            self._trp_fi_time.setText(f"{row['timestamp_s']:.3f} s")
+        if self._trp_fi_inliers:
+            n = row["n_inlier_observations"]
+            self._trp_fi_inliers.setText(str(n) if n is not None else "—")
+        if self._trp_fi_nis:
+            nis, dof = row["nis_value"], row["nis_dof"]
+            if nis is not None and dof:
+                self._trp_fi_nis.setText(f"{nis:.2f} / {dof}  ({nis/dof:.2f} norm)")
+            else:
+                self._trp_fi_nis.setText("—")
+        if self._trp_fi_cov:
+            cov = row["cov_condition_number"]
+            self._trp_fi_cov.setText(f"{cov:.1f}" if cov is not None else "—")
 
     def _export_bvh(self) -> None:
         out_path, _ = QFileDialog.getSaveFileName(

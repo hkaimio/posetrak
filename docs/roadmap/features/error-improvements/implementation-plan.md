@@ -222,7 +222,115 @@ hierarchy. Primary target: two-hand interactions, hand–object contact, model p
 
 ---
 
-## Deferred — Approaches 1 and 3
+## Phase 5 — Cross-person relative observations
+
+*Depends on: Phase 4 (reuses `RELATIVE` observation infrastructure and cross-pair selection
+logic)*
+*Estimated effort: 3–5 days*
+
+Extends cross-pair relative observations across person boundaries. Primary target:
+two-person contact, handshakes, assisted movements. Calibration bias cancels in the same
+way as within-person `RELATIVE` — both the reference and child pixel come from the same
+camera, so a per-camera offset affects both equally.
+
+### Approach
+
+**Contact detection via 3D gating:** Candidate pairs are identified using FK-projected
+world-space proximity (`cross_person_max_world_mm`), not pixel distance. This excludes
+projectively-coincident but spatially-separated persons (one standing 3 m behind another
+on the same camera ray).
+
+**Gauss-Seidel iteration on contact windows:** Persons are solved independently in a
+first pass (existing behaviour). Contact windows are then re-solved in successive passes,
+injecting the other person's FK projections as anchored reference points. Typically 2–3
+iterations suffice for tight contact.
+
+**RTS smoothing:** Two viable strategies:
+- *Smooth-after-all-iterations* (simpler): run full forward + RTS only after Gauss-Seidel
+  has converged. Single backward pass per person; no stitching needed.
+- *Smooth-then-re-solve* (better anchors): run RTS after pass 1, use smoothed trajectories
+  as anchors for pass 2, then re-smooth. The smoothed positions reduce anchor uncertainty,
+  which is most valuable when the reference person is partially occluded during contact.
+
+### Deliverables
+
+**C++ — `include/posetrak/core/observation.hpp`**
+- Add `ANCHORED_RELATIVE` to `MeasurementMode`.
+- Add `Eigen::Vector2d anchor_position` and `double anchor_noise_std` fields to
+  `Observation`.
+- For `ANCHORED_RELATIVE`, the anchor is an externally-supplied pixel position (from
+  another person's previous-iterate FK posterior), not a state-vector marker. The `anchor_noise_std`
+  absorbs both the pose noise and the projected covariance of the other person's filter at
+  that keypoint.
+
+**C++ — `src/filters/ukf.cpp`**
+- In `predict_measurements()`, for `ANCHORED_RELATIVE` mode:
+  ```cpp
+  auto child = project(sigma_pt, obs.marker_id, camera);
+  predicted = child - obs.anchor_position;   // anchor is fixed across sigma points
+  ```
+- Noise for `ANCHORED_RELATIVE` is taken directly from `obs.anchor_noise_std` (already
+  accounts for both persons).
+
+**C++ — `include/posetrak/tracking/tracker.hpp` + `src/tracking/tracker.cpp`**
+- Add `Tracker::get_projected_keypoints(int frame) → PerCameraMarkerProjections` — FK
+  projection of the current posterior mean for each visible marker / camera pair.
+- Add `Tracker::get_projected_keypoint_std(int frame) → PerCameraMarkerStds` — pixel-space
+  posterior standard deviation via `diag(J_proj * P * J_proj^T)^0.5`; used by the
+  orchestrator to compute `anchor_noise_std = sqrt(pose_noise_B² + anchor_pixel_std²)`.
+
+**Python — multi-person orchestrator**
+- New module `posetrak/tracker/multi_person.py`.
+- `MultiPersonTracker`:
+  - `run_pass_1()` — runs all persons in parallel using existing `Tracker` instances.
+  - `detect_contact_windows(max_world_mm, min_confidence)` — scans pass-1 FK output for
+    frames where any two persons have markers within `max_world_mm` in world space; returns
+    `[(person_a, person_b, t_start, t_end)]` with a small time margin added on each side.
+  - `run_contact_pass(window, prev_results)` — for one contact window, builds
+    `ANCHORED_RELATIVE` observations from each person's previous-iterate projected
+    keypoints and re-runs the relevant `Tracker` instances for that window.
+  - `run(n_iter)` — orchestrates pass 1 → contact detection → Gauss-Seidel loop.
+
+**C++ — `include/posetrak/core/config.hpp` + `src/core/config.cpp`**
+- Add `double cross_person_max_world_mm = 0.0` (0 = disabled).
+- Add `int cross_person_max_iter = 3`.
+- Add `double cross_person_min_confidence = 0.5`.
+
+**Python UI**
+- `run_tracker.py`: multi-person controls (enable toggle, world-distance threshold, max
+  iterations).
+- `content_panels.py`: show contact window count and per-window iteration convergence in
+  run summary if multi-person mode was active.
+- `app/mcp/tools/runs.py`: surface `cross_person_max_world_mm` and iteration count in
+  `describe_config` output.
+
+### Tests
+
+- Unit test: `ANCHORED_RELATIVE` predicted measurement equals
+  `project(sigma_pt, child) - obs.anchor_position` (anchor does not vary across sigma
+  points, unlike within-person `RELATIVE`).
+- Unit test: `get_projected_keypoint_std()` returns values proportional to the diagonal of
+  the projected covariance; verify analytically on a trivial 1-DOF case.
+- Unit test: contact-window detection correctly identifies 3D-close pairs and rejects a
+  pair that is pixel-close but 3 m apart in world space.
+- Integration: two-person handshake sequence; verify mean 3D wrist distance is reduced
+  with Phase 5 enabled.
+- Regression: `cross_person_max_world_mm = 0` produces bitwise-identical output to Phase 4
+  baseline.
+
+### Acceptance criteria
+
+- `cross_person_max_world_mm = 0` is bitwise-identical to Phase 4 baseline.
+- Contact detection gates on 3D proximity; a person standing directly behind another at
+  3 m distance does not generate cross-person observations even if their projections
+  overlap.
+- On a two-person contact sequence, mean 3D distance between interacting markers is lower
+  than Phase 4 output.
+- No regression in NIS or 3D accuracy for non-contact frames.
+
+---
+
+## Deferred — Approaches 1, 3, and joint-state multi-person
 
 **Approach 1 (per-camera bias states):** Revisit if post-Phase-4 residual analysis shows
 clear temporal drift in per-camera residuals (suggesting a bumped or thermally drifting
@@ -232,6 +340,16 @@ camera). Not well matched to spatially-fixed calibration error.
 range once Phase 4 is validated. Requires `GPyTorch` or `scikit-learn` dependency and a
 Marimo analysis notebook for the offline correction workflow. The GP posterior can also
 serve as input to an extrinsic refinement step.
+
+**Joint-state multi-person UKF (merge/split):** A merged `UKF` with state
+`[state_A ; state_B]` and block-diagonal initial covariance can represent the
+cross-person posterior exactly during contact. Sigma-point count and covariance operations
+scale as O(n²) in the joint state, making this ~4× more expensive per merged frame for
+two 60-DOF persons. The harder problem is RTS smoothing: the backward pass must traverse
+the merged period with the joint filter, then extract marginals at the split boundary to
+inject into the two independent backward passes. Revisit if Phase 5 shows clear residual
+cross-person correlation that the Gauss-Seidel iteration fails to resolve (i.e., if the
+iterates do not converge within 3–4 passes on tight-contact sequences).
 
 ---
 
@@ -243,12 +361,13 @@ main
        ├── phase-1/split-noise-model          → PR 1: prerequisite, standalone
        ├── phase-2/huber-robust-likelihood    → PR 2: quick win, minimal risk
        ├── phase-3/relative-parent-child      → PR 3: core relative mode
-       └── phase-4/relative-cross-pairs       → PR 4: interaction constraint
+       ├── phase-4/relative-cross-pairs       → PR 4: interaction constraint
+       └── phase-5/cross-person-relative      → PR 5: multi-person contact
 ```
 
 Each phase is a self-contained PR against `feature/measurement-error-model`. The feature
-branch is merged to `main` after Phase 4 (or after Phase 3 if Phase 4 is deferred).
+branch is merged to `main` after Phase 5 (or earlier if later phases are deferred).
 
-Phases 2, 3, and 4 each have a config flag that defaults to the Phase 1 baseline behaviour,
+Phases 2–5 each have a config flag that defaults to the prior-phase baseline behaviour,
 so the feature branch can be used for normal tracking throughout development without
 enabling experimental features.

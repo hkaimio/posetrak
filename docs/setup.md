@@ -161,16 +161,32 @@ uv sync --group dev --group pose-app
 
 ### GPU acceleration for pose extraction
 
-The `pose-app` group installs the CPU `onnxruntime` by default. For GPU inference,
-reinstall with the GPU variant after syncing:
+`onnxruntime-gpu` is in the base dependencies, so GPU inference is enabled
+automatically on NVIDIA systems once the CUDA-enabled PyTorch wheel is installed.
+
+**NVIDIA (CUDA 12.x) — Windows or Linux:**
 
 ```bash
-uv sync --group pose-app
-uv pip install --reinstall onnxruntime-gpu
+uv sync --group segmentation
 ```
 
-This must be repeated after any `uv sync` that touches the `pose-app` group,
-because uv may reinstall the CPU version as a dependency resolution side effect.
+This installs `torch 2.9.1+cu126` from the PyTorch CUDA 12.6 index (see
+`[tool.uv.sources]` in `pyproject.toml`). The `onnxruntime-gpu` CUDA provider
+then works automatically — on Windows the code registers PyTorch's bundled
+`lib/` directory as a DLL search path so `cublasLt64_12.dll` is found.
+
+**Non-NVIDIA / CPU-only:**
+
+Skip `--group segmentation`. The base `uv sync` installs CPU `onnxruntime`
+alongside `onnxruntime-gpu`; detection falls back to `CPUExecutionProvider`
+automatically.
+
+**Version constraints:**
+
+| Package | Constraint | Reason |
+|---|---|---|
+| `onnxruntime-gpu` | `>=1.19,<1.26` | 1.26+ require CUDA 13 (`cublasLt64_13.dll`) |
+| `torch` (segmentation group) | `>=2.7,<2.10` | 2.10 from PyPI is CPU-only; cu126 index tops at 2.9.1 |
 
 ### Running the applications
 

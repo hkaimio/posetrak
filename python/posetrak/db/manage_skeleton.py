@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import importlib.resources
 import sqlite3
 from pathlib import Path
 
@@ -184,6 +185,29 @@ def copy_skeleton(
     """
     from posetrak.db.db import _copy_rows_if_missing
     _copy_rows_if_missing(src, dst, "skeletons", [skeleton_id])
+
+
+_DEFAULT_SKELETONS: list[tuple[str, str]] = [
+    ("Default male", "default_male.yaml"),
+    ("Default female", "default_female.yaml"),
+]
+
+
+def seed_default_skeletons(conn: sqlite3.Connection) -> list[str]:
+    """Insert bundled default skeletons into *conn* if not already present.
+
+    Idempotent: re-seeding a DB that already has the defaults is a no-op
+    (SHA-256 primary key means the INSERT silently skips duplicates).
+    Returns the list of skeleton IDs (one per default, whether new or existing).
+    """
+    pkg = importlib.resources.files("posetrak.data.skeletons")
+    ids: list[str] = []
+    for name, filename in _DEFAULT_SKELETONS:
+        yaml_content = pkg.joinpath(filename).read_text(encoding="utf-8")
+        ids.append(
+            import_skeleton_str(conn, yaml_content, name=name, source="bundled-default")
+        )
+    return ids
 
 
 def list_skeletons(registry: sqlite3.Connection) -> list[sqlite3.Row]:

@@ -39,6 +39,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["python"]
 
+[tool.setuptools.package-data]
+"posetrak.data.skeletons" = ["*.yaml"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

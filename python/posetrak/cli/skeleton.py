@@ -17,6 +17,7 @@ from posetrak.db.manage_skeleton import (
     import_skeleton,
     import_skeleton_str,
     list_skeletons,
+    seed_default_skeletons,
 )
 from posetrak.db.scale_skeleton import scale_skeleton_yaml, scaling_summary
 
@@ -78,6 +79,23 @@ def _open_conn(obj: dict):
 @click.group("skeleton")
 def skeleton_group() -> None:
     """Manage skeleton definitions."""
+
+
+@skeleton_group.command("add-defaults")
+@click.pass_obj
+def skeleton_add_defaults(obj: dict) -> None:
+    """Seed bundled default skeletons into the registry or session DB.
+
+    Safe to run on an existing database — already-present skeletons are skipped.
+    """
+    conn, label = _open_conn(obj)
+    try:
+        ids = seed_default_skeletons(conn)
+    finally:
+        conn.close()
+    for sid in ids:
+        click.echo(f"skeleton_id: {sid}")
+    click.echo(f"Default skeletons available in {label}.")
 
 
 @skeleton_group.command("import")

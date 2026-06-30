@@ -205,14 +205,15 @@ class TestSkeletonImport:
 
 
 class TestSkeletonList:
-    def test_empty(
+    def test_shows_defaults(
         self, cli_runner: CliRunner, registry_db_path: Path
     ) -> None:
         result = cli_runner.invoke(
             main, ["--registry", str(registry_db_path), "skeleton", "list"]
         )
         assert result.exit_code == 0
-        assert "No skeletons" in result.output
+        assert "Default male" in result.output
+        assert "Default female" in result.output
 
     def test_lists_after_import(
         self,
@@ -257,9 +258,10 @@ class TestSkeletonList:
             ["--registry", str(registry_db_path), "--json", "skeleton", "list"],
         )
         assert result.exit_code == 0
-        obj = json.loads(result.output.strip())
-        assert "id" in obj
-        assert "name" in obj
+        # Output is NDJSON (one JSON object per line); verify all rows parse and one is ours.
+        rows = [json.loads(line) for line in result.output.strip().splitlines()]
+        assert all("id" in r and "name" in r for r in rows)
+        assert any(r["name"] == "JSON Skel" for r in rows)
 
 
 class TestSkeletonScale:

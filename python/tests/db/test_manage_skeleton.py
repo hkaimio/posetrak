@@ -41,11 +41,12 @@ def test_import_skeleton_returns_sha256_id(registry_db: sqlite3.Connection, tmp_
 def test_import_skeleton_idempotent(registry_db: sqlite3.Connection, tmp_path: Path) -> None:
     """Second import of the same YAML returns the same ID without creating a duplicate row."""
     yaml_path = _write_yaml(tmp_path, content="joints: [hip, knee]\n")
+    count_before = registry_db.execute("SELECT COUNT(*) FROM skeletons").fetchone()[0]
     id1 = import_skeleton(registry_db, yaml_path)
     id2 = import_skeleton(registry_db, yaml_path)
     assert id1 == id2
-    count = registry_db.execute("SELECT COUNT(*) FROM skeletons").fetchone()[0]
-    assert count == 1
+    count_after = registry_db.execute("SELECT COUNT(*) FROM skeletons").fetchone()[0]
+    assert count_after == count_before + 1
 
 
 def test_import_skeleton_default_name_from_filename(
@@ -117,21 +118,24 @@ def test_import_skeleton_person_label_and_source(
 # ---------------------------------------------------------------------------
 
 
-def test_list_skeletons_empty(registry_db: sqlite3.Connection) -> None:
-    """list_skeletons() returns an empty list when no skeletons are registered."""
-    assert list_skeletons(registry_db) == []
+def test_list_skeletons_defaults(registry_db: sqlite3.Connection) -> None:
+    """A fresh registry contains the two bundled default skeletons."""
+    rows = list_skeletons(registry_db)
+    names = {r["name"] for r in rows}
+    assert "Default male" in names
+    assert "Default female" in names
 
 
 def test_list_skeletons_returns_all(registry_db: sqlite3.Connection, tmp_path: Path) -> None:
-    """list_skeletons() returns one row per imported skeleton."""
+    """list_skeletons() returns one row per imported skeleton (plus the seeded defaults)."""
     yaml1 = _write_yaml(tmp_path, name="skel_a.yaml", content="joints: [a]\n")
     yaml2 = _write_yaml(tmp_path, name="skel_b.yaml", content="joints: [b]\n")
     import_skeleton(registry_db, yaml1)
     import_skeleton(registry_db, yaml2)
     rows = list_skeletons(registry_db)
-    assert len(rows) == 2
     names = {row["name"] for row in rows}
-    assert names == {"skel_a", "skel_b"}
+    assert "skel_a" in names
+    assert "skel_b" in names
 
 
 # ---------------------------------------------------------------------------

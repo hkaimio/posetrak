@@ -196,6 +196,8 @@ def create_registry(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = _connect(path)
     _apply_schema(conn, _REGISTRY_SCHEMA_SQL, REGISTRY_SCHEMA_VERSION)
+    from posetrak.db.manage_skeleton import seed_default_skeletons
+    seed_default_skeletons(conn)
     return conn
 
 

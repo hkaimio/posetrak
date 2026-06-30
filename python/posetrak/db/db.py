@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 6
-SESSION_SCHEMA_VERSION: Final[int] = 24
+SESSION_SCHEMA_VERSION: Final[int] = 25
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -685,6 +685,32 @@ def _migrate_session_v23_to_v24(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v24_to_v25(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 24 to 25.
+
+    v25 adds trial_id to tracking_runs as a direct FK, enabling fast trial lookup
+    without the 3-hop join through observation_sequences and detection_runs.
+    Existing rows are backfilled via that join.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tracking_runs)")}
+    if "trial_id" not in cols:
+        conn.execute(
+            "ALTER TABLE tracking_runs ADD COLUMN trial_id TEXT REFERENCES trials(id)"
+        )
+        conn.execute("""
+            UPDATE tracking_runs
+            SET trial_id = (
+                SELECT dr.trial_id
+                FROM detection_runs dr
+                JOIN pose_observation_sequences s
+                    ON s.id = tracking_runs.observation_sequence_id
+                WHERE dr.id = s.detection_run_id
+            )
+        """)
+    _set_schema_version(conn, 25)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -777,6 +803,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 23
     if actual == 23:
         _migrate_session_v23_to_v24(conn)
+        actual = 24
+    if actual == 24:
+        _migrate_session_v24_to_v25(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

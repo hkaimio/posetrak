@@ -20,12 +20,15 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -404,8 +407,8 @@ class CapturePanel(QWidget):
         ext_btn = QPushButton("Extrinsics…")
         ext_btn.clicked.connect(self._open_extrinsics)
 
-        self._detect_btn = QPushButton("Detect Pose…")
-        self._detect_btn.clicked.connect(self._open_detection_dialog)
+        self._detect_btn = QPushButton("New trial…")
+        self._detect_btn.clicked.connect(self._open_new_trial_dialog)
         self._detect_btn.setEnabled(has_sync and bool(videos))
         if not has_sync:
             self._detect_btn.setToolTip("Set up sync first")
@@ -494,18 +497,94 @@ class CapturePanel(QWidget):
         )
         dlg.exec()
 
-    def _open_detection_dialog(self) -> None:
-        from app.pose.run_detection_dialog import RunDetectionDialog
-        dlg = RunDetectionDialog(
+    def _open_new_trial_dialog(self) -> None:
+        dlg = _NewTrialDialog(
             conn=self._conn,
-            session_path=self._session_path,
             capture_id=self._capture_id,
             time_start_s=self._start_s if self._start_s > 0 else None,
             time_end_s=self._end_s if self._end_s > 0 else None,
             parent=self,
         )
-        dlg.detection_finished.connect(lambda _tid, _rid: self.data_changed.emit())
+        dlg.trial_created.connect(lambda _tid: self.data_changed.emit())
         dlg.exec()
+
+
+# ---------------------------------------------------------------------------
+# _NewTrialDialog — simple dialog to create a trial (no detection)
+# ---------------------------------------------------------------------------
+
+
+class _NewTrialDialog(QDialog):
+    """Collect trial name and time range; insert a trials row.  No detection."""
+
+    trial_created = Signal(str)  # trial_id
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        capture_id: str,
+        time_start_s: float | None = None,
+        time_end_s: float | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("New Trial")
+        self.setMinimumWidth(360)
+        self._conn = conn
+        self._capture_id = capture_id
+        self._build_ui(time_start_s, time_end_s)
+
+    def _build_ui(self, time_start_s: float | None, time_end_s: float | None) -> None:
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        count = self._conn.execute(
+            "SELECT COUNT(*) FROM trials WHERE capture_id = ?", (self._capture_id,)
+        ).fetchone()[0]
+        self._name = QLineEdit(f"Trial {count + 1}")
+        form.addRow("Trial name:", self._name)
+
+        self._start = QDoubleSpinBox()
+        self._start.setRange(0.0, 100_000.0)
+        self._start.setDecimals(3)
+        self._start.setSuffix(" s")
+        self._start.setValue(time_start_s if time_start_s is not None else 0.0)
+        form.addRow("Start time:", self._start)
+
+        self._end = QDoubleSpinBox()
+        self._end.setRange(0.0, 100_000.0)
+        self._end.setDecimals(3)
+        self._end.setSuffix(" s")
+        self._end.setValue(time_end_s if time_end_s is not None else 0.0)
+        form.addRow("End time:", self._end)
+
+        layout.addLayout(form)
+
+        btns = QHBoxLayout()
+        create_btn = QPushButton("Create Trial")
+        create_btn.setDefault(True)
+        create_btn.clicked.connect(self._on_create)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btns.addWidget(create_btn)
+        btns.addWidget(cancel_btn)
+        layout.addLayout(btns)
+
+    def _on_create(self) -> None:
+        from posetrak.db.db import generate_id
+        name = self._name.text().strip() or "Trial"
+        trial_id = generate_id()
+        start = self._start.value() if self._start.value() > 0 else None
+        end = self._end.value() if self._end.value() > 0 else None
+        self._conn.execute(
+            "INSERT INTO trials (id, capture_id, name, time_start_s, time_end_s) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (trial_id, self._capture_id, name, start, end),
+        )
+        self._conn.commit()
+        self.trial_created.emit(trial_id)
+        self.accept()
 
 
 # ---------------------------------------------------------------------------
@@ -514,46 +593,29 @@ class CapturePanel(QWidget):
 
 
 class TrialPanel(QWidget):
-    """Stitcher + assignment panel for a trial.
+    """Overview panel for a trial: info, segmentation, detection runs, tracking runs."""
 
-    Shows a compact header (trial name, time range, run selector) then embeds
-    StitcherPanel for the selected detection run.  Exposes has_unsaved_changes()
-    so the main window can prompt before navigating away.
-    """
-
-    data_changed = Signal()  # forwarded from StitcherPanel.applied
+    data_changed = Signal()
+    navigate_detection = Signal(str)   # detection run_id — open assignment editor
+    navigate_tracking = Signal(str)    # tracking run_id — open tracking run panel
 
     def __init__(
         self,
         conn: sqlite3.Connection,
         trial_id: str,
-        preselect_run_id: str | None = None,
+        session_path: "Path | None" = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._conn = conn
         self._trial_id = trial_id
-        self._preselect_run_id = preselect_run_id
-        self._stitcher_panel: "StitcherPanel | None" = None
+        self._session_path = session_path
         self._build()
 
-    # ------------------------------------------------------------------
-
-    def has_unsaved_changes(self) -> bool:
-        return self._stitcher_panel is not None and self._stitcher_panel.is_dirty
-
-    def save_changes(self) -> bool:
-        if self._stitcher_panel is not None:
-            return self._stitcher_panel.apply()
-        return True
-
-    # ------------------------------------------------------------------
-
     def _build(self) -> None:
-        from app.pose.stitcher_panel import StitcherPanel
-
         trial = self._conn.execute(
-            "SELECT id, name, time_start_s, time_end_s FROM trials WHERE id = ?",
+            "SELECT t.id, t.name, t.time_start_s, t.time_end_s, c.label AS capture_label "
+            "FROM trials t JOIN captures c ON c.id = t.capture_id WHERE t.id = ?",
             (self._trial_id,),
         ).fetchone()
         if trial is None:
@@ -561,96 +623,121 @@ class TrialPanel(QWidget):
             self.layout().addWidget(QLabel("Trial not found."))
             return
 
-        runs = self._conn.execute(
+        detection_runs = self._conn.execute(
             "SELECT id, detector_model, pose_model, status, created_at "
             "FROM detection_runs WHERE trial_id = ? ORDER BY created_at DESC",
             (self._trial_id,),
         ).fetchall()
 
-        vbox = QVBoxLayout(self)
-        vbox.setContentsMargins(4, 4, 4, 4)
-        vbox.setSpacing(4)
+        tracking_runs = self._conn.execute(
+            "SELECT tr.id, COALESCE(sp.person_name, 'Unnamed') AS person_name, "
+            "       tr.status, tr.created_at "
+            "FROM tracking_runs tr "
+            "LEFT JOIN pose_observation_sequences pos ON pos.id = tr.observation_sequence_id "
+            "LEFT JOIN sequence_persons sp ON sp.sequence_id = pos.id "
+            "WHERE tr.trial_id = ? "
+            "ORDER BY tr.created_at DESC",
+            (self._trial_id,),
+        ).fetchall()
 
-        # --- Header row ---
-        header = QHBoxLayout()
+        inner = QWidget()
+        vbox = QVBoxLayout(inner)
+        vbox.setAlignment(Qt.AlignmentFlag.AlignTop)
+        vbox.setSpacing(8)
+        vbox.setContentsMargins(8, 8, 8, 8)
+
+        # Breadcrumb
+        bc = QLabel(f"Capture: <b>{trial['capture_label']}</b>")
+        bc.setStyleSheet("color: gray; font-size: 11px;")
+        vbox.addWidget(bc)
+
+        # Trial title + time range
         title = trial["name"] or "Unnamed trial"
         start_s = trial["time_start_s"]
         end_s = trial["time_end_s"]
         time_str = (
-            f"  {_fmt_time(start_s)} – {_fmt_time(end_s)}"
-            if start_s is not None and end_s is not None else ""
+            f"{_fmt_time(start_s)} – {_fmt_time(end_s)}"
+            if start_s is not None and end_s is not None else "—"
         )
-        header.addWidget(QLabel(f"<b>{title}</b>{time_str}"))
-        header.addStretch()
+        vbox.addWidget(QLabel(f"<h2>{title}</h2>"))
+        info_form = QFormLayout()
+        info_form.addRow("Time range:", QLabel(time_str))
+        vbox.addLayout(info_form)
 
-        self._run_combo = QComboBox()
-        for r in runs:
-            label = (
-                f"{r['detector_model']}+{r['pose_model']}"
-                f"  {_fmt_ts(r['created_at'])}"
-                f"  ({r['status']})"
-            )
-            self._run_combo.addItem(label, r["id"])
-        header.addWidget(QLabel("Run:"))
-        header.addWidget(self._run_combo)
-
-        self._seg_init_btn = QPushButton("Segmentation…")
-        self._seg_init_btn.setToolTip(
-            "Open interactive Cutie segmentation initialisation for this detection run"
+        # Segmentation section
+        seg_box = _section("Segmentation")
+        self._seg_btn = QPushButton(
+            "Create segmentation" if detection_runs else "No detection runs yet"
         )
-        self._seg_init_btn.clicked.connect(self._on_open_seg_init)
-        self._seg_init_btn.setEnabled(bool(runs))
-        header.addWidget(self._seg_init_btn)
+        self._seg_btn.setEnabled(bool(detection_runs))
+        self._seg_btn.setToolTip(
+            "Open interactive Cutie segmentation initialisation"
+        )
+        self._seg_btn.clicked.connect(self._on_open_seg_init)
+        seg_box.inner_layout().addWidget(self._seg_btn)
+        vbox.addWidget(seg_box)
 
-        vbox.addLayout(header)
-
-        # --- Stitcher area (fills remaining space) ---
-        self._stitcher_container = QVBoxLayout()
-        self._stitcher_container.setContentsMargins(0, 0, 0, 0)
-        vbox.addLayout(self._stitcher_container, 1)
-
-        # Pre-select run if specified (e.g. clicked on Detection Run node)
-        if self._preselect_run_id:
-            idx = self._run_combo.findData(self._preselect_run_id)
-            if idx >= 0:
-                self._run_combo.setCurrentIndex(idx)
-
-        self._run_combo.currentIndexChanged.connect(self._on_run_changed)
-        self._load_stitcher(self._run_combo.currentData())
-
-    def _load_stitcher(self, run_id: str | None) -> None:
-        from app.pose.stitcher_panel import StitcherPanel
-
-        # Clear previous panel
-        while self._stitcher_container.count():
-            item = self._stitcher_container.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._stitcher_panel = None
-
-        if not run_id:
-            self._stitcher_container.addWidget(QLabel("No detection run selected."))
-            return
-
-        panel = StitcherPanel(self._conn, run_id, parent=self)
-        panel.applied.connect(self.data_changed)
-        self._stitcher_panel = panel
-        self._stitcher_container.addWidget(panel)
-
-    def _on_run_changed(self, index: int) -> None:
-        if self._stitcher_panel is not None and self._stitcher_panel.is_dirty:
-            ans = QMessageBox.question(
-                self, "Unsaved changes",
-                "You have unapplied assignments. Discard and switch run?",
-                QMessageBox.Yes | QMessageBox.No,
+        # Detection runs section
+        det_box = _section(f"Detection runs ({len(detection_runs)})")
+        if detection_runs:
+            self._det_list = QListWidget()
+            self._det_list.setMaximumHeight(140)
+            self._det_list.setAlternatingRowColors(True)
+            for r in detection_runs:
+                label = (
+                    f"{r['detector_model']}+{r['pose_model']}"
+                    f"  {_fmt_ts(r['created_at'])}"
+                    f"  [{r['status']}]"
+                )
+                item = QListWidgetItem(label)
+                item.setData(Qt.ItemDataRole.UserRole, r["id"])
+                self._det_list.addItem(item)
+            self._det_list.itemDoubleClicked.connect(
+                lambda it: self.navigate_detection.emit(it.data(Qt.ItemDataRole.UserRole))
             )
-            if ans != QMessageBox.Yes:
-                return
-        self._load_stitcher(self._run_combo.itemData(index))
+            det_box.inner_layout().addWidget(self._det_list)
+        else:
+            det_box.inner_layout().addWidget(QLabel("No detection runs yet."))
+
+        run_det_btn = QPushButton("Run detection…")
+        run_det_btn.setEnabled(self._session_path is not None)
+        run_det_btn.clicked.connect(self._on_run_detection)
+        det_box.inner_layout().addWidget(run_det_btn)
+        vbox.addWidget(det_box)
+
+        # Tracking runs section
+        trk_box = _section(f"Tracking runs ({len(tracking_runs)})")
+        if tracking_runs:
+            self._trk_list = QListWidget()
+            self._trk_list.setMaximumHeight(140)
+            self._trk_list.setAlternatingRowColors(True)
+            for r in tracking_runs:
+                label = (
+                    f"{r['person_name']}"
+                    f"  {_fmt_ts(r['created_at'])}"
+                    f"  [{r['status']}]"
+                )
+                item = QListWidgetItem(label)
+                item.setData(Qt.ItemDataRole.UserRole, r["id"])
+                self._trk_list.addItem(item)
+            self._trk_list.itemDoubleClicked.connect(
+                lambda it: self.navigate_tracking.emit(it.data(Qt.ItemDataRole.UserRole))
+            )
+            trk_box.inner_layout().addWidget(self._trk_list)
+        else:
+            trk_box.inner_layout().addWidget(QLabel("No tracking runs yet."))
+        vbox.addWidget(trk_box)
+
+        self.setLayout(QVBoxLayout())
+        self.layout().setContentsMargins(0, 0, 0, 0)
+        self.layout().addWidget(_scrollable(inner))
 
     def _on_open_seg_init(self) -> None:
-        run_id = self._run_combo.currentData()
-        if not run_id:
+        row = self._conn.execute(
+            "SELECT id FROM detection_runs WHERE trial_id = ? ORDER BY created_at DESC LIMIT 1",
+            (self._trial_id,),
+        ).fetchone()
+        if not row:
             return
         from app.pose.cutie_init_panel import CutieInitPanel
         win = QWidget(self, Qt.WindowType.Window)
@@ -658,11 +745,24 @@ class TrialPanel(QWidget):
         win.resize(1200, 750)
         layout = QVBoxLayout(win)
         layout.setContentsMargins(0, 0, 0, 0)
-        panel = CutieInitPanel(self._conn, run_id, parent=win)
+        panel = CutieInitPanel(self._conn, row["id"], parent=win)
         layout.addWidget(panel)
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         win.destroyed.connect(panel.shutdown)
         win.show()
+
+    def _on_run_detection(self) -> None:
+        if self._session_path is None:
+            return
+        from app.pose.run_detection_dialog import RunDetectionDialog
+        dlg = RunDetectionDialog(
+            conn=self._conn,
+            session_path=self._session_path,
+            trial_id=self._trial_id,
+            parent=self,
+        )
+        dlg.detection_finished.connect(lambda _tid, _rid: self.data_changed.emit())
+        dlg.exec()
 
 
 # ---------------------------------------------------------------------------
@@ -760,12 +860,17 @@ class DetectionRunPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# StandaloneRunPanel — stitcher for a detection run not linked to a trial
+# StandaloneRunPanel — assignment editor for a single detection run
 # ---------------------------------------------------------------------------
 
 
 class StandaloneRunPanel(QWidget):
-    """Stitcher wrapper for a detection run that isn't associated with a trial."""
+    """Assignment editor (StitcherPanel) for a single detection run.
+
+    Reached by clicking a detection run row in TrialPanel or a detection run
+    node in the session tree.  Shows a compact breadcrumb header above the
+    full-width StitcherPanel.
+    """
 
     data_changed = Signal()
 
@@ -788,7 +893,12 @@ class StandaloneRunPanel(QWidget):
         from app.pose.stitcher_panel import StitcherPanel
 
         run = self._conn.execute(
-            "SELECT detector_model, pose_model, created_at FROM detection_runs WHERE id = ?",
+            "SELECT dr.id, dr.detector_model, dr.pose_model, dr.created_at, "
+            "       dr.trial_id, t.name AS trial_name, c.label AS capture_label "
+            "FROM detection_runs dr "
+            "LEFT JOIN trials t ON t.id = dr.trial_id "
+            "LEFT JOIN captures c ON c.id = t.capture_id "
+            "WHERE dr.id = ?",
             (self._run_id,),
         ).fetchone()
 
@@ -797,10 +907,18 @@ class StandaloneRunPanel(QWidget):
         vbox.setSpacing(4)
 
         if run:
-            vbox.addWidget(QLabel(
-                f"Detection run: {run['detector_model']}+{run['pose_model']}"
-                f"  ({_fmt_ts(run['created_at'])})  — not linked to a trial"
-            ))
+            # Breadcrumb
+            parts = []
+            if run["capture_label"]:
+                parts.append(run["capture_label"])
+            if run["trial_name"]:
+                parts.append(run["trial_name"])
+            parts.append(
+                f"{run['detector_model']}+{run['pose_model']}  {_fmt_ts(run['created_at'])}"
+            )
+            bc = QLabel("  /  ".join(parts))
+            bc.setStyleSheet("color: gray; font-size: 11px;")
+            vbox.addWidget(bc)
 
         panel = StitcherPanel(self._conn, self._run_id, parent=self)
         panel.applied.connect(self.data_changed)

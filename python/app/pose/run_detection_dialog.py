@@ -1,8 +1,8 @@
 """run_detection_dialog.py — Modal dialog to configure and launch a detection run.
 
-Opens from CapturePanel.  On success it creates a trials row, links the new
-detection_run to it, and emits detection_finished(trial_id, run_id) so the
-caller can refresh the session tree.
+Opens from CapturePanel (creates a new trial) or TrialPanel (uses an existing
+trial).  On success it links the new detection_run to the trial and emits
+detection_finished(trial_id, run_id) so the caller can refresh the session tree.
 """
 from __future__ import annotations
 
@@ -20,7 +20,12 @@ from posetrak.db.db import generate_id
 
 
 class RunDetectionDialog(QDialog):
-    """Configure model, time range, and trial name; run detection in background."""
+    """Configure model, time range, and (optionally) trial name; run detection in background.
+
+    When *trial_id* is provided the dialog runs detection against an existing
+    trial; no new trial row is created.  When *trial_id* is None a new trial row
+    is created after detection completes (legacy path from CapturePanel).
+    """
 
     detection_finished = Signal(str, str)  # trial_id, run_id
 
@@ -28,18 +33,33 @@ class RunDetectionDialog(QDialog):
         self,
         conn: sqlite3.Connection,
         session_path: Path,
-        capture_id: str,
+        capture_id: str | None = None,
         time_start_s: float | None = None,
         time_end_s: float | None = None,
+        trial_id: str | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Detect Pose")
+        self.setWindowTitle("Run Detection")
         self.setMinimumWidth(520)
         self._conn = conn
         self._session_path = session_path
-        self._capture_id = capture_id
+        self._trial_id = trial_id
         self._job = None
+
+        if trial_id is not None:
+            trial = conn.execute(
+                "SELECT capture_id, time_start_s, time_end_s FROM trials WHERE id = ?",
+                (trial_id,),
+            ).fetchone()
+            if trial:
+                capture_id = capture_id or trial["capture_id"]
+                if time_start_s is None:
+                    time_start_s = trial["time_start_s"]
+                if time_end_s is None:
+                    time_end_s = trial["time_end_s"]
+
+        self._capture_id = capture_id
         self._build_ui(time_start_s, time_end_s)
 
     # ------------------------------------------------------------------
@@ -50,12 +70,15 @@ class RunDetectionDialog(QDialog):
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
 
-        # Trial name
-        trial_count = self._conn.execute(
-            "SELECT COUNT(*) FROM trials WHERE capture_id = ?", (self._capture_id,)
-        ).fetchone()[0]
-        self._trial_name = QLineEdit(f"Trial {trial_count + 1}")
-        form.addRow("Trial name:", self._trial_name)
+        # Trial name — only shown when creating a new trial
+        if self._trial_id is None:
+            trial_count = self._conn.execute(
+                "SELECT COUNT(*) FROM trials WHERE capture_id = ?", (self._capture_id,)
+            ).fetchone()[0]
+            self._trial_name = QLineEdit(f"Trial {trial_count + 1}")
+            form.addRow("Trial name:", self._trial_name)
+        else:
+            self._trial_name = None
 
         # Sync config
         syncs = self._conn.execute(
@@ -152,12 +175,14 @@ class RunDetectionDialog(QDialog):
 
     def _controls_enabled(self, enabled: bool) -> None:
         for w in [
-            self._trial_name, self._sync_combo,
+            self._sync_combo,
             self._start_spin, self._end_spin,
             self._detector_combo, self._pose_combo, self._conf_spin,
             self._run_btn, self._close_btn,
         ]:
             w.setEnabled(enabled)
+        if self._trial_name is not None:
+            self._trial_name.setEnabled(enabled)
 
     def _on_run(self) -> None:
         sync_id = self._sync_combo.currentData()
@@ -205,15 +230,20 @@ class RunDetectionDialog(QDialog):
         self._cam_bar.setValue(100)
         self._cam_label.setText("Done")
 
-        # Create trial and link detection run to it
-        trial_id = generate_id()
-        name = self._trial_name.text().strip() or "Trial"
-        self._conn.execute(
-            "INSERT INTO trials (id, capture_id, name, time_start_s, time_end_s) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (trial_id, self._capture_id, name,
-             self._start_spin.value(), self._end_spin.value()),
-        )
+        if self._trial_id is None:
+            # Create a new trial and link the detection run to it
+            trial_id = generate_id()
+            name = self._trial_name.text().strip() if self._trial_name else "Trial"
+            name = name or "Trial"
+            self._conn.execute(
+                "INSERT INTO trials (id, capture_id, name, time_start_s, time_end_s) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (trial_id, self._capture_id, name,
+                 self._start_spin.value(), self._end_spin.value()),
+            )
+        else:
+            trial_id = self._trial_id
+
         self._conn.execute(
             "UPDATE detection_runs SET trial_id = ? WHERE id = ?",
             (trial_id, run_id),

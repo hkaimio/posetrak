@@ -381,21 +381,15 @@ class MainWindow(QMainWindow):
 
     def _show_trial(self, trial_id: str) -> None:
         from app.ui.content_panels import TrialPanel
-        panel = TrialPanel(self._session_conn, trial_id)
+        panel = TrialPanel(self._session_conn, trial_id, session_path=self._session_path)
         panel.data_changed.connect(self.reload_tree)
+        panel.navigate_detection.connect(self._show_detection_run)
+        panel.navigate_tracking.connect(self._show_tracking_run)
         self._swap_content(panel)
 
     def _show_detection_run(self, run_id: str) -> None:
-        row = self._session_conn.execute(
-            "SELECT trial_id FROM detection_runs WHERE id = ?", (run_id,)
-        ).fetchone()
-        trial_id = row["trial_id"] if row else None
-        if trial_id:
-            from app.ui.content_panels import TrialPanel
-            panel = TrialPanel(self._session_conn, trial_id, preselect_run_id=run_id)
-        else:
-            from app.ui.content_panels import StandaloneRunPanel
-            panel = StandaloneRunPanel(self._session_conn, run_id)
+        from app.ui.content_panels import StandaloneRunPanel
+        panel = StandaloneRunPanel(self._session_conn, run_id)
         panel.data_changed.connect(self.reload_tree)
         self._swap_content(panel)
 

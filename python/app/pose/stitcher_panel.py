@@ -342,7 +342,7 @@ class StitcherPanel(QWidget):
         header_row = QHBoxLayout()
         header_row.addWidget(QLabel("View:"))
         self._view_combo = QComboBox()
-        self._view_combo.addItem("By Detection", userData="detection")
+        self._view_combo.addItem("By Camera", userData="detection")
         self._view_combo.addItem("By Person", userData="person")
         self._view_combo.currentIndexChanged.connect(self._on_view_mode_changed)
         header_row.addWidget(self._view_combo)
@@ -403,7 +403,7 @@ class StitcherPanel(QWidget):
         btn_row.addWidget(self._conflict_label)
         btn_row.addStretch()
 
-        self._apply_btn = QPushButton("Apply")
+        self._apply_btn = QPushButton("Save assignments")
         self._apply_btn.setToolTip(
             "Finalise person assignments and create person sequences (Ctrl+S)"
         )

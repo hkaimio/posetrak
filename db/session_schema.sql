@@ -223,7 +223,8 @@ CREATE TABLE IF NOT EXISTS tracking_runs (
     posetrak_version         TEXT NOT NULL,
     active_camera_ids        TEXT NOT NULL,
     marker_names             TEXT NOT NULL,
-    notes                    TEXT
+    notes                    TEXT,
+    trial_id                 TEXT REFERENCES trials(id)
 );
 
 -- Per-person skeleton override within a run (supports multi-person tracking)

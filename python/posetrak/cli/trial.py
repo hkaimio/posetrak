@@ -15,7 +15,7 @@ from pathlib import Path
 import click
 
 from posetrak.cli._output import fail, print_table
-from posetrak.db.db import create_session, open_session, resolve_id_prefix
+from posetrak.db.db import create_session, generate_id, open_session, resolve_id_prefix
 from posetrak.db.trial_export import (
     AnchorSpec,
     ExportScope,
@@ -66,11 +66,7 @@ def cmd_list(ctx: click.Context) -> None:
             c.label  AS capture_label,
             (SELECT COUNT(*) FROM detection_runs dr WHERE dr.trial_id = t.id)
                 AS n_detections,
-            (SELECT COUNT(*) FROM tracking_runs tr
-             JOIN pose_observation_sequences s ON s.id = tr.observation_sequence_id
-             WHERE s.shot_id = t.capture_id
-               AND (t.time_start_s IS NULL OR s.time_start_s >= t.time_start_s - 0.5)
-               AND (t.time_end_s   IS NULL OR s.time_end_s   <= t.time_end_s   + 0.5))
+            (SELECT COUNT(*) FROM tracking_runs WHERE trial_id = t.id)
                 AS n_tracking_runs
         FROM trials t
         JOIN captures c ON c.id = t.capture_id
@@ -109,6 +105,165 @@ def cmd_list(ctx: click.Context) -> None:
         columns=["id", "name", "capture_label", "time_start_s", "time_end_s", "n_detections", "n_tracking_runs"],
         json_mode=json_mode,
     )
+
+
+# ---------------------------------------------------------------------------
+# trial create
+# ---------------------------------------------------------------------------
+
+
+@trial_group.command("create")
+@click.option("--capture", "capture_id", required=True, metavar="ID",
+              help="Capture ID or unique prefix.")
+@click.option("--name", "name", required=True, metavar="NAME",
+              help="Trial name.")
+@click.option("--start", "time_start_s", type=float, default=None, metavar="S",
+              help="Trial start time in seconds.")
+@click.option("--end", "time_end_s", type=float, default=None, metavar="S",
+              help="Trial end time in seconds.")
+@click.pass_context
+def cmd_create(
+    ctx: click.Context,
+    capture_id: str,
+    name: str,
+    time_start_s: float | None,
+    time_end_s: float | None,
+) -> None:
+    """Create a new trial within a capture.
+
+    Example:
+
+        posetrak --session session.db trial create --capture 13af67f5 --name "Sprint 1" --start 10.0 --end 30.0
+    """
+    session_path: str | None = ctx.obj.get("session")
+    if session_path is None:
+        fail("--session / POSETRAK_SESSION_DB is required for 'trial create'.")
+
+    try:
+        conn = open_session(Path(session_path))
+    except Exception as exc:
+        fail(str(exc))
+
+    try:
+        capture_id = resolve_id_prefix(conn, "captures", capture_id)
+    except ValueError as exc:
+        fail(str(exc))
+
+    trial_id = generate_id()
+    conn.execute(
+        "INSERT INTO trials (id, capture_id, name, time_start_s, time_end_s) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (trial_id, capture_id, name, time_start_s, time_end_s),
+    )
+    conn.commit()
+    conn.close()
+
+    click.echo(f"trial_id: {trial_id}")
+
+
+# ---------------------------------------------------------------------------
+# trial show
+# ---------------------------------------------------------------------------
+
+
+@trial_group.command("show")
+@click.argument("trial_id", metavar="TRIAL_ID")
+@click.pass_context
+def cmd_show(ctx: click.Context, trial_id: str) -> None:
+    """Show details of a trial including its detection runs and tracking runs.
+
+    TRIAL_ID accepts a unique prefix (first 8 characters suffice).
+
+    Example:
+
+        posetrak --session session.db trial show abc12345
+    """
+    session_path: str | None = ctx.obj.get("session")
+    if session_path is None:
+        fail("--session / POSETRAK_SESSION_DB is required for 'trial show'.")
+
+    json_mode: bool = ctx.obj.get("json_mode", False)
+
+    try:
+        conn = open_session(Path(session_path))
+    except Exception as exc:
+        fail(str(exc))
+
+    try:
+        trial_id = resolve_id_prefix(conn, "trials", trial_id)
+    except ValueError as exc:
+        fail(str(exc))
+
+    trial = conn.execute(
+        "SELECT t.id, t.name, t.time_start_s, t.time_end_s, c.label AS capture_label "
+        "FROM trials t JOIN captures c ON c.id = t.capture_id "
+        "WHERE t.id = ?",
+        (trial_id,),
+    ).fetchone()
+
+    if trial is None:
+        fail(f"Trial not found: {trial_id}")
+
+    detection_runs = conn.execute(
+        "SELECT id, detector_model, pose_model, status, created_at "
+        "FROM detection_runs WHERE trial_id = ? ORDER BY created_at",
+        (trial_id,),
+    ).fetchall()
+
+    tracking_runs = conn.execute(
+        "SELECT tr.id, COALESCE(sp.person_name, 'unnamed') AS person_name, "
+        "       tr.status, tr.created_at "
+        "FROM tracking_runs tr "
+        "LEFT JOIN pose_observation_sequences pos ON pos.id = tr.observation_sequence_id "
+        "LEFT JOIN sequence_persons sp ON sp.sequence_id = pos.id "
+        "WHERE tr.trial_id = ? "
+        "ORDER BY tr.created_at",
+        (trial_id,),
+    ).fetchall()
+
+    if json_mode:
+        import json
+        click.echo(json.dumps({
+            "id": trial["id"],
+            "name": trial["name"],
+            "capture_label": trial["capture_label"],
+            "time_start_s": trial["time_start_s"],
+            "time_end_s": trial["time_end_s"],
+            "detection_runs": [dict(r) for r in detection_runs],
+            "tracking_runs": [dict(r) for r in tracking_runs],
+        }))
+        return
+
+    click.echo(f"Trial:    {trial['name']} ({trial['id'][:8]}…)")
+    click.echo(f"Capture:  {trial['capture_label']}")
+    start = f"{trial['time_start_s']:.3f} s" if trial["time_start_s"] is not None else "—"
+    end = f"{trial['time_end_s']:.3f} s" if trial["time_end_s"] is not None else "—"
+    click.echo(f"Range:    {start} → {end}")
+    click.echo()
+
+    if detection_runs:
+        click.echo(f"Detection runs ({len(detection_runs)}):")
+        print_table(
+            [dict(r) for r in detection_runs],
+            columns=["id", "detector_model", "pose_model", "status", "created_at"],
+            json_mode=False,
+        )
+    else:
+        click.echo("Detection runs: none")
+
+    click.echo()
+
+    if tracking_runs:
+        click.echo(f"Tracking runs ({len(tracking_runs)}):")
+        print_table(
+            [dict(r) for r in tracking_runs],
+            columns=["id", "person_name", "status", "created_at"],
+            json_mode=False,
+        )
+    else:
+        click.echo("Tracking runs: none")
+
+    conn.close()
 
 
 # ---------------------------------------------------------------------------

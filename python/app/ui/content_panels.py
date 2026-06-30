@@ -52,7 +52,8 @@ _USD_TOOLTIP = (
 )
 
 # Target pixel width per camera cell — used to auto-compute column count on resize.
-_TARGET_CELL_W = 340
+# Portrait-aspect ROIs need narrower cells; 220 gives 3 cols on ~700 px panels.
+_TARGET_CELL_W = 220
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +243,7 @@ def _cfg_text(cfg: sqlite3.Row | None, cfg_id: str | None) -> str:
         n = cfg["cross_pair_max_n"]
         n_suffix = f"×{n}" if n is not None else ""
         parts.append(f"cross@{cfg['cross_pair_max_px']}px{n_suffix}")
-    return "  ".join(parts)
+    return "\n".join(parts)
 
 
 def _fmt_time(s: float | None) -> str:
@@ -1271,7 +1272,9 @@ class _ImageCanvas(QWidget):
 
     def __init__(self, min_h: int = 240, parent=None) -> None:
         super().__init__(parent)
+        self._min_h = min_h
         self.setMinimumHeight(min_h)
+        self._content_aspect: float | None = None  # w/h of last displayed image
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setStyleSheet("background: #222;")
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
@@ -1330,7 +1333,20 @@ class _ImageCanvas(QWidget):
         self._x1 = x1
         self._y1 = y1
         self._src_scale = src_scale
+        if pixmap and pixmap.height() > 0:
+            new_aspect = pixmap.width() / pixmap.height()
+            if new_aspect != self._content_aspect:
+                self._content_aspect = new_aspect
+                self.updateGeometry()
         self.update()
+
+    def hasHeightForWidth(self) -> bool:
+        return self._content_aspect is not None
+
+    def heightForWidth(self, w: int) -> int:
+        if self._content_aspect and self._content_aspect > 0:
+            return max(self._min_h, int(w / self._content_aspect))
+        return self._min_h
 
     def set_overlay(
         self,
@@ -1705,7 +1721,7 @@ class _ImageCanvas(QWidget):
 class _CropCell(QWidget):
     """One camera cell in the crop grid: name label + image canvas."""
 
-    _IMG_H = 240
+    _IMG_H = 300
     maximize_requested = Signal()
 
     def __init__(self, label: str, parent=None) -> None:
@@ -1742,6 +1758,13 @@ class _CropCell(QWidget):
 
     def set_is_maximized(self, maximized: bool) -> None:
         self._max_btn.setText("⤡" if maximized else "⤢")
+
+    def hasHeightForWidth(self) -> bool:
+        return self._canvas.hasHeightForWidth()
+
+    def heightForWidth(self, w: int) -> int:
+        h = self._canvas.heightForWidth(w)
+        return h + 20  # title row overhead
 
     def show_empty(self) -> None:
         self._canvas.show_empty()
@@ -2106,6 +2129,8 @@ class PersonCropGridWidget(QWidget):
         super().resizeEvent(event)
         if self._maximized_idx is not None or not self._cells:
             return
+        if self.width() < 100:
+            return  # skip layout during initial sizing before widget is shown
         new_ncols = max(2, min(len(self._cameras) + 1, self.width() // _TARGET_CELL_W))
         if new_ncols != self._ncols:
             self._ncols = new_ncols
@@ -3566,15 +3591,25 @@ class PersonPanel(QWidget):
             (self._sequence_id,),
         ).fetchone()[0]
 
-        inner = QWidget()
-        vbox = QVBoxLayout(inner)
-        vbox.setAlignment(Qt.AlignmentFlag.AlignTop)
+        # ------------------------------------------------------------------
+        # Right sidebar content
+        # ------------------------------------------------------------------
+        title_lbl = QLabel(f"<b>{person_names or seq['name'] or 'Person'}</b>")
+        title_lbl.setWordWrap(True)
 
-        title = person_names or seq["name"] or "Person"
-        vbox.addWidget(QLabel(f"<h2>{title}</h2>"))
+        hide_btn = QToolButton()
+        hide_btn.setText("✕")
+        hide_btn.setToolTip("Hide info panel")
+        hide_btn.setFixedSize(20, 20)
+
+        title_row = QHBoxLayout()
+        title_row.addWidget(title_lbl, stretch=1)
+        title_row.addWidget(hide_btn)
 
         form_box = _section("Person info")
         form = QFormLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(2)
         form.addRow("Persons:", QLabel(person_names or "—"))
         form.addRow("Time range:", QLabel(
             f"{_fmt_time(seq['time_start_s'])}  →  {_fmt_time(seq['time_end_s'])}"
@@ -3582,14 +3617,13 @@ class PersonPanel(QWidget):
         form.addRow("Observations:", QLabel(str(n_obs)))
         form.addRow("Pose model:", QLabel(seq["pose_model"] or "—"))
         form_box.layout().addLayout(form)
-        vbox.addWidget(form_box)
 
         # --- Tracking runs section ---
         self._run_box = _section("Tracking runs (0)")
         box_vbox = self._run_box.layout()
 
         self._run_list = QListWidget()
-        self._run_list.setMaximumHeight(110)
+        self._run_list.setMaximumHeight(130)
         self._run_list.currentItemChanged.connect(self._on_run_selected)
         box_vbox.addWidget(self._run_list)
 
@@ -3598,8 +3632,7 @@ class PersonPanel(QWidget):
         self._run_detail.setVisible(False)
         box_vbox.addWidget(self._run_detail)
 
-        run_act_row = QHBoxLayout()
-        run_act_row.setContentsMargins(0, 2, 0, 0)
+        # Buttons as vertical column in the narrow sidebar
         self._export_bvh_btn = QPushButton("Export BVH…")
         self._export_bvh_btn.setEnabled(False)
         self._export_bvh_btn.clicked.connect(self._export_bvh)
@@ -3620,51 +3653,86 @@ class PersonPanel(QWidget):
             "Measure bone lengths from inlier observations and scale the skeleton"
         )
         self._scale_btn.clicked.connect(self._open_scaling)
-        self._info_toggle_btn = QPushButton("Info")
-        self._info_toggle_btn.setCheckable(True)
-        self._info_toggle_btn.setChecked(False)
-        self._info_toggle_btn.setToolTip("Show / hide run info pane")
-        self._info_toggle_btn.toggled.connect(self._toggle_info_pane)
-        run_act_row.addStretch()
-        run_act_row.addWidget(self._scale_btn)
-        run_act_row.addWidget(self._info_toggle_btn)
-        run_act_row.addWidget(self._export_bvh_btn)
-        run_act_row.addWidget(self._export_usd_btn)
-        run_act_row.addWidget(self._export_gltf_btn)
-        run_act_row.addWidget(self._delete_run_btn)
-        box_vbox.addLayout(run_act_row)
+        run_btn = _action_btn("Run tracker…")
+        run_btn.clicked.connect(self._open_run_tracker)
 
-        vbox.addWidget(self._run_box)
+        for btn in (self._export_bvh_btn, self._export_usd_btn, self._export_gltf_btn,
+                    self._scale_btn, self._delete_run_btn):
+            box_vbox.addWidget(btn)
+
+        # Run info pane (per-frame stats + charts) lives below the runs section
+        self._info_pane = _RunInfoPane(self._conn)
+
+        sidebar_content = QWidget()
+        sb_v = QVBoxLayout(sidebar_content)
+        sb_v.setContentsMargins(6, 4, 6, 4)
+        sb_v.setSpacing(6)
+        sb_v.addLayout(title_row)
+        sb_v.addWidget(form_box)
+        sb_v.addWidget(self._run_box)
+        sb_v.addWidget(run_btn)
+        sb_v.addWidget(self._info_pane)
+        sb_v.addStretch()
+
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setWidget(sidebar_content)
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setMinimumWidth(220)
+
+        # Show button + top bar (visible only while sidebar is hidden)
+        show_btn = QToolButton()
+        show_btn.setText("ℹ")
+        show_btn.setToolTip("Show info panel")
+        show_btn.setVisible(False)
+
+        top_bar = QWidget()
+        top_bar.setMaximumHeight(24)
+        top_bar_h = QHBoxLayout(top_bar)
+        top_bar_h.setContentsMargins(0, 2, 4, 0)
+        top_bar_h.addStretch()
+        top_bar_h.addWidget(show_btn)
+        top_bar.setVisible(False)
+
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        def _toggle_sidebar() -> None:
+            visible = not sidebar_scroll.isVisible()
+            sidebar_scroll.setVisible(visible)
+            top_bar.setVisible(not visible)
+            if visible:
+                w = self._splitter.width()
+                self._splitter.setSizes([w - 300, 300])
+
+        hide_btn.clicked.connect(_toggle_sidebar)
+        show_btn.clicked.connect(_toggle_sidebar)
+
+        # ------------------------------------------------------------------
+        # Camera grid (left pane)
+        # ------------------------------------------------------------------
+        self._crop_grid = PersonCropGridWidget(self._conn, self._sequence_id)
+        self._crop_grid.time_changed.connect(self._info_pane.on_time_changed)
 
         self._refresh_runs()
 
-        btn_row = QHBoxLayout()
-        run_btn = _action_btn("Run tracker…")
-        run_btn.clicked.connect(self._open_run_tracker)
-        btn_row.addWidget(run_btn)
-        btn_row.addStretch()
-        vbox.addLayout(btn_row)
+        left_w = QWidget()
+        left_v = QVBoxLayout(left_w)
+        left_v.setContentsMargins(0, 0, 0, 0)
+        left_v.setSpacing(0)
+        left_v.addWidget(top_bar)
+        left_v.addWidget(self._crop_grid, stretch=1)
 
-        scroll = _scrollable(inner)
-        scroll.setMaximumHeight(320)
-
-        self._crop_grid = PersonCropGridWidget(self._conn, self._sequence_id)
-        self._info_pane = _RunInfoPane(self._conn)
-        self._info_pane.setVisible(False)
-        self._crop_grid.time_changed.connect(self._info_pane.on_time_changed)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._crop_grid)
-        splitter.addWidget(self._info_pane)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-        splitter.setSizes([700, 280])
+        self._splitter.addWidget(left_w)
+        self._splitter.addWidget(sidebar_scroll)
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 0)
+        self._splitter.setCollapsible(0, False)
+        self._splitter.setCollapsible(1, True)
+        self._splitter.setSizes([700, 300])
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(4)
-        root.addWidget(scroll)
-        root.addWidget(splitter, stretch=1)
+        root.setSpacing(0)
+        root.addWidget(self._splitter)
 
         # Auto-select the most recent tracking run so the overlay loads immediately
         if self._run_list.count() > 0 and self._run_list.item(0).data(
@@ -3767,10 +3835,6 @@ class PersonPanel(QWidget):
             self._crop_grid.set_tracking_run(run_id)
         if self._info_pane is not None:
             self._info_pane.load_run(run_id)
-
-    def _toggle_info_pane(self, checked: bool) -> None:
-        if self._info_pane is not None:
-            self._info_pane.setVisible(checked)
 
     # ------------------------------------------------------------------
     # BVH export
@@ -4021,7 +4085,9 @@ class TrackingRunPanel(QWidget):
             form.addRow("Cameras:", cam_lbl)
         except Exception:
             pass
-        form.addRow("Config:", QLabel(_cfg_text(cfg, cfg_id)))
+        cfg_lbl = QLabel(_cfg_text(cfg, cfg_id))
+        cfg_lbl.setWordWrap(True)
+        form.addRow("Config:", cfg_lbl)
         if run["notes"]:
             notes_lbl = QLabel(run["notes"])
             notes_lbl.setWordWrap(True)

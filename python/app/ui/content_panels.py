@@ -1823,6 +1823,235 @@ class _CropCell(QWidget):
         self._canvas.set_selected_kp(idx, show_ring=show_ring, name=name)
 
 
+class _TrackingRunLoader(QThread):
+    """Loads tracking run overlay data (obs blobs + FK projections) on a background thread.
+
+    All expensive work — blob deserialization, undistortion, forward kinematics — runs
+    here so the UI thread stays responsive while the page opens.
+
+    Emits ``loaded`` with the four result dicts when complete, or with empty dicts if
+    no run_id is given or loading fails.
+    """
+
+    loaded = Signal(list, dict, dict, dict, dict)
+    # args: tracking_timestamps, marker_proj, joint_proj, bone_pairs_list, outlier_masks
+    # bone_pairs is wrapped in a list so Signal can carry it
+
+    def __init__(self, db_path: str, run_id: str, parent=None) -> None:
+        super().__init__(parent)
+        self._db_path = db_path
+        self._run_id = run_id
+
+    def run(self) -> None:  # noqa: C901
+        import json
+        import sqlite3 as _sqlite3
+        import numpy as np
+        from posetrak.db.skeleton_layout import SkeletonLayout
+
+        conn = _sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+        conn.row_factory = _sqlite3.Row
+        try:
+            self._do_load(conn, np, json, SkeletonLayout)
+        except Exception:
+            self.loaded.emit([], {}, {}, [], {})
+        finally:
+            conn.close()
+
+    def _do_load(self, conn, np, json, SkeletonLayout) -> None:
+        run_id = self._run_id
+        run = conn.execute(
+            "SELECT active_camera_ids, marker_names, skeleton_id, "
+            "       extrinsic_calibration_id, observation_sequence_id "
+            "FROM tracking_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+        if run is None:
+            self.loaded.emit([], {}, {}, [], {})
+            return
+
+        cam_labels: list[str] = json.loads(run["active_camera_ids"] or "[]")
+        marker_names: list[str] = json.loads(run["marker_names"] or "[]")
+        n_cams, n_markers = len(cam_labels), len(marker_names)
+        if n_cams == 0 or n_markers == 0:
+            self.loaded.emit([], {}, {}, [], {})
+            return
+
+        # Map camera label → camera_instance_id
+        placeholders = ",".join("?" * n_cams)
+        label_to_cam_id: dict[str, str] = {}
+        for r in conn.execute(
+            f"SELECT id, label FROM camera_instances WHERE label IN ({placeholders})",
+            cam_labels,
+        ):
+            label_to_cam_id[r["label"]] = r["id"]
+
+        # Tracking timestamps for nearest-step lookup
+        ts_rows = conn.execute(
+            "SELECT tracker_step, timestamp_s FROM tracking_results "
+            "WHERE run_id=? AND person_id=0 AND is_smoothed=0 ORDER BY tracker_step",
+            (run_id,),
+        ).fetchall()
+        tracking_timestamps = sorted(
+            (r["timestamp_s"], r["tracker_step"]) for r in ts_rows
+        )
+
+        # Skeleton → bone pairs
+        skel = conn.execute(
+            "SELECT yaml_content FROM skeletons WHERE id=?",
+            (run["skeleton_id"],),
+        ).fetchone()
+        if not skel or not skel["yaml_content"]:
+            self.loaded.emit([], {}, {}, [], {})
+            return
+        layout = SkeletonLayout(skel["yaml_content"])
+        bone_pairs = layout.bone_pairs
+
+        marker_to_coco = {
+            m["name"]: m["openpose_keypoint"]
+            for m in layout.markers
+            if m["openpose_keypoint"] is not None
+        }
+        mi_to_coco: dict[int, int] = {
+            mi: marker_to_coco[name]
+            for mi, name in enumerate(marker_names)
+            if name in marker_to_coco
+        }
+        n_coco_kp = max((c + 1 for c in mi_to_coco.values()), default=17)
+
+        # Extrinsics: cam_instance_id → (R, t)
+        ext_id = run["extrinsic_calibration_id"]
+        cam_extrinsics: dict[str, tuple] = {}
+        if ext_id:
+            for r in conn.execute(
+                "SELECT camera_instance_id, R, t FROM extrinsic_entries "
+                "WHERE extrinsic_calibration_id = ?",
+                (ext_id,),
+            ):
+                cam_extrinsics[r["camera_instance_id"]] = (
+                    np.frombuffer(bytes(r["R"]), dtype="<f8").reshape(3, 3),
+                    np.frombuffer(bytes(r["t"]), dtype="<f8"),
+                )
+
+        # Intrinsics: cam_instance_id → dict
+        seq = conn.execute(
+            "SELECT shot_id FROM pose_observation_sequences WHERE id=?",
+            (run["observation_sequence_id"],),
+        ).fetchone()
+        cam_intrinsics: dict[str, dict] = {}
+        if seq:
+            for r in conn.execute(
+                "SELECT cv.camera_instance_id, ic.fx, ic.fy, ic.cx, ic.cy, "
+                "       ic.dist_coeffs, ic.matrix_original "
+                "FROM capture_videos cv "
+                "JOIN intrinsics_calibrations ic ON ic.id = cv.intrinsics_calibration_id "
+                "WHERE cv.shot_id = ?",
+                (seq["shot_id"],),
+            ):
+                K_orig = (
+                    np.frombuffer(bytes(r["matrix_original"]), dtype="<f8").reshape(3, 3)
+                    if r["matrix_original"] else None
+                )
+                dist = (
+                    np.frombuffer(bytes(r["dist_coeffs"]), dtype="<f8")
+                    if r["dist_coeffs"] else None
+                )
+                cam_intrinsics[r["camera_instance_id"]] = {
+                    "fx": r["fx"], "fy": r["fy"], "cx": r["cx"], "cy": r["cy"],
+                    "K_orig": K_orig, "dist": dist,
+                }
+
+        # Obs blobs → predicted marker pixel positions
+        marker_proj: dict[str, dict[int, object]] = {}
+        outlier_masks: dict[str, dict[int, object]] = {}
+        obs_rows = conn.execute(
+            "SELECT tracker_step, obs_blob FROM tracking_obs_results "
+            "WHERE run_id=? AND person_id=0 ORDER BY tracker_step",
+            (run_id,),
+        ).fetchall()
+        expected_obs = n_cams * n_markers * 8
+        for obs_row in obs_rows:
+            step = obs_row["tracker_step"]
+            blob = np.frombuffer(bytes(obs_row["obs_blob"]), dtype="<f4")
+            if len(blob) != expected_obs:
+                continue
+            obs = blob.reshape(n_cams, n_markers, 8)
+            for ci, label in enumerate(cam_labels):
+                cam_id = label_to_cam_id.get(label)
+                if cam_id is None:
+                    continue
+                pred_xy = obs[ci, :, 2:4].copy()
+                intr = cam_intrinsics.get(cam_id)
+                if intr is not None:
+                    K_orig = intr.get("K_orig")
+                    dist_c = intr.get("dist")
+                    if K_orig is not None and dist_c is not None:
+                        fx_n, fy_n = intr["fx"], intr["fy"]
+                        cx_n, cy_n = intr["cx"], intr["cy"]
+                        K_new = np.array([[fx_n, 0, cx_n], [0, fy_n, cy_n], [0, 0, 1]])
+                        for mi in range(pred_xy.shape[0]):
+                            u_n, v_n = float(pred_xy[mi, 0]), float(pred_xy[mi, 1])
+                            if np.isfinite(u_n) and np.isfinite(v_n):
+                                u_d, v_d = _undistorted_to_distorted(
+                                    u_n, v_n, K_new, K_orig, dist_c
+                                )
+                                pred_xy[mi, 0] = u_d
+                                pred_xy[mi, 1] = v_d
+                marker_proj.setdefault(cam_id, {})[step] = pred_xy
+                if mi_to_coco:
+                    mask = np.zeros(n_coco_kp, dtype=bool)
+                    for mi, coco_id in mi_to_coco.items():
+                        is_out = obs[ci, mi, 6]
+                        if np.isfinite(is_out) and is_out != 0.0:
+                            mask[coco_id] = True
+                    outlier_masks.setdefault(cam_id, {})[step] = mask
+
+        # State blobs → joint projections via FK
+        joint_proj: dict[str, dict[int, dict]] = {}
+        state_rows = conn.execute(
+            "SELECT tracker_step, state FROM tracking_results "
+            "WHERE run_id=? AND person_id=0 AND is_smoothed=0 ORDER BY tracker_step",
+            (run_id,),
+        ).fetchall()
+        for state_row in state_rows:
+            step = state_row["tracker_step"]
+            try:
+                decoded = layout.decode_state_blob(bytes(state_row["state"]))
+                transforms = layout.compute_joint_transforms(decoded)
+            except Exception:
+                continue
+            for label in cam_labels:
+                cam_id = label_to_cam_id.get(label)
+                if cam_id is None:
+                    continue
+                ext = cam_extrinsics.get(cam_id)
+                intr = cam_intrinsics.get(cam_id)
+                if ext is None or intr is None:
+                    continue
+                R, t = ext
+                K_orig = intr.get("K_orig")
+                dist_c = intr.get("dist")
+                fx, fy, cx_k, cy_k = intr["fx"], intr["fy"], intr["cx"], intr["cy"]
+                use_distortion = K_orig is not None and dist_c is not None
+                joint_xy: dict[str, object] = {}
+                for jname, T in transforms.items():
+                    p_world = T[:3, 3]
+                    if use_distortion:
+                        uv = _project_point_distorted(p_world, R, t, K_orig, dist_c)
+                        if uv is None:
+                            continue
+                        u, v = uv
+                    else:
+                        p_cam = R @ p_world + t
+                        if p_cam[2] <= 1e-3:
+                            continue
+                        u = fx * p_cam[0] / p_cam[2] + cx_k
+                        v = fy * p_cam[1] / p_cam[2] + cy_k
+                    joint_xy[jname] = np.array([u, v])
+                joint_proj.setdefault(cam_id, {})[step] = joint_xy
+
+        self.loaded.emit(tracking_timestamps, marker_proj, joint_proj, bone_pairs, outlier_masks)
+
+
 class PersonCropGridWidget(QWidget):
     """Grid of per-camera person crop images with a time scrubber.
 
@@ -1873,6 +2102,7 @@ class PersonCropGridWidget(QWidget):
         # cam_instance_id → tracker_step → bool array indexed by COCO keypoint ID
         self._outlier_masks: dict[str, dict[int, object]] = {}
         self._backfill: CropBackfillWorker | None = None
+        self._loader: _TrackingRunLoader | None = None
         self._maximized_idx: int | None = None
         self._pose_model: PoseModel = _get_pose_model(None)  # updated in _build
         # Copy/paste clipboard: kp_idx → (x, y); None until first copy
@@ -2812,9 +3042,17 @@ class PersonCropGridWidget(QWidget):
         return None
 
     def _load_tracking_run(self, run_id: str | None) -> None:
-        import json
-        import numpy as np
-        from posetrak.db.skeleton_layout import SkeletonLayout
+        """Start async loading of tracking overlay data.
+
+        Cells are shown in a loading state immediately; the overlay is applied
+        once the background thread finishes.
+        """
+        # Cancel any in-flight load
+        if self._loader is not None:
+            self._loader.loaded.disconnect()
+            self._loader.quit()
+            self._loader.wait(500)
+            self._loader = None
 
         self._marker_proj.clear()
         self._joint_proj.clear()
@@ -2826,192 +3064,35 @@ class PersonCropGridWidget(QWidget):
             self._load_frame(self._current_t)
             return
 
-        run = self._conn.execute(
-            "SELECT active_camera_ids, marker_names, skeleton_id, "
-            "       extrinsic_calibration_id, observation_sequence_id "
-            "FROM tracking_runs WHERE id=?",
-            (run_id,),
-        ).fetchone()
-        if run is None:
+        # Get the db file path from the open connection
+        db_row = self._conn.execute("PRAGMA database_list").fetchone()
+        db_path = db_row[2] if db_row else None
+        if not db_path:
             self._load_frame(self._current_t)
             return
 
-        cam_labels: list[str] = json.loads(run["active_camera_ids"] or "[]")
-        marker_names: list[str] = json.loads(run["marker_names"] or "[]")
-        n_cams, n_markers = len(cam_labels), len(marker_names)
-        if n_cams == 0 or n_markers == 0:
-            self._load_frame(self._current_t)
-            return
+        # Show loading indicator on all cells while the thread runs
+        for cell in self._cells:
+            cell.show_loading()
 
-        # Map camera label → camera_instance_id
-        placeholders = ",".join("?" * n_cams)
-        label_to_cam_id: dict[str, str] = {}
-        for r in self._conn.execute(
-            f"SELECT id, label FROM camera_instances WHERE label IN ({placeholders})",
-            cam_labels,
-        ):
-            label_to_cam_id[r["label"]] = r["id"]
+        self._loader = _TrackingRunLoader(db_path, run_id, parent=self)
+        self._loader.loaded.connect(self._on_tracking_loaded)
+        self._loader.start()
 
-        # Load timestamps for nearest-step lookup
-        ts_rows = self._conn.execute(
-            "SELECT tracker_step, timestamp_s FROM tracking_results "
-            "WHERE run_id=? AND person_id=0 AND is_smoothed=0 ORDER BY tracker_step",
-            (run_id,),
-        ).fetchall()
-        step_to_ts = {r["tracker_step"]: r["timestamp_s"] for r in ts_rows}
-        self._tracking_timestamps = sorted(
-            (ts, step) for step, ts in step_to_ts.items()
-        )
-
-        # Load skeleton → bone pairs
-        skel = self._conn.execute(
-            "SELECT yaml_content FROM skeletons WHERE id=?",
-            (run["skeleton_id"],),
-        ).fetchone()
-        if not skel or not skel["yaml_content"]:
-            self._load_frame(self._current_t)
-            return
-        layout = SkeletonLayout(skel["yaml_content"])
-        self._bone_pairs = layout.bone_pairs
-
-        # marker index → COCO keypoint index (for outlier colouring)
-        marker_to_coco = {
-            m["name"]: m["openpose_keypoint"]
-            for m in layout.markers
-            if m["openpose_keypoint"] is not None
-        }
-        mi_to_coco: dict[int, int] = {
-            mi: marker_to_coco[name]
-            for mi, name in enumerate(marker_names)
-            if name in marker_to_coco
-        }
-        n_coco_kp = max((c + 1 for c in mi_to_coco.values()), default=17)
-
-        # Load extrinsics: cam_instance_id → (R 3×3, t 3-vector)
-        ext_id = run["extrinsic_calibration_id"]
-        cam_extrinsics: dict[str, tuple] = {}
-        if ext_id:
-            for r in self._conn.execute(
-                "SELECT ee.camera_instance_id, ee.R, ee.t "
-                "FROM extrinsic_entries ee "
-                "WHERE ee.extrinsic_calibration_id = ?",
-                (ext_id,),
-            ):
-                R = np.frombuffer(bytes(r["R"]), dtype="<f8").reshape(3, 3)
-                t = np.frombuffer(bytes(r["t"]), dtype="<f8")
-                cam_extrinsics[r["camera_instance_id"]] = (R, t)
-
-        # Load intrinsics: cam_instance_id → {fx, fy, cx, cy}
-        seq = self._conn.execute(
-            "SELECT shot_id FROM pose_observation_sequences WHERE id=?",
-            (run["observation_sequence_id"],),
-        ).fetchone()
-        cam_intrinsics: dict[str, dict] = {}
-        if seq:
-            for r in self._conn.execute(
-                "SELECT cv.camera_instance_id, ic.fx, ic.fy, ic.cx, ic.cy, "
-                "       ic.dist_coeffs, ic.matrix_original "
-                "FROM capture_videos cv "
-                "JOIN intrinsics_calibrations ic ON ic.id = cv.intrinsics_calibration_id "
-                "WHERE cv.shot_id = ?",
-                (seq["shot_id"],),
-            ):
-                K_orig = None
-                dist = None
-                if r["matrix_original"]:
-                    K_orig = np.frombuffer(bytes(r["matrix_original"]), dtype="<f8").reshape(3, 3)
-                if r["dist_coeffs"]:
-                    dist = np.frombuffer(bytes(r["dist_coeffs"]), dtype="<f8")
-                cam_intrinsics[r["camera_instance_id"]] = {
-                    "fx": r["fx"], "fy": r["fy"], "cx": r["cx"], "cy": r["cy"],
-                    "K_orig": K_orig, "dist": dist,
-                }
-
-        # Load obs blobs for marker dots (predicted positions from tracker output)
-        obs_rows = self._conn.execute(
-            "SELECT tracker_step, obs_blob FROM tracking_obs_results "
-            "WHERE run_id=? AND person_id=0 ORDER BY tracker_step",
-            (run_id,),
-        ).fetchall()
-        expected_obs = n_cams * n_markers * 8
-        for obs_row in obs_rows:
-            step = obs_row["tracker_step"]
-            blob = np.frombuffer(bytes(obs_row["obs_blob"]), dtype="<f4")
-            if len(blob) != expected_obs:
-                continue
-            obs = blob.reshape(n_cams, n_markers, 8)
-            for ci, label in enumerate(cam_labels):
-                cam_id = label_to_cam_id.get(label)
-                if cam_id is None:
-                    continue
-                pred_xy = obs[ci, :, 2:4].copy()  # undistorted predicted positions
-                intr = cam_intrinsics.get(cam_id)
-                if intr is not None:
-                    K_orig = intr.get("K_orig")
-                    dist = intr.get("dist")
-                    if K_orig is not None and dist is not None:
-                        fx_n = intr["fx"]; fy_n = intr["fy"]
-                        cx_n = intr["cx"]; cy_n = intr["cy"]
-                        K_new = np.array([[fx_n, 0, cx_n], [0, fy_n, cy_n], [0, 0, 1]])
-                        for mi in range(pred_xy.shape[0]):
-                            u_n, v_n = float(pred_xy[mi, 0]), float(pred_xy[mi, 1])
-                            if np.isfinite(u_n) and np.isfinite(v_n):
-                                u_d, v_d = _undistorted_to_distorted(u_n, v_n, K_new, K_orig, dist)
-                                pred_xy[mi, 0] = u_d
-                                pred_xy[mi, 1] = v_d
-                self._marker_proj.setdefault(cam_id, {})[step] = pred_xy
-
-                if mi_to_coco:
-                    mask = np.zeros(n_coco_kp, dtype=bool)
-                    for mi, coco_id in mi_to_coco.items():
-                        is_out = obs[ci, mi, 6]
-                        if np.isfinite(is_out) and is_out != 0.0:
-                            mask[coco_id] = True
-                    self._outlier_masks.setdefault(cam_id, {})[step] = mask
-
-        # Compute joint projections via FK from state blobs
-        state_rows = self._conn.execute(
-            "SELECT tracker_step, state FROM tracking_results "
-            "WHERE run_id=? AND person_id=0 AND is_smoothed=0 ORDER BY tracker_step",
-            (run_id,),
-        ).fetchall()
-        for state_row in state_rows:
-            step = state_row["tracker_step"]
-            try:
-                decoded = layout.decode_state_blob(bytes(state_row["state"]))
-                transforms = layout.compute_joint_transforms(decoded)
-            except Exception:
-                continue
-            for label in cam_labels:
-                cam_id = label_to_cam_id.get(label)
-                if cam_id is None:
-                    continue
-                ext = cam_extrinsics.get(cam_id)
-                intr = cam_intrinsics.get(cam_id)
-                if ext is None or intr is None:
-                    continue
-                R, t = ext
-                K_orig = intr.get("K_orig")
-                dist = intr.get("dist")
-                fx, fy, cx_k, cy_k = intr["fx"], intr["fy"], intr["cx"], intr["cy"]
-                use_distortion = K_orig is not None and dist is not None
-                joint_xy: dict[str, np.ndarray] = {}
-                for jname, T in transforms.items():
-                    p_world = T[:3, 3]
-                    if use_distortion:
-                        uv = _project_point_distorted(p_world, R, t, K_orig, dist)
-                        if uv is None:
-                            continue
-                        u, v = uv
-                    else:
-                        p_cam = R @ p_world + t
-                        if p_cam[2] <= 1e-3:
-                            continue
-                        u = fx * p_cam[0] / p_cam[2] + cx_k
-                        v = fy * p_cam[1] / p_cam[2] + cy_k
-                    joint_xy[jname] = np.array([u, v])
-                self._joint_proj.setdefault(cam_id, {})[step] = joint_xy
-
+    def _on_tracking_loaded(
+        self,
+        tracking_timestamps: list,
+        marker_proj: dict,
+        joint_proj: dict,
+        bone_pairs: list,
+        outlier_masks: dict,
+    ) -> None:
+        self._tracking_timestamps = tracking_timestamps
+        self._marker_proj = marker_proj
+        self._joint_proj = joint_proj
+        self._bone_pairs = bone_pairs
+        self._outlier_masks = outlier_masks
+        self._loader = None
         self._load_frame(self._current_t)
 
     def _load_frame(self, global_time: float) -> None:

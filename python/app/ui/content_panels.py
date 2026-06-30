@@ -1823,6 +1823,13 @@ class _CropCell(QWidget):
         self._canvas.set_selected_kp(idx, show_ring=show_ring, name=name)
 
 
+# Keeps running _TrackingRunLoader instances alive at the Python level until their
+# OS thread has fully exited.  Without this, dropping the widget's self._loader
+# reference while run() is still in its finally-block would GC the QThread Python
+# wrapper and call the C++ destructor on a still-running thread.
+_ACTIVE_LOADERS: set["_TrackingRunLoader"] = set()
+
+
 class _TrackingRunLoader(QThread):
     """Loads tracking run overlay data (obs blobs + FK projections) on a background thread.
 
@@ -1830,17 +1837,22 @@ class _TrackingRunLoader(QThread):
     here so the UI thread stays responsive while the page opens.
 
     Emits ``loaded`` with the four result dicts when complete, or with empty dicts if
-    no run_id is given or loading fails.
+    loading fails.
     """
 
-    loaded = Signal(list, dict, dict, dict, dict)
-    # args: tracking_timestamps, marker_proj, joint_proj, bone_pairs_list, outlier_masks
-    # bone_pairs is wrapped in a list so Signal can carry it
+    loaded = Signal(list, dict, dict, list, dict)
+    # args: tracking_timestamps, marker_proj, joint_proj, bone_pairs, outlier_masks
 
-    def __init__(self, db_path: str, run_id: str, parent=None) -> None:
-        super().__init__(parent)
+    def __init__(self, db_path: str, run_id: str) -> None:
+        super().__init__()   # no Qt parent — lifetime managed via _ACTIVE_LOADERS
         self._db_path = db_path
         self._run_id = run_id
+        _ACTIVE_LOADERS.add(self)
+
+    def _on_finished(self) -> None:
+        """Connected to finished(). Removes from active set and schedules C++ cleanup."""
+        _ACTIVE_LOADERS.discard(self)
+        self.deleteLater()
 
     def run(self) -> None:  # noqa: C901
         import json
@@ -1848,14 +1860,16 @@ class _TrackingRunLoader(QThread):
         import numpy as np
         from posetrak.db.skeleton_layout import SkeletonLayout
 
-        conn = _sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
-        conn.row_factory = _sqlite3.Row
+        conn = None
         try:
+            conn = _sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+            conn.row_factory = _sqlite3.Row
             self._do_load(conn, np, json, SkeletonLayout)
         except Exception:
             self.loaded.emit([], {}, {}, [], {})
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
     def _do_load(self, conn, np, json, SkeletonLayout) -> None:
         run_id = self._run_id
@@ -3047,11 +3061,17 @@ class PersonCropGridWidget(QWidget):
         Cells are shown in a loading state immediately; the overlay is applied
         once the background thread finishes.
         """
-        # Cancel any in-flight load
+        # Abandon any in-flight load: disconnect data and cleanup signals so stale
+        # results are ignored.  _ACTIVE_LOADERS keeps the thread alive until it exits.
         if self._loader is not None:
-            self._loader.loaded.disconnect()
-            self._loader.quit()
-            self._loader.wait(500)
+            for sig, slot in [
+                (self._loader.loaded,    self._on_tracking_loaded),
+                (self._loader.finished,  self._on_loader_finished),
+            ]:
+                try:
+                    sig.disconnect(slot)
+                except RuntimeError:
+                    pass
             self._loader = None
 
         self._marker_proj.clear()
@@ -3075,8 +3095,19 @@ class PersonCropGridWidget(QWidget):
         for cell in self._cells:
             cell.show_loading()
 
-        self._loader = _TrackingRunLoader(db_path, run_id, parent=self)
-        self._loader.loaded.connect(self._on_tracking_loaded)
+        self._loader = _TrackingRunLoader(db_path, run_id)
+        # _on_finished removes from _ACTIVE_LOADERS and calls deleteLater — must fire
+        # even if the widget is gone, so connect as a self-connection on the thread.
+        self._loader.finished.connect(self._loader._on_finished)
+        # _on_loader_finished clears self._loader only after the thread has fully exited.
+        # Qt auto-disconnects this if the widget is destroyed before finished fires.
+        self._loader.finished.connect(self._on_loader_finished)
+        # Explicit QueuedConnection: _on_tracking_loaded is fired from the UI thread
+        # event loop, not directly from run() — critical because loaded is emitted
+        # while run() is still executing its finally block.
+        self._loader.loaded.connect(
+            self._on_tracking_loaded, Qt.ConnectionType.QueuedConnection
+        )
         self._loader.start()
 
     def _on_tracking_loaded(
@@ -3087,13 +3118,20 @@ class PersonCropGridWidget(QWidget):
         bone_pairs: list,
         outlier_masks: dict,
     ) -> None:
+        # Do NOT clear self._loader here — the thread's run() may still be executing
+        # its finally block.  _on_loader_finished (connected to finished) does it safely.
         self._tracking_timestamps = tracking_timestamps
         self._marker_proj = marker_proj
         self._joint_proj = joint_proj
         self._bone_pairs = bone_pairs
         self._outlier_masks = outlier_masks
-        self._loader = None
         self._load_frame(self._current_t)
+
+    def _on_loader_finished(self) -> None:
+        """Connected to _TrackingRunLoader.finished(). Safe to drop the reference here
+        because finished() is emitted only after run() has returned and the OS thread
+        has fully exited — isRunning() is False by this point."""
+        self._loader = None
 
     def _load_frame(self, global_time: float) -> None:
         import cv2

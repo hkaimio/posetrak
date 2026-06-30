@@ -2124,9 +2124,18 @@ class PersonCropGridWidget(QWidget):
         max_h.setContentsMargins(0, 0, 0, 0)
         max_h.addWidget(self._max_splitter)
 
+        # Wrap the grid in a scroll area so the window can always be made smaller
+        # without the grid's minimum height forcing the window taller than the screen.
+        # The slider and controls below are outside the scroll area and always visible.
+        grid_scroll = QScrollArea()
+        grid_scroll.setWidget(self._grid_container)
+        grid_scroll.setWidgetResizable(True)
+        grid_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        grid_scroll.setMinimumHeight(0)
+
         self._stack = QStackedWidget()
-        self._stack.addWidget(self._grid_container)  # page 0: normal grid
-        self._stack.addWidget(max_container)          # page 1: maximized view
+        self._stack.addWidget(grid_scroll)   # page 0: scrollable grid
+        self._stack.addWidget(max_container) # page 1: maximized view
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)

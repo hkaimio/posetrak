@@ -143,10 +143,6 @@ class SyncTable:
 
         if local_fps > 0:
             frame = anchor_frame + round((timestamp_s - anchor_ts) * local_fps)
-            _log.debug(
-                "lookup vid=%.8s t=%.4f anchor=(%.4f, %d) local_fps=%.4f -> frame=%d",
-                shot_video_id, timestamp_s, anchor_ts, anchor_frame, local_fps, frame,
-            )
             return frame
         # No usable fps: snap to nearest anchor
         if idx == 0:

@@ -631,12 +631,12 @@ class TrialPanel(QWidget):
 
         tracking_runs = self._conn.execute(
             "SELECT tr.id, COALESCE(sp.person_name, 'Unnamed') AS person_name, "
-            "       tr.status, tr.created_at "
+            "       tr.ran_at "
             "FROM tracking_runs tr "
             "LEFT JOIN pose_observation_sequences pos ON pos.id = tr.observation_sequence_id "
             "LEFT JOIN sequence_persons sp ON sp.sequence_id = pos.id "
             "WHERE tr.trial_id = ? "
-            "ORDER BY tr.created_at DESC",
+            "ORDER BY tr.ran_at DESC",
             (self._trial_id,),
         ).fetchall()
 
@@ -714,8 +714,7 @@ class TrialPanel(QWidget):
             for r in tracking_runs:
                 label = (
                     f"{r['person_name']}"
-                    f"  {_fmt_ts(r['created_at'])}"
-                    f"  [{r['status']}]"
+                    f"  {_fmt_ts(r['ran_at'])}"
                 )
                 item = QListWidgetItem(label)
                 item.setData(Qt.ItemDataRole.UserRole, r["id"])

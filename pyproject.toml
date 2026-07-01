@@ -48,11 +48,13 @@ dev = [
     "pytest-cov>=5.0",
 ]
 segmentation = [
-    "cutie",
     # Pin torch so uv picks the CUDA 12.6 wheel via [tool.uv.sources] above
     # instead of pulling 2.10.0+cpu from PyPI as a cutie transitive dep.
     "torch>=2.7,<2.10",
     "torchvision",
+    "omegaconf",
+    "hydra-core",
+    "timm",
 ]
 analysis = [
     "marimo>=0.19",

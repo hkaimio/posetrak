@@ -188,6 +188,35 @@ automatically.
 | `onnxruntime-gpu` | `>=1.19,<1.26` | 1.26+ require CUDA 13 (`cublasLt64_13.dll`) |
 | `torch` (segmentation group) | `>=2.7,<2.10` | 2.10 from PyPI is CPU-only; cu126 index tops at 2.9.1 |
 
+### Cutie segmentation
+
+Cutie (video object segmentation, used in the segmentation init UI) is not on
+PyPI. It must be cloned separately. Clone it to the standard location and the
+app will find it automatically:
+
+**Linux / macOS:**
+
+```bash
+git clone https://github.com/hkchengrex/Cutie ~/.local/share/posetrak/Cutie
+```
+
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/hkchengrex/Cutie "$env:LOCALAPPDATA\posetrak\Cutie"
+```
+
+Alternatively, clone anywhere and point to it with `CUTIE_DIR`:
+
+```bash
+CUTIE_DIR=/path/to/Cutie uv run posetrak-ui
+```
+
+The `--group segmentation` dependencies (`torch`, `torchvision`, `omegaconf`,
+`hydra-core`, `timm`) must still be installed via `uv sync --group segmentation`.
+Cutie's own model weights are downloaded automatically on first use via
+`get_default_model()`.
+
 ### Running the applications
 
 ```bash

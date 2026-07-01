@@ -106,9 +106,14 @@ logger = logging.getLogger(__name__)
 def _find_cutie_dir() -> Path:
     """Return the Cutie project directory.
 
-    Checks ``CUTIE_DIR`` env var first; falls back to the sibling
-    ``tests/Cutie`` directory next to this project's root.
+    Search order:
+    1. ``CUTIE_DIR`` environment variable (explicit override)
+    2. Platform data directory: ``%LOCALAPPDATA%\\posetrak\\Cutie`` (Windows)
+       or ``~/.local/share/posetrak/Cutie`` (Linux/macOS)
+    3. Legacy fallback: ``<project-root>/../tests/Cutie``
     """
+    import platform
+
     env = os.environ.get("CUTIE_DIR")
     if env:
         p = Path(env)
@@ -116,16 +121,32 @@ def _find_cutie_dir() -> Path:
             return p
         raise EnvironmentError(f"CUTIE_DIR={env!r} is not a directory")
 
-    # python/pipeline/pose/segmentation.py → 3 parents → python/ → 1 more → project root
-    # project root's parent → tests/Cutie
+    if platform.system() == "Windows":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home()))
+    else:
+        base = Path.home() / ".local" / "share"
+    platform_candidate = base / "posetrak" / "Cutie"
+    if platform_candidate.is_dir():
+        return platform_candidate
+
+    # Legacy: sibling tests/Cutie next to project root
     project_root = Path(__file__).parents[3]
-    candidate = project_root.parent / "tests" / "Cutie"
-    if candidate.is_dir():
-        return candidate
+    legacy_candidate = project_root.parent / "tests" / "Cutie"
+    if legacy_candidate.is_dir():
+        return legacy_candidate
+
+    if platform.system() == "Windows":
+        install_dir = platform_candidate
+        install_cmd = f'git clone https://github.com/hkchengrex/Cutie "{install_dir}"'
+    else:
+        install_dir = platform_candidate
+        install_cmd = f"git clone https://github.com/hkchengrex/Cutie {install_dir}"
 
     raise EnvironmentError(
-        "Cannot find Cutie directory.  Set the CUTIE_DIR environment variable "
-        "to the path of a Cutie clone (https://github.com/hkchengrex/Cutie)."
+        f"Cannot find Cutie (https://github.com/hkchengrex/Cutie).\n"
+        f"Install it to the default location:\n\n"
+        f"    {install_cmd}\n\n"
+        f"Or set CUTIE_DIR to the path of an existing clone."
     )
 
 

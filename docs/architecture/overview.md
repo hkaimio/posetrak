@@ -109,19 +109,19 @@ Cross-database foreign keys are stored as TEXT IDs but cannot be enforced at the
 ## Session DB schema layers
 
 **Layer 0 — session structure**
-`mocap_sessions`, `captures` (alias: *shots*), `trials`, `capture_videos` (alias: *shot_videos*), `session_cameras`.
+`mocap_sessions`, `captures` (alias: *shots*), `trials`, `capture_videos` (alias: *shot_videos*), `session_cameras`.  `trials` are named time windows within a capture; they are the parent of both detection runs and tracking runs.
 
 **Layer 1 — calibration and sync**
 `extrinsic_calibrations`, `extrinsic_entries`, `intrinsics_calibrations` (mirrored from registry), `sync_configs`, `sync_points`.  Extrinsics live at the shot level so a mid-session re-calibration can be captured.
 
 **Layer 2 — detection pipeline (anonymous tracks)**
-`detection_runs`, `detection_keypoints`, `person_detections`, `person_tracks`, `frame_cache_entries` (JPEG crop blobs), `detection_track_assignments`, `keypoint_obs_quality`.  `track_id` in this layer is the ByteTrack ID — it carries no person identity.
+`detection_runs` (linked to a trial via `trial_id`), `detection_keypoints`, `person_detections`, `person_tracks`, `frame_cache_entries` (JPEG crop blobs), `detection_track_assignments`, `keypoint_obs_quality`.  `track_id` in this layer is the ByteTrack ID — it carries no person identity.
 
 **Layer 3 — named person observations**
 `pose_observation_sequences`, `sequence_persons`, `pose_observations`, `pose_observation_edits`.  Produced by `finalise_to_db()` after the user completes stitching.  This is the input to the tracker.
 
 **Layer 4 — tracking results**
-`tracking_runs`, `tracking_run_persons`, `tracking_results` (state vector + covariance diagonal + NIS per frame), `tracking_obs_results` (projected marker 2-D positions).  Written by the C++ tracker.
+`tracking_runs` (`trial_id` FK links each run directly to its trial), `tracking_run_persons`, `tracking_results` (state vector + covariance diagonal + NIS per frame), `tracking_obs_results` (projected marker 2-D positions).  Written by the C++ tracker.
 
 ---
 
@@ -142,6 +142,8 @@ Current detection pipeline stores distorted coordinates (`pixels_are_undistorted
 ## Schema versioning
 
 Both databases use `PRAGMA user_version` as a monotonic migration counter.  `open_session()` in Python applies outstanding migrations automatically.  The C++ `SessionReader` does not check the version — new optional tables must be handled gracefully.
+
+Current session DB schema version: **25** (as of 2026-07).
 
 ---
 

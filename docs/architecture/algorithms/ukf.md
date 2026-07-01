@@ -33,7 +33,7 @@ The filter maintains a probability distribution over the full body state:
 - **Joint angles** — one number per revolute DOF, three per spherical DOF (radians)
 - **All of the above, differentiated** — the corresponding velocity for each
 
-For a full-body skeleton with hands, the error-state dimension is approximately 230 (108 joint DOFs $\times$ 2 for position and velocity, plus 12 for root), yielding around 460 sigma points per frame.  The exact number depends on the skeleton definition.
+For a full-body skeleton with hands, the error-state dimension is approximately 230 (108 joint DOFs × 2 for position and velocity, plus 12 for root), yielding around 460 sigma points per frame.  A simpler skeleton without hands is roughly 60–70 DOF and ~130 sigma points.  The exact number depends on the skeleton definition.
 
 The filter expresses uncertainty as a covariance matrix of that dimension.
 
@@ -118,7 +118,7 @@ The three spread parameters `alpha`, `beta`, `kappa` control sigma point placeme
 
 | Parameter | Typical value | Effect |
 |---|---|---|
-| `alpha` | 0.5 | Spread of sigma points around the mean.  **Must be ≥ 0.5 for a ~230-DOF state** — smaller values cause negative weights on the central sigma point, which breaks the covariance update. |
+| `alpha` | 0.5 | Spread of sigma points around the mean.  **Must be ≥ 0.5 for typical state dimensions (~60–230 DOF)** — smaller values cause negative weights on the central sigma point, which breaks the covariance update. |
 | `beta` | 2.0 | Encodes prior knowledge about the distribution (Gaussian → β = 2 is optimal). |
 | `kappa` | 0.0 | Secondary scaling; usually left at 0. |
 

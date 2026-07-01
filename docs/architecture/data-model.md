@@ -21,10 +21,13 @@ erDiagram
   ExtrinsicCalibration ||--o{ Shot                 : "used by"
   Shot            ||--o{ ShotVideo                 : "has videos"
   Shot            ||--o{ SyncConfig                : "has"
-  Shot            ||--o{ PoseObservationSequence   : "yields"
+  Shot            ||--o{ Trial                     : "contains"
+  Trial           ||--o{ DetectionRun              : "has"
+  Trial           ||--o{ TrackingRun               : "has"
   SyncConfig      ||--o{ SyncPoint                 : "has points"
   ShotVideo       ||--o{ SyncPoint                 : "anchors"
   SyncConfig      ||--o{ PoseObservationSequence   : "used by"
+  DetectionRun    ||--o{ PoseObservationSequence   : "yields"
   PoseObservationSequence ||--o{ PoseObservation   : "contains"
   PoseObservationSequence ||--o{ TrackingRun       : "input to"
   Skeleton        ||--o{ TrackingRunPerson         : "used by"
@@ -110,7 +113,20 @@ See [state-vector-format.md](../reference/state-vector-format.md) for the full l
 
 ### `TrackingObsResult.obs_blob`
 
-`float32[n_cameras, n_markers, 4]` where the last axis is `[x_px, y_px, mahalanobis_distance, is_inlier]`.  Coordinates are in undistorted pixel space (K_new).  Camera and marker ordering from `TrackingRun.active_camera_ids` and `.marker_names`.
+`float32[n_cameras, n_markers, 8]` where the last axis is `[actual_x, actual_y, pred_x, pred_y, mahal_dist, used, is_outlier, pad]`:
+
+| Index | Field | Notes |
+|---|---|---|
+| 0 | `actual_x` | Observed keypoint x in undistorted pixel space (K_new); NaN if no observation for this camera/marker slot |
+| 1 | `actual_y` | Observed keypoint y; NaN if absent |
+| 2 | `pred_x` | Filter-predicted x |
+| 3 | `pred_y` | Filter-predicted y |
+| 4 | `mahal_dist` | Mahalanobis distance of this observation |
+| 5 | `used` | 1 if observation was used as an inlier in the update step, 0 otherwise |
+| 6 | `is_outlier` | 1 if explicitly rejected by Mahalanobis gating |
+| 7 | `pad` | Reserved / unused |
+
+Camera and marker ordering from `TrackingRun.active_camera_ids` and `.marker_names` (JSON arrays).  NaN `actual_x` means no observation was available for that camera/marker slot in this frame.
 
 ---
 
@@ -118,6 +134,6 @@ See [state-vector-format.md](../reference/state-vector-format.md) for the full l
 
 Both databases use `PRAGMA user_version` as a monotonic migration counter.  `open_session()` in `db.py` applies outstanding migrations automatically on every open.  The C++ `SessionReader` does not check the version — it reads whatever tables are present, so new optional tables (like `pose_observation_edits`) must be handled gracefully.
 
-Current versions (as of 2026-06):
+Current versions (as of 2026-07):
 - Registry DB: `REGISTRY_SCHEMA_VERSION` in `db.py`
-- Session DB: version 20+ (see migration functions in `db.py`)
+- Session DB: **25** (`SESSION_SCHEMA_VERSION` in `db.py`; see migration functions for history)

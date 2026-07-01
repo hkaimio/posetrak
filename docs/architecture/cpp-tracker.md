@@ -2,7 +2,7 @@
 
 The C++ tracker (`posetrak-tracker`) is an internal component invoked as a subprocess by the Python app and CLI.  It reads a pose observation sequence from the session DB, estimates the 3-D skeletal pose using an Unscented Kalman Filter, and writes the results back to the DB.
 
-A second command (`posetrak-tracker scale`) post-processes a bone-length calibration run.  This command is not currently invoked by the Python app and is a candidate for deprecation — skeleton scaling is performed by the Python tooling instead.
+A second subcommand `posetrak-tracker scale` post-processes a bone-length calibration run.  It is experimental, not reliably working, and not invoked by the Python app — skeleton scaling is handled by the Python tooling instead.
 
 ---
 

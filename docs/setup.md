@@ -55,7 +55,7 @@ meson setup optbuild --buildtype=release
 meson compile -C optbuild
 ```
 
-The CLI is at `builddir/cli/posetrak` (debug) or `optbuild/cli/posetrak` (optimized).
+The CLI is at `builddir/cli/posetrak-tracker` (debug) or `optbuild/cli/posetrak-tracker` (optimized).
 
 ### Running C++ tests
 
@@ -76,7 +76,7 @@ meson test -C builddir -v
 
 ### Cross-compiling for Windows (on Linux)
 
-Produces a `posetrak.exe` that runs on Windows x86-64 without installing any
+Produces a `posetrak-tracker.exe` that runs on Windows x86-64 without installing any
 build tools on the Windows machine.
 
 ```bash
@@ -85,7 +85,7 @@ meson setup winbuild --cross-file cross/mingw-w64-x86_64.ini
 meson compile -C winbuild
 ```
 
-The exe is at `winbuild/cli/posetrak.exe`. Copy it to Windows together with the
+The exe is at `winbuild/cli/posetrak-tracker.exe`. Copy it to Windows together with the
 four MinGW runtime DLLs (see [Windows: C++ tracker](#windows-c-tracker)).
 
 ---
@@ -99,7 +99,7 @@ Copy the following files into a single directory on the Windows machine:
 
 | File | Source (on the Linux build machine) |
 |---|---|
-| `posetrak.exe` | `winbuild/cli/posetrak.exe` |
+| `posetrak-tracker.exe` | `winbuild/cli/posetrak-tracker.exe` |
 | `libgcc_s_seh-1.dll` | `/usr/lib/gcc/x86_64-w64-mingw32/13-win32/` |
 | `libstdc++-6.dll` | `/usr/lib/gcc/x86_64-w64-mingw32/13-win32/` |
 | `libgomp-1.dll` | `/usr/lib/gcc/x86_64-w64-mingw32/13-win32/` |
@@ -107,12 +107,12 @@ Copy the following files into a single directory on the Windows machine:
 
 All five files must be in the same directory. `libwinpthread-1.dll` is a
 transitive dependency of `libgomp-1.dll` (OpenMP thread pool) and must be
-included even though it is not listed in `posetrak.exe`'s direct imports.
+included even though it is not listed in `posetrak-tracker.exe`'s direct imports.
 
 Verify with:
 
 ```
-posetrak.exe --help
+posetrak-tracker.exe --help
 ```
 
 ### Python tools
@@ -226,9 +226,9 @@ uv run posetrak-db --help     # Database CLI
 uv run posetrak-mcp --db-path /path/to/session.db   # MCP diagnostic server
 
 # C++ tracker (Linux — from debug build)
-./builddir/cli/posetrak track config.toml
+./builddir/cli/posetrak-tracker track config.toml
 # C++ tracker (Linux — from optimized build)
-./optbuild/cli/posetrak track config.toml
+./optbuild/cli/posetrak-tracker track config.toml
 ```
 
 ### Running Python tests

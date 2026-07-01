@@ -105,10 +105,10 @@ Skeleton files use **YAML** format (see `docs/skeleton-format.md`). Camera calib
 
 ```bash
 # Run tracker
-builddir/cli/posetrak track config.toml
+builddir/cli/posetrak-tracker track config.toml
 
 # Post-process bone-length calibration run
-builddir/cli/posetrak scale config.toml
+builddir/cli/posetrak-tracker scale config.toml
 ```
 
 Performacne between debug & optimized builds is big; therefore before executing actual tracking tests with posetrak CLI create another meson build environmnet to `optbuild/` directory and use it. For unit testing and debugging it is ok to use the debug build in `builddir/`.

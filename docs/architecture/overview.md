@@ -6,8 +6,8 @@ Posetrak is a multi-camera motion capture suite that estimates full-body 3-D ske
 
 | Component | Technology |
 |---|---|
-| Tracker | C++20, Eigen, Pinocchio (FK), fmt |
-| GUI apps | Python, PySide6 (Qt 6) |
+| C++ tracker | C++20, Eigen, Pinocchio (FK), fmt |
+| Python apps (UI + CLI) | Python, PySide6 (Qt 6), Click |
 | Storage | SQLite (two files: registry + session) |
 | Person detection | YOLOv11 + ByteTrack, or SAM2 segmentation |
 | Pose estimation | RTMPose or VITpose++ |
@@ -20,8 +20,8 @@ Posetrak is a multi-camera motion capture suite that estimates full-body 3-D ske
 ```mermaid
 flowchart TD
     Setup["Setup wizard\npython/app/setup/\nCamera hardware · intrinsics\nextrinsics · sync"]
-    UI["Main app\npython/app/ui/\nSession tree · crop grid · keypoint editing\npose extraction · tracker invocation"]
-    Tracker["C++ tracker\ncli/posetrak track\nTriangulation → IK → UKF"]
+    UI["Main app + CLI\npython/app/ui/ · python/posetrak/cli/\nSession tree · crop grid · keypoint editing\npose extraction · tracker invocation\ntrial/capture/video management"]
+    Tracker["C++ tracker\nposetrak-tracker track\nTriangulation → IK → UKF\n(internal component)"]
     RegDB[("Registry DB\ncameras · skeletons\ncalibrations · configs")]
     SessDB[("Session DB\ncaptures · videos\ndetections · observations\ntracking results")]
     BVH["BVH / CSV export"]
@@ -29,7 +29,7 @@ flowchart TD
     Setup -->|camera & calib metadata| RegDB
     Setup -->|session + extrinsics| SessDB
     UI -->|detection keypoints\npose observation sequences\nkeypoint edits| SessDB
-    UI -->|invokes via CLI args| Tracker
+    UI -->|invokes as subprocess| Tracker
     RegDB -->|read: skeleton + config| Tracker
     SessDB -->|read: observations + calib| Tracker
     Tracker -->|write: tracking results| SessDB

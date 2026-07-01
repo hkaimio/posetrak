@@ -1,8 +1,8 @@
 # C++ tracker architecture
 
-The C++ tracker (`cli/posetrak track`) reads a pose observation sequence from the session DB, estimates the 3-D skeletal pose using an Unscented Kalman Filter, and writes the results back to the DB.
+The C++ tracker (`posetrak-tracker`) is an internal component invoked as a subprocess by the Python app and CLI.  It reads a pose observation sequence from the session DB, estimates the 3-D skeletal pose using an Unscented Kalman Filter, and writes the results back to the DB.
 
-A second command (`cli/posetrak scale`) post-processes a bone-length calibration run.  This command is not currently invoked by the Python app and is a candidate for deprecation — skeleton scaling is performed by the Python tooling instead.
+A second command (`posetrak-tracker scale`) post-processes a bone-length calibration run.  This command is not currently invoked by the Python app and is a candidate for deprecation — skeleton scaling is performed by the Python tooling instead.
 
 ---
 
@@ -11,7 +11,7 @@ A second command (`cli/posetrak scale`) post-processes a bone-length calibration
 ```
 src/
 ├── cli/
-│   └── main.cpp                        posetrak track / scale entry points
+│   └── main.cpp                        posetrak-tracker track / scale entry points
 ├── core/
 │   ├── skeleton.hpp/.cpp               kinematic tree: joints, markers, DOF types
 │   ├── skeleton_layout.hpp/.cpp        DOF index table (single source of truth)
@@ -123,7 +123,7 @@ Orchestrates initialisation (triangulation → IK) and the per-frame predict/upd
 The Python app (`RunTrackerDialog` in `python/app/pose/run_tracker.py`) invokes the tracker by passing all parameters as command-line arguments — no TOML file is written to disk:
 
 ```
-posetrak track
+posetrak-tracker track
     --session-db  <path>
     --sequence    <sequence_id>
     --skeleton    <skeleton_id>
@@ -142,7 +142,7 @@ The tracker resolves all IDs against the session DB at startup.  The Python app 
 When invoked directly from the command line (not via the Python app), the tracker also accepts a TOML config file:
 
 ```bash
-optbuild/cli/posetrak track config.toml
+optbuild/cli/posetrak-tracker track config.toml
 ```
 
 Key sections:
@@ -167,7 +167,7 @@ See [UKF algorithm](algorithms/ukf.md) for the meaning of the UKF noise paramete
 meson setup optbuild -Dbuildtype=release   # optimised build for tracking
 meson compile -C optbuild
 
-optbuild/cli/posetrak track config.toml
+optbuild/cli/posetrak-tracker track config.toml
 ```
 
 Performance between debug and optimised builds is substantial.  Use `optbuild/` for actual tracking runs; the debug build in `builddir/` is adequate for unit tests.

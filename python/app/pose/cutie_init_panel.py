@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QSizePolicy,
@@ -1267,7 +1268,17 @@ class CutieInitPanel(QWidget):
         self._flush_masks()
         self._conn.commit()
         self._refresh_queue_list()
-        self._set_status(f"Job failed: {error}")
+        if error.startswith("CUTIE_SETUP_ERROR:"):
+            detail = error[len("CUTIE_SETUP_ERROR:"):]
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Cutie not found")
+            msg.setIcon(QMessageBox.Icon.Critical)
+            msg.setText("Cutie segmentation library is not installed.")
+            msg.setInformativeText(detail)
+            msg.exec()
+            self._set_status("Cutie not found — see dialog for setup instructions.")
+        else:
+            self._set_status(f"Job failed: {error}")
 
     def _on_queue_done(self) -> None:
         self._stop_btn.setEnabled(False)

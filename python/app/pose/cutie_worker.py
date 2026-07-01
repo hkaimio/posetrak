@@ -96,6 +96,9 @@ class CutieWorker(QThread):
                 self._run_forward()
             else:
                 self._run_backward()
+        except EnvironmentError as exc:
+            log.error("CutieWorker error: %s", exc)
+            self.error.emit(f"CUTIE_SETUP_ERROR:{exc}")
         except Exception:
             log.exception("CutieWorker error")
             self.error.emit("Cutie tracking failed — see console for details.")

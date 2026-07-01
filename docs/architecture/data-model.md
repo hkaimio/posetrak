@@ -56,13 +56,13 @@ UUIDs are generated client-side, which simplifies import tooling and offline wor
 
 Intrinsics are tied to `CameraMode` (resolution + codec), not to `CameraInstance`.  The same physical camera can run in different modes across sessions; each combination gets its own calibration without duplicating hardware metadata.
 
-### Extrinsics are per-shot, not per-session
+### Extrinsics are per-capture, not per-session
 
-A session usually shares one extrinsic calibration, but a mid-session re-calibration (e.g. after a camera is knocked) can be captured by assigning a different calibration to specific shots.
+A session usually shares one extrinsic calibration, but a mid-session re-calibration (e.g. after a camera is knocked) can be captured by assigning a different calibration to specific captures.
 
-### Sync configs are per-shot
+### Sync configs are per-capture
 
-Multiple pose observation sequences in the same shot share one sync config.  This matches reality: sync alignment is done once per recording.
+Multiple pose observation sequences in the same capture share one sync config.  This matches reality: sync alignment is done once per recording.
 
 ### Frame index namespacing
 
@@ -83,7 +83,7 @@ Two distinct integer frame counters appear in the model:
 
 ### Observation sequences are the atomic tracking input
 
-A single tracker run consumes exactly one `PoseObservationSequence`.  All relationships required to reproduce a run are reachable from `TrackingRun`: observations → sequence → shot → extrinsics → cameras (with intrinsics), sync config, per-person skeletons, and tracker config.
+A single tracker run consumes exactly one `PoseObservationSequence`.  All relationships required to reproduce a run are reachable from `TrackingRun`: observations → sequence → capture → extrinsics → cameras (with intrinsics), sync config, per-person skeletons, and tracker config.
 
 ### `TrackingObsResult` uses a packed float32 blob
 

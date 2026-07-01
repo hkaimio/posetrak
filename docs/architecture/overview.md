@@ -112,7 +112,7 @@ Cross-database foreign keys are stored as TEXT IDs but cannot be enforced at the
 `mocap_sessions`, `captures` (alias: *shots*), `trials`, `capture_videos` (alias: *shot_videos*), `session_cameras`.  `trials` are named time windows within a capture; they are the parent of both detection runs and tracking runs.
 
 **Layer 1 — calibration and sync**
-`extrinsic_calibrations`, `extrinsic_entries`, `intrinsics_calibrations` (mirrored from registry), `sync_configs`, `sync_points`.  Extrinsics live at the shot level so a mid-session re-calibration can be captured.
+`extrinsic_calibrations`, `extrinsic_entries`, `intrinsics_calibrations` (mirrored from registry), `sync_configs`, `sync_points`.  Extrinsics live at the capture level so a mid-session re-calibration can be captured.
 
 **Layer 2 — detection pipeline (anonymous tracks)**
 `detection_runs` (linked to a trial via `trial_id`), `detection_keypoints`, `person_detections`, `person_tracks`, `frame_cache_entries` (JPEG crop blobs), `detection_track_assignments`, `keypoint_obs_quality`.  `track_id` in this layer is the ByteTrack ID — it carries no person identity.

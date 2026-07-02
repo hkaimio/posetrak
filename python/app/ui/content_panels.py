@@ -2516,6 +2516,13 @@ class PersonCropGridWidget(QWidget):
         self._timeline.keyframe_toggled.connect(self._on_timeline_keyframe_toggle)
         self._timeline.time_scrubbed.connect(self._on_timeline_scrub)
         if self._cameras:
+            # set_time_range only needs to run once: t_start/t_end/sync_table
+            # are the same for every camera in a sequence, so re-running it on
+            # every camera switch or post-edit status refresh would reset the
+            # user's zoom/pan for no reason (see _push_timeline_camera_data).
+            self._timeline.set_time_range(
+                self._t_start, self._t_end, self._cameras[0]["shot_video_id"], self._sync_table
+            )
             self._push_timeline_camera_data(0)
 
         top_container = QWidget()
@@ -3298,11 +3305,16 @@ class PersonCropGridWidget(QWidget):
                 self._push_timeline_camera_data(self._timeline.active_camera_index())
 
     def _push_timeline_camera_data(self, cam_idx: int) -> None:
-        """Push the cached status/inlier data for camera *cam_idx* into the timeline widget."""
+        """Push the cached status/inlier data for camera *cam_idx* into the timeline widget.
+
+        Uses set_svid (not set_time_range) so this can be called on every
+        post-edit status refresh and camera switch without resetting the
+        user's zoom/pan — t_start/t_end/sync_table never change per camera.
+        """
         if self._timeline is None or not (0 <= cam_idx < len(self._cameras)):
             return
         cam = self._cameras[cam_idx]
-        self._timeline.set_time_range(self._t_start, self._t_end, cam["shot_video_id"], self._sync_table)
+        self._timeline.set_svid(cam["shot_video_id"])
         self._timeline.set_status_data(
             self._timeline_status_by_cam.get(cam["camera_instance_id"], {}),
             self._timeline_inlier_counts,

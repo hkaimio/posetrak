@@ -326,3 +326,31 @@ def test_interpolate_clears_range_and_calls_load_frame(qapp, multikey_db):
     assert w._range_start_v is None
     assert w._range_end_v is None
     w._load_frame.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Regression: interpolating must not reset the timeline's zoom/pan.
+#
+# _interpolate_range refreshes the edited camera's timeline status
+# (_refresh_timeline_status -> _push_timeline_camera_data), which used to
+# call KeypointTimelineWidget.set_time_range unconditionally — that resets
+# the visible time window to the full trial on every single edit, silently
+# undoing whatever the user had zoomed into.
+# ---------------------------------------------------------------------------
+
+def test_interpolate_does_not_reset_timeline_zoom(qapp, multikey_db):
+    from app.pose.kp_models import COCO17
+    from app.ui.keypoint_timeline_widget import KeypointTimelineWidget
+
+    w = _make_widget(qapp, multikey_db)
+    w._timeline = KeypointTimelineWidget(COCO17, w._cameras)
+    w._timeline.set_time_range(w._t_start, w._t_end, "sv1", w._sync_table)
+    w._timeline._canvas.resize(340, w._timeline._canvas.minimumHeight())
+    w._timeline._canvas.set_current_time_v(300)
+    w._timeline._canvas.zoom(0.3)  # zoom in around ms=300
+    zoomed_view = w._timeline._canvas.view_range()
+    assert zoomed_view != (0, w._timeline._canvas.total_ms())  # sanity: really zoomed
+
+    w._interpolate_range()
+
+    assert w._timeline._canvas.view_range() == zoomed_view

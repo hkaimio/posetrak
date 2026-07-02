@@ -259,6 +259,15 @@ class _TimelineCanvas(QWidget):
         self._view_end_v = self._total_ms()
         self.update()
 
+    def set_svid(self, svid: str | None) -> None:
+        """Switch which camera's frames `_frame_at_time_v` resolves against,
+        without resetting the view window — t_start/t_end/sync_table are the
+        same object across all cameras in a sequence, so there's no reason
+        for a mere camera switch (or a status refresh after an edit) to reset
+        the user's current zoom/pan. See KeypointTimelineWidget.set_svid."""
+        self._svid = svid
+        self.update()
+
     def set_status_data(
         self, status_by_frame: dict[int, object], inlier_counts: dict[int, object], n_cameras: int,
     ) -> None:
@@ -941,6 +950,15 @@ class KeypointTimelineWidget(QWidget):
     def set_time_range(self, t_start: float, t_end: float, svid: str | None, sync_table) -> None:
         self._canvas.set_time_range(t_start, t_end, svid, sync_table)
         self._sync_hscroll()
+        self._ruler.update()
+
+    def set_svid(self, svid: str | None) -> None:
+        """Switch the active camera's frame source without resetting zoom/pan
+        (see `_TimelineCanvas.set_svid`) — used for camera switches and
+        post-edit status refreshes, as opposed to `set_time_range`, which is
+        only needed once at setup since t_start/t_end/sync_table don't vary
+        per camera within a sequence."""
+        self._canvas.set_svid(svid)
         self._ruler.update()
 
     def set_status_data(

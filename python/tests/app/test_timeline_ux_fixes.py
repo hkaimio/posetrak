@@ -402,6 +402,31 @@ def test_hscroll_value_pans_canvas(qapp):
     assert start == w._hscroll.maximum()
 
 
+def test_canvas_set_svid_preserves_view_range(canvas):
+    """Regression: set_time_range resets zoom (by design, it's a full
+    reset), but set_svid — used for camera switches and post-edit status
+    refreshes — must not, or every edit while zoomed in would silently pop
+    the timeline back out to the full trial."""
+    canvas.zoom(0.3)
+    zoomed = canvas.view_range()
+
+    canvas.set_svid("sv2")
+
+    assert canvas.view_range() == zoomed
+    assert canvas._svid == "sv2"
+
+
+def test_container_set_svid_preserves_view_range(qapp):
+    w = _make_container(qapp)
+    w.set_time_range(0.0, 2.0, "sv1", MagicMock())
+    w._canvas.zoom(0.3)
+    zoomed = w._canvas.view_range()
+
+    w.set_svid("sv2")
+
+    assert w._canvas.view_range() == zoomed
+
+
 def test_time_scrubbed_forwarded_by_container(qapp):
     w = _make_container(qapp)
     w.set_time_range(0.0, 2.0, "sv1", MagicMock())
@@ -476,6 +501,17 @@ def dummy_db(tmp_path):
     conn.execute("PRAGMA foreign_keys = OFF")
     yield conn
     conn.close()
+
+
+def test_push_timeline_camera_data_uses_set_svid_not_set_time_range(qapp, dummy_db):
+    """Regression: _push_timeline_camera_data runs on every post-edit status
+    refresh (e.g. after interpolating). It used to call set_time_range,
+    which resets the timeline's zoom/pan on every single edit."""
+    w = _make_widget(dummy_db)
+    w._push_timeline_camera_data(0)
+
+    w._timeline.set_svid.assert_called_once_with("sv1")
+    w._timeline.set_time_range.assert_not_called()
 
 
 def test_on_timeline_scrub_updates_slider_value(qapp, dummy_db):

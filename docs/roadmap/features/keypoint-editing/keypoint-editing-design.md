@@ -923,9 +923,59 @@ overconfident and could diverge differently than a true continuation.
 Written by a new `ResultWriter::write_checkpoint(step, timestamp, state,
 full_covariance)`, called from the tracking loop (`cli/track.cpp`) whenever
 `timestamp - last_checkpoint_time >= checkpoint_interval_s` (new
-`TrackerConfig` field, default 1.0 s). Size is modest: a ~58-DOF state gives a
-~27 KB dense covariance per checkpoint; at 1 Hz over a 5-minute trial that's
-roughly 8 MB — acceptable for a per-run table.
+`TrackerConfig` field, default 1.0 s).
+
+**Size, corrected against real runs**: the ~58-DOF estimate above was wrong —
+`SkeletonLayout::error_state_dim()` on the actual regress-test skeleton (27
+`SPHERICAL` + 32 `REVOLUTE` joints + a floating root) comes out around
+120-130, matching Harri's number from real runs, not the toy estimate. At
+error-state dim 125, `cov_blob` is 125×125×8 bytes ≈ 122 KB dense (not ~27
+KB). At the default 1 Hz checkpoint interval that's ~7.3 MB/minute of
+*tracked video time* — roughly 37 MB for a 5-minute trial, 73 MB for 10
+minutes. That's per tracking run, and a session accumulates one run per
+tracking attempt as the user iterates on config/edits.
+
+On the write-cost side, 1 Hz is checkpointing against *video timestamp*, not
+wall-clock: the tracker currently processes at roughly 10 video-frames/second
+of wall-clock compute, so a 120 fps capture takes ~10-15 s of wall-clock work
+per second of footage. One checkpoint write per second of *video* time is
+therefore one write per ~10-15 s of *wall-clock* compute — cheap relative to
+the surrounding work, so the interval shouldn't go much below 1 s (a much
+tighter interval would multiply both the write overhead and the storage size
+below for little benefit), but doesn't need to go higher either.
+
+The storage number is the real problem, not the write cost: unbounded
+accumulation across many tracking attempts needs pruning, not more careful
+frequency tuning. See *Checkpoint retention* below — folded into the same
+ephemeral-run garbage collection introduced under *Temporary ("ephemeral")
+tracking runs*, since both are "don't keep every run's full state forever"
+problems with the same shape.
+
+### Checkpoint retention
+
+Checkpoints are pruned using the *same* recency policy as ephemeral tracking
+runs (see below), rather than a separate knob — one retention setting to
+reason about instead of two that can drift out of sync:
+
+- When an ephemeral run is garbage-collected (dropped beyond the most recent
+  *M* for its `observation_sequence_id`, or older than *N* days), its
+  `tracking_checkpoints` rows are deleted in the same transaction — a
+  discarded test run has no future use for its checkpoints either.
+- For **non-ephemeral (committed) runs**, checkpoints are useful for as long
+  as the user might want to "test from here" against that run again. Once a
+  run is no longer among the *M* most recent tracking runs for its
+  `observation_sequence_id`, its checkpoints (but not its
+  `tracking_results` — the committed output stays) are pruned the same way.
+  A user who wants to test further edits against an old run is expected to
+  re-run tracking first, which produces fresh checkpoints.
+- An explicit **"Discard checkpoints"** action (independent of deleting the
+  run itself) lets a user free the space for a run early once they're
+  confident in it and no longer need to test further partial edits against
+  it, without losing the committed `tracking_results`.
+
+This keeps steady-state storage bounded by *M* runs' worth of checkpoints
+(a small, fixed number) rather than growing with total tracking attempts
+over a session's lifetime.
 
 ### RTS smoothing interaction
 
@@ -939,10 +989,33 @@ should not — checkpoint the **forward-pass (filtered) state only**:
 - The filtered state at step *k* depends only on frames ≤ *k*, which is
   exactly "resume tracking from here" semantics.
 
-Smoothing is unaffected: after a promising test run is folded back into the
-main trial (or the full trial is re-tracked with edits applied throughout),
-the existing full-trial RTS smoothing pass still runs once at the end as it
-does today. Test runs themselves do not smooth.
+This part is not in question: the checkpoint *state to resume from* must be
+unsmoothed, for the reason above. What's separately open is whether the
+**test run's own forward pass** should be RTS-smoothed after it completes,
+rather than left as raw filtered output.
+
+There's a real argument for smoothing it. RTS smoothing's main visible
+benefit is reducing the lag the filter shows when reacting to fast motion —
+and fast, hard-to-track motion is disproportionately the reason a segment
+needed manual keypoint edits in the first place. A test run that's
+deliberately shown unsmoothed could look worse than the edit actually is,
+because the comparison is unsmoothed-test-run against a smoothed main trial,
+not an apples-to-apples check of whether the edit fixed the problem.
+
+Given that, treat this as a follow-on refinement rather than something Phase
+18 needs to get right immediately: ship test runs unsmoothed first (simpler,
+and still answers "does the filter recover at all"), and add an option to
+also run RTS over just the test window once there's a feel for whether the
+unsmoothed comparison is actually misleading users in practice. If added,
+smoothing a test run only needs the test window's own forward-pass cache
+(`FrameSmootherData`) — it doesn't need the main trial's smoother state,
+since the whole point of a test run is that it doesn't touch the committed
+trial until promoted.
+
+Smoothing of the *committed* trial is unaffected either way: after a
+promising test run is folded back into the main trial (or the full trial is
+re-tracked with edits applied throughout), the existing full-trial RTS
+smoothing pass still runs once at the end as it does today.
 
 ### Temporary ("ephemeral") tracking runs
 
@@ -953,8 +1026,13 @@ does today. Test runs themselves do not smooth.
 - Excluded from `list_tracking_runs` (UI tree and MCP tool) by default,
   nested under their parent run when a "show test runs" toggle is on.
 - Garbage-collected: on session open, drop ephemeral runs beyond the most
-  recent *M* per sequence (default configurable, e.g. 5) or older than *N*
-  days; also exposed as an explicit "Discard test run" UI action.
+  recent *M* (default configurable, e.g. 5) or older than *N* days, grouped
+  by `tracking_runs.observation_sequence_id` — the `pose_observation_sequences`
+  row a run tracked, which is the actual grouping key `tracking_runs` carries
+  (not "trial": a trial can have more than one observation sequence, e.g.
+  after re-stitching, and each keeps its own independent set of tracking
+  runs and checkpoints). Also exposed as an explicit "Discard test run" UI
+  action.
 - Inherit `tracker_configs` from the parent run by default (no separate
   config UI needed for the common "just test my edit" case).
 
@@ -993,7 +1071,29 @@ posetrak-tracker track config.toml --resume-from-run <run_id> --resume-time 12.5
   is selected, so it isn't mistaken for the trial's authoritative result.
 - "Test from here" is triggered from the crop grid / timeline: it resolves
   the checkpoint nearest-but-before the earliest edit in the current
-  selection or active range, and launches a resumed run automatically.
+  selection or active range, and launches a resumed run. On launch, the
+  tracking-run selector automatically switches to the new ephemeral run —
+  the whole point is a fast look at the result, so making the user manually
+  find and select it afterward would defeat that.
+
+**How long does a test run track for?** Tied to whatever selection state the
+user already has, rather than a fixed duration or a separate "how far"
+prompt that adds a step to the common case:
+
+- If a frame **range** is active (the same range used for `Space`/`I`), the
+  test run covers checkpoint-before-range-start through range-end **plus a
+  fixed trailing buffer** (default a few seconds). The buffer matters
+  because the interesting question isn't just "does the filter recover by
+  the end of my edit" — it's "does it *stay* recovered for a bit after,"
+  which the exact edit boundary can't show.
+- If no range is active (a single-frame edit, e.g. one Ctrl-click keyframe),
+  the test run covers checkpoint-before-current-frame through
+  current-frame-plus-the-same-default-buffer.
+- An explicit **"Extend test run"** action continues the *same* ephemeral run
+  further (no new checkpoint resolution, just more `track_frame()` calls
+  appended) for when the default window wasn't enough to tell — this avoids
+  needing to guess the right window length upfront, at the cost of a second
+  click when the default guess undershoots.
 
 ### Phasing
 
@@ -1011,17 +1111,30 @@ the original run's from that point forward (within numerical tolerance);
 resume with a deliberately edited observation and verify the trajectory
 diverges only after the checkpoint.
 
-**Phase 17 — ephemeral run bookkeeping.** `is_ephemeral` column, retention
-GC, "show test runs" UI toggle. *Validation*: create several test runs,
+**Phase 17 — ephemeral run bookkeeping + checkpoint retention.**
+`is_ephemeral` column, retention GC, "show test runs" UI toggle, and the
+shared checkpoint-pruning policy from *Checkpoint retention* above (applies
+to ephemeral *and* non-ephemeral runs' checkpoints — `tracking_results`
+itself is never pruned by this GC). *Validation*: create several test runs,
 verify only the most recent *M* survive after session reopen, and that
-non-ephemeral runs are never garbage-collected.
+non-ephemeral runs' `tracking_results` are never garbage-collected even
+though their `tracking_checkpoints` are once they age out of the *M* most
+recent; verify the explicit "Discard checkpoints" action removes a run's
+checkpoints without touching its `tracking_results`.
 
-**Phase 18 — UI wiring.** "Test from here" action, `CompositeRunView`, status
-bar indicator, "Promote" (rename, clear `is_ephemeral`) / "Discard" actions.
-*Validation*: edit a keypoint range, trigger "Test from here", verify the
-crop grid / trajectory plot shows original data before the checkpoint and
-test-run data after; discard the test run and verify its `tracking_results`
-rows are removed.
+**Phase 18 — UI wiring.** "Test from here" action (auto-selects the new
+ephemeral run in the tracking-run selector on launch, and resolves the test
+window from the active frame range + trailing buffer, or the current frame +
+buffer if no range is active — see *UI: visualization switch-over* above),
+"Extend test run", `CompositeRunView`, status bar indicator, "Promote"
+(rename, clear `is_ephemeral`) / "Discard" actions. *Validation*: edit a
+keypoint range, trigger "Test from here", verify the tracking-run selector
+switches to the new run automatically and the crop grid / trajectory plot
+shows original data before the checkpoint and test-run data after; verify
+the test run's last tracked frame matches range-end-plus-buffer; click
+"Extend test run" and verify it continues past that point without
+re-resolving the checkpoint; discard the test run and verify its
+`tracking_results` rows are removed.
 
 ## Keypoint / camera / frame-specific measurement error
 
@@ -1039,7 +1152,7 @@ update (`UnscentedKalmanFilter::update()`) is required.
 
 ### Static per-keypoint defaults
 
-New TOML config section:
+New TOML config field, for configs launched directly via the CLI:
 
 ```toml
 [tracking.keypoint_noise_multiplier]
@@ -1047,6 +1160,27 @@ left_hip = 2.0
 right_hip = 2.0
 left_pinky_tip = 0.5
 ```
+
+**DB mapping**: TOML is only how the CLI accepts a config; configs launched
+from the UI are rows in the registry's `tracker_configs` table
+(`db/registry_schema.sql:79`), which the TOML loader (`config.cpp`) doesn't
+touch at all. The existing precedent for a variable-length, per-config
+structure on that table is `velocity_mode_camera_ids` — a JSON array in a
+`TEXT` column — rather than a child table, because it's a single
+config-scoped blob with no need to join or query into it. The same shape
+fits here: add `keypoint_noise_multipliers TEXT` (JSON object, keypoint name
+→ multiplier, e.g. `{"left_hip": 2.0, "right_hip": 2.0}`) to
+`tracker_configs`, keyed by name rather than index so it stays meaningful
+across pose models with different keypoint orderings.
+
+Both the TOML loader and whatever reads a `tracker_configs` row into a
+`TrackerConfig` (`session_reader.cpp` or a dedicated config loader — same
+place `pose_noise_std` etc. already get read from the DB) need to populate
+`TrackerConfig::keypoint_noise_multiplier`; a config created via one path and
+edited via the other must agree on the same field. Shipping a UI for editing
+this column is separate, later work — `cross_pair_max_px` and several other
+advanced `tracker_configs` fields already ship DB/TOML-only today without a
+settings-page editor, so there's precedent for that split too.
 
 Applied as `pose_noise_std * multiplier` (default multiplier 1.0) when each
 `Observation` is constructed from a detection. Ship a default multiplier
@@ -1060,10 +1194,48 @@ pixel calibration instead of duplicating it.
 
 Static defaults don't cover "this specific hip detection on this specific
 camera in this specific frame is untrustworthy," which is what the editor
-needs. New table, deliberately separate from `pose_observation_edits` rather
-than a fourth channel on its `kp_blob` — keeping that table's format and the
-shipped `apply_keypoint_edits` codec unchanged, since overrides are sparse and
-optional:
+needs.
+
+**Separate table vs. a fourth channel on `pose_observation_edits.kp_blob`** —
+weighing both instead of asserting the separate table by default:
+
+*Extend `pose_observation_edits` (float32[N,4]: x, y, is_outlier, multiplier):*
+- **For**: one table, one lookup per frame instead of two, one write path.
+  Natural for the "nudge this hip's position *and* mark it less trustworthy"
+  workflow in a single write.
+- **Against**: `pose_observation_edits.kp_mask` currently means "this row
+  overrides x/y/is_outlier for keypoint *i* as one unit." Noise overrides
+  need *independent* presence-tracking from position/outlier overrides — you
+  want to widen a keypoint's uncertainty without necessarily moving it or
+  touching its outlier flag, and vice versa. That forces a second mask
+  alongside the first, which is most of the cost of the separate-table
+  option, paid *in addition to* a breaking blob-format change: every
+  existing `pose_observation_edits` row (already shipped, already written by
+  users across Phases 1-14) would need a migration from float32[N,3] to
+  float32[N,4], and the C++ `apply_keypoint_edits` codec, `read_observations_with_edits`,
+  `write_observation_edit`, and `update_single_keypoint_edit` would all need
+  updating in lockstep. High blast radius for a feature most frames will
+  never use — noise overrides are expected to be far rarer than position/
+  outlier edits.
+
+*Separate `pose_observation_noise_overrides` table (this design):*
+- **For**: purely additive — no change to the already-shipped
+  `pose_observation_edits` format or codec, no migration risk to existing
+  data. Matches the actual usage pattern: sparse and optional, most frames
+  never get a row. Keeps two conceptually different facts ("what value is
+  this keypoint" vs. "how much do we trust it") in independently-reasoned-
+  about tables instead of one row format serving two purposes.
+- **Against**: two lookups per frame in `session_reader.cpp` instead of one
+  (both cheap, prepared-statement lookups — same pattern already used for
+  `pose_observation_edits`, so not a new kind of cost). Two Python
+  read/write helper sets instead of one. A combined "move + adjust
+  trust" edit is two DB writes instead of one, though both still happen
+  within the same user-visible edit action.
+
+The separate table wins mainly because it's non-breaking: the fourth-channel
+option pays for a second mask *and* a format migration, while the separate
+table only pays for the second mask's cost (a second lookup), without ever
+touching code that Phases 1-14 already shipped and tested.
 
 ```sql
 CREATE TABLE pose_observation_noise_overrides (
@@ -1107,12 +1279,17 @@ formula rather than replacing it) before `measurement_noise_std()` is called.
 
 ### Phasing
 
-**Phase 19 — static per-keypoint config.** TOML section, `Observation`
-construction wiring, default multiplier tables for COCO-17 and COCO-133.
-*Validation*: track a config with one keypoint's multiplier set to 10× and
-confirm (via `tracking_obs_results` / the MCP `get_filter_stats` tool) that
-its innovation covariance scales accordingly and it's outlier-rejected less
-aggressively than an unmodified keypoint with equally noisy input.
+**Phase 19 — static per-keypoint config.** TOML section, `tracker_configs.
+keypoint_noise_multipliers` DB column (JSON, keyed by keypoint name — see
+*DB mapping* above), `Observation` construction wiring reading from
+whichever source produced the running config, default multiplier tables for
+COCO-17 and COCO-133. *Validation*: track a config with one keypoint's
+multiplier set to 10× and confirm (via `tracking_obs_results` / the MCP
+`get_filter_stats` tool) that its innovation covariance scales accordingly
+and it's outlier-rejected less aggressively than an unmodified keypoint with
+equally noisy input; verify a config loaded from a `tracker_configs` DB row
+and one loaded from the equivalent TOML produce the same per-keypoint
+multipliers.
 
 **Phase 20 — override storage + merge.** `pose_observation_noise_overrides`
 migration, Python read/write helpers mirroring `db_cache.py`'s edit helpers,

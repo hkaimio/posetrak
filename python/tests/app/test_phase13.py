@@ -64,8 +64,10 @@ def test_drag_disabled_outside_edit_mode(canvas):
     assert received == []
 
 
-def test_plain_click_emits_degenerate_rubber_band(canvas):
-    """A click with no drag still emits rubber_band_selected: v0 == v1, ctrl=False."""
+def test_plain_click_emits_empty_selection_to_clear(canvas):
+    """A click with no drag clears the selection (empty kp_indices), not the clicked row —
+    see the follow-up fix: replacing the selection with just the clicked row silently
+    discarded the rest of a multi-keypoint selection on a stray click."""
     received = []
     canvas.rubber_band_selected.connect(lambda *args: received.append(args))
 
@@ -74,7 +76,7 @@ def test_plain_click_emits_degenerate_rubber_band(canvas):
 
     assert len(received) == 1
     kp_indices, v0, v1, ctrl = received[0]
-    assert kp_indices == set(canvas._rows[0].kp_indices)
+    assert kp_indices == set()
     assert v0 == v1
     assert ctrl is False
 

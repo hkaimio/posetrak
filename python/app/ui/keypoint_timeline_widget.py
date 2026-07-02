@@ -2,24 +2,27 @@
 
 Phases 12-13 of the keypoint-editing timeline view (see
 docs/keypoint-editing/keypoint-editing-design.md, "Improvements" section),
-plus follow-up UX fixes requested after Phase 13 landed:
+plus two rounds of follow-up UX fixes requested after Phase 13 landed:
 
 - Phase 12: a custom-painted tree of keypoint/group rows colored by
   `app.pose.timeline_status` axis-1 status, scoped to one camera at a time
   (matching `PersonCropGridWidget._sel_cam_idx`), with a playhead.
-- Phase 13: rubber-band drag (or a plain click) selects keypoints + a frame
-  range, and Ctrl+click toggles a keyframe — both only emit signals, the
-  actual DB writes and `_sel_kp_indices`/`_range_start_v` state live on the
-  host widget (`PersonCropGridWidget`), matching the "state is owned by the
+- Phase 13: rubber-band drag selects keypoints + a frame range, and
+  Ctrl+click toggles a keyframe — both only emit signals, the actual DB
+  writes and `_sel_kp_indices`/`_range_start_v` state live on the host
+  widget (`PersonCropGridWidget`), matching the "state is owned by the
   host, not duplicated per-widget" rule from the design doc.
-- Click/drag-to-seek: the timeline now doubles as the trial's only scrub
-  control (the standalone slider was removed) — clicking or dragging in the
-  track area always emits `time_scrubbed`, regardless of edit mode.
-- Zoom/pan: Ctrl+wheel zooms the visible time window around the cursor;
-  a horizontal scrollbar pans it; a "Fit" button resets to the full trial.
-- Collapsible: starts collapsed to the tab-row height (keypoint editing is
-  occasional); a toggle button expands it, and its height is then
-  user-resizable via the QSplitter the host widget places it in.
+- Round 1: the standalone scrub slider was removed — the timeline became
+  the trial's only clock; zoom (Ctrl+wheel / +/-/Fit buttons) and a
+  horizontal scrollbar for panning; collapsible to save space.
+- Round 2: seeking and selecting turned out to conflict when both lived in
+  the row-tree's click handler (clicking to scrub silently nuked most of
+  a multi-keypoint selection). Seeking now lives exclusively in a always-
+  visible `_RulerWidget` (tick marks + playhead) above the row tree;
+  clicking the row tree is purely a selection gesture (click clears,
+  drag selects). Zoom now anchors on the playhead, not the cursor/click
+  position. At high zoom, adjacent frame cells get a small gap so
+  individual frames are visually distinguishable.
 """
 from __future__ import annotations
 
@@ -41,10 +44,13 @@ from app.pose.kp_models import PoseModel
 from app.pose.timeline_status import STATUS_BLUE, STATUS_GREEN, STATUS_GREY, STATUS_YELLOW
 
 ROW_H = 16
+RULER_H = 22
 LABEL_W = 140
 COL_W = 2  # px per sampled time bucket when drawing status cells
 MIN_VIEW_SPAN_MS = 100  # can't zoom in past a 100ms window
 _EXPANDED_HEIGHT = 200  # default canvas height when first expanded
+_FRAME_GAP_PX_THRESHOLD = 6  # start drawing gaps once a frame is wider than this
+_FRAME_GAP_PX = 2
 
 _STATUS_COLORS = {
     STATUS_GREEN: QColor(80, 170, 80),
@@ -60,6 +66,24 @@ _RANGE_OVERLAY = QColor(255, 255, 255, 60)
 _PLAYHEAD_COLOR = QColor(255, 80, 80)
 _INLIER_BAR_COLOR = QColor(180, 180, 180)
 _DRAG_RECT_COLOR = QColor(120, 170, 255, 60)
+
+# "Nice" tick intervals for the ruler, in ms — smallest that keeps labels
+# legibly spaced (see _pick_tick_interval_ms) is picked for the current zoom.
+_NICE_INTERVALS_MS = (
+    10, 20, 50, 100, 200, 500,
+    1000, 2000, 5000, 10000, 15000, 30000,
+    60000, 120000, 300000, 600000,
+)
+
+
+def _fmt_tick(ms: int) -> str:
+    """Format a ruler tick label as 'M:SS' or 'M:SS.mmm' when sub-second precision matters."""
+    total_s = ms / 1000.0
+    m = int(total_s // 60)
+    s = total_s - m * 60
+    if ms % 1000 == 0:
+        return f"{m}:{int(round(s)):02d}"
+    return f"{m}:{s:06.3f}"
 
 
 @dataclass(frozen=True)
@@ -105,16 +129,20 @@ _DRAG_THRESHOLD = 5  # px — matches _KP_DRAG_THRESHOLD in content_panels.py's 
 
 
 class _TimelineCanvas(QWidget):
-    """Custom-painted tree + time-colored cells for one camera's keypoint status."""
+    """Custom-painted tree + time-colored cells for one camera's keypoint status.
+
+    Purely a selection surface: click clears the selection, drag selects
+    keypoints + a frame range, Ctrl+click toggles a keyframe. It does *not*
+    move the playhead — that's `_RulerWidget`'s job, so scrubbing never
+    disturbs an in-progress multi-keypoint selection.
+    """
 
     # kp_indices(set[int]), range_start_v, range_end_v, ctrl (add-to-selection vs. replace)
     rubber_band_selected = Signal(object, int, int, bool)
     # kp_idx, time_v (ms from t_start) — Ctrl+click on a leaf row's cell
     keyframe_toggled = Signal(int, int)
-    # time_v (ms from t_start) — click or drag in the track area; always active
-    time_scrubbed = Signal(int)
     # emitted whenever the visible time window changes (zoom in/out/fit), so the
-    # host container can resync its panning scrollbar
+    # host container can resync its panning scrollbar and the ruler can redraw
     view_changed = Signal()
 
     def __init__(self, pose_model: PoseModel, parent=None) -> None:
@@ -220,12 +248,14 @@ class _TimelineCanvas(QWidget):
     def view_range(self) -> tuple[int, int]:
         return self._view_start_v, self._view_end_v
 
-    def zoom(self, factor: float, anchor_x: float) -> None:
-        """Scale the visible window by *factor* (< 1 zooms in), keeping the
-        time under *anchor_x* (widget-local x, e.g. cursor position) fixed."""
+    def zoom(self, factor: float) -> None:
+        """Scale the visible window by *factor* (< 1 zooms in), anchored on
+        the playhead — not the cursor — per user feedback: zooming around
+        wherever the mouse happens to be was disorienting; the playhead is
+        the one fixed reference point you're always looking at."""
         total = self._total_ms()
         span = max(1, self._view_end_v - self._view_start_v)
-        anchor_v = self._time_v_at_x(anchor_x)
+        anchor_v = self._current_v
         new_span = max(MIN_VIEW_SPAN_MS, min(total, int(round(span * factor))))
         frac = (anchor_v - self._view_start_v) / span
         new_start = int(round(anchor_v - frac * new_span))
@@ -286,17 +316,61 @@ class _TimelineCanvas(QWidget):
             return None
         return self._sync_table.lookup(self._t_start + v / 1000.0, self._svid)
 
-    def _status_columns(self, row: Row) -> list[tuple[int, int, int]]:
+    def _estimate_ms_per_frame(self) -> float | None:
+        """Probe the sync table to find roughly how many ms one frame spans.
+
+        No public fps accessor exists on the sync table object handed to us
+        (it only offers `lookup(t, svid) -> frame`), so this walks forward
+        from the current view until the returned frame number changes, then
+        binary-searches for a tighter estimate of exactly where.
+        """
+        f0 = self._frame_at_time_v(self._view_start_v)
+        if f0 is None:
+            return None
+        lo, hi = 0.0, None
+        for probe_ms in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000):
+            f1 = self._frame_at_time_v(self._view_start_v + probe_ms)
+            if f1 is not None and f1 != f0:
+                hi = float(probe_ms)
+                break
+            lo = float(probe_ms)
+        if hi is None:
+            return None
+        for _ in range(8):
+            mid = (lo + hi) / 2
+            f_mid = self._frame_at_time_v(self._view_start_v + mid)
+            if f_mid is not None and f_mid != f0:
+                hi = mid
+            else:
+                lo = mid
+        return hi
+
+    def _should_gap_frames(self) -> bool:
+        """True once each frame is wide enough on screen to draw a small gap
+        between adjacent frame cells (see _FRAME_GAP_PX_THRESHOLD)."""
+        ms_per_frame = self._estimate_ms_per_frame()
+        if ms_per_frame is None:
+            return False
+        w = max(1, self.width() - LABEL_W)
+        px_per_frame = ms_per_frame * w / self._view_span()
+        return px_per_frame > _FRAME_GAP_PX_THRESHOLD
+
+    def _status_columns(self, row: Row, split_by_frame: bool = False) -> list[tuple[int, int, int]]:
         """Run-length-encoded [(x_px, width_px, status_code)] segments for *row*.
 
         status_code is the max (highest-precedence) axis-1 code across the
-        row's kp_indices at each sampled time; -1 means "no data".
+        row's kp_indices at each sampled time; -1 means "no data". When
+        *split_by_frame* is set, a new segment also starts whenever the
+        sampled frame number changes (even if the status code doesn't), so
+        callers can draw a gap at each frame boundary once zoomed in enough
+        for that to be legible.
         """
         w = max(0, self.width() - LABEL_W)
         if w <= 0 or not row.kp_indices:
             return []
         segments: list[tuple[int, int, int]] = []
         cur_code: int | None = None
+        cur_frame: int | None = None
         cur_start = 0
         x = 0
         while x < w:
@@ -310,10 +384,12 @@ class _TimelineCanvas(QWidget):
                     (int(status[i]) for i in row.kp_indices if i < status.shape[0]),
                     default=-1,
                 )
-            if code != cur_code:
+            boundary = code != cur_code or (split_by_frame and frame != cur_frame)
+            if boundary:
                 if cur_code is not None:
                     segments.append((LABEL_W + cur_start, x - cur_start, cur_code))
                 cur_code = code
+                cur_frame = frame
                 cur_start = x
             x += COL_W
         if cur_code is not None:
@@ -362,8 +438,9 @@ class _TimelineCanvas(QWidget):
         return bool(self._sel_kp_indices) and bool(set(row.kp_indices) & self._sel_kp_indices)
 
     # ------------------------------------------------------------------
-    # Mouse: group-row expand/collapse (always), click/drag-to-seek (always),
-    # rubber-band select and Ctrl+click keyframe toggle (edit mode only)
+    # Mouse: group-row expand/collapse (always), rubber-band select /
+    # click-to-clear / Ctrl+click keyframe toggle (edit mode only).
+    # Seeking lives in `_RulerWidget`, not here.
     # ------------------------------------------------------------------
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -374,13 +451,13 @@ class _TimelineCanvas(QWidget):
                 if row is not None and row.kind == "group":
                     self.toggle_group(row.label)
                     return
-            ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-            self._drag_start = (pos.x(), pos.y())
-            self._drag_current = (pos.x(), pos.y())
-            self._drag_ctrl = ctrl
-            self._drag_moved = False
-            self.time_scrubbed.emit(self._time_v_at_x(pos.x()))
-            return
+            if self._edit_mode:
+                ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                self._drag_start = (pos.x(), pos.y())
+                self._drag_current = (pos.x(), pos.y())
+                self._drag_ctrl = ctrl
+                self._drag_moved = False
+                return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
@@ -391,7 +468,6 @@ class _TimelineCanvas(QWidget):
             dy = pos.y() - self._drag_start[1]
             if dx * dx + dy * dy >= _DRAG_THRESHOLD ** 2:
                 self._drag_moved = True
-            self.time_scrubbed.emit(self._time_v_at_x(pos.x()))
             self.update()
             return
         super().mouseMoveEvent(event)
@@ -410,12 +486,19 @@ class _TimelineCanvas(QWidget):
                 if row is not None and row.kind == "leaf" and x0 >= LABEL_W:
                     v = self._time_v_at_x(x0)
                     self.keyframe_toggled.emit(row.kp_indices[0], v)
-            elif x0 >= LABEL_W or x1 >= LABEL_W:
-                kp_indices = self._kp_indices_in_row_range(min(y0, y1), max(y0, y1))
-                if kp_indices:
-                    v0 = self._time_v_at_x(min(x0, x1))
-                    v1 = self._time_v_at_x(max(x0, x1))
-                    self.rubber_band_selected.emit(kp_indices, v0, v1, self._drag_ctrl)
+            elif self._drag_moved:
+                if x0 >= LABEL_W or x1 >= LABEL_W:
+                    kp_indices = self._kp_indices_in_row_range(min(y0, y1), max(y0, y1))
+                    if kp_indices:
+                        v0 = self._time_v_at_x(min(x0, x1))
+                        v1 = self._time_v_at_x(max(x0, x1))
+                        self.rubber_band_selected.emit(kp_indices, v0, v1, self._drag_ctrl)
+            elif not self._drag_ctrl and x0 >= LABEL_W:
+                # Plain click, no drag: clear the selection entirely rather than
+                # collapsing it down to just the clicked row — a stray click
+                # shouldn't discard the rest of a multi-keypoint selection.
+                v0 = self._time_v_at_x(x0)
+                self.rubber_band_selected.emit(set(), v0, v0, False)
 
         self._drag_start = None
         self._drag_current = None
@@ -425,9 +508,8 @@ class _TimelineCanvas(QWidget):
 
     def wheelEvent(self, event) -> None:  # noqa: N802
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            pos = event.position()
             factor = 0.8 if event.angleDelta().y() > 0 else 1.25
-            self.zoom(factor, pos.x())
+            self.zoom(factor)
             event.accept()
             return
         super().wheelEvent(event)
@@ -440,6 +522,7 @@ class _TimelineCanvas(QWidget):
         painter = QPainter(self)
         try:
             painter.fillRect(self.rect(), _BG_COLOR)
+            split_by_frame = self._should_gap_frames()
             for row_idx, row in enumerate(self._rows):
                 y = row_idx * ROW_H
                 is_selected = self._is_row_selected(row)
@@ -453,9 +536,10 @@ class _TimelineCanvas(QWidget):
                     prefix = "▼ " if row.label in self._expanded else "▶ "
                 painter.drawText(indent, y + ROW_H - 4, prefix + row.label)
 
-                for x, w, code in self._status_columns(row):
+                for x, w, code in self._status_columns(row, split_by_frame):
                     color = _STATUS_COLORS.get(code, _NO_DATA_COLOR)
-                    painter.fillRect(x, y + 1, max(1, w), ROW_H - 4, color)
+                    draw_w = max(1, w - _FRAME_GAP_PX) if split_by_frame else w
+                    painter.fillRect(x, y + 1, max(1, draw_w), ROW_H - 4, color)
 
                 if row.kind == "leaf":
                     for x, w, frac in self._inlier_fraction_columns(row.kp_indices[0]):
@@ -489,12 +573,96 @@ class _TimelineCanvas(QWidget):
             painter.end()
 
 
-class KeypointTimelineWidget(QWidget):
-    """Container: collapse toggle + camera tabs + zoom controls + scrollable
-    `_TimelineCanvas` + a horizontal scrollbar for panning when zoomed in.
+class _RulerWidget(QWidget):
+    """Fixed-height timestamp ruler above the row tree: the only place that
+    moves the playhead. Always visible, even while the row tree is
+    collapsed, so scrubbing never requires expanding the timeline.
 
-    Starts collapsed (tab-row height only) — manual keypoint editing is the
-    exception, not the common case.  Once expanded, height is controlled by
+    Shares view/time state with a `_TimelineCanvas` instance (same module,
+    tightly coupled sibling widgets — see the module docstring) rather than
+    duplicating zoom/pan bookkeeping.
+    """
+
+    time_scrubbed = Signal(int)  # time_v, ms from t_start
+
+    def __init__(self, canvas: _TimelineCanvas, parent=None) -> None:
+        super().__init__(parent)
+        self._canvas = canvas
+        self._dragging = False
+        self.setFixedHeight(RULER_H)
+
+    def _pick_tick_interval_ms(self, span_ms: int, px_width: int, min_px_gap: int = 60) -> int:
+        if px_width <= 0 or span_ms <= 0:
+            return _NICE_INTERVALS_MS[-1]
+        for interval in _NICE_INTERVALS_MS:
+            if px_width * interval / span_ms >= min_px_gap:
+                return interval
+        return _NICE_INTERVALS_MS[-1]
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position()
+            if pos.x() >= LABEL_W:
+                self._dragging = True
+                self.time_scrubbed.emit(self._canvas._time_v_at_x(pos.x()))
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._dragging and (event.buttons() & Qt.MouseButton.LeftButton):
+            pos = event.position()
+            self.time_scrubbed.emit(self._canvas._time_v_at_x(pos.x()))
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._dragging = False
+        super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            factor = 0.8 if event.angleDelta().y() > 0 else 1.25
+            self._canvas.zoom(factor)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        try:
+            painter.fillRect(self.rect(), _BG_COLOR)
+            view_start, view_end = self._canvas.view_range()
+            span = max(1, view_end - view_start)
+            w = max(0, self.width() - LABEL_W)
+            interval = self._pick_tick_interval_ms(span, w)
+
+            painter.setPen(_LABEL_COLOR)
+            v = (view_start // interval) * interval
+            while v <= view_end:
+                if v >= view_start:
+                    x = self._canvas._x_at_time_v(v)
+                    painter.drawLine(int(x), self.height() - 6, int(x), self.height())
+                    painter.drawText(int(x) + 2, self.height() - 8, _fmt_tick(v))
+                v += interval
+
+            cur_v = self._canvas._current_v
+            if view_start <= cur_v <= view_end:
+                px = self._canvas._x_at_time_v(cur_v)
+                painter.setPen(QPen(_PLAYHEAD_COLOR, 2))
+                painter.drawLine(int(px), 0, int(px), self.height())
+        finally:
+            painter.end()
+
+
+class KeypointTimelineWidget(QWidget):
+    """Container: collapse toggle + camera tabs + zoom controls + always-
+    visible `_RulerWidget` + scrollable `_TimelineCanvas` + a horizontal
+    scrollbar for panning when zoomed in.
+
+    Starts collapsed to tab-row + ruler height only (manual keypoint editing
+    is the exception, not the common case) — the ruler stays visible even
+    collapsed, so the timeline still works as a scrub control without
+    expanding it. Once expanded, the row-tree height is controlled by
     whatever QSplitter the host places this widget in.
     """
 
@@ -533,11 +701,11 @@ class KeypointTimelineWidget(QWidget):
         fit_btn = QPushButton("Fit")
         for b in (zoom_out_btn, zoom_in_btn, fit_btn):
             b.setFixedWidth(28)
-        zoom_out_btn.setToolTip("Zoom out (Ctrl+scroll)")
-        zoom_in_btn.setToolTip("Zoom in (Ctrl+scroll)")
+        zoom_out_btn.setToolTip("Zoom out around the playhead (Ctrl+scroll)")
+        zoom_in_btn.setToolTip("Zoom in around the playhead (Ctrl+scroll)")
         fit_btn.setToolTip("Reset zoom to the full trial")
-        zoom_out_btn.clicked.connect(lambda: self._zoom_button(1.25))
-        zoom_in_btn.clicked.connect(lambda: self._zoom_button(0.8))
+        zoom_out_btn.clicked.connect(lambda: self._canvas.zoom(1.25))
+        zoom_in_btn.clicked.connect(lambda: self._canvas.zoom(0.8))
         fit_btn.clicked.connect(self._on_fit_clicked)
         tab_row.addWidget(zoom_out_btn)
         tab_row.addWidget(zoom_in_btn)
@@ -546,8 +714,11 @@ class KeypointTimelineWidget(QWidget):
         self._canvas = _TimelineCanvas(pose_model)
         self._canvas.rubber_band_selected.connect(self.rubber_band_selected)
         self._canvas.keyframe_toggled.connect(self.keyframe_toggled)
-        self._canvas.time_scrubbed.connect(self.time_scrubbed)
         self._canvas.view_changed.connect(self._sync_hscroll)
+
+        self._ruler = _RulerWidget(self._canvas)
+        self._ruler.time_scrubbed.connect(self.time_scrubbed)
+        self._canvas.view_changed.connect(self._ruler.update)
 
         self._canvas_scroll = QScrollArea()
         self._canvas_scroll.setWidget(self._canvas)
@@ -560,6 +731,7 @@ class KeypointTimelineWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
         layout.addLayout(tab_row)
+        layout.addWidget(self._ruler)
         layout.addWidget(self._canvas_scroll)
         layout.addWidget(self._hscroll)
 
@@ -596,20 +768,16 @@ class KeypointTimelineWidget(QWidget):
         self._canvas_scroll.setVisible(not self._collapsed)
         self._hscroll.setVisible(not self._collapsed)
         if self._collapsed:
-            bar_h = self._collapse_btn.sizeHint().height() + 8
+            bar_h = self._collapse_btn.sizeHint().height() + RULER_H + 12
             self.setMaximumHeight(bar_h)
             self.setMinimumHeight(bar_h)
         else:
             self.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
-            self.setMinimumHeight(60)
+            self.setMinimumHeight(60 + RULER_H)
             if self.height() <= self.minimumHeight():
                 self.resize(self.width(), _EXPANDED_HEIGHT)
 
     # Zoom / pan ------------------------------------------------------------
-
-    def _zoom_button(self, factor: float) -> None:
-        anchor = LABEL_W + max(1, self._canvas.width() - LABEL_W) / 2
-        self._canvas.zoom(factor, anchor)
 
     def _on_fit_clicked(self) -> None:
         self._canvas.zoom_fit()
@@ -626,6 +794,7 @@ class KeypointTimelineWidget(QWidget):
 
     def _on_hscroll(self, value: int) -> None:
         self._canvas.set_view_start(value)
+        self._ruler.update()
 
     # Pass-throughs to the canvas ---------------------------------------
 
@@ -635,6 +804,7 @@ class KeypointTimelineWidget(QWidget):
     def set_time_range(self, t_start: float, t_end: float, svid: str | None, sync_table) -> None:
         self._canvas.set_time_range(t_start, t_end, svid, sync_table)
         self._sync_hscroll()
+        self._ruler.update()
 
     def set_status_data(
         self, status_by_frame: dict[int, object], inlier_counts: dict[int, object], n_cameras: int,
@@ -648,6 +818,7 @@ class KeypointTimelineWidget(QWidget):
 
     def set_current_time_v(self, v: int) -> None:
         self._canvas.set_current_time_v(v)
+        self._ruler.update()
 
     def set_edit_mode(self, enabled: bool) -> None:
         self._canvas.set_edit_mode(enabled)

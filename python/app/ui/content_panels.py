@@ -2534,6 +2534,12 @@ class PersonCropGridWidget(QWidget):
         self._main_splitter.setStretchFactor(0, 1)
         self._main_splitter.setStretchFactor(1, 0)
         self._main_splitter.setCollapsible(0, False)
+        # QSplitter can squash a "collapsible" pane to 0px on first layout even
+        # when it has an explicit min/maxHeight — without this the timeline
+        # (including its always-visible tab row + ruler) doesn't render at all
+        # until the user drags the splitter handle.
+        self._main_splitter.setCollapsible(1, False)
+        self._main_splitter.setSizes([3000, self._timeline.maximumHeight()])
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -3300,7 +3306,25 @@ class PersonCropGridWidget(QWidget):
     def _on_timeline_rubber_band(
         self, kp_indices: set[int], range_start_v: int, range_end_v: int, ctrl: bool,
     ) -> None:
-        """Rubber-band drag (or a plain click) on the timeline: mirrors _on_rubber_band_selected."""
+        """Rubber-band drag (selects) or a plain click (clears) on the timeline row tree.
+
+        The timeline emits an empty `kp_indices` set for a plain, non-Ctrl
+        click — clearing the whole selection (keypoints *and* range) rather
+        than collapsing it down to just the clicked row, which used to
+        silently discard the rest of a multi-keypoint selection on a stray
+        click. Seeking is handled separately by the ruler and never reaches
+        this method.
+        """
+        if not kp_indices and not ctrl:
+            self._sel_kp_indices = set()
+            self._primary_kp_idx = None
+            self._range_start_v = None
+            self._range_end_v = None
+            if self._timeline is not None:
+                self._sel_cam_idx = self._timeline.active_camera_index()
+            self._load_frame(self._current_t)
+            return
+
         if ctrl:
             self._sel_kp_indices |= set(kp_indices)
         else:

@@ -662,12 +662,597 @@ virtual "Hip" and "Neck" nodes; the same approach can be added to
 
 ---
 
+# Improvements (second iteration)
+
+The sections below extend this design per
+`keypoint-editing-improvements-brief.md`, plus a fourth section (*Background
+full-resolution frame extraction*) addressing a follow-up problem raised
+during review. They continue the phase numbering from the phases above and
+follow the same validation-per-phase convention.
+
+## Timeline view
+
+### Motivation
+
+The crop grid is efficient for spatially correcting a keypoint once you know
+which frame it's wrong on, but there is no way to see *where in the trial*
+problems are without scrubbing through it manually.  A dope-sheet-style
+timeline — one row per keypoint, colored by status, collapsible into body-part
+groups — surfaces the temporal pattern at a glance, similar to Blender's dope
+sheet or Cascadeur's timeline.
+
+### Status signal (no new tables for classification)
+
+Status has **two independent axes**, not one merged color scale. An earlier
+draft of this section collapsed "tracker-classified outlier" and
+"user-disabled" into a single grey; that's a problem because (a) the
+enable/disable and multi-keyframe-interpolation logic only care about the
+user's edit intent, not the tracker's verdict, and (b) an edited/enabled
+keypoint can still come back as an outlier the next time the tracker runs —
+merging the two would make a cell's color contradict itself across runs.
+
+**Axis 1 — edit state** (stable; independent of any tracking run), the cell's
+fill color:
+- **grey** — user-disabled: an edit row exists with `is_outlier == 1`.
+- **blue** — edited/moved: an edit row exists with `is_outlier == 0` and a
+  position different from the original.
+- **yellow** — original detection, outside person segmentation.
+- **green** — original detection, inside person segmentation (also the
+  default when no segmentation-quality run exists for the sequence —
+  segmentation is a refinement signal, not a requirement).
+- Precedence when computing an aggregate cell (see *Row hierarchy* below):
+  grey > blue > yellow > green.
+- Segmentation lookup: `keypoint_obs_quality.quality_blob`, keyed by
+  `(seg_run_id, shot_video_id, video_frame, track_id)` and already populated
+  by `python/tools/add_seg_quality.py`. The `seg_run_id` / `shot_video_id` /
+  `track_id` for a given camera + person resolve via the same
+  `detection_track_assignments` lookup path already used for crop loading
+  (see *Crop loading* above).
+
+**Axis 2 — last-run tracker verdict** (only present once a tracking run is
+selected; changes on every re-run), drawn as an **overlay** on top of the
+axis-1 fill rather than folded into it — a thin red outline/hatch, sourced
+from the selected run's `tracking_obs_results.obs_blob` (`is_outlier` field,
+per the schema notes in `CLAUDE.md`). This lets both facts coexist: a
+keypoint the user edited (blue fill) that the tracker's outlier rejection
+still didn't trust in the last run (red outline) is a legible, useful signal
+— "your edit didn't fix it" — without the edit-state color changing every
+time the tracker re-runs.
+
+### Row hierarchy and camera scope
+
+Editing is inherently per-camera — moving or disabling a keypoint only
+affects the camera cell it was edited in.
+`PersonCropGridWidget._sel_cam_idx` (`content_panels.py:2218`) already tracks
+exactly this: "the camera that last emitted `keypoint_selected`", and is what
+nudge/`Space` already act on today (`content_panels.py:3048`, `:3077`). The
+timeline reuses the same scope instead of inventing a new definition of
+"selected camera":
+
+- **Default view**: single camera = `_sel_cam_idx`, i.e. whichever crop cell
+  the user last clicked a keypoint dot in. This keeps the timeline consistent
+  with what `Space`/nudge would actually edit if pressed right now.
+- A camera tab/dropdown at the top of the timeline switches which camera it
+  displays — and, symmetrically, setting `_sel_cam_idx` (e.g. by clicking a
+  keypoint in a crop cell) switches the timeline's tab to match, so the two
+  controls stay in sync in either direction.
+- An explicit **"all cameras" toggle** switches to an aggregated overview:
+  one row per keypoint, striped by the axis-1 precedence across cameras (the
+  "split coloring" technique the brief describes for body-part rows, applied
+  one level down), with an expand arrow revealing one sub-row per camera.
+  This is a scan-for-problems view, not the primary editing view — editing
+  interactions (rubber-band, `Space`, drag) stay disabled while it's active,
+  since there's no single camera for them to target.
+- **Inlier-count hint**: every single-camera-mode cell also gets a thin bar
+  beneath it, filled to `n_cameras_with_inlier / n_cameras` for that
+  (keypoint, frame) — computed once from the same merged-observation data
+  already loaded for all cameras (no extra query). This directly answers "do
+  I need to bother fixing this camera": a mostly-filled bar means several
+  other cameras already have a good observation for this keypoint at this
+  frame, so a gap or outlier in the *currently shown* camera is usually not
+  worth manually correcting. The bar's value is the same regardless of which
+  camera tab is active, since it counts across all cameras.
+
+Group rows (Face, Left arm, …) reuse `PoseModel.groups` (already implemented
+in `kp_models.py`) directly — no need to build the anytree parent/child
+hierarchy flagged as future work in *Keypoint model definitions* above; a
+flat named-group tree is sufficient for a dope sheet (it doesn't need
+joint-chain semantics, only grouping). Group rows aggregate the same way as
+the "all cameras" keypoint rows: striped swatch across child keypoints,
+collapsible.
+
+### Widget
+
+New `KeypointTimelineWidget(QWidget)`, custom-painted (`paintEvent`) to match
+the existing idiom — the codebase has no `QGraphicsView` usage anywhere
+(`_ImageCanvas`, `FilmstripBarItem` are both hand-painted `QWidget`s) and a
+dope sheet with hundreds of small flat-colored cells doesn't benefit from a
+scene graph. Docked below the crop grid inside `PersonPanel`.
+
+- X axis: frame index. Independent horizontal zoom/scroll (mouse wheel +
+  modifier, or `+`/`-`), since one-pixel-per-frame won't fit a multi-minute
+  trial. The existing global `QSlider` (`content_panels.py:2429`) remains the
+  coarse scrub control; a vertical playhead line on the timeline stays in
+  sync with it via the existing `time_changed` signal.
+- Y axis: fixed-height tree rows (~16 px), vertically scrollable.
+- Zoomed-out cells aggregate multiple frames using the same precedence
+  ordering (worst-status-wins striping) plus a mean fill fraction for the
+  inlier-count bar, so problem regions stay visible even when zoomed out to
+  see the whole trial.
+- A camera tab strip and the "all cameras" toggle (see *Row hierarchy* above)
+  sit above the tree.
+
+### Interaction
+
+- Rubber-band drag over rows × frame span → sets both `_sel_kp_indices`
+  (rows touched) and `_range_start`/`_range_end` (columns touched) in one
+  gesture — a natural generalization combining Phase 8 (multi-select) and
+  Phase 10 (frame range). Disabled while the "all cameras" overview is active
+  (see *Row hierarchy* above).
+- `Ctrl`+click a single cell → toggle a **keyframe** at that (keypoint,
+  frame): writes (or removes) an edit row at the keypoint's *current* merged
+  position with `is_outlier == 0`, i.e. it freezes the frame's existing value
+  as an explicit anchor without moving it. This is the same underlying action
+  as nudging or re-enabling that frame — it becomes an ordinary edit row — it
+  just doesn't require the user to actually change the position first. See
+  *Multi-keyframe interpolation* below for why this distinction from "just an
+  inlier frame" matters.
+- Selection and range state are owned by `PersonPanel` (or a small shared
+  controller), not duplicated per-widget, so `Space`, arrow-key nudge, and `I`
+  behave identically regardless of whether the crop grid or the timeline has
+  focus.
+
+### Multi-keyframe interpolation
+
+Generalizes Phase 10's two-anchor interpolation to N anchors, matching the
+brief's workflow: disable a broad range, then re-enable/place a few frames
+inside it (including the two ends) as keyframes, then interpolate. This
+supersedes the anchor-scan described in Phase 10 — there is a single `I`
+interpolation algorithm, described here, used by both the crop grid and the
+timeline.
+
+**The anchor predicate is the key decision, and it can't be "any inlier
+frame."** A common editing pattern is: a handful of frames in an otherwise
+fine range have bad detections; the user selects a slightly wider range
+covering them and the surrounding good frames, and hits interpolate expecting
+the *whole* range to be overwritten by a straight line between its two ends
+(the original Phase 10 behavior) — none of the interior frames were
+deliberately preserved, they just happen to still hold their original,
+untouched (and in this case wrong) detections. If the anchor-scan treated
+"any inlier frame inside the range" as an anchor, it would pick up those bad
+detections as extra anchors and only interpolate around them — the opposite
+of what the user wants, and indistinguishable from the multi-keyframe case
+where the interior frames the user chose to keep genuinely are correct.
+
+The two cases are only distinguishable by **whether the user explicitly
+touched that frame**, not by whether it happens to be an inlier. That's
+exactly what `is_edited` (the `pose_observation_edits.kp_mask` bit, already
+returned by the merge) tracks. So the anchor predicate is:
+
+> An interior frame is an anchor **iff** it has an edit row with
+> `is_outlier == 0` (i.e. `is_edited and not is_outlier`) — the user
+> explicitly moved it, re-enabled it, or `Ctrl`-clicked it as a keyframe (see
+> *Interaction* above). An untouched original detection, even if it's
+> currently an inlier, is never an interior anchor.
+
+Algorithm:
+1. Interior anchors = frames in `[range_start, range_end]` satisfying the
+   predicate above.
+2. Boundary anchors = nearest inlier frame outside the range on each side
+   (unchanged from Phase 10) — guarantees at least two anchors even with zero
+   interior ones.
+3. Sort all anchors by frame number; interpolate piecewise-linearly between
+   each consecutive pair; overwrite every non-anchor frame in the range.
+
+This resolves the brief's open question of how to signal "plain overwrite"
+vs. "keyframed" without a mode switch, and does so correctly for the "fix a
+few bad frames in a wider selection" case above: if the user never touched
+the interior of the range, there are zero interior anchors and step 3
+degrades exactly to Phase 10's two-anchor overwrite. If the user disabled a
+broad range and then re-enabled/placed/`Ctrl`-clicked specific interior
+frames, those become anchors and everything else in between is filled by
+piecewise interpolation.
+
+### Phasing
+
+**Phase 11 — status data plumbing.** Extend the Python read path with a
+`read_timeline_status(session, sequence_id, camera_instance_id)` helper that
+joins `pose_observations` + `pose_observation_edits` + `keypoint_obs_quality`
+per `(keypoint, frame)` for one camera at a time (matching the single-camera
+default view), plus a separate cross-camera inlier-count helper for the
+bar/aggregate view. *Validation*: unit test with a synthetic sequence
+covering all four axis-1 states and confirm precedence ordering (e.g. a
+disabled-after-being-edited keypoint reports grey, not blue); unit test the
+inlier-count helper with a keypoint visible/inlier in 3 of 4 cameras and
+confirm it returns 0.75.
+
+**Phase 12 — `KeypointTimelineWidget` skeleton.** Tree rows from
+`PoseModel.groups`, flat-colored cells reading `_sel_cam_idx`, camera tab
+strip, playhead synced to the existing slider. *Validation*: open a person
+with a known detection run; verify row colors match `read_timeline_status`
+output at a few spot-checked frames for the currently selected camera, and
+that clicking a different camera tab both changes the displayed colors and
+updates `_sel_cam_idx` (verify a subsequent `Space` press affects that
+camera's edit rows).
+
+**Phase 13 — selection & keyboard parity.** Rubber-band + ctrl-click wired to
+shared selection/range state. *Validation*: rubber-band select 3 keypoints ×
+10 frames on the timeline, then press `Space` — verify the crop grid shows
+those keypoints as disabled at those frames, in the camera the timeline was
+scoped to (state applied from the timeline, displayed in the grid).
+
+**Phase 14 — multi-keyframe interpolation.** Anchor-scan extended to also
+collect interior anchors satisfying `is_edited and not is_outlier`, ranked by
+frame number alongside the existing boundary anchors. *Validation* (three
+cases):
+- *Plain overwrite*: keypoints at frames 1 and 20 are inliers with different
+  positions; frames 5–15 are inliers too (untouched, "wrong" detections);
+  select range 1–20, press `I`; verify frames 2–19 are all overwritten by a
+  single straight line from frame 1 to frame 20 (the interior inliers at
+  5–15 must **not** act as anchors).
+- *Multi-keyframe*: keypoint disabled across frames 1–20 (`Space` over the
+  range), then re-enabled/moved at frames 1, 10, 20 with different positions;
+  press `I`; verify frames 1–10 and 10–20 interpolate as two independent
+  linear segments (not one straight line from 1 to 20), and frames 1, 10, 20
+  themselves are unchanged.
+- *`Ctrl`-click keyframe*: same as above but frame 10 is kept at its
+  original (untouched) position via `Ctrl`-click instead of being moved;
+  verify it still acts as an anchor (an edit row was written at its existing
+  position) even though its value didn't change.
+
+## Partial tracking
+
+### Motivation
+
+Full re-tracking after every edit is slow and breaks the edit/verify loop.
+`Tracker::initialize_from_state()` (`include/posetrak/tracking/tracker.hpp:148`)
+already exists and is already used by `cli/track.cpp` to seed the UKF mean
+from an externally supplied `State` — this is the entry point partial
+tracking needs; it just isn't wired to a persisted mid-trial checkpoint yet.
+
+### Checkpoints
+
+New table `tracking_checkpoints`: `(run_id, step, timestamp, state_blob,
+cov_blob)`. `state_blob` reuses the existing `State` vector encoding used by
+`tracking_results.state`. `cov_blob` stores the **full** covariance matrix
+(float64, row-major), not just the diagonal that `tracking_results.cov_diag`
+stores today — resuming a filter from a diagonal-only covariance discards the
+cross-correlations the UKF has built up, so the resumed run would be
+overconfident and could diverge differently than a true continuation.
+
+Written by a new `ResultWriter::write_checkpoint(step, timestamp, state,
+full_covariance)`, called from the tracking loop (`cli/track.cpp`) whenever
+`timestamp - last_checkpoint_time >= checkpoint_interval_s` (new
+`TrackerConfig` field, default 1.0 s). Size is modest: a ~58-DOF state gives a
+~27 KB dense covariance per checkpoint; at 1 Hz over a 5-minute trial that's
+roughly 8 MB — acceptable for a per-run table.
+
+### RTS smoothing interaction
+
+The brief asks whether checkpoints should store the smoothed state. They
+should not — checkpoint the **forward-pass (filtered) state only**:
+
+- A smoothed state at step *k* (`FrameSmootherData`, `rts_smoother.hpp`)
+  depends on the *entire* forward pass, including frames after *k* that the
+  user is about to edit. Checkpointing it would silently bake in the
+  pre-edit future, defeating the point of testing the edit's impact.
+- The filtered state at step *k* depends only on frames ≤ *k*, which is
+  exactly "resume tracking from here" semantics.
+
+Smoothing is unaffected: after a promising test run is folded back into the
+main trial (or the full trial is re-tracked with edits applied throughout),
+the existing full-trial RTS smoothing pass still runs once at the end as it
+does today. Test runs themselves do not smooth.
+
+### Temporary ("ephemeral") tracking runs
+
+- `tracking_runs.is_ephemeral INTEGER NOT NULL DEFAULT 0` (migration).
+- Ephemeral runs write `tracking_results` / `tracking_obs_results` exactly
+  like normal runs — no viewer or analysis code path needs to special-case
+  them for reading.
+- Excluded from `list_tracking_runs` (UI tree and MCP tool) by default,
+  nested under their parent run when a "show test runs" toggle is on.
+- Garbage-collected: on session open, drop ephemeral runs beyond the most
+  recent *M* per sequence (default configurable, e.g. 5) or older than *N*
+  days; also exposed as an explicit "Discard test run" UI action.
+- Inherit `tracker_configs` from the parent run by default (no separate
+  config UI needed for the common "just test my edit" case).
+
+### C++ entry point
+
+No changes needed to existing public methods — `Tracker::get_ukf()`
+(`tracker.hpp:205`) and `UnscentedKalmanFilter::set_covariance()`
+(`ukf.hpp:126`) are both already public:
+
+```cpp
+Tracker tracker(skeleton, cameras, config);
+tracker.initialize_from_state(checkpoint.state, checkpoint.timestamp);
+tracker.get_ukf()->set_covariance(checkpoint.covariance);
+for (auto const& [obs, t] : observations_from(checkpoint.timestamp)) {
+    tracker.track_frame(obs, t);
+}
+```
+
+New surface area is limited to `ResultWriter::write_checkpoint`, a
+`load_checkpoint(run_id, before_timestamp)` reader in `session_reader.cpp`,
+and a CLI flag, e.g.:
+
+```bash
+posetrak-tracker track config.toml --resume-from-run <run_id> --resume-time 12.5
+```
+
+### UI: visualization switch-over
+
+- The tracking-run selector in `PersonPanel` shows ephemeral test runs nested
+  under their parent (not as tree siblings).
+- Trajectory/overlay views use a thin `CompositeRunView`: read from the
+  parent run for frames before the checkpoint's timestamp, and from the test
+  run from that timestamp onward. This avoids copying the pre-edit segment
+  into the test run's own rows.
+- Status bar shows "Test run — resumed from t=12.5s" while an ephemeral run
+  is selected, so it isn't mistaken for the trial's authoritative result.
+- "Test from here" is triggered from the crop grid / timeline: it resolves
+  the checkpoint nearest-but-before the earliest edit in the current
+  selection or active range, and launches a resumed run automatically.
+
+### Phasing
+
+**Phase 15 — checkpoint writer/reader.** `tracking_checkpoints` migration,
+`ResultWriter::write_checkpoint`, `session_reader` loader,
+`checkpoint_interval_s` config field. *Validation*: track `tests/regress.toml`
+with `checkpoint_interval_s=1.0`; verify one checkpoint row per second with
+correct step/timestamp, and that the covariance blob has nonzero off-diagonal
+entries (proving it's the full matrix, not the diagonal).
+
+**Phase 16 — resume entry point.** CLI flag using `initialize_from_state` +
+`set_covariance`. *Validation*: resume from a mid-trial checkpoint with
+unmodified observations and verify the resumed run's state trajectory matches
+the original run's from that point forward (within numerical tolerance);
+resume with a deliberately edited observation and verify the trajectory
+diverges only after the checkpoint.
+
+**Phase 17 — ephemeral run bookkeeping.** `is_ephemeral` column, retention
+GC, "show test runs" UI toggle. *Validation*: create several test runs,
+verify only the most recent *M* survive after session reopen, and that
+non-ephemeral runs are never garbage-collected.
+
+**Phase 18 — UI wiring.** "Test from here" action, `CompositeRunView`, status
+bar indicator, "Promote" (rename, clear `is_ephemeral`) / "Discard" actions.
+*Validation*: edit a keypoint range, trigger "Test from here", verify the
+crop grid / trajectory plot shows original data before the checkpoint and
+test-run data after; discard the test run and verify its `tracking_results`
+rows are removed.
+
+## Keypoint / camera / frame-specific measurement error
+
+### Motivation
+
+`pose_noise_std` / `calib_noise_std` (`include/posetrak/core/config.hpp:86-87`)
+are single scalars per tracker config today — overridable per hierarchical
+child filter and per velocity-mode camera, but not per keypoint. Detection
+noise is known to vary a lot by keypoint (finger tips are precise; hips are
+often noisy). `Observation::noise_std_override`
+(`include/posetrak/core/observation.hpp:51`) already exists as a per-
+observation override — currently populated only for `PAIR_DIFF` mode — and is
+exactly the hook this feature needs. No change to the UKF's measurement
+update (`UnscentedKalmanFilter::update()`) is required.
+
+### Static per-keypoint defaults
+
+New TOML config section:
+
+```toml
+[tracking.keypoint_noise_multiplier]
+left_hip = 2.0
+right_hip = 2.0
+left_pinky_tip = 0.5
+```
+
+Applied as `pose_noise_std * multiplier` (default multiplier 1.0) when each
+`Observation` is constructed from a detection. Ship a default multiplier
+table per pose model (co-located with `python/app/pose/kp_models.py`, e.g. as
+a small JSON/TOML asset) that users can override in their tracking config —
+this satisfies the brief's "add a default for each keypoint" while keeping it
+a *multiplier*, so it composes with existing `pose_noise_std`/`calib_noise_std`
+pixel calibration instead of duplicating it.
+
+### Editor-driven per-camera/frame overrides
+
+Static defaults don't cover "this specific hip detection on this specific
+camera in this specific frame is untrustworthy," which is what the editor
+needs. New table, deliberately separate from `pose_observation_edits` rather
+than a fourth channel on its `kp_blob` — keeping that table's format and the
+shipped `apply_keypoint_edits` codec unchanged, since overrides are sparse and
+optional:
+
+```sql
+CREATE TABLE pose_observation_noise_overrides (
+    id                 TEXT PRIMARY KEY,
+    sequence_id        TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+    camera_instance_id TEXT NOT NULL,
+    video_frame        INTEGER NOT NULL,
+    -- float32[N]: per-keypoint multiplier applied to pose_noise_std.
+    mult_blob          BLOB NOT NULL,
+    -- uint8[ceil(N/8)]: bitmask of which slots this row overrides.
+    kp_mask            BLOB NOT NULL,
+    created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
+CREATE UNIQUE INDEX pose_observation_noise_overrides_unique
+    ON pose_observation_noise_overrides (sequence_id, camera_instance_id, video_frame);
+```
+
+`session_reader.cpp` applies it the same way it applies
+`pose_observation_edits` today: one more optional prepared-statement lookup
+per frame, with the same pre-migration `SQLITE_ERROR`-catch compatibility
+pattern, setting `Observation::noise_std_override = pose_noise_std *
+multiplier * crop_scale + calib_noise_std` (reusing the existing split-noise
+formula rather than replacing it) before `measurement_noise_std()` is called.
+
+### UI: stddev circle/ellipse
+
+- When a keypoint is selected, draw a circle of radius `noise_std_override`
+  around its dot, in display-crop pixels, reusing the existing
+  `display_x = (frame_x - src_x) / src_w * display_w` transform. Rendered
+  only for the selected keypoint(s), matching the trail-only-for-primary
+  convention from Phase 8 to avoid clutter.
+- New shortcuts `[` / `]` (unused in the current binding table) shrink/grow
+  the selected keypoint(s)' multiplier by a fixed step (e.g. ×0.9 / ×1.1);
+  `Shift+[` / `Shift+]` for a bigger step. Applies to the current frame, or
+  the whole active range if one is set — matching the existing range
+  semantics for `Space`/drag.
+- Interpolation (`I`, Phase 10 / multi-keyframe from the timeline section
+  above) also interpolates the multiplier channel when an override exists at
+  both anchors, alongside x/y.
+
+### Phasing
+
+**Phase 19 — static per-keypoint config.** TOML section, `Observation`
+construction wiring, default multiplier tables for COCO-17 and COCO-133.
+*Validation*: track a config with one keypoint's multiplier set to 10× and
+confirm (via `tracking_obs_results` / the MCP `get_filter_stats` tool) that
+its innovation covariance scales accordingly and it's outlier-rejected less
+aggressively than an unmodified keypoint with equally noisy input.
+
+**Phase 20 — override storage + merge.** `pose_observation_noise_overrides`
+migration, Python read/write helpers mirroring `db_cache.py`'s edit helpers,
+C++ reader wiring with pre-migration compatibility. *Validation*: write an
+override for one keypoint on one frame; verify `load_observations` produces
+an `Observation` with the expected `noise_std_override` and that a DB
+predating the migration still loads (edits skipped, no crash).
+
+**Phase 21 — editor UI.** Stddev circle rendering, `[`/`]` shortcuts (single
+keypoint and active range), multiplier interpolation. *Validation*: select a
+keypoint, press `]` five times, verify the drawn circle grows and the stored
+multiplier matches the expected compounded step; select a range, repeat, and
+verify all frames in the range receive the same multiplier.
+
+## Background full-resolution frame extraction
+
+### Motivation
+
+The cached crops in `frame_cache_entries` trade fidelity for scrub speed:
+they're downscaled to 240 px height at JPEG quality 75
+(`_CROP_TARGET_HEIGHT`/`_CROP_JPEG_QUALITY`, `python/app/pose/db_cache.py:13-14`)
+and cropped to the detection bbox (even after the Phase 6 union-bbox
+widening, still bounded by nearby detections). That's the right tradeoff for
+instantaneous scrubbing, but it's too coarse to place a keypoint precisely
+once you're zoomed in on it, and too tight when the person has moved further
+than nearby frames suggest. The alternative — seeking the source video on
+demand — has the opposite problem: `FrameCache.get_frame()`
+(`python/app/pose/frame_cache.py:50`) does a `cap.set(CAP_PROP_POS_FRAMES,
+…)` random seek per frame, which is too slow for interactive scrubbing (this
+is exactly why `frame_cache_entries` exists — see *UI context* above: "It
+does not seek raw video files").
+
+### Design: background sequential extraction into a session-scoped cache
+
+When edit mode is entered for a person, launch a background worker — same
+`QThread` + priority-queue architecture as the existing `CropBackfillWorker`
+(`content_panels.py:932`) — that walks each active camera's video
+**sequentially** (no seeking) over the trial's frame range, decoding every
+frame once and writing it to a temp-directory JPEG cache. Sequential decode
+avoids the per-seek GOP-reparse cost that makes random access slow, even
+though it visits every frame rather than only the ones the user has scrubbed
+to — for a multi-minute trial at video frame rate this is a one-time linear
+pass, not repeated per scrub.
+
+- **Storage**: reuse the `tempfile.mkdtemp(prefix=...)` pattern from
+  `FrameCache` (`frame_cache.py:40`), not the SQLite `frame_cache_entries`
+  table — this cache is large (full trial × near-full resolution) and
+  session-scoped, so it doesn't belong in the persistent session DB.
+- **Resolution**: full source resolution, or capped to a configurable max
+  dimension (mirrors `FrameCache`'s `max_dim` parameter) — enough headroom to
+  zoom in well past the current 240 px crops.
+- **Quality**: higher JPEG quality than the 75 used for scrub crops (e.g. 90+),
+  since these exist specifically to support precise edits.
+- **Priority**: same `prioritise(svid, frame_idx)` mechanism as
+  `CropBackfillWorker`, so frames near the user's current scrub position
+  extract first — matching the "fills in behind you as you work" feel
+  `CropBackfillWorker` already provides for Phase 6 gaps, including the same
+  status-bar convention ("Extracting full-res frames… N remaining").
+
+### Serving frames: layered fallback, not a replacement
+
+`PersonCropGridWidget`'s frame source already layers DB blob → Phase 6
+in-memory synthetic crop → placeholder. Insert the extraction cache as a
+**preferred** layer above the DB blob:
+
+1. If a full-res extracted frame exists for `(shot_video_id, frame_idx)`:
+   crop it in-memory to whatever region the display currently wants (the
+   existing bbox / union-bbox math), at full source resolution — sharp and
+   generously framed regardless of how tight the original detection bbox was.
+2. Else fall back to the existing `frame_cache_entries` DB blob (instant, but
+   240p and tightly cropped).
+3. Else fall back to the existing Phase 6 in-memory synthetic crop / on-demand
+   decode path.
+
+Because extraction runs in the background, editing stays usable immediately
+on layer 2/3 and silently upgrades to layer 1 as extraction catches up — no
+explicit "wait for extraction" step or mode switch.
+
+### Tiling — only if profiling shows it's needed
+
+Harri's brief also raises tiled JPEGs as an option. Not needed for the first
+cut: start with one whole-frame JPEG per extracted frame. If source video is
+high-resolution (4K+) and decoding a full uncropped frame per scrub proves
+too slow even after sequential extraction removes the seek cost, split each
+extracted frame into fixed-size tiles (e.g. 512×512) at native resolution
+instead, indexed by `(video, frame_idx, tile_row, tile_col)`. The crop-grid's
+existing crop-region math (`src_x, src_y, src_w, src_h` → display transform,
+see *Coordinate conversion* above) already knows which rectangle of the
+source frame it wants, so computing which tiles intersect that rectangle and
+decoding only those is a small, isolated extension — worth deferring until
+whole-frame decode is measured to actually be the bottleneck.
+
+### Lifecycle
+
+- One worker + temp dir per edit session (per open `PersonPanel` instance),
+  started on entering edit mode, stopped and cleaned up
+  (`shutil.rmtree`, mirroring `FrameCache.close()`) when the panel closes or
+  edit mode exits.
+- Frame range limited to the sequence's trial span (`t_start`/`t_end`,
+  already used by the time slider), not the whole source video.
+- No persistence across sessions: reopening the same person re-extracts.
+  Simpler than an on-disk persistent cache, and the DB-backed
+  `frame_cache_entries` remains the durable, instant-load fast path.
+
+### Phasing
+
+**Phase 22 — extraction worker.** New `FullFrameExtractWorker(QThread)`
+mirroring `CropBackfillWorker`'s structure (per-camera `cv2.VideoCapture`,
+sequential read loop, priority queue, `frame_ready` signal), writing JPEGs to
+a `tempfile.mkdtemp()` directory. *Validation*: open a person; verify a
+background thread starts and the temp directory fills with one JPEG per
+`(camera, frame)` in the trial range in sequential order; verify the UI
+thread stays responsive to scrubbing while extraction runs (no dropped
+frames / stalls in the slider).
+
+**Phase 23 — layered frame serving.** Extend the crop-source fallback chain
+to check the extraction cache first, cropping in-memory to the requested
+region at full resolution. *Validation*: scrub to a frame before extraction
+reaches it — verify the existing 240p crop displays; scrub back after
+extraction has passed that frame — verify the display seamlessly upgrades to
+the sharper, more generously framed image with no visible reload glitch.
+
+**Phase 24 — priority + status bar + lifecycle.** `prioritise()` called on
+scrub, status bar message while active, worker stop/cleanup on panel close.
+*Validation*: scrub to an unextracted frame — verify it's prioritized and
+appears within a bounded time well under a raw video seek's latency; close
+the panel mid-extraction — verify the temp directory is removed and the
+worker thread stops (no orphaned thread or leaked temp files).
+
+---
+
 ## Open questions
 
 1. **Freeze / version management** — the brief envisions marking the current
    edit state as a named frozen version.  A `pose_observation_edit_snapshots`
-   table linking edit rows to a named snapshot is the natural extension.
+   table linking edit rows to a named snapshot is the natural extension, and
+   would naturally also cover "promoting" an ephemeral test run (see
+   *Partial tracking* above) to a named, permanent one.
 
-2. **Incremental re-tracking** — re-solving only the affected time window by
-   warm-starting the UKF from a state checkpoint just before the first edit.
-   This requires caching UKF state, which is a significant C++ change.
+2. ~~**Incremental re-tracking**~~ — addressed by *Partial tracking* above
+   (Phases 15–18): checkpoint the forward-pass UKF state + full covariance
+   periodically, and resume via the already-existing
+   `Tracker::initialize_from_state()`.

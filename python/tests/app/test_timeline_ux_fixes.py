@@ -39,6 +39,7 @@ from app.ui.keypoint_timeline_widget import (
     RULER_H,
     KeypointTimelineWidget,
     Row,
+    _fmt_tick,
     _RulerWidget,
     _TimelineCanvas,
 )
@@ -105,20 +106,42 @@ def test_ruler_ctrl_wheel_zooms_around_playhead(ruler, canvas):
     assert mid == pytest.approx(1000, abs=50)
 
 
-def test_row_canvas_no_longer_has_time_scrubbed_signal(canvas):
-    """Seeking moved to _RulerWidget; the row-tree canvas is selection-only now."""
-    assert not hasattr(canvas, "time_scrubbed")
-
-
-def test_click_in_row_area_does_not_move_playhead(canvas):
-    """The row tree only selects; it must never move the playhead itself."""
-    canvas.set_edit_mode(True)
-    canvas.set_current_time_v(500)
+def test_row_canvas_click_also_emits_time_scrubbed(canvas):
+    """Round 3: clicking a keypoint row clears the selection *and* moves the
+    playhead — round 2 made row clicks selection-only, but that meant a click
+    that unselected everything visibly did nothing else, which read as
+    unresponsive. The row tree keeps its own selection-only edit_mode gating;
+    scrubbing now works regardless of edit mode, like the ruler."""
+    received = []
+    canvas.time_scrubbed.connect(received.append)
 
     from PySide6.QtTest import QTest
-    QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(LABEL_W + 150, 5))
+    QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(LABEL_W + 100, 5))
 
-    assert canvas._current_v == 500  # unchanged — only set_current_time_v() moves it
+    assert len(received) == 1
+    assert received[0] == pytest.approx(1000, abs=5)
+
+
+def test_row_canvas_click_scrubs_outside_edit_mode_too(canvas):
+    assert canvas._edit_mode is False
+    received = []
+    canvas.time_scrubbed.connect(received.append)
+
+    from PySide6.QtTest import QTest
+    QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(LABEL_W + 50, 5))
+
+    assert len(received) == 1
+
+
+def test_row_canvas_group_label_click_does_not_scrub(canvas):
+    """x < LABEL_W is group-toggle territory, not the clock — same as before."""
+    received = []
+    canvas.time_scrubbed.connect(received.append)
+
+    from PySide6.QtTest import QTest
+    QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(10, 5))
+
+    assert received == []
 
 
 # ---------------------------------------------------------------------------
@@ -279,12 +302,29 @@ def test_expand_shows_canvas_and_scrollbar(qapp):
     assert w._hscroll.isHidden() is False
 
 
-def test_collapse_button_toggles(qapp):
+def test_collapse_arrow_on_ruler_toggles(qapp):
+    """Round 3: the collapse arrow moved from the tab row onto the ruler,
+    since the ruler is the row that stays visible while collapsed."""
     w = _make_container(qapp)
-    w._collapse_btn.click()
+    w._ruler.resize(LABEL_W + 200, RULER_H)
+
+    from PySide6.QtTest import QTest
+    QTest.mouseClick(w._ruler, Qt.MouseButton.LeftButton, pos=QPoint(8, 5))
     assert w.is_collapsed() is False
-    w._collapse_btn.click()
+    QTest.mouseClick(w._ruler, Qt.MouseButton.LeftButton, pos=QPoint(8, 5))
     assert w.is_collapsed() is True
+
+
+def test_collapse_arrow_click_does_not_also_scrub(qapp):
+    w = _make_container(qapp)
+    w._ruler.resize(LABEL_W + 200, RULER_H)
+    received = []
+    w.time_scrubbed.connect(received.append)
+
+    from PySide6.QtTest import QTest
+    QTest.mouseClick(w._ruler, Qt.MouseButton.LeftButton, pos=QPoint(8, 5))
+
+    assert received == []
 
 
 def test_set_collapsed_emits_signal(qapp):
@@ -624,6 +664,119 @@ def test_pick_tick_interval_grows_as_span_widens(canvas):
     narrow = ruler._pick_tick_interval_ms(span_ms=1000, px_width=600)
     wide = ruler._pick_tick_interval_ms(span_ms=600_000, px_width=600)
     assert wide > narrow
+
+
+# ---------------------------------------------------------------------------
+# Round 3, issue 1: ruler tick labels use the capture's global timestamp
+# (t_start + v/1000), matching the overlay row's _time_label, not time
+# relative to the trial start.
+# ---------------------------------------------------------------------------
+
+def test_fmt_tick_matches_time_label_format():
+    # Same numeric style as content_panels._fmt_time: f"{s:.3f} s" — same
+    # number, so the two rows agree on what "the time" is.
+    assert _fmt_tick(12.345) == "12.345"
+
+
+def test_ruler_ticks_offset_by_t_start(qapp):
+    """A trial starting at global t=100s should show ticks near '100.xxx',
+    not '0.xxx' — the old (round-2) ruler ignored t_start entirely."""
+    c = _TimelineCanvas(COCO17)
+    c.resize(LABEL_W + 600, c.minimumHeight())
+    c.set_time_range(100.0, 102.0, "sv1", MagicMock())
+    ruler = _RulerWidget(c)
+    ruler.resize(LABEL_W + 600, RULER_H)
+
+    interval = ruler._pick_tick_interval_ms(2000, 600)
+    first_tick_v = (0 // interval) * interval
+    label = _fmt_tick(c._t_start + first_tick_v / 1000.0)
+    assert label.startswith("100.")
+
+
+# ---------------------------------------------------------------------------
+# Round 3, issue 2: the active-range overlay snaps to whole-frame pixel
+# bounds instead of the raw (fractional) millisecond range.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def frame_range_canvas(qapp):
+    c = _TimelineCanvas(COCO17)
+    c.resize(LABEL_W + 900, c.minimumHeight())
+    sync = MagicMock()
+    sync.lookup = lambda t, svid: int(t * 30)  # 30fps
+    c.set_time_range(0.0, 2.0, "sv1", sync)
+    return c
+
+
+def test_range_bounds_snap_to_frame_edges(frame_range_canvas):
+    # Frame 15 spans [500, 533.3)ms at 30fps; select a sub-range entirely
+    # inside frame 15 (e.g. 510-520ms) — the highlighted pixels should still
+    # cover all of frame 15, not just the 10ms sliver that was selected.
+    frame_range_canvas.set_selection({0}, 510, 520)
+    bounds = frame_range_canvas._range_frame_pixel_bounds()
+    assert bounds is not None
+    x1, x2 = bounds
+
+    frame15_start_x = frame_range_canvas._x_at_time_v(500)
+    frame15_end_x = frame_range_canvas._x_at_time_v(533)
+    assert x1 <= frame15_start_x + 2
+    assert x2 >= frame15_end_x - 2
+
+
+def test_range_bounds_none_without_range(frame_range_canvas):
+    frame_range_canvas.set_selection({0}, None, None)
+    assert frame_range_canvas._range_frame_pixel_bounds() is None
+
+
+def test_range_bounds_falls_back_without_sync_table(qapp):
+    c = _TimelineCanvas(COCO17)
+    c.resize(LABEL_W + 200, c.minimumHeight())
+    c.set_time_range(0.0, 2.0, None, None)  # no sync table at all
+    c.set_selection({0}, 100, 200)
+    bounds = c._range_frame_pixel_bounds()
+    assert bounds is not None
+    x1, x2 = bounds
+    assert x1 == pytest.approx(c._x_at_time_v(100), abs=1)
+    assert x2 == pytest.approx(c._x_at_time_v(200), abs=1)
+
+
+# ---------------------------------------------------------------------------
+# Round 3, issue "alignment": ruler and canvas map time <-> pixel using
+# their own width, and the container keeps a right-margin on the ruler in
+# sync with the canvas's vertical scrollbar so ticks line up with rows.
+# ---------------------------------------------------------------------------
+
+def test_ruler_mapping_uses_its_own_width_not_canvas(canvas):
+    """Regression: the ruler used to delegate to canvas._x_at_time_v, which
+    is keyed to canvas.width() — wrong once the two widgets' widths diverge
+    (e.g. the canvas's QScrollArea grows a vertical scrollbar)."""
+    ruler = _RulerWidget(canvas)
+    ruler.resize(LABEL_W + 999, RULER_H)  # deliberately different from canvas's LABEL_W+200
+    canvas.set_current_time_v(1000)
+
+    ruler_x = ruler._x_at_time_v(1000)
+    canvas_x = canvas._x_at_time_v(1000)
+    assert ruler_x != pytest.approx(canvas_x)
+    # But it's still correct for the ruler's own width: round-tripping through
+    # the ruler's own inverse should land back on 1000.
+    assert ruler._time_v_at_x(ruler_x) == pytest.approx(1000, abs=2)
+
+
+def test_ruler_right_margin_shrinks_drawable_width(canvas):
+    ruler = _RulerWidget(canvas)
+    ruler.resize(LABEL_W + 200, RULER_H)
+    x_before = ruler._x_at_time_v(2000)  # right edge of a 2000ms trial
+
+    ruler.set_right_margin(20)
+    x_after = ruler._x_at_time_v(2000)
+
+    assert x_after == pytest.approx(x_before - 20, abs=1)
+
+
+def test_sync_ruler_margin_zero_when_scrollbar_hidden(qapp):
+    w = _make_container(qapp)
+    w._sync_ruler_margin()
+    assert w._ruler._right_margin == 0
 
 
 def test_pick_tick_interval_keeps_labels_legibly_spaced(canvas):

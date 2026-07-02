@@ -23,6 +23,22 @@ plus two rounds of follow-up UX fixes requested after Phase 13 landed:
   drag selects). Zoom now anchors on the playhead, not the cursor/click
   position. At high zoom, adjacent frame cells get a small gap so
   individual frames are visually distinguishable.
+- Round 3: ruler ticks now show the same capture-global timestamp as the
+  overlay row's current-time label, instead of time-from-trial-start (two
+  different clocks looked like a bug). A track-area click on the row tree
+  clears the selection *and* moves the playhead — round 2 made clicking
+  selection-only, which felt unresponsive since clicking to deselect did
+  nothing else. The active-range overlay snaps to whole-frame pixel bounds
+  (frames are what's actually selected, not a continuous ms span) via
+  `_TimelineCanvas._range_frame_pixel_bounds`. The collapse/expand arrow
+  moved from the tab row onto the ruler, since the ruler is the row that
+  stays visible while collapsed. Along the way, `_RulerWidget` and
+  `_TimelineCanvas` were found to be silently misaligned whenever the row
+  tree grows a vertical scrollbar (the ruler, outside that scroll area,
+  didn't shrink to match) — fixed by giving both widgets their own
+  width-aware time<->pixel mapping (module-level `_x_at_time_v`/
+  `_time_v_at_x`) plus a dynamic right-margin on the ruler that tracks the
+  canvas's scrollbar width.
 """
 from __future__ import annotations
 
@@ -76,14 +92,35 @@ _NICE_INTERVALS_MS = (
 )
 
 
-def _fmt_tick(ms: int) -> str:
-    """Format a ruler tick label as 'M:SS' or 'M:SS.mmm' when sub-second precision matters."""
-    total_s = ms / 1000.0
-    m = int(total_s // 60)
-    s = total_s - m * 60
-    if ms % 1000 == 0:
-        return f"{m}:{int(round(s)):02d}"
-    return f"{m}:{s:06.3f}"
+def _fmt_tick(t_abs: float) -> str:
+    """Format a ruler tick label — same '<seconds>.<ms>' style as the overlay
+    row's current-time label (`_fmt_time` in content_panels.py), using the
+    capture's global timestamp rather than time-from-trial-start, so the two
+    rows agree on what "the time" is."""
+    return f"{t_abs:.3f}"
+
+
+def _x_at_time_v(v: int, view_start: int, view_end: int, width: int) -> float:
+    """Map a time value (ms from t_start) to a widget-local x pixel.
+
+    A free function (not a method) so `_TimelineCanvas` and `_RulerWidget`
+    can each map using *their own* width — they used to share the canvas's
+    width, which silently drifted out of alignment whenever the canvas's
+    QScrollArea grew a vertical scrollbar (shrinking the canvas's viewport)
+    while the ruler, being outside that scroll area, didn't shrink to match.
+    """
+    span = max(1, view_end - view_start)
+    w = max(1, width - LABEL_W)
+    return LABEL_W + ((v - view_start) / span) * w
+
+
+def _time_v_at_x(x: float, view_start: int, view_end: int, width: int) -> int:
+    """Inverse of `_x_at_time_v`; see its docstring for why *width* is explicit."""
+    span = max(1, view_end - view_start)
+    w = max(1, width - LABEL_W)
+    frac = (x - LABEL_W) / w
+    frac = min(1.0, max(0.0, frac))
+    return int(round(view_start + frac * span))
 
 
 @dataclass(frozen=True)
@@ -141,6 +178,10 @@ class _TimelineCanvas(QWidget):
     rubber_band_selected = Signal(object, int, int, bool)
     # kp_idx, time_v (ms from t_start) — Ctrl+click on a leaf row's cell
     keyframe_toggled = Signal(int, int)
+    # time_v, ms from t_start — any click in the track area also moves the
+    # playhead (in addition to whatever selection action it performs), so
+    # clicking a keypoint row behaves the way clicking a slider used to.
+    time_scrubbed = Signal(int)
     # emitted whenever the visible time window changes (zoom in/out/fit), so the
     # host container can resync its panning scrollbar and the ruler can redraw
     view_changed = Signal()
@@ -292,14 +333,10 @@ class _TimelineCanvas(QWidget):
         return max(1, self._view_end_v - self._view_start_v)
 
     def _x_at_time_v(self, v: int) -> float:
-        w = max(1, self.width() - LABEL_W)
-        return LABEL_W + ((v - self._view_start_v) / self._view_span()) * w
+        return _x_at_time_v(v, self._view_start_v, self._view_end_v, self.width())
 
     def _time_v_at_x(self, x: float) -> int:
-        w = max(1, self.width() - LABEL_W)
-        frac = (x - LABEL_W) / w
-        frac = min(1.0, max(0.0, frac))
-        return int(round(self._view_start_v + frac * self._view_span()))
+        return _time_v_at_x(x, self._view_start_v, self._view_end_v, self.width())
 
     def _row_index_at_y(self, y: int) -> int | None:
         idx = y // ROW_H
@@ -437,10 +474,51 @@ class _TimelineCanvas(QWidget):
     def _is_row_selected(self, row: Row) -> bool:
         return bool(self._sel_kp_indices) and bool(set(row.kp_indices) & self._sel_kp_indices)
 
+    def _range_frame_pixel_bounds(self) -> tuple[float, float] | None:
+        """Pixel span covering every whole frame in [_range_start_v, _range_end_v].
+
+        The active range is selected in frames, not milliseconds, but
+        `_range_start_v`/`_range_end_v` are stored as raw slider ms and don't
+        line up with frame boundaries — drawing the overlay directly from
+        them highlighted a fractional sliver of the first/last frame instead
+        of the whole cell. Snap outward to the frames' full pixel extent
+        instead. Falls back to the raw ms mapping when there's no sync table
+        (e.g. in isolated unit tests) so the overlay still renders something.
+        """
+        if self._range_start_v is None or self._range_end_v is None:
+            return None
+        frame_lo = self._frame_at_time_v(min(self._range_start_v, self._range_end_v))
+        frame_hi = self._frame_at_time_v(max(self._range_start_v, self._range_end_v))
+        if frame_lo is None or frame_hi is None:
+            return (self._x_at_time_v(self._range_start_v), self._x_at_time_v(self._range_end_v))
+        if frame_lo > frame_hi:
+            frame_lo, frame_hi = frame_hi, frame_lo
+
+        w = max(0, self.width() - LABEL_W)
+        if w <= 0:
+            return None
+        x_min: float | None = None
+        x_max: float | None = None
+        x = 0
+        while x < w:
+            v = self._time_v_at_x(LABEL_W + x)
+            frame = self._frame_at_time_v(v)
+            if frame is not None and frame_lo <= frame <= frame_hi:
+                if x_min is None:
+                    x_min = float(LABEL_W + x)
+                x_max = float(LABEL_W + x + COL_W)
+            x += COL_W
+        if x_min is None or x_max is None:
+            return None
+        return (x_min, x_max)
+
     # ------------------------------------------------------------------
-    # Mouse: group-row expand/collapse (always), rubber-band select /
-    # click-to-clear / Ctrl+click keyframe toggle (edit mode only).
-    # Seeking lives in `_RulerWidget`, not here.
+    # Mouse: group-row expand/collapse (always); a track-area click also
+    # moves the playhead (always, like clicking a slider used to); rubber-
+    # band select / click-to-clear / Ctrl+click keyframe toggle happen only
+    # in edit mode. `_RulerWidget` provides the same seeking without any
+    # selection side effect, and stays usable while this canvas is hidden
+    # behind the timeline's collapse toggle.
     # ------------------------------------------------------------------
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -451,6 +529,8 @@ class _TimelineCanvas(QWidget):
                 if row is not None and row.kind == "group":
                     self.toggle_group(row.label)
                     return
+            else:
+                self.time_scrubbed.emit(self._time_v_at_x(pos.x()))
             if self._edit_mode:
                 ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
                 self._drag_start = (pos.x(), pos.y())
@@ -523,6 +603,7 @@ class _TimelineCanvas(QWidget):
         try:
             painter.fillRect(self.rect(), _BG_COLOR)
             split_by_frame = self._should_gap_frames()
+            range_bounds = self._range_frame_pixel_bounds()
             for row_idx, row in enumerate(self._rows):
                 y = row_idx * ROW_H
                 is_selected = self._is_row_selected(row)
@@ -551,10 +632,11 @@ class _TimelineCanvas(QWidget):
                 # actually part of the selection it applies to — painting it
                 # across every row (selected or not) made it look like the
                 # whole time range was highlighted rather than just the
-                # selected keypoints within it.
-                if is_selected and self._range_start_v is not None and self._range_end_v is not None:
-                    x1 = self._x_at_time_v(self._range_start_v)
-                    x2 = self._x_at_time_v(self._range_end_v)
+                # selected keypoints within it. Bounds are frame-snapped (see
+                # _range_frame_pixel_bounds) since the range is a set of whole
+                # frames, not a continuous span of milliseconds.
+                if is_selected and range_bounds is not None:
+                    x1, x2 = range_bounds
                     painter.fillRect(int(x1), y, max(1, int(x2 - x1)), ROW_H, _RANGE_OVERLAY)
 
             if self._view_start_v <= self._current_v <= self._view_end_v:
@@ -573,23 +655,55 @@ class _TimelineCanvas(QWidget):
             painter.end()
 
 
+_COLLAPSE_HOTSPOT_W = 20  # px — clickable width of the collapse arrow, left edge of the ruler
+
+
 class _RulerWidget(QWidget):
     """Fixed-height timestamp ruler above the row tree: the only place that
-    moves the playhead. Always visible, even while the row tree is
-    collapsed, so scrubbing never requires expanding the timeline.
+    moves the playhead, plus the collapse/expand arrow (moved here from the
+    tab row since this is the row that stays visible while collapsed — the
+    arrow belongs where it's always reachable). Always visible, even while
+    the row tree is collapsed, so scrubbing never requires expanding the
+    timeline.
 
-    Shares view/time state with a `_TimelineCanvas` instance (same module,
+    Reads view/zoom state from a `_TimelineCanvas` instance (same module,
     tightly coupled sibling widgets — see the module docstring) rather than
-    duplicating zoom/pan bookkeeping.
+    duplicating zoom/pan bookkeeping, but maps time <-> pixel using *its own*
+    width (see the module-level `_x_at_time_v`/`_time_v_at_x`), since the
+    ruler and canvas widths only match when the canvas's QScrollArea has no
+    vertical scrollbar — see `set_right_margin`.
     """
 
     time_scrubbed = Signal(int)  # time_v, ms from t_start
+    collapse_clicked = Signal()
 
     def __init__(self, canvas: _TimelineCanvas, parent=None) -> None:
         super().__init__(parent)
         self._canvas = canvas
         self._dragging = False
+        self._collapsed = True
+        # Extra right-side inset so this widget's drawable width matches the
+        # canvas's actual (scrollbar-shrunk, when a vertical scrollbar is
+        # showing) width — see KeypointTimelineWidget._sync_ruler_margin.
+        self._right_margin = 0
         self.setFixedHeight(RULER_H)
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self._collapsed = collapsed
+        self.update()
+
+    def set_right_margin(self, px: int) -> None:
+        if px != self._right_margin:
+            self._right_margin = px
+            self.update()
+
+    def _x_at_time_v(self, v: int) -> float:
+        view_start, view_end = self._canvas.view_range()
+        return _x_at_time_v(v, view_start, view_end, self.width() - self._right_margin)
+
+    def _time_v_at_x(self, x: float) -> int:
+        view_start, view_end = self._canvas.view_range()
+        return _time_v_at_x(x, view_start, view_end, self.width() - self._right_margin)
 
     def _pick_tick_interval_ms(self, span_ms: int, px_width: int, min_px_gap: int = 60) -> int:
         if px_width <= 0 or span_ms <= 0:
@@ -602,16 +716,19 @@ class _RulerWidget(QWidget):
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position()
+            if pos.x() < _COLLAPSE_HOTSPOT_W:
+                self.collapse_clicked.emit()
+                return
             if pos.x() >= LABEL_W:
                 self._dragging = True
-                self.time_scrubbed.emit(self._canvas._time_v_at_x(pos.x()))
+                self.time_scrubbed.emit(self._time_v_at_x(pos.x()))
                 return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._dragging and (event.buttons() & Qt.MouseButton.LeftButton):
             pos = event.position()
-            self.time_scrubbed.emit(self._canvas._time_v_at_x(pos.x()))
+            self.time_scrubbed.emit(self._time_v_at_x(pos.x()))
             return
         super().mouseMoveEvent(event)
 
@@ -631,23 +748,27 @@ class _RulerWidget(QWidget):
         painter = QPainter(self)
         try:
             painter.fillRect(self.rect(), _BG_COLOR)
-            view_start, view_end = self._canvas.view_range()
-            span = max(1, view_end - view_start)
-            w = max(0, self.width() - LABEL_W)
-            interval = self._pick_tick_interval_ms(span, w)
 
             painter.setPen(_LABEL_COLOR)
+            painter.drawText(4, self.height() - 6, "▸" if self._collapsed else "▾")
+
+            view_start, view_end = self._canvas.view_range()
+            span = max(1, view_end - view_start)
+            w = max(0, self.width() - self._right_margin - LABEL_W)
+            interval = self._pick_tick_interval_ms(span, w)
+            t_start = self._canvas._t_start
+
             v = (view_start // interval) * interval
             while v <= view_end:
                 if v >= view_start:
-                    x = self._canvas._x_at_time_v(v)
+                    x = self._x_at_time_v(v)
                     painter.drawLine(int(x), self.height() - 6, int(x), self.height())
-                    painter.drawText(int(x) + 2, self.height() - 8, _fmt_tick(v))
+                    painter.drawText(int(x) + 2, self.height() - 8, _fmt_tick(t_start + v / 1000.0))
                 v += interval
 
             cur_v = self._canvas._current_v
             if view_start <= cur_v <= view_end:
-                px = self._canvas._x_at_time_v(cur_v)
+                px = self._x_at_time_v(cur_v)
                 painter.setPen(QPen(_PLAYHEAD_COLOR, 2))
                 painter.drawLine(int(px), 0, int(px), self.height())
         finally:
@@ -679,14 +800,11 @@ class KeypointTimelineWidget(QWidget):
         self._cam_buttons: list[QPushButton] = []
         self._collapsed = True
 
-        self._collapse_btn = QPushButton("▸")
-        self._collapse_btn.setFixedWidth(20)
-        self._collapse_btn.setToolTip("Expand/collapse the keypoint timeline")
-        self._collapse_btn.clicked.connect(self._on_collapse_clicked)
-
+        # Camera tabs + zoom controls. The collapse/expand arrow lives on the
+        # ruler below (not here) — it needs to work while this row's sibling
+        # canvas is hidden, and the ruler is the row that stays visible then.
         tab_row = QHBoxLayout()
         tab_row.setContentsMargins(0, 0, 0, 0)
-        tab_row.addWidget(self._collapse_btn)
         for i, cam in enumerate(cameras):
             btn = QPushButton(cam.get("label", str(i)))
             btn.setCheckable(True)
@@ -696,33 +814,41 @@ class KeypointTimelineWidget(QWidget):
             tab_row.addWidget(btn)
         tab_row.addStretch()
 
+        self._fit_btn = QPushButton("Fit")
         zoom_out_btn = QPushButton("−")
         zoom_in_btn = QPushButton("+")
-        fit_btn = QPushButton("Fit")
-        for b in (zoom_out_btn, zoom_in_btn, fit_btn):
+        for b in (zoom_out_btn, zoom_in_btn, self._fit_btn):
             b.setFixedWidth(28)
         zoom_out_btn.setToolTip("Zoom out around the playhead (Ctrl+scroll)")
         zoom_in_btn.setToolTip("Zoom in around the playhead (Ctrl+scroll)")
-        fit_btn.setToolTip("Reset zoom to the full trial")
+        self._fit_btn.setToolTip("Reset zoom to the full trial")
         zoom_out_btn.clicked.connect(lambda: self._canvas.zoom(1.25))
         zoom_in_btn.clicked.connect(lambda: self._canvas.zoom(0.8))
-        fit_btn.clicked.connect(self._on_fit_clicked)
+        self._fit_btn.clicked.connect(self._on_fit_clicked)
         tab_row.addWidget(zoom_out_btn)
         tab_row.addWidget(zoom_in_btn)
-        tab_row.addWidget(fit_btn)
+        tab_row.addWidget(self._fit_btn)
 
         self._canvas = _TimelineCanvas(pose_model)
         self._canvas.rubber_band_selected.connect(self.rubber_band_selected)
         self._canvas.keyframe_toggled.connect(self.keyframe_toggled)
+        self._canvas.time_scrubbed.connect(self.time_scrubbed)
         self._canvas.view_changed.connect(self._sync_hscroll)
 
         self._ruler = _RulerWidget(self._canvas)
         self._ruler.time_scrubbed.connect(self.time_scrubbed)
+        self._ruler.collapse_clicked.connect(self._on_collapse_clicked)
         self._canvas.view_changed.connect(self._ruler.update)
 
         self._canvas_scroll = QScrollArea()
         self._canvas_scroll.setWidget(self._canvas)
         self._canvas_scroll.setWidgetResizable(True)
+        # Keep the ruler's time<->pixel mapping aligned with the canvas: when
+        # the row tree grows tall enough to need a vertical scrollbar, the
+        # canvas's viewport (and therefore its usable width) shrinks by the
+        # scrollbar's width, but the ruler — being outside this scroll area —
+        # wouldn't shrink to match on its own.
+        self._canvas_scroll.verticalScrollBar().rangeChanged.connect(self._sync_ruler_margin)
 
         self._hscroll = QScrollBar(Qt.Orientation.Horizontal)
         self._hscroll.valueChanged.connect(self._on_hscroll)
@@ -764,11 +890,11 @@ class KeypointTimelineWidget(QWidget):
         self.collapsed_changed.emit(collapsed)
 
     def _apply_collapsed_state(self) -> None:
-        self._collapse_btn.setText("▸" if self._collapsed else "▾")
+        self._ruler.set_collapsed(self._collapsed)
         self._canvas_scroll.setVisible(not self._collapsed)
         self._hscroll.setVisible(not self._collapsed)
         if self._collapsed:
-            bar_h = self._collapse_btn.sizeHint().height() + RULER_H + 12
+            bar_h = self._fit_btn.sizeHint().height() + RULER_H + 12
             self.setMaximumHeight(bar_h)
             self.setMinimumHeight(bar_h)
         else:
@@ -795,6 +921,17 @@ class KeypointTimelineWidget(QWidget):
     def _on_hscroll(self, value: int) -> None:
         self._canvas.set_view_start(value)
         self._ruler.update()
+
+    def _sync_ruler_margin(self, *_args) -> None:
+        """Match the ruler's right inset to the canvas's vertical scrollbar
+        width so tick marks line up with the rows underneath (see the
+        `_RulerWidget` docstring). Connected to the scrollbar's rangeChanged
+        signal, which fires synchronously whenever the row tree's content
+        height changes (group expand/collapse), unlike isVisible() checked
+        right after a resize, which can still reflect a stale Qt layout."""
+        vbar = self._canvas_scroll.verticalScrollBar()
+        margin = vbar.sizeHint().width() if vbar.isVisible() else 0
+        self._ruler.set_right_margin(margin)
 
     # Pass-throughs to the canvas ---------------------------------------
 

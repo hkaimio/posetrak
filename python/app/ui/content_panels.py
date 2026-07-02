@@ -2437,6 +2437,10 @@ class PersonCropGridWidget(QWidget):
         dur_ms = max(1, int((self._t_end - self._t_start) * 1000))
         _fps_vals = [float(r["actual_fps"]) for r in sp_rows if r["actual_fps"]]
         frame_step_ms = max(1, round(1000.0 / max(_fps_vals))) if _fps_vals else 8
+        # Headless value/range holder — the timeline widget is now the only visible
+        # scrub control (see _on_timeline_scrub); this keeps _on_slider, seek(),
+        # _extend_range_left/right, and _compute_range_highlights unchanged, since
+        # they only need value()/setValue()/singleStep()/min/max, not visibility.
         self._slider = QSlider(Qt.Orientation.Horizontal)
         self._slider.setMinimum(0)
         self._slider.setMaximum(dur_ms)
@@ -2446,10 +2450,6 @@ class PersonCropGridWidget(QWidget):
 
         self._time_label = QLabel(_fmt_time(self._t_start))
         self._time_label.setMinimumWidth(70)
-
-        slider_row = QHBoxLayout()
-        slider_row.addWidget(self._slider)
-        slider_row.addWidget(self._time_label)
 
         self._show_detected = QCheckBox("Detected keypoints")
         self._show_detected.setChecked(True)
@@ -2475,6 +2475,7 @@ class PersonCropGridWidget(QWidget):
         overlay_row.addWidget(self._show_tracked)
         overlay_row.addWidget(self._show_seg)
         overlay_row.addStretch()
+        overlay_row.addWidget(self._time_label)
         overlay_row.addWidget(self._edit_btn)
 
         # Maximized-view container: big cell on left, thumbnail strip on right.
@@ -2513,16 +2514,31 @@ class PersonCropGridWidget(QWidget):
         self._timeline.camera_changed.connect(self._on_timeline_camera_changed)
         self._timeline.rubber_band_selected.connect(self._on_timeline_rubber_band)
         self._timeline.keyframe_toggled.connect(self._on_timeline_keyframe_toggle)
+        self._timeline.time_scrubbed.connect(self._on_timeline_scrub)
         if self._cameras:
             self._push_timeline_camera_data(0)
+
+        top_container = QWidget()
+        top_layout = QVBoxLayout(top_container)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(4)
+        top_layout.addWidget(self._stack, stretch=1)
+        top_layout.addLayout(overlay_row)
+
+        # Vertical splitter: the video grid gets all the space by default (the
+        # timeline starts collapsed to its tab-row height); dragging the handle
+        # resizes the timeline once it's expanded.
+        self._main_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._main_splitter.addWidget(top_container)
+        self._main_splitter.addWidget(self._timeline)
+        self._main_splitter.setStretchFactor(0, 1)
+        self._main_splitter.setStretchFactor(1, 0)
+        self._main_splitter.setCollapsible(0, False)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
-        layout.addWidget(self._stack, stretch=1)
-        layout.addLayout(overlay_row)
-        layout.addLayout(slider_row)
-        layout.addWidget(self._timeline)
+        layout.addWidget(self._main_splitter, stretch=1)
 
         self._current_t = self._t_start
         self._load_frame(self._t_start)
@@ -3254,10 +3270,27 @@ class PersonCropGridWidget(QWidget):
         self._sel_cam_idx = cam_idx
         self._push_timeline_camera_data(cam_idx)
 
+    def _on_timeline_scrub(self, v: int) -> None:
+        """Click/drag on the timeline: the timeline is now the only scrub control.
+
+        Routes through the (headless, no longer shown) _slider so _on_slider
+        remains the single place that updates _current_t, reloads the frame,
+        and emits time_changed for external listeners (PersonPanel, etc).
+        """
+        if self._slider is not None:
+            self._slider.setValue(v)
+
     def _sync_timeline(self, global_time: float) -> None:
         """Push cheap, per-scrub state (playhead + selection) to the timeline widget."""
         if self._timeline is None:
             return
+        # If the user just selected a keypoint in a different camera's crop cell,
+        # follow it — editing a keypoint in one camera almost always means you
+        # want to see that same camera's timeline, not whichever tab was last
+        # clicked directly on the timeline itself.
+        if self._sel_cam_idx is not None and self._sel_cam_idx != self._timeline.active_camera_index():
+            self._timeline.set_active_camera(self._sel_cam_idx)
+            self._push_timeline_camera_data(self._sel_cam_idx)
         v = int(round((global_time - self._t_start) * 1000))
         self._timeline.set_current_time_v(v)
         self._timeline.set_selection(

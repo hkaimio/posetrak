@@ -1,15 +1,17 @@
 """keypoint_timeline_widget.py — dope-sheet style timeline for keypoint editing.
 
-Phase 12 of the keypoint-editing timeline view (see
+Phases 12-13 of the keypoint-editing timeline view (see
 docs/keypoint-editing/keypoint-editing-design.md, "Improvements" section):
-a read-only, custom-painted tree of keypoint/group rows colored by
-`app.pose.timeline_status` axis-1 status, scoped to one camera at a time
-(matching `PersonCropGridWidget._sel_cam_idx`), with a playhead synced to
-the existing time slider.
 
-Selection/rubber-band interaction (Phase 13) is added on top of this in a
-later change; this module intentionally has no keypoint-editing side
-effects yet — it only reads and displays data supplied by the host widget.
+- Phase 12: a custom-painted tree of keypoint/group rows colored by
+  `app.pose.timeline_status` axis-1 status, scoped to one camera at a time
+  (matching `PersonCropGridWidget._sel_cam_idx`), with a playhead synced to
+  the existing time slider.
+- Phase 13: rubber-band drag (or a plain click) selects keypoints + a frame
+  range, and Ctrl+click toggles a keyframe — both only emit signals, the
+  actual DB writes and `_sel_kp_indices`/`_range_start_v` state live on the
+  host widget (`PersonCropGridWidget`), matching the "state is owned by the
+  host, not duplicated per-widget" rule from the design doc.
 """
 from __future__ import annotations
 
@@ -39,6 +41,7 @@ _SELECTED_LABEL_BG = QColor(60, 90, 130)
 _RANGE_OVERLAY = QColor(255, 255, 255, 40)
 _PLAYHEAD_COLOR = QColor(255, 80, 80)
 _INLIER_BAR_COLOR = QColor(180, 180, 180)
+_DRAG_RECT_COLOR = QColor(120, 170, 255, 60)
 
 
 @dataclass(frozen=True)
@@ -80,8 +83,16 @@ def build_rows(pose_model: PoseModel, expanded: set[str]) -> list[Row]:
     return rows
 
 
+_DRAG_THRESHOLD = 5  # px — matches _KP_DRAG_THRESHOLD in content_panels.py's _ImageCanvas
+
+
 class _TimelineCanvas(QWidget):
     """Custom-painted tree + time-colored cells for one camera's keypoint status."""
+
+    # kp_indices(set[int]), range_start_v, range_end_v, ctrl (add-to-selection vs. replace)
+    rubber_band_selected = Signal(object, int, int, bool)
+    # kp_idx, time_v (ms from t_start) — Ctrl+click on a leaf row's cell
+    keyframe_toggled = Signal(int, int)
 
     def __init__(self, pose_model: PoseModel, parent=None) -> None:
         super().__init__(parent)
@@ -103,7 +114,20 @@ class _TimelineCanvas(QWidget):
         self._range_end_v: int | None = None
         self._current_v: int = 0
 
+        self._edit_mode = False
+        self._drag_start: tuple[float, float] | None = None
+        self._drag_current: tuple[float, float] | None = None
+        self._drag_ctrl = False
+        self._drag_moved = False
+
         self._resize_to_rows()
+
+    def set_edit_mode(self, enabled: bool) -> None:
+        self._edit_mode = enabled
+        if not enabled:
+            self._drag_start = None
+            self._drag_current = None
+            self._drag_moved = False
 
     # ------------------------------------------------------------------
     # Data wiring (called by the host widget)
@@ -250,8 +274,20 @@ class _TimelineCanvas(QWidget):
             segments.append((LABEL_W + cur_start, w - cur_start, cur_val))
         return segments
 
+    def _kp_indices_in_row_range(self, y0: float, y1: float) -> set[int]:
+        """Union of kp_indices for every row whose band intersects [y0, y1]."""
+        if not self._rows:
+            return set()
+        idx0 = max(0, int(y0) // ROW_H)
+        idx1 = min(len(self._rows) - 1, int(y1) // ROW_H)
+        result: set[int] = set()
+        for i in range(idx0, idx1 + 1):
+            result.update(self._rows[i].kp_indices)
+        return result
+
     # ------------------------------------------------------------------
-    # Mouse: group-row expand/collapse only in this phase
+    # Mouse: group-row expand/collapse (always), rubber-band select and
+    # Ctrl+click keyframe toggle (edit mode only)
     # ------------------------------------------------------------------
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -262,7 +298,52 @@ class _TimelineCanvas(QWidget):
                 if row is not None and row.kind == "group":
                     self.toggle_group(row.label)
                     return
+            if self._edit_mode:
+                ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                self._drag_start = (pos.x(), pos.y())
+                self._drag_current = (pos.x(), pos.y())
+                self._drag_ctrl = ctrl
+                self._drag_moved = False
+                return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag_start is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+            pos = event.position()
+            self._drag_current = (pos.x(), pos.y())
+            dx = pos.x() - self._drag_start[0]
+            dy = pos.y() - self._drag_start[1]
+            if dx * dx + dy * dy >= _DRAG_THRESHOLD ** 2:
+                self._drag_moved = True
+            self.update()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton or self._drag_start is None:
+            super().mouseReleaseEvent(event)
+            return
+
+        x0, y0 = self._drag_start
+        x1, y1 = self._drag_current if self._drag_current is not None else self._drag_start
+
+        if self._drag_ctrl and not self._drag_moved:
+            row = self._row_at_y(int(y0))
+            if row is not None and row.kind == "leaf" and x0 >= LABEL_W:
+                v = self._time_v_at_x(x0)
+                self.keyframe_toggled.emit(row.kp_indices[0], v)
+        elif x0 >= LABEL_W or x1 >= LABEL_W:
+            kp_indices = self._kp_indices_in_row_range(min(y0, y1), max(y0, y1))
+            if kp_indices:
+                v0 = self._time_v_at_x(min(x0, x1))
+                v1 = self._time_v_at_x(max(x0, x1))
+                self.rubber_band_selected.emit(kp_indices, v0, v1, self._drag_ctrl)
+
+        self._drag_start = None
+        self._drag_current = None
+        self._drag_ctrl = False
+        self._drag_moved = False
+        self.update()
 
     # ------------------------------------------------------------------
     # Paint
@@ -302,6 +383,14 @@ class _TimelineCanvas(QWidget):
             px = self._x_at_time_v(self._current_v)
             painter.setPen(QPen(_PLAYHEAD_COLOR, 2))
             painter.drawLine(int(px), 0, int(px), self.height())
+
+            if self._drag_moved and self._drag_start is not None and self._drag_current is not None:
+                x0, y0 = self._drag_start
+                x1, y1 = self._drag_current
+                rect_x, rect_w = min(x0, x1), abs(x1 - x0)
+                rect_y, rect_h = min(y0, y1), abs(y1 - y0)
+                painter.fillRect(int(rect_x), int(rect_y), max(1, int(rect_w)), max(1, int(rect_h)),
+                                  _DRAG_RECT_COLOR)
         finally:
             painter.end()
 
@@ -310,6 +399,8 @@ class KeypointTimelineWidget(QWidget):
     """Container: camera tab strip + scrollable `_TimelineCanvas`."""
 
     camera_changed = Signal(int)
+    rubber_band_selected = Signal(object, int, int, bool)
+    keyframe_toggled = Signal(int, int)
 
     def __init__(self, pose_model: PoseModel, cameras: list[dict], parent=None) -> None:
         super().__init__(parent)
@@ -329,6 +420,8 @@ class KeypointTimelineWidget(QWidget):
         tab_row.addStretch()
 
         self._canvas = _TimelineCanvas(pose_model)
+        self._canvas.rubber_band_selected.connect(self.rubber_band_selected)
+        self._canvas.keyframe_toggled.connect(self.keyframe_toggled)
 
         scroll = QScrollArea()
         scroll.setWidget(self._canvas)
@@ -374,3 +467,6 @@ class KeypointTimelineWidget(QWidget):
 
     def set_current_time_v(self, v: int) -> None:
         self._canvas.set_current_time_v(v)
+
+    def set_edit_mode(self, enabled: bool) -> None:
+        self._canvas.set_edit_mode(enabled)

@@ -1287,7 +1287,7 @@ _BODY_SKELETON = [
 ]
 
 from app.pose.kp_models import PoseModel, get_pose_model as _get_pose_model
-from app.pose.timeline_status import compute_inlier_camera_counts, read_timeline_status
+from app.pose.timeline_status import STATUS_BLUE, compute_inlier_camera_counts, read_timeline_status
 from app.ui.keypoint_timeline_widget import KeypointTimelineWidget
 
 
@@ -2511,6 +2511,8 @@ class PersonCropGridWidget(QWidget):
 
         self._timeline = KeypointTimelineWidget(self._pose_model, self._cameras)
         self._timeline.camera_changed.connect(self._on_timeline_camera_changed)
+        self._timeline.rubber_band_selected.connect(self._on_timeline_rubber_band)
+        self._timeline.keyframe_toggled.connect(self._on_timeline_keyframe_toggle)
         if self._cameras:
             self._push_timeline_camera_data(0)
 
@@ -2633,6 +2635,9 @@ class PersonCropGridWidget(QWidget):
             if not enabled:
                 cell.set_trail(None)
                 cell.set_selection(None, frozenset())
+        if self._timeline is not None:
+            self._timeline.set_edit_mode(enabled)
+            self._sync_timeline(self._current_t)
 
     def _start_backfill(self) -> None:
         """Start the background crop-generation worker if there is a detection run."""
@@ -3258,6 +3263,63 @@ class PersonCropGridWidget(QWidget):
         self._timeline.set_selection(
             set(self._sel_kp_indices), self._range_start_v, self._range_end_v,
         )
+
+    def _on_timeline_rubber_band(
+        self, kp_indices: set[int], range_start_v: int, range_end_v: int, ctrl: bool,
+    ) -> None:
+        """Rubber-band drag (or a plain click) on the timeline: mirrors _on_rubber_band_selected."""
+        if ctrl:
+            self._sel_kp_indices |= set(kp_indices)
+        else:
+            self._sel_kp_indices = set(kp_indices)
+        if self._sel_kp_indices and self._primary_kp_idx not in self._sel_kp_indices:
+            self._primary_kp_idx = next(iter(self._sel_kp_indices))
+        elif not self._sel_kp_indices:
+            self._primary_kp_idx = None
+        if self._timeline is not None:
+            self._sel_cam_idx = self._timeline.active_camera_index()
+        if range_start_v != range_end_v:
+            self._range_start_v = min(range_start_v, range_end_v)
+            self._range_end_v = max(range_start_v, range_end_v)
+        self._load_frame(self._current_t)
+
+    def _on_timeline_keyframe_toggle(self, kp_idx: int, time_v: int) -> None:
+        """Ctrl+click on the timeline: freeze the current position as a keyframe, or
+        un-freeze it if it already is one (see *Multi-keyframe interpolation* in the
+        design doc — an interior anchor is any frame with an edit row where
+        `is_outlier == 0`, i.e. STATUS_BLUE)."""
+        from app.pose.db_cache import (
+            clear_single_keypoint_edit,
+            read_observations_with_edits,
+            update_single_keypoint_edit,
+        )
+        if self._timeline is None or not self._sync_table:
+            return
+        cam_idx = self._timeline.active_camera_index()
+        if not (0 <= cam_idx < len(self._cameras)):
+            return
+        cam = self._cameras[cam_idx]
+        cam_id = cam["camera_instance_id"]
+        svid = cam["shot_video_id"]
+        frame_idx = self._sync_table.lookup(self._t_start + time_v / 1000.0, svid)
+        if frame_idx is None:
+            return
+
+        status = self._timeline_status_by_cam.get(cam_id, {}).get(frame_idx)
+        is_keyframe = status is not None and kp_idx < len(status) and int(status[kp_idx]) == STATUS_BLUE
+        if is_keyframe:
+            clear_single_keypoint_edit(self._conn, self._sequence_id, cam_id, frame_idx, kp_idx)
+        else:
+            kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
+            if kp is None or kp_idx >= kp.shape[0]:
+                return
+            update_single_keypoint_edit(
+                self._conn, self._sequence_id, cam_id, frame_idx, kp_idx,
+                float(kp[kp_idx, 0]), float(kp[kp_idx, 1]), is_outlier=False,
+            )
+        self._obs_kp[cam_id] = read_observations_with_edits(self._conn, self._sequence_id, cam_id)
+        self._refresh_timeline_status(cam_id)
+        self._load_frame(self._current_t)
 
     def _load_tracking_run(self, run_id: str | None) -> None:
         """Start async loading of tracking overlay data.

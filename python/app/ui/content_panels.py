@@ -1287,6 +1287,8 @@ _BODY_SKELETON = [
 ]
 
 from app.pose.kp_models import PoseModel, get_pose_model as _get_pose_model
+from app.pose.timeline_status import compute_inlier_camera_counts, read_timeline_status
+from app.ui.keypoint_timeline_widget import KeypointTimelineWidget
 
 
 def _project_point_distorted(
@@ -2242,6 +2244,11 @@ class PersonCropGridWidget(QWidget):
         # Frame-range selection for interpolation (slider values in ms from t_start)
         self._range_start_v: int | None = None
         self._range_end_v: int | None = None
+        # Timeline dope-sheet widget (Phase 12): cam_instance_id → frame → int8[N] status,
+        # plus a cross-camera inlier count shared by all cameras.
+        self._timeline: KeypointTimelineWidget | None = None
+        self._timeline_status_by_cam: dict[str, dict[int, object]] = {}
+        self._timeline_inlier_counts: dict[int, object] = {}
         self._build()
 
     def _build(self) -> None:
@@ -2354,6 +2361,10 @@ class PersonCropGridWidget(QWidget):
             self._obs_kp[cam["camera_instance_id"]] = read_observations_with_edits(
                 self._conn, self._sequence_id, cam["camera_instance_id"]
             )
+
+        # Timeline dope-sheet status, one camera at a time (Phase 12).
+        for cam in self._cameras:
+            self._refresh_timeline_status(cam["camera_instance_id"])
 
         # Pre-load detection bboxes: svid → frame → (cx, cy, w, h)
         # Load for every track_id that is assigned to the person in each camera.
@@ -2498,12 +2509,18 @@ class PersonCropGridWidget(QWidget):
         self._stack.addWidget(grid_scroll)   # page 0: scrollable grid
         self._stack.addWidget(max_container) # page 1: maximized view
 
+        self._timeline = KeypointTimelineWidget(self._pose_model, self._cameras)
+        self._timeline.camera_changed.connect(self._on_timeline_camera_changed)
+        if self._cameras:
+            self._push_timeline_camera_data(0)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
         layout.addWidget(self._stack, stretch=1)
         layout.addLayout(overlay_row)
         layout.addLayout(slider_row)
+        layout.addWidget(self._timeline)
 
         self._current_t = self._t_start
         self._load_frame(self._t_start)
@@ -2682,6 +2699,7 @@ class PersonCropGridWidget(QWidget):
         for cell in self._cells:
             cell.set_trail(None)
             cell.set_selection(None, frozenset())
+        self._sync_timeline(self._current_t)
 
     def _on_rubber_band_selected(
         self, cam_idx: int, x1: float, y1: float, x2: float, y2: float, ctrl: bool
@@ -2783,6 +2801,7 @@ class PersonCropGridWidget(QWidget):
         self._obs_kp[cam_id] = read_observations_with_edits(
             self._conn, self._sequence_id, cam_id
         )
+        self._refresh_timeline_status(cam_id)
         self._load_frame(self._current_t)
 
     # ------------------------------------------------------------------
@@ -2836,6 +2855,7 @@ class PersonCropGridWidget(QWidget):
                 cell.set_trail(None)
                 cell.set_selection(None, frozenset())
                 cell.set_range_highlights([])
+            self._sync_timeline(self._current_t)
             return True
 
         if key == Qt.Key.Key_I and self._range_start_v is not None:
@@ -2910,6 +2930,7 @@ class PersonCropGridWidget(QWidget):
         self._obs_kp[cam_id] = read_observations_with_edits(
             self._conn, self._sequence_id, cam_id
         )
+        self._refresh_timeline_status(cam_id)
         self._load_frame(self._current_t)
         n = len(self._clipboard)
         self.status_message.emit(f"Pasted {n} keypoint{'s' if n != 1 else ''}")
@@ -3034,6 +3055,7 @@ class PersonCropGridWidget(QWidget):
                 self._obs_kp[cam_id] = read_observations_with_edits(
                     self._conn, self._sequence_id, cam_id
                 )
+                self._refresh_timeline_status(cam_id)
 
         self._range_start_v = None
         self._range_end_v = None
@@ -3068,6 +3090,7 @@ class PersonCropGridWidget(QWidget):
         self._obs_kp[cam_id] = read_observations_with_edits(
             self._conn, self._sequence_id, cam_id
         )
+        self._refresh_timeline_status(cam_id)
         self._load_frame(self._current_t)
 
     def _toggle_outlier(self) -> None:
@@ -3115,6 +3138,7 @@ class PersonCropGridWidget(QWidget):
         self._obs_kp[cam_id] = read_observations_with_edits(
             self._conn, self._sequence_id, cam_id
         )
+        self._refresh_timeline_status(cam_id)
         self._load_frame(self._current_t)
 
     def _on_slider(self, value: int) -> None:
@@ -3171,6 +3195,69 @@ class PersonCropGridWidget(QWidget):
             if first_frame <= frame_idx <= last_frame:
                 return track_id
         return None
+
+    def _track_id_by_frame(self, svid: str) -> dict[int, int]:
+        """Expand `_track_segs[svid]` into a flat {frame: track_id} map.
+
+        Used by `read_timeline_status` to resolve `keypoint_obs_quality` rows,
+        which are keyed by track_id and can change mid-trial if the person's
+        assignment switches tracks (e.g. after a detection-track split).
+        """
+        result: dict[int, int] = {}
+        for track_id, first_frame, last_frame in self._track_segs.get(svid, []):
+            for frame in range(first_frame, last_frame + 1):
+                result[frame] = track_id
+        return result
+
+    def _refresh_timeline_status(self, cam_id: str) -> None:
+        """Recompute timeline axis-1 status for one camera + inlier counts for all.
+
+        Called once per camera in `_build()`, and again for the edited camera
+        after any keypoint edit (nudge, move, toggle-outlier, interpolate,
+        paste) so the timeline reflects the change immediately.
+        """
+        cam = next((c for c in self._cameras if c["camera_instance_id"] == cam_id), None)
+        if cam is None:
+            return
+        svid = cam["shot_video_id"]
+        self._timeline_status_by_cam[cam_id] = read_timeline_status(
+            self._conn, self._sequence_id, cam_id,
+            shot_video_id=svid,
+            seg_run_id=self._seg_sources.get(svid),
+            track_id_by_frame=self._track_id_by_frame(svid),
+        )
+        self._timeline_inlier_counts = compute_inlier_camera_counts(self._obs_kp)
+        if self._timeline is not None:
+            active_cam = self._cameras[self._timeline.active_camera_index()]
+            if active_cam["camera_instance_id"] == cam_id:
+                self._push_timeline_camera_data(self._timeline.active_camera_index())
+
+    def _push_timeline_camera_data(self, cam_idx: int) -> None:
+        """Push the cached status/inlier data for camera *cam_idx* into the timeline widget."""
+        if self._timeline is None or not (0 <= cam_idx < len(self._cameras)):
+            return
+        cam = self._cameras[cam_idx]
+        self._timeline.set_time_range(self._t_start, self._t_end, cam["shot_video_id"], self._sync_table)
+        self._timeline.set_status_data(
+            self._timeline_status_by_cam.get(cam["camera_instance_id"], {}),
+            self._timeline_inlier_counts,
+            n_cameras=max(1, len(self._cameras)),
+        )
+
+    def _on_timeline_camera_changed(self, cam_idx: int) -> None:
+        """User clicked a camera tab on the timeline: mirror it onto _sel_cam_idx."""
+        self._sel_cam_idx = cam_idx
+        self._push_timeline_camera_data(cam_idx)
+
+    def _sync_timeline(self, global_time: float) -> None:
+        """Push cheap, per-scrub state (playhead + selection) to the timeline widget."""
+        if self._timeline is None:
+            return
+        v = int(round((global_time - self._t_start) * 1000))
+        self._timeline.set_current_time_v(v)
+        self._timeline.set_selection(
+            set(self._sel_kp_indices), self._range_start_v, self._range_end_v,
+        )
 
     def _load_tracking_run(self, run_id: str | None) -> None:
         """Start async loading of tracking overlay data.
@@ -3501,6 +3588,8 @@ class PersonCropGridWidget(QWidget):
                 cell.set_range_highlights(
                     self._compute_range_highlights(cam_id, svid)
                 )
+
+        self._sync_timeline(global_time)
 
 
 # ---------------------------------------------------------------------------

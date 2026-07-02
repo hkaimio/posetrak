@@ -67,6 +67,9 @@ def _make_widget(qapp, seq_db):
     w._clipboard_cam_idx = None
     w._range_start_v = None
     w._range_end_v = None
+    w._timeline = None
+    w._timeline_status_by_cam = {}
+    w._timeline_inlier_counts = {}
 
     # Pre-load obs_kp from DB
     from app.pose.db_cache import read_observations_with_edits

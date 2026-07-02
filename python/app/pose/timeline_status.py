@@ -1,6 +1,7 @@
 """timeline_status.py — per-(keypoint, frame) status for the keypoint-editing timeline.
 
-Status has two independent axes (see docs/keypoint-editing/keypoint-editing-design.md,
+Status has two independent axes (see
+docs/roadmap/features/keypoint-editing/keypoint-editing-design.md,
 "Improvements" section, *Timeline view*):
 
 Axis 1 (implemented here) — edit state: stable, independent of any tracking

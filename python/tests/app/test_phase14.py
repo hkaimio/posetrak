@@ -9,8 +9,9 @@ interior anchor, so "select a wide range, press I" still overwrites
 everything between the two ends with a single straight line when the user
 hasn't deliberately kept any interior frame.
 
-See docs/keypoint-editing/keypoint-editing-design.md, "Multi-keyframe
-interpolation", for the three validation cases this file covers.
+See docs/roadmap/features/keypoint-editing/keypoint-editing-design.md,
+"Multi-keyframe interpolation", for the three validation cases this file
+covers.
 """
 from __future__ import annotations
 

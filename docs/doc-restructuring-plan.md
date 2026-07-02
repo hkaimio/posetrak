@@ -124,8 +124,9 @@ docs/
 │   ├── pose-extraction.md        UPDATE from pose-extraction-app-design.md:
 │   │                             how to run detection, stitch, finalise
 │   ├── running-the-tracker.md    NEW: UI dialog + CLI; skeleton + config; output
-│   ├── keypoint-editing/         MOVE from docs/keypoint-editing/
-│   │   └── keypoint-editing-user-guide.md
+│   ├── keypoint-editing/         MOVE user guide from
+│   │   └── keypoint-editing-user-guide.md   docs/roadmap/features/keypoint-editing/
+│   │                             (design docs + status.md stay in roadmap/features)
 │   ├── configuration-reference.md  NEW: all TOML config params, UKF param meaning
 │   └── troubleshooting.md        NEW: interpreting stats, common failures, tuning
 │

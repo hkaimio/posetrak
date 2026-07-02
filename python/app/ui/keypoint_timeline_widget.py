@@ -1,8 +1,9 @@
 """keypoint_timeline_widget.py — dope-sheet style timeline for keypoint editing.
 
 Phases 12-13 of the keypoint-editing timeline view (see
-docs/keypoint-editing/keypoint-editing-design.md, "Improvements" section),
-plus two rounds of follow-up UX fixes requested after Phase 13 landed:
+docs/roadmap/features/keypoint-editing/keypoint-editing-design.md,
+"Improvements" section), plus four rounds of follow-up UX fixes requested
+after Phase 13 landed:
 
 - Phase 12: a custom-painted tree of keypoint/group rows colored by
   `app.pose.timeline_status` axis-1 status, scoped to one camera at a time

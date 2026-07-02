@@ -3032,7 +3032,23 @@ class PersonCropGridWidget(QWidget):
         self._slider.setValue(new_val)
 
     def _interpolate_range(self) -> None:
-        """I key: linearly interpolate selected kp between the range endpoints."""
+        """I key: piecewise-linear interpolation of selected kp across the range.
+
+        The range's own boundary frames are always anchors (Phase 10
+        behavior). Phase 14 adds interior anchors: any frame inside the range
+        that is an explicit keyframe for a given keypoint — i.e. has an edit
+        row with is_outlier == 0 (STATUS_BLUE; see timeline_status.py and the
+        design doc's *Multi-keyframe interpolation* section) — also anchors
+        the interpolation, splitting it into independent segments around it.
+
+        An untouched original detection is never an interior anchor, even if
+        it's currently an inlier: with a wide range covering both good and
+        bad frames, plain "select range, press I" must still overwrite
+        everything between the two ends with one straight line (the Phase 10
+        behavior), not silently keep whatever wrong values happen to sit in
+        the middle. Deliberately keeping a frame's value (Ctrl+click freeze,
+        or re-enabling/moving it) is what turns it into an anchor.
+        """
         from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit
         if self._range_start_v is None or self._range_end_v is None:
             return
@@ -3043,40 +3059,62 @@ class PersonCropGridWidget(QWidget):
             cam_id = cam["camera_instance_id"]
             svid = cam["shot_video_id"]
 
-            range_frames = self._range_frame_set(svid)
+            range_frames = sorted(self._range_frame_set(svid))
             if not range_frames:
                 continue
 
-            frame_start = min(range_frames)
-            frame_end = max(range_frames)
-            # Only write frames strictly between the endpoints; endpoints are anchors.
-            inner_frames = sorted(f for f in range_frames if frame_start < f < frame_end)
-            if not inner_frames:
-                continue
-
+            frame_start = range_frames[0]
+            frame_end = range_frames[-1]
             kp_by_frame = self._obs_kp.get(cam_id, {})
             kp_l = kp_by_frame.get(frame_start)
             kp_r = kp_by_frame.get(frame_end)
             if kp_l is None or kp_r is None:
                 continue
 
-            span = frame_end - frame_start
+            status_by_frame = read_timeline_status(
+                self._conn, self._sequence_id, cam_id,
+                shot_video_id=svid,
+                seg_run_id=self._seg_sources.get(svid),
+                track_id_by_frame=self._track_id_by_frame(svid),
+            )
+
             any_written = False
             for kp_idx in self._sel_kp_indices:
                 if kp_idx >= kp_l.shape[0] or kp_idx >= kp_r.shape[0]:
                     continue
                 if float(kp_l[kp_idx, 2]) < 0.01 or float(kp_r[kp_idx, 2]) < 0.01:
                     continue
-                x_l, y_l = float(kp_l[kp_idx, 0]), float(kp_l[kp_idx, 1])
-                x_r, y_r = float(kp_r[kp_idx, 0]), float(kp_r[kp_idx, 1])
-                for f in inner_frames:
-                    t = (f - frame_start) / span
-                    x = x_l + t * (x_r - x_l)
-                    y = y_l + t * (y_r - y_l)
-                    update_single_keypoint_edit(
-                        self._conn, self._sequence_id, cam_id, f, kp_idx, x, y
-                    )
-                    any_written = True
+
+                anchors: list[tuple[int, float, float]] = [
+                    (frame_start, float(kp_l[kp_idx, 0]), float(kp_l[kp_idx, 1])),
+                ]
+                for f in range_frames:
+                    if f == frame_start or f == frame_end:
+                        continue
+                    status = status_by_frame.get(f)
+                    if status is None or kp_idx >= len(status) or int(status[kp_idx]) != STATUS_BLUE:
+                        continue
+                    kp_f = kp_by_frame.get(f)
+                    if kp_f is not None and kp_idx < kp_f.shape[0]:
+                        anchors.append((f, float(kp_f[kp_idx, 0]), float(kp_f[kp_idx, 1])))
+                anchors.append((frame_end, float(kp_r[kp_idx, 0]), float(kp_r[kp_idx, 1])))
+                anchors.sort(key=lambda a: a[0])
+                anchor_frames = {a[0] for a in anchors}
+
+                for (f0, x0, y0), (f1, x1, y1) in zip(anchors, anchors[1:]):
+                    span = f1 - f0
+                    if span <= 0:
+                        continue
+                    for f in range_frames:
+                        if f <= f0 or f >= f1 or f in anchor_frames:
+                            continue
+                        t = (f - f0) / span
+                        x = x0 + t * (x1 - x0)
+                        y = y0 + t * (y1 - y0)
+                        update_single_keypoint_edit(
+                            self._conn, self._sequence_id, cam_id, f, kp_idx, x, y
+                        )
+                        any_written = True
 
             if any_written:
                 self._obs_kp[cam_id] = read_observations_with_edits(

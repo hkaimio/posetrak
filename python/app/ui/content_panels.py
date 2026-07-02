@@ -1448,6 +1448,7 @@ class _ImageCanvas(QWidget):
         # Edit mode state
         self._edit_mode: bool = False
         self._sel_kp_set: frozenset[int] = frozenset()   # all selected kp indices
+        self._hidden_kp: frozenset[int] = frozenset()    # excluded from drawing + hit-testing
         self._primary_kp: int | None = None               # primary (name label, trail)
         self._drag_kp: int | None = None
         self._drag_start_disp: tuple[float, float] | None = None
@@ -1537,6 +1538,12 @@ class _ImageCanvas(QWidget):
         self._selected_kp_name = name
         self.update()
 
+    def set_hidden(self, hidden: frozenset[int]) -> None:
+        """Keypoint indices toggled off from the timeline's eye icon: drawn
+        nowhere and excluded from hit-testing, regardless of edit mode."""
+        self._hidden_kp = hidden
+        self.update()
+
     def set_selected_kp(
         self, idx: int | None, show_ring: bool = True, name: str | None = None
     ) -> None:
@@ -1561,6 +1568,8 @@ class _ImageCanvas(QWidget):
         combined = self._src_scale * disp_scale
         best_i, best_d2 = None, float(_KP_HIT_RADIUS ** 2)
         for i in range(self._obs_kp.shape[0]):
+            if i in self._hidden_kp:
+                continue
             if float(self._obs_kp[i, 2]) < 0.1 and not self._edit_mode:
                 continue
             px = (float(self._obs_kp[i, 0]) - self._x1) * combined + off_x
@@ -1714,6 +1723,8 @@ class _ImageCanvas(QWidget):
             for a, b in _BODY_SKELETON:
                 if a >= n_kp or b >= n_kp:
                     continue
+                if a in self._hidden_kp or b in self._hidden_kp:
+                    continue
                 if float(kp[a, 2]) < 0.3 or float(kp[b, 2]) < 0.3:
                     continue
                 painter.drawLine(
@@ -1723,6 +1734,8 @@ class _ImageCanvas(QWidget):
 
             painter.setPen(Qt.PenStyle.NoPen)
             for i in range(n_kp):
+                if i in self._hidden_kp:
+                    continue
                 conf = float(kp[i, 2])
                 kp_x, kp_y = float(kp[i, 0]), float(kp[i, 1])
                 if conf < 0.1:
@@ -1935,6 +1948,9 @@ class _CropCell(QWidget):
         self, primary: int | None, sel_indices: frozenset[int], name: str | None = None
     ) -> None:
         self._canvas.set_selection(primary, sel_indices, name)
+
+    def set_hidden(self, hidden: frozenset[int]) -> None:
+        self._canvas.set_hidden(hidden)
 
     def set_selected_kp(
         self, idx: int | None, show_ring: bool = True, name: str | None = None
@@ -2249,6 +2265,10 @@ class PersonCropGridWidget(QWidget):
         self._timeline: KeypointTimelineWidget | None = None
         self._timeline_status_by_cam: dict[str, dict[int, object]] = {}
         self._timeline_inlier_counts: dict[int, object] = {}
+        # Keypoint indices hidden via the timeline's eye icon: drawn nowhere,
+        # excluded from selection/hit-testing/interpolation. UI-only, not
+        # persisted — resets each time the editor is reopened.
+        self._hidden_kp_indices: set[int] = set()
         self._build()
 
     def _build(self) -> None:
@@ -2515,6 +2535,7 @@ class PersonCropGridWidget(QWidget):
         self._timeline.rubber_band_selected.connect(self._on_timeline_rubber_band)
         self._timeline.keyframe_toggled.connect(self._on_timeline_keyframe_toggle)
         self._timeline.time_scrubbed.connect(self._on_timeline_scrub)
+        self._timeline.visibility_toggled.connect(self._on_timeline_visibility_toggled)
         if self._cameras:
             # set_time_range only needs to run once: t_start/t_end/sync_table
             # are the same for every camera in a sequence, so re-running it on
@@ -2753,6 +2774,8 @@ class PersonCropGridWidget(QWidget):
         fx2, fy2 = cell._canvas._display_to_full(x2, y2)
         new_hits: set[int] = set()
         for i in range(obs_kp.shape[0]):
+            if i in self._hidden_kp_indices:
+                continue
             kx, ky = float(obs_kp[i, 0]), float(obs_kp[i, 1])
             if fx1 <= kx <= fx2 and fy1 <= ky <= fy2:
                 new_hits.add(i)
@@ -2789,14 +2812,14 @@ class PersonCropGridWidget(QWidget):
         menu.exec(global_pos)
 
     def _select_group(self, group_name: str, cam_idx: int | None = None) -> None:
-        self._sel_kp_indices = set(self._pose_model.group_indices(group_name))
+        self._sel_kp_indices = set(self._pose_model.group_indices(group_name)) - self._hidden_kp_indices
         self._primary_kp_idx = next(iter(self._sel_kp_indices), None)
         if cam_idx is not None:
             self._sel_cam_idx = cam_idx
         self._load_frame(self._current_t)
 
     def _select_all(self, cam_idx: int | None = None) -> None:
-        self._sel_kp_indices = set(self._pose_model.all_indices)
+        self._sel_kp_indices = set(self._pose_model.all_indices) - self._hidden_kp_indices
         self._primary_kp_idx = next(iter(self._sel_kp_indices), None)
         if cam_idx is not None:
             self._sel_cam_idx = cam_idx
@@ -3428,6 +3451,29 @@ class PersonCropGridWidget(QWidget):
         self._refresh_timeline_status(cam_id)
         self._load_frame(self._current_t)
 
+    def _on_timeline_visibility_toggled(self, kp_indices) -> None:
+        """Eye-icon click on the timeline: hide/show a keypoint (leaf row) or
+        every keypoint in a group (group row). If every index in *kp_indices*
+        is already hidden, this shows them all; otherwise it hides them all —
+        the same rule a tri-state "select all" checkbox uses, so clicking a
+        partially-hidden group's icon hides the rest rather than leaving the
+        group in a confusing mixed state.
+        """
+        kp_indices = set(kp_indices)
+        if not kp_indices:
+            return
+        if kp_indices <= self._hidden_kp_indices:
+            self._hidden_kp_indices -= kp_indices
+        else:
+            self._hidden_kp_indices |= kp_indices
+        # Hidden keypoints can't stay selected, moved, or interpolated.
+        self._sel_kp_indices -= self._hidden_kp_indices
+        if self._primary_kp_idx in self._hidden_kp_indices:
+            self._primary_kp_idx = next(iter(self._sel_kp_indices), None)
+        if self._timeline is not None:
+            self._timeline.set_hidden(frozenset(self._hidden_kp_indices))
+        self._load_frame(self._current_t)
+
     def _load_tracking_run(self, run_id: str | None) -> None:
         """Start async loading of tracking overlay data.
 
@@ -3573,6 +3619,7 @@ class PersonCropGridWidget(QWidget):
                             show_detected=show_detected,
                             show_tracked=show_tracked,
                         )
+                        cell.set_hidden(frozenset(self._hidden_kp_indices))
                         if self._edit_mode:
                             trail = None
                             kp_name = None
@@ -3740,6 +3787,7 @@ class PersonCropGridWidget(QWidget):
                 show_detected=show_detected,
                 show_tracked=show_tracked,
             )
+            cell.set_hidden(frozenset(self._hidden_kp_indices))
 
             if self._edit_mode:
                 trail = None

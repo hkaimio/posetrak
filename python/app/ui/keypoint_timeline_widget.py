@@ -39,12 +39,19 @@ plus two rounds of follow-up UX fixes requested after Phase 13 landed:
   width-aware time<->pixel mapping (module-level `_x_at_time_v`/
   `_time_v_at_x`) plus a dynamic right-margin on the ruler that tracks the
   canvas's scrollbar width.
+- Round 4: per-row visibility. Each row gets a small eye icon (hand-drawn,
+  not a font glyph) at the right edge of the label column; clicking it
+  hides/shows that keypoint (or every keypoint in a group row at once).
+  Hidden keypoints are excluded from drag-select and Ctrl+click keyframe
+  toggling here, and from drawing/hit-testing/selection in the crop grid
+  (`PersonCropGridWidget._hidden_kp_indices`, the actual source of truth —
+  this widget only renders it and emits `visibility_toggled`).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QPointF, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -67,6 +74,8 @@ MIN_VIEW_SPAN_MS = 100  # can't zoom in past a 100ms window
 _EXPANDED_HEIGHT = 200  # default canvas height when first expanded
 _FRAME_GAP_PX_THRESHOLD = 6  # start drawing gaps once a frame is wider than this
 _FRAME_GAP_PX = 2
+_EYE_ICON_W = 18          # px — clickable/drawn width of the per-row visibility toggle
+_EYE_ICON_MARGIN = 4      # px gap between the icon and the label column's right edge
 
 _STATUS_COLORS = {
     STATUS_GREEN: QColor(80, 170, 80),
@@ -82,6 +91,9 @@ _RANGE_OVERLAY = QColor(255, 255, 255, 60)
 _PLAYHEAD_COLOR = QColor(255, 80, 80)
 _INLIER_BAR_COLOR = QColor(180, 180, 180)
 _DRAG_RECT_COLOR = QColor(120, 170, 255, 60)
+_HIDDEN_ROW_OVERLAY = QColor(0, 0, 0, 140)
+_EYE_ICON_COLOR = QColor(200, 200, 200)
+_EYE_ICON_HIDDEN_COLOR = QColor(110, 110, 110)
 
 # "Nice" tick intervals for the ruler, in ms — smallest that keeps labels
 # legibly spaced (see _pick_tick_interval_ms) is picked for the current zoom.
@@ -162,6 +174,39 @@ def build_rows(pose_model: PoseModel, expanded: set[str]) -> list[Row]:
     return rows
 
 
+def _eye_icon_x_range() -> tuple[float, float]:
+    """(x_start, x_end) of the visibility-toggle hotspot — same for every row."""
+    x = LABEL_W - _EYE_ICON_W - _EYE_ICON_MARGIN
+    return (x, x + _EYE_ICON_W)
+
+
+def _eye_icon_rect(row_y: int) -> tuple[float, float, float, float]:
+    """(x, y, w, h) of the visibility-toggle icon for a row at *row_y*."""
+    x, _x_end = _eye_icon_x_range()
+    h = ROW_H - 4
+    y = row_y + 2
+    return (x, y, _EYE_ICON_W, h)
+
+
+def _draw_eye_icon(painter: QPainter, rect: tuple[float, float, float, float], visible: bool) -> None:
+    """A small hand-drawn eye (outline + pupil), or the same shape with a
+    diagonal slash through it when hidden — avoids depending on an emoji /
+    icon font being available for a plain QPainter widget."""
+    x, y, w, h = rect
+    cx, cy = x + w / 2, y + h / 2
+    ew, eh = w * 0.75, h * 0.6
+    color = _EYE_ICON_COLOR if visible else _EYE_ICON_HIDDEN_COLOR
+    painter.setPen(QPen(color, 1.2))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(QPointF(cx, cy), ew / 2, eh / 2)
+    if visible:
+        painter.setBrush(color)
+        painter.drawEllipse(QPointF(cx, cy), eh * 0.2, eh * 0.2)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+    else:
+        painter.drawLine(QPointF(x + 1, y + 1), QPointF(x + w - 1, y + h - 1))
+
+
 _DRAG_THRESHOLD = 5  # px — matches _KP_DRAG_THRESHOLD in content_panels.py's _ImageCanvas
 
 
@@ -185,6 +230,9 @@ class _TimelineCanvas(QWidget):
     # emitted whenever the visible time window changes (zoom in/out/fit), so the
     # host container can resync its panning scrollbar and the ruler can redraw
     view_changed = Signal()
+    # kp_indices(frozenset[int]) — eye-icon click on a row's label column;
+    # the host decides show-vs-hide (see PersonCropGridWidget's handler)
+    visibility_toggled = Signal(object)
 
     def __init__(self, pose_model: PoseModel, parent=None) -> None:
         super().__init__(parent)
@@ -207,6 +255,7 @@ class _TimelineCanvas(QWidget):
         self._view_end_v: int = 1
 
         self._sel_kp_indices: set[int] = set()
+        self._hidden_kp: frozenset[int] = frozenset()
         self._range_start_v: int | None = None
         self._range_end_v: int | None = None
         self._current_v: int = 0
@@ -286,6 +335,10 @@ class _TimelineCanvas(QWidget):
 
     def set_current_time_v(self, v: int) -> None:
         self._current_v = v
+        self.update()
+
+    def set_hidden(self, hidden: frozenset[int]) -> None:
+        self._hidden_kp = hidden
         self.update()
 
     # ------------------------------------------------------------------
@@ -470,7 +523,9 @@ class _TimelineCanvas(QWidget):
         return segments
 
     def _kp_indices_in_row_range(self, y0: float, y1: float) -> set[int]:
-        """Union of kp_indices for every row whose band intersects [y0, y1]."""
+        """Union of kp_indices for every row whose band intersects [y0, y1],
+        excluding hidden keypoints — a rubber-band drag over a group with
+        some hidden members must not select the hidden ones."""
         if not self._rows:
             return set()
         idx0 = max(0, int(y0) // ROW_H)
@@ -478,10 +533,17 @@ class _TimelineCanvas(QWidget):
         result: set[int] = set()
         for i in range(idx0, idx1 + 1):
             result.update(self._rows[i].kp_indices)
-        return result
+        return result - self._hidden_kp
 
     def _is_row_selected(self, row: Row) -> bool:
         return bool(self._sel_kp_indices) and bool(set(row.kp_indices) & self._sel_kp_indices)
+
+    def _is_row_hidden(self, row: Row) -> bool:
+        """True once *every* keypoint in the row is hidden — drives both the
+        eye-icon glyph and the row-dimming overlay. A group with only some
+        children hidden still reads as visible (open eye), since there's
+        real, interactable content left in it."""
+        return bool(row.kp_indices) and all(i in self._hidden_kp for i in row.kp_indices)
 
     def _range_frame_pixel_bounds(self) -> tuple[float, float] | None:
         """Pixel span covering every whole frame in [_range_start_v, _range_end_v].
@@ -533,6 +595,12 @@ class _TimelineCanvas(QWidget):
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position()
+            eye_x0, eye_x1 = _eye_icon_x_range()
+            if eye_x0 <= pos.x() < eye_x1:
+                row = self._row_at_y(int(pos.y()))
+                if row is not None and row.kp_indices:
+                    self.visibility_toggled.emit(frozenset(row.kp_indices))
+                    return
             if pos.x() < LABEL_W:
                 row = self._row_at_y(int(pos.y()))
                 if row is not None and row.kind == "group":
@@ -572,7 +640,8 @@ class _TimelineCanvas(QWidget):
         if self._edit_mode:
             if self._drag_ctrl and not self._drag_moved:
                 row = self._row_at_y(int(y0))
-                if row is not None and row.kind == "leaf" and x0 >= LABEL_W:
+                if (row is not None and row.kind == "leaf" and x0 >= LABEL_W
+                        and row.kp_indices[0] not in self._hidden_kp):
                     v = self._time_v_at_x(x0)
                     self.keyframe_toggled.emit(row.kp_indices[0], v)
             elif self._drag_moved:
@@ -616,6 +685,7 @@ class _TimelineCanvas(QWidget):
             for row_idx, row in enumerate(self._rows):
                 y = row_idx * ROW_H
                 is_selected = self._is_row_selected(row)
+                is_hidden = self._is_row_hidden(row)
                 if is_selected:
                     painter.fillRect(0, y, self.width(), ROW_H, _SELECTED_ROW_BG)
 
@@ -625,6 +695,7 @@ class _TimelineCanvas(QWidget):
                 if row.kind == "group":
                     prefix = "▼ " if row.label in self._expanded else "▶ "
                 painter.drawText(indent, y + ROW_H - 4, prefix + row.label)
+                _draw_eye_icon(painter, _eye_icon_rect(y), visible=not is_hidden)
 
                 for x, w, code in self._status_columns(row, split_by_frame):
                     color = _STATUS_COLORS.get(code, _NO_DATA_COLOR)
@@ -647,6 +718,13 @@ class _TimelineCanvas(QWidget):
                 if is_selected and range_bounds is not None:
                     x1, x2 = range_bounds
                     painter.fillRect(int(x1), y, max(1, int(x2 - x1)), ROW_H, _RANGE_OVERLAY)
+
+                # Dim the whole row (label, status cells, everything) once
+                # every keypoint in it is hidden — a translucent wash over
+                # already-drawn content is simpler than threading a "hidden"
+                # branch through every color decision above.
+                if is_hidden:
+                    painter.fillRect(0, y, self.width(), ROW_H, _HIDDEN_ROW_OVERLAY)
 
             if self._view_start_v <= self._current_v <= self._view_end_v:
                 px = self._x_at_time_v(self._current_v)
@@ -801,6 +879,7 @@ class KeypointTimelineWidget(QWidget):
     keyframe_toggled = Signal(int, int)
     time_scrubbed = Signal(int)
     collapsed_changed = Signal(bool)
+    visibility_toggled = Signal(object)
 
     def __init__(self, pose_model: PoseModel, cameras: list[dict], parent=None) -> None:
         super().__init__(parent)
@@ -842,6 +921,7 @@ class KeypointTimelineWidget(QWidget):
         self._canvas.rubber_band_selected.connect(self.rubber_band_selected)
         self._canvas.keyframe_toggled.connect(self.keyframe_toggled)
         self._canvas.time_scrubbed.connect(self.time_scrubbed)
+        self._canvas.visibility_toggled.connect(self.visibility_toggled)
         self._canvas.view_changed.connect(self._sync_hscroll)
 
         self._ruler = _RulerWidget(self._canvas)
@@ -974,6 +1054,9 @@ class KeypointTimelineWidget(QWidget):
     def set_current_time_v(self, v: int) -> None:
         self._canvas.set_current_time_v(v)
         self._ruler.update()
+
+    def set_hidden(self, hidden: frozenset[int]) -> None:
+        self._canvas.set_hidden(hidden)
 
     def set_edit_mode(self, enabled: bool) -> None:
         self._canvas.set_edit_mode(enabled)

@@ -168,8 +168,17 @@ _LEFT_FOOT_IDX  = frozenset({17, 18, 19})
 _RIGHT_FOOT_IDX = frozenset({20, 21, 22})
 _BODY17_IDX     = frozenset(range(17))
 
+# The default skeleton (tests/data/Harri_skeleton-regress-test.yaml) only
+# attaches markers to nose + ears — eyes and the 68 detailed face landmarks
+# aren't used by tracking. Splitting "Face" into that small, actually-useful
+# subset plus everything else keeps "Select Face" meaningful for editing
+# instead of pulling in ~70 densely-packed, rarely-needed points at once.
+_FACE_MARKER_IDX = frozenset({0, 3, 4})              # nose, left_ear, right_ear
+_FACE_DETAIL_IDX = frozenset({1, 2}) | _FACE_IDX     # eyes + jaw/brow/nose/lip landmarks
+
 _COCO133_GROUPS: dict[str, frozenset[int]] = {
-    "Face":        frozenset({0, 1, 2, 3, 4}) | _FACE_IDX,
+    "Face":          _FACE_MARKER_IDX,
+    "Face (detail)": _FACE_DETAIL_IDX,
     "Left arm":    frozenset({5, 7, 9}),
     "Right arm":   frozenset({6, 8, 10}),
     "Left hand":   _LEFT_HAND_IDX,
@@ -184,7 +193,8 @@ _COCO133_GROUPS: dict[str, frozenset[int]] = {
 }
 
 _COCO133_TREE_GROUPS: tuple[str, ...] = (
-    "Face", "Left arm", "Right arm", "Left hand", "Right hand", "Left leg", "Right leg",
+    "Face", "Face (detail)", "Left arm", "Right arm", "Left hand", "Right hand",
+    "Left leg", "Right leg",
 )
 
 COCO133 = PoseModel(

@@ -442,6 +442,47 @@ def update_single_keypoint_edit(
     write_observation_edit(session, sequence_id, camera_instance_id, video_frame, edit_kp, bytes(mask))
 
 
+def clear_single_keypoint_edit(
+    session: sqlite3.Connection,
+    sequence_id: str,
+    camera_instance_id: str,
+    video_frame: int,
+    kp_idx: int,
+) -> None:
+    """Clear one keypoint slot's override, reverting it to the original detection.
+
+    Clears the kp_mask bit for kp_idx; if no slots remain overridden, deletes
+    the row entirely.  No-op if there is no edit row for this frame.
+    """
+    edit_row = session.execute(
+        "SELECT kp_mask FROM pose_observation_edits"
+        " WHERE sequence_id = ? AND camera_instance_id = ? AND video_frame = ?",
+        (sequence_id, camera_instance_id, video_frame),
+    ).fetchone()
+    if edit_row is None:
+        return
+
+    mask = bytearray(bytes(edit_row["kp_mask"]))
+    byte_idx, bit_idx = divmod(kp_idx, 8)
+    if byte_idx >= len(mask):
+        return
+    mask[byte_idx] &= ~(1 << bit_idx)
+
+    if any(mask):
+        session.execute(
+            "UPDATE pose_observation_edits SET kp_mask = ?"
+            " WHERE sequence_id = ? AND camera_instance_id = ? AND video_frame = ?",
+            (bytes(mask), sequence_id, camera_instance_id, video_frame),
+        )
+    else:
+        session.execute(
+            "DELETE FROM pose_observation_edits"
+            " WHERE sequence_id = ? AND camera_instance_id = ? AND video_frame = ?",
+            (sequence_id, camera_instance_id, video_frame),
+        )
+    session.commit()
+
+
 def read_track_spans(
     session: sqlite3.Connection,
     detection_run_id: str,

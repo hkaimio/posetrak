@@ -26,6 +26,11 @@ class PoseModel:
     model_id: str
     names: tuple[str, ...]
     groups: dict[str, frozenset[int]]
+    # Ordered subset of `groups` names that partitions all keypoint indices with
+    # no overlap — used for tree-structured views (e.g. the timeline dope sheet).
+    # `groups` itself is not partition-safe: entries like "Upper body" or "Torso"
+    # deliberately overlap "Left arm" etc. for the flexible group-selection menu.
+    tree_groups: tuple[str, ...] = ()
 
     def name_of(self, idx: int) -> str:
         if 0 <= idx < len(self.names):
@@ -77,10 +82,15 @@ _COCO17_GROUPS: dict[str, frozenset[int]] = {
     "Lower body":  frozenset(range(11, 17)),
 }
 
+_COCO17_TREE_GROUPS: tuple[str, ...] = (
+    "Face", "Left arm", "Right arm", "Left leg", "Right leg",
+)
+
 COCO17 = PoseModel(
     model_id="coco-17",
     names=_COCO17_NAMES,
     groups=_COCO17_GROUPS,
+    tree_groups=_COCO17_TREE_GROUPS,
 )
 
 
@@ -173,11 +183,34 @@ _COCO133_GROUPS: dict[str, frozenset[int]] = {
     "Lower body":  frozenset({11, 12, 13, 14, 15, 16}) | _LEFT_FOOT_IDX | _RIGHT_FOOT_IDX,
 }
 
+_COCO133_TREE_GROUPS: tuple[str, ...] = (
+    "Face", "Left arm", "Right arm", "Left hand", "Right hand", "Left leg", "Right leg",
+)
+
 COCO133 = PoseModel(
     model_id="coco-133",
     names=_COCO133_NAMES,
     groups=_COCO133_GROUPS,
+    tree_groups=_COCO133_TREE_GROUPS,
 )
+
+
+def _assert_tree_partitions(model: PoseModel) -> None:
+    """Verify tree_groups covers every keypoint index exactly once."""
+    seen: set[int] = set()
+    for group in model.tree_groups:
+        idx = model.groups[group]
+        overlap = seen & idx
+        assert not overlap, f"{model.model_id}: {group!r} overlaps prior tree groups at {overlap}"
+        seen |= idx
+    assert seen == model.all_indices, (
+        f"{model.model_id}: tree_groups cover {sorted(seen)}, "
+        f"missing {sorted(model.all_indices - seen)}"
+    )
+
+
+_assert_tree_partitions(COCO17)
+_assert_tree_partitions(COCO133)
 
 
 # ---------------------------------------------------------------------------

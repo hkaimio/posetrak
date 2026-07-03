@@ -1693,6 +1693,206 @@ sharing a cache — verify the cache survives until the second also closes.
 
 ---
 
+## Zoom and pan in the camera crop views
+
+### Motivation
+
+The wide-crop cache (see above) already caches more pixel detail than the
+display currently uses — crops are encoded up to `MAX_LONG_EDGE` (1200px)
+long edge, well beyond the ~240-400px a typical crop cell renders at. That
+headroom was explicitly left for future zoom (see *Tiling / digital zoom*
+above). Precise keypoint placement — small joints (fingers, ankles), or fast
+motion where the auto-detected position is close but not exact — needs the
+ability to zoom in past "fit to cell" and pan around, independently per
+camera.
+
+### Interaction model: designed around the touchpad, not added to it after
+
+This needs to work identically with a mouse and a laptop touchpad. Qt
+reports two-finger touchpad scroll (Windows Precision Touchpad) through the
+same `QWheelEvent` a mouse wheel produces — vertical `angleDelta().y()`, and,
+for a two-finger swipe in any direction, `angleDelta().x()` too — so there is
+no separate touchpad code path to write. The design just needs to not lean
+on gestures a touchpad can't produce: a real middle mouse button, or
+pinch-to-zoom (`QNativeGestureEvent`), which Qt's Windows touchpad support is
+inconsistent about across driver versions and not something to depend on for
+a first cut.
+
+That's what rules out the initial "plain scroll = zoom" idea: reserving
+scroll for zoom would leave touchpad users with no way to pan at all (no
+middle button, and holding a modifier while swiping is asking a touchpad to
+do something a mouse doesn't need to). Flipping the convention around fixes
+both devices with the same gesture set, and reuses a modifier this app's
+users are already trained on:
+
+| Input | Action |
+|---|---|
+| Plain wheel scroll / two-finger scroll | Pan (vertical delta → vertical pan; a two-finger diagonal swipe pans both axes) |
+| `Ctrl` + wheel scroll / `Ctrl` + two-finger scroll | Zoom, centered on the cursor position |
+| Middle-mouse drag | Pan (mouse-only convenience; touchpad users already have scroll-to-pan) |
+| Double-click, or a small per-cell "Fit" affordance | Reset to fit (today's behavior, unchanged default) |
+
+`Ctrl`+wheel matches the existing timeline zoom convention (Round 1 in
+status.md) — same modifier, no new convention for users to learn, and it's
+also the general-purpose-app convention (browsers, image viewers) for
+exactly the reason above: plain scroll is claimed by panning/scrolling
+everywhere else, so zoom needs a modifier regardless of device.
+
+### View state: a full-frame rectangle, not a display-pixel offset
+
+Zoom/pan state must survive scrubbing to a nearby frame, but the *source
+image itself can change* between frames — the wide-crop cache's cluster crop
+is only stable within one ~0.4s epoch (see *Background wide-crop frame
+cache* above); crossing an epoch boundary can shift the underlying crop's
+position and size. Storing pan as a fixed offset in *display* pixels would
+silently show a different part of the scene the moment the source crop
+shifts under it.
+
+Instead, `_ImageCanvas` stores the user's desired view as a rectangle in
+**full-frame pixel coordinates** — `self._zoom_rect: (x0, y0, x1, y1) | None`,
+`None` meaning "fit whatever crop is given" (today's behavior, unchanged
+default):
+
+- **Zoom**: if `_zoom_rect` is `None`, initialize it from the pixmap's
+  current full-frame extent (`self._x1, self._y1` plus its size divided by
+  `self._src_scale` — already tracked for the existing crop-to-full-frame
+  overlay math). Then shrink/grow it around the full-frame point under the
+  cursor (inverse of the existing `to_pt` transform) by the wheel's zoom
+  factor.
+- **Pan**: translate `_zoom_rect` by the wheel/drag delta converted from
+  display pixels to full-frame pixels (divide by the current combined
+  scale).
+- **At paint time**: clamp `_zoom_rect` to the *current* pixmap's own
+  full-frame extent (same "can't show pixels that were never decoded" clamp
+  already used for the wide-crop cache's sub-crop, in `_load_frame` /
+  `_display_crop_result`) before computing the display transform. If the
+  clamped rectangle has shrunk to nothing — the new frame's crop doesn't
+  overlap the desired view at all, e.g. after a large epoch-boundary shift —
+  fall back to fit mode for that frame rather than show a blank cell, but
+  don't clear the stored `_zoom_rect` itself, so the zoomed view resumes as
+  soon as an overlapping frame is reached again.
+
+This is the same clamp-and-fall-back shape already built for the wide-crop
+cache's own sub-cropping — the two features compose rather than fighting
+each other.
+
+### Consolidating the coordinate transform
+
+`_ImageCanvas.paintEvent`, its mouse handlers (click hit-testing, drag,
+rubber-band, context menu), and `_image_rect()` each independently derive a
+`combined = self._src_scale * disp_scale` today (four call sites). Zoom/pan
+adds a second scale factor and an offset every one of them needs too, so
+this needs consolidating into one method — e.g. `_view_transform() ->
+(off_x, off_y, combined_scale)` — used by every consumer, rather than adding
+a fifth ad hoc copy of the same math. This is mechanical but not optional:
+any interaction that doesn't route through it will silently misregister the
+moment a cell is zoomed.
+
+### Phasing
+
+**Phase 25 — canonical view transform + zoom.** Consolidate the four
+existing `combined = src_scale * disp_scale` call sites into one
+`_view_transform()`; add `_zoom_rect`, `Ctrl`+wheel zoom centered on the
+cursor, clamped to the pixmap's own extent. *Validation*: zoom in on a
+keypoint, verify click/drag/rubber-band hit-testing still lines up exactly
+with what's drawn at the new scale; verify plain (non-`Ctrl`) scroll and all
+existing shortcuts are unaffected on an unzoomed cell.
+
+**Phase 26 — pan.** Plain wheel/two-finger-scroll and middle-drag translate
+`_zoom_rect`; clamp-and-fall-back-to-fit at frame load when the new frame's
+crop doesn't cover the stored view. *Validation*: zoom in, scrub across an
+epoch boundary, verify the view either follows smoothly or falls back to fit
+without an error or blank cell — never shows stale/wrong pixels; verify a
+two-finger diagonal touchpad swipe pans both axes at once.
+
+**Phase 27 — reset/fit + persistence check.** Double-click (or a small
+per-cell button) resets `_zoom_rect` to `None`. *Validation*: zoom one
+camera cell, scrub several frames within the same epoch, verify the view
+stays anchored to the same real-world region (not just visually similar) by
+parking on a specific static object in the background; reset and verify it
+returns to today's fit-to-cell behavior exactly.
+
+---
+
+## Keypoint-placement toolbar
+
+### Motivation
+
+The existing move-a-keypoint interaction (drag from an existing dot) has a
+hard prerequisite: a dot to grab. Two of the cases keypoint editing exists
+for don't have one:
+
+- The person wasn't detected at all in this frame (no observation, no dot)
+  — Phase 7's ghost-frame placement already covers this, but only through
+  the *currently selected* keypoint and only by clicking empty space, so
+  switching which keypoint you're placing means going back to a *different*,
+  already-drawn dot elsewhere to reselect first.
+- Detection exists but is bad enough that the wrong keypoint's dot is what
+  you'd have to click on, or dots are stacked closely enough that hitting
+  the right one is fiddly.
+
+Both are solved by picking the target keypoint from a list instead of from
+the canvas.
+
+### Design
+
+A new persistent panel — the same `pose_model.tree_groups` hierarchy the
+timeline already uses for its row tree (`build_rows` in
+`keypoint_timeline_widget.py`), reused here as a plain clickable tree rather
+than the timeline's per-frame status columns.
+
+1. Clicking a **leaf** row (single keypoint) sets
+   `self._pending_place_kp_idx` and changes every camera canvas's cursor to
+   a crosshair (`Qt.CursorShape.CrossCursor`). Clicking a **group** row can
+   still drive the existing multi-select context-menu behavior (unchanged)
+   but does not enter placement mode — placement is one keypoint at a time,
+   since a single click only has one location to give it.
+2. The **next click on any camera canvas**, in any state — empty space, on
+   top of an existing dot, ghost frame or not — places
+   `self._pending_place_kp_idx` at the clicked location via the existing
+   `_on_kp_moved(cam_idx, kp_idx, new_x, new_y)` write path
+   (`update_single_keypoint_edit` → re-read merged observations → refresh
+   timeline → reload frame). This is a strict superset of what
+   `_on_empty_area_clicked` already does for ghost frames — same write path,
+   just no longer gated on "no observation for this frame at all" or
+   restricted to whichever keypoint happens to be the current primary
+   selection.
+3. Placement mode **stays active** after a placement, so the same keypoint
+   can be placed across several consecutive frames/cameras in one sweep
+   (matches the existing range-editing spirit of `Shift+A/D`) — it doesn't
+   revert to a passive/select mode after one click, since scanning through a
+   bad-detection stretch and re-placing the same joint frame by frame is the
+   expected use, not a one-off correction.
+4. `Esc` clears `self._pending_place_kp_idx` and reverts the cursor.
+   Existing `Esc` semantics (deselect keypoint / exit edit mode, see
+   *Interaction model* above) still apply once nothing is pending —
+   placement-cancel takes priority over them, not instead of them.
+5. Picking a *different* keypoint from the list while one is already
+   pending simply retargets it — no need to `Esc` first.
+
+### Phasing
+
+**Phase 28 — toolbar panel.** New dock/panel widget listing
+`pose_model.tree_groups` (group headers + expandable leaf rows — worth
+sharing `build_rows` from `keypoint_timeline_widget.py` rather than
+reimplementing the same tree derivation). Clicking a leaf sets
+`_pending_place_kp_idx` and the crosshair cursor on every canvas.
+*Validation*: open the panel for a skeleton with several groups, verify
+every keypoint is reachable and clicking one visibly changes the cursor over
+the camera cells.
+
+**Phase 29 — canvas placement override.** Canvas mouse-press, when
+`_pending_place_kp_idx` is set, short-circuits the existing
+hit-test/select/drag/ghost-frame branches and calls `_on_kp_moved` directly
+at the click location; `Esc` clears the pending state ahead of its existing
+deselect/exit-edit-mode handling. *Validation*: with a keypoint picked from
+the list, click a frame that has other correctly-detected keypoints and
+verify only the picked one moves; click across several consecutive frames
+and verify placement mode persists between clicks; press `Esc` mid-placement
+and verify the cursor reverts and a normal click no longer places anything.
+
+---
+
 ## Open questions
 
 1. **Freeze / version management** — the brief envisions marking the current

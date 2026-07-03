@@ -29,6 +29,8 @@ See:
 | — | Partial tracking (checkpoint + resume from mid-trial) | ⬜ Designed, not implemented |
 | — | Per-keypoint/camera/frame measurement noise override | ⬜ Designed, not implemented |
 | — | Background wide-crop frame cache (person-cluster merging) | ✅ Done (see below) |
+| 25-27 | Zoom and pan in the camera crop views | ⬜ Designed, not implemented |
+| 28-29 | Keypoint-placement toolbar (pick from list, click to place) | ⬜ Designed, not implemented |
 
 Phases 1-10 predate this status document; phases 11-14 and the follow-up UX rounds below were
 implemented together as one continuous effort.

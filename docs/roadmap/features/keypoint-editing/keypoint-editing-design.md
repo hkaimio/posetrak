@@ -1558,25 +1558,39 @@ know that ahead of time.
 3. If found: sub-crop the decoded cluster JPEG to the target track's own
    window — not the whole cluster, and not a re-derived tight window.
 4. Widen that sub-crop to cover whatever keypoints are actually about to be
-   drawn for this frame (the merged `pose_observations` + edits result, at
-   the same confidence cutoff the overlay itself uses to decide what's
-   visible), then clamp the result to what the cluster image actually has
-   decoded — a sub-crop can't show pixels outside the cached region.
-5. If even the clamped, widened window still doesn't cover the displayed
-   keypoints — the edit moved something outside this cluster's own cached
-   extent entirely — don't use this cache entry for this frame. Fall through
-   to the existing chain instead (step 7) rather than show a crop that's
-   silently missing part of what should be visible.
-6. If two people sharing the same cluster both have edit panels open at
+   drawn for this frame:
+   - the merged `pose_observations` + edits result (same confidence cutoff
+     the overlay uses to decide what's visible), and
+   - the tracked skeleton's projected joints/markers, if a tracking run is
+     selected and available. Keypoints can in principle be edited before a
+     tracking run exists, or a selected run's own projection can drift from
+     the raw detection the cache was built from — either way this is a
+     second, independent overlay that needs the same guarantee.
+5. Grow (never shrink) the widened window to match the display cell's own
+   aspect ratio, so the cell fills with image content instead of showing a
+   letterboxed black border around whatever aspect ratio the padded/widened
+   window happened to end up with.
+6. Clamp the result to what the cluster image actually has decoded — a
+   sub-crop can't show pixels outside the cached region. (The aspect-ratio
+   growth in step 5 happens *before* this clamp, so it only fills in extra
+   margin where the cache actually has it — it never causes a fallback on
+   its own.)
+7. If even the clamped, keypoint-widened window (before the aspect-ratio
+   growth) still doesn't cover the displayed keypoints/joints — the edit or
+   tracking result moved something outside this cluster's own cached extent
+   entirely — don't use this cache entry for this frame. Fall through to the
+   existing chain instead (step 9) rather than show a crop that's silently
+   missing part of what should be visible.
+8. If two people sharing the same cluster both have edit panels open at
    once, both read the same cached cluster JPEG and each does its own local
-   sub-crop from steps 3-4 — no extra decode or storage cost. This is where
+   sub-crop from steps 3-6 — no extra decode or storage cost. This is where
    the sharing actually pays off, and is also why the cache is scoped to the
    detection run rather than to a single panel (see *Cache scope and
    lifecycle* below) — a second person's panel should reuse, not rebuild,
    crops the first person's panel already generated.
-7. If no cluster entry exists yet for this `(shot_video_id, frame_idx,
+9. If no cluster entry exists yet for this `(shot_video_id, frame_idx,
    track)` (background worker hasn't reached it, or hasn't started for this
-   camera), or step 5 rejected the one that does exist: fall back to the
+   camera), or step 7 rejected the one that does exist: fall back to the
    existing layered chain unchanged — DB blob → Phase 6 in-memory synthetic
    crop → placeholder.
 
@@ -1648,21 +1662,25 @@ real detections before/after the gap, not an empty or missing crop.
 **Phase 23 — layered frame serving.** Extend the crop-source fallback chain
 to check the cluster cache first via the selection algorithm above:
 sub-crop to the target track's own padded window, widen to cover the
-frame's actual displayed keypoints (including edits), clamp to the
-cluster's decoded extent, and fall through to the existing chain if that
-still doesn't cover everything (see that section for the two wrong
-revisions this went through first).
+frame's actual displayed keypoints and tracked-skeleton projection
+(including edits, and independent of the tracking run's own drift), grow to
+the display cell's aspect ratio, clamp to the cluster's decoded extent, and
+fall through to the existing chain if that still doesn't cover everything
+(see that section for the two wrong revisions this went through first).
 *Validation*: scrub to a frame before extraction reaches it — verify the
 existing 240p crop displays; scrub back after extraction has passed that
 frame — verify the display seamlessly upgrades to the sharper, more
 generously framed image (visibly wider margin than the old 240p crop, not
 just higher resolution, but zoomed to the person being edited rather than
-the whole cluster) with no visible reload glitch; open a second person's
-panel in the same trial and verify it reuses the first panel's already-built
-cache instead of restarting extraction from scratch; edit a keypoint to a
-position well outside the original detection's bbox and verify the crop
-either widens to include it or falls back cleanly, never silently clipping
-it off-frame.
+the whole cluster) with no visible reload glitch and no letterboxed black
+border around the crop cell; open a second person's panel in the same trial
+and verify it reuses the first panel's already-built cache instead of
+restarting extraction from scratch; edit a keypoint to a position well
+outside the original detection's bbox and verify the crop either widens to
+include it or falls back cleanly, never silently clipping it off-frame;
+select a tracking run whose projected skeleton reaches outside the person's
+own detected bbox and verify the same widen-or-fall-back behavior applies
+to it too.
 
 **Phase 24 — priority + status bar + lifecycle.** `prioritise()` called on
 scrub, status bar message while active, reference-counted worker/cache

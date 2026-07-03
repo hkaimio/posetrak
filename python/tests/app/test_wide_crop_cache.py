@@ -22,7 +22,11 @@ from app.pose.wide_crop_cache import (
     _union_rect,
     cluster_rects,
 )
-from app.ui.content_panels import _kp_overlay_bbox
+from app.ui.content_panels import (
+    _expand_rect_to_aspect,
+    _kp_overlay_bbox,
+    _tracked_overlay_bbox,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -224,3 +228,48 @@ def test_kp_overlay_bbox_ignores_hidden_indices():
 def test_kp_overlay_bbox_covers_all_visible_points():
     kp = _kp_array((50, 100, 0.9), (10, 400, 0.5), (200, 20, 0.2))
     assert _kp_overlay_bbox(kp, frozenset()) == (10, 20, 200, 400)
+
+
+# ---------------------------------------------------------------------------
+# _tracked_overlay_bbox -- tracked-skeleton coverage for the same sub-crop
+# ---------------------------------------------------------------------------
+
+def test_tracked_overlay_bbox_none_when_nothing_available():
+    assert _tracked_overlay_bbox(None, None) is None
+
+
+def test_tracked_overlay_bbox_covers_joints_and_markers():
+    joint_xy = {"hip": [50.0, 60.0], "knee": [10.0, 400.0]}
+    marker_xy = np.array([[200.0, 20.0], [30.0, 30.0]], dtype=np.float32)
+    assert _tracked_overlay_bbox(joint_xy, marker_xy) == (10.0, 20.0, 200.0, 400.0)
+
+
+def test_tracked_overlay_bbox_ignores_nan_joints():
+    joint_xy = {"hip": [50.0, 60.0], "behind_camera": [float("nan"), float("nan")]}
+    assert _tracked_overlay_bbox(joint_xy, None) == (50.0, 60.0, 50.0, 60.0)
+
+
+def test_tracked_overlay_bbox_ignores_nan_markers():
+    marker_xy = np.array([[float("nan"), float("nan")], [30.0, 40.0]], dtype=np.float32)
+    assert _tracked_overlay_bbox(None, marker_xy) == (30.0, 40.0, 30.0, 40.0)
+
+
+# ---------------------------------------------------------------------------
+# _expand_rect_to_aspect -- fill the cell instead of letterboxing
+# ---------------------------------------------------------------------------
+
+def test_expand_rect_to_aspect_grows_width_when_too_narrow():
+    # 100x200 rect (ar=0.5) expanded to a 1:1 cell -> grow width to 200x200.
+    rect = _expand_rect_to_aspect((0, 0, 100, 200), target_ar=1.0)
+    assert rect == (-50, 0, 150, 200)
+
+
+def test_expand_rect_to_aspect_grows_height_when_too_short():
+    # 200x100 rect (ar=2.0) expanded to a 1:1 cell -> grow height to 200x200.
+    rect = _expand_rect_to_aspect((0, 0, 200, 100), target_ar=1.0)
+    assert rect == (0, -50, 200, 150)
+
+
+def test_expand_rect_to_aspect_noop_when_already_matching():
+    rect = _expand_rect_to_aspect((0, 0, 160, 90), target_ar=16 / 9)
+    assert rect == (0, 0, 160, 90)

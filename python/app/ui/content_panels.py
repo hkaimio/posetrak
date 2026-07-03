@@ -1420,6 +1420,61 @@ def _kp_overlay_bbox(obs_kp, hidden_indices: "frozenset[int]"):
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+def _tracked_overlay_bbox(joint_xy: "dict | None", marker_xy) -> "tuple | None":
+    """Bounding box (x0, y0, x1, y1), full-frame pixel coords, of the tracked
+    skeleton's projected joints/markers for one camera + tracker step, or
+    None if neither is available.
+
+    A tracking result can exist and be selected independently of whether the
+    person's keypoints have been edited yet (edits are normally done before
+    tracking, but nothing prevents editing after a run too), so the wide-crop
+    sub-crop must cover this overlay as well as `_kp_overlay_bbox`'s.
+    """
+    from math import isnan
+
+    xs, ys = [], []
+    if joint_xy:
+        for u, v in joint_xy.values():
+            u, v = float(u), float(v)
+            if isnan(u) or isnan(v):
+                continue
+            xs.append(u)
+            ys.append(v)
+    if marker_xy is not None:
+        for i in range(marker_xy.shape[0]):
+            u, v = float(marker_xy[i, 0]), float(marker_xy[i, 1])
+            if isnan(u) or isnan(v):
+                continue
+            xs.append(u)
+            ys.append(v)
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _expand_rect_to_aspect(rect: tuple, target_ar: float) -> tuple:
+    """Grow *rect* (x0, y0, x1, y1), centered, to match *target_ar* (w/h).
+
+    Only ever grows, never shrinks, so callers that already ensured some
+    minimum content is covered don't lose it. Used so the wide-crop cache's
+    displayed sub-crop fills the cell instead of leaving a letterboxed black
+    border -- the padded/keypoint-widened window has no inherent reason to
+    match the cell's aspect ratio otherwise.
+    """
+    x0, y0, x1, y1 = rect
+    w, h = x1 - x0, y1 - y0
+    if w <= 0 or h <= 0 or target_ar <= 0:
+        return rect
+    cur_ar = w / h
+    if cur_ar < target_ar:
+        new_w = h * target_ar
+        dx = (new_w - w) / 2
+        return (x0 - dx, y0, x1 + dx, y1)
+    new_h = w / target_ar
+    dy = (new_h - h) / 2
+    return (x0, y0 - dy, x1, y1 + dy)
+
+
 def _build_cam_trail(
     kp_by_frame: dict,
     cam_id: str,
@@ -3755,27 +3810,51 @@ class PersonCropGridWidget(QWidget):
                             self._obs_kp.get(cam_id, {}).get(frame_idx),
                             frozenset(self._hidden_kp_indices),
                         )
+                        # Also cover the tracked skeleton (cyan overlay), if a
+                        # tracking run is selected -- keypoints can in
+                        # principle be edited before a tracking run exists,
+                        # or a run can be selected whose own projected joints
+                        # drifted away from the raw detection the cache was
+                        # built from.
+                        tracked_bbox = _tracked_overlay_bbox(
+                            self._joint_proj.get(cam_id, {}).get(tracking_step)
+                            if tracking_step is not None else None,
+                            self._marker_proj.get(cam_id, {}).get(tracking_step)
+                            if tracking_step is not None else None,
+                        )
                         desired = own_rect
-                        if kp_bbox is not None:
-                            # Widen to cover whatever's actually drawn -- an
-                            # edit can place a keypoint far from where the raw
-                            # (possibly wrong) detection the cache was built
-                            # from said the person was.
-                            desired = (
-                                min(desired[0], kp_bbox[0]), min(desired[1], kp_bbox[1]),
-                                max(desired[2], kp_bbox[2]), max(desired[3], kp_bbox[3]),
-                            )
+                        for bbox in (kp_bbox, tracked_bbox):
+                            if bbox is not None:
+                                # Widen to cover whatever's actually drawn -- an
+                                # edit (or a tracking run's own projection) can
+                                # place a point far from where the raw
+                                # (possibly wrong) detection the cache was
+                                # built from said the person was.
+                                desired = (
+                                    min(desired[0], bbox[0]), min(desired[1], bbox[1]),
+                                    max(desired[2], bbox[2]), max(desired[3], bbox[3]),
+                                )
+                        # Fill the cell instead of letterboxing: grow (never
+                        # shrink) to the cell's own aspect ratio before
+                        # clamping to available pixels.
+                        cell_w, cell_h = cell.width(), cell.height()
+                        if cell_w > 0 and cell_h > 0:
+                            desired = _expand_rect_to_aspect(desired, cell_w / cell_h)
                         # Clamp to what this cluster image actually has decoded --
                         # can't show pixels that were never cached.
                         clamped = (
                             max(desired[0], cluster_extent[0]), max(desired[1], cluster_extent[1]),
                             min(desired[2], cluster_extent[2]), min(desired[3], cluster_extent[3]),
                         )
-                        covers_kp = kp_bbox is None or (
-                            kp_bbox[0] >= cluster_extent[0] and kp_bbox[1] >= cluster_extent[1]
-                            and kp_bbox[2] <= cluster_extent[2] and kp_bbox[3] <= cluster_extent[3]
-                        )
-                        if covers_kp and clamped[2] > clamped[0] and clamped[3] > clamped[1]:
+
+                        def _fits(bbox):
+                            return bbox is None or (
+                                bbox[0] >= cluster_extent[0] and bbox[1] >= cluster_extent[1]
+                                and bbox[2] <= cluster_extent[2] and bbox[3] <= cluster_extent[3]
+                            )
+
+                        if (_fits(kp_bbox) and _fits(tracked_bbox)
+                                and clamped[2] > clamped[0] and clamped[3] > clamped[1]):
                             self._display_crop_result(
                                 cell, cam_id, svid, frame_idx, tracking_step,
                                 show_detected, show_tracked, wide, sub_rect=clamped,

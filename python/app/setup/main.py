@@ -3,17 +3,30 @@
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import sys
+from pathlib import Path
 
-logging.basicConfig(
-    level=logging.WARNING,
-    format="%(asctime)s %(name)s %(levelname)s: %(message)s",
-    datefmt="%H:%M:%S",
-    stream=sys.stderr,
+_LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+_LOG_PATH = _LOG_DIR / "posetrak-setup.log"
+
+_formatter = logging.Formatter(
+    "%(asctime)s %(name)s %(levelname)s: %(message)s", datefmt="%H:%M:%S",
 )
+_stream_handler = logging.StreamHandler(sys.stderr)
+_stream_handler.setFormatter(_formatter)
+_file_handler = logging.handlers.RotatingFileHandler(
+    _LOG_PATH, maxBytes=20_000_000, backupCount=5, encoding="utf-8",
+)
+_file_handler.setFormatter(_formatter)
+
+logging.basicConfig(level=logging.WARNING, handlers=[_stream_handler, _file_handler])
 # Verbose debug output for the setup wizard and LED sync algorithm.
 for _name in ("app.setup", "app.setup.led_sync"):
     logging.getLogger(_name).setLevel(logging.DEBUG)
+
+print(f"Logging to {_LOG_PATH}", file=sys.stderr)
 
 
 def main() -> int:

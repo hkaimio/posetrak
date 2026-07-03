@@ -263,14 +263,45 @@ class WideCropExtractWorker(QThread):
             by_track[r["track_id"]][r["video_frame"]] = (
                 r["bbox_x"], r["bbox_y"], r["bbox_w"], r["bbox_h"],
             )
-        windows = {tid: _TrackWindow(det) for tid, det in by_track.items()}
-        frame_min = min(min(det) for det in by_track.values())
-        frame_max = max(max(det) for det in by_track.values())
 
         cap = cv2.VideoCapture(cam.get("file_path", ""))
         if not cap.isOpened():
             _log.warning("wide-crop worker: cannot open video svid=%s", svid)
             return
+
+        # Detection bboxes are stored in the resolution the detection pipeline
+        # decoded frames at (see PoseWorker._run_pose). If this worker's own
+        # cv2.VideoCapture ever decodes the same file at a *different*
+        # resolution -- a stale/mismatched calibration record, a different
+        # OpenCV/ffmpeg build, a re-encoded file -- bboxes would silently land
+        # on the wrong region, and the error is far more visible on a 4K
+        # camera than a 1080p one for the same relative mismatch. Rescale
+        # defensively whenever the expected resolution (camera_modes /
+        # intrinsics_calibrations, same source `_video_dims` in
+        # content_panels.py uses) disagrees with what's actually decoded.
+        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        expected_w, expected_h = cam.get("expected_w"), cam.get("expected_h")
+        if expected_w and expected_h and (actual_w != expected_w or actual_h != expected_h):
+            sx, sy = actual_w / expected_w, actual_h / expected_h
+            _log.warning(
+                "wide-crop worker: resolution mismatch svid=%s expected=%dx%d "
+                "decoded=%dx%d -- rescaling bboxes by (%.4f, %.4f)",
+                svid, expected_w, expected_h, actual_w, actual_h, sx, sy,
+            )
+            for det in by_track.values():
+                for f, (cx, cy, w, h) in det.items():
+                    det[f] = (cx * sx, cy * sy, w * sx, h * sy)
+
+        windows = {tid: _TrackWindow(det) for tid, det in by_track.items()}
+        frame_min = min(min(det) for det in by_track.values())
+        frame_max = max(max(det) for det in by_track.values())
+        _log.info(
+            "wide-crop worker: svid=%s file=%s decoded=%dx%d fps=%.2f "
+            "tracks=%s frames=[%d,%d] epoch_frames=%d",
+            svid, cam.get("file_path"), actual_w, actual_h, fps,
+            sorted(by_track.keys()), frame_min, frame_max, epoch_frames,
+        )
 
         starts = list(range((frame_min // epoch_frames) * epoch_frames, frame_max + 1, epoch_frames))
         queue: collections.deque = collections.deque(starts)
@@ -391,8 +422,13 @@ class FrameCropCacheManager:
             ).fetchone()
             if row is not None:
                 cam_rows = conn.execute(
-                    "SELECT id AS shot_video_id, file_path, actual_fps "
-                    "FROM capture_videos WHERE shot_id=?",
+                    "SELECT cv.id AS shot_video_id, cv.file_path, cv.actual_fps, "
+                    "       COALESCE(cm.width_px, ic.image_width) AS expected_w, "
+                    "       COALESCE(cm.height_px, ic.image_height) AS expected_h "
+                    "FROM capture_videos cv "
+                    "LEFT JOIN camera_modes cm ON cm.id = cv.camera_mode_id "
+                    "LEFT JOIN intrinsics_calibrations ic ON ic.id = cv.intrinsics_calibration_id "
+                    "WHERE cv.shot_id=?",
                     (row["shot_id"],),
                 ).fetchall()
                 cameras = [
@@ -400,6 +436,8 @@ class FrameCropCacheManager:
                         "shot_video_id": r["shot_video_id"],
                         "file_path": r["file_path"] or "",
                         "fps": float(r["actual_fps"] or 30.0),
+                        "expected_w": int(r["expected_w"]) if r["expected_w"] else None,
+                        "expected_h": int(r["expected_h"]) if r["expected_h"] else None,
                     }
                     for r in cam_rows
                 ]

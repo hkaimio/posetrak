@@ -39,6 +39,8 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -1629,6 +1631,11 @@ class _ImageCanvas(QWidget):
     rubber_band_selected = Signal(float, float, float, float, bool)
     # Right-click: hit_kp_idx (-1 if empty), display (dx, dy)
     context_menu_requested = Signal(int, float, float)
+    # Left-click while placement mode is active (see set_placement_active):
+    # display-space coords, regardless of whether the click hit an existing
+    # dot -- placement always wins over the normal select/drag/rubber-band
+    # flow while armed.
+    placement_clicked = Signal(float, float)
 
     def __init__(self, min_h: int = 240, parent=None) -> None:
         super().__init__(parent)
@@ -1672,6 +1679,15 @@ class _ImageCanvas(QWidget):
         self._pan_active: bool = False
         self._pan_start_disp: tuple[float, float] | None = None
         self._pan_start_rect: tuple[float, float, float, float] | None = None
+        # Keypoint-placement mode: set via set_placement_active when a
+        # keypoint is picked from _KeypointPickerPanel. While True, any
+        # left-click places it (see placement_clicked / mousePressEvent)
+        # instead of the normal select/drag/rubber-band flow.
+        self._placement_active: bool = False
+
+    def set_placement_active(self, active: bool) -> None:
+        self._placement_active = active
+        self.setCursor(Qt.CursorShape.CrossCursor if active else Qt.CursorShape.ArrowCursor)
 
     def show_empty(self) -> None:
         self._loading = False
@@ -1835,6 +1851,12 @@ class _ImageCanvas(QWidget):
             if event.button() == Qt.MouseButton.RightButton:
                 hit = self._hit_kp(dx, dy)
                 self.context_menu_requested.emit(hit if hit is not None else -1, dx, dy)
+                return
+
+            if self._placement_active and event.button() == Qt.MouseButton.LeftButton:
+                # Placement wins over the normal select/drag/rubber-band flow
+                # entirely -- no hit-test, no drag threshold, immediate place.
+                self.placement_clicked.emit(dx, dy)
                 return
 
             if event.button() == Qt.MouseButton.LeftButton:
@@ -2275,6 +2297,9 @@ class _CropCell(QWidget):
     def set_edit_mode(self, enabled: bool) -> None:
         self._canvas.set_edit_mode(enabled)
 
+    def set_placement_active(self, active: bool) -> None:
+        self._canvas.set_placement_active(active)
+
     def set_trail(self, trail) -> None:
         self._canvas.set_trail(trail)
 
@@ -2538,6 +2563,100 @@ class _TrackingRunLoader(QThread):
         self.loaded.emit(tracking_timestamps, marker_proj, joint_proj, bone_pairs, outlier_masks)
 
 
+class _KeypointPickerPanel(QWidget):
+    """Hierarchical keypoint list for the "pick a keypoint, then click a
+    camera cell to place/move it there" workflow -- see "Keypoint-placement
+    toolbar" in the design doc. Generalizes Phase 7's ghost-frame
+    click-to-place (limited to the current primary selection and frames with
+    no observation at all) to any keypoint, on any frame.
+
+    Uses the same `pose_model.tree_groups` partition the timeline's row tree
+    derives (`build_rows` in keypoint_timeline_widget.py), but as a native
+    `QTreeWidget` rather than that module's custom-painted canvas, since this
+    panel only needs plain click-to-select, not per-frame status columns.
+    """
+
+    keypoint_picked = Signal(int)  # kp_idx
+    group_picked = Signal(str)     # group label -- selects the group, doesn't arm placement
+
+    def __init__(self, pose_model: PoseModel, parent=None) -> None:
+        super().__init__(parent)
+        self._pose_model = pose_model
+        self._active_item: QTreeWidgetItem | None = None
+
+        title = QLabel("<b>Place keypoint</b>")
+        title.setStyleSheet("font-size: 10px;")
+        hint = QLabel("Pick a keypoint, then click a camera view to place it. Esc cancels.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("font-size: 9px; color: #888;")
+
+        self._tree = QTreeWidget()
+        self._tree.setHeaderHidden(True)
+        self._tree.itemClicked.connect(self._on_item_clicked)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
+        layout.addWidget(title)
+        layout.addWidget(hint)
+        layout.addWidget(self._tree, stretch=1)
+
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        self._tree.clear()
+        covered: set[int] = set()
+
+        def _add_group(label: str, indices: list[int]) -> None:
+            group_item = QTreeWidgetItem([label])
+            group_item.setFlags(Qt.ItemFlag.ItemIsEnabled)  # header only, not clickable-to-place
+            self._tree.addTopLevelItem(group_item)
+            for kp_idx in indices:
+                leaf = QTreeWidgetItem([self._pose_model.name_of(kp_idx)])
+                leaf.setData(0, Qt.ItemDataRole.UserRole, kp_idx)
+                group_item.addChild(leaf)
+
+        for group_name in self._pose_model.tree_groups:
+            idx = sorted(self._pose_model.group_indices(group_name))
+            covered.update(idx)
+            _add_group(group_name, idx)
+
+        leftover = sorted(self._pose_model.all_indices - covered)
+        if leftover:
+            _add_group("Other", leftover)
+
+        self._tree.collapseAll()
+
+    def _on_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        kp_idx = item.data(0, Qt.ItemDataRole.UserRole)
+        if kp_idx is None:
+            # Group header: select the group for the existing multi-select
+            # operations (nudge/toggle/etc. on the whole group) -- doesn't
+            # arm placement mode, since a click only has one location to
+            # place a single keypoint at.
+            self.group_picked.emit(item.text(0))
+            return
+        self.keypoint_picked.emit(int(kp_idx))
+
+    def set_active(self, kp_idx: int | None) -> None:
+        """Highlight the currently-pending keypoint (or clear the highlight)."""
+        if self._active_item is not None:
+            self._active_item.setBackground(0, QColor("transparent"))
+            self._active_item = None
+        if kp_idx is None:
+            return
+        root = self._tree.invisibleRootItem()
+        for gi in range(root.childCount()):
+            group_item = root.child(gi)
+            for li in range(group_item.childCount()):
+                leaf = group_item.child(li)
+                if leaf.data(0, Qt.ItemDataRole.UserRole) == kp_idx:
+                    leaf.setBackground(0, QColor(255, 200, 0, 90))
+                    self._active_item = leaf
+                    group_item.setExpanded(True)
+                    return
+
+
 class PersonCropGridWidget(QWidget):
     """Grid of per-camera person crop images with a time scrubber.
 
@@ -2571,6 +2690,13 @@ class PersonCropGridWidget(QWidget):
         self._sel_kp_indices: set[int] = set()   # all selected kp indices
         self._primary_kp_idx: int | None = None   # primary kp (trail, nudge, toggle)
         self._sel_cam_idx: int | None = None      # camera that last emitted keypoint_selected
+        # Keypoint-placement mode (see _KeypointPickerPanel): the keypoint
+        # picked from the toolbar, waiting for a canvas click to place it.
+        # Stays set after a placement so the same keypoint can be placed
+        # across several consecutive frames/cameras; cleared by Esc, by
+        # picking a different keypoint, or on exiting edit mode.
+        self._pending_place_kp_idx: int | None = None
+        self._kp_picker: "_KeypointPickerPanel | None" = None
         # svid → seg_quality_run_id (or None when no masks are available)
         self._seg_sources: dict[str, str | None] = {}
         # Per-camera track segments: svid → [(track_id, first_frame, last_frame)] sorted by first_frame
@@ -2776,6 +2902,9 @@ class PersonCropGridWidget(QWidget):
             cell._canvas.context_menu_requested.connect(
                 lambda hit, dx, dy, i=i: self._on_context_menu_requested(i, hit, dx, dy)
             )
+            cell._canvas.placement_clicked.connect(
+                lambda dx, dy, i=i: self._on_placement_clicked(i, dx, dy)
+            )
             cell._canvas.installEventFilter(self)
             cell.maximize_requested.connect(lambda i=i: self._on_maximize_requested(i))
 
@@ -2891,11 +3020,29 @@ class PersonCropGridWidget(QWidget):
         top_layout.addWidget(self._stack, stretch=1)
         top_layout.addLayout(overlay_row)
 
+        # Keypoint-placement toolbar: a narrow sidebar next to the grid, only
+        # useful (and only shown) in edit mode -- see "Keypoint-placement
+        # toolbar" in the design doc.
+        self._kp_picker = _KeypointPickerPanel(self._pose_model)
+        self._kp_picker.keypoint_picked.connect(self._on_kp_picked)
+        self._kp_picker.group_picked.connect(self._select_group)
+        self._kp_picker.setVisible(False)
+        self._kp_picker.setMinimumWidth(120)
+        self._kp_picker.setMaximumWidth(220)
+
+        grid_and_picker = QSplitter(Qt.Orientation.Horizontal)
+        grid_and_picker.addWidget(top_container)
+        grid_and_picker.addWidget(self._kp_picker)
+        grid_and_picker.setStretchFactor(0, 1)
+        grid_and_picker.setStretchFactor(1, 0)
+        grid_and_picker.setCollapsible(0, False)
+        grid_and_picker.setSizes([3000, 0])
+
         # Vertical splitter: the video grid gets all the space by default (the
         # timeline starts collapsed to its tab-row height); dragging the handle
         # resizes the timeline once it's expanded.
         self._main_splitter = QSplitter(Qt.Orientation.Vertical)
-        self._main_splitter.addWidget(top_container)
+        self._main_splitter.addWidget(grid_and_picker)
         self._main_splitter.addWidget(self._timeline)
         self._main_splitter.setStretchFactor(0, 1)
         self._main_splitter.setStretchFactor(1, 0)
@@ -3013,6 +3160,7 @@ class PersonCropGridWidget(QWidget):
             self._sel_cam_idx = None
             self._range_start_v = None
             self._range_end_v = None
+            self._cancel_placement()
             if self._backfill is not None:
                 self._backfill.stop()
                 self._backfill = None
@@ -3028,6 +3176,8 @@ class PersonCropGridWidget(QWidget):
             if not enabled:
                 cell.set_trail(None)
                 cell.set_selection(None, frozenset())
+        if self._kp_picker is not None:
+            self._kp_picker.setVisible(enabled)
         if self._timeline is not None:
             self._timeline.set_edit_mode(enabled)
             self._sync_timeline(self._current_t)
@@ -3228,6 +3378,37 @@ class PersonCropGridWidget(QWidget):
         self._refresh_timeline_status(cam_id)
         self._load_frame(self._current_t)
 
+    def _on_kp_picked(self, kp_idx: int) -> None:
+        """A keypoint was picked from the placement toolbar: arm placement
+        mode on every camera cell. Picking a different keypoint while one is
+        already pending just retargets it -- no need to Esc first."""
+        self._pending_place_kp_idx = kp_idx
+        for cell in self._cells:
+            cell.set_placement_active(True)
+        if self._kp_picker is not None:
+            self._kp_picker.set_active(kp_idx)
+
+    def _cancel_placement(self) -> None:
+        if self._pending_place_kp_idx is None:
+            return
+        self._pending_place_kp_idx = None
+        for cell in self._cells:
+            cell.set_placement_active(False)
+        if self._kp_picker is not None:
+            self._kp_picker.set_active(None)
+
+    def _on_placement_clicked(self, cam_idx: int, dx: float, dy: float) -> None:
+        """Canvas click while placement mode is armed: place the pending
+        keypoint at the clicked location, on any frame (real detection,
+        ghost frame, or already has a dot there) -- a superset of
+        _on_empty_area_clicked's ghost-frame-only, primary-selection-only
+        placement. Stays armed afterward so the same keypoint can be placed
+        across consecutive frames/cameras in one sweep."""
+        if self._pending_place_kp_idx is None:
+            return
+        full_x, full_y = self._cells[cam_idx]._canvas._display_to_full(dx, dy)
+        self._on_kp_moved(cam_idx, self._pending_place_kp_idx, full_x, full_y)
+
     # ------------------------------------------------------------------
     # Keyboard handling
     # ------------------------------------------------------------------
@@ -3270,6 +3451,11 @@ class PersonCropGridWidget(QWidget):
             return False
 
         if key == Qt.Key.Key_Escape:
+            if self._pending_place_kp_idx is not None:
+                # Cancel placement mode first; a second Esc (nothing pending
+                # anymore) falls through to the existing deselect below.
+                self._cancel_placement()
+                return True
             self._sel_kp_indices = set()
             self._primary_kp_idx = None
             self._sel_cam_idx = None

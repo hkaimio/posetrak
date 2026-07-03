@@ -30,7 +30,7 @@ See:
 | — | Per-keypoint/camera/frame measurement noise override | ⬜ Designed, not implemented |
 | — | Background wide-crop frame cache (person-cluster merging) | ✅ Done (see below) |
 | 25-27 | Zoom and pan in the camera crop views | ✅ Done (see below) |
-| 28-29 | Keypoint-placement toolbar (pick from list, click to place) | ⬜ Designed, not implemented |
+| 28-29 | Keypoint-placement toolbar (pick from list, click to place) | ✅ Done (see below) |
 
 Phases 1-10 predate this status document; phases 11-14 and the follow-up UX rounds below were
 implemented together as one continuous effort.
@@ -134,9 +134,39 @@ given — the wide-crop-cache-specific fill in `_load_frame` still does the heav
 by the time `_ImageCanvas` sees the pixmap it's already been cropped down and any wider cluster
 margin has been discarded for good.
 
+## Keypoint-placement toolbar (`_KeypointPickerPanel` in `content_panels.py`)
+
+Implements the design in *keypoint-editing-design.md*: a new `_KeypointPickerPanel` — a native
+`QTreeWidget` built from `pose_model.tree_groups`/`group_indices` (the same partition
+`keypoint_timeline_widget.py`'s `build_rows` derives for the timeline's row tree, though this panel
+builds its own native tree items directly rather than reusing that module's `Row`/custom-canvas
+approach, since it only needs plain click-to-select, not per-frame status columns) — sits as a
+narrow sidebar next to the camera grid (`grid_and_picker`, a horizontal `QSplitter` wrapping the
+existing `top_container`), shown only in edit mode.
+
+Clicking a leaf emits `keypoint_picked(kp_idx)` → `PersonCropGridWidget._on_kp_picked` sets
+`_pending_place_kp_idx` and arms every `_ImageCanvas` via `set_placement_active(True)` (crosshair
+cursor, `Qt.CursorShape.CrossCursor`). While armed, `_ImageCanvas.mousePressEvent` short-circuits the
+normal hit-test/drag/rubber-band flow entirely for a left-click, emitting `placement_clicked` instead
+of starting a drag — `PersonCropGridWidget._on_placement_clicked` then calls the existing
+`_on_kp_moved` write path directly, regardless of whether the frame has other detections or a dot to
+grab. This is a strict superset of Phase 7's ghost-frame click-to-place (`_on_empty_area_clicked`),
+which only worked on frames with no observation at all and only for the current primary selection.
+
+Placement mode stays armed after a placement (repeat-friendly for scanning through a bad-detection
+stretch frame by frame) and retargets cleanly when a different keypoint is picked from the list
+without needing to cancel first. `Esc` cancels pending placement ahead of the existing
+deselect/exit-edit-mode handling (`_handle_key`'s `Escape` branch checks `_pending_place_kp_idx`
+first) — a second `Esc` with nothing pending falls through to that existing behavior unchanged.
+
+**Not yet live-tested**: unit tests cover `_KeypointPickerPanel`'s tree construction, the
+armed/disarmed `_ImageCanvas` click override, and the widget-level placement/cancel/retarget/Esc
+logic (with mocked cells), but the actual splitter layout, cursor behavior across real camera cells,
+and DB writes through a live edit session haven't been exercised in the running app.
+
 ## Test coverage
 
-268 tests across the feature's test files as of this writing:
+276 tests across the feature's test files as of this writing:
 
 | File | Covers |
 |---|---|
@@ -153,6 +183,7 @@ margin has been discarded for good.
 | `test_trail.py`, `test_crop_editor.py` | Trail overlay, crop editor (adjacent, exercised for regressions) |
 | `test_wide_crop_cache.py` | Wide-crop cache geometry: padding, overlap clustering + merge guard, per-track gap search, JPEG encode/clip, nearest-segment track-id fallback across a true assignment gap |
 | `test_crop_zoom_pan.py` | Crop-cell zoom/pan geometry: zoom-around-anchor, pan translation, view-transform clamp/fallback |
+| `test_keypoint_placement.py` | Placement toolbar: pick/retarget/cancel, armed-canvas click override, Esc-cancels-placement-first priority |
 
 Run with `pytest python/tests/app/test_phase{4,5,9,10,11,12,13,14}.py python/tests/app/test_timeline_ux_fixes.py python/tests/app/test_keypoint_visibility.py python/tests/app/test_wide_crop_cache.py`.
 
@@ -168,9 +199,9 @@ Run with `pytest python/tests/app/test_phase{4,5,9,10,11,12,13,14}.py python/tes
   showing whether the tracker's own outlier rejection still distrusts an edited keypoint — was never
   assigned a phase number and is not implemented. Only axis 1 (edit state: green/yellow/blue/grey)
   exists today.
-- **Partial tracking, per-keypoint measurement noise, and the keypoint-placement toolbar** are
-  fully designed (see keypoint-editing-design.md) but not started. None block the current feature;
-  they were lower-priority ideas from the same improvements brief.
+- **Partial tracking and per-keypoint measurement noise** are fully designed (see
+  keypoint-editing-design.md) but not started. Neither blocks the current feature; they were
+  lower-priority ideas from the same improvements brief.
 - **Background wide-crop frame cache** (see above) has not yet had a manual UI validation pass
   (real multi-person trial, scrubbing through a long detection gap) — the algorithms are unit
   tested but the worker's QThread mechanics and on-screen framing haven't been eyeballed live, the
@@ -179,3 +210,6 @@ Run with `pytest python/tests/app/test_phase{4,5,9,10,11,12,13,14}.py python/tes
   pan (`Shift`+swipe) and the letterboxing fix have only been reasoned through and unit tested, not
   yet re-verified live after the fixes above. Mouse-side behavior (wheel zoom, middle-drag pan) is
   entirely unverified — no mouse was available during the last test pass.
+- **Keypoint-placement toolbar** (see above) has not been live-tested at all — splitter layout,
+  cursor behavior on real camera cells, and end-to-end DB writes through an actual edit session are
+  unverified beyond the mocked-cell unit tests in `test_keypoint_placement.py`.

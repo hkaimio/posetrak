@@ -50,6 +50,8 @@ def _make_widget(qapp, seq_db):
     w._sel_kp_indices = set()
     w._primary_kp_idx = None
     w._sel_cam_idx = None
+    w._pending_place_kp_idx = None
+    w._kp_picker = None
     w._obs_kp = {}
     w._det_bboxes = {}
     w._marker_proj = {}

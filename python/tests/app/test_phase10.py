@@ -95,6 +95,8 @@ def _make_widget(qapp, db):
     w._sel_kp_indices = {0}
     w._primary_kp_idx = 0
     w._sel_cam_idx = 0
+    w._pending_place_kp_idx = None
+    w._kp_picker = None
     w._obs_kp = {}
     w._det_bboxes = {}
     w._marker_proj = {}

@@ -205,8 +205,25 @@ class WideCropExtractWorker(QThread):
         self._index: dict[tuple[str, int], list[tuple[frozenset, tuple]]] = {}
 
     def stop(self) -> None:
+        """Signal the worker to stop and block until it actually has.
+
+        Never return early: the caller (FrameCropCacheManager.release) drops
+        its last reference to this QThread right after calling stop(), and
+        letting that happen while the underlying OS thread is still running
+        destroys a live QThread object -- undefined behaviour in Qt, observed
+        as "QThread: Destroyed while thread is still running" followed by the
+        whole app exiting. A 3s timeout is normally plenty (the run loop
+        checks the stop flag every frame), but if a single decode/seek is
+        slow, wait however long it actually takes rather than proceeding.
+        """
         self._stop_event.set()
-        self.wait(3000)
+        if not self.wait(3000):
+            _log.warning(
+                "wide-crop worker: still running 3s after stop() for det_run=%s -- "
+                "waiting for it to actually finish before releasing",
+                self._det_run_id,
+            )
+            self.wait()
 
     def prioritise(self, svid: str, frame_idx: int) -> None:
         """Ensure the epoch containing (svid, frame_idx) is processed next."""

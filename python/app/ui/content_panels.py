@@ -966,8 +966,18 @@ class CropBackfillWorker(QThread):
         self._mem_lock = threading.Lock()
 
     def stop(self) -> None:
+        """Signal the worker to stop and block until it actually has.
+
+        Never return early: dropping the last reference to a QThread while
+        its underlying OS thread is still running is undefined behaviour in
+        Qt (observed as "QThread: Destroyed while thread is still running",
+        followed by the app exiting). A 3s timeout is normally enough, but if
+        a single decode/seek is slow, wait however long it actually takes.
+        """
         self._stop_event.set()
-        self.wait(3000)
+        if not self.wait(3000):
+            _log.warning("backfill worker: still running 3s after stop() -- waiting for it to finish")
+            self.wait()
 
     def get_mem_result(self, svid: str, frame_idx: int):
         """Return (jpeg_bytes, x1, y1, src_scale) for a frame decoded into memory, or None."""

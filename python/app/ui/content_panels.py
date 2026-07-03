@@ -3588,7 +3588,6 @@ class PersonCropGridWidget(QWidget):
         show_detected: bool,
         show_tracked: bool,
         result: tuple,
-        sub_rect: "tuple[float, float, float, float] | None" = None,
     ) -> None:
         """Decode a (jpeg, wpx, hpx, src_x, src_y, src_w, src_h) crop and render
         it into *cell*, including keypoint/tracking overlays and (in edit mode)
@@ -3597,14 +3596,6 @@ class PersonCropGridWidget(QWidget):
         Shared by the wide-crop cluster cache (see "Background wide-crop frame
         cache" in the design doc) and the Phase 6 in-memory synthetic-crop
         path, since both produce results in this same shape.
-
-        *sub_rect*, if given, is a tighter window in full-frame pixel
-        coordinates to zoom into within the decoded crop -- used by the
-        wide-crop cluster cache to re-derive a smooth, per-frame tight
-        framing from its deliberately wider (and only per-epoch-refreshed)
-        cached crop, per "Algorithm: selecting the cached image for a frame
-        & scaling for display" in the design doc. Silently ignored if it
-        doesn't intersect the cached crop (e.g. a stale bbox).
         """
         import cv2
         import numpy as np
@@ -3619,20 +3610,6 @@ class PersonCropGridWidget(QWidget):
         y1 = float(src_y)
         jpeg_h = float(hpx or crop_bgr.shape[0])
         src_scale = jpeg_h / float(src_h) if src_h > 0 else 1.0
-
-        if sub_rect is not None:
-            sx0 = max(sub_rect[0], x1)
-            sy0 = max(sub_rect[1], y1)
-            sx1 = min(sub_rect[2], x1 + crop_bgr.shape[1] / src_scale)
-            sy1 = min(sub_rect[3], y1 + crop_bgr.shape[0] / src_scale)
-            if sx1 > sx0 and sy1 > sy0:
-                lx0, ly0 = int((sx0 - x1) * src_scale), int((sy0 - y1) * src_scale)
-                lx1, ly1 = int((sx1 - x1) * src_scale), int((sy1 - y1) * src_scale)
-                sub = crop_bgr[ly0:ly1, lx0:lx1]
-                if sub.size > 0:
-                    crop_bgr = sub
-                    x1, y1 = sx0, sy0
-
         crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
         h_img, w_img = crop_rgb.shape[:2]
         qimg = QImage(crop_rgb.data, w_img, h_img, 3 * w_img, QImage.Format.Format_RGB888)
@@ -3680,7 +3657,6 @@ class PersonCropGridWidget(QWidget):
     def _load_frame(self, global_time: float) -> None:
         import cv2
         import numpy as np
-        from app.pose.db_cache import _CROP_MARGIN
 
         if not self._det_run_id or not self._sync_table:
             for cell in self._cells:
@@ -3714,27 +3690,14 @@ class PersonCropGridWidget(QWidget):
                 if wide_track_id is not None:
                     wide = self._wide_crop_mgr.get_cluster_result(svid, frame_idx, wide_track_id)
                     if wide is not None:
-                        # Re-derive a tight, per-frame display window from this
-                        # frame's own real bbox when one exists, so scrubbing
-                        # stays smoothly zoomed on the person even though the
-                        # cached crop itself only refreshes once per epoch. On
-                        # a ghost/gap frame with no real bbox here, show the
-                        # cached crop as-is -- its generous "known bounds" span
-                        # is exactly what's useful while the person is
-                        # undetected (see "Algorithm: deciding which crop areas
-                        # to cache" in the design doc).
-                        sub_rect = None
-                        wide_bbox = self._det_bboxes.get(svid, {}).get(frame_idx)
-                        if wide_bbox is not None:
-                            wcx, wcy, wbw, wbh = wide_bbox
-                            wmx, wmy = wbw * _CROP_MARGIN, wbh * _CROP_MARGIN
-                            sub_rect = (
-                                wcx - wbw / 2 - wmx, wcy - wbh / 2 - wmy,
-                                wcx + wbw / 2 + wmx, wcy + wbh / 2 + wmy,
-                            )
+                        # Show the cached crop as-is -- its own generous padding
+                        # (see PAD_FRAC in wide_crop_cache.py) is the point, both
+                        # for normal frames and for ghost/gap frames where the
+                        # "known bounds" span is exactly what's useful while the
+                        # person is undetected.
                         self._display_crop_result(
                             cell, cam_id, svid, frame_idx, tracking_step,
-                            show_detected, show_tracked, wide, sub_rect=sub_rect,
+                            show_detected, show_tracked, wide,
                         )
                         continue
                     self._wide_crop_mgr.prioritise(svid, frame_idx)

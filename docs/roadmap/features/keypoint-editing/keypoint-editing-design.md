@@ -1519,27 +1519,28 @@ track being edited in that camera cell:
 1. Look up `(shot_video_id, frame_idx)` in the in-memory cluster index.
 2. Find the entry whose `track_ids` contains the target track. (Cheap linear
    scan — there are only ever a few clusters per camera per frame.)
-3. If found: decode that cluster's cached JPEG and treat it as the new
-   "source frame" for the existing crop-grid display math — **do not**
-   simply show the whole cached crop. Compute the tight, current-frame
-   display window exactly as today (the person's live bbox, or the Phase 6
-   union-bbox for gap frames, expanded to the cell's aspect ratio), then
-   translate that window from full-frame coordinates into the cached crop's
-   local coordinates by subtracting the cluster entry's `(src_x, src_y)`
-   offset — the same subtraction already used in *Coordinate conversion*
-   above, just chained through one extra intermediate crop. Resize that
-   sub-region to the display cell as usual.
-   This is the key decoupling: the cache only refreshes once per epoch
-   (coarse), but the on-screen framing is still computed fresh every frame
-   (smooth) — scrubbing never looks like it's snapping between fixed
-   windows, even though the underlying cached image does.
+3. If found: decode that cluster's cached JPEG and display it directly,
+   exactly like every other layer in this fallback chain (DB blob, Phase 6
+   synthetic crop) already does — no additional re-crop to a tighter window.
+   An earlier revision of this design re-derived a tight, current-frame
+   window from the person's live bbox before display, on the theory that it
+   would keep scrubbing visually smooth between epoch recomputes. Once
+   actually tried, that re-crop used a much smaller margin than the cache's
+   own (roughly Phase 6's 10-20%, not the 35% the cluster crop was cached
+   with), so it silently cancelled out the wider framing on every frame that
+   had a real detection — which is most frames, so the feature looked like
+   it wasn't wired up at all even though the cache was populating correctly.
+   The fix is to not re-crop: showing the cached crop as-is is simpler and
+   is what actually delivers the generous framing this feature exists for.
+   Some epoch-to-epoch resizing as the union window grows or shrinks is an
+   acceptable, minor tradeoff for that.
 4. If two people sharing the same cluster both have edit panels open at
-   once, both simply read the same cached JPEG and each does its own local
-   sub-crop from step 3 — no extra decode or storage cost. This is where
-   the sharing actually pays off, and is also why the cache is scoped to the
-   detection run rather than to a single panel (see *Cache scope and
-   lifecycle* below) — a second person's panel should reuse, not rebuild,
-   crops the first person's panel already generated.
+   once, both simply read and display the same cached JPEG — no extra
+   decode or storage cost. This is where the sharing actually pays off, and
+   is also why the cache is scoped to the detection run rather than to a
+   single panel (see *Cache scope and lifecycle* below) — a second person's
+   panel should reuse, not rebuild, crops the first person's panel already
+   generated.
 5. If no cluster entry exists yet for this `(shot_video_id, frame_idx,
    track)` (background worker hasn't reached it, or hasn't started for this
    camera): fall back to the existing layered chain unchanged — DB blob →
@@ -1611,12 +1612,14 @@ epochs still spans a generous, well-formed region derived from the nearest
 real detections before/after the gap, not an empty or missing crop.
 
 **Phase 23 — layered frame serving.** Extend the crop-source fallback chain
-to check the cluster cache first via the selection algorithm above,
-re-deriving the tight display window from the wider cached crop.
+to check the cluster cache first via the selection algorithm above, and
+display it directly (no re-crop — see that section for why an earlier
+tight-recrop attempt defeated the whole feature).
 *Validation*: scrub to a frame before extraction reaches it — verify the
 existing 240p crop displays; scrub back after extraction has passed that
 frame — verify the display seamlessly upgrades to the sharper, more
-generously framed image with no visible reload glitch; open a second
+generously framed image (visibly wider margin than the old 240p crop, not
+just higher resolution) with no visible reload glitch; open a second
 person's panel in the same trial and verify it reuses the first panel's
 already-built cache instead of restarting extraction from scratch.
 

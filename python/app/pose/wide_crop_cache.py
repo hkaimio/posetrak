@@ -201,8 +201,12 @@ class WideCropExtractWorker(QThread):
         self._priority_lock = threading.Lock()
         self._priority_request: tuple[str, int] | None = None
         self._index_lock = threading.Lock()
-        # (svid, frame_idx) -> [(frozenset(track_ids), result_tuple), ...]
-        self._index: dict[tuple[str, int], list[tuple[frozenset, tuple]]] = {}
+        # (svid, frame_idx) -> [(frozenset(track_ids), result_tuple, {track_id: own_rect}), ...]
+        # own_rect is that track's individual padded window (full-frame coords,
+        # pre-clustering) -- kept alongside the shared cluster image so display
+        # can sub-crop to just the person being edited instead of showing the
+        # whole (possibly multi-person-spanning) cluster crop.
+        self._index: dict[tuple[str, int], list[tuple[frozenset, tuple, dict]]] = {}
 
     def stop(self) -> None:
         """Signal the worker to stop and block until it actually has.
@@ -231,13 +235,19 @@ class WideCropExtractWorker(QThread):
             self._priority_request = (svid, frame_idx)
 
     def get_cluster_result(self, svid: str, frame_idx: int, track_id: int):
+        """Return (result, own_rect) for *track_id* at this frame, or None.
+
+        *own_rect* is that track's individual padded window in full-frame
+        coordinates -- narrower than the (possibly multi-person) cluster
+        *result* image, for sub-cropping to just the person being edited.
+        """
         with self._index_lock:
             entries = self._index.get((svid, frame_idx))
             if not entries:
                 return None
-            for track_ids, result in entries:
+            for track_ids, result, own_rects in entries:
                 if track_id in track_ids:
-                    return result
+                    return result, own_rects[track_id]
         return None
 
     def run(self) -> None:  # noqa: C901
@@ -363,7 +373,8 @@ class WideCropExtractWorker(QThread):
                     for track_ids, rect in clusters:
                         result = _encode_rect(bgr, rect)
                         if result is not None:
-                            entries.append((frozenset(track_ids), result))
+                            own_rects = {tid: rects[tid] for tid in track_ids}
+                            entries.append((frozenset(track_ids), result, own_rects))
                     if entries:
                         with self._index_lock:
                             self._index[(svid, f)] = entries

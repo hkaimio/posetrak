@@ -1397,6 +1397,29 @@ _TRAIL_DOT_R = 3
 _TRAIL_N = 10
 
 
+def _kp_overlay_bbox(obs_kp, hidden_indices: "frozenset[int]"):
+    """Bounding box (x0, y0, x1, y1), full-frame pixel coords, of keypoints
+    that would actually be drawn for this frame (matches paintEvent's
+    conf >= 0.1 visibility cutoff), or None if none qualify.
+
+    Used to make sure the wide-crop cache's sub-crop always covers whatever
+    is actually being displayed -- including edited keypoints, which can sit
+    far from where the original (possibly wrong) detection placed the
+    person, since the crop cache only knows about raw `person_detections`.
+    """
+    if obs_kp is None:
+        return None
+    xs, ys = [], []
+    for i in range(obs_kp.shape[0]):
+        if i in hidden_indices or float(obs_kp[i, 2]) < 0.1:
+            continue
+        xs.append(float(obs_kp[i, 0]))
+        ys.append(float(obs_kp[i, 1]))
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
 def _build_cam_trail(
     kp_by_frame: dict,
     cam_id: str,
@@ -3598,6 +3621,7 @@ class PersonCropGridWidget(QWidget):
         show_detected: bool,
         show_tracked: bool,
         result: tuple,
+        sub_rect: "tuple[float, float, float, float] | None" = None,
     ) -> None:
         """Decode a (jpeg, wpx, hpx, src_x, src_y, src_w, src_h) crop and render
         it into *cell*, including keypoint/tracking overlays and (in edit mode)
@@ -3606,6 +3630,12 @@ class PersonCropGridWidget(QWidget):
         Shared by the wide-crop cluster cache (see "Background wide-crop frame
         cache" in the design doc) and the Phase 6 in-memory synthetic-crop
         path, since both produce results in this same shape.
+
+        *sub_rect*, if given, is a tighter window (full-frame pixel
+        coordinates) to zoom into within the decoded crop -- used by the
+        wide-crop cluster cache to sub-crop a possibly multi-person cluster
+        image down to just the person being edited. Caller is responsible for
+        having already clamped it to the decoded crop's own extent.
         """
         import cv2
         import numpy as np
@@ -3620,6 +3650,16 @@ class PersonCropGridWidget(QWidget):
         y1 = float(src_y)
         jpeg_h = float(hpx or crop_bgr.shape[0])
         src_scale = jpeg_h / float(src_h) if src_h > 0 else 1.0
+
+        if sub_rect is not None:
+            sx0, sy0, sx1, sy1 = sub_rect
+            lx0, ly0 = int((sx0 - x1) * src_scale), int((sy0 - y1) * src_scale)
+            lx1, ly1 = int((sx1 - x1) * src_scale), int((sy1 - y1) * src_scale)
+            sub = crop_bgr[max(0, ly0):ly1, max(0, lx0):lx1]
+            if sub.size > 0:
+                crop_bgr = sub
+                x1, y1 = max(sx0, x1), max(sy0, y1)
+
         crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
         h_img, w_img = crop_rgb.shape[:2]
         qimg = QImage(crop_rgb.data, w_img, h_img, 3 * w_img, QImage.Format.Format_RGB888)
@@ -3694,23 +3734,59 @@ class PersonCropGridWidget(QWidget):
             # Preferred layer: wide-crop cluster cache -- generous, higher-quality
             # crop, shared across nearby people where their crop windows overlap.
             # Falls through to the existing chain below if no cluster entry
-            # exists yet for this frame/track (worker hasn't reached it).
+            # exists yet for this frame/track (worker hasn't reached it), or if
+            # the cached crop turns out not to cover what's actually being
+            # displayed for this frame (see below).
             if self._edit_mode and self._wide_crop_mgr is not None:
                 wide_track_id = self._track_id_at_frame(svid, frame_idx)
                 if wide_track_id is not None:
-                    wide = self._wide_crop_mgr.get_cluster_result(svid, frame_idx, wide_track_id)
-                    if wide is not None:
-                        # Show the cached crop as-is -- its own generous padding
-                        # (see PAD_FRAC in wide_crop_cache.py) is the point, both
-                        # for normal frames and for ghost/gap frames where the
-                        # "known bounds" span is exactly what's useful while the
-                        # person is undetected.
-                        self._display_crop_result(
-                            cell, cam_id, svid, frame_idx, tracking_step,
-                            show_detected, show_tracked, wide,
+                    wide_lookup = self._wide_crop_mgr.get_cluster_result(svid, frame_idx, wide_track_id)
+                    if wide_lookup is not None:
+                        wide, own_rect = wide_lookup
+                        _, _, _, src_x, src_y, src_w, src_h = wide
+                        cluster_extent = (src_x, src_y, src_x + src_w, src_y + src_h)
+
+                        # Sub-crop to this track's own padded window, not the
+                        # whole (possibly multi-person) cluster image -- a
+                        # cluster spanning several spread-out people would
+                        # otherwise show most of the room for someone editing
+                        # just one of them.
+                        kp_bbox = _kp_overlay_bbox(
+                            self._obs_kp.get(cam_id, {}).get(frame_idx),
+                            frozenset(self._hidden_kp_indices),
                         )
-                        continue
-                    self._wide_crop_mgr.prioritise(svid, frame_idx)
+                        desired = own_rect
+                        if kp_bbox is not None:
+                            # Widen to cover whatever's actually drawn -- an
+                            # edit can place a keypoint far from where the raw
+                            # (possibly wrong) detection the cache was built
+                            # from said the person was.
+                            desired = (
+                                min(desired[0], kp_bbox[0]), min(desired[1], kp_bbox[1]),
+                                max(desired[2], kp_bbox[2]), max(desired[3], kp_bbox[3]),
+                            )
+                        # Clamp to what this cluster image actually has decoded --
+                        # can't show pixels that were never cached.
+                        clamped = (
+                            max(desired[0], cluster_extent[0]), max(desired[1], cluster_extent[1]),
+                            min(desired[2], cluster_extent[2]), min(desired[3], cluster_extent[3]),
+                        )
+                        covers_kp = kp_bbox is None or (
+                            kp_bbox[0] >= cluster_extent[0] and kp_bbox[1] >= cluster_extent[1]
+                            and kp_bbox[2] <= cluster_extent[2] and kp_bbox[3] <= cluster_extent[3]
+                        )
+                        if covers_kp and clamped[2] > clamped[0] and clamped[3] > clamped[1]:
+                            self._display_crop_result(
+                                cell, cam_id, svid, frame_idx, tracking_step,
+                                show_detected, show_tracked, wide, sub_rect=clamped,
+                            )
+                            continue
+                        # Else: what's actually displayed (e.g. an edited
+                        # keypoint) falls outside even this cluster's cached
+                        # pixels -- fall through rather than show a crop known
+                        # to be missing part of the overlay.
+                    else:
+                        self._wide_crop_mgr.prioritise(svid, frame_idx)
 
             # Check in-memory results first (frames decoded without a detection bbox).
             if self._backfill is not None:

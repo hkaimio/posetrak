@@ -1465,7 +1465,11 @@ For each epoch, per camera:
    *the rect is fixed for the whole epoch; only the pixels change frame to
    frame.*
 6. Update the in-memory index: `(shot_video_id, frame_idx) → [ (track_ids,
-   file_or_blob, src_x, src_y, src_w, src_h), ... ]` for every frame written.
+   file_or_blob, src_x, src_y, src_w, src_h, {track_id: own_padded_rect}),
+   ... ]` for every frame written. `own_padded_rect` is each member's
+   individual rect from step 2, before the union in step 3 — kept alongside
+   the shared cluster image so display can sub-crop to just one person
+   instead of showing the whole cluster (see the selection algorithm below).
 
 A track can belong to different clusters in different epochs (people
 separating and rejoining) — that's expected and handled automatically since
@@ -1516,35 +1520,65 @@ Rejected in favor of cluster-merge.
 Given the frame being displayed (`shot_video_id`, `frame_idx`) and the
 track being edited in that camera cell:
 
+This went through two wrong revisions before landing here, both caught by
+actually using the feature rather than by review, so both are worth
+recording:
+
+- **Attempt 1** re-derived a tight, current-frame window from the person's
+  live bbox before display, on the theory that it would keep scrubbing
+  visually smooth between epoch recomputes. That re-crop used a much
+  smaller margin than the cache's own (roughly Phase 6's 10-20%, not the
+  35% the cluster crop was cached with), so it silently cancelled out the
+  wider framing on every frame that had a real detection — which is most
+  frames — making the feature look unwired even though the cache was
+  populating correctly.
+- **Attempt 2**, reacting to that, went to the other extreme: display the
+  cached cluster crop directly, no re-crop at all. That fixed the
+  cancelled-margin problem but exposed a different one — a cluster can
+  legitimately span several spread-out people (that's the whole point of
+  merging), so showing the *entire* cluster image for someone editing just
+  one of them can mean most of the frame is empty room with the target
+  person as a small figure in it.
+
+The actual algorithm needs a rect that's tighter than the whole cluster but
+not so tight it fights the cache's own margin, **and** it needs to account
+for something neither attempt considered: the cache is built entirely from
+raw `person_detections`, which is exactly the data this feature exists to
+*correct*. An edited keypoint can legitimately sit far from where the
+original (wrong) detection placed the person, and the cache has no way to
+know that ahead of time.
+
 1. Look up `(shot_video_id, frame_idx)` in the in-memory cluster index.
 2. Find the entry whose `track_ids` contains the target track. (Cheap linear
-   scan — there are only ever a few clusters per camera per frame.)
-3. If found: decode that cluster's cached JPEG and display it directly,
-   exactly like every other layer in this fallback chain (DB blob, Phase 6
-   synthetic crop) already does — no additional re-crop to a tighter window.
-   An earlier revision of this design re-derived a tight, current-frame
-   window from the person's live bbox before display, on the theory that it
-   would keep scrubbing visually smooth between epoch recomputes. Once
-   actually tried, that re-crop used a much smaller margin than the cache's
-   own (roughly Phase 6's 10-20%, not the 35% the cluster crop was cached
-   with), so it silently cancelled out the wider framing on every frame that
-   had a real detection — which is most frames, so the feature looked like
-   it wasn't wired up at all even though the cache was populating correctly.
-   The fix is to not re-crop: showing the cached crop as-is is simpler and
-   is what actually delivers the generous framing this feature exists for.
-   Some epoch-to-epoch resizing as the union window grows or shrinks is an
-   acceptable, minor tradeoff for that.
-4. If two people sharing the same cluster both have edit panels open at
-   once, both simply read and display the same cached JPEG — no extra
-   decode or storage cost. This is where the sharing actually pays off, and
-   is also why the cache is scoped to the detection run rather than to a
-   single panel (see *Cache scope and lifecycle* below) — a second person's
-   panel should reuse, not rebuild, crops the first person's panel already
-   generated.
-5. If no cluster entry exists yet for this `(shot_video_id, frame_idx,
+   scan — there are only ever a few clusters per camera per frame.) Each
+   entry stores not just the shared cluster image but also, per member
+   track, that track's own padded window from *before* clustering (step 2 of
+   the caching algorithm above) — narrower than the merged cluster rect,
+   still with the cache's full 35% margin.
+3. If found: sub-crop the decoded cluster JPEG to the target track's own
+   window — not the whole cluster, and not a re-derived tight window.
+4. Widen that sub-crop to cover whatever keypoints are actually about to be
+   drawn for this frame (the merged `pose_observations` + edits result, at
+   the same confidence cutoff the overlay itself uses to decide what's
+   visible), then clamp the result to what the cluster image actually has
+   decoded — a sub-crop can't show pixels outside the cached region.
+5. If even the clamped, widened window still doesn't cover the displayed
+   keypoints — the edit moved something outside this cluster's own cached
+   extent entirely — don't use this cache entry for this frame. Fall through
+   to the existing chain instead (step 7) rather than show a crop that's
+   silently missing part of what should be visible.
+6. If two people sharing the same cluster both have edit panels open at
+   once, both read the same cached cluster JPEG and each does its own local
+   sub-crop from steps 3-4 — no extra decode or storage cost. This is where
+   the sharing actually pays off, and is also why the cache is scoped to the
+   detection run rather than to a single panel (see *Cache scope and
+   lifecycle* below) — a second person's panel should reuse, not rebuild,
+   crops the first person's panel already generated.
+7. If no cluster entry exists yet for this `(shot_video_id, frame_idx,
    track)` (background worker hasn't reached it, or hasn't started for this
-   camera): fall back to the existing layered chain unchanged — DB blob →
-   Phase 6 in-memory synthetic crop → placeholder.
+   camera), or step 5 rejected the one that does exist: fall back to the
+   existing layered chain unchanged — DB blob → Phase 6 in-memory synthetic
+   crop → placeholder.
 
 ### Serving frames: layered fallback, not a replacement
 
@@ -1612,16 +1646,23 @@ epochs still spans a generous, well-formed region derived from the nearest
 real detections before/after the gap, not an empty or missing crop.
 
 **Phase 23 — layered frame serving.** Extend the crop-source fallback chain
-to check the cluster cache first via the selection algorithm above, and
-display it directly (no re-crop — see that section for why an earlier
-tight-recrop attempt defeated the whole feature).
+to check the cluster cache first via the selection algorithm above:
+sub-crop to the target track's own padded window, widen to cover the
+frame's actual displayed keypoints (including edits), clamp to the
+cluster's decoded extent, and fall through to the existing chain if that
+still doesn't cover everything (see that section for the two wrong
+revisions this went through first).
 *Validation*: scrub to a frame before extraction reaches it — verify the
 existing 240p crop displays; scrub back after extraction has passed that
 frame — verify the display seamlessly upgrades to the sharper, more
 generously framed image (visibly wider margin than the old 240p crop, not
-just higher resolution) with no visible reload glitch; open a second
-person's panel in the same trial and verify it reuses the first panel's
-already-built cache instead of restarting extraction from scratch.
+just higher resolution, but zoomed to the person being edited rather than
+the whole cluster) with no visible reload glitch; open a second person's
+panel in the same trial and verify it reuses the first panel's already-built
+cache instead of restarting extraction from scratch; edit a keypoint to a
+position well outside the original detection's bbox and verify the crop
+either widens to include it or falls back cleanly, never silently clipping
+it off-frame.
 
 **Phase 24 — priority + status bar + lifecycle.** `prioritise()` called on
 scrub, status bar message while active, reference-counted worker/cache

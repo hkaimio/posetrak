@@ -22,6 +22,7 @@ from app.pose.wide_crop_cache import (
     _union_rect,
     cluster_rects,
 )
+from app.ui.content_panels import _kp_overlay_bbox
 
 
 # ---------------------------------------------------------------------------
@@ -194,3 +195,32 @@ def test_encode_rect_downscales_past_max_long_edge():
     _, wpx, hpx, _src_x, _src_y, src_w, src_h = result
     assert (src_w, src_h) == (2000, 2000)
     assert max(wpx, hpx) == wc.MAX_LONG_EDGE
+
+
+# ---------------------------------------------------------------------------
+# _kp_overlay_bbox -- what the wide-crop display sub-crop must cover
+# ---------------------------------------------------------------------------
+
+def _kp_array(*points):
+    """points: list of (x, y, conf)."""
+    return np.array(points, dtype=np.float32)
+
+
+def test_kp_overlay_bbox_none_for_no_keypoints():
+    assert _kp_overlay_bbox(None, frozenset()) is None
+
+
+def test_kp_overlay_bbox_ignores_low_confidence_points():
+    # Matches paintEvent's conf < 0.1 cutoff -- these aren't really drawn.
+    kp = _kp_array((10, 10, 0.05), (500, 500, 0.09))
+    assert _kp_overlay_bbox(kp, frozenset()) is None
+
+
+def test_kp_overlay_bbox_ignores_hidden_indices():
+    kp = _kp_array((10, 10, 0.9), (500, 500, 0.9))
+    assert _kp_overlay_bbox(kp, frozenset({1})) == (10, 10, 10, 10)
+
+
+def test_kp_overlay_bbox_covers_all_visible_points():
+    kp = _kp_array((50, 100, 0.9), (10, 400, 0.5), (200, 20, 0.2))
+    assert _kp_overlay_bbox(kp, frozenset()) == (10, 20, 200, 400)

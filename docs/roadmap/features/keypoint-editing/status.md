@@ -28,7 +28,7 @@ See:
 | 14 | Multi-keyframe interpolation (N anchors, not just the range's two ends) | ✅ Done |
 | — | Partial tracking (checkpoint + resume from mid-trial) | ⬜ Designed, not implemented |
 | — | Per-keypoint/camera/frame measurement noise override | ⬜ Designed, not implemented |
-| — | Background wide-crop frame cache (person-cluster merging) | ⬜ Designed, not implemented |
+| — | Background wide-crop frame cache (person-cluster merging) | ✅ Done (see below) |
 
 Phases 1-10 predate this status document; phases 11-14 and the follow-up UX rounds below were
 implemented together as one continuous effort.
@@ -66,9 +66,27 @@ rounds, plus one additional feature, all in `python/app/ui/keypoint_timeline_wid
   help. Split into "Face" (nose + ears) and "Face (detail)" (eyes + landmarks), a non-overlapping
   partition of the original group.
 
+## Background wide-crop frame cache (`app/pose/wide_crop_cache.py`)
+
+Implements the design in *keypoint-editing-design.md*: `WideCropExtractWorker` walks each camera's
+video sequentially per fixed-length epoch, computes each tracked person's padded crop window (with
+gap-search past the epoch boundary for detection gaps longer than one epoch), clusters overlapping
+windows with a merge-area guard so nearby people share one cached crop, and exposes results through
+an in-memory index (`get_cluster_result`). `FrameCropCacheManager` reference-counts one worker per
+`detection_run_id` across every open `PersonPanel`, so a second person's panel in the same trial
+reuses the first panel's cache instead of rebuilding it. `PersonCropGridWidget._load_frame` checks
+this cache before the Phase 6 in-memory crop / `frame_cache_entries` DB blob, and re-derives a tight,
+per-frame display window from the wider cached crop when a real bbox exists at that frame (falling
+back to showing the full generous crop on ghost/gap frames, where that generosity is the point).
+
+Status-bar progress messaging for this worker was not wired up — the same gap already exists for the
+Phase 6 `CropBackfillWorker` (`status_message` is only used for copy/paste/interpolation feedback
+today, not backfill progress), so this isn't a regression, just an existing gap inherited by the new
+worker.
+
 ## Test coverage
 
-219 tests across the feature's test files as of this writing:
+239 tests across the feature's test files as of this writing:
 
 | File | Covers |
 |---|---|
@@ -83,8 +101,9 @@ rounds, plus one additional feature, all in `python/app/ui/keypoint_timeline_wid
 | `test_timeline_ux_fixes.py` | All four UX rounds: seek/ruler, zoom, alignment, zoom-reset bugfix |
 | `test_keypoint_visibility.py` | Eye icon, hidden-keypoint exclusion, `Face`/`Face (detail)` split |
 | `test_trail.py`, `test_crop_editor.py` | Trail overlay, crop editor (adjacent, exercised for regressions) |
+| `test_wide_crop_cache.py` | Wide-crop cache geometry: padding, overlap clustering + merge guard, per-track gap search, JPEG encode/clip |
 
-Run with `pytest python/tests/app/test_phase{4,5,9,10,11,12,13,14}.py python/tests/app/test_timeline_ux_fixes.py python/tests/app/test_keypoint_visibility.py`.
+Run with `pytest python/tests/app/test_phase{4,5,9,10,11,12,13,14}.py python/tests/app/test_timeline_ux_fixes.py python/tests/app/test_keypoint_visibility.py python/tests/app/test_wide_crop_cache.py`.
 
 ## Known limitations
 
@@ -98,6 +117,10 @@ Run with `pytest python/tests/app/test_phase{4,5,9,10,11,12,13,14}.py python/tes
   showing whether the tracker's own outlier rejection still distrusts an edited keypoint — was never
   assigned a phase number and is not implemented. Only axis 1 (edit state: green/yellow/blue/grey)
   exists today.
-- **Partial tracking, per-keypoint measurement noise, and the background wide-crop frame cache**
-  are fully designed (see keypoint-editing-design.md) but not started. None of them block the
-  current feature; they were lower-priority ideas from the same improvements brief.
+- **Partial tracking and per-keypoint measurement noise** are fully designed (see
+  keypoint-editing-design.md) but not started. Neither blocks the current feature; they were
+  lower-priority ideas from the same improvements brief.
+- **Background wide-crop frame cache** (see above) has not yet had a manual UI validation pass
+  (real multi-person trial, scrubbing through a long detection gap) — the algorithms are unit
+  tested but the worker's QThread mechanics and on-screen framing haven't been eyeballed live, the
+  same gap the original `CropBackfillWorker` has (no dedicated test file for it either).

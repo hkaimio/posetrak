@@ -2251,6 +2251,7 @@ class PersonCropGridWidget(QWidget):
         # cam_instance_id → tracker_step → bool array indexed by COCO keypoint ID
         self._outlier_masks: dict[str, dict[int, object]] = {}
         self._backfill: CropBackfillWorker | None = None
+        self._wide_crop_mgr: "FrameCropCacheManager | None" = None
         self._loader: _TrackingRunLoader | None = None
         self._maximized_idx: int | None = None
         self._pose_model: PoseModel = _get_pose_model(None)  # updated in _build
@@ -2678,8 +2679,13 @@ class PersonCropGridWidget(QWidget):
             if self._backfill is not None:
                 self._backfill.stop()
                 self._backfill = None
+            if self._wide_crop_mgr is not None:
+                self._wide_crop_mgr.frame_ready.disconnect(self._on_crop_ready)
+                self._wide_crop_mgr.release()
+                self._wide_crop_mgr = None
         else:
             self._start_backfill()
+            self._start_wide_crop_cache()
         for cell in self._cells:
             cell.set_edit_mode(enabled)
             if not enabled:
@@ -2714,6 +2720,26 @@ class PersonCropGridWidget(QWidget):
         worker.frame_ready.connect(self._on_crop_ready)
         self._backfill = worker
         worker.start()
+
+    def _start_wide_crop_cache(self) -> None:
+        """Acquire the shared, detection-run-scoped wide-crop cluster cache.
+
+        Scoped to the detection run (not this panel) via
+        `FrameCropCacheManager`, so a second person's panel in the same trial
+        reuses the first panel's already-built cache instead of rebuilding it
+        -- see "Cache scope and lifecycle" in the design doc.
+        """
+        if not self._det_run_id:
+            return
+        row = self._conn.execute("PRAGMA database_list").fetchone()
+        if row is None or not row[2]:
+            return
+        db_path = row[2]
+        from app.pose.wide_crop_cache import FrameCropCacheManager
+
+        mgr = FrameCropCacheManager.acquire(db_path, self._det_run_id)
+        mgr.frame_ready.connect(self._on_crop_ready)
+        self._wide_crop_mgr = mgr
 
     def _on_crop_ready(self, svid: str, frame_idx: int) -> None:
         """Called on the main thread when the backfill worker writes a new crop."""
@@ -3552,9 +3578,109 @@ class PersonCropGridWidget(QWidget):
         has fully exited — isRunning() is False by this point."""
         self._loader = None
 
+    def _display_crop_result(
+        self,
+        cell,
+        cam_id: str,
+        svid: str,
+        frame_idx: int,
+        tracking_step: int | None,
+        show_detected: bool,
+        show_tracked: bool,
+        result: tuple,
+        sub_rect: "tuple[float, float, float, float] | None" = None,
+    ) -> None:
+        """Decode a (jpeg, wpx, hpx, src_x, src_y, src_w, src_h) crop and render
+        it into *cell*, including keypoint/tracking overlays and (in edit mode)
+        the trail/selection/range-highlight overlays.
+
+        Shared by the wide-crop cluster cache (see "Background wide-crop frame
+        cache" in the design doc) and the Phase 6 in-memory synthetic-crop
+        path, since both produce results in this same shape.
+
+        *sub_rect*, if given, is a tighter window in full-frame pixel
+        coordinates to zoom into within the decoded crop -- used by the
+        wide-crop cluster cache to re-derive a smooth, per-frame tight
+        framing from its deliberately wider (and only per-epoch-refreshed)
+        cached crop, per "Algorithm: selecting the cached image for a frame
+        & scaling for display" in the design doc. Silently ignored if it
+        doesn't intersect the cached crop (e.g. a stale bbox).
+        """
+        import cv2
+        import numpy as np
+
+        jpeg, wpx, hpx, src_x, src_y, src_w, src_h = result
+        buf = np.frombuffer(jpeg, dtype=np.uint8)
+        crop_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if crop_bgr is None:
+            cell.show_empty()
+            return
+        x1 = float(src_x)
+        y1 = float(src_y)
+        jpeg_h = float(hpx or crop_bgr.shape[0])
+        src_scale = jpeg_h / float(src_h) if src_h > 0 else 1.0
+
+        if sub_rect is not None:
+            sx0 = max(sub_rect[0], x1)
+            sy0 = max(sub_rect[1], y1)
+            sx1 = min(sub_rect[2], x1 + crop_bgr.shape[1] / src_scale)
+            sy1 = min(sub_rect[3], y1 + crop_bgr.shape[0] / src_scale)
+            if sx1 > sx0 and sy1 > sy0:
+                lx0, ly0 = int((sx0 - x1) * src_scale), int((sy0 - y1) * src_scale)
+                lx1, ly1 = int((sx1 - x1) * src_scale), int((sy1 - y1) * src_scale)
+                sub = crop_bgr[ly0:ly1, lx0:lx1]
+                if sub.size > 0:
+                    crop_bgr = sub
+                    x1, y1 = sx0, sy0
+
+        crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+        h_img, w_img = crop_rgb.shape[:2]
+        qimg = QImage(crop_rgb.data, w_img, h_img, 3 * w_img, QImage.Format.Format_RGB888)
+        cell.show_image(QPixmap.fromImage(qimg), x1, y1, src_scale)
+        obs_kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
+        joint_xy = (
+            self._joint_proj.get(cam_id, {}).get(tracking_step)
+            if tracking_step is not None else None
+        )
+        marker_xy = (
+            self._marker_proj.get(cam_id, {}).get(tracking_step)
+            if tracking_step is not None else None
+        )
+        outlier_mask = (
+            self._outlier_masks.get(cam_id, {}).get(tracking_step)
+            if tracking_step is not None else None
+        )
+        cell.set_overlay(
+            obs_kp=obs_kp,
+            joint_xy=joint_xy,
+            bone_pairs=self._bone_pairs,
+            marker_xy=marker_xy,
+            outlier_mask=outlier_mask,
+            show_detected=show_detected,
+            show_tracked=show_tracked,
+        )
+        cell.set_hidden(frozenset(self._hidden_kp_indices))
+        if self._edit_mode:
+            trail = None
+            kp_name = None
+            if self._primary_kp_idx is not None:
+                kp_by_frame = self._obs_kp.get(cam_id, {})
+                trail = _build_cam_trail(kp_by_frame, cam_id, frame_idx, self._primary_kp_idx)
+                kp_name = self._pose_model.name_of(self._primary_kp_idx)
+            cell.set_trail(trail)
+            cell.set_selection(
+                self._primary_kp_idx,
+                frozenset(self._sel_kp_indices),
+                name=kp_name,
+            )
+            cell.set_range_highlights(
+                self._compute_range_highlights(cam_id, svid)
+            )
+
     def _load_frame(self, global_time: float) -> None:
         import cv2
         import numpy as np
+        from app.pose.db_cache import _CROP_MARGIN
 
         if not self._det_run_id or not self._sync_table:
             for cell in self._cells:
@@ -3579,65 +3705,48 @@ class PersonCropGridWidget(QWidget):
                 cell.show_empty()
                 continue
 
+            # Preferred layer: wide-crop cluster cache -- generous, higher-quality
+            # crop, shared across nearby people where their crop windows overlap.
+            # Falls through to the existing chain below if no cluster entry
+            # exists yet for this frame/track (worker hasn't reached it).
+            if self._edit_mode and self._wide_crop_mgr is not None:
+                wide_track_id = self._track_id_at_frame(svid, frame_idx)
+                if wide_track_id is not None:
+                    wide = self._wide_crop_mgr.get_cluster_result(svid, frame_idx, wide_track_id)
+                    if wide is not None:
+                        # Re-derive a tight, per-frame display window from this
+                        # frame's own real bbox when one exists, so scrubbing
+                        # stays smoothly zoomed on the person even though the
+                        # cached crop itself only refreshes once per epoch. On
+                        # a ghost/gap frame with no real bbox here, show the
+                        # cached crop as-is -- its generous "known bounds" span
+                        # is exactly what's useful while the person is
+                        # undetected (see "Algorithm: deciding which crop areas
+                        # to cache" in the design doc).
+                        sub_rect = None
+                        wide_bbox = self._det_bboxes.get(svid, {}).get(frame_idx)
+                        if wide_bbox is not None:
+                            wcx, wcy, wbw, wbh = wide_bbox
+                            wmx, wmy = wbw * _CROP_MARGIN, wbh * _CROP_MARGIN
+                            sub_rect = (
+                                wcx - wbw / 2 - wmx, wcy - wbh / 2 - wmy,
+                                wcx + wbw / 2 + wmx, wcy + wbh / 2 + wmy,
+                            )
+                        self._display_crop_result(
+                            cell, cam_id, svid, frame_idx, tracking_step,
+                            show_detected, show_tracked, wide, sub_rect=sub_rect,
+                        )
+                        continue
+                    self._wide_crop_mgr.prioritise(svid, frame_idx)
+
             # Check in-memory results first (frames decoded without a detection bbox).
             if self._backfill is not None:
                 mem = self._backfill.get_mem_result(svid, frame_idx)
                 if mem is not None:
-                    jpeg, wpx, hpx, src_x, src_y, src_w, src_h = mem
-                    buf = np.frombuffer(jpeg, dtype=np.uint8)
-                    crop_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-                    if crop_bgr is not None:
-                        x1 = float(src_x)
-                        y1 = float(src_y)
-                        jpeg_h = float(hpx or crop_bgr.shape[0])
-                        src_scale = jpeg_h / float(src_h) if src_h > 0 else 1.0
-                        crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-                        h_img, w_img = crop_rgb.shape[:2]
-                        qimg = QImage(
-                            crop_rgb.data, w_img, h_img, 3 * w_img, QImage.Format.Format_RGB888
-                        )
-                        cell.show_image(QPixmap.fromImage(qimg), x1, y1, src_scale)
-                        obs_kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
-                        joint_xy = (
-                            self._joint_proj.get(cam_id, {}).get(tracking_step)
-                            if tracking_step is not None else None
-                        )
-                        marker_xy = (
-                            self._marker_proj.get(cam_id, {}).get(tracking_step)
-                            if tracking_step is not None else None
-                        )
-                        outlier_mask = (
-                            self._outlier_masks.get(cam_id, {}).get(tracking_step)
-                            if tracking_step is not None else None
-                        )
-                        cell.set_overlay(
-                            obs_kp=obs_kp,
-                            joint_xy=joint_xy,
-                            bone_pairs=self._bone_pairs,
-                            marker_xy=marker_xy,
-                            outlier_mask=outlier_mask,
-                            show_detected=show_detected,
-                            show_tracked=show_tracked,
-                        )
-                        cell.set_hidden(frozenset(self._hidden_kp_indices))
-                        if self._edit_mode:
-                            trail = None
-                            kp_name = None
-                            if self._primary_kp_idx is not None:
-                                kp_by_frame = self._obs_kp.get(cam_id, {})
-                                trail = _build_cam_trail(kp_by_frame, cam_id, frame_idx, self._primary_kp_idx)
-                                kp_name = self._pose_model.name_of(self._primary_kp_idx)
-                            cell.set_trail(trail)
-                            cell.set_selection(
-                                self._primary_kp_idx,
-                                frozenset(self._sel_kp_indices),
-                                name=kp_name,
-                            )
-                            cell.set_range_highlights(
-                                self._compute_range_highlights(cam_id, svid)
-                            )
-                    else:
-                        cell.show_empty()
+                    self._display_crop_result(
+                        cell, cam_id, svid, frame_idx, tracking_step,
+                        show_detected, show_tracked, mem,
+                    )
                     continue
 
             # Find which track covers this frame for this camera.

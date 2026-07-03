@@ -2692,9 +2692,8 @@ class PersonCropGridWidget(QWidget):
         self._sel_cam_idx: int | None = None      # camera that last emitted keypoint_selected
         # Keypoint-placement mode (see _KeypointPickerPanel): the keypoint
         # picked from the toolbar, waiting for a canvas click to place it.
-        # Stays set after a placement so the same keypoint can be placed
-        # across several consecutive frames/cameras; cleared by Esc, by
-        # picking a different keypoint, or on exiting edit mode.
+        # One-shot -- cleared after a placement, by Esc, by picking a
+        # different keypoint, or on exiting edit mode.
         self._pending_place_kp_idx: int | None = None
         self._kp_picker: "_KeypointPickerPanel | None" = None
         # svid → seg_quality_run_id (or None when no masks are available)
@@ -3402,12 +3401,14 @@ class PersonCropGridWidget(QWidget):
         keypoint at the clicked location, on any frame (real detection,
         ghost frame, or already has a dot there) -- a superset of
         _on_empty_area_clicked's ghost-frame-only, primary-selection-only
-        placement. Stays armed afterward so the same keypoint can be placed
-        across consecutive frames/cameras in one sweep."""
+        placement. One shot: disarms afterward, same as a normal drag-to-move
+        only moves the one keypoint it grabbed."""
         if self._pending_place_kp_idx is None:
             return
+        kp_idx = self._pending_place_kp_idx
         full_x, full_y = self._cells[cam_idx]._canvas._display_to_full(dx, dy)
-        self._on_kp_moved(cam_idx, self._pending_place_kp_idx, full_x, full_y)
+        self._cancel_placement()
+        self._on_kp_moved(cam_idx, kp_idx, full_x, full_y)
 
     # ------------------------------------------------------------------
     # Keyboard handling

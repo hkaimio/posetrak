@@ -107,6 +107,27 @@ def test_on_placement_clicked_places_pending_keypoint_at_full_frame_coords(qapp)
     w._on_kp_moved.assert_called_once_with(0, 9, 123.0, 456.0)
 
 
+def test_on_placement_clicked_is_one_shot_and_disarms_afterward(qapp):
+    # A single placement should return the editor to normal mode, matching
+    # a normal drag-to-move -- not stay armed for repeat placements.
+    w = _make_widget(qapp)
+    w._on_kp_picked(9)
+    w._cells[0]._canvas._display_to_full.return_value = (1.0, 2.0)
+    w._on_kp_moved = MagicMock()
+
+    w._on_placement_clicked(0, 10.0, 20.0)
+
+    assert w._pending_place_kp_idx is None
+    for cell in w._cells:
+        cell.set_placement_active.assert_called_with(False)
+    w._kp_picker.set_active.assert_called_with(None)
+
+    # A second click with nothing armed should not place anything again.
+    w._on_kp_moved.reset_mock()
+    w._on_placement_clicked(0, 30.0, 40.0)
+    w._on_kp_moved.assert_not_called()
+
+
 def test_on_placement_clicked_does_nothing_when_not_armed(qapp):
     w = _make_widget(qapp)
     w._on_kp_moved = MagicMock()

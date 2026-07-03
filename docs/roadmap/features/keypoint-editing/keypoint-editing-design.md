@@ -1906,16 +1906,18 @@ than the timeline's per-frame status columns.
    just no longer gated on "no observation for this frame at all" or
    restricted to whichever keypoint happens to be the current primary
    selection.
-3. Placement mode **stays active** after a placement, so the same keypoint
-   can be placed across several consecutive frames/cameras in one sweep
-   (matches the existing range-editing spirit of `Shift+A/D`) — it doesn't
-   revert to a passive/select mode after one click, since scanning through a
-   bad-detection stretch and re-placing the same joint frame by frame is the
-   expected use, not a one-off correction.
-4. `Esc` clears `self._pending_place_kp_idx` and reverts the cursor.
-   Existing `Esc` semantics (deselect keypoint / exit edit mode, see
-   *Interaction model* above) still apply once nothing is pending —
-   placement-cancel takes priority over them, not instead of them.
+3. Placement is **one-shot**: it disarms immediately after placing, the same
+   as a normal drag-to-move only ever moves the one keypoint it grabbed.
+   (An earlier revision kept it armed across placements, reasoning it would
+   help scan through a bad-detection stretch frame by frame — tried live and
+   rejected as unintuitive: staying armed after the action you asked for has
+   already happened isn't how anything else in this editor behaves, and
+   re-arming for the next frame is one click away via the toolbar anyway.)
+4. `Esc` clears `self._pending_place_kp_idx` and reverts the cursor without
+   requiring a placement first. Existing `Esc` semantics (deselect keypoint
+   / exit edit mode, see *Interaction model* above) still apply once nothing
+   is pending — placement-cancel takes priority over them, not instead of
+   them.
 5. Picking a *different* keypoint from the list while one is already
    pending simply retargets it — no need to `Esc` first.
 
@@ -1933,12 +1935,14 @@ the camera cells.
 **Phase 29 — canvas placement override.** Canvas mouse-press, when
 `_pending_place_kp_idx` is set, short-circuits the existing
 hit-test/select/drag/ghost-frame branches and calls `_on_kp_moved` directly
-at the click location; `Esc` clears the pending state ahead of its existing
-deselect/exit-edit-mode handling. *Validation*: with a keypoint picked from
-the list, click a frame that has other correctly-detected keypoints and
-verify only the picked one moves; click across several consecutive frames
-and verify placement mode persists between clicks; press `Esc` mid-placement
-and verify the cursor reverts and a normal click no longer places anything.
+at the click location, then disarms (one-shot); `Esc` clears the pending
+state ahead of its existing deselect/exit-edit-mode handling.
+*Validation*: with a keypoint picked from the list, click a frame that has
+other correctly-detected keypoints and verify only the picked one moves,
+and that placement mode is off immediately afterward (cursor back to
+normal, a second click doesn't also place something); press `Esc`
+mid-placement (before any click) and verify the cursor reverts and a
+normal click no longer places anything.
 
 ---
 

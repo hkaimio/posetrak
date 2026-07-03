@@ -153,11 +153,15 @@ of starting a drag — `PersonCropGridWidget._on_placement_clicked` then calls t
 grab. This is a strict superset of Phase 7's ghost-frame click-to-place (`_on_empty_area_clicked`),
 which only worked on frames with no observation at all and only for the current primary selection.
 
-Placement mode stays armed after a placement (repeat-friendly for scanning through a bad-detection
-stretch frame by frame) and retargets cleanly when a different keypoint is picked from the list
-without needing to cancel first. `Esc` cancels pending placement ahead of the existing
-deselect/exit-edit-mode handling (`_handle_key`'s `Escape` branch checks `_pending_place_kp_idx`
-first) — a second `Esc` with nothing pending falls through to that existing behavior unchanged.
+Placement is one-shot — `_on_placement_clicked` disarms immediately after placing, same as a normal
+drag-to-move only ever moving the one keypoint it grabbed. (Originally kept armed across placements
+to help scan a bad-detection stretch frame by frame; live feedback called this out as unintuitive —
+staying armed after the requested action already happened doesn't match anything else in the editor
+— so it was reverted before this ever shipped.) Retargets cleanly when a different keypoint is
+picked from the list without needing to cancel first. `Esc` cancels pending placement ahead of the
+existing deselect/exit-edit-mode handling (`_handle_key`'s `Escape` branch checks
+`_pending_place_kp_idx` first) — a second `Esc` with nothing pending falls through to that existing
+behavior unchanged.
 
 **Not yet live-tested**: unit tests cover `_KeypointPickerPanel`'s tree construction, the
 armed/disarmed `_ImageCanvas` click override, and the widget-level placement/cancel/retarget/Esc

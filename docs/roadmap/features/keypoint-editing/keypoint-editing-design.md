@@ -1723,13 +1723,26 @@ scroll for zoom would leave touchpad users with no way to pan at all (no
 middle button, and holding a modifier while swiping is asking a touchpad to
 do something a mouse doesn't need to). Flipping the convention around fixes
 both devices with the same gesture set, and reuses a modifier this app's
-users are already trained on:
+users are already trained on.
+
+One more device asymmetry the first pass missed: a two-finger touchpad
+swipe naturally reports *both* `angleDelta().x()` and `.y()` at once (it's
+a genuine 2D gesture), but a plain mouse wheel is one axis only — there is
+no `x` delta to read, so "plain scroll = pan" alone would leave mouse users
+able to pan vertically but with no way to reach horizontal pan at all.
+The fix is the same one browsers and spreadsheet apps already use for
+exactly this limitation: `Shift`+wheel remaps the wheel's one axis of
+motion to horizontal instead of vertical. Nothing new to teach — it's
+already how horizontal scrolling works in almost every other app a mouse
+user has used:
 
 | Input | Action |
 |---|---|
-| Plain wheel scroll / two-finger scroll | Pan (vertical delta → vertical pan; a two-finger diagonal swipe pans both axes) |
+| Wheel scroll / two-finger vertical scroll | Vertical pan |
+| `Shift` + wheel scroll | Horizontal pan (mouse's one axis remapped — standard convention, e.g. browsers, spreadsheets) |
+| Two-finger diagonal/horizontal swipe (touchpad) | Pans both axes directly — genuinely 2D, no modifier needed |
 | `Ctrl` + wheel scroll / `Ctrl` + two-finger scroll | Zoom, centered on the cursor position |
-| Middle-mouse drag | Pan (mouse-only convenience; touchpad users already have scroll-to-pan) |
+| Middle-mouse drag | Free 2D pan (mouse-only convenience — the one gesture that doesn't need `Shift` for horizontal) |
 | Double-click, or a small per-cell "Fit" affordance | Reset to fit (today's behavior, unchanged default) |
 
 `Ctrl`+wheel matches the existing timeline zoom convention (Round 1 in
@@ -1798,12 +1811,14 @@ keypoint, verify click/drag/rubber-band hit-testing still lines up exactly
 with what's drawn at the new scale; verify plain (non-`Ctrl`) scroll and all
 existing shortcuts are unaffected on an unzoomed cell.
 
-**Phase 26 — pan.** Plain wheel/two-finger-scroll and middle-drag translate
-`_zoom_rect`; clamp-and-fall-back-to-fit at frame load when the new frame's
-crop doesn't cover the stored view. *Validation*: zoom in, scrub across an
-epoch boundary, verify the view either follows smoothly or falls back to fit
-without an error or blank cell — never shows stale/wrong pixels; verify a
-two-finger diagonal touchpad swipe pans both axes at once.
+**Phase 26 — pan.** Wheel/two-finger-scroll, `Shift`+wheel, and middle-drag
+all translate `_zoom_rect`; clamp-and-fall-back-to-fit at frame load when
+the new frame's crop doesn't cover the stored view. *Validation*: zoom in,
+scrub across an epoch boundary, verify the view either follows smoothly or
+falls back to fit without an error or blank cell — never shows stale/wrong
+pixels; with a plain single-axis mouse wheel, verify `Shift`+wheel reaches
+horizontal pan (not just vertical); verify a two-finger diagonal touchpad
+swipe pans both axes at once without needing `Shift`.
 
 **Phase 27 — reset/fit + persistence check.** Double-click (or a small
 per-cell button) resets `_zoom_rect` to `None`. *Validation*: zoom one

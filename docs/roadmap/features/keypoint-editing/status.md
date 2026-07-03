@@ -86,6 +86,17 @@ Phase 6 `CropBackfillWorker` (`status_message` is only used for copy/paste/inter
 today, not backfill progress), so this isn't a regression, just an existing gap inherited by the new
 worker.
 
+Found live: a gap between two of a person's own `detection_track_assignments` segments (no track
+assignment covers those frames at all, distinct from a frame within a segment lacking a real
+per-frame detection) meant `_track_id_at_frame` returned `None`, and the wide-crop lookup skipped
+entirely — never even attempting `get_cluster_result` — while the older `CropBackfillWorker`
+ghost-crop path filled in as normal, since it works off frame proximity to any nearby real bbox, not
+track-id continuity. Fixed with `_nearest_segment_track_id` (`content_panels.py`): when the exact
+lookup fails, resolve to whichever of the person's own segments is nearest and try that track_id
+instead — the wide-crop cache's own gap-search (`_TrackWindow.raw_rect`) is what actually decides
+whether a crop exists that far from the last/next real detection, so this doesn't need to duplicate
+that radius, just give it a track_id to check against.
+
 ## Zoom and pan in the camera crop views (`_ImageCanvas` in `content_panels.py`)
 
 Implements the design in *keypoint-editing-design.md*. View state is `_ImageCanvas._zoom_rect`, a
@@ -125,7 +136,7 @@ margin has been discarded for good.
 
 ## Test coverage
 
-261 tests across the feature's test files as of this writing:
+268 tests across the feature's test files as of this writing:
 
 | File | Covers |
 |---|---|
@@ -140,7 +151,7 @@ margin has been discarded for good.
 | `test_timeline_ux_fixes.py` | All four UX rounds: seek/ruler, zoom, alignment, zoom-reset bugfix |
 | `test_keypoint_visibility.py` | Eye icon, hidden-keypoint exclusion, `Face`/`Face (detail)` split |
 | `test_trail.py`, `test_crop_editor.py` | Trail overlay, crop editor (adjacent, exercised for regressions) |
-| `test_wide_crop_cache.py` | Wide-crop cache geometry: padding, overlap clustering + merge guard, per-track gap search, JPEG encode/clip |
+| `test_wide_crop_cache.py` | Wide-crop cache geometry: padding, overlap clustering + merge guard, per-track gap search, JPEG encode/clip, nearest-segment track-id fallback across a true assignment gap |
 | `test_crop_zoom_pan.py` | Crop-cell zoom/pan geometry: zoom-around-anchor, pan translation, view-transform clamp/fallback |
 
 Run with `pytest python/tests/app/test_phase{4,5,9,10,11,12,13,14}.py python/tests/app/test_timeline_ux_fixes.py python/tests/app/test_keypoint_visibility.py python/tests/app/test_wide_crop_cache.py`.

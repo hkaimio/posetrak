@@ -1487,6 +1487,34 @@ def _compute_view_transform(
     return scale, origin_x, origin_y, view
 
 
+def _nearest_segment_track_id(
+    segs: "list[tuple[int, int, int]]", frame_idx: int,
+) -> "int | None":
+    """Track id of whichever `(track_id, first_frame, last_frame)` segment in
+    *segs* is closest to *frame_idx* -- 0 distance (and an early return) if
+    one already covers it, otherwise the smallest gap to whichever segment's
+    nearest edge is closest. None if *segs* is empty.
+
+    Used to resolve a wide-crop cache lookup for a frame in a genuine gap
+    between two of a person's assigned track segments (see
+    `_nearest_track_id_for_gap`) -- distinct from a frame within a segment
+    that simply lacks a real per-frame detection, which the wide-crop
+    cache's own gap-search already handles given a resolvable track_id.
+    """
+    best_id, best_dist = None, None
+    for track_id, first_frame, last_frame in segs:
+        if frame_idx < first_frame:
+            dist = first_frame - frame_idx
+        elif frame_idx > last_frame:
+            dist = frame_idx - last_frame
+        else:
+            return track_id
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_id = track_id
+    return best_id
+
+
 def _kp_overlay_bbox(obs_kp, hidden_indices: "frozenset[int]"):
     """Bounding box (x0, y0, x1, y1), full-frame pixel coords, of keypoints
     that would actually be drawn for this frame (matches paintEvent's
@@ -3630,6 +3658,22 @@ class PersonCropGridWidget(QWidget):
                 return track_id
         return None
 
+    def _nearest_track_id_for_gap(self, svid: str, frame_idx: int) -> int | None:
+        """Track id of whichever of this person's own assigned segments is
+        closest to *frame_idx*, for frames `_track_id_at_frame` can't resolve
+        at all -- a true gap between two segments (no track assignment
+        covers it), not just a frame within a segment lacking a real
+        per-frame detection.
+
+        Used only to pick which wide-crop cluster to *look up*: the cache's
+        own gap-search (`_TrackWindow.raw_rect` in wide_crop_cache.py) is
+        what actually decides whether a crop exists this far from that
+        track's last/next real detection. Querying with a too-distant
+        track_id just costs a dict lookup that returns None -- there's no
+        need to duplicate the cache's own gap-radius threshold here.
+        """
+        return _nearest_segment_track_id(self._track_segs.get(svid, []), frame_idx)
+
     def _track_id_by_frame(self, svid: str) -> dict[int, int]:
         """Expand `_track_segs[svid]` into a flat {frame: track_id} map.
 
@@ -4019,6 +4063,13 @@ class PersonCropGridWidget(QWidget):
             # displayed for this frame (see below).
             if self._edit_mode and self._wide_crop_mgr is not None:
                 wide_track_id = self._track_id_at_frame(svid, frame_idx)
+                if wide_track_id is None:
+                    # A true gap between two assigned segments (no track
+                    # covers this frame at all) -- fall back to whichever of
+                    # this person's own segments is nearest, so the cache's
+                    # own gap-search still gets a chance to serve a crop
+                    # anchored to the last/next real detection.
+                    wide_track_id = self._nearest_track_id_for_gap(svid, frame_idx)
                 if wide_track_id is not None:
                     wide_lookup = self._wide_crop_mgr.get_cluster_result(svid, frame_idx, wide_track_id)
                     if wide_lookup is not None:

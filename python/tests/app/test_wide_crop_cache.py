@@ -25,6 +25,7 @@ from app.pose.wide_crop_cache import (
 from app.ui.content_panels import (
     _expand_rect_to_aspect,
     _kp_overlay_bbox,
+    _nearest_segment_track_id,
     _tracked_overlay_bbox,
 )
 
@@ -273,3 +274,25 @@ def test_expand_rect_to_aspect_grows_height_when_too_short():
 def test_expand_rect_to_aspect_noop_when_already_matching():
     rect = _expand_rect_to_aspect((0, 0, 160, 90), target_ar=16 / 9)
     assert rect == (0, 0, 160, 90)
+
+
+# ---------------------------------------------------------------------------
+# _nearest_segment_track_id -- resolving a wide-crop lookup across a true
+# gap between two of a person's own assigned track segments
+# ---------------------------------------------------------------------------
+
+def test_nearest_segment_track_id_returns_covering_segment_directly():
+    segs = [(1, 0, 99), (2, 200, 299)]
+    assert _nearest_segment_track_id(segs, 50) == 1
+    assert _nearest_segment_track_id(segs, 250) == 2
+
+
+def test_nearest_segment_track_id_picks_closer_side_of_a_gap():
+    segs = [(1, 0, 99), (2, 200, 299)]
+    assert _nearest_segment_track_id(segs, 110) == 1   # 11 frames from seg 1's end
+    assert _nearest_segment_track_id(segs, 190) == 2   # 10 frames from seg 2's start
+    assert _nearest_segment_track_id(segs, 149) == 1   # 50 vs 51 frames -- seg 1 closer
+
+
+def test_nearest_segment_track_id_none_when_no_segments():
+    assert _nearest_segment_track_id([], 50) is None

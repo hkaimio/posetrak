@@ -1548,16 +1548,32 @@ raw `person_detections`, which is exactly the data this feature exists to
 original (wrong) detection placed the person, and the cache has no way to
 know that ahead of time.
 
-1. Look up `(shot_video_id, frame_idx)` in the in-memory cluster index.
-2. Find the entry whose `track_ids` contains the target track. (Cheap linear
+1. Resolve which track_id to look up. Usually the one whose assigned
+   segment (`detection_track_assignments`) covers `frame_idx` exactly. But a
+   *true* gap between two of the person's own segments — no track
+   assignment covers this frame at all, not just a frame within a segment
+   lacking a real per-frame detection — has no track_id to resolve that
+   way. Found live: a ~0.87s gap (`b05e51a9…`, camera `pixel7`, person
+   Roosa) where the wide-crop cache silently never even attempted a lookup,
+   while the older `CropBackfillWorker` ghost-crop path — which works off
+   frame proximity to *any* nearby real bbox, not track-id continuity —
+   filled in as normal. Fixed by falling back to whichever of the person's
+   *own* segments is nearest (before or after the gap): this doesn't need to
+   duplicate the cache's own gap-search radius, since querying with a
+   too-distant track_id just costs a dict lookup that returns None in step 2
+   below — the cache's own `raw_rect` gap-search is what actually decides
+   whether a crop exists that far from that track's last/next real
+   detection.
+2. Look up `(shot_video_id, frame_idx)` in the in-memory cluster index.
+3. Find the entry whose `track_ids` contains the target track. (Cheap linear
    scan — there are only ever a few clusters per camera per frame.) Each
    entry stores not just the shared cluster image but also, per member
    track, that track's own padded window from *before* clustering (step 2 of
    the caching algorithm above) — narrower than the merged cluster rect,
    still with the cache's full 35% margin.
-3. If found: sub-crop the decoded cluster JPEG to the target track's own
+4. If found: sub-crop the decoded cluster JPEG to the target track's own
    window — not the whole cluster, and not a re-derived tight window.
-4. Widen that sub-crop to cover whatever keypoints are actually about to be
+5. Widen that sub-crop to cover whatever keypoints are actually about to be
    drawn for this frame:
    - the merged `pose_observations` + edits result (same confidence cutoff
      the overlay uses to decide what's visible), and
@@ -1566,33 +1582,33 @@ know that ahead of time.
      tracking run exists, or a selected run's own projection can drift from
      the raw detection the cache was built from — either way this is a
      second, independent overlay that needs the same guarantee.
-5. Grow (never shrink) the widened window to match the display cell's own
+6. Grow (never shrink) the widened window to match the display cell's own
    aspect ratio, so the cell fills with image content instead of showing a
    letterboxed black border around whatever aspect ratio the padded/widened
    window happened to end up with.
-6. Clamp the result to what the cluster image actually has decoded — a
+7. Clamp the result to what the cluster image actually has decoded — a
    sub-crop can't show pixels outside the cached region. (The aspect-ratio
-   growth in step 5 happens *before* this clamp, so it only fills in extra
+   growth in step 6 happens *before* this clamp, so it only fills in extra
    margin where the cache actually has it — it never causes a fallback on
    its own.)
-7. If even the clamped, keypoint-widened window (before the aspect-ratio
+8. If even the clamped, keypoint-widened window (before the aspect-ratio
    growth) still doesn't cover the displayed keypoints/joints — the edit or
    tracking result moved something outside this cluster's own cached extent
    entirely — don't use this cache entry for this frame. Fall through to the
-   existing chain instead (step 9) rather than show a crop that's silently
+   existing chain instead (step 10) rather than show a crop that's silently
    missing part of what should be visible.
-8. If two people sharing the same cluster both have edit panels open at
+9. If two people sharing the same cluster both have edit panels open at
    once, both read the same cached cluster JPEG and each does its own local
-   sub-crop from steps 3-6 — no extra decode or storage cost. This is where
+   sub-crop from steps 4-7 — no extra decode or storage cost. This is where
    the sharing actually pays off, and is also why the cache is scoped to the
    detection run rather than to a single panel (see *Cache scope and
    lifecycle* below) — a second person's panel should reuse, not rebuild,
    crops the first person's panel already generated.
-9. If no cluster entry exists yet for this `(shot_video_id, frame_idx,
-   track)` (background worker hasn't reached it, or hasn't started for this
-   camera), or step 7 rejected the one that does exist: fall back to the
-   existing layered chain unchanged — DB blob → Phase 6 in-memory synthetic
-   crop → placeholder.
+10. If no cluster entry exists yet for this `(shot_video_id, frame_idx,
+    track)` (background worker hasn't reached it, or hasn't started for this
+    camera), or step 8 rejected the one that does exist: fall back to the
+    existing layered chain unchanged — DB blob → Phase 6 in-memory synthetic
+    crop → placeholder.
 
 ### Serving frames: layered fallback, not a replacement
 

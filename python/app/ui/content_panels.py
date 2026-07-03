@@ -1396,6 +1396,79 @@ _TRAIL_LINE_WIDTH = 1.5
 _TRAIL_DOT_R = 3
 _TRAIL_N = 10
 
+# ---------------------------------------------------------------------------
+# Crop-cell zoom/pan constants and pure geometry helpers
+#
+# See "Zoom and pan in the camera crop views" in the design doc: view state
+# is a full-frame-pixel rectangle (not a display-pixel offset), because the
+# wide-crop cache's underlying crop can shift between epochs -- the same
+# clamp-to-available-pixels shape already built for that feature's
+# sub-cropping.
+# ---------------------------------------------------------------------------
+
+_ZOOM_PER_WHEEL_STEP = 1.15   # factor per 120-unit angleDelta step (one mouse click)
+_MIN_ZOOM_RECT_SIZE = 20.0    # full-frame px floor, prevents a degenerate zoom-in
+
+
+def _zoomed_rect(
+    rect: tuple, factor: float, anchor: tuple, min_size: float = _MIN_ZOOM_RECT_SIZE,
+) -> "tuple | None":
+    """Scale *rect* (x0, y0, x1, y1) by 1/factor around *anchor* (ax, ay).
+
+    factor > 1 zooms in (rect shrinks toward the anchor); factor < 1 zooms
+    out. Returns None if the result would be smaller than *min_size* on
+    either axis -- the caller should then leave the rect unchanged rather
+    than apply a degenerate (near-zero-area) zoom.
+    """
+    x0, y0, x1, y1 = rect
+    ax, ay = anchor
+    nx0 = ax + (x0 - ax) / factor
+    nx1 = ax + (x1 - ax) / factor
+    ny0 = ay + (y0 - ay) / factor
+    ny1 = ay + (y1 - ay) / factor
+    if nx1 - nx0 < min_size or ny1 - ny0 < min_size:
+        return None
+    return (nx0, ny0, nx1, ny1)
+
+
+def _panned_rect(rect: tuple, dx: float, dy: float) -> tuple:
+    """Translate *rect* (x0, y0, x1, y1) by (dx, dy)."""
+    x0, y0, x1, y1 = rect
+    return (x0 + dx, y0 + dy, x1 + dx, y1 + dy)
+
+
+def _compute_view_transform(
+    cell_w: float,
+    cell_h: float,
+    pixmap_extent: tuple,
+    zoom_rect: "tuple | None",
+) -> tuple:
+    """Return (scale, origin_x, origin_y, view_rect).
+
+    The affine map from full-frame pixel (u, v) to display pixel is
+    `(u * scale + origin_x, v * scale + origin_y)`. *view_rect* is the
+    full-frame rectangle actually being displayed: *zoom_rect* clamped to
+    *pixmap_extent* (both (x0, y0, x1, y1)) if given and it overlaps, else
+    the whole *pixmap_extent* -- "fit whatever crop is given", today's
+    unzoomed behavior.
+    """
+    pm_x0, pm_y0, pm_x1, pm_y1 = pixmap_extent
+    view = (pm_x0, pm_y0, pm_x1, pm_y1)
+    if zoom_rect is not None:
+        zx0, zy0, zx1, zy1 = zoom_rect
+        cx0, cy0 = max(zx0, pm_x0), max(zy0, pm_y0)
+        cx1, cy1 = min(zx1, pm_x1), min(zy1, pm_y1)
+        if cx1 > cx0 and cy1 > cy0:
+            view = (cx0, cy0, cx1, cy1)
+    vx0, vy0, vx1, vy1 = view
+    view_w, view_h = vx1 - vx0, vy1 - vy0
+    if view_w <= 0 or view_h <= 0 or cell_w <= 0 or cell_h <= 0:
+        return 1.0, 0.0, 0.0, view
+    scale = min(cell_w / view_w, cell_h / view_h)
+    origin_x = (cell_w - view_w * scale) / 2 - vx0 * scale
+    origin_y = (cell_h - view_h * scale) / 2 - vy0 * scale
+    return scale, origin_x, origin_y, view
+
 
 def _kp_overlay_bbox(obs_kp, hidden_indices: "frozenset[int]"):
     """Bounding box (x0, y0, x1, y1), full-frame pixel coords, of keypoints
@@ -1548,6 +1621,12 @@ class _ImageCanvas(QWidget):
         self._selected_kp_name: str | None = None
         self._loading: bool = False
         self._range_pts: list[tuple[float, float]] = []  # frame-space positions to highlight
+        # Zoom/pan: desired view, full-frame pixel coords; None = fit whatever
+        # crop is given (today's default). See _compute_view_transform.
+        self._zoom_rect: tuple[float, float, float, float] | None = None
+        self._pan_active: bool = False
+        self._pan_start_disp: tuple[float, float] | None = None
+        self._pan_start_rect: tuple[float, float, float, float] | None = None
 
     def show_empty(self) -> None:
         self._loading = False
@@ -1637,31 +1716,56 @@ class _ImageCanvas(QWidget):
     ) -> None:
         self.set_selection(idx, frozenset({idx}) if idx is not None else frozenset(), name)
 
+    def _pixmap_extent(self) -> "tuple[float, float, float, float] | None":
+        """Full-frame pixel extent (x0, y0, x1, y1) the current pixmap covers."""
+        if self._pixmap is None or self._pixmap.width() == 0 or self._src_scale <= 0:
+            return None
+        return (
+            self._x1, self._y1,
+            self._x1 + self._pixmap.width() / self._src_scale,
+            self._y1 + self._pixmap.height() / self._src_scale,
+        )
+
+    def _view_transform(self) -> tuple:
+        """(scale, origin_x, origin_y, view_rect) -- see _compute_view_transform."""
+        extent = self._pixmap_extent()
+        if extent is None:
+            return 1.0, 0.0, 0.0, (0.0, 0.0, float(self.width()), float(self.height()))
+        return _compute_view_transform(
+            float(self.width()), float(self.height()), extent, self._zoom_rect,
+        )
+
+    def reset_zoom(self) -> None:
+        """Return to fit-whatever-crop-is-given (today's unzoomed default)."""
+        if self._zoom_rect is not None:
+            self._zoom_rect = None
+            self.update()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        self.reset_zoom()
+
     def _to_pt(self, u: float, v: float) -> QPointF:
-        off_x, off_y, _, _, disp_scale = self._image_rect()
-        combined = self._src_scale * disp_scale
-        return QPointF((u - self._x1) * combined + off_x, (v - self._y1) * combined + off_y)
+        scale, origin_x, origin_y, _view = self._view_transform()
+        return QPointF(u * scale + origin_x, v * scale + origin_y)
 
     def _display_to_full(self, dx: float, dy: float) -> tuple[float, float]:
-        off_x, off_y, _, _, disp_scale = self._image_rect()
-        combined = self._src_scale * disp_scale
-        if combined == 0:
+        scale, origin_x, origin_y, _view = self._view_transform()
+        if scale == 0:
             return self._x1, self._y1
-        return (dx - off_x) / combined + self._x1, (dy - off_y) / combined + self._y1
+        return (dx - origin_x) / scale, (dy - origin_y) / scale
 
     def _hit_kp(self, dx: float, dy: float) -> int | None:
         if self._obs_kp is None:
             return None
-        off_x, off_y, _, _, disp_scale = self._image_rect()
-        combined = self._src_scale * disp_scale
+        scale, origin_x, origin_y, _view = self._view_transform()
         best_i, best_d2 = None, float(_KP_HIT_RADIUS ** 2)
         for i in range(self._obs_kp.shape[0]):
             if i in self._hidden_kp:
                 continue
             if float(self._obs_kp[i, 2]) < 0.1 and not self._edit_mode:
                 continue
-            px = (float(self._obs_kp[i, 0]) - self._x1) * combined + off_x
-            py = (float(self._obs_kp[i, 1]) - self._y1) * combined + off_y
+            px = float(self._obs_kp[i, 0]) * scale + origin_x
+            py = float(self._obs_kp[i, 1]) * scale + origin_y
             d2 = (dx - px) ** 2 + (dy - py) ** 2
             if d2 < best_d2:
                 best_d2 = d2
@@ -1669,6 +1773,16 @@ class _ImageCanvas(QWidget):
         return best_i
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        # Middle-mouse pan works regardless of edit mode -- it's a view-only
+        # operation, not an edit action, and doesn't compete with left/right
+        # button handling below.
+        if event.button() == Qt.MouseButton.MiddleButton:
+            pos = event.position()
+            self._pan_active = True
+            self._pan_start_disp = (pos.x(), pos.y())
+            self._pan_start_rect = self._zoom_rect or self._pixmap_extent()
+            return
+
         if self._edit_mode:
             pos = event.position()
             dx, dy = pos.x(), pos.y()
@@ -1704,6 +1818,19 @@ class _ImageCanvas(QWidget):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._pan_active and (event.buttons() & Qt.MouseButton.MiddleButton):
+            if self._pan_start_disp is not None and self._pan_start_rect is not None:
+                pos = event.position()
+                scale, _ox, _oy, _view = self._view_transform()
+                if scale > 0:
+                    fdx = (pos.x() - self._pan_start_disp[0]) / scale
+                    fdy = (pos.y() - self._pan_start_disp[1]) / scale
+                    # Grab-and-drag: content follows the cursor, so the view
+                    # rect moves opposite to the drag direction.
+                    self._zoom_rect = _panned_rect(self._pan_start_rect, -fdx, -fdy)
+                    self.update()
+            return
+
         if self._drag_kp is not None and (event.buttons() & Qt.MouseButton.LeftButton):
             pos = event.position()
             self._drag_cur_disp = (pos.x(), pos.y())
@@ -1726,6 +1853,12 @@ class _ImageCanvas(QWidget):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._pan_active = False
+            self._pan_start_disp = None
+            self._pan_start_rect = None
+            return
+
         if event.button() == Qt.MouseButton.LeftButton:
             if self._drag_kp is not None:
                 if self._drag_moved and self._drag_cur_disp is not None:
@@ -1755,21 +1888,83 @@ class _ImageCanvas(QWidget):
         else:
             super().mouseReleaseEvent(event)
 
-    def _image_rect(self) -> tuple[int, int, int, int, float]:
-        """Return (off_x, off_y, disp_w, disp_h, disp_scale) for the current pixmap."""
-        cw, ch = self.width(), self.height()
-        if self._pixmap is None or self._pixmap.width() == 0:
-            return 0, 0, cw, ch, 1.0
-        px_w, px_h = self._pixmap.width(), self._pixmap.height()
-        disp_scale = min(cw / px_w, ch / px_h)
-        disp_w = int(px_w * disp_scale)
-        disp_h = int(px_h * disp_scale)
-        off_x = (cw - disp_w) // 2
-        off_y = (ch - disp_h) // 2
-        return off_x, off_y, disp_w, disp_h, disp_scale
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        """Device-dispatched zoom/pan -- see "Zoom and pan in the camera crop
+        views" in the design doc. Mouse wheel zooms unmodified (matches every
+        other image viewer); touchpad two-finger scroll pans unmodified
+        (matches ordinary scrolling) and needs Shift to zoom, since a
+        touchpad has no separate button to give zoom its own gesture.
+        """
+        from PySide6.QtGui import QInputDevice
+
+        is_touchpad = False
+        try:
+            is_touchpad = event.device().type() == QInputDevice.DeviceType.TouchPad
+        except Exception:
+            pass  # Unknown/unclassified device -- fall back to the mouse mapping.
+
+        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        zooming = shift if is_touchpad else True
+
+        angle = event.angleDelta()
+        pos = event.position()
+
+        if zooming:
+            steps = angle.y() / 120.0
+            if steps == 0:
+                event.ignore()
+                return
+            factor = _ZOOM_PER_WHEEL_STEP ** steps
+            self._apply_zoom(factor, (pos.x(), pos.y()))
+            event.accept()
+            return
+
+        # Not zooming only happens for a touchpad without Shift held (a mouse
+        # is always `zooming` above) -- pan with both swipe axes (natural
+        # scrolling: content follows the finger, same sign convention as
+        # middle-drag). A mouse wheel has no horizontal axis and no
+        # unmodified pan gesture of its own -- middle-drag covers that.
+        self._apply_pan_delta(angle.x() / 8.0, angle.y() / 8.0)
+        event.accept()
+
+    def _apply_zoom(self, factor: float, anchor_disp: tuple[float, float]) -> None:
+        extent = self._pixmap_extent()
+        if extent is None:
+            return
+        base_rect = self._zoom_rect or extent
+        anchor_full = self._display_to_full(*anchor_disp)
+        new_rect = _zoomed_rect(base_rect, factor, anchor_full)
+        if new_rect is None:
+            return
+        # Zooming out past the pixmap's own extent is equivalent to fit mode
+        # (_compute_view_transform already clamps to it) -- collapse back to
+        # None so a subsequent zoom-in starts fresh from the *current* frame's
+        # extent rather than a stale rect from a since-changed crop.
+        x0, y0, x1, y1 = new_rect
+        ex0, ey0, ex1, ey1 = extent
+        if x0 <= ex0 and y0 <= ey0 and x1 >= ex1 and y1 >= ey1:
+            self._zoom_rect = None
+        else:
+            self._zoom_rect = new_rect
+        self.update()
+
+    def _apply_pan_delta(self, disp_dx: float, disp_dy: float) -> None:
+        extent = self._pixmap_extent()
+        if extent is None or self._zoom_rect is None:
+            # Not zoomed in -- the whole crop already fits the cell, so
+            # panning has nothing new to reveal. Let it propagate (e.g. to an
+            # enclosing scroll area) instead of silently doing nothing.
+            return
+        scale, _ox, _oy, _view = self._view_transform()
+        if scale <= 0:
+            return
+        self._zoom_rect = _panned_rect(self._zoom_rect, -disp_dx / scale, -disp_dy / scale)
+        self.update()
 
     def paintEvent(self, _event) -> None:
         from math import isnan
+
+        from PySide6.QtCore import QRect
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -1784,22 +1979,31 @@ class _ImageCanvas(QWidget):
             painter.end()
             return
 
-        off_x, off_y, disp_w, disp_h, disp_scale = self._image_rect()
-        scaled_pix = self._pixmap.scaled(
-            disp_w, disp_h,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        painter.drawPixmap(off_x, off_y, scaled_pix)
-
-        # Combined scale: full-frame pixels → display pixels
-        combined = self._src_scale * disp_scale
+        scale, origin_x, origin_y, view = self._view_transform()
+        vx0, vy0, vx1, vy1 = view
+        # view is in full-frame pixel coords; convert to this pixmap's own
+        # local pixel coords (may be a sub-region of it when zoomed) before
+        # cropping -- clamped defensively even though _compute_view_transform
+        # already clamps against the same extent this pixmap reports.
+        pix_x0 = max(0, int(round((vx0 - self._x1) * self._src_scale)))
+        pix_y0 = max(0, int(round((vy0 - self._y1) * self._src_scale)))
+        pix_x1 = min(self._pixmap.width(), int(round((vx1 - self._x1) * self._src_scale)))
+        pix_y1 = min(self._pixmap.height(), int(round((vy1 - self._y1) * self._src_scale)))
+        if pix_x1 > pix_x0 and pix_y1 > pix_y0:
+            cropped = self._pixmap.copy(QRect(pix_x0, pix_y0, pix_x1 - pix_x0, pix_y1 - pix_y0))
+            disp_x = vx0 * scale + origin_x
+            disp_y = vy0 * scale + origin_y
+            disp_w = max(1, int(round((vx1 - vx0) * scale)))
+            disp_h = max(1, int(round((vy1 - vy0) * scale)))
+            scaled_pix = cropped.scaled(
+                disp_w, disp_h,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap(int(round(disp_x)), int(round(disp_y)), scaled_pix)
 
         def to_pt(u: float, v: float) -> QPointF:
-            return QPointF(
-                (u - self._x1) * combined + off_x,
-                (v - self._y1) * combined + off_y,
-            )
+            return QPointF(u * scale + origin_x, v * scale + origin_y)
 
         # ---- Detected keypoints (white connections, colour-coded dots) ----
         if self._show_detected and self._obs_kp is not None:
@@ -2922,6 +3126,10 @@ class PersonCropGridWidget(QWidget):
         clear_act = menu.addAction("Deselect all")
         clear_act.triggered.connect(lambda: self._on_kp_deselected(cam_idx))
         cell = self._cells[cam_idx]
+        if cell._canvas._zoom_rect is not None:
+            menu.addSeparator()
+            reset_zoom_act = menu.addAction("Reset zoom")
+            reset_zoom_act.triggered.connect(lambda ci=cam_idx: self._cells[ci]._canvas.reset_zoom())
         global_pos = cell._canvas.mapToGlobal(QPoint(int(dx), int(dy)))
         menu.exec(global_pos)
 

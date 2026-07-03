@@ -29,7 +29,7 @@ See:
 | — | Partial tracking (checkpoint + resume from mid-trial) | ⬜ Designed, not implemented |
 | — | Per-keypoint/camera/frame measurement noise override | ⬜ Designed, not implemented |
 | — | Background wide-crop frame cache (person-cluster merging) | ✅ Done (see below) |
-| 25-27 | Zoom and pan in the camera crop views | ⬜ Designed, not implemented |
+| 25-27 | Zoom and pan in the camera crop views | ✅ Done (see below) |
 | 28-29 | Keypoint-placement toolbar (pick from list, click to place) | ⬜ Designed, not implemented |
 
 Phases 1-10 predate this status document; phases 11-14 and the follow-up UX rounds below were
@@ -86,9 +86,39 @@ Phase 6 `CropBackfillWorker` (`status_message` is only used for copy/paste/inter
 today, not backfill progress), so this isn't a regression, just an existing gap inherited by the new
 worker.
 
+## Zoom and pan in the camera crop views (`_ImageCanvas` in `content_panels.py`)
+
+Implements the design in *keypoint-editing-design.md*. View state is `_ImageCanvas._zoom_rect`, a
+full-frame-pixel rectangle (`None` = fit whatever crop is given, today's unchanged default) rather
+than a display-pixel offset, so it survives the wide-crop cache's crop shifting at epoch boundaries —
+`_compute_view_transform` clamps it to the current pixmap's own extent each paint, falling back to fit
+if a frame's crop no longer overlaps it at all. `_zoomed_rect`/`_panned_rect`/`_compute_view_transform`
+are pure functions (unit tested in `test_crop_zoom_pan.py`); `_ImageCanvas` methods are thin wrappers
+over them plus the four pre-existing `combined = src_scale * disp_scale` call sites (`_to_pt`,
+`_display_to_full`, `_hit_kp`, `paintEvent`), now consolidated into one `_view_transform()`.
+
+Gestures dispatch on `QWheelEvent.device().type()` (PySide6 6.10 / `QInputDevice.DeviceType`) rather
+than a single shared mapping, since a mouse wheel and a touchpad's two-finger scroll arrive as the
+same `QWheelEvent` but their users expect different defaults:
+
+- **Mouse**: wheel scroll zooms (centered on the cursor); middle-button drag pans freely.
+- **Touchpad**: two-finger swipe pans (both axes, since it's a genuine 2D gesture); `Shift`+swipe
+  zooms.
+- Double-click, or "Reset zoom" on the existing right-click group-selection context menu (only shown
+  once actually zoomed), resets to fit.
+
+If `device().type()` ever reports something other than `Mouse`/`TouchPad` (an exception is caught),
+the mouse mapping is used as the fallback, per the design doc's stated reliability caveat.
+
+**Not yet validated on real hardware**: whether `device().type()` reliably classifies an actual
+Windows Precision Touchpad in this environment is exactly the design doc's one flagged uncertainty —
+worth a manual pass (scroll, `Shift`+scroll, and middle-drag on both a real mouse and the target
+laptop's touchpad) before relying on it further. `QRect`/`QInputDevice` are imported locally inside
+the functions that need them, matching this file's existing convention for less-common Qt types.
+
 ## Test coverage
 
-239 tests across the feature's test files as of this writing:
+261 tests across the feature's test files as of this writing:
 
 | File | Covers |
 |---|---|
@@ -104,6 +134,7 @@ worker.
 | `test_keypoint_visibility.py` | Eye icon, hidden-keypoint exclusion, `Face`/`Face (detail)` split |
 | `test_trail.py`, `test_crop_editor.py` | Trail overlay, crop editor (adjacent, exercised for regressions) |
 | `test_wide_crop_cache.py` | Wide-crop cache geometry: padding, overlap clustering + merge guard, per-track gap search, JPEG encode/clip |
+| `test_crop_zoom_pan.py` | Crop-cell zoom/pan geometry: zoom-around-anchor, pan translation, view-transform clamp/fallback |
 
 Run with `pytest python/tests/app/test_phase{4,5,9,10,11,12,13,14}.py python/tests/app/test_timeline_ux_fixes.py python/tests/app/test_keypoint_visibility.py python/tests/app/test_wide_crop_cache.py`.
 
@@ -119,10 +150,15 @@ Run with `pytest python/tests/app/test_phase{4,5,9,10,11,12,13,14}.py python/tes
   showing whether the tracker's own outlier rejection still distrusts an edited keypoint — was never
   assigned a phase number and is not implemented. Only axis 1 (edit state: green/yellow/blue/grey)
   exists today.
-- **Partial tracking and per-keypoint measurement noise** are fully designed (see
-  keypoint-editing-design.md) but not started. Neither blocks the current feature; they were
-  lower-priority ideas from the same improvements brief.
+- **Partial tracking, per-keypoint measurement noise, and the keypoint-placement toolbar** are
+  fully designed (see keypoint-editing-design.md) but not started. None block the current feature;
+  they were lower-priority ideas from the same improvements brief.
 - **Background wide-crop frame cache** (see above) has not yet had a manual UI validation pass
   (real multi-person trial, scrubbing through a long detection gap) — the algorithms are unit
   tested but the worker's QThread mechanics and on-screen framing haven't been eyeballed live, the
   same gap the original `CropBackfillWorker` has (no dedicated test file for it either).
+- **Zoom/pan device dispatch** (see above) has not been validated on real mouse + touchpad hardware
+  — the geometry is unit tested, but whether `QWheelEvent.device().type()` actually distinguishes
+  them correctly on this project's target Windows laptop is unverified, and is the one place this
+  feature's design explicitly flagged as an assumption rather than something proven elsewhere in the
+  codebase.

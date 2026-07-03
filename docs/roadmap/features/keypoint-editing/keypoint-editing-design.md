@@ -1407,16 +1407,43 @@ with longer epochs (storage savings 37%→42%, encode-time 17%→26% from 24 to
 96 frames) — so there's no sharp cost to erring toward a longer epoch;
 0.4s is a reasonable starting default, not a value to tune finely up front.
 
+**The frames that most need editing are exactly the ones detection struggled
+with**: wrong-person assignment, or a person not detected at all for a
+stretch that can outlast one epoch during a fast, high-motion sequence (a
+throw or roll can occlude someone for well over 0.4s). The crop must stay
+generous precisely there, not shrink to nothing just because an epoch
+happens to contain zero real detections. So step 1 below deliberately looks
+past the epoch's own boundary rather than only at detections strictly inside
+it:
+
 For each epoch, per camera:
 
-1. For every track with at least one detection in the epoch, compute the
-   union of its `person_detections` bboxes across the epoch's frames — this
-   is exactly the Phase 6 union-bbox primitive, just windowed by epoch
-   boundary instead of a fixed `±10` frames.
-2. Pad that union rect by a configurable fraction on each side (default 35%,
-   noticeably more generous than Phase 6's 10% — this is what covers full
-   detection dropouts within the epoch and gives room for motion before the
-   next recompute). This is the track's candidate crop rect for the epoch.
+1. Compute each track's **raw rect** for the epoch:
+   a. First, union the track's real `person_detections` bboxes over
+      `[epoch_start − 10, epoch_end + 10)` frames — the epoch widened by
+      Phase 6's existing `±10`-frame margin, not just the frames strictly
+      inside it. This absorbs short gaps straddling an epoch edge and
+      epochs with only a couple of real detections near their boundary,
+      the same way Phase 6 already does for a single missing frame.
+   b. If that widened window still has *zero* real detections — a gap
+      longer than the epoch itself — search further outward from the
+      epoch's edges for the nearest real detection before it and the
+      nearest one after it, up to a bounded search radius (a few seconds;
+      configurable). Union whichever anchor(s) are found within that
+      radius. This is intentionally generous: it produces a box spanning
+      from wherever the person was last seen to wherever they reappear,
+      because a large "known bounds" box is far more useful for editing a
+      long undetected stretch than a tight, stale, or missing one. If the
+      radius is exceeded on one side (track truly gone — e.g. leaves the
+      camera's view for the rest of the trial), use only the anchor found
+      on the other side; if neither side has one within the radius, this
+      track has no crop for this epoch and falls through to the existing
+      layered fallback (see *Serving frames* below).
+2. Pad the raw rect by a configurable fraction on each side (default 35%,
+   noticeably more generous than Phase 6's 10% — this is what gives room for
+   motion before the next recompute, on top of whatever gap-handling already
+   widened the rect in step 1). This is the track's candidate crop rect for
+   the epoch.
 3. Cluster tracks whose padded rects overlap: a simple union-find /
    connected-components pass over the (typically single-digit) tracks active
    in the camera — merge any two clusters whose rects intersect, taking the
@@ -1442,7 +1469,47 @@ For each epoch, per camera:
 
 A track can belong to different clusters in different epochs (people
 separating and rejoining) — that's expected and handled automatically since
-clustering is recomputed independently per epoch.
+clustering is recomputed independently per epoch. Because step 1's gap
+handling already reaches outside the epoch boundary when needed, the fixed
+epoch length is mostly a cost/cadence knob from here on, not a correctness
+requirement — even a track invisible for several epochs in a row still gets
+a generous, well-formed crop from its nearest real detections on either
+side.
+
+### Alternative considered: fixed-grid tiles
+
+Before settling on cluster-merge, we evaluated a simpler-looking
+alternative: partition each frame into a fixed tile grid and cache any tile
+intersecting a person's padded window, stitching the needed tiles together
+at display time. This is appealing on paper — it removes the
+clustering/merge-guard/epoch bookkeeping entirely, since sharing between
+overlapping people is implicit (two people whose windows touch the same
+grid cell just get that cell cached once) and the caching decision per
+frame is only "which tiles does this window touch."
+
+Simulated against the same real bboxes, using the *same* padded-window
+definition as the cluster approach so only the sharing mechanism differs,
+across tile sizes from 400px to 2400px:
+
+| Strategy | Storage | Encode time | Images |
+|---|---|---|---|
+| separate crop per person | 2.42 GB | 67.8 s | 50,288 |
+| cluster-merge | **1.47 GB** | **53.2 s** | 22,892 |
+| fixed tiles, best size (1400px) | 5.28 GB | 271.0 s | 32,182 |
+| fixed tiles, 400-800px | 5.3-6.1 GB | 112-204 s | 74k-163k |
+| fixed tiles, 1800-2400px | 7.8-10.4 GB | 425-597 s | 24k-30k |
+
+Tiling loses at *every* size tested — 3.5-8× worse than cluster-merge on
+both storage and encode time, and often worse than not sharing at all. The
+reason is structural, not a tuning problem: a person's padded motion window
+is an elongated, arbitrarily-positioned rectangle (someone rolling or being
+thrown covers a lot of ground in a fraction of a second), and a fixed square
+grid can't conform to that shape — it always rounds outward to whole tiles
+at the boundary, and an elongated region wastes disproportionately more
+tile area than a compact one, whichever grid size is chosen. Serving isn't
+meaningfully simpler either in practice: stitching 2-4 tiles back into a
+display crop is about as much code as cluster-merge's single sub-crop.
+Rejected in favor of cluster-merge.
 
 ### Algorithm: selecting the cached image for a frame & scaling for display
 
@@ -1538,7 +1605,10 @@ the epoch/union/cluster/merge-guard algorithm above and writing one JPEG per
 person in a trial with ≥2 close-together tracked persons; verify clusters
 form where bboxes overlap and stay separate where they don't (log or debug-
 dump cluster membership per epoch); verify the background thread doesn't
-stall UI scrubbing.
+stall UI scrubbing; find or construct a gap longer than one epoch (a track
+undetected across several consecutive epochs) and verify the crop for those
+epochs still spans a generous, well-formed region derived from the nearest
+real detections before/after the gap, not an empty or missing crop.
 
 **Phase 23 — layered frame serving.** Extend the crop-source fallback chain
 to check the cluster cache first via the selection algorithm above,

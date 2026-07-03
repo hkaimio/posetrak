@@ -1706,57 +1706,57 @@ motion where the auto-detected position is close but not exact — needs the
 ability to zoom in past "fit to cell" and pan around, independently per
 camera.
 
-### Interaction model: different defaults per device, not one shared mapping
+### Interaction model: one modifier-based mapping, not per-device dispatch
 
-Two earlier passes at this both assumed a *single* gesture table has to work
-for mouse and touchpad alike, and both produced something that reads wrong
-for whichever device it wasn't optimized for: "scroll = zoom" leaves a
-touchpad with no way to pan (no middle button), and "scroll = pan" makes a
-mouse wheel behave unlike almost every other app someone with a mouse has
-used, where the wheel zooms.
+Three passes at this now, each corrected by something the previous one got
+wrong:
 
-The actual fix isn't a shared mapping — it's per-device defaults, and Qt can
-tell the two apart. `QWheelEvent.device().type()` (PySide6 6.10;
-`QInputDevice.DeviceType`) reports `Mouse` or `TouchPad` distinctly — Windows
-Precision Touchpad hardware shows up as its own HID device class, not a
-mouse, so this isn't guessing from `angleDelta()` shape, it's asking Qt
-directly which device produced the event:
+- **Attempt 1** ("scroll = zoom") left a touchpad with no way to pan at all
+  (no middle button).
+- **Attempt 2** ("scroll = pan") made a mouse wheel behave unlike almost
+  every other app someone with a mouse has used, where the wheel zooms.
+- **Attempt 3** tried to have it both ways by dispatching on
+  `QWheelEvent.device().type()` (PySide6 6.10; `QInputDevice.DeviceType`),
+  giving mouse and touchpad different unmodified defaults. This is where
+  real-hardware testing mattered: on the actual target laptop, *every*
+  two-finger touchpad gesture came through as a zoom, `Shift` held or not.
+  That's consistent with a real, documented Windows behavior rather than a
+  bug in the dispatch logic — Windows Precision Touchpad drivers generally
+  synthesize ordinary `WM_MOUSEWHEEL` / `WM_MOUSEHWHEEL` messages for a
+  plain two-finger scroll (there's no separate OS-level gesture message for
+  "scroll" the way there is for pinch), so by the time Qt sees the event
+  it's indistinguishable from a physical wheel — `device().type()` reports
+  `Mouse` for both, not because Qt is misclassifying the hardware but
+  because the OS already erased the distinction upstream of Qt entirely.
+  This means device-based dispatch was never going to work reliably on
+  Windows and should be treated as a dead end here, not something to keep
+  tuning.
 
-| Device | Unmodified gesture | Modified gesture |
-|---|---|---|
-| Mouse | Wheel scroll → zoom, centered on the cursor | `Shift` + wheel → *(reserved; not needed, see below)* |
-| Mouse | Middle-button drag → free 2D pan | — |
-| Touchpad | Two-finger swipe → pan (genuinely 2D — `angleDelta().x()` and `.y()` both arrive from one diagonal swipe) | `Shift` + two-finger swipe → zoom, centered on the cursor |
-| Both | Double-click, or a small per-cell "Fit" affordance → reset to fit | |
+The fix that doesn't depend on Qt/Windows telling the devices apart: **one
+modifier-based mapping**, identical regardless of which device produced the
+event, since that's no longer knowable anyway.
 
-This matches what each device's users already expect: a mouse wheel zooms
-the way it does in image viewers and maps apps; middle-drag is the
-already-standard "free pan" gesture for a mouse, so the wheel doesn't need a
-modifier scheme for panning at all. A touchpad's two-finger swipe is already
-"scroll/pan" muscle memory (how every scrollable view already behaves), and
-zoom rides on `Shift` precisely because a touchpad has no separate button to
-give zoom its own unmodified gesture.
+| Gesture | Action |
+|---|---|
+| Wheel scroll / two-finger swipe (no modifier) | Zoom, centered on the cursor |
+| `Shift` + wheel scroll / `Shift` + two-finger swipe | Pan, using whichever axes the event actually carries |
+| Middle-button drag (mouse only) | Free 2D pan, no modifier needed |
+| Double-click, or "Reset zoom" on the existing right-click context menu | Reset to fit |
 
-For the `Shift`+two-finger zoom case, only the swipe's dominant axis (in
-practice `angleDelta().y()`, since that's the axis a vertical two-finger
-swipe drives) should feed the zoom factor — a slightly diagonal swipe
-shouldn't also sneak in a pan while zooming. Same continuous-vs-stepped
-distinction as before applies naturally: a mouse wheel delivers a handful of
-discrete ±120 detents per click (visibly stepped zoom), a touchpad delivers
-many small continuous deltas (smooth zoom) — no special-casing needed, both
-just run the same delta→factor formula.
+Plain scroll zooming matches what a mouse wheel already does in image
+viewers and maps apps; a touchpad's plain two-finger swipe zooming instead
+of panning is the one departure from touchpad muscle memory, accepted
+because there's no reliable way to give it the "should pan" default without
+device detection that doesn't work on this platform. `Shift`+pan uses
+whichever `angleDelta()` axes are actually present: a touchpad swipe
+supplies both x and y directly (genuinely 2D, no remap needed), a mouse
+wheel only ever supplies y (vertical-only pan via `Shift`+wheel — mouse
+users needing horizontal or free-form pan already have middle-drag).
 
-**Reliability caveat, not a blocker**: `device().type()` depends on the
-platform plugin correctly classifying the hardware, which is generally solid
-for Windows Precision Touchpad drivers but not something to bet the whole
-feature on sight unseen. If it ever reports `Unknown` (an unusual mouse, a
-non-PTP touchpad driver, or a platform where Qt hasn't wired this up),
-default to the mouse mapping — wheel zooms, middle-drag pans — since that's
-usable (if not ideal) on a touchpad too via a two-finger click for the
-middle button on most trackpad drivers, whereas defaulting to the touchpad
-mapping on an actual mouse would leave no way to zoom at all. Worth an
-explicit manual override (a small settings toggle) if this turns out to
-misclassify in practice, rather than something to design further on a guess.
+Continuous-vs-stepped zoom feel falls out of the same delta→factor formula
+without special-casing: a mouse wheel delivers a handful of discrete ±120
+detents per click (visibly stepped), a touchpad delivers many small
+continuous deltas (smooth).
 
 Note this deliberately diverges from the timeline's `Ctrl`+wheel-to-zoom
 convention (Round 1 in status.md) — that's not an inconsistency so much as
@@ -1819,28 +1819,24 @@ moment a cell is zoomed.
 
 **Phase 25 — canonical view transform + zoom.** Consolidate the four
 existing `combined = src_scale * disp_scale` call sites into one
-`_view_transform()`; add `_zoom_rect` and device-dispatched zoom (mouse
-wheel unmodified; touchpad `Shift`+two-finger swipe, dominant-axis delta
-only), both centered on the cursor and clamped to the pixmap's own extent.
-*Validation*: zoom in on a keypoint with a mouse wheel, verify
-click/drag/rubber-band hit-testing still lines up exactly with what's drawn
-at the new scale; verify a plain (unmodified) touchpad swipe does *not*
-zoom; verify `device().type()` correctly distinguishes the two on the actual
-target hardware (Windows Precision Touchpad + a USB/wireless mouse) before
-relying on it further — this is the one part of the design that's an
-assumption about Qt/driver behavior rather than something already proven
-elsewhere in the codebase.
+`_view_transform()`; add `_zoom_rect` and wheel/swipe zoom (no modifier),
+centered on the cursor and clamped to the pixmap's own extent.
+*Validation*: zoom in on a keypoint, verify click/drag/rubber-band
+hit-testing still lines up exactly with what's drawn at the new scale.
+(Device-based dispatch was tried and abandoned here after real-hardware
+testing showed Windows collapses touchpad two-finger scroll into ordinary
+wheel messages before Qt ever sees them — see *Interaction model* above —
+so there is no per-device validation step; the modifier-based mapping is
+device-agnostic by construction.)
 
-**Phase 26 — pan.** Mouse middle-drag and touchpad two-finger swipe
-(unmodified) both translate `_zoom_rect`; clamp-and-fall-back-to-fit at
-frame load when the new frame's crop doesn't cover the stored view.
-*Validation*: zoom in, scrub across an epoch boundary, verify the view
-either follows smoothly or falls back to fit without an error or blank cell
-— never shows stale/wrong pixels; verify a two-finger diagonal touchpad
-swipe pans both axes at once; verify middle-drag pans freely on a mouse
-without needing any modifier; if `device().type()` ever misclassifies on
-real hardware (see Phase 25), confirm the mouse-mapping fallback still
-leaves both zoom and pan reachable rather than silently dropping one.
+**Phase 26 — pan.** Mouse middle-drag (unmodified) and `Shift`+wheel/swipe
+both translate `_zoom_rect`; clamp-and-fall-back-to-fit at frame load when
+the new frame's crop doesn't cover the stored view. *Validation*: zoom in,
+scrub across an epoch boundary, verify the view either follows smoothly or
+falls back to fit without an error or blank cell — never shows stale/wrong
+pixels; verify a two-finger diagonal touchpad swipe (with `Shift`) pans both
+axes at once; verify middle-drag pans freely on a mouse without needing any
+modifier.
 
 **Phase 27 — reset/fit + persistence check.** Double-click (or a small
 per-cell button) resets `_zoom_rect` to `None`. *Validation*: zoom one

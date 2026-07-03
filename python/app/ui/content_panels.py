@@ -1451,6 +1451,16 @@ def _compute_view_transform(
     *pixmap_extent* (both (x0, y0, x1, y1)) if given and it overlaps, else
     the whole *pixmap_extent* -- "fit whatever crop is given", today's
     unzoomed behavior.
+
+    Before fitting, *view* is grown (never shrunk) to match the cell's own
+    aspect ratio, then re-clamped to *pixmap_extent* -- fills the cell with
+    image content instead of a letterboxed border whenever the cache has the
+    extra margin to do so. This applies whether or not *zoom_rect* is set:
+    without it, a zoomed-uniformly rect preserves whatever aspect ratio the
+    unzoomed crop happened to have, which has no reason to match the cell
+    either -- the same problem the wide-crop cache's own initial crop
+    selection has, fixed here once for every layer and every zoom level
+    instead of separately per crop-selection call site.
     """
     pm_x0, pm_y0, pm_x1, pm_y1 = pixmap_extent
     view = (pm_x0, pm_y0, pm_x1, pm_y1)
@@ -1458,6 +1468,13 @@ def _compute_view_transform(
         zx0, zy0, zx1, zy1 = zoom_rect
         cx0, cy0 = max(zx0, pm_x0), max(zy0, pm_y0)
         cx1, cy1 = min(zx1, pm_x1), min(zy1, pm_y1)
+        if cx1 > cx0 and cy1 > cy0:
+            view = (cx0, cy0, cx1, cy1)
+    if cell_w > 0 and cell_h > 0:
+        expanded = _expand_rect_to_aspect(view, cell_w / cell_h)
+        ex0, ey0, ex1, ey1 = expanded
+        cx0, cy0 = max(ex0, pm_x0), max(ey0, pm_y0)
+        cx1, cy1 = min(ex1, pm_x1), min(ey1, pm_y1)
         if cx1 > cx0 and cy1 > cy0:
             view = (cx0, cy0, cx1, cy1)
     vx0, vy0, vx1, vy1 = view
@@ -1889,27 +1906,28 @@ class _ImageCanvas(QWidget):
             super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event) -> None:  # noqa: N802
-        """Device-dispatched zoom/pan -- see "Zoom and pan in the camera crop
-        views" in the design doc. Mouse wheel zooms unmodified (matches every
-        other image viewer); touchpad two-finger scroll pans unmodified
-        (matches ordinary scrolling) and needs Shift to zoom, since a
-        touchpad has no separate button to give zoom its own gesture.
+        """Zoom/pan -- see "Zoom and pan in the camera crop views" in the
+        design doc.
+
+        Originally dispatched on `QWheelEvent.device().type()` to give mouse
+        and touchpad different unmodified defaults, but real-hardware testing
+        showed Windows doesn't preserve that distinction by the time Qt sees
+        the event -- a Precision Touchpad's two-finger scroll arrives
+        indistinguishable from a physical wheel (Windows synthesizes the same
+        WM_MOUSEWHEEL/WM_MOUSEHWHEEL messages for both; there's no native
+        gesture API in play for a plain two-finger scroll the way there is
+        for pinch). So this uses one modifier-based mapping instead of trying
+        to tell the devices apart: plain wheel/swipe zooms, `Shift`+wheel/swipe
+        pans. That's device-agnostic by construction -- it doesn't matter
+        which device produced the event. Mouse users still have middle-drag
+        for pan without any modifier, since a physical wheel has no
+        horizontal axis to pan with regardless.
         """
-        from PySide6.QtGui import QInputDevice
-
-        is_touchpad = False
-        try:
-            is_touchpad = event.device().type() == QInputDevice.DeviceType.TouchPad
-        except Exception:
-            pass  # Unknown/unclassified device -- fall back to the mouse mapping.
-
         shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-        zooming = shift if is_touchpad else True
-
         angle = event.angleDelta()
         pos = event.position()
 
-        if zooming:
+        if not shift:
             steps = angle.y() / 120.0
             if steps == 0:
                 event.ignore()
@@ -1919,11 +1937,10 @@ class _ImageCanvas(QWidget):
             event.accept()
             return
 
-        # Not zooming only happens for a touchpad without Shift held (a mouse
-        # is always `zooming` above) -- pan with both swipe axes (natural
-        # scrolling: content follows the finger, same sign convention as
-        # middle-drag). A mouse wheel has no horizontal axis and no
-        # unmodified pan gesture of its own -- middle-drag covers that.
+        # Shift+wheel/swipe: pan using whichever axes the event actually
+        # carries -- a touchpad swipe supplies both x and y directly; a
+        # mouse wheel only ever supplies y (no synthesized remap needed,
+        # middle-drag already covers full 2D pan for mouse users).
         self._apply_pan_delta(angle.x() / 8.0, angle.y() / 8.0)
         event.accept()
 
@@ -4043,11 +4060,20 @@ class PersonCropGridWidget(QWidget):
                                     max(desired[2], bbox[2]), max(desired[3], bbox[3]),
                                 )
                         # Fill the cell instead of letterboxing: grow (never
-                        # shrink) to the cell's own aspect ratio before
-                        # clamping to available pixels.
-                        cell_w, cell_h = cell.width(), cell.height()
-                        if cell_w > 0 and cell_h > 0:
-                            desired = _expand_rect_to_aspect(desired, cell_w / cell_h)
+                        # shrink) to the *canvas's* own aspect ratio before
+                        # clamping to available pixels. Must happen here, not
+                        # only in _ImageCanvas -- the cluster's extra margin
+                        # beyond `desired` is only available now; once
+                        # _display_crop_result crops the pixmap down to
+                        # whatever we hand it below, that margin is gone for
+                        # good, and _view_transform has nothing left to
+                        # expand into. Uses cell._canvas's own dimensions, not
+                        # the outer _CropCell's -- _CropCell stacks a title
+                        # bar above the canvas, so its aspect ratio isn't the
+                        # canvas's; using it here would under-correct.
+                        canvas_w, canvas_h = cell._canvas.width(), cell._canvas.height()
+                        if canvas_w > 0 and canvas_h > 0:
+                            desired = _expand_rect_to_aspect(desired, canvas_w / canvas_h)
                         # Clamp to what this cluster image actually has decoded --
                         # can't show pixels that were never cached.
                         clamped = (

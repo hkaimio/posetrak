@@ -97,24 +97,31 @@ are pure functions (unit tested in `test_crop_zoom_pan.py`); `_ImageCanvas` meth
 over them plus the four pre-existing `combined = src_scale * disp_scale` call sites (`_to_pt`,
 `_display_to_full`, `_hit_kp`, `paintEvent`), now consolidated into one `_view_transform()`.
 
-Gestures dispatch on `QWheelEvent.device().type()` (PySide6 6.10 / `QInputDevice.DeviceType`) rather
-than a single shared mapping, since a mouse wheel and a touchpad's two-finger scroll arrive as the
-same `QWheelEvent` but their users expect different defaults:
+Gestures were originally dispatched on `QWheelEvent.device().type()` to give mouse and touchpad
+different unmodified defaults, but real-hardware testing on the actual target laptop found every
+touchpad two-finger gesture arriving as a zoom regardless of `Shift` — consistent with Windows
+synthesizing ordinary wheel messages for touchpad scroll before Qt ever sees a device distinction,
+not a bug in the dispatch logic. Replaced with one modifier-based mapping that doesn't depend on
+telling the devices apart at all:
 
-- **Mouse**: wheel scroll zooms (centered on the cursor); middle-button drag pans freely.
-- **Touchpad**: two-finger swipe pans (both axes, since it's a genuine 2D gesture); `Shift`+swipe
-  zooms.
+- Wheel scroll / two-finger swipe (no modifier) → zoom, centered on the cursor.
+- `Shift`+wheel / `Shift`+two-finger swipe → pan, using whichever `angleDelta()` axes are present
+  (both for a touchpad swipe, y-only for a mouse wheel — mouse users have middle-drag for free pan).
+- Middle-button drag (mouse) → free 2D pan, no modifier needed.
 - Double-click, or "Reset zoom" on the existing right-click group-selection context menu (only shown
   once actually zoomed), resets to fit.
 
-If `device().type()` ever reports something other than `Mouse`/`TouchPad` (an exception is caught),
-the mouse mapping is used as the fallback, per the design doc's stated reliability caveat.
-
-**Not yet validated on real hardware**: whether `device().type()` reliably classifies an actual
-Windows Precision Touchpad in this environment is exactly the design doc's one flagged uncertainty —
-worth a manual pass (scroll, `Shift`+scroll, and middle-drag on both a real mouse and the target
-laptop's touchpad) before relying on it further. `QRect`/`QInputDevice` are imported locally inside
-the functions that need them, matching this file's existing convention for less-common Qt types.
+Also found and fixed on the same hardware pass: letterboxing persisted after zooming in, traced to
+two compounding issues. First, the wide-crop cache's aspect-fill (`_load_frame`, added in an earlier
+round) was measuring against `_CropCell`'s own `width()/height()`, not `_ImageCanvas`'s — `_CropCell`
+stacks a title bar above the canvas, so the two have measurably different aspect ratios (confirmed
+live: 0.935 vs 0.987 for a 300x300 cell), and the fill was targeting the wrong one. Fixed by using
+`cell._canvas.width()/height()`. Second, `_compute_view_transform` now also applies the same
+grow-to-cell-aspect step generically (for every crop layer and zoom level, not just the wide-crop
+cache's initial load), though it can only recover margin still present in whatever pixmap it's
+given — the wide-crop-cache-specific fill in `_load_frame` still does the heavy lifting there, since
+by the time `_ImageCanvas` sees the pixmap it's already been cropped down and any wider cluster
+margin has been discarded for good.
 
 ## Test coverage
 
@@ -157,8 +164,7 @@ Run with `pytest python/tests/app/test_phase{4,5,9,10,11,12,13,14}.py python/tes
   (real multi-person trial, scrubbing through a long detection gap) — the algorithms are unit
   tested but the worker's QThread mechanics and on-screen framing haven't been eyeballed live, the
   same gap the original `CropBackfillWorker` has (no dedicated test file for it either).
-- **Zoom/pan device dispatch** (see above) has not been validated on real mouse + touchpad hardware
-  — the geometry is unit tested, but whether `QWheelEvent.device().type()` actually distinguishes
-  them correctly on this project's target Windows laptop is unverified, and is the one place this
-  feature's design explicitly flagged as an assumption rather than something proven elsewhere in the
-  codebase.
+- **Zoom/pan** has been live-tested on the target laptop's touchpad for zoom and confirmed working;
+  pan (`Shift`+swipe) and the letterboxing fix have only been reasoned through and unit tested, not
+  yet re-verified live after the fixes above. Mouse-side behavior (wheel zoom, middle-drag pan) is
+  entirely unverified — no mouse was available during the last test pass.

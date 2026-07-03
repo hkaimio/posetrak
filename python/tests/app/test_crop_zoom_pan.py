@@ -108,3 +108,70 @@ def test_view_transform_degenerate_cell_size_does_not_crash():
         cell_w=0, cell_h=0, pixmap_extent=(0, 0, 100, 100), zoom_rect=None,
     )
     assert scale == 1.0 and ox == 0.0 and oy == 0.0
+
+
+def test_view_transform_unzoomed_aspect_fill_cannot_exceed_the_pixmap_itself():
+    # When zoom_rect is None, `view` starts as the whole pixmap_extent, so
+    # expanding it and then clamping back to that same extent is always a
+    # no-op -- there's no margin beyond the pixmap to grow into. This is why
+    # the aspect fill for the *unzoomed* wide-crop-cache case has to happen
+    # earlier, in _load_frame, while the wider cluster crop's extra margin
+    # is still available (before _display_crop_result crops the pixmap down
+    # to whatever it's handed). This test documents that limit rather than
+    # a bug: _compute_view_transform can't manufacture pixels that were
+    # never in the pixmap to begin with.
+    scale, ox, oy, view = _compute_view_transform(
+        cell_w=200, cell_h=200,
+        pixmap_extent=(0, 0, 1000, 400),
+        zoom_rect=None,
+    )
+    assert view == (0, 0, 1000, 400)
+
+
+def test_view_transform_fills_cell_aspect_after_zoom_too():
+    # Zooming a mismatched-aspect rect uniformly preserves the mismatch --
+    # verify the fill still kicks in post-zoom, not just in the unzoomed
+    # default (this was the reported bug: letterboxing persisted after
+    # zooming in).
+    scale, ox, oy, view = _compute_view_transform(
+        cell_w=100, cell_h=100,
+        pixmap_extent=(0, 0, 1000, 1000),
+        zoom_rect=(400, 300, 600, 500),  # 200x200 zoomed rect, ar=1.0 already
+    )
+    assert view == (400, 300, 600, 500)  # already square -- no-op case
+    # Now a mismatched zoom rect (200 wide x 100 tall, ar=2.0) in a square cell.
+    scale, ox, oy, view = _compute_view_transform(
+        cell_w=100, cell_h=100,
+        pixmap_extent=(0, 0, 1000, 1000),
+        zoom_rect=(400, 400, 600, 500),
+    )
+    vx0, vy0, vx1, vy1 = view
+    assert round(vx1 - vx0, 6) == round(vy1 - vy0, 6)  # square cell -> square view
+
+
+def test_view_transform_aspect_fill_expands_zoom_rect_when_extent_has_margin():
+    # Unlike the unzoomed case, a zoom_rect that's a genuine subset of a
+    # larger pixmap_extent *does* have real margin to expand into -- e.g.
+    # after zooming in, or if the window was resized since the pixmap was
+    # loaded and the stored zoom_rect no longer matches the current cell.
+    scale, ox, oy, view = _compute_view_transform(
+        cell_w=100, cell_h=100,  # square cell
+        pixmap_extent=(0, 0, 1000, 1000),  # ample margin around the small zoom_rect
+        zoom_rect=(100, 100, 500, 300),  # 400x200, ar=2.0 -- mismatched
+    )
+    vx0, vy0, vx1, vy1 = view
+    assert round(vx1 - vx0, 6) == round(vy1 - vy0, 6)  # grown to square
+    assert view == (100, 0, 500, 400)  # grew height using available margin, clamped to extent
+
+
+def test_view_transform_aspect_fill_clamps_when_extent_lacks_margin():
+    # Pixmap extent is itself narrow (100x400) -- expanding to a square
+    # cell's aspect wants 400x400, but there's only 100px of width
+    # available. Should clamp to what's there (a no-op here, same limit as
+    # the unzoomed case above), not crash or overshoot.
+    scale, ox, oy, view = _compute_view_transform(
+        cell_w=200, cell_h=200,
+        pixmap_extent=(0, 0, 100, 400),
+        zoom_rect=None,
+    )
+    assert view == (0, 0, 100, 400)

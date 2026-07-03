@@ -666,9 +666,9 @@ virtual "Hip" and "Neck" nodes; the same approach can be added to
 
 The sections below extend this design per
 `keypoint-editing-improvements-brief.md`, plus a fourth section (*Background
-full-resolution frame extraction*) addressing a follow-up problem raised
-during review. They continue the phase numbering from the phases above and
-follow the same validation-per-phase convention.
+wide-crop frame cache*) addressing a follow-up problem raised during review.
+They continue the phase numbering from the phases above and follow the same
+validation-per-phase convention.
 
 ## Timeline view
 
@@ -1304,7 +1304,10 @@ keypoint, press `]` five times, verify the drawn circle grows and the stored
 multiplier matches the expected compounded step; select a range, repeat, and
 verify all frames in the range receive the same multiplier.
 
-## Background full-resolution frame extraction
+## Background wide-crop frame cache
+
+*(Originally scoped as "full-resolution frame extraction" — superseded by the
+cropped-cluster design below after benchmarking; see Motivation.)*
 
 ### Motivation
 
@@ -1322,102 +1325,239 @@ demand — has the opposite problem: `FrameCache.get_frame()`
 is exactly why `frame_cache_entries` exists — see *UI context* above: "It
 does not seek raw video files").
 
-### Design: background sequential extraction into a session-scoped cache
+The original idea here was to extract every full (or 1920px-capped) frame in
+the background. Benchmarked on real 4K/120fps footage
+(`cam1.mp4`, mpeg4, `D:\mocap\desktop\2026-03-10-posetrak-test\...`), that
+doesn't hold up once multiplied across a multi-camera rig:
+
+| | full 4K | 1920px-capped | generous crop (~1.2-1.6 Mpx) |
+|---|---|---|---|
+| decode+encode | ~19-25 fps | ~40 fps | ~37-49 fps |
+| size/camera/10s | ~767 MB | ~313 MB | ~104-268 MB |
+
+Even the downscaled full-frame variant is both slower *and* bigger than
+encoding only a generous crop around the person — and the crop also gives
+back the resolution that downscaling the whole frame throws away, since the
+person typically occupies a small fraction of a 4K frame. So the design
+below replaces "extract every frame" with "extend the existing crop cache to
+be wider, higher quality, and shared across nearby people," which is a much
+smaller change against the current Phase 1-6 pipeline.
+
+That third column also isn't the whole story: an ukemi (close-contact
+throwing/rolling) capture has multiple people whose generous crop windows
+frequently overlap. Simulating both encoding strategies against real per-frame
+bboxes from detection run `b05e51a9-5fd8-49de-98aa-958c8a84ce3a` (5 cameras ×
+3 tracked persons, ~28s each) — one crop per person vs. one shared crop per
+overlapping cluster of persons — showed:
+
+| | separate per-person crops | merged clusters | savings |
+|---|---|---|---|
+| storage (5 cams, ~28s) | 2.42 GB | 1.46 GB | ~40% |
+| encode time (5 cams) | 67.6 s | 53.2 s | ~21% |
+| cached images | baseline | — | ~55% fewer |
+
+98% of the simulated windows had at least one beneficial merge — for this
+kind of capture, treating "which persons to cache together" as a first-class
+decision is worth the extra bookkeeping, not just a nice-to-have.
+
+### Design: background sequential extraction with per-cluster crops
 
 When edit mode is entered for a person, launch a background worker — same
 `QThread` + priority-queue architecture as the existing `CropBackfillWorker`
 (`content_panels.py:932`) — that walks each active camera's video
 **sequentially** (no seeking) over the trial's frame range, decoding every
-frame once and writing it to a temp-directory JPEG cache. Sequential decode
-avoids the per-seek GOP-reparse cost that makes random access slow, even
-though it visits every frame rather than only the ones the user has scrubbed
-to — for a multi-minute trial at video frame rate this is a one-time linear
-pass, not repeated per scrub.
+frame once. Sequential decode avoids the per-seek GOP-reparse cost that makes
+random access slow, even though it visits every frame rather than only the
+ones the user has scrubbed to — for a multi-minute trial at video frame rate
+this is a one-time linear pass, not repeated per scrub.
+
+Unlike the original design, the worker does not encode one JPEG per frame —
+it encodes one JPEG per **(camera, frame, person-cluster)**, where a cluster
+is a group of one or more tracked persons whose generous crop windows
+overlap closely enough to be worth sharing a single cached image. See
+*Algorithm: deciding which crop areas to cache* below.
 
 - **Storage**: reuse the `tempfile.mkdtemp(prefix=...)` pattern from
   `FrameCache` (`frame_cache.py:40`), not the SQLite `frame_cache_entries`
-  table — this cache is large (full trial × near-full resolution) and
-  session-scoped, so it doesn't belong in the persistent session DB.
-- **Resolution**: full source resolution, or capped to a configurable max
-  dimension (mirrors `FrameCache`'s `max_dim` parameter) — enough headroom to
-  zoom in well past the current 240 px crops.
-- **Quality**: higher JPEG quality than the 75 used for scrub crops (e.g. 90+),
-  since these exist specifically to support precise edits.
+  table. Even with cropping, a multi-minute trial across several cameras is
+  still large (extrapolating the simulation above, a 5-minute, 5-camera trial
+  is on the order of 15 GB) — too large and too session-specific to belong in
+  the durable, backed-up session DB. An in-memory index (see below) maps
+  `(shot_video_id, frame_idx)` → the cluster file(s) covering that frame, so
+  no SQL schema change is needed at all.
+- **Resolution/quality**: no fixed low cap — encode the padded cluster crop
+  at its natural pixel size (optionally capped at something generous, e.g.
+  1200 px on the long edge, well above the current 240 px), JPEG quality
+  ~90 (vs. the scrub cache's 75).
 - **Priority**: same `prioritise(svid, frame_idx)` mechanism as
   `CropBackfillWorker`, so frames near the user's current scrub position
-  extract first — matching the "fills in behind you as you work" feel
-  `CropBackfillWorker` already provides for Phase 6 gaps, including the same
-  status-bar convention ("Extracting full-res frames… N remaining").
+  extract first, with the same "fills in behind you as you work" status-bar
+  convention ("Generating wide crops… N remaining").
+
+### Algorithm: deciding which crop areas to cache
+
+Runs per camera, over fixed-length, non-overlapping **epochs** of the
+trial's frame range (default: ~0.4s of wall-clock time, converted to frames
+via that camera's actual fps — e.g. 48 frames at 120fps). The epoch length is
+a direct tradeoff: longer epochs recompute the crop window less often
+(cheaper, and the resulting crop is generous enough to tolerate more motion
+before the next recompute) but also grow each crop's average size. The
+simulation above swept 24/48/96-frame epochs and found savings *improve*
+with longer epochs (storage savings 37%→42%, encode-time 17%→26% from 24 to
+96 frames) — so there's no sharp cost to erring toward a longer epoch;
+0.4s is a reasonable starting default, not a value to tune finely up front.
+
+For each epoch, per camera:
+
+1. For every track with at least one detection in the epoch, compute the
+   union of its `person_detections` bboxes across the epoch's frames — this
+   is exactly the Phase 6 union-bbox primitive, just windowed by epoch
+   boundary instead of a fixed `±10` frames.
+2. Pad that union rect by a configurable fraction on each side (default 35%,
+   noticeably more generous than Phase 6's 10% — this is what covers full
+   detection dropouts within the epoch and gives room for motion before the
+   next recompute). This is the track's candidate crop rect for the epoch.
+3. Cluster tracks whose padded rects overlap: a simple union-find /
+   connected-components pass over the (typically single-digit) tracks active
+   in the camera — merge any two clusters whose rects intersect, taking the
+   bounding union as the merged cluster's rect, and repeat until no cluster
+   changes. This is cheap (O(n²) on a handful of tracks) and needs no
+   external library.
+4. **Merge guard**: only accept a merge if the union rect's area doesn't
+   exceed roughly `1.3×` the sum of the merged rects' individual areas. Two
+   rects that only graze at a corner produce a union much larger than either
+   one alone — in that case keep them as separate clusters rather than
+   caching one mostly-empty shared crop. (The simulation above merged
+   unconditionally and still landed net-positive; this guard is a
+   robustness refinement for the real implementation, not a correction to
+   those numbers.)
+5. The resulting clusters (each with a member track-id set and a union crop
+   rect) are what gets cached for every frame in the epoch: one JPEG per
+   `(shot_video_id, frame_idx, cluster)`, decoded from that frame (already in
+   hand from the sequential walk) and cropped to the cluster's rect —
+   *the rect is fixed for the whole epoch; only the pixels change frame to
+   frame.*
+6. Update the in-memory index: `(shot_video_id, frame_idx) → [ (track_ids,
+   file_or_blob, src_x, src_y, src_w, src_h), ... ]` for every frame written.
+
+A track can belong to different clusters in different epochs (people
+separating and rejoining) — that's expected and handled automatically since
+clustering is recomputed independently per epoch.
+
+### Algorithm: selecting the cached image for a frame & scaling for display
+
+Given the frame being displayed (`shot_video_id`, `frame_idx`) and the
+track being edited in that camera cell:
+
+1. Look up `(shot_video_id, frame_idx)` in the in-memory cluster index.
+2. Find the entry whose `track_ids` contains the target track. (Cheap linear
+   scan — there are only ever a few clusters per camera per frame.)
+3. If found: decode that cluster's cached JPEG and treat it as the new
+   "source frame" for the existing crop-grid display math — **do not**
+   simply show the whole cached crop. Compute the tight, current-frame
+   display window exactly as today (the person's live bbox, or the Phase 6
+   union-bbox for gap frames, expanded to the cell's aspect ratio), then
+   translate that window from full-frame coordinates into the cached crop's
+   local coordinates by subtracting the cluster entry's `(src_x, src_y)`
+   offset — the same subtraction already used in *Coordinate conversion*
+   above, just chained through one extra intermediate crop. Resize that
+   sub-region to the display cell as usual.
+   This is the key decoupling: the cache only refreshes once per epoch
+   (coarse), but the on-screen framing is still computed fresh every frame
+   (smooth) — scrubbing never looks like it's snapping between fixed
+   windows, even though the underlying cached image does.
+4. If two people sharing the same cluster both have edit panels open at
+   once, both simply read the same cached JPEG and each does its own local
+   sub-crop from step 3 — no extra decode or storage cost. This is where
+   the sharing actually pays off, and is also why the cache is scoped to the
+   detection run rather than to a single panel (see *Cache scope and
+   lifecycle* below) — a second person's panel should reuse, not rebuild,
+   crops the first person's panel already generated.
+5. If no cluster entry exists yet for this `(shot_video_id, frame_idx,
+   track)` (background worker hasn't reached it, or hasn't started for this
+   camera): fall back to the existing layered chain unchanged — DB blob →
+   Phase 6 in-memory synthetic crop → placeholder.
 
 ### Serving frames: layered fallback, not a replacement
 
 `PersonCropGridWidget`'s frame source already layers DB blob → Phase 6
-in-memory synthetic crop → placeholder. Insert the extraction cache as a
-**preferred** layer above the DB blob:
+in-memory synthetic crop → placeholder. Insert the wide-crop cache as a
+**preferred** layer above the DB blob, using the selection algorithm above:
 
-1. If a full-res extracted frame exists for `(shot_video_id, frame_idx)`:
-   crop it in-memory to whatever region the display currently wants (the
-   existing bbox / union-bbox math), at full source resolution — sharp and
-   generously framed regardless of how tight the original detection bbox was.
-2. Else fall back to the existing `frame_cache_entries` DB blob (instant, but
-   240p and tightly cropped).
-3. Else fall back to the existing Phase 6 in-memory synthetic crop / on-demand
-   decode path.
+1. Wide-crop cluster cache, if an entry exists for this frame + track — sharp,
+   generously framed, and (per the merge guard) shared across nearby people
+   where that helps.
+2. Else the existing `frame_cache_entries` DB blob (instant, but 240p and
+   tightly cropped).
+3. Else the existing Phase 6 in-memory synthetic crop / on-demand path.
 
 Because extraction runs in the background, editing stays usable immediately
 on layer 2/3 and silently upgrades to layer 1 as extraction catches up — no
 explicit "wait for extraction" step or mode switch.
 
-### Tiling — only if profiling shows it's needed
+### Cache scope and lifecycle
 
-Harri's brief also raises tiled JPEGs as an option. Not needed for the first
-cut: start with one whole-frame JPEG per extracted frame. If source video is
-high-resolution (4K+) and decoding a full uncropped frame per scrub proves
-too slow even after sequential extraction removes the seek cost, split each
-extracted frame into fixed-size tiles (e.g. 512×512) at native resolution
-instead, indexed by `(video, frame_idx, tile_row, tile_col)`. The crop-grid's
-existing crop-region math (`src_x, src_y, src_w, src_h` → display transform,
-see *Coordinate conversion* above) already knows which rectangle of the
-source frame it wants, so computing which tiles intersect that rectangle and
-decoding only those is a small, isolated extension — worth deferring until
-whole-frame decode is measured to actually be the bottleneck.
+Because clusters are shared across persons by construction, scoping the
+worker and its temp directory to a single `PersonPanel` instance (as
+originally designed) would throw away the sharing benefit the moment a
+second person in the same trial is opened for editing — exactly the "if
+there are multiple persons in a trial it's likely all of them are edited at
+one go" case this design is meant to help. Instead:
 
-### Lifecycle
-
-- One worker + temp dir per edit session (per open `PersonPanel` instance),
-  started on entering edit mode, stopped and cleaned up
-  (`shutil.rmtree`, mirroring `FrameCache.close()`) when the panel closes or
-  edit mode exits.
+- Scope the worker + temp dir + in-memory index to the **detection run**
+  (`detection_run_id`), not the panel. A small reference-counted
+  `FrameCropCacheManager` keyed by `detection_run_id`: opening a
+  `PersonPanel` acquires (starting the worker on first acquire), closing one
+  releases (tearing down — `shutil.rmtree`, mirroring `FrameCache.close()` —
+  only once the last referencing panel has closed).
 - Frame range limited to the sequence's trial span (`t_start`/`t_end`,
   already used by the time slider), not the whole source video.
-- No persistence across sessions: reopening the same person re-extracts.
+- No persistence across sessions: reopening the trial later re-extracts.
   Simpler than an on-disk persistent cache, and the DB-backed
   `frame_cache_entries` remains the durable, instant-load fast path.
 
+### Tiling / digital zoom — future work, not needed for the first cut
+
+Harri's brief also raises tiled JPEGs and digital zoom as options. The
+cluster-crop cache already gets most of the way there for free: because the
+cached crop is deliberately wider than what's displayed, zooming in on a
+region of it is just a tighter sub-crop in step 3 of the selection algorithm
+above, no new cache entries required, up to the resolution the crop was
+encoded at. True fixed-size tiling (indexed by `(video, frame_idx, tile_row,
+tile_col)`) remains a possible later extension if profiling shows
+whole-cluster decode is a bottleneck even after cropping — worth deferring
+until measured, same as before.
+
 ### Phasing
 
-**Phase 22 — extraction worker.** New `FullFrameExtractWorker(QThread)`
+**Phase 22 — cluster-crop worker.** New `WideCropExtractWorker(QThread)`
 mirroring `CropBackfillWorker`'s structure (per-camera `cv2.VideoCapture`,
-sequential read loop, priority queue, `frame_ready` signal), writing JPEGs to
-a `tempfile.mkdtemp()` directory. *Validation*: open a person; verify a
-background thread starts and the temp directory fills with one JPEG per
-`(camera, frame)` in the trial range in sequential order; verify the UI
-thread stays responsive to scrubbing while extraction runs (no dropped
-frames / stalls in the slider).
+sequential read loop, priority queue, `frame_ready` signal), implementing
+the epoch/union/cluster/merge-guard algorithm above and writing one JPEG per
+`(camera, frame, cluster)` plus the in-memory index. *Validation*: open a
+person in a trial with ≥2 close-together tracked persons; verify clusters
+form where bboxes overlap and stay separate where they don't (log or debug-
+dump cluster membership per epoch); verify the background thread doesn't
+stall UI scrubbing.
 
 **Phase 23 — layered frame serving.** Extend the crop-source fallback chain
-to check the extraction cache first, cropping in-memory to the requested
-region at full resolution. *Validation*: scrub to a frame before extraction
-reaches it — verify the existing 240p crop displays; scrub back after
-extraction has passed that frame — verify the display seamlessly upgrades to
-the sharper, more generously framed image with no visible reload glitch.
+to check the cluster cache first via the selection algorithm above,
+re-deriving the tight display window from the wider cached crop.
+*Validation*: scrub to a frame before extraction reaches it — verify the
+existing 240p crop displays; scrub back after extraction has passed that
+frame — verify the display seamlessly upgrades to the sharper, more
+generously framed image with no visible reload glitch; open a second
+person's panel in the same trial and verify it reuses the first panel's
+already-built cache instead of restarting extraction from scratch.
 
 **Phase 24 — priority + status bar + lifecycle.** `prioritise()` called on
-scrub, status bar message while active, worker stop/cleanup on panel close.
-*Validation*: scrub to an unextracted frame — verify it's prioritized and
-appears within a bounded time well under a raw video seek's latency; close
-the panel mid-extraction — verify the temp directory is removed and the
-worker thread stops (no orphaned thread or leaked temp files).
+scrub, status bar message while active, reference-counted worker/cache
+teardown on last panel close for a detection run. *Validation*: scrub to an
+unextracted frame — verify it's prioritized and appears within a bounded
+time well under a raw video seek's latency; close all panels for a trial
+mid-extraction — verify the temp directory is removed and the worker thread
+stops (no orphaned thread or leaked temp files); close one of two panels
+sharing a cache — verify the cache survives until the second also closes.
 
 ---
 

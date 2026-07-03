@@ -28,7 +28,7 @@ See:
 | 14 | Multi-keyframe interpolation (N anchors, not just the range's two ends) | ✅ Done |
 | — | Partial tracking (checkpoint + resume from mid-trial) | ⬜ Designed, not implemented |
 | — | Per-keypoint/camera/frame measurement noise override | ⬜ Designed, not implemented |
-| — | Background full-resolution frame extraction | ⬜ Designed, not implemented |
+| — | Background wide-crop frame cache (person-cluster merging) | ⬜ Designed, not implemented |
 
 Phases 1-10 predate this status document; phases 11-14 and the follow-up UX rounds below were
 implemented together as one continuous effort.
@@ -98,6 +98,6 @@ Run with `pytest python/tests/app/test_phase{4,5,9,10,11,12,13,14}.py python/tes
   showing whether the tracker's own outlier rejection still distrusts an edited keypoint — was never
   assigned a phase number and is not implemented. Only axis 1 (edit state: green/yellow/blue/grey)
   exists today.
-- **Partial tracking, per-keypoint measurement noise, and background full-resolution frame
-  extraction** are fully designed (see keypoint-editing-design.md) but not started. None of them
-  block the current feature; they were lower-priority ideas from the same improvements brief.
+- **Partial tracking, per-keypoint measurement noise, and the background wide-crop frame cache**
+  are fully designed (see keypoint-editing-design.md) but not started. None of them block the
+  current feature; they were lower-priority ideas from the same improvements brief.

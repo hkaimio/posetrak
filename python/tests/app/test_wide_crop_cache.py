@@ -26,7 +26,9 @@ from app.ui.content_panels import (
     _composite_black_fill,
     _expand_rect_to_aspect,
     _kp_overlay_bbox,
+    _MAX_CANVAS_DIM_PX,
     _nearest_segment_track_id,
+    _sane_bbox,
     _tracked_overlay_bbox,
     _windowed_kp_bbox,
 )
@@ -404,6 +406,45 @@ def test_composite_black_fill_survives_fractional_scale_rounding_drift():
             canvas, tx0, ty0 = _composite_black_fill(crop, x1, y1, scale, target)
             assert (tx0, ty0) == (target[0], target[1])
             assert canvas.shape[0] > 0 and canvas.shape[1] > 0
+
+
+def test_composite_black_fill_clamps_implausible_target_rect():
+    # Regression test for a real crash: an unbounded target_rect (e.g. from
+    # a diverged tracked-marker projection) tried to allocate a multi-
+    # terabyte canvas. _composite_black_fill must clamp rather than crash,
+    # even if a caller failed to sanity-check target_rect first.
+    crop = np.full((10, 10, 3), 200, dtype=np.uint8)
+    canvas, tx0, ty0 = _composite_black_fill(crop, 0.0, 0.0, 1.0, (0.0, 0.0, 5_000_000.0, 1_000_000.0))
+    assert (tx0, ty0) == (0.0, 0.0)
+    assert canvas.shape[0] <= _MAX_CANVAS_DIM_PX
+    assert canvas.shape[1] <= _MAX_CANVAS_DIM_PX
+
+
+# ---------------------------------------------------------------------------
+# _sane_bbox -- rejects a bbox with a non-finite or implausibly large extent
+# ---------------------------------------------------------------------------
+
+def test_sane_bbox_passes_through_a_normal_bbox():
+    assert _sane_bbox((10.0, 20.0, 100.0, 200.0)) == (10.0, 20.0, 100.0, 200.0)
+
+
+def test_sane_bbox_none_stays_none():
+    assert _sane_bbox(None) is None
+
+
+def test_sane_bbox_rejects_non_finite_coordinates():
+    assert _sane_bbox((0.0, 0.0, float("inf"), 100.0)) is None
+    assert _sane_bbox((0.0, 0.0, float("nan"), 100.0)) is None
+
+
+def test_sane_bbox_rejects_implausibly_large_extent():
+    # e.g. a diverged tracked-marker projection landing hundreds of
+    # thousands of pixels away -- must be rejected, not unioned in.
+    assert _sane_bbox((0.0, 0.0, 571_414.0, 100.0)) is None
+
+
+def test_sane_bbox_accepts_extent_at_the_cap():
+    assert _sane_bbox((0.0, 0.0, 20_000.0, 20_000.0)) == (0.0, 0.0, 20_000.0, 20_000.0)
 
 
 # ---------------------------------------------------------------------------

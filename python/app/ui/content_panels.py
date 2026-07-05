@@ -12,7 +12,7 @@ from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
-from math import ceil, log10
+from math import ceil, isfinite, log10
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
@@ -1636,6 +1636,32 @@ def _tracked_overlay_bbox(
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+# Last-resort sanity cap for a display bbox, in full-frame pixels --
+# comfortably larger than any real camera resolution. `_tracked_overlay_bbox`
+# already drops out-of-frame points when `video_dims` is known, but that
+# guard is a no-op when a shot's video dimensions aren't recorded in the DB;
+# a numerically diverged tracked-skeleton projection (e.g. from a UKF state
+# that's diverged during fast motion -- see the covariance-ill-conditioning
+# investigation in the design doc) or a corrupted keypoint edit can then
+# reach `desired` unbounded, which previously turned into an attempt to
+# allocate a multi-terabyte canvas in `_composite_black_fill`.
+_MAX_PLAUSIBLE_BBOX_DIM = 20_000.0
+
+
+def _sane_bbox(bbox: "tuple | None") -> "tuple | None":
+    """Reject a bbox with a non-finite coordinate or an implausibly large
+    width/height, so one bad source (edit, detection, or projection) can't
+    blow up the crop area unioned from several independent sources."""
+    if bbox is None:
+        return None
+    x0, y0, x1, y1 = bbox
+    if not all(isfinite(v) for v in bbox):
+        return None
+    if (x1 - x0) > _MAX_PLAUSIBLE_BBOX_DIM or (y1 - y0) > _MAX_PLAUSIBLE_BBOX_DIM:
+        return None
+    return bbox
+
+
 def _expand_rect_to_aspect(rect: tuple, target_ar: float) -> tuple:
     """Grow *rect* (x0, y0, x1, y1), centered, to match *target_ar* (w/h).
 
@@ -1657,6 +1683,9 @@ def _expand_rect_to_aspect(rect: tuple, target_ar: float) -> tuple:
     new_h = w / target_ar
     dy = (new_h - h) / 2
     return (x0, y0 - dy, x1, y1 + dy)
+
+
+_MAX_CANVAS_DIM_PX = 8000  # last-resort allocation cap, see _composite_black_fill
 
 
 def _composite_black_fill(
@@ -1682,6 +1711,18 @@ def _composite_black_fill(
     tx0, ty0, tx1, ty1 = target_rect
     canvas_w = max(1, round((tx1 - tx0) * src_scale))
     canvas_h = max(1, round((ty1 - ty0) * src_scale))
+    if canvas_w > _MAX_CANVAS_DIM_PX or canvas_h > _MAX_CANVAS_DIM_PX:
+        # Callers are expected to have already sanity-checked target_rect
+        # (see _sane_bbox) -- this is a last-resort guard against actually
+        # allocating a multi-gigabyte/terabyte array if something upstream
+        # still let an implausible rect through, rather than crashing.
+        _log.warning(
+            "_composite_black_fill: clamping implausible canvas %dx%d px "
+            "(target_rect=%r, src_scale=%.4g)",
+            canvas_w, canvas_h, target_rect, src_scale,
+        )
+        canvas_w = min(canvas_w, _MAX_CANVAS_DIM_PX)
+        canvas_h = min(canvas_h, _MAX_CANVAS_DIM_PX)
     canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
 
     # Overlap between the desired window and what's actually decoded, in
@@ -4387,24 +4428,24 @@ class PersonCropGridWidget(QWidget):
                         # cluster spanning several spread-out people would
                         # otherwise show most of the room for someone editing
                         # just one of them.
-                        kp_bbox = _windowed_kp_bbox(
+                        kp_bbox = _sane_bbox(_windowed_kp_bbox(
                             self._obs_kp.get(cam_id, {}),
                             frame_idx,
                             frozenset(self._hidden_kp_indices),
-                        )
+                        ))
                         # Also cover the tracked skeleton (cyan overlay), if a
                         # tracking run is selected -- keypoints can in
                         # principle be edited before a tracking run exists,
                         # or a run can be selected whose own projected joints
                         # drifted away from the raw detection the cache was
                         # built from.
-                        tracked_bbox = _tracked_overlay_bbox(
+                        tracked_bbox = _sane_bbox(_tracked_overlay_bbox(
                             self._joint_proj.get(cam_id, {}).get(tracking_step)
                             if tracking_step is not None else None,
                             self._marker_proj.get(cam_id, {}).get(tracking_step)
                             if tracking_step is not None else None,
                             self._video_dims.get(svid),
-                        )
+                        ))
                         desired = own_rect
                         for bbox in (kp_bbox, tracked_bbox):
                             if bbox is not None:

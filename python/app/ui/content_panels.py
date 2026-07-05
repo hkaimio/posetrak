@@ -12,7 +12,7 @@ from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
-from math import ceil
+from math import ceil, log10
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
@@ -222,6 +222,38 @@ def _populate_run_ids(
                    extra_tooltip=run["trial_name"] or "")
     _set_id_widget(widgets["capture"],   run["capture_id"],
                    extra_tooltip=run["capture_label"] or "")
+
+
+def _frame_identifier_text(
+    db_path: "str | None",
+    run: sqlite3.Row,
+    step: "int | None",
+    timestamp_s: "float | None",
+) -> str:
+    """Multi-line, copy-pasteable identifier for one exact frame of one run --
+    db path + run/trial/capture IDs + tracker step/timestamp. One button,
+    one clipboard paste, instead of separately copying each UUID and reading
+    the step/time off the sidebar by hand.
+    """
+    lines = [f"db: {db_path or '?'}", f"run: {run['run_id']}"]
+    trial_id = run["trial_id"]
+    if trial_id:
+        name = run["trial_name"]
+        lines.append(f"trial: {trial_id}" + (f" ({name})" if name else ""))
+    capture_id = run["capture_id"]
+    if capture_id:
+        label = run["capture_label"]
+        lines.append(f"capture: {capture_id}" + (f" ({label})" if label else ""))
+    if step is not None:
+        lines.append(f"step: {step}")
+    if timestamp_s is not None:
+        lines.append(f"time_s: {timestamp_s:.3f}")
+    return "\n".join(lines)
+
+
+def _db_path_of(conn: sqlite3.Connection) -> "str | None":
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return row[2] if row else None
 
 
 _RUN_INFO_SQL = (
@@ -1340,35 +1372,6 @@ def _project_point_distorted(
     u = K_orig[0, 0] * xd + K_orig[0, 2]
     v = K_orig[1, 1] * yd + K_orig[1, 2]
     return u, v
-
-
-def _undistorted_to_distorted(
-    u_n: float,
-    v_n: float,
-    K_new: "np.ndarray",
-    K_orig: "np.ndarray",
-    dist: "np.ndarray",
-) -> "tuple[float, float]":
-    """Forward-distort an undistorted (K_new) pixel to distorted (K_orig) pixel coords."""
-    import numpy as np
-    x = (u_n - K_new[0, 2]) / K_new[0, 0]
-    y = (v_n - K_new[1, 2]) / K_new[1, 1]
-    r2 = x * x + y * y
-    r4, r6 = r2 * r2, r2 * r2 * r2
-    k1, k2 = float(dist[0]), float(dist[1])
-    p1, p2 = float(dist[2]), float(dist[3])
-    k3 = float(dist[4]) if len(dist) > 4 else 0.0
-    k4 = float(dist[5]) if len(dist) > 5 else 0.0
-    k5 = float(dist[6]) if len(dist) > 6 else 0.0
-    k6 = float(dist[7]) if len(dist) > 7 else 0.0
-    numer = 1.0 + k1 * r2 + k2 * r4 + k3 * r6
-    denom = 1.0 + k4 * r2 + k5 * r4 + k6 * r6
-    radial = numer / denom if denom != 0.0 else numer
-    dx = 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
-    dy = p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y
-    xd = x * radial + dx
-    yd = y * radial + dy
-    return K_orig[0, 0] * xd + K_orig[0, 2], K_orig[1, 1] * yd + K_orig[1, 2]
 
 
 def _nearest_tracker_step(t: float, timestamps: list[tuple[float, int]]) -> int:
@@ -2581,44 +2584,32 @@ class _TrackingRunLoader(QThread):
                     "K_orig": K_orig, "dist": dist,
                 }
 
-        # Obs blobs → predicted marker pixel positions
-        marker_proj: dict[str, dict[int, object]] = {}
+        # Obs blobs → outlier flags only. Marker *positions* are projected
+        # from the posterior state below, alongside the joints -- obs_blob's
+        # own pred_x/pred_y is the UKF's PRE-update prediction (the sigma
+        # points' measurement mean before the Kalman correction, used for
+        # gating/innovation), which can legitimately sit far from the
+        # corrected skeleton on a fast-motion frame. Projecting both markers
+        # and joints from the same posterior state keeps the two overlays
+        # from ever visually disagreeing.
         outlier_masks: dict[str, dict[int, object]] = {}
-        obs_rows = conn.execute(
-            "SELECT tracker_step, obs_blob FROM tracking_obs_results "
-            "WHERE run_id=? AND person_id=0 ORDER BY tracker_step",
-            (run_id,),
-        ).fetchall()
-        expected_obs = n_cams * n_markers * 8
-        for obs_row in obs_rows:
-            step = obs_row["tracker_step"]
-            blob = np.frombuffer(bytes(obs_row["obs_blob"]), dtype="<f4")
-            if len(blob) != expected_obs:
-                continue
-            obs = blob.reshape(n_cams, n_markers, 8)
-            for ci, label in enumerate(cam_labels):
-                cam_id = label_to_cam_id.get(label)
-                if cam_id is None:
+        if mi_to_coco:
+            obs_rows = conn.execute(
+                "SELECT tracker_step, obs_blob FROM tracking_obs_results "
+                "WHERE run_id=? AND person_id=0 ORDER BY tracker_step",
+                (run_id,),
+            ).fetchall()
+            expected_obs = n_cams * n_markers * 8
+            for obs_row in obs_rows:
+                step = obs_row["tracker_step"]
+                blob = np.frombuffer(bytes(obs_row["obs_blob"]), dtype="<f4")
+                if len(blob) != expected_obs:
                     continue
-                pred_xy = obs[ci, :, 2:4].copy()
-                intr = cam_intrinsics.get(cam_id)
-                if intr is not None:
-                    K_orig = intr.get("K_orig")
-                    dist_c = intr.get("dist")
-                    if K_orig is not None and dist_c is not None:
-                        fx_n, fy_n = intr["fx"], intr["fy"]
-                        cx_n, cy_n = intr["cx"], intr["cy"]
-                        K_new = np.array([[fx_n, 0, cx_n], [0, fy_n, cy_n], [0, 0, 1]])
-                        for mi in range(pred_xy.shape[0]):
-                            u_n, v_n = float(pred_xy[mi, 0]), float(pred_xy[mi, 1])
-                            if np.isfinite(u_n) and np.isfinite(v_n):
-                                u_d, v_d = _undistorted_to_distorted(
-                                    u_n, v_n, K_new, K_orig, dist_c
-                                )
-                                pred_xy[mi, 0] = u_d
-                                pred_xy[mi, 1] = v_d
-                marker_proj.setdefault(cam_id, {})[step] = pred_xy
-                if mi_to_coco:
+                obs = blob.reshape(n_cams, n_markers, 8)
+                for ci, label in enumerate(cam_labels):
+                    cam_id = label_to_cam_id.get(label)
+                    if cam_id is None:
+                        continue
                     mask = np.zeros(n_coco_kp, dtype=bool)
                     for mi, coco_id in mi_to_coco.items():
                         is_out = obs[ci, mi, 6]
@@ -2626,8 +2617,10 @@ class _TrackingRunLoader(QThread):
                             mask[coco_id] = True
                     outlier_masks.setdefault(cam_id, {})[step] = mask
 
-        # State blobs → joint projections via FK
+        # State blobs → joint + marker projections via FK, both from the same
+        # posterior (corrected) state.
         joint_proj: dict[str, dict[int, dict]] = {}
+        marker_proj: dict[str, dict[int, object]] = {}
         state_rows = conn.execute(
             "SELECT tracker_step, state FROM tracking_results "
             "WHERE run_id=? AND person_id=0 AND is_smoothed=0 ORDER BY tracker_step",
@@ -2638,6 +2631,7 @@ class _TrackingRunLoader(QThread):
             try:
                 decoded = layout.decode_state_blob(bytes(state_row["state"]))
                 transforms = layout.compute_joint_transforms(decoded)
+                marker_world = layout.compute_marker_positions(decoded)
             except Exception:
                 continue
             for label in cam_labels:
@@ -2653,22 +2647,36 @@ class _TrackingRunLoader(QThread):
                 dist_c = intr.get("dist")
                 fx, fy, cx_k, cy_k = intr["fx"], intr["fy"], intr["cx"], intr["cy"]
                 use_distortion = K_orig is not None and dist_c is not None
+
+                def _project(p_world):
+                    if use_distortion:
+                        return _project_point_distorted(p_world, R, t, K_orig, dist_c)
+                    p_cam = R @ p_world + t
+                    if p_cam[2] <= 1e-3:
+                        return None
+                    return (
+                        fx * p_cam[0] / p_cam[2] + cx_k,
+                        fy * p_cam[1] / p_cam[2] + cy_k,
+                    )
+
                 joint_xy: dict[str, object] = {}
                 for jname, T in transforms.items():
-                    p_world = T[:3, 3]
-                    if use_distortion:
-                        uv = _project_point_distorted(p_world, R, t, K_orig, dist_c)
-                        if uv is None:
-                            continue
-                        u, v = uv
-                    else:
-                        p_cam = R @ p_world + t
-                        if p_cam[2] <= 1e-3:
-                            continue
-                        u = fx * p_cam[0] / p_cam[2] + cx_k
-                        v = fy * p_cam[1] / p_cam[2] + cy_k
-                    joint_xy[jname] = np.array([u, v])
+                    uv = _project(T[:3, 3])
+                    if uv is None:
+                        continue
+                    joint_xy[jname] = np.array(uv)
                 joint_proj.setdefault(cam_id, {})[step] = joint_xy
+
+                marker_xy = np.full((n_markers, 2), np.nan, dtype=np.float64)
+                for mi, mname in enumerate(marker_names):
+                    p_world = marker_world.get(mname)
+                    if p_world is None:
+                        continue
+                    uv = _project(p_world)
+                    if uv is None:
+                        continue
+                    marker_xy[mi] = uv
+                marker_proj.setdefault(cam_id, {})[step] = marker_xy
 
         self.loaded.emit(tracking_timestamps, marker_proj, joint_proj, bone_pairs, outlier_masks)
 
@@ -4631,6 +4639,12 @@ class PersonCropGridWidget(QWidget):
 # _LineChart — small metric time-series widget with a cursor line
 # ---------------------------------------------------------------------------
 
+# Matches the posetrak MCP diagnostic server's own condition-number warning
+# threshold (app/mcp/tools/diagnostics.py: _COV_COND_WARN) -- drawn as a
+# reference line so a spike above it is visible at a glance, not just in
+# text form in the "Current frame" box above.
+_COV_COND_WARN = 1_000_000.0
+
 
 class _LineChart(QWidget):
     """Compact line chart for a single metric over tracker steps.
@@ -4645,15 +4659,36 @@ class _LineChart(QWidget):
     _PAD_T = 18   # space for title text
     _PAD_B = 4
 
-    def __init__(self, title: str, reference_y: float | None = None, parent=None) -> None:
+    def __init__(
+        self,
+        title: str,
+        reference_y: float | None = None,
+        log_y: bool = False,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._title = title
         self._reference_y = reference_y
+        self._log_y = log_y
         self._steps: list[int] = []
         self._values: list[float | None] = []
         self._cursor_step: int | None = None
         self.setMinimumHeight(80)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def _y_space(self, v: float) -> "float | None":
+        """Map a raw value into the space the Y axis is actually drawn in --
+        log10 when `log_y` (values <= 0 have no log and are treated as
+        missing), otherwise unchanged. A metric like the covariance
+        condition number naturally spans several orders of magnitude; on a
+        linear axis one bad frame's spike flattens every other problem frame
+        into visual insignificance near zero, whereas log scale keeps
+        relative differences between large values visible without dropping
+        (clipping) any of them.
+        """
+        if not self._log_y:
+            return v
+        return log10(v) if v > 0 else None
 
     def set_data(self, steps: list[int], values: list[float | None]) -> None:
         self._steps = steps
@@ -4679,15 +4714,17 @@ class _LineChart(QWidget):
         painter.setPen(text_color)
         painter.drawText(pl, pt - 4, self._title)
 
-        vals = [v for v in self._values if v is not None and v == v]  # skip None/NaN
+        raw = [v for v in self._values if v is not None and v == v]  # skip None/NaN
+        vals = [t for t in (self._y_space(v) for v in raw) if t is not None]
         if not self._steps or not vals:
             return
 
+        ref_y = self._y_space(self._reference_y) if self._reference_y is not None else None
         y_min, y_max = min(vals), max(vals)
         # Extend range to keep reference_y visible even if data is all above/below it
-        if self._reference_y is not None:
-            y_min = min(y_min, self._reference_y)
-            y_max = max(y_max, self._reference_y)
+        if ref_y is not None:
+            y_min = min(y_min, ref_y)
+            y_max = max(y_max, ref_y)
         if y_min == y_max:
             y_min -= 1.0
             y_max += 1.0
@@ -4707,8 +4744,12 @@ class _LineChart(QWidget):
         # Data line
         path = QPainterPath()
         started = False
-        for step, val in zip(self._steps, self._values):
-            if val is None or val != val:
+        for step, raw_val in zip(self._steps, self._values):
+            if raw_val is None or raw_val != raw_val:
+                started = False
+                continue
+            val = self._y_space(raw_val)
+            if val is None:
                 started = False
                 continue
             x, y = sx(step), sy(val)
@@ -4721,8 +4762,8 @@ class _LineChart(QWidget):
         painter.drawPath(path)
 
         # Reference line (e.g. NIS/DOF = 1 indicating well-calibrated filter)
-        if self._reference_y is not None and y_min <= self._reference_y <= y_max:
-            ry = sy(self._reference_y)
+        if ref_y is not None and y_min <= ref_y <= y_max:
+            ry = sy(ref_y)
             painter.setPen(QPen(QColor(220, 50, 50), 1.0, Qt.PenStyle.DashLine))
             painter.drawLine(QPointF(pl, ry), QPointF(w - pr, ry))
 
@@ -4758,6 +4799,9 @@ class _RunInfoPane(QWidget):
         self._nis_dof_vals: list[float | None] = []
         self._cov_steps: list[int] = []
         self._cov_vals: list[float | None] = []
+        self._run_row: sqlite3.Row | None = None
+        self._cur_step: int | None = None
+        self._cur_ts: float | None = None
         self.setMinimumWidth(self._MIN_WIDTH)
         self._build()
 
@@ -4815,12 +4859,21 @@ class _RunInfoPane(QWidget):
         frame_form.addRow("NIS / DOF:", self._fi_nis)
         frame_form.addRow("Cov cond #:", self._fi_cov)
         frame_box.inner_layout().addLayout(frame_form)
+        copy_frame_btn = _action_btn("⎘ Copy frame ID")
+        copy_frame_btn.setToolTip(
+            "Copy db path, run/trial/capture IDs, and the current step/timestamp "
+            "to the clipboard, in one paste-able block."
+        )
+        copy_frame_btn.clicked.connect(self._copy_frame_id)
+        frame_box.inner_layout().addWidget(copy_frame_btn)
         root.addWidget(frame_box)
 
         # --- Charts ---
         charts_box = _CollapsibleBox("Metrics")
         self._nis_chart = _LineChart("NIS / DOF", reference_y=1.0)
-        self._cov_chart = _LineChart("Covariance condition #")
+        self._cov_chart = _LineChart(
+            "Covariance condition # (log scale)", reference_y=_COV_COND_WARN, log_y=True,
+        )
         charts_box.inner_layout().addWidget(self._nis_chart)
         charts_box.inner_layout().addWidget(self._cov_chart)
         root.addWidget(charts_box)
@@ -4851,6 +4904,9 @@ class _RunInfoPane(QWidget):
             lbl.setText("—")
         self._nis_chart.set_data([], [])
         self._cov_chart.set_data([], [])
+        self._run_row = None
+        self._cur_step = None
+        self._cur_ts = None
 
         if not run_id:
             return
@@ -4858,6 +4914,7 @@ class _RunInfoPane(QWidget):
         run = self._conn.execute(_RUN_INFO_SQL, (run_id,)).fetchone()
         if not run:
             return
+        self._run_row = run
 
         n_frames = self._conn.execute(
             "SELECT COUNT(*) FROM tracking_results "
@@ -4918,6 +4975,8 @@ class _RunInfoPane(QWidget):
         if row is None:
             return
 
+        self._cur_step = step
+        self._cur_ts = row["timestamp_s"]
         self._fi_step.setText(str(step))
         self._fi_time.setText(f"{row['timestamp_s']:.3f} s")
 
@@ -4936,6 +4995,14 @@ class _RunInfoPane(QWidget):
 
         self._nis_chart.set_cursor(step)
         self._cov_chart.set_cursor(step)
+
+    def _copy_frame_id(self) -> None:
+        if self._run_row is None:
+            return
+        text = _frame_identifier_text(
+            _db_path_of(self._conn), self._run_row, self._cur_step, self._cur_ts,
+        )
+        QApplication.clipboard().setText(text)
 
 
 # ---------------------------------------------------------------------------
@@ -5440,6 +5507,9 @@ class TrackingRunPanel(QWidget):
         self._trp_fi_inliers: QLabel | None = None
         self._trp_fi_nis: QLabel | None = None
         self._trp_fi_cov: QLabel | None = None
+        self._run_row: sqlite3.Row | None = None
+        self._trp_cur_step: int | None = None
+        self._trp_cur_ts: float | None = None
         self._export_done.connect(self._on_export_done)
         self._build()
 
@@ -5447,6 +5517,7 @@ class TrackingRunPanel(QWidget):
         run = self._conn.execute(_RUN_INFO_SQL, (self._run_id,)).fetchone()
         if run is None:
             return
+        self._run_row = run
 
         n_frames = self._conn.execute(
             "SELECT COUNT(*) FROM tracking_results WHERE run_id = ? AND is_smoothed = 0",
@@ -5542,11 +5613,20 @@ class TrackingRunPanel(QWidget):
         frame_form.addRow("NIS / DOF:",  self._trp_fi_nis)
         frame_form.addRow("Cov cond #:", self._trp_fi_cov)
         frame_box.inner_layout().addLayout(frame_form)
+        copy_frame_btn = _action_btn("⎘ Copy frame ID")
+        copy_frame_btn.setToolTip(
+            "Copy db path, run/trial/capture IDs, and the current step/timestamp "
+            "to the clipboard, in one paste-able block."
+        )
+        copy_frame_btn.clicked.connect(self._copy_frame_id)
+        frame_box.inner_layout().addWidget(copy_frame_btn)
         info_v.addWidget(frame_box)
 
         # --- Metrics charts ---
         self._nis_chart = _LineChart("NIS / DOF", reference_y=1.0)
-        self._cov_chart = _LineChart("Covariance condition #")
+        self._cov_chart = _LineChart(
+            "Covariance condition # (log scale)", reference_y=_COV_COND_WARN, log_y=True,
+        )
         charts_box = _CollapsibleBox("Metrics")
         charts_box.inner_layout().addWidget(self._nis_chart)
         charts_box.inner_layout().addWidget(self._cov_chart)
@@ -5650,6 +5730,8 @@ class TrackingRunPanel(QWidget):
         row = self._trp_step_stats.get(step)
         if row is None:
             return
+        self._trp_cur_step = step
+        self._trp_cur_ts = row["timestamp_s"]
         if self._trp_fi_step:
             self._trp_fi_step.setText(str(step))
         if self._trp_fi_time:
@@ -5666,6 +5748,14 @@ class TrackingRunPanel(QWidget):
         if self._trp_fi_cov:
             cov = row["cov_condition_number"]
             self._trp_fi_cov.setText(f"{cov:.1f}" if cov is not None else "—")
+
+    def _copy_frame_id(self) -> None:
+        if self._run_row is None:
+            return
+        text = _frame_identifier_text(
+            _db_path_of(self._conn), self._run_row, self._trp_cur_step, self._trp_cur_ts,
+        )
+        QApplication.clipboard().setText(text)
 
     def _export_bvh(self) -> None:
         out_path, _ = QFileDialog.getSaveFileName(

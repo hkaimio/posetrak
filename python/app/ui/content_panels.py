@@ -1410,6 +1410,7 @@ _TRAIL_N = 10
 
 _ZOOM_PER_WHEEL_STEP = 1.15   # factor per 120-unit angleDelta step (one mouse click)
 _MIN_ZOOM_RECT_SIZE = 20.0    # full-frame px floor, prevents a degenerate zoom-in
+_DISPLAY_MARGIN_FRAC = 0.15   # margin around the minimum display bbox, default (unzoomed) view
 
 
 def _zoomed_rect(
@@ -1540,7 +1541,53 @@ def _kp_overlay_bbox(obs_kp, hidden_indices: "frozenset[int]"):
     return (min(xs), min(ys), max(xs), max(ys))
 
 
-def _tracked_overlay_bbox(joint_xy: "dict | None", marker_xy) -> "tuple | None":
+def _windowed_kp_bbox(
+    obs_kp_by_frame: "dict[int, object]",
+    frame_idx: int,
+    hidden_indices: "frozenset[int]",
+    n_frames: int = 10,
+) -> "tuple | None":
+    """Union of `_kp_overlay_bbox` over the nearest `n_frames` frames *with
+    an observation* on each side of `frame_idx` (inclusive of `frame_idx`
+    itself), skipping frames with none -- so a long stretch with no
+    detection doesn't erode the window down to nothing.
+
+    E.g. frame_idx=100 with no observations for this person in frames
+    75-450: the backward side reaches past the gap to whichever 10 frames
+    <=100 do have data (e.g. 65-74), and the forward side likewise reaches
+    to whichever 10 do (e.g. 451-460) -- not just frames 90-110.
+
+    `obs_kp_by_frame` is the already edit-merged per-frame array (see
+    `read_observations_with_edits`), so this single window covers both the
+    "raw observation" and "edited keypoint" cases from the original brief:
+    edits overwrite a keypoint's x/y in place, they don't add a second,
+    separate signal to track.
+    """
+    if not obs_kp_by_frame:
+        return None
+    frames = sorted(obs_kp_by_frame.keys())
+    backward = [f for f in frames if f <= frame_idx][-n_frames:]
+    forward = [f for f in frames if f > frame_idx][:n_frames]
+    bbox = None
+    for f in backward + forward:
+        b = _kp_overlay_bbox(obs_kp_by_frame.get(f), hidden_indices)
+        if b is None:
+            continue
+        if bbox is None:
+            bbox = b
+        else:
+            bbox = (
+                min(bbox[0], b[0]), min(bbox[1], b[1]),
+                max(bbox[2], b[2]), max(bbox[3], b[3]),
+            )
+    return bbox
+
+
+def _tracked_overlay_bbox(
+    joint_xy: "dict | None",
+    marker_xy,
+    video_dims: "tuple[int, int] | None" = None,
+) -> "tuple | None":
     """Bounding box (x0, y0, x1, y1), full-frame pixel coords, of the tracked
     skeleton's projected joints/markers for one camera + tracker step, or
     None if neither is available.
@@ -1549,21 +1596,35 @@ def _tracked_overlay_bbox(joint_xy: "dict | None", marker_xy) -> "tuple | None":
     person's keypoints have been edited yet (edits are normally done before
     tracking, but nothing prevents editing after a run too), so the wide-crop
     sub-crop must cover this overlay as well as `_kp_overlay_bbox`'s.
+
+    If `video_dims` (full-frame width, height) is given, points projecting
+    outside the camera's own frame are dropped before the bbox is built --
+    the skeleton can be entirely or partly out of view/behind this camera
+    (e.g. occluded during part of a throw), and including those off-frame
+    coordinates would force the requested crop area to an unsatisfiable
+    extent, permanently starving this camera of a displayable crop instead
+    of just showing whatever part of the skeleton is actually visible here.
     """
     from math import isnan
+
+    def _in_view(u: float, v: float) -> bool:
+        if video_dims is None:
+            return True
+        w, h = video_dims
+        return 0.0 <= u <= w and 0.0 <= v <= h
 
     xs, ys = [], []
     if joint_xy:
         for u, v in joint_xy.values():
             u, v = float(u), float(v)
-            if isnan(u) or isnan(v):
+            if isnan(u) or isnan(v) or not _in_view(u, v):
                 continue
             xs.append(u)
             ys.append(v)
     if marker_xy is not None:
         for i in range(marker_xy.shape[0]):
             u, v = float(marker_xy[i, 0]), float(marker_xy[i, 1])
-            if isnan(u) or isnan(v):
+            if isnan(u) or isnan(v) or not _in_view(u, v):
                 continue
             xs.append(u)
             ys.append(v)
@@ -1593,6 +1654,55 @@ def _expand_rect_to_aspect(rect: tuple, target_ar: float) -> tuple:
     new_h = w / target_ar
     dy = (new_h - h) / 2
     return (x0, y0 - dy, x1, y1 + dy)
+
+
+def _composite_black_fill(
+    crop_bgr,
+    x1: float,
+    y1: float,
+    src_scale: float,
+    target_rect: "tuple[float, float, float, float]",
+):
+    """Composite *crop_bgr* (a decoded BGR crop whose top-left full-frame
+    corner is (x1, y1), at `src_scale` full-frame-px -> crop-px) onto a
+    black canvas exactly covering *target_rect*, in full-frame pixel
+    coordinates.
+
+    Returns (canvas, new_x1, new_y1). Unlike a plain sub-crop, *target_rect*
+    is not required to fit inside what's actually decoded -- any part of it
+    outside the decoded pixels stays black, rather than shrinking the
+    display down to whatever *is* available. See "Unified minimum-display
+    bbox..." in the design doc.
+    """
+    import numpy as np
+
+    tx0, ty0, tx1, ty1 = target_rect
+    canvas_w = max(1, round((tx1 - tx0) * src_scale))
+    canvas_h = max(1, round((ty1 - ty0) * src_scale))
+    canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+
+    # Overlap between the desired window and what's actually decoded, in
+    # full-frame coordinates.
+    dec_x1 = x1 + crop_bgr.shape[1] / src_scale
+    dec_y1 = y1 + crop_bgr.shape[0] / src_scale
+    ox0, oy0 = max(tx0, x1), max(ty0, y1)
+    ox1, oy1 = min(tx1, dec_x1), min(ty1, dec_y1)
+    if ox1 > ox0 and oy1 > oy0:
+        sx0 = int(round((ox0 - x1) * src_scale))
+        sy0 = int(round((oy0 - y1) * src_scale))
+        dx0 = int(round((ox0 - tx0) * src_scale))
+        dy0 = int(round((oy0 - ty0) * src_scale))
+        # Width/height come from whichever of {remaining source, remaining
+        # canvas} runs out first, rather than independently rounding
+        # (ox1 - x1) and (ox1 - tx0) -- those two roundings can disagree by
+        # a pixel (different offsets rounding differently), which previously
+        # made the source patch one pixel wider/taller than the canvas slot
+        # it was being copied into and crashed with a broadcast-shape error.
+        pw = min(crop_bgr.shape[1] - sx0, canvas_w - dx0)
+        ph = min(crop_bgr.shape[0] - sy0, canvas_h - dy0)
+        if pw > 0 and ph > 0:
+            canvas[dy0:dy0 + ph, dx0:dx0 + pw] = crop_bgr[sy0:sy0 + ph, sx0:sx0 + pw]
+    return canvas, tx0, ty0
 
 
 def _build_cam_trail(
@@ -4132,7 +4242,7 @@ class PersonCropGridWidget(QWidget):
         show_detected: bool,
         show_tracked: bool,
         result: tuple,
-        sub_rect: "tuple[float, float, float, float] | None" = None,
+        target_rect: "tuple[float, float, float, float] | None" = None,
     ) -> None:
         """Decode a (jpeg, wpx, hpx, src_x, src_y, src_w, src_h) crop and render
         it into *cell*, including keypoint/tracking overlays and (in edit mode)
@@ -4142,11 +4252,19 @@ class PersonCropGridWidget(QWidget):
         cache" in the design doc) and the Phase 6 in-memory synthetic-crop
         path, since both produce results in this same shape.
 
-        *sub_rect*, if given, is a tighter window (full-frame pixel
-        coordinates) to zoom into within the decoded crop -- used by the
-        wide-crop cluster cache to sub-crop a possibly multi-person cluster
-        image down to just the person being edited. Caller is responsible for
-        having already clamped it to the decoded crop's own extent.
+        *target_rect*, if given, is the desired display window (full-frame
+        pixel coordinates) -- used by the wide-crop cluster cache to sub-crop
+        a possibly multi-person cluster image down to just the person being
+        edited, widened to cover whatever keypoints/tracked-skeleton overlay
+        is actually about to be drawn (see *_windowed_kp_bbox* /
+        `_tracked_overlay_bbox`). Unlike a plain sub-crop, *target_rect* is
+        not required to fit inside what's actually been decoded: any part of
+        it outside the decoded pixels is filled black rather than shrinking
+        the display down to whatever *is* available (see "Unified
+        minimum-display bbox..." in the design doc) -- this keeps the
+        overlay's coordinate mapping (and the requested framing) correct even
+        when the cache hasn't caught up with a large edit or a fast-moving
+        tracked skeleton yet.
         """
         import cv2
         import numpy as np
@@ -4162,14 +4280,8 @@ class PersonCropGridWidget(QWidget):
         jpeg_h = float(hpx or crop_bgr.shape[0])
         src_scale = jpeg_h / float(src_h) if src_h > 0 else 1.0
 
-        if sub_rect is not None:
-            sx0, sy0, sx1, sy1 = sub_rect
-            lx0, ly0 = int((sx0 - x1) * src_scale), int((sy0 - y1) * src_scale)
-            lx1, ly1 = int((sx1 - x1) * src_scale), int((sy1 - y1) * src_scale)
-            sub = crop_bgr[max(0, ly0):ly1, max(0, lx0):lx1]
-            if sub.size > 0:
-                crop_bgr = sub
-                x1, y1 = max(sx0, x1), max(sy0, y1)
+        if target_rect is not None:
+            crop_bgr, x1, y1 = _composite_black_fill(crop_bgr, x1, y1, src_scale, target_rect)
 
         crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
         h_img, w_img = crop_rgb.shape[:2]
@@ -4261,16 +4373,15 @@ class PersonCropGridWidget(QWidget):
                     wide_lookup = self._wide_crop_mgr.get_cluster_result(svid, frame_idx, wide_track_id)
                     if wide_lookup is not None:
                         wide, own_rect = wide_lookup
-                        _, _, _, src_x, src_y, src_w, src_h = wide
-                        cluster_extent = (src_x, src_y, src_x + src_w, src_y + src_h)
 
                         # Sub-crop to this track's own padded window, not the
                         # whole (possibly multi-person) cluster image -- a
                         # cluster spanning several spread-out people would
                         # otherwise show most of the room for someone editing
                         # just one of them.
-                        kp_bbox = _kp_overlay_bbox(
-                            self._obs_kp.get(cam_id, {}).get(frame_idx),
+                        kp_bbox = _windowed_kp_bbox(
+                            self._obs_kp.get(cam_id, {}),
+                            frame_idx,
                             frozenset(self._hidden_kp_indices),
                         )
                         # Also cover the tracked skeleton (cyan overlay), if a
@@ -4284,6 +4395,7 @@ class PersonCropGridWidget(QWidget):
                             if tracking_step is not None else None,
                             self._marker_proj.get(cam_id, {}).get(tracking_step)
                             if tracking_step is not None else None,
+                            self._video_dims.get(svid),
                         )
                         desired = own_rect
                         for bbox in (kp_bbox, tracked_bbox):
@@ -4309,33 +4421,30 @@ class PersonCropGridWidget(QWidget):
                         # the outer _CropCell's -- _CropCell stacks a title
                         # bar above the canvas, so its aspect ratio isn't the
                         # canvas's; using it here would under-correct.
+                        # Margin around the minimum display bbox so overlay
+                        # points never sit flush against the cell edge.
+                        mx = (desired[2] - desired[0]) * _DISPLAY_MARGIN_FRAC
+                        my = (desired[3] - desired[1]) * _DISPLAY_MARGIN_FRAC
+                        desired = (desired[0] - mx, desired[1] - my, desired[2] + mx, desired[3] + my)
                         canvas_w, canvas_h = cell._canvas.width(), cell._canvas.height()
                         if canvas_w > 0 and canvas_h > 0:
                             desired = _expand_rect_to_aspect(desired, canvas_w / canvas_h)
-                        # Clamp to what this cluster image actually has decoded --
-                        # can't show pixels that were never cached.
-                        clamped = (
-                            max(desired[0], cluster_extent[0]), max(desired[1], cluster_extent[1]),
-                            min(desired[2], cluster_extent[2]), min(desired[3], cluster_extent[3]),
-                        )
-
-                        def _fits(bbox):
-                            return bbox is None or (
-                                bbox[0] >= cluster_extent[0] and bbox[1] >= cluster_extent[1]
-                                and bbox[2] <= cluster_extent[2] and bbox[3] <= cluster_extent[3]
-                            )
-
-                        if (_fits(kp_bbox) and _fits(tracked_bbox)
-                                and clamped[2] > clamped[0] and clamped[3] > clamped[1]):
+                        # No longer clamped to what this cluster image
+                        # actually has decoded: _display_crop_result now
+                        # black-fills any part of `desired` outside the
+                        # decoded pixels instead of the crop silently
+                        # shrinking (or being rejected outright) when an
+                        # edit or a tracked-skeleton projection reaches
+                        # beyond what's cached so far -- see "Unified
+                        # minimum-display bbox..." in the design doc.
+                        if desired[2] > desired[0] and desired[3] > desired[1]:
                             self._display_crop_result(
                                 cell, cam_id, svid, frame_idx, tracking_step,
-                                show_detected, show_tracked, wide, sub_rect=clamped,
+                                show_detected, show_tracked, wide, target_rect=desired,
                             )
                             continue
-                        # Else: what's actually displayed (e.g. an edited
-                        # keypoint) falls outside even this cluster's cached
-                        # pixels -- fall through rather than show a crop known
-                        # to be missing part of the overlay.
+                        # Else: degenerate window (shouldn't normally happen
+                        # given a valid own_rect) -- fall through.
                     else:
                         self._wide_crop_mgr.prioritise(svid, frame_idx)
 

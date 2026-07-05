@@ -23,10 +23,12 @@ from app.pose.wide_crop_cache import (
     cluster_rects,
 )
 from app.ui.content_panels import (
+    _composite_black_fill,
     _expand_rect_to_aspect,
     _kp_overlay_bbox,
     _nearest_segment_track_id,
     _tracked_overlay_bbox,
+    _windowed_kp_bbox,
 )
 
 
@@ -232,6 +234,48 @@ def test_kp_overlay_bbox_covers_all_visible_points():
 
 
 # ---------------------------------------------------------------------------
+# _windowed_kp_bbox -- gap-aware +/-N real-observation-frame window
+# ---------------------------------------------------------------------------
+
+def test_windowed_kp_bbox_none_when_no_observations():
+    assert _windowed_kp_bbox({}, 100, frozenset()) is None
+
+
+def test_windowed_kp_bbox_skips_over_a_long_gap():
+    # Real observations only at frames 60-74 and 451-465; nothing 75-450.
+    # Target frame 100 (itself has no data) must reach back to 65-74 and
+    # forward to 451-460 -- the nearest 10 real frames on each side -- not
+    # just a fixed +/-10 index window around 100.
+    obs = {}
+    for f in range(60, 75):
+        obs[f] = _kp_array((float(f), 0.0, 0.9))
+    for f in range(451, 466):
+        obs[f] = _kp_array((float(f), 0.0, 0.9))
+    bbox = _windowed_kp_bbox(obs, 100, frozenset(), n_frames=10)
+    assert bbox == (65.0, 0.0, 460.0, 0.0)
+
+
+def test_windowed_kp_bbox_includes_target_frame_itself():
+    obs = {100: _kp_array((999.0, 0.0, 0.9))}
+    assert _windowed_kp_bbox(obs, 100, frozenset(), n_frames=10) == (999.0, 0.0, 999.0, 0.0)
+
+
+def test_windowed_kp_bbox_uses_fewer_frames_near_sequence_start():
+    obs = {f: _kp_array((float(f), 0.0, 0.9)) for f in range(0, 5)}
+    # Only 5 frames with data exist at all, less than n_frames=10 on either side.
+    assert _windowed_kp_bbox(obs, 2, frozenset(), n_frames=10) == (0.0, 0.0, 4.0, 0.0)
+
+
+def test_windowed_kp_bbox_respects_hidden_indices_and_confidence():
+    obs = {
+        98: _kp_array((10.0, 10.0, 0.9), (500.0, 500.0, 0.9)),
+        102: _kp_array((20.0, 20.0, 0.9), (0.0, 0.0, 0.05)),
+    }
+    bbox = _windowed_kp_bbox(obs, 100, frozenset({1}), n_frames=10)
+    assert bbox == (10.0, 10.0, 20.0, 20.0)
+
+
+# ---------------------------------------------------------------------------
 # _tracked_overlay_bbox -- tracked-skeleton coverage for the same sub-crop
 # ---------------------------------------------------------------------------
 
@@ -255,6 +299,25 @@ def test_tracked_overlay_bbox_ignores_nan_markers():
     assert _tracked_overlay_bbox(None, marker_xy) == (30.0, 40.0, 30.0, 40.0)
 
 
+def test_tracked_overlay_bbox_drops_points_outside_video_dims():
+    # "knee" projects well outside a 640x480 frame (e.g. person occluded /
+    # out of this camera's view) -- must not drag the bbox out to it.
+    joint_xy = {"hip": [50.0, 60.0], "knee": [-500.0, 2000.0]}
+    marker_xy = np.array([[600.0, 400.0], [700.0, 100.0]], dtype=np.float32)
+    assert _tracked_overlay_bbox(joint_xy, marker_xy, (640, 480)) == (50.0, 60.0, 600.0, 400.0)
+
+
+def test_tracked_overlay_bbox_none_when_entirely_out_of_view():
+    joint_xy = {"hip": [-50.0, -60.0]}
+    marker_xy = np.array([[5000.0, 5000.0]], dtype=np.float32)
+    assert _tracked_overlay_bbox(joint_xy, marker_xy, (640, 480)) is None
+
+
+def test_tracked_overlay_bbox_no_video_dims_keeps_old_behavior():
+    joint_xy = {"hip": [-500.0, 2000.0]}
+    assert _tracked_overlay_bbox(joint_xy, None) == (-500.0, 2000.0, -500.0, 2000.0)
+
+
 # ---------------------------------------------------------------------------
 # _expand_rect_to_aspect -- fill the cell instead of letterboxing
 # ---------------------------------------------------------------------------
@@ -274,6 +337,73 @@ def test_expand_rect_to_aspect_grows_height_when_too_short():
 def test_expand_rect_to_aspect_noop_when_already_matching():
     rect = _expand_rect_to_aspect((0, 0, 160, 90), target_ar=16 / 9)
     assert rect == (0, 0, 160, 90)
+
+
+# ---------------------------------------------------------------------------
+# _composite_black_fill -- black-fill the part of target_rect not decoded
+# ---------------------------------------------------------------------------
+
+def test_composite_black_fill_fully_covered_by_decoded_crop():
+    # 10x10 decoded crop at full-frame origin (0, 0), scale 1:1; requesting
+    # exactly that same window back should reproduce it untouched.
+    crop = np.full((10, 10, 3), 200, dtype=np.uint8)
+    canvas, x1, y1 = _composite_black_fill(crop, 0.0, 0.0, 1.0, (0.0, 0.0, 10.0, 10.0))
+    assert (x1, y1) == (0.0, 0.0)
+    assert canvas.shape == (10, 10, 3)
+    assert (canvas == 200).all()
+
+
+def test_composite_black_fill_pads_black_where_target_exceeds_decoded():
+    # Decoded crop only covers (0,0)-(10,10); requesting a (0,0)-(20,10)
+    # window must keep the real pixels on the left and black-fill the right.
+    crop = np.full((10, 10, 3), 200, dtype=np.uint8)
+    canvas, x1, y1 = _composite_black_fill(crop, 0.0, 0.0, 1.0, (0.0, 0.0, 20.0, 10.0))
+    assert (x1, y1) == (0.0, 0.0)
+    assert canvas.shape == (10, 20, 3)
+    assert (canvas[:, :10] == 200).all()
+    assert (canvas[:, 10:] == 0).all()
+
+
+def test_composite_black_fill_places_decoded_patch_at_correct_offset():
+    # Decoded crop's full-frame origin is (5, 5); requesting a window
+    # starting at (0, 0) must place the real pixels at the right offset
+    # inside the canvas, not at the canvas's own origin.
+    crop = np.full((10, 10, 3), 200, dtype=np.uint8)
+    canvas, x1, y1 = _composite_black_fill(crop, 5.0, 5.0, 1.0, (0.0, 0.0, 15.0, 15.0))
+    assert (x1, y1) == (0.0, 0.0)
+    assert canvas.shape == (15, 15, 3)
+    assert (canvas[:5, :] == 0).all()
+    assert (canvas[:, :5] == 0).all()
+    assert (canvas[5:15, 5:15] == 200).all()
+
+
+def test_composite_black_fill_entirely_uncovered_is_all_black():
+    crop = np.full((10, 10, 3), 200, dtype=np.uint8)
+    canvas, x1, y1 = _composite_black_fill(crop, 0.0, 0.0, 1.0, (100.0, 100.0, 110.0, 110.0))
+    assert (x1, y1) == (100.0, 100.0)
+    assert canvas.shape == (10, 10, 3)
+    assert (canvas == 0).all()
+
+
+def test_composite_black_fill_survives_fractional_scale_rounding_drift():
+    # Regression test for a real crash: independently rounding the overlap's
+    # source-side edge ((ox1 - x1) * scale) and the canvas width
+    # ((tx1 - tx0) * scale) can disagree by a pixel at certain fractional
+    # scales/offsets, producing a source patch one pixel wider/taller than
+    # the canvas slot it's copied into -- "could not broadcast input array
+    # from shape (h, w+1, 3) into shape (h, w, 3)". Sweep scales and
+    # fractional edge offsets prone to exactly this disagreement.
+    crop = np.full((300, 300, 3), 200, dtype=np.uint8)
+    x1, y1 = 10.0, 5.0
+    for scale in (0.6165, 0.7139, 1.333, 2.71, 0.999, 1.001):
+        for edge_frac in (0.1, 0.3, 0.5, 0.7, 0.9):
+            target = (
+                x1 - 20.0, y1 - 20.0,
+                x1 + 300 / scale - edge_frac, y1 + 300 / scale - edge_frac,
+            )
+            canvas, tx0, ty0 = _composite_black_fill(crop, x1, y1, scale, target)
+            assert (tx0, ty0) == (target[0], target[1])
+            assert canvas.shape[0] > 0 and canvas.shape[1] > 0
 
 
 # ---------------------------------------------------------------------------

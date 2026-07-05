@@ -1946,6 +1946,184 @@ normal click no longer places anything.
 
 ---
 
+## Unified minimum-display bbox, black-fill, and view-mode parity
+
+### Motivation
+
+Harri reported recurring problems generating and using the high-res crop in
+edit mode, and noticed the *same* underlying symptom in the ordinary (view
+mode, non-edit) camera view: a cell that goes blank/placeholder on any frame
+that lacks a raw detection, even when there's perfectly good data to show —
+an edited keypoint, or a tracked skeleton's projection, sitting right there
+in `self._obs_kp` / `self._joint_proj` / `self._marker_proj` and simply never
+reaching the canvas.
+
+The root cause is that "what area should be visible for this frame" is
+decided three different, incomplete ways depending on mode:
+
+- View mode uses only the raw detection bbox from `frame_cache_entries`
+  (`_load_frame`, `content_panels.py:4366-4375`) — no keypoints, no tracked
+  skeleton, no windowing, and a hard `cell.show_empty()` (which also clears
+  any existing overlay state, `content_panels.py:1692-1699`) the moment
+  there's no track assignment or no cached row for the current frame.
+- Edit mode's wide-crop branch (`content_panels.py:4251-4340`) does union in
+  keypoints and tracked-skeleton overlays via `_kp_overlay_bbox` /
+  `_tracked_overlay_bbox`, but only for the *current* frame — the actual
+  windowing (`GAP_MARGIN_FRAMES=10` in `wide_crop_cache.py`, `_UNION_N=10` in
+  `CropBackfillWorker`) is applied only to raw `person_detections` bboxes,
+  and counts frame *slots*, not frames that actually have data — a stretch
+  of true gap erodes it down to nothing.
+- If the resulting desired area doesn't fit what's actually cached, edit mode
+  declines to render at all (`content_panels.py:4335-4338`) rather than show
+  whatever part *is* available.
+
+This section defines one bbox computation used by both modes, replaces
+"decline to render" with black-fill, and closes the view-mode gap so it
+draws (and, where missing, requests) the same overlays edit mode already
+does. It supersedes step 1 of *Algorithm: deciding which crop areas to
+cache* and steps 5 and 8 of *Algorithm: selecting the cached image for a
+frame & scaling for display* above, and extends that selection logic —
+today edit-mode-only — to view mode, which currently has no equivalent
+algorithm at all.
+
+### The minimum display bbox
+
+Per camera + frame, one rectangle in full-frame pixel coordinates, unioning:
+
+1. **Keypoint window** — walk outward from the target frame in
+   `self._obs_kp[cam_id]` (the `read_observations_with_edits` result, already
+   merged per keypoint slot: edited keypoints replace the raw x/y in place,
+   un-edited slots in the same frame keep their raw detected position — see
+   `db_cache.py:283-349`) until 10 frames *with data* are found on each side,
+   skipping frames with none, and union their visible (conf ≥ 0.1) keypoints.
+   Example: target frame 100, no observations 75-450 → window is 65-460, not
+   90-110. Because the merge already happens per keypoint slot, this single
+   windowed walk covers both "raw observation" and "edited keypoint" cases
+   from the original brief — there's no separate raw-only signal to window
+   independently; `_kp_overlay_bbox` already draws from this same merged
+   array today, just without the window.
+2. **Tracked-skeleton bbox** — `_tracked_overlay_bbox`'s existing per-frame
+   projected joints/markers, unchanged in scope (whenever a tracking run is
+   selected and covers this frame, independent of the `show_tracked`
+   checkbox — this part was already correct), now filtered to points that
+   land within this camera's own frame bounds (`self._video_dims[svid]`).
+   That viewport filter has already landed ahead of the rest of this
+   phasing (see *Phase 30* below) since it was a small, isolated fix once
+   identified. Caveat, in Harri's own words: "I am not sure if there
+   actually are cases like this in my material — it was just an additional
+   situation I realized will happen eventually with some datasets, latest
+   once we add the tracked skeleton into the crop area." Treat it as
+   preventive rather than a confirmed-fixed bug until it's actually observed
+   failing (or not) against a real capture.
+
+Unlike the keypoint window, the tracked-skeleton contribution isn't itself
+windowed across frames — a tracker step already varies smoothly enough
+frame-to-frame that the current-frame projection is representative, and
+windowing it would reintroduce the same "erodes to nothing across a gap"
+problem the keypoint window is specifically designed to avoid, for a signal
+that doesn't have gaps in the same sense (the tracker always has *some*
+state for a covered timestamp).
+
+### Black-fill instead of decline-to-render
+
+Where the current algorithm's step 8 falls through to a worse cache layer
+(or, in view mode, to a blank cell) when the desired area exceeds what's
+actually decoded, instead: allocate a canvas-sized buffer, fill it black,
+and blit whatever portion of the available cached pixels overlaps at the
+correct offset, reusing the existing crop-to-full-frame transform
+(`x1, y1, src_scale`, already computed for overlay coordinate mapping at
+`content_panels.py:4396-4409`) to place it. This applies uniformly to: the
+high-res wide-crop cluster cache not yet having decoded the full minimum
+bbox, the low-res per-track cache being tighter than the minimum bbox, and
+(new, see below) view mode having no cache entry at all for part of the
+window. The overlay (keypoints, skeleton, trail) is still drawn on top at
+its correct position regardless of how much of the backing image is black —
+position is a function of the full-frame transform, not of what's decoded.
+
+### View-mode parity
+
+1. `_load_frame`'s view-mode path gains the same minimum-bbox computation and
+   black-fill compositing as edit mode — no more separate, simpler code path
+   for the two modes; the wide-crop cache stays the preferred layer only
+   where it's actually running (edit mode, per *Cache scope and lifecycle*
+   above), with the low-res per-track cache and its own backfill as the
+   layer used in view mode.
+2. `cell.show_empty()` currently clears `_obs_kp`/`_joint_xy`/`_marker_xy`
+   unconditionally (`content_panels.py:1692-1699`) any time there's no raw
+   crop image, which is what makes a no-detection frame show nothing at all
+   today even though the overlay data exists independently. Split this:
+   `show_empty()` (no image, black background) no longer implies "also clear
+   the overlay" — `_load_frame` calls `cell.set_overlay(...)` with whatever
+   keypoint/tracked data exists for the frame regardless of whether an image
+   was found, so a person with an edited keypoint or an active tracking run
+   is still visible (as a dot/skeleton on black) on a frame with no
+   detection at all, in both modes.
+3. View mode currently never triggers generation on a cache miss — only
+   `_set_edit_mode` starts `CropBackfillWorker` (`content_panels.py:3154-3182`).
+   Start the low-res backfill worker whenever a `PersonPanel` becomes the
+   active tab / is shown, independent of edit mode, so a view-mode miss
+   prioritises and eventually fills in instead of leaving a permanent
+   placeholder. The heavier wide-crop cluster cache stays edit-mode-only, per
+   its existing scope/cost rationale — this does not change.
+
+### Debug overlay
+
+A small text label drawn in the corner of each cell (same mechanism as the
+existing `"—"` / `"generating…"` placeholder text, `content_panels.py:2044`),
+toggleable alongside the existing `show_detected`/`show_tracked`/`show_seg`
+checkboxes, naming which layer actually produced the current image and
+whether black-fill was applied, e.g. `wide-cache`, `low-res backfill`,
+`ghost/gap`, `black-fill (2 regions)`. Purely diagnostic — no effect on the
+selection algorithm itself — but the only way today to tell *which* of the
+several fallback layers is actually on screen is to add a temporary
+`_log.debug` and watch the console.
+
+### Phasing
+
+**Phase 30 — minimum-display-bbox function.** New shared function
+(replacing `_kp_overlay_bbox`'s single-frame call site in the wide-crop
+branch) that performs the gap-aware ±10-real-observation-frame keypoint
+window and unions it with `_tracked_overlay_bbox`'s viewport-filtered
+current-frame result. (The viewport filter itself already landed standalone,
+ahead of this phase — see *Tracked-skeleton bbox* above.) *Validation*:
+construct a >20-frame gap in raw+edited observations around a target frame
+and verify the window reaches back/forward to the 10 real observations on
+each side rather than collapsing to nothing; verify a tracking run whose
+projection is fully outside a camera's frame contributes nothing to the
+union for that camera, while one partially in view still contributes its
+visible portion.
+
+**Phase 31 — default view + black-fill.** Default (non-zoomed) view uses the
+minimum display bbox plus a fixed display margin, not just whatever the
+cache handed back; replace the decline-to-render fallback with black-fill
+compositing at the crop-to-full-frame offset already used for overlay
+mapping. *Validation*: scrub to a frame where the minimum bbox exceeds the
+wide-crop cache's decoded extent and verify the cell shows the available
+pixels with black margins and correctly-positioned overlays, instead of
+falling back to a lower-quality layer or a blank cell; verify the default
+(unzoomed) framing visibly follows the person/skeleton rather than a fixed
+detection-bbox crop.
+
+**Phase 32 — view-mode parity.** Route view mode's `_load_frame` path
+through the same minimum-bbox/black-fill logic; split `show_empty()`'s
+"no image" state from "no overlay" so edited keypoints and tracked-skeleton
+projections still draw on frames with no raw detection; start the low-res
+`CropBackfillWorker` whenever a `PersonPanel` is shown, not only in edit
+mode. *Validation*: open a person (not in edit mode) at a frame with no
+detection but an existing edit or an active tracking run, verify the
+edit/skeleton is visible on a black/backfilled background instead of a
+blank placeholder; verify a genuine view-mode cache miss eventually resolves
+instead of staying blank indefinitely.
+
+**Phase 33 — debug overlay.** Per-cell corner label naming the layer that
+produced the currently-displayed image (and whether black-fill was applied),
+toggleable via a new checkbox alongside `show_detected`/`show_tracked`/
+`show_seg`. *Validation*: scrub across a wide-crop / low-res / black-fill
+boundary and verify the label updates to match, with no effect on the
+underlying selection logic when the checkbox is off.
+
+---
+
 ## Open questions
 
 1. **Freeze / version management** — the brief envisions marking the current

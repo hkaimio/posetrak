@@ -29,6 +29,21 @@ if cpp.get_id() == 'msvc'
   # actually cross-compiling.
   add_project_arguments('-D_USE_MATH_DEFINES', language: 'cpp')
 
+  # Debug builds only: heavy Eigen/Pinocchio template instantiation (e.g.
+  # inverse_kinematics.cpp's use of computeJointJacobians) generates far more
+  # COFF sections per object file in an unoptimized debug build than a
+  # release build (no inlining/dead-code-elimination collapses them) --
+  # observed hitting "fatal error C1128: number of sections exceeded object
+  # file format limit" building builddir with -Dbuildtype=debug, the same
+  # buildtype CLAUDE.md's own convention uses for day-to-day unit
+  # testing/debugging (optbuild/ is the separate release build for actual
+  # tracking runs). /bigobj raises that limit; only needed in debug because
+  # release's optimizer already keeps section counts well under the default
+  # limit for every file in this codebase.
+  if get_option('buildtype') == 'debug'
+    add_project_arguments('/bigobj', language: 'cpp')
+  endif
+
   # Pinocchio's fwd.hpp does `#ifdef _WIN32: #include <windows.h>` unconditionally.
   # Without NOMINMAX, windows.h #defines min/max as function-like macros, which
   # would corrupt any std::min/std::max call or template `<`/`>` parse throughout

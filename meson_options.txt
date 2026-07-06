@@ -12,3 +12,6 @@ option('pinocchio_includedir', type: 'string', value: '',
 
 option('boost_includedir', type: 'string', value: '',
        description: 'Extra include dir for Pinocchio Boost header dependencies (math, type_traits). Needed for native Windows builds.')
+
+option('boost_libdir', type: 'string', value: '',
+       description: 'Lib dir for boost_serialization, pulled in transitively by some Pinocchio header. Needed for native Windows builds.')

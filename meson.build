@@ -28,6 +28,39 @@ if cpp.get_id() == 'msvc'
   # define too (cross/mingw-w64-x86_64.ini), but that file only applies when
   # actually cross-compiling.
   add_project_arguments('-D_USE_MATH_DEFINES', language: 'cpp')
+
+  # Pinocchio's fwd.hpp does `#ifdef _WIN32: #include <windows.h>` unconditionally.
+  # Without NOMINMAX, windows.h #defines min/max as function-like macros, which
+  # would corrupt any std::min/std::max call or template `<`/`>` parse throughout
+  # Pinocchio and Eigen. Standard, low-risk practice for any Windows C++ project
+  # that pulls in windows.h transitively while also using std::min/max or
+  # Eigen/Pinocchio-style templates -- kept even though it wasn't the actual
+  # cause of a similar-looking cascade hit while debugging this (that one
+  # turned out to be a missing PINOCCHIO_DEPRECATED definition instead).
+  add_project_arguments('-DNOMINMAX', language: 'cpp')
+
+  # pinocchio/macros.hpp does `#if WIN32` (bare, not _WIN32) to choose between
+  # __FUNCSIG__ (MSVC) and __PRETTY_FUNCTION__ (GCC/Clang) for
+  # PINOCCHIO_PRETTY_FUNCTION. MSVC does not predefine bare WIN32 (only
+  # _WIN32), so without this the macro is completely undefined and `#if WIN32`
+  # fails with "invalid integer constant expression" the moment macros.hpp is
+  # ever included. The MinGW cross build needs the same define for a different
+  # reason (cross/mingw-w64-x86_64.ini: GCC's own headers clear WIN32 after
+  # Pinocchio's macros.hpp already needs it) -- __FUNCSIG__ genuinely exists on
+  # MSVC, so unlike the cross build this needs no __FUNCSIG__ remap.
+  add_project_arguments('-DWIN32=1', language: 'cpp')
+
+  # Some Pinocchio header transitively includes Boost Serialization, which
+  # (unlike the header-only boost/math, boost/type_traits this project
+  # otherwise relies on) triggers Boost's MSVC-only "auto-link" feature: a
+  # `#pragma comment(lib, "boost_serialization.lib")` requesting the linker
+  # pull in a compiled library, purely because MSVC honours that pragma and
+  # GCC/Clang silently ignore it -- the Linux/WSL build links fine without
+  # ever providing that library. Rather than chase down which header pulls
+  # this in and hunt a matching compiled Boost lib, disable the auto-link
+  # feature outright: nothing this project actually calls into needs Boost
+  # Serialization's compiled support, only its header-only pieces.
+  add_project_arguments('-DBOOST_ALL_NO_LIB', language: 'cpp')
 endif
 
 # Dependencies
@@ -112,6 +145,18 @@ endif
 # boost/type_traits) are themselves header-only and present at the system include path.
 # See docs/pinocchio-header-only-analysis.md for the full rationale.
 #
+# One exception found bringing up a native Windows build against Pinocchio
+# 3.9.0 (the version /opt/openrobots actually has -- Frame::parentJoint,
+# renamed from Frame::parent post-2.7.1, is what confirmed the version):
+# something transitively pulls in boost::archive::codecvt_null<wchar_t>,
+# which needs actually-compiled Boost Serialization, not just headers. The
+# Linux/WSL build links fine without ever providing it explicitly -- Boost's
+# MSVC-only auto-link pragma (a `#pragma comment(lib, ...)` GCC/Clang simply
+# ignore) would normally request it there by mangled name, but that name
+# doesn't reliably match what a given Boost distribution actually calls the
+# file, so BOOST_ALL_NO_LIB disables the pragma and boost_libdir below links
+# the real file explicitly instead.
+#
 # Default assumes a robotpkg install at /opt/openrobots (the Linux/WSL dev
 # environment), where Boost is also on the compiler's default system include
 # path. Native Windows has neither: pinocchio_includedir/boost_includedir let
@@ -139,8 +184,15 @@ if meson.is_cross_build()
   pinocchio_extra_incs += include_directories('cross/include', is_system: true)
 endif
 
+pinocchio_deps = []
+boost_libdir_opt = get_option('boost_libdir')
+if boost_libdir_opt != ''
+  pinocchio_deps += cpp.find_library('boost_serialization', dirs: [boost_libdir_opt])
+endif
+
 pinocchio_dep = declare_dependency(
   include_directories: [pinocchio_inc] + pinocchio_extra_incs,
+  dependencies: pinocchio_deps,
 )
 
 # Will add these as we progress:

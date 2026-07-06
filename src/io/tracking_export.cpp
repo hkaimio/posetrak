@@ -3,6 +3,7 @@
 #include <fmt/core.h>
 
 #include "posetrak/kinematics/forward_kinematics.hpp"
+#include <set>
 #include <stdexcept>
 
 namespace posetrak {

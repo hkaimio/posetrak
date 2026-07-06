@@ -191,6 +191,44 @@ class UnscentedKalmanFilter {
     void set_vel_half_life(double half_life_s);
 
     /**
+     * @brief Configure velocity-driven per-DOF process noise (adaptive process
+     * noise, Phase 1 / "Mechanism A" — see
+     * docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md).
+     *
+     * Each active DOF's own process noise variance is scaled by
+     * `(1 + gain * |velocity_dof| / vel_ref)^2`, clamped to
+     * `kMaxVelocityNoiseMultiplier`, using that DOF's velocity from the posterior
+     * state at the start of predict() (before propagation). Root position and
+     * orientation DOFs share one gain/reference; joint DOFs share another, since
+     * root moves in world units (metres/rad) and joints in radians and a shared
+     * gain would conflate the two scales. Prismatic (bone-length) DOFs are never
+     * scaled — they stay under the existing frozen/calibration-mode noise.
+     *
+     * A gain of 0.0 disables scaling for that DOF class and reproduces the exact
+     * pre-Phase-1 static process noise.
+     *
+     * @param gain_joint Velocity gain for joint DOFs (0.0 = disabled).
+     * @param vel_ref_joint Reference velocity for joint DOFs (rad/s). Must be > 0
+     *        if gain_joint > 0.
+     * @param gain_root Velocity gain for root DOFs (0.0 = disabled).
+     * @param vel_ref_root Reference velocity for root DOFs (m/s for position,
+     *        rad/s for orientation — both share this one reference). Must be > 0
+     *        if gain_root > 0.
+     */
+    void set_velocity_noise_gain(double gain_joint, double vel_ref_joint, double gain_root,
+                                 double vel_ref_root);
+
+    /**
+     * @brief Per-DOF velocity-noise multiplier computed by the most recent predict()
+     * call, keyed by absolute error-state position index (same indexing as
+     * process_noise_'s position block). Empty if velocity-driven scaling is
+     * disabled (both gains 0.0). Debug/tuning use only.
+     */
+    std::unordered_map<int, double> const& last_velocity_noise_scale() const {
+        return vel_noise_scale_debug_;
+    }
+
+    /**
      * @brief Set current frame number for debug exports
      * @param frame_num Frame number
      */
@@ -347,6 +385,19 @@ class UnscentedKalmanFilter {
     void write_sigma_points_csv(std::vector<State> const& sigma_points) const;
 
     /**
+     * @brief Append one row to debug_dir_/process_noise_velocity_scale.csv with the
+     * per-DOF velocity-noise std multiplier from the most recent apply_velocity_scaling()
+     * call (see last_velocity_noise_scale()).
+     *
+     * Unlike the frame-0/frame-1-only debug exports above, this runs every predict()
+     * call so the tuning process can inspect how the gain reacts frame-to-frame over
+     * a whole run without rebuilding. Writes the header (root + per-joint-DOF column
+     * names, from layout_) on frame 0 only. No-op if velocity scaling is disabled
+     * (both gains 0.0) -- nothing changes frame to frame in that case anyway.
+     */
+    void write_velocity_noise_scale_csv() const;
+
+    /**
      * @brief Write matrix to CSV file for debugging
      * @param matrix Matrix to write
      * @param filename Filename (without path, e.g., "prior_covariance.csv")
@@ -369,6 +420,24 @@ class UnscentedKalmanFilter {
     bool calibration_mode_ = false;        ///< Whether prismatic DOFs have active process noise
     double prismatic_noise_std_ = 0.0001;  ///< Sigma for prismatic DOFs in calibration mode
     void rebuild_process_noise();          ///< Rebuild process_noise_ matrix with per-DOF values
+
+    // Velocity-driven per-DOF process noise (Phase 1 adaptive process noise).
+    // 0.0 gain = disabled, reproduces the exact static process_noise_ built by
+    // rebuild_process_noise() above.
+    double vel_noise_gain_joint_ = 0.0;
+    double vel_noise_ref_joint_ = 1.0;
+    double vel_noise_gain_root_ = 0.0;
+    double vel_noise_ref_root_ = 1.0;
+    static constexpr double kMaxVelocityNoiseMultiplier = 10.0;
+    /// Returns a copy of the static process_noise_ baseline (as built by
+    /// rebuild_process_noise()) with each active DOF's diagonal entries scaled by
+    /// its own velocity-driven multiplier; returns process_noise_ unchanged if both
+    /// gains are 0.0. Called fresh every predict() -- never mutates process_noise_
+    /// itself, so per-step scaling never compounds across frames.
+    Eigen::MatrixXd apply_velocity_scaling(State const& velocity_state) const;
+    /// Per-DOF multiplier from the most recent apply_velocity_scaling() call, for
+    /// last_velocity_noise_scale()'s debug/tuning accessor above.
+    mutable std::unordered_map<int, double> vel_noise_scale_debug_;
 
     // Posterior state saved at the start of predict() for velocity-mode measurement prediction.
     // Initialized to the same zero state as state_; overwritten on first predict() call.

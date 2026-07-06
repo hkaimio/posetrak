@@ -368,3 +368,159 @@ TEST_CASE("UKF multiple prediction steps", "[ukf]") {
     // Quaternion should remain normalized
     REQUIRE_THAT(ukf.state().root_orientation().norm(), WithinAbs(1.0, 1e-9));
 }
+
+// -----------------------------------------------------------------------------
+// Adaptive process noise (Phase 1 — velocity-driven per-DOF scaling)
+// docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md
+// -----------------------------------------------------------------------------
+
+namespace {
+/// Two-revolute-joint skeleton (plus floating root) for adaptive-noise tests:
+/// joint1 and joint2 can be independently set to different velocities.
+Skeleton make_two_joint_skeleton() {
+    Skeleton skeleton;
+    skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    skeleton.add_joint("joint1", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1));
+    skeleton.add_joint("joint2", 0, JointType::REVOLUTE, Eigen::Vector3d(1, 0, 0));
+    return skeleton;
+}
+
+Eigen::VectorXd zero_angles_2() {
+    Eigen::VectorXd angles(2);
+    angles << 0.0, 0.0;
+    return angles;
+}
+}  // namespace
+
+TEST_CASE("Adaptive process noise disabled by default leaves scale map empty",
+          "[ukf][adaptive-noise]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+
+    Eigen::VectorXd joint_vels(2);
+    joint_vels << 5.0, 0.0;  // joint1 moving fast, joint2 still
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), zero_angles_2(),
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), joint_vels);
+    ukf.set_state(state);
+
+    ukf.predict(0.01);
+
+    // No set_velocity_noise_gain() call -- both gains default to 0.0 (disabled).
+    REQUIRE(ukf.last_velocity_noise_scale().empty());
+}
+
+TEST_CASE("Adaptive process noise disabled reproduces the exact static baseline",
+          "[ukf][adaptive-noise]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_joint_skeleton()));
+    UnscentedKalmanFilter ukf_still(layout, 0.1);
+    UnscentedKalmanFilter ukf_moving(layout, 0.1);
+
+    Eigen::MatrixXd tiny_cov =
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 1e-12;
+    ukf_still.set_covariance(tiny_cov);
+    ukf_moving.set_covariance(tiny_cov);
+
+    State still_state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), zero_angles_2(),
+                      Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), zero_angles_2());
+    Eigen::VectorXd fast_vels(2);
+    fast_vels << 50.0, 50.0;
+    State moving_state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), zero_angles_2(),
+                       Eigen::Vector3d(10.0, 10.0, 10.0), Eigen::Vector3d(10.0, 10.0, 10.0),
+                       fast_vels);
+    ukf_still.set_state(still_state);
+    ukf_moving.set_state(moving_state);
+
+    ukf_still.predict(0.05);
+    ukf_moving.predict(0.05);
+
+    // With both gains at their 0.0 default, process noise must not depend on velocity at
+    // all -- the resulting covariance (dominated entirely by process noise, since the
+    // pre-process-noise covariance starts near machine-zero) must match regardless of
+    // how fast the state was moving.
+    REQUIRE(ukf_still.covariance().isApprox(ukf_moving.covariance(), 1e-9));
+}
+
+TEST_CASE("Adaptive process noise scales a moving joint DOF more than a stationary one",
+          "[ukf][adaptive-noise]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_velocity_noise_gain(/*gain_joint=*/1.0, /*vel_ref_joint=*/1.0, /*gain_root=*/0.0,
+                                /*vel_ref_root=*/1.0);
+
+    Eigen::VectorXd joint_vels(2);
+    // joint1 moving at 1x the reference velocity, joint2 still. Kept below the
+    // sqrt(kMaxVelocityNoiseMultiplier) =~ 3.162 clamp so this test isolates the
+    // unclamped scaling formula (see the separate clamping test below for that case).
+    joint_vels << 1.0, 0.0;
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), zero_angles_2(),
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), joint_vels);
+    ukf.set_state(state);
+
+    ukf.predict(0.01);
+
+    auto const& scale = ukf.last_velocity_noise_scale();
+    int const root_n = layout->root_error_dof_count();
+    REQUIRE(root_n == 6);
+    // joint1 is the first joint after the root block (error_index 0), joint2 next (error_index 1).
+    int const joint1_idx = root_n + 0;
+    int const joint2_idx = root_n + 1;
+
+    REQUIRE(scale.count(joint1_idx) == 1);
+    REQUIRE(scale.count(joint2_idx) == 1);
+    // joint1: std_mult = 1 + 1.0 * 1.0 / 1.0 = 2.0
+    REQUIRE_THAT(scale.at(joint1_idx), WithinAbs(2.0, 1e-6));
+    // joint2: zero velocity -> no scaling
+    REQUIRE_THAT(scale.at(joint2_idx), WithinAbs(1.0, 1e-6));
+    REQUIRE(scale.at(joint1_idx) > scale.at(joint2_idx));
+}
+
+TEST_CASE("Adaptive process noise scales root DOFs from root velocity, independently per axis",
+          "[ukf][adaptive-noise]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_velocity_noise_gain(/*gain_joint=*/0.0, /*vel_ref_joint=*/1.0, /*gain_root=*/1.0,
+                                /*vel_ref_root=*/2.0);
+
+    // Root moving only along X; Y and Z (and all angular) stationary.
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), zero_angles_2(),
+                Eigen::Vector3d(2.0, 0.0, 0.0), Eigen::Vector3d::Zero(), zero_angles_2());
+    ukf.set_state(state);
+
+    ukf.predict(0.01);
+
+    auto const& scale = ukf.last_velocity_noise_scale();
+    // Root error-state layout: 0-2 = position (x,y,z), 3-5 = orientation.
+    REQUIRE(scale.count(0) == 1);
+    REQUIRE(scale.count(1) == 1);
+    // root_pos_x: std_mult = 1 + 1.0 * 2.0 / 2.0 = 2.0
+    REQUIRE_THAT(scale.at(0), WithinAbs(2.0, 1e-6));
+    // root_pos_y: zero velocity -> no scaling
+    REQUIRE_THAT(scale.at(1), WithinAbs(1.0, 1e-6));
+}
+
+TEST_CASE("Adaptive process noise multiplier is clamped for an extreme velocity",
+          "[ukf][adaptive-noise]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_velocity_noise_gain(/*gain_joint=*/1.0, /*vel_ref_joint=*/1.0, /*gain_root=*/0.0,
+                                /*vel_ref_root=*/1.0);
+
+    Eigen::VectorXd joint_vels(2);
+    joint_vels << 1.0e6, 0.0;  // absurdly large -- must not blow up unbounded
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), zero_angles_2(),
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), joint_vels);
+    ukf.set_state(state);
+
+    ukf.predict(0.01);
+
+    int const root_n = layout->root_error_dof_count();
+    double const joint1_scale = ukf.last_velocity_noise_scale().at(root_n + 0);
+    // Variance-domain clamp is documented as 10x -> std-domain clamp is sqrt(10) =~ 3.1623.
+    REQUIRE(joint1_scale < 4.0);
+    REQUIRE(joint1_scale > 3.0);  // confirms it actually hit the clamp, not some tiny value
+}

@@ -10,6 +10,7 @@
 #include <omp.h>
 
 #include "posetrak/core/skeleton_layout.hpp"
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -118,6 +119,68 @@ void UnscentedKalmanFilter::set_vel_noise_std(double vel_noise_std) {
 
 void UnscentedKalmanFilter::set_vel_half_life(double half_life_s) {
     vel_half_life_s_ = half_life_s;
+}
+
+void UnscentedKalmanFilter::set_velocity_noise_gain(double gain_joint, double vel_ref_joint,
+                                                    double gain_root, double vel_ref_root) {
+    vel_noise_gain_joint_ = gain_joint;
+    vel_noise_ref_joint_ = vel_ref_joint;
+    vel_noise_gain_root_ = gain_root;
+    vel_noise_ref_root_ = vel_ref_root;
+}
+
+Eigen::MatrixXd UnscentedKalmanFilter::apply_velocity_scaling(State const& velocity_state) const {
+    vel_noise_scale_debug_.clear();
+    if (vel_noise_gain_joint_ <= 0.0 && vel_noise_gain_root_ <= 0.0) {
+        return process_noise_;
+    }
+
+    Eigen::MatrixXd scaled = process_noise_;
+    int const root_n = layout_->root_error_dof_count();
+    int const active_dof = root_n + layout_->joint_active_dof_count();
+
+    // Singer-model-style: noise_std_dof = base_noise * (1 + gain * |v| / v_ref), applied to
+    // variance (squared) since process_noise_ stores variances, not std devs. Clamped so a
+    // transiently-wrong velocity estimate can't blow up process noise unboundedly.
+    auto scale_dof = [&](int pos_idx, double velocity, double gain, double vel_ref) {
+        if (gain <= 0.0)
+            return;
+        double const std_mult = std::min(1.0 + gain * std::abs(velocity) / vel_ref,
+                                         std::sqrt(kMaxVelocityNoiseMultiplier));
+        double const var_mult = std_mult * std_mult;
+        int const vel_idx = active_dof + pos_idx;
+        scaled(pos_idx, pos_idx) *= var_mult;
+        scaled(vel_idx, vel_idx) *= var_mult;
+        // Debug/tuning export is in std-domain (matches the design doc's own
+        // "noise_std_dof = base * (1 + gain*|v|/v_ref)" formula), not the
+        // variance-domain multiplier actually applied to process_noise_ above.
+        vel_noise_scale_debug_[pos_idx] = std_mult;
+    };
+
+    if (root_n == 6 && vel_noise_gain_root_ > 0.0) {
+        Eigen::Vector3d const lin_vel = velocity_state.root_velocity();
+        Eigen::Vector3d const ang_vel = velocity_state.root_angular_velocity();
+        for (int d = 0; d < 3; ++d)
+            scale_dof(d, lin_vel(d), vel_noise_gain_root_, vel_noise_ref_root_);
+        for (int d = 0; d < 3; ++d)
+            scale_dof(3 + d, ang_vel(d), vel_noise_gain_root_, vel_noise_ref_root_);
+    }
+
+    if (vel_noise_gain_joint_ > 0.0) {
+        Eigen::VectorXd const& joint_vel = velocity_state.joint_velocities();
+        for (JointDesc const& j : layout_->joints()) {
+            if (j.type == JointType::PRISMATIC)
+                continue;  // Frozen/calibration-only noise; not velocity-driven.
+            for (uint32_t d = 0; d < j.active_dof_count; ++d) {
+                int const pos_idx = root_n + static_cast<int>(j.error_index) + static_cast<int>(d);
+                int const state_idx = static_cast<int>(j.state_index) + static_cast<int>(d);
+                scale_dof(pos_idx, joint_vel(state_idx), vel_noise_gain_joint_,
+                          vel_noise_ref_joint_);
+            }
+        }
+    }
+
+    return scaled;
 }
 
 void UnscentedKalmanFilter::enable_calibration_mode(double prismatic_noise_std) {
@@ -509,8 +572,13 @@ PredictResult UnscentedKalmanFilter::predict(double dt) {
 
     result.mean_cov_ms = Ms(Clock::now() - t2).count();
 
-    // Add process noise
-    covariance_ += process_noise_ * dt;
+    // Add process noise. Velocity-driven per-DOF scaling (Phase 1 adaptive process
+    // noise) uses posterior_state -- the state as of the START of this predict()
+    // call, before propagation -- since it's the actual observed velocity, not the
+    // (identical, constant-velocity-model) propagated one, that should drive it.
+    covariance_ += apply_velocity_scaling(posterior_state) * dt;
+    if (debug_enabled_)
+        write_velocity_noise_scale_csv();
 
     // Debug: Export covariance after process noise (frame 0 - Python matching format)
     if (debug_enabled_ && frame_number_ == 0) {
@@ -1740,6 +1808,57 @@ void UnscentedKalmanFilter::write_matrix_csv(Eigen::MatrixXd const& matrix,
         }
         f << "\n";
     }
+}
+
+void UnscentedKalmanFilter::write_velocity_noise_scale_csv() const {
+    if (vel_noise_gain_joint_ <= 0.0 && vel_noise_gain_root_ <= 0.0)
+        return;  // Scaling disabled; nothing changes frame to frame, not worth logging.
+
+    int const root_n = layout_->root_error_dof_count();
+    std::string const path = debug_dir_ + "/process_noise_velocity_scale.csv";
+    std::ios_base::openmode const mode =
+        (frame_number_ == 0) ? std::ios::out | std::ios::trunc : std::ios::out | std::ios::app;
+    std::ofstream f(path, mode);
+    if (!f.is_open()) {
+        std::cerr << "Failed to open " << path << " for writing\n";
+        return;
+    }
+    f << std::setprecision(9);
+
+    if (frame_number_ == 0) {
+        f << "frame_number";
+        if (root_n == 6) {
+            f << ",root_pos_x,root_pos_y,root_pos_z,root_rot_x,root_rot_y,root_rot_z";
+        }
+        for (JointDesc const& j : layout_->joints()) {
+            if (j.type == JointType::PRISMATIC)
+                continue;
+            for (uint32_t d = 0; d < j.active_dof_count; ++d) {
+                f << "," << j.name << "_" << d;
+            }
+        }
+        f << "\n";
+    }
+
+    auto scale_or_one = [&](int pos_idx) {
+        auto it = vel_noise_scale_debug_.find(pos_idx);
+        return it != vel_noise_scale_debug_.end() ? it->second : 1.0;
+    };
+
+    f << frame_number_;
+    if (root_n == 6) {
+        for (int d = 0; d < 6; ++d)
+            f << "," << scale_or_one(d);
+    }
+    for (JointDesc const& j : layout_->joints()) {
+        if (j.type == JointType::PRISMATIC)
+            continue;
+        for (uint32_t d = 0; d < j.active_dof_count; ++d) {
+            int const pos_idx = root_n + static_cast<int>(j.error_index) + static_cast<int>(d);
+            f << "," << scale_or_one(pos_idx);
+        }
+    }
+    f << "\n";
 }
 
 void UnscentedKalmanFilter::write_sigma_points_csv(std::vector<State> const& sigma_points) const {

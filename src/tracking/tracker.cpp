@@ -396,6 +396,9 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
         ukf_->set_vel_noise_std(*config_.process_noise_vel_std);
     if (config_.velocity_half_life_s)
         ukf_->set_vel_half_life(*config_.velocity_half_life_s);
+    ukf_->set_velocity_noise_gain(
+        config_.process_noise_vel_gain_joint, config_.process_noise_vel_ref_joint,
+        config_.process_noise_vel_gain_root, config_.process_noise_vel_ref_root);
 
     // Enable calibration mode if requested (prismatic DOFs get small process noise)
     fmt::print("calibration_mode={}, prismatic_process_noise_std={}\n", config_.calibration_mode,

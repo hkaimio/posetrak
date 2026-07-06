@@ -349,21 +349,23 @@ def test_composite_black_fill_fully_covered_by_decoded_crop():
     # 10x10 decoded crop at full-frame origin (0, 0), scale 1:1; requesting
     # exactly that same window back should reproduce it untouched.
     crop = np.full((10, 10, 3), 200, dtype=np.uint8)
-    canvas, x1, y1 = _composite_black_fill(crop, 0.0, 0.0, 1.0, (0.0, 0.0, 10.0, 10.0))
+    canvas, x1, y1, black_filled = _composite_black_fill(crop, 0.0, 0.0, 1.0, (0.0, 0.0, 10.0, 10.0))
     assert (x1, y1) == (0.0, 0.0)
     assert canvas.shape == (10, 10, 3)
     assert (canvas == 200).all()
+    assert black_filled is False
 
 
 def test_composite_black_fill_pads_black_where_target_exceeds_decoded():
     # Decoded crop only covers (0,0)-(10,10); requesting a (0,0)-(20,10)
     # window must keep the real pixels on the left and black-fill the right.
     crop = np.full((10, 10, 3), 200, dtype=np.uint8)
-    canvas, x1, y1 = _composite_black_fill(crop, 0.0, 0.0, 1.0, (0.0, 0.0, 20.0, 10.0))
+    canvas, x1, y1, black_filled = _composite_black_fill(crop, 0.0, 0.0, 1.0, (0.0, 0.0, 20.0, 10.0))
     assert (x1, y1) == (0.0, 0.0)
     assert canvas.shape == (10, 20, 3)
     assert (canvas[:, :10] == 200).all()
     assert (canvas[:, 10:] == 0).all()
+    assert black_filled is True
 
 
 def test_composite_black_fill_places_decoded_patch_at_correct_offset():
@@ -371,20 +373,22 @@ def test_composite_black_fill_places_decoded_patch_at_correct_offset():
     # starting at (0, 0) must place the real pixels at the right offset
     # inside the canvas, not at the canvas's own origin.
     crop = np.full((10, 10, 3), 200, dtype=np.uint8)
-    canvas, x1, y1 = _composite_black_fill(crop, 5.0, 5.0, 1.0, (0.0, 0.0, 15.0, 15.0))
+    canvas, x1, y1, black_filled = _composite_black_fill(crop, 5.0, 5.0, 1.0, (0.0, 0.0, 15.0, 15.0))
     assert (x1, y1) == (0.0, 0.0)
     assert canvas.shape == (15, 15, 3)
     assert (canvas[:5, :] == 0).all()
     assert (canvas[:, :5] == 0).all()
     assert (canvas[5:15, 5:15] == 200).all()
+    assert black_filled is True
 
 
 def test_composite_black_fill_entirely_uncovered_is_all_black():
     crop = np.full((10, 10, 3), 200, dtype=np.uint8)
-    canvas, x1, y1 = _composite_black_fill(crop, 0.0, 0.0, 1.0, (100.0, 100.0, 110.0, 110.0))
+    canvas, x1, y1, black_filled = _composite_black_fill(crop, 0.0, 0.0, 1.0, (100.0, 100.0, 110.0, 110.0))
     assert (x1, y1) == (100.0, 100.0)
     assert canvas.shape == (10, 10, 3)
     assert (canvas == 0).all()
+    assert black_filled is True
 
 
 def test_composite_black_fill_survives_fractional_scale_rounding_drift():
@@ -403,7 +407,7 @@ def test_composite_black_fill_survives_fractional_scale_rounding_drift():
                 x1 - 20.0, y1 - 20.0,
                 x1 + 300 / scale - edge_frac, y1 + 300 / scale - edge_frac,
             )
-            canvas, tx0, ty0 = _composite_black_fill(crop, x1, y1, scale, target)
+            canvas, tx0, ty0, _black_filled = _composite_black_fill(crop, x1, y1, scale, target)
             assert (tx0, ty0) == (target[0], target[1])
             assert canvas.shape[0] > 0 and canvas.shape[1] > 0
 
@@ -414,10 +418,13 @@ def test_composite_black_fill_clamps_implausible_target_rect():
     # terabyte canvas. _composite_black_fill must clamp rather than crash,
     # even if a caller failed to sanity-check target_rect first.
     crop = np.full((10, 10, 3), 200, dtype=np.uint8)
-    canvas, tx0, ty0 = _composite_black_fill(crop, 0.0, 0.0, 1.0, (0.0, 0.0, 5_000_000.0, 1_000_000.0))
+    canvas, tx0, ty0, black_filled = _composite_black_fill(
+        crop, 0.0, 0.0, 1.0, (0.0, 0.0, 5_000_000.0, 1_000_000.0)
+    )
     assert (tx0, ty0) == (0.0, 0.0)
     assert canvas.shape[0] <= _MAX_CANVAS_DIM_PX
     assert canvas.shape[1] <= _MAX_CANVAS_DIM_PX
+    assert black_filled is True
 
 
 # ---------------------------------------------------------------------------

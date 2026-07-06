@@ -1649,13 +1649,23 @@ _MAX_PLAUSIBLE_BBOX_DIM = 20_000.0
 
 
 def _sane_bbox(bbox: "tuple | None") -> "tuple | None":
-    """Reject a bbox with a non-finite coordinate or an implausibly large
-    width/height, so one bad source (edit, detection, or projection) can't
-    blow up the crop area unioned from several independent sources."""
+    """Reject a bbox with a non-finite coordinate, an implausibly large
+    width/height, or an implausibly large coordinate magnitude, so one bad
+    source (edit, detection, or projection) can't blow up the crop area
+    unioned from several independent sources.
+
+    The magnitude check matters on its own, separately from the
+    width/height check: a single diverged point (e.g. one tracked marker
+    projected far from the scene) is a *zero-width* bbox -- (v, v, v, v) --
+    so a width/height-only check would never catch it before it's unioned
+    with another, normally-sized bbox and the combined extent blows up.
+    """
     if bbox is None:
         return None
     x0, y0, x1, y1 = bbox
     if not all(isfinite(v) for v in bbox):
+        return None
+    if any(abs(v) > _MAX_PLAUSIBLE_BBOX_DIM for v in bbox):
         return None
     if (x1 - x0) > _MAX_PLAUSIBLE_BBOX_DIM or (y1 - y0) > _MAX_PLAUSIBLE_BBOX_DIM:
         return None
@@ -1700,9 +1710,12 @@ def _composite_black_fill(
     black canvas exactly covering *target_rect*, in full-frame pixel
     coordinates.
 
-    Returns (canvas, new_x1, new_y1). Unlike a plain sub-crop, *target_rect*
-    is not required to fit inside what's actually decoded -- any part of it
-    outside the decoded pixels stays black, rather than shrinking the
+    Returns (canvas, new_x1, new_y1, black_filled) -- `black_filled` is True
+    iff some part of the canvas wasn't covered by decoded pixels (used only
+    for the debug label, see "Debug overlay" in the design doc). Unlike a
+    plain sub-crop, *target_rect* is not required to fit inside what's
+    actually decoded -- any part of it outside the decoded pixels stays
+    black, rather than shrinking the
     display down to whatever *is* available. See "Unified minimum-display
     bbox..." in the design doc.
     """
@@ -1731,6 +1744,7 @@ def _composite_black_fill(
     dec_y1 = y1 + crop_bgr.shape[0] / src_scale
     ox0, oy0 = max(tx0, x1), max(ty0, y1)
     ox1, oy1 = min(tx1, dec_x1), min(ty1, dec_y1)
+    black_filled = True  # any part of the canvas not proven covered below
     if ox1 > ox0 and oy1 > oy0:
         sx0 = int(round((ox0 - x1) * src_scale))
         sy0 = int(round((oy0 - y1) * src_scale))
@@ -1746,7 +1760,8 @@ def _composite_black_fill(
         ph = min(crop_bgr.shape[0] - sy0, canvas_h - dy0)
         if pw > 0 and ph > 0:
             canvas[dy0:dy0 + ph, dx0:dx0 + pw] = crop_bgr[sy0:sy0 + ph, sx0:sx0 + pw]
-    return canvas, tx0, ty0
+            black_filled = not (dx0 == 0 and dy0 == 0 and pw == canvas_w and ph == canvas_h)
+    return canvas, tx0, ty0, black_filled
 
 
 def _build_cam_trail(
@@ -1838,6 +1853,11 @@ class _ImageCanvas(QWidget):
         # left-click places it (see placement_clicked / mousePressEvent)
         # instead of the normal select/drag/rubber-band flow.
         self._placement_active: bool = False
+        # Diagnostic label naming which crop-source layer produced the
+        # currently-shown image (and whether black-fill was applied) --
+        # see "Debug overlay" in the design doc. None = hidden (checkbox off
+        # or nothing to report yet).
+        self._debug_label: str | None = None
 
     def set_placement_active(self, active: bool) -> None:
         self._placement_active = active
@@ -1850,6 +1870,7 @@ class _ImageCanvas(QWidget):
         self._outlier_kp_mask = None
         self._joint_xy = None
         self._marker_xy = None
+        self._debug_label = None
         self.update()
 
     def show_loading(self) -> None:
@@ -1860,6 +1881,7 @@ class _ImageCanvas(QWidget):
         self._outlier_kp_mask = None
         self._joint_xy = None
         self._marker_xy = None
+        self._debug_label = None
         self.update()
 
     def show_image(self, pixmap: QPixmap, x1: float, y1: float, src_scale: float) -> None:
@@ -1888,6 +1910,11 @@ class _ImageCanvas(QWidget):
         self._show_tracked = show_tracked
         self._outlier_kp_mask = outlier_mask
         self.update()
+
+    def set_debug_label(self, text: "str | None") -> None:
+        if text != self._debug_label:
+            self._debug_label = text
+            self.update()
 
     def set_edit_mode(self, enabled: bool) -> None:
         self._edit_mode = enabled
@@ -2193,10 +2220,26 @@ class _ImageCanvas(QWidget):
         cw, ch = self.width(), self.height()
         painter.fillRect(0, 0, cw, ch, QColor("#222"))
 
+        def _draw_debug_label() -> None:
+            # Diagnostic only -- names which crop-source layer produced the
+            # currently-shown image, and whether black-fill was applied.
+            # See "Debug overlay" in the design doc.
+            if not self._debug_label:
+                return
+            fm = painter.fontMetrics()
+            pad = 3
+            tw = fm.horizontalAdvance(self._debug_label)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 160))
+            painter.drawRect(QRectF(pad, pad, tw + 2 * pad, fm.height() + 2 * pad))
+            painter.setPen(QColor(255, 220, 0))
+            painter.drawText(QPointF(2 * pad, pad + fm.ascent() + pad), self._debug_label)
+
         if self._pixmap is None:
             painter.setPen(QColor("#666"))
             label = "generating…" if self._loading else "—"
             painter.drawText(QRectF(0, 0, cw, ch), Qt.AlignmentFlag.AlignCenter, label)
+            _draw_debug_label()
             painter.end()
             return
 
@@ -2380,6 +2423,7 @@ class _ImageCanvas(QWidget):
                 min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0)
             ))
 
+        _draw_debug_label()
         painter.end()
 
 
@@ -2467,6 +2511,9 @@ class _CropCell(QWidget):
 
     def set_hidden(self, hidden: frozenset[int]) -> None:
         self._canvas.set_hidden(hidden)
+
+    def set_debug_label(self, text: "str | None") -> None:
+        self._canvas.set_debug_label(text)
 
     def set_selected_kp(
         self, idx: int | None, show_ring: bool = True, name: str | None = None
@@ -2843,6 +2890,7 @@ class PersonCropGridWidget(QWidget):
         self._show_detected: QCheckBox | None = None   # green pose-detection keypoints
         self._show_tracked: QCheckBox | None = None    # FK skeleton lines + predicted dots
         self._show_seg: QCheckBox | None = None         # segmentation mask overlay
+        self._show_debug: QCheckBox | None = None       # per-cell crop-source-layer label
         self._edit_btn: QPushButton | None = None       # edit mode toggle
         # Edit mode state
         self._edit_mode: bool = False
@@ -3107,6 +3155,13 @@ class PersonCropGridWidget(QWidget):
         self._show_seg.setChecked(has_seg)
         self._show_seg.setEnabled(has_seg)
         self._show_seg.stateChanged.connect(lambda _: self._load_frame(self._current_t))
+        self._show_debug = QCheckBox("Debug")
+        self._show_debug.setChecked(False)
+        self._show_debug.setToolTip(
+            "Show which crop-source layer produced each cell's image, and "
+            "whether black-fill was applied. Diagnostic only."
+        )
+        self._show_debug.stateChanged.connect(lambda _: self._load_frame(self._current_t))
 
         self._edit_btn = QPushButton("Edit keypoints")
         self._edit_btn.setCheckable(True)
@@ -3119,6 +3174,7 @@ class PersonCropGridWidget(QWidget):
         overlay_row.addWidget(self._show_detected)
         overlay_row.addWidget(self._show_tracked)
         overlay_row.addWidget(self._show_seg)
+        overlay_row.addWidget(self._show_debug)
         overlay_row.addStretch()
         overlay_row.addWidget(self._time_label)
         overlay_row.addWidget(self._edit_btn)
@@ -3216,6 +3272,13 @@ class PersonCropGridWidget(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
         layout.addWidget(self._main_splitter, stretch=1)
+
+        # Low-res backfill runs regardless of edit mode -- a view-mode cache
+        # miss should also eventually resolve instead of leaving a permanent
+        # placeholder. See "View-mode parity" in the design doc. The heavier
+        # wide-crop cluster cache stays edit-mode-only (started/released in
+        # _set_edit_mode), per its own cost/scope rationale.
+        self._start_backfill()
 
         self._current_t = self._t_start
         self._load_frame(self._t_start)
@@ -3319,15 +3382,18 @@ class PersonCropGridWidget(QWidget):
             self._range_start_v = None
             self._range_end_v = None
             self._cancel_placement()
-            if self._backfill is not None:
-                self._backfill.stop()
-                self._backfill = None
+            # Low-res backfill (self._backfill) is *not* stopped here -- it
+            # now runs regardless of edit mode (started once in _build), so
+            # view mode keeps benefiting from it after editing ends. Only
+            # the heavier, edit-mode-only wide-crop cluster cache is torn
+            # down.
             if self._wide_crop_mgr is not None:
                 self._wide_crop_mgr.frame_ready.disconnect(self._on_crop_ready)
                 self._wide_crop_mgr.release()
                 self._wide_crop_mgr = None
         else:
-            self._start_backfill()
+            if self._backfill is None:
+                self._start_backfill()
             self._start_wide_crop_cache()
         for cell in self._cells:
             cell.set_edit_mode(enabled)
@@ -4281,61 +4347,24 @@ class PersonCropGridWidget(QWidget):
         has fully exited — isRunning() is False by this point."""
         self._loader = None
 
-    def _display_crop_result(
+    def _apply_overlay(
         self,
         cell,
         cam_id: str,
         svid: str,
         frame_idx: int,
-        tracking_step: int | None,
+        tracking_step: "int | None",
         show_detected: bool,
         show_tracked: bool,
-        result: tuple,
-        target_rect: "tuple[float, float, float, float] | None" = None,
     ) -> None:
-        """Decode a (jpeg, wpx, hpx, src_x, src_y, src_w, src_h) crop and render
-        it into *cell*, including keypoint/tracking overlays and (in edit mode)
-        the trail/selection/range-highlight overlays.
+        """Set cell's keypoint/tracked-skeleton overlay (and, in edit mode,
+        the trail/selection/range-highlight overlays) for one camera/frame.
 
-        Shared by the wide-crop cluster cache (see "Background wide-crop frame
-        cache" in the design doc) and the Phase 6 in-memory synthetic-crop
-        path, since both produce results in this same shape.
-
-        *target_rect*, if given, is the desired display window (full-frame
-        pixel coordinates) -- used by the wide-crop cluster cache to sub-crop
-        a possibly multi-person cluster image down to just the person being
-        edited, widened to cover whatever keypoints/tracked-skeleton overlay
-        is actually about to be drawn (see *_windowed_kp_bbox* /
-        `_tracked_overlay_bbox`). Unlike a plain sub-crop, *target_rect* is
-        not required to fit inside what's actually been decoded: any part of
-        it outside the decoded pixels is filled black rather than shrinking
-        the display down to whatever *is* available (see "Unified
-        minimum-display bbox..." in the design doc) -- this keeps the
-        overlay's coordinate mapping (and the requested framing) correct even
-        when the cache hasn't caught up with a large edit or a fast-moving
-        tracked skeleton yet.
+        Independent of whether an image was actually found for this frame --
+        an edited keypoint or a tracked skeleton stays visible (drawn over a
+        black background) even on a frame with no raw detection at all, in
+        both view and edit mode. See "View-mode parity" in the design doc.
         """
-        import cv2
-        import numpy as np
-
-        jpeg, wpx, hpx, src_x, src_y, src_w, src_h = result
-        buf = np.frombuffer(jpeg, dtype=np.uint8)
-        crop_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-        if crop_bgr is None:
-            cell.show_empty()
-            return
-        x1 = float(src_x)
-        y1 = float(src_y)
-        jpeg_h = float(hpx or crop_bgr.shape[0])
-        src_scale = jpeg_h / float(src_h) if src_h > 0 else 1.0
-
-        if target_rect is not None:
-            crop_bgr, x1, y1 = _composite_black_fill(crop_bgr, x1, y1, src_scale, target_rect)
-
-        crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-        h_img, w_img = crop_rgb.shape[:2]
-        qimg = QImage(crop_rgb.data, w_img, h_img, 3 * w_img, QImage.Format.Format_RGB888)
-        cell.show_image(QPixmap.fromImage(qimg), x1, y1, src_scale)
         obs_kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
         joint_xy = (
             self._joint_proj.get(cam_id, {}).get(tracking_step)
@@ -4376,6 +4405,135 @@ class PersonCropGridWidget(QWidget):
                 self._compute_range_highlights(cam_id, svid)
             )
 
+    def _display_crop_result(
+        self,
+        cell,
+        cam_id: str,
+        svid: str,
+        frame_idx: int,
+        tracking_step: int | None,
+        show_detected: bool,
+        show_tracked: bool,
+        result: tuple,
+        target_rect: "tuple[float, float, float, float] | None" = None,
+        layer_label: str = "",
+        show_debug: bool = False,
+    ) -> None:
+        """Decode a (jpeg, wpx, hpx, src_x, src_y, src_w, src_h) crop and render
+        it into *cell*, including keypoint/tracking overlays and (in edit mode)
+        the trail/selection/range-highlight overlays.
+
+        Shared by the wide-crop cluster cache (see "Background wide-crop frame
+        cache" in the design doc) and the Phase 6 in-memory synthetic-crop
+        path, since both produce results in this same shape.
+
+        *target_rect*, if given, is the desired display window (full-frame
+        pixel coordinates) -- used by the wide-crop cluster cache to sub-crop
+        a possibly multi-person cluster image down to just the person being
+        edited, widened to cover whatever keypoints/tracked-skeleton overlay
+        is actually about to be drawn (see *_windowed_kp_bbox* /
+        `_tracked_overlay_bbox`). Unlike a plain sub-crop, *target_rect* is
+        not required to fit inside what's actually been decoded: any part of
+        it outside the decoded pixels is filled black rather than shrinking
+        the display down to whatever *is* available (see "Unified
+        minimum-display bbox..." in the design doc) -- this keeps the
+        overlay's coordinate mapping (and the requested framing) correct even
+        when the cache hasn't caught up with a large edit or a fast-moving
+        tracked skeleton yet.
+
+        *layer_label*/*show_debug* feed the "Debug overlay" corner label --
+        see the design doc.
+        """
+        import cv2
+        import numpy as np
+
+        jpeg, wpx, hpx, src_x, src_y, src_w, src_h = result
+        buf = np.frombuffer(jpeg, dtype=np.uint8)
+        crop_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if crop_bgr is None:
+            cell.show_empty()
+            self._apply_overlay(
+                cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
+            )
+            return
+        x1 = float(src_x)
+        y1 = float(src_y)
+        jpeg_h = float(hpx or crop_bgr.shape[0])
+        src_scale = jpeg_h / float(src_h) if src_h > 0 else 1.0
+
+        black_filled = False
+        if target_rect is not None:
+            crop_bgr, x1, y1, black_filled = _composite_black_fill(
+                crop_bgr, x1, y1, src_scale, target_rect,
+            )
+
+        crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+        h_img, w_img = crop_rgb.shape[:2]
+        qimg = QImage(crop_rgb.data, w_img, h_img, 3 * w_img, QImage.Format.Format_RGB888)
+        cell.show_image(QPixmap.fromImage(qimg), x1, y1, src_scale)
+        cell.set_debug_label(
+            (layer_label + (" +black-fill" if black_filled else "")) if show_debug else None
+        )
+        self._apply_overlay(
+            cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
+        )
+
+    def _compute_target_rect(
+        self,
+        cell,
+        cam_id: str,
+        svid: str,
+        frame_idx: int,
+        tracking_step: "int | None",
+        own_rect: "tuple[float, float, float, float]",
+    ) -> "tuple[float, float, float, float]":
+        """Minimum display bbox for one camera/frame: *own_rect* (whichever
+        crop-source layer's own decoded extent) unioned with the windowed
+        keypoint bbox and the tracked-skeleton bbox, padded by a margin, and
+        grown to the cell's own aspect ratio.
+
+        Shared by every crop-source layer (wide-crop cluster cache, low-res
+        per-track cache, in-memory backfill) so they all frame the same way
+        regardless of which layer actually served the image -- see "Unified
+        minimum-display bbox..." in the design doc.
+        """
+        kp_bbox = _sane_bbox(_windowed_kp_bbox(
+            self._obs_kp.get(cam_id, {}),
+            frame_idx,
+            frozenset(self._hidden_kp_indices),
+        ))
+        tracked_bbox = _sane_bbox(_tracked_overlay_bbox(
+            self._joint_proj.get(cam_id, {}).get(tracking_step)
+            if tracking_step is not None else None,
+            self._marker_proj.get(cam_id, {}).get(tracking_step)
+            if tracking_step is not None else None,
+            self._video_dims.get(svid),
+        ))
+        desired = own_rect
+        for bbox in (kp_bbox, tracked_bbox):
+            if bbox is not None:
+                # Widen to cover whatever's actually drawn -- an edit (or a
+                # tracking run's own projection) can place a point far from
+                # where the raw (possibly wrong) detection said the person was.
+                desired = (
+                    min(desired[0], bbox[0]), min(desired[1], bbox[1]),
+                    max(desired[2], bbox[2]), max(desired[3], bbox[3]),
+                )
+        # Margin around the minimum display bbox so overlay points never sit
+        # flush against the cell edge.
+        mx = (desired[2] - desired[0]) * _DISPLAY_MARGIN_FRAC
+        my = (desired[3] - desired[1]) * _DISPLAY_MARGIN_FRAC
+        desired = (desired[0] - mx, desired[1] - my, desired[2] + mx, desired[3] + my)
+        # Fill the cell instead of letterboxing: grow (never shrink) to the
+        # *canvas's* own aspect ratio. Uses cell._canvas's own dimensions,
+        # not the outer _CropCell's -- _CropCell stacks a title bar above
+        # the canvas, so its aspect ratio isn't the canvas's; using it here
+        # would under-correct.
+        canvas_w, canvas_h = cell._canvas.width(), cell._canvas.height()
+        if canvas_w > 0 and canvas_h > 0:
+            desired = _expand_rect_to_aspect(desired, canvas_w / canvas_h)
+        return desired
+
     def _load_frame(self, global_time: float) -> None:
         import cv2
         import numpy as np
@@ -4388,6 +4546,7 @@ class PersonCropGridWidget(QWidget):
         show_detected = self._show_detected is None or self._show_detected.isChecked()
         show_tracked = self._show_tracked is None or self._show_tracked.isChecked()
         show_seg = self._show_seg is not None and self._show_seg.isChecked()
+        show_debug = self._show_debug is not None and self._show_debug.isChecked()
 
         tracking_step: int | None = None
         if self._tracking_timestamps:
@@ -4427,69 +4586,22 @@ class PersonCropGridWidget(QWidget):
                         # whole (possibly multi-person) cluster image -- a
                         # cluster spanning several spread-out people would
                         # otherwise show most of the room for someone editing
-                        # just one of them.
-                        kp_bbox = _sane_bbox(_windowed_kp_bbox(
-                            self._obs_kp.get(cam_id, {}),
-                            frame_idx,
-                            frozenset(self._hidden_kp_indices),
-                        ))
-                        # Also cover the tracked skeleton (cyan overlay), if a
-                        # tracking run is selected -- keypoints can in
-                        # principle be edited before a tracking run exists,
-                        # or a run can be selected whose own projected joints
-                        # drifted away from the raw detection the cache was
-                        # built from.
-                        tracked_bbox = _sane_bbox(_tracked_overlay_bbox(
-                            self._joint_proj.get(cam_id, {}).get(tracking_step)
-                            if tracking_step is not None else None,
-                            self._marker_proj.get(cam_id, {}).get(tracking_step)
-                            if tracking_step is not None else None,
-                            self._video_dims.get(svid),
-                        ))
-                        desired = own_rect
-                        for bbox in (kp_bbox, tracked_bbox):
-                            if bbox is not None:
-                                # Widen to cover whatever's actually drawn -- an
-                                # edit (or a tracking run's own projection) can
-                                # place a point far from where the raw
-                                # (possibly wrong) detection the cache was
-                                # built from said the person was.
-                                desired = (
-                                    min(desired[0], bbox[0]), min(desired[1], bbox[1]),
-                                    max(desired[2], bbox[2]), max(desired[3], bbox[3]),
-                                )
-                        # Fill the cell instead of letterboxing: grow (never
-                        # shrink) to the *canvas's* own aspect ratio before
-                        # clamping to available pixels. Must happen here, not
-                        # only in _ImageCanvas -- the cluster's extra margin
-                        # beyond `desired` is only available now; once
-                        # _display_crop_result crops the pixmap down to
-                        # whatever we hand it below, that margin is gone for
-                        # good, and _view_transform has nothing left to
-                        # expand into. Uses cell._canvas's own dimensions, not
-                        # the outer _CropCell's -- _CropCell stacks a title
-                        # bar above the canvas, so its aspect ratio isn't the
-                        # canvas's; using it here would under-correct.
-                        # Margin around the minimum display bbox so overlay
-                        # points never sit flush against the cell edge.
-                        mx = (desired[2] - desired[0]) * _DISPLAY_MARGIN_FRAC
-                        my = (desired[3] - desired[1]) * _DISPLAY_MARGIN_FRAC
-                        desired = (desired[0] - mx, desired[1] - my, desired[2] + mx, desired[3] + my)
-                        canvas_w, canvas_h = cell._canvas.width(), cell._canvas.height()
-                        if canvas_w > 0 and canvas_h > 0:
-                            desired = _expand_rect_to_aspect(desired, canvas_w / canvas_h)
-                        # No longer clamped to what this cluster image
-                        # actually has decoded: _display_crop_result now
-                        # black-fills any part of `desired` outside the
-                        # decoded pixels instead of the crop silently
-                        # shrinking (or being rejected outright) when an
-                        # edit or a tracked-skeleton projection reaches
-                        # beyond what's cached so far -- see "Unified
-                        # minimum-display bbox..." in the design doc.
+                        # just one of them. No longer clamped to what this
+                        # cluster image actually has decoded: _display_crop_result
+                        # now black-fills any part of `desired` outside the
+                        # decoded pixels instead of the crop silently shrinking
+                        # (or being rejected outright) when an edit or a
+                        # tracked-skeleton projection reaches beyond what's
+                        # cached so far -- see "Unified minimum-display
+                        # bbox..." in the design doc.
+                        desired = self._compute_target_rect(
+                            cell, cam_id, svid, frame_idx, tracking_step, own_rect,
+                        )
                         if desired[2] > desired[0] and desired[3] > desired[1]:
                             self._display_crop_result(
                                 cell, cam_id, svid, frame_idx, tracking_step,
                                 show_detected, show_tracked, wide, target_rect=desired,
+                                layer_label="wide-cache", show_debug=show_debug,
                             )
                             continue
                         # Else: degenerate window (shouldn't normally happen
@@ -4501,24 +4613,42 @@ class PersonCropGridWidget(QWidget):
             if self._backfill is not None:
                 mem = self._backfill.get_mem_result(svid, frame_idx)
                 if mem is not None:
+                    _, _, _, mem_x, mem_y, mem_w, mem_h = mem
+                    own_rect = (mem_x, mem_y, mem_x + mem_w, mem_y + mem_h)
+                    desired = self._compute_target_rect(
+                        cell, cam_id, svid, frame_idx, tracking_step, own_rect,
+                    )
                     self._display_crop_result(
                         cell, cam_id, svid, frame_idx, tracking_step,
-                        show_detected, show_tracked, mem,
+                        show_detected, show_tracked, mem, target_rect=desired,
+                        layer_label="backfill/ghost", show_debug=show_debug,
                     )
                     continue
 
-            # Find which track covers this frame for this camera.
+            # Find which track covers this frame for this camera. Runs in
+            # both modes -- the low-res backfill worker (self._backfill) is
+            # started once, unconditionally, when the sequence loads (see
+            # _build), not only in edit mode, so a view-mode miss also
+            # prioritises and eventually fills in instead of leaving a
+            # permanent placeholder. See "View-mode parity" in the design doc.
             track_id = self._track_id_at_frame(svid, frame_idx)
             if track_id is None:
                 _log.debug(
                     "_load_frame: no track  svid=%s  frame=%d  t=%.3f",
                     svid[-8:], frame_idx, global_time,
                 )
-                if self._edit_mode and self._backfill is not None:
+                if self._backfill is not None:
                     cell.show_loading()
                     self._backfill.prioritise(svid, frame_idx)
                 else:
                     cell.show_empty()
+                # An edited keypoint or an active tracking run can still be
+                # meaningful here even with zero raw detection for this
+                # frame -- keep it visible (drawn over black) rather than
+                # blanking it along with the missing image.
+                self._apply_overlay(
+                    cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
+                )
                 continue
 
             row = self._conn.execute(
@@ -4542,6 +4672,9 @@ class PersonCropGridWidget(QWidget):
                     self._backfill.prioritise(svid, frame_idx)
                 else:
                     cell.show_empty()
+                self._apply_overlay(
+                    cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
+                )
                 continue
 
             buf = np.frombuffer(bytes(row["image_data"]), dtype=np.uint8)
@@ -4549,6 +4682,9 @@ class PersonCropGridWidget(QWidget):
 
             if crop_bgr is None:
                 cell.show_empty()
+                self._apply_overlay(
+                    cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
+                )
                 continue
 
             # Compute crop-to-full-frame transform for overlay coordinate mapping.
@@ -4623,6 +4759,22 @@ class PersonCropGridWidget(QWidget):
                                         )
                                     crop_bgr = overlay.astype(np.uint8)
 
+            # Widen to the same minimum display bbox every other layer uses
+            # (own extent unioned with keypoint/tracked-skeleton overlays),
+            # black-filling whatever's outside this crop's own decoded
+            # extent -- see "Unified minimum-display bbox..." in the design
+            # doc. Must happen after the segmentation blend above, which
+            # operates on the crop in its original decoded extent/origin.
+            own_rect = (x1, y1, x1 + crop_bgr.shape[1] / src_scale, y1 + crop_bgr.shape[0] / src_scale)
+            desired = self._compute_target_rect(
+                cell, cam_id, svid, frame_idx, tracking_step, own_rect,
+            )
+            black_filled = False
+            if desired[2] > desired[0] and desired[3] > desired[1]:
+                crop_bgr, x1, y1, black_filled = _composite_black_fill(
+                    crop_bgr, x1, y1, src_scale, desired,
+                )
+
             # Convert image to QPixmap (no vector overlays drawn into the image)
             crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
             h_img, w_img = crop_rgb.shape[:2]
@@ -4630,48 +4782,12 @@ class PersonCropGridWidget(QWidget):
                 crop_rgb.data, w_img, h_img, 3 * w_img, QImage.Format.Format_RGB888
             )
             cell.show_image(QPixmap.fromImage(qimg), x1, y1, src_scale)
-
-            # Pass overlay data — canvas draws everything at display resolution
-            obs_kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
-            joint_xy = (
-                self._joint_proj.get(cam_id, {}).get(tracking_step)
-                if tracking_step is not None else None
+            cell.set_debug_label(
+                ("low-res" + (" +black-fill" if black_filled else "")) if show_debug else None
             )
-            marker_xy = (
-                self._marker_proj.get(cam_id, {}).get(tracking_step)
-                if tracking_step is not None else None
+            self._apply_overlay(
+                cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
             )
-            outlier_mask = (
-                self._outlier_masks.get(cam_id, {}).get(tracking_step)
-                if tracking_step is not None else None
-            )
-            cell.set_overlay(
-                obs_kp=obs_kp,
-                joint_xy=joint_xy,
-                bone_pairs=self._bone_pairs,
-                marker_xy=marker_xy,
-                outlier_mask=outlier_mask,
-                show_detected=show_detected,
-                show_tracked=show_tracked,
-            )
-            cell.set_hidden(frozenset(self._hidden_kp_indices))
-
-            if self._edit_mode:
-                trail = None
-                kp_name = None
-                if self._primary_kp_idx is not None:
-                    kp_by_frame = self._obs_kp.get(cam_id, {})
-                    trail = _build_cam_trail(kp_by_frame, cam_id, frame_idx, self._primary_kp_idx)
-                    kp_name = self._pose_model.name_of(self._primary_kp_idx)
-                cell.set_trail(trail)
-                cell.set_selection(
-                    self._primary_kp_idx,
-                    frozenset(self._sel_kp_indices),
-                    name=kp_name,
-                )
-                cell.set_range_highlights(
-                    self._compute_range_highlights(cam_id, svid)
-                )
 
         self._sync_timeline(global_time)
 

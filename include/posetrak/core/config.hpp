@@ -87,6 +87,14 @@ struct TrackerConfig {
     double calib_noise_std = 5.0;      ///< Calibration error (pixels in original video)
     double outlier_threshold = 5.991;  ///< Chi-squared threshold (95% for 2-DOF)
 
+    // === Adaptive process noise (Phase 1 — velocity-driven per-DOF scaling) ===
+    // See docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
+    // 0.0 gain = disabled (exact pre-Phase-1 static process noise).
+    double process_noise_vel_gain_joint = 0.0;  ///< Velocity gain for joint DOFs
+    double process_noise_vel_ref_joint = 1.0;   ///< Reference velocity for joint DOFs (rad/s)
+    double process_noise_vel_gain_root = 0.0;   ///< Velocity gain for root DOFs
+    double process_noise_vel_ref_root = 1.0;    ///< Reference velocity for root DOFs (m/s, rad/s)
+
     // UKF sigma point parameters
     double ukf_alpha = 0.5;  ///< Sigma point spread (0.001 for Python compatibility)
     double ukf_beta = 2.0;   ///< Gaussian distribution parameter
@@ -170,6 +178,13 @@ struct TrackerAppConfig {
     double pose_noise_std = 0.0;   ///< Pose estimation error (pixels in model input image)
     double calib_noise_std = 2.0;  ///< Calibration error (pixels in original video)
     double outlier_threshold = 4.0;
+
+    // === Adaptive process noise (Phase 1 — velocity-driven per-DOF scaling) ===
+    // 0.0 gain = disabled (exact pre-Phase-1 static process noise).
+    double process_noise_vel_gain_joint = 0.0;
+    double process_noise_vel_ref_joint = 1.0;
+    double process_noise_vel_gain_root = 0.0;
+    double process_noise_vel_ref_root = 1.0;
 
     // === Initialization ===
     std::optional<std::filesystem::path> python_state_path;  // Optional: use Python state for init
@@ -258,6 +273,10 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.pose_noise_std = pose_noise_std;
     tc.calib_noise_std = calib_noise_std;
     tc.outlier_threshold = outlier_threshold;
+    tc.process_noise_vel_gain_joint = process_noise_vel_gain_joint;
+    tc.process_noise_vel_ref_joint = process_noise_vel_ref_joint;
+    tc.process_noise_vel_gain_root = process_noise_vel_gain_root;
+    tc.process_noise_vel_ref_root = process_noise_vel_ref_root;
     tc.ukf_alpha = ukf_alpha;
     tc.ukf_beta = ukf_beta;
     tc.ukf_kappa = ukf_kappa;

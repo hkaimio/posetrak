@@ -81,6 +81,11 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
         result.relative_min_confidence = tracking["relative_min_confidence"].value_or(0.5);
         result.cross_pair_max_px = tracking["cross_pair_max_px"].value_or(0.0);
         result.cross_pair_max_n = tracking["cross_pair_max_n"].value_or(10);
+        result.process_noise_vel_gain_joint =
+            tracking["process_noise_vel_gain_joint"].value_or(0.0);
+        result.process_noise_vel_ref_joint = tracking["process_noise_vel_ref_joint"].value_or(1.0);
+        result.process_noise_vel_gain_root = tracking["process_noise_vel_gain_root"].value_or(0.0);
+        result.process_noise_vel_ref_root = tracking["process_noise_vel_ref_root"].value_or(1.0);
 
         // Initialization sub-section
         if (auto init = tracking["initialization"]) {
@@ -231,6 +236,13 @@ void TrackerAppConfig::validate() const {
             fmt::format("Invalid noise parameters: pose_noise_std={}, calib_noise_std={} "
                         "(both must be >= 0, at least one > 0)",
                         pose_noise_std, calib_noise_std));
+    }
+
+    if ((process_noise_vel_gain_joint > 0.0 && process_noise_vel_ref_joint <= 0.0) ||
+        (process_noise_vel_gain_root > 0.0 && process_noise_vel_ref_root <= 0.0)) {
+        throw std::runtime_error(
+            "process_noise_vel_ref_joint/root must be > 0 when the corresponding "
+            "process_noise_vel_gain_joint/root is > 0 (used as a divisor)");
     }
 
     if (outlier_threshold <= 0.0) {

@@ -9,14 +9,21 @@
     - Creates (if missing) a dedicated conda environment holding Pinocchio
       3.9.0 headers + a compiled Boost Serialization -- this project never
       imports the Python package, only the C++ headers/libs it ships.
-    - Configures builddir/ (debug -- day-to-day unit testing/debugging) and
-      optbuild/ (release -- for actual tracking runs) with the options
-      native Windows needs that Linux/WSL gets for free.
-    - Prints the PATH addition needed before running any built .exe.
+    - Configures AND builds builddir/ (debug -- day-to-day unit testing/
+      debugging) and optbuild/ (release -- for actual tracking runs) with
+      the options native Windows needs that Linux/WSL gets for free.
+    - Copies the two runtime DLLs (boost_serialization.dll, yaml-cpp.dll)
+      next to each built posetrak-tracker.exe / test_posetrak.exe.
+      Windows always searches an executable's own directory for its DLL
+      dependencies first, so this makes the binaries runnable as-is --
+      including when launched as a subprocess from the Python UI, which
+      does not (and should not have to) know about this conda environment
+      or modify its own PATH to find them.
 
     Safe to re-run after a meson.build/meson_options.txt change: existing
-    build directories are reconfigured in place rather than recreated, and
-    an existing conda environment is left alone.
+    build directories are reconfigured (not recreated) in place, an
+    existing conda environment is left alone, and the DLL copy is a
+    harmless overwrite if already done.
 
 .PARAMETER PinocchioVersion
     Pinocchio version to install. Must match whatever the project's
@@ -103,6 +110,25 @@ $commonArgs = @(
     "-Ddefault_library=static"
 )
 
+$runtimeDlls = @(
+    (Join-Path $pinocchioEnv "bin\boost_serialization.dll"),
+    (Join-Path $condaBase "Library\bin\yaml-cpp.dll")
+)
+foreach ($dll in $runtimeDlls) {
+    if (-not (Test-Path $dll)) {
+        throw "Expected runtime DLL not found: $dll -- conda environment may be incomplete."
+    }
+}
+
+function Copy-RuntimeDlls($Dir) {
+    foreach ($subdir in @("cli", "tests")) {
+        $target = Join-Path $RepoRoot "$Dir\$subdir"
+        if (Test-Path $target) {
+            Copy-Item -Force $runtimeDlls -Destination $target
+        }
+    }
+}
+
 function Set-MesonBuild($Dir, $Buildtype) {
     $buildFile = Join-Path $RepoRoot "$Dir\build.ninja"
     Push-Location $RepoRoot
@@ -117,18 +143,26 @@ function Set-MesonBuild($Dir, $Buildtype) {
         if ($LASTEXITCODE -ne 0) {
             throw "meson setup failed for $Dir -- see output above."
         }
+        Write-Host "  Building $Dir (this takes a while the first time)..."
+        & meson compile -C $Dir
+        if ($LASTEXITCODE -ne 0) {
+            throw "meson compile failed for $Dir -- see output above."
+        }
     } finally {
         Pop-Location
     }
+    Copy-RuntimeDlls $Dir
 }
 
 Set-MesonBuild "builddir" "debug"
 Set-MesonBuild "optbuild" "release"
 
 Write-Host "`n== Done ==" -ForegroundColor Green
-Write-Host "Build:  meson compile -C builddir     (debug, day-to-day unit testing/debugging)"
-Write-Host "        meson compile -C optbuild     (release, for actual tracking runs)"
-Write-Host "Test:   meson test -C builddir"
+Write-Host "Both builddir/ (debug) and optbuild/ (release) are built, and the two runtime"
+Write-Host "DLLs are copied next to each posetrak-tracker.exe / test_posetrak.exe -- no PATH"
+Write-Host "changes needed to run them directly, including from the Python UI."
 Write-Host ""
-Write-Host "Before running a built .exe directly, add the runtime DLL directories to PATH:"
-Write-Host "  `$env:PATH = `"$pinocchioEnv\bin;$condaBase\Library\bin;`$env:PATH`""
+Write-Host "Rebuild:  meson compile -C builddir   /   meson compile -C optbuild"
+Write-Host "Test:     meson test -C builddir"
+Write-Host "(Re-run this script -- or just re-copy the two DLLs above into cli/ and tests/ --"
+Write-Host " if you ever delete and recreate either build directory.)"

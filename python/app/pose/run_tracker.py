@@ -47,7 +47,12 @@ class _TrackerThread(QThread):
     """Runs run_tracker() in a background thread and emits Qt signals."""
 
     line_output = Signal(str)
-    tracking_finished = Signal(int, str)  # exit_code, run_id (empty str if None)
+    # exit_code as `object`, not `int`: on Windows, a process killed before
+    # main() runs (e.g. a missing DLL dependency) reports its NTSTATUS code
+    # as the return code, which is always > INT32_MAX -- marshalling that
+    # into a C++ `int` signal argument overflows (a real crash reported as
+    # "libshiboken: Overflow" once, traced to exactly this).
+    tracking_finished = Signal(object, str)  # exit_code, run_id (empty str if None)
 
     def __init__(
         self,
@@ -584,6 +589,9 @@ class RunTrackerWidget(QWidget):
         if exit_code != 0:
             self._progress_bar.setValue(0)
             self._status_label.setText(f"Tracker exited with code {exit_code}.")
+            detail = _describe_windows_exit_code(exit_code)
+            if detail:
+                QMessageBox.critical(self, "Tracker failed to start", detail)
             return
 
         self._progress_bar.setValue(100)
@@ -715,3 +723,34 @@ def _float_spin(default: float, mn: float, mx: float, decimals: int) -> QDoubleS
     spin.setDecimals(decimals)
     spin.setValue(default)
     return spin
+
+
+# Windows NTSTATUS codes with the Error severity bits set (top two bits) are
+# always > 2**31 -- a normal program's own exit code never reaches that range,
+# so seeing one here means Windows killed the process before main() ran
+# (missing DLL, bad image, etc.), not that the tracker itself failed.
+_STATUS_DLL_NOT_FOUND = 0xC0000135
+
+
+def _describe_windows_exit_code(exit_code: int) -> str | None:
+    """Return a human-readable explanation for a Windows process-launch
+    failure exit code, or None if *exit_code* looks like an ordinary exit
+    code the tracker itself returned (nothing further to explain here).
+    """
+    if exit_code < 0x8000_0000:
+        return None
+    if exit_code == _STATUS_DLL_NOT_FOUND:
+        return (
+            "The tracker binary could not load a required DLL "
+            "(boost_serialization.dll and/or yaml-cpp.dll).\n\n"
+            "See CONTRIBUTING.md's \"Windows (native, MSVC)\" section — "
+            "these need to be copied next to posetrak-tracker.exe, not just "
+            "added to PATH (re-running setup-windows.ps1 does this)."
+        )
+    return (
+        f"Windows terminated the tracker process before it could run "
+        f"(NTSTATUS 0x{exit_code:08X}), rather than the tracker exiting "
+        f"with an error of its own. This usually means a missing or "
+        f"mismatched runtime dependency -- see CONTRIBUTING.md's "
+        f"\"Windows (native, MSVC)\" section."
+    )

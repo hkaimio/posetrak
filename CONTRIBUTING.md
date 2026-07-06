@@ -33,12 +33,13 @@ supplied Pinocchio/Boost headers.
    mismatch shows up as real compile errors (e.g. `Frame::parentJoint` not
    existing — that field was `Frame::parent` before Pinocchio 3.0), not
    something that just happens to link with slightly wrong behaviour.
-4. Run `setup-windows.ps1` (repo root) to create two build directories —
-   `builddir/` (debug, for day-to-day unit testing/debugging) and
-   `optbuild/` (release, for actual tracking runs — see the performance note
-   in the main `CLAUDE.md`/project instructions). The script is idempotent;
-   re-run it after a `meson.build`/`meson_options.txt` change instead of
-   hand-reconstructing the `-D...` flags below.
+4. Run `setup-windows.ps1` (repo root). It configures and builds two build
+   directories — `builddir/` (debug, for day-to-day unit testing/debugging)
+   and `optbuild/` (release, for actual tracking runs — see the performance
+   note in the main `CLAUDE.md`/project instructions) — and copies the two
+   runtime DLLs described below next to each built `.exe`. The script is
+   idempotent; re-run it after a `meson.build`/`meson_options.txt` change
+   instead of hand-reconstructing the `-D...` flags below.
 
 **Manually, if you'd rather not use the script** (or need to see exactly
 what it does):
@@ -52,12 +53,24 @@ meson compile -C builddir
 meson test    -C builddir
 ```
 
-**Before running any built `.exe`**, put both DLL directories on `PATH` (the
-runtime needs `boost_serialization.dll` and `yaml-cpp.dll`, and this project
-links everything else statically so nothing further is needed):
+**Before running any built `.exe`**, copy the two runtime DLLs
+(`boost_serialization.dll`, `yaml-cpp.dll` — everything else links
+statically) into the same directory as the `.exe`:
 ```powershell
-$env:PATH = "$env:USERPROFILE\miniconda3\envs\posetrak-pinocchio\Library\bin;$env:USERPROFILE\miniconda3\Library\bin;$env:PATH"
+Copy-Item "$pinocchioEnv\bin\boost_serialization.dll", "$env:USERPROFILE\miniconda3\Library\bin\yaml-cpp.dll" -Destination builddir\cli
+Copy-Item "$pinocchioEnv\bin\boost_serialization.dll", "$env:USERPROFILE\miniconda3\Library\bin\yaml-cpp.dll" -Destination builddir\tests
 ```
+(and the same into `optbuild\cli` / `optbuild\tests`). **Colocate, don't put
+on `PATH`**: Windows always searches an executable's own directory for its
+DLL dependencies first, so this is what makes the binary runnable
+standalone — including when the Python UI (`python/posetrak/tracker/runner.py`)
+launches `posetrak-tracker.exe` as a subprocess, which inherits whatever
+environment the UI happens to be running in and has no reason to know
+about this conda environment. Forgetting this step doesn't fail loudly:
+Windows kills the process at load time with `STATUS_DLL_NOT_FOUND`
+(`0xC0000135` / `3221225781`), which turns up as a `libshiboken: Overflow`
+warning when the huge exit code is marshalled back into a Qt `int` signal —
+if you see that, this is almost always why.
 
 **Why the extra options, if you're wondering what's Windows-specific and
 why** (all gated behind `cpp.get_id() == 'msvc'` / a native, non-cross build

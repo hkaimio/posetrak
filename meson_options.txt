@@ -6,3 +6,9 @@ option('test_framework', type: 'combo', choices: ['catch2', 'gtest'], value: 'ca
 
 option('enable_python', type: 'boolean', value: false,
        description: 'Build Python bindings (future)')
+
+option('pinocchio_includedir', type: 'string', value: '',
+       description: 'Override path to Pinocchio headers, default is /opt/openrobots/include. Needed for native Windows builds.')
+
+option('boost_includedir', type: 'string', value: '',
+       description: 'Extra include dir for Pinocchio Boost header dependencies (math, type_traits). Needed for native Windows builds.')

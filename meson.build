@@ -22,6 +22,14 @@ add_project_arguments(
   language: 'cpp'
 )
 
+if cpp.get_id() == 'msvc'
+  # M_PI and friends are not defined by <cmath> on MSVC unless this is set
+  # before the first include -- the MinGW cross build needs the equivalent
+  # define too (cross/mingw-w64-x86_64.ini), but that file only applies when
+  # actually cross-compiling.
+  add_project_arguments('-D_USE_MATH_DEFINES', language: 'cpp')
+endif
+
 # Dependencies
 # Strategy: Use meson wraps (wrapdb) when possible, system packages only when necessary
 message('Finding dependencies...')
@@ -104,11 +112,23 @@ endif
 # boost/type_traits) are themselves header-only and present at the system include path.
 # See docs/pinocchio-header-only-analysis.md for the full rationale.
 #
-# When cross-compiling for Windows the MinGW toolchain does not search the Linux
-# host's /usr/include, but Pinocchio's Boost dependencies live there.  They are
-# pure C++ templates with no OS-specific API calls, so including them from the
-# host is safe and correct for the Windows target.
-pinocchio_inc = include_directories('/opt/openrobots/include', is_system: true)
+# Default assumes a robotpkg install at /opt/openrobots (the Linux/WSL dev
+# environment), where Boost is also on the compiler's default system include
+# path. Native Windows has neither: pinocchio_includedir/boost_includedir let
+# a native Windows build point at manually-placed header copies instead.
+pinocchio_includedir_opt = get_option('pinocchio_includedir')
+if pinocchio_includedir_opt != ''
+  pinocchio_inc = include_directories(pinocchio_includedir_opt, is_system: true)
+else
+  pinocchio_inc = include_directories('/opt/openrobots/include', is_system: true)
+endif
+
+pinocchio_extra_incs = []
+boost_includedir_opt = get_option('boost_includedir')
+if boost_includedir_opt != ''
+  pinocchio_extra_incs += include_directories(boost_includedir_opt, is_system: true)
+endif
+
 if meson.is_cross_build()
   # Pinocchio's templates pull in Boost (math, type_traits).  The cross-compiler
   # does not search the Linux host's /usr/include, but adding it wholesale would
@@ -116,17 +136,12 @@ if meson.is_cross_build()
   # cross/include/ contains only a symlink to /usr/include/boost — the pure-C++
   # Boost headers — so only those are exposed to the MinGW compiler.
   # Requires: apt install libboost-dev  (symlink: cross/include/boost -> /usr/include/boost)
-  pinocchio_dep = declare_dependency(
-    include_directories: [
-      pinocchio_inc,
-      include_directories('cross/include', is_system: true),
-    ],
-  )
-else
-  pinocchio_dep = declare_dependency(
-    include_directories: pinocchio_inc,
-  )
+  pinocchio_extra_incs += include_directories('cross/include', is_system: true)
 endif
+
+pinocchio_dep = declare_dependency(
+  include_directories: [pinocchio_inc] + pinocchio_extra_incs,
+)
 
 # Will add these as we progress:
 # opencv_dep = dependency('opencv4', version: '>=4.5',

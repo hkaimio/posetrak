@@ -7,6 +7,82 @@
 3. Build: `meson compile -C builddir`
 4. Run tests: `meson test -C builddir`
 
+The above is the Linux/WSL path, where Pinocchio is installed system-wide via
+robotpkg at `/opt/openrobots` (see `docs/pinocchio-header-only-analysis.md`).
+For native Windows, see the next section — the same `meson setup`/`compile`/
+`test` commands apply, just with a few extra options pointing at manually
+supplied Pinocchio/Boost headers.
+
+### Windows (native, MSVC)
+
+**One-time setup:**
+
+1. Visual Studio 2022 (or later) with the "Desktop development with C++"
+   workload.
+2. [Meson](https://mesonbuild.com/) and Ninja (`pip install meson ninja`, or
+   the standalone Meson MSI installer).
+3. Pinocchio 3.9.0 headers + a compiled Boost Serialization — easiest via a
+   dedicated conda environment (this project only needs the headers/libs,
+   not a Python installation of Pinocchio itself):
+   ```powershell
+   conda create -y -n posetrak-pinocchio -c conda-forge pinocchio=3.9.0
+   ```
+   **Match the version to whatever `/opt/openrobots` actually has** — check
+   the [openrobots package list](https://robotpkg.openrobots.org/) or ask
+   whoever maintains the Linux/WSL dev environment. A header-version
+   mismatch shows up as real compile errors (e.g. `Frame::parentJoint` not
+   existing — that field was `Frame::parent` before Pinocchio 3.0), not
+   something that just happens to link with slightly wrong behaviour.
+4. Run `setup-windows.ps1` (repo root) to create two build directories —
+   `builddir/` (debug, for day-to-day unit testing/debugging) and
+   `optbuild/` (release, for actual tracking runs — see the performance note
+   in the main `CLAUDE.md`/project instructions). The script is idempotent;
+   re-run it after a `meson.build`/`meson_options.txt` change instead of
+   hand-reconstructing the `-D...` flags below.
+
+**Manually, if you'd rather not use the script** (or need to see exactly
+what it does):
+```powershell
+$pinocchioEnv = "$env:USERPROFILE\miniconda3\envs\posetrak-pinocchio\Library"
+meson setup builddir  -Dbuildtype=debug   -Ddefault_library=static `
+  -Dpinocchio_includedir=$pinocchioEnv/include -Dboost_includedir=$pinocchioEnv/include -Dboost_libdir=$pinocchioEnv/lib
+meson setup optbuild   -Dbuildtype=release -Ddefault_library=static `
+  -Dpinocchio_includedir=$pinocchioEnv/include -Dboost_includedir=$pinocchioEnv/include -Dboost_libdir=$pinocchioEnv/lib
+meson compile -C builddir
+meson test    -C builddir
+```
+
+**Before running any built `.exe`**, put both DLL directories on `PATH` (the
+runtime needs `boost_serialization.dll` and `yaml-cpp.dll`, and this project
+links everything else statically so nothing further is needed):
+```powershell
+$env:PATH = "$env:USERPROFILE\miniconda3\envs\posetrak-pinocchio\Library\bin;$env:USERPROFILE\miniconda3\Library\bin;$env:PATH"
+```
+
+**Why the extra options, if you're wondering what's Windows-specific and
+why** (all gated behind `cpp.get_id() == 'msvc'` / a native, non-cross build
+in `meson.build` — none of this affects the Linux/WSL or MinGW cross paths):
+- `pinocchio_includedir`/`boost_includedir`/`boost_libdir` — Linux/WSL finds
+  Pinocchio and Boost at fixed system paths (`/opt/openrobots`, the default
+  compiler include path); native Windows has neither, so these point at the
+  conda environment instead.
+- `default_library=static` — this codebase has no `dllexport`/`dllimport`
+  annotations, so as a shared library nothing would be exported and every
+  consumer (the CLI, the tests) fails to link. The existing MinGW cross
+  build (`cross/mingw-w64-x86_64.ini`) already works around this the same
+  way, for the same reason.
+- `NOMINMAX`, `WIN32=1`, `BOOST_ALL_NO_LIB`, `_USE_MATH_DEFINES`, `/bigobj`
+  (debug only) — Pinocchio/Eigen/MSVC preprocessor and object-format quirks;
+  see the comments beside each in `meson.build` for the specific error each
+  one fixes.
+
+**Alternative: MinGW cross-compile from WSL.** If you'd rather not maintain
+a native Windows toolchain at all, `cross/mingw-w64-x86_64.ini` cross-compiles
+a `posetrak-tracker.exe` from a Linux/WSL host (`apt install mingw-w64
+libboost-dev`, then `meson setup winbuild --cross-file
+cross/mingw-w64-x86_64.ini`) — see the comments at the top of that file for
+the exact steps and the four runtime DLLs it needs alongside the `.exe`.
+
 ## Coding Standards
 
 ### C++ Style

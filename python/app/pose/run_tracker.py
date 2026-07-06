@@ -121,6 +121,31 @@ class RunTrackerWidget(QWidget):
         self._proc_noise_std  = _float_spin(0.1,   0.0, 1000.0, 4)
         self._proc_vel_noise  = _float_spin(0.5,   0.0, 1000.0, 4)
         self._vel_half_life   = _float_spin(0.25,  0.0,   10.0, 4)
+
+        self._vel_noise_gain_joint = _float_spin(0.0, 0.0, 100.0, 3)
+        self._vel_noise_gain_joint.setToolTip(
+            "Adaptive process noise (Phase 1): scales each joint DOF's own process noise\n"
+            "by (1 + gain * |its velocity| / reference velocity). 0 = disabled (static noise,\n"
+            "matches pre-Phase-1 behaviour)."
+        )
+        self._vel_noise_ref_joint = _float_spin(1.0, 1.0e-3, 1000.0, 3)
+        self._vel_noise_ref_joint.setToolTip("Reference velocity for the joint gain above (rad/s).")
+        self._vel_noise_gain_root = _float_spin(0.0, 0.0, 100.0, 3)
+        self._vel_noise_gain_root.setToolTip(
+            "Same as the joint gain above, but for the root's position/orientation DOFs\n"
+            "(separate knob: root moves in metres/rad, joints in radians)."
+        )
+        self._vel_noise_ref_root = _float_spin(1.0, 1.0e-3, 1000.0, 3)
+        self._vel_noise_ref_root.setToolTip(
+            "Reference velocity for the root gain above (m/s for position, rad/s for orientation)."
+        )
+        for gain, ref in (
+            (self._vel_noise_gain_joint, self._vel_noise_ref_joint),
+            (self._vel_noise_gain_root, self._vel_noise_ref_root),
+        ):
+            ref.setEnabled(False)
+            gain.valueChanged.connect(lambda v, r=ref: r.setEnabled(v > 0.0))
+
         self._pose_noise      = _float_spin(0.0,   0.0, 1.0e6,  2)
         self._calib_noise     = _float_spin(60.0,  0.0, 1.0e6,  2)
         self._outlier_thresh  = _float_spin(4.0,   0.1,   50.0, 2)
@@ -170,6 +195,10 @@ class RunTrackerWidget(QWidget):
         config_form.addRow("Process noise std:", self._proc_noise_std)
         config_form.addRow("Velocity noise std:", self._proc_vel_noise)
         config_form.addRow("Velocity half-life (s):", self._vel_half_life)
+        config_form.addRow("Adaptive noise gain (joint):", self._vel_noise_gain_joint)
+        config_form.addRow("Adaptive noise ref vel (joint, rad/s):", self._vel_noise_ref_joint)
+        config_form.addRow("Adaptive noise gain (root):", self._vel_noise_gain_root)
+        config_form.addRow("Adaptive noise ref vel (root, m/s, rad/s):", self._vel_noise_ref_root)
         config_form.addRow("Pose noise std (px in model):", self._pose_noise)
         config_form.addRow("Calib noise std (px in video):", self._calib_noise)
         config_form.addRow("Outlier threshold:", self._outlier_thresh)
@@ -553,8 +582,10 @@ class RunTrackerWidget(QWidget):
                 "  measurement_noise_std, pose_noise_std, outlier_threshold, tracker_fps,"
                 "  velocity_mode_camera_ids,"
                 "  use_relative_observations, relative_min_confidence,"
-                "  cross_pair_max_px, cross_pair_max_n)"
-                " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  cross_pair_max_px, cross_pair_max_n,"
+                "  process_noise_vel_gain_joint, process_noise_vel_ref_joint,"
+                "  process_noise_vel_gain_root, process_noise_vel_ref_root)"
+                " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     config_id, "ui-run", now,
                     self._proc_noise_std.value(),
@@ -569,6 +600,10 @@ class RunTrackerWidget(QWidget):
                     rel_min_conf,
                     cross_px_val,
                     cross_n,
+                    self._vel_noise_gain_joint.value(),
+                    self._vel_noise_ref_joint.value(),
+                    self._vel_noise_gain_root.value(),
+                    self._vel_noise_ref_root.value(),
                 ),
             )
         return config_id

@@ -161,7 +161,11 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
               "       COALESCE(use_relative_observations, 0) AS use_relative_observations,"
               "       COALESCE(relative_min_confidence, 0.5) AS relative_min_confidence,"
               "       COALESCE(cross_pair_max_px, 0.0) AS cross_pair_max_px,"
-              "       COALESCE(cross_pair_max_n, 10) AS cross_pair_max_n"
+              "       COALESCE(cross_pair_max_n, 10) AS cross_pair_max_n,"
+              "       COALESCE(process_noise_vel_gain_joint, 0.0) AS process_noise_vel_gain_joint,"
+              "       COALESCE(process_noise_vel_ref_joint, 1.0) AS process_noise_vel_ref_joint,"
+              "       COALESCE(process_noise_vel_gain_root, 0.0) AS process_noise_vel_gain_root,"
+              "       COALESCE(process_noise_vel_ref_root, 1.0) AS process_noise_vel_ref_root"
               " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -177,7 +181,10 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         12=init_velocity_std, 13=min_cameras_for_init, 14=process_noise_vel_std,
     //         15=velocity_half_life_s, 16=velocity_mode_camera_ids,
     //         17=velocity_measurement_noise_std, 18=pose_noise_std,
-    //         19=use_relative_observations, 20=relative_min_confidence
+    //         19=use_relative_observations, 20=relative_min_confidence,
+    //         21=cross_pair_max_px, 22=cross_pair_max_n,
+    //         23=process_noise_vel_gain_joint, 24=process_noise_vel_ref_joint,
+    //         25=process_noise_vel_gain_root, 26=process_noise_vel_ref_root
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -230,6 +237,10 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(20, out.tracker.relative_min_confidence);
     apply_real(21, out.tracker.cross_pair_max_px);
     apply_int(22, out.tracker.cross_pair_max_n);
+    apply_real(23, out.tracker.process_noise_vel_gain_joint);
+    apply_real(24, out.tracker.process_noise_vel_ref_joint);
+    apply_real(25, out.tracker.process_noise_vel_gain_root);
+    apply_real(26, out.tracker.process_noise_vel_ref_root);
 
     return out;
 }

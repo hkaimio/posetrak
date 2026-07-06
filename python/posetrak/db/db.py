@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 6
-SESSION_SCHEMA_VERSION: Final[int] = 25
+SESSION_SCHEMA_VERSION: Final[int] = 26
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -711,6 +711,27 @@ def _migrate_session_v24_to_v25(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v25_to_v26(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 25 to 26.
+
+    v26 adds process_noise_vel_gain_joint/root and process_noise_vel_ref_joint/root
+    to tracker_configs, enabling velocity-driven per-DOF process noise (adaptive
+    process noise Phase 1). NULL/0 gain means disabled (backward-compatible with
+    v25 configs, which get the exact static process noise as before).
+    """
+    existing = _tracker_config_columns(conn)
+    if "process_noise_vel_gain_joint" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_gain_joint REAL")
+    if "process_noise_vel_ref_joint" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_ref_joint REAL")
+    if "process_noise_vel_gain_root" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_gain_root REAL")
+    if "process_noise_vel_ref_root" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_ref_root REAL")
+    _set_schema_version(conn, 26)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -806,6 +827,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 24
     if actual == 24:
         _migrate_session_v24_to_v25(conn)
+        actual = 25
+    if actual == 25:
+        _migrate_session_v25_to_v26(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

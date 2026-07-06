@@ -105,5 +105,10 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     use_relative_observations         INTEGER, -- 0/1 flag for child-minus-parent pixel observations
     relative_min_confidence           REAL,  -- Min keypoint confidence for relative pairs
     cross_pair_max_px                 REAL,  -- Pixel radius for spatial cross-pair observations; NULL = disabled
-    cross_pair_max_n                  INTEGER -- Max cross-pairs per frame per camera
+    cross_pair_max_n                  INTEGER, -- Max cross-pairs per frame per camera
+    -- Added in schema migration v26: adaptive process noise (Phase 1, velocity-driven per-DOF scaling)
+    process_noise_vel_gain_joint      REAL,  -- Velocity gain for joint DOFs; NULL/0 = disabled
+    process_noise_vel_ref_joint       REAL,  -- Reference velocity for joint DOFs (rad/s)
+    process_noise_vel_gain_root       REAL,  -- Velocity gain for root DOFs; NULL/0 = disabled
+    process_noise_vel_ref_root        REAL   -- Reference velocity for root DOFs (m/s, rad/s)
 );

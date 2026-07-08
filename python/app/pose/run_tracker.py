@@ -37,6 +37,47 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _TOOLS_DIR = _REPO_ROOT / "python" / "tools"
 _DEFAULT_BINARY = default_binary_path()
 
+# Adaptive process noise (Phase 1) joint gain scope -- prototyping only.
+#
+# A single body-wide joint gain over-loosens fast-but-normal limb motion (arms)
+# while barely engaging for the slower torso/hip motion it's meant to help,
+# degrading arm tracking (see docs/roadmap/features/adaptive-process-noise/).
+# Scoping by literal joint name rather than skeleton group: existing skeleton
+# YAMLs only define one "main" group spanning the whole body, and this is
+# prototyping-stage -- adding a finer group split to every person's skeleton
+# file isn't worth it until we know whether joint-scoped gain is actually the
+# right fix. Matches the "reallusion-no-waist"-style joint names currently in
+# use; revisit (or make this configurable) if other skeleton naming shows up.
+ADAPTIVE_NOISE_CORE_JOINTS: list[str] = [
+    "spine1", "spine2", "neck1", "neck2", "head",
+    "thigh.L", "shin.L", "foot.L", "toe.L",
+    "thigh.R", "shin.R", "foot.R", "toe.R",
+]
+
+# NIS-feedback (Mechanism B) "arms" scope -- prototyping only, same rationale as
+# ADAPTIVE_NOISE_CORE_JOINTS above. This is deliberately the complement of that list
+# (everything excluded from the joint gain): the natural allocation is Mechanism A+B
+# for core, B-only for arms as a safety net where A is scoped out -- see
+# docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md,
+# "Mechanism B", *Case 3*.
+_FINGER_CHAINS = ["f_index", "f_middle", "f_ring", "f_pinky", "thumb"]
+NIS_FEEDBACK_ARM_JOINTS: list[str] = [
+    f"{part}.{side}"
+    for side in ("L", "R")
+    for part in ["shoulder", "upper_arm", "forearm", "hand"]
+] + [
+    f"{chain}.{segment:02d}.{side}"
+    for side in ("L", "R")
+    for chain in _FINGER_CHAINS
+    for segment in (1, 2, 3)
+]
+
+# Pose regularization (kinematic redundancy) Phase 1 chain -- prototyping only, see
+# docs/roadmap/features/pose-regularization/pose-regularization-design.md. Scoped to
+# spine1/spine2 per that note's Phase 1; extend only if the same pattern is confirmed
+# on other chains (e.g. neck).
+POSE_REG_SPINE_CHAIN: list[str] = ["spine1", "spine2"]
+
 
 # ---------------------------------------------------------------------------
 # Background thread
@@ -139,12 +180,54 @@ class RunTrackerWidget(QWidget):
         self._vel_noise_ref_root.setToolTip(
             "Reference velocity for the root gain above (m/s for position, rad/s for orientation)."
         )
+        self._vel_noise_gain_arms = _float_spin(0.0, 0.0, 100.0, 3)
+        self._vel_noise_gain_arms.setToolTip(
+            "Second, independent adaptive process noise gain for NIS_FEEDBACK_ARM_JOINTS\n"
+            "(shoulder/upper_arm/forearm/hand/fingers) -- arms are excluded from the joint\n"
+            "gain above to avoid over-loosening fast normal gestures, so give them their\n"
+            "own, separately-tuned gain here instead of none at all. 0 = disabled."
+        )
+        self._vel_noise_ref_arms = _float_spin(1.0, 1.0e-3, 1000.0, 3)
+        self._vel_noise_ref_arms.setToolTip("Reference velocity for the arms gain above (rad/s).")
+
         for gain, ref in (
             (self._vel_noise_gain_joint, self._vel_noise_ref_joint),
             (self._vel_noise_gain_root, self._vel_noise_ref_root),
+            (self._vel_noise_gain_arms, self._vel_noise_ref_arms),
         ):
             ref.setEnabled(False)
             gain.valueChanged.connect(lambda v, r=ref: r.setEnabled(v > 0.0))
+
+        self._pose_reg_equal_split = _float_spin(0.0, 0.0, 10.0, 4)
+        self._pose_reg_equal_split.setToolTip(
+            "Pose regularization: pseudo-measurement pulling POSE_REG_SPINE_CHAIN's joint\n"
+            "angles toward each other, per axis (stiffness = this std, radians; smaller =\n"
+            "stronger pull). 0 = disabled."
+        )
+        self._pose_reg_rest_pose = _float_spin(0.0, 0.0, 10.0, 4)
+        self._pose_reg_rest_pose.setToolTip(
+            "Pose regularization: pseudo-measurement pulling POSE_REG_SPINE_CHAIN's joint\n"
+            "angles toward zero, per axis (stiffness = this std, radians). 0 = disabled."
+        )
+
+        self._nis_feedback_threshold = _float_spin(1.5, 0.1, 100.0, 2)
+        self._nis_feedback_threshold.setToolTip(
+            "NIS-feedback safety net (Mechanism B): windowed NIS/DOF for the 'core' and\n"
+            "'arms' scopes above this triggers a temporary process-noise multiplier.\n"
+            "Only takes effect if 'Enable NIS feedback' is checked."
+        )
+        self._nis_feedback_max_mult = _float_spin(10.0, 1.0, 1000.0, 1)
+        self._nis_feedback_max_mult.setToolTip("Cap on the variance-domain multiplier above.")
+        self._nis_feedback_enabled = QCheckBox()
+        self._nis_feedback_enabled.setToolTip(
+            "Enable the NIS-feedback safety net, scoped to ADAPTIVE_NOISE_CORE_JOINTS\n"
+            "('core') and NIS_FEEDBACK_ARM_JOINTS ('arms') -- see\n"
+            "docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md."
+        )
+        self._nis_feedback_enabled.toggled.connect(self._nis_feedback_threshold.setEnabled)
+        self._nis_feedback_enabled.toggled.connect(self._nis_feedback_max_mult.setEnabled)
+        self._nis_feedback_threshold.setEnabled(False)
+        self._nis_feedback_max_mult.setEnabled(False)
 
         self._pose_noise      = _float_spin(0.0,   0.0, 1.0e6,  2)
         self._calib_noise     = _float_spin(60.0,  0.0, 1.0e6,  2)
@@ -199,6 +282,13 @@ class RunTrackerWidget(QWidget):
         config_form.addRow("Adaptive noise ref vel (joint, rad/s):", self._vel_noise_ref_joint)
         config_form.addRow("Adaptive noise gain (root):", self._vel_noise_gain_root)
         config_form.addRow("Adaptive noise ref vel (root, m/s, rad/s):", self._vel_noise_ref_root)
+        config_form.addRow("Adaptive noise gain (arms):", self._vel_noise_gain_arms)
+        config_form.addRow("Adaptive noise ref vel (arms, rad/s):", self._vel_noise_ref_arms)
+        config_form.addRow("Pose reg equal-split std (spine1/2, rad):", self._pose_reg_equal_split)
+        config_form.addRow("Pose reg rest-pose std (spine1/2, rad):", self._pose_reg_rest_pose)
+        config_form.addRow("Enable NIS feedback (core+arms):", self._nis_feedback_enabled)
+        config_form.addRow("NIS feedback threshold:", self._nis_feedback_threshold)
+        config_form.addRow("NIS feedback max multiplier:", self._nis_feedback_max_mult)
         config_form.addRow("Pose noise std (px in model):", self._pose_noise)
         config_form.addRow("Calib noise std (px in video):", self._calib_noise)
         config_form.addRow("Outlier threshold:", self._outlier_thresh)
@@ -574,6 +664,20 @@ class RunTrackerWidget(QWidget):
         cross_px = self._cross_pair_max_px.value()
         cross_n = self._cross_pair_max_n.value() if cross_px > 0.0 else None
         cross_px_val = cross_px if cross_px > 0.0 else None
+        joint_gain = self._vel_noise_gain_joint.value()
+        joint_names_json = json.dumps(ADAPTIVE_NOISE_CORE_JOINTS) if joint_gain > 0.0 else None
+        arms_gain = self._vel_noise_gain_arms.value()
+        arms_joint_names_json = json.dumps(NIS_FEEDBACK_ARM_JOINTS) if arms_gain > 0.0 else None
+        pose_reg_equal_split = self._pose_reg_equal_split.value()
+        pose_reg_rest_pose = self._pose_reg_rest_pose.value()
+        pose_reg_enabled = pose_reg_equal_split > 0.0 or pose_reg_rest_pose > 0.0
+        pose_reg_joint_names_json = json.dumps(POSE_REG_SPINE_CHAIN) if pose_reg_enabled else None
+        nis_feedback_scopes_json = None
+        if self._nis_feedback_enabled.isChecked():
+            nis_feedback_scopes_json = json.dumps([
+                {"name": "core", "joint_names": ADAPTIVE_NOISE_CORE_JOINTS},
+                {"name": "arms", "joint_names": NIS_FEEDBACK_ARM_JOINTS},
+            ])
         with self._conn:
             self._conn.execute(
                 "INSERT INTO tracker_configs"
@@ -584,8 +688,14 @@ class RunTrackerWidget(QWidget):
                 "  use_relative_observations, relative_min_confidence,"
                 "  cross_pair_max_px, cross_pair_max_n,"
                 "  process_noise_vel_gain_joint, process_noise_vel_ref_joint,"
-                "  process_noise_vel_gain_root, process_noise_vel_ref_root)"
-                " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  process_noise_vel_gain_root, process_noise_vel_ref_root,"
+                "  process_noise_vel_joint_names,"
+                "  process_noise_vel_gain_arms, process_noise_vel_ref_arms,"
+                "  process_noise_vel_joint_names_arms,"
+                "  pose_reg_joint_names, pose_reg_equal_split_noise_std, pose_reg_rest_pose_noise_std,"
+                "  nis_feedback_scopes, nis_feedback_threshold, nis_feedback_max_multiplier)"
+                " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+                "         ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     config_id, "ui-run", now,
                     self._proc_noise_std.value(),
@@ -600,10 +710,20 @@ class RunTrackerWidget(QWidget):
                     rel_min_conf,
                     cross_px_val,
                     cross_n,
-                    self._vel_noise_gain_joint.value(),
+                    joint_gain,
                     self._vel_noise_ref_joint.value(),
                     self._vel_noise_gain_root.value(),
                     self._vel_noise_ref_root.value(),
+                    joint_names_json,
+                    arms_gain,
+                    self._vel_noise_ref_arms.value(),
+                    arms_joint_names_json,
+                    pose_reg_joint_names_json,
+                    pose_reg_equal_split,
+                    pose_reg_rest_pose,
+                    nis_feedback_scopes_json,
+                    self._nis_feedback_threshold.value(),
+                    self._nis_feedback_max_mult.value(),
                 ),
             )
         return config_id

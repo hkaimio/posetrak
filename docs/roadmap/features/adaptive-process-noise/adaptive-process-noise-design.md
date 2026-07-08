@@ -1,5 +1,13 @@
 # Adaptive process noise — design note
 
+> **Status (2026-07-07)**: Phase 1 (Mechanism A) is implemented and validated
+> on Case 1. Validating it surfaced an unplanned regression (arms/hands losing
+> tracking under a body-wide gain) and, after fixing that by scoping the gain
+> to specific joints, a new failure case (Case 3) on the now-excluded joints.
+> This revision documents both and revises Mechanism B's design in response —
+> see the *Status* callouts inline below. No code changes yet for the Mechanism
+> B revision; this is the sketch to review before implementing it.
+
 ## Goals
 
 Reduce the two related UKF failure modes already observed in real captures, where
@@ -41,6 +49,55 @@ the same underlying cause: one static `process_noise_std`, chosen for "typical"
 motion, is a bad fit for the actual range of dynamics in a mocap capture —
 standing still, walking, and a fast martial-arts throw or bend all appear in the
 same trial.
+
+**Case 3 — bilateral hand-raise not tracked, on a joint deliberately excluded
+from Mechanism A** (run `5dff7e33-feba-4164-929e-cd629912a45a`,
+`ukemi-tommi-20260509.db`, t≈59.06s, both hands raise). Found while validating
+Phase 1, in two steps:
+
+1. An early Phase 1 config applied the joint gain body-wide (no scoping).
+   This *did* fix Case 1, but visual review found a new regression it
+   introduced: arm/hand tracking lost during ordinary fast gesture, confirmed
+   at three separate timestamps across two body-wide-gain runs (e.g. right
+   arm lost at t≈59.08s, left arm at t≈60.0s). Root cause: `vel_ref_joint` was
+   tuned around the torso/hip's slow typical velocity; arms routinely move
+   faster than that even during mundane motion, so the same reference engaged
+   far more readily for arms than intended, over-loosening their process
+   noise until tracking lock was lost.
+2. Fixed by scoping the joint gain to a literal joint-name list
+   (`process_noise_vel_joint_names`, empty = all joints = original
+   behaviour) — deliberately name-based rather than skeleton-group-based,
+   since existing skeleton YAMLs don't define groups fine-grained enough (one
+   "main" group spans the whole body) and adding a finer split would mean
+   editing every person's skeleton file. Excluding arms preserved the Case 1
+   improvement in full (NIS/DOF 2.68 vs. 2.65 unscoped) and even further
+   improved covariance conditioning — no tradeoff on the original problem.
+
+But excluding arms reopened, on arms specifically, exactly the failure
+Mechanism A exists to fix: as both hands rise, wrist Mahalanobis distance
+climbs steadily from ~1.5 (t≈58.98s) to over 6 across roughly 20 steps
+(~0.17s), crosses `outlier_threshold=6.0` at step ~500-501, and the wrist
+observations get rejected. From that point the filter has no correction
+signal for the wrists at all and cannot recover in the forward pass, however
+correct the detections remain.
+
+Critically, the whole-skeleton `NIS/DOF` aggregate does **not** surface this:
+across the 2-second window containing this exact rejection, aggregate
+NIS/DOF for this run was 2.68 — unremarkable, since 2 markers' worth of
+residual is diluted across the other ~59. This is the direct motivation for
+scoping Mechanism B by joint-group rather than computing it whole-skeleton
+(see *Mechanism B*, revised below).
+
+Tracing Case 3 further back found a proximate trigger one step upstream of
+everything above: `spine1` alone absorbs the forward-bend rotation until it
+hits its own configured joint limit, at which point the fit degrades faster
+than root rotation (correctly, but not fast enough) can compensate. That's a
+kinematic-redundancy problem — root, `spine1`, and `spine2` all rotate the
+same torso markers, and nothing currently prefers a sensible split among
+solutions that fit about equally well — not a process-noise problem per se,
+though it's what triggers the process-noise failure above. See
+`docs/roadmap/features/pose-regularization/pose-regularization-design.md`
+for a separate, complementary mechanism targeting that trigger directly.
 
 ---
 
@@ -142,21 +199,53 @@ the existing `process_noise_std` fields): a velocity gain `k` and a reference
 velocity scale, at minimum; possibly separate root/joint gains per the open
 question above.
 
-### Mechanism B — NIS-feedback fading safety net (secondary, reactive)
+### Mechanism B — regional NIS-feedback fading safety net (secondary, reactive)
+
+> **Status (2026-07-07), revised from the original whole-skeleton design**:
+> Case 3 above shows the original design (one NIS/DOF number for the entire
+> skeleton, one fading multiplier applied everywhere) has a dilution problem
+> — confirmed empirically, not just in theory: aggregate NIS/DOF across the
+> Case 3 window was 2.68, unremarkable, despite a real, severe rejection
+> confined to two wrist markers happening inside that exact window. A
+> whole-skeleton Mechanism B would very likely have missed Case 3 for the
+> same reason the aggregate metric did when we first went looking for it.
+> Not yet implemented — this is the revised design to review before coding.
 
 A Strong-Tracking-Filter-style catch-all for whatever Mechanism A's velocity
 heuristic doesn't anticipate (a sudden contact/collision event that isn't a
-smooth velocity ramp, an occlusion-driven jump). Track a short moving window
-(e.g. last 5-10 steps) of `NIS/DOF` — already computed per step
-(`UpdateResult`, surfaced today via `tracking_results.nis_value`/`nis_dof` and
-the MCP diagnostic server's `_NIS_HIGH = 1.5` threshold,
-`app/mcp/tools/diagnostics.py`). If the windowed average exceeds threshold,
-apply a temporary multiplier λ > 1 on top of Mechanism A's per-DOF Q for the
-next `predict()`, decaying back to 1 as NIS/DOF returns to nominal.
+smooth velocity ramp, an occlusion-driven jump, or — Case 3 — a body region
+Mechanism A doesn't cover at all because it's scoped out).
 
-Reusing the same `1.5` threshold the diagnostic tooling already uses would keep
-the "is this filter healthy" definition consistent between offline diagnosis
-and the tracker's own runtime behaviour.
+**Revised design: track NIS/DOF per noise scope, not whole-skeleton.** A
+*scope* is the same kind of literal joint-name list Mechanism A already uses
+(`process_noise_vel_joint_names`) — the simplest starting point is to reuse
+whatever scopes Mechanism A is already configured with (e.g. "core" and
+"arms"), so a residual spike confined to the arms shows up in the arms' own
+windowed NIS/DOF, undiluted by an unaffected torso/legs.
+
+For each scope: track a short moving window (e.g. last 5-10 steps, needs
+tuning — see *Open questions*) of NIS/DOF computed only from observations
+whose marker's parent joint falls in that scope. This requires attributing
+each step's per-observation Mahalanobis contribution to a scope — a
+bookkeeping addition over `ObservationResult` data the update step already
+computes, not a change to the UKF's predict/update math itself (consistent
+with this note's non-goals). If a scope's windowed average exceeds threshold
+— reuse the `1.5` `_NIS_HIGH` value the MCP diagnostic server already uses
+(`app/mcp/tools/diagnostics.py`), keeping "is this filter healthy" consistent
+between offline diagnosis and the tracker's own runtime behaviour — apply a
+temporary multiplier λ > 1 to *that scope's* process noise for the next
+`predict()`, decaying back to 1 as its windowed NIS/DOF returns to nominal.
+
+This targets the actual pathology directly (model overconfident relative to
+real motion → good observations rejected → no recovery) rather than a proxy
+for it (raw velocity), so unlike Mechanism A it doesn't need a body-part-
+specific velocity reference tuned at all — which is exactly what got Mechanism
+A into trouble on arms in the first place. The natural allocation this
+suggests: joints excluded from Mechanism A (arms) get Mechanism B only;
+joints Mechanism A already handles well (core) keep both, with B as the
+safety net for whatever A's velocity heuristic doesn't anticipate. Worth
+confirming once B actually exists to test against, rather than assuming it
+now (see *Open questions*).
 
 ---
 
@@ -177,36 +266,58 @@ and the tracker's own runtime behaviour.
 - Add a debug export for the computed per-DOF scale factors (mirroring the
   existing `debug_enabled_` / `get_frame_number()` CSV dumps already in
   `ukf.cpp`), so the tuning process doesn't require rebuilding to inspect what
-  the gain is doing frame-to-frame.
+  the gain is doing frame-to-frame. **Done** — `process_noise_velocity_scale.csv`,
+  per predict() call, one column per active DOF.
+- **Case 3's segment is now the primary regression target for Mechanism B**:
+  run `5dff7e33-feba-4164-929e-cd629912a45a`, `MRK-wrist.L`/`MRK-wrist.R`,
+  t≈58.98-59.2s. Mahalanobis distance for both wrists must stay under
+  `outlier_threshold` through the hand-raise *without* widening
+  `vel_ref_joint` for arms in Mechanism A (that reintroduces the original
+  over-loosening regression Case 3's own history started from).
 
 ---
 
 ## Phasing
 
-**Phase 1 — velocity-driven per-DOF process noise (Mechanism A).**
-`rebuild_process_noise()` takes the current velocity state and computes a true
-per-DOF diagonal instead of one scalar per block; new `process_noise_velocity_gain`
-(and reference-velocity) config fields. *Validation*: on the forward-bend and
-hip-throw segments, verify the spine/leg DOFs' own noise visibly grows while
-uninvolved DOFs (the other side's standing leg, e.g.) stay near baseline;
-verify NIS/DOF and inlier% improve in the affected window without moving in the
-calm baseline segment.
+**Phase 1 — velocity-driven per-DOF process noise (Mechanism A). Done
+(2026-07-06/07).** `rebuild_process_noise()` takes the current velocity state
+and computes a true per-DOF diagonal instead of one scalar per block;
+`process_noise_vel_gain_joint`/`_gain_root` and `_ref_joint`/`_ref_root`
+config fields. *Validated* on Case 1: inlier count and covariance
+conditioning improved monotonically as gain went 0→1→2 (NIS/DOF avg
+3.41→3.09→2.65), with zero regressions against a stashed pre-change baseline
+across the full C++ test suite.
 
-**Phase 2 — NIS-feedback fading safety net (Mechanism B).** Track a short
-NIS/DOF window in `Tracker`, compute a fading multiplier against the `1.5`
-threshold already used by the MCP diagnostics, apply on top of Phase 1's
-per-DOF Q. *Validation*: fading factor stays ≈1 in nominal segments (no
-behavioural change when nothing is wrong); rises and decays smoothly around a
-real anomaly window without oscillating or itself causing `cov_condition_number`
-to blow up.
+**Unplanned extension — joint-name-list scoping for Mechanism A. Done
+(2026-07-07).** Validating Phase 1 with a body-wide gain surfaced a new
+regression (arm/hand tracking lost during ordinary fast gesture — see Case 3)
+before Case 3's own failure was even found. Fixed by adding
+`process_noise_vel_joint_names` (empty = all joints, unchanged behaviour) so
+the joint gain can be scoped to specific joints by literal name. Excluding
+arms fully preserved the Case 1 improvement and further improved covariance
+conditioning, confirming the scoping itself costs nothing on the original
+problem — the tradeoff only shows up on the excluded joints (Case 3).
+
+**Phase 2 — regional NIS-feedback fading safety net (Mechanism B). Revised
+design below, not yet implemented.** Reuses the joint-name-list scopes from
+Phase 1's extension instead of a whole-skeleton NIS/DOF aggregate — see
+*Mechanism B* above for why the original whole-skeleton design would likely
+have missed Case 3. *Validation*: on Case 3 (wrist rejection during a
+bilateral hand-raise), confirm the "arms" scope's windowed NIS/DOF triggers
+the fading factor before Mahalanobis crosses `outlier_threshold`, and that
+the wrist stays an inlier through the motion; confirm the fading factor stays
+≈1 in nominal segments; re-verify Case 1 and Case 2 don't regress; re-verify
+a calm segment doesn't regress.
 
 **Phase 3 (only if 1+2 measured insufficient) — chain-scoped / IMM-lite.** If
 per-DOF scaling under-reacts for a motion that's coupled across several joints
-at once (a whole-arm swing, say), group DOFs by kinematic chain — reusing the
-`SkeletonLayout::from_groups()` machinery already built for child filters —
-and drive Mechanism A/B off chain-level statistics instead of strictly
-per-DOF. Explicitly gated on Phase 1+2 turning out insufficient in practice;
-not worth building ahead of that evidence.
+at once (a whole-arm swing, say), group DOFs by kinematic chain and drive
+Mechanism A/B off chain-level statistics instead of strictly per-DOF. Largely
+subsumed by Phase 2's scope mechanism already borrowing this same
+chain/group-scoping idea (applied to Mechanism B rather than a full IMM) —
+revisit only if Phase 2's scopes turn out too coarse even at joint-name-list
+granularity. Explicitly gated on Phase 1+2 turning out insufficient in
+practice; not worth building ahead of that evidence.
 
 ---
 
@@ -228,4 +339,24 @@ not worth building ahead of that evidence.
    shows process-noise tuning and gate behaviour are coupled (an
    ill-conditioned covariance defeats the gate regardless of Q). Worth
    revisiting once Phase 1/2 are measured — a better Q might reduce how often
-   the gate's own failure mode is even reached.
+   the gate's own failure mode is even reached. Case 3 is a second, direct
+   example of this coupling: the wrist rejection *is* the gate's failure mode
+   being reached, not a separate issue.
+5. **Scope granularity for Mechanism B.** One scope per Mechanism-A-excluded
+   joint list (e.g. a single "arms" scope covering both sides), or finer
+   (left/right arm tracked separately, so a one-sided event isn't diluted by
+   an unaffected other side)? Case 3 was bilateral, so a single "arms" scope
+   would have caught it — but a one-sided reach might not, at that
+   granularity. Needs more real examples before deciding either way.
+6. **Does Mechanism A still apply to excluded joints at all, or does
+   Mechanism B fully replace it there?** Current thinking (see *Phasing*) is
+   B-only for arms, A+B for core — worth confirming this is actually the
+   right allocation once B exists to test against, rather than assuming it
+   now.
+7. **Implementation cost of per-scope NIS.** Today `nis_value`/`nis_dof` are
+   single whole-body-per-step scalars (`UpdateResult`). Per-scope tracking
+   needs attributing each observation's Mahalanobis contribution to a scope
+   via its marker's parent joint, then windowing/decaying per scope somewhere
+   above the UKF (`Tracker`, most likely, since scopes are a Mechanism-A/B
+   config concept, not intrinsic to the UKF's own state). Real but bounded
+   work — a bookkeeping restructure, not a new algorithm.

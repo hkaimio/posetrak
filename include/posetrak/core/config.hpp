@@ -8,6 +8,17 @@
 namespace posetrak {
 
 /**
+ * @brief One named scope for the NIS-feedback regional fading safety net
+ * (Mechanism B) -- see
+ * docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
+ */
+struct NisFeedbackScope {
+    std::string name;  ///< Identifier used in debug export / logging.
+    std::vector<std::string>
+        joint_names;  ///< Joints this scope covers (e.g. {"upper_arm.L", ...}).
+};
+
+/**
  * @brief Configuration for a single child UKF filter in a hierarchical setup.
  *
  * A child filter tracks a named subset of joints (e.g. one hand) using only
@@ -94,6 +105,34 @@ struct TrackerConfig {
     double process_noise_vel_ref_joint = 1.0;   ///< Reference velocity for joint DOFs (rad/s)
     double process_noise_vel_gain_root = 0.0;   ///< Velocity gain for root DOFs
     double process_noise_vel_ref_root = 1.0;    ///< Reference velocity for root DOFs (m/s, rad/s)
+    /// Literal joint names (e.g. "spine1", "thigh.L") the joint gain applies to.
+    /// Empty (default) = all joints. Added after finding a body-wide gain
+    /// over-loosens fast-but-normal limb motion (arms) while barely engaging for
+    /// the slower torso/hip motion it targets. Name-based rather than
+    /// skeleton-group-based since existing skeleton YAMLs don't define groups
+    /// fine-grained enough (one "main" group spans the whole body) and adding a
+    /// finer split would mean editing every person's skeleton file.
+    std::vector<std::string> process_noise_vel_joint_names;
+    /// Second, independent velocity gain scope (e.g. arms) -- see
+    /// UnscentedKalmanFilter::set_velocity_noise_gain_arms(). 0.0 gain = disabled.
+    double process_noise_vel_gain_arms = 0.0;
+    double process_noise_vel_ref_arms = 1.0;
+    std::vector<std::string> process_noise_vel_joint_names_arms;
+
+    // === Pose regularization (kinematic redundancy) — Phase 1 ===
+    // See docs/roadmap/features/pose-regularization/pose-regularization-design.md.
+    // Empty pose_reg_joint_names = disabled.
+    std::vector<std::string> pose_reg_joint_names;  ///< Redundant chain, e.g. {"spine1","spine2"}
+    double pose_reg_equal_split_noise_std = 0.0;    ///< 0.0 = disabled
+    double pose_reg_rest_pose_noise_std = 0.0;      ///< 0.0 = disabled
+
+    // === NIS-feedback regional fading safety net (Mechanism B) ===
+    // See docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
+    // Empty nis_feedback_scopes = disabled.
+    std::vector<NisFeedbackScope> nis_feedback_scopes;
+    int nis_feedback_window = 8;                ///< Moving window size, in tracker steps
+    double nis_feedback_threshold = 1.5;        ///< Windowed NIS/DOF above this triggers fading
+    double nis_feedback_max_multiplier = 10.0;  ///< Cap on the variance-domain multiplier
 
     // UKF sigma point parameters
     double ukf_alpha = 0.5;  ///< Sigma point spread (0.001 for Python compatibility)
@@ -185,6 +224,21 @@ struct TrackerAppConfig {
     double process_noise_vel_ref_joint = 1.0;
     double process_noise_vel_gain_root = 0.0;
     double process_noise_vel_ref_root = 1.0;
+    std::vector<std::string> process_noise_vel_joint_names;
+    double process_noise_vel_gain_arms = 0.0;
+    double process_noise_vel_ref_arms = 1.0;
+    std::vector<std::string> process_noise_vel_joint_names_arms;
+
+    // === Pose regularization (kinematic redundancy) — Phase 1 ===
+    std::vector<std::string> pose_reg_joint_names;
+    double pose_reg_equal_split_noise_std = 0.0;
+    double pose_reg_rest_pose_noise_std = 0.0;
+
+    // === NIS-feedback regional fading safety net (Mechanism B) ===
+    std::vector<NisFeedbackScope> nis_feedback_scopes;
+    int nis_feedback_window = 8;
+    double nis_feedback_threshold = 1.5;
+    double nis_feedback_max_multiplier = 10.0;
 
     // === Initialization ===
     std::optional<std::filesystem::path> python_state_path;  // Optional: use Python state for init
@@ -277,6 +331,17 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.process_noise_vel_ref_joint = process_noise_vel_ref_joint;
     tc.process_noise_vel_gain_root = process_noise_vel_gain_root;
     tc.process_noise_vel_ref_root = process_noise_vel_ref_root;
+    tc.process_noise_vel_joint_names = process_noise_vel_joint_names;
+    tc.process_noise_vel_gain_arms = process_noise_vel_gain_arms;
+    tc.process_noise_vel_ref_arms = process_noise_vel_ref_arms;
+    tc.process_noise_vel_joint_names_arms = process_noise_vel_joint_names_arms;
+    tc.pose_reg_joint_names = pose_reg_joint_names;
+    tc.pose_reg_equal_split_noise_std = pose_reg_equal_split_noise_std;
+    tc.pose_reg_rest_pose_noise_std = pose_reg_rest_pose_noise_std;
+    tc.nis_feedback_scopes = nis_feedback_scopes;
+    tc.nis_feedback_window = nis_feedback_window;
+    tc.nis_feedback_threshold = nis_feedback_threshold;
+    tc.nis_feedback_max_multiplier = nis_feedback_max_multiplier;
     tc.ukf_alpha = ukf_alpha;
     tc.ukf_beta = ukf_beta;
     tc.ukf_kappa = ukf_kappa;

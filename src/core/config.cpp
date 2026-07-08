@@ -86,6 +86,49 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
         result.process_noise_vel_ref_joint = tracking["process_noise_vel_ref_joint"].value_or(1.0);
         result.process_noise_vel_gain_root = tracking["process_noise_vel_gain_root"].value_or(0.0);
         result.process_noise_vel_ref_root = tracking["process_noise_vel_ref_root"].value_or(1.0);
+        if (auto names = tracking["process_noise_vel_joint_names"].as_array()) {
+            for (auto&& elem : *names) {
+                if (auto str = elem.value<std::string>())
+                    result.process_noise_vel_joint_names.push_back(*str);
+            }
+        }
+        result.process_noise_vel_gain_arms = tracking["process_noise_vel_gain_arms"].value_or(0.0);
+        result.process_noise_vel_ref_arms = tracking["process_noise_vel_ref_arms"].value_or(1.0);
+        if (auto names = tracking["process_noise_vel_joint_names_arms"].as_array()) {
+            for (auto&& elem : *names) {
+                if (auto str = elem.value<std::string>())
+                    result.process_noise_vel_joint_names_arms.push_back(*str);
+            }
+        }
+        if (auto names = tracking["pose_reg_joint_names"].as_array()) {
+            for (auto&& elem : *names) {
+                if (auto str = elem.value<std::string>())
+                    result.pose_reg_joint_names.push_back(*str);
+            }
+        }
+        result.pose_reg_equal_split_noise_std =
+            tracking["pose_reg_equal_split_noise_std"].value_or(0.0);
+        result.pose_reg_rest_pose_noise_std =
+            tracking["pose_reg_rest_pose_noise_std"].value_or(0.0);
+
+        if (auto scopes = tracking["nis_feedback_scopes"].as_array()) {
+            for (auto&& elem : *scopes) {
+                if (auto scope_table = elem.as_table()) {
+                    NisFeedbackScope scope;
+                    scope.name = (*scope_table)["name"].value_or(std::string{});
+                    if (auto names = (*scope_table)["joint_names"].as_array()) {
+                        for (auto&& name_elem : *names) {
+                            if (auto str = name_elem.value<std::string>())
+                                scope.joint_names.push_back(*str);
+                        }
+                    }
+                    result.nis_feedback_scopes.push_back(std::move(scope));
+                }
+            }
+        }
+        result.nis_feedback_window = tracking["nis_feedback_window"].value_or(8);
+        result.nis_feedback_threshold = tracking["nis_feedback_threshold"].value_or(1.5);
+        result.nis_feedback_max_multiplier = tracking["nis_feedback_max_multiplier"].value_or(10.0);
 
         // Initialization sub-section
         if (auto init = tracking["initialization"]) {

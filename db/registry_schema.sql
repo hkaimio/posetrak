@@ -110,5 +110,30 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     process_noise_vel_gain_joint      REAL,  -- Velocity gain for joint DOFs; NULL/0 = disabled
     process_noise_vel_ref_joint       REAL,  -- Reference velocity for joint DOFs (rad/s)
     process_noise_vel_gain_root       REAL,  -- Velocity gain for root DOFs; NULL/0 = disabled
-    process_noise_vel_ref_root        REAL   -- Reference velocity for root DOFs (m/s, rad/s)
+    process_noise_vel_ref_root        REAL,  -- Reference velocity for root DOFs (m/s, rad/s)
+    -- Added in schema migration v27: scope the joint gain to specific joints by literal
+    -- name (e.g. exclude arms) instead of applying it body-wide. Name-based rather than
+    -- skeleton-group-based since existing skeleton YAMLs don't define groups fine-grained
+    -- enough for this (one "main" group spans the whole body).
+    process_noise_vel_joint_names     TEXT,  -- JSON array of joint names; NULL/[] = all joints
+    -- Added in schema migration v28: pose regularization for a kinematically redundant
+    -- joint chain (e.g. spine1/spine2) -- see
+    -- docs/roadmap/features/pose-regularization/pose-regularization-design.md.
+    pose_reg_joint_names              TEXT,  -- JSON array of joint names; NULL/[] = disabled
+    pose_reg_equal_split_noise_std    REAL,  -- Radians; NULL/0 = disabled
+    pose_reg_rest_pose_noise_std      REAL,  -- Radians; NULL/0 = disabled
+    -- Added in schema migration v29: NIS-feedback regional fading safety net
+    -- (Mechanism B) -- see
+    -- docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
+    nis_feedback_scopes               TEXT,  -- JSON array of {name, joint_names}; NULL/[] = disabled
+    nis_feedback_window               INTEGER,  -- Moving window size, in tracker steps
+    nis_feedback_threshold            REAL,     -- Windowed NIS/DOF above this triggers fading
+    nis_feedback_max_multiplier       REAL,     -- Cap on the variance-domain multiplier
+    -- Added in schema migration v30: second, independent adaptive process noise
+    -- gain scope (e.g. arms), separate from process_noise_vel_gain_joint/
+    -- process_noise_vel_joint_names above -- see
+    -- UnscentedKalmanFilter::set_velocity_noise_gain_arms().
+    process_noise_vel_gain_arms       REAL,  -- Velocity gain for this scope; NULL/0 = disabled
+    process_noise_vel_ref_arms        REAL,  -- Reference velocity (rad/s)
+    process_noise_vel_joint_names_arms TEXT  -- JSON array of joint names; NULL/[] = disabled
 );

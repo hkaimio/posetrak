@@ -19,7 +19,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 6
-SESSION_SCHEMA_VERSION: Final[int] = 26
+SESSION_SCHEMA_VERSION: Final[int] = 30
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -732,6 +732,105 @@ def _migrate_session_v25_to_v26(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v26_to_v27(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 26 to 27.
+
+    v27 adds process_noise_vel_joint_names to tracker_configs: a JSON array of
+    literal joint names (e.g. "spine1", "thigh.L") the adaptive process noise
+    joint gain applies to. NULL/empty means all joints (backward-compatible with
+    v26 configs). Added after finding a body-wide joint gain over-loosens
+    fast-but-normal limb motion (arms) while barely engaging for the slower
+    torso/hip motion it targets. Name-based rather than skeleton-group-based
+    since existing skeleton YAMLs don't define groups fine-grained enough for
+    this (one "main" group spans the whole body), and adding a finer split would
+    mean editing every person's skeleton file.
+    """
+    existing = _tracker_config_columns(conn)
+    if "process_noise_vel_joint_names" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_joint_names TEXT")
+    _set_schema_version(conn, 27)
+    conn.commit()
+
+
+def _migrate_session_v27_to_v28(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 27 to 28.
+
+    v28 adds pose_reg_joint_names, pose_reg_equal_split_noise_std, and
+    pose_reg_rest_pose_noise_std to tracker_configs: pose regularization for a
+    kinematically redundant joint chain (e.g. spine1/spine2), fusing two soft
+    pseudo-measurements (equal-split and rest-pose pull) into the UKF update so
+    one joint in a redundant chain doesn't absorb all available rotation (and
+    hit its own limit) while the others stay near neutral. NULL/empty
+    pose_reg_joint_names means disabled (backward-compatible with v27
+    configs). See
+    docs/roadmap/features/pose-regularization/pose-regularization-design.md.
+    """
+    existing = _tracker_config_columns(conn)
+    if "pose_reg_joint_names" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN pose_reg_joint_names TEXT")
+    if "pose_reg_equal_split_noise_std" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN pose_reg_equal_split_noise_std REAL"
+        )
+    if "pose_reg_rest_pose_noise_std" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN pose_reg_rest_pose_noise_std REAL")
+    _set_schema_version(conn, 28)
+    conn.commit()
+
+
+def _migrate_session_v28_to_v29(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 28 to 29.
+
+    v29 adds nis_feedback_scopes, nis_feedback_window, nis_feedback_threshold, and
+    nis_feedback_max_multiplier to tracker_configs: the NIS-feedback regional fading
+    safety net (Mechanism B). Each scope is a named group of joints; when a scope's
+    windowed average NIS/DOF (computed from per-observation Mahalanobis distances
+    attributed to that scope's joints) exceeds nis_feedback_threshold, a temporary
+    variance-domain multiplier (capped at nis_feedback_max_multiplier) widens that
+    scope's process noise until the windowed average returns to nominal. NULL/empty
+    nis_feedback_scopes means disabled (backward-compatible with v28 configs). See
+    docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
+    """
+    existing = _tracker_config_columns(conn)
+    if "nis_feedback_scopes" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN nis_feedback_scopes TEXT")
+    if "nis_feedback_window" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN nis_feedback_window INTEGER")
+    if "nis_feedback_threshold" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN nis_feedback_threshold REAL")
+    if "nis_feedback_max_multiplier" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN nis_feedback_max_multiplier REAL")
+    _set_schema_version(conn, 29)
+    conn.commit()
+
+
+def _migrate_session_v29_to_v30(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 29 to 30.
+
+    v30 adds process_noise_vel_gain_arms, process_noise_vel_ref_arms, and
+    process_noise_vel_joint_names_arms to tracker_configs: a second, independent
+    adaptive process noise gain scope (e.g. arms), separate from
+    process_noise_vel_gain_joint/process_noise_vel_joint_names. Added after finding
+    the NIS-feedback safety net (Mechanism B) alone wasn't enough to keep a fast
+    bilateral hand-raise tracked, once pose regularization separately fixed the
+    spine issue that originally forced arms to be excluded from the primary gain
+    scope. NULL/empty process_noise_vel_joint_names_arms means disabled
+    (backward-compatible with v29 configs). See
+    docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
+    """
+    existing = _tracker_config_columns(conn)
+    if "process_noise_vel_gain_arms" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_gain_arms REAL")
+    if "process_noise_vel_ref_arms" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_ref_arms REAL")
+    if "process_noise_vel_joint_names_arms" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_joint_names_arms TEXT"
+        )
+    _set_schema_version(conn, 30)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -830,6 +929,18 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 25
     if actual == 25:
         _migrate_session_v25_to_v26(conn)
+        actual = 26
+    if actual == 26:
+        _migrate_session_v26_to_v27(conn)
+        actual = 27
+    if actual == 27:
+        _migrate_session_v27_to_v28(conn)
+        actual = 28
+    if actual == 28:
+        _migrate_session_v28_to_v29(conn)
+        actual = 29
+    if actual == 29:
+        _migrate_session_v29_to_v30(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

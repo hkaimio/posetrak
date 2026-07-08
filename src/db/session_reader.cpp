@@ -151,22 +151,34 @@ std::string SessionReader::load_skeleton_yaml(std::string const& skeleton_id) {
 // ---------------------------------------------------------------------------
 
 DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id) {
-    Stmt stmt(db_,
-              "SELECT alpha, beta, kappa, process_noise_std, measurement_noise_std,"
-              "       outlier_threshold, tracker_fps, ik_max_iterations, ik_tolerance,"
-              "       init_position_std, init_orientation_std, init_joint_std, init_velocity_std,"
-              "       min_cameras_for_init, process_noise_vel_std, velocity_half_life_s,"
-              "       velocity_mode_camera_ids, velocity_measurement_noise_std,"
-              "       COALESCE(pose_noise_std, 0.0) AS pose_noise_std,"
-              "       COALESCE(use_relative_observations, 0) AS use_relative_observations,"
-              "       COALESCE(relative_min_confidence, 0.5) AS relative_min_confidence,"
-              "       COALESCE(cross_pair_max_px, 0.0) AS cross_pair_max_px,"
-              "       COALESCE(cross_pair_max_n, 10) AS cross_pair_max_n,"
-              "       COALESCE(process_noise_vel_gain_joint, 0.0) AS process_noise_vel_gain_joint,"
-              "       COALESCE(process_noise_vel_ref_joint, 1.0) AS process_noise_vel_ref_joint,"
-              "       COALESCE(process_noise_vel_gain_root, 0.0) AS process_noise_vel_gain_root,"
-              "       COALESCE(process_noise_vel_ref_root, 1.0) AS process_noise_vel_ref_root"
-              " FROM tracker_configs WHERE id = ?");
+    Stmt stmt(
+        db_,
+        "SELECT alpha, beta, kappa, process_noise_std, measurement_noise_std,"
+        "       outlier_threshold, tracker_fps, ik_max_iterations, ik_tolerance,"
+        "       init_position_std, init_orientation_std, init_joint_std, init_velocity_std,"
+        "       min_cameras_for_init, process_noise_vel_std, velocity_half_life_s,"
+        "       velocity_mode_camera_ids, velocity_measurement_noise_std,"
+        "       COALESCE(pose_noise_std, 0.0) AS pose_noise_std,"
+        "       COALESCE(use_relative_observations, 0) AS use_relative_observations,"
+        "       COALESCE(relative_min_confidence, 0.5) AS relative_min_confidence,"
+        "       COALESCE(cross_pair_max_px, 0.0) AS cross_pair_max_px,"
+        "       COALESCE(cross_pair_max_n, 10) AS cross_pair_max_n,"
+        "       COALESCE(process_noise_vel_gain_joint, 0.0) AS process_noise_vel_gain_joint,"
+        "       COALESCE(process_noise_vel_ref_joint, 1.0) AS process_noise_vel_ref_joint,"
+        "       COALESCE(process_noise_vel_gain_root, 0.0) AS process_noise_vel_gain_root,"
+        "       COALESCE(process_noise_vel_ref_root, 1.0) AS process_noise_vel_ref_root,"
+        "       process_noise_vel_joint_names,"
+        "       pose_reg_joint_names,"
+        "       COALESCE(pose_reg_equal_split_noise_std, 0.0) AS pose_reg_equal_split_noise_std,"
+        "       COALESCE(pose_reg_rest_pose_noise_std, 0.0) AS pose_reg_rest_pose_noise_std,"
+        "       nis_feedback_scopes,"
+        "       COALESCE(nis_feedback_window, 8) AS nis_feedback_window,"
+        "       COALESCE(nis_feedback_threshold, 1.5) AS nis_feedback_threshold,"
+        "       COALESCE(nis_feedback_max_multiplier, 10.0) AS nis_feedback_max_multiplier,"
+        "       COALESCE(process_noise_vel_gain_arms, 0.0) AS process_noise_vel_gain_arms,"
+        "       COALESCE(process_noise_vel_ref_arms, 1.0) AS process_noise_vel_ref_arms,"
+        "       process_noise_vel_joint_names_arms"
+        " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
     if (!stmt.step()) {
@@ -184,7 +196,12 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         19=use_relative_observations, 20=relative_min_confidence,
     //         21=cross_pair_max_px, 22=cross_pair_max_n,
     //         23=process_noise_vel_gain_joint, 24=process_noise_vel_ref_joint,
-    //         25=process_noise_vel_gain_root, 26=process_noise_vel_ref_root
+    //         25=process_noise_vel_gain_root, 26=process_noise_vel_ref_root,
+    //         27=process_noise_vel_joint_names, 28=pose_reg_joint_names,
+    //         29=pose_reg_equal_split_noise_std, 30=pose_reg_rest_pose_noise_std,
+    //         31=nis_feedback_scopes, 32=nis_feedback_window, 33=nis_feedback_threshold,
+    //         34=nis_feedback_max_multiplier, 35=process_noise_vel_gain_arms,
+    //         36=process_noise_vel_ref_arms, 37=process_noise_vel_joint_names_arms
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -241,6 +258,81 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(24, out.tracker.process_noise_vel_ref_joint);
     apply_real(25, out.tracker.process_noise_vel_gain_root);
     apply_real(26, out.tracker.process_noise_vel_ref_root);
+
+    // process_noise_vel_joint_names: stored as JSON string array, e.g. ["spine1","thigh.L"]
+    if (sqlite3_column_type(stmt.ptr, 27) != SQLITE_NULL) {
+        char const* json_str = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 27));
+        if (json_str) {
+            auto arr = nlohmann::json::parse(json_str, nullptr, /*allow_exceptions=*/false);
+            if (arr.is_array()) {
+                for (auto const& elem : arr) {
+                    if (elem.is_string())
+                        out.tracker.process_noise_vel_joint_names.push_back(
+                            elem.get<std::string>());
+                }
+            }
+        }
+    }
+
+    // pose_reg_joint_names: stored as JSON string array, e.g. ["spine1","spine2"]
+    if (sqlite3_column_type(stmt.ptr, 28) != SQLITE_NULL) {
+        char const* json_str = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 28));
+        if (json_str) {
+            auto arr = nlohmann::json::parse(json_str, nullptr, /*allow_exceptions=*/false);
+            if (arr.is_array()) {
+                for (auto const& elem : arr) {
+                    if (elem.is_string())
+                        out.tracker.pose_reg_joint_names.push_back(elem.get<std::string>());
+                }
+            }
+        }
+    }
+    apply_real(29, out.tracker.pose_reg_equal_split_noise_std);
+    apply_real(30, out.tracker.pose_reg_rest_pose_noise_std);
+
+    // nis_feedback_scopes: stored as JSON array of {"name": ..., "joint_names": [...]}
+    if (sqlite3_column_type(stmt.ptr, 31) != SQLITE_NULL) {
+        char const* json_str = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 31));
+        if (json_str) {
+            auto arr = nlohmann::json::parse(json_str, nullptr, /*allow_exceptions=*/false);
+            if (arr.is_array()) {
+                for (auto const& elem : arr) {
+                    if (!elem.is_object())
+                        continue;
+                    NisFeedbackScope scope;
+                    if (elem.contains("name") && elem["name"].is_string())
+                        scope.name = elem["name"].get<std::string>();
+                    if (elem.contains("joint_names") && elem["joint_names"].is_array()) {
+                        for (auto const& name_elem : elem["joint_names"]) {
+                            if (name_elem.is_string())
+                                scope.joint_names.push_back(name_elem.get<std::string>());
+                        }
+                    }
+                    out.tracker.nis_feedback_scopes.push_back(std::move(scope));
+                }
+            }
+        }
+    }
+    apply_int(32, out.tracker.nis_feedback_window);
+    apply_real(33, out.tracker.nis_feedback_threshold);
+    apply_real(34, out.tracker.nis_feedback_max_multiplier);
+    apply_real(35, out.tracker.process_noise_vel_gain_arms);
+    apply_real(36, out.tracker.process_noise_vel_ref_arms);
+
+    // process_noise_vel_joint_names_arms: stored as JSON string array
+    if (sqlite3_column_type(stmt.ptr, 37) != SQLITE_NULL) {
+        char const* json_str = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 37));
+        if (json_str) {
+            auto arr = nlohmann::json::parse(json_str, nullptr, /*allow_exceptions=*/false);
+            if (arr.is_array()) {
+                for (auto const& elem : arr) {
+                    if (elem.is_string())
+                        out.tracker.process_noise_vel_joint_names_arms.push_back(
+                            elem.get<std::string>());
+                }
+            }
+        }
+    }
 
     return out;
 }

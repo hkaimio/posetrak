@@ -21,12 +21,14 @@
 #include "posetrak/kinematics/forward_kinematics.hpp"
 #include "posetrak/kinematics/inverse_kinematics.hpp"
 #include "posetrak/kinematics/triangulation.hpp"
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace posetrak {
@@ -292,6 +294,32 @@ class Tracker {
      */
     std::vector<Observation>
     build_annotated_observations(std::vector<Observation> const& observations) const;
+
+    /**
+     * @brief Windowed NIS/DOF bookkeeping for one NIS-feedback scope (Mechanism B) --
+     * see docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
+     * Not intrinsic to the UKF's own state (see UnscentedKalmanFilter::
+     * set_nis_feedback_scopes() doc comment), so it lives here instead.
+     */
+    struct NisFeedbackScopeWindow {
+        std::string name;
+        std::unordered_set<std::string> joint_names;
+        std::deque<double> step_sum_mahal_sq;  ///< Sum of mahalanobis_distance^2, per step
+        std::deque<int> step_dof_count;        ///< 2 per attributed observation (u,v), per step
+        double running_sum_mahal_sq = 0.0;
+        int running_dof_count = 0;
+    };
+    std::vector<NisFeedbackScopeWindow> nis_feedback_windows_;
+    /// marker_name -> parent joint name, built once at construction from skeleton_.
+    std::unordered_map<std::string, std::string> marker_to_joint_name_;
+
+    /**
+     * @brief Update each configured scope's windowed NIS/DOF from this step's
+     * per-observation Mahalanobis distances, and push the resulting multiplier
+     * into the UKF for the next predict() call. No-op if nis_feedback_windows_
+     * is empty (Mechanism B not configured).
+     */
+    void update_nis_feedback_scopes(std::vector<ObservationResult> const& observations);
 
     std::shared_ptr<const Skeleton> skeleton_;
     std::unordered_map<int, Camera> const& cameras_;

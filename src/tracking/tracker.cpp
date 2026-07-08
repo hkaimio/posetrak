@@ -39,6 +39,20 @@ Tracker::Tracker(std::shared_ptr<const Skeleton> skeleton,
 
     // Create IK solver
     ik_solver_ = std::make_unique<InverseKinematics>(*model_, *data_, *fk_, marker_frame_map_);
+
+    // Mechanism B (NIS-feedback regional fading) bookkeeping -- see
+    // update_nis_feedback_scopes() doc comment. Built once here since it only depends
+    // on skeleton_/config_, both fixed for the lifetime of this Tracker.
+    for (Marker const& marker : skeleton_->markers()) {
+        marker_to_joint_name_[marker.name] = skeleton_->joints()[marker.joint_index].name;
+    }
+    for (NisFeedbackScope const& scope : config_.nis_feedback_scopes) {
+        NisFeedbackScopeWindow window;
+        window.name = scope.name;
+        window.joint_names =
+            std::unordered_set<std::string>(scope.joint_names.begin(), scope.joint_names.end());
+        nis_feedback_windows_.push_back(std::move(window));
+    }
 }
 
 bool Tracker::initialize(std::vector<Observation> const& observations, double timestamp) {
@@ -398,7 +412,20 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
         ukf_->set_vel_half_life(*config_.velocity_half_life_s);
     ukf_->set_velocity_noise_gain(
         config_.process_noise_vel_gain_joint, config_.process_noise_vel_ref_joint,
-        config_.process_noise_vel_gain_root, config_.process_noise_vel_ref_root);
+        config_.process_noise_vel_gain_root, config_.process_noise_vel_ref_root,
+        config_.process_noise_vel_joint_names);
+    ukf_->set_velocity_noise_gain_arms(config_.process_noise_vel_gain_arms,
+                                       config_.process_noise_vel_ref_arms,
+                                       config_.process_noise_vel_joint_names_arms);
+    ukf_->set_pose_regularization(config_.pose_reg_joint_names,
+                                  config_.pose_reg_equal_split_noise_std,
+                                  config_.pose_reg_rest_pose_noise_std);
+    {
+        std::vector<std::pair<std::string, std::vector<std::string>>> scopes;
+        for (NisFeedbackScope const& scope : config_.nis_feedback_scopes)
+            scopes.emplace_back(scope.name, scope.joint_names);
+        ukf_->set_nis_feedback_scopes(scopes);
+    }
 
     // Enable calibration mode if requested (prismatic DOFs get small process noise)
     fmt::print("calibration_mode={}, prismatic_process_noise_std={}\n", config_.calibration_mode,
@@ -517,6 +544,46 @@ Tracker::build_annotated_observations(std::vector<Observation> const& observatio
     return annotated;
 }
 
+void Tracker::update_nis_feedback_scopes(std::vector<ObservationResult> const& observations) {
+    if (nis_feedback_windows_.empty())
+        return;
+
+    for (NisFeedbackScopeWindow& window : nis_feedback_windows_) {
+        double step_sum_sq = 0.0;
+        int step_dof = 0;
+        for (ObservationResult const& obs : observations) {
+            auto joint_it = marker_to_joint_name_.find(obs.marker_name);
+            if (joint_it == marker_to_joint_name_.end())
+                continue;
+            if (!window.joint_names.count(joint_it->second))
+                continue;
+            step_sum_sq += obs.mahalanobis_distance * obs.mahalanobis_distance;
+            step_dof += 2;  // each observation is a 2-DOF (u,v) pixel residual
+        }
+
+        window.step_sum_mahal_sq.push_back(step_sum_sq);
+        window.step_dof_count.push_back(step_dof);
+        window.running_sum_mahal_sq += step_sum_sq;
+        window.running_dof_count += step_dof;
+        if (static_cast<int>(window.step_sum_mahal_sq.size()) > config_.nis_feedback_window) {
+            window.running_sum_mahal_sq -= window.step_sum_mahal_sq.front();
+            window.running_dof_count -= window.step_dof_count.front();
+            window.step_sum_mahal_sq.pop_front();
+            window.step_dof_count.pop_front();
+        }
+
+        double const windowed_nis_dof = (window.running_dof_count > 0)
+                                            ? window.running_sum_mahal_sq / window.running_dof_count
+                                            : 0.0;
+        double multiplier = 1.0;
+        if (windowed_nis_dof > config_.nis_feedback_threshold) {
+            multiplier = std::min(config_.nis_feedback_max_multiplier,
+                                  windowed_nis_dof / config_.nis_feedback_threshold);
+        }
+        ukf_->set_scope_noise_multiplier(window.name, multiplier);
+    }
+}
+
 void Tracker::print_init_debug(State const& state, std::string const& label) const {
     auto fk_markers = fk_->compute(state);
 
@@ -629,6 +696,11 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
     auto update_info = ukf_->update(observations, cameras_, *fk_, config_.pose_noise_std,
                                     config_.calib_noise_std, config_.outlier_threshold);
     double const update_ms = Ms(Clock::now() - t1).count();
+
+    // Mechanism B: feed this step's per-observation Mahalanobis distances into each
+    // configured scope's windowed NIS/DOF, and push the resulting multiplier into the
+    // UKF so it's in effect for the next predict() call.
+    update_nis_feedback_scopes(update_info.observations);
 
     if (frame_count_ < config_.debug_init_frames) {
         fmt::print(

@@ -122,16 +122,134 @@ void UnscentedKalmanFilter::set_vel_half_life(double half_life_s) {
 }
 
 void UnscentedKalmanFilter::set_velocity_noise_gain(double gain_joint, double vel_ref_joint,
-                                                    double gain_root, double vel_ref_root) {
+                                                    double gain_root, double vel_ref_root,
+                                                    std::vector<std::string> const& joint_names) {
     vel_noise_gain_joint_ = gain_joint;
     vel_noise_ref_joint_ = vel_ref_joint;
     vel_noise_gain_root_ = gain_root;
     vel_noise_ref_root_ = vel_ref_root;
+
+    vel_noise_joint_scope_all_ = joint_names.empty();
+    vel_noise_joint_names_ =
+        std::unordered_set<std::string>(joint_names.begin(), joint_names.end());
+}
+
+void UnscentedKalmanFilter::set_velocity_noise_gain_arms(
+    double gain, double vel_ref, std::vector<std::string> const& joint_names) {
+    vel_noise_gain_arms_ = gain;
+    vel_noise_ref_arms_ = vel_ref;
+    vel_noise_joint_names_arms_ =
+        std::unordered_set<std::string>(joint_names.begin(), joint_names.end());
+}
+
+void UnscentedKalmanFilter::set_pose_regularization(std::vector<std::string> const& joint_names,
+                                                    double equal_split_noise_std,
+                                                    double rest_pose_noise_std) {
+    pose_reg_pairs_.clear();
+    pose_reg_rest_indices_.clear();
+    pose_reg_equal_split_var_ = equal_split_noise_std * equal_split_noise_std;
+    pose_reg_rest_pose_var_ = rest_pose_noise_std * rest_pose_noise_std;
+
+    // Resolve joint names to JointDesc, preserving only SPHERICAL/REVOLUTE joints that
+    // are actually present in this layout (silently skips joints outside the active
+    // group -- e.g. a child filter's layout -- rather than treating it as an error).
+    std::vector<JointDesc const*> chain;
+    for (std::string const& name : joint_names) {
+        JointDesc const* j = layout_->get_joint(name);
+        if (j && (j->type == JointType::SPHERICAL || j->type == JointType::REVOLUTE))
+            chain.push_back(j);
+    }
+
+    if (rest_pose_noise_std > 0.0) {
+        for (JointDesc const* j : chain) {
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                bool const active =
+                    (j->type == JointType::REVOLUTE) ? (axis == 0) : j->active_dof_mask[axis];
+                if (active)
+                    pose_reg_rest_indices_.push_back(static_cast<int>(j->state_index) +
+                                                     static_cast<int>(axis));
+            }
+        }
+    }
+
+    if (equal_split_noise_std > 0.0 && chain.size() >= 2) {
+        for (size_t a = 0; a < chain.size(); ++a) {
+            for (size_t b = a + 1; b < chain.size(); ++b) {
+                JointDesc const* ja = chain[a];
+                JointDesc const* jb = chain[b];
+                for (uint32_t axis = 0; axis < 3; ++axis) {
+                    bool const active_a =
+                        (ja->type == JointType::REVOLUTE) ? (axis == 0) : ja->active_dof_mask[axis];
+                    bool const active_b =
+                        (jb->type == JointType::REVOLUTE) ? (axis == 0) : jb->active_dof_mask[axis];
+                    if (active_a && active_b) {
+                        pose_reg_pairs_.emplace_back(
+                            static_cast<int>(ja->state_index) + static_cast<int>(axis),
+                            static_cast<int>(jb->state_index) + static_cast<int>(axis));
+                    }
+                }
+            }
+        }
+    }
+}
+
+void UnscentedKalmanFilter::set_nis_feedback_scopes(
+    std::vector<std::pair<std::string, std::vector<std::string>>> const& scopes) {
+    joint_to_scope_names_.clear();
+    nis_feedback_scope_multiplier_.clear();
+    for (auto const& [scope_name, joint_names] : scopes) {
+        nis_feedback_scope_multiplier_[scope_name] = 1.0;
+        for (std::string const& joint_name : joint_names)
+            joint_to_scope_names_[joint_name].push_back(scope_name);
+    }
+}
+
+void UnscentedKalmanFilter::set_scope_noise_multiplier(std::string const& scope_name,
+                                                       double multiplier) {
+    auto it = nis_feedback_scope_multiplier_.find(scope_name);
+    if (it != nis_feedback_scope_multiplier_.end())
+        it->second = multiplier;
+}
+
+Eigen::MatrixXd
+UnscentedKalmanFilter::apply_nis_feedback_scaling(Eigen::MatrixXd const& scaled_in) const {
+    if (joint_to_scope_names_.empty())
+        return scaled_in;
+
+    Eigen::MatrixXd scaled = scaled_in;
+    int const root_n = layout_->root_error_dof_count();
+    int const active_dof = root_n + layout_->joint_active_dof_count();
+
+    for (JointDesc const& j : layout_->joints()) {
+        if (j.type == JointType::PRISMATIC)
+            continue;  // Frozen/calibration-only noise; not scope-scaled.
+        auto scope_it = joint_to_scope_names_.find(j.name);
+        if (scope_it == joint_to_scope_names_.end())
+            continue;  // Not covered by any configured scope.
+
+        double var_mult = 1.0;
+        for (std::string const& scope_name : scope_it->second) {
+            auto mult_it = nis_feedback_scope_multiplier_.find(scope_name);
+            if (mult_it != nis_feedback_scope_multiplier_.end())
+                var_mult *= mult_it->second;
+        }
+        if (var_mult <= 1.0)
+            continue;
+
+        for (uint32_t d = 0; d < j.active_dof_count; ++d) {
+            int const pos_idx = root_n + static_cast<int>(j.error_index) + static_cast<int>(d);
+            int const vel_idx = active_dof + pos_idx;
+            scaled(pos_idx, pos_idx) *= var_mult;
+            scaled(vel_idx, vel_idx) *= var_mult;
+        }
+    }
+    return scaled;
 }
 
 Eigen::MatrixXd UnscentedKalmanFilter::apply_velocity_scaling(State const& velocity_state) const {
     vel_noise_scale_debug_.clear();
-    if (vel_noise_gain_joint_ <= 0.0 && vel_noise_gain_root_ <= 0.0) {
+    if (vel_noise_gain_joint_ <= 0.0 && vel_noise_gain_root_ <= 0.0 &&
+        vel_noise_gain_arms_ <= 0.0) {
         return process_noise_;
     }
 
@@ -171,6 +289,8 @@ Eigen::MatrixXd UnscentedKalmanFilter::apply_velocity_scaling(State const& veloc
         for (JointDesc const& j : layout_->joints()) {
             if (j.type == JointType::PRISMATIC)
                 continue;  // Frozen/calibration-only noise; not velocity-driven.
+            if (!vel_noise_joint_scope_all_ && !vel_noise_joint_names_.count(j.name))
+                continue;  // Outside the configured joint_groups scope (e.g. arms excluded).
             for (uint32_t d = 0; d < j.active_dof_count; ++d) {
                 int const pos_idx = root_n + static_cast<int>(j.error_index) + static_cast<int>(d);
                 int const state_idx = static_cast<int>(j.state_index) + static_cast<int>(d);
@@ -180,7 +300,110 @@ Eigen::MatrixXd UnscentedKalmanFilter::apply_velocity_scaling(State const& veloc
         }
     }
 
+    // Second, independent gain scope (e.g. arms) -- see set_velocity_noise_gain_arms().
+    // A joint in both scopes is scaled by the primary scope only (skipped here).
+    if (vel_noise_gain_arms_ > 0.0) {
+        Eigen::VectorXd const& joint_vel = velocity_state.joint_velocities();
+        for (JointDesc const& j : layout_->joints()) {
+            if (j.type == JointType::PRISMATIC)
+                continue;
+            if (!vel_noise_joint_names_arms_.count(j.name))
+                continue;
+            if (!vel_noise_joint_scope_all_ && vel_noise_joint_names_.count(j.name))
+                continue;  // Already scaled by the primary scope above.
+            for (uint32_t d = 0; d < j.active_dof_count; ++d) {
+                int const pos_idx = root_n + static_cast<int>(j.error_index) + static_cast<int>(d);
+                int const state_idx = static_cast<int>(j.state_index) + static_cast<int>(d);
+                scale_dof(pos_idx, joint_vel(state_idx), vel_noise_gain_arms_, vel_noise_ref_arms_);
+            }
+        }
+    }
+
     return scaled;
+}
+
+void UnscentedKalmanFilter::apply_pose_regularization() {
+    int const n_res = static_cast<int>(pose_reg_pairs_.size() + pose_reg_rest_indices_.size());
+    if (n_res == 0)
+        return;  // Disabled, or configured joints/axes not found in this layout.
+
+    // Second, small Kalman update pass, mirroring update()'s main correction (same
+    // sigma-point / cross-covariance / Kalman-gain pattern) but scoped to a handful of
+    // joint-angle pseudo-residuals instead of the full camera-pixel measurement vector.
+    // Regenerating sigma points from the just-corrected state_/covariance_ means this
+    // naturally composes with the real-observation update that already ran this step,
+    // and reuses apply_error_to_state() for the manifold-consistent SO(3) composition
+    // spherical joints need (rather than a hand-rolled small-angle approximation).
+    auto sigma_points = sigma_gen_.generate_sigma_points(state_, covariance_);
+    int const n_sigma = static_cast<int>(sigma_points.size());
+
+    Eigen::MatrixXd predicted(n_res, n_sigma);
+    for (int i = 0; i < n_sigma; ++i) {
+        Eigen::VectorXd const& angles = sigma_points[i].joint_angles();
+        int row = 0;
+        for (auto const& [idx_a, idx_b] : pose_reg_pairs_)
+            predicted(row++, i) = angles(idx_a) - angles(idx_b);
+        for (int idx : pose_reg_rest_indices_)
+            predicted(row++, i) = angles(idx);
+    }
+
+    Eigen::VectorXd const weights_mean = sigma_gen_.get_mean_weights();
+    Eigen::VectorXd const weights_cov = sigma_gen_.get_covariance_weights();
+    Eigen::VectorXd const predicted_mean = predicted * weights_mean;
+
+    Eigen::MatrixXd Z(n_res, n_sigma);
+    for (int i = 0; i < n_sigma; ++i)
+        Z.col(i) = predicted.col(i) - predicted_mean;
+    Eigen::MatrixXd ZW = Z;
+    for (int i = 0; i < n_sigma; ++i)
+        ZW.col(i) *= weights_cov(i);
+    Eigen::MatrixXd innovation_cov(n_res, n_res);
+    innovation_cov.noalias() = ZW * Z.transpose();
+
+    // Measurement noise R (diagonal): equal-split residuals first, then rest-pose --
+    // same order as the rows were assembled above.
+    for (int row = 0; row < static_cast<int>(pose_reg_pairs_.size()); ++row)
+        innovation_cov(row, row) += pose_reg_equal_split_var_;
+    for (int row = static_cast<int>(pose_reg_pairs_.size()); row < n_res; ++row)
+        innovation_cov(row, row) += pose_reg_rest_pose_var_;
+
+    Eigen::MatrixXd E(error_dim(), n_sigma);
+    for (int i = 0; i < n_sigma; ++i)
+        E.col(i) = compute_state_error(sigma_points[i], state_);
+    Eigen::MatrixXd EW = E;
+    for (int i = 0; i < n_sigma; ++i)
+        EW.col(i) *= weights_cov(i);
+    Eigen::MatrixXd cross_cov(error_dim(), n_res);
+    cross_cov.noalias() = EW * Z.transpose();
+
+    Eigen::LDLT<Eigen::MatrixXd> const S_ldlt(innovation_cov);
+    // Both pseudo-residual types target 0 (see set_pose_regularization()'s doc comment),
+    // so the innovation is simply the negative of the current predicted residual.
+    Eigen::VectorXd const innovation = -predicted_mean;
+    Eigen::MatrixXd const K_T = S_ldlt.solve(cross_cov.transpose());
+    Eigen::VectorXd const state_correction = K_T.transpose() * innovation;
+
+    state_ = sigma_gen_.apply_error_to_state(state_, state_correction);
+    enforce_joint_limits();
+
+    covariance_.noalias() -= cross_cov * K_T;
+    covariance_ = 0.5 * (covariance_ + covariance_.transpose());
+
+    Eigen::LLT<Eigen::MatrixXd> llt_check(covariance_);
+    if (llt_check.info() != Eigen::Success) {
+        ++psd_fix_count_;
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen_solver(covariance_);
+        if (eigen_solver.info() != Eigen::Success) {
+            throw std::runtime_error(
+                "Failed to compute eigenvalues for covariance conditioning "
+                "(pose regularization update)");
+        }
+        double const min_eig_floor = 1e-6;
+        Eigen::VectorXd eigenvalues = eigen_solver.eigenvalues().cwiseMax(min_eig_floor);
+        covariance_ = eigen_solver.eigenvectors() * eigenvalues.asDiagonal() *
+                      eigen_solver.eigenvectors().transpose();
+        covariance_ = 0.5 * (covariance_ + covariance_.transpose());
+    }
 }
 
 void UnscentedKalmanFilter::enable_calibration_mode(double prismatic_noise_std) {
@@ -576,7 +799,11 @@ PredictResult UnscentedKalmanFilter::predict(double dt) {
     // noise) uses posterior_state -- the state as of the START of this predict()
     // call, before propagation -- since it's the actual observed velocity, not the
     // (identical, constant-velocity-model) propagated one, that should drive it.
-    covariance_ += apply_velocity_scaling(posterior_state) * dt;
+    // Mechanism B (NIS-feedback regional fading) composes multiplicatively on top of
+    // Mechanism A's velocity-driven scaling -- see apply_nis_feedback_scaling() doc
+    // comment. Its multipliers were set (by Tracker) from the previous update()'s
+    // per-observation Mahalanobis distances, so this reflects last step's fit quality.
+    covariance_ += apply_nis_feedback_scaling(apply_velocity_scaling(posterior_state)) * dt;
     if (debug_enabled_)
         write_velocity_noise_scale_csv();
 
@@ -1281,6 +1508,13 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     // Step 11: Damp velocity covariance for joints that hit limits
     damp_velocity_covariance_at_limits(prev_state, state_);
     result.cov_update_ms = Ms(Clock::now() - t_cov).count();
+
+    // Step 11b: Pose regularization (kinematic redundancy) -- a second, small Kalman
+    // update pass, run after the real camera-observation correction above so it only
+    // acts on whatever redundancy the real data left underdetermined. No-op unless
+    // configured via set_pose_regularization(). Deliberately excluded from the NIS
+    // computed below -- NIS measures fit to real observations, not this synthetic term.
+    apply_pose_regularization();
 
     // Step 12: NIS = innovation^T * S^-1 * innovation — reuse LDLT factorization (vector solve)
     double nis = 0.0;

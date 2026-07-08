@@ -19,7 +19,9 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace posetrak {
@@ -214,9 +216,125 @@ class UnscentedKalmanFilter {
      * @param vel_ref_root Reference velocity for root DOFs (m/s for position,
      *        rad/s for orientation — both share this one reference). Must be > 0
      *        if gain_root > 0.
+     * @param joint_names Literal skeleton joint names (Joint::name, e.g. "spine1",
+     *        "thigh.L") the joint gain applies to. Empty (default) = all joints.
+     *        Joints not in this list keep the plain static process noise --
+     *        added after finding that a single body-wide gain over-loosens fast,
+     *        normally-fast-moving limbs (arms) while barely engaging for the
+     *        slower torso/hip motion it was tuned for, degrading limb tracking.
+     *        Deliberately name-based rather than skeleton-group-based: group
+     *        definitions in existing skeleton YAMLs aren't fine-grained enough
+     *        (e.g. one "main" group spanning the whole body) and adding a finer
+     *        split would mean editing every person's skeleton file. Does not
+     *        affect gain_root/vel_ref_root.
      */
     void set_velocity_noise_gain(double gain_joint, double vel_ref_joint, double gain_root,
-                                 double vel_ref_root);
+                                 double vel_ref_root,
+                                 std::vector<std::string> const& joint_names = {});
+
+    /**
+     * @brief Configure a second, independent velocity-driven gain for a disjoint
+     * joint scope (e.g. arms) — same Singer-model formula as
+     * set_velocity_noise_gain(), but with its own gain/reference velocity so it
+     * doesn't have to share set_velocity_noise_gain()'s joint_names tuning.
+     *
+     * Added after set_velocity_noise_gain()'s joint_names scoping excluded arms
+     * entirely (see its doc comment) to fix the original body-wide-gain
+     * regression, which left arms with only the reactive NIS-feedback safety net
+     * (set_nis_feedback_scopes()) and no proactive velocity-driven headroom.
+     * Once pose regularization (set_pose_regularization()) separately fixed the
+     * spine issue that originally forced a high core gain, a modest, independent
+     * arm gain became worth trying without reintroducing that regression.
+     *
+     * A joint listed in both this scope and set_velocity_noise_gain()'s
+     * joint_names is scaled by the primary scope only (this one is skipped for
+     * it) -- scopes are expected to be disjoint (core vs. arms) by construction.
+     *
+     * @param gain Velocity gain for this scope's joint DOFs (0.0 = disabled).
+     * @param vel_ref Reference velocity (rad/s). Must be > 0 if gain > 0.
+     * @param joint_names Literal skeleton joint names this scope covers. Empty =
+     *        disabled (not "all joints" -- unlike the primary scope, there's no
+     *        sensible default here).
+     */
+    void set_velocity_noise_gain_arms(double gain, double vel_ref,
+                                      std::vector<std::string> const& joint_names);
+
+    /**
+     * @brief Configure pose regularization for a kinematically redundant joint
+     * chain (e.g. spine1/spine2) — see
+     * docs/roadmap/features/pose-regularization/pose-regularization-design.md.
+     *
+     * Fuses two soft pseudo-measurements into a second, small Kalman update
+     * pass run at the end of update(), after the real camera-observation
+     * correction: for every pair of joints in joint_names, per shared active
+     * axis, a pseudo-residual `angle_i - angle_j -> 0` (equal-split); and for
+     * every joint in joint_names, per active axis, a pseudo-residual
+     * `angle_i -> 0` (rest-pose pull — the joint's own zero configuration,
+     * since Skeleton::Joint::rest_orientation is already baked into the
+     * kinematic model's fixed frame, not a target in State::joint_angles()
+     * space). Both use the same sigma-point/Kalman-gain machinery as the main
+     * update, so they degrade gracefully in the presence of strong,
+     * disambiguating real observations and only meaningfully act when the
+     * real data leaves the redundant direction underdetermined.
+     *
+     * Not anatomically accurate by design — a heuristic to avoid one joint in
+     * a redundant chain absorbing all available rotation (and hitting its own
+     * limit) while the others stay near neutral, not a biomechanical model.
+     *
+     * @param joint_names Joints forming the redundant chain (e.g.
+     *        {"spine1", "spine2"}). Fewer than 2 disables the equal-split
+     *        residual (rest-pose can still apply to a single joint). Empty
+     *        disables the whole mechanism.
+     * @param equal_split_noise_std Std of the equal-split pseudo-measurement
+     *        (radians) — the "stiffness" of that spring. 0.0 = disabled.
+     * @param rest_pose_noise_std Std of the rest-pose pseudo-measurement
+     *        (radians). 0.0 = disabled.
+     */
+    void set_pose_regularization(std::vector<std::string> const& joint_names,
+                                 double equal_split_noise_std, double rest_pose_noise_std);
+
+    /**
+     * @brief Configure NIS-feedback regional fading scopes (Mechanism B) — see
+     * docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
+     *
+     * A reactive safety net alongside Mechanism A (set_velocity_noise_gain()):
+     * each scope is a named group of joints (e.g. "arms"). Every predict() call,
+     * that scope's currently-set multiplier (see set_scope_noise_multiplier())
+     * is applied on top of Mechanism A's velocity-driven scaling to every active
+     * DOF of every joint in the scope — same per-DOF loop, composed
+     * multiplicatively in variance domain. The multiplier itself is computed
+     * upstream (Tracker, from a windowed average of per-observation Mahalanobis
+     * distances attributed to the scope's joints via ObservationResult::marker_name)
+     * since that bookkeeping isn't intrinsic to the UKF's own state.
+     *
+     * Root DOFs are not covered by any scope (scopes are joint-name lists;
+     * Mechanism A already has its own separate root gain).
+     *
+     * @param scopes (name, joint_names) pairs. A joint may appear in more than
+     *        one scope; their multipliers compose multiplicatively. Empty =
+     *        disabled. Calling this resets any previously-set multipliers to 1.0.
+     */
+    void set_nis_feedback_scopes(
+        std::vector<std::pair<std::string, std::vector<std::string>>> const& scopes);
+
+    /**
+     * @brief Set the current per-scope process-noise multiplier for Mechanism B.
+     * Called once per step (typically by Tracker, before the next predict())
+     * with the scope's latest windowed NIS/DOF-derived value. Unrecognized
+     * scope_name (not passed to set_nis_feedback_scopes()) is a silent no-op.
+     * @param scope_name Must match a name passed to set_nis_feedback_scopes().
+     * @param multiplier Variance-domain multiplier, >= 1.0 expected (< 1.0 is
+     *        accepted but unusual — Mechanism B only ever widens noise).
+     */
+    void set_scope_noise_multiplier(std::string const& scope_name, double multiplier);
+
+    /**
+     * @brief Per-scope process-noise multiplier most recently set via
+     * set_scope_noise_multiplier(). Debug/tuning use only.
+     */
+    std::unordered_map<std::string, double> const& last_scope_noise_multipliers() const {
+        return nis_feedback_scope_multiplier_;
+    }
 
     /**
      * @brief Per-DOF velocity-noise multiplier computed by the most recent predict()
@@ -260,6 +378,13 @@ class UnscentedKalmanFilter {
     std::vector<State> generate_sigma_points_for_testing() const {
         return sigma_gen_.generate_sigma_points(state_, covariance_);
     }
+
+    /**
+     * @brief Run the pose-regularization update pass directly (for testing),
+     * without needing a full camera-observation update() call.
+     * @see set_pose_regularization()
+     */
+    void apply_pose_regularization_for_testing() { apply_pose_regularization(); }
 
    private:
     /**
@@ -428,6 +553,18 @@ class UnscentedKalmanFilter {
     double vel_noise_ref_joint_ = 1.0;
     double vel_noise_gain_root_ = 0.0;
     double vel_noise_ref_root_ = 1.0;
+    // Set directly from set_velocity_noise_gain()'s joint_names argument: joints the
+    // joint gain applies to. Empty means "all joints" -- checked via
+    // vel_noise_joint_scope_all_ rather than by leaving this empty and treating
+    // empty-set as "no joints", which would silently disable the feature by default.
+    std::unordered_set<std::string> vel_noise_joint_names_;
+    bool vel_noise_joint_scope_all_ = true;
+    // Second, independent gain scope -- see set_velocity_noise_gain_arms(). 0.0 gain =
+    // disabled. Unlike vel_noise_joint_names_, empty joint_names means "no joints"
+    // (there's no sensible "all joints" default for a secondary scope).
+    double vel_noise_gain_arms_ = 0.0;
+    double vel_noise_ref_arms_ = 1.0;
+    std::unordered_set<std::string> vel_noise_joint_names_arms_;
     static constexpr double kMaxVelocityNoiseMultiplier = 10.0;
     /// Returns a copy of the static process_noise_ baseline (as built by
     /// rebuild_process_noise()) with each active DOF's diagonal entries scaled by
@@ -438,6 +575,36 @@ class UnscentedKalmanFilter {
     /// Per-DOF multiplier from the most recent apply_velocity_scaling() call, for
     /// last_velocity_noise_scale()'s debug/tuning accessor above.
     mutable std::unordered_map<int, double> vel_noise_scale_debug_;
+
+    // Pose regularization (kinematic redundancy) -- see set_pose_regularization().
+    // Precomputed once there from the configured joint_names, as (state_index_a,
+    // state_index_b) pairs (one per shared active axis) for the equal-split
+    // residual, and state_index list (one per active axis) for the rest-pose
+    // residual. Empty = disabled.
+    std::vector<std::pair<int, int>> pose_reg_pairs_;
+    std::vector<int> pose_reg_rest_indices_;
+    double pose_reg_equal_split_var_ = 0.0;
+    double pose_reg_rest_pose_var_ = 0.0;
+    /// Second, small Kalman update pass fusing the pose-regularization
+    /// pseudo-measurements, run at the end of update() after the real
+    /// camera-observation correction. No-op if set_pose_regularization() was
+    /// never called with a non-empty joint_names.
+    void apply_pose_regularization();
+
+    // NIS-feedback regional fading safety net (Mechanism B) -- see
+    // set_nis_feedback_scopes() / set_scope_noise_multiplier(). joint_to_scope_names_
+    // is precomputed once in set_nis_feedback_scopes() (joint name -> scope names it
+    // belongs to, usually one, multiple allowed); nis_feedback_scope_multiplier_ is
+    // updated every step by set_scope_noise_multiplier(), defaulting to 1.0 (no-op)
+    // for any scope never explicitly set. Empty joint_to_scope_names_ = disabled.
+    std::unordered_map<std::string, std::vector<std::string>> joint_to_scope_names_;
+    std::unordered_map<std::string, double> nis_feedback_scope_multiplier_;
+    /// Returns a copy of scaled_in (Mechanism A's output) with each active DOF's
+    /// diagonal entries additionally scaled by its joint's current scope
+    /// multiplier/multipliers (multiplicative if more than one); returns scaled_in
+    /// unchanged if no scopes are configured. Root DOFs are never scoped (see
+    /// set_nis_feedback_scopes() doc comment).
+    Eigen::MatrixXd apply_nis_feedback_scaling(Eigen::MatrixXd const& scaled_in) const;
 
     // Posterior state saved at the start of predict() for velocity-mode measurement prediction.
     // Initialized to the same zero state as state_; overwritten on first predict() call.

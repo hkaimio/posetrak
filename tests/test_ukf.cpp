@@ -477,6 +477,64 @@ TEST_CASE("Adaptive process noise scales a moving joint DOF more than a stationa
     REQUIRE(scale.at(joint1_idx) > scale.at(joint2_idx));
 }
 
+TEST_CASE("Adaptive process noise arms scope applies its own independent gain",
+          "[ukf][adaptive-noise]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    // Primary scope covers joint1 with gain 1.0; arms scope covers joint2 with a
+    // different, independent gain 3.0.
+    ukf.set_velocity_noise_gain(/*gain_joint=*/1.0, /*vel_ref_joint=*/1.0, /*gain_root=*/0.0,
+                                /*vel_ref_root=*/1.0, {"joint1"});
+    // Kept below the sqrt(kMaxVelocityNoiseMultiplier) =~ 3.162 clamp so this test
+    // isolates the unclamped scaling formula (see the separate clamping test above).
+    ukf.set_velocity_noise_gain_arms(/*gain=*/1.5, /*vel_ref=*/1.0, {"joint2"});
+
+    Eigen::VectorXd joint_vels(2);
+    joint_vels << 1.0, 1.0;  // both joints moving at the same speed
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), zero_angles_2(),
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), joint_vels);
+    ukf.set_state(state);
+
+    ukf.predict(0.01);
+
+    auto const& scale = ukf.last_velocity_noise_scale();
+    int const root_n = layout->root_error_dof_count();
+    int const joint1_idx = root_n + 0;
+    int const joint2_idx = root_n + 1;
+
+    // joint1 (primary scope): std_mult = 1 + 1.0 * 1.0 / 1.0 = 2.0
+    REQUIRE_THAT(scale.at(joint1_idx), WithinAbs(2.0, 1e-6));
+    // joint2 (arms scope, independent gain): std_mult = 1 + 1.5 * 1.0 / 1.0 = 2.5
+    REQUIRE_THAT(scale.at(joint2_idx), WithinAbs(2.5, 1e-6));
+}
+
+TEST_CASE(
+    "Adaptive process noise arms scope disabled by default leaves scale map "
+    "unaffected for arm joints",
+    "[ukf][adaptive-noise]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_velocity_noise_gain(/*gain_joint=*/1.0, /*vel_ref_joint=*/1.0, /*gain_root=*/0.0,
+                                /*vel_ref_root=*/1.0, {"joint1"});
+    // No set_velocity_noise_gain_arms() call -- disabled by default.
+
+    Eigen::VectorXd joint_vels(2);
+    joint_vels << 1.0, 1.0;
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), zero_angles_2(),
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), joint_vels);
+    ukf.set_state(state);
+
+    ukf.predict(0.01);
+
+    auto const& scale = ukf.last_velocity_noise_scale();
+    int const root_n = layout->root_error_dof_count();
+    int const joint2_idx = root_n + 1;
+    // joint2 outside the primary scope and no arms scope configured -- unscaled.
+    REQUIRE(scale.count(joint2_idx) == 0);
+}
+
 TEST_CASE("Adaptive process noise scales root DOFs from root velocity, independently per axis",
           "[ukf][adaptive-noise]") {
     auto layout = SkeletonLayout::from_full_skeleton(
@@ -523,4 +581,235 @@ TEST_CASE("Adaptive process noise multiplier is clamped for an extreme velocity"
     // Variance-domain clamp is documented as 10x -> std-domain clamp is sqrt(10) =~ 3.1623.
     REQUIRE(joint1_scale < 4.0);
     REQUIRE(joint1_scale > 3.0);  // confirms it actually hit the clamp, not some tiny value
+}
+
+// -----------------------------------------------------------------------------
+// Pose regularization (kinematic redundancy)
+// docs/roadmap/features/pose-regularization/pose-regularization-design.md
+// -----------------------------------------------------------------------------
+
+namespace {
+/// Two-spherical-joint skeleton (spine1 -> spine2 chain, plus floating root),
+/// matching spine1/spine2's shape: both fully free (all 3 axes active, no
+/// limits configured).
+Skeleton make_two_spherical_joint_skeleton() {
+    Skeleton skeleton;
+    skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    skeleton.add_joint("spine1", 0, JointType::SPHERICAL, Eigen::Vector3d(0, 0.1, 0));
+    skeleton.add_joint("spine2", 1, JointType::SPHERICAL, Eigen::Vector3d(0, 0.1, 0));
+    return skeleton;
+}
+
+/// angles = [spine1_x, spine1_y, spine1_z, spine2_x, spine2_y, spine2_z].
+State make_pose_reg_test_state(std::shared_ptr<const SkeletonLayout> const& layout,
+                               double spine1_x) {
+    Eigen::VectorXd angles(6);
+    angles << spine1_x, 0.0, 0.0, 0.0, 0.0, 0.0;
+    Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(6);
+    return State(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), angles,
+                 Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), joint_vels);
+}
+}  // namespace
+
+TEST_CASE("Pose regularization disabled by default is a no-op", "[ukf][pose-regularization]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_spherical_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+
+    ukf.set_state(make_pose_reg_test_state(layout, 0.3));
+    ukf.set_covariance(
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 0.01);
+
+    // No set_pose_regularization() call -- disabled by default.
+    ukf.apply_pose_regularization_for_testing();
+
+    REQUIRE_THAT(ukf.state().joint_angles()(0), WithinAbs(0.3, 1e-12));
+    REQUIRE_THAT(ukf.state().joint_angles()(3), WithinAbs(0.0, 1e-12));
+}
+
+TEST_CASE("Pose regularization equal-split pulls two joints' angles toward each other",
+          "[ukf][pose-regularization]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_spherical_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_pose_regularization({"spine1", "spine2"}, /*equal_split_noise_std=*/0.05,
+                                /*rest_pose_noise_std=*/0.0);
+
+    ukf.set_state(make_pose_reg_test_state(layout, 0.3));  // spine1_x=0.3, spine2_x=0.0
+    ukf.set_covariance(
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 0.01);
+
+    ukf.apply_pose_regularization_for_testing();
+
+    double const spine1_x = ukf.state().joint_angles()(0);
+    double const spine2_x = ukf.state().joint_angles()(3);
+    // Both should move toward each other (spine1 down, spine2 up), narrowing the gap.
+    REQUIRE(std::abs(spine1_x - spine2_x) < 0.3);
+    REQUIRE(spine1_x < 0.3);
+    REQUIRE(spine2_x > 0.0);
+    // The y/z axes started equal (0) on both joints -- should stay near 0, no spurious
+    // cross-axis coupling from a mechanism that's supposed to be strictly per-axis.
+    REQUIRE_THAT(ukf.state().joint_angles()(1), WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(ukf.state().joint_angles()(2), WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(ukf.state().joint_angles()(4), WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(ukf.state().joint_angles()(5), WithinAbs(0.0, 1e-6));
+}
+
+TEST_CASE("Pose regularization rest-pose pulls a joint's angle toward zero",
+          "[ukf][pose-regularization]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_spherical_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_pose_regularization({"spine1"}, /*equal_split_noise_std=*/0.0,
+                                /*rest_pose_noise_std=*/0.05);
+
+    ukf.set_state(make_pose_reg_test_state(layout, 0.3));
+    ukf.set_covariance(
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 0.01);
+
+    ukf.apply_pose_regularization_for_testing();
+
+    double const spine1_x = ukf.state().joint_angles()(0);
+    double const spine2_x = ukf.state().joint_angles()(3);
+    REQUIRE(spine1_x < 0.3);                       // pulled toward 0
+    REQUIRE(spine1_x > 0.0);                       // but not past it (gentle pull, not a snap)
+    REQUIRE_THAT(spine2_x, WithinAbs(0.0, 1e-6));  // spine2 not in the chain -- untouched
+}
+
+TEST_CASE("Pose regularization with unresolvable joint names is a no-op",
+          "[ukf][pose-regularization]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_spherical_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_pose_regularization({"does_not_exist_1", "does_not_exist_2"},
+                                /*equal_split_noise_std=*/0.05, /*rest_pose_noise_std=*/0.05);
+
+    ukf.set_state(make_pose_reg_test_state(layout, 0.3));
+    ukf.set_covariance(
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 0.01);
+
+    REQUIRE_NOTHROW(ukf.apply_pose_regularization_for_testing());
+    REQUIRE_THAT(ukf.state().joint_angles()(0), WithinAbs(0.3, 1e-12));
+}
+
+// -----------------------------------------------------------------------------
+// NIS-feedback regional fading safety net (Mechanism B)
+// docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md
+// -----------------------------------------------------------------------------
+
+TEST_CASE("NIS feedback disabled by default leaves multiplier map empty", "[ukf][nis-feedback]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), zero_angles_2(),
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), zero_angles_2());
+    ukf.set_state(state);
+    ukf.predict(0.01);
+
+    // No set_nis_feedback_scopes() call -- disabled by default.
+    REQUIRE(ukf.last_scope_noise_multipliers().empty());
+}
+
+TEST_CASE("NIS feedback disabled reproduces the exact static baseline", "[ukf][nis-feedback]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+
+    Eigen::MatrixXd tiny_cov =
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 1e-12;
+    ukf.set_covariance(tiny_cov);
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), zero_angles_2(),
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), zero_angles_2());
+    ukf.set_state(state);
+
+    ukf.predict(0.05);
+    Eigen::MatrixXd const baseline_cov = ukf.covariance();
+
+    // Calling set_scope_noise_multiplier() for a scope name that was never registered
+    // via set_nis_feedback_scopes() must be a silent no-op.
+    ukf.set_scope_noise_multiplier("nonexistent_scope", 5.0);
+    ukf.set_state(state);
+    ukf.set_covariance(tiny_cov);
+    ukf.predict(0.05);
+
+    REQUIRE(ukf.covariance().isApprox(baseline_cov, 1e-9));
+}
+
+TEST_CASE("NIS feedback scope multiplier scales only the joints in that scope",
+          "[ukf][nis-feedback]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_nis_feedback_scopes({{"scope1", {"joint1"}}});
+    ukf.set_scope_noise_multiplier("scope1", 4.0);
+
+    Eigen::MatrixXd tiny_cov =
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 1e-12;
+    ukf.set_covariance(tiny_cov);
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), zero_angles_2(),
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), zero_angles_2());
+    ukf.set_state(state);
+
+    ukf.predict(0.05);
+
+    int const root_n = layout->root_error_dof_count();
+    int const joint1_idx = root_n + 0;
+    int const joint2_idx = root_n + 1;
+
+    auto const& mult = ukf.last_scope_noise_multipliers();
+    REQUIRE(mult.count("scope1") == 1);
+    REQUIRE_THAT(mult.at("scope1"), WithinAbs(4.0, 1e-9));
+
+    // Since covariance started at ~0, the covariance after predict() is dominated
+    // entirely by process noise -- joint1's diagonal entry should be ~4x joint2's
+    // (joint2 is outside any configured scope, so unaffected).
+    double const ratio =
+        ukf.covariance()(joint1_idx, joint1_idx) / ukf.covariance()(joint2_idx, joint2_idx);
+    REQUIRE_THAT(ratio, WithinAbs(4.0, 1e-6));
+}
+
+TEST_CASE("NIS feedback and adaptive process noise compose multiplicatively",
+          "[ukf][nis-feedback]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_two_joint_skeleton()));
+    UnscentedKalmanFilter ukf_a(layout, 0.1);   // Mechanism A only
+    UnscentedKalmanFilter ukf_ab(layout, 0.1);  // Mechanism A + B
+
+    ukf_a.set_velocity_noise_gain(/*gain_joint=*/1.0, /*vel_ref_joint=*/1.0, /*gain_root=*/0.0,
+                                  /*vel_ref_root=*/1.0);
+    ukf_ab.set_velocity_noise_gain(/*gain_joint=*/1.0, /*vel_ref_joint=*/1.0, /*gain_root=*/0.0,
+                                   /*vel_ref_root=*/1.0);
+    ukf_ab.set_nis_feedback_scopes({{"scope1", {"joint1"}}});
+    ukf_ab.set_scope_noise_multiplier("scope1", 3.0);
+
+    Eigen::MatrixXd tiny_cov =
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 1e-12;
+    ukf_a.set_covariance(tiny_cov);
+    ukf_ab.set_covariance(tiny_cov);
+
+    Eigen::VectorXd joint_vels(2);
+    joint_vels << 1.0, 0.0;  // joint1 moving (engages Mechanism A), joint2 still
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), zero_angles_2(),
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), joint_vels);
+    ukf_a.set_state(state);
+    ukf_ab.set_state(state);
+
+    ukf_a.predict(0.05);
+    ukf_ab.predict(0.05);
+
+    int const root_n = layout->root_error_dof_count();
+    int const joint1_idx = root_n + 0;
+    int const joint2_idx = root_n + 1;
+
+    // joint1: Mechanism B's variance-domain 3.0x multiplies on top of whatever
+    // Mechanism A already computed from velocity.
+    double const ratio_joint1 =
+        ukf_ab.covariance()(joint1_idx, joint1_idx) / ukf_a.covariance()(joint1_idx, joint1_idx);
+    REQUIRE_THAT(ratio_joint1, WithinAbs(3.0, 1e-6));
+
+    // joint2: outside the scope, and zero velocity means Mechanism A doesn't engage
+    // either -- must be identical between the two filters.
+    REQUIRE_THAT(ukf_ab.covariance()(joint2_idx, joint2_idx),
+                 WithinAbs(ukf_a.covariance()(joint2_idx, joint2_idx), 1e-12));
 }

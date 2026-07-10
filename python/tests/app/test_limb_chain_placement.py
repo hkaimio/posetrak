@@ -76,6 +76,16 @@ def test_start_chain_placement_arms_first_keypoint(qapp):
     w._kp_picker.set_active.assert_called_once_with(_LEFT_ARM[0])
 
 
+def test_start_chain_placement_moves_keyboard_focus_to_first_cell(qapp):
+    # Picking a limb from the "Set limb…" menu leaves keyboard focus on the
+    # button unless we move it -- and a focused QPushButton treats Space as
+    # "click me" (reopening the menu) rather than "skip this keypoint", since
+    # key events only reach _handle_key when a camera canvas holds focus.
+    w = _make_widget(qapp)
+    w._start_chain_placement("Left arm")
+    w._cells[0]._canvas.setFocus.assert_called_once()
+
+
 def test_start_chain_placement_unknown_limb_is_a_noop(qapp):
     w = _make_widget(qapp)
     w._start_chain_placement("Tail")
@@ -105,7 +115,10 @@ def test_placement_click_advances_to_next_chain_keypoint(qapp):
         cell.set_placement_active.assert_called_with(True)
 
 
-def test_placement_click_on_last_keypoint_ends_the_chain(qapp):
+def test_placement_click_on_last_keypoint_wraps_back_to_first(qapp):
+    # The chain stays armed indefinitely (until Esc, a new limb, or a single
+    # keypoint pick) so the same limb can be placed again on another frame
+    # without re-picking it from the "Set limb…" menu each time.
     w = _make_widget(qapp)
     w._start_chain_placement("Left arm")
     w._on_kp_moved = MagicMock()
@@ -115,11 +128,12 @@ def test_placement_click_on_last_keypoint_ends_the_chain(qapp):
         w._on_placement_clicked(0, 0.0, 0.0)
 
     assert w._on_kp_moved.call_count == len(_LEFT_ARM)
-    assert w._chain_limb is None
-    assert w._pending_place_kp_idx is None
+    assert w._chain_limb == "Left arm"
+    assert w._chain_pos == 0
+    assert w._pending_place_kp_idx == _LEFT_ARM[0]
     for cell in w._cells:
-        cell.set_placement_active.assert_called_with(False)
-        cell.set_placement_label.assert_called_with(None)
+        cell.set_placement_active.assert_called_with(True)
+        cell.set_placement_label.assert_called_with("Left arm: left_shoulder (1/3)")
 
 
 # ---------------------------------------------------------------------------
@@ -139,15 +153,16 @@ def test_space_skips_current_chain_keypoint_without_writing(qapp):
     assert w._pending_place_kp_idx == _LEFT_ARM[1]
 
 
-def test_space_on_last_chain_keypoint_ends_the_chain(qapp):
+def test_space_on_last_chain_keypoint_wraps_back_to_first(qapp):
     w = _make_widget(qapp)
     w._start_chain_placement("Left arm")
 
     for _ in range(len(_LEFT_ARM)):
         w._handle_key(_FakeKeyEvent(Qt.Key.Key_Space))
 
-    assert w._chain_limb is None
-    assert w._pending_place_kp_idx is None
+    assert w._chain_limb == "Left arm"
+    assert w._chain_pos == 0
+    assert w._pending_place_kp_idx == _LEFT_ARM[0]
 
 
 def test_space_without_active_chain_falls_through_to_toggle_outlier(qapp):

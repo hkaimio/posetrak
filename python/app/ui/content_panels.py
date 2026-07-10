@@ -3225,6 +3225,11 @@ class PersonCropGridWidget(QWidget):
             "or hip→knee→ankle→...). Space skips the current keypoint, Esc ends it."
         )
         self._chain_btn.setEnabled(False)
+        # Clicking it must not leave it holding keyboard focus -- Space is
+        # the "skip keypoint" shortcut during a chain, and a focused
+        # QPushButton treats Space as "click me" (reopening this menu)
+        # instead of letting the shortcut reach _handle_key.
+        self._chain_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._chain_btn.clicked.connect(self._show_chain_menu)
 
         overlay_row = QHBoxLayout()
@@ -3735,10 +3740,15 @@ class PersonCropGridWidget(QWidget):
 
     def _arm_chain_step(self) -> None:
         """Arm placement for the current chain keypoint and show its name/position
-        on every cell. Ends the chain once the last keypoint has been placed."""
-        if self._chain_limb is None or self._chain_pos >= len(self._chain_indices):
-            self._cancel_placement()
+        on every cell. Wraps back to the first keypoint once the last one has
+        been placed, rather than ending the mode -- the whole point is to run
+        the same limb again on another frame without re-picking it from the
+        "Set limb…" menu each time. Esc (or picking a different limb/keypoint)
+        is the actual way to stop."""
+        if self._chain_limb is None:
             return
+        if self._chain_pos >= len(self._chain_indices):
+            self._chain_pos = 0
         kp_idx = self._chain_indices[self._chain_pos]
         self._pending_place_kp_idx = kp_idx
         label = (
@@ -3750,6 +3760,12 @@ class PersonCropGridWidget(QWidget):
             cell.set_placement_label(label)
         if self._kp_picker is not None:
             self._kp_picker.set_active(kp_idx)
+        # Space/Esc must reach _handle_key immediately, without the user
+        # having to click a camera view first -- key events only route there
+        # (via the installed eventFilter) when a canvas actually holds
+        # keyboard focus, which picking a limb from the menu does not confer.
+        if self._cells:
+            self._cells[0]._canvas.setFocus()
 
     def _on_placement_clicked(self, cam_idx: int, dx: float, dy: float) -> None:
         """Canvas click while placement mode is armed: place the pending

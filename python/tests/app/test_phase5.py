@@ -51,6 +51,9 @@ def _make_widget(qapp, seq_db):
     w._primary_kp_idx = None
     w._sel_cam_idx = None
     w._pending_place_kp_idx = None
+    w._chain_limb = None
+    w._chain_indices = []
+    w._chain_pos = 0
     w._kp_picker = None
     w._obs_kp = {}
     w._det_bboxes = {}

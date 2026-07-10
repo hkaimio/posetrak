@@ -24,6 +24,9 @@ def _make_widget(qapp):
     w._primary_kp_idx = 1
     w._sel_cam_idx = 0
     w._pending_place_kp_idx = None
+    w._chain_limb = None
+    w._chain_indices = []
+    w._chain_pos = 0
     w._kp_picker = MagicMock()
     w._range_start_v = None
     w._range_end_v = None

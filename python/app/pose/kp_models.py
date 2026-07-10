@@ -16,7 +16,7 @@ Usage::
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,12 @@ class PoseModel:
     # `groups` itself is not partition-safe: entries like "Upper body" or "Torso"
     # deliberately overlap "Left arm" etc. for the flexible group-selection menu.
     tree_groups: tuple[str, ...] = ()
+    # limb name -> proximal-to-distal keypoint names, for the chain keypoint
+    # placement tool (click the shoulder, then the elbow, then the wrist, ...).
+    # Unlike `groups`, order matters here. Names not present in this model
+    # (e.g. finger tips on COCO-17) are simply absent from the tuple --
+    # limb_chain_indices() below drops names that don't resolve.
+    limb_chains: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def name_of(self, idx: int) -> str:
         if 0 <= idx < len(self.names):
@@ -53,6 +59,15 @@ class PoseModel:
     @property
     def group_names(self) -> list[str]:
         return list(self.groups)
+
+    def limb_chain_indices(self, limb: str) -> list[int]:
+        """Ordered keypoint indices for *limb*, skipping names absent from this model."""
+        indices = []
+        for name in self.limb_chains.get(limb, ()):
+            idx = self.index_of(name)
+            if idx is not None:
+                indices.append(idx)
+        return indices
 
 
 # ---------------------------------------------------------------------------
@@ -86,11 +101,19 @@ _COCO17_TREE_GROUPS: tuple[str, ...] = (
     "Face", "Left arm", "Right arm", "Left leg", "Right leg",
 )
 
+_COCO17_LIMB_CHAINS: dict[str, tuple[str, ...]] = {
+    "Left arm":   ("left_shoulder", "left_elbow", "left_wrist"),
+    "Right arm":  ("right_shoulder", "right_elbow", "right_wrist"),
+    "Left leg":   ("left_hip", "left_knee", "left_ankle"),
+    "Right leg":  ("right_hip", "right_knee", "right_ankle"),
+}
+
 COCO17 = PoseModel(
     model_id="coco-17",
     names=_COCO17_NAMES,
     groups=_COCO17_GROUPS,
     tree_groups=_COCO17_TREE_GROUPS,
+    limb_chains=_COCO17_LIMB_CHAINS,
 )
 
 
@@ -197,11 +220,19 @@ _COCO133_TREE_GROUPS: tuple[str, ...] = (
     "Left leg", "Right leg",
 )
 
+_COCO133_LIMB_CHAINS: dict[str, tuple[str, ...]] = {
+    "Left arm":   ("left_shoulder", "left_elbow", "left_wrist", "left_index_1", "left_pinky_1"),
+    "Right arm":  ("right_shoulder", "right_elbow", "right_wrist", "right_index_1", "right_pinky_1"),
+    "Left leg":   ("left_hip", "left_knee", "left_ankle", "left_heel", "left_big_toe", "left_small_toe"),
+    "Right leg":  ("right_hip", "right_knee", "right_ankle", "right_heel", "right_big_toe", "right_small_toe"),
+}
+
 COCO133 = PoseModel(
     model_id="coco-133",
     names=_COCO133_NAMES,
     groups=_COCO133_GROUPS,
     tree_groups=_COCO133_TREE_GROUPS,
+    limb_chains=_COCO133_LIMB_CHAINS,
 )
 
 

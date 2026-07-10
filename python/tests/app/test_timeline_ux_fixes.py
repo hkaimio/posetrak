@@ -476,6 +476,9 @@ def _make_widget(db):
     w._slider.setValue(0)
     w._time_label = None
     w._edit_mode = False
+    w._chain_limb = None
+    w._chain_indices = []
+    w._chain_pos = 0
     w._sel_kp_indices = set()
     w._primary_kp_idx = None
     w._sel_cam_idx = None

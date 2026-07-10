@@ -1853,6 +1853,10 @@ class _ImageCanvas(QWidget):
         # left-click places it (see placement_clicked / mousePressEvent)
         # instead of the normal select/drag/rubber-band flow.
         self._placement_active: bool = False
+        # Text shown top-center while chain-placement mode is armed, naming
+        # the limb keypoint the next click will set. None hides it (also used
+        # for the plain one-shot placement mode, which has no chain to name).
+        self._placement_label: str | None = None
         # Diagnostic label naming which crop-source layer produced the
         # currently-shown image (and whether black-fill was applied) --
         # see "Debug overlay" in the design doc. None = hidden (checkbox off
@@ -1862,6 +1866,10 @@ class _ImageCanvas(QWidget):
     def set_placement_active(self, active: bool) -> None:
         self._placement_active = active
         self.setCursor(Qt.CursorShape.CrossCursor if active else Qt.CursorShape.ArrowCursor)
+
+    def set_placement_label(self, text: str | None) -> None:
+        self._placement_label = text
+        self.update()
 
     def show_empty(self) -> None:
         self._loading = False
@@ -2235,11 +2243,36 @@ class _ImageCanvas(QWidget):
             painter.setPen(QColor(255, 220, 0))
             painter.drawText(QPointF(2 * pad, pad + fm.ascent() + pad), self._debug_label)
 
+        def _draw_placement_label() -> None:
+            # Chain-placement mode: names which keypoint the next click will
+            # set, e.g. "Left arm: elbow (2/5)" -- top-center, out of the way
+            # of the debug label (top-left) and any per-keypoint name label.
+            if not self._placement_label:
+                return
+            font = painter.font()
+            font.setBold(True)
+            painter.setFont(font)
+            fm = painter.fontMetrics()
+            pad = 4
+            text = self._placement_label
+            tw = fm.horizontalAdvance(text)
+            th = fm.height()
+            x = (cw - tw) / 2 - pad
+            y = 4.0
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 140, 0, 225))
+            painter.drawRoundedRect(QRectF(x, y, tw + 2 * pad, th + 2 * pad), 3.0, 3.0)
+            painter.setPen(QColor(0, 0, 0))
+            painter.drawText(QPointF(x + pad, y + pad + fm.ascent()), text)
+            font.setBold(False)
+            painter.setFont(font)
+
         if self._pixmap is None:
             painter.setPen(QColor("#666"))
             label = "generating…" if self._loading else "—"
             painter.drawText(QRectF(0, 0, cw, ch), Qt.AlignmentFlag.AlignCenter, label)
             _draw_debug_label()
+            _draw_placement_label()
             painter.end()
             return
 
@@ -2424,6 +2457,7 @@ class _ImageCanvas(QWidget):
             ))
 
         _draw_debug_label()
+        _draw_placement_label()
         painter.end()
 
 
@@ -2497,6 +2531,9 @@ class _CropCell(QWidget):
 
     def set_placement_active(self, active: bool) -> None:
         self._canvas.set_placement_active(active)
+
+    def set_placement_label(self, text: str | None) -> None:
+        self._canvas.set_placement_label(text)
 
     def set_trail(self, trail) -> None:
         self._canvas.set_trail(trail)
@@ -2900,8 +2937,21 @@ class PersonCropGridWidget(QWidget):
         # Keypoint-placement mode (see _KeypointPickerPanel): the keypoint
         # picked from the toolbar, waiting for a canvas click to place it.
         # One-shot -- cleared after a placement, by Esc, by picking a
-        # different keypoint, or on exiting edit mode.
+        # different keypoint, or on exiting edit mode. Chain-placement mode
+        # (see _start_chain_placement) also drives this same field, one limb
+        # keypoint at a time, but re-arms itself after each placement instead
+        # of clearing it -- see _chain_limb below.
         self._pending_place_kp_idx: int | None = None
+        # Chain-placement mode state: set a whole limb in shoulder->wrist (or
+        # hip->toe) order with one click per keypoint. _chain_limb is the
+        # active limb name (a key into PoseModel.limb_chains) or None when no
+        # chain is in progress; _chain_indices is that limb's ordered
+        # keypoint indices (resolved once, at chain start); _chain_pos is the
+        # index into _chain_indices of the keypoint the next click will set.
+        self._chain_limb: str | None = None
+        self._chain_indices: list[int] = []
+        self._chain_pos: int = 0
+        self._chain_btn: QPushButton | None = None
         self._kp_picker: "_KeypointPickerPanel | None" = None
         # svid → seg_quality_run_id (or None when no masks are available)
         self._seg_sources: dict[str, str | None] = {}
@@ -3169,6 +3219,14 @@ class PersonCropGridWidget(QWidget):
         self._edit_btn.setToolTip("Toggle keypoint editing mode: click to select, drag to move")
         self._edit_btn.toggled.connect(self._set_edit_mode)
 
+        self._chain_btn = QPushButton("Set limb…")
+        self._chain_btn.setToolTip(
+            "Click through a limb's keypoints in order (shoulder→elbow→wrist→...\n"
+            "or hip→knee→ankle→...). Space skips the current keypoint, Esc ends it."
+        )
+        self._chain_btn.setEnabled(False)
+        self._chain_btn.clicked.connect(self._show_chain_menu)
+
         overlay_row = QHBoxLayout()
         overlay_row.addWidget(QLabel("Show:"))
         overlay_row.addWidget(self._show_detected)
@@ -3178,6 +3236,7 @@ class PersonCropGridWidget(QWidget):
         overlay_row.addStretch()
         overlay_row.addWidget(self._time_label)
         overlay_row.addWidget(self._edit_btn)
+        overlay_row.addWidget(self._chain_btn)
 
         # Maximized-view container: big cell on left, thumbnail strip on right.
         self._max_placeholder = QWidget()  # occupies left slot when not maximized
@@ -3414,6 +3473,8 @@ class PersonCropGridWidget(QWidget):
                 cell.set_selection(None, frozenset())
         if self._kp_picker is not None:
             self._kp_picker.setVisible(enabled)
+        if self._chain_btn is not None:
+            self._chain_btn.setEnabled(enabled)
         if self._timeline is not None:
             self._timeline.set_edit_mode(enabled)
             self._sync_timeline(self._current_t)
@@ -3626,35 +3687,89 @@ class PersonCropGridWidget(QWidget):
     def _on_kp_picked(self, kp_idx: int) -> None:
         """A keypoint was picked from the placement toolbar: arm placement
         mode on every camera cell. Picking a different keypoint while one is
-        already pending just retargets it -- no need to Esc first."""
+        already pending just retargets it -- no need to Esc first. Also ends
+        any in-progress limb chain, since a single explicit pick overrides it."""
+        self._chain_limb = None
+        self._chain_indices = []
+        self._chain_pos = 0
         self._pending_place_kp_idx = kp_idx
         for cell in self._cells:
             cell.set_placement_active(True)
+            cell.set_placement_label(None)
         if self._kp_picker is not None:
             self._kp_picker.set_active(kp_idx)
 
     def _cancel_placement(self) -> None:
-        if self._pending_place_kp_idx is None:
+        if self._pending_place_kp_idx is None and self._chain_limb is None:
             return
         self._pending_place_kp_idx = None
+        self._chain_limb = None
+        self._chain_indices = []
+        self._chain_pos = 0
         for cell in self._cells:
             cell.set_placement_active(False)
+            cell.set_placement_label(None)
         if self._kp_picker is not None:
             self._kp_picker.set_active(None)
+
+    def _show_chain_menu(self) -> None:
+        """"Set limb…" button: pick which limb to place, in shoulder/hip-first order."""
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        for limb in ("Left arm", "Right arm", "Left leg", "Right leg"):
+            if not self._pose_model.limb_chain_indices(limb):
+                continue
+            action = menu.addAction(limb)
+            action.triggered.connect(lambda checked=False, lb=limb: self._start_chain_placement(lb))
+        if self._chain_btn is not None:
+            menu.exec(self._chain_btn.mapToGlobal(self._chain_btn.rect().bottomLeft()))
+
+    def _start_chain_placement(self, limb: str) -> None:
+        indices = self._pose_model.limb_chain_indices(limb)
+        if not indices:
+            return
+        self._chain_limb = limb
+        self._chain_indices = indices
+        self._chain_pos = 0
+        self._arm_chain_step()
+
+    def _arm_chain_step(self) -> None:
+        """Arm placement for the current chain keypoint and show its name/position
+        on every cell. Ends the chain once the last keypoint has been placed."""
+        if self._chain_limb is None or self._chain_pos >= len(self._chain_indices):
+            self._cancel_placement()
+            return
+        kp_idx = self._chain_indices[self._chain_pos]
+        self._pending_place_kp_idx = kp_idx
+        label = (
+            f"{self._chain_limb}: {self._pose_model.name_of(kp_idx)} "
+            f"({self._chain_pos + 1}/{len(self._chain_indices)})"
+        )
+        for cell in self._cells:
+            cell.set_placement_active(True)
+            cell.set_placement_label(label)
+        if self._kp_picker is not None:
+            self._kp_picker.set_active(kp_idx)
 
     def _on_placement_clicked(self, cam_idx: int, dx: float, dy: float) -> None:
         """Canvas click while placement mode is armed: place the pending
         keypoint at the clicked location, on any frame (real detection,
         ghost frame, or already has a dot there) -- a superset of
         _on_empty_area_clicked's ghost-frame-only, primary-selection-only
-        placement. One shot: disarms afterward, same as a normal drag-to-move
-        only moves the one keypoint it grabbed."""
+        placement. Plain toolbar placement is one shot: disarms afterward,
+        same as a normal drag-to-move only moves the one keypoint it grabbed.
+        Chain placement instead re-arms for the next limb keypoint."""
         if self._pending_place_kp_idx is None:
             return
         kp_idx = self._pending_place_kp_idx
         full_x, full_y = self._cells[cam_idx]._canvas._display_to_full(dx, dy)
-        self._cancel_placement()
-        self._on_kp_moved(cam_idx, kp_idx, full_x, full_y)
+        if self._chain_limb is not None:
+            self._chain_pos += 1
+            self._on_kp_moved(cam_idx, kp_idx, full_x, full_y)
+            self._arm_chain_step()
+        else:
+            self._cancel_placement()
+            self._on_kp_moved(cam_idx, kp_idx, full_x, full_y)
 
     # ------------------------------------------------------------------
     # Keyboard handling
@@ -3721,6 +3836,10 @@ class PersonCropGridWidget(QWidget):
         if key == Qt.Key.Key_M and self._timeline is not None:
             v = int(round((self._current_t - self._t_start) * 1000))
             self._timeline.set_marker(v)
+            return True
+        if key == Qt.Key.Key_Space and self._chain_limb is not None:
+            self._chain_pos += 1
+            self._arm_chain_step()
             return True
         if ctrl and key == Qt.Key.Key_C:
             self._copy_keypoints()
@@ -4123,6 +4242,13 @@ class PersonCropGridWidget(QWidget):
         self._current_t = self._t_start + value / 1000.0
         if self._time_label is not None:
             self._time_label.setText(_fmt_time(self._current_t))
+        if self._chain_limb is not None and self._chain_pos != 0:
+            # A limb chain always restarts at its first keypoint on a frame
+            # change (A/D, slider drag, or timeline scrub all land here) --
+            # per-frame progress through the chain isn't meaningful since
+            # each frame needs the whole limb set from scratch.
+            self._chain_pos = 0
+            self._arm_chain_step()
         self._load_frame(self._current_t)
         self.time_changed.emit(self._current_t)
 

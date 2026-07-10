@@ -3217,6 +3217,11 @@ class PersonCropGridWidget(QWidget):
         self._timeline.keyframe_toggled.connect(self._on_timeline_keyframe_toggle)
         self._timeline.time_scrubbed.connect(self._on_timeline_scrub)
         self._timeline.visibility_toggled.connect(self._on_timeline_visibility_toggled)
+        self._timeline.select_to_marker_requested.connect(self._on_timeline_select_to_marker)
+        self._timeline.select_all_to_marker_requested.connect(self._on_timeline_select_all_to_marker)
+        self._timeline.disable_selected_requested.connect(lambda: self._set_outlier_selected(True))
+        self._timeline.enable_selected_requested.connect(lambda: self._set_outlier_selected(False))
+        self._timeline.interpolate_missing_requested.connect(self._interpolate_missing_range)
         if self._cameras:
             # set_time_range only needs to run once: t_start/t_end/sync_table
             # are the same for every camera in a sequence, so re-running it on
@@ -3356,6 +3361,13 @@ class PersonCropGridWidget(QWidget):
         self._3d_ph.show()
 
         self._stack.setCurrentIndex(1)
+
+        # Maximizing a camera almost always means you want to work with that
+        # camera's data next -- follow it in the timeline, same rule already
+        # used when a keypoint gets selected in a different camera's cell
+        # (see _sync_timeline).
+        self._sel_cam_idx = idx
+        self._sync_timeline(self._current_t)
 
     def _leave_maximized(self) -> None:
         if self._maximized_idx is None:
@@ -3544,6 +3556,15 @@ class PersonCropGridWidget(QWidget):
         all_act.triggered.connect(lambda ci=cam_idx: self._select_all(ci))
         clear_act = menu.addAction("Deselect all")
         clear_act.triggered.connect(lambda: self._on_kp_deselected(cam_idx))
+        if self._sel_kp_indices:
+            menu.addSeparator()
+            disable_act = menu.addAction("Disable selected")
+            disable_act.triggered.connect(lambda: self._set_outlier_selected(True))
+            enable_act = menu.addAction("Enable selected")
+            enable_act.triggered.connect(lambda: self._set_outlier_selected(False))
+            if self._range_start_v is not None:
+                interp_act = menu.addAction("Interpolate missing")
+                interp_act.triggered.connect(self._interpolate_missing_range)
         cell = self._cells[cam_idx]
         if cell._canvas._zoom_rect is not None:
             menu.addSeparator()
@@ -3696,6 +3717,10 @@ class PersonCropGridWidget(QWidget):
 
         if key == Qt.Key.Key_I and self._range_start_v is not None:
             self._interpolate_range()
+            return True
+        if key == Qt.Key.Key_M and self._timeline is not None:
+            v = int(round((self._current_t - self._t_start) * 1000))
+            self._timeline.set_marker(v)
             return True
         if ctrl and key == Qt.Key.Key_C:
             self._copy_keypoints()
@@ -3968,8 +3993,32 @@ class PersonCropGridWidget(QWidget):
         self._load_frame(self._current_t)
 
     def _toggle_outlier(self) -> None:
+        """Space bar: flip the current frame's primary kp state and apply
+        that same new state to the whole selection (see
+        `_set_outlier_selected` for the shared apply-to-range logic)."""
+        if not self._sel_kp_indices or self._sel_cam_idx is None or not self._sync_table:
+            return
+        cam = self._cameras[self._sel_cam_idx]
+        cam_id = cam["camera_instance_id"]
+        svid = cam["shot_video_id"]
+        frame_idx = self._sync_table.lookup(self._current_t, svid)
+        kp_cur = self._obs_kp.get(cam_id, {}).get(frame_idx) if frame_idx is not None else None
+        if kp_cur is None:
+            return
+        pri = self._primary_kp_idx
+        if pri is None or pri >= kp_cur.shape[0]:
+            pri = next(iter(self._sel_kp_indices))
+        new_outlier = float(kp_cur[pri, 2]) >= 0.01
+        self._set_outlier_selected(new_outlier)
+
+    def _set_outlier_selected(self, is_outlier: bool) -> None:
+        """Mark every selected keypoint as outlier (disabled) or not, across
+        every frame in the active range — or just the current frame if no
+        range is selected. Shared by the Space-bar toggle and the "Disable
+        selected" / "Enable selected" context-menu actions, which pass an
+        explicit target state instead of inferring one from the primary kp."""
         from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit
-        if not self._sel_kp_indices:
+        if not self._sel_kp_indices or self._sel_cam_idx is None:
             return
         cam = self._cameras[self._sel_cam_idx]
         cam_id = cam["camera_instance_id"]
@@ -3978,17 +4027,7 @@ class PersonCropGridWidget(QWidget):
             return
         kp_by_frame = self._obs_kp.get(cam_id, {})
 
-        # Determine new outlier state from current frame's primary kp
         frame_idx = self._sync_table.lookup(self._current_t, svid)
-        kp_cur = kp_by_frame.get(frame_idx) if frame_idx is not None else None
-        if kp_cur is None:
-            return
-        pri = self._primary_kp_idx
-        if pri is None or pri >= kp_cur.shape[0]:
-            pri = next(iter(self._sel_kp_indices))
-        new_outlier = float(kp_cur[pri, 2]) >= 0.01
-
-        # Apply to all frames in range (or just current frame if no range)
         target_frames: list[int]
         if self._range_start_v is not None:
             target_frames = sorted(self._range_frame_set(svid))
@@ -4007,13 +4046,78 @@ class PersonCropGridWidget(QWidget):
                     kp_idx,
                     float(kp_f[kp_idx, 0]),
                     float(kp_f[kp_idx, 1]),
-                    is_outlier=new_outlier,
+                    is_outlier=is_outlier,
                 )
         self._obs_kp[cam_id] = read_observations_with_edits(
             self._conn, self._sequence_id, cam_id
         )
         self._refresh_timeline_status(cam_id)
         self._load_frame(self._current_t)
+
+    def _interpolate_missing_range(self) -> None:
+        """Right-click "Interpolate missing": like `_interpolate_range`, but
+        only fills frames that have *no* value for a selected keypoint
+        (confidence < 0.01 — disabled, or a ghost frame with nothing at that
+        slot) — every frame that already has a value, disabled or not, is
+        left untouched. Anchors are the nearest present values on either
+        side of each gap, found independently per keypoint; a gap that
+        isn't bounded by a present value on both sides (e.g. touching the
+        range's own edge) is left as still-missing rather than extrapolated.
+        """
+        from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit
+        if self._range_start_v is None or self._range_end_v is None:
+            return
+        if not self._sel_kp_indices or not self._sync_table:
+            return
+
+        for cam in self._cameras:
+            cam_id = cam["camera_instance_id"]
+            svid = cam["shot_video_id"]
+
+            range_frames = sorted(self._range_frame_set(svid))
+            if not range_frames:
+                continue
+            kp_by_frame = self._obs_kp.get(cam_id, {})
+
+            any_written = False
+            for kp_idx in self._sel_kp_indices:
+                present: list[tuple[int, float, float]] = []
+                for f in range_frames:
+                    kp_f = kp_by_frame.get(f)
+                    if kp_f is None or kp_idx >= kp_f.shape[0]:
+                        continue
+                    if float(kp_f[kp_idx, 2]) >= 0.01:
+                        present.append((f, float(kp_f[kp_idx, 0]), float(kp_f[kp_idx, 1])))
+                if len(present) < 2:
+                    continue  # nothing to interpolate from
+
+                present_frames = {f for f, _, _ in present}
+                for (f0, x0, y0), (f1, x1, y1) in zip(present, present[1:]):
+                    span = f1 - f0
+                    if span <= 0:
+                        continue
+                    for f in range_frames:
+                        if f <= f0 or f >= f1 or f in present_frames:
+                            continue
+                        t = (f - f0) / span
+                        x = x0 + t * (x1 - x0)
+                        y = y0 + t * (y1 - y0)
+                        update_single_keypoint_edit(
+                            self._conn, self._sequence_id, cam_id, f, kp_idx, x, y
+                        )
+                        any_written = True
+
+            if any_written:
+                self._obs_kp[cam_id] = read_observations_with_edits(
+                    self._conn, self._sequence_id, cam_id
+                )
+                self._refresh_timeline_status(cam_id)
+
+        self._load_frame(self._current_t)
+        n = len(self._sel_kp_indices)
+        self.status_message.emit(
+            f"Interpolated missing values for {n} keypoint{'s' if n != 1 else ''} over range"
+        )
 
     def _on_slider(self, value: int) -> None:
         self._current_t = self._t_start + value / 1000.0
@@ -4206,6 +4310,40 @@ class PersonCropGridWidget(QWidget):
         if range_start_v != range_end_v:
             self._range_start_v = min(range_start_v, range_end_v)
             self._range_end_v = max(range_start_v, range_end_v)
+        self._load_frame(self._current_t)
+
+    def _on_timeline_select_to_marker(self, kp_indices) -> None:
+        """"Select to marker" from a timeline row's right-click menu:
+        selects that row's keypoint(s) and the frame range between the
+        marker and the current playhead, whichever order they fall in."""
+        if self._timeline is None:
+            return
+        marker_v = self._timeline.marker_v()
+        if marker_v is None:
+            return
+        current_v = int(round((self._current_t - self._t_start) * 1000))
+        self._sel_kp_indices = set(kp_indices) - self._hidden_kp_indices
+        self._primary_kp_idx = next(iter(self._sel_kp_indices), None)
+        self._sel_cam_idx = self._timeline.active_camera_index()
+        self._range_start_v = min(marker_v, current_v)
+        self._range_end_v = max(marker_v, current_v)
+        self._load_frame(self._current_t)
+
+    def _on_timeline_select_all_to_marker(self) -> None:
+        """"Select all keypoints to marker" from the ruler's right-click
+        menu: every visible keypoint, over the range between the marker
+        and the current playhead."""
+        if self._timeline is None:
+            return
+        marker_v = self._timeline.marker_v()
+        if marker_v is None:
+            return
+        current_v = int(round((self._current_t - self._t_start) * 1000))
+        self._sel_kp_indices = set(self._pose_model.all_indices) - self._hidden_kp_indices
+        self._primary_kp_idx = next(iter(self._sel_kp_indices), None)
+        self._sel_cam_idx = self._timeline.active_camera_index()
+        self._range_start_v = min(marker_v, current_v)
+        self._range_end_v = max(marker_v, current_v)
         self._load_frame(self._current_t)
 
     def _on_timeline_keyframe_toggle(self, kp_idx: int, time_v: int) -> None:

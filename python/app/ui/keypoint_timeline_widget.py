@@ -47,6 +47,14 @@ after Phase 13 landed:
   toggling here, and from drawing/hit-testing/selection in the crop grid
   (`PersonCropGridWidget._hidden_kp_indices`, the actual source of truth —
   this widget only renders it and emits `visibility_toggled`).
+- Round 5: a single timestamp marker, shown as a red flag in the ruler.
+  Right-click the ruler to set/clear it (`_RulerWidget.contextMenuEvent`).
+  Right-click a row in the canvas to "Select to marker", which selects that
+  row's keypoint(s) and the frame range between the marker and the current
+  playhead (whichever order they're in) — the actual selection/DB state
+  still lives on the host widget, this only emits `marker_set` /
+  `select_to_marker_requested`, matching the existing
+  state-lives-on-the-host convention from Phase 13.
 """
 from __future__ import annotations
 
@@ -56,6 +64,7 @@ from PySide6.QtCore import Qt, QPointF, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QMenu,
     QPushButton,
     QScrollArea,
     QScrollBar,
@@ -90,6 +99,9 @@ _LABEL_COLOR = QColor(220, 220, 220)
 _SELECTED_ROW_BG = QColor(60, 90, 130, 130)
 _RANGE_OVERLAY = QColor(255, 255, 255, 60)
 _PLAYHEAD_COLOR = QColor(255, 80, 80)
+_MARKER_COLOR = QColor(230, 40, 40)
+_MARKER_FLAG_W = 9   # px — width of the flag triangle
+_MARKER_FLAG_H = 7   # px — height of the flag triangle
 _INLIER_BAR_COLOR = QColor(180, 180, 180)
 _DRAG_RECT_COLOR = QColor(120, 170, 255, 60)
 _HIDDEN_ROW_OVERLAY = QColor(0, 0, 0, 140)
@@ -234,6 +246,20 @@ class _TimelineCanvas(QWidget):
     # kp_indices(frozenset[int]) — eye-icon click on a row's label column;
     # the host decides show-vs-hide (see PersonCropGridWidget's handler)
     visibility_toggled = Signal(object)
+    # kp_indices(tuple[int, ...]) — "Select to marker" chosen from a row's
+    # right-click menu; the host computes the actual frame range from the
+    # marker and the current playhead (this widget doesn't own DB state)
+    select_to_marker_requested = Signal(object)
+    # emitted whenever the marker moves/clears, so the ruler (a sibling
+    # widget that reads marker_v() directly rather than duplicating it,
+    # same as view_range()) knows to repaint
+    marker_changed = Signal()
+    # no-payload: "Disable selected" / "Enable selected" / "Interpolate
+    # missing" from a row's right-click menu, acting on the host's current
+    # selection + range — same three actions as the crop-grid canvas menu
+    disable_selected_requested = Signal()
+    enable_selected_requested = Signal()
+    interpolate_missing_requested = Signal()
 
     def __init__(self, pose_model: PoseModel, parent=None) -> None:
         super().__init__(parent)
@@ -260,6 +286,7 @@ class _TimelineCanvas(QWidget):
         self._range_start_v: int | None = None
         self._range_end_v: int | None = None
         self._current_v: int = 0
+        self._marker_v: int | None = None
 
         self._edit_mode = False
         self._drag_start: tuple[float, float] | None = None
@@ -341,6 +368,14 @@ class _TimelineCanvas(QWidget):
     def set_hidden(self, hidden: frozenset[int]) -> None:
         self._hidden_kp = hidden
         self.update()
+
+    def set_marker(self, v: int | None) -> None:
+        self._marker_v = v
+        self.update()
+        self.marker_changed.emit()
+
+    def marker_v(self) -> int | None:
+        return self._marker_v
 
     # ------------------------------------------------------------------
     # Zoom / pan
@@ -665,6 +700,42 @@ class _TimelineCanvas(QWidget):
         self._drag_moved = False
         self.update()
 
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        """Right-click a row: offer to select that row's keypoint(s) across
+        the range between the marker and the current playhead, plus —
+        whenever a selection already exists — the same disable/enable/
+        interpolate-missing actions the crop-grid canvas's menu has. A
+        selection made via "select to marker" naturally continues here,
+        so those actions need to be reachable from this menu too, not
+        only from the crop grid."""
+        if not self._edit_mode:
+            return
+        pos = event.pos()
+        row = self._row_at_y(int(pos.y())) if pos.x() >= LABEL_W else None
+
+        menu = QMenu(self)
+        if self._marker_v is not None and row is not None and row.kp_indices:
+            kp_indices = tuple(i for i in row.kp_indices if i not in self._hidden_kp)
+            if kp_indices:
+                label = row.label if row.kind == "leaf" else f"{row.label} (all)"
+                action = menu.addAction(f"Select {label} to marker")
+                action.triggered.connect(
+                    lambda checked=False, idx=kp_indices: self.select_to_marker_requested.emit(idx)
+                )
+        if self._sel_kp_indices:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            disable_act = menu.addAction("Disable selected")
+            disable_act.triggered.connect(lambda: self.disable_selected_requested.emit())
+            enable_act = menu.addAction("Enable selected")
+            enable_act.triggered.connect(lambda: self.enable_selected_requested.emit())
+            if self._range_start_v is not None:
+                interp_act = menu.addAction("Interpolate missing")
+                interp_act.triggered.connect(lambda: self.interpolate_missing_requested.emit())
+        if menu.isEmpty():
+            return
+        menu.exec(event.globalPos())
+
     def wheelEvent(self, event) -> None:  # noqa: N802
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             factor = 0.8 if event.angleDelta().y() > 0 else 1.25
@@ -727,6 +798,12 @@ class _TimelineCanvas(QWidget):
                 if is_hidden:
                     painter.fillRect(0, y, self.width(), ROW_H, _HIDDEN_ROW_OVERLAY)
 
+            if (self._marker_v is not None
+                    and self._view_start_v <= self._marker_v <= self._view_end_v):
+                mx = self._x_at_time_v(self._marker_v)
+                painter.setPen(QPen(_MARKER_COLOR, 1, Qt.PenStyle.DashLine))
+                painter.drawLine(int(mx), 0, int(mx), self.height())
+
             if self._view_start_v <= self._current_v <= self._view_end_v:
                 px = self._x_at_time_v(self._current_v)
                 painter.setPen(QPen(_PLAYHEAD_COLOR, 2))
@@ -764,6 +841,10 @@ class _RulerWidget(QWidget):
 
     time_scrubbed = Signal(int)  # time_v, ms from t_start
     collapse_clicked = Signal()
+    # no-payload: "Select all keypoints to marker" from the ruler's
+    # right-click menu; the host selects every visible keypoint and the
+    # frame range between the marker and the current playhead
+    select_all_to_marker_requested = Signal()
 
     def __init__(self, canvas: _TimelineCanvas, parent=None) -> None:
         super().__init__(parent)
@@ -824,6 +905,28 @@ class _RulerWidget(QWidget):
         self._dragging = False
         super().mouseReleaseEvent(event)
 
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        """Right-click the ruler: set the marker at the clicked time, clear
+        it if one's already set, or select every keypoint across the range
+        between the marker and the current playhead. Only one marker at a
+        time — setting a new one silently replaces whatever was there."""
+        pos = event.pos()
+        if pos.x() < LABEL_W:
+            return
+        menu = QMenu(self)
+        v = self._time_v_at_x(pos.x())
+        set_act = menu.addAction("Set marker here")
+        set_act.triggered.connect(lambda checked=False, mv=v: self._canvas.set_marker(mv))
+        if self._canvas.marker_v() is not None:
+            clear_act = menu.addAction("Clear marker")
+            clear_act.triggered.connect(lambda: self._canvas.set_marker(None))
+            menu.addSeparator()
+            select_all_act = menu.addAction("Select all keypoints to marker")
+            select_all_act.triggered.connect(
+                lambda: self.select_all_to_marker_requested.emit()
+            )
+        menu.exec(event.globalPos())
+
     def wheelEvent(self, event) -> None:  # noqa: N802
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             factor = 0.8 if event.angleDelta().y() > 0 else 1.25
@@ -854,6 +957,20 @@ class _RulerWidget(QWidget):
                     painter.drawText(int(x) + 2, self.height() - 8, _fmt_tick(t_start + v / 1000.0))
                 v += interval
 
+            marker_v = self._canvas.marker_v()
+            if marker_v is not None and view_start <= marker_v <= view_end:
+                mx = self._x_at_time_v(marker_v)
+                painter.setPen(QPen(_MARKER_COLOR, 1, Qt.PenStyle.DashLine))
+                painter.drawLine(int(mx), 0, int(mx), self.height())
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(_MARKER_COLOR)
+                painter.drawPolygon([
+                    QPointF(mx, 0),
+                    QPointF(mx + _MARKER_FLAG_W, _MARKER_FLAG_H / 2),
+                    QPointF(mx, _MARKER_FLAG_H),
+                ])
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+
             cur_v = self._canvas._current_v
             if view_start <= cur_v <= view_end:
                 px = self._x_at_time_v(cur_v)
@@ -881,6 +998,11 @@ class KeypointTimelineWidget(QWidget):
     time_scrubbed = Signal(int)
     collapsed_changed = Signal(bool)
     visibility_toggled = Signal(object)
+    select_to_marker_requested = Signal(object)
+    select_all_to_marker_requested = Signal()
+    disable_selected_requested = Signal()
+    enable_selected_requested = Signal()
+    interpolate_missing_requested = Signal()
 
     def __init__(self, pose_model: PoseModel, cameras: list[dict], parent=None) -> None:
         super().__init__(parent)
@@ -923,11 +1045,17 @@ class KeypointTimelineWidget(QWidget):
         self._canvas.keyframe_toggled.connect(self.keyframe_toggled)
         self._canvas.time_scrubbed.connect(self.time_scrubbed)
         self._canvas.visibility_toggled.connect(self.visibility_toggled)
+        self._canvas.select_to_marker_requested.connect(self.select_to_marker_requested)
+        self._canvas.disable_selected_requested.connect(self.disable_selected_requested)
+        self._canvas.enable_selected_requested.connect(self.enable_selected_requested)
+        self._canvas.interpolate_missing_requested.connect(self.interpolate_missing_requested)
         self._canvas.view_changed.connect(self._sync_hscroll)
+        self._canvas.marker_changed.connect(lambda: self._ruler.update())
 
         self._ruler = _RulerWidget(self._canvas)
         self._ruler.time_scrubbed.connect(self.time_scrubbed)
         self._ruler.collapse_clicked.connect(self._on_collapse_clicked)
+        self._ruler.select_all_to_marker_requested.connect(self.select_all_to_marker_requested)
         self._canvas.view_changed.connect(self._ruler.update)
 
         self._canvas_scroll = QScrollArea()
@@ -1058,6 +1186,12 @@ class KeypointTimelineWidget(QWidget):
 
     def set_hidden(self, hidden: frozenset[int]) -> None:
         self._canvas.set_hidden(hidden)
+
+    def set_marker(self, v: int | None) -> None:
+        self._canvas.set_marker(v)
+
+    def marker_v(self) -> int | None:
+        return self._canvas.marker_v()
 
     def set_edit_mode(self, enabled: bool) -> None:
         self._canvas.set_edit_mode(enabled)

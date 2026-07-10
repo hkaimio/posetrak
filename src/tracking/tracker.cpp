@@ -414,12 +414,21 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
         config_.process_noise_vel_gain_joint, config_.process_noise_vel_ref_joint,
         config_.process_noise_vel_gain_root, config_.process_noise_vel_ref_root,
         config_.process_noise_vel_joint_names);
-    ukf_->set_velocity_noise_gain_arms(config_.process_noise_vel_gain_arms,
-                                       config_.process_noise_vel_ref_arms,
-                                       config_.process_noise_vel_joint_names_arms);
+    {
+        std::vector<UnscentedKalmanFilter::VelocityNoiseScope> scopes;
+        for (VelocityNoiseScope const& scope : config_.process_noise_vel_scopes) {
+            scopes.push_back({scope.name, scope.joint_names, scope.gain, scope.vel_ref});
+        }
+        ukf_->set_velocity_noise_gain_scopes(scopes);
+    }
     ukf_->set_pose_regularization(config_.pose_reg_joint_names,
                                   config_.pose_reg_equal_split_noise_std,
                                   config_.pose_reg_rest_pose_noise_std);
+    ukf_->set_soft_joint_limits(config_.soft_limit_joint_names, config_.soft_limit_margin_rad,
+                                config_.soft_limit_noise_std);
+    ukf_->set_near_limit_damping(config_.near_limit_damping_joint_names,
+                                 config_.near_limit_margin_rad, config_.near_limit_spread_sigma,
+                                 config_.near_limit_damping_factor);
     {
         std::vector<std::pair<std::string, std::vector<std::string>>> scopes;
         for (NisFeedbackScope const& scope : config_.nis_feedback_scopes)

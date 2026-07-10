@@ -129,11 +129,21 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     nis_feedback_window               INTEGER,  -- Moving window size, in tracker steps
     nis_feedback_threshold            REAL,     -- Windowed NIS/DOF above this triggers fading
     nis_feedback_max_multiplier       REAL,     -- Cap on the variance-domain multiplier
-    -- Added in schema migration v30: second, independent adaptive process noise
-    -- gain scope (e.g. arms), separate from process_noise_vel_gain_joint/
-    -- process_noise_vel_joint_names above -- see
-    -- UnscentedKalmanFilter::set_velocity_noise_gain_arms().
-    process_noise_vel_gain_arms       REAL,  -- Velocity gain for this scope; NULL/0 = disabled
-    process_noise_vel_ref_arms        REAL,  -- Reference velocity (rad/s)
-    process_noise_vel_joint_names_arms TEXT  -- JSON array of joint names; NULL/[] = disabled
+    -- Added in schema migration v31 (replacing v30's single hardcoded "arms" scope
+    -- once one split stopped being enough): an arbitrary list of additional,
+    -- independent adaptive process noise gain scopes beyond
+    -- process_noise_vel_gain_joint/process_noise_vel_joint_names above -- see
+    -- UnscentedKalmanFilter::set_velocity_noise_gain_scopes().
+    process_noise_vel_scopes TEXT,  -- JSON array of {name, joint_names, gain, vel_ref}; NULL/[] = none
+    -- Added in schema migration v32: soft joint-limit repulsion -- see
+    -- docs/roadmap/features/soft-joint-limits/soft-joint-limits-design.md.
+    soft_limit_joint_names            TEXT,  -- JSON array of joint names; NULL/[] = disabled
+    soft_limit_margin_rad             REAL,  -- Radians; width of the soft zone
+    soft_limit_noise_std              REAL,  -- Radians; NULL/0 = disabled
+    -- Added in schema migration v33: near-limit process-noise damping -- see
+    -- docs/roadmap/features/tracking-crisis-debugging-log.md, "Proposals".
+    near_limit_damping_joint_names    TEXT,  -- JSON array of joint names; NULL/[] = disabled
+    near_limit_margin_rad             REAL,  -- Radians; detection-zone width
+    near_limit_spread_sigma           REAL,  -- Multiplier on sqrt(covariance) for spread estimate
+    near_limit_damping_factor         REAL   -- Variance-domain multiplier; NULL/1.0 = disabled
 );

@@ -16,7 +16,10 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <numbers>
 #include <ostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -134,12 +137,17 @@ void UnscentedKalmanFilter::set_velocity_noise_gain(double gain_joint, double ve
         std::unordered_set<std::string>(joint_names.begin(), joint_names.end());
 }
 
-void UnscentedKalmanFilter::set_velocity_noise_gain_arms(
-    double gain, double vel_ref, std::vector<std::string> const& joint_names) {
-    vel_noise_gain_arms_ = gain;
-    vel_noise_ref_arms_ = vel_ref;
-    vel_noise_joint_names_arms_ =
-        std::unordered_set<std::string>(joint_names.begin(), joint_names.end());
+void UnscentedKalmanFilter::set_velocity_noise_gain_scopes(
+    std::vector<VelocityNoiseScope> const& scopes) {
+    vel_noise_extra_scopes_.clear();
+    for (VelocityNoiseScope const& scope : scopes) {
+        ResolvedVelocityNoiseScope resolved;
+        resolved.gain = scope.gain;
+        resolved.vel_ref = scope.vel_ref;
+        resolved.joint_names =
+            std::unordered_set<std::string>(scope.joint_names.begin(), scope.joint_names.end());
+        vel_noise_extra_scopes_.push_back(std::move(resolved));
+    }
 }
 
 void UnscentedKalmanFilter::set_pose_regularization(std::vector<std::string> const& joint_names,
@@ -189,6 +197,60 @@ void UnscentedKalmanFilter::set_pose_regularization(std::vector<std::string> con
                     }
                 }
             }
+        }
+    }
+}
+
+void UnscentedKalmanFilter::set_soft_joint_limits(std::vector<std::string> const& joint_names,
+                                                  double margin_rad, double noise_std) {
+    soft_limit_axes_.clear();
+    soft_limit_noise_var_ = noise_std * noise_std;
+
+    // Resolve joint names to JointDesc, same filtering as set_pose_regularization():
+    // only SPHERICAL/REVOLUTE joints actually present in this layout.
+    for (std::string const& name : joint_names) {
+        JointDesc const* j = layout_->get_joint(name);
+        if (!j || (j->type != JointType::SPHERICAL && j->type != JointType::REVOLUTE))
+            continue;
+        for (uint32_t axis = 0; axis < 3; ++axis) {
+            bool const active =
+                (j->type == JointType::REVOLUTE) ? (axis == 0) : j->active_dof_mask[axis];
+            if (!active || static_cast<int>(axis) >= j->limit_count)
+                continue;  // No configured limit on this axis -- nothing to stay away from.
+            SoftJointLimitAxis entry;
+            entry.angle_idx = static_cast<int>(j->state_index) + static_cast<int>(axis);
+            entry.interior_lo = j->limits[axis].x() + margin_rad;
+            entry.interior_hi = j->limits[axis].y() - margin_rad;
+            soft_limit_axes_.push_back(entry);
+        }
+    }
+}
+
+void UnscentedKalmanFilter::set_near_limit_damping(std::vector<std::string> const& joint_names,
+                                                   double margin_rad, double spread_sigma,
+                                                   double damping_factor) {
+    near_limit_damping_axes_.clear();
+    near_limit_margin_ = margin_rad;
+    near_limit_spread_sigma_ = spread_sigma;
+    near_limit_damping_factor_ = damping_factor;
+
+    int const root_n = layout_->root_error_dof_count();
+    // Resolve joint names to JointDesc, same filtering as set_soft_joint_limits().
+    for (std::string const& name : joint_names) {
+        JointDesc const* j = layout_->get_joint(name);
+        if (!j || (j->type != JointType::SPHERICAL && j->type != JointType::REVOLUTE))
+            continue;
+        for (uint32_t axis = 0; axis < 3; ++axis) {
+            bool const active =
+                (j->type == JointType::REVOLUTE) ? (axis == 0) : j->active_dof_mask[axis];
+            if (!active || static_cast<int>(axis) >= j->limit_count)
+                continue;
+            NearLimitDampingAxis entry;
+            entry.angle_idx = static_cast<int>(j->state_index) + static_cast<int>(axis);
+            entry.pos_idx = root_n + static_cast<int>(j->error_index) + static_cast<int>(axis);
+            entry.lo = j->limits[axis].x();
+            entry.hi = j->limits[axis].y();
+            near_limit_damping_axes_.push_back(entry);
         }
     }
 }
@@ -246,10 +308,38 @@ UnscentedKalmanFilter::apply_nis_feedback_scaling(Eigen::MatrixXd const& scaled_
     return scaled;
 }
 
+Eigen::MatrixXd UnscentedKalmanFilter::apply_near_limit_damping(Eigen::MatrixXd const& scaled_in,
+                                                                State const& mean_state) const {
+    if (near_limit_damping_axes_.empty() || near_limit_damping_factor_ >= 1.0)
+        return scaled_in;
+
+    Eigen::MatrixXd scaled = scaled_in;
+    int const root_n = layout_->root_error_dof_count();
+    int const active_dof = root_n + layout_->joint_active_dof_count();
+    Eigen::VectorXd const& angles = mean_state.joint_angles();
+
+    for (NearLimitDampingAxis const& axis : near_limit_damping_axes_) {
+        double const mean_angle = angles(axis.angle_idx);
+        double const var = std::max(covariance_(axis.pos_idx, axis.pos_idx), 0.0);
+        double const spread = near_limit_spread_sigma_ * std::sqrt(var);
+        bool const near_limit = (mean_angle + spread > axis.hi - near_limit_margin_) ||
+                                (mean_angle - spread < axis.lo + near_limit_margin_);
+        if (!near_limit)
+            continue;
+        int const vel_idx = active_dof + axis.pos_idx;
+        scaled(axis.pos_idx, axis.pos_idx) *= near_limit_damping_factor_;
+        if (vel_idx < scaled.rows())
+            scaled(vel_idx, vel_idx) *= near_limit_damping_factor_;
+    }
+    return scaled;
+}
+
 Eigen::MatrixXd UnscentedKalmanFilter::apply_velocity_scaling(State const& velocity_state) const {
     vel_noise_scale_debug_.clear();
-    if (vel_noise_gain_joint_ <= 0.0 && vel_noise_gain_root_ <= 0.0 &&
-        vel_noise_gain_arms_ <= 0.0) {
+    bool const any_extra_scope_active =
+        std::any_of(vel_noise_extra_scopes_.begin(), vel_noise_extra_scopes_.end(),
+                    [](ResolvedVelocityNoiseScope const& s) { return s.gain > 0.0; });
+    if (vel_noise_gain_joint_ <= 0.0 && vel_noise_gain_root_ <= 0.0 && !any_extra_scope_active) {
         return process_noise_;
     }
 
@@ -300,21 +390,26 @@ Eigen::MatrixXd UnscentedKalmanFilter::apply_velocity_scaling(State const& veloc
         }
     }
 
-    // Second, independent gain scope (e.g. arms) -- see set_velocity_noise_gain_arms().
-    // A joint in both scopes is scaled by the primary scope only (skipped here).
-    if (vel_noise_gain_arms_ > 0.0) {
+    // Additional, independent gain scopes beyond the primary one -- see
+    // set_velocity_noise_gain_scopes(). A joint covered by the primary scope or an
+    // earlier extra scope is scaled by that earlier one only (first match wins).
+    if (!vel_noise_extra_scopes_.empty()) {
         Eigen::VectorXd const& joint_vel = velocity_state.joint_velocities();
         for (JointDesc const& j : layout_->joints()) {
             if (j.type == JointType::PRISMATIC)
                 continue;
-            if (!vel_noise_joint_names_arms_.count(j.name))
-                continue;
             if (!vel_noise_joint_scope_all_ && vel_noise_joint_names_.count(j.name))
                 continue;  // Already scaled by the primary scope above.
-            for (uint32_t d = 0; d < j.active_dof_count; ++d) {
-                int const pos_idx = root_n + static_cast<int>(j.error_index) + static_cast<int>(d);
-                int const state_idx = static_cast<int>(j.state_index) + static_cast<int>(d);
-                scale_dof(pos_idx, joint_vel(state_idx), vel_noise_gain_arms_, vel_noise_ref_arms_);
+            for (ResolvedVelocityNoiseScope const& scope : vel_noise_extra_scopes_) {
+                if (scope.gain <= 0.0 || !scope.joint_names.count(j.name))
+                    continue;
+                for (uint32_t d = 0; d < j.active_dof_count; ++d) {
+                    int const pos_idx =
+                        root_n + static_cast<int>(j.error_index) + static_cast<int>(d);
+                    int const state_idx = static_cast<int>(j.state_index) + static_cast<int>(d);
+                    scale_dof(pos_idx, joint_vel(state_idx), scope.gain, scope.vel_ref);
+                }
+                break;  // First matching extra scope wins; don't double-scale.
             }
         }
     }
@@ -397,6 +492,85 @@ void UnscentedKalmanFilter::apply_pose_regularization() {
             throw std::runtime_error(
                 "Failed to compute eigenvalues for covariance conditioning "
                 "(pose regularization update)");
+        }
+        double const min_eig_floor = 1e-6;
+        Eigen::VectorXd eigenvalues = eigen_solver.eigenvalues().cwiseMax(min_eig_floor);
+        covariance_ = eigen_solver.eigenvectors() * eigenvalues.asDiagonal() *
+                      eigen_solver.eigenvectors().transpose();
+        covariance_ = 0.5 * (covariance_ + covariance_.transpose());
+    }
+}
+
+void UnscentedKalmanFilter::apply_soft_joint_limits() {
+    int const n_res = static_cast<int>(soft_limit_axes_.size());
+    if (n_res == 0 || soft_limit_noise_var_ <= 0.0)
+        return;  // Disabled, or configured joints/axes not found in this layout.
+
+    // Same second-Kalman-update-pass pattern as apply_pose_regularization() -- see
+    // that function's comment for the rationale. Residual per axis is
+    // max(0, angle - interior_hi) + min(0, angle - interior_lo), target 0: zero in
+    // the interior, growing unboundedly as the angle leaves it in either direction
+    // (see set_soft_joint_limits()'s doc comment).
+    auto sigma_points = sigma_gen_.generate_sigma_points(state_, covariance_);
+    int const n_sigma = static_cast<int>(sigma_points.size());
+
+    Eigen::MatrixXd predicted(n_res, n_sigma);
+    for (int i = 0; i < n_sigma; ++i) {
+        Eigen::VectorXd const& angles = sigma_points[i].joint_angles();
+        for (int row = 0; row < n_res; ++row) {
+            SoftJointLimitAxis const& axis = soft_limit_axes_[row];
+            double const angle = angles(axis.angle_idx);
+            predicted(row, i) =
+                std::max(0.0, angle - axis.interior_hi) + std::min(0.0, angle - axis.interior_lo);
+        }
+    }
+
+    Eigen::VectorXd const weights_mean = sigma_gen_.get_mean_weights();
+    Eigen::VectorXd const weights_cov = sigma_gen_.get_covariance_weights();
+    Eigen::VectorXd const predicted_mean = predicted * weights_mean;
+
+    Eigen::MatrixXd Z(n_res, n_sigma);
+    for (int i = 0; i < n_sigma; ++i)
+        Z.col(i) = predicted.col(i) - predicted_mean;
+    Eigen::MatrixXd ZW = Z;
+    for (int i = 0; i < n_sigma; ++i)
+        ZW.col(i) *= weights_cov(i);
+    Eigen::MatrixXd innovation_cov(n_res, n_res);
+    innovation_cov.noalias() = ZW * Z.transpose();
+
+    for (int row = 0; row < n_res; ++row)
+        innovation_cov(row, row) += soft_limit_noise_var_;
+
+    Eigen::MatrixXd E(error_dim(), n_sigma);
+    for (int i = 0; i < n_sigma; ++i)
+        E.col(i) = compute_state_error(sigma_points[i], state_);
+    Eigen::MatrixXd EW = E;
+    for (int i = 0; i < n_sigma; ++i)
+        EW.col(i) *= weights_cov(i);
+    Eigen::MatrixXd cross_cov(error_dim(), n_res);
+    cross_cov.noalias() = EW * Z.transpose();
+
+    Eigen::LDLT<Eigen::MatrixXd> const S_ldlt(innovation_cov);
+    // Target 0 (see set_soft_joint_limits()'s doc comment), so the innovation is
+    // simply the negative of the current predicted residual.
+    Eigen::VectorXd const innovation = -predicted_mean;
+    Eigen::MatrixXd const K_T = S_ldlt.solve(cross_cov.transpose());
+    Eigen::VectorXd const state_correction = K_T.transpose() * innovation;
+
+    state_ = sigma_gen_.apply_error_to_state(state_, state_correction);
+    enforce_joint_limits();
+
+    covariance_.noalias() -= cross_cov * K_T;
+    covariance_ = 0.5 * (covariance_ + covariance_.transpose());
+
+    Eigen::LLT<Eigen::MatrixXd> llt_check(covariance_);
+    if (llt_check.info() != Eigen::Success) {
+        ++psd_fix_count_;
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen_solver(covariance_);
+        if (eigen_solver.info() != Eigen::Success) {
+            throw std::runtime_error(
+                "Failed to compute eigenvalues for covariance conditioning "
+                "(soft joint limit update)");
         }
         double const min_eig_floor = 1e-6;
         Eigen::VectorXd eigenvalues = eigen_solver.eigenvalues().cwiseMax(min_eig_floor);
@@ -803,7 +977,10 @@ PredictResult UnscentedKalmanFilter::predict(double dt) {
     // Mechanism A's velocity-driven scaling -- see apply_nis_feedback_scaling() doc
     // comment. Its multipliers were set (by Tracker) from the previous update()'s
     // per-observation Mahalanobis distances, so this reflects last step's fit quality.
-    covariance_ += apply_nis_feedback_scaling(apply_velocity_scaling(posterior_state)) * dt;
+    covariance_ +=
+        apply_near_limit_damping(
+            apply_nis_feedback_scaling(apply_velocity_scaling(posterior_state)), posterior_state) *
+        dt;
     if (debug_enabled_)
         write_velocity_noise_scale_csv();
 
@@ -868,6 +1045,13 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
                                                 Eigen::VectorXd const& weights) const {
     // Create mean state
     State mean_state(layout_->skeleton()->total_dof_count());
+
+    // Diagnostic: Karcher-mean convergence + raw axis-angle-vector sigma-point spread
+    // per spherical joint, for the near-pi-singularity investigation -- see
+    // docs/roadmap/features/tracking-crisis-debugging-log.md, "Proposal 1" section and
+    // the swing-twist design discussion. Accumulated here, written once at the end of
+    // this function (one row per spherical joint, gated on debug_enabled_).
+    std::vector<std::string> karcher_diag_rows;
 
     // Mean position (simple weighted average)
     Eigen::Vector3d pos_mean = Eigen::Vector3d::Zero();
@@ -943,6 +1127,23 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
             Eigen::Vector3d const initial_aa = states[0].joint_angles().segment<3>(si);
             Eigen::Matrix3d R_mean = State::axis_angle_to_quaternion(initial_aa).toRotationMatrix();
 
+            // Diagnostic accumulators (see comment at top of function).
+            double sigma_angle_min_deg = std::numeric_limits<double>::infinity();
+            double sigma_angle_max_deg = -std::numeric_limits<double>::infinity();
+            double sigma_rawvec_dist_max = 0.0;
+            if (debug_enabled_) {
+                for (size_t i = 0; i < states.size(); ++i) {
+                    Eigen::Vector3d const aa_i = states[i].joint_angles().segment<3>(si);
+                    double const ang_deg = aa_i.norm() * 180.0 / std::numbers::pi;
+                    sigma_angle_min_deg = std::min(sigma_angle_min_deg, ang_deg);
+                    sigma_angle_max_deg = std::max(sigma_angle_max_deg, ang_deg);
+                    sigma_rawvec_dist_max =
+                        std::max(sigma_rawvec_dist_max, (aa_i - initial_aa).norm());
+                }
+            }
+
+            int iterations_used = 0;
+            double final_error_deg = 0.0;
             for (int iter = 0; iter < 10; ++iter) {
                 Eigen::Vector3d error_sum = Eigen::Vector3d::Zero();
 
@@ -973,6 +1174,8 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
                     State::axis_angle_to_quaternion(error_sum).toRotationMatrix();
                 R_mean = R_mean * R_delta;
 
+                iterations_used = iter + 1;
+                final_error_deg = error_sum.norm() * 180.0 / std::numbers::pi;
                 if (error_sum.norm() < 1e-6) {
                     break;
                 }
@@ -982,11 +1185,39 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
             Eigen::Quaterniond const q_mean(R_mean);
             angles_mean.segment<3>(si) = State::quaternion_to_axis_angle(q_mean);
 
+            if (debug_enabled_) {
+                double const nominal_angle_deg = initial_aa.norm() * 180.0 / std::numbers::pi;
+                double const mean_angle_deg =
+                    angles_mean.segment<3>(si).norm() * 180.0 / std::numbers::pi;
+                std::ostringstream row;
+                row << std::setprecision(9) << frame_number_ << "," << j.name << ","
+                    << states.size() << "," << nominal_angle_deg << "," << sigma_angle_min_deg
+                    << "," << sigma_angle_max_deg << "," << sigma_rawvec_dist_max << ","
+                    << iterations_used << "," << final_error_deg << "," << mean_angle_deg;
+                karcher_diag_rows.push_back(row.str());
+            }
+
             // Velocities: simple weighted average
             for (size_t i = 0; i < states.size(); ++i) {
                 velocities_mean.segment<3>(si) +=
                     weights(i) * states[i].joint_velocities().segment<3>(si);
             }
+        }
+    }
+
+    if (debug_enabled_ && !karcher_diag_rows.empty()) {
+        std::string const path = debug_dir_ + "/karcher_mean_diagnostics.csv";
+        std::ios_base::openmode const mode =
+            (frame_number_ == 0) ? std::ios::out | std::ios::trunc : std::ios::out | std::ios::app;
+        std::ofstream f(path, mode);
+        if (f.is_open()) {
+            if (frame_number_ == 0) {
+                f << "frame,joint,n_sigma,nominal_angle_deg,sigma_angle_min_deg,"
+                     "sigma_angle_max_deg,sigma_rawvec_dist_max_rad,iterations_used,"
+                     "final_error_deg,mean_angle_deg\n";
+            }
+            for (auto const& row : karcher_diag_rows)
+                f << row << "\n";
         }
     }
     Eigen::Index i;
@@ -1515,6 +1746,12 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
     // configured via set_pose_regularization(). Deliberately excluded from the NIS
     // computed below -- NIS measures fit to real observations, not this synthetic term.
     apply_pose_regularization();
+
+    // Step 11c: Soft joint-limit repulsion -- same additive-pseudo-measurement shape
+    // as pose regularization above (see set_soft_joint_limits()), independent pass so
+    // the two can be tuned/validated separately. No-op unless configured. Also
+    // excluded from the NIS computed below, same rationale as pose regularization.
+    apply_soft_joint_limits();
 
     // Step 12: NIS = innovation^T * S^-1 * innovation — reuse LDLT factorization (vector solve)
     double nis = 0.0;

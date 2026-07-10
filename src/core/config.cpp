@@ -92,12 +92,21 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
                     result.process_noise_vel_joint_names.push_back(*str);
             }
         }
-        result.process_noise_vel_gain_arms = tracking["process_noise_vel_gain_arms"].value_or(0.0);
-        result.process_noise_vel_ref_arms = tracking["process_noise_vel_ref_arms"].value_or(1.0);
-        if (auto names = tracking["process_noise_vel_joint_names_arms"].as_array()) {
-            for (auto&& elem : *names) {
-                if (auto str = elem.value<std::string>())
-                    result.process_noise_vel_joint_names_arms.push_back(*str);
+        if (auto scopes = tracking["process_noise_vel_scopes"].as_array()) {
+            for (auto&& elem : *scopes) {
+                if (auto scope_table = elem.as_table()) {
+                    VelocityNoiseScope scope;
+                    scope.name = (*scope_table)["name"].value_or(std::string{});
+                    scope.gain = (*scope_table)["gain"].value_or(0.0);
+                    scope.vel_ref = (*scope_table)["vel_ref"].value_or(1.0);
+                    if (auto names = (*scope_table)["joint_names"].as_array()) {
+                        for (auto&& name_elem : *names) {
+                            if (auto str = name_elem.value<std::string>())
+                                scope.joint_names.push_back(*str);
+                        }
+                    }
+                    result.process_noise_vel_scopes.push_back(std::move(scope));
+                }
             }
         }
         if (auto names = tracking["pose_reg_joint_names"].as_array()) {
@@ -110,6 +119,25 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
             tracking["pose_reg_equal_split_noise_std"].value_or(0.0);
         result.pose_reg_rest_pose_noise_std =
             tracking["pose_reg_rest_pose_noise_std"].value_or(0.0);
+
+        if (auto names = tracking["soft_limit_joint_names"].as_array()) {
+            for (auto&& elem : *names) {
+                if (auto str = elem.value<std::string>())
+                    result.soft_limit_joint_names.push_back(*str);
+            }
+        }
+        result.soft_limit_margin_rad = tracking["soft_limit_margin_rad"].value_or(0.0);
+        result.soft_limit_noise_std = tracking["soft_limit_noise_std"].value_or(0.0);
+
+        if (auto names = tracking["near_limit_damping_joint_names"].as_array()) {
+            for (auto&& elem : *names) {
+                if (auto str = elem.value<std::string>())
+                    result.near_limit_damping_joint_names.push_back(*str);
+            }
+        }
+        result.near_limit_margin_rad = tracking["near_limit_margin_rad"].value_or(0.0);
+        result.near_limit_spread_sigma = tracking["near_limit_spread_sigma"].value_or(3.0);
+        result.near_limit_damping_factor = tracking["near_limit_damping_factor"].value_or(1.0);
 
         if (auto scopes = tracking["nis_feedback_scopes"].as_array()) {
             for (auto&& elem : *scopes) {

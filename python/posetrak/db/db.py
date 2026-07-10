@@ -9,6 +9,7 @@ This module handles:
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from pathlib import Path
@@ -19,7 +20,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 6
-SESSION_SCHEMA_VERSION: Final[int] = 30
+SESSION_SCHEMA_VERSION: Final[int] = 33
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -831,6 +832,120 @@ def _migrate_session_v29_to_v30(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v30_to_v31(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 30 to 31.
+
+    v31 replaces v30's single hardcoded "arms" gain scope
+    (process_noise_vel_gain_arms/process_noise_vel_ref_arms/
+    process_noise_vel_joint_names_arms) with process_noise_vel_scopes: an
+    arbitrary JSON list of {name, joint_names, gain, vel_ref}, once a single
+    extra split stopped being enough -- distal joints (wrist, ankle) move
+    faster than proximal ones (elbow, knee, shoulder, hip) and warrant their
+    own reference velocity, not one shared "arms" value. Existing v30 configs
+    with a non-empty arms scope are migrated into a single-entry
+    process_noise_vel_scopes list (named "arms") so they keep working
+    unchanged; the old columns are then dropped. See
+    docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
+    """
+    existing = _tracker_config_columns(conn)
+    if "process_noise_vel_scopes" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_scopes TEXT")
+
+    if "process_noise_vel_gain_arms" in existing:
+        rows = conn.execute(
+            "SELECT id, process_noise_vel_gain_arms, process_noise_vel_ref_arms,"
+            "       process_noise_vel_joint_names_arms"
+            " FROM tracker_configs"
+            " WHERE process_noise_vel_gain_arms IS NOT NULL"
+            "   AND process_noise_vel_gain_arms > 0"
+            "   AND process_noise_vel_joint_names_arms IS NOT NULL"
+        ).fetchall()
+        for config_id, gain, vel_ref, joint_names_json in rows:
+            joint_names = json.loads(joint_names_json) if joint_names_json else []
+            if not joint_names:
+                continue
+            scopes = [
+                {
+                    "name": "arms",
+                    "joint_names": joint_names,
+                    "gain": gain,
+                    "vel_ref": vel_ref if vel_ref is not None else 1.0,
+                }
+            ]
+            conn.execute(
+                "UPDATE tracker_configs SET process_noise_vel_scopes = ? WHERE id = ?",
+                (json.dumps(scopes), config_id),
+            )
+        conn.execute("ALTER TABLE tracker_configs DROP COLUMN process_noise_vel_gain_arms")
+        conn.execute("ALTER TABLE tracker_configs DROP COLUMN process_noise_vel_ref_arms")
+        conn.execute(
+            "ALTER TABLE tracker_configs DROP COLUMN process_noise_vel_joint_names_arms"
+        )
+
+    _set_schema_version(conn, 31)
+    conn.commit()
+
+
+def _migrate_session_v31_to_v32(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 31 to 32.
+
+    v32 adds soft_limit_joint_names, soft_limit_margin_rad, and
+    soft_limit_noise_std to tracker_configs: a pseudo-measurement that
+    discourages a joint's angle from approaching its own hard limit, rather
+    than only reacting once the hard clamp fires after the fact. Added after
+    tracing a sustained "arms completely lost" crisis to upper_arm.L/R
+    overshooting their own ball-joint limits during a fast bilateral motion,
+    where adaptive process noise (widening the sigma-point spread for a
+    fast-moving joint) made the overshoot worse rather than better. NULL/empty
+    soft_limit_joint_names means disabled (backward-compatible with v31
+    configs). See
+    docs/roadmap/features/soft-joint-limits/soft-joint-limits-design.md.
+    """
+    existing = _tracker_config_columns(conn)
+    if "soft_limit_joint_names" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN soft_limit_joint_names TEXT")
+    if "soft_limit_margin_rad" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN soft_limit_margin_rad REAL")
+    if "soft_limit_noise_std" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN soft_limit_noise_std REAL")
+    _set_schema_version(conn, 32)
+    conn.commit()
+
+
+def _migrate_session_v32_to_v33(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 32 to 33.
+
+    v33 adds near_limit_damping_joint_names, near_limit_margin_rad,
+    near_limit_spread_sigma, and near_limit_damping_factor to
+    tracker_configs: shrinks process noise for a joint whose current
+    covariance-implied spread already reaches close to one of its
+    configured hard limits, regardless of velocity -- the inverse of the
+    existing velocity-driven adaptive process noise. Added after tracing
+    two unrelated tracking-crisis events to the same mechanism: a wide
+    sigma-point cloud straddling a box-constraint corner (2-3 axes near
+    their limits simultaneously) breaks the UKF's local-linearity
+    assumption, causing a discontinuous multi-radian jump. The soft
+    joint-limit pseudo-measurement (v32) steers the *mean* away from the
+    corner but was shown insufficient alone -- this targets the sigma
+    *spread* instead. NULL/empty near_limit_damping_joint_names means
+    disabled (backward-compatible with v32 configs). See
+    docs/roadmap/features/tracking-crisis-debugging-log.md, "Proposals".
+    """
+    existing = _tracker_config_columns(conn)
+    if "near_limit_damping_joint_names" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN near_limit_damping_joint_names TEXT"
+        )
+    if "near_limit_margin_rad" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN near_limit_margin_rad REAL")
+    if "near_limit_spread_sigma" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN near_limit_spread_sigma REAL")
+    if "near_limit_damping_factor" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN near_limit_damping_factor REAL")
+    _set_schema_version(conn, 33)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -941,6 +1056,15 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 29
     if actual == 29:
         _migrate_session_v29_to_v30(conn)
+        actual = 30
+    if actual == 30:
+        _migrate_session_v30_to_v31(conn)
+        actual = 31
+    if actual == 31:
+        _migrate_session_v31_to_v32(conn)
+        actual = 32
+    if actual == 32:
+        _migrate_session_v32_to_v33(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

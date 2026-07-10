@@ -37,34 +37,35 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _TOOLS_DIR = _REPO_ROOT / "python" / "tools"
 _DEFAULT_BINARY = default_binary_path()
 
-# Adaptive process noise (Phase 1) joint gain scope -- prototyping only.
+# Adaptive process noise (Phase 1) joint gain scopes -- prototyping only.
 #
-# A single body-wide joint gain over-loosens fast-but-normal limb motion (arms)
-# while barely engaging for the slower torso/hip motion it's meant to help,
-# degrading arm tracking (see docs/roadmap/features/adaptive-process-noise/).
-# Scoping by literal joint name rather than skeleton group: existing skeleton
-# YAMLs only define one "main" group spanning the whole body, and this is
-# prototyping-stage -- adding a finer group split to every person's skeleton
-# file isn't worth it until we know whether joint-scoped gain is actually the
-# right fix. Matches the "reallusion-no-waist"-style joint names currently in
-# use; revisit (or make this configurable) if other skeleton naming shows up.
-ADAPTIVE_NOISE_CORE_JOINTS: list[str] = [
-    "spine1", "spine2", "neck1", "neck2", "head",
-    "thigh.L", "shin.L", "foot.L", "toe.L",
-    "thigh.R", "shin.R", "foot.R", "toe.R",
-]
+# A single body-wide joint gain over-loosens fast-but-normal limb motion while
+# barely engaging for the slower torso motion it's meant to help (see
+# docs/roadmap/features/adaptive-process-noise/). Scoping by literal joint name
+# rather than skeleton group: existing skeleton YAMLs only define one "main"
+# group spanning the whole body, and this is prototyping-stage -- adding a
+# finer group split to every person's skeleton file isn't worth it until we
+# know whether joint-scoped gain is actually the right fix. Matches the
+# "reallusion-no-waist"-style joint names currently in use; revisit (or make
+# this configurable) if other skeleton naming shows up.
+#
+# Three anatomical scopes, not two: distal joints (wrist, ankle) are more
+# accurate but move faster than proximal ones (elbow, knee, shoulder, hip), so
+# lumping all limb joints into one "arms" scope with one reference velocity
+# either over-loosens the fast distal joints or under-engages for the slower
+# proximal ones. Torso (spine/neck/head) stays its own scope since it's slower
+# again and was the original motivation for Mechanism A in the first place.
+ADAPTIVE_NOISE_CORE_JOINTS: list[str] = ["spine1", "spine2", "neck1", "neck2", "head"]
 
-# NIS-feedback (Mechanism B) "arms" scope -- prototyping only, same rationale as
-# ADAPTIVE_NOISE_CORE_JOINTS above. This is deliberately the complement of that list
-# (everything excluded from the joint gain): the natural allocation is Mechanism A+B
-# for core, B-only for arms as a safety net where A is scoped out -- see
-# docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md,
-# "Mechanism B", *Case 3*.
-_FINGER_CHAINS = ["f_index", "f_middle", "f_ring", "f_pinky", "thumb"]
-NIS_FEEDBACK_ARM_JOINTS: list[str] = [
+ADAPTIVE_NOISE_PROXIMAL_JOINTS: list[str] = [
     f"{part}.{side}"
     for side in ("L", "R")
-    for part in ["shoulder", "upper_arm", "forearm", "hand"]
+    for part in ["shoulder", "upper_arm", "forearm", "thigh", "shin"]
+]
+
+_FINGER_CHAINS = ["f_index", "f_middle", "f_ring", "f_pinky", "thumb"]
+ADAPTIVE_NOISE_DISTAL_JOINTS: list[str] = [
+    f"{part}.{side}" for side in ("L", "R") for part in ["hand", "foot", "toe"]
 ] + [
     f"{chain}.{segment:02d}.{side}"
     for side in ("L", "R")
@@ -72,11 +73,29 @@ NIS_FEEDBACK_ARM_JOINTS: list[str] = [
     for segment in (1, 2, 3)
 ]
 
+# NIS-feedback (Mechanism B) "limbs" scope -- prototyping only, same rationale as
+# ADAPTIVE_NOISE_CORE_JOINTS above. Deliberately the complement of that list
+# (everything excluded from the core joint gain, i.e. proximal + distal
+# combined): the natural allocation is Mechanism A+B for core, B-only for limbs
+# as a safety net where core's own gain doesn't apply -- see
+# docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md,
+# "Mechanism B", *Case 3*. Kept as one combined bucket for the reactive
+# safety net even though Mechanism A's proactive gain is now split finer.
+NIS_FEEDBACK_LIMB_JOINTS: list[str] = (
+    ADAPTIVE_NOISE_PROXIMAL_JOINTS + ADAPTIVE_NOISE_DISTAL_JOINTS
+)
+
 # Pose regularization (kinematic redundancy) Phase 1 chain -- prototyping only, see
 # docs/roadmap/features/pose-regularization/pose-regularization-design.md. Scoped to
 # spine1/spine2 per that note's Phase 1; extend only if the same pattern is confirmed
 # on other chains (e.g. neck).
 POSE_REG_SPINE_CHAIN: list[str] = ["spine1", "spine2"]
+
+# Soft joint-limit repulsion Phase 1 scope -- prototyping only, see
+# docs/roadmap/features/soft-joint-limits/soft-joint-limits-design.md. Scoped to the
+# joints diagnosed as overshooting their own ball-joint limits during a fast bilateral
+# motion; extend only if the same saturation pattern is confirmed on other joints.
+SOFT_LIMIT_JOINT_NAMES: list[str] = ["upper_arm.L", "upper_arm.R"]
 
 
 # ---------------------------------------------------------------------------
@@ -180,20 +199,34 @@ class RunTrackerWidget(QWidget):
         self._vel_noise_ref_root.setToolTip(
             "Reference velocity for the root gain above (m/s for position, rad/s for orientation)."
         )
-        self._vel_noise_gain_arms = _float_spin(0.0, 0.0, 100.0, 3)
-        self._vel_noise_gain_arms.setToolTip(
-            "Second, independent adaptive process noise gain for NIS_FEEDBACK_ARM_JOINTS\n"
-            "(shoulder/upper_arm/forearm/hand/fingers) -- arms are excluded from the joint\n"
-            "gain above to avoid over-loosening fast normal gestures, so give them their\n"
-            "own, separately-tuned gain here instead of none at all. 0 = disabled."
+        self._vel_noise_gain_proximal = _float_spin(0.0, 0.0, 100.0, 3)
+        self._vel_noise_gain_proximal.setToolTip(
+            "Independent adaptive process noise gain for ADAPTIVE_NOISE_PROXIMAL_JOINTS\n"
+            "(shoulder/upper_arm/forearm, hip/knee) -- excluded from the torso gain above\n"
+            "to avoid over-loosening fast normal gestures, so give them their own,\n"
+            "separately-tuned gain here instead of none at all. 0 = disabled."
         )
-        self._vel_noise_ref_arms = _float_spin(1.0, 1.0e-3, 1000.0, 3)
-        self._vel_noise_ref_arms.setToolTip("Reference velocity for the arms gain above (rad/s).")
+        self._vel_noise_ref_proximal = _float_spin(1.0, 1.0e-3, 1000.0, 3)
+        self._vel_noise_ref_proximal.setToolTip(
+            "Reference velocity for the proximal-limb gain above (rad/s)."
+        )
+        self._vel_noise_gain_distal = _float_spin(0.0, 0.0, 100.0, 3)
+        self._vel_noise_gain_distal.setToolTip(
+            "Independent adaptive process noise gain for ADAPTIVE_NOISE_DISTAL_JOINTS\n"
+            "(wrist/hand/fingers, ankle/foot/toe) -- kept separate from the proximal scope\n"
+            "above since distal joints are typically more accurate but move faster, so\n"
+            "warrant their own (likely higher) reference velocity. 0 = disabled."
+        )
+        self._vel_noise_ref_distal = _float_spin(1.0, 1.0e-3, 1000.0, 3)
+        self._vel_noise_ref_distal.setToolTip(
+            "Reference velocity for the distal-limb gain above (rad/s)."
+        )
 
         for gain, ref in (
             (self._vel_noise_gain_joint, self._vel_noise_ref_joint),
             (self._vel_noise_gain_root, self._vel_noise_ref_root),
-            (self._vel_noise_gain_arms, self._vel_noise_ref_arms),
+            (self._vel_noise_gain_proximal, self._vel_noise_ref_proximal),
+            (self._vel_noise_gain_distal, self._vel_noise_ref_distal),
         ):
             ref.setEnabled(False)
             gain.valueChanged.connect(lambda v, r=ref: r.setEnabled(v > 0.0))
@@ -210,10 +243,23 @@ class RunTrackerWidget(QWidget):
             "angles toward zero, per axis (stiffness = this std, radians). 0 = disabled."
         )
 
+        self._soft_limit_margin = _float_spin(0.0, 0.0, 1.5, 4)
+        self._soft_limit_margin.setToolTip(
+            "Soft joint-limit repulsion: width (radians) of the soft zone just inside\n"
+            "each SOFT_LIMIT_JOINT_NAMES axis's hard limit. Only matters if the noise std\n"
+            "below is nonzero."
+        )
+        self._soft_limit_noise_std = _float_spin(0.0, 0.0, 10.0, 4)
+        self._soft_limit_noise_std.setToolTip(
+            "Soft joint-limit repulsion: pseudo-measurement pulling SOFT_LIMIT_JOINT_NAMES's\n"
+            "joint angles away from their own hard limits once inside the margin above\n"
+            "(stiffness = this std, radians; smaller = stronger pull). 0 = disabled."
+        )
+
         self._nis_feedback_threshold = _float_spin(1.5, 0.1, 100.0, 2)
         self._nis_feedback_threshold.setToolTip(
             "NIS-feedback safety net (Mechanism B): windowed NIS/DOF for the 'core' and\n"
-            "'arms' scopes above this triggers a temporary process-noise multiplier.\n"
+            "'limbs' scopes above this triggers a temporary process-noise multiplier.\n"
             "Only takes effect if 'Enable NIS feedback' is checked."
         )
         self._nis_feedback_max_mult = _float_spin(10.0, 1.0, 1000.0, 1)
@@ -221,7 +267,7 @@ class RunTrackerWidget(QWidget):
         self._nis_feedback_enabled = QCheckBox()
         self._nis_feedback_enabled.setToolTip(
             "Enable the NIS-feedback safety net, scoped to ADAPTIVE_NOISE_CORE_JOINTS\n"
-            "('core') and NIS_FEEDBACK_ARM_JOINTS ('arms') -- see\n"
+            "('core') and NIS_FEEDBACK_LIMB_JOINTS ('limbs') -- see\n"
             "docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md."
         )
         self._nis_feedback_enabled.toggled.connect(self._nis_feedback_threshold.setEnabled)
@@ -282,11 +328,19 @@ class RunTrackerWidget(QWidget):
         config_form.addRow("Adaptive noise ref vel (joint, rad/s):", self._vel_noise_ref_joint)
         config_form.addRow("Adaptive noise gain (root):", self._vel_noise_gain_root)
         config_form.addRow("Adaptive noise ref vel (root, m/s, rad/s):", self._vel_noise_ref_root)
-        config_form.addRow("Adaptive noise gain (arms):", self._vel_noise_gain_arms)
-        config_form.addRow("Adaptive noise ref vel (arms, rad/s):", self._vel_noise_ref_arms)
+        config_form.addRow("Adaptive noise gain (proximal):", self._vel_noise_gain_proximal)
+        config_form.addRow(
+            "Adaptive noise ref vel (proximal, rad/s):", self._vel_noise_ref_proximal
+        )
+        config_form.addRow("Adaptive noise gain (distal):", self._vel_noise_gain_distal)
+        config_form.addRow("Adaptive noise ref vel (distal, rad/s):", self._vel_noise_ref_distal)
         config_form.addRow("Pose reg equal-split std (spine1/2, rad):", self._pose_reg_equal_split)
         config_form.addRow("Pose reg rest-pose std (spine1/2, rad):", self._pose_reg_rest_pose)
-        config_form.addRow("Enable NIS feedback (core+arms):", self._nis_feedback_enabled)
+        config_form.addRow("Soft joint-limit margin (upper_arm, rad):", self._soft_limit_margin)
+        config_form.addRow(
+            "Soft joint-limit noise std (upper_arm, rad):", self._soft_limit_noise_std
+        )
+        config_form.addRow("Enable NIS feedback (core+limbs):", self._nis_feedback_enabled)
         config_form.addRow("NIS feedback threshold:", self._nis_feedback_threshold)
         config_form.addRow("NIS feedback max multiplier:", self._nis_feedback_max_mult)
         config_form.addRow("Pose noise std (px in model):", self._pose_noise)
@@ -666,17 +720,37 @@ class RunTrackerWidget(QWidget):
         cross_px_val = cross_px if cross_px > 0.0 else None
         joint_gain = self._vel_noise_gain_joint.value()
         joint_names_json = json.dumps(ADAPTIVE_NOISE_CORE_JOINTS) if joint_gain > 0.0 else None
-        arms_gain = self._vel_noise_gain_arms.value()
-        arms_joint_names_json = json.dumps(NIS_FEEDBACK_ARM_JOINTS) if arms_gain > 0.0 else None
+        vel_scopes = []
+        if self._vel_noise_gain_proximal.value() > 0.0:
+            vel_scopes.append({
+                "name": "proximal",
+                "joint_names": ADAPTIVE_NOISE_PROXIMAL_JOINTS,
+                "gain": self._vel_noise_gain_proximal.value(),
+                "vel_ref": self._vel_noise_ref_proximal.value(),
+            })
+        if self._vel_noise_gain_distal.value() > 0.0:
+            vel_scopes.append({
+                "name": "distal",
+                "joint_names": ADAPTIVE_NOISE_DISTAL_JOINTS,
+                "gain": self._vel_noise_gain_distal.value(),
+                "vel_ref": self._vel_noise_ref_distal.value(),
+            })
+        vel_scopes_json = json.dumps(vel_scopes) if vel_scopes else None
         pose_reg_equal_split = self._pose_reg_equal_split.value()
         pose_reg_rest_pose = self._pose_reg_rest_pose.value()
         pose_reg_enabled = pose_reg_equal_split > 0.0 or pose_reg_rest_pose > 0.0
         pose_reg_joint_names_json = json.dumps(POSE_REG_SPINE_CHAIN) if pose_reg_enabled else None
+        soft_limit_margin = self._soft_limit_margin.value()
+        soft_limit_noise_std = self._soft_limit_noise_std.value()
+        soft_limit_enabled = soft_limit_noise_std > 0.0
+        soft_limit_joint_names_json = (
+            json.dumps(SOFT_LIMIT_JOINT_NAMES) if soft_limit_enabled else None
+        )
         nis_feedback_scopes_json = None
         if self._nis_feedback_enabled.isChecked():
             nis_feedback_scopes_json = json.dumps([
                 {"name": "core", "joint_names": ADAPTIVE_NOISE_CORE_JOINTS},
-                {"name": "arms", "joint_names": NIS_FEEDBACK_ARM_JOINTS},
+                {"name": "limbs", "joint_names": NIS_FEEDBACK_LIMB_JOINTS},
             ])
         with self._conn:
             self._conn.execute(
@@ -690,12 +764,12 @@ class RunTrackerWidget(QWidget):
                 "  process_noise_vel_gain_joint, process_noise_vel_ref_joint,"
                 "  process_noise_vel_gain_root, process_noise_vel_ref_root,"
                 "  process_noise_vel_joint_names,"
-                "  process_noise_vel_gain_arms, process_noise_vel_ref_arms,"
-                "  process_noise_vel_joint_names_arms,"
+                "  process_noise_vel_scopes,"
                 "  pose_reg_joint_names, pose_reg_equal_split_noise_std, pose_reg_rest_pose_noise_std,"
+                "  soft_limit_joint_names, soft_limit_margin_rad, soft_limit_noise_std,"
                 "  nis_feedback_scopes, nis_feedback_threshold, nis_feedback_max_multiplier)"
                 " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                "         ?, ?, ?, ?, ?, ?, ?, ?)",
+                "         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     config_id, "ui-run", now,
                     self._proc_noise_std.value(),
@@ -715,12 +789,13 @@ class RunTrackerWidget(QWidget):
                     self._vel_noise_gain_root.value(),
                     self._vel_noise_ref_root.value(),
                     joint_names_json,
-                    arms_gain,
-                    self._vel_noise_ref_arms.value(),
-                    arms_joint_names_json,
+                    vel_scopes_json,
                     pose_reg_joint_names_json,
                     pose_reg_equal_split,
                     pose_reg_rest_pose,
+                    soft_limit_joint_names_json,
+                    soft_limit_margin,
+                    soft_limit_noise_std,
                     nis_feedback_scopes_json,
                     self._nis_feedback_threshold.value(),
                     self._nis_feedback_max_mult.value(),

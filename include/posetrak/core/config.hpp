@@ -19,6 +19,17 @@ struct NisFeedbackScope {
 };
 
 /**
+ * @brief One additional, independent adaptive process noise gain scope beyond
+ * the primary one -- see UnscentedKalmanFilter::set_velocity_noise_gain_scopes().
+ */
+struct VelocityNoiseScope {
+    std::string name;                      ///< Identifier used in debug/logging only.
+    std::vector<std::string> joint_names;  ///< Joints this scope covers.
+    double gain = 0.0;                     ///< 0.0 = this scope disabled.
+    double vel_ref = 1.0;                  ///< Reference velocity (rad/s).
+};
+
+/**
  * @brief Configuration for a single child UKF filter in a hierarchical setup.
  *
  * A child filter tracks a named subset of joints (e.g. one hand) using only
@@ -113,11 +124,9 @@ struct TrackerConfig {
     /// fine-grained enough (one "main" group spans the whole body) and adding a
     /// finer split would mean editing every person's skeleton file.
     std::vector<std::string> process_noise_vel_joint_names;
-    /// Second, independent velocity gain scope (e.g. arms) -- see
-    /// UnscentedKalmanFilter::set_velocity_noise_gain_arms(). 0.0 gain = disabled.
-    double process_noise_vel_gain_arms = 0.0;
-    double process_noise_vel_ref_arms = 1.0;
-    std::vector<std::string> process_noise_vel_joint_names_arms;
+    /// Additional, independent velocity gain scopes beyond the primary one -- see
+    /// UnscentedKalmanFilter::set_velocity_noise_gain_scopes(). Empty = none.
+    std::vector<VelocityNoiseScope> process_noise_vel_scopes;
 
     // === Pose regularization (kinematic redundancy) — Phase 1 ===
     // See docs/roadmap/features/pose-regularization/pose-regularization-design.md.
@@ -125,6 +134,21 @@ struct TrackerConfig {
     std::vector<std::string> pose_reg_joint_names;  ///< Redundant chain, e.g. {"spine1","spine2"}
     double pose_reg_equal_split_noise_std = 0.0;    ///< 0.0 = disabled
     double pose_reg_rest_pose_noise_std = 0.0;      ///< 0.0 = disabled
+
+    // === Soft joint-limit repulsion — Phase 1 ===
+    // See docs/roadmap/features/soft-joint-limits/soft-joint-limits-design.md.
+    // Empty soft_limit_joint_names = disabled.
+    std::vector<std::string> soft_limit_joint_names;  ///< e.g. {"upper_arm.L","upper_arm.R"}
+    double soft_limit_margin_rad = 0.0;               ///< Width of the soft zone (radians)
+    double soft_limit_noise_std = 0.0;                ///< 0.0 = disabled
+
+    // === Near-limit process-noise damping ===
+    // See docs/roadmap/features/tracking-crisis-debugging-log.md, "Proposals".
+    // Empty near_limit_damping_joint_names = disabled.
+    std::vector<std::string> near_limit_damping_joint_names;
+    double near_limit_margin_rad = 0.0;
+    double near_limit_spread_sigma = 3.0;
+    double near_limit_damping_factor = 1.0;  ///< 1.0 = disabled
 
     // === NIS-feedback regional fading safety net (Mechanism B) ===
     // See docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
@@ -225,14 +249,23 @@ struct TrackerAppConfig {
     double process_noise_vel_gain_root = 0.0;
     double process_noise_vel_ref_root = 1.0;
     std::vector<std::string> process_noise_vel_joint_names;
-    double process_noise_vel_gain_arms = 0.0;
-    double process_noise_vel_ref_arms = 1.0;
-    std::vector<std::string> process_noise_vel_joint_names_arms;
+    std::vector<VelocityNoiseScope> process_noise_vel_scopes;
 
     // === Pose regularization (kinematic redundancy) — Phase 1 ===
     std::vector<std::string> pose_reg_joint_names;
     double pose_reg_equal_split_noise_std = 0.0;
     double pose_reg_rest_pose_noise_std = 0.0;
+
+    // === Soft joint-limit repulsion — Phase 1 ===
+    std::vector<std::string> soft_limit_joint_names;
+    double soft_limit_margin_rad = 0.0;
+    double soft_limit_noise_std = 0.0;
+
+    // === Near-limit process-noise damping ===
+    std::vector<std::string> near_limit_damping_joint_names;
+    double near_limit_margin_rad = 0.0;
+    double near_limit_spread_sigma = 3.0;
+    double near_limit_damping_factor = 1.0;
 
     // === NIS-feedback regional fading safety net (Mechanism B) ===
     std::vector<NisFeedbackScope> nis_feedback_scopes;
@@ -332,12 +365,17 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.process_noise_vel_gain_root = process_noise_vel_gain_root;
     tc.process_noise_vel_ref_root = process_noise_vel_ref_root;
     tc.process_noise_vel_joint_names = process_noise_vel_joint_names;
-    tc.process_noise_vel_gain_arms = process_noise_vel_gain_arms;
-    tc.process_noise_vel_ref_arms = process_noise_vel_ref_arms;
-    tc.process_noise_vel_joint_names_arms = process_noise_vel_joint_names_arms;
+    tc.process_noise_vel_scopes = process_noise_vel_scopes;
     tc.pose_reg_joint_names = pose_reg_joint_names;
     tc.pose_reg_equal_split_noise_std = pose_reg_equal_split_noise_std;
     tc.pose_reg_rest_pose_noise_std = pose_reg_rest_pose_noise_std;
+    tc.soft_limit_joint_names = soft_limit_joint_names;
+    tc.soft_limit_margin_rad = soft_limit_margin_rad;
+    tc.soft_limit_noise_std = soft_limit_noise_std;
+    tc.near_limit_damping_joint_names = near_limit_damping_joint_names;
+    tc.near_limit_margin_rad = near_limit_margin_rad;
+    tc.near_limit_spread_sigma = near_limit_spread_sigma;
+    tc.near_limit_damping_factor = near_limit_damping_factor;
     tc.nis_feedback_scopes = nis_feedback_scopes;
     tc.nis_feedback_window = nis_feedback_window;
     tc.nis_feedback_threshold = nis_feedback_threshold;

@@ -233,31 +233,42 @@ class UnscentedKalmanFilter {
                                  std::vector<std::string> const& joint_names = {});
 
     /**
-     * @brief Configure a second, independent velocity-driven gain for a disjoint
-     * joint scope (e.g. arms) — same Singer-model formula as
-     * set_velocity_noise_gain(), but with its own gain/reference velocity so it
-     * doesn't have to share set_velocity_noise_gain()'s joint_names tuning.
-     *
-     * Added after set_velocity_noise_gain()'s joint_names scoping excluded arms
-     * entirely (see its doc comment) to fix the original body-wide-gain
-     * regression, which left arms with only the reactive NIS-feedback safety net
-     * (set_nis_feedback_scopes()) and no proactive velocity-driven headroom.
-     * Once pose regularization (set_pose_regularization()) separately fixed the
-     * spine issue that originally forced a high core gain, a modest, independent
-     * arm gain became worth trying without reintroducing that regression.
-     *
-     * A joint listed in both this scope and set_velocity_noise_gain()'s
-     * joint_names is scaled by the primary scope only (this one is skipped for
-     * it) -- scopes are expected to be disjoint (core vs. arms) by construction.
-     *
-     * @param gain Velocity gain for this scope's joint DOFs (0.0 = disabled).
-     * @param vel_ref Reference velocity (rad/s). Must be > 0 if gain > 0.
-     * @param joint_names Literal skeleton joint names this scope covers. Empty =
-     *        disabled (not "all joints" -- unlike the primary scope, there's no
-     *        sensible default here).
+     * @brief One additional, independent velocity-driven gain scope for
+     * set_velocity_noise_gain_scopes() -- own gain/reference velocity, own
+     * disjoint joint list.
      */
-    void set_velocity_noise_gain_arms(double gain, double vel_ref,
-                                      std::vector<std::string> const& joint_names);
+    struct VelocityNoiseScope {
+        std::string name;  ///< Identifier for debug/logging only.
+        std::vector<std::string> joint_names;
+        double gain = 0.0;     ///< 0.0 = this scope disabled.
+        double vel_ref = 1.0;  ///< Reference velocity (rad/s).
+    };
+
+    /**
+     * @brief Configure additional, independent velocity-driven gain scopes
+     * beyond the primary one (set_velocity_noise_gain()) -- same Singer-model
+     * formula, each with its own gain/reference velocity so it doesn't have to
+     * share the primary scope's joint_names tuning.
+     *
+     * Generalizes what started as a single hardcoded "arms" scope (added after
+     * set_velocity_noise_gain()'s joint_names scoping excluded arms entirely --
+     * see its doc comment -- to fix a body-wide-gain regression that left arms
+     * with only the reactive NIS-feedback safety net and no proactive
+     * velocity-driven headroom) into an arbitrary list, once a single split
+     * stopped being enough: distal joints (wrist, ankle) are more accurate but
+     * move faster than proximal ones (elbow, knee, shoulder, hip), so they
+     * warrant their own reference velocity too, not just one shared "arms"
+     * value.
+     *
+     * A joint covered by an earlier scope in this list (or by the primary
+     * scope) is scaled by that earlier one only -- scopes are expected to be
+     * disjoint by construction, first match wins.
+     *
+     * @param scopes List of additional scopes, evaluated in order. Replaces any
+     *        previously configured list (does not merge). Empty = none beyond
+     *        the primary scope.
+     */
+    void set_velocity_noise_gain_scopes(std::vector<VelocityNoiseScope> const& scopes);
 
     /**
      * @brief Configure pose regularization for a kinematically redundant joint
@@ -292,6 +303,82 @@ class UnscentedKalmanFilter {
      */
     void set_pose_regularization(std::vector<std::string> const& joint_names,
                                  double equal_split_noise_std, double rest_pose_noise_std);
+
+    /**
+     * @brief Configure soft joint-limit repulsion — see
+     * docs/roadmap/features/soft-joint-limits/soft-joint-limits-design.md.
+     *
+     * Fuses a pseudo-measurement into a second, small Kalman update pass (same
+     * pattern as set_pose_regularization()) that discourages a configured joint's
+     * angle from approaching its own hard limit, rather than only reacting once
+     * enforce_joint_limits() clamps it after the fact. Per axis with hard limits
+     * [lo, hi] and this margin m, the pseudo-residual is
+     * `max(0, angle - (hi - m)) + min(0, angle - (lo + m))`, target 0: zero
+     * anywhere in the interior [lo+m, hi-m], growing linearly (unbounded, no
+     * saturation) as the angle leaves that band in either direction, including
+     * past the hard limit itself.
+     *
+     * Added after tracing a sustained tracking crisis to upper_arm.L/R
+     * overshooting their own ball-joint limits during a fast bilateral motion —
+     * adaptive process noise (set_velocity_noise_gain()) widened their sigma-point
+     * spread right as they approached the wall, and the resulting overshoot then
+     * got hard-clamped with the state's position covariance left inconsistent
+     * with the deterministic override (enforce_joint_limits() only damps velocity
+     * covariance for the clamped DOF, not position). This mechanism aims to make
+     * that overshoot rare instead of routine; enforce_joint_limits() remains the
+     * backstop that guarantees the stored state never exceeds a configured limit.
+     *
+     * @param joint_names Joints to apply this to (e.g. {"upper_arm.L", "upper_arm.R"}).
+     *        Only SPHERICAL/REVOLUTE joints with configured limits contribute; axes
+     *        without a configured limit are skipped. Empty disables the mechanism.
+     * @param margin_rad Width of the soft zone just inside each bound (radians).
+     *        Must be > 0 for any axis to actually engage; not clamped against the
+     *        axis's own range here (a margin wider than the range collapses the
+     *        interior to a point, at which point the residual is nonzero
+     *        everywhere on that axis).
+     * @param noise_std Std of the pseudo-measurement (radians) — the "stiffness"
+     *        of the pull once the residual is nonzero. 0.0 = disabled.
+     */
+    void set_soft_joint_limits(std::vector<std::string> const& joint_names, double margin_rad,
+                               double noise_std);
+
+    /**
+     * @brief Configure near-limit process-noise damping — see
+     * docs/roadmap/features/tracking-crisis-debugging-log.md, "Proposals" section.
+     *
+     * Complementary to, and the inverse of, set_velocity_noise_gain() /
+     * set_velocity_noise_gain_scopes(): where those inflate process noise for a
+     * fast-moving joint, this shrinks it for a joint whose CURRENT
+     * covariance-implied spread already reaches close to one of its configured
+     * hard limits, regardless of velocity. Targets a traced failure mechanism
+     * where a wide sigma-point cloud straddling a box-constraint corner (2-3
+     * axes near their bounds simultaneously) breaks the UKF's local-linearity
+     * assumption, causing a discontinuous multi-radian jump and cascading
+     * instability -- by keeping the cloud narrower exactly where that would
+     * happen, rather than trying to steer the mean away from the corner (which
+     * set_soft_joint_limits() already does, and was shown insufficient alone:
+     * the corner events recur even with soft limits active, because the real
+     * motion's Kalman-fit solution can still land there).
+     *
+     * Detection uses the CURRENT (pre-process-noise) covariance's implied
+     * spread, not just the mean's distance from the limit -- a mean that's
+     * safely inside the interior can still have a covariance wide enough that
+     * sigma points already reach past the limit, which is exactly when
+     * linearization is already breaking down.
+     *
+     * @param joint_names Joints to apply this to. Only SPHERICAL/REVOLUTE
+     *        joints with configured limits contribute. Empty disables the
+     *        mechanism.
+     * @param margin_rad Width of the detection zone just inside each hard
+     *        limit (radians) -- same idiom as set_soft_joint_limits()'s margin.
+     * @param spread_sigma Multiplier on sqrt(covariance) used to estimate the
+     *        sigma-point spread for the detection check (e.g. 3.0).
+     * @param damping_factor Variance-domain multiplier applied to a detected
+     *        near-limit axis's process noise. Must be in (0, 1) to shrink;
+     *        1.0 = disabled (no-op).
+     */
+    void set_near_limit_damping(std::vector<std::string> const& joint_names, double margin_rad,
+                                double spread_sigma, double damping_factor);
 
     /**
      * @brief Configure NIS-feedback regional fading scopes (Mechanism B) — see
@@ -385,6 +472,23 @@ class UnscentedKalmanFilter {
      * @see set_pose_regularization()
      */
     void apply_pose_regularization_for_testing() { apply_pose_regularization(); }
+
+    /**
+     * @brief Run the soft-joint-limit update pass directly (for testing),
+     * without needing a full camera-observation update() call.
+     * @see set_soft_joint_limits()
+     */
+    void apply_soft_joint_limits_for_testing() { apply_soft_joint_limits(); }
+
+    /**
+     * @brief Run near-limit process-noise damping directly (for testing),
+     * against the current state() and covariance(), without needing a full
+     * predict() call.
+     * @see set_near_limit_damping()
+     */
+    Eigen::MatrixXd apply_near_limit_damping_for_testing(Eigen::MatrixXd const& scaled_in) const {
+        return apply_near_limit_damping(scaled_in, state_);
+    }
 
    private:
     /**
@@ -559,12 +663,16 @@ class UnscentedKalmanFilter {
     // empty-set as "no joints", which would silently disable the feature by default.
     std::unordered_set<std::string> vel_noise_joint_names_;
     bool vel_noise_joint_scope_all_ = true;
-    // Second, independent gain scope -- see set_velocity_noise_gain_arms(). 0.0 gain =
-    // disabled. Unlike vel_noise_joint_names_, empty joint_names means "no joints"
-    // (there's no sensible "all joints" default for a secondary scope).
-    double vel_noise_gain_arms_ = 0.0;
-    double vel_noise_ref_arms_ = 1.0;
-    std::unordered_set<std::string> vel_noise_joint_names_arms_;
+    // Additional, independent gain scopes beyond the primary one -- see
+    // set_velocity_noise_gain_scopes(). Each entry's joint_names is resolved to a
+    // set once there (unlike vel_noise_joint_names_, empty means "no joints" for
+    // an additional scope -- there's no sensible "all joints" default).
+    struct ResolvedVelocityNoiseScope {
+        double gain = 0.0;
+        double vel_ref = 1.0;
+        std::unordered_set<std::string> joint_names;
+    };
+    std::vector<ResolvedVelocityNoiseScope> vel_noise_extra_scopes_;
     static constexpr double kMaxVelocityNoiseMultiplier = 10.0;
     /// Returns a copy of the static process_noise_ baseline (as built by
     /// rebuild_process_noise()) with each active DOF's diagonal entries scaled by
@@ -590,6 +698,48 @@ class UnscentedKalmanFilter {
     /// camera-observation correction. No-op if set_pose_regularization() was
     /// never called with a non-empty joint_names.
     void apply_pose_regularization();
+
+    // Soft joint-limit repulsion -- see set_soft_joint_limits(). Precomputed once
+    // there from the configured joint_names, one entry per active axis that has a
+    // configured hard limit; interior_lo/interior_hi are the margin-shrunk bounds
+    // baked in at set time so apply_soft_joint_limits() doesn't recompute them every
+    // step. Empty = disabled.
+    struct SoftJointLimitAxis {
+        int angle_idx = 0;         ///< Index into State::joint_angles()/joint_velocities()
+        double interior_lo = 0.0;  ///< lo + margin
+        double interior_hi = 0.0;  ///< hi - margin
+    };
+    std::vector<SoftJointLimitAxis> soft_limit_axes_;
+    double soft_limit_noise_var_ = 0.0;
+    /// Second, small Kalman update pass fusing the soft-joint-limit
+    /// pseudo-measurements, run at the end of update() alongside
+    /// apply_pose_regularization(). No-op if set_soft_joint_limits() was never
+    /// called with a non-empty joint_names.
+    void apply_soft_joint_limits();
+
+    // Near-limit process-noise damping -- see set_near_limit_damping().
+    // Precomputed once there from the configured joint_names, one entry per
+    // active axis that has a configured hard limit. lo/hi are the raw
+    // (unshrunk) limits -- the margin is applied at check time against
+    // mean +/- spread, not baked into these bounds. Empty = disabled.
+    struct NearLimitDampingAxis {
+        int angle_idx = 0;  ///< Index into State::joint_angles()
+        int pos_idx = 0;    ///< Error-state covariance position index
+        double lo = 0.0;
+        double hi = 0.0;
+    };
+    std::vector<NearLimitDampingAxis> near_limit_damping_axes_;
+    double near_limit_margin_ = 0.0;
+    double near_limit_spread_sigma_ = 3.0;
+    double near_limit_damping_factor_ = 1.0;  ///< 1.0 = disabled (no-op)
+    /// Shrinks process-noise variance for axes whose current covariance-implied
+    /// spread already reaches close to a configured hard limit, on top of the
+    /// Mechanism A/B scaling already applied to scaled_in. Called from predict()
+    /// using the pre-process-noise covariance_ and the pre-propagation
+    /// mean_state. No-op if set_near_limit_damping() was never called with a
+    /// non-empty joint_names.
+    Eigen::MatrixXd apply_near_limit_damping(Eigen::MatrixXd const& scaled_in,
+                                             State const& mean_state) const;
 
     // NIS-feedback regional fading safety net (Mechanism B) -- see
     // set_nis_feedback_scopes() / set_scope_noise_multiplier(). joint_to_scope_names_

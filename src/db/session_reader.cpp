@@ -175,9 +175,14 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "       COALESCE(nis_feedback_window, 8) AS nis_feedback_window,"
         "       COALESCE(nis_feedback_threshold, 1.5) AS nis_feedback_threshold,"
         "       COALESCE(nis_feedback_max_multiplier, 10.0) AS nis_feedback_max_multiplier,"
-        "       COALESCE(process_noise_vel_gain_arms, 0.0) AS process_noise_vel_gain_arms,"
-        "       COALESCE(process_noise_vel_ref_arms, 1.0) AS process_noise_vel_ref_arms,"
-        "       process_noise_vel_joint_names_arms"
+        "       process_noise_vel_scopes,"
+        "       soft_limit_joint_names,"
+        "       COALESCE(soft_limit_margin_rad, 0.0) AS soft_limit_margin_rad,"
+        "       COALESCE(soft_limit_noise_std, 0.0) AS soft_limit_noise_std,"
+        "       near_limit_damping_joint_names,"
+        "       COALESCE(near_limit_margin_rad, 0.0) AS near_limit_margin_rad,"
+        "       COALESCE(near_limit_spread_sigma, 3.0) AS near_limit_spread_sigma,"
+        "       COALESCE(near_limit_damping_factor, 1.0) AS near_limit_damping_factor"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -200,8 +205,10 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         27=process_noise_vel_joint_names, 28=pose_reg_joint_names,
     //         29=pose_reg_equal_split_noise_std, 30=pose_reg_rest_pose_noise_std,
     //         31=nis_feedback_scopes, 32=nis_feedback_window, 33=nis_feedback_threshold,
-    //         34=nis_feedback_max_multiplier, 35=process_noise_vel_gain_arms,
-    //         36=process_noise_vel_ref_arms, 37=process_noise_vel_joint_names_arms
+    //         34=nis_feedback_max_multiplier, 35=process_noise_vel_scopes,
+    //         36=soft_limit_joint_names, 37=soft_limit_margin_rad, 38=soft_limit_noise_std,
+    //         39=near_limit_damping_joint_names, 40=near_limit_margin_rad,
+    //         41=near_limit_spread_sigma, 42=near_limit_damping_factor
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -316,23 +323,69 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_int(32, out.tracker.nis_feedback_window);
     apply_real(33, out.tracker.nis_feedback_threshold);
     apply_real(34, out.tracker.nis_feedback_max_multiplier);
-    apply_real(35, out.tracker.process_noise_vel_gain_arms);
-    apply_real(36, out.tracker.process_noise_vel_ref_arms);
 
-    // process_noise_vel_joint_names_arms: stored as JSON string array
-    if (sqlite3_column_type(stmt.ptr, 37) != SQLITE_NULL) {
-        char const* json_str = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 37));
+    // process_noise_vel_scopes: stored as JSON array of
+    // {"name": ..., "joint_names": [...], "gain": ..., "vel_ref": ...}
+    if (sqlite3_column_type(stmt.ptr, 35) != SQLITE_NULL) {
+        char const* json_str = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 35));
+        if (json_str) {
+            auto arr = nlohmann::json::parse(json_str, nullptr, /*allow_exceptions=*/false);
+            if (arr.is_array()) {
+                for (auto const& elem : arr) {
+                    if (!elem.is_object())
+                        continue;
+                    VelocityNoiseScope scope;
+                    if (elem.contains("name") && elem["name"].is_string())
+                        scope.name = elem["name"].get<std::string>();
+                    if (elem.contains("joint_names") && elem["joint_names"].is_array()) {
+                        for (auto const& name_elem : elem["joint_names"]) {
+                            if (name_elem.is_string())
+                                scope.joint_names.push_back(name_elem.get<std::string>());
+                        }
+                    }
+                    if (elem.contains("gain") && elem["gain"].is_number())
+                        scope.gain = elem["gain"].get<double>();
+                    if (elem.contains("vel_ref") && elem["vel_ref"].is_number())
+                        scope.vel_ref = elem["vel_ref"].get<double>();
+                    out.tracker.process_noise_vel_scopes.push_back(std::move(scope));
+                }
+            }
+        }
+    }
+
+    // soft_limit_joint_names: stored as JSON string array
+    if (sqlite3_column_type(stmt.ptr, 36) != SQLITE_NULL) {
+        char const* json_str = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 36));
         if (json_str) {
             auto arr = nlohmann::json::parse(json_str, nullptr, /*allow_exceptions=*/false);
             if (arr.is_array()) {
                 for (auto const& elem : arr) {
                     if (elem.is_string())
-                        out.tracker.process_noise_vel_joint_names_arms.push_back(
+                        out.tracker.soft_limit_joint_names.push_back(elem.get<std::string>());
+                }
+            }
+        }
+    }
+    apply_real(37, out.tracker.soft_limit_margin_rad);
+    apply_real(38, out.tracker.soft_limit_noise_std);
+
+    // near_limit_damping_joint_names: stored as JSON string array
+    if (sqlite3_column_type(stmt.ptr, 39) != SQLITE_NULL) {
+        char const* json_str = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 39));
+        if (json_str) {
+            auto arr = nlohmann::json::parse(json_str, nullptr, /*allow_exceptions=*/false);
+            if (arr.is_array()) {
+                for (auto const& elem : arr) {
+                    if (elem.is_string())
+                        out.tracker.near_limit_damping_joint_names.push_back(
                             elem.get<std::string>());
                 }
             }
         }
     }
+    apply_real(40, out.tracker.near_limit_margin_rad);
+    apply_real(41, out.tracker.near_limit_spread_sigma);
+    apply_real(42, out.tracker.near_limit_damping_factor);
 
     return out;
 }

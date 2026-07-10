@@ -477,18 +477,18 @@ TEST_CASE("Adaptive process noise scales a moving joint DOF more than a stationa
     REQUIRE(scale.at(joint1_idx) > scale.at(joint2_idx));
 }
 
-TEST_CASE("Adaptive process noise arms scope applies its own independent gain",
+TEST_CASE("Adaptive process noise extra scope applies its own independent gain",
           "[ukf][adaptive-noise]") {
     auto layout = SkeletonLayout::from_full_skeleton(
         std::make_shared<const Skeleton>(make_two_joint_skeleton()));
     UnscentedKalmanFilter ukf(layout, 0.1);
-    // Primary scope covers joint1 with gain 1.0; arms scope covers joint2 with a
-    // different, independent gain 3.0.
+    // Primary scope covers joint1 with gain 1.0; an extra scope covers joint2 with a
+    // different, independent gain 1.5.
     ukf.set_velocity_noise_gain(/*gain_joint=*/1.0, /*vel_ref_joint=*/1.0, /*gain_root=*/0.0,
                                 /*vel_ref_root=*/1.0, {"joint1"});
     // Kept below the sqrt(kMaxVelocityNoiseMultiplier) =~ 3.162 clamp so this test
     // isolates the unclamped scaling formula (see the separate clamping test above).
-    ukf.set_velocity_noise_gain_arms(/*gain=*/1.5, /*vel_ref=*/1.0, {"joint2"});
+    ukf.set_velocity_noise_gain_scopes({{"scope2", {"joint2"}, /*gain=*/1.5, /*vel_ref=*/1.0}});
 
     Eigen::VectorXd joint_vels(2);
     joint_vels << 1.0, 1.0;  // both joints moving at the same speed
@@ -505,20 +505,20 @@ TEST_CASE("Adaptive process noise arms scope applies its own independent gain",
 
     // joint1 (primary scope): std_mult = 1 + 1.0 * 1.0 / 1.0 = 2.0
     REQUIRE_THAT(scale.at(joint1_idx), WithinAbs(2.0, 1e-6));
-    // joint2 (arms scope, independent gain): std_mult = 1 + 1.5 * 1.0 / 1.0 = 2.5
+    // joint2 (extra scope, independent gain): std_mult = 1 + 1.5 * 1.0 / 1.0 = 2.5
     REQUIRE_THAT(scale.at(joint2_idx), WithinAbs(2.5, 1e-6));
 }
 
 TEST_CASE(
-    "Adaptive process noise arms scope disabled by default leaves scale map "
-    "unaffected for arm joints",
+    "Adaptive process noise extra scopes disabled by default leave scale map "
+    "unaffected for non-primary joints",
     "[ukf][adaptive-noise]") {
     auto layout = SkeletonLayout::from_full_skeleton(
         std::make_shared<const Skeleton>(make_two_joint_skeleton()));
     UnscentedKalmanFilter ukf(layout, 0.1);
     ukf.set_velocity_noise_gain(/*gain_joint=*/1.0, /*vel_ref_joint=*/1.0, /*gain_root=*/0.0,
                                 /*vel_ref_root=*/1.0, {"joint1"});
-    // No set_velocity_noise_gain_arms() call -- disabled by default.
+    // No set_velocity_noise_gain_scopes() call -- disabled by default.
 
     Eigen::VectorXd joint_vels(2);
     joint_vels << 1.0, 1.0;
@@ -531,8 +531,50 @@ TEST_CASE(
     auto const& scale = ukf.last_velocity_noise_scale();
     int const root_n = layout->root_error_dof_count();
     int const joint2_idx = root_n + 1;
-    // joint2 outside the primary scope and no arms scope configured -- unscaled.
+    // joint2 outside the primary scope and no extra scopes configured -- unscaled.
     REQUIRE(scale.count(joint2_idx) == 0);
+}
+
+TEST_CASE("Adaptive process noise supports more than one extra scope, first match wins",
+          "[ukf][adaptive-noise]") {
+    Skeleton skeleton;
+    skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    skeleton.add_joint("joint1", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 0, 1));
+    skeleton.add_joint("joint2", 0, JointType::REVOLUTE, Eigen::Vector3d(1, 0, 0));
+    skeleton.add_joint("joint3", 0, JointType::REVOLUTE, Eigen::Vector3d(0, 1, 0));
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+
+    // Primary scope covers joint1. Two extra scopes with different gains; joint3 is
+    // deliberately listed in both -- the first one in the list ("proximal") should win.
+    ukf.set_velocity_noise_gain(/*gain_joint=*/1.0, /*vel_ref_joint=*/1.0, /*gain_root=*/0.0,
+                                /*vel_ref_root=*/1.0, {"joint1"});
+    ukf.set_velocity_noise_gain_scopes({
+        {"proximal", {"joint2", "joint3"}, /*gain=*/1.5, /*vel_ref=*/1.0},
+        {"distal", {"joint3"}, /*gain=*/2.0, /*vel_ref=*/1.0},
+    });
+
+    Eigen::VectorXd joint_vels(3);
+    joint_vels << 1.0, 1.0, 1.0;
+    Eigen::VectorXd angles(3);
+    angles << 0.0, 0.0, 0.0;
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), angles,
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), joint_vels);
+    ukf.set_state(state);
+
+    ukf.predict(0.01);
+
+    auto const& scale = ukf.last_velocity_noise_scale();
+    int const root_n = layout->root_error_dof_count();
+    int const joint1_idx = root_n + 0;
+    int const joint2_idx = root_n + 1;
+    int const joint3_idx = root_n + 2;
+
+    REQUIRE_THAT(scale.at(joint1_idx), WithinAbs(2.0, 1e-6));  // primary: 1 + 1.0
+    REQUIRE_THAT(scale.at(joint2_idx), WithinAbs(2.5, 1e-6));  // "proximal": 1 + 1.5
+    // joint3 is listed in both extra scopes -- "proximal" (listed first) wins, not
+    // "distal"'s 1 + 2.0 = 3.0.
+    REQUIRE_THAT(scale.at(joint3_idx), WithinAbs(2.5, 1e-6));
 }
 
 TEST_CASE("Adaptive process noise scales root DOFs from root velocity, independently per axis",
@@ -690,6 +732,236 @@ TEST_CASE("Pose regularization with unresolvable joint names is a no-op",
 
     REQUIRE_NOTHROW(ukf.apply_pose_regularization_for_testing());
     REQUIRE_THAT(ukf.state().joint_angles()(0), WithinAbs(0.3, 1e-12));
+}
+
+// -----------------------------------------------------------------------------
+// Soft joint-limit repulsion
+// docs/roadmap/features/soft-joint-limits/soft-joint-limits-design.md
+// -----------------------------------------------------------------------------
+
+namespace {
+/// Single spherical joint ("arm") with limits [-0.5, 0.5] rad on all three axes,
+/// plus floating root -- small, easy-to-reason-about range for testing the soft
+/// limit's margin/pull behavior.
+Skeleton make_limited_joint_skeleton() {
+    Skeleton skeleton;
+    skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    uint32_t arm_idx =
+        skeleton.add_joint("arm", 0, JointType::SPHERICAL, Eigen::Vector3d(0, 0.1, 0));
+    std::array<Eigen::Vector2d, 3> limits;
+    limits[0] = Eigen::Vector2d(-0.5, 0.5);
+    limits[1] = Eigen::Vector2d(-0.5, 0.5);
+    limits[2] = Eigen::Vector2d(-0.5, 0.5);
+    skeleton.set_joint_limits(arm_idx, limits, 3);
+    return skeleton;
+}
+
+/// angles = [arm_x, arm_y, arm_z].
+State make_soft_limit_test_state(double arm_x) {
+    Eigen::VectorXd angles(3);
+    angles << arm_x, 0.0, 0.0;
+    Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(3);
+    return State(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), angles,
+                 Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), joint_vels);
+}
+}  // namespace
+
+TEST_CASE("Soft joint limits disabled by default is a no-op", "[ukf][soft-joint-limits]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_limited_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+
+    ukf.set_state(make_soft_limit_test_state(0.48));  // deep in the margin band, if it were on
+    ukf.set_covariance(
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 0.01);
+
+    // No set_soft_joint_limits() call -- disabled by default.
+    ukf.apply_soft_joint_limits_for_testing();
+
+    REQUIRE_THAT(ukf.state().joint_angles()(0), WithinAbs(0.48, 1e-12));
+}
+
+TEST_CASE("Soft joint limits leave the interior untouched", "[ukf][soft-joint-limits]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_limited_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_soft_joint_limits({"arm"}, /*margin_rad=*/0.1, /*noise_std=*/0.02);
+
+    // Limits are [-0.5, 0.5], margin 0.1 -> interior [-0.4, 0.4]. 0.0 is deep inside.
+    ukf.set_state(make_soft_limit_test_state(0.0));
+    ukf.set_covariance(
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 0.01);
+
+    ukf.apply_soft_joint_limits_for_testing();
+
+    REQUIRE_THAT(ukf.state().joint_angles()(0), WithinAbs(0.0, 1e-6));
+}
+
+TEST_CASE("Soft joint limits pull an angle in the margin band back toward the interior",
+          "[ukf][soft-joint-limits]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_limited_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_soft_joint_limits({"arm"}, /*margin_rad=*/0.1, /*noise_std=*/0.02);
+
+    // Limits are [-0.5, 0.5], margin 0.1 -> interior_hi = 0.4. 0.45 is inside the
+    // margin band (past interior_hi, short of the hard limit).
+    ukf.set_state(make_soft_limit_test_state(0.45));
+    ukf.set_covariance(
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 0.01);
+
+    ukf.apply_soft_joint_limits_for_testing();
+
+    double const arm_x = ukf.state().joint_angles()(0);
+    REQUIRE(arm_x < 0.45);  // pulled back toward the interior
+    REQUIRE(arm_x > 0.35);  // gentle pull, not a snap past interior_hi
+    // y/z started at 0 and have no configured pull direction there -- unaffected.
+    REQUIRE_THAT(ukf.state().joint_angles()(1), WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(ukf.state().joint_angles()(2), WithinAbs(0.0, 1e-6));
+}
+
+TEST_CASE("Soft joint limits pull strengthens for an angle further past the hard limit",
+          "[ukf][soft-joint-limits]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_limited_joint_skeleton()));
+
+    auto correction_for = [&](double start_angle) {
+        UnscentedKalmanFilter ukf(layout, 0.1);
+        ukf.set_soft_joint_limits({"arm"}, /*margin_rad=*/0.1, /*noise_std=*/0.02);
+        ukf.set_state(make_soft_limit_test_state(start_angle));
+        ukf.set_covariance(
+            Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 0.01);
+        ukf.apply_soft_joint_limits_for_testing();
+        return start_angle - ukf.state().joint_angles()(0);  // how far it got pulled back
+    };
+
+    // Hard limit is 0.5. 0.55 is just past it; 0.9 is well past it. Both should get
+    // pulled back toward the interior, and the more-overshot one should get pulled
+    // back further -- the residual (and thus the pull) doesn't saturate at the wall.
+    double const correction_near = correction_for(0.55);
+    double const correction_far = correction_for(0.9);
+    REQUIRE(correction_near > 0.0);
+    REQUIRE(correction_far > correction_near);
+}
+
+TEST_CASE("Soft joint limits with unresolvable joint names is a no-op",
+          "[ukf][soft-joint-limits]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_limited_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_soft_joint_limits({"does_not_exist"}, /*margin_rad=*/0.1, /*noise_std=*/0.02);
+
+    ukf.set_state(make_soft_limit_test_state(0.6));
+    ukf.set_covariance(
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 0.01);
+
+    REQUIRE_NOTHROW(ukf.apply_soft_joint_limits_for_testing());
+    REQUIRE_THAT(ukf.state().joint_angles()(0), WithinAbs(0.6, 1e-12));
+}
+
+// -----------------------------------------------------------------------------
+// Near-limit process-noise damping
+// docs/roadmap/features/tracking-crisis-debugging-log.md, "Proposals"
+// -----------------------------------------------------------------------------
+
+TEST_CASE("Near-limit damping disabled by default is a no-op", "[ukf][near-limit-damping]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_limited_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_state(make_soft_limit_test_state(0.48));  // near the limit, if damping were on
+    ukf.set_covariance(
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 0.01);
+
+    // No set_near_limit_damping() call -- disabled by default.
+    Eigen::MatrixXd const input =
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim());
+    Eigen::MatrixXd const result = ukf.apply_near_limit_damping_for_testing(input);
+
+    REQUIRE(result.isApprox(input));
+}
+
+TEST_CASE("Near-limit damping leaves a deep-interior joint with tight covariance untouched",
+          "[ukf][near-limit-damping]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_limited_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_near_limit_damping({"arm"}, /*margin_rad=*/0.1, /*spread_sigma=*/3.0,
+                               /*damping_factor=*/0.3);
+
+    // Limits are [-0.5, 0.5]. 0.0 is deep interior; tiny covariance means the
+    // 3-sigma spread doesn't come close to either bound.
+    ukf.set_state(make_soft_limit_test_state(0.0));
+    ukf.set_covariance(
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 1e-6);
+
+    Eigen::MatrixXd const input =
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim());
+    Eigen::MatrixXd const result = ukf.apply_near_limit_damping_for_testing(input);
+
+    REQUIRE(result.isApprox(input));
+}
+
+TEST_CASE("Near-limit damping shrinks process noise when the mean is close to a hard limit",
+          "[ukf][near-limit-damping]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_limited_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_near_limit_damping({"arm"}, /*margin_rad=*/0.1, /*spread_sigma=*/3.0,
+                               /*damping_factor=*/0.3);
+
+    // Limits are [-0.5, 0.5], margin 0.1 -> detection zone starts at 0.4. 0.45 is
+    // inside it even with negligible covariance-implied spread.
+    ukf.set_state(make_soft_limit_test_state(0.45));
+    ukf.set_covariance(
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 1e-6);
+
+    Eigen::MatrixXd const input =
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim());
+    Eigen::MatrixXd const result = ukf.apply_near_limit_damping_for_testing(input);
+
+    REQUIRE(result.trace() < input.trace());
+}
+
+TEST_CASE(
+    "Near-limit damping shrinks process noise for a deep-interior mean when covariance spread "
+    "reaches the limit",
+    "[ukf][near-limit-damping]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_limited_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_near_limit_damping({"arm"}, /*margin_rad=*/0.1, /*spread_sigma=*/3.0,
+                               /*damping_factor=*/0.3);
+
+    // Mean at 0.0 is deep interior (limit is 0.5, margin-adjusted detection zone
+    // starts at 0.4) -- but a large covariance means the 3-sigma spread reaches
+    // well past it. This is the key case a mean-only check would miss.
+    ukf.set_state(make_soft_limit_test_state(0.0));
+    ukf.set_covariance(
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 1.0);
+
+    Eigen::MatrixXd const input =
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim());
+    Eigen::MatrixXd const result = ukf.apply_near_limit_damping_for_testing(input);
+
+    REQUIRE(result.trace() < input.trace());
+}
+
+TEST_CASE("Near-limit damping with unresolvable joint names is a no-op",
+          "[ukf][near-limit-damping]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(make_limited_joint_skeleton()));
+    UnscentedKalmanFilter ukf(layout, 0.1);
+    ukf.set_near_limit_damping({"does_not_exist"}, /*margin_rad=*/0.1, /*spread_sigma=*/3.0,
+                               /*damping_factor=*/0.3);
+    ukf.set_state(make_soft_limit_test_state(0.49));
+    ukf.set_covariance(
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim()) * 1.0);
+
+    Eigen::MatrixXd const input =
+        Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim());
+    Eigen::MatrixXd const result = ukf.apply_near_limit_damping_for_testing(input);
+
+    REQUIRE(result.isApprox(input));
 }
 
 // -----------------------------------------------------------------------------

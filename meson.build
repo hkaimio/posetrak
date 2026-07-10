@@ -76,6 +76,18 @@ if cpp.get_id() == 'msvc'
   # feature outright: nothing this project actually calls into needs Boost
   # Serialization's compiled support, only its header-only pieces.
   add_project_arguments('-DBOOST_ALL_NO_LIB', language: 'cpp')
+
+  # Without an explicit /arch: flag, MSVC only targets the x64-guaranteed
+  # SSE2 baseline (128-bit vector registers, 2 doubles/instruction), so
+  # Eigen's auto-vectorization -- used throughout the UKF's matrix/vector
+  # math -- never gets past that. /arch:AVX2 lets Eigen use 256-bit AVX2/FMA
+  # codepaths instead (4 doubles/instruction plus fused multiply-add),
+  # purely a compile-time codegen change, no source changes needed. AVX2
+  # has been present on essentially all x86_64 CPUs sold since ~2013
+  # (Haswell onward); not using AVX-512 since it's still absent on some
+  # current CPUs (notably AMD before Zen 4) and support is inconsistent
+  # enough to not be a safe default the way AVX2 now is.
+  add_project_arguments('/arch:AVX2', language: 'cpp')
 endif
 
 # Dependencies

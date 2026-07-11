@@ -1,5 +1,22 @@
 # Adaptive process noise — design note
 
+> **Status (2026-07-11)**: A full-trial A/B comparison (Mechanisms A+B
+> enabled vs. both disabled, all other config identical) across three people
+> found **on is worse than off for every person, on every conditioning
+> metric, no exceptions** — avg NIS/DOF, % steps overconfident, average and
+> worst-case covariance condition number all regress, most severely for the
+> least-manually-cleaned data (Timo: 11x worse avg condition number; one
+> single-step spike 5,593x worse). Not yet isolated whether Mechanism A,
+> Mechanism B, or their interaction is responsible. No decision made yet on
+> whether to revert, retune, or keep either mechanism. Full writeup, tables,
+> and a per-mechanism keep/kill initial lean:
+> `docs/roadmap/features/tracking-crisis-debugging-log.md`, sections
+> "Adaptive process noise (Mechanisms A+B) on/off comparison" and "Mechanism
+> inventory — keep/kill initial lean." This significantly changes the
+> confidence level behind the *Phasing* section below — treat Phase 1/2 as
+> "implemented but now under review," not "done and validated," until that
+> follow-up work lands.
+
 > **Status (2026-07-07)**: Phase 1 (Mechanism A) is implemented and validated
 > on Case 1. Validating it surfaced an unplanned regression (arms/hands losing
 > tracking under a body-wide gain) and, after fixing that by scoping the gain

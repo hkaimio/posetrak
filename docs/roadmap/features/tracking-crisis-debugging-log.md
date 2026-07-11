@@ -550,6 +550,162 @@ result that superficially matches another known pattern.
 
 ---
 
+## Adaptive process noise (Mechanisms A+B) on/off comparison, all three people — 2026-07-10/11
+
+Prompted by a qualitative observation while reviewing other people's data:
+the adaptive gain appeared to be widening process noise enough that the
+Mahalanobis outlier gate was letting clear misses through, causing visible
+limb "reactions" to bad observations. Tested directly: full-trial reruns for
+Roosa, Tommi, and Timo, each with the current shared config (`dc1be02f…`,
+Mechanism A velocity gain + Mechanism B NIS-feedback both enabled, same as
+their most recent prior runs) and a cloned config
+(`b257daa3906f44038f5eba24639b1267`, `parent_id`→`dc1be02f…`) with **both**
+mechanisms disabled (`process_noise_vel_gain_joint`/`_root` = 0,
+`process_noise_vel_scopes` = null, `nis_feedback_scopes` = null) — everything
+else (base process noise, outlier threshold, pose-reg, soft joint limits)
+identical. Both mechanisms were disabled together rather than isolated,
+since both widen process noise and either could produce the symptom; not yet
+determined which (or both) is the actual driver.
+
+Rebuilt `optbuild` first to confirm today's AVX2 flag was included. 6 runs,
+~590-620s each:
+
+| run_id | person | config | | run_id | person | config |
+|---|---|---|---|---|---|---|
+| `8851a531-9534-4008-82ce-86eb4b633832` | Roosa | on | | `a7e317f4-c5e7-4be1-8024-b11b3d2fe29a` | Roosa | off |
+| `cc9cff6a-e16f-4054-bd82-c7774c65221f` | Tommi | on | | `4f6daf6a-f448-4233-b748-c9842bc9575a` | Tommi | off |
+| `396295ee-2bc6-4515-b6b0-032825842151` | Timo | on | | `5be2f1f4-1f6d-48b9-8093-54f0326bff25` | Timo | off |
+
+BVH exports for all 6: `<scratchpad>/adaptive-gain-comparison/{Person}-{on,off}.bvh`
+(session-scratchpad path, not repo-permanent — re-export from the run_ids
+above if these have been cleaned up).
+
+**Result: on is worse than off, for every person, on every metric, no
+exceptions.**
+
+| metric | Roosa on | Roosa off | Tommi on | Tommi off | Timo on | Timo off |
+|---|---|---|---|---|---|---|
+| avg NIS/DOF | 2.11 | **1.52** | 3.48 | **1.79** | 2.79 | **2.05** |
+| % steps NIS/DOF > 1.5 | 47.0% | **42.7%** | 67.3% | **58.1%** | 76.0% | **71.3%** |
+| avg cov condition # | 699K | **368K** | 1.09M | **406K** | 5.02M | **452K** |
+| % steps ill-conditioned (>1e6) | 11.8% | **5.4%** | 22.3% | **5.9%** | 18.9% | **7.5%** |
+| avg n_inlier_observations | 352.9 | 350.2 | 393.9 | 392.9 | 402.3 | 398.1 |
+| tracking_lost | 0% | 0% | 0% | 0% | 0% | 0% |
+
+Effect size scales inversely with how much manual observation cleanup each
+person's data has had (least cleaned → largest effect): Timo (least) 11x
+worse avg condition number, Tommi (partial) 2.7x, Roosa (most, including all
+four rounds of crisis-B cleanup documented above) still ~1.9x.
+
+**Concrete single-step spikes**, same timestamp compared directly:
+
+| person | t | cov_cond ON | cov_cond OFF | ratio |
+|---|---|---|---|---|
+| Timo | 63.05s | 1.73×10⁹ | 309,298 | **5,593x** |
+| Tommi | 50.66s | 1.16×10⁸ | 887,007 | **131x** |
+| Roosa | 45.37s | 1.15×10⁷ | 244,774 | **47x** |
+
+All three people's ill-conditioned (>1e6) spans under the "on" config cluster
+in roughly the same t≈39-65s window — the trial's full observation range is
+t=38.08-66.43s (per the *Trial* header above), so this is essentially "most
+of the fast/bilateral-motion portion of the trial," not an isolated moment.
+Given Roosa's sequence (`a5da88ea…`) is the exact trial this whole crisis
+log is about, and her data has already had crisis B cleaned to 17-25σ
+mahalanobis (see "User-driven observation-data cleanup" above) — the fact
+that her "on" run *still* shows meaningfully worse conditioning than "off"
+suggests this is at least partly a mechanism-level effect, not purely
+residual bad data. Not proven to be the *only* driver of the noisier-looking
+data the investigation started from, but a real, reproducible, cross-person
+effect.
+
+**Methodology note — a metric that didn't work**: also tried a direct
+"gate-fooled" check (pixel gap between actual and predicted marker position
+for observations the gate accepted as inliers). Abandoned it — distal limb
+markers (wrist/elbow/ankle/knee/toe) showed enormous nominal gaps (1000px+)
+in *both* configs, apparently dominated by a lens-distortion/coordinate-space
+effect specific to certain cameras (GoPro views far worse than
+`insta_ace2_pro`), unrelated to adaptive gain. NIS/DOF and covariance
+condition number (both already-established diagnostics from earlier in this
+log) were the reliable signal; raw actual-vs-predicted pixel gap was not,
+at least not without an undistortion correction this check didn't do.
+
+**Not yet decided**: whether to disable Mechanism A, Mechanism B, or both,
+permanently — see the mechanism inventory below. This run only shows both
+disabled together is better than both enabled; it doesn't isolate which one
+(or whether it's their interaction, e.g. Mechanism B's NIS-feedback reacting
+to noise Mechanism A already introduced) is responsible.
+
+---
+
+## Mechanism inventory — keep/kill initial lean, not decided — 2026-07-11
+
+Every process-noise/covariance-shaping mechanism implemented during this
+investigation arc, with an initial lean based on evidence gathered so far.
+**None of these are final decisions** — flagging for discussion.
+
+| mechanism | what it does | evidence | initial lean |
+|---|---|---|---|
+| **Mechanism A** (`process_noise_vel_gain_joint/_root`, `process_noise_vel_scopes`) | Scales process noise up proportionally to a DOF's current velocity (Singer-model style) | Validated as a net *improvement* in isolation on Case 1 (forward bend) back in Phase 1. But the on/off comparison above shows it — bundled with Mechanism B — makes full-trial conditioning meaningfully worse for all three people. Not tested in isolation from Mechanism B since Phase 1. | **Lean: reconsider / re-validate in isolation.** The Case 1 win may still be real but be outweighed by fast-motion-segment harm; or Mechanism B may be the actual culprit and A is fine. Needs an A-only vs. B-only split run before deciding either way. |
+| **Mechanism B** (`nis_feedback_scopes`, NIS-feedback fading) | Reactively multiplies process noise when a scope's windowed NIS/DOF exceeds threshold | Built specifically as the Case 3 fix (arms losing tracking) and never independently re-validated against a full trial since. Plausible feedback-loop risk: high NIS → widens noise → worse conditioning → more bad observations accepted → higher NIS next step — exactly the shape of the spikes found above (up to 5,593x at a single step). Not proven, but is the more likely of the two mechanisms to runaway like this given its reactive design. | **Lean: prime suspect, test in isolation first.** |
+| **Pose regularization** (`pose_reg_joint_names` = spine1/spine2) | Equal-split + rest-pose soft constraint on the spine1/spine2 kinematic-redundancy pair | Independent of this A/B test — left enabled in both "on" and "off" configs above, so this test says nothing about it either way. Built for the "bend forward" artifact (steps 2680-2707/2750-2827 in the visual QC pass), not yet confirmed whether it's actually engaging there. | **Lean: keep, orthogonal to this finding** — but still has its own open question (does it actually fire where intended?) from the visual QC pass, item 3 in *Open threads*. |
+| **Soft joint-limit repulsion** (`soft_limit_joint_names` = upper_arm.L/R) | Soft repulsive penalty as a joint approaches its hard limit | Also left enabled in both configs above. Independently validated earlier in this log: real, general conditioning improvement (PSD fired 17.8%→13.9%) and eliminated `upper_arm.R`'s hard-limit clamps entirely — though it didn't fix crisis B (which turned out to be pure bad data, not a limit problem). | **Lean: keep** — real, if modest, benefit; no negative evidence found. |
+| **Near-limit process-noise damping** | Shrinks process noise for a DOF whose covariance-implied spread already nears a hard limit | Already implemented, tested, and conclusively evaluated as **net negative** earlier in this log ("Proposal 1" — eliminates hard clamps but makes overall conditioning *worse*, doesn't touch crisis B). **Already not deployed**: the shared config used for the runs above (`dc1be02f…`) has `near_limit_damping_factor` unset/disabled. | **Lean: kill, already effectively done** — just needs the code path formally removed or left permanently off if there's any reason to keep it available for future experiments. |
+| **Swing-twist joint limits** | Design sketch only (cone/twist limit representation instead of box-constrained per-axis limits), not implemented | Motivated by the frame-227/228 event's π-proximity signature, which is still open (not re-verified against a data-cleanup pass the way crisis B was). No new evidence from this A/B test either way. | **Lean: still open, unaffected by this finding** — see *Open threads* item 2. |
+
+**Suggested next step** (not started): an A-only and a B-only variant (2 more
+configs, 6 more runs across the three people) to isolate which mechanism —
+or their interaction — is actually driving the conditioning regression,
+before deciding whether to revert, retune, or keep either one.
+
+---
+
+## Visual QC of the on/off BVH exports + two concrete false-inlier root causes — 2026-07-11
+
+User visually reviewed the Roosa and Tommi on/off BVH pairs. **Tommi: off
+(adaptive disabled) is clearly better.** **Roosa: a tie** — consistent with
+the hunch that residual data-quality issues in her sequence are muddying
+the comparison, confirmed below.
+
+User flagged two specific moments where a far-away observation appeared to
+be accepted as an inlier and destabilize tracking, both in the Roosa "off"
+run (`a7e317f4-c5e7-4be1-8024-b11b3d2fe29a`): `gopro-11_mini_01` step 911
+(t=45.672s) and `gopro-11_mini_02` step 1884 (t=53.780s). **Root-caused,
+and it's not an adaptive-noise or gate problem at all**: both are literal
+`(0.0, 0.0)` pixel coordinates with confidence **1.0** (fully trusted),
+written via `pose_observation_edits` on ghost frames (no backing raw
+detection), `created_at` 2026-07-03/04 — predating this week's marker/
+chain-placement/interpolate-missing UI work, so not caused by that. A
+follow-up hygiene scan (read-only, all 10,640 edit rows in the DB, all
+sequences) found exactly **3** such rows total, **all in Roosa's sequence,
+none in Tommi's or Timo's**, and no other degenerate patterns (`NaN`,
+extreme-magnitude coordinates) anywhere else in the trial. Narrow and fully
+enumerated — see
+`docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md`
+for the scan details and a design sketch for related ideas (an
+outlier-gate bypass for *human-verified* edited keypoints, gated on this
+staying clean; plus two hand/finger-tracking quality ideas raised in the
+same discussion: a dedicated hand-detection pass in the pipeline, and
+automated post-edit hand redetection).
+
+**Revises the adaptive-gain conclusion slightly**: Tommi's clean-cut result
+(no known data-quality confound) is the more reliable signal of the two
+BVH comparisons done so far — the earlier full-trial NIS/cov-condition
+numbers stand regardless (that evidence didn't depend on these three edit
+rows), but Roosa's *visual* tie is now explained by a real, separate
+data-quality issue rather than adaptive gain being a wash for her too.
+
+**Also still open, not yet investigated**: fast bilateral hand-raises still
+lose tracking lock at the outlier gate — once the state has drifted, the
+*correct* observations get rejected as outliers, so the arm stays stuck
+rather than recovering (the original Case 1/Case 3 failure mode, still
+present). Hand/finger keypoints are also frequently wrong for two other,
+distinct reasons: incorrect identity assignment during grabs (common in
+this aikido footage), and self-occlusion where the pose model still emits
+a confident-looking guess. See the new design doc for candidate mitigations
+for both — none implemented yet.
+
+---
+
 ## Recurring pitfalls / methodology notes
 
 - **`marker_projections.csv`'s `proj_x/proj_y` vs `obs_x/obs_y` are in
@@ -584,7 +740,27 @@ result that superficially matches another known pattern.
 
 ---
 
-## Open threads (as of 2026-07-10)
+## Open threads (as of 2026-07-11)
+
+0. **Adaptive process noise (Mechanisms A+B) — full-trial on/off comparison
+   done, showing net-negative conditioning across all three people (Roosa,
+   Tommi, Timo) — see the new section above. Not yet isolated which
+   mechanism (A, B, or their interaction) is responsible, and no decision
+   made on whether to revert/retune/keep either one — see the mechanism
+   inventory above for an initial (non-final) lean per mechanism. Visual
+   QC of the BVH exports confirms Tommi clearly favors adaptive-off;
+   Roosa's tie is explained by three unrelated corrupted edit rows (found
+   and fully enumerated via hygiene scan, see below), not by adaptive gain
+   being a wash for her too — Tommi's result is the more reliable signal.
+   The A-only/B-only isolation run is still the suggested next step.
+0.5. **Hand/finger tracking quality — design sketch written, nothing
+   implemented.** Fast bilateral hand-raises still lose lock at the outlier
+   gate and don't recover once the state drifts (Case 1/3's original
+   failure mode, still present). Hand keypoints are frequently wrong from
+   identity mixup during grabs or self-occlusion. See
+   `docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md`
+   for three related ideas (trusted-edit gate bypass, pipeline hand-detection
+   pass, automated post-edit hand redetection) and their open questions.
 
 1. **Crisis B — resolved.** Four rounds of camera-by-camera bad-observation
    fixes (pixel9, gopro02 hand mixup, insta-ace2 second-person

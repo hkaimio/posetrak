@@ -1,0 +1,140 @@
+Test frames for hadn detection
+
+Tommi (should be easy)
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 64180d42-8593-43da-9e93-9c7f872b9b9e
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 2409
+time_s: 58.155
+
+Tommi (similar, but Roosa's hadn close to Tommi's left hand)
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 64180d42-8593-43da-9e93-9c7f872b9b9e
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 2072
+time_s: 55.347
+
+Tommi ( more difficult, Roosa's elbow at same location as Tommi's left elbow, left hand not visible)
+
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 64180d42-8593-43da-9e93-9c7f872b9b9e
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 1856
+time_s: 53.547
+
+Tommi (left jand visible, right not)
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 64180d42-8593-43da-9e93-9c7f872b9b9e
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 1740
+time_s: 52.580
+
+Tommi (Timo's hand very close to Tommi's right hand). Wrist / index/pinky1 markers look to be in correct places, so should be able to detet the difference)
+
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 64180d42-8593-43da-9e93-9c7f872b9b9e
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 1665
+time_s: 51.955
+
+Tommi (wrist markers edited to correct places but finger markers missing. Fast movement)
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 64180d42-8593-43da-9e93-9c7f872b9b9e
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 1579
+time_s: 51.238
+
+Tommi (Tmo grabbing from Tommi's right wrist - might be challenging to distinguish the hands)
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 64180d42-8593-43da-9e93-9c7f872b9b9e
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 1517
+time_s: 50.722
+
+Tommi (left hand visible, right hand not)
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 64180d42-8593-43da-9e93-9c7f872b9b9e
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 1415
+time_s: 49.872
+
+TOmmi (right hand side view; Tomi grabbing left wrist)
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 64180d42-8593-43da-9e93-9c7f872b9b9e
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 1376
+time_s: 49.547
+
+
+Roosa (should be easy, both hands vidiable in both gorpo 01 and pixel 7)
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 2370cef2-e1ea-4214-852e-cbb621bb8489
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 72
+time_s: 38.680
+
+Roosa (fast move, both hands visible close to each other. gopro 01)
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 2370cef2-e1ea-4214-852e-cbb621bb8489
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 661
+time_s: 43.588
+
+Roosa (gopro 01, this is tricky as TOmmi is grabbing her both wrists)
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 2370cef2-e1ea-4214-852e-cbb621bb8489
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 788
+time_s: 44.647
+
+Roosa (gpro 01, Tommi's hand is very close)
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 2370cef2-e1ea-4214-852e-cbb621bb8489
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 1044
+time_s: 46.780
+
+Roosa (fopro 01, fas movement, left hand partially occluded)
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 2370cef2-e1ea-4214-852e-cbb621bb8489
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 1923
+time_s: 54.105
+
+Roosa (gopro 02, easy)
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 2370cef2-e1ea-4214-852e-cbb621bb8489
+trial: 7cebaac9-05b7-4564-8c49-1fa1b92ba7f7 (Ekat ukemit)
+capture: b862ca88-d7d7-43f5-b36a-1fa10c035503 (Ukemit yritys 6)
+step: 2339
+time_s: 57.572
+
+Harri (gopoo 01, gopro 02, insta ace2 and pixel 9, holdign sword with both hands, two frames)
+
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 51fd9bc6-3f5c-422b-8db9-78ba68f51aa7
+trial: 3f855758-d926-4e41-9ad5-b285ee6beeca (shomenuchi & awase 1)
+capture: 2af2c0c0-6dae-462d-8fab-2c7e265be96a (bokken 20260524)
+step: 6436
+time_s: 92.333
+
+db: D:\mocap\vanhaa\ukemi-tommi-20260509.db
+run: 51fd9bc6-3f5c-422b-8db9-78ba68f51aa7
+trial: 3f855758-d926-4e41-9ad5-b285ee6beeca (shomenuchi & awase 1)
+capture: 2af2c0c0-6dae-462d-8fab-2c7e265be96a (bokken 20260524)
+step: 1483
+time_s: 51.058

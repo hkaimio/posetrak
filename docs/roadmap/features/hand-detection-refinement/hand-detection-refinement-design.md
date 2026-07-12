@@ -1,5 +1,25 @@
 # Hand-detection refinement & trusted-edit gate bypass — design sketch
 
+> **Status (2026-07-12, update 4)**: Idea 2's core mechanism — crop sizing,
+> model choice, and a validation gate — is now empirically tuned against
+> four rounds of offline stills (Tommi, Roosa, and Harri in a completely
+> different trial with a two-handed sword grip; 60+ crops reviewed, several
+> by eye). See the rewritten "Idea 2" section below for the validated
+> formulas and `rtmlib.Hand` as the concrete model choice. Headline
+> results: occlusion and motion blur correctly come back low-confidence
+> (the core premise this whole idea was betting on, confirmed); a
+> proximity gate on the hand model's *own* detected root keypoint —
+> `reject if far from the tracked wrist relative to forearm length` —
+> reliably catches wrong-hand/wrong-person detections without also
+> rejecting good ones; and a crop offset away from the elbow (not
+> centered on the wrist) fixed finger-clipping. One new, real edge case
+> surfaced and not yet handled: a two-handed coordinated grip (sword,
+> clasped hands) can fool the gate into rejecting the *correct* hand
+> because it's checking distance to a single wrist, and the other hand's
+> grip point can be closer. Phasing revised below to reflect this —
+> pipeline integration (Phase 1) is now well-specified rather than a
+> sketch.
+
 > **Status (2026-07-11, update 3)**: Idea 1's revised design (scale-to-
 > threshold, update 2 below) is now tested against real data (Roosa +
 > Tommi) — see "(a) Scale noise to land just inside the gate threshold" in
@@ -246,16 +266,84 @@ something worth surfacing.
 
 ## Idea 2 — hand-specific detection pass in the original pipeline
 
-Run the existing full-body detector (VitPose, COCO-133) first as today,
-then for each frame/camera with a confident wrist detection, crop around
-the estimated hand location and run an RTMPose hand-specific model on that
-crop (RTMPose has a dedicated hand model; VitPose in this pipeline does
-not). If the hand is actually occluded by the body, a hand-specific
+Run the existing full-body detector (VitPose/RTMPose, COCO-133) first as
+today, then for each frame/camera with a confident wrist detection, crop
+around the estimated hand location and run a dedicated hand model on that
+crop. If the hand is actually occluded by the body, a hand-specific
 detector — trained on hand crops, not whole-body context — should be much
 better calibrated to report low/no confidence than a whole-body model
 guessing from pose priors (the calibration problem discussed for the
 "tighter confidence gate" idea, which this sidesteps rather than solves
 directly).
+
+**Confirmed empirically, not just a hypothesis anymore (2026-07-12).** Four
+rounds of offline stills against `rtmlib.Hand` (below) across Tommi, Roosa,
+and Harri (a different trial, two-handed sword grip): occlusion and motion
+blur consistently come back with low enough confidence that nothing gets
+drawn/accepted, while clearly-visible hands detect cleanly. This was the
+central bet the whole idea rested on and it held up across genuinely
+different footage, not just the original motivating case.
+
+### Model, crop, and validation — now a concrete, tuned mechanism
+
+**Model: `rtmlib.Hand`**, already available via the `rtmlib` dependency the
+whole-body pass already uses — no new package. It's a two-stage pipeline
+internally (an `RTMDet` hand-region detector, then an `RTMPose` 21-keypoint
+hand model, MMPose hand21 keypoint order — index 0 is the hand root/wrist,
+matching this project's own `left_hand_root`/`right_hand_root` naming in
+`kp_models.py`). Both checkpoints download once via `rtmlib`'s own cache
+(`~/.cache/rtmlib/hub/checkpoints`, ~53MB total), same mechanism already in
+use for the whole-body model.
+
+**Crop, tuned across three rounds**:
+- Half-width: `max(0.9 × forearm_len_px, 60px)`, `forearm_len_px = |wrist -
+  elbow|` in the current tracked/edited position for that camera/frame.
+  *Round 1's first attempt used a 150px floor that dominated every single
+  case regardless of actual arm scale — an oversized, non-adaptive crop is
+  exactly what let a neighbour's hand into frame in a grappling scene.*
+  Lowering the floor and the multiplier made the crop genuinely scale-
+  adaptive (round 2: 120-191px depending on actual limb size in that
+  camera view, vs. a flat 300px before).
+- Centre offset: shift `0.35 × forearm_len_px` from the wrist *away from
+  the elbow* (along the elbow→wrist direction, continued past the wrist),
+  rather than centering exactly on the wrist joint. Centering on the wrist
+  wastes roughly half the box on forearm/sleeve where there's never a
+  finger — round 2 clipped fingers in a few cases for exactly this reason;
+  round 3's offset fixed it (spot-checked: full hand in frame, well
+  centered, no clipping in the case reviewed).
+- Fallback when the elbow isn't confidently known: no offset (crop
+  centres on the wrist alone), `forearm_len_px` treated as 0, so the half-
+  width floor (60px) applies directly, giving a small 120×120px box. This
+  is the current answer to *Open questions* #3 below — a simple fallback,
+  not a tuned one; hasn't come up often enough in testing to know if it
+  needs more care.
+
+**Validation gate, new — not in earlier revisions of this doc**: `Hand()`
+can return multiple candidate hands per crop (observed 1-3 in testing).
+Pick the candidate whose own detected root keypoint (hand21 index 0,
+mapped back into full-frame coordinates) is *closest* to the tracked
+wrist — not confidence, not detection order. Then reject that best
+candidate anyway if the distance still exceeds `max(0.5 × forearm_len_px,
+40px)`. This is the direct, tuned answer to the "surface which edits/
+detections to trust" problem: in testing, 16 of 18 (round 3) and 22 of 28
+(round 4, different trial) candidates passed, and every rejection spot-
+checked had either no clearly visible hand in the crop or a legitimate
+wrong-hand pick — no case found where a good detection got wrongly
+rejected. Passing cases often landed within a few pixels of the tracked
+wrist (one case: 0.4px), well inside the threshold, not borderline passes.
+
+**New, real edge case, not yet handled**: a two-handed coordinated grip
+(sword/bokken, held hands) can fool this gate — both hands are close
+together by design, so the detector can find the *other* hand's grip
+point, which may still be closer to *a* threshold than 40px but attributed
+to the wrong wrist, or in the observed case, simply farther than the gate
+allows even though the detection itself might be a legitimate hand (round
+4: two rejects on a sword grip, both at a grip point plausibly belonging
+to the other hand). This is a different failure shape from the identity-
+mixup case the gate was built for — same person, ambiguous between their
+*own* two hands — and isn't solved by tightening the crop (the grip is
+often *inside* both crops if the hands are close). Not designed further
+here; flagged as a known gap.
 
 **Noise-model win falls out for free.** `Observation::measurement_noise_std()`
 (`observation.hpp:49-53`) is `(pose_noise_std * crop_scale + calib_noise_std)
@@ -403,18 +491,20 @@ detection pass, before track assignment/finalization.
 ## Idea 3 — automated hand redetection after a manual edit
 
 **Trigger mechanism (revised — the original "trigger on editing wrist" was
-underspecified, per Harri's questions)**:
+underspecified, per Harri's questions; anchor set simplified below now that
+testing has shown wrist+elbow alone are sufficient)**:
 
 - **Debounced, not synchronous.** Fire on a short idle timer (e.g. 500ms-1s
-  of no further edits to `wrist`/`index_1`/`pinky_1` on that specific
-  camera/frame) rather than on every single edit event. Covers both the
-  chain-placement case (wrist is the 3rd of 5 keypoints placed in order —
-  firing immediately on it would run with a worse fallback crop seconds
-  before better anchors arrive) and a standalone nudge (arrow-key taps each
-  write to the DB individually today — firing per-keystroke would be both
-  wasteful and visually flickery). Anchor set used at fire time: whichever
-  of wrist/index_1/pinky_1 are currently known, same fallback rule as
-  before (forearm-length crop if index_1/pinky_1 aren't set).
+  of no further edits to `wrist`/`elbow` on that specific camera/frame)
+  rather than on every single edit event. Covers both the chain-placement
+  case (wrist is placed a few keypoints into an ordered chain — firing
+  immediately on it would run before a settled position is known) and a
+  standalone nudge (arrow-key taps each write to the DB individually today
+  — firing per-keystroke would be both wasteful and visually flickery).
+  Anchor set used at fire time: current wrist + elbow position (edited if
+  available, tracked otherwise), same as Idea 2's crop — no separate
+  index_1/pinky_1 anchors needed (superseded, see *Shared code with Idea 2*
+  below).
 - **Never overwrite a human-placed finger keypoint — resolved for free by
   where the write lands, not by a mask bit.** Automated results write to
   `pose_observations` (a new `source='hand.L'`/`'hand.R'` row, see below),
@@ -453,12 +543,27 @@ correctly-scaled measurement noise automatically (their own `crop_scale`,
 per the multi-row mechanism), rather than inheriting the frame's original
 whole-body noise level.
 
-**Validation before writing**: same geometric-consistency check as
-originally proposed — redetected `index_1`/`pinky_1` should land within
-some pixel tolerance of the anchors that generated the crop; combined with
-the hand model's own confidence. Below either threshold: write nothing for
-that camera/frame (matches the existing tolerance for sparse per-camera
-observations — no special-casing needed elsewhere).
+**Validation before writing — now the validated proximity gate from Idea 2,
+not the original vague "index_1/pinky_1 tolerance" sketch.** Pick the
+candidate hand (of possibly several `Hand()` returns) whose own root
+keypoint lands closest to the wrist anchor; reject it if that distance
+still exceeds `max(0.5 × forearm_len_px, 40px)`. Below that: write nothing
+for that camera/frame (matches the existing tolerance for sparse
+per-camera observations — no special-casing needed elsewhere). This is a
+stricter, cheaper check than the original plan — it needs only wrist +
+elbow (already the trigger's anchor set above), not a separate
+index_1/pinky_1 tolerance comparison, since the hand model's own root
+keypoint already gives a direct identity signal the original proposal was
+reaching for indirectly. Confidence (the hand model's own per-keypoint
+score) is still worth surfacing alongside the write, but isn't part of the
+gate itself — the proximity check alone caught every bad case found in
+testing (wrong person, wrong hand) without also rejecting good ones.
+**Known gap carried over from Idea 2**: a two-handed coordinated grip can
+make the gate reject a correct hand because the *other* hand's grip point
+is closer to the wrist anchor than the true hand is — Idea 3 inherits this
+limitation unchanged; a rejection there means "wrote nothing," same
+graceful degradation as any other reject, just possibly a missed
+opportunity rather than a wrong write.
 
 **Where this lives / how it's triggered**: the codebase already has a
 precedent for exactly this shape of work — a background worker started
@@ -474,13 +579,30 @@ pipeline-write table) is itself a small boundary shift worth naming
 explicitly — the editor process would need write access to that table,
 which it doesn't exercise today (it only ever writes `pose_observation_edits`).
 
-**Shared code with Idea 2**: both ideas are "crop around an estimated hand
-location, run the RTMPose hand model, validate the result" — the actual
-detect+validate logic should be one function
-(`detect_hand_in_crop(image, wrist, index1_hint, pinky1_hint) -> keypoints | None`
-or similar) used by both the batch pipeline (Idea 2, after every frame's
-full-body pass) and the interactive post-edit worker (Idea 3, on demand).
-Worth writing it once, shared, when this gets built.
+**Shared code with Idea 2, signature now grounded in the validated
+mechanism** (revised from the original `index1_hint`/`pinky1_hint`-based
+sketch, which testing showed unnecessary — wrist + elbow alone drive both
+the crop and the gate):
+
+```python
+def detect_hand_in_crop(
+    image: np.ndarray, wrist: tuple[float, float], elbow: tuple[float, float] | None
+) -> HandDetectionResult | None:
+    """Crop, run rtmlib.Hand, pick nearest candidate, gate by proximity.
+
+    Returns None if no candidate passes the gate. Otherwise a result
+    carrying the 21 hand21 keypoints (crop-local, caller maps back to
+    full-frame), per-keypoint confidence, and the winning candidate's
+    root-to-wrist distance (worth logging/surfacing even on a pass).
+    """
+```
+
+Used by both the batch pipeline (Idea 2, after every frame's full-body
+pass) and the interactive post-edit worker (Idea 3, on demand) — same
+crop formula, same candidate selection, same gate, one implementation.
+Worth writing it once, shared, when this gets built; the offline test
+scripts used for the four rounds of stills validation are a direct,
+already-working reference implementation to start from.
 
 ---
 
@@ -504,17 +626,38 @@ decision, not made here. The "surface gate-rejected edits" diagnostic idea
 (section above) is still unbuilt and would help future tuning/validation
 of this mechanism.
 
-**Phase 1 — Idea 2, interim version (no schema change).** Add the
-hand-specific detection stage to the pipeline, merged into the existing
-single `kp_blob`/row (accept the noise imprecision for now — hand
-keypoints inherit the frame's whole-body `noise_scale` until Phase 2's
-multi-row schema exists to represent the difference properly). Cheap to
-build, validates the actual
-premise (does a dedicated hand-crop detector meaningfully reduce
-occlusion/identity-mixup garbage before investing in schema work) against
-real trial data. *Validation*: hygiene-scan-style before/after comparison
+**Phase 0.5 — offline stills validation (done, cheaper than a pipeline
+build, 2026-07-12).** Before writing any pipeline code, the crop/gate
+mechanism itself was validated against curated real frames (60+ crops
+across Tommi, Roosa, and Harri in a different trial/activity) using a
+standalone script against `rtmlib.Hand`, iterated through four rounds
+based on direct visual review. This is the premise-validation step Phase 1
+below originally described doing *inside* the pipeline — doing it offline
+first turned out to be strictly cheaper (no pipeline plumbing, no DB
+writes, fast iterate-on-a-formula loop) and already answered the open
+question ("does a dedicated hand-crop detector meaningfully reduce
+occlusion/identity-mixup garbage") with a concrete yes, plus tuned,
+specific formulas (crop sizing/offset, candidate selection, gate
+threshold — see *Idea 2* above) that Phase 1 can now implement directly
+instead of guessing at. One real limitation surfaced (two-handed
+coordinated grips) that Phase 1 inherits knowingly rather than discovering
+mid-build.
+
+**Phase 1 — Idea 2, interim version (no schema change), now well-specified
+rather than a sketch.** Add the hand-specific detection stage to the
+pipeline in `python/app/pose` (after the existing full-body pass, before
+track assignment/finalization — see *Open questions* #8 for the remaining
+integration-point trace), using the shared `detect_hand_in_crop` function
+from *Idea 3*'s section above and the tuned crop/gate formulas from *Idea
+2*. Merged into the existing single `kp_blob`/row for now (accept the
+noise imprecision — hand keypoints inherit the frame's whole-body
+`noise_scale` until Phase 2's multi-row schema exists to represent the
+difference properly; this was always the accepted interim tradeoff, now
+just explicit). *Validation*: hygiene-scan-style before/after comparison
 of near-origin/garbage finger detections (same scan already run this
-session), plus visual QC on a known-bad segment.
+session) across a full trial, plus a targeted look at the two-handed-grip
+failure mode on real pipeline output (not just the curated stills) to see
+how often it actually occurs at trial scale.
 
 **Phase 2 — multi-row `pose_observations` migration.** Only once Phase 1
 has shown hand-specific detection is worth doing precisely. The PK
@@ -549,25 +692,42 @@ comparison (does this actually reduce how long manual hand-editing takes).
    built now") remains the longer-term direction.
 2. **Idea 3 debounce window**: 500ms-1s proposed above is a guess, not
    tuned.
-3. **Idea 3 fallback crop sizing** (forearm-length-based, when index_1/
-   pinky_1 aren't yet known) is a guess, not validated against real data —
-   needs tuning once built.
-4. **Automated writes re-triggering**: a later automated redetection for
+3. **Idea 2/3 crop and gate formulas** (half-width `max(0.9×forearm,
+   60px)`, offset `0.35×forearm` away from elbow, gate
+   `max(0.5×forearm, 40px)`): validated against 60+ curated stills across
+   three people, two trials — see *Idea 2* above. Still open: tuning
+   against a full trial run rather than curated cases (curated frames
+   likely skew toward the interesting/hard cases the user picked, not a
+   representative sample), and the elbow-unconfident fallback (small
+   wrist-centered crop, no offset) has only come up rarely in testing so
+   its adequacy is unconfirmed.
+4. **Two-handed coordinated grip failure mode** (new, round 4, real
+   footage): the proximity gate can reject a correct hand because the
+   *other* hand's grip point is closer to the wrist anchor, seen twice on
+   a sword grip. Not designed further in this doc. Possible directions,
+   none evaluated: gate against both wrists simultaneously and disambiguate
+   by which anchor the candidate is closer to (rather than a single
+   pass/fail threshold); widen the gate specifically when both wrists are
+   themselves close together (a detectable precondition); or accept this
+   as an inherent limit and let it degrade to "no write" the same as any
+   other reject, which is not silently wrong, just less complete for these
+   scenes.
+5. **Automated writes re-triggering**: a later automated redetection for
    the same (camera, frame, source) — the multi-row PK
    `(sequence_id, camera_instance_id, video_frame, person_id, source)`
    naturally supports upsert-by-source, so overwrite is the easy default;
    not yet confirmed there's no reason to want history/accumulation instead.
-5. **Multi-row `pose_observations` migration** is the biggest open item in
+6. **Multi-row `pose_observations` migration** is the biggest open item in
    this whole doc: PK rebuild (not a simple `ADD COLUMN`), moving
    `detection_run_id` down from the sequence to the row, and a real
    `session_reader.cpp` loader change (iterate + merge N rows with
    per-source keypoint vocabularies, not one). Sizing this is future work.
-6. **Editor write access to `pose_observations`**: Idea 3 needs the
+7. **Editor write access to `pose_observations`**: Idea 3 needs the
    interactive editor to write a table it has never written before
    (today: read-only there, all editor writes go through
    `pose_observation_edits`) — worth a deliberate look before building,
    not assumed safe by default.
-7. Idea 2's pipeline integration point (before/after track assignment,
+8. Idea 2's pipeline integration point (before/after track assignment,
    whether it shares the sequence's existing `detection_run_id` or gets
    its own under the multi-row model) not yet traced against
    `python/app/pose`'s current pipeline structure.

@@ -32,7 +32,12 @@ def main() -> None:
 @click.option("--pose-model", default="rtmpose-l-133kp", show_default=True, help="Pose model name.")
 @click.option("--device", default="cuda", show_default=True, help="Inference device.")
 @click.option("--detector-conf", default=0.3, show_default=True, help="Detector confidence threshold.")
-def run(session_db, shot, sync, start, end, detector, pose_model, device, detector_conf):
+@click.option(
+    "--refine-hands/--no-refine-hands", default=True, show_default=True,
+    help="After the full-body pass, refine hand keypoints via a hand-specific "
+         "detection pass (rtmlib.Hand). Only has an effect for 133-keypoint pose models.",
+)
+def run(session_db, shot, sync, start, end, detector, pose_model, device, detector_conf, refine_hands):
     """Run person detection and pose estimation for a shot time range.
 
     Results are written directly to the session DB; no intermediate files
@@ -85,6 +90,19 @@ def run(session_db, shot, sync, start, end, detector, pose_model, device, detect
     click.echo(f"Cameras processed: {len(result.cameras_processed)}")
     click.echo(f"Frames processed:  {result.frames_processed}")
     click.echo(f"Status: {result.status}")
+
+    if refine_hands:
+        from posetrak.detection.hand_refinement import HandRefinementPipeline
+
+        def on_hand_progress(done: int, total: int, cam_id: str) -> None:
+            pct = 100 * done / max(total, 1)
+            click.echo(f"\r  {cam_id}: {done}/{total} frames ({pct:.0f}%)", nl=False)
+
+        click.echo("Refining hands...")
+        hand_pipeline = HandRefinementPipeline(session)
+        n_refined = hand_pipeline.run(result.detection_run_id, pipeline.cameras, on_progress=on_hand_progress)
+        click.echo()
+        click.echo(f"Hands refined: {n_refined}")
 
 
 @main.command(name="list-runs")

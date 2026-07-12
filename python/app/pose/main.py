@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -90,6 +91,7 @@ class DetectionJob(BackgroundJob):
         detector_name: str,
         pose_model_name: str,
         detector_conf: float,
+        refine_hands: bool = True,
     ):
         super().__init__()
         self._session_path = session_path
@@ -100,6 +102,7 @@ class DetectionJob(BackgroundJob):
         self._detector_name = detector_name
         self._pose_model_name = pose_model_name
         self._detector_conf = detector_conf
+        self._refine_hands = refine_hands
 
     def run(self):
         from posetrak.db.db import open_session
@@ -132,6 +135,20 @@ class DetectionJob(BackgroundJob):
             estimator=est,
         )
         result = pipeline.run(on_progress=on_progress, on_camera_done=on_camera_done)
+
+        if self._refine_hands:
+            from posetrak.detection.hand_refinement import HandRefinementPipeline
+
+            def on_hand_progress(done: int, total: int, cam_id: str) -> None:
+                pct = int(done / max(total, 1) * 100)
+                self.progress.emit(pct, f"hands: {cam_id}  {done}/{total} frames")
+
+            hand_pipeline = HandRefinementPipeline(session)
+            n_refined = hand_pipeline.run(
+                result.detection_run_id, pipeline.cameras, on_progress=on_hand_progress
+            )
+            self.progress.emit(100, f"hands: {n_refined} refined")
+
         self.finished.emit(result.detection_run_id)
 
 
@@ -261,6 +278,14 @@ class PoseExtractionWindow(QMainWindow):
         self._conf_spin.setSingleStep(0.05)
         self._conf_spin.setValue(0.3)
         row3.addWidget(self._conf_spin)
+        self._refine_hands_check = QCheckBox("Refine hands")
+        self._refine_hands_check.setChecked(True)
+        self._refine_hands_check.setToolTip(
+            "After the full-body pass, re-detect each tracked wrist's hand in a "
+            "tight crop (rtmlib.Hand) and patch in the refined finger keypoints. "
+            "Only has an effect for 133-keypoint pose models."
+        )
+        row3.addWidget(self._refine_hands_check)
         row3.addStretch()
         top_layout.addLayout(row3)
 
@@ -616,6 +641,7 @@ class PoseExtractionWindow(QMainWindow):
             detector_name=self._detector_combo.currentText(),
             pose_model_name=self._pose_combo.currentText(),
             detector_conf=self._conf_spin.value(),
+            refine_hands=self._refine_hands_check.isChecked(),
         )
         self._job.progress.connect(self._on_job_progress)
         self._job.camera_progress.connect(self._on_camera_progress)
@@ -652,7 +678,7 @@ class PoseExtractionWindow(QMainWindow):
             self._open_btn, self._shot_combo, self._sync_combo,
             self._mark_start_btn, self._mark_end_btn,
             self._detector_combo, self._pose_combo, self._conf_spin,
-            self._run_combo,
+            self._refine_hands_check, self._run_combo,
         ]:
             w.setEnabled(enabled)
         # Run button also requires both time marks to be set

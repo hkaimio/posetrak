@@ -1,5 +1,28 @@
 # Hand-detection refinement & trusted-edit gate bypass — design sketch
 
+> **Status (2026-07-12, update 5)**: Phase 1 (Idea 2, interim no-schema-
+> change version) is implemented — `posetrak.detection.hand_refinement`
+> (`HandRefinementPipeline`, `detect_hand_in_crop`), wired into both the
+> GUI (`app/pose/main.py`, a "Refine hands" checkbox, on by default) and
+> the CLI (`app/pose/cli.py run --refine-hands/--no-refine-hands`) as a
+> step right after the full-body pass, before track assignment. Uses the
+> exact crop/candidate-selection/gate formulas from the "Idea 2" section
+> below, patches the refined 21-point hand into the existing 133-point
+> `detection_keypoints` blob in place, and no-ops for 17-keypoint pose
+> models. The sequential-frame decoder was pulled out of `DetectionPipeline`
+> into a shared `posetrak.detection.frame_source` module so this pass can
+> re-read the same frames a run's keypoints were built from. Unit-tested
+> (`python/tests/app/test_hand_refinement.py`, 12 cases covering the crop
+> math, nearest-candidate selection, gate accept/reject, and the DB patch
+> round-trip) against a fake hand model — not yet run against a real
+> trial (the before/after garbage-detection comparison and two-handed-grip
+> frequency check from "Phasing" below are still open). The hand model's
+> own per-keypoint confidence is scaled by a placeholder `×5.0` factor
+> (`_HAND_CONF_SCALE`) to bring its 0-1 range into the same ballpark as
+> the whole-body RTMPose model's raw SimCC logits before both land in the
+> same blob's confidence column — reusing the project's existing
+> ViTPose-conf-scale convention, not an empirically tuned value.
+
 > **Status (2026-07-12, update 4)**: Idea 2's core mechanism — crop sizing,
 > model choice, and a validation gate — is now empirically tuned against
 > four rounds of offline stills (Tommi, Roosa, and Harri in a completely
@@ -643,21 +666,30 @@ instead of guessing at. One real limitation surfaced (two-handed
 coordinated grips) that Phase 1 inherits knowingly rather than discovering
 mid-build.
 
-**Phase 1 — Idea 2, interim version (no schema change), now well-specified
-rather than a sketch.** Add the hand-specific detection stage to the
-pipeline in `python/app/pose` (after the existing full-body pass, before
-track assignment/finalization — see *Open questions* #8 for the remaining
-integration-point trace), using the shared `detect_hand_in_crop` function
-from *Idea 3*'s section above and the tuned crop/gate formulas from *Idea
-2*. Merged into the existing single `kp_blob`/row for now (accept the
-noise imprecision — hand keypoints inherit the frame's whole-body
-`noise_scale` until Phase 2's multi-row schema exists to represent the
-difference properly; this was always the accepted interim tradeoff, now
-just explicit). *Validation*: hygiene-scan-style before/after comparison
-of near-origin/garbage finger detections (same scan already run this
-session) across a full trial, plus a targeted look at the two-handed-grip
-failure mode on real pipeline output (not just the curated stills) to see
-how often it actually occurs at trial scale.
+**Phase 1 — Idea 2, interim version (no schema change) — implemented,
+2026-07-12.** Added the hand-specific detection stage as
+`posetrak.detection.hand_refinement` (`HandRefinementPipeline`,
+`detect_hand_in_crop`), run in `python/app/pose` right after the existing
+full-body pass, before track assignment/finalization (wired into both
+`DetectionJob` in `main.py`, behind a "Refine hands" checkbox, and the CLI
+`run` command's `--refine-hands/--no-refine-hands` — see *Open questions*
+#8 for the remaining integration-point questions this didn't need to
+resolve, since it hooks in via the existing job/command rather than a new
+pipeline phase). Uses the tuned crop/gate formulas from *Idea 2* above.
+Merged into the existing single `kp_blob`/row for now (accept the noise
+imprecision — hand keypoints inherit the frame's whole-body `noise_scale`
+until Phase 2's multi-row schema exists to represent the difference
+properly; this was always the accepted interim tradeoff). Unit-tested
+against a fake hand model (`python/tests/app/test_hand_refinement.py`);
+the `detect_hand_in_crop(image, wrist, elbow)` function ended up not
+needing to be literally shared with Idea 3's sketch signature word-for-word
+since Idea 3 isn't built yet, but it's the same function, ready to be
+called from a future post-edit worker. **Not yet done**: *Validation*
+against a real trial — the hygiene-scan-style before/after comparison of
+near-origin/garbage finger detections (same scan already run this
+session), and a targeted look at how often the two-handed-grip failure
+mode actually occurs at trial scale (so far only observed twice, in
+curated stills).
 
 **Phase 2 — multi-row `pose_observations` migration.** Only once Phase 1
 has shown hand-specific detection is worth doing precisely. The PK

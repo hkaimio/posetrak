@@ -12,7 +12,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QVBoxLayout,
 )
 
@@ -128,6 +128,15 @@ class RunDetectionDialog(QDialog):
         self._conf_spin.setValue(0.3)
         form.addRow("Confidence:", self._conf_spin)
 
+        self._refine_hands_check = QCheckBox("Refine hands")
+        self._refine_hands_check.setChecked(True)
+        self._refine_hands_check.setToolTip(
+            "After the full-body pass, re-detect each tracked wrist's hand in a "
+            "tight crop (rtmlib.Hand) and patch in the refined finger keypoints. "
+            "Only has an effect for 133-keypoint pose models."
+        )
+        form.addRow("", self._refine_hands_check)
+
         layout.addLayout(form)
 
         # Progress
@@ -178,7 +187,7 @@ class RunDetectionDialog(QDialog):
             self._sync_combo,
             self._start_spin, self._end_spin,
             self._detector_combo, self._pose_combo, self._conf_spin,
-            self._run_btn, self._close_btn,
+            self._refine_hands_check, self._run_btn, self._close_btn,
         ]:
             w.setEnabled(enabled)
         if self._trial_name is not None:
@@ -210,6 +219,7 @@ class RunDetectionDialog(QDialog):
             detector_name=self._detector_combo.currentText(),
             pose_model_name=self._pose_combo.currentText(),
             detector_conf=self._conf_spin.value(),
+            refine_hands=self._refine_hands_check.isChecked(),
         )
         self._job.progress.connect(self._on_progress)
         self._job.camera_progress.connect(self._on_camera_progress)

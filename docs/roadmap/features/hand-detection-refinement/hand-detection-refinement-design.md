@@ -1,5 +1,38 @@
 # Hand-detection refinement & trusted-edit gate bypass — design sketch
 
+> **Status (2026-07-11, update 3)**: Idea 1's revised design (scale-to-
+> threshold, update 2 below) is now tested against real data (Roosa +
+> Tommi) — see "(a) Scale noise to land just inside the gate threshold" in
+> Idea 1's section below, and the crisis log's "Phase 0b" section for the
+> full writeup. **Roosa: complete success**, on par with adaptive-off.
+> **Tommi: initially a severe-looking new failure (condition number up to
+> 1.7×10²⁸), traced to a genuine data error** (swapped shoulder/wrist
+> keypoints in one camera for ~20 frames) rather than a mechanism
+> limitation — fixed and confirmed resolved on rerun. Both real-data
+> failures this mechanism has hit so far turned out to be bad data, not
+> architecture, once actually traced.
+
+> **Status (2026-07-11, update 2)**: Idea 1's revised design (scale an
+> edited observation's noise, via bisection, so its mahalanobis distance
+> lands exactly at `outlier_threshold` instead of an unconditional bypass)
+> is now implemented too — see "(a) Scale noise to land just inside the
+> gate threshold" in Idea 1's section below for the mechanism. `force_inlier`
+> observations are still always kept, but no longer forced through with
+> arbitrarily tight noise regardless of consequence. Superseded by update 3
+> above (real-data result).
+
+> **Status (2026-07-11, update 1)**: Idea 1's Phase 0 (hard `force_inlier`
+> bypass, flat `edited_kp_noise_std`) was implemented and tested first — see
+> "Phase 0 (trusted keypoint edits, Idea 1)" in
+> `docs/roadmap/features/tracking-crisis-debugging-log.md`. **Result: net
+> negative as configured** (Roosa's avg NIS/DOF went 1.52→28.84). Root cause
+> traced to a real, legitimate edit forcing a 48σ correction through in a
+> single step with tight (25px) noise, badly ill-conditioning the
+> covariance — not a bad edit, but the *hard bypass + tight noise*
+> combination proved too blunt for correcting a state that had already
+> drifted significantly. Superseded by update 2 above. Ideas 2/3 and the
+> multi-row schema discussion below are unaffected by this finding.
+
 > **Status (2026-07-11)**: Sketch only, not implemented. Written up after the
 > adaptive-process-noise on/off comparison
 > (`docs/roadmap/features/tracking-crisis-debugging-log.md`, "Adaptive
@@ -45,7 +78,7 @@ disable them, both already-supported operations — no schema change).
 
 ---
 
-## Idea 1 — skip the outlier gate for edited keypoints (revised scope)
+## Idea 1 — skip the outlier gate for edited keypoints (Phase 0 tested, net negative — revised design below)
 
 **Revised framing after this discussion**: this must apply to *human-placed*
 edits specifically, not to anything written automatically — see the schema
@@ -85,9 +118,129 @@ unambiguously human-only**, exactly as it is today. `force_inlier` is
 simply: bit set in `kp_mask`, full stop — no second bitmask, no schema
 change to the edits table at all.
 
-**Still open**: hard bypass vs. a generous-but-finite threshold override
-(e.g. 3-5x `outlier_threshold` instead of infinite) as a minimal sanity
-backstop against a genuine misclick. No strong lean either way yet.
+**Implemented and tested as Phase 0** (`edited_kp_noise_std` config field,
+schema v34, `force_inlier` field on `Observation`) — see "Phase 0 (trusted
+keypoint edits, Idea 1)" in the crisis log for the full writeup. **Result:
+net negative as configured.** Traced concretely: a real, legitimate,
+internally-consistent human edit (not garbage) got force-included with
+tight 25px noise despite the filter's predicted state having already
+drifted ~1275px / 48σ away by that point — the mechanism doesn't
+distinguish "gently nudge the filter back on track" from "yank the state
+by 48σ in one step," and the latter badly ill-conditioned the covariance
+(the same "large sudden correction breaks local linearity" pathology
+already documented for the frame-227/228 event and Proposal 1). This
+wasn't one unlucky edit either — Roosa's degradation persists (though
+smaller) even excluding the worst 50 steps, and with 6,672 edit rows in
+her sequence there's no reason to expect this was the only case.
+
+**The mechanism (unconditional force-include) may still be sound in
+principle** — the traced case really was a correct edit fixing a real
+problem, just applied too abruptly. Two follow-up ideas, both raised in
+response to this finding, not yet built:
+
+**(a) Scale noise to land just inside the gate threshold — implemented,
+exactly, not the approximation originally sketched here (2026-07-11).**
+Instead of a fixed `noise_std_override` (or a hard `force_inlier` bypass),
+`reject_outliers()` now computes a *per-observation* noise value such that
+the resulting mahalanobis distance comes out at exactly `outlier_threshold`
+whenever the raw (unscaled) distance would exceed it — capping how much any
+single edited observation can pull the state in one step, regardless of
+how far the raw pixel gap is, while still guaranteeing it's never rejected.
+Below threshold: included unchanged, no scaling at all.
+
+**Turned out to be exact, not approximate, and cheap either way.** The
+original plan here assumed solving for the `R` that lands mahalanobis
+exactly on threshold wasn't closed-form since `R` sits inside
+`S = H·P·H^T + R`. True, but `reject_outliers()` already has `cov_2x2`
+(observation *i*'s own 2×2 diagonal block of the already-built `S`) and the
+noise variance that went into it (recoverable via
+`Observation::measurement_noise_std()`, same `pose_noise_std`/
+`calib_noise_std` `update()` used to build `S` in the first place — now
+threaded into `reject_outliers()` as two extra parameters for exactly this).
+Subtracting that variance back out recovers `H·P·H^T`'s local block (the
+*R-free*, purely-geometric part), PSD-clamped via
+`Eigen::SelfAdjointEigenSolver` against floating-point noise. From there,
+mahalanobis distance as a function of a candidate noise multiplier `k` is
+one cheap 2×2 matrix inverse (`compute_mahalanobis_distance`, already
+existing) — monotonically decreasing in `k`, so a plain bisection (exponential
+bracket-expansion, then ~40 bisection iterations, all on 2×2 matrices)
+converges to the exact `k` in a handful of microseconds. The resulting
+`noise_std_override` — carefully un-doing the `/max(confidence, 0.1)`
+`measurement_noise_std()` will re-apply downstream, since `noise_std_override`
+is defined as the *pre*-division raw value — is written onto a **copy** of
+the observation before it's pushed into `inliers`, which is exactly what
+`update()`'s existing "recompute predictions/covariance for inliers only"
+step (right after `reject_outliers()` returns) reads back from — no changes
+needed anywhere else in `update()`'s structure at all, confirming the
+original "doesn't require touching the two-pass structure" intuition, just
+via a different (and now exact) mechanism than first planned.
+
+**Base noise revised upward.** Phase 0's tested value (`edited_kp_noise_std
+= 25.0`, exactly `calib_noise_std`) was flagged as likely too tight —
+calibration error isn't the only source of uncertainty in a human-placed
+point, and using it alone probably underweights the additional imprecision
+of a human click. Revised interim value for the next test:
+`sqrt(pose_noise_std² + calib_noise_std²)` ≈ 28.18px (13.0 and 25.0 in the
+configs used) — reusing the codebase's existing quadrature-combination
+convention for independent error sources (matches how RELATIVE-mode noise
+is already computed as `pose_noise_std·√2·crop_scale` elsewhere) rather
+than inventing a new dedicated "click precision" config field without any
+empirical basis for its magnitude. Still explicitly a placeholder, not a
+considered answer — same caveat as before. Note this base value now mostly
+only matters for the *not-capped* case (an edit that's already within
+threshold) — for a capped correction, the converged result is `threshold`
+regardless of where the bisection started, so the base value barely
+affects the failure mode Phase 0 actually hit.
+
+New tests: `UKF force_inlier is kept but its noise is scaled to land at
+threshold` (includes a regression guard — `root_position().norm() < 2.0`
+after a would-be-wild correction, guarding against ever silently
+regressing back to unconditional-bypass-shaped behaviour) and `UKF
+force_inlier within threshold is included with its noise unchanged`
+(`tests/test_ukf_update.cpp`). Full `[ukf]` suite passes.
+
+**Tested against real data (Roosa + Tommi), full writeup in the crisis
+log's "Phase 0b" section.** Roosa: complete success, every metric on or
+fractionally better than the adaptive-off baseline — exactly fixed the
+single-point 48σ case Phase 0 failed on. Tommi: a second, worse-looking
+failure at first (covariance condition number up to 1.7×10²⁸), traced not
+to a mechanism limitation but to a genuine data error — swapped
+shoulder/wrist keypoints in one camera for ~20 frames, found by the user
+reviewing the footage directly. Fixed and confirmed resolved on rerun
+(back in line with the adaptive-off baseline). Both failures this
+mechanism has hit so far turned out to be data problems, not architectural
+ones, once actually traced — same pattern as Crisis B. Still off by
+default; not yet tested on Timo or against the full trial-wide
+adaptive-on/off comparison this whole investigation arc started from.
+
+**(b) Surface which edits the gate rejects.** Right now there's no way to
+tell, without manually cross-referencing `pose_observation_edits` against
+`tracking_obs_results.obs_blob`'s `is_outlier` flag, that an edit a human
+carefully placed got rejected by the tracker and had zero effect on the
+result — exactly the blind spot that made this Phase 0 investigation
+necessary in the first place (the corrupted-edit hygiene scan and the
+48σ-edit trace above both required ad hoc one-off scripts). Two places
+this could surface, not mutually exclusive:
+- **MCP diagnostic tool**: a sibling to the existing `get_edit_coverage`
+  (which already flags unedited key landmarks) — report, per edited
+  keypoint/camera/frame, whether the corresponding `tracking_obs_results`
+  row for the most recent run marked it `is_outlier=true`. Cheap: both
+  tables already exist, this is a join, not new instrumentation.
+  Read-only, fits the existing MCP server's scope directly.
+- **Interactive editor UI**: visually distinguish an edited keypoint's dot
+  (in `_ImageCanvas`/`PersonCropGridWidget`) when the *current* tracking
+  run's `obs_blob` shows it as rejected — e.g. a distinct outline color,
+  reusing the existing grey-for-rejected convention already used for
+  unedited outliers (`content_panels.py`'s paint code, `QColor(120, 120,
+  120)` for tracker-rejected non-edit-mode markers) but visually distinct
+  from that, so "the tracker didn't listen to your edit" is obvious at a
+  glance rather than requiring a diagnostic tool. Needs the crop-grid view
+  to have the relevant tracking run's `obs_blob` loaded, which it doesn't
+  today (it currently only shows raw/edited observations, not per-run
+  gate outcomes) — a real, if bounded, addition.
+
+Neither built yet — flagging both as valuable next steps once (a) has
+something worth surfacing.
 
 ---
 
@@ -214,6 +367,16 @@ problem this idea originally targeted (correct edits arriving after the
 state has drifted, discussed in the crisis log) — Idea 1's `force_inlier`
 question stays live and separate from this.
 
+**Tested**: 25px (`calib_noise_std`'s value in the configs used) as
+`noise_std_override`, paired with `force_inlier`. Net negative — see Idea
+1's section above and the crisis log's "Phase 0" writeup. The specific
+25px number isn't obviously implicated on its own (the failure mode was a
+single-step 48σ correction being forced through regardless of noise value,
+which a hard bypass would do at *any* fixed noise level) — Idea 1's
+revised "scale to just inside threshold" design is the more promising
+next attempt, not a different constant for this same fixed-override
+approach.
+
 **The real fix, not built now**: let a human express their own confidence
 per edit (a displayed precision estimate, or a coarse
 confident/uncertain toggle) and feed *that* into `noise_std_override`
@@ -328,16 +491,18 @@ directly tied to an already-diagnosed problem first; the expensive,
 foundational schema work deferred until a cheaper version has validated
 the underlying premise is worth building on.
 
-**Phase 0 — Idea 1, edit noise + gate treatment.** No schema change, no
-dependency on anything else in this doc — `noise_std_override` (interim
-`calib_noise_std` default, see above) and `force_inlier`/gate-bypass for
-genuine `pose_observation_edits` rows, both set in the same
-`session_reader.cpp` per-keypoint loop. Directly targets the
-already-diagnosed "fast hand-raise loses lock, correct returning
-observations get rejected by the gate, arm stays stuck" problem from the
-crisis log — smallest, most self-contained, ships first. *Validation*: the
-Case 1/3-style hand-raise segments that still fail per the crisis log;
-confirm a corrected wrist/hand edit is actually accepted post-drift.
+**Phase 0 — Idea 1, edit noise + gate treatment.** First cut (hard
+`force_inlier` bypass, flat `edited_kp_noise_std`) tested net negative
+(Roosa avg NIS/DOF 1.52→28.84) — see "Phase 0" in the crisis log. **Phase
+0b (revised: scale-to-threshold via bisection) done and now working for
+both Roosa and Tommi** — see "Phase 0b" in the crisis log for the full
+writeup, including a second real-data failure on Tommi that turned out to
+be a data error (swapped shoulder/wrist keypoints), not a mechanism
+limitation, fixed and confirmed resolved. Still off by default
+(`edited_kp_noise_std=0`) — promoting to on-by-default is a separate
+decision, not made here. The "surface gate-rejected edits" diagnostic idea
+(section above) is still unbuilt and would help future tuning/validation
+of this mechanism.
 
 **Phase 1 — Idea 2, interim version (no schema change).** Add the
 hand-specific detection stage to the pipeline, merged into the existing
@@ -371,14 +536,17 @@ comparison (does this actually reduce how long manual hand-editing takes).
 
 ## Open questions
 
-1. **Idea 1**: `force_inlier`/gate-bypass (or a generous finite threshold)
-   is still needed regardless of the interim `calib_noise_std` default for
-   edits above — that default puts edits on par with a normal detection,
-   it doesn't make them privileged, so it doesn't touch the original
-   "correct edits rejected after drift" problem. What the *right*
-   `noise_std_override` value is remains genuinely open and needs empirical
-   tuning, ideally superseded by per-edit user-specified confidence
-   (see *Measurement noise*, "The real fix, not built now").
+1. **Idea 1**: hard `force_inlier` + fixed `noise_std_override` (Phase 0)
+   tested net negative; scale-to-threshold (Phase 0b) tested and now
+   working for Roosa and Tommi, both real-data failures traced to bad data
+   rather than the mechanism — see crisis log. Not yet: tested on Timo,
+   tested against the full trial-wide adaptive-on/off comparison, or
+   promoted to on-by-default. The "surface gate-rejected edits" diagnostic
+   (MCP tool and/or editor UI, Idea 1's section above) is still unbuilt and
+   would help validate further tuning without needing an ad hoc script
+   each time (as this round's investigation needed twice). Per-edit
+   user-specified confidence (*Measurement noise*, "The real fix, not
+   built now") remains the longer-term direction.
 2. **Idea 3 debounce window**: 500ms-1s proposed above is a guess, not
    tuned.
 3. **Idea 3 fallback crop sizing** (forearm-length-based, when index_1/

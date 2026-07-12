@@ -706,6 +706,152 @@ for both — none implemented yet.
 
 ---
 
+## Phase 0 (trusted keypoint edits, Idea 1) — implemented and tested, net negative as configured — 2026-07-11
+
+Implemented per the phasing plan in
+`docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md`:
+schema v34 adds `tracker_configs.edited_kp_noise_std` (0 = disabled, matches
+pre-v34 behaviour exactly); when > 0, every keypoint slot touched by a
+`pose_observation_edits` row gets that value as `Observation::noise_std_override`
+and `Observation::force_inlier = true`, exempting it from both of
+`UnscentedKalmanFilter::reject_outliers()`'s rejection paths (standard
+Mahalanobis threshold and cross-camera consistency — also excluded from
+*contributing* to the cross-camera median, so a currently-inconsistent
+trusted edit can't skew whether other cameras' bad observations pass).
+`mahalanobis_distance` is still computed and recorded either way, just not
+used to reject. New unit test: `UKF force_inlier bypasses both
+outlier-rejection paths` (`tests/test_ukf_update.cpp`). Full `[ukf]` suite
+passes; two pre-existing, unrelated `posetrak_tests` failures (path/schema
+issues in unrelated test fixtures) confirmed identical on the clean
+baseline via `git stash` before starting.
+
+Tested with `edited_kp_noise_std=25.0` (the interim "same as calib_noise_std"
+convention from the design doc — **note this *replaces* the normal formula
+entirely, it is not added on top of calib_noise_std**; see the design doc's
+revised measurement-noise section for the exact semantics), config
+`2d941533-7848-4c0b-a09f-e7d06fcc4da7` (cloned from the adaptive-off config
+`b257daa3906f44038f5eba24639b1267`), full-trial reruns for Roosa and Tommi
+against their adaptive-off baselines.
+
+**Result: net negative, badly so for Roosa.**
+
+| metric | Roosa off | Roosa phase0 | Tommi off | Tommi phase0 |
+|---|---|---|---|---|
+| avg NIS/DOF | 1.52 | **28.84** | 1.79 | 1.83 |
+| avg cov condition # | 368K | **614K** | 406K | **543K** |
+| max cov condition # | 6.7M | **82.6M** | 10.8M | **59.5M** |
+| avg n_inlier_observations | 350.2 | 332.1 | 392.9 | 392.7 |
+
+Not just one bad step: excluding Roosa's single worst spike (t=61.455s,
+NIS/DOF=52,226), the average is still 12.6; excluding the worst 50 steps
+entirely, still 8.7 vs. the 1.52 baseline — a broad degradation, not one
+outlier event skewing the average.
+
+**Root cause of the worst spike, traced concretely**: `right_shoulder`/
+`right_elbow`/`right_wrist` edited on camera `pixel7` (2026-07-06,
+`is_outlier=0`, internally consistent, plausible-looking pixel coordinates
+— not garbage like the three corrupted rows found earlier). By the time
+this edit's frame was reached, the filter's *predicted* shoulder position
+had already drifted ~1275px away (mahalanobis ≈48σ) — **a correction for a
+divergence that started earlier, not a bad edit causing the divergence
+itself** (user's read, confirmed by inspection: the other unedited markers
+on the same camera/frame — nose, ears, hip — show the identical ~1200-1350px
+gap in the same direction, i.e. the *state* had drifted, not this one
+point). `force_inlier` did exactly what it's built to do: forced that
+single 48σ-inconsistent observation through with tight (25px) noise,
+unconditionally. The result was a violent, single-step correction that
+overshot and badly ill-conditioned the covariance — the same "large sudden
+correction breaks local linearity" pathology already documented for the
+frame-227/228 event and Proposal 1 above, now confirmed to also apply here.
+Even outside this specific event, the broader degradation suggests this
+isn't an isolated unlucky edit — with 6,672 edit rows in Roosa's sequence
+(vs. Tommi's 3,946, whose damage was correspondingly milder), there are
+evidently other edits with similar-shaped problems.
+
+**Conclusion: the mechanism itself (trust human edits unconditionally) may
+still be sound in principle — this traced case really was a legitimate
+correction, not a bad edit — but hard, tight-noise `force_inlier` is too
+blunt an instrument.** It doesn't distinguish "gently nudge the filter back
+toward a correct point" from "yank the state by 48σ in one step regardless
+of consequence." **Not adopted as configured** — `edited_kp_noise_std`
+stays at its default-disabled (0) value. See the design doc for a revised
+approach (scaling noise so an edit's mahalanobis distance lands just inside
+the gate threshold, rather than bypassing the gate outright) proposed in
+response to this finding, not yet built or tested.
+
+---
+
+## Phase 0b (scale-to-threshold, Idea 1 revised) — implemented, tested — 2026-07-11
+
+Built the revised design from Phase 0's finding: `reject_outliers()` now
+scales a `force_inlier` observation's noise (via bisection on a 2×2
+innovation-covariance block, exact not approximate — see the design doc's
+"(a) Scale noise..." section for the mechanism) so its mahalanobis distance
+lands at exactly `outlier_threshold` whenever the raw distance would exceed
+it, rather than bypassing the gate unconditionally. Below threshold: no
+change, included as-is. Base noise value also revised: `edited_kp_noise_std`
+now set to `sqrt(pose_noise_std² + calib_noise_std²) ≈ 28.18px` (was 25px,
+`calib_noise_std` alone — flagged as likely too tight, since calibration
+error isn't the only source of uncertainty in a human click). Two new unit
+tests in `tests/test_ukf_update.cpp`, including a regression guard against
+ever silently reverting to unbounded-correction behavior
+(`root_position().norm() < 2.0`). Full `[ukf]` suite passes.
+
+**First rerun (Roosa + Tommi, config `d4631b5f-4ba0-4bb0-8662-ab8583c68acd`):
+Roosa a complete success, Tommi a new, different failure.**
+
+Roosa: every metric landed on or fractionally better than the adaptive-off
+baseline (avg NIS/DOF 1.542 vs. off's 1.516; avg cov condition # 363K vs.
+368K) — a world away from Phase 0's 28.84. The single-point 48σ case from
+Phase 0's writeup is exactly what threshold-capping was built to fix, and
+it did.
+
+Tommi: covariance condition number reached **astronomical, though still
+finite (non-NaN), values — up to 1.7×10²⁸** (avg 1.2×10²⁶, both essentially
+meaningless as numbers but confirming a real, severe breakdown, not a
+crash). Traced to t≈50.5s (step ~1494-1497): **4 of 5 cameras
+simultaneously** had `force_inlier`-marked right-arm observations (wrist,
+elbow, index, thumb), each individually showing 1,400-2,200px gaps, each
+individually capped to a mahalanobis distance near threshold (~3-7) — the
+mechanism worked exactly as designed *per observation*. But capping each
+observation's mahalanobis distance *individually* doesn't cap the *joint*
+correction when several agree on the same large direction at once — four
+cameras' worth of "just inside the gate" corrections, all pointing the
+same way, still combine to an enormous joint pull. This looked at first
+like a genuine structural limitation of per-observation-only capping (see
+the design doc's original writeup of this, before the actual root cause
+below was found) — multiple *correlated but individually legitimate*
+trusted edits overwhelming the filter jointly even though none does
+individually.
+
+**Root cause, found by the user reviewing the footage directly**:
+`right_shoulder` and `right_wrist` keypoints were **swapped** in camera
+`gopro-11_mini_01` for ~20 frames right at this exact window — a data
+error, not a legitimate multi-camera correction. User fixed the affected
+edit rows directly. **Rerun after the fix** (`64180d42-8593-43da-9e93-9c7f872b9b9e`)
+resolves the blowup completely: avg NIS/DOF 1.755 (vs. off's 1.794), avg
+cov condition # 399K (vs. 406K), % ill-conditioned steps 3.5% (vs. off's
+5.9% — actually *better*), avg inliers 393.2 (vs. 392.9). One small
+residual: max condition number 51.3M vs. off's 10.8M (4 steps total exceed
+the off-baseline's own max, only 1 above 30M, right at the edge of the
+originally-corrupted window) — not concerning on its own.
+
+**Revised conclusion**: the "multiple correlated trusted edits overwhelm
+the filter jointly" theory above was a red herring, in the same shape as
+the Karcher-mean/π-proximity detour during Crisis B's investigation (see
+"User-driven observation-data cleanup" above) — an architectural-looking
+symptom that turned out to be bad data once the data was actually cleaned
+up. **With both traced failures (Roosa's single-point 48σ case, Tommi's
+swapped-keypoint case) now resolved by data fixes rather than further
+mechanism changes, scale-to-threshold performs on par with or better than
+the adaptive-off baseline for both people tested.** Not yet tested on
+Timo, and not yet re-tested against the full adaptive-on/off comparison
+this whole arc started from. `edited_kp_noise_std` is still off by default
+— promoting it to a default-on config is a separate decision, not made
+here.
+
+---
+
 ## Recurring pitfalls / methodology notes
 
 - **`marker_projections.csv`'s `proj_x/proj_y` vs `obs_x/obs_y` are in
@@ -761,6 +907,20 @@ for both — none implemented yet.
    `docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md`
    for three related ideas (trusted-edit gate bypass, pipeline hand-detection
    pass, automated post-edit hand redetection) and their open questions.
+   **Idea 1 (trusted-edit gate bypass) — Phase 0 (hard bypass) net
+   negative, Phase 0b (scale-to-threshold) now working for both Roosa and
+   Tommi** — see "Phase 0" and "Phase 0b" above. Phase 0's hard,
+   tight-noise bypass forced a single legitimate 48σ edit through in one
+   step, badly ill-conditioning the covariance. Phase 0b (bisection-scaled
+   noise, capped at `outlier_threshold`) fixed that case completely, then
+   surfaced a second, worse-looking failure on Tommi (covariance condition
+   number up to 1.7×10²⁸) that traced to a genuine data error (swapped
+   shoulder/wrist keypoints in one camera, ~20 frames) rather than a
+   mechanism limitation — fixed by the user re-editing the affected frames,
+   confirmed resolved on rerun. Both traced failures turned out to be data
+   problems once actually run down, same lesson as Crisis B. Still off by
+   default (`edited_kp_noise_std=0`); not yet tested on Timo or against the
+   full adaptive-on/off comparison.
 
 1. **Crisis B — resolved.** Four rounds of camera-by-camera bad-observation
    fixes (pixel9, gopro02 hand mixup, insta-ace2 second-person

@@ -36,6 +36,7 @@ class PoseExtractionJob:
     last_frame: int
     pose_model: str = "rtmpose-l-133kp"
     overwrite_range: bool = True    # delete existing keypoints in range first
+    refine_hands: bool = True       # run HandRefinementPipeline after estimation
     status: str = "pending"
     keypoints_written: int = 0
     error: str = ""
@@ -96,6 +97,45 @@ class PoseWorker(QThread):
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _run_hand_refinement(self, conn: sqlite3.Connection, job: "PoseExtractionJob") -> None:
+        """Patch refined hand keypoints into the just-written detection_keypoints.
+
+        Same mechanism the YOLO-based pipeline uses (posetrak.detection.
+        hand_refinement) — mask-derived bboxes give better crops for the
+        body pass, but the hand-specific crop/gate is unaffected by bbox
+        source, so it's worth applying here too. See
+        docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md.
+        """
+        try:
+            from posetrak.detection.hand_refinement import HandRefinementPipeline
+        except ImportError:
+            log.warning("PoseWorker: rtmlib unavailable, skipping hand refinement")
+            return
+        from posetrak.detection.pipeline import CameraInfo
+
+        cam_row = conn.execute(
+            "SELECT camera_instance_id FROM capture_videos WHERE id=?",
+            (job.shot_video_id,),
+        ).fetchone()
+        cam = CameraInfo(
+            shot_video_id=job.shot_video_id,
+            camera_instance_id=cam_row["camera_instance_id"] if cam_row else job.shot_video_id,
+            file_path=job.video_path,
+            actual_fps=0.0,
+            ref_frame=0,
+            ref_timestamp_s=0.0,
+        )
+
+        def on_progress(done: int, total: int, cam_id: str) -> None:
+            self.progress.emit(done, total)
+
+        t0 = time.monotonic()
+        n_refined = HandRefinementPipeline(conn).run(
+            job.detection_run_id, cameras=[cam], on_progress=on_progress
+        )
+        log.info("PoseWorker: hand refinement done  %d refined  %.2fs",
+                 n_refined, time.monotonic() - t0)
 
     def _run_pose(self) -> None:
         from app.pose.backends_rtmpose import RTMPoseEstimator
@@ -168,6 +208,10 @@ class PoseWorker(QThread):
                 cap.release()
 
             writer.finalise()
+
+            if job.refine_hands and not self._stop_requested:
+                self._run_hand_refinement(conn, job)
+
             # Recompute person_track spans from full person_detections — handles
             # partial re-runs where overwrite_range covered only part of the video.
             _update_track_spans(conn, job.detection_run_id, job.shot_video_id)

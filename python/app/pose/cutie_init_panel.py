@@ -20,6 +20,7 @@ from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QGroupBox,
     QHBoxLayout,
@@ -349,6 +350,15 @@ class CutieInitPanel(QWidget):
         self._pose_model_combo.addItem("VITpose-L 133kp", "vitpose-l-133kp")
         self._pose_model_combo.setToolTip("Pose estimator model for queued pose extraction")
         pose_row.addWidget(self._pose_model_combo)
+
+        self._refine_hands_check = QCheckBox("Refine hands")
+        self._refine_hands_check.setChecked(True)
+        self._refine_hands_check.setToolTip(
+            "After pose extraction, re-detect each tracked wrist's hand in a "
+            "tight crop (rtmlib.Hand) and patch in the refined finger keypoints. "
+            "Only has an effect for 133-keypoint pose models."
+        )
+        pose_row.addWidget(self._refine_hands_check)
 
         self._queue_pose_btn = QPushButton("🎯 Queue Pose")
         self._queue_pose_btn.setToolTip(
@@ -1029,6 +1039,7 @@ class CutieInitPanel(QWidget):
     def _queue_pose_jobs(self, cameras: list[dict]) -> None:
         """Create and enqueue PoseExtractionJobs for the given cameras."""
         pose_model = self._pose_model_combo.currentData()
+        refine_hands = self._refine_hands_check.isChecked()
         detection_run_id = self._resolve_or_create_detection_run(pose_model)
         if detection_run_id is None:
             return  # user cancelled
@@ -1066,6 +1077,7 @@ class CutieInitPanel(QWidget):
                 last_frame=cam["track_last"],
                 pose_model=pose_model,
                 overwrite_range=True,
+                refine_hands=refine_hands,
             )
             self._runner.enqueue(job)
             queued += 1

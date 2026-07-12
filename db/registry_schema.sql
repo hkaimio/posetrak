@@ -145,5 +145,8 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     near_limit_damping_joint_names    TEXT,  -- JSON array of joint names; NULL/[] = disabled
     near_limit_margin_rad             REAL,  -- Radians; detection-zone width
     near_limit_spread_sigma           REAL,  -- Multiplier on sqrt(covariance) for spread estimate
-    near_limit_damping_factor         REAL   -- Variance-domain multiplier; NULL/1.0 = disabled
+    near_limit_damping_factor         REAL,  -- Variance-domain multiplier; NULL/1.0 = disabled
+    -- Added in schema migration v34: trusted keypoint edits (Phase 0) -- see
+    -- docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md.
+    edited_kp_noise_std               REAL   -- Pixels; NULL/0 = disabled
 );

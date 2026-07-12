@@ -41,6 +41,12 @@ struct Observation {
     double crop_scale = 1.0;  ///< bbox_width / pose_input_width from detection pipeline.
                               ///< 1.0 = unknown (calibration-only noise formula).
     double noise_std_override = 0.0;  ///< When > 0, replaces computed noise for this observation.
+    /// Set for keypoints overridden by a human-placed pose_observation_edits row (see
+    /// TrackerConfig::edited_kp_noise_std). When true, UnscentedKalmanFilter::reject_outliers()
+    /// exempts this observation from both outlier-rejection paths (standard Mahalanobis
+    /// threshold and cross-camera consistency), regardless of its computed mahalanobis_distance
+    /// -- mahalanobis_distance is still computed and recorded for diagnostics either way.
+    bool force_inlier = false;
 
     /// @brief Compute measurement noise std from split pose + calibration error model.
     /// @param ep Pose estimation error (pixels in model input image)

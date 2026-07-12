@@ -158,6 +158,8 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
         result.nis_feedback_threshold = tracking["nis_feedback_threshold"].value_or(1.5);
         result.nis_feedback_max_multiplier = tracking["nis_feedback_max_multiplier"].value_or(10.0);
 
+        result.edited_kp_noise_std = tracking["edited_kp_noise_std"].value_or(0.0);
+
         // Initialization sub-section
         if (auto init = tracking["initialization"]) {
             if (auto state_path = init["python_state_path"].value<std::string>()) {

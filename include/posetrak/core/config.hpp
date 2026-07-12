@@ -158,6 +158,19 @@ struct TrackerConfig {
     double nis_feedback_threshold = 1.5;        ///< Windowed NIS/DOF above this triggers fading
     double nis_feedback_max_multiplier = 10.0;  ///< Cap on the variance-domain multiplier
 
+    // === Trusted keypoint edits (Phase 0) ===
+    // See docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md.
+    // 0.0 = disabled (edited keypoints use the normal computed noise and outlier gate,
+    // same as any other observation). When > 0: every keypoint slot touched by a
+    // pose_observation_edits row (human-placed, is_outlier=false) gets this value as
+    // Observation::noise_std_override instead of the usual pose/calibration-error
+    // formula, and is exempted from both outlier-rejection paths in
+    // UnscentedKalmanFilter::reject_outliers() (Observation::force_inlier). The right
+    // value is an open empirical question -- there is no principled default, a human
+    // placing a keypoint is not zero-error. Interim convention: set to the run's own
+    // calib_noise_std (puts edits on par with a normal detection, not privileged).
+    double edited_kp_noise_std = 0.0;
+
     // UKF sigma point parameters
     double ukf_alpha = 0.5;  ///< Sigma point spread (0.001 for Python compatibility)
     double ukf_beta = 2.0;   ///< Gaussian distribution parameter
@@ -273,6 +286,9 @@ struct TrackerAppConfig {
     double nis_feedback_threshold = 1.5;
     double nis_feedback_max_multiplier = 10.0;
 
+    // === Trusted keypoint edits (Phase 0) ===
+    double edited_kp_noise_std = 0.0;
+
     // === Initialization ===
     std::optional<std::filesystem::path> python_state_path;  // Optional: use Python state for init
     int ik_max_iterations = 1000;
@@ -380,6 +396,7 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.nis_feedback_window = nis_feedback_window;
     tc.nis_feedback_threshold = nis_feedback_threshold;
     tc.nis_feedback_max_multiplier = nis_feedback_max_multiplier;
+    tc.edited_kp_noise_std = edited_kp_noise_std;
     tc.ukf_alpha = ukf_alpha;
     tc.ukf_beta = ukf_beta;
     tc.ukf_kappa = ukf_kappa;

@@ -551,6 +551,195 @@ TEST_CASE("UKF update with outlier rejection", "[ukf][update][outlier]") {
     REQUIRE(std::isfinite(final_state.root_position().z()));
 }
 
+TEST_CASE("UKF force_inlier is kept but its noise is scaled to land at threshold",
+          "[ukf][update][trusted-edits]") {
+    // Same shape as "UKF update with outlier rejection" above: marker1 at its correct
+    // position (ordinary inlier), marker2 placed wildly off (would normally be rejected)
+    // but with force_inlier set -- see TrackerConfig::edited_kp_noise_std,
+    // docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md,
+    // "Idea 1". A first version of this mechanism bypassed the gate unconditionally at a
+    // fixed noise level and was found (full-trial, real data) to force large one-step
+    // corrections through regardless of consequence, badly ill-conditioning the covariance
+    // -- see the crisis log's "Phase 0" writeup. The current version still always keeps a
+    // force_inlier observation, but scales its noise up (bisection) so its effective
+    // mahalanobis distance never exceeds threshold, capping how hard a single edit can pull
+    // the state in one step. This test's marker2 is kept (unchanged from before) but the
+    // resulting state correction must stay bounded, unlike the discarded unconditional
+    // version -- see the REQUIRE on root_position's magnitude below.
+    Skeleton skeleton;
+    skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    uint32_t marker1_idx = skeleton.add_marker("marker1", 0, Eigen::Vector3d(-0.5, 0, 0));
+    uint32_t marker2_idx = skeleton.add_marker("marker2", 0, Eigen::Vector3d(0.5, 0, 0));
+
+    pinocchio::Model model;
+    pinocchio::Data data;
+    PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
+    auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+    ForwardKinematics fk(model, data, marker_frame_map, fk_layout);
+
+    Intrinsics intrinsics;
+    intrinsics.fx = 500.0;
+    intrinsics.fy = 500.0;
+    intrinsics.cx = 320.0;
+    intrinsics.cy = 240.0;
+    intrinsics.width = 640;
+    intrinsics.height = 480;
+    intrinsics.model = Intrinsics::DistortionModel::BrownConrady;
+    intrinsics.distortion_coeffs = {0.0, 0.0, 0.0, 0.0, 0.0};
+
+    Extrinsics extrinsics;
+    extrinsics.position = Eigen::Vector3d(0, 0, -2.0);
+    extrinsics.orientation = Eigen::Quaterniond::Identity();
+
+    Camera camera(0, "cam0", intrinsics, extrinsics);
+    std::unordered_map<int, Camera> cameras;
+    cameras.emplace(0, camera);
+
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+    UnscentedKalmanFilter ukf(layout, 0.01);
+
+    Eigen::Vector3d pos = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
+    Eigen::VectorXd angles = Eigen::VectorXd::Zero(0);
+    Eigen::Vector3d vel = Eigen::Vector3d::Zero();
+    Eigen::Vector3d angvel = Eigen::Vector3d::Zero();
+    Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(0);
+
+    State initial_state(pos, quat, angles, vel, angvel, joint_vels);
+    ukf.set_state(initial_state);
+
+    Eigen::MatrixXd cov = Eigen::MatrixXd::Identity(12, 12) * 0.1;
+    ukf.set_covariance(cov);
+
+    Observation obs1;
+    obs1.camera_id = 0;
+    obs1.marker_id = marker1_idx;
+    obs1.position = Eigen::Vector2d(195.0, 240.0);  // Close to expected -- ordinary inlier
+    obs1.confidence = 0.9;
+
+    Observation obs2;
+    obs2.camera_id = 0;
+    obs2.marker_id = marker2_idx;
+    obs2.position = Eigen::Vector2d(100.0, 100.0);  // Very far from expected (~445, 240)
+    obs2.confidence = 0.9;
+    obs2.force_inlier = true;
+
+    std::vector<Observation> observations = {obs1, obs2};
+
+    double threshold = 4.0;  // Same threshold the un-forced test above rejects marker2 at
+    UpdateResult result = ukf.update(observations, cameras, fk, 0.0, 5.0, threshold);
+
+    REQUIRE(result.num_observations == 2);
+    REQUIRE(result.num_outliers == 0);
+    REQUIRE(result.num_inliers == 2);
+
+    bool marker2_kept_as_inlier = false;
+    for (auto const& obs_result : result.observations) {
+        if (obs_result.marker_name == "marker2") {
+            marker2_kept_as_inlier = !obs_result.is_outlier;
+            // Still the real computed distance, well past threshold -- force_inlier only
+            // changes whether it's used to reject, not what gets recorded for diagnostics.
+            REQUIRE(obs_result.mahalanobis_distance > threshold);
+        }
+    }
+    REQUIRE(marker2_kept_as_inlier);
+
+    // Regression guard for the discarded unconditional-bypass behaviour: a threshold-capped
+    // correction should stay modest, not the wild multi-unit jump an unbounded 48-sigma-class
+    // correction at fixed noise would produce (the real-data failure mode that motivated this
+    // design). Initial covariance trace is 0.1*12=1.2, so a few tenths of a metre is generous
+    // headroom for a genuinely threshold-bounded single-observation correction.
+    State const& final_state = ukf.state();
+    REQUIRE(std::isfinite(final_state.root_position().x()));
+    REQUIRE(std::isfinite(final_state.root_position().y()));
+    REQUIRE(std::isfinite(final_state.root_position().z()));
+    REQUIRE(final_state.root_position().norm() < 2.0);
+}
+
+TEST_CASE("UKF force_inlier within threshold is included with its noise unchanged",
+          "[ukf][update][trusted-edits]") {
+    // Companion to the scale-to-threshold test above: when a force_inlier observation's raw
+    // mahalanobis distance is already within threshold, no scaling should happen at all --
+    // same shape, but marker2 is placed close to its expected position instead of wildly off.
+    Skeleton skeleton;
+    skeleton.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    uint32_t marker1_idx = skeleton.add_marker("marker1", 0, Eigen::Vector3d(-0.5, 0, 0));
+    uint32_t marker2_idx = skeleton.add_marker("marker2", 0, Eigen::Vector3d(0.5, 0, 0));
+
+    pinocchio::Model model;
+    pinocchio::Data data;
+    PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
+    auto marker_frame_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
+    auto fk_layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+
+    ForwardKinematics fk(model, data, marker_frame_map, fk_layout);
+
+    Intrinsics intrinsics;
+    intrinsics.fx = 500.0;
+    intrinsics.fy = 500.0;
+    intrinsics.cx = 320.0;
+    intrinsics.cy = 240.0;
+    intrinsics.width = 640;
+    intrinsics.height = 480;
+    intrinsics.model = Intrinsics::DistortionModel::BrownConrady;
+    intrinsics.distortion_coeffs = {0.0, 0.0, 0.0, 0.0, 0.0};
+
+    Extrinsics extrinsics;
+    extrinsics.position = Eigen::Vector3d(0, 0, -2.0);
+    extrinsics.orientation = Eigen::Quaterniond::Identity();
+
+    Camera camera(0, "cam0", intrinsics, extrinsics);
+    std::unordered_map<int, Camera> cameras;
+    cameras.emplace(0, camera);
+
+    auto layout = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skeleton));
+    UnscentedKalmanFilter ukf(layout, 0.01);
+
+    Eigen::Vector3d pos = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
+    Eigen::VectorXd angles = Eigen::VectorXd::Zero(0);
+    Eigen::Vector3d vel = Eigen::Vector3d::Zero();
+    Eigen::Vector3d angvel = Eigen::Vector3d::Zero();
+    Eigen::VectorXd joint_vels = Eigen::VectorXd::Zero(0);
+
+    State initial_state(pos, quat, angles, vel, angvel, joint_vels);
+    ukf.set_state(initial_state);
+
+    Eigen::MatrixXd cov = Eigen::MatrixXd::Identity(12, 12) * 0.1;
+    ukf.set_covariance(cov);
+
+    Observation obs1;
+    obs1.camera_id = 0;
+    obs1.marker_id = marker1_idx;
+    obs1.position = Eigen::Vector2d(195.0, 240.0);
+    obs1.confidence = 0.9;
+
+    Observation obs2;
+    obs2.camera_id = 0;
+    obs2.marker_id = marker2_idx;
+    obs2.position = Eigen::Vector2d(445.0, 240.0);  // Close to expected -- ordinary inlier too
+    obs2.confidence = 0.9;
+    obs2.force_inlier = true;
+
+    std::vector<Observation> observations = {obs1, obs2};
+
+    double threshold = 4.0;
+    UpdateResult result = ukf.update(observations, cameras, fk, 0.0, 5.0, threshold);
+
+    REQUIRE(result.num_observations == 2);
+    REQUIRE(result.num_outliers == 0);
+    REQUIRE(result.num_inliers == 2);
+
+    for (auto const& obs_result : result.observations) {
+        if (obs_result.marker_name == "marker2") {
+            REQUIRE_FALSE(obs_result.is_outlier);
+            REQUIRE(obs_result.mahalanobis_distance <= threshold);
+        }
+    }
+}
+
 TEST_CASE("UKF velocity damping at joint limits", "[ukf][update][damping]") {
     // Create skeleton with revolute joint that has limits
     Skeleton skeleton;

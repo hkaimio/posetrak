@@ -111,13 +111,17 @@ class SessionReader {
     /// @param pose_noise_std Pose estimation error std (pixels); sets RELATIVE noise_std_override
     /// @param cross_pair_max_px Pixel radius for spatial cross-pair RELATIVE obs (0 = disabled)
     /// @param cross_pair_max_n  Max cross-pairs per frame per camera (sorted by proximity)
+    /// @param edited_kp_noise_std When > 0, keypoints overridden by a pose_observation_edits row
+    ///   get this as noise_std_override and Observation::force_inlier = true (see
+    ///   TrackerConfig::edited_kp_noise_std). 0 = disabled (edits use the normal formula/gate).
     /// @return ObservationSet ready for the tracker
     ObservationSet load_observations(std::string const& sequence_id,
                                      std::map<std::string, Camera> const& cameras,
                                      Skeleton const& skeleton, double min_confidence = 0.1,
                                      int person_id = 0, bool use_relative_obs = false,
                                      double relative_min_conf = 0.5, double pose_noise_std = 0.0,
-                                     double cross_pair_max_px = 0.0, int cross_pair_max_n = 10);
+                                     double cross_pair_max_px = 0.0, int cross_pair_max_n = 10,
+                                     double edited_kp_noise_std = 0.0);
 
    private:
     sqlite3* db_{};

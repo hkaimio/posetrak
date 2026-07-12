@@ -74,6 +74,19 @@ inline std::vector<Keypoint> decode_keypoints(void const* data, int byte_count) 
     return result;
 }
 
+/// @brief Test whether slot i is overridden by a pose_observation_edits kp_mask.
+///
+/// Same bit convention as apply_keypoint_edits() below (uint8[ceil(N/8)], bit i LSB-first).
+/// Used to identify which keypoints in an already-merged frame came from a human edit, e.g.
+/// to set Observation::force_inlier -- see TrackerConfig::edited_kp_noise_std.
+inline bool is_kp_edited(void const* mask_data, int mask_bytes, int i) {
+    int byte_idx = i / 8;
+    if (mask_data == nullptr || byte_idx >= mask_bytes)
+        return false;
+    auto const* mask = static_cast<uint8_t const*>(mask_data);
+    return (mask[byte_idx] >> (i % 8)) & 1u;
+}
+
 /// @brief Apply a pose_observation_edits overlay to a decoded keypoint list in-place.
 ///
 /// edit_kp_data / edit_kp_bytes: float32[N,3] blob in the same format as decode_keypoints().

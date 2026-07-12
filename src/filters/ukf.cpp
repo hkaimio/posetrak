@@ -1499,7 +1499,7 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
         auto t_outlier = Clock::now();
         auto [inliers, results] =
             reject_outliers(observations, predicted_measurements, measurement_mean, innovation_cov,
-                            outlier_threshold_mahalanobis);
+                            outlier_threshold_mahalanobis, pose_noise_std, calib_noise_std);
         inlier_observations = inliers;
         observation_results = results;
         result.outlier_ms = Ms(Clock::now() - t_outlier).count();
@@ -1927,8 +1927,8 @@ std::pair<std::vector<Observation>, std::vector<ObservationResult>>
 UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observations,
                                        Eigen::MatrixXd const& predicted_measurements,
                                        Eigen::VectorXd const& measurement_mean,
-                                       Eigen::MatrixXd const& innovation_cov,
-                                       double threshold) const {
+                                       Eigen::MatrixXd const& innovation_cov, double threshold,
+                                       double pose_noise_std, double calib_noise_std) const {
     std::vector<Observation> inliers;
     std::vector<ObservationResult> results;
 
@@ -1991,10 +1991,14 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
     }
 
     // Second pass: cross-camera outlier detection
-    // Group valid observations by marker_id
+    // Group valid observations by marker_id. force_inlier observations are excluded here too,
+    // not just from the rejection decision in the third pass below -- a trusted edit that's
+    // currently inconsistent with the filter's state (exactly when force_inlier matters) would
+    // otherwise skew the per-marker median and change whether *other* cameras' genuinely bad
+    // observations of the same marker pass the cross-camera check.
     std::map<int, std::vector<size_t>> marker_to_obs_indices;
     for (size_t i = 0; i < observations.size(); ++i) {
-        if (obs_data[i].is_valid) {
+        if (obs_data[i].is_valid && !observations[i].force_inlier) {
             marker_to_obs_indices[observations[i].marker_id].push_back(i);
         }
     }
@@ -2055,8 +2059,75 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
         obs_result.mahalanobis_distance = data.mahalanobis_distance;
 
         if (!data.is_valid) {
-            // Invalid observation (NaN projection)
+            // Invalid observation (NaN projection) -- force_inlier can't rescue this, there's
+            // no finite innovation to include in the update regardless of trust.
             obs_result.is_outlier = true;
+        } else if (obs.force_inlier) {
+            // Trusted keypoint edit (TrackerConfig::edited_kp_noise_std > 0) -- always kept as
+            // an inlier, but if its raw mahalanobis_distance exceeds threshold, its noise is
+            // scaled up (bisection search) until the distance would land at exactly threshold.
+            // This bounds how hard a single edit can pull the state in one step -- an
+            // unconditional bypass at a fixed noise level was tried first and found to force
+            // arbitrarily large one-step corrections through, badly ill-conditioning the
+            // covariance (see docs/roadmap/features/tracking-crisis-debugging-log.md, "Phase 0
+            // (trusted keypoint edits, Idea 1)"). obs_result.mahalanobis_distance above is
+            // still the raw, pre-scaling value, for diagnostics.
+            obs_result.is_outlier = false;
+            Observation to_include = obs;
+            if (data.mahalanobis_distance > threshold) {
+                Eigen::Matrix2d const cov_2x2 = innovation_cov.block<2, 2>(2 * i, 2 * i);
+                // This observation's own noise contribution, as already baked into cov_2x2
+                // when innovation_cov was built (see update()'s "Add measurement noise R") --
+                // same pose_noise_std/calib_noise_std args as that call, matters when
+                // noise_std_override isn't set (force_inlier without an explicit override
+                // still falls back to the normal formula, same as any other observation).
+                double const base_noise_std =
+                    obs.measurement_noise_std(pose_noise_std, calib_noise_std);
+                double const base_variance = base_noise_std * base_noise_std;
+                // Recover the R-free (purely geometric, sigma-point-derived) part of the
+                // local covariance so it can be combined with a *different* noise variance
+                // below -- clamped PSD to guard against floating-point noise pushing an
+                // eigenvalue slightly negative after subtracting base_variance*I.
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> es(
+                    cov_2x2 - base_variance * Eigen::Matrix2d::Identity());
+                Eigen::Vector2d const ev = es.eigenvalues().cwiseMax(0.0);
+                Eigen::Matrix2d const hpht_local =
+                    es.eigenvectors() * ev.asDiagonal() * es.eigenvectors().transpose();
+
+                auto mahal_for_k = [&](double k) {
+                    double const var_k = base_variance * k * k;
+                    return compute_mahalanobis_distance(
+                        data.innovation, hpht_local + var_k * Eigen::Matrix2d::Identity());
+                };
+
+                // Bisect on k (multiplier on base_noise_std) for mahal_for_k(k) == threshold.
+                // Monotonically decreasing in k (more noise -> smaller distance), so a plain
+                // bisection converges; expand k_hi first since the right bracket isn't known
+                // up front.
+                double k_lo = 1.0;
+                double k_hi = 2.0;
+                for (int guard = 0; guard < 40 && mahal_for_k(k_hi) > threshold; ++guard) {
+                    k_hi *= 2.0;
+                }
+                for (int iter = 0; iter < 40; ++iter) {
+                    double const k_mid = 0.5 * (k_lo + k_hi);
+                    if (mahal_for_k(k_mid) > threshold) {
+                        k_lo = k_mid;
+                    } else {
+                        k_hi = k_mid;
+                    }
+                }
+                // noise_std_override is the *raw* (pre-confidence-division) value --
+                // measurement_noise_std() divides it by max(confidence, 0.1) again when this
+                // observation is used downstream, so undo that division here to land on
+                // exactly k_hi * base_noise_std as the final effective noise. Setting this to
+                // obs.noise_std_override * k_hi directly would be wrong whenever confidence
+                // isn't ~1 (double-divides) or when noise_std_override was 0 to begin with
+                // (force_inlier without an explicit override -- stays 0 regardless of k_hi).
+                to_include.noise_std_override =
+                    k_hi * base_noise_std * std::max(obs.confidence, 0.1);
+            }
+            inliers.push_back(to_include);
         } else {
             // Valid observation - check both standard and cross-camera thresholds
             bool standard_outlier = data.mahalanobis_distance > threshold;

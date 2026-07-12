@@ -182,7 +182,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "       near_limit_damping_joint_names,"
         "       COALESCE(near_limit_margin_rad, 0.0) AS near_limit_margin_rad,"
         "       COALESCE(near_limit_spread_sigma, 3.0) AS near_limit_spread_sigma,"
-        "       COALESCE(near_limit_damping_factor, 1.0) AS near_limit_damping_factor"
+        "       COALESCE(near_limit_damping_factor, 1.0) AS near_limit_damping_factor,"
+        "       COALESCE(edited_kp_noise_std, 0.0) AS edited_kp_noise_std"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -208,7 +209,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         34=nis_feedback_max_multiplier, 35=process_noise_vel_scopes,
     //         36=soft_limit_joint_names, 37=soft_limit_margin_rad, 38=soft_limit_noise_std,
     //         39=near_limit_damping_joint_names, 40=near_limit_margin_rad,
-    //         41=near_limit_spread_sigma, 42=near_limit_damping_factor
+    //         41=near_limit_spread_sigma, 42=near_limit_damping_factor,
+    //         43=edited_kp_noise_std
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -386,6 +388,7 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(40, out.tracker.near_limit_margin_rad);
     apply_real(41, out.tracker.near_limit_spread_sigma);
     apply_real(42, out.tracker.near_limit_damping_factor);
+    apply_real(43, out.tracker.edited_kp_noise_std);
 
     return out;
 }
@@ -632,7 +635,8 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                                                 Skeleton const& skeleton, double min_confidence,
                                                 int person_id, bool use_relative_obs,
                                                 double relative_min_conf, double pose_noise_std,
-                                                double cross_pair_max_px, int cross_pair_max_n) {
+                                                double cross_pair_max_px, int cross_pair_max_n,
+                                                double edited_kp_noise_std) {
     // Step 0: Read pixels_are_undistorted flag for this sequence
     bool pixels_are_undistorted = true;  // default: assume undistorted (safe for existing data)
     {
@@ -818,15 +822,19 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
 
         // Step 4: Decode keypoints, apply any edits, then create Observation objects
         auto kps = db::decode_keypoints(kp_data, kp_bytes);
+        // Kept past the edit-lookup block so the per-keypoint loop below can test which
+        // slots came from this human edit (db::is_kp_edited) -- see edited_kp_noise_std.
+        FrameEdit const* active_edit = nullptr;
         {
             auto edit_inst_it = edits.find(inst_id);
             if (edit_inst_it != edits.end()) {
                 auto edit_frame_it = edit_inst_it->second.find(video_frame);
                 if (edit_frame_it != edit_inst_it->second.end()) {
-                    auto const& fe = edit_frame_it->second;
-                    db::apply_keypoint_edits(kps, fe.kp_blob.data(),
-                                             static_cast<int>(fe.kp_blob.size()), fe.mask.data(),
-                                             static_cast<int>(fe.mask.size()));
+                    active_edit = &edit_frame_it->second;
+                    db::apply_keypoint_edits(kps, active_edit->kp_blob.data(),
+                                             static_cast<int>(active_edit->kp_blob.size()),
+                                             active_edit->mask.data(),
+                                             static_cast<int>(active_edit->mask.size()));
                 }
             }
         }
@@ -857,6 +865,12 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                                                   : camera->undistort(obs.position_distorted);
             obs.confidence = kps[static_cast<size_t>(i)].confidence;
             obs.crop_scale = crop_scale;
+            if (edited_kp_noise_std > 0.0 && active_edit != nullptr &&
+                db::is_kp_edited(active_edit->mask.data(),
+                                 static_cast<int>(active_edit->mask.size()), i)) {
+                obs.force_inlier = true;
+                obs.noise_std_override = edited_kp_noise_std;
+            }
             frame_obs.push_back(obs);
         }
 

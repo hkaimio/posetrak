@@ -20,7 +20,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 6
-SESSION_SCHEMA_VERSION: Final[int] = 33
+SESSION_SCHEMA_VERSION: Final[int] = 34
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -946,6 +946,26 @@ def _migrate_session_v32_to_v33(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v33_to_v34(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 33 to 34.
+
+    v34 adds edited_kp_noise_std to tracker_configs (Phase 0 of trusted
+    keypoint edits): when > 0, a keypoint slot overridden by a
+    pose_observation_edits row (human-placed, is_outlier=false) gets this
+    value as its measurement noise instead of the usual pose/calibration
+    formula, and is exempted from the tracker's outlier gate entirely.
+    NULL/0 means disabled (identical to pre-v34 behaviour). There is no
+    principled default value -- see
+    docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md,
+    "Measurement noise for edited and automated observations".
+    """
+    existing = _tracker_config_columns(conn)
+    if "edited_kp_noise_std" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN edited_kp_noise_std REAL")
+    _set_schema_version(conn, 34)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1065,6 +1085,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 32
     if actual == 32:
         _migrate_session_v32_to_v33(conn)
+        actual = 33
+    if actual == 33:
+        _migrate_session_v33_to_v34(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

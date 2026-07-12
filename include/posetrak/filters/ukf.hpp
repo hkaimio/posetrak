@@ -556,13 +556,16 @@ class UnscentedKalmanFilter {
      * @param measurement_mean Mean predicted measurement
      * @param innovation_cov Innovation covariance matrix
      * @param threshold Mahalanobis distance threshold
+     * @param pose_noise_std Pose estimation error std (pixels) -- same value used to build
+     *   innovation_cov's diagonal; needed to recompute a force_inlier observation's own noise
+     *   contribution when scaling it to land at threshold (Observation::force_inlier).
+     * @param calib_noise_std Calibration error std (pixels) -- see pose_noise_std above.
      * @return Tuple of (inlier observations, all observation results)
      */
-    std::pair<std::vector<Observation>, std::vector<ObservationResult>>
-    reject_outliers(std::vector<Observation> const& observations,
-                    Eigen::MatrixXd const& predicted_measurements,
-                    Eigen::VectorXd const& measurement_mean, Eigen::MatrixXd const& innovation_cov,
-                    double threshold) const;
+    std::pair<std::vector<Observation>, std::vector<ObservationResult>> reject_outliers(
+        std::vector<Observation> const& observations, Eigen::MatrixXd const& predicted_measurements,
+        Eigen::VectorXd const& measurement_mean, Eigen::MatrixXd const& innovation_cov,
+        double threshold, double pose_noise_std = 0.0, double calib_noise_std = 0.0) const;
 
     /**
      * @brief Compute observation diagnostics without rejection

@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
 from posetrak.db.db import generate_id
+from posetrak.db.observation_merge import BODY_SOURCE, merge_observation_sources
 
 _CROP_JPEG_QUALITY = 75
 _CROP_TARGET_HEIGHT = 240
@@ -288,12 +290,15 @@ def read_observations_with_edits(
     """Return {video_frame: float32[N,3]} for one camera, with pose_observation_edits applied.
 
     Each frame's keypoint array matches the float32[N,3] format used in
-    pose_observations.kp_blob.  Edited slots (bit set in kp_mask) have their
-    x/y replaced by the edit values; if the edit marks a keypoint as outlier
-    (is_outlier != 0) its confidence is zeroed.
+    pose_observations.kp_blob.  If a frame has rows from multiple detection
+    sources (e.g. 'body' plus refined 'hand_l'/'hand_r' passes), they are
+    merged first via observation_merge.merge_observation_sources.  Edited
+    slots (bit set in kp_mask) have their x/y replaced by the edit values;
+    if the edit marks a keypoint as outlier (is_outlier != 0) its confidence
+    is zeroed.
     """
     obs_rows = session.execute(
-        "SELECT video_frame, kp_blob FROM pose_observations"
+        "SELECT video_frame, source, kp_blob FROM pose_observations"
         " WHERE sequence_id = ? AND camera_instance_id = ?"
         " ORDER BY video_frame",
         (sequence_id, camera_instance_id),
@@ -301,7 +306,10 @@ def read_observations_with_edits(
     if not obs_rows:
         return {}
 
-    n_kp = len(bytes(obs_rows[0]["kp_blob"])) // (3 * 4)  # float32, 3 values per kp
+    by_frame: dict[int, list[tuple[str, np.ndarray]]] = defaultdict(list)
+    for row in obs_rows:
+        kp = np.frombuffer(bytes(row["kp_blob"]), dtype=np.float32).reshape(-1, 3).copy()
+        by_frame[row["video_frame"]].append((row["source"], kp))
 
     edit_rows = session.execute(
         "SELECT video_frame, kp_blob, kp_mask FROM pose_observation_edits"
@@ -331,9 +339,13 @@ def read_observations_with_edits(
                     kp[i, 2] = 1.0  # manually placed → full confidence
 
     result: dict[int, np.ndarray] = {}
-    for row in obs_rows:
-        frame = row["video_frame"]
-        kp = np.frombuffer(bytes(row["kp_blob"]), dtype=np.float32).reshape(-1, 3).copy()
+    for frame, rows in by_frame.items():
+        kp = merge_observation_sources(rows)
+        if kp is None:
+            # Defensive: no 'body' row for this frame (shouldn't happen in
+            # practice — every write path writes a 'body' base row). Fall
+            # back to whichever row is present rather than dropping the frame.
+            kp = rows[0][1]
         if frame in edits:
             _apply_edit(kp, *edits[frame])
         result[frame] = kp
@@ -399,21 +411,26 @@ def update_single_keypoint_edit(
 
     Works on ghost frames (no pose_observations row) by inferring the keypoint
     count from any other observation in the same camera.
+
+    The keypoint count is always inferred from a 'body' row: a frame may also
+    have 'hand_l'/'hand_r' rows (narrower, 21-point arrays) that must not be
+    mistaken for the frame's full keypoint width.
     """
     obs_row = session.execute(
         "SELECT kp_blob FROM pose_observations"
-        " WHERE sequence_id = ? AND camera_instance_id = ? AND video_frame = ?",
-        (sequence_id, camera_instance_id, video_frame),
+        " WHERE sequence_id = ? AND camera_instance_id = ? AND video_frame = ?"
+        " AND source = ?",
+        (sequence_id, camera_instance_id, video_frame, BODY_SOURCE),
     ).fetchone()
 
     if obs_row is not None:
         n_kp = len(bytes(obs_row["kp_blob"])) // (3 * 4)
     else:
-        # Ghost frame: infer n_kp from any other observation in this camera.
+        # Ghost frame: infer n_kp from any other 'body' observation in this camera.
         any_obs = session.execute(
             "SELECT kp_blob FROM pose_observations"
-            " WHERE sequence_id = ? AND camera_instance_id = ? LIMIT 1",
-            (sequence_id, camera_instance_id),
+            " WHERE sequence_id = ? AND camera_instance_id = ? AND source = ? LIMIT 1",
+            (sequence_id, camera_instance_id, BODY_SOURCE),
         ).fetchone()
         if any_obs is None:
             return  # no observations at all — cannot determine keypoint count

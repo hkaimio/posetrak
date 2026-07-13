@@ -9,7 +9,11 @@ import pytest
 
 from posetrak.db.db import create_session
 
-from app.pose.db_cache import read_observations_with_edits, write_observation_edit
+from app.pose.db_cache import (
+    read_observations_with_edits,
+    update_single_keypoint_edit,
+    write_observation_edit,
+)
 
 N_KP = 4  # small keypoint count for tests
 
@@ -141,3 +145,83 @@ def test_upsert_replaces_existing_edit(obs_session):
     result = read_observations_with_edits(obs_session, "seq1", "cam1")
     assert result[10][0, 0] == pytest.approx(77.0)
     assert result[10][0, 1] == pytest.approx(88.0)
+
+
+# ---------------------------------------------------------------------------
+# Multi-source rows (Phase 2: body + hand_l/hand_r sharing one frame)
+# ---------------------------------------------------------------------------
+
+_N_KP_133 = 133
+
+
+def _kp133(fill: float, n: int = _N_KP_133) -> np.ndarray:
+    kp = np.zeros((n, 3), dtype=np.float32)
+    kp[:] = [fill, fill, fill]
+    return kp
+
+
+@pytest.fixture()
+def multi_source_session(tmp_path):
+    """Session DB with 'body' + 'hand_l' rows sharing frame 10 of seq1/cam1."""
+    conn = create_session(tmp_path / "obs_edits_multi.db")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute(
+        "INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO captures (id, session_id, capture_number) VALUES ('shot1', 'sess1', 1)"
+    )
+    conn.execute(
+        "INSERT INTO pose_observation_sequences"
+        " (id, shot_id, sync_config_id, time_start_s, time_end_s, pixels_are_undistorted)"
+        " VALUES ('seq1', 'shot1', 'sync1', 0.0, 1.0, 0)"
+    )
+    conn.execute(
+        "INSERT INTO pose_observations"
+        " (sequence_id, camera_instance_id, video_frame, timestamp_s, person_id, source, kp_blob)"
+        " VALUES ('seq1', 'cam1', 10, 0.0, 0, 'body', ?)",
+        (_kp133(1.0).tobytes(),),
+    )
+    conn.execute(
+        "INSERT INTO pose_observations"
+        " (sequence_id, camera_instance_id, video_frame, timestamp_s, person_id, source, kp_blob)"
+        " VALUES ('seq1', 'cam1', 10, 0.0, 0, 'hand_l', ?)",
+        (_kp133(9.0, n=21).tobytes(),),
+    )
+    conn.commit()
+    yield conn
+    conn.close()
+
+
+def test_read_observations_merges_body_and_hand_rows(multi_source_session):
+    """A frame with both 'body' and 'hand_l' rows must merge, not overwrite.
+
+    Regression test: read_observations_with_edits used to do an unconditional
+    `result[frame] = kp` per row, so whichever row loaded last silently won —
+    losing the other source's keypoints instead of merging them.
+    """
+    result = read_observations_with_edits(multi_source_session, "seq1", "cam1")
+    kp = result[10]
+    assert kp.shape[0] == 133
+    np.testing.assert_allclose(kp[91:112, 0], 9.0)  # hand_l slots
+    np.testing.assert_allclose(kp[0, 0], 1.0)  # body slot untouched
+
+
+def test_update_single_keypoint_edit_uses_body_row_width(multi_source_session):
+    """n_kp inference must use the 'body' row, not whichever row loads first.
+
+    Regression test: update_single_keypoint_edit inferred n_kp from a bare
+    fetchone() with no source filter; if it happened to bind to the 21-point
+    'hand_l' row instead of the 133-point 'body' row, editing a body-range
+    index would silently corrupt the edit blob width.
+    """
+    update_single_keypoint_edit(
+        multi_source_session, "seq1", "cam1", 10, kp_idx=5,
+        new_x=42.0, new_y=43.0, is_outlier=False,
+    )
+    result = read_observations_with_edits(multi_source_session, "seq1", "cam1")
+    kp = result[10]
+    assert kp[5, 0] == pytest.approx(42.0)
+    assert kp[5, 1] == pytest.approx(43.0)
+    # hand_l slots still present and untouched by the edit.
+    np.testing.assert_allclose(kp[91:112, 0], 9.0)

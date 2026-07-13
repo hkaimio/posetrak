@@ -584,7 +584,7 @@ class PersonCropGridWidget(QWidget):
         frame_obs = session.execute(
             "SELECT camera_instance_id, video_frame, timestamp_s"
             " FROM pose_observations"
-            " WHERE sequence_id = ? AND person_id = 0"
+            " WHERE sequence_id = ? AND person_id = 0 AND source = 'body'"
             " ORDER BY timestamp_s, camera_instance_id",
             (sequence_id,),
         ).fetchall()

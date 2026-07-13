@@ -406,13 +406,18 @@ def load_observations_from_session(
     DataFrame with columns:
       frame, timestamp, camera_id, pixel_x, pixel_y, confidence
     One row per (camera, frame, keypoint) combination with confidence > 0.
+
+    Only the 'body' source is loaded: keypoint_index below is a global
+    COCO-133 index, and a 'hand_l'/'hand_r' row's local hand21 indices would
+    collide with unrelated body keypoint indices if merged in naively. Use
+    posetrak.db.observation_merge if a caller needs the refined hand data too.
     """
     conn = _open_db(session_db)
     try:
         rows = conn.execute(
             "SELECT camera_instance_id, video_frame, timestamp_s, person_id, kp_blob "
             "FROM pose_observations "
-            "WHERE sequence_id = ? "
+            "WHERE sequence_id = ? AND source = 'body' "
             "ORDER BY video_frame, camera_instance_id",
             (sequence_id,),
         ).fetchall()

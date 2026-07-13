@@ -183,7 +183,7 @@ class SegmentCropPanel(QWidget):
         kp_row = self._conn.execute(
             "SELECT keypoints FROM detection_keypoints "
             "WHERE detection_run_id = ? AND shot_video_id = ? "
-            "  AND track_id = ? AND video_frame = ?",
+            "  AND track_id = ? AND video_frame = ? AND region_type = 'full_body'",
             (self._run_id, svid, tid, frame_idx),
         ).fetchone()
 

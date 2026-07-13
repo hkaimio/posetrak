@@ -195,7 +195,8 @@ def apply_quality_weighting(
     new_obs_rows = []
 
     obs_rows = conn.execute(
-        """SELECT camera_instance_id, video_frame, timestamp_s, person_id, kp_blob, noise_scale
+        """SELECT camera_instance_id, video_frame, timestamp_s, person_id, source,
+                  detection_run_id, kp_blob, noise_scale
            FROM pose_observations WHERE sequence_id = ?
            ORDER BY camera_instance_id, video_frame, person_id""",
         (sequence_id,),
@@ -207,8 +208,21 @@ def apply_quality_weighting(
         person_id = row["person_id"]
         person_name = person_map.get(person_id)
 
+        # Segmentation quality weighting is only meaningful for the whole-body
+        # pass — a 'hand_l'/'hand_r' row's local hand21 indices don't line up
+        # with the full-skeleton quality_blob, so those rows are copied through
+        # unweighted rather than misapplied.
         shot_video_id = camera_map.get(cam_inst_id)
         kp = decode_kp_blob(row["kp_blob"])  # (N_KP, 3)
+        if row["source"] != "body":
+            new_kp = kp
+            total += 1
+            new_obs_rows.append((
+                row["camera_instance_id"], row["video_frame"], row["timestamp_s"],
+                row["person_id"], row["source"], row["detection_run_id"],
+                encode_kp_blob(new_kp), row["noise_scale"],
+            ))
+            continue
 
         quality_arr = None
         if shot_video_id and person_name:
@@ -237,6 +251,8 @@ def apply_quality_weighting(
             row["video_frame"],
             row["timestamp_s"],
             row["person_id"],
+            row["source"],
+            row["detection_run_id"],
             encode_kp_blob(new_kp),
             row["noise_scale"],
         ))
@@ -281,8 +297,8 @@ def apply_quality_weighting(
     conn.executemany(
         """INSERT INTO pose_observations
            (sequence_id, camera_instance_id, video_frame, timestamp_s, person_id,
-            kp_blob, noise_scale)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            source, detection_run_id, kp_blob, noise_scale)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         [(new_seq_id, *r) for r in new_obs_rows],
     )
 

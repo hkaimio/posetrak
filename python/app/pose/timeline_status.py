@@ -14,8 +14,11 @@ number assigned in the design doc).
 from __future__ import annotations
 
 import sqlite3
+from collections import defaultdict
 
 import numpy as np
+
+from posetrak.db.observation_merge import merge_observation_sources
 
 # Ascending precedence: when aggregating several keypoints/cameras into one
 # cell, the maximum code wins (GREY > BLUE > YELLOW > GREEN).
@@ -46,7 +49,7 @@ def read_timeline_status(
     not a requirement — see *Status signal* in the design doc).
     """
     obs_rows = session.execute(
-        "SELECT video_frame, kp_blob FROM pose_observations"
+        "SELECT video_frame, source, kp_blob FROM pose_observations"
         " WHERE sequence_id = ? AND camera_instance_id = ?"
         " ORDER BY video_frame",
         (sequence_id, camera_instance_id),
@@ -66,10 +69,15 @@ def read_timeline_status(
         for r in edit_rows
     }
 
-    obs_by_frame: dict[int, np.ndarray] = {
-        r["video_frame"]: np.frombuffer(bytes(r["kp_blob"]), dtype=np.float32).reshape(-1, 3)
-        for r in obs_rows
-    }
+    by_frame_rows: dict[int, list[tuple[str, np.ndarray]]] = defaultdict(list)
+    for r in obs_rows:
+        kp = np.frombuffer(bytes(r["kp_blob"]), dtype=np.float32).reshape(-1, 3)
+        by_frame_rows[r["video_frame"]].append((r["source"], kp))
+
+    obs_by_frame: dict[int, np.ndarray] = {}
+    for frame, rows in by_frame_rows.items():
+        merged = merge_observation_sources(rows)
+        obs_by_frame[frame] = merged if merged is not None else rows[0][1]
 
     frames = sorted(set(obs_by_frame) | set(edits))
     if not frames:

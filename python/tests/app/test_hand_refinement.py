@@ -1,7 +1,7 @@
-"""Tests for posetrak.detection.hand_refinement — Idea 2 Phase 1.
+"""Tests for posetrak.detection.hand_refinement — Idea 2.
 
 Covers the pure crop/candidate-selection/gate logic in detect_hand_in_crop
-and the keypoint-patching/pose-model-gating logic in HandRefinementPipeline,
+and the hand-row-building/pose-model-gating logic in HandRefinementPipeline,
 using a fake hand model so no rtmlib checkpoint download is required. See
 docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md
 for the validated formulas these tests pin down.
@@ -20,9 +20,9 @@ from posetrak.detection.hand_refinement import (
     HandCandidate,
     HandRefinementPipeline,
     _ELBOW_IDX,
-    _HAND_BASE_IDX,
     _HAND_CONF_SCALE,
     _HAND_N_KP,
+    _HAND_POSE_INPUT_WIDTH,
     _WRIST_IDX,
     detect_hand_in_crop,
 )
@@ -78,6 +78,15 @@ def _uniform_hand_kp(xy: tuple[float, float]) -> np.ndarray:
     return np.tile(np.array(xy, dtype=np.float32), (21, 1))
 
 
+def _fake_candidate(xy: tuple[float, float], conf: float = 0.8, crop_w_px: float = 120.0) -> HandCandidate:
+    return HandCandidate(
+        keypoints=_uniform_hand_kp(xy),
+        scores=np.full(21, conf, dtype=np.float32),
+        root_dist_px=1.0,
+        crop_w_px=crop_w_px,
+    )
+
+
 # ---------------------------------------------------------------------------
 # detect_hand_in_crop
 # ---------------------------------------------------------------------------
@@ -107,6 +116,7 @@ class TestDetectHandInCrop:
         assert result is not None
         assert result.root_dist_px < 1.0
         np.testing.assert_allclose(result.keypoints[0], self._WRIST, atol=1.0)
+        assert result.crop_w_px == pytest.approx(120.0)  # 2 * half(=60)
 
     def test_far_candidate_rejected_by_gate(self):
         img = np.zeros((400, 400, 3), dtype=np.uint8)
@@ -151,18 +161,14 @@ class TestDetectHandInCrop:
 # ---------------------------------------------------------------------------
 
 class TestRefineOne:
-    def test_patches_only_the_confident_hand(self, monkeypatch):
+    def test_returns_only_the_confident_hand(self, monkeypatch):
         kp = np.zeros((133, 3), dtype=np.float32)
         kp[_WRIST_IDX["left"]] = [200.0, 200.0, 5.0]
         kp[_ELBOW_IDX["left"]] = [150.0, 200.0, 5.0]
         # right wrist left at (0,0,0) confidence -> should be skipped entirely
         img = np.zeros((400, 400, 3), dtype=np.uint8)
 
-        fake_result = HandCandidate(
-            keypoints=_uniform_hand_kp((201.0, 199.0)),
-            scores=np.full(21, 0.8, dtype=np.float32),
-            root_dist_px=1.0,
-        )
+        fake_result = _fake_candidate((201.0, 199.0), conf=0.8, crop_w_px=128.0)
         calls = []
 
         def fake_detect(hand_model, image, wrist, elbow):
@@ -171,17 +177,20 @@ class TestRefineOne:
 
         monkeypatch.setattr("posetrak.detection.hand_refinement.detect_hand_in_crop", fake_detect)
 
-        changed = HandRefinementPipeline._refine_one(None, object(), kp, img)
-        assert changed is True
+        results = HandRefinementPipeline._refine_one(None, object(), kp, img)
         assert calls == [((200.0, 200.0), (150.0, 200.0))]  # only left, with elbow anchor
 
-        base = _HAND_BASE_IDX["left"]
-        np.testing.assert_allclose(kp[base:base + _HAND_N_KP, 0], 201.0)
-        np.testing.assert_allclose(kp[base:base + _HAND_N_KP, 1], 199.0)
-        np.testing.assert_allclose(kp[base:base + _HAND_N_KP, 2], 0.8 * _HAND_CONF_SCALE)
+        assert len(results) == 1
+        region_type, hand_kp, noise_scale = results[0]
+        assert region_type == "hand_l"
+        assert hand_kp.shape == (_HAND_N_KP, 3)
+        np.testing.assert_allclose(hand_kp[:, 0], 201.0)
+        np.testing.assert_allclose(hand_kp[:, 1], 199.0)
+        np.testing.assert_allclose(hand_kp[:, 2], 0.8 * _HAND_CONF_SCALE)
+        assert noise_scale == pytest.approx(128.0 / _HAND_POSE_INPUT_WIDTH)
 
-        base_r = _HAND_BASE_IDX["right"]
-        assert np.all(kp[base_r:base_r + _HAND_N_KP] == 0.0)  # untouched
+        # kp itself is never mutated — hand rows are returned, not patched in.
+        assert np.all(kp[91:133] == 0.0)
 
     def test_no_confident_wrist_skips_entirely(self, monkeypatch):
         kp = np.zeros((133, 3), dtype=np.float32)
@@ -191,11 +200,11 @@ class TestRefineOne:
             "posetrak.detection.hand_refinement.detect_hand_in_crop",
             lambda *a, **k: called.append(1),
         )
-        changed = HandRefinementPipeline._refine_one(None, object(), kp, img)
-        assert changed is False
+        results = HandRefinementPipeline._refine_one(None, object(), kp, img)
+        assert results == []
         assert called == []
 
-    def test_gate_reject_leaves_slots_untouched(self, monkeypatch):
+    def test_gate_reject_returns_nothing(self, monkeypatch):
         kp = np.zeros((133, 3), dtype=np.float32)
         kp[_WRIST_IDX["left"]] = [200.0, 200.0, 5.0]
         img = np.zeros((400, 400, 3), dtype=np.uint8)
@@ -203,10 +212,8 @@ class TestRefineOne:
             "posetrak.detection.hand_refinement.detect_hand_in_crop",
             lambda *a, **k: None,
         )
-        changed = HandRefinementPipeline._refine_one(None, object(), kp, img)
-        assert changed is False
-        base = _HAND_BASE_IDX["left"]
-        assert np.all(kp[base:base + _HAND_N_KP] == 0.0)
+        results = HandRefinementPipeline._refine_one(None, object(), kp, img)
+        assert results == []
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +230,7 @@ class TestHandRefinementPipelineRun:
         pipeline = HandRefinementPipeline(session)
         assert pipeline.run(run_id, cameras=[]) == 0
 
-    def test_run_patches_gated_pass_into_detection_keypoints(self, session, monkeypatch):
+    def test_run_writes_gated_pass_as_separate_hand_row(self, session, monkeypatch):
         run_id = create_detection_run(
             session, shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
             time_start_s=0.0, time_end_s=1.0,
@@ -245,11 +252,7 @@ class TestHandRefinementPipelineRun:
             "posetrak.detection.hand_refinement.iter_frames",
             lambda path, first, last: iter([(0, fake_img)]),
         )
-        fake_result = HandCandidate(
-            keypoints=_uniform_hand_kp((201.0, 199.0)),
-            scores=np.full(21, 0.8, dtype=np.float32),
-            root_dist_px=1.0,
-        )
+        fake_result = _fake_candidate((201.0, 199.0), conf=0.8, crop_w_px=64.0)
         monkeypatch.setattr(
             "posetrak.detection.hand_refinement.detect_hand_in_crop",
             lambda *a, **k: fake_result,
@@ -265,21 +268,39 @@ class TestHandRefinementPipelineRun:
         n = pipeline.run(run_id, cameras=[cam])
         assert n == 1
 
-        row = session.execute(
+        # Original whole-body row is untouched.
+        body_row = session.execute(
             "SELECT keypoints, noise_scale FROM detection_keypoints"
-            " WHERE detection_run_id=? AND track_id=1",
+            " WHERE detection_run_id=? AND track_id=1 AND region_type='full_body'",
             (run_id,),
         ).fetchone()
-        kp_after = np.frombuffer(bytes(row["keypoints"]), dtype=np.float32).reshape(-1, 3)
-        base = _HAND_BASE_IDX["left"]
-        np.testing.assert_allclose(kp_after[base:base + _HAND_N_KP, 0], 201.0)
-        np.testing.assert_allclose(kp_after[base:base + _HAND_N_KP, 2], 0.8 * _HAND_CONF_SCALE)
-        # Phase 1 leaves noise_scale untouched (inherits the whole-body value)
-        assert abs(row["noise_scale"] - 0.5) < 1e-6
-        # Body wrist/elbow slots are untouched — only the hand-specific indices change
-        np.testing.assert_allclose(kp_after[_WRIST_IDX["left"]][:2], [200.0, 200.0])
+        assert bytes(body_row["keypoints"]) == kp.tobytes()
+        assert abs(body_row["noise_scale"] - 0.5) < 1e-6
 
-    def test_run_no_gate_pass_leaves_row_unchanged(self, session, monkeypatch):
+        # A separate hand_l row is written, with its own crop-derived noise_scale.
+        hand_row = session.execute(
+            "SELECT keypoints, noise_scale FROM detection_keypoints"
+            " WHERE detection_run_id=? AND track_id=1 AND region_type='hand_l'",
+            (run_id,),
+        ).fetchone()
+        assert hand_row is not None
+        hand_kp = np.frombuffer(bytes(hand_row["keypoints"]), dtype=np.float32).reshape(-1, 3)
+        assert hand_kp.shape == (_HAND_N_KP, 3)
+        np.testing.assert_allclose(hand_kp[:, 0], 201.0)
+        np.testing.assert_allclose(hand_kp[:, 2], 0.8 * _HAND_CONF_SCALE)
+        expected_noise = 64.0 / _HAND_POSE_INPUT_WIDTH
+        assert hand_row["noise_scale"] == pytest.approx(expected_noise)
+        # A tight hand crop (64px) implies lower noise than the whole-body row (0.5).
+        assert hand_row["noise_scale"] < body_row["noise_scale"]
+
+        # No hand_r row was written — right wrist had zero confidence.
+        assert session.execute(
+            "SELECT 1 FROM detection_keypoints"
+            " WHERE detection_run_id=? AND track_id=1 AND region_type='hand_r'",
+            (run_id,),
+        ).fetchone() is None
+
+    def test_run_no_gate_pass_writes_no_hand_row(self, session, monkeypatch):
         run_id = create_detection_run(
             session, shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
             time_start_s=0.0, time_end_s=1.0,
@@ -316,8 +337,10 @@ class TestHandRefinementPipelineRun:
         n = pipeline.run(run_id, cameras=[cam])
         assert n == 0
 
-        row = session.execute(
-            "SELECT keypoints FROM detection_keypoints WHERE detection_run_id=? AND track_id=1",
+        rows = session.execute(
+            "SELECT region_type, keypoints FROM detection_keypoints WHERE detection_run_id=? AND track_id=1",
             (run_id,),
-        ).fetchone()
-        assert bytes(row["keypoints"]) == original_bytes
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["region_type"] == "full_body"
+        assert bytes(rows[0]["keypoints"]) == original_bytes

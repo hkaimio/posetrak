@@ -151,8 +151,10 @@ def finalise_to_db(
             (seq_id, person_name),
         )
 
-        # Keyed by (camera_instance_id, video_frame) so that adjacent segments
-        # sharing a boundary frame don't produce duplicates — later segment wins.
+        # Keyed by (camera_instance_id, video_frame, source) so that adjacent
+        # segments sharing a boundary frame don't produce duplicates (later
+        # segment wins), while 'body' and 'hand_l'/'hand_r' rows for the same
+        # frame coexist as separate pose_observations rows.
         obs_by_key: dict[tuple, tuple] = {}
         for asgn in person_assignments:
             camera_instance_id = camera_by_svid.get(asgn.shot_video_id)
@@ -160,11 +162,11 @@ def finalise_to_db(
                 continue
 
             kp_rows = session.execute(
-                "SELECT video_frame, keypoints, noise_scale "
+                "SELECT video_frame, region_type, keypoints, noise_scale "
                 "FROM detection_keypoints "
                 "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? "
                 "AND video_frame BETWEEN ? AND ? "
-                "AND region_type='full_body' "
+                "AND region_type IN ('full_body','hand_l','hand_r') "
                 "ORDER BY video_frame",
                 (detection_run_id, asgn.shot_video_id, asgn.track_id,
                  asgn.first_frame, asgn.last_frame),
@@ -175,12 +177,20 @@ def finalise_to_db(
                 timestamp_s = sync_table.frame_to_global_time(frame_idx, asgn.shot_video_id)
                 if timestamp_s is None:
                     continue
+                # detection_keypoints.region_type='full_body' becomes
+                # pose_observations.source='body'; hand_l/hand_r pass through
+                # unchanged (same spelling, both enums already agree).
+                source = "body" if kp_row["region_type"] == "full_body" else kp_row["region_type"]
                 kp_blob = bytes(kp_row["keypoints"])
-                if confidence_scale != 1.0:
+                # confidence_scale corrects the whole-body pose model's raw
+                # score range (see conf_scale_for_model) — hand rows already
+                # carry a hand-model-appropriate scale from hand_refinement.py.
+                if source == "body" and confidence_scale != 1.0:
                     kp_blob = _scale_kp_confidence(kp_blob, confidence_scale)
-                obs_by_key[(camera_instance_id, frame_idx)] = (
+                obs_by_key[(camera_instance_id, frame_idx, source)] = (
                     seq_id, camera_instance_id, frame_idx,
                     timestamp_s, 0,  # person_id=0, single person per sequence
+                    source, detection_run_id,
                     kp_blob, kp_row["noise_scale"],
                 )
 
@@ -188,8 +198,8 @@ def finalise_to_db(
             session.executemany(
                 "INSERT INTO pose_observations "
                 "(sequence_id, camera_instance_id, video_frame, timestamp_s, "
-                " person_id, kp_blob, noise_scale) "
-                "VALUES (?,?,?,?,?,?,?)",
+                " person_id, source, detection_run_id, kp_blob, noise_scale) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 obs_by_key.values(),
             )
 

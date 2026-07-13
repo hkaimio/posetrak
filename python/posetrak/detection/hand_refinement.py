@@ -1,20 +1,20 @@
-"""hand_refinement.py — Idea 2 Phase 1: hand-specific detection pass.
+"""hand_refinement.py — Idea 2: hand-specific detection pass.
 
 Refines wrist/finger keypoints for an existing full-body detection run by
 cropping around each tracked wrist and running a dedicated hand model
-(``rtmlib.Hand``) on the crop, then patching the refined 21 keypoints back
-into the same ``detection_keypoints`` row (``region_type='full_body'``) if
-the result passes a proximity gate against the tracked wrist.
+(``rtmlib.Hand``) on the crop, then writing the refined 21 keypoints as a
+separate ``detection_keypoints`` row (``region_type='hand_l'``/``'hand_r'``)
+if the result passes a proximity gate against the tracked wrist.
 
-Phase 1 is the interim, no-schema-change version described in
+The crop, candidate-selection, and gate formulas below are exactly the ones
+validated against four rounds of offline stills testing (60+ crops, three
+people, two trials) described in
 ``docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md``
-("Idea 2" and "Phasing"): hand keypoints are patched in place in the
-existing 133-point ``kp_blob``/row rather than written as a separate
-``source='hand.L'/'hand.R'`` row (Phase 2, not built), so they still
-inherit the frame's whole-body ``noise_scale`` rather than getting their
-own tighter, crop-derived value. The crop, candidate-selection, and gate
-formulas below are exactly the ones validated there against four rounds of
-offline stills testing (60+ crops, three people, two trials).
+("Idea 2"). Phase 1 wrote hand keypoints patched in place into the existing
+133-point whole-body row, inheriting its ``noise_scale``; Phase 2 (here)
+writes them as their own row with a noise_scale derived from the hand crop's
+own size, so a tight, low-noise hand crop isn't diluted by the wider
+whole-body bbox's noise.
 """
 from __future__ import annotations
 
@@ -61,14 +61,25 @@ _GATE_FLOOR_PX = 40.0
 # edited_kp_noise_std.
 _HAND_CONF_SCALE = 5.0
 
-# COCO-133 keypoint indices (see app/pose/kp_models.py). Phase 1 only
-# refines runs using the 133-point whole-body layout — a 17-point model has
-# no hand keypoints to refine at all.
+# COCO-133 keypoint indices (see app/pose/kp_models.py). Hand refinement only
+# runs against the 133-point whole-body layout — a 17-point model has no
+# hand keypoints to refine at all.
 _N_KP_133 = 133
 _WRIST_IDX = {"left": 9, "right": 10}
 _ELBOW_IDX = {"left": 7, "right": 8}
+# Canonical source of truth for the hand21 -> COCO-133 index mapping;
+# posetrak.db.observation_merge and the C++ session loader reference these
+# values (91/112/21) in their own comments rather than importing this module.
 _HAND_BASE_IDX = {"left": 91, "right": 112}
 _HAND_N_KP = 21
+_REGION_TYPE = {"left": "hand_l", "right": "hand_r"}
+
+# rtmlib.Hand's RTMPose stage input size (square). Used to derive noise_scale
+# from the hand crop's own pixel size the same way the whole-body pipeline
+# derives it from the person bbox (bbox_w / pose_input_width) — a tighter
+# crop implies a more precise detection, so a smaller crop_w_px/width ratio
+# means lower measurement noise.
+_HAND_POSE_INPUT_WIDTH = 256
 
 ProgressCallback = Callable[[int, int, str], None]  # done, total, camera_id
 
@@ -78,6 +89,7 @@ class HandCandidate:
     keypoints: np.ndarray  # float32[21, 2], full-frame pixel coordinates
     scores: np.ndarray     # float32[21], the hand model's own 0-1 confidence
     root_dist_px: float    # winning candidate's root-to-wrist distance
+    crop_w_px: float       # pixel width of the wrist-centred crop fed to hand_model
 
 
 def detect_hand_in_crop(
@@ -143,17 +155,22 @@ def detect_hand_in_crop(
         keypoints=kp_full,
         scores=scores[best_idx].astype(np.float32),
         root_dist_px=best_dist,
+        crop_w_px=2.0 * half,
     )
 
 
 class HandRefinementPipeline:
-    """Idea 2 Phase 1: patch hand keypoints into an existing detection run.
+    """Idea 2: write refined hand keypoints for an existing detection run.
 
     Reads ``detection_keypoints`` rows (``region_type='full_body'``) for a
     completed run, and for each frame/track/side with a confidently known
     wrist, re-detects the hand in a tight crop; if the result passes the
-    proximity gate, overwrites that hand's 21 keypoint slots (indices
-    91-111 left, 112-132 right of the 133-point layout) in place.
+    proximity gate, writes it as its own ``detection_keypoints`` row
+    (``region_type='hand_l'``/``'hand_r'``, 21 keypoints) with a noise_scale
+    derived from the hand crop's own size — a separate row rather than a
+    patch into the whole-body row, so ``finalise_to_db`` can carry it into
+    ``pose_observations`` as its own ``source`` with its own measurement
+    noise instead of inheriting the whole-body bbox's noise_scale.
     """
 
     def __init__(
@@ -236,9 +253,11 @@ class HandRefinementPipeline:
                     kp = np.frombuffer(bytes(row["keypoints"]), dtype=np.float32).reshape(-1, 3)
                     if kp.shape[0] != _N_KP_133:
                         continue
-                    kp = kp.copy()
-                    if self._refine_one(hand_model, kp, img):
-                        updates.append((kp.tobytes(), run_id, cam.shot_video_id, video_frame, row["track_id"]))
+                    for region_type, hand_kp, noise_scale in self._refine_one(hand_model, kp, img):
+                        updates.append((
+                            run_id, cam.shot_video_id, video_frame, row["track_id"],
+                            region_type, hand_kp.tobytes(), noise_scale,
+                        ))
                         n_refined += 1
                 frames_done += 1
                 if on_progress:
@@ -253,9 +272,16 @@ class HandRefinementPipeline:
         )
         return n_refined
 
-    def _refine_one(self, hand_model, kp: np.ndarray, img: np.ndarray) -> bool:
-        """Refine both hands' keypoints in *kp* (float32[133,3]) in place."""
-        changed = False
+    def _refine_one(
+        self, hand_model, kp: np.ndarray, img: np.ndarray,
+    ) -> list[tuple[str, np.ndarray, float]]:
+        """Detect and gate both hands' keypoints given whole-body *kp* + *img*.
+
+        Read-only with respect to *kp*. Returns a list of (region_type,
+        hand_kp[21,3], noise_scale) — one entry per side whose hand was found
+        and passed the gate — ready to write as new detection_keypoints rows.
+        """
+        results: list[tuple[str, np.ndarray, float]] = []
         for side in ("left", "right"):
             wx, wy, wc = kp[_WRIST_IDX[side]]
             if wc <= 0.0:
@@ -265,20 +291,22 @@ class HandRefinementPipeline:
             result = detect_hand_in_crop(hand_model, img, (float(wx), float(wy)), elbow)
             if result is None:
                 continue
-            base = _HAND_BASE_IDX[side]
-            kp[base:base + _HAND_N_KP, 0] = result.keypoints[:, 0]
-            kp[base:base + _HAND_N_KP, 1] = result.keypoints[:, 1]
-            kp[base:base + _HAND_N_KP, 2] = result.scores * _HAND_CONF_SCALE
-            changed = True
-        return changed
+            hand_kp = np.empty((_HAND_N_KP, 3), dtype=np.float32)
+            hand_kp[:, 0] = result.keypoints[:, 0]
+            hand_kp[:, 1] = result.keypoints[:, 1]
+            hand_kp[:, 2] = result.scores * _HAND_CONF_SCALE
+            noise_scale = result.crop_w_px / _HAND_POSE_INPUT_WIDTH
+            results.append((_REGION_TYPE[side], hand_kp, noise_scale))
+        return results
 
     def _flush(self, updates: list[tuple]) -> None:
         if not updates:
             return
         self._session.executemany(
-            "UPDATE detection_keypoints SET keypoints=?"
-            " WHERE detection_run_id=? AND shot_video_id=? AND video_frame=?"
-            " AND track_id=? AND region_type='full_body'",
+            "INSERT OR REPLACE INTO detection_keypoints"
+            " (detection_run_id, shot_video_id, video_frame, track_id,"
+            "  region_type, keypoints, noise_scale)"
+            " VALUES (?,?,?,?,?,?,?)",
             updates,
         )
         self._session.commit()

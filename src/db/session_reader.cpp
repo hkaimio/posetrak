@@ -786,15 +786,40 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
         // rc != SQLITE_OK means table absent — edits stays empty, silently skipped
     }
 
-    // Step 3: Fetch all observations for this sequence and person
+    // Step 3: Fetch all observations for this sequence and person, one row per
+    // (camera, frame, source) -- Phase 2 of hand-detection refinement lets a
+    // (camera, frame) pair have multiple source rows ('body' plus refined
+    // 'hand_l'/'hand_r' passes) instead of one shared row.
     Stmt obs_stmt(db_,
-                  "SELECT po.camera_instance_id, po.video_frame, po.timestamp_s, po.kp_blob,"
-                  " COALESCE(po.noise_scale, 1.0) AS crop_scale"
+                  "SELECT po.camera_instance_id, po.video_frame, po.source, po.timestamp_s,"
+                  " po.kp_blob, COALESCE(po.noise_scale, 1.0) AS crop_scale"
                   " FROM pose_observations po"
                   " WHERE po.sequence_id = ? AND po.person_id = ?"
                   " ORDER BY po.camera_instance_id, po.video_frame");
     sqlite3_bind_text(obs_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(obs_stmt.ptr, 2, person_id);
+
+    // hand21 -> COCO-133 index offsets. Canonical source of truth is
+    // posetrak.detection.hand_refinement's _HAND_BASE_IDX / _HAND_N_KP
+    // (Python and C++ don't share a header here, so this is duplicated —
+    // see posetrak/db/observation_merge.py for the Python-side mirror).
+    constexpr int kHandBaseIdxLeft = 91;
+    constexpr int kHandBaseIdxRight = 112;
+    constexpr int kHandNKp = 21;
+    auto hand_base_idx = [&](std::string const& source) -> int {
+        if (source == "hand_l")
+            return kHandBaseIdxLeft;
+        if (source == "hand_r")
+            return kHandBaseIdxRight;
+        return -1;
+    };
+
+    struct SourceRow {
+        std::string source;
+        double timestamp_s;
+        std::vector<db::Keypoint> kps;
+        double crop_scale;
+    };
 
     // Accumulate observations per instance_id
     std::unordered_map<std::string, std::vector<Observation>> seq_observations;
@@ -803,35 +828,65 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
     int rows_skipped_confidence = 0;
     int rows_skipped_coco = 0;
 
-    while (obs_stmt.step()) {
-        std::string inst_id = reinterpret_cast<char const*>(sqlite3_column_text(obs_stmt.ptr, 0));
-        int video_frame = sqlite3_column_int(obs_stmt.ptr, 1);
-        double timestamp_s = sqlite3_column_double(obs_stmt.ptr, 2);
-        void const* kp_data = sqlite3_column_blob(obs_stmt.ptr, 3);
-        int kp_bytes = sqlite3_column_bytes(obs_stmt.ptr, 3);
-        double crop_scale = sqlite3_column_double(obs_stmt.ptr, 4);
+    // Processes one buffered (camera, frame) group: merges its source rows
+    // into one dense array ('body' as the base layer, hand_l/hand_r
+    // overlaying their own index range), applies edits to the merged array
+    // (so the edit blob's width always matches, regardless of which sources
+    // are present), then builds Observations with per-index crop_scale.
+    std::string group_inst_id;
+    int group_frame = std::numeric_limits<int>::min();
+    std::vector<SourceRow> group_rows;
+
+    auto flush_group = [&]() {
+        if (group_rows.empty())
+            return;
         ++rows_total;
 
-        // Skip rows whose camera instance is not in the camera map
-        auto cam_it = inst_to_cam.find(inst_id);
+        auto cam_it = inst_to_cam.find(group_inst_id);
         if (cam_it == inst_to_cam.end()) {
             ++rows_skipped_camera;
-            continue;
+            group_rows.clear();
+            return;
         }
         Camera const* camera = cam_it->second;
 
-        // Step 4: Decode keypoints, apply any edits, then create Observation objects
-        auto kps = db::decode_keypoints(kp_data, kp_bytes);
+        SourceRow const* body_row = nullptr;
+        for (auto const& r : group_rows) {
+            if (r.source == "body") {
+                body_row = &r;
+                break;
+            }
+        }
+        // Defensive: no 'body' row for this group (shouldn't happen in
+        // practice -- every write path writes a 'body' base row). Fall back
+        // to whichever row is present rather than dropping the group.
+        SourceRow const& base_row = body_row != nullptr ? *body_row : group_rows.front();
+
+        std::vector<db::Keypoint> merged = base_row.kps;
+        std::vector<double> merged_crop_scale(merged.size(), base_row.crop_scale);
+        for (auto const& r : group_rows) {
+            int base = hand_base_idx(r.source);
+            if (base < 0)
+                continue;
+            int n = std::min(
+                {kHandNKp, static_cast<int>(r.kps.size()), static_cast<int>(merged.size()) - base});
+            for (int k = 0; k < n; ++k) {
+                merged[static_cast<size_t>(base + k)] = r.kps[static_cast<size_t>(k)];
+                merged_crop_scale[static_cast<size_t>(base + k)] = r.crop_scale;
+            }
+        }
+
+        // Step 4: apply any edits to the merged array, then create Observation objects.
         // Kept past the edit-lookup block so the per-keypoint loop below can test which
         // slots came from this human edit (db::is_kp_edited) -- see edited_kp_noise_std.
         FrameEdit const* active_edit = nullptr;
         {
-            auto edit_inst_it = edits.find(inst_id);
+            auto edit_inst_it = edits.find(group_inst_id);
             if (edit_inst_it != edits.end()) {
-                auto edit_frame_it = edit_inst_it->second.find(video_frame);
+                auto edit_frame_it = edit_inst_it->second.find(group_frame);
                 if (edit_frame_it != edit_inst_it->second.end()) {
                     active_edit = &edit_frame_it->second;
-                    db::apply_keypoint_edits(kps, active_edit->kp_blob.data(),
+                    db::apply_keypoint_edits(merged, active_edit->kp_blob.data(),
                                              static_cast<int>(active_edit->kp_blob.size()),
                                              active_edit->mask.data(),
                                              static_cast<int>(active_edit->mask.size()));
@@ -841,8 +896,8 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
 
         // Collect POSITION observations for this frame/camera first, then generate RELATIVE pairs.
         std::vector<Observation> frame_obs;
-        for (int i = 0; i < static_cast<int>(kps.size()); ++i) {
-            if (kps[static_cast<size_t>(i)].confidence < static_cast<float>(min_confidence)) {
+        for (int i = 0; i < static_cast<int>(merged.size()); ++i) {
+            if (merged[static_cast<size_t>(i)].confidence < static_cast<float>(min_confidence)) {
                 ++rows_skipped_confidence;
                 continue;
             }
@@ -855,16 +910,16 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
             Observation obs;
             obs.camera_id = camera->id();
             obs.marker_id = it->second;
-            obs.frame_idx = video_frame;
-            obs.timestamp = timestamp_s;
+            obs.frame_idx = group_frame;
+            obs.timestamp = base_row.timestamp_s;
             obs.position_distorted =
-                Eigen::Vector2d(kps[static_cast<size_t>(i)].x, kps[static_cast<size_t>(i)].y);
+                Eigen::Vector2d(merged[static_cast<size_t>(i)].x, merged[static_cast<size_t>(i)].y);
             // When pixels_are_undistorted, coordinates are already in K_new space;
             // skip undistortion to avoid applying the distortion model a second time.
             obs.position = pixels_are_undistorted ? obs.position_distorted
                                                   : camera->undistort(obs.position_distorted);
-            obs.confidence = kps[static_cast<size_t>(i)].confidence;
-            obs.crop_scale = crop_scale;
+            obs.confidence = merged[static_cast<size_t>(i)].confidence;
+            obs.crop_scale = merged_crop_scale[static_cast<size_t>(i)];
             if (edited_kp_noise_std > 0.0 && active_edit != nullptr &&
                 db::is_kp_edited(active_edit->mask.data(),
                                  static_cast<int>(active_edit->mask.size()), i)) {
@@ -874,7 +929,7 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
             frame_obs.push_back(obs);
         }
 
-        auto& dest = seq_observations[inst_id];
+        auto& dest = seq_observations[group_inst_id];
         dest.insert(dest.end(), frame_obs.begin(), frame_obs.end());
 
         // Generate RELATIVE observations: one per (child, parent) pair visible in this frame.
@@ -913,7 +968,7 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                 rel.crop_scale = child_obs.crop_scale;
                 // Noise = pose_noise_std * sqrt(2) * crop_scale (calib error cancels in diff).
                 // Baked into noise_std_override so the confidence scaling still applies.
-                rel.noise_std_override = pose_noise_std * std::sqrt(2.0) * crop_scale;
+                rel.noise_std_override = pose_noise_std * std::sqrt(2.0) * child_obs.crop_scale;
                 dest.push_back(rel);
             }
         }
@@ -968,7 +1023,29 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                 dest.push_back(rel);
             }
         }
+
+        group_rows.clear();
+    };
+
+    while (obs_stmt.step()) {
+        std::string inst_id = reinterpret_cast<char const*>(sqlite3_column_text(obs_stmt.ptr, 0));
+        int video_frame = sqlite3_column_int(obs_stmt.ptr, 1);
+        std::string source = reinterpret_cast<char const*>(sqlite3_column_text(obs_stmt.ptr, 2));
+        double timestamp_s = sqlite3_column_double(obs_stmt.ptr, 3);
+        void const* kp_data = sqlite3_column_blob(obs_stmt.ptr, 4);
+        int kp_bytes = sqlite3_column_bytes(obs_stmt.ptr, 4);
+        double crop_scale = sqlite3_column_double(obs_stmt.ptr, 5);
+
+        if (inst_id != group_inst_id || video_frame != group_frame) {
+            flush_group();
+            group_inst_id = inst_id;
+            group_frame = video_frame;
+        }
+        // Decode immediately -- Stmt column pointers are only valid until the next step().
+        group_rows.push_back(SourceRow{std::move(source), timestamp_s,
+                                       db::decode_keypoints(kp_data, kp_bytes), crop_scale});
     }
+    flush_group();
 
     // Step 5: Build ObservationSet — throw a diagnostic error if nothing came through
     if (rows_total == 0) {

@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace posetrak;
@@ -137,6 +138,8 @@ static void create_fixture_db() {
             notes TEXT
         );
     )");
+    // Mirrors db/registry_schema.sql's tracker_configs (kept in sync manually --
+    // SessionReader::load_tracker_config() selects every column by name).
     exec_sql(db, R"(
         CREATE TABLE tracker_configs (
             id TEXT PRIMARY KEY,
@@ -147,8 +150,9 @@ static void create_fixture_db() {
             beta REAL,
             kappa REAL,
             process_noise_std REAL,
+            process_noise_vel_std REAL,
+            velocity_half_life_s REAL,
             measurement_noise_std REAL,
-            pose_noise_std REAL,
             outlier_threshold REAL,
             tracker_fps REAL,
             ik_max_iterations INTEGER,
@@ -158,7 +162,35 @@ static void create_fixture_db() {
             init_joint_std REAL,
             init_velocity_std REAL,
             min_cameras_for_init INTEGER,
-            notes TEXT
+            velocity_mode_camera_ids TEXT,
+            velocity_measurement_noise_std REAL,
+            notes TEXT,
+            pose_noise_std REAL,
+            use_relative_observations INTEGER,
+            relative_min_confidence REAL,
+            cross_pair_max_px REAL,
+            cross_pair_max_n INTEGER,
+            process_noise_vel_gain_joint REAL,
+            process_noise_vel_ref_joint REAL,
+            process_noise_vel_gain_root REAL,
+            process_noise_vel_ref_root REAL,
+            process_noise_vel_joint_names TEXT,
+            pose_reg_joint_names TEXT,
+            pose_reg_equal_split_noise_std REAL,
+            pose_reg_rest_pose_noise_std REAL,
+            nis_feedback_scopes TEXT,
+            nis_feedback_window INTEGER,
+            nis_feedback_threshold REAL,
+            nis_feedback_max_multiplier REAL,
+            process_noise_vel_scopes TEXT,
+            soft_limit_joint_names TEXT,
+            soft_limit_margin_rad REAL,
+            soft_limit_noise_std REAL,
+            near_limit_damping_joint_names TEXT,
+            near_limit_margin_rad REAL,
+            near_limit_spread_sigma REAL,
+            near_limit_damping_factor REAL,
+            edited_kp_noise_std REAL
         );
     )");
 
@@ -198,19 +230,19 @@ static void create_fixture_db() {
         );
     )");
     exec_sql(db, R"(
-        CREATE TABLE shots (
+        CREATE TABLE captures (
             id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL REFERENCES mocap_sessions(id),
             extrinsic_calibration_id TEXT NOT NULL REFERENCES extrinsic_calibrations(id),
-            shot_number INTEGER NOT NULL,
+            capture_number INTEGER NOT NULL,
             label TEXT,
             notes TEXT
         );
     )");
     exec_sql(db, R"(
-        CREATE TABLE shot_videos (
+        CREATE TABLE capture_videos (
             id TEXT PRIMARY KEY,
-            shot_id TEXT NOT NULL REFERENCES shots(id),
+            shot_id TEXT NOT NULL REFERENCES captures(id),
             camera_instance_id TEXT NOT NULL,
             file_path TEXT NOT NULL,
             first_video_frame INTEGER NOT NULL,
@@ -223,7 +255,7 @@ static void create_fixture_db() {
     exec_sql(db, R"(
         CREATE TABLE sync_configs (
             id TEXT PRIMARY KEY,
-            shot_id TEXT NOT NULL REFERENCES shots(id),
+            shot_id TEXT NOT NULL REFERENCES captures(id),
             created_by TEXT,
             notes TEXT
         );
@@ -232,7 +264,7 @@ static void create_fixture_db() {
         CREATE TABLE sync_points (
             sync_config_id TEXT NOT NULL REFERENCES sync_configs(id),
             camera_instance_id TEXT NOT NULL,
-            shot_video_id TEXT NOT NULL REFERENCES shot_videos(id),
+            shot_video_id TEXT NOT NULL REFERENCES capture_videos(id),
             video_frame INTEGER NOT NULL,
             timestamp_s REAL NOT NULL,
             PRIMARY KEY (sync_config_id, camera_instance_id)
@@ -241,15 +273,18 @@ static void create_fixture_db() {
     exec_sql(db, R"(
         CREATE TABLE pose_observation_sequences (
             id TEXT PRIMARY KEY,
-            shot_id TEXT NOT NULL REFERENCES shots(id),
+            shot_id TEXT NOT NULL REFERENCES captures(id),
             sync_config_id TEXT NOT NULL REFERENCES sync_configs(id),
             time_start_s REAL NOT NULL,
             time_end_s REAL NOT NULL,
             pose_model TEXT,
             notes TEXT,
-            pixels_are_undistorted INTEGER NOT NULL DEFAULT 1
+            pixels_are_undistorted INTEGER NOT NULL DEFAULT 1,
+            detection_run_id TEXT
         );
     )");
+    // source: 'body' | 'hand_l' | 'hand_r' -- Phase 2 of hand-detection refinement
+    // lets a (camera, frame, person) share multiple source rows instead of one.
     exec_sql(db, R"(
         CREATE TABLE pose_observations (
             sequence_id TEXT NOT NULL REFERENCES pose_observation_sequences(id),
@@ -257,9 +292,22 @@ static void create_fixture_db() {
             video_frame INTEGER NOT NULL,
             timestamp_s REAL NOT NULL,
             person_id INTEGER NOT NULL,
+            source TEXT NOT NULL DEFAULT 'body',
+            detection_run_id TEXT,
             kp_blob BLOB NOT NULL,
             noise_scale REAL,
-            PRIMARY KEY (sequence_id, camera_instance_id, video_frame, person_id)
+            PRIMARY KEY (sequence_id, camera_instance_id, video_frame, person_id, source)
+        );
+    )");
+    exec_sql(db, R"(
+        CREATE TABLE pose_observation_edits (
+            id TEXT PRIMARY KEY,
+            sequence_id TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+            camera_instance_id TEXT NOT NULL,
+            video_frame INTEGER NOT NULL,
+            kp_blob BLOB NOT NULL,
+            kp_mask BLOB NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         );
     )");
 
@@ -302,10 +350,10 @@ static void create_fixture_db() {
     }
 
     // Shot + video + sync
-    exec_sql(db, "INSERT INTO shots VALUES ('shot1','sess1','ec1',1,NULL,NULL);");
+    exec_sql(db, "INSERT INTO captures VALUES ('shot1','sess1','ec1',1,NULL,NULL);");
     exec_sql(
         db,
-        "INSERT INTO shot_videos "
+        "INSERT INTO capture_videos "
         "(id,shot_id,camera_instance_id,file_path,first_video_frame,last_video_frame,actual_fps,"
         "camera_mode_id,intrinsics_calibration_id)"
         " VALUES ('sv1','shot1','inst1','cam1.mp4',0,1000,120.0,'mode1','ic1');");
@@ -357,6 +405,83 @@ static void create_fixture_db() {
         }
     }
 
+    // ---------- Multi-source (Phase 2 hand-detection refinement) fixture ----------
+    // A second sequence, isolated from seq1's fixed observation-count assertions,
+    // covering 'body' + 'hand_l' + 'hand_r' rows sharing one (camera, frame) group.
+    exec_sql(db,
+             "INSERT INTO pose_observation_sequences "
+             "(id,shot_id,sync_config_id,time_start_s,time_end_s) "
+             "VALUES ('seq_hands','shot1','sc1',0.0,1.0);");
+    {
+        auto make_kp_blob = [](int n,
+                               std::vector<std::pair<int, std::array<float, 3>>> const& set) {
+            std::vector<float> kps(static_cast<size_t>(n) * 3, 0.f);
+            for (auto const& [idx, v] : set) {
+                kps[static_cast<size_t>(idx) * 3 + 0] = v[0];
+                kps[static_cast<size_t>(idx) * 3 + 1] = v[1];
+                kps[static_cast<size_t>(idx) * 3 + 2] = v[2];
+            }
+            return encode_float32_blob(kps);
+        };
+        auto insert_row = [&](int frame, std::string const& source,
+                              std::vector<uint8_t> const& blob, double noise_scale) {
+            std::string sql =
+                "INSERT INTO pose_observations "
+                "(sequence_id, camera_instance_id, video_frame, timestamp_s, person_id, source,"
+                " kp_blob, noise_scale) "
+                "VALUES ('seq_hands', 'inst1', " +
+                std::to_string(frame) + ", " + std::to_string(frame * (1.0 / 120.0)) + ", 0, '" +
+                source + "', ?, " + std::to_string(noise_scale) + ")";
+            sqlite3_stmt* stmt = nullptr;
+            sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+            sqlite3_bind_blob(stmt, 1, blob.data(), static_cast<int>(blob.size()), SQLITE_STATIC);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        };
+
+        // Frame 0: 'body' (coco 0, 5) + 'hand_l' (local 4 -> coco 95) + 'hand_r' (local 4 -> coco
+        // 116). This frame also carries edits (below) -- used by the merge+edit test case.
+        insert_row(0, "body", make_kp_blob(133, {{0, {10.f, 20.f, 0.9f}}, {5, {50.f, 60.f, 0.9f}}}),
+                   2.0);
+        insert_row(0, "hand_l", make_kp_blob(21, {{4, {150.f, 160.f, 0.5f}}}), 0.3);
+        insert_row(0, "hand_r", make_kp_blob(21, {{4, {170.f, 180.f, 0.6f}}}), 0.4);
+
+        // Frame 1: 'body' only -- confirms grouping doesn't leak frame 0's hand rows in.
+        insert_row(1, "body", make_kp_blob(133, {{0, {11.f, 21.f, 0.9f}}, {5, {51.f, 61.f, 0.9f}}}),
+                   2.5);
+
+        // Frame 2: same shape as frame 0 but no edits -- used by the pure-merge test
+        // to check raw per-source crop_scale/values survive the merge untouched.
+        insert_row(2, "body", make_kp_blob(133, {{0, {12.f, 22.f, 0.9f}}, {5, {52.f, 62.f, 0.9f}}}),
+                   2.2);
+        insert_row(2, "hand_l", make_kp_blob(21, {{4, {152.f, 162.f, 0.5f}}}), 0.32);
+        insert_row(2, "hand_r", make_kp_blob(21, {{4, {172.f, 182.f, 0.6f}}}), 0.42);
+    }
+
+    // Edits for seq_hands frame 0: one body-range index (5) and one hand-range
+    // index (95, inside the hand_l 91-111 range) overridden in the same frame,
+    // exercising db::apply_keypoint_edits against the *merged* 133-wide array.
+    {
+        std::vector<float> edit_kps(133 * 3, 0.f);
+        edit_kps[5 * 3 + 0] = 555.f;  // body-range override
+        edit_kps[5 * 3 + 1] = 556.f;
+        edit_kps[5 * 3 + 2] = 0.f;     // is_outlier=0 -> apply x/y, confidence=1
+        edit_kps[95 * 3 + 0] = 995.f;  // hand-range override
+        edit_kps[95 * 3 + 1] = 996.f;
+        edit_kps[95 * 3 + 2] = 0.f;
+        auto edit_blob = encode_float32_blob(edit_kps);
+
+        std::vector<uint8_t> mask(17, 0);  // ceil(133/8) = 17 bytes
+        mask[5 / 8] |= static_cast<uint8_t>(1u << (5 % 8));
+        mask[95 / 8] |= static_cast<uint8_t>(1u << (95 % 8));
+
+        bind_and_step(db,
+                      "INSERT INTO pose_observation_edits "
+                      "(id, sequence_id, camera_instance_id, video_frame, kp_blob, kp_mask) "
+                      "VALUES ('edit1', 'seq_hands', 'inst1', 0, ?, ?)",
+                      edit_blob, mask);
+    }
+
     sqlite3_close(db);
 }
 
@@ -380,6 +505,21 @@ static Skeleton make_test_skeleton() {
     s.add_marker("left_eye", 0, Eigen::Vector3d(0.05, 0, 0), 1);
     s.add_marker("right_eye", 0, Eigen::Vector3d(-0.05, 0, 0), 2);
     s.add_marker("left_ear", 0, Eigen::Vector3d(0.1, 0, 0), 3);
+    return s;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: skeleton with markers spanning both a 'body' index (5) and the
+// 'hand_l' (coco 95 = 91+4) / 'hand_r' (coco 116 = 112+4) index ranges, for
+// exercising the multi-source merge in load_observations.
+// ---------------------------------------------------------------------------
+static Skeleton make_test_skeleton_with_hands() {
+    Skeleton s;
+    s.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    s.add_marker("nose", 0, Eigen::Vector3d::Zero(), 0);
+    s.add_marker("body5", 0, Eigen::Vector3d(0.02, 0, 0), 5);
+    s.add_marker("hand_l4", 0, Eigen::Vector3d(0.03, 0, 0), 95);
+    s.add_marker("hand_r4", 0, Eigen::Vector3d(0.04, 0, 0), 116);
     return s;
 }
 
@@ -501,4 +641,88 @@ TEST_CASE("SessionReader error on missing record", "[session_reader]") {
     REQUIRE_THROWS_AS(reader.load_skeleton_yaml("nonexistent"), std::runtime_error);
     REQUIRE_THROWS_AS(reader.load_tracker_config("nonexistent"), std::runtime_error);
     REQUIRE_THROWS_AS(reader.load_sequence_info("nonexistent"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 of hand-detection refinement: multi-source pose_observations rows
+// ('body' plus 'hand_l'/'hand_r') sharing one (camera, frame) group must be
+// merged into one dense array before edits apply and Observations are built.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SessionReader load_observations merges body and hand source rows", "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    auto cameras = reader.load_cameras_for_sequence("seq_hands");
+    auto skeleton = make_test_skeleton_with_hands();
+
+    auto obs_set = reader.load_observations("seq_hands", cameras, skeleton, 0.1, 0);
+    auto const& seq = obs_set.sequences().begin()->second;
+
+    // Frame 0 (edited) has 4 markers, frame 1 (body-only) has 2 (coco 95/116
+    // are absent that frame), frame 2 (unedited merge) has 4 -- 10 total.
+    REQUIRE(obs_set.total_observations() == 10);
+
+    // Frame 2: no edits applied -- raw per-source values and crop_scale survive
+    // the merge. Observations come out in ascending coco-index order (0, 5, 95, 116).
+    std::vector<Observation> frame2;
+    for (auto const& o : seq.observations)
+        if (o.frame_idx == 2)
+            frame2.push_back(o);
+    REQUIRE(frame2.size() == 4);
+
+    // coco 0 ("nose") and coco 5 ("body5") -- both from the 'body' row, crop_scale 2.2.
+    REQUIRE(frame2[0].position_distorted.x() == Catch::Approx(12.0));
+    REQUIRE(frame2[0].position_distorted.y() == Catch::Approx(22.0));
+    REQUIRE(frame2[0].crop_scale == Catch::Approx(2.2));
+    REQUIRE(frame2[1].position_distorted.x() == Catch::Approx(52.0));
+    REQUIRE(frame2[1].crop_scale == Catch::Approx(2.2));
+
+    // coco 95 ("hand_l4", local hand21 index 4) -- from the 'hand_l' row, crop_scale 0.32.
+    REQUIRE(frame2[2].position_distorted.x() == Catch::Approx(152.0));
+    REQUIRE(frame2[2].position_distorted.y() == Catch::Approx(162.0));
+    REQUIRE(frame2[2].crop_scale == Catch::Approx(0.32));
+
+    // coco 116 ("hand_r4", local hand21 index 4) -- from the 'hand_r' row, crop_scale 0.42.
+    REQUIRE(frame2[3].position_distorted.x() == Catch::Approx(172.0));
+    REQUIRE(frame2[3].position_distorted.y() == Catch::Approx(182.0));
+    REQUIRE(frame2[3].crop_scale == Catch::Approx(0.42));
+}
+
+TEST_CASE("SessionReader load_observations applies edits to the merged array", "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    auto cameras = reader.load_cameras_for_sequence("seq_hands");
+    auto skeleton = make_test_skeleton_with_hands();
+
+    // Must not throw: with the naive per-row-Observation approach this would hit
+    // apply_keypoint_edits' size-mismatch check when applied to a 21-wide hand
+    // row instead of the merged 133-wide array.
+    ObservationSet obs_set;
+    REQUIRE_NOTHROW(obs_set = reader.load_observations("seq_hands", cameras, skeleton, 0.1, 0));
+
+    auto const& seq = obs_set.sequences().begin()->second;
+    std::vector<Observation> frame0;
+    for (auto const& o : seq.observations)
+        if (o.frame_idx == 0)
+            frame0.push_back(o);
+    REQUIRE(frame0.size() == 4);
+
+    // coco 5 (body-range): edited to (555, 556), confidence forced to 1.
+    REQUIRE(frame0[1].position_distorted.x() == Catch::Approx(555.0));
+    REQUIRE(frame0[1].position_distorted.y() == Catch::Approx(556.0));
+    REQUIRE(frame0[1].confidence == Catch::Approx(1.0f));
+
+    // coco 95 (hand-range, inside 'hand_l'): edited to (995, 996) -- the edit
+    // blob's global index overrides the hand_l row's merged-in value correctly.
+    REQUIRE(frame0[2].position_distorted.x() == Catch::Approx(995.0));
+    REQUIRE(frame0[2].position_distorted.y() == Catch::Approx(996.0));
+    REQUIRE(frame0[2].confidence == Catch::Approx(1.0f));
+
+    // coco 116 (hand_r, not edited): still the raw hand_r-sourced value --
+    // no cross-contamination from the body/hand_l edits on the same frame.
+    REQUIRE(frame0[3].position_distorted.x() == Catch::Approx(170.0));
+    REQUIRE(frame0[3].position_distorted.y() == Catch::Approx(180.0));
+    REQUIRE(frame0[3].crop_scale == Catch::Approx(0.4));
 }

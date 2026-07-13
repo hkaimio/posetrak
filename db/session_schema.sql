@@ -176,19 +176,28 @@ CREATE TABLE IF NOT EXISTS sequence_persons (
     PRIMARY KEY (sequence_id, person_id)
 );
 
--- Individual 2-D pose observations: one row per (sequence, camera, frame, person)
+-- Individual 2-D pose observations: one row per (sequence, camera, frame, person, source)
 -- kp_blob: little-endian float32 array shaped [n_keypoints, 3] (x, y, confidence)
 -- camera_instance_id -- references registry: camera_instances(id)
 -- noise_scale: measurement noise scale factor (bbox_w / pose_input_width)
+-- source: 'body' | 'hand_l' | 'hand_r' — matches detection_keypoints.region_type's
+--   spelling ('full_body' rows become source='body' here). Multiple sources can
+--   coexist for the same (sequence, camera, frame, person); the C++ loader merges
+--   them into one dense per-marker array, each source keeping its own noise_scale.
+-- detection_run_id: the detection run that produced this row. Usually matches the
+--   sequence's own detection_run_id, but tracked per-row so a source's provenance
+--   is unambiguous even if that changes in the future.
 CREATE TABLE IF NOT EXISTS pose_observations (
     sequence_id        TEXT    NOT NULL REFERENCES pose_observation_sequences(id),
     camera_instance_id TEXT    NOT NULL, -- references registry: camera_instances(id)
     video_frame        INTEGER NOT NULL,
     timestamp_s        REAL    NOT NULL,
     person_id          INTEGER NOT NULL,
+    source             TEXT    NOT NULL DEFAULT 'body',
+    detection_run_id   TEXT    REFERENCES detection_runs(id),
     kp_blob            BLOB    NOT NULL,
     noise_scale        REAL,
-    PRIMARY KEY (sequence_id, camera_instance_id, video_frame, person_id)
+    PRIMARY KEY (sequence_id, camera_instance_id, video_frame, person_id, source)
 );
 
 -- Non-destructive keypoint edits applied on top of pose_observations.

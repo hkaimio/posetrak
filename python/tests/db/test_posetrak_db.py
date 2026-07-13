@@ -143,6 +143,80 @@ def test_open_session_fails_if_missing(tmp_path: Path) -> None:
         open_session(tmp_path / "nonexistent.db")
 
 
+def test_migrate_session_v34_to_v35_adds_source_to_pose_observations(tmp_path: Path) -> None:
+    """v34→v35 rebuilds pose_observations with `source` in the PK, preserving data.
+
+    Existing rows must survive as source='body' with detection_run_id
+    backfilled from their parent sequence, and the row count must be
+    unchanged (see db/migrations/024_pose_observations_source.sql).
+    """
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+
+    # Downgrade to the pre-migration (v34) pose_observations shape.
+    conn.executescript("""
+        BEGIN;
+        CREATE TABLE pose_observations_old (
+            sequence_id        TEXT    NOT NULL REFERENCES pose_observation_sequences(id),
+            camera_instance_id TEXT    NOT NULL,
+            video_frame        INTEGER NOT NULL,
+            timestamp_s        REAL    NOT NULL,
+            person_id          INTEGER NOT NULL,
+            kp_blob            BLOB    NOT NULL,
+            noise_scale        REAL,
+            PRIMARY KEY (sequence_id, camera_instance_id, video_frame, person_id)
+        );
+        DROP TABLE pose_observations;
+        ALTER TABLE pose_observations_old RENAME TO pose_observations;
+        PRAGMA user_version = 34;
+        COMMIT;
+    """)
+
+    conn.execute(
+        "INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO captures (id, session_id, capture_number) VALUES ('shot1', 'sess1', 1)"
+    )
+    conn.execute(
+        "INSERT INTO sync_configs (id, shot_id) VALUES ('sync1', 'shot1')"
+    )
+    conn.execute(
+        "INSERT INTO detection_runs (id, shot_id, sync_config_id, time_start_s, time_end_s,"
+        " detector_model, pose_model, status, created_at)"
+        " VALUES ('run1', 'shot1', 'sync1', 0.0, 1.0, 'yolo', 'rtmpose', 'complete', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO pose_observation_sequences"
+        " (id, shot_id, sync_config_id, time_start_s, time_end_s, detection_run_id,"
+        "  pixels_are_undistorted)"
+        " VALUES ('seq1', 'shot1', 'sync1', 0.0, 1.0, 'run1', 0)"
+    )
+    conn.execute(
+        "INSERT INTO pose_observations"
+        " (sequence_id, camera_instance_id, video_frame, timestamp_s, person_id, kp_blob,"
+        "  noise_scale)"
+        " VALUES ('seq1', 'ci1', 10, 0.1, 0, X'00', 1.5)"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION == 35
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(pose_observations)")}
+    assert {"source", "detection_run_id"} <= cols
+
+    rows = conn.execute(
+        "SELECT source, detection_run_id, noise_scale FROM pose_observations"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["source"] == "body"
+    assert rows[0]["detection_run_id"] == "run1"
+    assert rows[0]["noise_scale"] == 1.5
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------

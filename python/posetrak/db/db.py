@@ -20,7 +20,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 6
-SESSION_SCHEMA_VERSION: Final[int] = 34
+SESSION_SCHEMA_VERSION: Final[int] = 35
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -966,6 +966,25 @@ def _migrate_session_v33_to_v34(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v34_to_v35(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 34 to 35.
+
+    v35 adds `source` to the pose_observations primary key (Phase 2 of
+    hand-detection refinement): existing rows become source='body', and a
+    new detection_run_id column is backfilled from each row's parent
+    pose_observation_sequences.detection_run_id. This lets a refined hand
+    pass (source='hand_l'/'hand_r') contribute its own row with its own
+    noise_scale instead of being patched into the whole-body kp_blob in
+    place, so the C++ tracker can model each source's measurement noise
+    correctly. See
+    docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md.
+    """
+    sql = (_DB_DIR / "migrations" / "024_pose_observations_source.sql").read_text(
+        encoding="utf-8"
+    )
+    conn.executescript(sql)
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1088,6 +1107,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 33
     if actual == 33:
         _migrate_session_v33_to_v34(conn)
+        actual = 34
+    if actual == 34:
+        _migrate_session_v34_to_v35(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

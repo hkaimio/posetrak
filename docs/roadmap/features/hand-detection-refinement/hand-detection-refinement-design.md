@@ -1,5 +1,29 @@
 # Hand-detection refinement & trusted-edit gate bypass — design sketch
 
+> **Status (2026-07-14, update 6)**: Phase 2 (multi-source `pose_observations`,
+> see *Idea 2*'s schema section) validated end-to-end against real session
+> data — schema, batch hand-refinement pipeline, `finalise_to_db`, and C++
+> tracking all confirmed working together (hand markers' median mahalanobis
+> distance roughly halved vs. a body-only baseline). Along the way: fixed a
+> real bug (`HandRefinementPipeline` hardcoded `device="cpu"` instead of
+> using the same `_auto_device()` autodetection the whole-body pass already
+> had), fixed a real bug in `finalise_to_db` (re-finalising a run whose
+> sequences already had tracking/edits crashed on an unhandled FK violation
+> instead of refusing cleanly — now fixed, see `python/app/pose/finalise.py`),
+> and found a real gap in the real-data test workflow itself (there's no
+> supported way to reuse an existing segmentation as a second detection run's
+> bbox source — written up separately as
+> `docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md`,
+> postponed). **Idea 3's integration-level design is now finalized** (the
+> crop/gate mechanism itself was already validated via Idea 2) — six
+> previously-open questions (schema/provenance, reject/revert, interpolation
+> integration, trigger convergence across edit operations, frame access, UI
+> status color) are resolved in the *Idea 3* section below. The
+> schema/provenance answer was generalized per Harri's comment into a
+> **generic `<base>.refined` source-precedence convention** rather than a
+> hand-specific mechanism, so future auto-detection-after-edit features
+> (e.g. face landmarks) can reuse it directly. Not yet implemented.
+
 > **Status (2026-07-12, update 5)**: Phase 1 (Idea 2, interim no-schema-
 > change version) is implemented — `posetrak.detection.hand_refinement`
 > (`HandRefinementPipeline`, `detect_hand_in_crop`), wired into both the
@@ -422,6 +446,13 @@ a second, independent `detection_run_id` with its own `source`, run
 separately (possibly much later, on already-tracked footage) — the same
 mechanism covers both without a special case.
 
+**Forward reference**: Idea 3 below generalizes this further — an
+auto-detection-after-edit feature (hand redetection here, conceivably face-
+landmark refinement or similar later) doesn't need its own bespoke
+`source` value and merge special-case. See *Source tiering* in Idea 3 for
+the generic `<base>.refined` precedence convention this `source` column ends
+up supporting.
+
 **Backward compatibility**: existing rows all become `source='body'` by
 migration default — reads stay correct unchanged. The real cost is the
 primary key itself: SQLite can't alter a `PRIMARY KEY` in place, so this is
@@ -513,6 +544,12 @@ detection pass, before track assignment/finalization.
 
 ## Idea 3 — automated hand redetection after a manual edit
 
+**Integration-level design finalized 2026-07-14** (crop/gate math below was
+already validated via Idea 2's offline-stills testing; this round resolved
+how the mechanism actually plugs into the editor — schema/provenance,
+reject/revert, interpolation, trigger convergence, frame access, UI
+surfacing). Not yet implemented.
+
 **Trigger mechanism (revised — the original "trigger on editing wrist" was
 underspecified, per Harri's questions; anchor set simplified below now that
 testing has shown wrist+elbow alone are sufficient)**:
@@ -530,13 +567,14 @@ testing has shown wrist+elbow alone are sufficient)**:
   below).
 - **Never overwrite a human-placed finger keypoint — resolved for free by
   where the write lands, not by a mask bit.** Automated results write to
-  `pose_observations` (a new `source='hand.L'`/`'hand.R'` row, see below),
-  never to `pose_observation_edits`. Since the loader always applies
-  `pose_observation_edits` *last*, on top of every merged `pose_observations`
-  row regardless of source (today's existing merge order, unchanged), a
-  human edit on any finger index automatically wins over whatever the
-  automated row says for that same index — no provenance bit, no
-  overwrite-detection logic needed at all. Simpler than the earlier
+  `pose_observations` (a new `source='hand_l.refined'`/`'hand_r.refined'` row —
+  see *Source tiering* below, supersedes the original `'hand.L'`/`'hand.R'`
+  naming sketch), never to `pose_observation_edits`. Since the loader always
+  applies `pose_observation_edits` *last*, on top of every merged
+  `pose_observations` row regardless of source (today's existing merge
+  order, unchanged), a human edit on any finger index automatically wins
+  over whatever the automated row says for that same index — no provenance
+  bit, no overwrite-detection logic needed at all. Simpler than the earlier
   `auto_mask` proposal, and gets the safety property for free from the
   existing precedence rule.
 - **Interpolated values inherit whatever the wrist/anchor edit's own
@@ -552,19 +590,175 @@ Once fired: recompute the crop from the current anchors, run the shared
 detect+validate function (see below).
 
 **Confirmed design decision (per discussion), refined**: results are
-written as their own `pose_observations` row(s) (`source='hand.L'`/
-`'hand.R'`, own `detection_run_id` — an "interactive redetection" run,
-distinct from the sequence's original batch detection run) and go through
-the *same* outlier gate as any other detector output via the normal
-merge-then-gate path — not through Idea 1's trusted-edit bypass, which
-only ever sees genuine `pose_observation_edits` rows. This is the right
-call: an automated redetection, however good the geometric-consistency
-check, is still a machine guess, not a human verification — treating it
-identically to a manual edit would undermine the whole point of keeping
-the gate meaningful for edited data. It also means Idea 3's writes get
-correctly-scaled measurement noise automatically (their own `crop_scale`,
-per the multi-row mechanism), rather than inheriting the frame's original
-whole-body noise level.
+written as their own `pose_observations` row(s) and go through the *same*
+outlier gate as any other detector output via the normal merge-then-gate
+path — not through Idea 1's trusted-edit bypass, which only ever sees
+genuine `pose_observation_edits` rows. This is the right call: an automated
+redetection, however good the geometric-consistency check, is still a
+machine guess, not a human verification — treating it identically to a
+manual edit would undermine the whole point of keeping the gate meaningful
+for edited data. It also means Idea 3's writes get correctly-scaled
+measurement noise automatically (their own `crop_scale`, per the multi-row
+mechanism), rather than inheriting the frame's original whole-body noise
+level.
+
+**Source tiering, resolved 2026-07-14 — no manufactured `detection_run_id`,
+no schema change, and generalized beyond hand detection (revised per
+Harri's comment).** The original sketch above ("own `detection_run_id` — an
+'interactive redetection' run") turned out not to scale: a real editing
+session produces thousands of these writes (this trial's sequences alone
+carry 3,946 and 6,673 manual edit rows), so minting/managing a dedicated
+`detection_runs` row for this would need its own lifecycle question (create
+once per sequence? per app session? reused across days?) for no real
+benefit.
+
+Resolved with a **generic convention, not a hand-specific one**: any source
+name of the form **`<base>.refined`** takes precedence over its corresponding
+`<base>` source, per marker slot, for the same
+`(sequence_id, camera_instance_id, video_frame, person_id)`. Hand
+redetection is the first feature to use it (`hand_l` → `hand_l.refined`,
+`hand_r` → `hand_r.refined`), but the rule itself doesn't know anything about
+hands — a later "detect additional face points from a few manually placed
+anchors" feature (the kind of case that prompted this generalization) would
+just introduce its own `<face-source>.refined` pair and get the same
+precedence behavior for free, no new merge special-case anywhere. Merge at
+load time becomes: apply each base source, then apply its `.refined`
+counterpart on top (per marker slot, wherever the `.refined` row has a
+present/nonzero-confidence value) if one exists; `pose_observation_edits`
+still applies last, on top of everything, unchanged:
+
+```
+<base>  →  <base>.refined (if present, per-slot override)  →  pose_observation_edits (human, always wins)
+```
+
+concretely, for hand detection today:
+
+```
+body  →  hand_l / hand_r (Idea 2, batch)  →  hand_l.refined / hand_r.refined (Idea 3, interactive)  →  pose_observation_edits (human, always wins)
+```
+
+No schema change needed either way: `source` is already a free-text column
+inside `pose_observations`' primary key
+(`sequence_id, camera_instance_id, video_frame, person_id, source`), so a
+`.refined` row for a given frame is a different PK row from its base row — it
+can never overwrite it, exactly mirroring how `pose_observation_edits` never
+overwrites `pose_observations`. `detection_run_id` on `.refined` rows: left
+`NULL` (the column is nullable: `db/session_schema.sql:197`) — sidesteps
+the lifecycle question entirely, generically, for any future feature that
+uses this convention.
+
+**Naming: resolved 2026-07-14 — `.refined`.** Considered against
+`.corrected`/`.interactive`/`.auto`; Harri picked `.refined`.
+
+Real, bounded cost this generic rule does add: `session_reader.cpp`'s merge
+(currently two tiers — body, then hand_l/hand_r) needs a generic
+"apply `.refined` override if present" pass added (not hand-specific code —
+implement it once against the naming convention, not per feature), and the
+Python read-path (`posetrak.db.observation_merge.merge_observation_sources`,
+used by `read_timeline_status` among others) needs the same generic pass for
+UI display to agree with what the tracker actually sees.
+
+**Reject / revert / further-edit, resolved 2026-07-14 — mostly
+already-existing machinery, one new op.**
+- **"Revert to the original detection"**: `DELETE FROM pose_observations
+  WHERE sequence_id=? AND camera_instance_id=? AND video_frame=? AND
+  person_id=? AND source IN ('hand_l.refined','hand_r.refined')` for the relevant
+  side — the merge then naturally falls back to whatever `hand_l`/`hand_r`
+  (batch) row exists for that slot, or nothing. Needs one small new DB
+  helper (symmetric to `update_single_keypoint_edit`) and one new UI action
+  (e.g. a "Revert hand redetection" context-menu item).
+- **"Disable hand keypoints entirely"**: no new mechanism — `_set_outlier_selected`
+  (`content_panels.py:4149`, the existing "Disable selected" context-menu
+  action) already marks selected keypoints as outlier via
+  `pose_observation_edits`, which already wins over every source tier
+  including `hand_l.refined`. Only possibly-needed addition: a "select whole
+  hand" convenience if one doesn't already exist (not yet checked).
+- **"Further edit a redetected finger"**: already works, unchanged — edits
+  overlay on top of whatever's currently displayed regardless of which
+  source tier produced it.
+
+**Interpolation integration, resolved 2026-07-14 — maps directly onto
+`_interpolate_range`/`_interpolate_missing_range` as they exist today, not a
+new mode.** Both functions (`content_panels.py:4003` and `:4192`) already
+loop `for kp_idx in self._sel_kp_indices` — i.e. **"interpolate only the
+keypoints the user selected" is exactly their existing behavior.** If the
+user selects only wrist (and maybe index1/pinky1) and presses "I", only
+those indices get geometrically interpolated; every other finger index is
+simply left untouched by these functions today, with no code change needed
+to get that part of the behavior. The new piece: after either function
+finishes writing edits for a range, if wrist (or wrist+elbow) was among the
+touched indices for a hand side, queue one hand-redetect request per frame
+in that range using the just-interpolated wrist/elbow position as anchor —
+filling in whichever finger indices the user *didn't* select via detection
+rather than geometric interpolation. This resolves the open question of
+"interpolate hand keypoints or redetect them" in favor of redetection for
+anything not explicitly selected, matching the intuition that finger
+articulation doesn't move linearly the way a geometric interpolation would
+assume.
+
+**One converged trigger point across every editing operation, resolved
+2026-07-14.** Every single-keypoint write in the editor funnels through one
+function, `update_single_keypoint_edit` — confirmed 7 call sites in
+`content_panels.py` (nudge, drag, chain-placement, toggle-outlier,
+interpolate, interpolate-missing, and one more). Rather than duplicating
+hand-redetect-trigger logic at each site, add **one** convergence point:
+after any editing operation finishes, scan whichever `(frame, kp_idx)` pairs
+it just touched for wrist/elbow indices, and enqueue one hand-redetect
+request per `(camera, frame)` that changed. Keying the debounce by
+`(camera, frame)` rather than "the operation that fired" makes single-edit
+debouncing and interpolation-batch firing *the same mechanism* for free: a
+single nudge produces one debounced key (coalescing rapid arrow-key taps as
+originally intended); a big interpolation produces many independent keys
+that don't interfere with each other's timers. No separate batch-mode logic
+needed.
+
+**Frame access mechanism, resolved 2026-07-14 — union of two patterns that
+already exist in this codebase, not a new one.** A single post-edit trigger
+needs one frame — the same shape as `CropBackfillWorker.prioritise()`'s
+single-seek path. An interpolation-fill needs potentially many frames across
+one contiguous range — per-frame seeking in compressed video is expensive,
+so this needs sequential decode over the span instead, the same shape as
+`WideCropExtractWorker`'s epoch-based sequential walk
+(`wide_crop_cache.py`). Recommendation: a new worker that reuses both access
+shapes (a prioritized single-frame path plus a sequential-range walk) rather
+than literally merging into `WideCropExtractWorker` itself — that worker's
+job is proactively caching crops for an entire run in the background; this
+one fires reactively only on edited/interpolated spans. Same architectural
+pattern and the same shared `detect_hand_in_crop` core function, not the
+same worker instance.
+
+**UI: new timeline status color for "value came from automated hand
+redetection (`.refined`), not yet human-verified", resolved 2026-07-14.**
+The keypoint-editing
+timeline already has exactly this kind of per-keypoint status signal
+(`python/app/pose/timeline_status.py`): `STATUS_GREEN` (original detection),
+`STATUS_YELLOW` (original detection, outside segmentation boundary),
+`STATUS_BLUE` (edited/kept as keyframe), `STATUS_GREY` (disabled/no data) —
+rendered via a single `_STATUS_COLORS` dict
+(`keypoint_timeline_widget.py:90-95`), already exactly the "easily
+adjustable, one place" pattern wanted for this. **Note: `STATUS_YELLOW` is
+already taken** for the segmentation-boundary-quality signal — reusing
+yellow for "auto-redetected" would collide with an existing, different
+meaning, so this needs its own code and color. Proposed: a new
+`STATUS_ORANGE` code, value `2` (renumbering today's `STATUS_BLUE: 2 → 3`
+and `STATUS_GREY: 3 → 4` — safe, since these codes are computed fresh from
+the DB on every render and never persisted), sitting between YELLOW and
+BLUE in the "ascending precedence, max code wins" aggregation scheme used
+when collapsing several keypoints/cameras into one displayed cell
+(`keypoint_timeline_widget.py:493-521`, an actual `max()` over these
+integers — an auto-redetected value is worth surfacing but still ranks
+below an actual human edit). Placeholder color: `QColor(220, 140, 50)`
+(orange) — an engineering color, trivially changed in the one dict it's
+defined in. Determining this status per-keypoint requires `read_timeline_status`
+(and the underlying `merge_observation_sources`) to track *which source*
+contributed each merged marker's final value, not just its coordinates —
+today that provenance is discarded once merged, so this is real, if small,
+added work, not just a new color entry. Open, not yet decided: whether this
+same color convention should also apply to the per-frame keypoint dots
+drawn in the crop-grid canvas itself (`_ImageCanvas` in
+`content_panels.py`), not just the timeline strip — the user's request was
+specifically about the timeline; extending it to the crop view is a
+related, natural-seeming, but unconfirmed follow-on.
 
 **Validation before writing — now the validated proximity gate from Idea 2,
 not the original vague "index_1/pinky_1 tolerance" sketch.** Pick the
@@ -593,14 +787,17 @@ precedent for exactly this shape of work — a background worker started
 from the editor that runs heavier processing and writes results back
 (`CropBackfillWorker`, `FrameCropCacheManager` in `content_panels.py`,
 `_start_backfill`/`_start_wide_crop_cache`). A new worker following that
-same pattern (armed by the debounce timer above, running the hand
-crop+detect step, writing the result as a `pose_observations` row with
-`source='hand.L'`/`'hand.R'`, then triggering `_load_frame` to refresh) is
-the natural fit rather than inventing a new async mechanism. Writing to
-`pose_observations` from the interactive editor (today exclusively a
-pipeline-write table) is itself a small boundary shift worth naming
-explicitly — the editor process would need write access to that table,
-which it doesn't exercise today (it only ever writes `pose_observation_edits`).
+same pattern (armed by the debounce/convergence point above, running the
+hand crop+detect step, writing the result as a `pose_observations` row with
+`source='hand_l.refined'`/`'hand_r.refined'`, then triggering `_load_frame` to
+refresh) is the natural fit rather than inventing a new async mechanism —
+see *Frame access mechanism* above for how it should actually decode frames.
+Writing to `pose_observations` from the interactive editor (today
+exclusively a pipeline-write table) is itself a small boundary shift worth
+naming explicitly — the editor process would need write access to that
+table, which it doesn't exercise today (it only ever writes
+`pose_observation_edits`). Not yet a deliberate go/no-go decision, just
+flagged (still Open Question, see below).
 
 **Shared code with Idea 2, signature now grounded in the validated
 mechanism** (revised from the original `index1_hint`/`pinky1_hint`-based
@@ -691,21 +888,33 @@ session), and a targeted look at how often the two-handed-grip failure
 mode actually occurs at trial scale (so far only observed twice, in
 curated stills).
 
-**Phase 2 — multi-row `pose_observations` migration.** Only once Phase 1
-has shown hand-specific detection is worth doing precisely. The PK
-rebuild + `detection_run_id`-per-row + `session_reader.cpp` loader
-rewrite from *Idea 2 — hand-specific detection pass*, above. Upgrades
-Phase 1's already-shipped hand pass to correct per-source noise as a side
-effect, and is the prerequisite for Idea 3 and (out of scope here) future
-marker detections.
+**Phase 2 — multi-row `pose_observations` migration — implemented and
+validated against real data, 2026-07-14.** Schema v34→v35 (PK rebuild
+adding `source`, `detection_run_id` moved per-row), C++ `session_reader.cpp`
+loader merge, Python read/write-path merges — all committed and confirmed
+working end-to-end on a real trial (new detection run copied from an
+existing one, hand-refined, finalised, tracked): hand markers' median
+mahalanobis distance roughly halved vs. a body-only baseline, per-source
+`noise_scale` confirmed correctly tighter for hand crops. Upgraded Phase 1's
+hand pass to correct per-source noise as intended, and is the prerequisite
+for Idea 3 (below) and (out of scope here) future marker detections.
 
-**Phase 3 — Idea 3, automated post-edit redetection.** Built on Phase 2's
-multi-row schema (proper per-source noise, clean `source='hand.L'/'hand.R'`
-separation, no provenance-bitmask complexity) and Phase 1's shared
-detect+validate function. Includes resolving the editor's new write access
-to `pose_observations` (open question below). *Validation*: the debounce/
-trigger behavior against real editing sessions, and a hand-completion-time
-comparison (does this actually reduce how long manual hand-editing takes).
+**Phase 3 — Idea 3, automated post-edit redetection. Integration-level
+design finalized 2026-07-14** (see the *Idea 3* section above for all six
+decisions: source tiering via a **generic `<base>.refined` precedence
+convention** — hand detection is its first user (`'hand_l'`→`'hand_l.refined'`,
+`'hand_r'`→`'hand_r.refined'`), not a hand-specific mechanism, so a future
+auto-detection-after-edit feature (e.g. face landmarks) can reuse it without
+its own merge special-case — instead of a manufactured `detection_run_id`;
+reject/revert/further-edit; interpolation integration; one converged
+trigger point across all 7 editing-operation call sites; frame access
+mechanism; new timeline status color). Not yet implemented. Still open
+before building: resolving the editor's new write access to
+`pose_observations` (Open Question below) and the generic `.refined`-override
+pass in `session_reader.cpp` / `observation_merge.py`. *Validation once
+built*: the debounce/trigger behavior against real editing sessions, and a
+hand-completion-time comparison (does this actually reduce how long manual
+hand-editing takes).
 
 ---
 
@@ -744,22 +953,31 @@ comparison (does this actually reduce how long manual hand-editing takes).
    as an inherent limit and let it degrade to "no write" the same as any
    other reject, which is not silently wrong, just less complete for these
    scenes.
-5. **Automated writes re-triggering**: a later automated redetection for
-   the same (camera, frame, source) — the multi-row PK
+5. ~~Automated writes re-triggering~~ — resolved 2026-07-14: `hand_l.refined`/
+   `hand_r.refined` reuse the same `source` value across repeated redetections
+   of the same (camera, frame), so the existing PK
    `(sequence_id, camera_instance_id, video_frame, person_id, source)`
-   naturally supports upsert-by-source, so overwrite is the easy default;
-   not yet confirmed there's no reason to want history/accumulation instead.
-6. **Multi-row `pose_observations` migration** is the biggest open item in
-   this whole doc: PK rebuild (not a simple `ADD COLUMN`), moving
-   `detection_run_id` down from the sequence to the row, and a real
-   `session_reader.cpp` loader change (iterate + merge N rows with
-   per-source keypoint vocabularies, not one). Sizing this is future work.
+   naturally upserts (`INSERT OR REPLACE`) — plain overwrite, no
+   history/accumulation, consistent with how edits and the batch hand pass
+   already behave.
+6. ~~Multi-row `pose_observations` migration~~ — done, see Phase 2 above.
 7. **Editor write access to `pose_observations`**: Idea 3 needs the
    interactive editor to write a table it has never written before
    (today: read-only there, all editor writes go through
    `pose_observation_edits`) — worth a deliberate look before building,
-   not assumed safe by default.
-8. Idea 2's pipeline integration point (before/after track assignment,
-   whether it shares the sequence's existing `detection_run_id` or gets
-   its own under the multi-row model) not yet traced against
-   `python/app/pose`'s current pipeline structure.
+   not assumed safe by default. Still genuinely open as of 2026-07-14.
+8. ~~Idea 2's pipeline integration point~~ — resolved, Phase 1 shipped
+   (hooks into the existing `DetectionJob`/CLI `run` command).
+9. **"Select whole hand" UI convenience** (Idea 3's *Reject/revert* section):
+   not yet confirmed whether the editor already has a way to select all 21
+   hand keypoint indices at once for the existing "Disable selected" action,
+   or whether this needs building too.
+10. **Provenance tracking through the merge** (Idea 3's *UI status color*
+    section): `merge_observation_sources`/`read_timeline_status` currently
+    discard which `source` contributed each merged marker's final value —
+    surfacing the new `STATUS_ORANGE` code needs that provenance threaded
+    through, a real (if small) change beyond just adding a color.
+11. **Scope of the new status color**: timeline strip only (as requested),
+    or also the per-frame keypoint dots in the crop-grid canvas
+    (`_ImageCanvas`) — not decided.
+12. ~~The suffix name itself~~ — resolved 2026-07-14: `.refined`.

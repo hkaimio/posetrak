@@ -1,5 +1,21 @@
 # Hand-detection refinement & trusted-edit gate bypass — design sketch
 
+> **Status (2026-07-14, update 7)**: The `.refined` suffix name is chosen
+> (Harri picked it over `.corrected`/`.interactive`/`.auto`). The four
+> remaining design-level open questions from update 6 are now resolved by
+> checking the actual code rather than guessing: **editor write access to
+> `pose_observations`** is safe (the DB already runs in WAL mode and
+> background `QThread`s already write concurrently to `frame_cache_entries`
+> today); **"select whole hand"** already exists (`"Left hand"`/`"Right
+> hand"` groups in `kp_models.py`, wired into the right-click group-select
+> menu); **provenance tracking through the merge** has a concrete algorithm
+> now (strip the `.refined` suffix, decide per base-name which row wins,
+> then apply existing per-source index placement); and the **new status
+> color's scope is timeline-only** (the crop-grid canvas already has its
+> own separate, unrelated color convention — `STATUS_BLUE` isn't used there
+> either). Idea 3 has no remaining open design questions — what's left is
+> the actual implementation.
+
 > **Status (2026-07-14, update 6)**: Phase 2 (multi-source `pose_observations`,
 > see *Idea 2*'s schema section) validated end-to-end against real session
 > data — schema, batch hand-refinement pipeline, `finalise_to_db`, and C++
@@ -667,12 +683,17 @@ already-existing machinery, one new op.**
   (batch) row exists for that slot, or nothing. Needs one small new DB
   helper (symmetric to `update_single_keypoint_edit`) and one new UI action
   (e.g. a "Revert hand redetection" context-menu item).
-- **"Disable hand keypoints entirely"**: no new mechanism — `_set_outlier_selected`
-  (`content_panels.py:4149`, the existing "Disable selected" context-menu
-  action) already marks selected keypoints as outlier via
-  `pose_observation_edits`, which already wins over every source tier
-  including `hand_l.refined`. Only possibly-needed addition: a "select whole
-  hand" convenience if one doesn't already exist (not yet checked).
+- **"Disable hand keypoints entirely"**: no new mechanism at all, confirmed
+  2026-07-14 — `_set_outlier_selected` (`content_panels.py:4149`, the
+  existing "Disable selected" context-menu action) already marks selected
+  keypoints as outlier via `pose_observation_edits`, which already wins over
+  every source tier including `hand_l.refined`. The "select whole hand"
+  convenience already exists too: the right-click group-selection menu
+  (`content_panels.py:3610-3654`) is populated from `PoseModel.group_names`,
+  and `kp_models.py` already defines `"Left hand"`/`"Right hand"` groups
+  covering the full 21-keypoint range each (`_LEFT_HAND_IDX`/`_RIGHT_HAND_IDX`,
+  `kp_models.py:188-189, 207-208`). "Reject = disable hand entirely" is
+  wiring, not new UI.
 - **"Further edit a redetected finger"**: already works, unchanged — edits
   overlay on top of whatever's currently displayed regardless of which
   source tier produced it.
@@ -752,13 +773,36 @@ below an actual human edit). Placeholder color: `QColor(220, 140, 50)`
 defined in. Determining this status per-keypoint requires `read_timeline_status`
 (and the underlying `merge_observation_sources`) to track *which source*
 contributed each merged marker's final value, not just its coordinates —
-today that provenance is discarded once merged, so this is real, if small,
-added work, not just a new color entry. Open, not yet decided: whether this
-same color convention should also apply to the per-frame keypoint dots
-drawn in the crop-grid canvas itself (`_ImageCanvas` in
-`content_panels.py`), not just the timeline strip — the user's request was
-specifically about the timeline; extending it to the crop view is a
-related, natural-seeming, but unconfirmed follow-on.
+today that provenance is discarded once merged.
+
+**Scope, resolved 2026-07-14 — timeline only, not the crop-grid canvas.**
+Checked `_ImageCanvas`'s dot-painting code (`content_panels.py:2341-2369`):
+it already uses its own separate, hardcoded palette (grey/green/yellow/red,
+keyed off *tracker* outlier status) — `STATUS_BLUE` (the timeline's edit
+color) is never used there at all, only for logic (`content_panels.py:4064,
+4514`, checking whether a keypoint is a keyframe for interpolation
+anchoring). So there's no existing precedent of the timeline's edit-status
+colors appearing in the crop view either — adding the new color there would
+mean designing a second, independent convention, not extending this one.
+Out of scope for now; timeline-only.
+
+**Provenance mechanism, made concrete 2026-07-14.** `observation_merge.py`
+today conflates two separate concerns: (a) placing each source's own
+vocabulary into the right final-marker index range (necessarily
+per-source — e.g. `hand_l` occupies indices 91-111 — a future face-
+refinement source would need its own such mapping regardless of `.refined`),
+and (b) precedence between a base source and its `.refined` variant. Untangle
+them: strip a trailing `.refined` suffix to get the base name, decide per
+base-name which row wins (prefer `.refined` if present), *then* apply the
+existing per-source index-placement logic keyed by the base name — this
+makes "prefer `.refined`" fully generic while keeping the necessarily-
+per-source vocabulary mapping separate. `merge_observation_sources`'s
+existing signature and its other caller (`db_cache.py`'s
+`read_observations_with_edits`, which only wants merged coordinates) stay
+unchanged; add one new, small companion function used only by
+`read_timeline_status` that additionally returns, per merged marker index,
+which source name won — `read_timeline_status` then colors a slot
+`STATUS_ORANGE` when that winning source name ends in `.refined`.
 
 **Validation before writing — now the validated proximity gate from Idea 2,
 not the original vague "index_1/pinky_1 tolerance" sketch.** Pick the
@@ -793,11 +837,17 @@ hand crop+detect step, writing the result as a `pose_observations` row with
 refresh) is the natural fit rather than inventing a new async mechanism —
 see *Frame access mechanism* above for how it should actually decode frames.
 Writing to `pose_observations` from the interactive editor (today
-exclusively a pipeline-write table) is itself a small boundary shift worth
-naming explicitly — the editor process would need write access to that
-table, which it doesn't exercise today (it only ever writes
-`pose_observation_edits`). Not yet a deliberate go/no-go decision, just
-flagged (still Open Question, see below).
+exclusively a pipeline-write table) is a small boundary shift worth naming
+explicitly — the editor process would need write access to that table,
+which it doesn't exercise today (it only ever writes
+`pose_observation_edits`). **Checked and resolved 2026-07-14: safe, given
+existing precedent.** The DB already runs `PRAGMA journal_mode = WAL`
+(`posetrak/db/db.py:137`), and `CropBackfillWorker`/`WideCropExtractWorker`
+already open their own SQLite connections from background `QThread`s within
+the editor process and write concurrently to `frame_cache_entries` — the
+"multiple writers from one process" pattern is already proven here, not a
+new risk category. The only actual change is which table gets a new writer,
+not a new kind of technical risk.
 
 **Shared code with Idea 2, signature now grounded in the validated
 mechanism** (revised from the original `index1_hint`/`pinky1_hint`-based
@@ -908,10 +958,12 @@ auto-detection-after-edit feature (e.g. face landmarks) can reuse it without
 its own merge special-case — instead of a manufactured `detection_run_id`;
 reject/revert/further-edit; interpolation integration; one converged
 trigger point across all 7 editing-operation call sites; frame access
-mechanism; new timeline status color). Not yet implemented. Still open
-before building: resolving the editor's new write access to
-`pose_observations` (Open Question below) and the generic `.refined`-override
-pass in `session_reader.cpp` / `observation_merge.py`. *Validation once
+mechanism; new timeline status color). All design-level open questions
+resolved as of 2026-07-14 (editor write access, "select whole hand",
+provenance tracking, status-color scope — see Open Questions below). Not
+yet implemented — remaining work is the actual build: the generic
+`.refined`-override pass in `session_reader.cpp` / `observation_merge.py`,
+the new worker, and the DB/UI plumbing described above. *Validation once
 built*: the debounce/trigger behavior against real editing sessions, and a
 hand-completion-time comparison (does this actually reduce how long manual
 hand-editing takes).
@@ -961,23 +1013,25 @@ hand-editing takes).
    history/accumulation, consistent with how edits and the batch hand pass
    already behave.
 6. ~~Multi-row `pose_observations` migration~~ — done, see Phase 2 above.
-7. **Editor write access to `pose_observations`**: Idea 3 needs the
-   interactive editor to write a table it has never written before
-   (today: read-only there, all editor writes go through
-   `pose_observation_edits`) — worth a deliberate look before building,
-   not assumed safe by default. Still genuinely open as of 2026-07-14.
+7. ~~Editor write access to `pose_observations`~~ — resolved 2026-07-14:
+   safe, given existing WAL-mode + multiple-background-writer precedent
+   (`CropBackfillWorker`/`WideCropExtractWorker` already do this today for
+   `frame_cache_entries`).
 8. ~~Idea 2's pipeline integration point~~ — resolved, Phase 1 shipped
    (hooks into the existing `DetectionJob`/CLI `run` command).
-9. **"Select whole hand" UI convenience** (Idea 3's *Reject/revert* section):
-   not yet confirmed whether the editor already has a way to select all 21
-   hand keypoint indices at once for the existing "Disable selected" action,
-   or whether this needs building too.
-10. **Provenance tracking through the merge** (Idea 3's *UI status color*
-    section): `merge_observation_sources`/`read_timeline_status` currently
-    discard which `source` contributed each merged marker's final value —
-    surfacing the new `STATUS_ORANGE` code needs that provenance threaded
-    through, a real (if small) change beyond just adding a color.
-11. **Scope of the new status color**: timeline strip only (as requested),
-    or also the per-frame keypoint dots in the crop-grid canvas
-    (`_ImageCanvas`) — not decided.
+9. ~~"Select whole hand" UI convenience~~ — resolved 2026-07-14: already
+   built. The right-click group-selection menu already has `"Left hand"`/
+   `"Right hand"` groups covering all 21 keypoints each
+   (`kp_models.py:188-189, 207-208`), combined with the existing "Disable
+   selected" action.
+10. ~~Provenance tracking through the merge~~ — resolved 2026-07-14: concrete
+    algorithm now specified in Idea 3's *UI status color* section (strip the
+    `.refined` suffix, decide per base-name which row wins, then apply
+    existing per-source index placement; one new small companion function,
+    `merge_observation_sources`'s own signature/other caller unaffected).
+11. ~~Scope of the new status color~~ — resolved 2026-07-14: timeline only.
+    Checked `_ImageCanvas`'s dot-painting code — it already uses its own
+    separate, tracker-outlier-based palette; `STATUS_BLUE` isn't used there
+    either, so there's no existing-convention argument for extending this
+    one to the crop view.
 12. ~~The suffix name itself~~ — resolved 2026-07-14: `.refined`.

@@ -189,7 +189,8 @@ class HandRefinementPipeline:
 
     def _get_hand_model(self):
         if self._hand_model is None:
-            self._hand_model = _Hand(to_openpose=False, backend="onnxruntime", device="cpu")
+            device = _rtmpose_backend._auto_device()
+            self._hand_model = _Hand(to_openpose=False, backend="onnxruntime", device=device)
         return self._hand_model
 
     def run(

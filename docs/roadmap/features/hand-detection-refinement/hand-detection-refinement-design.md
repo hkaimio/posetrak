@@ -1,5 +1,25 @@
 # Hand-detection refinement & trusted-edit gate bypass — design sketch
 
+> **Status (2026-07-14, update 8)**: Idea 3 implemented (Phases 1-4 of the
+> implementation plan) and validated against a real editing session
+> (Phase 5), which surfaced a real workflow gap: a common troubleshooting
+> pattern is "disable every keypoint in a bad camera, try tracking, and
+> only start real edits if that alone didn't help" — but since a plain
+> disable is an edit, and edits always win over `.refined` at merge time,
+> once *any* keypoint in a hand has been disabled this way, redetection's
+> output was permanently shadowed even after later fixing the wrist,
+> making the whole feature useless for exactly this workflow. Resolved with
+> a two-mode design (see *Reject/revert/further-edit* below): an
+> "auto-detect" vs "keep existing state" checkbox in the editor. In
+> auto-detect mode (the default), a successful redetection now also clears
+> *disable*-edits (not repositioning edits) on that hand's fingers, since a
+> wrist/elbow edit means the hand moved and old finger state — original
+> detection or a prior disable — is presumed stale either way. In
+> "keep existing state" mode, redetection doesn't run at all, so nothing
+> automatic touches existing edits. No schema change was needed — this
+> turned out to be a UI-level gate plus one new DB helper, not a
+> precedence/schema redesign.
+
 > **Status (2026-07-14, update 7)**: The `.refined` suffix name is chosen
 > (Harri picked it over `.corrected`/`.interactive`/`.auto`). The four
 > remaining design-level open questions from update 6 are now resolved by
@@ -698,6 +718,61 @@ already-existing machinery, one new op.**
   overlay on top of whatever's currently displayed regardless of which
   source tier produced it.
 
+**"Auto-detect" vs "keep existing state", added 2026-07-14 after real-session
+validation surfaced a genuine workflow gap.** A common troubleshooting
+pattern: disable every keypoint in a camera giving bad detections, try
+tracking, and only start real per-keypoint edits if disabling alone didn't
+fix it. Since a plain disable is itself an edit
+(`update_single_keypoint_edit(..., is_outlier=True)`), and edits always win
+over any source tier including `.refined`, once *any* hand keypoint had been
+disabled this way, a later redetection's output was permanently shadowed —
+even after the user went on to fix the wrist for real. This made the whole
+feature useless for exactly this common workflow.
+
+**Why a fixed precedence reorder doesn't work**: the instinctive fix
+("`.refined` outranks disable but loses to a real edit") breaks the opposite
+case — a user who disables a keypoint *because* they just saw the refined
+result and don't like it needs that disable to win, not be silently
+re-asserted by the next redetection. Disable-vs-refined precedence genuinely
+depends on which happened more recently, not on a fixed category rank, and
+`pose_observation_edits` doesn't track per-keypoint edit timestamps precisely
+enough to resolve that honestly (its `created_at` is per-row and isn't even
+updated on subsequent edits) — doing this properly would mean a schema
+change plus rewriting the merge in both `session_reader.cpp` and
+`observation_merge.py`, code every existing edited sequence depends on.
+Not undertaken.
+
+**Resolved instead by scoping the "replace" behavior to exactly the moment a
+fresh redetection succeeds, gated by a UI toggle** — no schema change:
+- A checkbox in the editor's edit-mode toolbar, **"Auto-redetect hands"**
+  (`content_panels.py`, next to the existing show-detected/show-tracked/
+  show-seg checkboxes), defaulting **on**, enabled only in edit mode.
+- **On ("auto-detect")**: the trigger mechanism works as already designed
+  above, *and* a successful `write_hand_refinement` is immediately followed
+  by a new DB helper, `clear_disabled_hand_edits(session, sequence_id,
+  camera_instance_id, video_frame, side)` — it clears the `kp_mask` bit for
+  any index in that hand's 21-keypoint range where the edit is a *disable*
+  (`edit_kp[i, 2] != 0`), but leaves a *repositioning* edit
+  (`edit_kp[i, 2] == 0`, an actual hand-placed x/y) untouched. This is the
+  premise the whole mode rests on: once the wrist/elbow moved enough to
+  trigger a redetection, the hand's prior state — original detection *or* a
+  prior disable — is presumed stale either way, but a deliberate
+  repositioning is a much stronger claim ("here is the correct value") that
+  a redetection must never discard. This is also what keeps "further edit a
+  redetected finger" working after this change: disable/reposition it once
+  more *after* seeing the redetected result, and nothing clears it again
+  unless the wrist/elbow is edited a second time.
+- **Off ("keep existing state")**: `_maybe_queue_hand_redetect`/
+  `_queue_hand_redetect_range` return immediately — no redetection runs at
+  all, so nothing automatic touches existing edits. This is the mode for
+  the disable-everything-and-troubleshoot workflow above.
+- The gate lives entirely in the UI layer (`PersonCropGridWidget.
+  _auto_redetect_enabled()`); `HandRedetectWorker`/`clear_disabled_hand_edits`
+  don't need to know the toggle exists — if the toggle is off, the worker
+  simply never receives a request, so calling `clear_disabled_hand_edits`
+  unconditionally after every successful write is correct without any
+  extra plumbing.
+
 **Interpolation integration, resolved 2026-07-14 — maps directly onto
 `_interpolate_range`/`_interpolate_missing_range` as they exist today, not a
 new mode.** Both functions (`content_panels.py:4003` and `:4192`) already
@@ -949,24 +1024,24 @@ mahalanobis distance roughly halved vs. a body-only baseline, per-source
 hand pass to correct per-source noise as intended, and is the prerequisite
 for Idea 3 (below) and (out of scope here) future marker detections.
 
-**Phase 3 — Idea 3, automated post-edit redetection. Integration-level
-design finalized 2026-07-14** (see the *Idea 3* section above for all six
-decisions: source tiering via a **generic `<base>.refined` precedence
-convention** — hand detection is its first user (`'hand_l'`→`'hand_l.refined'`,
+**Phase 3 — Idea 3, automated post-edit redetection. Implemented and
+validated 2026-07-14** (see the *Idea 3* section above for the full design:
+source tiering via a **generic `<base>.refined` precedence convention** —
+hand detection is its first user (`'hand_l'`→`'hand_l.refined'`,
 `'hand_r'`→`'hand_r.refined'`), not a hand-specific mechanism, so a future
 auto-detection-after-edit feature (e.g. face landmarks) can reuse it without
 its own merge special-case — instead of a manufactured `detection_run_id`;
 reject/revert/further-edit; interpolation integration; one converged
 trigger point across all 7 editing-operation call sites; frame access
-mechanism; new timeline status color). All design-level open questions
-resolved as of 2026-07-14 (editor write access, "select whole hand",
-provenance tracking, status-color scope — see Open Questions below). Not
-yet implemented — remaining work is the actual build: the generic
-`.refined`-override pass in `session_reader.cpp` / `observation_merge.py`,
-the new worker, and the DB/UI plumbing described above. *Validation once
-built*: the debounce/trigger behavior against real editing sessions, and a
-hand-completion-time comparison (does this actually reduce how long manual
-hand-editing takes).
+mechanism; new timeline status color; and the "auto-detect vs keep existing
+state" toggle added after real-session validation). Implementation phased
+as: (1) the generic `.refined`-override pass in `session_reader.cpp` /
+`observation_merge.py`, (2) DB write/revert helpers + `STATUS_ORANGE`,
+(3) `HandRedetectWorker`, (4) editor wiring, (5) real-session validation —
+which surfaced and fixed the disable-then-edit workflow gap described
+above. *Not yet done*: tuning the 700ms debounce window against extended
+real use, and a hand-completion-time comparison (does this measurably
+reduce how long manual hand-editing takes).
 
 ---
 

@@ -525,7 +525,10 @@ def write_hand_refinement(
     frame -- a different `source` value is a different primary-key row
     (`sequence_id, camera_instance_id, video_frame, person_id, source`) --
     and is itself always overridden by a human edit on the same slot at
-    load time (pose_observation_edits applies last, unchanged).
+    load time (pose_observation_edits applies last, unchanged). Callers in
+    "auto-detect" mode should immediately follow a successful write with
+    `clear_disabled_hand_edits` for the same (frame, side) -- see that
+    function's docstring for why.
 
     `detection_run_id` is left NULL: there is no dedicated "interactive
     redetection" detection run, since minting one per edit wouldn't scale
@@ -575,6 +578,72 @@ def revert_hand_refinement(
         " AND person_id = ? AND source = ?",
         (sequence_id, camera_instance_id, video_frame, person_id, source),
     )
+    session.commit()
+
+
+def clear_disabled_hand_edits(
+    session: sqlite3.Connection,
+    sequence_id: str,
+    camera_instance_id: str,
+    video_frame: int,
+    side: str,
+) -> None:
+    """Clear disable-edits (not repositioning edits) within *side*'s
+    21-keypoint range for this frame, as the "auto-detect" half of Idea 3's
+    two-mode design (see the design doc's "Idea 3" section, "auto-detect vs
+    keep existing state"): once the wrist/elbow has moved enough to trigger
+    a fresh redetection, whatever was true about this hand's fingers before
+    -- the original detection, or a prior "disable this" edit -- is
+    presumed stale, and the fresh redetection should not be silently
+    shadowed by it.
+
+    A prior *repositioning* edit (is_outlier=False, an actual hand-placed
+    x/y) is deliberately left untouched -- that is a much stronger claim
+    ("here is the correct value") that a redetection should never discard;
+    this is what makes "user decides to edit the auto-refined kps" still
+    work after this function runs. Call this once, right after a
+    successful `write_hand_refinement`, only when "auto-detect" mode is
+    active -- in "keep existing state" mode, redetection (and this
+    function) never runs at all, so prior edits are never touched by
+    anything automatic.
+    """
+    from posetrak.detection.hand_refinement import _HAND_BASE_IDX, _HAND_N_KP
+
+    edit_row = session.execute(
+        "SELECT kp_blob, kp_mask FROM pose_observation_edits"
+        " WHERE sequence_id = ? AND camera_instance_id = ? AND video_frame = ?",
+        (sequence_id, camera_instance_id, video_frame),
+    ).fetchone()
+    if edit_row is None:
+        return
+
+    edit_kp = np.frombuffer(bytes(edit_row["kp_blob"]), dtype=np.float32).reshape(-1, 3)
+    mask = bytearray(bytes(edit_row["kp_mask"]))
+    base = _HAND_BASE_IDX[side]
+    changed = False
+    for i in range(base, min(base + _HAND_N_KP, edit_kp.shape[0])):
+        byte_idx, bit_idx = divmod(i, 8)
+        if byte_idx >= len(mask) or not (mask[byte_idx] >> bit_idx) & 1:
+            continue  # not edited at all
+        if edit_kp[i, 2] == 0.0:
+            continue  # a repositioning edit, not a disable -- leave it alone
+        mask[byte_idx] &= ~(1 << bit_idx)
+        changed = True
+
+    if not changed:
+        return
+    if any(mask):
+        session.execute(
+            "UPDATE pose_observation_edits SET kp_mask = ?"
+            " WHERE sequence_id = ? AND camera_instance_id = ? AND video_frame = ?",
+            (bytes(mask), sequence_id, camera_instance_id, video_frame),
+        )
+    else:
+        session.execute(
+            "DELETE FROM pose_observation_edits"
+            " WHERE sequence_id = ? AND camera_instance_id = ? AND video_frame = ?",
+            (sequence_id, camera_instance_id, video_frame),
+        )
     session.commit()
 
 

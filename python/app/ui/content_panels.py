@@ -2942,6 +2942,11 @@ class PersonCropGridWidget(QWidget):
     # values from __init__ below.
     _hand_redetect: "HandRedetectWorker | None" = None
     _hand_redetect_timers: dict = {}
+    # "Auto-detect" vs "keep existing state" toggle (see the design doc's
+    # "Idea 3" section) -- None until _build() constructs the real checkbox;
+    # treated as "on" when None so a test fixture without it still exercises
+    # the default, common-case behavior.
+    _auto_redetect_chk: "QCheckBox | None" = None
 
     def __init__(self, conn: sqlite3.Connection, sequence_id: str, parent=None) -> None:
         super().__init__(parent)
@@ -3268,6 +3273,18 @@ class PersonCropGridWidget(QWidget):
         self._chain_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._chain_btn.clicked.connect(self._show_chain_menu)
 
+        self._auto_redetect_chk = QCheckBox("Auto-redetect hands")
+        self._auto_redetect_chk.setChecked(True)
+        self._auto_redetect_chk.setEnabled(False)  # enabled alongside edit mode, in _set_edit_mode
+        self._auto_redetect_chk.setToolTip(
+            "\"Auto-detect\": editing a wrist/elbow redetects that hand in the\n"
+            "background and clears any earlier \"disable\" edits on its fingers\n"
+            "(a deliberate reposition edit is never touched). Uncheck for\n"
+            "\"keep existing state\": nothing is redetected or touched\n"
+            "automatically -- useful while troubleshooting by hand (e.g.\n"
+            "disabling a camera's keypoints to see if that alone fixes tracking)."
+        )
+
         overlay_row = QHBoxLayout()
         overlay_row.addWidget(QLabel("Show:"))
         overlay_row.addWidget(self._show_detected)
@@ -3278,6 +3295,7 @@ class PersonCropGridWidget(QWidget):
         overlay_row.addWidget(self._time_label)
         overlay_row.addWidget(self._edit_btn)
         overlay_row.addWidget(self._chain_btn)
+        overlay_row.addWidget(self._auto_redetect_chk)
 
         # Maximized-view container: big cell on left, thumbnail strip on right.
         self._max_placeholder = QWidget()  # occupies left slot when not maximized
@@ -3526,6 +3544,8 @@ class PersonCropGridWidget(QWidget):
             self._kp_picker.setVisible(enabled)
         if self._chain_btn is not None:
             self._chain_btn.setEnabled(enabled)
+        if self._auto_redetect_chk is not None:
+            self._auto_redetect_chk.setEnabled(enabled)
         if self._timeline is not None:
             self._timeline.set_edit_mode(enabled)
             self._sync_timeline(self._current_t)
@@ -3627,6 +3647,13 @@ class PersonCropGridWidget(QWidget):
                     self._load_frame(self._current_t)
                 break
 
+    def _auto_redetect_enabled(self) -> bool:
+        """"Auto-detect" vs "keep existing state" (Idea 3's design doc):
+        the checkbox is absent (None) only on test-constructed widgets that
+        bypass __init__/_build, where the default is "on" so those tests
+        exercise the common-case behavior."""
+        return self._auto_redetect_chk is None or self._auto_redetect_chk.isChecked()
+
     def _maybe_queue_hand_redetect(self, cam_id: str, svid: str, frame_idx: int, kp_idx: int) -> None:
         """After any keypoint edit, arm a debounced hand-redetect request if
         *kp_idx* is a wrist/elbow index for either hand side -- the
@@ -3634,7 +3661,7 @@ class PersonCropGridWidget(QWidget):
         (see Idea 3's design doc). No-op if the worker isn't running (not
         in edit mode, or rtmlib unavailable).
         """
-        if self._hand_redetect is None:
+        if self._hand_redetect is None or not self._auto_redetect_enabled():
             return
         side = _hand_side_for_kp_idx(kp_idx)
         if side is None:
@@ -3684,7 +3711,8 @@ class PersonCropGridWidget(QWidget):
         settled by the time this is called."""
         from posetrak.detection.hand_refinement import _ELBOW_IDX, _WRIST_IDX
 
-        if self._hand_redetect is None or not frames or not self._sync_table:
+        if (self._hand_redetect is None or not frames or not self._sync_table
+                or not self._auto_redetect_enabled()):
             return
         kp_by_frame = self._obs_kp.get(cam_id, {})
         wrist_idx, elbow_idx = _WRIST_IDX[side], _ELBOW_IDX[side]

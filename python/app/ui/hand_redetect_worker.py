@@ -175,7 +175,7 @@ class HandRedetectWorker(QThread):
     def run(self) -> None:  # noqa: C901
         import cv2
 
-        from app.pose.db_cache import write_hand_refinement
+        from app.pose.db_cache import clear_disabled_hand_edits, write_hand_refinement
 
         try:
             conn = sqlite3.connect(self._db_path)
@@ -208,6 +208,15 @@ class HandRedetectWorker(QThread):
                 conn, self._sequence_id, cam_id, frame_idx, self._person_id,
                 timestamp_s=timestamp_s, side=side, kp=hand_kp, noise_scale=noise_scale,
             )
+            # "Auto-detect" mode's whole premise: a fresh redetection
+            # supersedes stale disable-edits for this hand (never a
+            # deliberate repositioning edit) -- see
+            # clear_disabled_hand_edits' docstring. Requests only ever
+            # reach this worker when the editor's "auto-detect" toggle is
+            # on (see content_panels.py's _maybe_queue_hand_redetect /
+            # _queue_hand_redetect_range), so this runs unconditionally
+            # here -- the toggle is what gates it, not this call site.
+            clear_disabled_hand_edits(conn, self._sequence_id, cam_id, frame_idx, side)
             self.result_ready.emit(cam_id, frame_idx)
 
         try:

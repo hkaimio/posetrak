@@ -11,7 +11,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.pose.timeline_status import STATUS_BLUE, STATUS_GREEN, STATUS_ORANGE, read_timeline_status
+from app.pose.timeline_status import (
+    STATUS_BLUE,
+    STATUS_GREEN,
+    STATUS_GREY,
+    STATUS_ORANGE,
+    read_timeline_status,
+)
 
 _N_KP = 133
 
@@ -182,3 +188,76 @@ def test_reverting_refinement_restores_prior_status(hand_db):
 
     revert_hand_refinement(hand_db, "seq1", "ci1", 1, 0, side="left")
     assert read_timeline_status(hand_db, "seq1", "ci1")[1][95] == STATUS_GREEN
+
+
+# ---------------------------------------------------------------------------
+# clear_disabled_hand_edits -- the "auto-detect" half of Idea 3's two-mode
+# design: a fresh redetection clears stale disable-edits for that hand's
+# fingers, but never touches a deliberate repositioning edit.
+# ---------------------------------------------------------------------------
+
+def test_clears_a_disabled_finger_within_the_hand_range(hand_db):
+    from app.pose.db_cache import clear_disabled_hand_edits, update_single_keypoint_edit
+
+    update_single_keypoint_edit(hand_db, "seq1", "ci1", 1, 95, 0.0, 0.0, is_outlier=True)
+    assert read_timeline_status(hand_db, "seq1", "ci1")[1][95] == STATUS_GREY
+
+    clear_disabled_hand_edits(hand_db, "seq1", "ci1", 1, side="left")
+
+    status = read_timeline_status(hand_db, "seq1", "ci1")[1]
+    assert status[95] == STATUS_GREEN  # back to the original (unedited) detection
+
+
+def test_leaves_a_repositioning_edit_untouched(hand_db):
+    from app.pose.db_cache import clear_disabled_hand_edits, update_single_keypoint_edit
+
+    update_single_keypoint_edit(hand_db, "seq1", "ci1", 1, 95, 10.0, 20.0, is_outlier=False)
+    clear_disabled_hand_edits(hand_db, "seq1", "ci1", 1, side="left")
+
+    status = read_timeline_status(hand_db, "seq1", "ci1")[1]
+    assert status[95] == STATUS_BLUE  # the deliberate placement still stands
+
+
+def test_leaves_edits_outside_the_hand_range_untouched(hand_db):
+    from app.pose.db_cache import clear_disabled_hand_edits, update_single_keypoint_edit
+
+    update_single_keypoint_edit(hand_db, "seq1", "ci1", 1, 5, 0.0, 0.0, is_outlier=True)  # body-range
+    clear_disabled_hand_edits(hand_db, "seq1", "ci1", 1, side="left")
+
+    status = read_timeline_status(hand_db, "seq1", "ci1")[1]
+    assert status[5] == STATUS_GREY  # still disabled -- outside hand_l's 91-111 range
+
+
+def test_noop_when_no_edit_row_exists(hand_db):
+    from app.pose.db_cache import clear_disabled_hand_edits
+
+    clear_disabled_hand_edits(hand_db, "seq1", "ci1", 1, side="left")  # must not raise
+    rows = hand_db.execute(
+        "SELECT count(*) AS n FROM pose_observation_edits WHERE sequence_id='seq1'"
+    ).fetchone()
+    assert rows["n"] == 0
+
+
+def test_deletes_the_edit_row_once_every_bit_is_cleared(hand_db):
+    from app.pose.db_cache import clear_disabled_hand_edits, update_single_keypoint_edit
+
+    update_single_keypoint_edit(hand_db, "seq1", "ci1", 1, 95, 0.0, 0.0, is_outlier=True)
+    clear_disabled_hand_edits(hand_db, "seq1", "ci1", 1, side="left")
+
+    rows = hand_db.execute(
+        "SELECT count(*) AS n FROM pose_observation_edits"
+        " WHERE sequence_id='seq1' AND camera_instance_id='ci1' AND video_frame=1"
+    ).fetchone()
+    assert rows["n"] == 0
+
+
+def test_mixed_disabled_and_repositioned_fingers_only_clears_the_disabled_one(hand_db):
+    from app.pose.db_cache import clear_disabled_hand_edits, update_single_keypoint_edit
+
+    update_single_keypoint_edit(hand_db, "seq1", "ci1", 1, 95, 0.0, 0.0, is_outlier=True)
+    update_single_keypoint_edit(hand_db, "seq1", "ci1", 1, 96, 30.0, 40.0, is_outlier=False)
+    clear_disabled_hand_edits(hand_db, "seq1", "ci1", 1, side="left")
+
+    status = read_timeline_status(hand_db, "seq1", "ci1")[1]
+    assert status[95] == STATUS_GREEN  # disable was cleared
+    assert status[96] == STATUS_BLUE   # reposition survives

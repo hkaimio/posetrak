@@ -148,3 +148,53 @@ def test_finalise_confidence_scale_applies_only_to_body(session):
 
     hand_kp = np.frombuffer(bytes(rows["hand_l"]["kp_blob"]), dtype=np.float32).reshape(-1, 3)
     assert hand_kp[0, 2] == pytest.approx(2.0)  # unscaled — hand rows keep their own conf
+
+
+def test_refinalise_refuses_once_sequence_has_edits(session):
+    """Re-finalising a detection run must refuse, not crash, once one of its
+    existing sequences has manual keypoint edits -- see
+    docs/roadmap/features/hand-detection-refinement (finalise_to_db edit-loss
+    bug): the delete cascade never removed pose_observation_edits, so a plain
+    re-finalise used to hit an unhandled FOREIGN KEY constraint failed instead
+    of a clear, intentional refusal.
+    """
+    session.execute(
+        "INSERT INTO detection_keypoints"
+        " (detection_run_id, shot_video_id, video_frame, track_id, region_type, keypoints, noise_scale)"
+        " VALUES ('run1', ?, 0, 1, 'full_body', ?, 0.5)",
+        (_SVID, _kp(1.0, 133)),
+    )
+    session.commit()
+
+    assignment = TrackAssignment(
+        shot_video_id=_SVID, track_id=1, person_name="alice",
+        first_frame=0, last_frame=0,
+    )
+    seq_ids = finalise_to_db(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        assignments=[assignment], pose_model="rtmpose-l-133kp",
+    )
+    seq_id = seq_ids[0]
+
+    session.execute(
+        "INSERT INTO pose_observation_edits"
+        " (id, sequence_id, camera_instance_id, video_frame, kp_blob, kp_mask)"
+        " VALUES (?, ?, ?, 0, ?, ?)",
+        (generate_id(), seq_id, _CAM_ID, _kp(9.0, 133), b"\x01" * 133),
+    )
+    session.commit()
+
+    with pytest.raises(RuntimeError, match="already has tracking results and/or manual"):
+        finalise_to_db(
+            session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+            assignments=[assignment], pose_model="rtmpose-l-133kp",
+        )
+
+    # Refused before touching anything -- the original sequence and its edit
+    # must both still exist untouched.
+    assert session.execute(
+        "SELECT count(*) FROM pose_observation_sequences WHERE id=?", (seq_id,)
+    ).fetchone()[0] == 1
+    assert session.execute(
+        "SELECT count(*) FROM pose_observation_edits WHERE sequence_id=?", (seq_id,)
+    ).fetchone()[0] == 1

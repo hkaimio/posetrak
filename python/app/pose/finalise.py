@@ -98,13 +98,35 @@ def finalise_to_db(
     time_start_s = float(run_row["time_start_s"])
     time_end_s = float(run_row["time_end_s"])
 
-    # Delete existing sequences for this detection run (cascade manually)
+    # Delete existing sequences for this detection run (cascade manually).
+    # This supports re-finalising while track assignments are still being
+    # tuned (stitch -> finalise -> notice a mistake -> restitch -> finalise
+    # again) -- but only up to the point where real work has been built on
+    # top of a sequence. Once a sequence has tracking results and/or manual
+    # keypoint edits, detection runs are meant to be immutable: refuse
+    # instead of silently destroying that work (and instead of the FK
+    # violation on pose_observation_edits.sequence_id this cascade used to
+    # hit uncontrolled, since edits were never deleted here).
     existing_ids = [
         r[0] for r in session.execute(
             "SELECT id FROM pose_observation_sequences WHERE detection_run_id = ?",
             (detection_run_id,),
         )
     ]
+    for sid in existing_ids:
+        has_tracking = session.execute(
+            "SELECT 1 FROM tracking_runs WHERE observation_sequence_id = ? LIMIT 1", (sid,)
+        ).fetchone()
+        has_edits = session.execute(
+            "SELECT 1 FROM pose_observation_edits WHERE sequence_id = ? LIMIT 1", (sid,)
+        ).fetchone()
+        if has_tracking or has_edits:
+            raise RuntimeError(
+                f"Cannot re-finalise detection run {detection_run_id}: sequence {sid} "
+                "already has tracking results and/or manual keypoint edits. Detection "
+                "runs are immutable once tracked or edited -- create a new detection "
+                "run instead of re-finalising this one."
+            )
     for sid in existing_ids:
         session.execute(
             "DELETE FROM tracking_results WHERE run_id IN "

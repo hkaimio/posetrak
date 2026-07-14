@@ -69,3 +69,45 @@ def test_unknown_source_is_ignored():
 
 def test_empty_rows_returns_none():
     assert merge_observation_sources([]) is None
+
+
+def test_refined_overrides_its_base_source():
+    body = _kp(1.0)
+    hand_l = _kp(2.0, n=21)
+    hand_l_refined = _kp(5.0, n=21)
+    merged = merge_observation_sources(
+        [("body", body), ("hand_l", hand_l), ("hand_l.refined", hand_l_refined)]
+    )
+    np.testing.assert_array_equal(merged[91:112], hand_l_refined)
+    np.testing.assert_array_equal(merged[:91], body[:91])
+
+
+def test_refined_wins_regardless_of_row_order():
+    """The DB has no ORDER BY on source, so the merge must not rely on
+    '.refined' rows happening to arrive after their base row."""
+    body = _kp(1.0)
+    hand_l = _kp(2.0, n=21)
+    hand_l_refined = _kp(5.0, n=21)
+    merged = merge_observation_sources(
+        [("hand_l.refined", hand_l_refined), ("body", body), ("hand_l", hand_l)]
+    )
+    np.testing.assert_array_equal(merged[91:112], hand_l_refined)
+
+
+def test_refined_alone_without_base_still_applies():
+    body = _kp(1.0)
+    hand_r_refined = _kp(7.0, n=21)
+    merged = merge_observation_sources([("body", body), ("hand_r.refined", hand_r_refined)])
+    np.testing.assert_array_equal(merged[112:133], hand_r_refined)
+
+
+def test_refined_on_one_side_does_not_affect_the_other():
+    body = _kp(1.0)
+    hand_l = _kp(2.0, n=21)
+    hand_r = _kp(3.0, n=21)
+    hand_l_refined = _kp(9.0, n=21)
+    merged = merge_observation_sources(
+        [("body", body), ("hand_l", hand_l), ("hand_r", hand_r), ("hand_l.refined", hand_l_refined)]
+    )
+    np.testing.assert_array_equal(merged[91:112], hand_l_refined)
+    np.testing.assert_array_equal(merged[112:133], hand_r)

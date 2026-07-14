@@ -9,6 +9,14 @@ into one dense per-marker array before doing anything else with them. This
 module is the single place that implements that merge so read-path call
 sites can't drift out of sync with each other.
 
+Idea 3 (automated post-edit redetection) adds a second, generic layer on top:
+any source of the form '<base>.refined' takes precedence over its plain
+'<base>' counterpart, per marker slot, for the same (camera, frame). Hand
+redetection ('hand_l' -> 'hand_l.refined', 'hand_r' -> 'hand_r.refined') is
+just the first feature to use this — the rule itself has no hand-specific
+knowledge, so a later auto-detection-after-edit feature can reuse it without
+its own merge special-case.
+
 See docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md.
 """
 from __future__ import annotations
@@ -16,13 +24,28 @@ from __future__ import annotations
 import numpy as np
 
 BODY_SOURCE = "body"
+_REFINED_SUFFIX = ".refined"
 
 # Keep in sync with posetrak.detection.hand_refinement's _HAND_BASE_IDX /
 # _HAND_N_KP (hand21 keypoints are written at COCO-133 offset 91 for the left
 # hand, 112 for the right hand). Duplicated rather than imported so this
 # low-level db module doesn't depend on the detection pipeline package.
-_HAND_BASE_IDX = {"hand_l": 91, "hand_r": 112}
-_HAND_N_KP = 21
+#
+# Maps a *base* source name (any '.refined' suffix already stripped) to its
+# (start_index, count) placement in the merged array. 'body' isn't listed
+# here — it's the base layer that establishes the merged array's width,
+# handled separately below; only overlay sources place into a sub-range of it.
+_SOURCE_PLACEMENT = {
+    "hand_l": (91, 21),
+    "hand_r": (112, 21),
+}
+
+
+def _split_source(source: str) -> tuple[str, bool]:
+    """Split *source* into (base_name, is_refined)."""
+    if source.endswith(_REFINED_SUFFIX):
+        return source[: -len(_REFINED_SUFFIX)], True
+    return source, False
 
 
 def merge_observation_sources(
@@ -31,30 +54,40 @@ def merge_observation_sources(
     """Merge (source, kp[n,3]) rows sharing one (camera, frame) into one array.
 
     'body' is the base layer — its own row establishes the merged array's
-    width. 'hand_l'/'hand_r' rows overwrite their own COCO-133 index range on
-    top, the same precedence Phase 1 already validated by patching hand
-    keypoints directly into the whole-body blob. Rows for an unrecognised
-    source are ignored.
+    width. Every other recognised source (`_SOURCE_PLACEMENT`) overlays its
+    own index range on top, the same precedence Phase 1 already validated by
+    patching hand keypoints directly into the whole-body blob.
+
+    A source '<base>.refined' overrides its plain '<base>' counterpart for
+    the same slots — applied as two explicit passes (plain sources, then
+    '.refined' sources) rather than relying on *rows*' order, since nothing
+    upstream guarantees '.refined' rows arrive after their base row (the DB
+    query has no ORDER BY on source). Rows for an unrecognised base source
+    are ignored.
 
     Returns None if no 'body' row is present (nothing to merge onto).
     """
     body: np.ndarray | None = None
-    hand_rows: list[tuple[str, np.ndarray]] = []
+    overlay_rows: list[tuple[str, bool, np.ndarray]] = []  # (base, is_refined, kp)
     for source, kp in rows:
-        if source == BODY_SOURCE:
+        base, is_refined = _split_source(source)
+        if base == BODY_SOURCE and not is_refined:
             body = kp
-        elif source in _HAND_BASE_IDX:
-            hand_rows.append((source, kp))
+        elif base in _SOURCE_PLACEMENT:
+            overlay_rows.append((base, is_refined, kp))
 
     if body is None:
         return None
 
     merged = body.copy()
-    for source, kp in hand_rows:
-        base = _HAND_BASE_IDX[source]
-        n = min(_HAND_N_KP, kp.shape[0], merged.shape[0] - base)
-        if n <= 0:
-            continue
-        merged[base:base + n] = kp[:n]
+    for pass_is_refined in (False, True):
+        for base, is_refined, kp in overlay_rows:
+            if is_refined != pass_is_refined:
+                continue
+            start, count = _SOURCE_PLACEMENT[base]
+            n = min(count, kp.shape[0], merged.shape[0] - start)
+            if n <= 0:
+                continue
+            merged[start:start + n] = kp[:n]
 
     return merged

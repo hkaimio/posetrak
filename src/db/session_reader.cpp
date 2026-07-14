@@ -806,12 +806,31 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
     constexpr int kHandBaseIdxLeft = 91;
     constexpr int kHandBaseIdxRight = 112;
     constexpr int kHandNKp = 21;
-    auto hand_base_idx = [&](std::string const& source) -> int {
-        if (source == "hand_l")
+    // Takes a *base* source name (any ".refined" suffix already stripped by
+    // split_source below) -- 'hand_l' and 'hand_l.refined' both resolve here
+    // via the same base name.
+    auto hand_base_idx = [&](std::string const& base_source) -> int {
+        if (base_source == "hand_l")
             return kHandBaseIdxLeft;
-        if (source == "hand_r")
+        if (base_source == "hand_r")
             return kHandBaseIdxRight;
         return -1;
+    };
+
+    // Idea 3 (automated post-edit redetection): a source '<base>.refined'
+    // overrides its plain '<base>' counterpart for the same slots. This
+    // rule is generic (no hand-specific knowledge) -- see
+    // posetrak/db/observation_merge.py's Python mirror and the design doc's
+    // "Source tiering" section.
+    constexpr char const kRefinedSuffix[] = ".refined";
+    constexpr size_t kRefinedSuffixLen = sizeof(kRefinedSuffix) - 1;
+    auto split_source = [](std::string const& source) -> std::pair<std::string, bool> {
+        if (source.size() > kRefinedSuffixLen &&
+            source.compare(source.size() - kRefinedSuffixLen, kRefinedSuffixLen, kRefinedSuffix) ==
+                0) {
+            return {source.substr(0, source.size() - kRefinedSuffixLen), true};
+        }
+        return {source, false};
     };
 
     struct SourceRow {
@@ -864,15 +883,24 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
 
         std::vector<db::Keypoint> merged = base_row.kps;
         std::vector<double> merged_crop_scale(merged.size(), base_row.crop_scale);
-        for (auto const& r : group_rows) {
-            int base = hand_base_idx(r.source);
-            if (base < 0)
-                continue;
-            int n = std::min(
-                {kHandNKp, static_cast<int>(r.kps.size()), static_cast<int>(merged.size()) - base});
-            for (int k = 0; k < n; ++k) {
-                merged[static_cast<size_t>(base + k)] = r.kps[static_cast<size_t>(k)];
-                merged_crop_scale[static_cast<size_t>(base + k)] = r.crop_scale;
+        // Two explicit passes -- plain sources, then '.refined' sources on
+        // top -- rather than a single loop over group_rows in fetch order:
+        // the SQL query has no ORDER BY on source, so nothing guarantees a
+        // '.refined' row is seen after its plain counterpart otherwise.
+        for (bool want_refined : {false, true}) {
+            for (auto const& r : group_rows) {
+                auto [base_source, is_refined] = split_source(r.source);
+                if (is_refined != want_refined)
+                    continue;
+                int base = hand_base_idx(base_source);
+                if (base < 0)
+                    continue;
+                int n = std::min({kHandNKp, static_cast<int>(r.kps.size()),
+                                  static_cast<int>(merged.size()) - base});
+                for (int k = 0; k < n; ++k) {
+                    merged[static_cast<size_t>(base + k)] = r.kps[static_cast<size_t>(k)];
+                    merged_crop_scale[static_cast<size_t>(base + k)] = r.crop_scale;
+                }
             }
         }
 

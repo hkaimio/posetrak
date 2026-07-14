@@ -456,6 +456,17 @@ static void create_fixture_db() {
                    2.2);
         insert_row(2, "hand_l", make_kp_blob(21, {{4, {152.f, 162.f, 0.5f}}}), 0.32);
         insert_row(2, "hand_r", make_kp_blob(21, {{4, {172.f, 182.f, 0.6f}}}), 0.42);
+
+        // Frame 3: Idea 3 (automated post-edit redetection) -- 'hand_l.refined'
+        // must override 'hand_l' for the same slot. Inserted deliberately out of
+        // precedence order ('.refined' row written *before* its plain 'hand_l'
+        // counterpart) since the SELECT has no ORDER BY on source -- this must
+        // not matter to the merge result.
+        insert_row(3, "hand_l.refined", make_kp_blob(21, {{4, {350.f, 360.f, 0.7f}}}), 0.15);
+        insert_row(3, "body", make_kp_blob(133, {{0, {13.f, 23.f, 0.9f}}, {5, {53.f, 63.f, 0.9f}}}),
+                   2.3);
+        insert_row(3, "hand_l", make_kp_blob(21, {{4, {153.f, 163.f, 0.5f}}}), 0.33);
+        insert_row(3, "hand_r", make_kp_blob(21, {{4, {173.f, 183.f, 0.6f}}}), 0.43);
     }
 
     // Edits for seq_hands frame 0: one body-range index (5) and one hand-range
@@ -660,8 +671,9 @@ TEST_CASE("SessionReader load_observations merges body and hand source rows", "[
     auto const& seq = obs_set.sequences().begin()->second;
 
     // Frame 0 (edited) has 4 markers, frame 1 (body-only) has 2 (coco 95/116
-    // are absent that frame), frame 2 (unedited merge) has 4 -- 10 total.
-    REQUIRE(obs_set.total_observations() == 10);
+    // are absent that frame), frame 2 (unedited merge) has 4, frame 3
+    // (hand_l.refined precedence) has 4 -- 14 total.
+    REQUIRE(obs_set.total_observations() == 14);
 
     // Frame 2: no edits applied -- raw per-source values and crop_scale survive
     // the merge. Observations come out in ascending coco-index order (0, 5, 95, 116).
@@ -725,4 +737,44 @@ TEST_CASE("SessionReader load_observations applies edits to the merged array", "
     REQUIRE(frame0[3].position_distorted.x() == Catch::Approx(170.0));
     REQUIRE(frame0[3].position_distorted.y() == Catch::Approx(180.0));
     REQUIRE(frame0[3].crop_scale == Catch::Approx(0.4));
+}
+
+// ---------------------------------------------------------------------------
+// Idea 3 (automated post-edit redetection): a '<base>.refined' source row
+// must override its plain '<base>' counterpart for the same slots, and this
+// must not depend on fetch order -- the SELECT has no ORDER BY on source.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SessionReader load_observations lets hand_l.refined override hand_l",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    auto cameras = reader.load_cameras_for_sequence("seq_hands");
+    auto skeleton = make_test_skeleton_with_hands();
+
+    auto obs_set = reader.load_observations("seq_hands", cameras, skeleton, 0.1, 0);
+    auto const& seq = obs_set.sequences().begin()->second;
+
+    std::vector<Observation> frame3;
+    for (auto const& o : seq.observations)
+        if (o.frame_idx == 3)
+            frame3.push_back(o);
+    REQUIRE(frame3.size() == 4);
+
+    // coco 0 ("nose") and coco 5 ("body5") -- from the 'body' row, unaffected.
+    REQUIRE(frame3[0].position_distorted.x() == Catch::Approx(13.0));
+    REQUIRE(frame3[1].position_distorted.x() == Catch::Approx(53.0));
+
+    // coco 95 ("hand_l4"): 'hand_l.refined' (350, 360, crop_scale 0.15) wins
+    // over the plain 'hand_l' row (153, 163, crop_scale 0.33) for the same
+    // slot, even though the fixture inserted '.refined' *before* 'hand_l'.
+    REQUIRE(frame3[2].position_distorted.x() == Catch::Approx(350.0));
+    REQUIRE(frame3[2].position_distorted.y() == Catch::Approx(360.0));
+    REQUIRE(frame3[2].crop_scale == Catch::Approx(0.15));
+
+    // coco 116 ("hand_r4"): no '.refined' variant for this side -- the plain
+    // 'hand_r' row still applies untouched.
+    REQUIRE(frame3[3].position_distorted.x() == Catch::Approx(173.0));
+    REQUIRE(frame3[3].crop_scale == Catch::Approx(0.43));
 }

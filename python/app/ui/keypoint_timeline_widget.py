@@ -74,7 +74,13 @@ from PySide6.QtWidgets import (
 )
 
 from app.pose.kp_models import PoseModel
-from app.pose.timeline_status import STATUS_BLUE, STATUS_GREEN, STATUS_GREY, STATUS_YELLOW
+from app.pose.timeline_status import (
+    STATUS_BLUE,
+    STATUS_GREEN,
+    STATUS_GREY,
+    STATUS_ORANGE,
+    STATUS_YELLOW,
+)
 
 ROW_H = 16
 RULER_H = 22
@@ -90,6 +96,7 @@ _EYE_ICON_MARGIN = 4      # px gap between the icon and the label column's right
 _STATUS_COLORS = {
     STATUS_GREEN: QColor(80, 170, 80),
     STATUS_YELLOW: QColor(210, 190, 60),
+    STATUS_ORANGE: QColor(220, 140, 50),  # Idea 3: auto-redetected, not yet human-verified
     STATUS_BLUE: QColor(70, 130, 220),
     STATUS_GREY: QColor(120, 120, 120),
 }

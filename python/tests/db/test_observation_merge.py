@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from posetrak.db.observation_merge import merge_observation_sources
+from posetrak.db.observation_merge import merge_observation_sources, refined_indices
 
 N_KP = 133
 
@@ -111,3 +111,23 @@ def test_refined_on_one_side_does_not_affect_the_other():
     )
     np.testing.assert_array_equal(merged[91:112], hand_l_refined)
     np.testing.assert_array_equal(merged[112:133], hand_r)
+
+
+def test_refined_indices_empty_when_no_refined_rows():
+    body = _kp(1.0)
+    hand_l = _kp(2.0, n=21)
+    assert refined_indices([("body", body), ("hand_l", hand_l)]) == frozenset()
+
+
+def test_refined_indices_reports_the_refined_sides_range():
+    body = _kp(1.0)
+    hand_l_refined = _kp(5.0, n=21)
+    assert refined_indices([("body", body), ("hand_l.refined", hand_l_refined)]) == frozenset(
+        range(91, 112)
+    )
+
+
+def test_refined_indices_ignores_unrecognised_source():
+    body = _kp(1.0)
+    weird = _kp(9.0, n=21)
+    assert refined_indices([("body", body), ("face.refined", weird)]) == frozenset()

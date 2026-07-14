@@ -500,6 +500,84 @@ def clear_single_keypoint_edit(
     session.commit()
 
 
+# Idea 3 (automated post-edit hand redetection): interactively-redetected
+# hands are their own pose_observations row, source='hand_l.refined'/
+# 'hand_r.refined' -- see posetrak.db.observation_merge's generic
+# <base>.refined precedence convention. 'side' matches the vocabulary
+# posetrak.detection.hand_refinement already uses ("left"/"right").
+_HAND_REFINED_SOURCE = {"left": "hand_l.refined", "right": "hand_r.refined"}
+
+
+def write_hand_refinement(
+    session: sqlite3.Connection,
+    sequence_id: str,
+    camera_instance_id: str,
+    video_frame: int,
+    person_id: int,
+    timestamp_s: float,
+    side: str,
+    kp: np.ndarray,
+    noise_scale: float,
+) -> None:
+    """Upsert one interactively-redetected hand as its own pose_observations row.
+
+    Never overwrites the original batch 'hand_l'/'hand_r' row for the same
+    frame -- a different `source` value is a different primary-key row
+    (`sequence_id, camera_instance_id, video_frame, person_id, source`) --
+    and is itself always overridden by a human edit on the same slot at
+    load time (pose_observation_edits applies last, unchanged).
+
+    `detection_run_id` is left NULL: there is no dedicated "interactive
+    redetection" detection run, since minting one per edit wouldn't scale
+    (a real editing session produces thousands of these writes). Re-writing
+    for the same (camera, frame, side) is a plain overwrite, not
+    accumulation -- consistent with how edits and the batch hand pass
+    already behave.
+
+    Parameters
+    ----------
+    kp:
+        float32[21,3] hand21-order keypoints (x, y, confidence), full-frame
+        pixel coordinates -- same shape/format as a batch hand_l/hand_r row.
+    """
+    source = _HAND_REFINED_SOURCE[side]
+    kp_blob = kp.astype(np.float32).tobytes()
+    session.execute(
+        "INSERT OR REPLACE INTO pose_observations"
+        " (sequence_id, camera_instance_id, video_frame, timestamp_s, person_id,"
+        "  source, detection_run_id, kp_blob, noise_scale)"
+        " VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+        (sequence_id, camera_instance_id, video_frame, timestamp_s, person_id,
+         source, kp_blob, noise_scale),
+    )
+    session.commit()
+
+
+def revert_hand_refinement(
+    session: sqlite3.Connection,
+    sequence_id: str,
+    camera_instance_id: str,
+    video_frame: int,
+    person_id: int,
+    side: str,
+) -> None:
+    """Delete an interactively-redetected hand row ("reject", per the design doc).
+
+    Reverting falls back to whatever the batch 'hand_l'/'hand_r' row (or
+    nothing) provides for that slot, the same graceful-degradation
+    tolerance as any other sparse observation. No-op if there is no such
+    row.
+    """
+    source = _HAND_REFINED_SOURCE[side]
+    session.execute(
+        "DELETE FROM pose_observations"
+        " WHERE sequence_id = ? AND camera_instance_id = ? AND video_frame = ?"
+        " AND person_id = ? AND source = ?",
+        (sequence_id, camera_instance_id, video_frame, person_id, source),
+    )
+    session.commit()
+
+
 def read_track_spans(
     session: sqlite3.Connection,
     detection_run_id: str,

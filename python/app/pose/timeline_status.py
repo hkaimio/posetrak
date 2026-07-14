@@ -18,14 +18,16 @@ from collections import defaultdict
 
 import numpy as np
 
-from posetrak.db.observation_merge import merge_observation_sources
+from posetrak.db.observation_merge import merge_observation_sources, refined_indices
 
 # Ascending precedence: when aggregating several keypoints/cameras into one
-# cell, the maximum code wins (GREY > BLUE > YELLOW > GREEN).
+# cell, the maximum code wins (GREY > BLUE > ORANGE > YELLOW > GREEN).
 STATUS_GREEN = 0   # original detection, inside person segmentation (or no segmentation data)
 STATUS_YELLOW = 1  # original detection, outside person segmentation
-STATUS_BLUE = 2    # edited/moved, or explicitly kept as a keyframe (not disabled)
-STATUS_GREY = 3    # disabled (user-forced outlier), or no usable detection at all
+STATUS_ORANGE = 2  # from a '<base>.refined' source (Idea 3: automated post-edit
+                   # redetection) -- not yet human-verified
+STATUS_BLUE = 3    # edited/moved, or explicitly kept as a keyframe (not disabled)
+STATUS_GREY = 4    # disabled (user-forced outlier), or no usable detection at all
 
 # quality_blob values: 1.0=inside, 0.5=boundary, 0.0=outside, -1.0=unavailable.
 # Boundary counts as "inside enough" (not flagged yellow); unavailable (-1)
@@ -75,9 +77,11 @@ def read_timeline_status(
         by_frame_rows[r["video_frame"]].append((r["source"], kp))
 
     obs_by_frame: dict[int, np.ndarray] = {}
+    refined_by_frame: dict[int, frozenset[int]] = {}
     for frame, rows in by_frame_rows.items():
         merged = merge_observation_sources(rows)
         obs_by_frame[frame] = merged if merged is not None else rows[0][1]
+        refined_by_frame[frame] = refined_indices(rows)
 
     frames = sorted(set(obs_by_frame) | set(edits))
     if not frames:
@@ -107,6 +111,15 @@ def read_timeline_status(
                 if quality is not None:
                     outside = (quality >= 0.0) & (quality < _SEG_INSIDE_THRESHOLD)
                     status[(status == STATUS_GREEN) & outside] = STATUS_YELLOW
+
+        # Idea 3: a slot backed by a '<base>.refined' source is flagged
+        # ORANGE regardless of its GREEN/YELLOW sub-state above -- "this came
+        # from automated redetection, review it" is a more specific signal
+        # than the segmentation-quality flag, but still ranks below an
+        # actual human edit (checked next).
+        for i in refined_by_frame.get(frame, ()):
+            if i < n_kp and status[i] in (STATUS_GREEN, STATUS_YELLOW):
+                status[i] = STATUS_ORANGE
 
         edit = edits.get(frame)
         if edit is not None:

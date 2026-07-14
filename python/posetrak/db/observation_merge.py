@@ -91,3 +91,25 @@ def merge_observation_sources(
             merged[start:start + n] = kp[:n]
 
     return merged
+
+
+def refined_indices(rows: list[tuple[str, np.ndarray]]) -> frozenset[int]:
+    """Return which merged marker indices are currently backed by a
+    '<base>.refined' source among *rows*.
+
+    Used only by timeline_status.read_timeline_status to flag a slot as
+    "value came from automated redetection, not yet human-verified"
+    (`STATUS_ORANGE`) — `merge_observation_sources` itself doesn't need this
+    (its other caller, `read_observations_with_edits`, only wants merged
+    coordinates), so it's kept as a separate, small function rather than
+    changing that one's return shape.
+    """
+    refined: set[int] = set()
+    for source, kp in rows:
+        base, is_refined = _split_source(source)
+        if not is_refined or base not in _SOURCE_PLACEMENT:
+            continue
+        start, count = _SOURCE_PLACEMENT[base]
+        n = min(count, kp.shape[0])
+        refined.update(range(start, start + n))
+    return frozenset(refined)

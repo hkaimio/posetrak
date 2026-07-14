@@ -230,6 +230,8 @@ def _make_widget(qapp, db):
     w._video_dims = {}
     w._3d_ph = None
     w._ncols = 1
+    w._hand_redetect = None
+    w._hand_redetect_timers = {}
     w._grid = None
     w._backfill = None
     w._clipboard = None

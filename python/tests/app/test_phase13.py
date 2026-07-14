@@ -210,6 +210,8 @@ def _make_widget(db):
     w._seg_sources = {}
     w._track_segs = {}
     w._load_frame = MagicMock()
+    w._hand_redetect = None
+    w._hand_redetect_timers = {}
 
     mock_sync = MagicMock()
     mock_sync.lookup = lambda t, svid: round(t * 30)

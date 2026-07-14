@@ -14,7 +14,7 @@ _log = logging.getLogger(__name__)
 
 from math import ceil, isfinite, log10
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QThread, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -1521,6 +1521,28 @@ def _nearest_segment_track_id(
     return best_id
 
 
+# Idea 3 (automated post-edit hand redetection): a debounced timer per
+# (camera, frame, side) waits this long after the last wrist/elbow edit
+# before firing a redetect request -- an untuned guess (500ms-1s proposed
+# in the design doc), meant to be adjusted once tried against real editing.
+_HAND_REDETECT_DEBOUNCE_MS = 700
+
+
+def _hand_side_for_kp_idx(kp_idx: int) -> "str | None":
+    """Return "left"/"right" if *kp_idx* is a wrist or elbow index for that
+    side, else None -- the trigger condition for Idea 3's hand redetection.
+    """
+    from posetrak.detection.hand_refinement import _ELBOW_IDX, _WRIST_IDX
+
+    for side, idx in _WRIST_IDX.items():
+        if idx == kp_idx:
+            return side
+    for side, idx in _ELBOW_IDX.items():
+        if idx == kp_idx:
+            return side
+    return None
+
+
 def _kp_overlay_bbox(obs_kp, hidden_indices: "frozenset[int]"):
     """Bounding box (x0, y0, x1, y1), full-frame pixel coords, of keypoints
     that would actually be drawn for this frame (matches paintEvent's
@@ -2911,6 +2933,16 @@ class PersonCropGridWidget(QWidget):
     time_changed = Signal(float)    # emitted on every slider move (absolute timestamp_s)
     status_message = Signal(str)    # short notification for the main window status bar
 
+    # Idea 3 (automated post-edit hand redetection): class-level defaults so
+    # that test fixtures constructing this widget via
+    # `PersonCropGridWidget.__new__(...)` (bypassing __init__ -- an
+    # established pattern across this test suite) still see these as None/{}
+    # rather than raising AttributeError, without needing every such fixture
+    # updated individually. Real instances always get their own per-instance
+    # values from __init__ below.
+    _hand_redetect: "HandRedetectWorker | None" = None
+    _hand_redetect_timers: dict = {}
+
     def __init__(self, conn: sqlite3.Connection, sequence_id: str, parent=None) -> None:
         super().__init__(parent)
         self._conn = conn
@@ -2971,6 +3003,10 @@ class PersonCropGridWidget(QWidget):
         self._outlier_masks: dict[str, dict[int, object]] = {}
         self._backfill: CropBackfillWorker | None = None
         self._wide_crop_mgr: "FrameCropCacheManager | None" = None
+        # Idea 3 (automated post-edit hand redetection): background worker +
+        # debounce timers keyed by (camera_instance_id, video_frame, side).
+        self._hand_redetect: "HandRedetectWorker | None" = None
+        self._hand_redetect_timers: dict[tuple[str, int, str], QTimer] = {}
         self._loader: _TrackingRunLoader | None = None
         self._maximized_idx: int | None = None
         self._pose_model: PoseModel = _get_pose_model(None)  # updated in _build
@@ -3467,10 +3503,20 @@ class PersonCropGridWidget(QWidget):
                 self._wide_crop_mgr.frame_ready.disconnect(self._on_crop_ready)
                 self._wide_crop_mgr.release()
                 self._wide_crop_mgr = None
+            # Idea 3: hand redetection only makes sense while editing --
+            # same edit-mode-only lifecycle as the wide-crop cache above.
+            for timer in self._hand_redetect_timers.values():
+                timer.stop()
+            self._hand_redetect_timers.clear()
+            if self._hand_redetect is not None:
+                self._hand_redetect.result_ready.disconnect(self._on_hand_redetect_ready)
+                self._hand_redetect.stop()
+                self._hand_redetect = None
         else:
             if self._backfill is None:
                 self._start_backfill()
             self._start_wide_crop_cache()
+            self._start_hand_redetect()
         for cell in self._cells:
             cell.set_edit_mode(enabled)
             if not enabled:
@@ -3530,6 +3576,28 @@ class PersonCropGridWidget(QWidget):
         mgr.frame_ready.connect(self._on_crop_ready)
         self._wide_crop_mgr = mgr
 
+    def _start_hand_redetect(self) -> None:
+        """Start the background hand-redetection worker (Idea 3).
+
+        Scoped to this panel's (sequence, person) -- unlike the wide-crop
+        cache, there's no cross-panel sharing concern here since a
+        redetection write is specific to one person's sequence.
+        """
+        row = self._conn.execute("PRAGMA database_list").fetchone()
+        if row is None or not row[2]:
+            return
+        db_path = row[2]
+        from app.ui.hand_redetect_worker import HandRedetectWorker
+
+        try:
+            worker = HandRedetectWorker(db_path, self._sequence_id, 0, self._cameras)
+        except ImportError:
+            _log.warning("hand-redetect: rtmlib unavailable, skipping")
+            return
+        worker.result_ready.connect(self._on_hand_redetect_ready)
+        self._hand_redetect = worker
+        worker.start()
+
     def _on_crop_ready(self, svid: str, frame_idx: int) -> None:
         """Called on the main thread when the backfill worker writes a new crop."""
         _log.debug("backfill: crop ready  svid=%s  frame=%d", svid, frame_idx)
@@ -3542,6 +3610,98 @@ class PersonCropGridWidget(QWidget):
                     _log.debug("backfill: refreshing display for current frame %d", frame_idx)
                     self._load_frame(self._current_t)
                 break
+
+    def _on_hand_redetect_ready(self, cam_id: str, frame_idx: int) -> None:
+        """Called on the main thread when the hand-redetect worker (Idea 3)
+        writes a new 'hand_l.refined'/'hand_r.refined' row."""
+        from app.pose.db_cache import read_observations_with_edits
+
+        self._obs_kp[cam_id] = read_observations_with_edits(self._conn, self._sequence_id, cam_id)
+        self._refresh_timeline_status(cam_id)
+        if not self._sync_table:
+            return
+        for cam in self._cameras:
+            if cam["camera_instance_id"] == cam_id:
+                current_fi = self._sync_table.lookup(self._current_t, cam["shot_video_id"])
+                if current_fi == frame_idx:
+                    self._load_frame(self._current_t)
+                break
+
+    def _maybe_queue_hand_redetect(self, cam_id: str, svid: str, frame_idx: int, kp_idx: int) -> None:
+        """After any keypoint edit, arm a debounced hand-redetect request if
+        *kp_idx* is a wrist/elbow index for either hand side -- the
+        converged trigger point every editing operation funnels through
+        (see Idea 3's design doc). No-op if the worker isn't running (not
+        in edit mode, or rtmlib unavailable).
+        """
+        if self._hand_redetect is None:
+            return
+        side = _hand_side_for_kp_idx(kp_idx)
+        if side is None:
+            return
+        key = (cam_id, frame_idx, side)
+        timer = self._hand_redetect_timers.get(key)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(
+                lambda: self._fire_hand_redetect(cam_id, svid, frame_idx, side)
+            )
+            self._hand_redetect_timers[key] = timer
+        timer.start(_HAND_REDETECT_DEBOUNCE_MS)
+
+    def _fire_hand_redetect(self, cam_id: str, svid: str, frame_idx: int, side: str) -> None:
+        """Debounce timer fired: look up the *current* wrist/elbow position
+        (edited if available, tracked otherwise -- same anchor convention as
+        Idea 2's batch crop) and queue a single-frame redetect request."""
+        from posetrak.detection.hand_refinement import _ELBOW_IDX, _WRIST_IDX
+
+        self._hand_redetect_timers.pop((cam_id, frame_idx, side), None)
+        if self._hand_redetect is None or not self._sync_table:
+            return
+        kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
+        if kp is None:
+            return
+        wrist_idx, elbow_idx = _WRIST_IDX[side], _ELBOW_IDX[side]
+        if wrist_idx >= kp.shape[0] or kp[wrist_idx, 2] <= 0.0:
+            return
+        wrist = (float(kp[wrist_idx, 0]), float(kp[wrist_idx, 1]))
+        elbow = None
+        if elbow_idx < kp.shape[0] and kp[elbow_idx, 2] > 0.0:
+            elbow = (float(kp[elbow_idx, 0]), float(kp[elbow_idx, 1]))
+        timestamp_s = self._sync_table.frame_to_global_time(frame_idx, svid)
+        if timestamp_s is None:
+            return
+        self._hand_redetect.request_frame(svid, frame_idx, timestamp_s, side, wrist, elbow)
+
+    def _queue_hand_redetect_range(
+        self, cam_id: str, svid: str, side: str, frames: "set[int]",
+    ) -> None:
+        """Queue one range redetect request covering *frames* (the
+        interpolation-fill case -- see Idea 3's design doc). Reads the
+        just-written wrist/elbow positions from `self._obs_kp` directly
+        rather than debouncing, since an interpolation batch is already
+        settled by the time this is called."""
+        from posetrak.detection.hand_refinement import _ELBOW_IDX, _WRIST_IDX
+
+        if self._hand_redetect is None or not frames or not self._sync_table:
+            return
+        kp_by_frame = self._obs_kp.get(cam_id, {})
+        wrist_idx, elbow_idx = _WRIST_IDX[side], _ELBOW_IDX[side]
+        anchor_by_frame: dict[int, tuple] = {}
+        for f in frames:
+            kp = kp_by_frame.get(f)
+            if kp is None or wrist_idx >= kp.shape[0] or kp[wrist_idx, 2] <= 0.0:
+                continue
+            wrist = (float(kp[wrist_idx, 0]), float(kp[wrist_idx, 1]))
+            elbow = None
+            if elbow_idx < kp.shape[0] and kp[elbow_idx, 2] > 0.0:
+                elbow = (float(kp[elbow_idx, 0]), float(kp[elbow_idx, 1]))
+            ts = self._sync_table.frame_to_global_time(f, svid)
+            if ts is None:
+                continue
+            anchor_by_frame[f] = (ts, wrist, elbow)
+        self._hand_redetect.request_range(svid, side, anchor_by_frame)
 
     def _on_kp_selected(self, cam_idx: int, kp_idx: int) -> None:
         """Plain left-click on a dot: sole selection."""
@@ -3631,6 +3791,21 @@ class PersonCropGridWidget(QWidget):
             if self._range_start_v is not None:
                 interp_act = menu.addAction("Interpolate missing")
                 interp_act.triggered.connect(self._interpolate_missing_range)
+        cam = self._cameras[cam_idx]
+        cam_id = cam["camera_instance_id"]
+        frame_idx = (
+            self._sync_table.lookup(self._current_t, cam["shot_video_id"])
+            if self._sync_table else None
+        )
+        refined_sides = self._refined_sides_at(cam_id, frame_idx) if frame_idx is not None else set()
+        if refined_sides:
+            menu.addSeparator()
+            for side in sorted(refined_sides):
+                label = "Revert left-hand redetection" if side == "left" else "Revert right-hand redetection"
+                revert_act = menu.addAction(label)
+                revert_act.triggered.connect(
+                    lambda checked=False, ci=cam_id, f=frame_idx, s=side: self._revert_hand_redetect(ci, f, s)
+                )
         cell = self._cells[cam_idx]
         if cell._canvas._zoom_rect is not None:
             menu.addSeparator()
@@ -3651,6 +3826,31 @@ class PersonCropGridWidget(QWidget):
         self._primary_kp_idx = next(iter(self._sel_kp_indices), None)
         if cam_idx is not None:
             self._sel_cam_idx = cam_idx
+        self._load_frame(self._current_t)
+
+    def _refined_sides_at(self, cam_id: str, frame_idx: int) -> "set[str]":
+        """Which hand sides currently have a 'hand_l.refined'/'hand_r.refined'
+        row for this (camera, frame) -- used to only offer "Revert hand
+        redetection" (Idea 3) when there's actually something to revert."""
+        from app.pose.db_cache import _HAND_REFINED_SOURCE
+
+        rows = self._conn.execute(
+            "SELECT source FROM pose_observations"
+            " WHERE sequence_id=? AND camera_instance_id=? AND video_frame=?",
+            (self._sequence_id, cam_id, frame_idx),
+        ).fetchall()
+        by_source = {r["source"] for r in rows}
+        return {side for side, source in _HAND_REFINED_SOURCE.items() if source in by_source}
+
+    def _revert_hand_redetect(self, cam_id: str, frame_idx: int, side: str) -> None:
+        """Revert-hand-redetection context-menu action (Idea 3): delete the
+        interactively-redetected row, falling back to whatever the batch
+        'hand_l'/'hand_r' row (or nothing) provides for that slot instead."""
+        from app.pose.db_cache import read_observations_with_edits, revert_hand_refinement
+
+        revert_hand_refinement(self._conn, self._sequence_id, cam_id, frame_idx, 0, side=side)
+        self._obs_kp[cam_id] = read_observations_with_edits(self._conn, self._sequence_id, cam_id)
+        self._refresh_timeline_status(cam_id)
         self._load_frame(self._current_t)
 
     def _on_empty_area_clicked(self, cam_idx: int, dx: float, dy: float) -> None:
@@ -3687,6 +3887,7 @@ class PersonCropGridWidget(QWidget):
             self._conn, self._sequence_id, cam_id
         )
         self._refresh_timeline_status(cam_id)
+        self._maybe_queue_hand_redetect(cam_id, svid, frame_idx, kp_idx)
         self._load_frame(self._current_t)
 
     def _on_kp_picked(self, kp_idx: int) -> None:
@@ -3923,6 +4124,7 @@ class PersonCropGridWidget(QWidget):
             update_single_keypoint_edit(
                 self._conn, self._sequence_id, cam_id, frame_idx, kp_idx, x, y
             )
+            self._maybe_queue_hand_redetect(cam_id, svid, frame_idx, kp_idx)
         self._obs_kp[cam_id] = read_observations_with_edits(
             self._conn, self._sequence_id, cam_id
         )
@@ -4048,6 +4250,11 @@ class PersonCropGridWidget(QWidget):
             )
 
             any_written = False
+            # Idea 3: frames actually written for a wrist/elbow index, per
+            # hand side -- queued as one redetect range per side below,
+            # covering exactly the interpolated (non-anchor) frames, once
+            # the whole kp_idx loop below has settled.
+            touched_frames_by_side: dict[str, set[int]] = {}
             for kp_idx in self._sel_kp_indices:
                 if kp_idx >= kp_l.shape[0] or kp_idx >= kp_r.shape[0]:
                     continue
@@ -4070,6 +4277,7 @@ class PersonCropGridWidget(QWidget):
                 anchors.sort(key=lambda a: a[0])
                 anchor_frames = {a[0] for a in anchors}
 
+                side = _hand_side_for_kp_idx(kp_idx)
                 for (f0, x0, y0), (f1, x1, y1) in zip(anchors, anchors[1:]):
                     span = f1 - f0
                     if span <= 0:
@@ -4084,12 +4292,16 @@ class PersonCropGridWidget(QWidget):
                             self._conn, self._sequence_id, cam_id, f, kp_idx, x, y
                         )
                         any_written = True
+                        if side is not None:
+                            touched_frames_by_side.setdefault(side, set()).add(f)
 
             if any_written:
                 self._obs_kp[cam_id] = read_observations_with_edits(
                     self._conn, self._sequence_id, cam_id
                 )
                 self._refresh_timeline_status(cam_id)
+                for side, frames in touched_frames_by_side.items():
+                    self._queue_hand_redetect_range(cam_id, svid, side, frames)
 
         self._range_start_v = None
         self._range_end_v = None
@@ -4121,6 +4333,7 @@ class PersonCropGridWidget(QWidget):
                 float(kp[kp_idx, 0]) + dx,
                 float(kp[kp_idx, 1]) + dy,
             )
+            self._maybe_queue_hand_redetect(cam_id, svid, frame_idx, kp_idx)
         self._obs_kp[cam_id] = read_observations_with_edits(
             self._conn, self._sequence_id, cam_id
         )
@@ -4183,6 +4396,7 @@ class PersonCropGridWidget(QWidget):
                     float(kp_f[kp_idx, 1]),
                     is_outlier=is_outlier,
                 )
+                self._maybe_queue_hand_redetect(cam_id, svid, f, kp_idx)
         self._obs_kp[cam_id] = read_observations_with_edits(
             self._conn, self._sequence_id, cam_id
         )
@@ -4215,6 +4429,7 @@ class PersonCropGridWidget(QWidget):
             kp_by_frame = self._obs_kp.get(cam_id, {})
 
             any_written = False
+            touched_frames_by_side: dict[str, set[int]] = {}
             for kp_idx in self._sel_kp_indices:
                 present: list[tuple[int, float, float]] = []
                 for f in range_frames:
@@ -4227,6 +4442,7 @@ class PersonCropGridWidget(QWidget):
                     continue  # nothing to interpolate from
 
                 present_frames = {f for f, _, _ in present}
+                side = _hand_side_for_kp_idx(kp_idx)
                 for (f0, x0, y0), (f1, x1, y1) in zip(present, present[1:]):
                     span = f1 - f0
                     if span <= 0:
@@ -4241,12 +4457,16 @@ class PersonCropGridWidget(QWidget):
                             self._conn, self._sequence_id, cam_id, f, kp_idx, x, y
                         )
                         any_written = True
+                        if side is not None:
+                            touched_frames_by_side.setdefault(side, set()).add(f)
 
             if any_written:
                 self._obs_kp[cam_id] = read_observations_with_edits(
                     self._conn, self._sequence_id, cam_id
                 )
                 self._refresh_timeline_status(cam_id)
+                for side, frames in touched_frames_by_side.items():
+                    self._queue_hand_redetect_range(cam_id, svid, side, frames)
 
         self._load_frame(self._current_t)
         n = len(self._sel_kp_indices)
@@ -4522,6 +4742,7 @@ class PersonCropGridWidget(QWidget):
                 self._conn, self._sequence_id, cam_id, frame_idx, kp_idx,
                 float(kp[kp_idx, 0]), float(kp[kp_idx, 1]), is_outlier=False,
             )
+        self._maybe_queue_hand_redetect(cam_id, svid, frame_idx, kp_idx)
         self._obs_kp[cam_id] = read_observations_with_edits(self._conn, self._sequence_id, cam_id)
         self._refresh_timeline_status(cam_id)
         self._load_frame(self._current_t)

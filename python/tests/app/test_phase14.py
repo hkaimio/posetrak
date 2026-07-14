@@ -112,6 +112,8 @@ def _make_widget(qapp, db):
     w._bone_pairs = []
     w._tracking_timestamps = []
     w._outlier_masks = {}
+    w._hand_redetect = None
+    w._hand_redetect_timers = {}
     w._seg_sources = {}
     w._track_segs = {}
     w._video_dims = {}

@@ -191,6 +191,7 @@ class HandRedetectWorker(QThread):
 
         try:
             conn = sqlite3.connect(self._db_path)
+            conn.row_factory = sqlite3.Row  # clear_disabled_hand_edits needs dict-style access
         except Exception:
             _log.exception("hand-redetect worker: failed to open DB")
             return
@@ -206,6 +207,27 @@ class HandRedetectWorker(QThread):
             return caps[svid]
 
         def process_and_write(
+            svid: str, frame_idx: int, timestamp_s: float, side: str, bgr,
+            wrist: tuple[float, float], elbow: tuple[float, float] | None,
+        ) -> None:
+            # A bug in here must not kill the whole worker thread -- it did
+            # exactly that during real-session testing (an uncaught
+            # exception propagated out of the while-loop body, silently
+            # ending run() after the very first request; every request
+            # after that was queued but never processed again, with no
+            # crash and no further log output). One bad request should log
+            # and move on, not take the rest of the session down with it.
+            try:
+                _process_and_write_unsafe(
+                    svid, frame_idx, timestamp_s, side, bgr, wrist, elbow,
+                )
+            except Exception:
+                _log.exception(
+                    "hand-redetect: unhandled error processing request  cam=%s frame=%d side=%s",
+                    self._cam_id_by_svid.get(svid), frame_idx, side,
+                )
+
+        def _process_and_write_unsafe(
             svid: str, frame_idx: int, timestamp_s: float, side: str, bgr,
             wrist: tuple[float, float], elbow: tuple[float, float] | None,
         ) -> None:
@@ -247,6 +269,66 @@ class HandRedetectWorker(QThread):
             )
             self.result_ready.emit(cam_id, frame_idx)
 
+        def process_task(task) -> None:
+            if task[0] == "frame":
+                _, svid, frame_idx, timestamp_s, side, wrist, elbow = task
+                cap = get_cap(svid)
+                if cap is None:
+                    return
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ok, bgr = cap.read()
+                if not ok:
+                    _log.warning(
+                        "hand-redetect: frame read failed  svid=%s frame=%d", svid, frame_idx,
+                    )
+                    return
+                actual = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+                if actual != frame_idx:
+                    # cv2's frame-index seeking is known to drift on
+                    # inter-frame-coded video -- surface it rather than
+                    # silently cropping around the wrong image.
+                    _log.warning(
+                        "hand-redetect: seek drift  requested frame=%d  actually decoded=%d"
+                        "  svid=%s -- gate may reject due to wrong crop",
+                        frame_idx, actual, svid,
+                    )
+                process_and_write(svid, frame_idx, timestamp_s, side, bgr, wrist, elbow)
+
+            else:  # "range"
+                _, svid, side, anchor_by_frame = task
+                cap = get_cap(svid)
+                if cap is None:
+                    return
+                frames = sorted(anchor_by_frame)
+                frame_set = set(frames)
+                last_frame = frames[-1]
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frames[0])
+                while True:
+                    if self._stop_event.is_set():
+                        break
+                    ok, bgr = cap.read()
+                    if not ok:
+                        _log.warning(
+                            "hand-redetect: range read failed, stopping early  svid=%s"
+                            " last_requested=%d", svid, last_frame,
+                        )
+                        break
+                    # POS_FRAMES after read() reports the index of the
+                    # *next* frame to decode -- one past what we just got.
+                    # Trust this over a manually incremented counter: cv2's
+                    # seek is known to drift on inter-frame-coded video,
+                    # and a naive counter would silently process an anchor
+                    # against the wrong image once that happens (this used
+                    # to be exactly such a counter -- fixed after
+                    # real-session testing showed the range path failing
+                    # more than the single-frame path).
+                    cur = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+                    if cur in frame_set:
+                        timestamp_s, wrist, elbow = anchor_by_frame[cur]
+                        process_and_write(svid, cur, timestamp_s, side, bgr, wrist, elbow)
+                    if cur >= last_frame:
+                        break
+
         try:
             while True:
                 with self._cv:
@@ -256,65 +338,15 @@ class HandRedetectWorker(QThread):
                         return
                     task = self._queue.popleft()
 
-                if task[0] == "frame":
-                    _, svid, frame_idx, timestamp_s, side, wrist, elbow = task
-                    cap = get_cap(svid)
-                    if cap is None:
-                        continue
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                    ok, bgr = cap.read()
-                    if not ok:
-                        _log.warning(
-                            "hand-redetect: frame read failed  svid=%s frame=%d", svid, frame_idx,
-                        )
-                        continue
-                    actual = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-                    if actual != frame_idx:
-                        # cv2's frame-index seeking is known to drift on
-                        # inter-frame-coded video -- surface it rather than
-                        # silently cropping around the wrong image.
-                        _log.warning(
-                            "hand-redetect: seek drift  requested frame=%d  actually decoded=%d"
-                            "  svid=%s -- gate may reject due to wrong crop",
-                            frame_idx, actual, svid,
-                        )
-                    process_and_write(svid, frame_idx, timestamp_s, side, bgr, wrist, elbow)
-
-                else:  # "range"
-                    _, svid, side, anchor_by_frame = task
-                    cap = get_cap(svid)
-                    if cap is None:
-                        continue
-                    frames = sorted(anchor_by_frame)
-                    frame_set = set(frames)
-                    last_frame = frames[-1]
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, frames[0])
-                    while True:
-                        if self._stop_event.is_set():
-                            break
-                        ok, bgr = cap.read()
-                        if not ok:
-                            _log.warning(
-                                "hand-redetect: range read failed, stopping early  svid=%s"
-                                " last_requested=%d", svid, last_frame,
-                            )
-                            break
-                        # POS_FRAMES after read() reports the index of the
-                        # *next* frame to decode -- one past what we just
-                        # got. Trust this over a manually incremented
-                        # counter: cv2's seek is known to drift on
-                        # inter-frame-coded video, and a naive counter would
-                        # silently process an anchor against the wrong
-                        # image once that happens (this used to be exactly
-                        # such a counter -- fixed after real-session
-                        # testing showed the range path failing more than
-                        # the single-frame path).
-                        cur = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-                        if cur in frame_set:
-                            timestamp_s, wrist, elbow = anchor_by_frame[cur]
-                            process_and_write(svid, cur, timestamp_s, side, bgr, wrist, elbow)
-                        if cur >= last_frame:
-                            break
+                try:
+                    process_task(task)
+                except Exception:
+                    # Belt-and-braces on top of process_and_write's own
+                    # try/except: anything unexpected here (video I/O,
+                    # dequeue bookkeeping) must not silently end run() --
+                    # see process_and_write's comment for why that's a real
+                    # failure mode this worker already hit once.
+                    _log.exception("hand-redetect: unhandled error processing task %r", task[0])
         finally:
             for cap in caps.values():
                 if cap is not None:

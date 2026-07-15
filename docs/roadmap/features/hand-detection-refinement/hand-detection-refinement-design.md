@@ -1,5 +1,26 @@
 # Hand-detection refinement & trusted-edit gate bypass — design sketch
 
+> **Status (2026-07-15, update 9)**: Phase 5 (real-session validation)
+> confirmed working end-to-end after fixing two real bugs found via live
+> testing with the new diagnostic logging (commits 70e7cf1, 098c477): (1)
+> the interpolation-range path tracked its position with a manually
+> incremented counter instead of trusting `cv2`'s own reported frame
+> position, so it could silently desync from what was actually decoded on
+> inter-frame-coded video; (2) bigger one — `HandRedetectWorker.run()`
+> opened its own SQLite connection without setting
+> `row_factory = sqlite3.Row`, so `clear_disabled_hand_edits`'s dict-style
+> row access crashed, and with no exception handling anywhere in the task
+> loop, that silently killed the whole worker thread after its very first
+> request — every edit after that queued but was never processed, with no
+> crash and no further log output. This is why the feature "worked once,
+> then did nothing." Fixed both, plus added per-task exception handling so
+> a bug like #2 degrades instead of permanently killing the thread, and
+> end-to-end logging (trigger arm/fire and why-not, worker request receipt,
+> `detect_hand_in_crop` gate pass/reject with actual distance vs threshold,
+> write outcome). Idea 3 is implemented and validated; not yet done: tuning
+> the 700ms debounce window against extended real use, and a
+> hand-completion-time comparison.
+
 > **Status (2026-07-14, update 8)**: Idea 3 implemented (Phases 1-4 of the
 > implementation plan) and validated against a real editing session
 > (Phase 5), which surfaced a real workflow gap: a common troubleshooting

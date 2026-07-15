@@ -177,6 +177,28 @@ def test_human_edit_still_wins_over_refined_status(hand_db):
     assert status[96] == STATUS_ORANGE
 
 
+def test_refined_hand_on_a_ghost_frame_does_not_crash_timeline_status(hand_db):
+    """Reproduces a crash seen in real use: placing a wrist/elbow via an edit
+    on a frame with no original 'body' detection ("set limb" on a gap), then
+    auto-redetection writes only a 'hand_l.refined' row for that frame.  With
+    no 'body' row of its own, that frame used to merge to a bare 21-point
+    array while every other frame in the camera was 133-wide, and
+    read_timeline_status crashed comparing a 133-wide status array against a
+    21-wide observation array."""
+    from app.pose.db_cache import write_hand_refinement
+
+    # Frame 2 has no 'body' row at all -- only the auto-redetected overlay.
+    write_hand_refinement(
+        hand_db, "seq1", "ci1", 2, 0, timestamp_s=0.066, side="left",
+        kp=_hand_kp(0.9), noise_scale=0.2,
+    )
+
+    status = read_timeline_status(hand_db, "seq1", "ci1")[2]
+    assert status.shape == (_N_KP,)
+    assert all(status[91:112] == STATUS_ORANGE)
+    assert status[0] == STATUS_GREY  # no body detection at all on this frame
+
+
 def test_reverting_refinement_restores_prior_status(hand_db):
     from app.pose.db_cache import revert_hand_refinement, write_hand_refinement
 

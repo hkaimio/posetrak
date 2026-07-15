@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from posetrak.db.observation_merge import merge_observation_sources, refined_indices
+from posetrak.db.observation_merge import (
+    infer_body_width,
+    merge_observation_sources,
+    refined_indices,
+)
 
 N_KP = 133
 
@@ -131,3 +135,35 @@ def test_refined_indices_ignores_unrecognised_source():
     body = _kp(1.0)
     weird = _kp(9.0, n=21)
     assert refined_indices([("body", body), ("face.refined", weird)]) == frozenset()
+
+
+def test_no_body_row_with_default_width_synthesizes_zero_body():
+    """A ghost frame's auto-redetected hand (no 'body' row of its own) must
+    still merge to the camera's full width, not the bare 21-kp overlay --
+    otherwise downstream code that assumes one width per camera breaks."""
+    hand_l = _kp(9.0, n=21)
+    merged = merge_observation_sources([("hand_l", hand_l)], default_width=N_KP)
+    assert merged.shape == (N_KP, 3)
+    np.testing.assert_array_equal(merged[91:112], hand_l)
+    np.testing.assert_array_equal(merged[:91], np.zeros((91, 3), dtype=np.float32))
+    np.testing.assert_array_equal(merged[112:], np.zeros((21, 3), dtype=np.float32))
+
+
+def test_no_body_row_without_default_width_still_returns_none():
+    hand = _kp(9.0, n=21)
+    assert merge_observation_sources([("hand_l", hand)], default_width=None) is None
+
+
+def test_infer_body_width_finds_body_row_in_any_frame():
+    body = _kp(1.0)
+    hand = _kp(9.0, n=21)
+    rows_by_frame = [
+        [("hand_l", hand)],  # ghost frame: no body row here
+        [("body", body), ("hand_l", hand)],
+    ]
+    assert infer_body_width(rows_by_frame) == N_KP
+
+
+def test_infer_body_width_returns_none_when_no_frame_has_a_body_row():
+    hand = _kp(9.0, n=21)
+    assert infer_body_width([[("hand_l", hand)]]) is None

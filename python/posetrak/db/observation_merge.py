@@ -21,6 +21,8 @@ See docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-de
 """
 from __future__ import annotations
 
+from typing import Iterable
+
 import numpy as np
 
 BODY_SOURCE = "body"
@@ -50,6 +52,7 @@ def _split_source(source: str) -> tuple[str, bool]:
 
 def merge_observation_sources(
     rows: list[tuple[str, np.ndarray]],
+    default_width: int | None = None,
 ) -> np.ndarray | None:
     """Merge (source, kp[n,3]) rows sharing one (camera, frame) into one array.
 
@@ -65,7 +68,19 @@ def merge_observation_sources(
     query has no ORDER BY on source). Rows for an unrecognised base source
     are ignored.
 
-    Returns None if no 'body' row is present (nothing to merge onto).
+    *default_width* covers a frame that has an overlay row (e.g.
+    'hand_l.refined') but no 'body' row of its own -- this happens when
+    auto-redetection (Idea 3) fires from a wrist/elbow placed on an
+    otherwise-undetected "ghost" frame (no original pose_observations row,
+    only a pose_observation_edits row). Without a 'body' row to overlay
+    onto, there is nothing to establish the merged array's width, so the
+    caller passes the camera's known keypoint count and this synthesizes a
+    zero-confidence body of that width to overlay onto -- consistent with
+    how a ghost frame is treated everywhere else (zero confidence except
+    for what's explicitly known).
+
+    Returns None if no 'body' row is present and no *default_width* was
+    given (nothing to merge onto).
     """
     body: np.ndarray | None = None
     overlay_rows: list[tuple[str, bool, np.ndarray]] = []  # (base, is_refined, kp)
@@ -77,7 +92,9 @@ def merge_observation_sources(
             overlay_rows.append((base, is_refined, kp))
 
     if body is None:
-        return None
+        if default_width is None:
+            return None
+        body = np.zeros((default_width, 3), dtype=np.float32)
 
     merged = body.copy()
     for pass_is_refined in (False, True):
@@ -91,6 +108,23 @@ def merge_observation_sources(
             merged[start:start + n] = kp[:n]
 
     return merged
+
+
+def infer_body_width(rows_by_frame: Iterable[list[tuple[str, np.ndarray]]]) -> int | None:
+    """Return the width of any 'body'-sourced row found across *rows_by_frame*.
+
+    Meant as the `default_width` for `merge_observation_sources` on a camera
+    with multiple frames: as long as one frame in the camera has a normal
+    'body' detection, every other frame's overlay-only rows (a ghost frame's
+    auto-redetected hand, say) can synthesize a same-width zero body instead
+    of falling back to a mismatched, overlay-width array.
+    """
+    for rows in rows_by_frame:
+        for source, kp in rows:
+            base, is_refined = _split_source(source)
+            if base == BODY_SOURCE and not is_refined:
+                return kp.shape[0]
+    return None
 
 
 def refined_indices(rows: list[tuple[str, np.ndarray]]) -> frozenset[int]:

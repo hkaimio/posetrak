@@ -18,7 +18,11 @@ from collections import defaultdict
 
 import numpy as np
 
-from posetrak.db.observation_merge import merge_observation_sources, refined_indices
+from posetrak.db.observation_merge import (
+    infer_body_width,
+    merge_observation_sources,
+    refined_indices,
+)
 
 # Ascending precedence: when aggregating several keypoints/cameras into one
 # cell, the maximum code wins (GREY > BLUE > ORANGE > YELLOW > GREEN).
@@ -76,10 +80,14 @@ def read_timeline_status(
         kp = np.frombuffer(bytes(r["kp_blob"]), dtype=np.float32).reshape(-1, 3)
         by_frame_rows[r["video_frame"]].append((r["source"], kp))
 
+    default_width = infer_body_width(by_frame_rows.values())
+    if default_width is None and edits:
+        default_width = next(iter(edits.values()))[0].shape[0]
+
     obs_by_frame: dict[int, np.ndarray] = {}
     refined_by_frame: dict[int, frozenset[int]] = {}
     for frame, rows in by_frame_rows.items():
-        merged = merge_observation_sources(rows)
+        merged = merge_observation_sources(rows, default_width=default_width)
         obs_by_frame[frame] = merged if merged is not None else rows[0][1]
         refined_by_frame[frame] = refined_indices(rows)
 

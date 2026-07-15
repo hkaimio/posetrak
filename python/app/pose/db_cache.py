@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 from posetrak.db.db import generate_id
-from posetrak.db.observation_merge import BODY_SOURCE, merge_observation_sources
+from posetrak.db.observation_merge import BODY_SOURCE, infer_body_width, merge_observation_sources
 
 _CROP_JPEG_QUALITY = 75
 _CROP_TARGET_HEIGHT = 240
@@ -325,6 +325,10 @@ def read_observations_with_edits(
         for r in edit_rows
     }
 
+    default_width = infer_body_width(by_frame.values())
+    if default_width is None and edits:
+        default_width = next(iter(edits.values()))[0].shape[0]
+
     def _apply_edit(kp: np.ndarray, edit_kp: np.ndarray, mask: bytes) -> None:
         if edit_kp.shape[0] != kp.shape[0]:
             return
@@ -340,11 +344,12 @@ def read_observations_with_edits(
 
     result: dict[int, np.ndarray] = {}
     for frame, rows in by_frame.items():
-        kp = merge_observation_sources(rows)
+        kp = merge_observation_sources(rows, default_width=default_width)
         if kp is None:
-            # Defensive: no 'body' row for this frame (shouldn't happen in
-            # practice — every write path writes a 'body' base row). Fall
-            # back to whichever row is present rather than dropping the frame.
+            # No 'body' row for this frame and no other frame in this camera
+            # had one either (default_width also came up empty) -- nothing
+            # establishes the true width, so fall back to whichever row is
+            # present rather than dropping the frame.
             kp = rows[0][1]
         if frame in edits:
             _apply_edit(kp, *edits[frame])

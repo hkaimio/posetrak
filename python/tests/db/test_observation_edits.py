@@ -207,6 +207,34 @@ def test_read_observations_merges_body_and_hand_rows(multi_source_session):
     np.testing.assert_allclose(kp[0, 0], 1.0)  # body slot untouched
 
 
+def test_ghost_frame_hand_only_row_merges_to_camera_width(multi_source_session):
+    """A frame with *only* an overlay row (no 'body' row) must still merge to
+    the camera's full width, using another frame's 'body' row as the width
+    reference.
+
+    Regression test: this is exactly Idea 3's auto-redetect-on-a-ghost-frame
+    case -- a wrist/elbow is placed via an edit on a frame with no original
+    detection, auto-redetection fires and writes only a 'hand_l.refined' row
+    for that frame (no accompanying 'body' row), and the frame used to come
+    back as a bare 21-point array while every other frame in the camera was
+    133-wide, crashing any code that assumes one width per camera.
+    """
+    multi_source_session.execute(
+        "INSERT INTO pose_observations"
+        " (sequence_id, camera_instance_id, video_frame, timestamp_s, person_id, source, kp_blob)"
+        " VALUES ('seq1', 'cam1', 11, 0.033, 0, 'hand_l.refined', ?)",
+        (_kp133(5.0, n=21).tobytes(),),
+    )
+    multi_source_session.commit()
+
+    result = read_observations_with_edits(multi_source_session, "seq1", "cam1")
+    kp = result[11]
+    assert kp.shape[0] == 133
+    np.testing.assert_allclose(kp[91:112, 0], 5.0)
+    np.testing.assert_allclose(kp[:91, 2], 0.0)  # no body detection -- zero confidence
+    np.testing.assert_allclose(kp[112:, 2], 0.0)
+
+
 def test_update_single_keypoint_edit_uses_body_row_width(multi_source_session):
     """n_kp inference must use the 'body' row, not whichever row loads first.
 

@@ -131,11 +131,19 @@ def detect_hand_in_crop(
     x0, y0 = int(max(0, cx - half)), int(max(0, cy - half))
     x1, y1 = int(min(img_w, cx + half)), int(min(img_h, cy + half))
     if x1 <= x0 or y1 <= y0:
+        _log.debug(
+            "detect_hand_in_crop: degenerate crop wrist=%s elbow=%s -> (%d,%d,%d,%d), rejecting",
+            wrist, elbow, x0, y0, x1, y1,
+        )
         return None
 
     keypoints, scores = hand_model(image[y0:y1, x0:x1])
     n_det = len(keypoints) if keypoints is not None else 0
     if n_det == 0:
+        _log.debug(
+            "detect_hand_in_crop: no candidates  crop=(%d,%d,%d,%d)  forearm_len=%.1f",
+            x0, y0, x1, y1, forearm_len,
+        )
         return None
 
     gate_thr = max(_GATE_FRAC_OF_FOREARM * forearm_len, _GATE_FLOOR_PX)
@@ -146,8 +154,16 @@ def detect_hand_in_crop(
             best_dist, best_idx = dist, i
 
     if best_idx is None or best_dist > gate_thr:
+        _log.debug(
+            "detect_hand_in_crop: gate REJECT  n_candidates=%d  best_dist=%.1fpx  gate_thr=%.1fpx",
+            n_det, best_dist if best_dist is not None else -1.0, gate_thr,
+        )
         return None
 
+    _log.debug(
+        "detect_hand_in_crop: gate PASS  n_candidates=%d  best_dist=%.1fpx  gate_thr=%.1fpx  crop_w=%.0fpx",
+        n_det, best_dist, gate_thr, 2.0 * half,
+    )
     kp_full = keypoints[best_idx].astype(np.float32).copy()
     kp_full[:, 0] += x0
     kp_full[:, 1] += y0

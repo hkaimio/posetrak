@@ -25,7 +25,11 @@ _file_handler = logging.handlers.RotatingFileHandler(
 _file_handler.setFormatter(_formatter)
 
 logging.basicConfig(level=logging.WARNING, handlers=[_stream_handler, _file_handler])
-for _name in ("app.setup", "app.setup.led_sync", "app.pose", "app.ui", "app.setup.db_context", "app.setup.page_sync"):
+for _name in (
+    "app.setup", "app.setup.led_sync", "app.pose", "app.ui",
+    "app.setup.db_context", "app.setup.page_sync",
+    "posetrak.detection",  # hand_refinement's detect_hand_in_crop gate logging
+):
     logging.getLogger(_name).setLevel(logging.DEBUG)
 
 print(f"Logging to {_LOG_PATH}", file=sys.stderr)

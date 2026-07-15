@@ -3666,6 +3666,10 @@ class PersonCropGridWidget(QWidget):
         side = _hand_side_for_kp_idx(kp_idx)
         if side is None:
             return
+        _log.debug(
+            "hand-redetect: armed debounce  cam=%s frame=%d side=%s kp_idx=%d",
+            cam_id, frame_idx, side, kp_idx,
+        )
         key = (cam_id, frame_idx, side)
         timer = self._hand_redetect_timers.get(key)
         if timer is None:
@@ -3688,9 +3692,19 @@ class PersonCropGridWidget(QWidget):
             return
         kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
         if kp is None:
+            _log.info(
+                "hand-redetect: debounce fired but no observation at all"
+                "  cam=%s frame=%d side=%s -- skipping", cam_id, frame_idx, side,
+            )
             return
         wrist_idx, elbow_idx = _WRIST_IDX[side], _ELBOW_IDX[side]
         if wrist_idx >= kp.shape[0] or kp[wrist_idx, 2] <= 0.0:
+            _log.info(
+                "hand-redetect: debounce fired but wrist not confidently known"
+                "  cam=%s frame=%d side=%s conf=%.2f -- skipping",
+                cam_id, frame_idx, side,
+                float(kp[wrist_idx, 2]) if wrist_idx < kp.shape[0] else -1.0,
+            )
             return
         wrist = (float(kp[wrist_idx, 0]), float(kp[wrist_idx, 1]))
         elbow = None
@@ -3698,6 +3712,10 @@ class PersonCropGridWidget(QWidget):
             elbow = (float(kp[elbow_idx, 0]), float(kp[elbow_idx, 1]))
         timestamp_s = self._sync_table.frame_to_global_time(frame_idx, svid)
         if timestamp_s is None:
+            _log.info(
+                "hand-redetect: debounce fired but no timestamp for frame"
+                "  cam=%s frame=%d side=%s -- skipping", cam_id, frame_idx, side,
+            )
             return
         self._hand_redetect.request_frame(svid, frame_idx, timestamp_s, side, wrist, elbow)
 
@@ -3711,15 +3729,19 @@ class PersonCropGridWidget(QWidget):
         settled by the time this is called."""
         from posetrak.detection.hand_refinement import _ELBOW_IDX, _WRIST_IDX
 
-        if (self._hand_redetect is None or not frames or not self._sync_table
-                or not self._auto_redetect_enabled()):
+        if self._hand_redetect is None or not frames or not self._sync_table:
+            return
+        if not self._auto_redetect_enabled():
+            _log.debug("hand-redetect: range skipped, auto-detect is off  cam=%s side=%s", cam_id, side)
             return
         kp_by_frame = self._obs_kp.get(cam_id, {})
         wrist_idx, elbow_idx = _WRIST_IDX[side], _ELBOW_IDX[side]
         anchor_by_frame: dict[int, tuple] = {}
+        skipped = 0
         for f in frames:
             kp = kp_by_frame.get(f)
             if kp is None or wrist_idx >= kp.shape[0] or kp[wrist_idx, 2] <= 0.0:
+                skipped += 1
                 continue
             wrist = (float(kp[wrist_idx, 0]), float(kp[wrist_idx, 1]))
             elbow = None
@@ -3727,8 +3749,13 @@ class PersonCropGridWidget(QWidget):
                 elbow = (float(kp[elbow_idx, 0]), float(kp[elbow_idx, 1]))
             ts = self._sync_table.frame_to_global_time(f, svid)
             if ts is None:
+                skipped += 1
                 continue
             anchor_by_frame[f] = (ts, wrist, elbow)
+        _log.info(
+            "hand-redetect: range candidate  cam=%s side=%s requested=%d usable=%d skipped=%d",
+            cam_id, side, len(frames), len(anchor_by_frame), skipped,
+        )
         self._hand_redetect.request_range(svid, side, anchor_by_frame)
 
     def _on_kp_selected(self, cam_idx: int, kp_idx: int) -> None:

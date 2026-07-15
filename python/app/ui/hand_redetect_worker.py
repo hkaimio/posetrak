@@ -144,6 +144,10 @@ class HandRedetectWorker(QThread):
         elbow: tuple[float, float] | None,
     ) -> None:
         """Queue a single-frame redetect request (the debounced post-edit case)."""
+        _log.info(
+            "hand-redetect: queued single-frame request  svid=%s frame=%d side=%s",
+            svid, frame_idx, side,
+        )
         with self._cv:
             self._queue.append(("frame", svid, frame_idx, timestamp_s, side, wrist, elbow))
             self._cv.notify_all()
@@ -161,7 +165,15 @@ class HandRedetectWorker(QThread):
         `[min(frames), max(frames)]`, not a seek per frame.
         """
         if not anchor_by_frame:
+            _log.info(
+                "hand-redetect: range request for svid=%s side=%s has no usable anchors, skipping",
+                svid, side,
+            )
             return
+        _log.info(
+            "hand-redetect: queued range request  svid=%s side=%s frames=[%d..%d] (%d frames)",
+            svid, side, min(anchor_by_frame), max(anchor_by_frame), len(anchor_by_frame),
+        )
         with self._cv:
             self._queue.append(("range", svid, side, dict(anchor_by_frame)))
             self._cv.notify_all()
@@ -199,9 +211,20 @@ class HandRedetectWorker(QThread):
         ) -> None:
             cam_id = self._cam_id_by_svid.get(svid)
             if cam_id is None:
+                _log.warning(
+                    "hand-redetect: no camera_instance_id for svid=%s -- check cameras list", svid,
+                )
                 return
+            _log.info(
+                "hand-redetect: processing  cam=%s frame=%d side=%s wrist=(%.1f,%.1f) elbow=%s",
+                cam_id, frame_idx, side, wrist[0], wrist[1], elbow,
+            )
             result = redetect_hand(self._get_hand_model(), bgr, wrist, elbow)
             if result is None:
+                _log.info(
+                    "hand-redetect: REJECTED (no candidate passed the gate)  cam=%s frame=%d side=%s",
+                    cam_id, frame_idx, side,
+                )
                 return
             hand_kp, noise_scale = result
             write_hand_refinement(
@@ -217,6 +240,11 @@ class HandRedetectWorker(QThread):
             # _queue_hand_redetect_range), so this runs unconditionally
             # here -- the toggle is what gates it, not this call site.
             clear_disabled_hand_edits(conn, self._sequence_id, cam_id, frame_idx, side)
+            _log.info(
+                "hand-redetect: WROTE hand_%s.refined  cam=%s frame=%d  mean_conf=%.2f  noise_scale=%.3f",
+                "l" if side == "left" else "r", cam_id, frame_idx,
+                float(hand_kp[:, 2].mean()), noise_scale,
+            )
             self.result_ready.emit(cam_id, frame_idx)
 
         try:
@@ -236,7 +264,20 @@ class HandRedetectWorker(QThread):
                     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                     ok, bgr = cap.read()
                     if not ok:
+                        _log.warning(
+                            "hand-redetect: frame read failed  svid=%s frame=%d", svid, frame_idx,
+                        )
                         continue
+                    actual = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+                    if actual != frame_idx:
+                        # cv2's frame-index seeking is known to drift on
+                        # inter-frame-coded video -- surface it rather than
+                        # silently cropping around the wrong image.
+                        _log.warning(
+                            "hand-redetect: seek drift  requested frame=%d  actually decoded=%d"
+                            "  svid=%s -- gate may reject due to wrong crop",
+                            frame_idx, actual, svid,
+                        )
                     process_and_write(svid, frame_idx, timestamp_s, side, bgr, wrist, elbow)
 
                 else:  # "range"
@@ -245,20 +286,35 @@ class HandRedetectWorker(QThread):
                     if cap is None:
                         continue
                     frames = sorted(anchor_by_frame)
+                    frame_set = set(frames)
+                    last_frame = frames[-1]
                     cap.set(cv2.CAP_PROP_POS_FRAMES, frames[0])
-                    cur = frames[0]
-                    remaining = collections.deque(frames)
-                    while remaining:
+                    while True:
                         if self._stop_event.is_set():
                             break
                         ok, bgr = cap.read()
                         if not ok:
+                            _log.warning(
+                                "hand-redetect: range read failed, stopping early  svid=%s"
+                                " last_requested=%d", svid, last_frame,
+                            )
                             break
-                        if cur == remaining[0]:
-                            remaining.popleft()
+                        # POS_FRAMES after read() reports the index of the
+                        # *next* frame to decode -- one past what we just
+                        # got. Trust this over a manually incremented
+                        # counter: cv2's seek is known to drift on
+                        # inter-frame-coded video, and a naive counter would
+                        # silently process an anchor against the wrong
+                        # image once that happens (this used to be exactly
+                        # such a counter -- fixed after real-session
+                        # testing showed the range path failing more than
+                        # the single-frame path).
+                        cur = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+                        if cur in frame_set:
                             timestamp_s, wrist, elbow = anchor_by_frame[cur]
                             process_and_write(svid, cur, timestamp_s, side, bgr, wrist, elbow)
-                        cur += 1
+                        if cur >= last_frame:
+                            break
         finally:
             for cap in caps.values():
                 if cap is not None:

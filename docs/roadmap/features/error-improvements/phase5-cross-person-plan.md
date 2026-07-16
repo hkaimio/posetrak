@@ -10,8 +10,7 @@
   construction/noise composition as pure, unit-tested functions
   (`tests/test_multi_person_contact_gating.cpp`); `MultiPersonTracker::run()`
   wires them into the per-frame loop with rotating processing order and
-  anchor-freshness extrapolation. Config fields exist on `TrackerConfig` but
-  are not yet loaded from the session DB (Stage 4).
+  anchor-freshness extrapolation.
 - **Stage 3** (per-marker anchor uncertainty via Jacobian): done.
   `Tracker::marker_projection_std()` computes a per-(camera, marker) pixel
   std via linearized error propagation (`J P J^T`) from the posterior
@@ -21,8 +20,19 @@
   floor). Verified against a sigma-point-reprojection oracle, a
   finite-difference manifold-perturbation check, and a hand-computed
   analytic case (`tests/test_marker_projection_std.cpp`).
-- **Stage 4** (config DB wiring, RTS smoothing, Python/UI/MCP surfacing):
-  not started.
+- **Stage 4** (config DB wiring, RTS smoothing, Python/UI/MCP surfacing): done.
+  `cross_person_max_world_mm`/`cross_person_min_confidence`/`cross_person_max_n`
+  are now session-DB columns (`db/registry_schema.sql`, migration 025,
+  `session_reader.cpp`); RTS smoothing turned out to already be wired for
+  `MultiPersonTracker` from Stage 1/2's shared `finalize_person_context()`
+  helper, confirmed by a new regression test rather than new code
+  (`tests/test_multi_person_tracker.cpp`). Python/UI/MCP surfacing: config
+  values shown in `content_panels.py`'s config summary and MCP's
+  `get_run_info()`; `run_tracker.py` gained a "track multiple people
+  together" control (person picker from `sequence_persons`) driving a new
+  `posetrak.tracker.runner.run_multi_person_tracker()`, which wraps the
+  CLI's repeated `--person` flag. Contact-window summary UI (a separate,
+  not-yet-designed data surface) remains deferred.
 
 ## Context
 

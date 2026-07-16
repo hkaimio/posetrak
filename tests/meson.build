@@ -45,6 +45,9 @@ test_sources = files(
   # DB read path
   'test_session_reader.cpp',
 
+  # Multi-person tracking orchestrator (error-improvements Phase 5, Stage 1)
+  'test_multi_person_tracker.cpp',
+
   # DB blob codec
   'test_blob_codec.cpp',
 )

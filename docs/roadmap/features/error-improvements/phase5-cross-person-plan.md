@@ -10,11 +10,19 @@
   construction/noise composition as pure, unit-tested functions
   (`tests/test_multi_person_contact_gating.cpp`); `MultiPersonTracker::run()`
   wires them into the per-frame loop with rotating processing order and
-  anchor-freshness extrapolation. `sigma_anchor` is a placeholder constant
-  pending Stage 3. Config fields exist on `TrackerConfig` but are not yet
-  loaded from the session DB (Stage 4).
-- **Stage 3** (per-marker anchor uncertainty via Jacobian) and **Stage 4**
-  (config DB wiring, RTS smoothing, Python/UI/MCP surfacing): not started.
+  anchor-freshness extrapolation. Config fields exist on `TrackerConfig` but
+  are not yet loaded from the session DB (Stage 4).
+- **Stage 3** (per-marker anchor uncertainty via Jacobian): done.
+  `Tracker::marker_projection_std()` computes a per-(camera, marker) pixel
+  std via linearized error propagation (`J P J^T`) from the posterior
+  covariance; `MultiPersonTracker::build_anchor_observations()` looks it up
+  per anchor and feeds it into `build_cross_person_anchors()`'s noise
+  composition, replacing the Stage 2 placeholder constant (still used as a
+  floor). Verified against a sigma-point-reprojection oracle, a
+  finite-difference manifold-perturbation check, and a hand-computed
+  analytic case (`tests/test_marker_projection_std.cpp`).
+- **Stage 4** (config DB wiring, RTS smoothing, Python/UI/MCP surfacing):
+  not started.
 
 ## Context
 

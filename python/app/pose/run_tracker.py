@@ -30,7 +30,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from posetrak.tracker.runner import TrackerResult, default_binary_path
+from posetrak.tracker.runner import MultiPersonResult, PersonRunSpec, TrackerResult, default_binary_path
+from posetrak.tracker.runner import run_multi_person_tracker as _run_multi_person_tracker
 from posetrak.tracker.runner import run_tracker as _run_tracker
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -147,6 +148,47 @@ class _TrackerThread(QThread):
         self.tracking_finished.emit(result.exit_code, result.run_id or "")
 
 
+class _MultiPersonTrackerThread(QThread):
+    """Runs run_multi_person_tracker() in a background thread and emits Qt signals.
+
+    Mirrors _TrackerThread above but for the ``--person``-mode multi-person
+    CLI path (Stage 1 of the cross-person relative observations plan -- see
+    docs/roadmap/features/error-improvements/phase5-cross-person-plan.md).
+    """
+
+    line_output = Signal(str)
+    # run_ids: list[str | None], one per PersonRunSpec passed in, same order.
+    tracking_finished = Signal(object, object)  # exit_code, run_ids
+
+    def __init__(
+        self,
+        *,
+        session_path: str,
+        persons: list[PersonRunSpec],
+        output_dir: Path,
+        binary_path: Path,
+        start_time: float,
+        end_time: float,
+        smooth: bool,
+    ) -> None:
+        super().__init__()
+        self._kwargs = dict(
+            session_path=Path(session_path),
+            persons=persons,
+            output_dir=output_dir,
+            binary_path=binary_path,
+            start_time=start_time,
+            end_time=end_time,
+            smooth=smooth,
+        )
+
+    def run(self) -> None:
+        result: MultiPersonResult = _run_multi_person_tracker(
+            **self._kwargs, on_progress=self.line_output.emit
+        )
+        self.tracking_finished.emit(result.exit_code, result.run_ids)
+
+
 # ---------------------------------------------------------------------------
 # Widget
 # ---------------------------------------------------------------------------
@@ -163,10 +205,13 @@ class RunTrackerWidget(QWidget):
         self._session_path: str | None = None
         self._run_id: str | None = None
         self._person_id: int = 0
-        self._thread: _TrackerThread | None = None
+        self._thread: _TrackerThread | _MultiPersonTrackerThread | None = None
         self._bvh_process = None
         self._sequence_cameras: list[str] = []
         self._velocity_cam_indices: set[int] = set()
+        self._available_persons: list[sqlite3.Row] = []
+        self._additional_person_ids: set[int] = set()
+        self._multi_person_ids: list[int] | None = None
 
         # ---- Configuration group ----------------------------------------
         self._skeleton_combo = QComboBox()
@@ -318,6 +363,33 @@ class RunTrackerWidget(QWidget):
         )
         self._cross_pair_max_n.setEnabled(False)
 
+        self._cross_person_max_world_mm = _float_spin(0.0, 0.0, 99999.0, 1)
+        self._cross_person_max_world_mm.setToolTip(
+            "3D world-space marker-pair distance gate (mm) for cross-person\n"
+            "PAIR_DIFF anchoring between people tracked together below\n"
+            "(e.g. ukemi throws, handshakes). 0 = disabled (Phase 5)."
+        )
+        self._cross_person_min_conf = _float_spin(0.5, 0.0, 1.0, 2)
+        self._cross_person_min_conf.setToolTip(
+            "Minimum keypoint confidence for both people's detections to form\n"
+            "a cross-person anchor."
+        )
+        self._cross_person_max_n = QSpinBox()
+        self._cross_person_max_n.setRange(1, 999)
+        self._cross_person_max_n.setValue(10)
+        self._cross_person_max_n.setToolTip(
+            "Maximum cross-person anchor observations per person pair per\n"
+            "camera per frame (closest pairs kept)."
+        )
+        self._cross_person_max_world_mm.valueChanged.connect(
+            lambda v: (
+                self._cross_person_min_conf.setEnabled(v > 0.0),
+                self._cross_person_max_n.setEnabled(v > 0.0),
+            )
+        )
+        self._cross_person_min_conf.setEnabled(False)
+        self._cross_person_max_n.setEnabled(False)
+
         config_form = QFormLayout()
         config_form.addRow("Skeleton:", self._skeleton_combo)
         config_form.addRow("Person ID:", self._person_id_spin)
@@ -352,6 +424,9 @@ class RunTrackerWidget(QWidget):
         config_form.addRow("Relative min confidence:", self._relative_min_conf)
         config_form.addRow("Cross-pair radius (px):", self._cross_pair_max_px)
         config_form.addRow("Cross-pair max count:", self._cross_pair_max_n)
+        config_form.addRow("Cross-person distance (mm):", self._cross_person_max_world_mm)
+        config_form.addRow("Cross-person min confidence:", self._cross_person_min_conf)
+        config_form.addRow("Cross-person max count:", self._cross_person_max_n)
 
         config_box = QGroupBox("Tracker configuration")
         config_box.setLayout(config_form)
@@ -378,10 +453,29 @@ class RunTrackerWidget(QWidget):
 
         self._sequence_combo.currentIndexChanged.connect(self._on_sequence_changed)
 
+        self._multi_person_enabled = QCheckBox()
+        self._multi_person_enabled.setToolTip(
+            "Track this sequence's other detected people together with the primary\n"
+            "Person ID above, interleaved frame-by-frame in one process (Stage 1 of\n"
+            "the cross-person relative observations plan). Enables cross-person\n"
+            "anchoring if Cross-person distance above is set > 0."
+        )
+        self._multi_person_enabled.toggled.connect(self._on_multi_person_toggled)
+
+        self._additional_persons_label = QLabel("None")
+        self._select_people_btn = QPushButton("Select people…")
+        self._select_people_btn.setEnabled(False)
+        self._select_people_btn.clicked.connect(self._select_additional_persons)
+        multi_row = QHBoxLayout()
+        multi_row.addWidget(self._additional_persons_label, 1)
+        multi_row.addWidget(self._select_people_btn)
+
         run_form = QFormLayout()
         run_form.addRow("Pose sequence:", self._sequence_combo)
         run_form.addRow("Output directory:", out_row)
         run_form.addRow("Tracker binary:", bin_row)
+        run_form.addRow("Track multiple people:", self._multi_person_enabled)
+        run_form.addRow("Additional people:", multi_row)
 
         run_box = QGroupBox("Run")
         run_box.setLayout(run_form)
@@ -515,11 +609,70 @@ class RunTrackerWidget(QWidget):
         data = self._sequence_combo.currentData()
         if data is None or self._conn is None:
             self._sequence_cameras = []
+            self._available_persons = []
         else:
             seq_id, _, _ = data
             self._sequence_cameras = self._cameras_for_sequence(seq_id)
+            self._available_persons = self._conn.execute(
+                "SELECT person_id, person_name FROM sequence_persons"
+                " WHERE sequence_id = ? ORDER BY person_id",
+                (seq_id,),
+            ).fetchall()
         self._velocity_cam_indices = set()
         self._update_velocity_cam_label()
+        self._additional_person_ids = set()
+        self._update_additional_persons_label()
+
+    def _on_multi_person_toggled(self, checked: bool) -> None:
+        self._select_people_btn.setEnabled(checked)
+        if not checked:
+            self._additional_person_ids = set()
+            self._update_additional_persons_label()
+
+    def _update_additional_persons_label(self) -> None:
+        if not self._additional_person_ids:
+            self._additional_persons_label.setText("None")
+            return
+        names = [
+            r["person_name"] or f"person {r['person_id']}"
+            for r in self._available_persons
+            if r["person_id"] in self._additional_person_ids
+        ]
+        self._additional_persons_label.setText(", ".join(names))
+
+    def _select_additional_persons(self) -> None:
+        primary = self._person_id_spin.value()
+        candidates = [r for r in self._available_persons if r["person_id"] != primary]
+        if not candidates:
+            QMessageBox.information(
+                self,
+                "No other people",
+                "This sequence has no other detected person_id besides the primary "
+                "Person ID.\n\nsequence_persons must have more than one row for this "
+                "sequence to track multiple people together.",
+            )
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Select additional people")
+        layout = QVBoxLayout(dlg)
+        checkboxes: list[tuple[int, QCheckBox]] = []
+        for r in candidates:
+            cb = QCheckBox(r["person_name"] or f"person {r['person_id']}")
+            cb.setChecked(r["person_id"] in self._additional_person_ids)
+            checkboxes.append((r["person_id"], cb))
+            layout.addWidget(cb)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._additional_person_ids = {pid for pid, cb in checkboxes if cb.isChecked()}
+            self._update_additional_persons_label()
 
     def _cameras_for_sequence(self, seq_id: str) -> list[str]:
         row = self._conn.execute(
@@ -635,6 +788,7 @@ class RunTrackerWidget(QWidget):
         config_id = self._create_config()
         self._person_id = person_id
         self._run_id = None
+        self._multi_person_ids = None
 
         self._progress_bar.setValue(0)
         self._status_label.setText("Starting…")
@@ -643,20 +797,44 @@ class RunTrackerWidget(QWidget):
         self._results_box.setVisible(False)
         self._run_btn.setEnabled(False)
 
-        thread = _TrackerThread(
-            session_path=self._session_path,
-            sequence_id=seq_id,
-            skeleton_id=skel_id,
-            config_id=config_id,
-            output_dir=out_dir,
-            binary_path=binary,
-            person_id=person_id,
-            start_time=time_start_s,
-            end_time=time_end_s,
-            smooth=True,
+        additional = (
+            sorted(pid for pid in self._additional_person_ids if pid != person_id)
+            if self._multi_person_enabled.isChecked()
+            else []
         )
-        thread.line_output.connect(self._on_output)
-        thread.tracking_finished.connect(self._on_finished)
+
+        if additional:
+            self._multi_person_ids = [person_id] + additional
+            persons = [
+                PersonRunSpec(seq_id, skel_id, config_id, pid) for pid in self._multi_person_ids
+            ]
+            thread = _MultiPersonTrackerThread(
+                session_path=self._session_path,
+                persons=persons,
+                output_dir=out_dir,
+                binary_path=binary,
+                start_time=time_start_s,
+                end_time=time_end_s,
+                smooth=True,
+            )
+            thread.line_output.connect(self._on_output)
+            thread.tracking_finished.connect(self._on_multi_finished)
+        else:
+            thread = _TrackerThread(
+                session_path=self._session_path,
+                sequence_id=seq_id,
+                skeleton_id=skel_id,
+                config_id=config_id,
+                output_dir=out_dir,
+                binary_path=binary,
+                person_id=person_id,
+                start_time=time_start_s,
+                end_time=time_end_s,
+                smooth=True,
+            )
+            thread.line_output.connect(self._on_output)
+            thread.tracking_finished.connect(self._on_finished)
+
         thread.start()
         self._thread = thread
 
@@ -718,6 +896,10 @@ class RunTrackerWidget(QWidget):
         cross_px = self._cross_pair_max_px.value()
         cross_n = self._cross_pair_max_n.value() if cross_px > 0.0 else None
         cross_px_val = cross_px if cross_px > 0.0 else None
+        cross_person_mm = self._cross_person_max_world_mm.value()
+        cross_person_mm_val = cross_person_mm if cross_person_mm > 0.0 else None
+        cross_person_min_conf = self._cross_person_min_conf.value() if cross_person_mm_val else None
+        cross_person_n = self._cross_person_max_n.value() if cross_person_mm_val else None
         joint_gain = self._vel_noise_gain_joint.value()
         joint_names_json = json.dumps(ADAPTIVE_NOISE_CORE_JOINTS) if joint_gain > 0.0 else None
         vel_scopes = []
@@ -761,6 +943,7 @@ class RunTrackerWidget(QWidget):
                 "  velocity_mode_camera_ids,"
                 "  use_relative_observations, relative_min_confidence,"
                 "  cross_pair_max_px, cross_pair_max_n,"
+                "  cross_person_max_world_mm, cross_person_min_confidence, cross_person_max_n,"
                 "  process_noise_vel_gain_joint, process_noise_vel_ref_joint,"
                 "  process_noise_vel_gain_root, process_noise_vel_ref_root,"
                 "  process_noise_vel_joint_names,"
@@ -769,7 +952,7 @@ class RunTrackerWidget(QWidget):
                 "  soft_limit_joint_names, soft_limit_margin_rad, soft_limit_noise_std,"
                 "  nis_feedback_scopes, nis_feedback_threshold, nis_feedback_max_multiplier)"
                 " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                "         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     config_id, "ui-run", now,
                     self._proc_noise_std.value(),
@@ -784,6 +967,9 @@ class RunTrackerWidget(QWidget):
                     rel_min_conf,
                     cross_px_val,
                     cross_n,
+                    cross_person_mm_val,
+                    cross_person_min_conf,
+                    cross_person_n,
                     joint_gain,
                     self._vel_noise_ref_joint.value(),
                     self._vel_noise_gain_root.value(),
@@ -830,9 +1016,65 @@ class RunTrackerWidget(QWidget):
         if self._run_id:
             self.run_finished.emit(self._run_id)
 
+    def _on_multi_finished(self, exit_code: int, run_ids: list) -> None:
+        self._thread = None
+        self._run_btn.setEnabled(True)
+
+        if exit_code != 0:
+            self._progress_bar.setValue(0)
+            self._status_label.setText(f"Tracker exited with code {exit_code}.")
+            detail = _describe_windows_exit_code(exit_code)
+            if detail:
+                QMessageBox.critical(self, "Tracker failed to start", detail)
+            return
+
+        self._progress_bar.setValue(100)
+        self._status_label.setText("Tracking complete.")
+        self._show_multi_results(run_ids)
+        # Emit run_finished for the primary person's run only -- e.g. so a
+        # PersonPanel embedding this widget can select the new run for the
+        # person it's showing. Other people's runs are separate tracking_runs
+        # rows visible in the main tree.
+        if run_ids and run_ids[0]:
+            self.run_finished.emit(run_ids[0])
+
     # ------------------------------------------------------------------
     # Results
     # ------------------------------------------------------------------
+
+    def _show_multi_results(self, run_ids: list) -> None:
+        if self._conn is None or not self._multi_person_ids:
+            return
+        lines = []
+        for person_id, run_id in zip(self._multi_person_ids, run_ids):
+            if not run_id:
+                lines.append(f"Person {person_id}: (no run_id — tracker exited early)")
+                continue
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS total,"
+                "       SUM(CASE WHEN tracking_lost = 0 THEN 1 ELSE 0 END) AS tracked,"
+                "       AVG(COALESCE(n_inlier_observations, 0)) AS avg_inliers"
+                " FROM tracking_results"
+                " WHERE run_id = ? AND person_id = ? AND is_smoothed = 0",
+                (run_id, person_id),
+            ).fetchone()
+            if row and row["total"]:
+                total = row["total"]
+                tracked = row["tracked"] or 0
+                pct = 100.0 * tracked / total
+                avg = row["avg_inliers"] or 0.0
+                lines.append(
+                    f"Person {person_id} — run {run_id[:12]}…: "
+                    f"{tracked}/{total} steps ({pct:.1f}%), avg inliers {avg:.1f}"
+                )
+            else:
+                lines.append(f"Person {person_id} — run {run_id[:12]}…: (no per-frame stats)")
+        self._results_label.setText("\n".join(lines))
+        self._results_box.setVisible(True)
+        # BVH export below only knows about a single (run_id, person_id) pair --
+        # default it to the primary person; export for the other people's runs
+        # from wherever those tracking_runs rows surface in the main tree.
+        self._run_id = run_ids[0] if run_ids else None
 
     def _show_results(self) -> None:
         if self._conn is None or self._run_id is None:

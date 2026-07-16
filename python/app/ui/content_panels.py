@@ -282,7 +282,8 @@ _CFG_SQL = (
     "       measurement_noise_std, pose_noise_std, outlier_threshold, tracker_fps, "
     "       velocity_mode_camera_ids, velocity_measurement_noise_std, "
     "       use_relative_observations, relative_min_confidence, "
-    "       cross_pair_max_px, cross_pair_max_n "
+    "       cross_pair_max_px, cross_pair_max_n, "
+    "       cross_person_max_world_mm, cross_person_min_confidence, cross_person_max_n "
     "FROM tracker_configs WHERE id=?"
 )
 
@@ -315,6 +316,10 @@ def _cfg_text(cfg: sqlite3.Row | None, cfg_id: str | None) -> str:
         n = cfg["cross_pair_max_n"]
         n_suffix = f"×{n}" if n is not None else ""
         parts.append(f"cross@{cfg['cross_pair_max_px']}px{n_suffix}")
+    if cfg["cross_person_max_world_mm"]:
+        n = cfg["cross_person_max_n"]
+        n_suffix = f"×{n}" if n is not None else ""
+        parts.append(f"xperson@{cfg['cross_person_max_world_mm']}mm{n_suffix}")
     return "\n".join(parts)
 
 

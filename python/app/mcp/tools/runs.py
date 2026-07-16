@@ -143,6 +143,14 @@ def get_run_info(conn: sqlite3.Connection, run_id: str) -> str:
         lines.append(f"  process_noise_vel_std:  {cfg['process_noise_vel_std']}")
         lines.append(f"  velocity_half_life_s:   {cfg['velocity_half_life_s']} s")
         lines.append(f"  tracker_fps:            {cfg['tracker_fps']} Hz")
+        if cfg["cross_person_max_world_mm"]:
+            lines.append(
+                f"  cross_person_max_world_mm:   {cfg['cross_person_max_world_mm']} mm"
+            )
+            lines.append(
+                f"  cross_person_min_confidence: {cfg['cross_person_min_confidence']}"
+            )
+            lines.append(f"  cross_person_max_n:          {cfg['cross_person_max_n']}")
     else:
         lines.append("  (config not found)")
 

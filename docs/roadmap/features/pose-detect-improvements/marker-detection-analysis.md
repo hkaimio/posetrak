@@ -33,35 +33,61 @@ absent entirely.
 
 ### Passive dots (retroreflective or colored)
 
-- **Retroreflective dots** only shine when a light source sits near the
-  camera axis — commercial mocap uses IR ring lights for this. Action
-  cameras have none, so in-the-wild retroreflectives are just
-  gray dots. Unless per-camera ring lights are added (lab territory),
-  retroreflective material buys little.
+- **Retroreflective dots** shine when a light source sits near the
+  camera axis; commercial mocap uses IR ring lights for this. A clip-on
+  LED ring per action camera / phone is simple, cheap extra equipment —
+  more hassle but perfectly field-viable when it earns its keep (Harri).
+  Two practical notes: (a) action cameras have IR-cut filters, so the
+  ring must be **visible-light** LED, not IR (unless cameras are
+  modified); (b) retroreflection returns light toward its source, so
+  each camera sees only its *own* ring's reflections — no cross-camera
+  marker glare, though opposing cameras do see the ring LED itself as a
+  static bright dot (trivially masked). With exposure biased slightly
+  down, the reflections pop far above the scene, giving the most
+  lighting-independent detection of any passive option — no white
+  balance or color-constancy concerns at all.
 - **Matte fluorescent / high-saturation colored dots** are the
-  in-the-wild substitute: under normal lighting a saturated color blob
-  is far easier to detect than a retroreflection. Detection is cheap
-  (color threshold + connected components + sub-pixel centroid) and the
-  centroid accuracy is the best of any option here (~0.5–1 px).
-- **Size math** (4K, ~90° HFOV → ~2.6 mm/px at 5 m): a 15 mm dot is
-  ~6 px across at 5 m — comfortably detectable. Dots can stay small.
+  no-extra-equipment alternative: under normal lighting a saturated
+  color blob is easier to detect than an unlit gray retro dot.
+  Detection for either variant is cheap (threshold + connected
+  components + sub-pixel centroid) and centroid accuracy is the best of
+  any option here (~0.5–1 px).
+- **Size math — with realistic action-cam FOV.** Wide modes are ~120°
+  HFOV or more (SuperView more still), not 90°: at 4K/3840 px that is
+  ~4–4.5 mm/px at 5 m mid-frame (fisheye projection is denser at frame
+  center, ~2.7 mm/px, and worse toward the edges). A blob needs ~4+ px
+  to detect reliably → **~20–25 mm dot at 5 m** in wide modes. Two
+  levers if that is too big: narrower FOV capture modes (e.g. GoPro
+  Linear ~87° recovers the ~2.6 mm/px figure at the cost of coverage),
+  or accepting detection dropout beyond some range.
 - **Color as soft ID**: a colored patch around (or instead of) the dot
-  gives partial identity. Realistically 4–8 colors are distinguishable
-  across cameras with varying lighting; treat color as a *soft prior*
-  in assignment (question B), never a hard ID. Requires locking white
-  balance in capture settings — auto-WB shifts colors per camera and
-  over time.
-- Verdict: **primary body-marker candidate.** No hard ID — the labeling
-  problem (question B) must be solved for these.
+  gives partial identity — but color *classification* needs materially
+  more pixels than blob *detection* (edge pixels are contaminated;
+  ~5–8 px of clean interior color is needed), so a color-coded patch is
+  **~25–40 mm at 5 m** in wide FOV modes, noticeably larger than a
+  detect-only dot. Realistically 4–8 colors are distinguishable across
+  cameras; treat color as a *soft prior* in assignment (question B),
+  never a hard ID. Requires locking white balance in capture settings —
+  auto-WB shifts colors per camera and over time. (Retroreflective +
+  ring light sidesteps the WB problem entirely, at the cost of carrying
+  no color ID unless colored retro material proves distinguishable —
+  empirical question.)
+- Verdict: **primary body-marker candidate, in two flavors** —
+  retroreflective + clip-on ring light (best robustness, extra
+  equipment, no color ID) vs. colored dots (no equipment, WB-sensitive,
+  soft ID for free). Which wins is an empirical shoot-out, not a design
+  decision. Either way there is no hard ID — the labeling problem
+  (question B) must be solved for these.
 
 ### Fiducial markers (ArUco / AprilTag / CCTag)
 
 - Square binary-code tags give hard ID and even single-marker 6-DOF,
   but the size problem the user noted is real and quantifiable: an
-  AprilTag needs roughly 50–80 px across to decode, i.e. **15–20 cm at
-  5 m** with 4K action cameras. On a body that is a billboard, not a
-  marker; on a thin weapon it does not fit flat at all (cylindrical
-  surfaces break the planar decode).
+  AprilTag needs roughly 50–80 px across to decode — at the realistic
+  ~4–4.5 mm/px of wide-FOV 4K action cameras, that is **~25–35 cm at
+  5 m**. On a body that is a billboard, not a marker; on a thin weapon
+  it does not fit flat at all (cylindrical surfaces break the planar
+  decode).
 - Square tags also die first under exactly the conditions that matter
   here: motion blur and oblique viewing angles. **CCTag-style
   concentric-circle fiducials** are the exception worth knowing about —
@@ -108,7 +134,7 @@ completeness.
 | Type | ID | 2D accuracy | Blur tolerance | Best role |
 |---|---|---|---|---|
 | Colored dot | none/soft (color) | high | good (with fast shutter) | body points (spine, hips) |
-| Retroreflective dot | none | high | good | only with ring lights (lab) |
+| Retro dot + ring light | none | high | good | body points; most lighting-robust, needs clip-on rings |
 | AprilTag/ArUco | hard | high (corners) | poor | static refs, large props |
 | CCTag (concentric) | hard, small ID space | high | **good** | prop ID, re-anchoring |
 | Colored clothing/bands | hard (region = ID) | low | very good | identity, limb axis, gloves |
@@ -261,9 +287,18 @@ a small YAML file per prop type and no new joint math. Notes:
 
 ## Open questions
 
+- **Retroreflective vs. colored dots shoot-out**: with a clip-on
+  visible-light LED ring per camera, how far above the scene do retro
+  reflections sit at realistic exposure, and how annoying is the ring
+  light for performers? Also whether colored retro material keeps
+  enough color separability to carry soft ID under ring lighting.
 - Color palette size that survives real dojo lighting across cameras
   with locked WB — needs an empirical test (record swatches, measure
   separability), not a design decision.
+- Practical marker/patch sizes vs. capture FOV mode: wide modes cost
+  ~40–70 % marker size versus linear/narrow modes — is the coverage
+  loss of narrower modes acceptable for marker-augmented trials, or do
+  markers need sizing for wide FOV?
 - Cloth-mounted marker noise: how bad is marker motion on a hakama or
   gi sleeve in practice? Determines whether spine/hip markers must go
   on snug base layers to be worth their weight.

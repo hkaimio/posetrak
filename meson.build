@@ -124,14 +124,17 @@ if not nlohmann_json_dep.found()
   nlohmann_json_dep = dependency('nlohmann_json', required: true)
 endif
 
-# yaml-cpp (use wrap)
-yaml_cpp_dep = dependency('yaml-cpp',
-  required: false,
-  fallback: ['yaml-cpp', 'yaml_cpp_dep']
-)
-if not yaml_cpp_dep.found()
-  yaml_cpp_dep = dependency('yaml-cpp', required: true)
-endif
+# yaml-cpp -- always build from the vendored subproject (skip system-package
+# lookup entirely). A system/conda-provided yaml-cpp on a Windows dev machine
+# was found to have a YAML::Load(std::string const&) that silently returns an
+# empty node for nested block sequences (YAML::LoadFile is unaffected),
+# breaking load_skeleton_from_yaml_string() -- used by every DB-driven
+# tracker run -- on any real skeleton with joints/markers. Discovered via
+# tests/test_multi_person_tracker.cpp; see error-improvements Phase 5 history.
+# The other dependency() + fallback: [...] blocks below still prefer a system
+# package when present -- only yaml-cpp has shown this failure mode so far.
+yaml_cpp_proj = subproject('yaml-cpp')
+yaml_cpp_dep = yaml_cpp_proj.get_variable('yaml_cpp_dep')
 
 # tomlplusplus (use wrap - toml11 not in wrapdb)
 # The tomlplusplus subproject defaults to shared_library; override to static so

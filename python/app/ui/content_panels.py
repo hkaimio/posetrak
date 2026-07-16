@@ -5025,6 +5025,8 @@ class PersonCropGridWidget(QWidget):
         target_rect: "tuple[float, float, float, float] | None" = None,
         layer_label: str = "",
         show_debug: bool = False,
+        track_id: "int | None" = None,
+        show_seg: bool = False,
     ) -> None:
         """Decode a (jpeg, wpx, hpx, src_x, src_y, src_w, src_h) crop and render
         it into *cell*, including keypoint/tracking overlays and (in edit mode)
@@ -5050,6 +5052,12 @@ class PersonCropGridWidget(QWidget):
 
         *layer_label*/*show_debug* feed the "Debug overlay" corner label --
         see the design doc.
+
+        *track_id*/*show_seg*: blend this track's segmentation mask in, same
+        as the per-track low-res path in _load_frame (see _blend_seg_mask).
+        Only the wide-crop cache caller has a track_id to key the mask by --
+        the in-memory backfill/ghost path (no detection at this frame) has
+        none, so it never passes these and the mask is skipped there.
         """
         import cv2
         import numpy as np
@@ -5068,6 +5076,11 @@ class PersonCropGridWidget(QWidget):
         jpeg_h = float(hpx or crop_bgr.shape[0])
         src_scale = jpeg_h / float(src_h) if src_h > 0 else 1.0
 
+        if show_seg and track_id is not None:
+            crop_bgr = self._blend_seg_mask(
+                crop_bgr, svid, frame_idx, track_id, x1, y1, float(src_w), float(src_h),
+            )
+
         black_filled = False
         if target_rect is not None:
             crop_bgr, x1, y1, black_filled = _composite_black_fill(
@@ -5084,6 +5097,86 @@ class PersonCropGridWidget(QWidget):
         self._apply_overlay(
             cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
         )
+
+    def _blend_seg_mask(
+        self,
+        crop_bgr,
+        svid: str,
+        frame_idx: int,
+        track_id: int,
+        x1: float,
+        y1: float,
+        src_w: float,
+        src_h: float,
+    ):
+        """Blend *track_id*'s segmentation mask into *crop_bgr*, returning the
+        blended array (or *crop_bgr* unchanged if there's no mask configured/
+        stored for this frame). *x1*/*y1*/*src_w*/*src_h* are the crop's
+        source region in full-frame pixel coordinates, before any black-fill
+        widening -- the mask must be blended against the crop's own decoded
+        extent, not a widened display window (see the "Widen to..." comment
+        at this method's two call sites in _load_frame/_display_crop_result).
+
+        Shared by both places a crop gets displayed: _load_frame's per-track
+        low-res path, and _display_crop_result (the wide-crop cache / Phase 6
+        in-memory-backfill renderer) -- previously only the former blended
+        the mask in, so the wide-crop cache's edit-mode "preferred layer"
+        (see _load_frame) silently skipped it whenever that cache had already
+        caught up, which is the common case once scrubbing settles.
+        """
+        import cv2
+        import numpy as np
+
+        sqr_id = self._seg_sources.get(svid)
+        if not sqr_id:
+            return crop_bgr
+        mask_row = self._conn.execute(
+            "SELECT mask_blob FROM seg_masks "
+            "WHERE seg_quality_run_id=? AND shot_video_id=? AND frame_idx=?",
+            (sqr_id, svid, frame_idx),
+        ).fetchone()
+        if not mask_row:
+            return crop_bgr
+        mask_buf = np.frombuffer(bytes(mask_row["mask_blob"]), dtype=np.uint8)
+        full_mask = cv2.imdecode(mask_buf, cv2.IMREAD_UNCHANGED)
+        if full_mask is None:
+            return crop_bgr
+        if full_mask.ndim == 3:
+            full_mask = full_mask[:, :, 0]
+        # Masks may be stored at a lower resolution than the video (e.g. FHD
+        # masks on 4K cameras), so scale src coordinates.
+        m_h, m_w = full_mask.shape[:2]
+        vid_dims = self._video_dims.get(svid)
+        if vid_dims and vid_dims[0] > 0 and vid_dims[1] > 0:
+            sx_scale = m_w / vid_dims[0]
+            sy_scale = m_h / vid_dims[1]
+        else:
+            sx_scale = sy_scale = 1.0
+        mx1 = max(0, int(x1 * sx_scale))
+        my1 = max(0, int(y1 * sy_scale))
+        mx2 = max(mx1 + 1, min(m_w, int((x1 + src_w) * sx_scale)))
+        my2 = max(my1 + 1, min(m_h, int((y1 + src_h) * sy_scale)))
+        mask_crop = full_mask[my1:my2, mx1:mx2]
+        if mask_crop.size == 0:
+            return crop_bgr
+        mask_crop = cv2.resize(
+            mask_crop, (crop_bgr.shape[1], crop_bgr.shape[0]), interpolation=cv2.INTER_NEAREST,
+        )
+        # DAVIS palette — BGR
+        _DAVIS_COLORS_BGR = [
+            (80, 80, 240), (120, 200, 80), (240, 120, 80),
+            (60, 200, 240), (240, 80, 180), (220, 60, 60),
+            (80, 240, 140), (60, 140, 240), (240, 200, 60),
+        ]
+        color_idx = (track_id - 1) % len(_DAVIS_COLORS_BGR)
+        color_bgr = _DAVIS_COLORS_BGR[color_idx]
+        fg = mask_crop == track_id
+        if not fg.any():
+            return crop_bgr
+        overlay = crop_bgr.astype(np.float32)
+        for c, cv_ in enumerate(color_bgr):
+            overlay[:, :, c][fg] = overlay[:, :, c][fg] * 0.55 + cv_ * 0.45
+        return overlay.astype(np.uint8)
 
     def _compute_target_rect(
         self,
@@ -5209,6 +5302,7 @@ class PersonCropGridWidget(QWidget):
                                 cell, cam_id, svid, frame_idx, tracking_step,
                                 show_detected, show_tracked, wide, target_rect=desired,
                                 layer_label="wide-cache", show_debug=show_debug,
+                                track_id=wide_track_id, show_seg=show_seg,
                             )
                             continue
                         # Else: degenerate window (shouldn't normally happen
@@ -5309,62 +5403,17 @@ class PersonCropGridWidget(QWidget):
             jpeg_h = float(row["height_px"] or crop_bgr.shape[0])
             src_scale = jpeg_h / src_h if src_h > 0 else 1.0
 
-            # Segmentation mask overlay (blended directly into the JPEG before Qt conversion)
-            if show_seg:
-                sqr_id = self._seg_sources.get(svid)
-                if sqr_id and track_id is not None:
-                    mask_row = self._conn.execute(
-                        "SELECT mask_blob FROM seg_masks "
-                        "WHERE seg_quality_run_id=? AND shot_video_id=? AND frame_idx=?",
-                        (sqr_id, svid, frame_idx),
-                    ).fetchone()
-                    if mask_row:
-                        mask_buf = np.frombuffer(bytes(mask_row["mask_blob"]), dtype=np.uint8)
-                        full_mask = cv2.imdecode(mask_buf, cv2.IMREAD_UNCHANGED)
-                        if full_mask is not None:
-                            if full_mask.ndim == 3:
-                                full_mask = full_mask[:, :, 0]
-                            # Crop mask to the same source region as the JPEG.
-                            # Masks may be stored at a lower resolution than the video
-                            # (e.g. FHD masks on 4K cameras), so scale src coordinates.
-                            m_h, m_w = full_mask.shape[:2]
-                            vid_dims = self._video_dims.get(svid)
-                            if vid_dims and vid_dims[0] > 0 and vid_dims[1] > 0:
-                                sx_scale = m_w / vid_dims[0]
-                                sy_scale = m_h / vid_dims[1]
-                            else:
-                                sx_scale = sy_scale = 1.0
-                            src_w_val = row["src_w"] if row["src_w"] is not None else (
-                                crop_bgr.shape[1] / src_scale if src_scale > 0 else crop_bgr.shape[1]
-                            )
-                            src_h_val = float(row["src_h"] or src_h)
-                            mx1 = max(0, int(x1 * sx_scale))
-                            my1 = max(0, int(y1 * sy_scale))
-                            mx2 = max(mx1 + 1, min(m_w, int((x1 + src_w_val) * sx_scale)))
-                            my2 = max(my1 + 1, min(m_h, int((y1 + src_h_val) * sy_scale)))
-                            mask_crop = full_mask[my1:my2, mx1:mx2]
-                            if mask_crop.size > 0:
-                                mask_crop = cv2.resize(
-                                    mask_crop,
-                                    (crop_bgr.shape[1], crop_bgr.shape[0]),
-                                    interpolation=cv2.INTER_NEAREST,
-                                )
-                                # DAVIS palette — BGR
-                                _DAVIS_COLORS_BGR = [
-                                    (80, 80, 240), (120, 200, 80), (240, 120, 80),
-                                    (60, 200, 240), (240, 80, 180), (220, 60, 60),
-                                    (80, 240, 140), (60, 140, 240), (240, 200, 60),
-                                ]
-                                color_idx = (track_id - 1) % len(_DAVIS_COLORS_BGR)
-                                color_bgr = _DAVIS_COLORS_BGR[color_idx]
-                                fg = mask_crop == track_id
-                                if fg.any():
-                                    overlay = crop_bgr.astype(np.float32)
-                                    for c, cv_ in enumerate(color_bgr):
-                                        overlay[:, :, c][fg] = (
-                                            overlay[:, :, c][fg] * 0.55 + cv_ * 0.45
-                                        )
-                                    crop_bgr = overlay.astype(np.uint8)
+            # Segmentation mask overlay (blended directly into the JPEG before Qt
+            # conversion) -- shared with _display_crop_result's wide-crop-cache/
+            # backfill paths, see _blend_seg_mask.
+            if show_seg and track_id is not None:
+                src_w_val = row["src_w"] if row["src_w"] is not None else (
+                    crop_bgr.shape[1] / src_scale if src_scale > 0 else crop_bgr.shape[1]
+                )
+                src_h_val = float(row["src_h"] or src_h)
+                crop_bgr = self._blend_seg_mask(
+                    crop_bgr, svid, frame_idx, track_id, x1, y1, src_w_val, src_h_val,
+                )
 
             # Widen to the same minimum display bbox every other layer uses
             # (own extent unioned with keypoint/tracked-skeleton overlays),

@@ -28,10 +28,19 @@
   helper, confirmed by a new regression test rather than new code
   (`tests/test_multi_person_tracker.cpp`). Python/UI/MCP surfacing: config
   values shown in `content_panels.py`'s config summary and MCP's
-  `get_run_info()`; `run_tracker.py` gained a "track multiple people
-  together" control (person picker from `sequence_persons`) driving a new
+  `get_run_info()`; `run_tracker.py` gained a "People" table (one row per
+  person, each with its own Sequence and Skeleton picker) driving a new
   `posetrak.tracker.runner.run_multi_person_tracker()`, which wraps the
-  CLI's repeated `--person` flag. Contact-window summary UI (a separate,
+  CLI's repeated `--person` flag. This replaced an earlier, incorrect first
+  cut that assumed one `pose_observation_sequences` row could hold several
+  people via `sequence_persons` — in practice `finalise_to_db()` gives every
+  detected person their own sequence (`person_id` always `0` inside it), so
+  "add another person" instead offers other sequences from the same
+  **trial** as the primary one (the natural scope: cross-person anchoring
+  needs shared cameras/world space, which sequences from one trial share by
+  construction). The tracker-configuration section also moved into a
+  `QScrollArea` so the Run button and results stay visible without resizing
+  the window. Contact-window summary UI (a separate,
   not-yet-designed data surface) remains deferred.
 
 ## Context

@@ -2953,6 +2953,21 @@ class PersonCropGridWidget(QWidget):
     # the default, common-case behavior.
     _auto_redetect_chk: "QCheckBox | None" = None
 
+    # Number-key shortcuts for limb groups (see _handle_key): plain key
+    # toggles show/hide of the limb's keypoints (same rule as the timeline's
+    # eye icon), Shift+key isolates it (hides everything else), Ctrl+key
+    # starts "Set limb..." chain placement for it (if the limb has a chain
+    # defined -- see kp_models.py's limb_chains; hands don't yet).
+    _LIMB_SHORTCUT_KEYS: dict[int, str] = {
+        Qt.Key.Key_1: "Face",
+        Qt.Key.Key_2: "Left arm",
+        Qt.Key.Key_3: "Left hand",
+        Qt.Key.Key_4: "Right arm",
+        Qt.Key.Key_5: "Right hand",
+        Qt.Key.Key_6: "Left leg",
+        Qt.Key.Key_7: "Right leg",
+    }
+
     def __init__(self, conn: sqlite3.Connection, sequence_id: str, parent=None) -> None:
         super().__init__(parent)
         self._conn = conn
@@ -3982,7 +3997,7 @@ class PersonCropGridWidget(QWidget):
         """"Set limb…" button: pick which limb to place, in shoulder/hip-first order."""
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
-        for limb in ("Left arm", "Right arm", "Left leg", "Right leg"):
+        for limb in ("Face", "Left arm", "Right arm", "Left leg", "Right leg"):
             if not self._pose_model.limb_chain_indices(limb):
                 continue
             action = menu.addAction(limb)
@@ -4125,6 +4140,11 @@ class PersonCropGridWidget(QWidget):
             self._paste_keypoints()
             return True
 
+        limb = self._LIMB_SHORTCUT_KEYS.get(key)
+        if limb is not None:
+            self._handle_limb_shortcut(limb, ctrl=ctrl, shift=shift)
+            return True
+
         if not self._sel_kp_indices or self._sel_cam_idx is None:
             return False
 
@@ -4143,6 +4163,32 @@ class PersonCropGridWidget(QWidget):
             return True
 
         return False
+
+    def _handle_limb_shortcut(self, limb: str, *, ctrl: bool, shift: bool) -> None:
+        """Number-key shortcut for *limb* (see _LIMB_SHORTCUT_KEYS): plain key
+        toggles show/hide, Shift+key isolates it, Ctrl+key starts chain
+        placement (if the limb has one -- see kp_models.py's limb_chains)."""
+        indices = set(self._pose_model.group_indices(limb))
+        if not indices:
+            self.status_message.emit(f"No {limb} keypoints in this pose model")
+            return
+
+        if ctrl:
+            if self._pose_model.limb_chain_indices(limb):
+                self._start_chain_placement(limb)
+            else:
+                self.status_message.emit(f"No limb-placement order defined for {limb} yet")
+        elif shift:
+            self._hidden_kp_indices = set(self._pose_model.all_indices) - indices
+            self._sel_kp_indices -= self._hidden_kp_indices
+            if self._primary_kp_idx in self._hidden_kp_indices:
+                self._primary_kp_idx = next(iter(self._sel_kp_indices), None)
+            if self._timeline is not None:
+                self._timeline.set_hidden(frozenset(self._hidden_kp_indices))
+            self._load_frame(self._current_t)
+            self.status_message.emit(f"Showing only {limb}")
+        else:
+            self._on_timeline_visibility_toggled(indices)
 
     def _copy_keypoints(self) -> None:
         """Ctrl+C: copy selected kp positions from current frame, primary camera."""

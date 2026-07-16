@@ -40,3 +40,21 @@ def test_coco133_right_leg_chain_includes_foot_keypoints():
 
 def test_limb_chain_indices_unknown_limb_is_empty():
     assert COCO133.limb_chain_indices("Tail") == []
+
+
+def test_coco17_face_chain_is_nose_left_ear_right_ear():
+    names = [COCO17.name_of(i) for i in COCO17.limb_chain_indices("Face")]
+    assert names == ["nose", "left_ear", "right_ear"]
+
+
+def test_coco133_face_chain_is_nose_left_ear_right_ear():
+    names = [COCO133.name_of(i) for i in COCO133.limb_chain_indices("Face")]
+    assert names == ["nose", "left_ear", "right_ear"]
+
+
+def test_coco133_hands_have_no_chain_defined():
+    # Unlike arms/legs, hands have no single proximal->distal walk (5 fingers)
+    # -- Ctrl+shortcut for hands relies on this being empty (see
+    # test_limb_shortcuts.py's ctrl_on_hand_with_no_chain_emits_status test).
+    assert COCO133.limb_chain_indices("Left hand") == []
+    assert COCO133.limb_chain_indices("Right hand") == []

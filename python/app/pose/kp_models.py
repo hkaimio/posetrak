@@ -102,6 +102,7 @@ _COCO17_TREE_GROUPS: tuple[str, ...] = (
 )
 
 _COCO17_LIMB_CHAINS: dict[str, tuple[str, ...]] = {
+    "Face":       ("nose", "left_ear", "right_ear"),
     "Left arm":   ("left_shoulder", "left_elbow", "left_wrist"),
     "Right arm":  ("right_shoulder", "right_elbow", "right_wrist"),
     "Left leg":   ("left_hip", "left_knee", "left_ankle"),
@@ -221,6 +222,9 @@ _COCO133_TREE_GROUPS: tuple[str, ...] = (
 )
 
 _COCO133_LIMB_CHAINS: dict[str, tuple[str, ...]] = {
+    # Same 3-point subset as _FACE_MARKER_IDX above -- the only face points
+    # the default skeleton actually rigs.
+    "Face":       ("nose", "left_ear", "right_ear"),
     "Left arm":   ("left_shoulder", "left_elbow", "left_wrist", "left_index_1", "left_pinky_1"),
     "Right arm":  ("right_shoulder", "right_elbow", "right_wrist", "right_index_1", "right_pinky_1"),
     "Left leg":   ("left_hip", "left_knee", "left_ankle", "left_heel", "left_big_toe", "left_small_toe"),

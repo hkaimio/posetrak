@@ -813,6 +813,13 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
     constexpr int kHandBaseIdxLeft = 91;
     constexpr int kHandBaseIdxRight = 112;
     constexpr int kHandNKp = 21;
+    // Full COCO-133 layout width -- needed as a fallback array size when a
+    // (camera, frame) group has no 'body' row at all (body detection can
+    // drop frames a refined pass still covers, e.g. a hand track surviving
+    // past where body tracking lost the person -- see the body_row-null
+    // branch below). Same layout assumption already baked into the hand
+    // base indices above, just made explicit here.
+    constexpr int kFullBodyNKp = 133;
     // Takes a *base* source name (any ".refined" suffix already stripped by
     // split_source below) -- 'hand_l' and 'hand_l.refined' both resolve here
     // via the same base name.
@@ -883,13 +890,28 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                 break;
             }
         }
-        // Defensive: no 'body' row for this group (shouldn't happen in
-        // practice -- every write path writes a 'body' base row). Fall back
-        // to whichever row is present rather than dropping the group.
-        SourceRow const& base_row = body_row != nullptr ? *body_row : group_rows.front();
-
-        std::vector<db::Keypoint> merged = base_row.kps;
-        std::vector<double> merged_crop_scale(merged.size(), base_row.crop_scale);
+        // No 'body' row for this group: happens whenever body detection
+        // drops a frame (person lost/occluded) that a refined pass still
+        // covers (e.g. a hand track surviving on its own persisted crop).
+        // Build a full-width, all-absent (confidence 0) placeholder rather
+        // than copying whichever refined row happens to be present -- that
+        // row is only kHandNKp long and would otherwise silently truncate
+        // 'merged' to its width, corrupting both the hand-overlay indices
+        // below (which assume the full COCO-133 layout) and any edit lookup
+        // (whose blob width always matches the full layout).
+        std::vector<db::Keypoint> merged;
+        double base_crop_scale;
+        double base_timestamp_s;
+        if (body_row != nullptr) {
+            merged = body_row->kps;
+            base_crop_scale = body_row->crop_scale;
+            base_timestamp_s = body_row->timestamp_s;
+        } else {
+            merged.assign(kFullBodyNKp, db::Keypoint{});
+            base_crop_scale = group_rows.front().crop_scale;
+            base_timestamp_s = group_rows.front().timestamp_s;
+        }
+        std::vector<double> merged_crop_scale(merged.size(), base_crop_scale);
         // Two explicit passes -- plain sources, then '.refined' sources on
         // top -- rather than a single loop over group_rows in fetch order:
         // the SQL query has no ORDER BY on source, so nothing guarantees a
@@ -946,7 +968,7 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
             obs.camera_id = camera->id();
             obs.marker_id = it->second;
             obs.frame_idx = group_frame;
-            obs.timestamp = base_row.timestamp_s;
+            obs.timestamp = base_timestamp_s;
             obs.position_distorted =
                 Eigen::Vector2d(merged[static_cast<size_t>(i)].x, merged[static_cast<size_t>(i)].y);
             // When pixels_are_undistorted, coordinates are already in K_new space;

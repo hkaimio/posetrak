@@ -470,6 +470,14 @@ static void create_fixture_db() {
                    2.3);
         insert_row(3, "hand_l", make_kp_blob(21, {{4, {153.f, 163.f, 0.5f}}}), 0.33);
         insert_row(3, "hand_r", make_kp_blob(21, {{4, {173.f, 183.f, 0.6f}}}), 0.43);
+
+        // Frame 4: NO 'body' row at all -- body detection can drop a frame a
+        // refined pass still covers (e.g. a hand track surviving on its own
+        // persisted crop past where body tracking lost the person). Also
+        // carries an edit (below) touching a body-range index, to confirm the
+        // merged array is still a full 133-wide placeholder rather than
+        // truncated to hand_l's own 21-wide row.
+        insert_row(4, "hand_l", make_kp_blob(21, {{4, {450.f, 460.f, 0.55f}}}), 0.34);
     }
 
     // Edits for seq_hands frame 0: one body-range index (5) and one hand-range
@@ -493,6 +501,26 @@ static void create_fixture_db() {
                       "INSERT INTO pose_observation_edits "
                       "(id, sequence_id, camera_instance_id, video_frame, kp_blob, kp_mask) "
                       "VALUES ('edit1', 'seq_hands', 'inst1', 0, ?, ?)",
+                      edit_blob, mask);
+    }
+
+    // Edit for seq_hands frame 4 (no 'body' row present -- see fixture above):
+    // a body-range index (5), sized for the full 133-wide layout. Must not
+    // throw a size-mismatch against a 21-wide hand-only row.
+    {
+        std::vector<float> edit_kps(133 * 3, 0.f);
+        edit_kps[5 * 3 + 0] = 445.f;
+        edit_kps[5 * 3 + 1] = 446.f;
+        edit_kps[5 * 3 + 2] = 0.f;  // is_outlier=0 -> apply x/y, confidence=1
+        auto edit_blob = encode_float32_blob(edit_kps);
+
+        std::vector<uint8_t> mask(17, 0);  // ceil(133/8) = 17 bytes
+        mask[5 / 8] |= static_cast<uint8_t>(1u << (5 % 8));
+
+        bind_and_step(db,
+                      "INSERT INTO pose_observation_edits "
+                      "(id, sequence_id, camera_instance_id, video_frame, kp_blob, kp_mask) "
+                      "VALUES ('edit2', 'seq_hands', 'inst1', 4, ?, ?)",
                       edit_blob, mask);
     }
 
@@ -680,8 +708,8 @@ TEST_CASE("SessionReader load_observations merges body and hand source rows", "[
 
     // Frame 0 (edited) has 4 markers, frame 1 (body-only) has 2 (coco 95/116
     // are absent that frame), frame 2 (unedited merge) has 4, frame 3
-    // (hand_l.refined precedence) has 4 -- 14 total.
-    REQUIRE(obs_set.total_observations() == 14);
+    // (hand_l.refined precedence) has 4, frame 4 (no body row) has 2 -- 16 total.
+    REQUIRE(obs_set.total_observations() == 16);
 
     // Frame 2: no edits applied -- raw per-source values and crop_scale survive
     // the merge. Observations come out in ascending coco-index order (0, 5, 95, 116).
@@ -745,6 +773,44 @@ TEST_CASE("SessionReader load_observations applies edits to the merged array", "
     REQUIRE(frame0[3].position_distorted.x() == Catch::Approx(170.0));
     REQUIRE(frame0[3].position_distorted.y() == Catch::Approx(180.0));
     REQUIRE(frame0[3].crop_scale == Catch::Approx(0.4));
+}
+
+// Regression test: a (camera, frame) group with no 'body' row at all (body
+// detection dropped the frame; a 'hand_l' pass still covered it) must still
+// merge into the full 133-wide layout -- not silently truncate to hand_l's
+// own 21-wide row -- so that an edit sized for the full layout applies
+// correctly instead of throwing apply_keypoint_edits' size-mismatch error.
+TEST_CASE("SessionReader load_observations handles a group with no body row", "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    auto cameras = reader.load_cameras_for_sequence("seq_hands");
+    auto skeleton = make_test_skeleton_with_hands();
+
+    ObservationSet obs_set;
+    REQUIRE_NOTHROW(obs_set = reader.load_observations("seq_hands", cameras, skeleton, 0.1, 0));
+
+    auto const& seq = obs_set.sequences().begin()->second;
+    std::vector<Observation> frame4;
+    for (auto const& o : seq.observations)
+        if (o.frame_idx == 4)
+            frame4.push_back(o);
+
+    // coco 0 ("nose") and coco 116 ("hand_r4"): no source row ever supplied
+    // them this frame (no 'body', no 'hand_r') and neither was edited, so
+    // they stay confidence 0 and get filtered out -- only 2 markers survive.
+    REQUIRE(frame4.size() == 2);
+
+    // coco 5 ("body5", body-range): absent from every source row this frame,
+    // but the edit still applies correctly against the full-width array.
+    REQUIRE(frame4[0].position_distorted.x() == Catch::Approx(445.0));
+    REQUIRE(frame4[0].position_distorted.y() == Catch::Approx(446.0));
+    REQUIRE(frame4[0].confidence == Catch::Approx(1.0f));
+
+    // coco 95 ("hand_l4"): raw 'hand_l' row value, untouched by the edit.
+    REQUIRE(frame4[1].position_distorted.x() == Catch::Approx(450.0));
+    REQUIRE(frame4[1].position_distorted.y() == Catch::Approx(460.0));
+    REQUIRE(frame4[1].crop_scale == Catch::Approx(0.34));
 }
 
 // ---------------------------------------------------------------------------

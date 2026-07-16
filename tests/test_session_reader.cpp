@@ -190,7 +190,10 @@ static void create_fixture_db() {
             near_limit_margin_rad REAL,
             near_limit_spread_sigma REAL,
             near_limit_damping_factor REAL,
-            edited_kp_noise_std REAL
+            edited_kp_noise_std REAL,
+            cross_person_max_world_mm REAL,
+            cross_person_min_confidence REAL,
+            cross_person_max_n INTEGER
         );
     )");
 
@@ -560,6 +563,11 @@ TEST_CASE("SessionReader load_tracker_config", "[session_reader]") {
 
     // Columns not set should keep TrackerConfig defaults
     REQUIRE(cfg.tracker.ukf_kappa == Catch::Approx(TrackerConfig{}.ukf_kappa));
+    REQUIRE(cfg.tracker.cross_person_max_world_mm ==
+            Catch::Approx(TrackerConfig{}.cross_person_max_world_mm));
+    REQUIRE(cfg.tracker.cross_person_min_confidence ==
+            Catch::Approx(TrackerConfig{}.cross_person_min_confidence));
+    REQUIRE(cfg.tracker.cross_person_max_n == TrackerConfig{}.cross_person_max_n);
 }
 
 TEST_CASE("SessionReader load_sequence_info", "[session_reader]") {

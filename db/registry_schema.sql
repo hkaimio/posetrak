@@ -148,5 +148,11 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     near_limit_damping_factor         REAL,  -- Variance-domain multiplier; NULL/1.0 = disabled
     -- Added in schema migration v34: trusted keypoint edits (Phase 0) -- see
     -- docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md.
-    edited_kp_noise_std               REAL   -- Pixels; NULL/0 = disabled
+    edited_kp_noise_std               REAL,  -- Pixels; NULL/0 = disabled
+    -- Added in schema migration v36: cross-person relative observations (Phase 5,
+    -- error-improvements) -- see
+    -- docs/roadmap/features/error-improvements/phase5-cross-person-plan.md.
+    cross_person_max_world_mm         REAL,  -- 3D marker-pair distance gate (mm); NULL/0 = disabled
+    cross_person_min_confidence       REAL,  -- Min keypoint confidence for both people's detections
+    cross_person_max_n                INTEGER  -- Max cross-person anchors per pair per camera per frame
 );

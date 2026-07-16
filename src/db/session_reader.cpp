@@ -183,7 +183,10 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "       COALESCE(near_limit_margin_rad, 0.0) AS near_limit_margin_rad,"
         "       COALESCE(near_limit_spread_sigma, 3.0) AS near_limit_spread_sigma,"
         "       COALESCE(near_limit_damping_factor, 1.0) AS near_limit_damping_factor,"
-        "       COALESCE(edited_kp_noise_std, 0.0) AS edited_kp_noise_std"
+        "       COALESCE(edited_kp_noise_std, 0.0) AS edited_kp_noise_std,"
+        "       COALESCE(cross_person_max_world_mm, 0.0) AS cross_person_max_world_mm,"
+        "       COALESCE(cross_person_min_confidence, 0.5) AS cross_person_min_confidence,"
+        "       COALESCE(cross_person_max_n, 10) AS cross_person_max_n"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -210,7 +213,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         36=soft_limit_joint_names, 37=soft_limit_margin_rad, 38=soft_limit_noise_std,
     //         39=near_limit_damping_joint_names, 40=near_limit_margin_rad,
     //         41=near_limit_spread_sigma, 42=near_limit_damping_factor,
-    //         43=edited_kp_noise_std
+    //         43=edited_kp_noise_std, 44=cross_person_max_world_mm,
+    //         45=cross_person_min_confidence, 46=cross_person_max_n
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -389,6 +393,9 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(41, out.tracker.near_limit_spread_sigma);
     apply_real(42, out.tracker.near_limit_damping_factor);
     apply_real(43, out.tracker.edited_kp_noise_std);
+    apply_real(44, out.tracker.cross_person_max_world_mm);
+    apply_real(45, out.tracker.cross_person_min_confidence);
+    apply_int(46, out.tracker.cross_person_max_n);
 
     return out;
 }

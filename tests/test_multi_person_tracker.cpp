@@ -215,7 +215,9 @@ void create_fixture_db(fs::path const& path, int num_frames, double dt) {
             soft_limit_joint_names TEXT, soft_limit_margin_rad REAL, soft_limit_noise_std REAL,
             near_limit_damping_joint_names TEXT, near_limit_margin_rad REAL,
             near_limit_spread_sigma REAL, near_limit_damping_factor REAL,
-            edited_kp_noise_std REAL
+            edited_kp_noise_std REAL,
+            cross_person_max_world_mm REAL, cross_person_min_confidence REAL,
+            cross_person_max_n INTEGER
         );
     )");
     exec_sql(db, R"(
@@ -602,4 +604,70 @@ TEST_CASE("MultiPersonTracker Stage 1: output matches single-person path bitwise
         REQUIRE(states_bitwise_equal(mctx0->tracker->state(), mctx1->tracker->state()));
         REQUIRE(mctx0->tracker->covariance() == mctx1->tracker->covariance());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 4: --smooth wires each person's independent RTS pass after the full
+// coupled forward pass (see finalize_person_context()'s smooth_output branch,
+// shared with the single-person run_track_from_db() path). Not new logic --
+// this is a regression test confirming MultiPersonTracker::run() reaches that
+// shared code per person with each person's own output_dir.
+// ---------------------------------------------------------------------------
+TEST_CASE("MultiPersonTracker Stage 4: --smooth runs independent per-person RTS smoothing",
+          "[multi_person_tracker][tracker]") {
+    fs::path db_path = fs::temp_directory_path() / "posetrak_test_multi_person_smooth.db";
+    int const num_frames = 12;
+    double const dt = 1.0 / 30.0;
+    create_fixture_db(db_path, num_frames, dt);
+
+    fs::path out_root = fs::temp_directory_path() / "posetrak_test_multi_person_smooth_out";
+    fs::remove_all(out_root);
+
+    BuildPersonContextOptions opts;
+    opts.db_path = db_path.string();
+    opts.quiet = true;
+    opts.smooth_output = true;
+
+    PersonSpec spec0;
+    spec0.sequence_id = "seq1";
+    spec0.skeleton_id = "skel1";
+    spec0.config_id = "tc1";
+
+    std::vector<PersonSpec> specs(2);
+    specs[0] = spec0;
+    specs[0].person_id = 0;
+    specs[0].output_dir = out_root / "person_0";
+    specs[1] = spec0;
+    specs[1].person_id = 1;
+    specs[1].output_dir = out_root / "person_1";
+
+    MultiPersonTracker multi(specs, opts, /*verbose=*/false);
+    multi.run();
+
+    REQUIRE(multi.persons().size() == 2);
+
+    for (auto const& dir : {specs[0].output_dir, specs[1].output_dir}) {
+        for (auto const& name : {"smoothed_state_vectors.csv", "smoothed_joint_angles.csv",
+                                 "smoothed_root_pose.csv"}) {
+            auto path = dir / name;
+            REQUIRE(fs::exists(path));
+            REQUIRE(fs::file_size(path) > 0);
+        }
+    }
+
+    // Each person's smoothed output is independent (different output_dir, own
+    // Tracker/smoother cache) even though both track identical observations.
+    auto count_data_rows = [](fs::path const& path) {
+        std::ifstream f(path);
+        std::string line;
+        int count = -1;  // first line is the header
+        while (std::getline(f, line))
+            ++count;
+        return count;
+    };
+    int const rows0 = count_data_rows(specs[0].output_dir / "smoothed_state_vectors.csv");
+    int const rows1 = count_data_rows(specs[1].output_dir / "smoothed_state_vectors.csv");
+    REQUIRE(rows0 > 0);
+    REQUIRE(rows0 == rows1);
+    REQUIRE(rows0 == multi.persons()[0]->frames_tracked);
 }

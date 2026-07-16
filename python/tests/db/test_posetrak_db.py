@@ -202,7 +202,7 @@ def test_migrate_session_v34_to_v35_adds_source_to_pose_observations(tmp_path: P
     conn.close()
 
     conn = open_session(db_path)
-    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION == 35
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
 
     cols = {row[1] for row in conn.execute("PRAGMA table_info(pose_observations)")}
     assert {"source", "detection_run_id"} <= cols

@@ -1,5 +1,21 @@
 # Cross-person relative observations (Phase 5, error-improvements) — implementation plan
 
+## Status
+
+- **Stage 1** (`MultiPersonTracker` orchestrator harness, no coupling): done.
+  Bitwise-identical to single-person runs, confirmed by
+  `tests/test_multi_person_tracker.cpp`.
+- **Stage 2** (contact gating + anchor injection): done. `update_contact_pairs()`
+  and `build_cross_person_anchors()` implement the three-level gate and anchor
+  construction/noise composition as pure, unit-tested functions
+  (`tests/test_multi_person_contact_gating.cpp`); `MultiPersonTracker::run()`
+  wires them into the per-frame loop with rotating processing order and
+  anchor-freshness extrapolation. `sigma_anchor` is a placeholder constant
+  pending Stage 3. Config fields exist on `TrackerConfig` but are not yet
+  loaded from the session DB (Stage 4).
+- **Stage 3** (per-marker anchor uncertainty via Jacobian) and **Stage 4**
+  (config DB wiring, RTS smoothing, Python/UI/MCP surfacing): not started.
+
 ## Context
 
 `docs/roadmap/features/error-improvements/implementation-plan.md` Phases

@@ -4,11 +4,15 @@
 #include <nlohmann/json.hpp>
 
 #include "posetrak/db/session_reader.hpp"
+#include "posetrak/filters/process_model.hpp"
 #include "posetrak/io/skeleton_loader.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
+#include <numeric>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace posetrak {
 
@@ -440,7 +444,8 @@ void step_person_context_frame0(PersonContext& ctx) {
     }
 }
 
-void step_person_context(PersonContext& ctx, int step, bool verbose, bool quiet) {
+void step_person_context(PersonContext& ctx, int step, bool verbose, bool quiet,
+                         std::vector<Observation> const& extra_observations) {
     double t_start = ctx.start_time + step * ctx.dt - ctx.dt / 2.0;
     double t_end = t_start + ctx.dt;
 
@@ -449,6 +454,7 @@ void step_person_context(PersonContext& ctx, int step, bool verbose, bool quiet)
     }
 
     auto frame_obs = ctx.observations.get_all_in_range(t_start, t_end);
+    frame_obs.insert(frame_obs.end(), extra_observations.begin(), extra_observations.end());
 
     if (frame_obs.empty()) {
         if (verbose) {
@@ -627,6 +633,222 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
 }
 
 // ---------------------------------------------------------------------------
+// Stage 2: contact gating + cross-person anchor construction (pure functions)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct Box {
+    Eigen::Vector3d lo = Eigen::Vector3d::Constant(std::numeric_limits<double>::infinity());
+    Eigen::Vector3d hi = Eigen::Vector3d::Constant(-std::numeric_limits<double>::infinity());
+};
+
+Box compute_box(std::map<std::string, Eigen::Vector3d> const& positions) {
+    Box box;
+    for (auto const& [name, pos] : positions) {
+        (void)name;
+        box.lo = box.lo.cwiseMin(pos);
+        box.hi = box.hi.cwiseMax(pos);
+    }
+    return box;
+}
+
+/// True if two AABBs are within *margin* of each other (an inflate-and-overlap
+/// test applied per axis).
+bool boxes_within(Box const& a, Box const& b, double margin) {
+    for (int axis = 0; axis < 3; ++axis) {
+        if (a.lo[axis] > b.hi[axis] + margin)
+            return false;
+        if (b.lo[axis] > a.hi[axis] + margin)
+            return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+void update_contact_pairs(std::vector<PersonGatingInput> const& persons,
+                          std::map<ContactMarkerPair, double>& active_pairs) {
+    size_t const n = persons.size();
+    std::vector<Box> boxes(n);
+    for (size_t i = 0; i < n; ++i) {
+        if (persons[i].cross_person_max_world_mm > 0.0) {
+            boxes[i] = compute_box(persons[i].marker_world_positions);
+        }
+    }
+
+    for (size_t i = 0; i < n; ++i) {
+        if (persons[i].cross_person_max_world_mm <= 0.0)
+            continue;
+        for (size_t j = i + 1; j < n; ++j) {
+            if (persons[j].cross_person_max_world_mm <= 0.0)
+                continue;
+
+            double const threshold_m = std::min(persons[i].cross_person_max_world_mm,
+                                                persons[j].cross_person_max_world_mm) /
+                                       1000.0;
+            double const exit_threshold_m = threshold_m * 1.2;
+
+            // Use the exit (not enter) threshold as the bbox margin: gate 1 must
+            // never be stricter than gate 2's hysteresis, or it would prematurely
+            // drop pairs the marker-distance gate still wants to keep active.
+            if (!boxes_within(boxes[i], boxes[j], exit_threshold_m)) {
+                // Out of range even with margin: drop every active pair between i and j.
+                for (auto it = active_pairs.begin(); it != active_pairs.end();) {
+                    if (it->first.person_a == static_cast<int>(i) &&
+                        it->first.person_b == static_cast<int>(j)) {
+                        it = active_pairs.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                continue;
+            }
+
+            for (auto const& [name_a, pos_a] : persons[i].marker_world_positions) {
+                auto id_a_it = persons[i].marker_name_to_id.find(name_a);
+                if (id_a_it == persons[i].marker_name_to_id.end())
+                    continue;
+                for (auto const& [name_b, pos_b] : persons[j].marker_world_positions) {
+                    auto id_b_it = persons[j].marker_name_to_id.find(name_b);
+                    if (id_b_it == persons[j].marker_name_to_id.end())
+                        continue;
+
+                    double const dist = (pos_a - pos_b).norm();
+                    ContactMarkerPair key{static_cast<int>(i), id_a_it->second, static_cast<int>(j),
+                                          id_b_it->second};
+                    auto existing = active_pairs.find(key);
+                    if (existing != active_pairs.end()) {
+                        if (dist > exit_threshold_m) {
+                            active_pairs.erase(existing);
+                        } else {
+                            existing->second = dist;
+                        }
+                    } else if (dist < threshold_m) {
+                        active_pairs.emplace(key, dist);
+                    }
+                }
+            }
+        }
+    }
+}
+
+std::vector<Observation> build_cross_person_anchors(
+    int my_idx, int other_idx, std::map<ContactMarkerPair, double> const& active_pairs,
+    std::vector<Observation> const& my_frame_obs, std::vector<Observation> const& other_frame_obs,
+    std::map<std::string, Eigen::Vector3d> const& other_anchor_marker_positions,
+    Skeleton const& other_skeleton, std::unordered_map<int, Camera> const& cameras,
+    double my_min_confidence, double other_min_confidence, int max_n, double my_pose_noise_std,
+    double other_pose_noise_std, double anchor_noise_std_floor, int frame_idx, double timestamp) {
+    std::vector<Observation> result;
+
+    // Marker id -> detections this frame (a marker can have one detection per
+    // camera), for both people.
+    std::unordered_map<int, std::vector<Observation const*>> my_by_marker;
+    for (auto const& o : my_frame_obs)
+        my_by_marker[o.marker_id].push_back(&o);
+    std::unordered_map<int, std::vector<Observation const*>> other_by_marker;
+    for (auto const& o : other_frame_obs)
+        other_by_marker[o.marker_id].push_back(&o);
+
+    // Which (my_marker, other_marker) pairs are active between these two people,
+    // in canonical (min_idx, max_idx) form.
+    std::vector<std::pair<int, int>> marker_pairs;  // (my_marker, other_marker)
+    for (auto const& [pair, dist] : active_pairs) {
+        (void)dist;
+        if (pair.person_a == my_idx && pair.person_b == other_idx) {
+            marker_pairs.emplace_back(pair.marker_a, pair.marker_b);
+        } else if (pair.person_b == my_idx && pair.person_a == other_idx) {
+            marker_pairs.emplace_back(pair.marker_b, pair.marker_a);
+        }
+    }
+
+    struct Candidate {
+        int camera_id;
+        Observation const* mine;
+        Observation const* other;
+        int other_marker;
+        double dist3d;
+    };
+    std::unordered_map<int, std::vector<Candidate>> by_camera;
+
+    for (auto const& [my_marker, other_marker] : marker_pairs) {
+        auto mit = my_by_marker.find(my_marker);
+        auto oit = other_by_marker.find(other_marker);
+        if (mit == my_by_marker.end() || oit == other_by_marker.end())
+            continue;
+
+        int const key_a = std::min(my_idx, other_idx);
+        int const key_b = std::max(my_idx, other_idx);
+        int const marker_key_a = (my_idx < other_idx) ? my_marker : other_marker;
+        int const marker_key_b = (my_idx < other_idx) ? other_marker : my_marker;
+        ContactMarkerPair key{key_a, marker_key_a, key_b, marker_key_b};
+        auto dist_it = active_pairs.find(key);
+        double const dist3d = (dist_it != active_pairs.end()) ? dist_it->second : 0.0;
+
+        for (auto const* mo : mit->second) {
+            if (mo->confidence < my_min_confidence)
+                continue;
+            for (auto const* oo : oit->second) {
+                if (oo->confidence < other_min_confidence)
+                    continue;
+                if (mo->camera_id != oo->camera_id)
+                    continue;
+                by_camera[mo->camera_id].push_back({mo->camera_id, mo, oo, other_marker, dist3d});
+            }
+        }
+    }
+
+    for (auto& [camera_id, candidates] : by_camera) {
+        std::sort(candidates.begin(), candidates.end(),
+                  [](Candidate const& a, Candidate const& b) { return a.dist3d < b.dist3d; });
+        if (max_n > 0 && static_cast<int>(candidates.size()) > max_n) {
+            candidates.resize(static_cast<size_t>(max_n));
+        }
+
+        auto cam_it = cameras.find(camera_id);
+        if (cam_it == cameras.end())
+            continue;
+
+        for (auto const& c : candidates) {
+            auto const& other_marker_name = other_skeleton.markers()[c.other_marker].name;
+            auto pos_it = other_anchor_marker_positions.find(other_marker_name);
+            if (pos_it == other_anchor_marker_positions.end())
+                continue;
+            auto proj_opt =
+                cam_it->second.project_undistorted(pos_it->second, /*clip_to_bounds=*/false);
+            if (!proj_opt.has_value())
+                continue;
+
+            Observation anchor;
+            anchor.camera_id = camera_id;
+            anchor.marker_id = c.mine->marker_id;
+            anchor.frame_idx = frame_idx;
+            anchor.timestamp = timestamp;
+            anchor.position = c.mine->position - c.other->position;
+            anchor.position_distorted = c.mine->position_distorted - c.other->position_distorted;
+            anchor.confidence = std::min(c.mine->confidence, c.other->confidence);
+            anchor.mode = MeasurementMode::PAIR_DIFF;
+            anchor.crop_scale = c.mine->crop_scale;
+            anchor.anchor_position = *proj_opt;
+            anchor.force_inlier =
+                false;  // always subject to the outlier gate (identity-switch guard)
+
+            double const sigma_pose_mine = my_pose_noise_std * c.mine->crop_scale;
+            double const sigma_pose_other = other_pose_noise_std * c.other->crop_scale;
+            double const sigma_anchor = anchor_noise_std_floor;
+            anchor.noise_std_override =
+                std::sqrt(sigma_pose_mine * sigma_pose_mine + sigma_pose_other * sigma_pose_other +
+                          sigma_anchor * sigma_anchor);
+
+            result.push_back(anchor);
+        }
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // MultiPersonTracker
 // ---------------------------------------------------------------------------
 
@@ -637,27 +859,131 @@ MultiPersonTracker::MultiPersonTracker(std::vector<PersonSpec> const& specs,
     for (auto const& spec : specs) {
         persons_.push_back(build_person_context(spec, opts_, verbose_));
     }
+
+    marker_name_to_id_.resize(persons_.size());
+    for (size_t i = 0; i < persons_.size(); ++i) {
+        auto const& markers = persons_[i]->skeleton.markers();
+        for (size_t m = 0; m < markers.size(); ++m) {
+            marker_name_to_id_[i][markers[m].name] = static_cast<int>(m);
+        }
+    }
+}
+
+void MultiPersonTracker::update_contact_gate() {
+    std::vector<PersonGatingInput> inputs(persons_.size());
+    for (size_t i = 0; i < persons_.size(); ++i) {
+        auto& ctx = *persons_[i];
+        inputs[i].cross_person_max_world_mm = ctx.tracker_config.cross_person_max_world_mm;
+        inputs[i].marker_name_to_id = marker_name_to_id_[i];
+        if (ctx.tracker_config.cross_person_max_world_mm > 0.0) {
+            auto positions = ctx.fk->compute(ctx.tracker->state());
+            inputs[i].marker_world_positions.insert(positions.begin(), positions.end());
+        }
+    }
+    update_contact_pairs(inputs, active_contact_pairs_);
+}
+
+std::vector<Observation>
+MultiPersonTracker::build_anchor_observations(int idx, int step,
+                                              std::vector<char> const& processed_this_frame) {
+    std::vector<Observation> result;
+    auto& ctx = *persons_[idx];
+    if (ctx.tracker_config.cross_person_max_world_mm <= 0.0)
+        return result;
+
+    double t_start = ctx.start_time + step * ctx.dt - ctx.dt / 2.0;
+    double t_end = t_start + ctx.dt;
+    double t_effective = t_start + ctx.dt / 2.0;
+    auto my_frame_obs = ctx.observations.get_all_in_range(t_start, t_end);
+
+    // Which other persons does the active set reference for idx? Group so each
+    // other person's frame_obs/anchor-state is fetched/computed at most once.
+    std::vector<int> other_idxs;
+    for (auto const& [pair, dist] : active_contact_pairs_) {
+        (void)dist;
+        if (pair.person_a == idx &&
+            std::find(other_idxs.begin(), other_idxs.end(), pair.person_b) == other_idxs.end()) {
+            other_idxs.push_back(pair.person_b);
+        } else if (pair.person_b == idx && std::find(other_idxs.begin(), other_idxs.end(),
+                                                     pair.person_a) == other_idxs.end()) {
+            other_idxs.push_back(pair.person_a);
+        }
+    }
+
+    // Stage 2 placeholder for sigma_anchor: Stage 3 replaces this constant with a
+    // real per-marker Jacobian-based projected-uncertainty value (see
+    // phase5-cross-person-plan.md, "Per-marker anchor uncertainty").
+    constexpr double kAnchorNoiseStdFloorPx = 5.0;
+
+    for (int other_idx : other_idxs) {
+        auto& other_ctx = *persons_[other_idx];
+        if (step >= other_ctx.num_steps)
+            continue;
+
+        // Anchor freshness: current-frame posterior if already stepped this
+        // frame, else a one-frame constant-velocity extrapolation of their
+        // frame-(t-1) posterior (see plan's "Anchor freshness").
+        State anchor_state = other_ctx.tracker->state();
+        if (static_cast<size_t>(other_idx) >= processed_this_frame.size() ||
+            !processed_this_frame[static_cast<size_t>(other_idx)]) {
+            ConstantVelocityModel extrapolation_model(other_ctx.layout);
+            anchor_state = extrapolation_model.propagate(anchor_state, other_ctx.dt);
+        }
+        auto anchor_positions_map = other_ctx.fk->compute(anchor_state);
+        std::map<std::string, Eigen::Vector3d> anchor_positions(anchor_positions_map.begin(),
+                                                                anchor_positions_map.end());
+
+        auto other_frame_obs = other_ctx.observations.get_all_in_range(t_start, t_end);
+
+        int max_n = std::min(ctx.tracker_config.cross_person_max_n,
+                             other_ctx.tracker_config.cross_person_max_n);
+        auto anchors = build_cross_person_anchors(
+            idx, other_idx, active_contact_pairs_, my_frame_obs, other_frame_obs, anchor_positions,
+            other_ctx.skeleton, ctx.cameras_by_id, ctx.tracker_config.cross_person_min_confidence,
+            other_ctx.tracker_config.cross_person_min_confidence, max_n,
+            ctx.tracker_config.pose_noise_std, other_ctx.tracker_config.pose_noise_std,
+            kAnchorNoiseStdFloorPx, step, t_effective);
+        result.insert(result.end(), anchors.begin(), anchors.end());
+    }
+
+    return result;
 }
 
 void MultiPersonTracker::run() {
     for (auto& ctx : persons_) {
         step_person_context_frame0(*ctx);
     }
+    update_contact_gate();
 
     int max_steps = 0;
     for (auto const& ctx : persons_) {
         max_steps = std::max(max_steps, ctx->num_steps);
     }
 
-    // "for frame: for person" so Stage 2 can insert contact-gating/anchor-injection
-    // logic once per frame, after every person completes that frame, without
-    // restructuring this loop.
+    std::vector<int> order(persons_.size());
+    std::iota(order.begin(), order.end(), 0);
+
+    // "for frame: for person", per Stage 1's shape -- Stage 2 fills in the
+    // per-frame contact-gate refresh and per-person anchor injection.
     for (int step = 1; step < max_steps; ++step) {
-        for (auto& ctx : persons_) {
-            if (step < ctx->num_steps) {
-                step_person_context(*ctx, step, verbose_, opts_.quiet);
+        // Rotate the processing order every frame so the "who goes first only
+        // sees stale anchors" asymmetry doesn't consistently favor one person.
+        if (!order.empty())
+            std::rotate(order.begin(), order.begin() + 1, order.end());
+
+        std::vector<char> processed_this_frame(persons_.size(), 0);
+        for (int idx : order) {
+            auto& ctx = *persons_[static_cast<size_t>(idx)];
+            if (step >= ctx.num_steps) {
+                processed_this_frame[static_cast<size_t>(idx)] = 1;
+                continue;
             }
+            auto anchors = build_anchor_observations(idx, step, processed_this_frame);
+            step_person_context(ctx, step, verbose_, opts_.quiet, anchors);
+            processed_this_frame[static_cast<size_t>(idx)] = 1;
         }
+
+        update_contact_gate();
     }
 
     for (auto& ctx : persons_) {

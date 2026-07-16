@@ -220,6 +220,16 @@ struct TrackerConfig {
     /// Maximum number of spatial cross-pairs to emit per frame per camera (sorted by proximity).
     int cross_pair_max_n = 10;
 
+    // === Cross-person relative observations (Phase 5 — MultiPersonTracker) ===
+    /// When > 0, marker pairs from two different people within this 3D world distance (mm)
+    /// become candidates for cross-person PAIR_DIFF anchoring. 0 = feature disabled.
+    double cross_person_max_world_mm = 0.0;
+    /// Minimum keypoint confidence for both people's detections to form a cross-person anchor.
+    double cross_person_min_confidence = 0.5;
+    /// Maximum number of cross-person anchor observations per person pair per camera per frame
+    /// (sorted by proximity), mirroring cross_pair_max_n.
+    int cross_person_max_n = 10;
+
     // === Calibration ===
     bool calibration_mode = false;  ///< Enable bone-length calibration DOFs
     double prismatic_process_noise_std =

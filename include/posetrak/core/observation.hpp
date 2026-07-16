@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -36,10 +37,17 @@ struct Observation {
 
     MeasurementMode mode = MeasurementMode::POSITION;
     Eigen::Vector2d
-        prev_position;        ///< Previous frame undistorted pixel; only used when mode == VELOCITY
-    int ref_marker_id = -1;   ///< Parent marker index for RELATIVE mode; -1 otherwise
-    double crop_scale = 1.0;  ///< bbox_width / pose_input_width from detection pipeline.
-                              ///< 1.0 = unknown (calibration-only noise formula).
+        prev_position;       ///< Previous frame undistorted pixel; only used when mode == VELOCITY
+    int ref_marker_id = -1;  ///< Parent marker index for RELATIVE mode; -1 otherwise
+    /// Cross-person PAIR_DIFF anchor (error-improvements Phase 5): when set, the
+    /// PAIR_DIFF prediction uses this fixed pixel value -- constant across sigma
+    /// points -- as the reference instead of reprojecting ref_marker_id. Used for
+    /// anchoring one person's marker to another person's projected marker
+    /// position; ref_marker_id is meaningless across skeletons so this is a
+    /// separate field rather than overloading that one.
+    std::optional<Eigen::Vector2d> anchor_position;
+    double crop_scale = 1.0;          ///< bbox_width / pose_input_width from detection pipeline.
+                                      ///< 1.0 = unknown (calibration-only noise formula).
     double noise_std_override = 0.0;  ///< When > 0, replaces computed noise for this observation.
     /// Set for keypoints overridden by a human-placed pose_observation_edits row (see
     /// TrackerConfig::edited_kp_noise_std). When true, UnscentedKalmanFilter::reject_outliers()

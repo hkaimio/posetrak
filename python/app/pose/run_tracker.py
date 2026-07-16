@@ -214,7 +214,6 @@ class RunTrackerWidget(QWidget):
         # (skeleton_id, display name), refreshed once per set_session() and
         # shared by every person row's skeleton combo.
         self._all_skeletons: list[tuple[str, str]] = []
-        self._all_sequences: list[sqlite3.Row] = []
         # Display label per person row, captured at run start (for
         # _show_multi_results() -- the table itself may change before the
         # run finishes if the user starts editing it again).
@@ -433,31 +432,46 @@ class RunTrackerWidget(QWidget):
         config_scroll.setWidget(config_box)
 
         # ---- People group -------------------------------------------------
-        # One row per person: each keeps their own sequence AND skeleton (people
-        # have different body proportions, and in practice every detected
-        # person already lives in their own pose_observation_sequences row --
-        # see docs/roadmap/features/error-improvements/phase5-cross-person-plan.md).
-        # Row 0 is the primary person and is never removable; its sequence
-        # choice pins which trial "Add person…" offers other people from.
-        self._people_table = QTableWidget(0, 3)
-        self._people_table.setHorizontalHeaderLabels(["Sequence", "Skeleton", ""])
+        # Person names are only defined per detection run (sequence_persons is
+        # a 1:1 name label per pose_observation_sequences row, itself one per
+        # person per detection run -- see
+        # docs/roadmap/features/error-improvements/phase5-cross-person-plan.md).
+        # So: pick a Trial first (the natural "track together" scope --
+        # cross-person anchoring needs shared cameras/world space, which every
+        # detection run in one trial shares by construction), then one row per
+        # person named within it; each row's Detection run choices are
+        # whichever detection runs in that trial produced a sequence for that
+        # name, and each row keeps its own Skeleton (people have different
+        # body proportions).
+        self._trial_combo = QComboBox()
+        self._trial_combo.currentIndexChanged.connect(self._on_trial_changed)
+        trial_form = QFormLayout()
+        trial_form.addRow("Trial:", self._trial_combo)
+
+        self._people_table = QTableWidget(0, 4)
+        self._people_table.setHorizontalHeaderLabels(
+            ["Person", "Detection run", "Skeleton", ""]
+        )
         header = self._people_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self._people_table.verticalHeader().setVisible(False)
         self._people_table.setMinimumHeight(90)
         self._people_table.setToolTip(
-            "Row 1 is the primary person. \"Add person…\" tracks additional people\n"
-            "from the same trial alongside them, interleaved frame-by-frame\n"
-            "(enables cross-person anchoring if Cross-person distance above is\n"
-            "set > 0). Each person keeps their own sequence and skeleton."
+            "Row 1 is the primary person and can't be removed. \"Add person…\"\n"
+            "tracks another named person from the same trial alongside them,\n"
+            "interleaved frame-by-frame (enables cross-person anchoring if\n"
+            "Cross-person distance above is set > 0). Each person keeps their\n"
+            "own detection run and skeleton."
         )
 
         add_person_btn = QPushButton("Add person…")
         add_person_btn.clicked.connect(self._add_person_row)
 
         people_layout = QVBoxLayout()
+        people_layout.addLayout(trial_form)
         people_layout.addWidget(self._people_table)
         add_person_row = QHBoxLayout()
         add_person_row.addStretch()
@@ -551,23 +565,51 @@ class RunTrackerWidget(QWidget):
         self._conn = conn
         self._session_path = session_path
         self._refresh_skeletons()
-        self._refresh_sequences()
+        self._refresh_trials()
         self._update_run_btn()
 
     def preselect_sequence(self, seq_id: str) -> None:
-        """Pre-select and lock the primary person's sequence to *seq_id*.
+        """Pre-select and lock the primary person's Trial/Person/Detection run
+        to whichever of those *seq_id* resolves to.
 
-        Call after set_session().  The combo is disabled so the user cannot
-        change the sequence when this widget is embedded in a PersonPanel.
+        Call after set_session(). Those three combos are disabled so the user
+        cannot change them when this widget is embedded in a PersonPanel;
+        Skeleton stays editable.
         """
-        combo = self._people_table.cellWidget(0, 0)
-        if combo is not None:
-            for i in range(combo.count()):
-                item_seq_id, _, _ = combo.itemData(i)
-                if item_seq_id == seq_id:
-                    combo.setCurrentIndex(i)
+        row = self._conn.execute(
+            "SELECT dr.trial_id, dr.id AS detection_run_id, sp.person_name"
+            " FROM pose_observation_sequences pos"
+            " JOIN detection_runs dr ON dr.id = pos.detection_run_id"
+            " LEFT JOIN sequence_persons sp"
+            "        ON sp.sequence_id = pos.id AND sp.person_id = 0"
+            " WHERE pos.id = ?",
+            (seq_id,),
+        ).fetchone()
+        if row is None or row["trial_id"] is None or row["person_name"] is None:
+            return
+
+        for i in range(self._trial_combo.count()):
+            if self._trial_combo.itemData(i)["trial_id"] == row["trial_id"]:
+                self._trial_combo.setCurrentIndex(i)
+                break
+        self._trial_combo.setEnabled(False)
+
+        person_combo = self._people_table.cellWidget(0, 0)
+        if person_combo is not None:
+            for i in range(person_combo.count()):
+                if person_combo.itemData(i) == row["person_name"]:
+                    person_combo.setCurrentIndex(i)
                     break
-            combo.setEnabled(False)
+            person_combo.setEnabled(False)
+
+        dr_combo = self._people_table.cellWidget(0, 1)
+        if dr_combo is not None:
+            for i in range(dr_combo.count()):
+                if dr_combo.itemData(i)[3] == row["detection_run_id"]:
+                    dr_combo.setCurrentIndex(i)
+                    break
+            dr_combo.setEnabled(False)
+
         self._update_run_btn()
 
     # ------------------------------------------------------------------
@@ -589,200 +631,84 @@ class RunTrackerWidget(QWidget):
                 return name
         return None
 
-    def _refresh_sequences(self) -> None:
-        self._all_sequences = []
+    def _refresh_trials(self) -> None:
+        self._trial_combo.blockSignals(True)
+        self._trial_combo.clear()
         if self._conn is not None:
-            self._all_sequences = self._conn.execute(
-                "SELECT pos.id AS seq_id, sh.label AS shot_label, sh.capture_number,"
-                "       pos.time_start_s, pos.time_end_s,"
-                "       sh.extrinsic_calibration_id, pos.sync_config_id"
-                " FROM pose_observation_sequences pos"
-                " JOIN captures sh ON sh.id = pos.shot_id"
-                " ORDER BY sh.capture_number, pos.time_start_s"
+            rows = self._conn.execute(
+                # DISTINCT: a trial can have several detection runs (re-runs);
+                # each just needs to have produced at least one sequence.
+                "SELECT DISTINCT t.id AS trial_id, t.name AS trial_name,"
+                "       t.time_start_s, t.time_end_s,"
+                "       cap.label AS capture_label, cap.capture_number,"
+                "       cap.extrinsic_calibration_id"
+                " FROM trials t"
+                " JOIN captures cap ON cap.id = t.capture_id"
+                " JOIN detection_runs dr ON dr.trial_id = t.id"
+                " JOIN pose_observation_sequences pos ON pos.detection_run_id = dr.id"
+                " ORDER BY cap.capture_number, t.time_start_s"
             ).fetchall()
-        self._rebuild_people_table()
+            for r in rows:
+                self._trial_combo.addItem(self._trial_label(r), r)
+        self._trial_combo.blockSignals(False)
+        self._on_trial_changed()
 
     @staticmethod
-    def _sequence_label(r: sqlite3.Row) -> str:
-        shot = r["shot_label"] or f"capture{r['capture_number']:03d}"
+    def _trial_label(r: sqlite3.Row) -> str:
+        capture = r["capture_label"] or f"capture{r['capture_number']:03d}"
+        trial_name = r["trial_name"] or "(unnamed trial)"
         duration = r["time_end_s"] - r["time_start_s"]
-        label = f"{shot}  [{r['time_start_s']:.1f}–{r['time_end_s']:.1f}s, {duration:.1f}s]"
-        missing = []
-        if not r["sync_config_id"]:
-            missing.append("no sync")
+        label = (
+            f"{capture} — {trial_name}"
+            f"  [{r['time_start_s']:.1f}–{r['time_end_s']:.1f}s, {duration:.1f}s]"
+        )
         if not r["extrinsic_calibration_id"]:
-            missing.append("no extrinsics")
-        if missing:
-            label += f"  ⚠ {', '.join(missing)}"
+            label += "  ⚠ no extrinsics"
         return label
 
-    def _make_sequence_combo(self, rows: list[sqlite3.Row]) -> QComboBox:
-        combo = QComboBox()
-        for r in rows:
-            combo.addItem(
-                self._sequence_label(r), (r["seq_id"], r["time_start_s"], r["time_end_s"])
-            )
-        return combo
+    def _current_trial_id(self) -> str | None:
+        data = self._trial_combo.currentData()
+        return data["trial_id"] if data is not None else None
 
-    def _make_skeleton_combo(self) -> QComboBox:
-        combo = QComboBox()
-        for skel_id, name in self._all_skeletons:
-            combo.addItem(name, skel_id)
-        return combo
-
-    def _row_sequence_data(self, row: int) -> tuple[str, float, float] | None:
-        combo = self._people_table.cellWidget(row, 0)
-        return combo.currentData() if combo is not None else None
-
-    def _row_skeleton_id(self, row: int) -> str | None:
-        combo = self._people_table.cellWidget(row, 1)
-        return combo.currentData() if combo is not None else None
-
-    def _rebuild_people_table(self) -> None:
-        """Reset the People table to a single (unremovable) primary row."""
-        self._people_table.setRowCount(0)
-        self._insert_person_row(self._all_sequences, removable=False)
-        primary_combo = self._people_table.cellWidget(0, 0)
-        primary_combo.currentIndexChanged.connect(self._on_primary_sequence_changed)
-        self._on_primary_sequence_changed()
-
-    def _insert_person_row(self, candidates: list[sqlite3.Row], *, removable: bool) -> int:
-        row = self._people_table.rowCount()
-        self._people_table.insertRow(row)
-        self._people_table.setCellWidget(row, 0, self._make_sequence_combo(candidates))
-        self._people_table.setCellWidget(row, 1, self._make_skeleton_combo())
-        if removable:
-            remove_btn = QPushButton("✕")
-            remove_btn.setFixedWidth(28)
-            remove_btn.setToolTip("Remove this person")
-            remove_btn.clicked.connect(self._make_remove_handler(remove_btn))
-            self._people_table.setCellWidget(row, 2, remove_btn)
-        self._update_run_btn()
-        return row
-
-    def _make_remove_handler(self, button: QPushButton):
-        def _remove() -> None:
-            for r in range(self._people_table.rowCount()):
-                if self._people_table.cellWidget(r, 2) is button:
-                    self._people_table.removeRow(r)
-                    break
-            self._update_run_btn()
-
-        return _remove
-
-    def _add_person_row(self) -> None:
-        primary_data = self._row_sequence_data(0)
-        if primary_data is None:
-            QMessageBox.information(
-                self, "Select a sequence first",
-                "Choose the primary person's Sequence before adding more people.",
-            )
-            return
-        primary_seq_id = primary_data[0]
-
-        candidates, note = self._trial_scoped_candidates(primary_seq_id)
-        used_ids = {
-            data[0]
-            for row in range(self._people_table.rowCount())
-            if (data := self._row_sequence_data(row)) is not None
-        }
-        candidates = [r for r in candidates if r["seq_id"] not in used_ids]
-
-        if not candidates:
-            msg = "No other sequences found in the same trial as the primary person."
-            if note:
-                msg += "\n\n" + note
-            QMessageBox.information(self, "No other people", msg)
-            return
-
-        self._insert_person_row(candidates, removable=True)
-
-    def _trial_scoped_candidates(
-        self, primary_seq_id: str
-    ) -> tuple[list[sqlite3.Row], str | None]:
-        """Other sequences from the same trial as *primary_seq_id*.
-
-        Trial is the natural scope for "track together": cross-person
-        anchoring needs shared cameras/world space, and sequences from one
-        trial share that by construction (same shot_id/sync_config_id).
-        Falls back to same-capture + overlapping time range if the primary's
-        detection run has no trial_id set (nullable in the schema), with a
-        note explaining the approximation.
-        """
-        primary = self._conn.execute(
-            "SELECT pos.shot_id, pos.time_start_s, pos.time_end_s, dr.trial_id"
-            " FROM pose_observation_sequences pos"
-            " LEFT JOIN detection_runs dr ON dr.id = pos.detection_run_id"
-            " WHERE pos.id = ?",
-            (primary_seq_id,),
-        ).fetchone()
-        if primary is None:
-            return [], None
-
-        if primary["trial_id"] is not None:
-            rows = self._conn.execute(
-                "SELECT pos.id AS seq_id, sh.label AS shot_label, sh.capture_number,"
-                "       pos.time_start_s, pos.time_end_s,"
-                "       sh.extrinsic_calibration_id, pos.sync_config_id"
-                " FROM pose_observation_sequences pos"
-                " JOIN captures sh ON sh.id = pos.shot_id"
-                " JOIN detection_runs dr ON dr.id = pos.detection_run_id"
-                " WHERE dr.trial_id = ? AND pos.id != ?"
-                " ORDER BY pos.time_start_s",
-                (primary["trial_id"], primary_seq_id),
-            ).fetchall()
-            return list(rows), None
-
+    def _person_names_for_trial(self, trial_id: str) -> list[str]:
         rows = self._conn.execute(
-            "SELECT pos.id AS seq_id, sh.label AS shot_label, sh.capture_number,"
-            "       pos.time_start_s, pos.time_end_s,"
-            "       sh.extrinsic_calibration_id, pos.sync_config_id"
-            " FROM pose_observation_sequences pos"
-            " JOIN captures sh ON sh.id = pos.shot_id"
-            " WHERE pos.shot_id = ? AND pos.id != ?"
-            "       AND pos.time_start_s < ? AND pos.time_end_s > ?"
-            " ORDER BY pos.time_start_s",
-            (primary["shot_id"], primary_seq_id, primary["time_end_s"], primary["time_start_s"]),
+            "SELECT DISTINCT sp.person_name"
+            " FROM sequence_persons sp"
+            " JOIN pose_observation_sequences pos ON pos.id = sp.sequence_id"
+            " JOIN detection_runs dr ON dr.id = pos.detection_run_id"
+            " WHERE dr.trial_id = ? AND sp.person_id = 0"
+            " ORDER BY sp.person_name",
+            (trial_id,),
         ).fetchall()
-        note = (
-            "This capture's detection run has no trial assigned, so sequences were "
-            "matched by overlapping time range within the same capture instead of by "
-            "trial (less precise -- set a trial for exact scoping)."
-        )
-        return list(rows), note
+        return [r["person_name"] for r in rows]
 
-    def _update_run_btn(self) -> None:
-        ok = (
-            len(self._all_skeletons) > 0
-            and self._people_table.rowCount() > 0
-            and self._row_sequence_data(0) is not None
-        )
-        self._run_btn.setEnabled(ok)
+    def _detection_runs_for_person(self, trial_id: str, person_name: str) -> list[sqlite3.Row]:
+        return list(self._conn.execute(
+            "SELECT dr.id AS detection_run_id, dr.created_at, dr.detector_model,"
+            "       dr.pose_model, dr.status,"
+            "       pos.id AS seq_id, pos.time_start_s, pos.time_end_s"
+            " FROM detection_runs dr"
+            " JOIN pose_observation_sequences pos ON pos.detection_run_id = dr.id"
+            " JOIN sequence_persons sp ON sp.sequence_id = pos.id"
+            " WHERE dr.trial_id = ? AND sp.person_name = ? AND sp.person_id = 0"
+            " ORDER BY dr.created_at DESC",
+            (trial_id, person_name),
+        ).fetchall())
 
-    def _on_primary_sequence_changed(self) -> None:
-        data = self._row_sequence_data(0)
-        if data is None or self._conn is None:
-            self._sequence_cameras = []
-        else:
-            seq_id, _, _ = data
-            self._sequence_cameras = self._cameras_for_sequence(seq_id)
-        self._velocity_cam_indices = set()
-        self._update_velocity_cam_label()
-        # Additional rows were scoped to the previous primary's trial; once
-        # the primary changes that scope may no longer be valid, so drop them
-        # rather than leave stale candidates in place.
-        while self._people_table.rowCount() > 1:
-            self._people_table.removeRow(1)
-        self._update_run_btn()
+    @staticmethod
+    def _detection_run_label(r: sqlite3.Row) -> str:
+        label = f"{r['created_at'][:19]}  ({r['detector_model']}/{r['pose_model']})"
+        if r["status"] != "complete":
+            label += f"  ⚠ {r['status']}"
+        return label
 
-    def _cameras_for_sequence(self, seq_id: str) -> list[str]:
+    def _cameras_for_trial(self, trial_id: str) -> list[str]:
         row = self._conn.execute(
-            "SELECT pos.sync_config_id FROM pose_observation_sequences pos WHERE pos.id = ?",
-            (seq_id,),
+            "SELECT sync_config_id FROM detection_runs WHERE trial_id = ? LIMIT 1",
+            (trial_id,),
         ).fetchone()
         if not row or not row["sync_config_id"]:
             return []
-        sync_id = row["sync_config_id"]
         rows = self._conn.execute(
             "SELECT ci.label"
             " FROM capture_videos sv"
@@ -791,9 +717,121 @@ class RunTrackerWidget(QWidget):
             " JOIN camera_instances ci ON ci.id = sv.camera_instance_id"
             " WHERE scfg.id = ?"
             " ORDER BY ci.label ASC",
-            (sync_id,),
+            (row["sync_config_id"],),
         ).fetchall()
         return [r["label"] for r in rows]
+
+    def _make_skeleton_combo(self) -> QComboBox:
+        combo = QComboBox()
+        for skel_id, name in self._all_skeletons:
+            combo.addItem(name, skel_id)
+        return combo
+
+    def _row_detection_run_data(self, row: int) -> tuple[str, float, float, str] | None:
+        combo = self._people_table.cellWidget(row, 1)
+        return combo.currentData() if combo is not None else None
+
+    def _row_skeleton_id(self, row: int) -> str | None:
+        combo = self._people_table.cellWidget(row, 2)
+        return combo.currentData() if combo is not None else None
+
+    def _insert_person_row(
+        self, trial_id: str, used_names: set[str], *, removable: bool
+    ) -> int | None:
+        names = [n for n in self._person_names_for_trial(trial_id) if n not in used_names]
+        if not names:
+            return None
+
+        row = self._people_table.rowCount()
+        self._people_table.insertRow(row)
+
+        person_combo = QComboBox()
+        for n in names:
+            person_combo.addItem(n, n)
+        self._people_table.setCellWidget(row, 0, person_combo)
+
+        dr_combo = QComboBox()
+        self._people_table.setCellWidget(row, 1, dr_combo)
+        person_combo.currentIndexChanged.connect(
+            lambda _index=None, r=row: self._refresh_detection_run_combo(r)
+        )
+
+        self._people_table.setCellWidget(row, 2, self._make_skeleton_combo())
+
+        if removable:
+            remove_btn = QPushButton("✕")
+            remove_btn.setFixedWidth(28)
+            remove_btn.setToolTip("Remove this person")
+            remove_btn.clicked.connect(self._make_remove_handler(remove_btn))
+            self._people_table.setCellWidget(row, 3, remove_btn)
+
+        self._refresh_detection_run_combo(row)
+        self._update_run_btn()
+        return row
+
+    def _refresh_detection_run_combo(self, row: int) -> None:
+        person_combo = self._people_table.cellWidget(row, 0)
+        dr_combo = self._people_table.cellWidget(row, 1)
+        if person_combo is None or dr_combo is None:
+            return
+        trial_id = self._current_trial_id()
+        person_name = person_combo.currentData()
+        dr_combo.clear()
+        if trial_id is not None and person_name is not None:
+            for r in self._detection_runs_for_person(trial_id, person_name):
+                dr_combo.addItem(
+                    self._detection_run_label(r),
+                    (r["seq_id"], r["time_start_s"], r["time_end_s"], r["detection_run_id"]),
+                )
+        self._update_run_btn()
+
+    def _make_remove_handler(self, button: QPushButton):
+        def _remove() -> None:
+            for r in range(self._people_table.rowCount()):
+                if self._people_table.cellWidget(r, 3) is button:
+                    self._people_table.removeRow(r)
+                    break
+            self._update_run_btn()
+
+        return _remove
+
+    def _add_person_row(self) -> None:
+        trial_id = self._current_trial_id()
+        if trial_id is None:
+            QMessageBox.information(
+                self, "Select a trial first", "Choose a Trial before adding people."
+            )
+            return
+        used_names = {
+            self._people_table.cellWidget(r, 0).currentData()
+            for r in range(self._people_table.rowCount())
+            if self._people_table.cellWidget(r, 0) is not None
+        }
+        row = self._insert_person_row(trial_id, used_names, removable=True)
+        if row is None:
+            QMessageBox.information(
+                self, "No other people", "No other person names found for this trial."
+            )
+
+    def _update_run_btn(self) -> None:
+        ok = (
+            len(self._all_skeletons) > 0
+            and self._people_table.rowCount() > 0
+            and self._row_detection_run_data(0) is not None
+        )
+        self._run_btn.setEnabled(ok)
+
+    def _on_trial_changed(self) -> None:
+        trial_id = self._current_trial_id()
+        self._people_table.setRowCount(0)
+        if trial_id is not None:
+            self._insert_person_row(trial_id, used_names=set(), removable=False)
+            self._sequence_cameras = self._cameras_for_trial(trial_id)
+        else:
+            self._sequence_cameras = []
+        self._velocity_cam_indices = set()
+        self._update_velocity_cam_label()
+        self._update_run_btn()
 
     def _update_velocity_cam_label(self) -> None:
         if not self._velocity_cam_indices or not self._sequence_cameras:
@@ -876,17 +914,18 @@ class RunTrackerWidget(QWidget):
 
         people: list[tuple[str, str, float, float, str]] = []
         for row in range(self._people_table.rowCount()):
-            data = self._row_sequence_data(row)
+            data = self._row_detection_run_data(row)
             skel_id = self._row_skeleton_id(row)
             if data is None or skel_id is None:
                 QMessageBox.critical(
                     self, "Cannot run tracker",
-                    "Every person needs both a sequence and a skeleton selected.",
+                    "Every person needs both a detection run and a skeleton selected.",
                 )
                 return
-            seq_id, t0, t1 = data
-            label = self._people_table.cellWidget(row, 0).currentText()
-            people.append((seq_id, skel_id, t0, t1, label))
+            seq_id, t0, t1, _dr_id = data
+            person_name = self._people_table.cellWidget(row, 0).currentText()
+            dr_label = self._people_table.cellWidget(row, 1).currentText()
+            people.append((seq_id, skel_id, t0, t1, f"{person_name} — {dr_label}"))
 
         primary_seq_id, primary_skel_id, time_start_s, time_end_s, _ = people[0]
 

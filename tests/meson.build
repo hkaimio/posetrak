@@ -48,6 +48,7 @@ test_sources = files(
   # Multi-person tracking orchestrator (error-improvements Phase 5, Stage 1)
   'test_multi_person_tracker.cpp',
   'test_multi_person_contact_gating.cpp',
+  'test_marker_projection_std.cpp',
 
   # DB blob codec
   'test_blob_codec.cpp',

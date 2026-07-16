@@ -212,6 +212,35 @@ class Tracker {
      */
     ForwardKinematics* get_fk() { return fk_.get(); }
 
+    /**
+     * @brief Per-marker projected-pixel-position standard deviation for one camera,
+     * via linearized error propagation from the current posterior covariance
+     * (error-improvements Phase 5, "Per-marker anchor uncertainty").
+     *
+     * pixel_covariance ≈ J P J^T, where J is the 2×n Jacobian of the
+     * FK-then-project map at the current state (n = error_state_dim()) and P is
+     * covariance(). J is assembled from: an analytic closed-form root position/
+     * orientation block (matching the exact retraction State::apply_error_update()
+     * and the sigma-point generator use -- see phase5-cross-person-plan.md for the
+     * derivation) plus Pinocchio's per-joint frame Jacobian (computeJointJacobians +
+     * getFrameJacobian, the same machinery InverseKinematics::compute_jacobian()
+     * already uses) for every non-root joint DOF, selected per SkeletonLayout's
+     * active_dof_mask. The returned std is the isotropic RMS of the 2x2 pixel
+     * covariance's diagonal (sqrt((var_u + var_v) / 2)), matching how the rest of
+     * the noise model treats noise as a single per-axis scalar.
+     *
+     * Lazy by design: only computes for the requested markers (each costs one
+     * small GEMM chain, not a full sigma-point regeneration), so callers should
+     * only ask for markers in currently-active contact pairs.
+     *
+     * @param camera_id Camera to project into; markers are omitted from the
+     *        result if this id is unknown or a marker projects behind the camera.
+     * @param marker_ids Marker indices (skeleton().markers() positions) to compute.
+     * @return marker_id -> pixel std, for however many of marker_ids succeeded.
+     */
+    std::unordered_map<int, double> marker_projection_std(int camera_id,
+                                                          std::vector<int> const& marker_ids) const;
+
     // ── RTS Smoothing ────────────────────────────────────────────────────────────
 
     /**

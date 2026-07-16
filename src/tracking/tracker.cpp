@@ -6,12 +6,16 @@
 #include "posetrak/tracking/tracker.hpp"
 
 #include <Eigen/Dense>
+#include <pinocchio/algorithm/frames.hpp>
+#include <pinocchio/algorithm/jacobian.hpp>
 
 #include <fmt/core.h>
 
 #include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/kinematics/pinocchio_model_builder.hpp"
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -844,6 +848,143 @@ std::vector<SmoothedFrame> Tracker::smooth() const {
     }
     RTSSmoother smoother(ukf_->layout());
     return smoother.smooth(smoother_cache_);
+}
+
+// ─── Per-marker anchor uncertainty (error-improvements Phase 5, Stage 3) ──────
+
+std::unordered_map<int, double>
+Tracker::marker_projection_std(int camera_id, std::vector<int> const& marker_ids) const {
+    std::unordered_map<int, double> result;
+    if (!initialized_ || marker_ids.empty())
+        return result;
+
+    auto cam_it = cameras_.find(camera_id);
+    if (cam_it == cameras_.end())
+        return result;
+    Camera const& camera = cam_it->second;
+    Intrinsics const& intr = camera.intrinsics();
+
+    State const& x = ukf_->state();
+    Eigen::MatrixXd const& P = ukf_->covariance();
+    auto layout = ukf_->layout();
+    int const n = layout->error_state_dim();
+    int const root_n = layout->root_error_dof_count();
+
+    // FK once for all requested markers' world positions, and Pinocchio's joint
+    // Jacobians once for all requested markers' frame Jacobians -- both are
+    // amortized across every marker in marker_ids, only the per-marker frame
+    // Jacobian lookup and the small GEMM chain below are actually per-marker.
+    Eigen::VectorXd q = ForwardKinematics::state_to_config(x, *layout);
+    pinocchio::computeJointJacobians(*model_, *data_, q);
+    pinocchio::updateFramePlacements(*model_, *data_);
+    auto marker_world = fk_->compute(x);
+
+    Eigen::Matrix3d const R_root = x.root_orientation().toRotationMatrix();
+    Eigen::Vector3d const p_root = x.root_position();
+
+    for (int marker_id : marker_ids) {
+        if (marker_id < 0 || marker_id >= static_cast<int>(skeleton_->markers().size()))
+            continue;
+        std::string const& marker_name = skeleton_->markers()[static_cast<size_t>(marker_id)].name;
+
+        auto pos_it = marker_world.find(marker_name);
+        if (pos_it == marker_world.end())
+            continue;
+        Eigen::Vector3d const& p_marker = pos_it->second;
+
+        // --- Camera projection Jacobian (2x3), w.r.t. marker world position ---
+        Eigen::Vector3d const p_cam = camera.orientation() * (p_marker - camera.position());
+        if (p_cam.z() <= 0.0)
+            continue;  // behind camera -- projection undefined
+        double const z = p_cam.z();
+        Eigen::Matrix<double, 2, 3> J_proj_cam;
+        J_proj_cam << intr.fx / z, 0.0, -intr.fx * p_cam.x() / (z * z), 0.0, intr.fy / z,
+            -intr.fy * p_cam.y() / (z * z);
+        Eigen::Matrix<double, 2, 3> const J_proj_world =
+            J_proj_cam * camera.orientation().toRotationMatrix();
+
+        // --- FK Jacobian (3 x n), w.r.t. the error state ---
+        Eigen::MatrixXd J_fk = Eigen::MatrixXd::Zero(3, n);
+
+        if (root_n > 0) {
+            // Root position: world-frame additive (State::apply_error_update()) ->
+            // marker moves 1:1 with the root, so this block is just the identity.
+            J_fk.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity();
+
+            // Root orientation: body-frame right-multiplicative perturbation
+            // (root_orientation_ = root_orientation_ * delta_q). For r = p_marker -
+            // p_root rotating rigidly with the root, d(p_marker)/d(delta_theta) =
+            // -[r]_x * R_root (see phase5-cross-person-plan.md for the derivation).
+            Eigen::Vector3d const r = p_marker - p_root;
+            Eigen::Matrix3d r_cross;
+            r_cross << 0, -r.z(), r.y(), r.z(), 0, -r.x(), -r.y(), r.x(), 0;
+            J_fk.block<3, 3>(0, 3) = -r_cross * R_root;
+        }
+
+        auto frame_it = marker_frame_map_.find(marker_name);
+        if (frame_it != marker_frame_map_.end()) {
+            Eigen::Matrix<double, 6, Eigen::Dynamic> J_frame(6, model_->nv);
+            J_frame.setZero();
+            pinocchio::getFrameJacobian(*model_, *data_, frame_it->second,
+                                        pinocchio::LOCAL_WORLD_ALIGNED, J_frame);
+            Eigen::MatrixXd const J_frame_linear = J_frame.topRows(3);  // 3 x nv
+
+            for (JointDesc const& j : layout->joints()) {
+                // Scale-group followers share their leader's error_index and have
+                // active_dof_count == 0 (no independent DOF), but each still has its
+                // own Pinocchio joint/column that must ADD into the leader's error
+                // column (scaled by this follower's own nominal_length) -- so they
+                // are the one active_dof_count == 0 case not skipped here.
+                bool const is_prismatic_follower =
+                    (j.type == JointType::PRISMATIC) && j.is_scale_follower;
+                if (j.active_dof_count == 0 && !is_prismatic_follower)
+                    continue;
+
+                // Find this joint's column range in Pinocchio's nv-space (same
+                // lookup InverseKinematics::compute_jacobian() uses to freeze
+                // prismatic columns).
+                int pin_col = -1;
+                for (pinocchio::JointIndex ji = 1;
+                     ji < static_cast<pinocchio::JointIndex>(model_->njoints); ++ji) {
+                    if (model_->names[ji] == j.name) {
+                        pin_col = model_->joints[ji].idx_v();
+                        break;
+                    }
+                }
+                if (pin_col < 0)
+                    continue;
+
+                int const error_col = root_n + static_cast<int>(j.error_index);
+                if (j.type == JointType::SPHERICAL) {
+                    int selected = 0;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        if (!j.active_dof_mask[axis])
+                            continue;
+                        J_fk.col(error_col + selected) = J_frame_linear.col(pin_col + axis);
+                        ++selected;
+                    }
+                } else if (j.type == JointType::PRISMATIC) {
+                    // State stores a dimensionless scale factor s (pinocchio q = s *
+                    // nominal_length, see ForwardKinematics::state_to_config), so the
+                    // chain rule needs an extra factor of nominal_length here. Leader
+                    // and any followers all accumulate into the same error_col (+=,
+                    // not =), each scaled by its OWN nominal_length.
+                    J_fk.col(error_col) += J_frame_linear.col(pin_col) * j.nominal_length;
+                } else {
+                    // REVOLUTE: 1 active DOF, direct radians-to-radians correspondence.
+                    J_fk.col(error_col) = J_frame_linear.col(pin_col);
+                }
+            }
+        }
+
+        Eigen::MatrixXd const J_total = J_proj_world * J_fk;  // 2 x n
+
+        Eigen::Matrix2d const pixel_cov = J_total * P * J_total.transpose();
+        double const var = std::max(0.0, (pixel_cov(0, 0) + pixel_cov(1, 1)) / 2.0);
+        result[marker_id] = std::sqrt(var);
+    }
+
+    return result;
 }
 
 }  // namespace posetrak

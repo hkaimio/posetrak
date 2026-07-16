@@ -235,17 +235,23 @@ void update_contact_pairs(std::vector<PersonGatingInput> const& persons,
 /// input) -- a candidate marker pair only produces an anchor observation for a
 /// given camera when both people have a detection there meeting the
 /// confidence floor. *anchor_noise_std_floor* is Stage 2's placeholder for
-/// sigma_anchor (Stage 3 replaces it with a real per-marker Jacobian-based
-/// value); it is floored/inflated here as its own term in the noise
-/// composition, guarding against the decentralized-fusion "data incest"
-/// failure mode the plan flags.
+/// sigma_anchor: looked up per (camera, other marker) in
+/// *anchor_noise_std_by_camera_marker* -- Stage 3's Tracker::marker_projection_std(),
+/// the real per-marker Jacobian-based projected-uncertainty value -- floored and
+/// mildly inflated by *anchor_noise_std_floor* as its own term in the noise
+/// composition, guarding against the decentralized-fusion "data incest" failure
+/// mode the plan flags. Falls back to the floor alone (as Stage 2 did before
+/// Stage 3) for any (camera, marker) missing from the lookup, e.g. because the
+/// projection failed or a caller hasn't wired Stage 3 in yet.
 std::vector<Observation> build_cross_person_anchors(
     int my_idx, int other_idx, std::map<ContactMarkerPair, double> const& active_pairs,
     std::vector<Observation> const& my_frame_obs, std::vector<Observation> const& other_frame_obs,
     std::map<std::string, Eigen::Vector3d> const& other_anchor_marker_positions,
     Skeleton const& other_skeleton, std::unordered_map<int, Camera> const& cameras,
     double my_min_confidence, double other_min_confidence, int max_n, double my_pose_noise_std,
-    double other_pose_noise_std, double anchor_noise_std_floor, int frame_idx, double timestamp);
+    double other_pose_noise_std, double anchor_noise_std_floor, int frame_idx, double timestamp,
+    std::unordered_map<int, std::unordered_map<int, double>> const&
+        anchor_noise_std_by_camera_marker = {});
 
 // ---------------------------------------------------------------------------
 // Multi-person orchestrator

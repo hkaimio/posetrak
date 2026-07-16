@@ -739,7 +739,9 @@ std::vector<Observation> build_cross_person_anchors(
     std::map<std::string, Eigen::Vector3d> const& other_anchor_marker_positions,
     Skeleton const& other_skeleton, std::unordered_map<int, Camera> const& cameras,
     double my_min_confidence, double other_min_confidence, int max_n, double my_pose_noise_std,
-    double other_pose_noise_std, double anchor_noise_std_floor, int frame_idx, double timestamp) {
+    double other_pose_noise_std, double anchor_noise_std_floor, int frame_idx, double timestamp,
+    std::unordered_map<int, std::unordered_map<int, double>> const&
+        anchor_noise_std_by_camera_marker) {
     std::vector<Observation> result;
 
     // Marker id -> detections this frame (a marker can have one detection per
@@ -836,7 +838,24 @@ std::vector<Observation> build_cross_person_anchors(
 
             double const sigma_pose_mine = my_pose_noise_std * c.mine->crop_scale;
             double const sigma_pose_other = other_pose_noise_std * c.other->crop_scale;
-            double const sigma_anchor = anchor_noise_std_floor;
+
+            // sigma_anchor: Stage 3's Jacobian-based per-marker uncertainty when
+            // available for this (camera, marker), mildly inflated as a guard
+            // against decentralized-fusion "data incest" (see the plan's
+            // "measurement model" section); always floored at
+            // anchor_noise_std_floor regardless, including when no Stage 3 value
+            // was computed for this (camera, marker) at all.
+            constexpr double kAnchorNoiseInflationFactor = 1.2;
+            double sigma_anchor = anchor_noise_std_floor;
+            auto cam_lookup = anchor_noise_std_by_camera_marker.find(camera_id);
+            if (cam_lookup != anchor_noise_std_by_camera_marker.end()) {
+                auto marker_lookup = cam_lookup->second.find(c.other_marker);
+                if (marker_lookup != cam_lookup->second.end()) {
+                    sigma_anchor = std::max(marker_lookup->second * kAnchorNoiseInflationFactor,
+                                            anchor_noise_std_floor);
+                }
+            }
+
             anchor.noise_std_override =
                 std::sqrt(sigma_pose_mine * sigma_pose_mine + sigma_pose_other * sigma_pose_other +
                           sigma_anchor * sigma_anchor);
@@ -935,6 +954,30 @@ MultiPersonTracker::build_anchor_observations(int idx, int step,
 
         auto other_frame_obs = other_ctx.observations.get_all_in_range(t_start, t_end);
 
+        // Stage 3: per-(camera, marker) anchor uncertainty, lazily computed only
+        // for the markers this active-pair set actually references for
+        // other_idx, and only for cameras other_idx has. Each marker_projection_std()
+        // call amortizes the FK/Pinocchio-Jacobian setup across every marker
+        // requested for that camera, so this is one such call per camera, not
+        // per marker.
+        std::vector<int> other_markers_needed;
+        for (auto const& [pair, dist] : active_contact_pairs_) {
+            (void)dist;
+            if (pair.person_a == idx && pair.person_b == other_idx) {
+                other_markers_needed.push_back(pair.marker_b);
+            } else if (pair.person_b == idx && pair.person_a == other_idx) {
+                other_markers_needed.push_back(pair.marker_a);
+            }
+        }
+        std::unordered_map<int, std::unordered_map<int, double>> anchor_noise_std_by_camera_marker;
+        if (!other_markers_needed.empty()) {
+            for (auto const& [camera_id, camera] : other_ctx.cameras_by_id) {
+                (void)camera;
+                anchor_noise_std_by_camera_marker[camera_id] =
+                    other_ctx.tracker->marker_projection_std(camera_id, other_markers_needed);
+            }
+        }
+
         int max_n = std::min(ctx.tracker_config.cross_person_max_n,
                              other_ctx.tracker_config.cross_person_max_n);
         auto anchors = build_cross_person_anchors(
@@ -942,7 +985,7 @@ MultiPersonTracker::build_anchor_observations(int idx, int step,
             other_ctx.skeleton, ctx.cameras_by_id, ctx.tracker_config.cross_person_min_confidence,
             other_ctx.tracker_config.cross_person_min_confidence, max_n,
             ctx.tracker_config.pose_noise_std, other_ctx.tracker_config.pose_noise_std,
-            kAnchorNoiseStdFloorPx, step, t_effective);
+            kAnchorNoiseStdFloorPx, step, t_effective, anchor_noise_std_by_camera_marker);
         result.insert(result.end(), anchors.begin(), anchors.end());
     }
 

@@ -213,6 +213,24 @@ class Tracker {
     ForwardKinematics* get_fk() { return fk_.get(); }
 
     /**
+     * @brief Inject this frame's externally-known root transform (fixed-root
+     * / child-filter mode -- see TrackerConfig::fixed_root_joint_name).
+     *
+     * Forwards to UnscentedKalmanFilter::set_root_transform(). The caller
+     * (e.g. a hierarchical solver's Stage B driving this Tracker off a
+     * TrajectoryStream) must call this once per frame before track_frame(),
+     * with the value for the frame about to be tracked -- root position and
+     * orientation are held fixed through that frame's predict+update, never
+     * estimated. A safety no-op if this Tracker's layout has a floating
+     * root (i.e. fixed_root_joint_name was never set) -- see
+     * docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md.
+     *
+     * @note Requires is_initialized() == true.
+     */
+    void set_external_root_transform(Eigen::Vector3d const& position,
+                                     Eigen::Quaterniond const& orientation);
+
+    /**
      * @brief Per-marker projected-pixel-position standard deviation for one camera,
      * via linearized error propagation from the current posterior covariance
      * (error-improvements Phase 5, "Per-marker anchor uncertainty").
@@ -268,16 +286,6 @@ class Tracker {
 
    private:
     /**
-     * @brief Placeholder for a child filter (subtree tracker).
-     *
-     * Phase 3h will populate this with: layout, ukf, fk, model, data,
-     * marker_frame_map, freeflyer_joint_name, merge_map, and config.
-     */
-    struct ChildFilter {
-        // Phase 3h members go here
-    };
-
-    /**
      * @brief Initialize UKF with given state and initial covariance
      */
     void initialize_ukf(State const& initial_state, double timestamp);
@@ -295,11 +303,6 @@ class Tracker {
      */
     TrackingResult run_parent_step(std::vector<Observation> const& obs, double dt,
                                    double timestamp);
-
-    /**
-     * @brief Run one child filter's predict+update step (stub for Phase 3h).
-     */
-    void run_child_step(ChildFilter& child, std::vector<Observation> const& obs, double dt);
 
     /**
      * @brief Check if we have sufficient observations for tracking
@@ -364,9 +367,6 @@ class Tracker {
     std::unique_ptr<pinocchio::Model> model_;
     std::unique_ptr<pinocchio::Data> data_;
     std::map<std::string, pinocchio::FrameIndex> marker_frame_map_;
-
-    // Child filters (populated in Phase 3h)
-    std::vector<ChildFilter> children_{};
 
     // State
     bool initialized_ = false;

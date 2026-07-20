@@ -458,12 +458,18 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
 
     // Rebuild FK if using a subset layout (so state_to_config and FK work on layout-sized state)
     if (!groups.empty()) {
-        // Find skeleton root joint (the one with no parent)
-        std::string root_joint_name;
-        for (auto const& joint : skeleton_->joints()) {
-            if (!joint.parent_index.has_value()) {
-                root_joint_name = joint.name;
-                break;
+        // Freeflyer/anchor joint for the subtree model: explicit override
+        // (fixed_root_joint_name -- the child-filter case, has_floating_root()
+        // will come back false since active_joint_groups excludes it) or,
+        // by default, the skeleton's own root (the existing active_joint_groups-
+        // only case -- a genuinely floating, estimated root).
+        std::string root_joint_name = config_.fixed_root_joint_name;
+        if (root_joint_name.empty()) {
+            for (auto const& joint : skeleton_->joints()) {
+                if (!joint.parent_index.has_value()) {
+                    root_joint_name = joint.name;
+                    break;
+                }
             }
         }
         if (root_joint_name.empty()) {
@@ -471,7 +477,6 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
         }
 
         // Rebuild pinocchio model/data/FK scoped to the layout groups
-        // Use build_subtree_model with the skeleton root as the freeflyer
         model_ = std::make_unique<pinocchio::Model>();
         PinocchioModelBuilder::build_subtree_model(*skeleton_, root_joint_name, groups, *model_);
         data_ = std::make_unique<pinocchio::Data>(*model_);
@@ -530,6 +535,16 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
     ukf_->set_covariance(initial_cov);
 
     last_timestamp_ = timestamp;
+}
+
+void Tracker::set_external_root_transform(Eigen::Vector3d const& position,
+                                          Eigen::Quaterniond const& orientation) {
+    if (!ukf_) {
+        throw std::runtime_error(
+            "Tracker::set_external_root_transform: not initialized (call initialize()/"
+            "initialize_from_state()/initialize_from_rest_pose() first)");
+    }
+    ukf_->set_root_transform(position, orientation);
 }
 
 std::vector<Observation>
@@ -664,9 +679,6 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
     auto result = run_parent_step(annotated, dt, timestamp);
 
     if (!result.tracking_lost) {
-        for (auto& child : children_) {
-            run_child_step(child, annotated, dt);
-        }
         last_timestamp_ = timestamp;
         ++frame_count_;
         // Store raw pixel positions for next frame's velocity-mode annotation
@@ -807,11 +819,6 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
         update_info.kalman_ms,
         update_info.cov_update_ms,
     };
-}
-
-void Tracker::run_child_step(ChildFilter& /*child*/,
-                             std::vector<Observation> const& /*observations*/, double /*dt*/) {
-    // Phase 3h: inject root from parent FK, run child UKF predict+update, merge state
 }
 
 bool Tracker::has_sufficient_observations(std::vector<Observation> const& observations) const {

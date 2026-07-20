@@ -432,3 +432,134 @@ TEST_CASE("End-to-end tracking of synthetic sequence", "[tracker][integration]")
         REQUIRE(std::isfinite(result.state.root_position().norm()));
     }
 }
+
+// ===========================================================================
+// Fixed-root ("child filter") mode -- hierarchical body/hand solver, PR2
+// (see docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md)
+// ===========================================================================
+//
+// tests/data/simple_humanoid.yaml already defines "right_arm"/"left_arm"
+// groups that hang off "spine_upper" without including it or "core" --
+// exactly the shape a hand child filter has relative to "forearm.{L,R}".
+// This exercises TrackerConfig::fixed_root_joint_name end to end: a Tracker
+// built with active_joint_groups={"right_arm"} and
+// fixed_root_joint_name="spine_upper" should hold its root exactly at
+// whatever set_external_root_transform() last injected, through predict AND
+// update, while still estimating r_shoulder/r_elbow/r_wrist normally from
+// their own markers.
+
+TEST_CASE("Fixed-root mode: child tracker holds an externally-injected root",
+          "[tracker][fixed_root]") {
+    TrackerIntegrationFixture fixture;
+    fixture.setup_cameras(3, 4.0, 1.5);
+
+    Skeleton skeleton = load_skeleton_from_yaml("tests/data/simple_humanoid.yaml");
+    auto skeleton_ptr = std::make_shared<const Skeleton>(skeleton);
+
+    int const num_frames = 10;
+    double const dt = 1.0 / 30.0;
+    fixture.generate_ground_truth_trajectory(skeleton, num_frames, dt);
+
+    // Full-skeleton FK: source of (a) synthetic observations and (b) the
+    // per-frame "spine_upper" world transform a parent solver's smoothed
+    // trajectory would supply to this child.
+    pinocchio::Model full_model;
+    pinocchio::Data full_data;
+    PinocchioModelBuilder::build_model_and_data(skeleton, full_model, full_data);
+    auto full_marker_map = PinocchioModelBuilder::build_marker_frame_map(full_model, skeleton);
+    auto full_layout = SkeletonLayout::from_full_skeleton(skeleton_ptr);
+    ForwardKinematics full_fk(full_model, full_data, full_marker_map, full_layout);
+
+    // noise_std intentionally small-but-nonzero, not exactly 0.0: this
+    // fixture's generate_observations() uses std::normal_distribution, whose
+    // MSVC STL implementation hangs indefinitely with stddev=0 -- a
+    // pre-existing quirk in shared test helper code, unrelated to fixed-root
+    // mode, discovered while writing this test.
+    fixture.generate_observations(skeleton, full_fk, /*noise_std=*/0.01);
+    auto const& all_observations = fixture.observations();
+    auto const& ground_truth = fixture.ground_truth_states();
+
+    std::vector<std::pair<Eigen::Vector3d, Eigen::Quaterniond>> spine_upper_transforms;
+    for (auto const& gt_state : ground_truth) {
+        full_fk.compute(gt_state);
+        spine_upper_transforms.push_back(full_fk.world_transform("spine_upper"));
+    }
+
+    // A real child filter only ever sees its own group's markers -- filter
+    // down to right_arm's three.
+    std::unordered_set<int> right_arm_marker_ids;
+    for (std::string const& name : {"r_shoulder_marker", "r_elbow_marker", "r_wrist_marker"}) {
+        for (size_t i = 0; i < skeleton.markers().size(); ++i) {
+            if (skeleton.markers()[i].name == name) {
+                right_arm_marker_ids.insert(static_cast<int>(i));
+            }
+        }
+    }
+    std::vector<std::vector<Observation>> child_observations(all_observations.size());
+    for (size_t f = 0; f < all_observations.size(); ++f) {
+        for (auto const& obs : all_observations[f]) {
+            if (right_arm_marker_ids.count(obs.marker_id)) {
+                child_observations[f].push_back(obs);
+            }
+        }
+    }
+    REQUIRE(child_observations[0].size() > 0);
+
+    TrackerConfig config;
+    config.process_noise_std = 0.3;
+    config.calib_noise_std = 2.0;
+    config.outlier_threshold = 6.0;
+    config.init_position_std = 0.1;
+    config.init_orientation_std = 0.1;
+    config.init_joint_std = 0.3;
+    config.init_velocity_std = 0.1;
+    config.active_joint_groups = {"right_arm"};
+    config.fixed_root_joint_name = "spine_upper";
+
+    std::unordered_map<int, Camera> camera_map;
+    for (auto const& cam : fixture.cameras()) {
+        camera_map.emplace(cam.id(), cam);
+    }
+
+    Tracker tracker(skeleton_ptr, camera_map, config);
+
+    // Seed with a deliberately wrong root -- set_external_root_transform()
+    // must be what fixes it, not initialization.
+    State seed(Eigen::Vector3d(99.0, 99.0, 99.0), Eigen::Quaterniond::Identity(),
+               Eigen::VectorXd::Zero(skeleton.total_dof_count()), Eigen::Vector3d::Zero(),
+               Eigen::Vector3d::Zero(), Eigen::VectorXd::Zero(skeleton.total_dof_count()));
+    tracker.initialize_from_state(seed, 0.0);
+
+    auto const [pos0, ori0] = spine_upper_transforms[0];
+    tracker.set_external_root_transform(pos0, ori0);
+
+    SECTION("root is held at the injected transform, not the seeded one") {
+        CHECK_THAT((tracker.state().root_position() - pos0).norm(), WithinAbs(0.0, 1e-9));
+        CHECK_THAT(tracker.state().root_orientation().angularDistance(ori0), WithinAbs(0.0, 1e-9));
+    }
+
+    SECTION("root stays fixed through predict+update; child joints converge to ground truth") {
+        auto child_layout = SkeletonLayout::from_groups(skeleton_ptr, {"right_arm"});
+        REQUIRE_FALSE(child_layout->has_floating_root());
+
+        for (int frame = 1; frame < num_frames; ++frame) {
+            auto const [pos, ori] = spine_upper_transforms[frame];
+            tracker.set_external_root_transform(pos, ori);
+            auto result = tracker.track_frame(child_observations[frame], frame * dt);
+            REQUIRE_FALSE(result.tracking_lost);
+
+            // Root must equal the injected transform exactly every frame --
+            // never estimated, never drifted by the process model.
+            CHECK_THAT((tracker.state().root_position() - pos).norm(), WithinAbs(0.0, 1e-6));
+            CHECK_THAT(tracker.state().root_orientation().angularDistance(ori),
+                       WithinAbs(0.0, 1e-6));
+        }
+
+        // Child's own joints (r_shoulder/r_elbow/r_wrist, 7 DOF) should have
+        // converged close to ground truth, sliced to the same layout.
+        State const gt_sliced = child_layout->slice_state(ground_truth[num_frames - 1]);
+        double const angle_error =
+            compute_angle_rmse(tracker.state().joint_angles(), gt_sliced.joint_angles());
+        CHECK(angle_error < 15.0);
+    }
+}

@@ -68,7 +68,14 @@ UnscentedKalmanFilter::UnscentedKalmanFilter(std::shared_ptr<const SkeletonLayou
                                              double process_noise_std, double alpha, double beta,
                                              double kappa)
     : layout_(layout),
-      state_(layout->skeleton()->total_dof_count()),
+      // Layout-sized, not skeleton()->total_dof_count() -- for a subset layout
+      // (active_joint_groups, or a fixed-root child filter) these differ; see
+      // the note on compute_state_mean()'s mean_state construction. Every
+      // current caller (Tracker::initialize_ukf()) immediately overwrites
+      // this via set_state() with a correctly-sliced State, so this was never
+      // observably wrong in isolation, but it's a real footgun for a UKF used
+      // without an explicit set_state() call.
+      state_(layout->total_storage_dof_count()),
       covariance_(Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim())),
       process_noise_(
           Eigen::MatrixXd::Identity(layout->error_state_dim(), layout->error_state_dim())),
@@ -80,8 +87,8 @@ UnscentedKalmanFilter::UnscentedKalmanFilter(std::shared_ptr<const SkeletonLayou
     rebuild_process_noise();
 
     // Debug: Print DOF counts
-    fmt::print("UKF initialized: total_dof={}, error_dim={}\n",
-               layout->skeleton()->total_dof_count(), layout->error_state_dim());
+    fmt::print("UKF initialized: total_dof={}, error_dim={}\n", layout->total_storage_dof_count(),
+               layout->error_state_dim());
 }
 
 void UnscentedKalmanFilter::rebuild_process_noise() {
@@ -1043,8 +1050,17 @@ PredictResult UnscentedKalmanFilter::predict(double dt) {
 
 State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states,
                                                 Eigen::VectorXd const& weights) const {
-    // Create mean state
-    State mean_state(layout_->skeleton()->total_dof_count());
+    // Create mean state. Sized from the layout's own storage DOF count, not the
+    // skeleton's full total -- for a subset layout (active_joint_groups, or a
+    // fixed-root child filter) these differ, and sizing from the full skeleton
+    // silently padded joint_angles()/joint_velocities() with unused trailing
+    // slots. Harmless in isolation (nothing downstream read past the layout's
+    // active range), but it broke callers that expect state() to be exactly
+    // layout-sized -- e.g. SkeletonLayout::build_index_map_from() and any
+    // direct joint_angles().size() comparison (found via the hierarchical
+    // solver's fixed-root Tracker test, see
+    // docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md).
+    State mean_state(layout_->total_storage_dof_count());
 
     // Diagnostic: Karcher-mean convergence + raw axis-angle-vector sigma-point spread
     // per spherical joint, for the near-pi-singularity investigation -- see
@@ -1106,9 +1122,9 @@ State UnscentedKalmanFilter::compute_state_mean(std::vector<State> const& states
     mean_state.set_root_velocity(vel_mean);
     mean_state.set_root_angular_velocity(angvel_mean);
 
-    // Mean joint angles and velocities
-    Eigen::VectorXd angles_mean = Eigen::VectorXd::Zero(layout_->skeleton()->total_dof_count());
-    Eigen::VectorXd velocities_mean = Eigen::VectorXd::Zero(layout_->skeleton()->total_dof_count());
+    // Mean joint angles and velocities -- sized from the layout, see the note above.
+    Eigen::VectorXd angles_mean = Eigen::VectorXd::Zero(layout_->total_storage_dof_count());
+    Eigen::VectorXd velocities_mean = Eigen::VectorXd::Zero(layout_->total_storage_dof_count());
 
     for (JointDesc const& j : layout_->joints()) {
         int const si = j.state_index;

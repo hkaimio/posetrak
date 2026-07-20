@@ -195,6 +195,22 @@ struct TrackerConfig {
     // Layout selection
     std::vector<std::string> active_joint_groups;  ///< Joint groups to track (empty = all)
 
+    /// Explicit freeflyer/anchor joint for the subtree model built from
+    /// active_joint_groups. Empty (default) = use the skeleton's own root
+    /// joint, exactly today's behaviour -- a genuinely floating root,
+    /// estimated by the UKF. Non-empty = build the subtree rooted at this
+    /// named joint instead; if active_joint_groups excludes it and every
+    /// joint between it and the skeleton's true root (the child-filter
+    /// case -- e.g. "forearm.L" with active_joint_groups={"HandL"}),
+    /// SkeletonLayout::from_groups() naturally reports has_floating_root()
+    /// == false (it only sets that flag when it reaches the skeleton's
+    /// actual root while filtering by group, per skeleton_layout.cpp), and
+    /// the resulting Tracker expects the caller to drive its root pose
+    /// externally every frame via set_external_root_transform() before
+    /// track_frame() -- see
+    /// docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md.
+    std::string fixed_root_joint_name;
+
     // === Velocity-mode cameras ===
     /// Camera IDs that use frame-to-frame pixel velocity instead of absolute position.
     /// Useful for cameras with large systematic extrinsic or lens-distortion errors.

@@ -19,13 +19,24 @@ docs already in the repo, which this doc does not duplicate:
   | 3c | done | Removed `set_active_groups()` from `Skeleton`; groups passed to layout factory |
   | 3d | done | `PinocchioModelBuilder::build_subtree_model()` + unified `ForwardKinematics` API (single `shared_ptr<const SkeletonLayout>` constructor, layout-aware `state_to_config()`), 9 passing `[subtree_model]` tests |
   | 3e | done | `UnscentedKalmanFilter::set_root_transform()` + fixed-root sigma-point path (root excluded from error state, held constant through predict/update), 3 passing `[child_filter]` tests |
-  | 3f | **next in that doc, not yet done** | `ForwardKinematics::world_transform(joint_name)` — reads a named joint's world pose from the Pinocchio cache after `compute()` |
+  | 3f | **done — corrected 2026-07-20** | `ForwardKinematics::world_transform(joint_name)` was already implemented (`joint_id_map_` populated from `model_.names`, reads `data_.oMi[]`) and tested (`[world_transform]`, 18 assertions), contrary to this doc's earlier "next, not yet done" — verified directly against the code before starting implementation. |
 
   This means the low-level plumbing a hand child-filter needs — a
   subtree Pinocchio model rooted at an externally-supplied joint, a UKF that
   holds that root fixed through predict/update, sigma points that never
   perturb it — **already exists and is tested**, independent of anything
   decided in this doc.
+
+  **Implementation status (2026-07-20)**: PR 1 done —
+  `BatchTrajectoryStream`/`TrajectoryStream` (`include/posetrak/tracking/trajectory_stream.hpp`)
+  wraps a completed `Tracker`'s smoothed output + its own `get_fk()` to yield
+  one named joint's world transform per frame, pull-based (`next()` →
+  `std::optional<FreeflyerPose>`), ready for a future fixed-lag producer to
+  replace the batch implementation without changing consumers. 16 passing
+  `[trajectory_stream]` assertions. Full test suite otherwise green; one
+  pre-existing, unrelated failure (`test_statistics_tracker.cpp`'s CSV/JSON
+  cleanup hits a Windows file-handle-release race) confirmed via `git status`
+  to predate this work and left alone as out of scope.
 
 This doc's job is narrower: (1) independently re-validate the root-cause
 diagnosis against fresh production data, since it happened to get re-derived
@@ -767,7 +778,7 @@ Sequenced as PR-sized units, each with an acceptance gate, checked
 
 | PR | Scope | Acceptance gate |
 |----|-------|------------------|
-| 1 | `ForwardKinematics::world_transform(joint_name)` (redesign.md §11, unchanged) + a small streaming interface over a completed `Tracker`'s smoothed trajectory yielding one named joint's world transform per frame. Build only enough for PR 3 to consume — not the fixed-lag machinery this leaves room for. | `[world_transform]` tests per redesign.md §11.5; a stream test against a short smoothed sequence. |
+| 1 — **done** | `ForwardKinematics::world_transform(joint_name)` (redesign.md §11 — found already implemented, not new work) + `TrajectoryStream`/`BatchTrajectoryStream`, a small streaming interface over a completed `Tracker`'s smoothed trajectory yielding one named joint's world transform per frame via its own `get_fk()`. | `[world_transform]` (pre-existing, 18 assertions) + `[trajectory_stream]` (new, 16 assertions), all passing. Commit `36ae6c5`. |
 | 2 | Decide + implement `Tracker` fixed-root mode vs. a new sibling class (the open decision inside 3h) — teach `Tracker` to accept an externally-supplied, per-frame root transform (from PR 1's stream) instead of estimating its own root, reusing Phase 3e's `set_root_transform()` at the `Tracker` level. Confirm `Triangulator`/`InverseKinematics` work unmodified against a small `from_groups()` layout rather than assuming it from the Phase 3a–3c refactor. | Synthetic small-skeleton fixture (redesign.md §9.4) tracked in fixed-root mode, root held constant through predict/update, output matches hand-computed expectation. Zero-children / monolithic path stays bit-identical (existing regression tests unchanged). |
 | 3 | Child initialization (fixed-root IK from triangulated hand markers when visible; rest-pose + `init_joint_std`-wide covariance fallback; re-init policy after tracking loss) + `PAIR_DIFF`/`ref_marker_id` observation construction against `MRK-wrist`, reusing the existing `PAIR_DIFF` branch in `ukf.cpp` unmodified. | One hand's forward pass run in isolation against a short real sequence; finger angles visually plausible via BVH spot check. |
 | 4 | `tracking_run_stages` migration (session DB) + `tracker_config_stages` migration (registry, NULL-inherits-from-parent). New `ResultWriter` read-modify-write capability for `tracking_results`, patching a caller-supplied index range via `SkeletonLayout::build_index_map_from()`. | Round-trip test: synthetic parent blob + synthetic child patch merge and decode correctly at both stages' expected indices. |

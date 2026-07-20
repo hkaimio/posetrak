@@ -38,6 +38,14 @@ not real data); and (3) propose a specific architecture for the phases after
 wrist-position-error argument that came out of this session's discussion
 and isn't in either old doc.
 
+**Revised 2026-07-20** after a schema-grounded design review (checked
+against `db/session_schema.sql`, `db/registry_schema.sql`,
+`src/db/result_writer.cpp`, and the implemented cross-person
+`MultiPersonTracker`): the persistence design, checkpoint/restore
+interaction, and multi-person composition sections below were reworked,
+and phases 3h–3l updated. Inline "(review, 2026-07-20)" markers show
+what changed.
+
 ## Independent re-validation of the root cause
 
 `hierarchical-ukf-design.md` already diagnosed the mechanism precisely: a
@@ -108,6 +116,15 @@ be silently dropped (if `from_groups()` also just filters against joints
 that exist) or become a real bug. **This should be corrected before
 Phase 3h wiring** — replace the `palm.*` entries below with nothing (they
 have no replacement).
+
+Two cheap guards make this class of error visible instead of silent
+(review, 2026-07-20): (1) `skeleton_loader.cpp` should warn — or error —
+on group entries referencing nonexistent joints/markers, replacing
+today's silent no-op (which is exactly how the phantom `palm.*` entries
+survived); (2) a unit test asserting the production skeletons' `groups:`
+sections are structurally identical, since group definitions become
+load-bearing with this feature but stay duplicated per performer file
+until the skeleton class/scaling split lands.
 
 **Revision from Harri's review**: `hand.L`/`hand.R` themselves are *not*
 the freeflyer boundary — see "wrist ownership" below. The freeflyer is one
@@ -357,6 +374,21 @@ parent-only runs were the *most* stable of everything tried, not just
   cross-person phase's memory scaling with person count, and interactive
   re-solving after edits — but isn't a prerequisite here.)
 
+### Parent-trajectory input is a stream, not a materialized array
+
+One API decision made now because it is cheap now and a solver rewrite
+later (review, 2026-07-20): the Stage B solver consumes the parent's
+smoothed freeflyer transforms as an **incremental stream**
+(iterator/callback supplying frame `t`'s transform), not as a fully
+materialized whole-sequence array. Under today's full-batch RTS the
+driver simply streams the completed trajectory, so nothing about the
+two-pass model changes. But if/when the tracker migrates to a fixed-lag
+smoother (planned independently, for cross-person memory scaling and
+edit-driven re-solving), the child becomes a pipeline stage running
+`lag` frames behind the parent with zero solver changes — only the
+driver changes. Baking "takes the whole trajectory up front" into
+3f2/3h would turn that migration into a rewrite.
+
 ### Scope decision, revised: narrow *and* generic — not narrow *or* general
 
 The first draft framed this as a binary: a purpose-built, hand-specific
@@ -383,54 +415,134 @@ specifically:
 - **C++**: no `HandSolver` class. The Phase 3d/3e subtree-filter machinery
   (subtree Pinocchio model + fixed-root UKF) is already generic — it takes
   a skeleton, a freeflyer joint name, and a group name list as data, not as
-  template/class parameters. The Stage B solver should be a generic
-  `ChildFilterSolver` (name TBD, no domain-specific naming), constructed
-  from config: `(freeflyer_joint_name, joint_groups, observation_groups,
-  ref_marker_name, tracker_config)`. It happens to get instantiated twice,
-  with `{"HandL"}`/`{"HandR"}` and `MRK-wrist.{L,R}`, for this feature —
-  nothing in the class itself knows what a hand is.
-- **Database — revised again, per Harri's review**: no new run identity at
-  all, not even a generic one. Checked the actual schema
-  (`db/session_schema.sql`): `tracking_results` stores one row per
-  `(run_id, person_id, tracker_step, is_smoothed)`, with `state`/`cov_diag`
-  as opaque blobs — "full UKF state vector" — and `tracking_obs_results`
-  stores `obs_blob` similarly, indexed by camera and marker across the
-  *whole* skeleton's marker list (`tracking_runs.marker_names`). Both are
-  already shaped as "one wide row per step," not "one row per DOF" — so a
-  multi-stage pipeline doesn't need multiple run rows at all. Keep exactly
+  template/class parameters. The Stage B solver is parameterized by
+  `(freeflyer_joint_name, joint_groups, observation_groups,
+  ref_marker_name, stage_config)` and gets instantiated twice, with
+  `{"HandL"}`/`{"HandR"}` and `MRK-wrist.{L,R}`, for this feature —
+  nothing in it knows what a hand is. Whether it is a new
+  `ChildFilterSolver` class or `Tracker` taught a fixed-root mode is
+  decided in 3h (review, 2026-07-20: prefer the latter — see the phase
+  table for the duplication-drift argument).
+- **Database — revised a third time (review, 2026-07-20)**: still no new
+  run identity — but the previous revision's "genuinely zero schema
+  change" claim does not survive contact with the actual write path
+  (`src/db/result_writer.cpp`); one small bookkeeping table is warranted
+  and three write-side conventions must be pinned down. The core shape
+  is unchanged: `tracking_results` stores one row per
+  `(run_id, person_id, tracker_step, is_smoothed)` with `state`/`cov_diag`
+  as opaque full-width blobs, and `tracking_obs_results` stores
+  `obs_blob` indexed by camera and marker across the *whole* skeleton's
+  marker list (`tracking_runs.marker_names`) — already "one wide row per
+  step," so a multi-stage pipeline needs no new run rows. Keep exactly
   one `tracking_runs`/`tracking_run_persons` row per person, referencing
-  the performer's *full*, unmodified skeleton (not a `main`-only or
-  `HandL`-only variant) — the same one used today. Each solver stage
-  internally uses its own smaller `SkeletonLayout` (`from_groups({"main"})`,
-  `from_groups({"HandL"})`, ...), but when writing results, expands its
-  compact state into the full skeleton's index range using
-  `SkeletonLayout::build_index_map_from()` — the exact same merge-map
-  mechanism `hierarchical-tracker-redesign.md` §5 already designed for an
-  in-memory merge, just applied at the DB-write boundary instead. The
-  parent writes first; each child then read-modifies-writes the same row,
-  patching only the index range it owns. Genuinely zero schema change for
-  `tracking_results`/`tracking_obs_results`.
+  the performer's *full*, unmodified skeleton — the same one used today.
+  Each solver stage internally uses its own smaller `SkeletonLayout`
+  (`from_groups({"main"})`, `from_groups({"HandL"})`, ...), and at the
+  DB-write boundary expands its compact state into the full skeleton's
+  index range via `SkeletonLayout::build_index_map_from()` — the same
+  merge-map mechanism `hierarchical-tracker-redesign.md` §5 designed for
+  an in-memory merge. The parent writes first; each child then
+  read-modifies-writes the same row, patching only the index range it
+  owns.
 
-  One place this doesn't fully resolve cleanly: `tracking_results`'s four
-  scalar diagnostic columns (`n_inlier_observations`, `cov_condition_number`,
-  `nis_value`, `nis_dof`) are inherently per-filter-instance — each of the
-  three solvers has its own independent covariance matrix and NIS, and
-  there's no lossless single value once merged. Proposed resolution: leave
-  those four columns reflecting the parent/body solver only (today's
-  behavior, unchanged), and get hand-specific versions of the same
-  diagnostics by bucketing `tracking_obs_results.obs_blob` post-hoc — group
-  membership is a static property of marker name, recoverable from the
-  skeleton's own `groups:` metadata, so per-stage NIS/outlier-rate doesn't
-  need its own column either; it's a query, not new storage.
+  What the review changed or pinned down:
 
-  Similarly, `tracking_runs.tracker_config_id` / `tracking_run_persons.skeleton_id`
-  are single-valued per run — but each solver stage plausibly wants its own
-  tuning (matching `ChildFilterConfig`'s original per-child noise/threshold
-  fields). Rather than a second FK'd config row, keep child-solver tuning as
-  a handful of lightweight fields attached directly to the skeleton's own
-  `HandL`/`HandR` group definitions (which the run's existing `skeleton_id`
-  already points at) — consistent with the "generic, group-driven" principle
-  above, and again no new run-identity or schema concept.
+  1. **One new table: `tracking_run_stages`** —
+     `(run_id, person_id, group_name, status, started_at, completed_at)`.
+     Plain read-modify-write rows leave no record of which stages have
+     run: a crash mid-child leaves rows silently half-patched,
+     indistinguishable from complete output, and nothing can answer "has
+     Stage B run?" or "is it stale?". The table gives an atomic
+     stage-completion boundary (mark `complete` only after the stage's
+     whole RMW pass commits), the staleness flag the checkpoint/edit
+     workflow needs (see the checkpoint section below), and a progress
+     surface for the UI. This deliberately trades away "zero schema
+     change": one small table buys crash-safety, provenance, and
+     invalidation tracking.
+
+  2. **Placeholder and `is_smoothed` semantics, made explicit.** The
+     parent writes rest-pose values with init-level `cov_diag` into
+     child-owned DOF ranges; readers distinguish "not yet solved" via
+     `tracking_run_stages`, never by sniffing blob values. The child
+     patches **both** row families — its filtered states into
+     `is_smoothed=0` rows, its smoothed states into `is_smoothed=1`
+     rows — accepting that hand DOFs in the "filtered" rows are
+     conditioned on the parent's *smoothed* trajectory (they are the
+     best per-frame-causal hand estimate available; a pure-filtered
+     hand estimate does not exist in this design). Merged `cov_diag` is
+     similarly mixed: child-DOF variances are conditional on a fixed
+     parent root and exclude parent uncertainty, so they are not
+     comparable to body-DOF variances — anything displaying confidence
+     must know this (surfacing phase 3l).
+
+  3. **`tracking_obs_results` has a real collision to resolve.**
+     `obs_blob` holds exactly one slot per (camera, marker)
+     (`result_writer.cpp::write_obs_results`), and `MRK-wrist`,
+     `MRK-index`, `MRK-pinky` are deliberately in *both* `main` and
+     `Hand{L,R}` — parent and child would overwrite each other's slot.
+     Additionally, the child's observations are all `PAIR_DIFF`, whose
+     natural `actual`/`predicted` values are pixel *differences*, while
+     every existing consumer (MCP `get_observation_gaps`, UI overlays)
+     reads fields 0–3 as absolute pixels — writing raw differences
+     would reproduce the known `observations.csv`/
+     `marker_projections.csv` mode-collision bug inside the DB.
+     Resolution: the child reconstructs absolute pixels before writing
+     (add the wrist detection back to `actual`, the wrist reprojection
+     back to `predicted`; `mahal_dist` stays the PAIR_DIFF value, and
+     the currently-unused pad field, index 7, becomes a per-slot mode
+     flag); for the shared-marker slots the **parent's entry wins** —
+     those observations constrain the parent update, and the child's
+     ~18 hand-only markers dominate its own statistics anyway.
+
+  4. **Per-stage diagnostics stay a query, with one caveat.** The four
+     scalar columns (`n_inlier_observations`, `cov_condition_number`,
+     `nis_value`, `nis_dof`) are inherently per-filter-instance; they
+     stay parent-only (today's behavior, unchanged), and per-stage
+     NIS/outlier-rate is derived by bucketing `obs_blob` by
+     marker→group — group membership is recoverable from the skeleton's
+     own `groups:` metadata. The caveat the earlier draft missed:
+     shared-marker slots carry only the parent's entry (point 3), so
+     the child-stage bucket excludes them — acceptable given the
+     child's marker count, but the bucketing query must not double-count
+     them into both stages.
+
+  **Per-stage tuning — revised: config layer, not skeleton metadata.**
+  The previous draft attached child-solver tuning to the skeleton's own
+  `HandL`/`HandR` group definitions. The review rejected that as a
+  provenance mistake: skeletons are shared, referenced-by-id registry
+  entities describing *topology*, while tuning is iterated per run —
+  retuning hand noise would mean either mutating a shared skeleton row
+  (breaking provenance for every past run referencing it, violating the
+  same immutability principle the project enforces for detection runs)
+  or versioning the whole skeleton per tweak. It also contradicts the
+  codebase's own pattern: `tracker_configs` has grown a column per
+  tuning feature through migrations v22–v28, and the v27 comment
+  (`registry_schema.sql`) explicitly chose config-side scoping over
+  skeleton groups. The dividing rule, agreed with Harri: **groups are
+  structure and live in the skeleton** (joint list, marker list,
+  `depends_on`, the reference/anchor marker; the freeflyer boundary is
+  derived from topology and needs no storage at all); **tuning is
+  numbers and lives in tracker config, keyed by group name**.
+  Concretely: a registry child table
+  `tracker_config_stages(tracker_config_id, group_name,
+  <nullable tuning columns>)` where NULL = inherit from the parent
+  config row — mirroring the `parent_id` inheritance `tracker_configs`
+  already has. The run's single `tracker_config_id` stays the complete
+  provenance record; the config never defines what a group *contains*,
+  it only attaches numbers to a name the skeleton defines. Tuning
+  columns, from `ChildFilterConfig` (`config.hpp:39`) minus its
+  structural fields: `process_noise_std` (+ vel/half-life variants —
+  finger dynamics are nothing like torso dynamics), `pose_noise_std`
+  (hand keypoints come from a different detector head/crop resolution),
+  `outlier_threshold` (the root-cause analysis *is* that one global
+  threshold can't serve both chain depths), `min_inliers_ratio`,
+  `max_innovation_norm`, min keypoint confidence,
+  `init_joint_std`/`init_velocity_std` (child initialization, 3h), and
+  optionally UKF `alpha` and the adaptive process-noise gains. A side
+  benefit: whether to run hierarchically, and *which* of the skeleton's
+  groups become stages, becomes a config-level choice — so monolithic
+  vs. hierarchical can be A/B'd on the identical skeleton, which 3k
+  needs anyway.
 - **Python export/merge**: given the DB correction above, there may be
   nothing to merge at read time at all — if every stage already writes into
   the same `tracking_results` row, `state`/`cov_diag` are already complete
@@ -439,19 +551,40 @@ specifically:
   state and re-encoding it into the full blob's index range via the merge
   map — parameterized by group name, not hardcoded.
 
-### Checkpoint/restore doesn't change this calculus
+### Checkpoint/restore: the real interaction is invalidation, not snapshot cost
 
-Harri flagged, correctly as a caution, that this may need revisiting once
-mid-sequence UKF-state snapshots (checkpoint/restore, already a separate
-planned work item per the cross-person phase's plan doc) exist. On
-reflection I don't think it actually favors one persistence option over the
-other here: checkpoint/restore complexity comes from needing to snapshot
-**three independent filter instances'** internal state (covariance,
-sigma-point cache, NIS-feedback windows, `prev_observations_`, ...), which
-is a property of *running three separate `UnscentedKalmanFilter` objects*
-— true regardless of whether their eventual output lands in one
-`tracking_results` row or three. The single-row output design doesn't add
-to that cost, and three separate run rows wouldn't have reduced it either.
+Harri flagged that this may need revisiting once mid-sequence UKF-state
+snapshots (checkpoint/restore, already a separate planned work item per
+the cross-person phase's plan doc) exist. The first draft's answer —
+snapshot complexity is a property of running three filter instances,
+regardless of whether their output lands in one row or three, so the
+persistence layout is unaffected — is true but incomplete. The review
+(2026-07-20) identified the interactions that actually matter, in both
+directions:
+
+- **Parent re-runs invalidate all child output.** RTS smoothing is a
+  backward pass from the sequence end, so a parent re-solve from a
+  mid-run checkpoint (the motivating use case: re-running after
+  time-local edits) changes the smoothed trajectory well beyond the
+  edited window — in principle everywhere. Children consume the
+  *smoothed* parent trajectory, so any parent re-run makes every child
+  stage stale — and plain result rows record nothing about that. This
+  is half the argument for the `tracking_run_stages` table above: a
+  parent re-run marks child stages stale, and the app knows to re-run
+  them before trusting hand DOFs.
+- **Hand-only edits get a fast path.** An edit touching only hand
+  keypoints needs only that hand's Stage B re-run — a small filter over
+  a sub-range with an externally supplied root, no parent involvement,
+  no cross-person coupling. In the interactive keypoint-editing
+  workflow this is arguably the strongest practical argument *for* the
+  two-pass architecture, and a child-only checkpoint is far cheaper
+  than a full-tracker one (small state, root supplied externally).
+- **Fixed-lag smoothing bounds the cascade.** With full-batch RTS the
+  invalidation above is formally sequence-wide; a fixed-lag smoother
+  limits how far an edit's effect propagates. One more reason the child
+  solver must consume the parent trajectory as a stream (see
+  "Parent-trajectory input is a stream" above), so that migration stays
+  a driver-level change.
 
 This keeps the actual engineering scope identical to the narrow pipeline
 (no recursion, no live sync, same phase count) — it only changes naming and
@@ -539,17 +672,68 @@ camera involved) per frame, read from the parent's smoothed trajectory, to
 seed `set_root_transform()` before each of the child's own predict/update
 steps.
 
+### What the relative model does and doesn't absorb (review, 2026-07-20)
+
+Two honest caveats, neither blocking:
+
+- **Parent-root error is unmodeled in the child's noise.** The noise
+  formula above carries no term for the parent's `forearm.{L,R}` error.
+  Root *position* error mostly cancels in the pixel difference (a small
+  projection-scale/parallax residual remains); root *orientation* error
+  is absorbed by the now-in-child `hand.{L,R}` DOF — but that
+  absorption means the exported wrist *joint angle* inherits the
+  parent's forearm orientation bias even when finger pixels track well.
+  Remember this when judging BVH wrist angles in 3k. If tuning ever
+  shows the child's outlier gate misbehaving during fast arm motion,
+  the already-built `Tracker::marker_projection_std()` machinery
+  (cross-person Stage 3) can inflate child noise from the parent's
+  smoothed covariance — the tool exists; no new math needed.
+- **Crop-scale source.** Hand keypoints come from dedicated hand-region
+  detections (`detection_keypoints.region_type`), so the child's noise
+  formula must use the hand crop's `noise_scale`, not the body crop's —
+  the per-detection value the observation loading path already carries;
+  stated here so 3h doesn't hardcode the body value.
+
+## Composition with the multi-person (cross-person) tracker
+
+Both features restructure the same orchestration layer — the
+cross-person plan's `MultiPersonTracker` is implemented — so the
+stacking order must be explicit (review, 2026-07-20):
+
+- **Stage A is `MultiPersonTracker`'s coupled forward pass run over
+  `main`-only layouts**, with per-person RTS smoothing after the coupled
+  pass exactly as that feature already does; each person's hand children
+  then run as Stage B off that person's smoothed trajectory. Children of
+  different persons are fully independent and can run in parallel.
+- **An automatic win**: the cross-person plan's own observation that
+  finger-pair candidates crowd out `cross_person_max_n`'s per-camera cap
+  disappears — `main`-only layouts have no finger markers, so the cap
+  budget goes to meaningful body-contact pairs.
+- **An explicit v1 loss, recorded as a decision**: finger markers now
+  live only inside per-person child filters that run independently in
+  batch, so there is **no cross-person coupling at finger level** — and
+  for the motivating contact scenarios (grips, handshakes, assisted
+  throws) contact is precisely hand-on-body. `MRK-wrist`, `MRK-index`,
+  `MRK-pinky` stay in `main`, so gross hand-scale contact coupling
+  survives; that is judged an acceptable v1 trade. Future option if it
+  proves insufficient: cross-person anchors *into* a child solve via the
+  `Observation::anchor_position` machinery Phase 5 built — the anchor
+  reference there is external to the estimating filter, which is exactly
+  that mechanism's job (unlike within-child observations, which
+  correctly don't need it).
+
 ## Revised phase plan (supersedes `hierarchical-tracker-redesign.md` §12 from 3f onward)
 
 | Phase | Work |
 |-------|------|
 | 3f | (unchanged from the existing plan) `ForwardKinematics::world_transform(joint_name)` — still needed, but now invoked while replaying the parent's *smoothed* state per frame (Stage B setup), not a live per-frame FK cache. |
-| 3f2 (new, revised) | Given the parent's full smoothed trajectory, compute and store the per-frame **joint world transform** (position + orientation) for whichever joint a child's config names as its freeflyer (`forearm.{L,R}` for this feature) — no camera/pixel projection involved (see measurement-model revision above). Generic over freeflyer joint name, not hand-specific. |
+| 3f2 (new, revised) | Given the parent's smoothed trajectory, compute the per-frame **joint world transform** (position + orientation) for whichever joint a child's config names as its freeflyer (`forearm.{L,R}` for this feature) — no camera/pixel projection involved (see measurement-model revision above). Generic over freeflyer joint name, not hand-specific, and **delivered to the child as an incremental stream** (see "Parent-trajectory input is a stream"). |
 | 3g (revised) | No `Tracker` → `HierarchicalTracker` rename/generalization, and no recursive coordinator (see scope decision above). Stage A needs no new code at all — it's today's `Tracker` run against a `main`-only `SkeletonLayout`. |
-| 3h (revised) | New generic `ChildFilterSolver` (name TBD — not hand-specific): constructed from `(freeflyer_joint_name, joint_groups, observation_groups, ref_marker_name, tracker_config)`, all data, none hardcoded. Owns a subtree UKF + subtree FK (Phase 3d/3e machinery), runs its own full forward pass building `PAIR_DIFF` observations against `ref_marker_name` (per the measurement-model revision above), own RTS smoothing pass after. Structurally similar to two already-tested code paths — `Tracker`'s own forward+smooth loop, and the within-person `PAIR_DIFF` construction already in `session_reader.cpp` — rather than new UKF math. Instantiated twice for this feature, with `{"HandL"}`/`{"HandR"}` and `MRK-wrist.{L,R}` as config, not as class identity. |
-| 3i (revised again) | Output: **no schema change** (see DB discussion above). One `tracking_runs`/`tracking_run_persons` row per person, referencing the full performer skeleton as today. Each solver stage — parent included — writes into the *same* `tracking_results`/`tracking_obs_results` row per step, expanding its compact state into the full skeleton's index range via `SkeletonLayout::build_index_map_from()` before a read-modify-write. `n_inlier_observations`/`cov_condition_number`/`nis_value`/`nis_dof` stay parent-only; per-stage versions are a query over `obs_blob` bucketed by marker→group, not new storage. Per-stage tuning lives as fields on the skeleton's own `HandL`/`HandR` group metadata, not a second `tracker_config_id`. |
-| 3j | CLI/config plumbing: extend `--person` (or a new mode) to select the multi-stage path, driven by however many/whichever named groups the skeleton defines beyond `main`, with per-stage tracker config (process/measurement noise, outlier threshold — same shape as `ChildFilterConfig`, already fully specified in `config.hpp`) — not hardcoded to exactly two hands. |
-| 3k | Integration test: compare against (a) today's monolithic fingers-on tracking and (b) this session's no-fingers-only baseline. Acceptance criteria: parent/body quality matches or exceeds the no-fingers baseline (should be near-identical, since Stage A *is* that baseline), and hand/finger quality is usably close to monolithic fingers-on tracking's finger output, without importing its arm-jerk regression. Re-run this session's visual BVH comparison as part of this. |
+| 3h (revised, 2026-07-20) | The child-stage solver: constructed from `(freeflyer_joint_name, joint_groups, observation_groups, ref_marker_name, stage_config)`, all data, none hardcoded; owns a subtree UKF + subtree FK (Phase 3d/3e machinery), runs a full forward pass building `PAIR_DIFF` observations against `ref_marker_name`, own RTS smoothing pass after; instantiated twice for this feature with `{"HandL"}`/`{"HandR"}` and `MRK-wrist.{L,R}` as config, not as class identity. **First decision inside this phase — reuse `Tracker`, don't sibling it**: prefer teaching `Tracker` a fixed-root mode (layout + streamed external root trajectory; Phase 3e already put fixed-root support in the UKF) over a new "structurally similar" `ChildFilterSolver` class — a second forward+smooth loop would duplicate outlier gating, NIS feedback, statistics, and result writing, and drift from `Tracker`. If a separate class still wins on inspection, name explicitly which shared pieces get factored out. **Also in this phase — child initialization, previously unspecified**: fixed-root IK over triangulated finger markers when enough are visible; rest pose with `init_joint_std`-wide covariance when occluded (common at sequence start); plus a re-init policy after the child loses tracking. |
+| 3i (revised, 2026-07-20) | Output per the DB discussion above: one run row per person (full performer skeleton, as today); every stage — parent included — read-modifies-writes the *same* `tracking_results` rows (both `is_smoothed` families, with the defined placeholder semantics) via `SkeletonLayout::build_index_map_from()`. New `tracking_run_stages` status table + session-DB migration. `obs_blob`: absolute-pixel reconstruction for child `PAIR_DIFF` entries, pad-field mode flag, parent-wins rule for shared-marker slots. The four scalar diagnostics stay parent-only; per-stage stats are the marker→group bucketing query. Per-stage tuning via the `tracker_config_stages` registry table + migration — **not** skeleton group metadata. |
+| 3j | CLI/config plumbing: extend `--person` (or a new mode) to select the multi-stage path, driven by however many/whichever named groups the skeleton defines beyond `main`, with per-stage tuning resolved from `tracker_config_stages` (NULL = inherit from the run's base config) — not hardcoded to exactly two hands. Stage selection is config-level, so monolithic vs. hierarchical A/B runs use the identical skeleton. |
+| 3k | Integration test: compare against (a) today's monolithic fingers-on tracking and (b) this session's no-fingers-only baseline. Acceptance criteria: parent/body quality matches or exceeds the no-fingers baseline (should be near-identical, since Stage A *is* that baseline), and hand/finger quality is usably close to monolithic fingers-on tracking's finger output, without importing its arm-jerk regression. Re-run this session's visual BVH comparison as part of this, remembering the wrist-angle caveat from the measurement-model section. |
+| 3l (new, 2026-07-20) | Python/UI/MCP surfacing, same shape as every other phase's final stage: MCP `get_filter_stats`/`get_run_info` label the scalar diagnostics as parent/body-only and expose the per-stage `obs_blob`-bucketed stats; `content_panels.py` shows stage structure and status from `tracking_run_stages`; `run_tracker.py` gains the hierarchical toggle + per-stage config editing; document the mixed `cov_diag` semantics wherever confidence is displayed. |
 
 ## Explicitly out of scope for this proposal
 
@@ -561,10 +745,20 @@ steps.
   (config/group-driven, not hand-specific code/schema) without building
   class-based skeleton typing. Still postponed, per Harri's earlier
   request to iterate in small steps; this feature is written so it doesn't
-  add structure the classes work would later have to undo.
+  add structure the classes work would later have to undo. The
+  structure-vs-tuning rule above (group membership in the skeleton, stage
+  tuning in `tracker_config_stages`) was chosen specifically so that when
+  the skeleton eventually splits into class (structure, joint limits) +
+  per-performer scaling (dimensions), group definitions migrate verbatim
+  into the class and nothing from this feature lands on the wrong side.
+  Until then, the two guards in the group-definitions section (loader
+  warning on stale group entries, cross-performer group-consistency test)
+  keep the per-file duplication safe.
 - Fixed-lag/sliding-window smoothing — not needed for this feature; remains
   a separate, later project for other reasons (cross-person memory scaling,
-  edit-driven re-solving).
+  edit-driven re-solving). The stream-based parent-trajectory input is
+  what keeps that migration a driver-level change rather than a
+  child-solver rewrite.
 - The skeleton structure/dimension separation (template vs. per-performer
   scale) discussed earlier this session — explicitly postponed by request;
   this doc's group definitions are written against the current flat

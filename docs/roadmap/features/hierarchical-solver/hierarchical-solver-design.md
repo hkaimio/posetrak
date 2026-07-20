@@ -779,7 +779,7 @@ Sequenced as PR-sized units, each with an acceptance gate, checked
 | PR | Scope | Acceptance gate |
 |----|-------|------------------|
 | 1 — **done** | `ForwardKinematics::world_transform(joint_name)` (redesign.md §11 — found already implemented, not new work) + `TrajectoryStream`/`BatchTrajectoryStream`, a small streaming interface over a completed `Tracker`'s smoothed trajectory yielding one named joint's world transform per frame via its own `get_fk()`. | `[world_transform]` (pre-existing, 18 assertions) + `[trajectory_stream]` (new, 16 assertions), all passing. Commit `36ae6c5`. |
-| 2 | Decide + implement `Tracker` fixed-root mode vs. a new sibling class (the open decision inside 3h) — teach `Tracker` to accept an externally-supplied, per-frame root transform (from PR 1's stream) instead of estimating its own root, reusing Phase 3e's `set_root_transform()` at the `Tracker` level. Confirm `Triangulator`/`InverseKinematics` work unmodified against a small `from_groups()` layout rather than assuming it from the Phase 3a–3c refactor. | Synthetic small-skeleton fixture (redesign.md §9.4) tracked in fixed-root mode, root held constant through predict/update, output matches hand-computed expectation. Zero-children / monolithic path stays bit-identical (existing regression tests unchanged). |
+| 2 — **done** | Decided in favor of teaching `Tracker` a fixed-root mode rather than a sibling class: `TrackerConfig::fixed_root_joint_name` (empty = today's behavior exactly) lets `initialize_ukf()`'s existing subtree-model path anchor at an arbitrary joint instead of the skeleton's own root — no `SkeletonLayout` changes needed, since `from_groups()` already reports `has_floating_root()==false` correctly whenever the requested groups exclude the skeleton's true root (confirmed by reading `skeleton_layout.cpp` before assuming otherwise). New `Tracker::set_external_root_transform()` forwards to `UnscentedKalmanFilter::set_root_transform()` (Phase 3e). Removed the unused `ChildFilter`/`run_child_step()`/`children_` scaffolding (dead code — `children_` was never populated — left over from the superseded interleaved-coordinator design). | New `[fixed_root]` test reusing `tests/data/simple_humanoid.yaml`'s existing `right_arm`/`spine_upper` group shape (already exactly analogous to `HandL`/`forearm.L`) — root held exactly at the injected transform across 9 predict+update cycles, child joints converge to ground truth; 33 assertions, all passing. Full suite otherwise unaffected (473/482 "as expected", same one pre-existing unrelated flake). Commit `57ef7d5`. **Found and fixed a real bug along the way**: `UnscentedKalmanFilter::compute_state_mean()` (and the constructor's initial `state_`) sized `joint_angles`/`joint_velocities` from `layout->skeleton()->total_dof_count()` (the full skeleton) instead of `layout->total_storage_dof_count()` (the layout's own count) — silently padding the state with unused trailing slots for any subset layout. Harmless for the already-shipped `active_joint_groups`-only case (still a floating root; nothing downstream read past the active range), but it broke the compact-state contract PR4's read-modify-write DB merge depends on. Fixed in the same commit. |
 | 3 | Child initialization (fixed-root IK from triangulated hand markers when visible; rest-pose + `init_joint_std`-wide covariance fallback; re-init policy after tracking loss) + `PAIR_DIFF`/`ref_marker_id` observation construction against `MRK-wrist`, reusing the existing `PAIR_DIFF` branch in `ukf.cpp` unmodified. | One hand's forward pass run in isolation against a short real sequence; finger angles visually plausible via BVH spot check. |
 | 4 — **schema half done, `ResultWriter` RMW not started** | `tracking_run_stages` + `tracker_config_stages` migration (v37, single combined session DB — not the separate session/registry split originally described; corrected after reading `python/posetrak/db/db.py`'s actual migration mechanism). Still needed: new `ResultWriter` read-modify-write capability for `tracking_results`, patching a caller-supplied index range via `SkeletonLayout::build_index_map_from()`. | Schema: `test_create_session_includes_hierarchical_solver_tables` + `test_migrate_session_v36_to_v37_adds_hierarchical_solver_tables`, both passing (`db/migrations/026_hierarchical_solver_stages.sql`, commit `5c6f745`). RMW capability: not yet built — deliberately paused before it, see status note below. |
 | 5 | `obs_blob` patching: absolute-pixel reconstruction for child `PAIR_DIFF` entries, pad-field (index 7) mode flag, parent-wins for shared-marker slots. Companion update to `decode_obs_blob` + MCP readers (gap 1 above) so the new data isn't write-only. | Frame with both parent and child observations for a shared marker (`MRK-wrist`): parent's entry survives, child's hand-only markers land in correct slots, MCP tools decode without error. |
@@ -791,19 +791,16 @@ PRs 1–7 are pure C++/DB/CLI and can proceed without live UI access. PR 8
 cannot be verified from source reading alone and needs an interactive
 session — flagged explicitly rather than silently skipped or guessed at.
 
-**Status (2026-07-20): PR 1 done, PR 4's schema half done, paused before
-`ResultWriter`'s RMW capability.** Not a UI-verification gap (none of
-PRs 1–4 need one) — a risk-pacing one: PR 2 (teaching `Tracker` a
-fixed-root mode) is the next item, and it modifies the core `Tracker`
-class every single- and multi-person production run depends on. The
-scope decision section above already recommends a direction for it, so
-proceeding isn't purely a guess — but it's consequential enough, and
-enough has landed in one sitting (two independently tested, committed
-slices), to check in before touching code with that blast radius rather
-than pushing straight through. `ResultWriter`'s RMW work was left until
-after PR 2/3 land regardless, since its exact shape (what a "patch" call
-looks like) depends on decisions PR 2 hasn't made yet — building it now
-risked designing against a shape that changes under it.
+**Status (2026-07-20): PRs 1 and 2 done, PR 4's schema half done, paused
+before `ResultWriter`'s RMW capability and PR 3.** Not a UI-verification
+gap (none of PRs 1–4 need one). PR 2 (teaching `Tracker` a fixed-root
+mode) turned out to be smaller than its risk profile suggested —
+`SkeletonLayout::from_groups()` already did the hard part correctly, and
+the only real surprise was a latent `compute_state_mean()` sizing bug,
+now fixed with a regression test. `ResultWriter`'s RMW work remains
+deliberately deferred until after PR 3, since its exact shape (what a
+"patch" call looks like) depends on PR 3's child-initialization design,
+not yet built.
 
 ## Explicitly out of scope for this proposal
 

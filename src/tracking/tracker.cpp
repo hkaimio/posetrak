@@ -59,12 +59,8 @@ Tracker::Tracker(std::shared_ptr<const Skeleton> skeleton,
     }
 }
 
-bool Tracker::initialize(std::vector<Observation> const& observations, double timestamp) {
-    if (observations.empty()) {
-        return false;
-    }
-
-    // Step 1: Triangulate marker positions
+std::map<std::string, Eigen::Vector3d>
+Tracker::triangulate_markers(std::vector<Observation> const& observations) const {
     std::map<int, std::vector<Observation>> obs_by_marker;
     for (auto const& obs : observations) {
         obs_by_marker[obs.marker_id].push_back(obs);
@@ -97,6 +93,16 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
             marker_positions[marker_name] = result.position;
         }
     }
+    return marker_positions;
+}
+
+bool Tracker::initialize(std::vector<Observation> const& observations, double timestamp) {
+    if (observations.empty()) {
+        return false;
+    }
+
+    // Step 1: Triangulate marker positions
+    std::map<std::string, Eigen::Vector3d> marker_positions = triangulate_markers(observations);
 
     if (marker_positions.size() < 3) {
         return false;
@@ -396,6 +402,64 @@ void Tracker::initialize_from_state(State const& initial_state, double timestamp
     last_timestamp_ = timestamp;
 
     fmt::print("Initialized from provided state\n");
+}
+
+bool Tracker::initialize_with_fixed_root(std::vector<Observation> const& observations,
+                                         Eigen::Vector3d const& root_position,
+                                         Eigen::Quaterniond const& root_orientation,
+                                         double timestamp) {
+    if (config_.fixed_root_joint_name.empty()) {
+        throw std::runtime_error(
+            "Tracker::initialize_with_fixed_root: TrackerConfig::fixed_root_joint_name must be "
+            "set (this Tracker was not configured as a fixed-root child filter)");
+    }
+
+    // Triangulate this filter's own markers -- unlike initialize(), no analytic
+    // root estimate: root is supplied by the caller (the parent's smoothed
+    // trajectory), not guessed from body landmarks this filter doesn't have.
+    std::map<std::string, Eigen::Vector3d> marker_positions = triangulate_markers(observations);
+    init_marker_positions_ = marker_positions;
+
+    // IK works in full-skeleton space regardless of active_joint_groups (matches
+    // initialize()) -- must run before initialize_ukf() rebuilds model_/data_/fk_
+    // to the fixed-root subtree, since ik_solver_ holds references into the
+    // original full-skeleton Pinocchio structures and is never rebuilt.
+    int const num_dof = skeleton_->total_dof_count();
+    State rest_guess(root_position, root_orientation, Eigen::VectorXd::Zero(num_dof),
+                     Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                     Eigen::VectorXd::Zero(num_dof));
+
+    State init_state = rest_guess;
+    if (marker_positions.size() >= 3) {
+        fmt::print("  Running fixed-root IK: max_iter={} tol={:.4f}m\n", config_.ik_max_iterations,
+                   config_.ik_tolerance);
+        auto ik_result = ik_solver_->solve(marker_positions, *skeleton_, rest_guess,
+                                           config_.ik_max_iterations, config_.ik_tolerance);
+        fmt::print("  Fixed-root IK: {} iterations, residual={:.4f}m, converged={}\n",
+                   ik_result.iterations, ik_result.residual, ik_result.converged);
+        // Root is always externally known -- keep IK's joint angles regardless
+        // of what it did to the root; overwritten unconditionally below.
+        init_state = ik_result.state;
+    } else {
+        fmt::print(
+            "  Fewer than 3 markers triangulated ({}) -- initializing fixed-root filter at "
+            "rest pose\n",
+            marker_positions.size());
+    }
+    init_state.set_root_position(root_position);
+    init_state.set_root_orientation(root_orientation);
+
+    initialize_ukf(init_state, timestamp);
+    // Belt-and-suspenders: initialize_ukf()'s slice_state() already carried the
+    // root through unchanged, but this also sets the UKF's internal
+    // fixed_root_pos_/fixed_root_ori_ used by predict()'s per-sigma-point
+    // root overwrite -- without it, the first predict() before any caller
+    // set_external_root_transform() call would have nothing to hold root to.
+    set_external_root_transform(root_position, root_orientation);
+
+    initialized_ = true;
+    last_timestamp_ = timestamp;
+    return true;
 }
 
 void Tracker::initialize_ukf(State const& initial_state, double timestamp) {

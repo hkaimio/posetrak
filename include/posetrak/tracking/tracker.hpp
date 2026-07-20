@@ -150,6 +150,47 @@ class Tracker {
     void initialize_from_state(State const& initial_state, double timestamp);
 
     /**
+     * @brief Initialize a fixed-root ("child filter") Tracker: triangulate its
+     * own markers and solve IK, with root pose supplied externally instead of
+     * estimated from body landmarks.
+     *
+     * Unlike initialize() -- which analytically estimates root position/
+     * orientation from hip/shoulder markers before running IK, irrelevant here
+     * since a child filter's root comes from the parent's smoothed trajectory,
+     * not its own markers -- this triangulates the child's own markers, runs
+     * IK from a rest-pose guess anchored at the known root, and always
+     * discards whatever root IK returned: root_position/root_orientation are
+     * authoritative regardless of IK's result. Falls back to rest pose (zero
+     * joint angles) at the known root if fewer than 3 markers triangulate
+     * (e.g. occluded at sequence start).
+     *
+     * @param observations     This frame's raw per-camera detections for the
+     *                         child's own marker group.
+     * @param root_position    World-frame position of the freeflyer joint
+     *                         (TrackerConfig::fixed_root_joint_name).
+     * @param root_orientation World-frame orientation of the freeflyer joint.
+     * @param timestamp        Initial timestamp.
+     * @return True (matches initialize()'s signature; always succeeds, via
+     *         the rest-pose fallback if triangulation is insufficient).
+     *
+     * @note Requires TrackerConfig::fixed_root_joint_name to be set.
+     * @note Call at most once per Tracker instance. IK runs against the
+     *       original full-skeleton model, before initialize_ukf() rebuilds
+     *       model_/data_/fk_ to the fixed-root subtree -- ik_solver_ and
+     *       triangulator_ are never rebuilt, so a second call after that
+     *       rebuild would use stale (dangling) Pinocchio structures. This
+     *       is a pre-existing constraint shared with initialize() (also
+     *       expected to run once), not new to fixed-root mode -- just newly
+     *       load-bearing here since a "re-initialize after tracking loss"
+     *       policy would naturally want a second call. Re-initialize by
+     *       constructing a new Tracker instead.
+     * @note Sets is_initialized() to true.
+     */
+    bool initialize_with_fixed_root(std::vector<Observation> const& observations,
+                                    Eigen::Vector3d const& root_position,
+                                    Eigen::Quaterniond const& root_orientation, double timestamp);
+
+    /**
      * @brief Track a single frame
      *
      * Performs predict-update cycle:
@@ -289,6 +330,15 @@ class Tracker {
      * @brief Initialize UKF with given state and initial covariance
      */
     void initialize_ukf(State const& initial_state, double timestamp);
+
+    /**
+     * @brief Triangulate 3D positions for markers with enough per-camera
+     * observations (>= config_.min_cameras_for_init). Shared by initialize()
+     * and initialize_with_fixed_root(); does not set init_marker_positions_
+     * or any other member -- callers do that with the return value.
+     */
+    std::map<std::string, Eigen::Vector3d>
+    triangulate_markers(std::vector<Observation> const& observations) const;
 
     /**
      * @brief Run the parent (full-body) predict+update step.

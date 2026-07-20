@@ -2,6 +2,7 @@
 #include <posetrak/io/skeleton_loader.hpp>
 #include <posetrak/kinematics/forward_kinematics.hpp>
 #include <posetrak/kinematics/pinocchio_model_builder.hpp>
+#include <posetrak/tracking/relative_observations.hpp>
 #include <posetrak/tracking/tracker.hpp>
 
 #include <fmt/core.h>
@@ -557,6 +558,151 @@ TEST_CASE("Fixed-root mode: child tracker holds an externally-injected root",
 
         // Child's own joints (r_shoulder/r_elbow/r_wrist, 7 DOF) should have
         // converged close to ground truth, sliced to the same layout.
+        State const gt_sliced = child_layout->slice_state(ground_truth[num_frames - 1]);
+        double const angle_error =
+            compute_angle_rmse(tracker.state().joint_angles(), gt_sliced.joint_angles());
+        CHECK(angle_error < 15.0);
+    }
+}
+
+// ===========================================================================
+// Child initialization + PAIR_DIFF/ref_marker_id observation wiring -- PR3
+// (see docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md)
+// ===========================================================================
+//
+// Exercises Tracker::initialize_with_fixed_root() (fixed-root IK from the
+// child's own triangulated markers, root supplied externally rather than
+// estimated) together with build_ref_marker_pair_observations() (PAIR_DIFF
+// against a reference marker, reusing the existing ref_marker_id branch in
+// ukf.cpp unmodified) end to end. r_wrist_marker stands in for MRK-wrist:
+// it gets both a plain POSITION observation (so the child's own wrist-area
+// joint benefits from an absolute measurement too, matching the
+// "wrist ownership: solved twice" design) and serves as the PAIR_DIFF
+// reference for r_shoulder_marker/r_elbow_marker.
+
+TEST_CASE(
+    "Fixed-root child init (triangulated IK) + PAIR_DIFF observations against a "
+    "reference marker",
+    "[tracker][fixed_root][relative_observations]") {
+    TrackerIntegrationFixture fixture;
+    fixture.setup_cameras(3, 4.0, 1.5);
+
+    Skeleton skeleton = load_skeleton_from_yaml("tests/data/simple_humanoid.yaml");
+    auto skeleton_ptr = std::make_shared<const Skeleton>(skeleton);
+
+    int const num_frames = 10;
+    double const dt = 1.0 / 30.0;
+    fixture.generate_ground_truth_trajectory(skeleton, num_frames, dt);
+
+    pinocchio::Model full_model;
+    pinocchio::Data full_data;
+    PinocchioModelBuilder::build_model_and_data(skeleton, full_model, full_data);
+    auto full_marker_map = PinocchioModelBuilder::build_marker_frame_map(full_model, skeleton);
+    auto full_layout = SkeletonLayout::from_full_skeleton(skeleton_ptr);
+    ForwardKinematics full_fk(full_model, full_data, full_marker_map, full_layout);
+
+    // Small-but-nonzero noise -- see the note in the fixed-root-mode test above
+    // (std::normal_distribution(stddev=0) hangs on this MSVC STL).
+    fixture.generate_observations(skeleton, full_fk, /*noise_std=*/0.01);
+    auto const& all_observations = fixture.observations();
+    auto const& ground_truth = fixture.ground_truth_states();
+
+    std::vector<std::pair<Eigen::Vector3d, Eigen::Quaterniond>> spine_upper_transforms;
+    for (auto const& gt_state : ground_truth) {
+        full_fk.compute(gt_state);
+        spine_upper_transforms.push_back(full_fk.world_transform("spine_upper"));
+    }
+
+    int wrist_marker_id = -1;
+    for (size_t i = 0; i < skeleton.markers().size(); ++i) {
+        if (skeleton.markers()[i].name == "r_wrist_marker") {
+            wrist_marker_id = static_cast<int>(i);
+        }
+    }
+    REQUIRE(wrist_marker_id >= 0);
+
+    std::unordered_set<int> right_arm_marker_ids;
+    for (std::string const& name : {"r_shoulder_marker", "r_elbow_marker", "r_wrist_marker"}) {
+        for (size_t i = 0; i < skeleton.markers().size(); ++i) {
+            if (skeleton.markers()[i].name == name) {
+                right_arm_marker_ids.insert(static_cast<int>(i));
+            }
+        }
+    }
+    std::vector<std::vector<Observation>> child_observations(all_observations.size());
+    for (size_t f = 0; f < all_observations.size(); ++f) {
+        for (auto const& obs : all_observations[f]) {
+            if (right_arm_marker_ids.count(obs.marker_id)) {
+                child_observations[f].push_back(obs);
+            }
+        }
+    }
+    REQUIRE(child_observations[0].size() > 0);
+
+    TrackerConfig config;
+    config.process_noise_std = 0.3;
+    config.calib_noise_std = 2.0;
+    config.pose_noise_std = 1.0;
+    config.outlier_threshold = 6.0;
+    config.init_position_std = 0.1;
+    config.init_orientation_std = 0.1;
+    config.init_joint_std = 0.3;
+    config.init_velocity_std = 0.1;
+    config.min_cameras_for_init = 2;
+    config.ik_max_iterations = 200;
+    config.ik_tolerance = 0.02;
+    config.active_joint_groups = {"right_arm"};
+    config.fixed_root_joint_name = "spine_upper";
+
+    std::unordered_map<int, Camera> camera_map;
+    for (auto const& cam : fixture.cameras()) {
+        camera_map.emplace(cam.id(), cam);
+    }
+
+    Tracker tracker(skeleton_ptr, camera_map, config);
+
+    auto const [pos0, ori0] = spine_upper_transforms[0];
+
+    SECTION("initialize_with_fixed_root triangulates + solves IK, root is the supplied one") {
+        bool const ok = tracker.initialize_with_fixed_root(child_observations[0], pos0, ori0, 0.0);
+        REQUIRE(ok);
+        CHECK(tracker.is_initialized());
+        CHECK_THAT((tracker.state().root_position() - pos0).norm(), WithinAbs(0.0, 1e-9));
+        CHECK_THAT(tracker.state().root_orientation().angularDistance(ori0), WithinAbs(0.0, 1e-9));
+        // IK found a real, non-rest-pose solution, not the zero-angle fallback.
+        CHECK(tracker.state().joint_angles().norm() > 1e-3);
+    }
+
+    SECTION("tracking with PAIR_DIFF observations converges and keeps root fixed") {
+        REQUIRE(tracker.initialize_with_fixed_root(child_observations[0], pos0, ori0, 0.0));
+
+        auto child_layout = SkeletonLayout::from_groups(skeleton_ptr, {"right_arm"});
+        REQUIRE_FALSE(child_layout->has_floating_root());
+
+        for (int frame = 1; frame < num_frames; ++frame) {
+            // PAIR_DIFF for every non-wrist marker, plus the wrist's own plain
+            // POSITION observation -- matches the production design ("wrist
+            // ownership: solved twice"): the reference marker constrains its
+            // own joint absolutely AND anchors the others' relative pairs.
+            auto pair_obs = build_ref_marker_pair_observations(
+                child_observations[frame], wrist_marker_id, config.pose_noise_std);
+            for (Observation const& obs : child_observations[frame]) {
+                if (obs.marker_id == wrist_marker_id) {
+                    pair_obs.push_back(obs);
+                }
+            }
+            REQUIRE(pair_obs.size() > 0);
+
+            auto const [pos, ori] = spine_upper_transforms[frame];
+            tracker.set_external_root_transform(pos, ori);
+            auto result = tracker.track_frame(pair_obs, frame * dt);
+            REQUIRE_FALSE(result.tracking_lost);
+
+            CHECK_THAT((tracker.state().root_position() - pos).norm(), WithinAbs(0.0, 1e-6));
+            CHECK_THAT(tracker.state().root_orientation().angularDistance(ori),
+                       WithinAbs(0.0, 1e-6));
+        }
+
         State const gt_sliced = child_layout->slice_state(ground_truth[num_frames - 1]);
         double const angle_error =
             compute_angle_rmse(tracker.state().joint_angles(), gt_sliced.joint_angles());

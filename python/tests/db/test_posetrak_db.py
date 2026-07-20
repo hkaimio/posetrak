@@ -217,6 +217,118 @@ def test_migrate_session_v34_to_v35_adds_source_to_pose_observations(tmp_path: P
     conn.close()
 
 
+def test_create_session_includes_hierarchical_solver_tables(tmp_path: Path) -> None:
+    """A freshly created session DB should have tracking_run_stages and
+    tracker_config_stages (hierarchical body/hand solver, v37) with the
+    columns the design doc specifies."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+
+    stage_cols = {row[1] for row in conn.execute("PRAGMA table_info(tracking_run_stages)")}
+    assert stage_cols == {
+        "run_id",
+        "person_id",
+        "group_name",
+        "status",
+        "started_at",
+        "completed_at",
+    }
+
+    config_cols = {row[1] for row in conn.execute("PRAGMA table_info(tracker_config_stages)")}
+    assert {
+        "tracker_config_id",
+        "group_name",
+        "process_noise_std",
+        "process_noise_vel_std",
+        "velocity_half_life_s",
+        "pose_noise_std",
+        "calib_noise_std",
+        "outlier_threshold",
+        "min_inliers_ratio",
+        "max_innovation_norm",
+        "init_joint_std",
+        "init_velocity_std",
+    } <= config_cols
+    conn.close()
+
+
+def test_migrate_session_v36_to_v37_adds_hierarchical_solver_tables(tmp_path: Path) -> None:
+    """v36→v37 adds tracking_run_stages and tracker_config_stages.
+
+    See db/migrations/026_hierarchical_solver_stages.sql.
+    """
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+
+    # Downgrade to the pre-migration (v36) shape: drop the new tables and
+    # roll the version pragma back, simulating a database created before
+    # this feature existed.
+    conn.executescript("""
+        BEGIN;
+        DROP TABLE tracking_run_stages;
+        DROP TABLE tracker_config_stages;
+        PRAGMA user_version = 36;
+        COMMIT;
+    """)
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    assert {"tracking_run_stages", "tracker_config_stages"} <= tables
+
+    # Status defaults and the CHECK constraint's allowed values round-trip.
+    # tracking_runs has real FKs to pose_observation_sequences/
+    # extrinsic_calibrations/sync_configs (foreign_keys is ON), so build the
+    # minimal parent chain rather than disabling enforcement.
+    conn.execute(
+        "INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO captures (id, session_id, capture_number) VALUES ('shot1', 'sess1', 1)"
+    )
+    conn.execute(
+        "INSERT INTO extrinsic_calibrations (id, session_id, calibrated_at)"
+        " VALUES ('extr1', 'sess1', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO sync_configs (id, shot_id) VALUES ('sync1', 'shot1')"
+    )
+    conn.execute(
+        "INSERT INTO pose_observation_sequences"
+        " (id, shot_id, sync_config_id, time_start_s, time_end_s)"
+        " VALUES ('seq1', 'shot1', 'sync1', 0.0, 1.0)"
+    )
+    conn.execute(
+        "INSERT INTO tracking_runs (id, observation_sequence_id, tracker_config_id,"
+        " skeleton_id, extrinsic_calibration_id, sync_config_id, ran_at,"
+        " posetrak_version, active_camera_ids, marker_names)"
+        " VALUES ('run1', 'seq1', 'cfg1', 'skel1', 'extr1', 'sync1', '2026-01-01',"
+        " '0.0.0', '[]', '[]')"
+    )
+    conn.execute(
+        "INSERT INTO tracking_run_stages (run_id, person_id, group_name)"
+        " VALUES ('run1', 0, 'HandL')"
+    )
+    row = conn.execute(
+        "SELECT status FROM tracking_run_stages WHERE run_id='run1' AND group_name='HandL'"
+    ).fetchone()
+    assert row["status"] == "pending"
+
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO tracking_run_stages (run_id, person_id, group_name, status)"
+            " VALUES ('run1', 0, 'HandR', 'not-a-real-status')"
+        )
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------

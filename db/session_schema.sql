@@ -274,6 +274,26 @@ CREATE TABLE IF NOT EXISTS tracking_obs_results (
     PRIMARY KEY (run_id, person_id, tracker_step)
 );
 
+-- Hierarchical body/hand solver: one row per (run, person, skeleton group)
+-- the solver treats as its own filter pass (e.g. "main", "HandL", "HandR").
+-- Every stage read-modify-writes the same tracking_results/
+-- tracking_obs_results rows for its owned DOF/marker range rather than
+-- getting its own run_id -- this table gives an atomic per-stage
+-- completion boundary, the staleness flag a parent re-run needs to
+-- invalidate every child stage that consumed its smoothed trajectory, and
+-- a progress surface for the UI. See
+-- docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md.
+CREATE TABLE IF NOT EXISTS tracking_run_stages (
+    run_id       TEXT    NOT NULL REFERENCES tracking_runs(id),
+    person_id    INTEGER NOT NULL,
+    group_name   TEXT    NOT NULL,
+    status       TEXT    NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending', 'running', 'complete', 'stale')),
+    started_at   TEXT,
+    completed_at TEXT,
+    PRIMARY KEY (run_id, person_id, group_name)
+);
+
 -- Detection runs: one row per execution of the pose extraction pipeline.
 -- Tracks which detector/pose model was used, over which time range.
 -- trial_id: optional link to the trial this run belongs to.

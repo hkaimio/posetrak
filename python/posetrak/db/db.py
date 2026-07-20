@@ -20,7 +20,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 6
-SESSION_SCHEMA_VERSION: Final[int] = 36
+SESSION_SCHEMA_VERSION: Final[int] = 37
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1006,6 +1006,20 @@ def _migrate_session_v35_to_v36(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v36_to_v37(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 36 to 37.
+
+    v37 adds tracking_run_stages (per-stage run bookkeeping) and
+    tracker_config_stages (per-stage tuning, NULL inherits from the parent
+    tracker_configs row) for the hierarchical body/hand solver. See
+    docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md.
+    """
+    sql = (_DB_DIR / "migrations" / "026_hierarchical_solver_stages.sql").read_text(
+        encoding="utf-8"
+    )
+    conn.executescript(sql)
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1134,6 +1148,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 35
     if actual == 35:
         _migrate_session_v35_to_v36(conn)
+        actual = 36
+    if actual == 36:
+        _migrate_session_v36_to_v37(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

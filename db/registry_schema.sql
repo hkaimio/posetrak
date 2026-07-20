@@ -156,3 +156,29 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     cross_person_min_confidence       REAL,  -- Min keypoint confidence for both people's detections
     cross_person_max_n                INTEGER  -- Max cross-person anchors per pair per camera per frame
 );
+
+-- Added in schema migration v37: hierarchical body/hand solver -- per-stage
+-- tuning, keyed by group name, NULL inherits from the parent tracker_configs
+-- row above (mirrors tracker_configs' own parent_id inheritance). NOT
+-- skeleton metadata: skeletons are shared, referenced-by-id registry
+-- entities describing topology; tuning is iterated per run the same way
+-- every other tracker_configs column already is (same config-side-scoping-
+-- over-skeleton-groups precedent as process_noise_vel_joint_names above). A
+-- tracker_config_id with any rows here is what selects hierarchical mode;
+-- one without runs monolithic, unchanged. See
+-- docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md.
+CREATE TABLE IF NOT EXISTS tracker_config_stages (
+    tracker_config_id     TEXT NOT NULL REFERENCES tracker_configs(id),
+    group_name            TEXT NOT NULL,
+    process_noise_std     REAL,
+    process_noise_vel_std REAL,
+    velocity_half_life_s  REAL,
+    pose_noise_std        REAL,
+    calib_noise_std       REAL,
+    outlier_threshold     REAL,
+    min_inliers_ratio     REAL,
+    max_innovation_norm   REAL,
+    init_joint_std        REAL,
+    init_velocity_std     REAL,
+    PRIMARY KEY (tracker_config_id, group_name)
+);

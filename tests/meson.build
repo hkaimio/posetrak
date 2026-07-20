@@ -20,6 +20,7 @@ test_sources = files(
 
   # Phase 3: Kinematics
   'test_pinocchio_integration.cpp',
+  'test_trajectory_stream.cpp',
   'test_triangulation.cpp',
   'test_inverse_kinematics.cpp',
 

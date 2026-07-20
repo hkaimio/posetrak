@@ -38,6 +38,7 @@ posetrak_sources = files(
   # Tracking (Phase 4)
   'tracking/tracker.cpp',
   'tracking/multi_person_tracker.cpp',
+  'tracking/trajectory_stream.cpp',
 
   # Build metadata
   'version.cpp',

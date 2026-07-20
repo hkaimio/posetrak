@@ -35,6 +35,20 @@ class ResultWriter {
                  std::string const& extrinsic_calibration_id, std::string const& sync_config_id,
                  int person_id, std::map<std::string, Camera> const& cameras,
                  Skeleton const& skeleton);
+
+    /// @brief Attach to an existing tracking run for read-modify-write patching.
+    ///
+    /// Does not insert a tracking_runs row -- used by a hierarchical solver's
+    /// child stage to patch into the row a parent-stage ResultWriter already
+    /// created for the same person. Only patch_frame() is valid to call on an
+    /// instance constructed this way; write_frame()/write_smoothed_frame()/
+    /// write_obs_results() would insert duplicate-key rows and are not meant
+    /// to be used with it.
+    /// @param db_path Path to the session SQLite database
+    /// @param run_id Existing tracking_runs row to patch into
+    /// @param person_id Person index (must match the parent's tracking_results rows)
+    ResultWriter(std::string const& db_path, std::string const& run_id, int person_id);
+
     ~ResultWriter();
 
     ResultWriter(ResultWriter const&) = delete;
@@ -64,6 +78,33 @@ class ResultWriter {
     /// @param observations Per-observation results from UpdateResult::observations
     void write_obs_results(int step, std::vector<ObservationResult> const& observations);
 
+    /// @brief Read-modify-write patch of an existing tracking_results row's
+    /// state/cov_diag blobs.
+    ///
+    /// Reads the current row for (run_id(), person_id(), step, is_smoothed),
+    /// decodes state/cov_diag as float64 vectors, overwrites the given
+    /// indices with the given values, and writes the row back. Index
+    /// semantics are entirely up to the caller (e.g. an offset derived from
+    /// SkeletonLayout::build_index_map_from() into the flat layout
+    /// State::to_error_vector() produces) -- ResultWriter has no
+    /// skeleton/layout knowledge, generically enough that no group/joint
+    /// name is ever hardcoded here.
+    ///
+    /// @param step Tracker step index of an already-written row
+    /// @param is_smoothed Which row family to patch (false=filtered, true=smoothed)
+    /// @param state_indices Indices into the row's decoded state vector to overwrite
+    /// @param state_values Replacement values, same length as state_indices
+    /// @param cov_diag_indices Indices into the row's decoded cov_diag vector to overwrite
+    /// @param cov_diag_values Replacement values, same length as cov_diag_indices
+    /// @throws std::runtime_error if no matching row exists, or the row's state is NULL
+    /// @throws std::invalid_argument if an indices/values pair has mismatched length,
+    ///         an index is out of range, or cov_diag_indices is non-empty but the row's
+    ///         cov_diag is NULL
+    void patch_frame(int step, bool is_smoothed, std::vector<int> const& state_indices,
+                     std::vector<double> const& state_values,
+                     std::vector<int> const& cov_diag_indices = {},
+                     std::vector<double> const& cov_diag_values = {});
+
     /// @brief Flush any pending batched rows to the database.
     void flush();
 
@@ -82,6 +123,10 @@ class ResultWriter {
 
     void flush_pending();
     static std::vector<uint8_t> encode_vector(Eigen::VectorXd const& v);
+    static std::vector<double> decode_doubles(void const* blob, int n_bytes);
+    static std::vector<uint8_t> encode_doubles(std::vector<double> const& v);
+    static void apply_patch(std::vector<double>& vec, std::vector<int> const& indices,
+                            std::vector<double> const& values, char const* field_name);
 
     // Metadata for obs_blob encoding (set during construction)
     std::vector<std::string> camera_labels_;  ///< Sorted camera labels (obs_blob camera axis)

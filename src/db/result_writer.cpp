@@ -137,6 +137,25 @@ ResultWriter::ResultWriter(std::string const& db_path, std::string const& sequen
 }
 
 // ---------------------------------------------------------------------------
+// Attach-mode constructor -- patch into an existing tracking run
+// ---------------------------------------------------------------------------
+
+ResultWriter::ResultWriter(std::string const& db_path, std::string const& run_id, int person_id)
+    : run_id_(run_id), person_id_(person_id) {
+    int rc = sqlite3_open_v2(db_path.c_str(), &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+                             nullptr);
+    if (rc != SQLITE_OK) {
+        std::string err = db_ ? sqlite3_errmsg(db_) : "unknown error";
+        if (db_)
+            sqlite3_close(db_);
+        db_ = nullptr;
+        throw std::runtime_error("ResultWriter: failed to open DB '" + db_path + "': " + err);
+    }
+
+    sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
+}
+
+// ---------------------------------------------------------------------------
 
 ResultWriter::~ResultWriter() {
     try {
@@ -156,6 +175,39 @@ std::vector<uint8_t> ResultWriter::encode_vector(Eigen::VectorXd const& v) {
     std::vector<uint8_t> buf(static_cast<size_t>(v.size()) * sizeof(double));
     std::memcpy(buf.data(), v.data(), buf.size());
     return buf;
+}
+
+// ---------------------------------------------------------------------------
+
+std::vector<double> ResultWriter::decode_doubles(void const* blob, int n_bytes) {
+    if (n_bytes <= 0 || blob == nullptr)
+        return {};
+    std::vector<double> out(static_cast<size_t>(n_bytes) / sizeof(double));
+    std::memcpy(out.data(), blob, out.size() * sizeof(double));
+    return out;
+}
+
+std::vector<uint8_t> ResultWriter::encode_doubles(std::vector<double> const& v) {
+    std::vector<uint8_t> buf(v.size() * sizeof(double));
+    std::memcpy(buf.data(), v.data(), buf.size());
+    return buf;
+}
+
+void ResultWriter::apply_patch(std::vector<double>& vec, std::vector<int> const& indices,
+                               std::vector<double> const& values, char const* field_name) {
+    if (indices.size() != values.size()) {
+        throw std::invalid_argument(std::string("ResultWriter::patch_frame: ") + field_name +
+                                    "_indices/values size mismatch");
+    }
+    for (size_t i = 0; i < indices.size(); ++i) {
+        int idx = indices[i];
+        if (idx < 0 || static_cast<size_t>(idx) >= vec.size()) {
+            throw std::invalid_argument(std::string("ResultWriter::patch_frame: ") + field_name +
+                                        " index " + std::to_string(idx) + " out of range (size " +
+                                        std::to_string(vec.size()) + ")");
+        }
+        vec[static_cast<size_t>(idx)] = values[i];
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -357,6 +409,97 @@ void ResultWriter::write_obs_results(int step, std::vector<ObservationResult> co
     if (rc != SQLITE_DONE)
         throw std::runtime_error(std::string("ResultWriter: INSERT tracking_obs_results failed: ") +
                                  sqlite3_errmsg(db_));
+}
+
+// ---------------------------------------------------------------------------
+
+void ResultWriter::patch_frame(int step, bool is_smoothed, std::vector<int> const& state_indices,
+                               std::vector<double> const& state_values,
+                               std::vector<int> const& cov_diag_indices,
+                               std::vector<double> const& cov_diag_values) {
+    // Make sure a row this same writer may have just batched is visible to the
+    // SELECT below.
+    flush_pending();
+
+    sqlite3_stmt* select_stmt = nullptr;
+    const char* select_sql =
+        "SELECT state, cov_diag FROM tracking_results"
+        " WHERE run_id=? AND person_id=? AND tracker_step=? AND is_smoothed=?";
+    int rc = sqlite3_prepare_v2(db_, select_sql, -1, &select_stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        throw std::runtime_error(std::string("ResultWriter: prepare SELECT tracking_results: ") +
+                                 sqlite3_errmsg(db_));
+    }
+    sqlite3_bind_text(select_stmt, 1, run_id_.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(select_stmt, 2, person_id_);
+    sqlite3_bind_int(select_stmt, 3, step);
+    sqlite3_bind_int(select_stmt, 4, is_smoothed ? 1 : 0);
+
+    rc = sqlite3_step(select_stmt);
+    if (rc != SQLITE_ROW) {
+        sqlite3_finalize(select_stmt);
+        throw std::runtime_error(fmt::format(
+            "ResultWriter::patch_frame: no tracking_results row for run_id={}, person_id={}, "
+            "tracker_step={}, is_smoothed={}",
+            run_id_, person_id_, step, is_smoothed ? 1 : 0));
+    }
+
+    bool state_is_null = sqlite3_column_type(select_stmt, 0) == SQLITE_NULL;
+    bool cov_is_null = sqlite3_column_type(select_stmt, 1) == SQLITE_NULL;
+    std::vector<double> state_vec =
+        decode_doubles(sqlite3_column_blob(select_stmt, 0), sqlite3_column_bytes(select_stmt, 0));
+    std::vector<double> cov_vec =
+        decode_doubles(sqlite3_column_blob(select_stmt, 1), sqlite3_column_bytes(select_stmt, 1));
+    sqlite3_finalize(select_stmt);
+
+    if (state_is_null && !state_indices.empty()) {
+        throw std::invalid_argument(
+            "ResultWriter::patch_frame: cannot patch state, row's state is NULL");
+    }
+    if (cov_is_null && !cov_diag_indices.empty()) {
+        throw std::invalid_argument(
+            "ResultWriter::patch_frame: cannot patch cov_diag, row's cov_diag is NULL");
+    }
+
+    apply_patch(state_vec, state_indices, state_values, "state");
+    apply_patch(cov_vec, cov_diag_indices, cov_diag_values, "cov_diag");
+
+    auto state_blob = encode_doubles(state_vec);
+    auto cov_blob = encode_doubles(cov_vec);
+
+    sqlite3_stmt* update_stmt = nullptr;
+    const char* update_sql =
+        "UPDATE tracking_results SET state=?, cov_diag=?"
+        " WHERE run_id=? AND person_id=? AND tracker_step=? AND is_smoothed=?";
+    rc = sqlite3_prepare_v2(db_, update_sql, -1, &update_stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        throw std::runtime_error(std::string("ResultWriter: prepare UPDATE tracking_results: ") +
+                                 sqlite3_errmsg(db_));
+    }
+
+    if (!state_is_null)
+        sqlite3_bind_blob(update_stmt, 1, state_blob.data(), static_cast<int>(state_blob.size()),
+                          SQLITE_STATIC);
+    else
+        sqlite3_bind_null(update_stmt, 1);
+
+    if (!cov_is_null)
+        sqlite3_bind_blob(update_stmt, 2, cov_blob.data(), static_cast<int>(cov_blob.size()),
+                          SQLITE_STATIC);
+    else
+        sqlite3_bind_null(update_stmt, 2);
+
+    sqlite3_bind_text(update_stmt, 3, run_id_.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(update_stmt, 4, person_id_);
+    sqlite3_bind_int(update_stmt, 5, step);
+    sqlite3_bind_int(update_stmt, 6, is_smoothed ? 1 : 0);
+
+    rc = sqlite3_step(update_stmt);
+    sqlite3_finalize(update_stmt);
+    if (rc != SQLITE_DONE) {
+        throw std::runtime_error(std::string("ResultWriter: UPDATE tracking_results failed: ") +
+                                 sqlite3_errmsg(db_));
+    }
 }
 
 // ---------------------------------------------------------------------------

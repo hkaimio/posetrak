@@ -54,6 +54,9 @@ test_sources = files(
 
   # DB blob codec
   'test_blob_codec.cpp',
+
+  # DB result writer (hierarchical solver read-modify-write patching)
+  'test_result_writer.cpp',
 )
 
 test_exe = executable('test_posetrak',

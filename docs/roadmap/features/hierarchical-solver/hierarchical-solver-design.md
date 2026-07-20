@@ -735,6 +735,51 @@ stacking order must be explicit (review, 2026-07-20):
 | 3k | Integration test: compare against (a) today's monolithic fingers-on tracking and (b) this session's no-fingers-only baseline. Acceptance criteria: parent/body quality matches or exceeds the no-fingers baseline (should be near-identical, since Stage A *is* that baseline), and hand/finger quality is usably close to monolithic fingers-on tracking's finger output, without importing its arm-jerk regression. Re-run this session's visual BVH comparison as part of this, remembering the wrist-angle caveat from the measurement-model section. |
 | 3l (new, 2026-07-20) | Python/UI/MCP surfacing, same shape as every other phase's final stage: MCP `get_filter_stats`/`get_run_info` label the scalar diagnostics as parent/body-only and expose the per-stage `obs_blob`-bucketed stats; `content_panels.py` shows stage structure and status from `tracking_run_stages`; `run_tracker.py` gains the hierarchical toggle + per-stage config editing; document the mixed `cov_diag` semantics wherever confidence is displayed. |
 
+## Implementation plan
+
+Sequenced as PR-sized units, each with an acceptance gate, checked
+2026-07-20 against the actual code before being locked in:
+
+- `src/db/result_writer.cpp`'s `tracking_results` write path is a plain
+  `INSERT INTO tracking_results ...` via a batched `pending_` list — no
+  `UPSERT`, no read-back. So PR 4 below needs a genuinely new
+  `ResultWriter` capability (`SELECT` + patch + `UPDATE`), not just "the
+  RMW pattern is already possible."
+- `detection_keypoints.region_type` is real, with exactly
+  `'full_body'/'face'/'hand_l'/'hand_r'` values (`session_schema.sql:308,316`)
+  — the crop-scale caveat in the measurement-model section has stronger
+  grounding than stated: hand detections are already a first-class,
+  separately-tracked region type in the detection pipeline.
+- The registry `v27` comment quoted in the persistence section is exact —
+  independently found earlier in this same review — so the
+  config-side-scoping precedent is solid.
+- Two gaps found that the phase table doesn't make explicit enough to
+  implement directly:
+  1. `decode_obs_blob` and its MCP consumers (`get_filter_stats`,
+     `get_camera_coverage`, `get_observation_gaps`) don't know about the
+     new pad-field mode flag or the parent-wins shared-marker rule —
+     writing that data is inert unless those readers change too. Folded
+     into PR 5, not left for 3l.
+  2. The hierarchical-mode toggle was never named. Resolved: existence-based
+     — a `tracker_config_id` with rows in `tracker_config_stages` runs
+     hierarchically; one without runs monolithic, unchanged. No separate
+     boolean flag. Folded into PR 6.
+
+| PR | Scope | Acceptance gate |
+|----|-------|------------------|
+| 1 | `ForwardKinematics::world_transform(joint_name)` (redesign.md §11, unchanged) + a small streaming interface over a completed `Tracker`'s smoothed trajectory yielding one named joint's world transform per frame. Build only enough for PR 3 to consume — not the fixed-lag machinery this leaves room for. | `[world_transform]` tests per redesign.md §11.5; a stream test against a short smoothed sequence. |
+| 2 | Decide + implement `Tracker` fixed-root mode vs. a new sibling class (the open decision inside 3h) — teach `Tracker` to accept an externally-supplied, per-frame root transform (from PR 1's stream) instead of estimating its own root, reusing Phase 3e's `set_root_transform()` at the `Tracker` level. Confirm `Triangulator`/`InverseKinematics` work unmodified against a small `from_groups()` layout rather than assuming it from the Phase 3a–3c refactor. | Synthetic small-skeleton fixture (redesign.md §9.4) tracked in fixed-root mode, root held constant through predict/update, output matches hand-computed expectation. Zero-children / monolithic path stays bit-identical (existing regression tests unchanged). |
+| 3 | Child initialization (fixed-root IK from triangulated hand markers when visible; rest-pose + `init_joint_std`-wide covariance fallback; re-init policy after tracking loss) + `PAIR_DIFF`/`ref_marker_id` observation construction against `MRK-wrist`, reusing the existing `PAIR_DIFF` branch in `ukf.cpp` unmodified. | One hand's forward pass run in isolation against a short real sequence; finger angles visually plausible via BVH spot check. |
+| 4 | `tracking_run_stages` migration (session DB) + `tracker_config_stages` migration (registry, NULL-inherits-from-parent). New `ResultWriter` read-modify-write capability for `tracking_results`, patching a caller-supplied index range via `SkeletonLayout::build_index_map_from()`. | Round-trip test: synthetic parent blob + synthetic child patch merge and decode correctly at both stages' expected indices. |
+| 5 | `obs_blob` patching: absolute-pixel reconstruction for child `PAIR_DIFF` entries, pad-field (index 7) mode flag, parent-wins for shared-marker slots. Companion update to `decode_obs_blob` + MCP readers (gap 1 above) so the new data isn't write-only. | Frame with both parent and child observations for a shared marker (`MRK-wrist`): parent's entry survives, child's hand-only markers land in correct slots, MCP tools decode without error. |
+| 6 | CLI/config plumbing: existence-based hierarchical toggle (gap 2 above); per-stage tuning resolution (NULL = inherit) into child solver construction. | Same skeleton + sequence, two `tracker_config_id`s (with/without `tracker_config_stages` rows) — confirm each selects the correct path. |
+| 7 | Integration test: merged output vs. (a) this session's no-fingers monolithic baseline for parent-owned DOFs, (b) monolithic fingers-on for hand-owned DOFs. Re-run this session's visual BVH comparison, checking the wrist-angle caveat (exported wrist angle inherits parent forearm orientation bias even when finger pixels track well). v1 runs children sequentially per person — no parallelism yet, even though the design supports it later. | (a) near-identical to the no-fingers baseline; (b) hand tracking usably close to monolithic fingers-on, without the arm-jerk regression. |
+| 8 | Python/UI/MCP surfacing: `get_filter_stats`/`get_run_info` label scalars as parent/body-only + expose per-stage bucketed stats; `content_panels.py` stage structure/status from `tracking_run_stages`; `run_tracker.py` hierarchical toggle + per-stage config editing; document mixed `cov_diag` semantics wherever confidence is shown. **Requires live UI verification per CLAUDE.md** ("start the dev server and use the feature in a browser before reporting complete") — not something to mark done from source inspection alone. | Manual walkthrough in the running app; screenshots/description of what was exercised. |
+
+PRs 1–7 are pure C++/DB/CLI and can proceed without live UI access. PR 8
+cannot be verified from source reading alone and needs an interactive
+session — flagged explicitly rather than silently skipped or guessed at.
+
 ## Explicitly out of scope for this proposal
 
 - The general/recursive `HierarchicalTracker` coordinator architecture —

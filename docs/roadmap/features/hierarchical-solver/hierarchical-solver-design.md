@@ -781,7 +781,7 @@ Sequenced as PR-sized units, each with an acceptance gate, checked
 | 1 — **done** | `ForwardKinematics::world_transform(joint_name)` (redesign.md §11 — found already implemented, not new work) + `TrajectoryStream`/`BatchTrajectoryStream`, a small streaming interface over a completed `Tracker`'s smoothed trajectory yielding one named joint's world transform per frame via its own `get_fk()`. | `[world_transform]` (pre-existing, 18 assertions) + `[trajectory_stream]` (new, 16 assertions), all passing. Commit `36ae6c5`. |
 | 2 | Decide + implement `Tracker` fixed-root mode vs. a new sibling class (the open decision inside 3h) — teach `Tracker` to accept an externally-supplied, per-frame root transform (from PR 1's stream) instead of estimating its own root, reusing Phase 3e's `set_root_transform()` at the `Tracker` level. Confirm `Triangulator`/`InverseKinematics` work unmodified against a small `from_groups()` layout rather than assuming it from the Phase 3a–3c refactor. | Synthetic small-skeleton fixture (redesign.md §9.4) tracked in fixed-root mode, root held constant through predict/update, output matches hand-computed expectation. Zero-children / monolithic path stays bit-identical (existing regression tests unchanged). |
 | 3 | Child initialization (fixed-root IK from triangulated hand markers when visible; rest-pose + `init_joint_std`-wide covariance fallback; re-init policy after tracking loss) + `PAIR_DIFF`/`ref_marker_id` observation construction against `MRK-wrist`, reusing the existing `PAIR_DIFF` branch in `ukf.cpp` unmodified. | One hand's forward pass run in isolation against a short real sequence; finger angles visually plausible via BVH spot check. |
-| 4 | `tracking_run_stages` migration (session DB) + `tracker_config_stages` migration (registry, NULL-inherits-from-parent). New `ResultWriter` read-modify-write capability for `tracking_results`, patching a caller-supplied index range via `SkeletonLayout::build_index_map_from()`. | Round-trip test: synthetic parent blob + synthetic child patch merge and decode correctly at both stages' expected indices. |
+| 4 — **schema half done, `ResultWriter` RMW not started** | `tracking_run_stages` + `tracker_config_stages` migration (v37, single combined session DB — not the separate session/registry split originally described; corrected after reading `python/posetrak/db/db.py`'s actual migration mechanism). Still needed: new `ResultWriter` read-modify-write capability for `tracking_results`, patching a caller-supplied index range via `SkeletonLayout::build_index_map_from()`. | Schema: `test_create_session_includes_hierarchical_solver_tables` + `test_migrate_session_v36_to_v37_adds_hierarchical_solver_tables`, both passing (`db/migrations/026_hierarchical_solver_stages.sql`, commit `5c6f745`). RMW capability: not yet built — deliberately paused before it, see status note below. |
 | 5 | `obs_blob` patching: absolute-pixel reconstruction for child `PAIR_DIFF` entries, pad-field (index 7) mode flag, parent-wins for shared-marker slots. Companion update to `decode_obs_blob` + MCP readers (gap 1 above) so the new data isn't write-only. | Frame with both parent and child observations for a shared marker (`MRK-wrist`): parent's entry survives, child's hand-only markers land in correct slots, MCP tools decode without error. |
 | 6 | CLI/config plumbing: existence-based hierarchical toggle (gap 2 above); per-stage tuning resolution (NULL = inherit) into child solver construction. | Same skeleton + sequence, two `tracker_config_id`s (with/without `tracker_config_stages` rows) — confirm each selects the correct path. |
 | 7 | Integration test: merged output vs. (a) this session's no-fingers monolithic baseline for parent-owned DOFs, (b) monolithic fingers-on for hand-owned DOFs. Re-run this session's visual BVH comparison, checking the wrist-angle caveat (exported wrist angle inherits parent forearm orientation bias even when finger pixels track well). v1 runs children sequentially per person — no parallelism yet, even though the design supports it later. | (a) near-identical to the no-fingers baseline; (b) hand tracking usably close to monolithic fingers-on, without the arm-jerk regression. |
@@ -790,6 +790,20 @@ Sequenced as PR-sized units, each with an acceptance gate, checked
 PRs 1–7 are pure C++/DB/CLI and can proceed without live UI access. PR 8
 cannot be verified from source reading alone and needs an interactive
 session — flagged explicitly rather than silently skipped or guessed at.
+
+**Status (2026-07-20): PR 1 done, PR 4's schema half done, paused before
+`ResultWriter`'s RMW capability.** Not a UI-verification gap (none of
+PRs 1–4 need one) — a risk-pacing one: PR 2 (teaching `Tracker` a
+fixed-root mode) is the next item, and it modifies the core `Tracker`
+class every single- and multi-person production run depends on. The
+scope decision section above already recommends a direction for it, so
+proceeding isn't purely a guess — but it's consequential enough, and
+enough has landed in one sitting (two independently tested, committed
+slices), to check in before touching code with that blast radius rather
+than pushing straight through. `ResultWriter`'s RMW work was left until
+after PR 2/3 land regardless, since its exact shape (what a "patch" call
+looks like) depends on decisions PR 2 hasn't made yet — building it now
+risked designing against a shape that changes under it.
 
 ## Explicitly out of scope for this proposal
 

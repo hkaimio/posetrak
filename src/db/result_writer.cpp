@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace posetrak {
@@ -153,6 +154,32 @@ ResultWriter::ResultWriter(std::string const& db_path, std::string const& run_id
     }
 
     sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
+
+    // Load camera_labels_/marker_names_ from the parent's tracking_runs row so
+    // patch_obs_results() can compute obs_blob slot indices without the caller
+    // having to re-derive and re-pass the same camera/skeleton metadata.
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT active_camera_ids, marker_names FROM tracking_runs WHERE id=?";
+    rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        throw std::runtime_error(std::string("ResultWriter: prepare SELECT tracking_runs: ") +
+                                 sqlite3_errmsg(db_));
+    }
+    sqlite3_bind_text(stmt, 1, run_id_.c_str(), -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        throw std::runtime_error("ResultWriter: no tracking_runs row for run_id '" + run_id_ + "'");
+    }
+    if (sqlite3_column_type(stmt, 0) != SQLITE_NULL) {
+        auto const* txt = reinterpret_cast<char const*>(sqlite3_column_text(stmt, 0));
+        camera_labels_ = nlohmann::json::parse(txt).get<std::vector<std::string>>();
+    }
+    if (sqlite3_column_type(stmt, 1) != SQLITE_NULL) {
+        auto const* txt = reinterpret_cast<char const*>(sqlite3_column_text(stmt, 1));
+        marker_names_ = nlohmann::json::parse(txt).get<std::vector<std::string>>();
+    }
+    sqlite3_finalize(stmt);
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +436,120 @@ void ResultWriter::write_obs_results(int step, std::vector<ObservationResult> co
     if (rc != SQLITE_DONE)
         throw std::runtime_error(std::string("ResultWriter: INSERT tracking_obs_results failed: ") +
                                  sqlite3_errmsg(db_));
+}
+
+// ---------------------------------------------------------------------------
+
+void ResultWriter::patch_obs_results(int step, std::vector<ObservationResult> const& observations,
+                                     std::vector<uint8_t> const& pair_diff_reconstructed,
+                                     std::vector<std::string> const& parent_owned_markers) {
+    if (pair_diff_reconstructed.size() != observations.size()) {
+        throw std::invalid_argument(
+            "ResultWriter::patch_obs_results: pair_diff_reconstructed/observations size "
+            "mismatch");
+    }
+    if (camera_labels_.empty() || marker_names_.empty()) {
+        throw std::runtime_error(
+            "ResultWriter::patch_obs_results: no camera_labels_/marker_names_ metadata "
+            "available (tracking_runs row has no active_camera_ids/marker_names)");
+    }
+
+    // Make sure a row this same writer may have just batched is visible to the
+    // SELECT below.
+    flush_pending();
+
+    int n_cams = static_cast<int>(camera_labels_.size());
+    int n_markers = static_cast<int>(marker_names_.size());
+    constexpr int kFields = 8;
+
+    std::unordered_map<std::string, int> marker_idx;
+    for (int i = 0; i < n_markers; ++i)
+        marker_idx[marker_names_[i]] = i;
+    std::unordered_set<std::string> const parent_owned(parent_owned_markers.begin(),
+                                                       parent_owned_markers.end());
+
+    sqlite3_stmt* select_stmt = nullptr;
+    const char* select_sql =
+        "SELECT obs_blob FROM tracking_obs_results"
+        " WHERE run_id=? AND person_id=? AND tracker_step=?";
+    int rc = sqlite3_prepare_v2(db_, select_sql, -1, &select_stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        throw std::runtime_error(
+            std::string("ResultWriter: prepare SELECT tracking_obs_results: ") +
+            sqlite3_errmsg(db_));
+    }
+    sqlite3_bind_text(select_stmt, 1, run_id_.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(select_stmt, 2, person_id_);
+    sqlite3_bind_int(select_stmt, 3, step);
+
+    rc = sqlite3_step(select_stmt);
+    if (rc != SQLITE_ROW) {
+        sqlite3_finalize(select_stmt);
+        throw std::runtime_error(fmt::format(
+            "ResultWriter::patch_obs_results: no tracking_obs_results row for run_id={}, "
+            "person_id={}, tracker_step={}",
+            run_id_, person_id_, step));
+    }
+
+    int n_bytes = sqlite3_column_bytes(select_stmt, 0);
+    size_t const expected_bytes =
+        static_cast<size_t>(n_cams) * static_cast<size_t>(n_markers) * kFields * sizeof(float);
+    if (static_cast<size_t>(n_bytes) != expected_bytes) {
+        sqlite3_finalize(select_stmt);
+        throw std::runtime_error(fmt::format(
+            "ResultWriter::patch_obs_results: obs_blob size {} does not match expected {} "
+            "({} cameras x {} markers x {} fields)",
+            n_bytes, expected_bytes, n_cams, n_markers, kFields));
+    }
+    std::vector<float> blob(static_cast<size_t>(n_cams) * static_cast<size_t>(n_markers) * kFields);
+    std::memcpy(blob.data(), sqlite3_column_blob(select_stmt, 0), expected_bytes);
+    sqlite3_finalize(select_stmt);
+
+    for (size_t i = 0; i < observations.size(); ++i) {
+        ObservationResult const& obs = observations[i];
+        if (parent_owned.count(obs.marker_name) != 0)
+            continue;  // parent-wins: shared-marker slots are never overwritten by a child
+        if (obs.camera_id < 0 || obs.camera_id >= n_cams)
+            continue;
+        auto mi = marker_idx.find(obs.marker_name);
+        if (mi == marker_idx.end())
+            continue;
+
+        int c = obs.camera_id;
+        int m = mi->second;
+        float* slot = blob.data() + (c * n_markers + m) * kFields;
+        slot[0] = static_cast<float>(obs.actual[0]);
+        slot[1] = static_cast<float>(obs.actual[1]);
+        slot[2] = static_cast<float>(obs.predicted[0]);
+        slot[3] = static_cast<float>(obs.predicted[1]);
+        slot[4] = static_cast<float>(obs.mahalanobis_distance);
+        slot[5] = obs.is_outlier ? 0.0f : 1.0f;  // used_in_update
+        slot[6] = obs.is_outlier ? 1.0f : 0.0f;  // is_outlier
+        slot[7] = pair_diff_reconstructed[i] ? 1.0f : 0.0f;
+    }
+
+    sqlite3_stmt* update_stmt = nullptr;
+    const char* update_sql =
+        "UPDATE tracking_obs_results SET obs_blob=?"
+        " WHERE run_id=? AND person_id=? AND tracker_step=?";
+    rc = sqlite3_prepare_v2(db_, update_sql, -1, &update_stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        throw std::runtime_error(
+            std::string("ResultWriter: prepare UPDATE tracking_obs_results: ") +
+            sqlite3_errmsg(db_));
+    }
+    sqlite3_bind_blob(update_stmt, 1, blob.data(), static_cast<int>(blob.size() * sizeof(float)),
+                      SQLITE_TRANSIENT);
+    sqlite3_bind_text(update_stmt, 2, run_id_.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(update_stmt, 3, person_id_);
+    sqlite3_bind_int(update_stmt, 4, step);
+
+    rc = sqlite3_step(update_stmt);
+    sqlite3_finalize(update_stmt);
+    if (rc != SQLITE_DONE) {
+        throw std::runtime_error(std::string("ResultWriter: UPDATE tracking_obs_results failed: ") +
+                                 sqlite3_errmsg(db_));
+    }
 }
 
 // ---------------------------------------------------------------------------

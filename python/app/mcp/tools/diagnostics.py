@@ -7,7 +7,7 @@ import sqlite3
 import numpy as np
 
 from app.mcp.db import (
-    OBS_ACTUAL_X, OBS_ACTUAL_Y, OBS_OUTLIER, OBS_PRED_X, OBS_PRED_Y, OBS_USED,
+    OBS_ACTUAL_X, OBS_ACTUAL_Y, OBS_OUTLIER, OBS_PAD, OBS_PRED_X, OBS_PRED_Y, OBS_USED,
     decode_obs_blob,
     get_run_cameras,
     get_run_markers,
@@ -140,7 +140,9 @@ def get_observation_gaps(
 
     sections: list[str] = []
     sections.append(
-        f"Observation gaps: {start_s}s – {end_s}s  (every {stride} steps, gaps ≥{_GAP_HIGHLIGHT}px flagged *)"
+        f"Observation gaps: {start_s}s – {end_s}s  (every {stride} steps, gaps ≥{_GAP_HIGHLIGHT}px "
+        f"flagged *; status 'r' = reconstructed from a hierarchical-solver child stage's "
+        f"PAIR_DIFF observation rather than measured directly)"
     )
 
     for mname in markers:
@@ -175,9 +177,12 @@ def get_observation_gaps(
                 py = blob[ci, midx, OBS_PRED_Y]
                 used = blob[ci, midx, OBS_USED]
                 outlier = blob[ci, midx, OBS_OUTLIER]
+                reconstructed = blob[ci, midx, OBS_PAD] > 0.5
                 gap = np.sqrt((ax - px) ** 2 + (ay - py) ** 2)
                 flag = "*" if gap >= _GAP_HIGHLIGHT else " "
                 status = "I" if used > 0.5 else ("x" if outlier > 0.5 else "?")
+                if reconstructed:
+                    status += "r"
 
                 sections.append(
                     f"{step:>5} {ts:>7.3f} | {cam_labels[ci]:<10} "

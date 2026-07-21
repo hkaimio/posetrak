@@ -1,6 +1,7 @@
 #include "posetrak/tracking/relative_observations.hpp"
 
 #include <cmath>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace posetrak {
@@ -52,6 +53,49 @@ build_ref_marker_pair_observations(std::vector<Observation> const& frame_obs, in
     }
 
     return result;
+}
+
+std::pair<std::vector<ObservationResult>, std::vector<uint8_t>>
+reconstruct_pair_diff_absolute(std::vector<ObservationResult> const& results,
+                               std::string const& ref_marker_name) {
+    // Index the reference marker's own entries by camera (at most one expected
+    // per camera per frame).
+    std::unordered_map<int, ObservationResult const*> ref_by_camera;
+    for (ObservationResult const& r : results) {
+        if (r.marker_name == ref_marker_name) {
+            ref_by_camera[r.camera_id] = &r;
+        }
+    }
+
+    std::vector<ObservationResult> out;
+    std::vector<uint8_t> reconstructed;
+    out.reserve(results.size());
+    reconstructed.reserve(results.size());
+
+    for (ObservationResult const& r : results) {
+        if (r.marker_name == ref_marker_name) {
+            out.push_back(r);
+            reconstructed.push_back(0);
+            continue;
+        }
+        auto ref_it = ref_by_camera.find(r.camera_id);
+        if (ref_it == ref_by_camera.end()) {
+            throw std::runtime_error("reconstruct_pair_diff_absolute: no reference marker '" +
+                                     ref_marker_name + "' result for camera " +
+                                     std::to_string(r.camera_id) +
+                                     " (required to reconstruct marker '" + r.marker_name + "')");
+        }
+        ObservationResult shifted = r;
+        shifted.actual += ref_it->second->actual;
+        shifted.predicted += ref_it->second->predicted;
+        // innovation/mahalanobis_distance are representation-invariant under this
+        // shift (actual and predicted move by the same additive amount), so they
+        // are left as computed by the PAIR_DIFF update -- no correction needed.
+        out.push_back(shifted);
+        reconstructed.push_back(1);
+    }
+
+    return {out, reconstructed};
 }
 
 }  // namespace posetrak

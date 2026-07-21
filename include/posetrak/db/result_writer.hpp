@@ -39,8 +39,11 @@ class ResultWriter {
     /// @brief Attach to an existing tracking run for read-modify-write patching.
     ///
     /// Does not insert a tracking_runs row -- used by a hierarchical solver's
-    /// child stage to patch into the row a parent-stage ResultWriter already
-    /// created for the same person. Only patch_frame() is valid to call on an
+    /// child stage to patch into the rows a parent-stage ResultWriter already
+    /// created for the same person. Loads camera_labels_/marker_names_ from
+    /// the existing tracking_runs row's active_camera_ids/marker_names JSON
+    /// columns, so patch_obs_results() works without the caller re-deriving
+    /// them. Only patch_frame()/patch_obs_results() are valid to call on an
     /// instance constructed this way; write_frame()/write_smoothed_frame()/
     /// write_obs_results() would insert duplicate-key rows and are not meant
     /// to be used with it.
@@ -104,6 +107,34 @@ class ResultWriter {
                      std::vector<double> const& state_values,
                      std::vector<int> const& cov_diag_indices = {},
                      std::vector<double> const& cov_diag_values = {});
+
+    /// @brief Read-modify-write patch of an existing tracking_obs_results row's obs_blob.
+    ///
+    /// Reads the current row's obs_blob for (run_id(), person_id(), step),
+    /// and for each entry in @p observations writes into its (camera, marker)
+    /// slot -- UNLESS the entry's marker_name is in @p parent_owned_markers,
+    /// in which case that slot is left untouched (parent-wins rule for
+    /// markers a parent and child stage both solve, e.g. a wrist marker
+    /// shared between a body and a hand group). The pad field (blob index 7,
+    /// unused before this method existed) is set per entry from @p
+    /// pair_diff_reconstructed: 1.0 marks an entry whose actual/predicted
+    /// pixels were reconstructed from a PAIR_DIFF difference (see
+    /// reconstruct_pair_diff_absolute() in relative_observations.hpp) rather
+    /// than measured directly, 0.0 marks a native absolute-pixel entry.
+    ///
+    /// @param step Tracker step index of an already-written tracking_obs_results row
+    /// @param observations Per-observation results to patch in (child stage's own results,
+    ///        already in absolute pixels -- see reconstruct_pair_diff_absolute())
+    /// @param pair_diff_reconstructed Same length as observations; the pad-field mode flag
+    ///        per entry
+    /// @param parent_owned_markers Marker names never overwritten (shared-marker slots)
+    /// @throws std::runtime_error if no matching row exists, or its obs_blob size doesn't
+    ///         match this run's camera/marker counts
+    /// @throws std::invalid_argument if pair_diff_reconstructed's length doesn't match
+    ///         observations'
+    void patch_obs_results(int step, std::vector<ObservationResult> const& observations,
+                           std::vector<uint8_t> const& pair_diff_reconstructed,
+                           std::vector<std::string> const& parent_owned_markers = {});
 
     /// @brief Flush any pending batched rows to the database.
     void flush();

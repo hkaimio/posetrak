@@ -11,6 +11,7 @@ import numpy as np
 from app.mcp.db import (
     HALPE_NAMES,
     OBS_OUTLIER,
+    OBS_PAD,
     OBS_USED,
     decode_kp_mask,
     decode_obs_blob,
@@ -104,10 +105,12 @@ def get_camera_coverage(
                 ax = blob[ci, midx, 0]
                 if np.isnan(ax):
                     cells.append(".")
-                elif blob[ci, midx, OBS_OUTLIER] > 0.5:
-                    cells.append("x")
+                    continue
+                reconstructed = blob[ci, midx, OBS_PAD] > 0.5
+                if blob[ci, midx, OBS_OUTLIER] > 0.5:
+                    cells.append("x" if reconstructed else "X")
                 else:
-                    cells.append("I")
+                    cells.append("i" if reconstructed else "I")
             blocks.append(" ".join(f"{c:>{_W}}" for c in cells))
         shown_rows.append(f"{step:>5} {ts:>7.3f} | " + "  ".join(blocks))
 
@@ -129,7 +132,10 @@ def get_camera_coverage(
 
     return (
         f"Camera coverage: {', '.join(markers)} | {start_s}s – {end_s}s | "
-        f"every {stride} steps\nI=inlier  x=outlier  .=absent\n\n"
+        f"every {stride} steps\n"
+        f"I=inlier  X=outlier  .=absent  "
+        f"(lowercase i/x = hierarchical-solver child stage, reconstructed from a "
+        f"PAIR_DIFF observation rather than measured directly)\n\n"
         + "\n".join(shown_rows)
     )
 

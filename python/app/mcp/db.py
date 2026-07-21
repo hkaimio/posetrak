@@ -35,7 +35,19 @@ OBS_PRED_Y = 3
 OBS_MAHAL = 4
 OBS_USED = 5    # 1.0 = inlier, 0.0 = outlier/absent
 OBS_OUTLIER = 6
-OBS_PAD = 7
+OBS_PAD = 7     # mode flag as of the hierarchical-solver feature -- see below
+
+# OBS_PAD values, written by ResultWriter::write_obs_results() (always 0 --
+# the "normal", single-stage tracking path) and
+# ResultWriter::patch_obs_results() (a hierarchical-solver child stage's
+# read-modify-write patch into a parent-owned run -- see
+# docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md).
+# A shared marker (e.g. a wrist both a body and a hand group solve) always
+# keeps the PARENT's entry -- patch_obs_results() never overwrites it -- so
+# OBS_MODE_PAIR_DIFF_RECONSTRUCTED only ever appears on a child stage's own
+# markers, never on a marker also owned by the parent.
+OBS_MODE_ABSOLUTE = 0.0
+OBS_MODE_PAIR_DIFF_RECONSTRUCTED = 1.0
 
 
 # ---------------------------------------------------------------------------

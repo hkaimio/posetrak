@@ -786,7 +786,7 @@ Sequenced as PR-sized units, each with an acceptance gate, checked
 | 6, prerequisite — **done** | Discovered while starting PR 6: neither `freeflyer_joint_name` nor `ref_marker_id` had anywhere to live — the skeleton's `groups:` section had no such fields, and `tracker_config_stages` deliberately excludes them per its own migration comment ("live in the skeleton, not here"). Added two new optional `groups:` YAML fields, `freeflyer_joint`/`ref_marker` (`SkeletonGroup` struct + `Skeleton::add_group()`/`get_group()`, parsed by `skeleton_loader.cpp`, documented in `docs/skeleton-format.md`). Getting their values right for `HandL`/`HandR` surfaced a second gap: the design doc's "wrist ownership: solved twice" requires `hand.{L,R}` to belong to **both** `main` and `HandL`/`HandR` at once, but `Joint::group` is a single string and every group filter (`SkeletonLayout::build()`, `PinocchioModelBuilder`'s subtree builders) matched on it exactly — fixed with `Skeleton::is_joint_in_groups()`, which unions a group's own declared `joints:`/`markers:` list (falling back to `Joint::group` when no `SkeletonGroup` is registered, so every existing group-filtering test/caller is unaffected). Also added the "warn on group entries referencing nonexistent joints/markers" guard the design doc's "Exact group definitions" section called for as a prerequisite. | New `[skeleton_loader][groups]` + `[skeleton_layout][groups]` suites, all passing. Commit `a51ad74`. |
 | 6, prerequisite — **done** | `python/tools/upgrade_skeleton_hand_groups.py`: applies the design doc's reviewed `HandL`/`HandR` corrections (phantom `palm.01-04.{L,R}`/`MRK-thumb2.{L,R}` references removed, `freeflyer_joint`/`ref_marker` added) to a skeleton YAML file or every matching row in a registry/session DB (content-addressed `skeletons` rows are never mutated in place — inserts a new row with `parent_id` set to the original). **Shipped a real bug in its first version**: it assumed every skeleton's `palm.*` references were phantom, and corrupted `tests/data/Harri_skeleton-regress-test.yaml`/`Harri_skeleton-shouldery-rot.yaml`, whose `palm.0N.{L,R}` are real, load-bearing joints (a different, unreviewed hand topology) — caught via `git diff` before committing, reverted, and fixed by checking joint existence directly instead of hardcoding the pattern, skipping the hand-group corrections entirely (with a printed note) whenever real `palm.*` joints are present. Applied to all 6 tracked skeleton YAML files. | New pytest suite (9 cases), including a regression test for the exact bug above. Commit `ddbeba7` (script) + `1558cd9` (applied to tracked skeletons). Full C++ suite (288/2980) and `python/tests/db` (253 passed) clean afterward. |
 | 6 — **done, not yet integration-tested** | CLI/config plumbing: `src/tracking/hierarchical_solver.cpp`'s `build_stage_tracker_config()` (per-stage tuning resolution, NULL = inherit) + `run_hierarchical_child_stages()` (the existence-based toggle from gap 2, and the full per-stage driver — builds the fixed-root child `Tracker`, streams the parent's smoothed `freeflyer_joint` trajectory, builds each frame's `PAIR_DIFF`+own-position observations, runs forward pass + smoothing, merges into the parent's `tracking_results`/`tracking_obs_results` rows, tracks `tracking_run_stages` status). Wired into both of `cli/track.cpp`'s DB paths after `finalize_person_context()`. `cov_diag` is deliberately not merged yet — needs a parallel `error_index` mapping between layouts that doesn't exist. Also fixed a real, unrelated bug discovered while working out the exact frame alignment this needed: every RTS-smoothed `tracking_results`/`smoothed_*.csv` row was mislabeled by one `tracker_step`, for every `--smooth` run ever, because a warm-up `track_frame()` call before the main loop fed the smoother cache without a filtered-row counterpart. | New `[hierarchical_solver]` suite (3 cases) covering `build_stage_tracker_config()`'s inherit/override/partial-override behavior — the one piece usable without a full DB-backed `Tracker` fixture. The orchestration driver itself compiles and integrates cleanly (full suite green) but has **no automated test of its own yet** — PR 7's integration test, against real production data, is the first end-to-end exercise. Commits `58946db` (dead `HierarchicalConfig` scaffolding removed), `271650f` (smoothed-frame off-by-one fix), `99cf8b1` (DB-layer additions), `5b1d4d6` (this PR). |
-| 7 | Integration test: merged output vs. (a) this session's no-fingers monolithic baseline for parent-owned DOFs, (b) monolithic fingers-on for hand-owned DOFs. Re-run this session's visual BVH comparison, checking the wrist-angle caveat (exported wrist angle inherits parent forearm orientation bias even when finger pixels track well). v1 runs children sequentially per person — no parallelism yet, even though the design supports it later. | (a) near-identical to the no-fingers baseline; (b) hand tracking usably close to monolithic fingers-on, without the arm-jerk regression. |
+| 7 | **in progress, 2026-07-21/22** — Integration test found and fixed two implementation bugs in PR 6 (parent DB rows not expanded to full-skeleton width; a second RTS-smoothing off-by-one in the child stage's own merge — see commits `772e3f9`), then a **third, more serious bug**: `SessionReader::load_observations()` (independent of anything hierarchical-solver-specific — this fires whenever `use_relative_observations` is on) appends an extra `PAIR_DIFF` observation for every marker against its own skeleton-tree parent marker, alongside that marker's normal absolute-position observation. The child stage's `raw_for_stage` filtered by `marker_id` only, so both the wrist's real position observation and its unrelated `PAIR_DIFF`-vs-elbow observation reached `build_ref_marker_pair_observations()`; that function's reference-marker lookup is last-write-wins per camera and the `PAIR_DIFF` entry sorts after the position entry, so it silently won — every finger's own `PAIR_DIFF` observation ended up built against "wrist pixel minus elbow pixel" instead of the wrist's real pixel position, baking a roughly-constant, elbow-offset-sized error into `hand.{L,R}`'s orientation from the very first frame of every run (visible to the eye as "the wrist looks rotated ~90 degrees, in a way that's hard to pin to one axis" — exactly what a large, frame-independent pixel offset produces). Fixed in commit `44f5d6a` by having both `raw_for_stage` and `build_ref_marker_pair_observations()` itself skip non-`POSITION` observations. | Fix verified against real production data: `hand.R`'s rotation vs. an independent main-group-only tracker of the same person/window went from ~127° mean disagreement (136° on frame 1) to ~44° (2.3° on frame 1) after the fix. Acceptance gate not yet fully met — see the 2026-07-22 status note below for what's confirmed and what's still open. |
 | 8 | Python/UI/MCP surfacing: `get_filter_stats`/`get_run_info` label scalars as parent/body-only + expose per-stage bucketed stats; `content_panels.py` stage structure/status from `tracking_run_stages`; `run_tracker.py` hierarchical toggle + per-stage config editing; document mixed `cov_diag` semantics wherever confidence is shown. **Requires live UI verification per CLAUDE.md** ("start the dev server and use the feature in a browser before reporting complete") — not something to mark done from source inspection alone. | Manual walkthrough in the running app; screenshots/description of what was exercised. |
 
 PRs 1–7 are pure C++/DB/CLI and can proceed without live UI access. PR 8
@@ -828,6 +828,50 @@ hand stages enabled, + BVH export, per Harri's 2026-07-21 request. Given
 PR 6 is completely unexercised, PR 7 should start cautiously (a short
 sequence first, not the full production run) rather than assuming the
 wiring is correct just because it compiles.
+
+**Status (2026-07-22): PR 7 in progress, three real bugs found and fixed,
+acceptance gate partially met.** The short-slice-first approach paid off
+immediately — the very first run crashed (see PR 6 row above: parent DB
+rows weren't expanded to full-skeleton width, so the child's
+`SkeletonLayout::build_index_map_from()` merge had no target for DOFs
+outside the parent's own group). After that fix, a second bug surfaced
+(the smoothed-frame off-by-one, also PR 6 row). After both were fixed and
+a full 3-person/both-hands/full-sequence run completed cleanly (no crash,
+no NaN), Harri caught by eye that every `hand.{L,R}` orientation looked
+rotated by a roughly-constant, hard-to-pin-to-one-axis amount — correctly
+pushing back on this agent's first (wrong) hypothesis of an IK
+initialization issue, on the grounds that the UKF reliably converges past
+bad inits elsewhere in this codebase, and instead proposing the comparison
+that actually found the bug: **compare the child hand-tracker's own
+`hand.{L,R}` solve against the parent's own independent solve of the same
+joint** (a `--joint-groups main` run with no hierarchical stages at all).
+That comparison isolated the fault to the child pipeline specifically (not
+finger-marker quality, not an inherent ambiguity) and led directly to the
+third bug described in the PR 7 row above — fixed in `44f5d6a`.
+
+**Confirmed by re-running the fix**: `hand.{L,R}`'s frame-1 agreement with
+the independent main-only tracker went from ~136° to ~2° (Roosa's `hand.R`;
+Timo's and Tommi's `hand.L` frame-1 diffs are 0.10°/0.15° respectively) —
+the systematic, all-frames error is gone. **Not yet fully closed**: over
+the full ~28 s sequence, `hand.{L,R}`'s disagreement between the three
+independent tracking methods (main-only, hierarchical child, monolithic
+fingers-on) grows to a mean of 34–66° with spikes past 150°, and this
+growth is now *comparable across all three pairwise comparisons* — no
+longer a hierarchical-specific outlier, but a real, unexplained
+disagreement all three methods have with each other. A 2-second-binned
+breakdown (Roosa, `hand.R`, main-only vs. hierarchical) shows this
+oscillating frame-to-frame rather than ramping monotonically, which reads
+more like motion/occlusion-dependent tracking difficulty (this sequence is
+a fast "ukemi" breakfall) than a single accumulating bug, but that's an
+untested hypothesis, not a conclusion — worth a per-window correlation
+against camera visibility/Mahalanobis stats before trusting it. Also still
+open, and *not* caused by the third bug (confirmed present identically
+before and after the fix): `tracking_obs_results.obs_blob`'s stored
+`actual` pixel value for `MRK-wrist.{L,R}` is small (tens of pixels) while
+`predicted` is a normal full-frame absolute pixel value — looks like a
+raw-observation-loading convention issue (possibly related to the
+hand-region detection pipeline's crop-relative coordinates), separate from
+anything in this feature's own code, not yet root-caused.
 
 ## Explicitly out of scope for this proposal
 

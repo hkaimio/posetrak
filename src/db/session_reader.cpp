@@ -402,8 +402,28 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
 
 // ---------------------------------------------------------------------------
 
+namespace {
+bool table_exists(sqlite3* db, char const* name) {
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", -1,
+                                &stmt, nullptr);
+    if (rc != SQLITE_OK)
+        return false;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    bool exists = sqlite3_step(stmt) == SQLITE_ROW;
+    sqlite3_finalize(stmt);
+    return exists;
+}
+}  // namespace
+
 std::vector<StageConfigOverrides>
 SessionReader::load_tracker_config_stages(std::string const& config_id) {
+    // A session DB created before db/migrations/026_hierarchical_solver_stages.sql
+    // has no tracker_config_stages table at all -- that's equivalent to "no stages
+    // for this config" (the existence-based hierarchical-mode toggle), not an error.
+    if (!table_exists(db_, "tracker_config_stages"))
+        return {};
+
     Stmt stmt(db_,
               "SELECT group_name, process_noise_std, process_noise_vel_std,"
               "       velocity_half_life_s, pose_noise_std, calib_noise_std,"

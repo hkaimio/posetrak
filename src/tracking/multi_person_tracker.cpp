@@ -6,6 +6,7 @@
 #include "posetrak/db/session_reader.hpp"
 #include "posetrak/filters/process_model.hpp"
 #include "posetrak/io/skeleton_loader.hpp"
+#include "posetrak/tracking/hierarchical_solver.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -394,6 +395,14 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
             ? SkeletonLayout::from_full_skeleton(skeleton_ptr)
             : SkeletonLayout::from_groups(skeleton_ptr, ctx->tracker_config.active_joint_groups);
 
+    // Existence-based hierarchical-mode toggle (see hierarchical_solver.hpp): a
+    // tracker_config with any tracker_config_stages rows needs its DB rows kept
+    // full-skeleton-width even though *ctx->layout* above may be group-scoped,
+    // so a child stage can later merge into DOFs *ctx->layout* doesn't cover.
+    if (!reader.load_tracker_config_stages(full_config_id).empty()) {
+        ctx->full_layout = SkeletonLayout::from_full_skeleton(skeleton_ptr);
+    }
+
     ctx->exporter = std::make_unique<TrackingExporter>(spec.output_dir, ctx->skeleton, *ctx->layout,
                                                        ctx->cameras_by_id);
     ctx->exporter->open();
@@ -510,10 +519,17 @@ void step_person_context(PersonContext& ctx, int step, bool verbose, bool quiet,
         if (dmin > 0.0)
             cov_cond = dmax / dmin;
     }
-    ctx.result_writer->write_frame(step, t_effective, result.state.to_error_vector(),
-                                   result.covariance, result.tracking_lost,
-                                   result.update_info.num_inliers, cov_cond, result.update_info.nis,
-                                   result.update_info.nis_dof);
+    // Hierarchical mode: expand this person's group-scoped state to full-skeleton
+    // width before writing -- see PersonContext::full_layout's doc comment. The
+    // covariance is written as-is (sized to *ctx.layout*, the tracker's own
+    // working layout); hierarchical_solver.cpp deliberately doesn't merge cov_diag.
+    Eigen::VectorXd const state_vec =
+        ctx.full_layout ? expand_state_to_full_layout(result.state, *ctx.layout, *ctx.full_layout)
+                              .to_error_vector()
+                        : result.state.to_error_vector();
+    ctx.result_writer->write_frame(step, t_effective, state_vec, result.covariance,
+                                   result.tracking_lost, result.update_info.num_inliers, cov_cond,
+                                   result.update_info.nis, result.update_info.nis_dof);
     if (!result.update_info.observations.empty())
         ctx.result_writer->write_obs_results(step, result.update_info.observations);
 
@@ -591,12 +607,18 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
             }
         }
 
-        // Write smoothed frames to DB
+        // Write smoothed frames to DB (same full-skeleton expansion as the forward
+        // pass above -- see PersonContext::full_layout's doc comment).
         {
             int step_idx = 1;
             for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
-                ctx.result_writer->write_smoothed_frame(
-                    step_idx++, it->timestamp, it->state.to_error_vector(), it->covariance);
+                Eigen::VectorXd const state_vec =
+                    ctx.full_layout
+                        ? expand_state_to_full_layout(it->state, *ctx.layout, *ctx.full_layout)
+                              .to_error_vector()
+                        : it->state.to_error_vector();
+                ctx.result_writer->write_smoothed_frame(step_idx++, it->timestamp, state_vec,
+                                                        it->covariance);
             }
         }
 

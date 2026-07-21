@@ -41,6 +41,29 @@ TrackerConfig build_stage_tracker_config(TrackerConfig const& parent_config,
     return child;
 }
 
+State expand_state_to_full_layout(State const& compact, SkeletonLayout const& compact_layout,
+                                  SkeletonLayout const& full_layout) {
+    State full(full_layout.total_storage_dof_count());
+    full.set_root_position(compact.root_position());
+    full.set_root_orientation(compact.root_orientation());
+    full.set_root_velocity(compact.root_velocity());
+    full.set_root_angular_velocity(compact.root_angular_velocity());
+
+    Eigen::VectorXd angles = full.joint_angles();
+    Eigen::VectorXd vels = full.joint_velocities();
+
+    auto merge_map = full_layout.build_index_map_from(compact_layout);
+    Eigen::VectorXd const& compact_angles = compact.joint_angles();
+    Eigen::VectorXd const& compact_vels = compact.joint_velocities();
+    for (size_t i = 0; i < merge_map.size(); ++i) {
+        angles[merge_map[i]] = compact_angles[static_cast<Eigen::Index>(i)];
+        vels[merge_map[i]] = compact_vels[static_cast<Eigen::Index>(i)];
+    }
+    full.set_joint_angles(angles);
+    full.set_joint_velocities(vels);
+    return full;
+}
+
 namespace {
 
 /// @brief Markers declared in both the parent's active group(s) and this
@@ -84,6 +107,14 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
                    group->freeflyer_joint, group->ref_marker);
     }
 
+    if (!parent_ctx.full_layout) {
+        throw std::runtime_error(
+            "run_hierarchical_child_stages: parent_ctx.full_layout is null -- "
+            "build_person_context() should have built it whenever this person's tracker_config "
+            "has hierarchical-solver stages");
+    }
+    SkeletonLayout const& parent_layout = *parent_ctx.full_layout;
+
     ResultWriter stage_writer(db_path, parent_ctx.result_writer->run_id(),
                               parent_ctx.spec.person_id);
     stage_writer.set_stage_status(group->name, "running", /*set_started=*/true);
@@ -125,6 +156,17 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
     //      tracker_step = i + 1 exactly (see hierarchical_solver.hpp doc comment). ----
     std::vector<std::string> const parent_owned_markers = compute_parent_owned_markers(
         skeleton, parent_ctx.tracker_config.active_joint_groups, *group);
+
+    // child_tracker's RTS smoother cache only accumulates successful track_frame()
+    // calls -- i==0 below uses initialize_with_fixed_root() instead (no track_frame
+    // call at all, see its comment), and any tracking_lost step is `continue`d before
+    // reaching track_frame's smoother push. So child_smoothed[k] (after the loop)
+    // corresponds to child_tracked_steps[k], NOT tracker_step (k+1) -- tracking a
+    // step's own the tracker_step whenever a track_frame() call actually succeeds is
+    // the only way to keep the smoothing-pass merge below aligned when one or more
+    // steps are skipped.
+    std::vector<int> child_tracked_steps;
+    child_tracked_steps.reserve(parent_smoothed.size());
 
     for (size_t i = 0; i < parent_smoothed.size(); ++i) {
         auto pose_opt = traj_stream.next();
@@ -178,6 +220,7 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
                 continue;  // leave this step's slots as the parent left them (placeholder/NaN)
             }
             merged_state = &child_tracker.state();
+            child_tracked_steps.push_back(tracker_step);
 
             // ---- Merge obs_blob (forward pass only -- tracking_obs_results has no
             //      is_smoothed dimension). ----
@@ -190,8 +233,8 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
         }
 
         // ---- Merge state into the parent's tracking_results row (is_smoothed=0). ----
-        auto merge_map = parent_ctx.layout->build_index_map_from(*child_layout);
-        int const n_dof_full = parent_ctx.layout->total_storage_dof_count();
+        auto merge_map = parent_layout.build_index_map_from(*child_layout);
+        int const n_dof_full = parent_layout.total_storage_dof_count();
         Eigen::VectorXd const& child_angles = merged_state->joint_angles();
         Eigen::VectorXd const& child_vels = merged_state->joint_velocities();
 
@@ -211,10 +254,16 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
 
     // ---- Smoothing pass: merge into is_smoothed=1 rows. ----
     auto child_smoothed = child_tracker.smooth();
-    auto merge_map = parent_ctx.layout->build_index_map_from(*child_layout);
-    int const n_dof_full = parent_ctx.layout->total_storage_dof_count();
+    if (child_smoothed.size() != child_tracked_steps.size()) {
+        throw std::runtime_error(fmt::format(
+            "run_hierarchical_child_stages: group '{}' smoother returned {} frames but {} "
+            "track_frame() calls succeeded -- child_tracked_steps bookkeeping is out of sync",
+            group->name, child_smoothed.size(), child_tracked_steps.size()));
+    }
+    auto merge_map = parent_layout.build_index_map_from(*child_layout);
+    int const n_dof_full = parent_layout.total_storage_dof_count();
     for (size_t i = 0; i < child_smoothed.size(); ++i) {
-        int const tracker_step = static_cast<int>(i) + 1;
+        int const tracker_step = child_tracked_steps[i];
         Eigen::VectorXd const& child_angles = child_smoothed[i].state.joint_angles();
         Eigen::VectorXd const& child_vels = child_smoothed[i].state.joint_velocities();
 

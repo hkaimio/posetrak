@@ -122,6 +122,21 @@ struct PersonContext {
     std::string sync_config_id;
 
     std::shared_ptr<const SkeletonLayout> layout;
+
+    /// Full-skeleton-width layout, built only when this person's tracker_config
+    /// has hierarchical-solver child stages (tracker_config_stages rows) --
+    /// nullptr for ordinary monolithic runs. In hierarchical mode *layout* may
+    /// be a strict subset (e.g. "main" only), scoped to what this person's own
+    /// Tracker actually solves, but tracking_results rows must stay
+    /// full-skeleton-width so run_hierarchical_child_stages()'s merge
+    /// (SkeletonLayout::build_index_map_from(child_layout), which requires the
+    /// receiving layout to be a superset of the child's joints) can reach
+    /// every stage's DOFs, not just the ones *layout* itself covers. Compact
+    /// states are expanded to this width via
+    /// hierarchical_solver.hpp's expand_state_to_full_layout() before being
+    /// handed to ResultWriter -- see step_person_context()/finalize_person_context().
+    std::shared_ptr<const SkeletonLayout> full_layout;
+
     std::unique_ptr<Tracker> tracker;
     ForwardKinematics* fk = nullptr;  ///< Owned by *tracker*.
 

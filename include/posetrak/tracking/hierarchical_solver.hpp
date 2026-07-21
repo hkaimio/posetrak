@@ -43,6 +43,28 @@ TrackerConfig build_stage_tracker_config(TrackerConfig const& parent_config,
                                          StageConfigOverrides const& overrides,
                                          SkeletonGroup const& group);
 
+/// @brief Expand a compact-layout State to full-skeleton width for DB storage.
+///
+/// The parent stage's own Tracker is scoped to its own group (e.g. "main"),
+/// so its State only has DOFs for that group's joints -- but tracking_results
+/// rows must stay full-skeleton-width so a child stage's own merge
+/// (SkeletonLayout::build_index_map_from(child_layout), which requires the
+/// receiving layout to be a superset of the child's joints) can reach every
+/// stage's DOFs, not just the ones the parent's own group covers. Every DOF
+/// @p full_layout has that @p compact_layout doesn't is filled with rest-pose
+/// defaults (0 angle, 0 velocity -- see State::State(int); this is the same
+/// convention Tracker::initialize_from_rest_pose() uses). Root pose/velocity
+/// are copied through unchanged (both layouts share the same root).
+///
+/// @param compact State produced by a Tracker scoped to @p compact_layout.
+/// @param compact_layout The Tracker's own (possibly group-scoped) layout.
+/// @param full_layout Full-skeleton layout; must be a superset of compact_layout
+///        (true for any group vs. SkeletonLayout::from_full_skeleton() of the
+///        same skeleton).
+/// @return A State sized for full_layout.total_storage_dof_count().
+State expand_state_to_full_layout(State const& compact, SkeletonLayout const& compact_layout,
+                                  SkeletonLayout const& full_layout);
+
 /// @brief Run every hierarchical-solver child stage for one person, after
 /// their parent (main) forward pass + RTS smoothing has completed.
 ///

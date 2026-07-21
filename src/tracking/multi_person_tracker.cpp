@@ -600,6 +600,8 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
             }
         }
 
+        ctx.smoothed_frames.assign(smoothed_begin, smoothed.end());
+
         if (!quiet) {
             fmt::print("  Smoothed {} frames\n", smoothed.size());
         }

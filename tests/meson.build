@@ -52,6 +52,9 @@ test_sources = files(
   'test_multi_person_contact_gating.cpp',
   'test_marker_projection_std.cpp',
 
+  # Hierarchical solver (PR 6: CLI/config plumbing)
+  'test_hierarchical_solver.cpp',
+
   # DB blob codec
   'test_blob_codec.cpp',
 

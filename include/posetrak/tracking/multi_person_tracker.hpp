@@ -149,6 +149,14 @@ struct PersonContext {
     /// entry when writing smoothed output, so smoothed tracker_step N lines up with
     /// filtered tracker_step N instead of being off by one.
     bool frame0_tracked = false;
+
+    /// Populated by finalize_person_context() when smooth_output is true, already
+    /// trimmed of the frame0_tracked leading entry (i.e. smoothed_frames[i]
+    /// corresponds to tracker_step (i+1), matching the filtered rows exactly).
+    /// Empty when smooth_output is false. A hierarchical solver's child stages
+    /// (run_hierarchical_child_stages(), called after finalize_person_context())
+    /// stream this as their freeflyer joint's trajectory.
+    std::vector<SmoothedFrame> smoothed_frames;
 };
 
 /// @brief Load a person's skeleton/cameras/config/observations from the session DB,

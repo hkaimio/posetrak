@@ -1,0 +1,92 @@
+/**
+ * @file hierarchical_solver.hpp
+ * @brief CLI/config plumbing for the hierarchical solver's child stages --
+ * PR 6 of docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md.
+ *
+ * A "stage" is a hierarchical solver child group (e.g. "HandL"): a filter
+ * that tracks a named subset of joints/markers with its root held fixed at
+ * another group's already-solved joint (the "freeflyer_joint"), per-frame,
+ * sourced from that parent group's *smoothed* trajectory. See
+ * SkeletonGroup (skeleton.hpp) for where freeflyer_joint/ref_marker live,
+ * and Tracker::initialize_with_fixed_root()/set_external_root_transform()
+ * for the underlying fixed-root machinery (PR 2/3).
+ *
+ * Existence-based hierarchical-mode toggle: a tracker_config_id with any
+ * tracker_config_stages rows (SessionReader::load_tracker_config_stages())
+ * runs hierarchically; one without runs monolithic, unchanged -- see the
+ * design doc's "gap 2" resolution.
+ */
+#pragma once
+
+#include "posetrak/core/skeleton.hpp"
+#include "posetrak/db/session_reader.hpp"
+#include "posetrak/tracking/multi_person_tracker.hpp"
+#include <string>
+#include <vector>
+
+namespace posetrak {
+
+/// @brief Build a child stage's effective TrackerConfig.
+///
+/// Starts from a copy of the parent's own TrackerConfig (so every field the
+/// stage doesn't explicitly override -- including ones with no
+/// tracker_config_stages column, e.g. ukf_alpha -- is inherited), applies
+/// each non-nullopt field in @p overrides, then sets active_joint_groups to
+/// {group.name} and fixed_root_joint_name to group.freeflyer_joint.
+///
+/// @param parent_config The parent stage's own (already-resolved) TrackerConfig.
+/// @param overrides This stage's tracker_config_stages row.
+/// @param group This stage's SkeletonGroup metadata (must be group.name ==
+///        overrides.group_name; not checked here).
+/// @return The child's effective TrackerConfig.
+TrackerConfig build_stage_tracker_config(TrackerConfig const& parent_config,
+                                         StageConfigOverrides const& overrides,
+                                         SkeletonGroup const& group);
+
+/// @brief Run every hierarchical-solver child stage for one person, after
+/// their parent (main) forward pass + RTS smoothing has completed.
+///
+/// No-op if @p stage_overrides is empty (the existence-based hierarchical-
+/// mode toggle -- see load_tracker_config_stages()). Each stage:
+///  1. Builds its own fixed-root Tracker (active_joint_groups={group.name},
+///     fixed_root_joint_name=group.freeflyer_joint) from the effective
+///     TrackerConfig build_stage_tracker_config() computes.
+///  2. Streams the parent's smoothed freeflyer_joint trajectory
+///     (BatchTrajectoryStream) and, per frame, builds this stage's own
+///     observations: the reference marker's own POSITION detections plus
+///     build_ref_marker_pair_observations()'s PAIR_DIFF pairs for every
+///     other stage marker.
+///  3. Runs a full forward pass (initialize_with_fixed_root() on the first
+///     frame, set_external_root_transform()+track_frame() thereafter) and
+///     its own RTS smoothing pass.
+///  4. Merges every frame's state into the SAME tracking_results rows the
+///     parent's own ResultWriter already wrote (both is_smoothed families),
+///     via a new attach-mode ResultWriter + SkeletonLayout::
+///     build_index_map_from() to translate the child's compact joint_angles/
+///     joint_velocities indices into the parent layout's index space.
+///     cov_diag is deliberately NOT merged in this version -- see the
+///     design doc's cov_diag semantics note; child-DOF variances would need
+///     a parallel error_index (not state_index) mapping this PR doesn't
+///     build. Per-observation results are merged into obs_blob via
+///     reconstruct_pair_diff_absolute() + ResultWriter::patch_obs_results(),
+///     with parent_owned_markers set to the markers shared between the
+///     parent's active group(s) and this stage (parent-wins).
+///  5. Tracks progress in tracking_run_stages via ResultWriter::set_stage_status().
+///
+/// @param parent_ctx The person's already-finalized (tracked + smoothed) context.
+///        parent_ctx.result_writer must still be open (attach-mode ResultWriter
+///        instances are constructed against the same db_path/run_id).
+/// @param stage_overrides This person's tracker_config_id's tracker_config_stages rows.
+/// @param parent_smoothed The parent's RTS-smoothed trajectory, in the same
+///        (already tracker_step-aligned) order Tracker::smooth() returns --
+///        parent_smoothed[i] corresponds to tracker_step (i+1).
+/// @param db_path Path to the session database (for attach-mode ResultWriter).
+/// @throws std::runtime_error if a stage's group_name has no SkeletonGroup
+///         metadata, or is missing freeflyer_joint/ref_marker, or if
+///         parent_smoothed is empty while stage_overrides is non-empty.
+void run_hierarchical_child_stages(PersonContext& parent_ctx,
+                                   std::vector<StageConfigOverrides> const& stage_overrides,
+                                   std::vector<SmoothedFrame> const& parent_smoothed,
+                                   std::string const& db_path, bool verbose, bool quiet);
+
+}  // namespace posetrak

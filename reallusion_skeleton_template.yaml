@@ -1852,10 +1852,6 @@ groups:
   - shin.R
   - foot.R
   - toe.R
-  - palm.01.L
-  - palm.04.L
-  - palm.01.R
-  - palm.04.R
   markers:
   - MRK-nose
   - MRK-ear.R
@@ -1886,10 +1882,7 @@ groups:
 - name: HandL
   depends_on: main
   joints:
-  - palm.01.L
-  - palm.02.L
-  - palm.03.L
-  - palm.04.L
+  - hand.L
   - thumb.01.L
   - thumb.02.L
   - thumb.03.L
@@ -1906,9 +1899,9 @@ groups:
   - f_pinky.02.L
   - f_pinky.03.L
   markers:
+  - MRK-wrist.L
   - MRK-thumb.L
   - MRK-thumb1.L
-  - MRK-thumb2.L
   - MRK-thumb3.L
   - MRK-thumb4.L
   - MRK-index.L
@@ -1927,13 +1920,12 @@ groups:
   - MRK-pinky2.L
   - MRK-pinky3.L
   - MRK-pinky4.L
+  freeflyer_joint: forearm.L
+  ref_marker: MRK-wrist.L
 - name: HandR
   depends_on: main
   joints:
-  - palm.01.R
-  - palm.02.R
-  - palm.03.R
-  - palm.04.R
+  - hand.R
   - thumb.01.R
   - thumb.02.R
   - thumb.03.R
@@ -1950,9 +1942,9 @@ groups:
   - f_pinky.02.R
   - f_pinky.03.R
   markers:
+  - MRK-wrist.R
   - MRK-thumb.R
   - MRK-thumb1.R
-  - MRK-thumb2.R
   - MRK-thumb3.R
   - MRK-thumb4.R
   - MRK-index.R
@@ -1971,3 +1963,5 @@ groups:
   - MRK-pinky2.R
   - MRK-pinky3.R
   - MRK-pinky4.R
+  freeflyer_joint: forearm.R
+  ref_marker: MRK-wrist.R

@@ -1945,7 +1945,7 @@ markers:
   confidence_threshold: 0.3
 
 groups:
-- name: "main"
+- name: main
   joints:
   - hips
   - spine1
@@ -1969,14 +1969,10 @@ groups:
   - shin.R
   - foot.R
   - toe.R
-  # Include palm bones for thumb & pinky so that the respective
-  # markers can be used to estimate the arm pose
-  # Hamd pose is handled as a separate pass
   - palm.01.L
   - palm.04.L
   - palm.01.R
   - palm.04.R
-
   markers:
   - MRK-nose
   - MRK-ear.R
@@ -2004,10 +2000,8 @@ groups:
   - MRK-pinky.L
   - MRK-pinky.R
   optional: false
-
-
-- name: "HandL"
-  depends_on: "main"
+- name: HandL
+  depends_on: main
   joints:
   - palm.01.L
   - palm.02.L
@@ -2031,7 +2025,6 @@ groups:
   markers:
   - MRK-thumb.L
   - MRK-thumb1.L
-  - MRK-thumb2.L
   - MRK-thumb3.L
   - MRK-thumb4.L
   - MRK-index.L
@@ -2050,11 +2043,8 @@ groups:
   - MRK-pinky2.L
   - MRK-pinky3.L
   - MRK-pinky4.L
-
-
-
-- name: "HandR"
-  depends_on: "main"
+- name: HandR
+  depends_on: main
   joints:
   - palm.01.R
   - palm.02.R
@@ -2078,7 +2068,6 @@ groups:
   markers:
   - MRK-thumb.R
   - MRK-thumb1.R
-  - MRK-thumb2.R
   - MRK-thumb3.R
   - MRK-thumb4.R
   - MRK-index.R

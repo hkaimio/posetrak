@@ -30,72 +30,6 @@ struct VelocityNoiseScope {
 };
 
 /**
- * @brief Configuration for a single child UKF filter in a hierarchical setup.
- *
- * A child filter tracks a named subset of joints (e.g. one hand) using only
- * the markers whose group is listed in observation_groups. It runs after the
- * parent filter has produced a world-space root pose for the child's root.
- */
-struct ChildFilterConfig {
-    /// Identifier used in log output and diagnostics.
-    std::string name;
-
-    /// Skeleton joint groups this filter tracks (e.g. {"HandR"}).
-    std::vector<std::string> joint_groups;
-
-    /// Marker observation groups this filter uses (e.g. {"HandR"}).
-    /// Typically matches joint_groups but may differ when marker naming diverges.
-    std::vector<std::string> observation_groups;
-
-    double process_noise_std = 0.3;  ///< Process noise std for child joints.
-    double pose_noise_std = 0.0;     ///< Pose estimation error (pixels in model input).
-    double calib_noise_std = 2.0;    ///< Calibration error (pixels in original video).
-    double outlier_threshold = 4.0;  ///< Chi-squared outlier rejection threshold.
-
-    /// Reject update if fewer than this fraction of expected markers are inliers.
-    double min_inliers_ratio = 0.3;
-
-    /// Reject individual observation if innovation norm exceeds this (pixels).
-    double max_innovation_norm = 200.0;
-};
-
-/**
- * @brief Configuration for hierarchical (multi-filter) tracking.
- *
- * When enabled, a parent filter tracks the body skeleton using only
- * parent_joint_groups, then each child filter refines its own subset
- * starting from the parent's pose estimate.
- *
- * When disabled (the default), the single monolithic filter in TrackerAppConfig
- * is used and all child entries are ignored.
- */
-struct HierarchicalConfig {
-    /// Enable hierarchical multi-filter tracking. False = monolithic tracker.
-    bool enabled = false;
-
-    /// After each parent step, synchronise child root poses from parent output.
-    bool enable_sync = true;
-
-    /// After child update, write back the child's covariance into the parent's
-    /// covariance matrix for the child's DOFs.
-    bool sync_covariance = false;
-
-    /// Joint groups assigned to the parent filter.
-    std::vector<std::string> parent_joint_groups;
-
-    /// Marker observation groups consumed by the parent filter.
-    std::vector<std::string> parent_observation_groups;
-
-    double parent_process_noise_std = 0.5;
-    double parent_pose_noise_std = 0.0;
-    double parent_calib_noise_std = 2.0;
-    double parent_outlier_threshold = 4.0;
-
-    /// One entry per child filter, processed in order after the parent step.
-    std::vector<ChildFilterConfig> children;
-};
-
-/**
  * @brief Configuration parameters for Tracker
  */
 struct TrackerConfig {
@@ -340,9 +274,6 @@ struct TrackerAppConfig {
     double start_time = 0.0;     // Start time in seconds
     double end_time = -1.0;      // End time in seconds (-1 = use all data)
     double tracker_fps = 100.0;  // Tracker sample rate (Hz)
-
-    // === Hierarchical tracking ===
-    HierarchicalConfig hierarchical;
 
     // === Velocity-mode cameras ===
     std::vector<int> velocity_mode_camera_ids;

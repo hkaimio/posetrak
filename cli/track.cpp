@@ -565,6 +565,10 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
         auto start_time = std::chrono::steady_clock::now();
         int frames_tracked = 0;
         int frames_lost = 0;
+        // True iff the frame-0 update below actually ran and succeeded, meaning it
+        // pushed an entry to Tracker's RTS smoother cache with no filtered-row
+        // counterpart (see the comment below and the smoothing block further down).
+        bool frame0_tracked = false;
 
         // Note: State vectors will start at frame 1 (step 1 posterior) to align with
         // tracking_results.csv Initialization state (frame 0) is not exported to maintain alignment
@@ -607,6 +611,7 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
                     fmt::print(stderr, "Warning: Tracking lost on first update\n");
                 } else {
                     frames_tracked++;
+                    frame0_tracked = true;
                 }
             } else {
                 if (!quiet) {
@@ -766,14 +771,23 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
             }
             auto smoothed = tracker.smooth();
 
+            // smoothed[0] is the frame-0 update's untracked warm-up result when it
+            // actually ran (frame0_tracked) -- it has no filtered-row counterpart,
+            // since that frame's posterior is deliberately never exported (see the
+            // "Note" above the frame-0 update block). Skip it here so smoothed frame N
+            // lines up with tracking_results.csv's frame N instead of being off by one
+            // (a real, previously-shipped bug: every smoothed row was mislabeled).
+            auto const smoothed_begin =
+                frame0_tracked && !smoothed.empty() ? smoothed.begin() + 1 : smoothed.begin();
+
             // smoothed_state_vectors.csv  (diagnostic, same format as state_vectors.csv)
             {
                 auto path = config.output_dir / "smoothed_state_vectors.csv";
                 std::ofstream f(path);
                 f << generate_state_header(*layout) << "\n";
                 int step = 1;
-                for (auto const& sf : smoothed) {
-                    export_state_vector(f, step++, sf.timestamp, sf.state, *layout);
+                for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
+                    export_state_vector(f, step++, it->timestamp, it->state, *layout);
                 }
             }
 
@@ -784,8 +798,8 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
                 f << "frame,timestamp,joint_name,angle_x,angle_y,angle_z,"
                      "velocity_x,velocity_y,velocity_z\n";
                 int step = 1;
-                for (auto const& sf : smoothed) {
-                    write_smoothed_joint_angles_frame(f, step++, sf.timestamp, sf.state, *layout);
+                for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
+                    write_smoothed_joint_angles_frame(f, step++, it->timestamp, it->state, *layout);
                 }
             }
 
@@ -796,8 +810,8 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
                 f << "frame,timestamp,pos_x,pos_y,pos_z,quat_w,quat_x,quat_y,quat_z,"
                      "vel_x,vel_y,vel_z,omega_x,omega_y,omega_z\n";
                 int step = 1;
-                for (auto const& sf : smoothed) {
-                    write_smoothed_root_pose_frame(f, step++, sf.timestamp, sf.state);
+                for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
+                    write_smoothed_root_pose_frame(f, step++, it->timestamp, it->state);
                 }
             }
 

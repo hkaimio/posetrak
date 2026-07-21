@@ -18,6 +18,7 @@
 #include <posetrak/kinematics/pinocchio_model_builder.hpp>
 #include <posetrak/tracking/multi_person_tracker.hpp>
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <sqlite3.h>
 
@@ -669,5 +670,82 @@ TEST_CASE("MultiPersonTracker Stage 4: --smooth runs independent per-person RTS 
     int const rows1 = count_data_rows(specs[1].output_dir / "smoothed_state_vectors.csv");
     REQUIRE(rows0 > 0);
     REQUIRE(rows0 == rows1);
-    REQUIRE(rows0 == multi.persons()[0]->frames_tracked);
+    // frames_tracked counts every successful track_frame() call, including frame0's
+    // untracked warm-up update -- which the smoothed CSVs deliberately omit (see
+    // PersonContext::frame0_tracked) so smoothed frame N lines up with
+    // tracking_results.csv's frame N. One fewer row than frames_tracked whenever
+    // frame0 itself was successfully tracked (true here: all frames share identical
+    // observations, so frame0 has valid data too).
+    REQUIRE(multi.persons()[0]->frame0_tracked);
+    REQUIRE(rows0 == multi.persons()[0]->frames_tracked - 1);
+}
+
+// ---------------------------------------------------------------------------
+// Regression test for the smoothed-frame off-by-one bug fixed alongside the
+// hierarchical solver's PR 6: smoothed[0] was step_person_context_frame0()'s
+// untracked warm-up result, which has no filtered-row (is_smoothed=0)
+// counterpart, but the smoothed-write loops started from smoothed[0]
+// unconditionally -- mislabeling every smoothed tracker_step by one and
+// leaving a dangling extra smoothed row with no filtered counterpart at all.
+// ---------------------------------------------------------------------------
+TEST_CASE("MultiPersonTracker --smooth: smoothed and filtered tracker_step rows align 1:1",
+          "[multi_person_tracker][tracker][smoothing_alignment]") {
+    fs::path db_path = fs::temp_directory_path() / "posetrak_test_smoothing_alignment.db";
+    int const num_frames = 12;
+    double const dt = 1.0 / 30.0;
+    create_fixture_db(db_path, num_frames, dt);
+
+    fs::path out_root = fs::temp_directory_path() / "posetrak_test_smoothing_alignment_out";
+    fs::remove_all(out_root);
+
+    BuildPersonContextOptions opts;
+    opts.db_path = db_path.string();
+    opts.quiet = true;
+    opts.smooth_output = true;
+
+    PersonSpec spec;
+    spec.sequence_id = "seq1";
+    spec.skeleton_id = "skel1";
+    spec.config_id = "tc1";
+    spec.person_id = 0;
+    spec.output_dir = out_root / "person_0";
+
+    MultiPersonTracker multi({spec}, opts, /*verbose=*/false);
+    multi.run();
+
+    REQUIRE(multi.persons().size() == 1);
+    REQUIRE(multi.persons()[0]->frame0_tracked);
+    std::string const run_id = multi.persons()[0]->result_writer->run_id();
+
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open_v2(db_path.string().c_str(), &db, SQLITE_OPEN_READONLY, nullptr) ==
+            SQLITE_OK);
+
+    auto steps_for = [&](int is_smoothed) {
+        std::vector<std::pair<int, double>> out;  // (tracker_step, timestamp_s)
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db,
+                           "SELECT tracker_step, timestamp_s FROM tracking_results "
+                           "WHERE run_id=? AND person_id=0 AND is_smoothed=? ORDER BY tracker_step",
+                           -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, run_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 2, is_smoothed);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            out.emplace_back(sqlite3_column_int(stmt, 0), sqlite3_column_double(stmt, 1));
+        }
+        sqlite3_finalize(stmt);
+        return out;
+    };
+
+    auto filtered = steps_for(0);
+    auto smoothed = steps_for(1);
+    sqlite3_close(db);
+
+    REQUIRE_FALSE(filtered.empty());
+    REQUIRE(filtered.size() == smoothed.size());
+    for (size_t i = 0; i < filtered.size(); ++i) {
+        CAPTURE(i);
+        REQUIRE(filtered[i].first == smoothed[i].first);                   // same tracker_step
+        REQUIRE(filtered[i].second == Catch::Approx(smoothed[i].second));  // same timestamp
+    }
 }

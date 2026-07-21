@@ -440,6 +440,9 @@ void step_person_context_frame0(PersonContext& ctx) {
             fmt::print(stderr, "Warning: Tracking lost on first update\n");
         } else {
             ctx.frames_tracked++;
+            // Successful, non-lost track_frame() calls always push to the smoother
+            // cache when smoothing is enabled -- see PersonContext::frame0_tracked.
+            ctx.frame0_tracked = true;
         }
     }
 }
@@ -549,13 +552,22 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
         }
         auto smoothed = ctx.tracker->smooth();
 
+        // smoothed[0] is step_person_context_frame0()'s untracked warm-up result when
+        // that frame actually ran (ctx.frame0_tracked) -- it has no filtered-row
+        // (is_smoothed=0) counterpart, since that frame's result is deliberately never
+        // written to tracking_results/state_vectors.csv. Skip it here so smoothed
+        // tracker_step N lines up with filtered tracker_step N instead of being off by
+        // one (a real, previously-shipped bug: every smoothed row was mislabeled).
+        auto const smoothed_begin =
+            ctx.frame0_tracked && !smoothed.empty() ? smoothed.begin() + 1 : smoothed.begin();
+
         {
             auto path = ctx.spec.output_dir / "smoothed_state_vectors.csv";
             std::ofstream f(path);
             f << generate_state_header(*ctx.layout) << "\n";
             int step = 1;
-            for (auto const& sf : smoothed) {
-                export_state_vector(f, step++, sf.timestamp, sf.state, *ctx.layout);
+            for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
+                export_state_vector(f, step++, it->timestamp, it->state, *ctx.layout);
             }
         }
         {
@@ -564,8 +576,8 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
             f << "frame,timestamp,joint_name,angle_x,angle_y,angle_z,"
                  "velocity_x,velocity_y,velocity_z\n";
             int step = 1;
-            for (auto const& sf : smoothed) {
-                write_smoothed_joint_angles_frame(f, step++, sf.timestamp, sf.state, *ctx.layout);
+            for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
+                write_smoothed_joint_angles_frame(f, step++, it->timestamp, it->state, *ctx.layout);
             }
         }
         {
@@ -574,17 +586,17 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
             f << "frame,timestamp,pos_x,pos_y,pos_z,quat_w,quat_x,quat_y,quat_z,"
                  "vel_x,vel_y,vel_z,omega_x,omega_y,omega_z\n";
             int step = 1;
-            for (auto const& sf : smoothed) {
-                write_smoothed_root_pose_frame(f, step++, sf.timestamp, sf.state);
+            for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
+                write_smoothed_root_pose_frame(f, step++, it->timestamp, it->state);
             }
         }
 
         // Write smoothed frames to DB
         {
             int step_idx = 1;
-            for (auto const& sf : smoothed) {
-                ctx.result_writer->write_smoothed_frame(step_idx++, sf.timestamp,
-                                                        sf.state.to_error_vector(), sf.covariance);
+            for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
+                ctx.result_writer->write_smoothed_frame(
+                    step_idx++, it->timestamp, it->state.to_error_vector(), it->covariance);
             }
         }
 

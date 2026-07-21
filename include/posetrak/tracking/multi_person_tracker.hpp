@@ -139,6 +139,16 @@ struct PersonContext {
     int frames_tracked = 0;
     int frames_lost = 0;
     std::chrono::steady_clock::time_point track_start_time;
+
+    /// True iff step_person_context_frame0()'s track_frame() call actually ran and
+    /// succeeded (non-empty observations, not tracking_lost) -- meaning it pushed an
+    /// entry to Tracker's RTS smoother cache that has no filtered-row (is_smoothed=0)
+    /// counterpart, since that frame's result is deliberately never written to
+    /// tracking_results/state_vectors.csv (see step_person_context_frame0()'s doc
+    /// comment). finalize_person_context() uses this to skip that leading cache
+    /// entry when writing smoothed output, so smoothed tracker_step N lines up with
+    /// filtered tracker_step N instead of being off by one.
+    bool frame0_tracked = false;
 };
 
 /// @brief Load a person's skeleton/cameras/config/observations from the session DB,

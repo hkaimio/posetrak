@@ -136,6 +136,22 @@ class ResultWriter {
                            std::vector<uint8_t> const& pair_diff_reconstructed,
                            std::vector<std::string> const& parent_owned_markers = {});
 
+    /// @brief Insert or update a tracking_run_stages row's status (upsert).
+    ///
+    /// One row per (run_id(), person_id(), group_name) -- see
+    /// db/migrations/026_hierarchical_solver_stages.sql. Gives an atomic
+    /// per-stage completion boundary: a crash mid-child leaves rows silently
+    /// half-patched otherwise, indistinguishable from complete output.
+    ///
+    /// @param group_name Stage identifier (e.g. "main", "HandL")
+    /// @param status One of "pending", "running", "complete", "stale"
+    /// @param set_started True to stamp started_at = now on this call
+    ///        (existing started_at is preserved when false)
+    /// @param set_completed True to stamp completed_at = now on this call
+    ///        (existing completed_at is preserved when false)
+    void set_stage_status(std::string const& group_name, std::string const& status,
+                          bool set_started = false, bool set_completed = false);
+
     /// @brief Flush any pending batched rows to the database.
     void flush();
 

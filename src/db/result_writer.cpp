@@ -645,6 +645,49 @@ void ResultWriter::patch_frame(int step, bool is_smoothed, std::vector<int> cons
 
 // ---------------------------------------------------------------------------
 
+void ResultWriter::set_stage_status(std::string const& group_name, std::string const& status,
+                                    bool set_started, bool set_completed) {
+    std::string const now = utc_iso_timestamp();
+
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql =
+        "INSERT INTO tracking_run_stages"
+        " (run_id, person_id, group_name, status, started_at, completed_at)"
+        " VALUES (?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(run_id, person_id, group_name) DO UPDATE SET"
+        "   status = excluded.status,"
+        "   started_at = COALESCE(excluded.started_at, tracking_run_stages.started_at),"
+        "   completed_at = COALESCE(excluded.completed_at, tracking_run_stages.completed_at)";
+
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        throw std::runtime_error(std::string("ResultWriter: prepare UPSERT tracking_run_stages: ") +
+                                 sqlite3_errmsg(db_));
+    }
+
+    sqlite3_bind_text(stmt, 1, run_id_.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, person_id_);
+    sqlite3_bind_text(stmt, 3, group_name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, status.c_str(), -1, SQLITE_TRANSIENT);
+    if (set_started)
+        sqlite3_bind_text(stmt, 5, now.c_str(), -1, SQLITE_TRANSIENT);
+    else
+        sqlite3_bind_null(stmt, 5);
+    if (set_completed)
+        sqlite3_bind_text(stmt, 6, now.c_str(), -1, SQLITE_TRANSIENT);
+    else
+        sqlite3_bind_null(stmt, 6);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        throw std::runtime_error(std::string("ResultWriter: UPSERT tracking_run_stages failed: ") +
+                                 sqlite3_errmsg(db_));
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 void ResultWriter::flush() {
     flush_pending();
 }

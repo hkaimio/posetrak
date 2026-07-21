@@ -73,6 +73,16 @@ fs::path make_fixture_db(fs::path const& path, std::string const& run_id, int pe
             PRIMARY KEY (run_id, person_id, tracker_step, is_smoothed)
         );
     )");
+    exec_sql(db, R"(
+        CREATE TABLE tracking_run_stages (
+            run_id TEXT NOT NULL REFERENCES tracking_runs(id),
+            person_id INTEGER NOT NULL, group_name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'running', 'complete', 'stale')),
+            started_at TEXT, completed_at TEXT,
+            PRIMARY KEY (run_id, person_id, group_name)
+        );
+    )");
 
     exec_sql(db,
              "INSERT INTO tracking_runs (id,observation_sequence_id,tracker_config_id,"
@@ -544,6 +554,108 @@ TEST_CASE("ResultWriter::patch_frame throws when no matching row exists",
         ResultWriter writer(path.string(), run_id, 0);
         CHECK_THROWS_AS(writer.patch_frame(/*step=*/999, false, {0}, {1.0}), std::runtime_error);
     }
+
+    fs::remove(path);
+}
+
+// ---------------------------------------------------------------------------
+// set_stage_status
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct StageRow {
+    std::string status;
+    bool started_is_null;
+    bool completed_is_null;
+};
+
+StageRow read_stage_row(fs::path const& path, std::string const& run_id, int person_id,
+                        std::string const& group_name) {
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open_v2(path.string().c_str(), &db, SQLITE_OPEN_READONLY, nullptr) ==
+            SQLITE_OK);
+    sqlite3_stmt* stmt = nullptr;
+    std::string sql =
+        "SELECT status, started_at, completed_at FROM tracking_run_stages"
+        " WHERE run_id=? AND person_id=? AND group_name=?";
+    sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, run_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, person_id);
+    sqlite3_bind_text(stmt, 3, group_name.c_str(), -1, SQLITE_STATIC);
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+    StageRow row;
+    row.status = reinterpret_cast<char const*>(sqlite3_column_text(stmt, 0));
+    row.started_is_null = sqlite3_column_type(stmt, 1) == SQLITE_NULL;
+    row.completed_is_null = sqlite3_column_type(stmt, 2) == SQLITE_NULL;
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return row;
+}
+
+}  // namespace
+
+TEST_CASE("ResultWriter::set_stage_status creates a row on first call",
+          "[result_writer][set_stage_status]") {
+    fs::path path = fs::temp_directory_path() / "test_result_writer_stage_create.db";
+    std::string run_id = "run1";
+    make_fixture_db(path, run_id, 0, 1, {1.0}, {0.1});
+
+    {
+        ResultWriter writer(path.string(), run_id, 0);
+        writer.set_stage_status("HandL", "pending");
+    }
+
+    auto row = read_stage_row(path, run_id, 0, "HandL");
+    CHECK(row.status == "pending");
+    CHECK(row.started_is_null);
+    CHECK(row.completed_is_null);
+
+    fs::remove(path);
+}
+
+TEST_CASE("ResultWriter::set_stage_status stamps started_at/completed_at only when requested",
+          "[result_writer][set_stage_status]") {
+    fs::path path = fs::temp_directory_path() / "test_result_writer_stage_timestamps.db";
+    std::string run_id = "run1";
+    make_fixture_db(path, run_id, 0, 1, {1.0}, {0.1});
+
+    {
+        ResultWriter writer(path.string(), run_id, 0);
+        writer.set_stage_status("HandL", "running", /*set_started=*/true);
+    }
+    auto running = read_stage_row(path, run_id, 0, "HandL");
+    CHECK(running.status == "running");
+    CHECK_FALSE(running.started_is_null);
+    CHECK(running.completed_is_null);
+
+    {
+        ResultWriter writer(path.string(), run_id, 0);
+        writer.set_stage_status("HandL", "complete", /*set_started=*/false,
+                                /*set_completed=*/true);
+    }
+    auto complete = read_stage_row(path, run_id, 0, "HandL");
+    CHECK(complete.status == "complete");
+    CHECK_FALSE(complete.started_is_null);  // preserved from the earlier call
+    CHECK_FALSE(complete.completed_is_null);
+
+    fs::remove(path);
+}
+
+TEST_CASE("ResultWriter::set_stage_status tracks stages independently per group_name",
+          "[result_writer][set_stage_status]") {
+    fs::path path = fs::temp_directory_path() / "test_result_writer_stage_independent.db";
+    std::string run_id = "run1";
+    make_fixture_db(path, run_id, 0, 1, {1.0}, {0.1});
+
+    {
+        ResultWriter writer(path.string(), run_id, 0);
+        writer.set_stage_status("HandL", "complete", true, true);
+        writer.set_stage_status("HandR", "pending");
+    }
+
+    CHECK(read_stage_row(path, run_id, 0, "HandL").status == "complete");
+    CHECK(read_stage_row(path, run_id, 0, "HandR").status == "pending");
 
     fs::remove(path);
 }

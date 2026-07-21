@@ -8,7 +8,9 @@
 #include <sqlite3.h>
 
 #include <map>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace posetrak {
 
@@ -16,6 +18,27 @@ namespace posetrak {
 struct DbTrackerConfig {
     TrackerConfig tracker;
     double tracker_fps = 100.0;
+};
+
+/// @brief One tracker_config_stages row: per-stage tuning overrides for a
+/// hierarchical solver child group. Every field is nullopt when its column
+/// is NULL, meaning "inherit the parent tracker_configs row's value" -- see
+/// docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md.
+/// min_inliers_ratio/max_innovation_norm are accepted here (the schema has
+/// them) but not yet consumed by TrackerConfig -- no corresponding field
+/// exists there yet.
+struct StageConfigOverrides {
+    std::string group_name;
+    std::optional<double> process_noise_std;
+    std::optional<double> process_noise_vel_std;
+    std::optional<double> velocity_half_life_s;
+    std::optional<double> pose_noise_std;
+    std::optional<double> calib_noise_std;
+    std::optional<double> outlier_threshold;
+    std::optional<double> min_inliers_ratio;
+    std::optional<double> max_innovation_norm;
+    std::optional<double> init_joint_std;
+    std::optional<double> init_velocity_std;
 };
 
 /// @brief Time range for a pose observation sequence
@@ -66,6 +89,16 @@ class SessionReader {
     /// @param config_id Primary key of the tracker_config record
     /// @return DbTrackerConfig with TrackerConfig defaults overridden by non-NULL columns
     DbTrackerConfig load_tracker_config(std::string const& config_id);
+
+    /// @brief Load every tracker_config_stages row for config_id.
+    ///
+    /// An empty return means config_id runs monolithic -- this is the
+    /// existence-based hierarchical-mode toggle the design doc specifies:
+    /// "A tracker_config_id with any tracker_config_stages rows is what
+    /// selects hierarchical mode; one without runs monolithic, unchanged."
+    /// @param config_id tracker_configs primary key
+    /// @return One entry per stage (group_name), in no particular order
+    std::vector<StageConfigOverrides> load_tracker_config_stages(std::string const& config_id);
 
     /// @brief Load time range information for a pose observation sequence
     /// @param sequence_id Primary key of the pose_observation_sequences record

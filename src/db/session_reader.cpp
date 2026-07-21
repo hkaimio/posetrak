@@ -402,6 +402,42 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
 
 // ---------------------------------------------------------------------------
 
+std::vector<StageConfigOverrides>
+SessionReader::load_tracker_config_stages(std::string const& config_id) {
+    Stmt stmt(db_,
+              "SELECT group_name, process_noise_std, process_noise_vel_std,"
+              "       velocity_half_life_s, pose_noise_std, calib_noise_std,"
+              "       outlier_threshold, min_inliers_ratio, max_innovation_norm,"
+              "       init_joint_std, init_velocity_std"
+              " FROM tracker_config_stages WHERE tracker_config_id = ?");
+    sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
+
+    auto apply_opt_real = [](sqlite3_stmt* s, int col, std::optional<double>& field) {
+        if (sqlite3_column_type(s, col) != SQLITE_NULL)
+            field = sqlite3_column_double(s, col);
+    };
+
+    std::vector<StageConfigOverrides> out;
+    while (stmt.step()) {
+        StageConfigOverrides row;
+        row.group_name = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 0));
+        apply_opt_real(stmt.ptr, 1, row.process_noise_std);
+        apply_opt_real(stmt.ptr, 2, row.process_noise_vel_std);
+        apply_opt_real(stmt.ptr, 3, row.velocity_half_life_s);
+        apply_opt_real(stmt.ptr, 4, row.pose_noise_std);
+        apply_opt_real(stmt.ptr, 5, row.calib_noise_std);
+        apply_opt_real(stmt.ptr, 6, row.outlier_threshold);
+        apply_opt_real(stmt.ptr, 7, row.min_inliers_ratio);
+        apply_opt_real(stmt.ptr, 8, row.max_innovation_norm);
+        apply_opt_real(stmt.ptr, 9, row.init_joint_std);
+        apply_opt_real(stmt.ptr, 10, row.init_velocity_std);
+        out.push_back(std::move(row));
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+
 SequenceInfo SessionReader::load_sequence_info(std::string const& sequence_id) {
     Stmt stmt(db_,
               "SELECT time_start_s, time_end_s"

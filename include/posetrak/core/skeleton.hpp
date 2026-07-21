@@ -82,6 +82,35 @@ struct Marker {
     std::string group;           ///< Marker group for filtering (e.g., "main", "HandL")
 };
 
+/// @brief Metadata for a named joint/marker group beyond membership (which
+/// lives on each Joint::group / Marker::group).
+///
+/// freeflyer_joint and ref_marker together describe a group that can run as
+/// its own hierarchical-solver child stage (see
+/// docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md
+/// and docs/skeleton-format.md's "groups:" section): freeflyer_joint is the
+/// joint PinocchioModelBuilder::build_subtree_model() treats as the
+/// subtree's externally-supplied, fixed root, and ref_marker is the marker
+/// build_ref_marker_pair_observations() measures every other marker in the
+/// group relative to via PAIR_DIFF. Both are empty for a group that is not
+/// (or not yet) wired up as a child stage, e.g. "main".
+struct SkeletonGroup {
+    std::string name;
+    std::string freeflyer_joint;  ///< Empty if this group is not a child-stage group
+    std::string ref_marker;       ///< Empty if this group is not a child-stage group
+
+    /// @brief Joint/marker names declared under this group's groups: YAML
+    /// entry, in declaration order. A name may appear in more than one
+    /// group's list -- e.g. a wrist joint solved by both a parent and a
+    /// child group (see docs/skeleton-format.md and the hierarchical
+    /// solver design doc's "wrist ownership" section) -- unlike
+    /// Joint::group/Marker::group, which hold only one ("primary") group
+    /// name per joint/marker. Skeleton::is_joint_in_groups() is what
+    /// actually resolves multi-group membership from these lists.
+    std::vector<std::string> joints;
+    std::vector<std::string> markers;
+};
+
 /// @brief Skeleton hierarchy with joints and markers
 ///
 /// Represents a kinematic tree with arbitrary joint structure.
@@ -146,6 +175,18 @@ class Skeleton {
     /// @param value True if this joint is a follower (non-first in its group)
     void set_joint_scale_follower(uint32_t joint_index, bool value);
 
+    /// @brief Register (or update) a named group's metadata from a YAML
+    /// groups: entry.
+    /// @param name Group name
+    /// @param joints Raw joints: list for this group (declaration order; may overlap
+    ///        with another group's list -- see SkeletonGroup::joints)
+    /// @param markers Raw markers: list for this group (see SkeletonGroup::markers)
+    /// @param freeflyer_joint See SkeletonGroup::freeflyer_joint. Empty if absent.
+    /// @param ref_marker See SkeletonGroup::ref_marker. Empty if absent.
+    void add_group(std::string const& name, std::vector<std::string> const& joints = {},
+                   std::vector<std::string> const& markers = {},
+                   std::string const& freeflyer_joint = "", std::string const& ref_marker = "");
+
     /// @brief Validate skeleton structure
     ///
     /// Checks:
@@ -176,6 +217,34 @@ class Skeleton {
     /// @param name Marker name
     /// @return Pointer to marker or nullptr if not found
     Marker const* get_marker(std::string const& name) const;
+
+    /// @brief Get group metadata by name.
+    /// @return Pointer to the group's metadata, or nullptr if no groups:
+    ///         entry with this name was declared (e.g. a skeleton with no
+    ///         groups: section at all, or a name that only ever appears as
+    ///         a Joint::group/Marker::group value with no matching entry).
+    SkeletonGroup const* get_group(std::string const& name) const;
+
+    /// @brief All declared groups, in groups: YAML order.
+    std::vector<SkeletonGroup> const& groups() const { return groups_; }
+
+    /// @brief True if joint_name belongs to any of group_names.
+    ///
+    /// For a name with a registered SkeletonGroup (a groups: YAML entry),
+    /// membership is resolved against that group's declared SkeletonGroup::joints
+    /// list -- this is what lets a joint belong to more than one group at once
+    /// (e.g. a wrist joint solved by both a parent and a child group). For a
+    /// name with no registered SkeletonGroup (a skeleton built without a
+    /// groups: section, e.g. directly via add_joint(group=...) in a test),
+    /// falls back to joint_own_group == name, matching the group-filtering
+    /// behavior every layer of this codebase had before SkeletonGroup existed.
+    ///
+    /// @param joint_name Joint to test
+    /// @param joint_own_group The joint's own Joint::group value (passed by the
+    ///        caller, who already has the Joint, to avoid a redundant name lookup)
+    /// @param group_names Groups to test membership against
+    bool is_joint_in_groups(std::string const& joint_name, std::string const& joint_own_group,
+                            std::vector<std::string> const& group_names) const;
 
     /// @brief Get all joints in depth-first order
     /// @return Ordered list of joints
@@ -210,8 +279,9 @@ class Skeleton {
     /// @return True if cycle detected
     bool detect_cycle(uint32_t joint_index, std::unordered_set<uint32_t>& visited) const;
 
-    std::vector<Joint> joints_;    ///< Joint definitions (in state vector order)
-    std::vector<Marker> markers_;  ///< Marker definitions (in state vector order)
+    std::vector<Joint> joints_;          ///< Joint definitions (in state vector order)
+    std::vector<Marker> markers_;        ///< Marker definitions (in state vector order)
+    std::vector<SkeletonGroup> groups_;  ///< Group metadata, in groups: YAML order
 };
 
 }  // namespace posetrak

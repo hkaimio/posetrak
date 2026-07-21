@@ -13,7 +13,6 @@
 #include "posetrak/core/skeleton.hpp"
 #include <map>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 namespace posetrak {
@@ -161,7 +160,7 @@ class PinocchioModelBuilder {
     static void
     add_subtree_joints_recursive(pinocchio::Model& model, Skeleton const& skeleton,
                                  uint32_t parent_skel_idx, pinocchio::JointIndex parent_pin_id,
-                                 std::unordered_set<std::string> const& group_set,
+                                 std::vector<std::string> const& group_names,
                                  std::map<std::string, pinocchio::JointIndex>& joint_to_id);
 
     /**

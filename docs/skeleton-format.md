@@ -33,6 +33,8 @@ groups:
     depends_on: "other_group"
     joints: ["joint1", "joint2", ...]
     markers: ["marker1", "marker2", ...]
+    freeflyer_joint: "joint_name"  # Optional, hierarchical solver only
+    ref_marker: "marker_name"      # Optional, hierarchical solver only
 ```
 
 ## Joint Definitions
@@ -188,6 +190,13 @@ Optional section for organizing joints and markers into logical groups.
 - **`depends_on`** (string): Name of another group this group depends on
 - **`joints`** (list): Joint names in this group
 - **`markers`** (list): Marker names in this group
+- **`freeflyer_joint`** (string, optional): See "Hierarchical solver fields" below
+- **`ref_marker`** (string, optional): See "Hierarchical solver fields" below
+
+A joint or marker name listed here that doesn't actually exist in the
+skeleton's `joints:`/`markers:` sections produces a loader warning (printed
+to stderr) rather than a load failure — this is a stale-reference bug in the
+file, not something the loader silently tolerates.
 
 ### Example
 
@@ -203,6 +212,50 @@ groups:
     depends_on: "body"
     joints: ["f_index.01.L", "f_index.02.L", "thumb.01.L"]
     markers: ["fingertip_index.L", "fingertip_thumb.L"]
+```
+
+### Hierarchical solver fields
+
+`freeflyer_joint` and `ref_marker` are only meaningful for a group that runs
+as its own **hierarchical-solver child stage** (see
+`docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md`) —
+a filter that tracks a sub-region of the skeleton (e.g. a hand) with its root
+held fixed at another group's already-solved joint, instead of estimating a
+free-floating root of its own. Both are empty/absent for an ordinary group
+like `main` that isn't wired up as a child stage.
+
+- **`freeflyer_joint`** (string): The joint this group's child filter treats
+  as its externally-supplied, fixed root — `PinocchioModelBuilder::
+  build_subtree_model()`'s `freeflyer_joint_name` parameter. Must be a joint
+  **outside** the group (typically the group's parent group, one level up
+  the kinematic tree from the group's own topmost joint) — it is the anchor
+  the child filter is fixed to, not a joint the child estimates itself.
+- **`ref_marker`** (string): The marker every other marker in this group is
+  measured relative to, via a `PAIR_DIFF` (pixel-difference) observation
+  instead of an absolute-pixel one — `build_ref_marker_pair_observations()`'s
+  reference marker. Conventionally a marker attached at (or very near) the
+  freeflyer joint, and conventionally also a member of the *other* group
+  that owns `freeflyer_joint` (shared markers across a parent/child group
+  pair are expected and fine — see the design doc's "wrist ownership"
+  section).
+
+Example — a hand group anchored at the forearm, with the wrist marker as
+its `PAIR_DIFF` reference (matches this repo's production skeletons):
+
+```yaml
+groups:
+  - name: "main"
+    joints: ["hips", "...", "forearm.L", "hand.L", "..."]
+    markers: ["MRK-wrist.L", "..."]
+    optional: false
+    # No freeflyer_joint/ref_marker: "main" is not a child stage.
+
+  - name: "HandL"
+    depends_on: "main"
+    joints: ["hand.L", "thumb.01.L", "f_index.01.L", "..."]
+    markers: ["MRK-wrist.L", "MRK-index.L", "..."]
+    freeflyer_joint: "forearm.L"  # in "main", not "HandL"
+    ref_marker: "MRK-wrist.L"     # shared with "main"
 ```
 
 ## Coordinate System Conventions

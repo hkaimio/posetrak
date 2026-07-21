@@ -384,3 +384,131 @@ groups:
         REQUIRE(sk.get_joint("arm") != nullptr);
     }
 }
+
+TEST_CASE("Skeleton loader parses hierarchical-solver group metadata",
+          "[skeleton_loader][groups]") {
+    char const* const yaml = R"yaml(
+joints:
+  - name: root
+    type: root
+    offset: [0, 0, 0]
+  - name: forearm
+    type: revolute
+    parent: root
+    offset: [0.3, 0, 0]
+    axis: [1, 0, 0]
+    limits: [-1.5, 1.5]
+  - name: hand
+    type: revolute
+    parent: forearm
+    offset: [0.2, 0, 0]
+    axis: [1, 0, 0]
+    limits: [-1.5, 1.5]
+markers:
+  - name: MRK-wrist
+    parent: hand
+    offset: [0, 0, 0]
+  - name: MRK-fingertip
+    parent: hand
+    offset: [0.05, 0, 0]
+groups:
+  - name: main
+    joints: [root, forearm]
+    markers: [MRK-wrist]
+    optional: false
+  - name: Hand
+    depends_on: main
+    joints: [hand]
+    markers: [MRK-wrist, MRK-fingertip]
+    freeflyer_joint: forearm
+    ref_marker: MRK-wrist
+)yaml";
+
+    auto test_file = get_temp_test_dir() / "group_metadata.yaml";
+    std::ofstream f(test_file);
+    f << yaml;
+    f.close();
+
+    Skeleton sk = load_skeleton_from_yaml(test_file.string());
+
+    SkeletonGroup const* hand_group = sk.get_group("Hand");
+    REQUIRE(hand_group != nullptr);
+    CHECK(hand_group->name == "Hand");
+    CHECK(hand_group->freeflyer_joint == "forearm");
+    CHECK(hand_group->ref_marker == "MRK-wrist");
+
+    SkeletonGroup const* main_group = sk.get_group("main");
+    REQUIRE(main_group != nullptr);
+    CHECK(main_group->freeflyer_joint.empty());
+    CHECK(main_group->ref_marker.empty());
+
+    CHECK(sk.get_group("nonexistent_group") == nullptr);
+
+    // groups() lists both, in YAML order.
+    REQUIRE(sk.groups().size() == 2);
+    CHECK(sk.groups()[0].name == "main");
+    CHECK(sk.groups()[1].name == "Hand");
+}
+
+TEST_CASE("Skeleton loader tolerates a groups: entry with no freeflyer_joint/ref_marker",
+          "[skeleton_loader][groups]") {
+    // A skeleton with a groups: section but no hierarchical-solver fields at all
+    // (the common case today) must still populate get_group() with empty strings,
+    // not leave the group unregistered.
+    char const* const yaml = R"yaml(
+joints:
+  - name: root
+    type: root
+    offset: [0, 0, 0]
+markers: []
+groups:
+  - name: body
+    joints: [root]
+    markers: []
+)yaml";
+
+    auto test_file = get_temp_test_dir() / "group_no_hierarchical_fields.yaml";
+    std::ofstream f(test_file);
+    f << yaml;
+    f.close();
+
+    Skeleton sk = load_skeleton_from_yaml(test_file.string());
+    SkeletonGroup const* body = sk.get_group("body");
+    REQUIRE(body != nullptr);
+    CHECK(body->freeflyer_joint.empty());
+    CHECK(body->ref_marker.empty());
+}
+
+TEST_CASE("Skeleton loader warns but does not throw on a stale group joint/marker reference",
+          "[skeleton_loader][groups]") {
+    // 'ghost_joint'/'ghost_marker' don't exist in joints:/markers: -- this is the
+    // silent-no-op case the loader used to have; it must still load (just warn to
+    // stderr), and the stale names must simply not resolve to anything.
+    char const* const yaml = R"yaml(
+joints:
+  - name: root
+    type: root
+    offset: [0, 0, 0]
+markers:
+  - name: MRK-root
+    parent: root
+    offset: [0, 0, 0]
+groups:
+  - name: body
+    joints: [root, ghost_joint]
+    markers: [MRK-root, ghost_marker]
+)yaml";
+
+    auto test_file = get_temp_test_dir() / "group_stale_reference.yaml";
+    std::ofstream f(test_file);
+    f << yaml;
+    f.close();
+
+    Skeleton sk;
+    REQUIRE_NOTHROW(sk = load_skeleton_from_yaml(test_file.string()));
+    CHECK(sk.get_joint("ghost_joint") == nullptr);
+    CHECK(sk.get_marker("ghost_marker") == nullptr);
+    // The real joint/marker in the same group still loads and gets its group assigned.
+    REQUIRE(sk.get_joint("root") != nullptr);
+    CHECK(sk.get_joint("root")->group == "body");
+}

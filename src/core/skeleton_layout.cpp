@@ -5,7 +5,6 @@
 #include <limits>
 #include <queue>
 #include <stdexcept>
-#include <unordered_set>
 
 namespace posetrak {
 
@@ -37,8 +36,6 @@ SkeletonLayout::build(std::shared_ptr<const Skeleton> skeleton, bool include_all
     if (!include_all && group_names.empty()) {
         throw std::invalid_argument("SkeletonLayout::from_groups: group_names must not be empty");
     }
-
-    std::unordered_set<std::string> group_set(group_names.begin(), group_names.end());
 
     // Use new, not make_shared, because constructor is private.
     auto layout = std::shared_ptr<SkeletonLayout>(new SkeletonLayout());
@@ -81,7 +78,8 @@ SkeletonLayout::build(std::shared_ptr<const Skeleton> skeleton, bool include_all
     std::unordered_map<std::string, int> scale_group_leader_error_idx;  // group_name -> error_idx
 
     for (auto const& joint : skeleton->get_joints_ordered()) {
-        bool const in_layout = include_all || (group_set.count(joint.group) > 0);
+        bool const in_layout =
+            include_all || skeleton->is_joint_in_groups(joint.name, joint.group, group_names);
         if (!in_layout)
             continue;
 

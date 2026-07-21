@@ -21,7 +21,6 @@
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
-#include <unordered_set>
 
 namespace posetrak {
 
@@ -273,7 +272,7 @@ bool is_descendant_of(Skeleton const& skeleton, uint32_t joint_idx, uint32_t anc
 
 void PinocchioModelBuilder::add_subtree_joints_recursive(
     pinocchio::Model& model, Skeleton const& skeleton, uint32_t parent_skel_idx,
-    pinocchio::JointIndex parent_pin_id, std::unordered_set<std::string> const& group_set,
+    pinocchio::JointIndex parent_pin_id, std::vector<std::string> const& group_names,
     std::map<std::string, pinocchio::JointIndex>& joint_to_id) {
     auto const& joints = skeleton.joints();
 
@@ -283,14 +282,15 @@ void PinocchioModelBuilder::add_subtree_joints_recursive(
             continue;
         }
 
-        bool const in_group = group_set.count(child.group) > 0;
+        bool const in_group = skeleton.is_joint_in_groups(child.name, child.group, group_names);
 
         if (child.type == JointType::FIXED) {
             // Fixed joints contribute no pinocchio joint. Map them to parent so
             // that any markers attached here resolve to the correct pinocchio joint.
             joint_to_id[child.name] = parent_pin_id;
             // Still recurse — descendants might be in-group.
-            add_subtree_joints_recursive(model, skeleton, i, parent_pin_id, group_set, joint_to_id);
+            add_subtree_joints_recursive(model, skeleton, i, parent_pin_id, group_names,
+                                         joint_to_id);
             continue;
         }
 
@@ -336,7 +336,7 @@ void PinocchioModelBuilder::add_subtree_joints_recursive(
         model.appendBodyToJoint(pin_id, pinocchio::Inertia::Identity());
         joint_to_id[child.name] = pin_id;
 
-        add_subtree_joints_recursive(model, skeleton, i, pin_id, group_set, joint_to_id);
+        add_subtree_joints_recursive(model, skeleton, i, pin_id, group_names, joint_to_id);
     }
 }
 
@@ -359,25 +359,22 @@ void PinocchioModelBuilder::build_subtree_model(Skeleton const& skeleton,
                         freeflyer_joint_name));
     }
 
-    // --- 2. Build group set ---
-    std::unordered_set<std::string> group_set(group_names.begin(), group_names.end());
-
-    // --- 3. Connectivity assertion ---
+    // --- 2. Connectivity assertion ---
     // Every non-fixed in-group joint must be a descendant of freeflyer_joint_name.
     for (uint32_t i = 0; i < static_cast<uint32_t>(joints.size()); ++i) {
         auto const& j = joints[i];
-        if (group_set.count(j.group) == 0)
+        if (!skeleton.is_joint_in_groups(j.name, j.group, group_names))
             continue;
         if (j.type == JointType::FIXED)
             continue;
         if (!is_descendant_of(skeleton, i, ff_idx)) {
-            throw std::invalid_argument(fmt::format(
-                "build_subtree_model: joint '{}' in group '{}' is not a descendant of '{}'", j.name,
-                j.group, freeflyer_joint_name));
+            throw std::invalid_argument(
+                fmt::format("build_subtree_model: joint '{}' is not a descendant of '{}'", j.name,
+                            freeflyer_joint_name));
         }
     }
 
-    // --- 4. Build pinocchio model ---
+    // --- 3. Build pinocchio model ---
     model = pinocchio::Model{};
     model.name = fmt::format("subtree_{}", freeflyer_joint_name);
 
@@ -390,12 +387,12 @@ void PinocchioModelBuilder::build_subtree_model(Skeleton const& skeleton,
     joint_to_id[freeflyer_joint_name] = ff_pin_id;
 
     // Recursively add in-group joints rooted at the freeflyer.
-    add_subtree_joints_recursive(model, skeleton, ff_idx, ff_pin_id, group_set, joint_to_id);
+    add_subtree_joints_recursive(model, skeleton, ff_idx, ff_pin_id, group_names, joint_to_id);
 
-    // --- 5. Add marker frames for the subtree ---
+    // --- 4. Add marker frames for the subtree ---
     // Reuse add_marker_frames — it attaches every skeleton marker whose parent joint
     // is present in joint_to_id.  Markers outside the subtree are warned and skipped.
-    // Override: only attach markers on joints in group_set or the freeflyer itself.
+    // Override: only attach markers on joints in group_names or the freeflyer itself.
     for (auto const& marker : skeleton.markers()) {
         std::string const& parent_joint_name = joints[marker.joint_index].name;
         auto it = joint_to_id.find(parent_joint_name);
@@ -414,8 +411,6 @@ void PinocchioModelBuilder::build_subtree_model(Skeleton const& skeleton,
 std::map<std::string, pinocchio::FrameIndex> PinocchioModelBuilder::build_subtree_marker_frame_map(
     pinocchio::Model const& model, Skeleton const& skeleton,
     std::string const& freeflyer_joint_name, std::vector<std::string> const& group_names) {
-    std::unordered_set<std::string> group_set(group_names.begin(), group_names.end());
-
     // Find freeflyer index in skeleton to use as boundary
     uint32_t ff_idx = UINT32_MAX;
     auto const& joints = skeleton.joints();
@@ -435,7 +430,8 @@ std::map<std::string, pinocchio::FrameIndex> PinocchioModelBuilder::build_subtre
         // parent is the freeflyer joint itself.
         uint32_t parent_idx = marker.joint_index;
         bool const on_freeflyer = (parent_idx == ff_idx);
-        bool const in_group = (group_set.count(joints[parent_idx].group) > 0);
+        bool const in_group = skeleton.is_joint_in_groups(joints[parent_idx].name,
+                                                          joints[parent_idx].group, group_names);
         // Also walk up through FIXED ancestors to see if the effective joint is in subtree.
         bool const fixed_ancestor_in_group = [&]() -> bool {
             uint32_t cur = parent_idx;
@@ -445,7 +441,7 @@ std::map<std::string, pinocchio::FrameIndex> PinocchioModelBuilder::build_subtre
                 cur = joints[cur].parent_index.value();
                 if (cur == ff_idx)
                     return true;
-                if (group_set.count(joints[cur].group) > 0)
+                if (skeleton.is_joint_in_groups(joints[cur].name, joints[cur].group, group_names))
                     return true;
             }
             return false;

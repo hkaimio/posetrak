@@ -1,5 +1,6 @@
 #include <posetrak/io/skeleton_loader.hpp>
 
+#include <fmt/core.h>
 #include <yaml-cpp/yaml.h>
 
 #include <fstream>
@@ -99,21 +100,37 @@ static Skeleton parse_skeleton_node(YAML::Node const& root) {
                 group_dependencies[group_name] = std::move(deps);
             }
 
-            // Map all joints in this group to the group name
+            // Map all joints in this group to the group name (Joint::group --
+            // last-declared-wins "primary" group per joint) and keep the raw
+            // per-group list (SkeletonGroup::joints -- supports a joint
+            // belonging to more than one group; see Skeleton::is_joint_in_groups()).
+            std::vector<std::string> group_joint_names;
             if (group_node["joints"]) {
                 for (auto const& joint_name_node : group_node["joints"]) {
                     std::string joint_name = joint_name_node.as<std::string>();
                     joint_to_group_map[joint_name] = group_name;
+                    group_joint_names.push_back(joint_name);
                 }
             }
 
-            // Map all markers in this group to the group name
+            // Same idea for markers.
+            std::vector<std::string> group_marker_names;
             if (group_node["markers"]) {
                 for (auto const& marker_name_node : group_node["markers"]) {
                     std::string marker_name = marker_name_node.as<std::string>();
                     marker_to_group_map[marker_name] = group_name;
+                    group_marker_names.push_back(marker_name);
                 }
             }
+
+            // Hierarchical-solver child-stage metadata (both optional; empty for
+            // groups like "main" that are not a child stage). See
+            // docs/skeleton-format.md's "groups:" section and SkeletonGroup's
+            // doc comment for what these mean.
+            std::string freeflyer_joint = group_node["freeflyer_joint"].as<std::string>("");
+            std::string ref_marker = group_node["ref_marker"].as<std::string>("");
+            skeleton.add_group(group_name, group_joint_names, group_marker_names, freeflyer_joint,
+                               ref_marker);
         }
     }
 
@@ -305,6 +322,31 @@ static Skeleton parse_skeleton_node(YAML::Node const& root) {
             if (marker_to_group_map.count(marker_name) > 0) {
                 skeleton.markers()[marker_idx].group = marker_to_group_map[marker_name];
             }
+        }
+    }
+
+    // Warn (don't fail the load) about groups: entries naming a joint or marker
+    // that doesn't actually exist in this skeleton. Historically this was a
+    // silent no-op -- the joint_to_group_map/marker_to_group_map lookups above
+    // just never match -- which let stale entries (e.g. a renamed joint) survive
+    // undetected. Now that group membership is load-bearing for the
+    // hierarchical solver (SkeletonLayout::from_groups() building a real
+    // child-filter subset), a stale reference silently produces a wrong or
+    // empty subtree instead of a wrong-but-harmless lookup miss.
+    for (auto const& [joint_name, group_name] : joint_to_group_map) {
+        if (skeleton.get_joint(joint_name) == nullptr) {
+            fmt::print(stderr,
+                       "WARNING: skeleton '{}': groups: entry '{}' references joint '{}', "
+                       "which does not exist in this skeleton\n",
+                       name, group_name, joint_name);
+        }
+    }
+    for (auto const& [marker_name, group_name] : marker_to_group_map) {
+        if (skeleton.get_marker(marker_name) == nullptr) {
+            fmt::print(stderr,
+                       "WARNING: skeleton '{}': groups: entry '{}' references marker '{}', "
+                       "which does not exist in this skeleton\n",
+                       name, group_name, marker_name);
         }
     }
 

@@ -540,3 +540,72 @@ TEST_CASE("hierarchy_distance: out-of-range marker returns INT_MAX", "[skeleton_
     REQUIRE(layout->hierarchy_distance(-1, 0) == std::numeric_limits<int>::max());
     REQUIRE(layout->hierarchy_distance(0, 99) == std::numeric_limits<int>::max());
 }
+
+// ---------------------------------------------------------------------------
+// from_groups: dual group membership (a joint declared in more than one
+// group's SkeletonGroup::joints list -- e.g. the hierarchical solver's
+// wrist joint, solved by both a parent and a child group; see
+// docs/skeleton-format.md and Skeleton::is_joint_in_groups()).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// root -> forearm -> hand -> finger. "main" declares [root, forearm, hand];
+/// "HandL" declares [hand, finger] -- "hand" is in BOTH.
+Skeleton create_dual_membership_skeleton() {
+    Skeleton skel;
+    uint32_t root =
+        skel.add_joint("root", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "main");
+    uint32_t forearm =
+        skel.add_joint("forearm", root, JointType::REVOLUTE, Eigen::Vector3d(0.1, 0, 0), "main");
+    uint32_t hand =
+        skel.add_joint("hand", forearm, JointType::SPHERICAL, Eigen::Vector3d(0.1, 0, 0), "HandL");
+    skel.add_joint("finger", hand, JointType::REVOLUTE, Eigen::Vector3d(0.05, 0, 0), "HandL");
+
+    skel.add_group("main", {"root", "forearm", "hand"}, {});
+    skel.add_group("HandL", {"hand", "finger"}, {}, /*freeflyer_joint=*/"forearm",
+                   /*ref_marker=*/"");
+    (void)root;
+    return skel;
+}
+
+}  // namespace
+
+TEST_CASE("from_groups: a joint declared in two groups' lists is included in both layouts",
+          "[skeleton_layout][groups]") {
+    auto skel_ptr = std::make_shared<const Skeleton>(create_dual_membership_skeleton());
+
+    auto main_layout = SkeletonLayout::from_groups(skel_ptr, {"main"});
+    auto hand_layout = SkeletonLayout::from_groups(skel_ptr, {"HandL"});
+
+    CHECK(main_layout->get_joint("hand") != nullptr);
+    CHECK(hand_layout->get_joint("hand") != nullptr);
+
+    // finger is HandL-only: excluded from main, included in HandL.
+    CHECK(main_layout->get_joint("finger") == nullptr);
+    CHECK(hand_layout->get_joint("finger") != nullptr);
+
+    // forearm is main-only: included in main, excluded from HandL (it's the
+    // freeflyer boundary, not one of HandL's own estimated joints).
+    CHECK(main_layout->get_joint("forearm") != nullptr);
+    CHECK(hand_layout->get_joint("forearm") == nullptr);
+}
+
+TEST_CASE("from_groups: falls back to Joint::group when no SkeletonGroup is registered",
+          "[skeleton_layout][groups]") {
+    // No add_group() calls at all -- matches every pre-existing from_groups()
+    // test/caller that builds a Skeleton directly via add_joint(group=...).
+    Skeleton skel;
+    skel.add_joint("root", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "main");
+    skel.add_joint("arm", 0u, JointType::REVOLUTE, Eigen::Vector3d(0.1, 0, 0), "main");
+    skel.add_joint("finger", 1u, JointType::REVOLUTE, Eigen::Vector3d(0.05, 0, 0), "HandL");
+
+    auto skel_ptr = std::make_shared<const Skeleton>(skel);
+    auto main_layout = SkeletonLayout::from_groups(skel_ptr, {"main"});
+    auto hand_layout = SkeletonLayout::from_groups(skel_ptr, {"HandL"});
+
+    CHECK(main_layout->get_joint("arm") != nullptr);
+    CHECK(main_layout->get_joint("finger") == nullptr);
+    CHECK(hand_layout->get_joint("finger") != nullptr);
+    CHECK(hand_layout->get_joint("arm") == nullptr);
+}

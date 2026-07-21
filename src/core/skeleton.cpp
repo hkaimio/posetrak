@@ -219,6 +219,46 @@ Marker const* Skeleton::get_marker(std::string const& name) const {
     return nullptr;
 }
 
+void Skeleton::add_group(std::string const& name, std::vector<std::string> const& joints,
+                         std::vector<std::string> const& markers,
+                         std::string const& freeflyer_joint, std::string const& ref_marker) {
+    for (auto& group : groups_) {
+        if (group.name == name) {
+            group.joints = joints;
+            group.markers = markers;
+            group.freeflyer_joint = freeflyer_joint;
+            group.ref_marker = ref_marker;
+            return;
+        }
+    }
+    groups_.push_back(SkeletonGroup{name, freeflyer_joint, ref_marker, joints, markers});
+}
+
+SkeletonGroup const* Skeleton::get_group(std::string const& name) const {
+    for (auto const& group : groups_) {
+        if (group.name == name) {
+            return &group;
+        }
+    }
+    return nullptr;
+}
+
+bool Skeleton::is_joint_in_groups(std::string const& joint_name, std::string const& joint_own_group,
+                                  std::vector<std::string> const& group_names) const {
+    for (auto const& name : group_names) {
+        SkeletonGroup const* group = get_group(name);
+        if (group != nullptr) {
+            if (std::find(group->joints.begin(), group->joints.end(), joint_name) !=
+                group->joints.end()) {
+                return true;
+            }
+        } else if (joint_own_group == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<Joint> Skeleton::get_joints_ordered() const {
     // Now just return a copy since vector already preserves insertion order
     return joints_;

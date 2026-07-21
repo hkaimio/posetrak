@@ -35,7 +35,14 @@ namespace posetrak {
 ///                       markers in the child's own observation group
 ///                       (including the reference marker itself -- its own
 ///                       entries are read as the reference, never emitted
-///                       as a result observation).
+///                       as a result observation). Non-POSITION entries
+///                       (e.g. this same source's own general-purpose
+///                       PAIR_DIFF-vs-skeleton-parent pairs, present
+///                       whenever the caller's ObservationSet was loaded
+///                       with use_relative_observations=true) are ignored --
+///                       this function only ever reads MeasurementMode::
+///                       POSITION detections, both for the reference marker
+///                       and for every other marker.
 /// @param ref_marker_id  Index of the reference marker (e.g. MRK-wrist) in
 ///                       the child's own skeleton -- becomes each result
 ///                       observation's ref_marker_id.

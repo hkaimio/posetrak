@@ -11,8 +11,22 @@ build_ref_marker_pair_observations(std::vector<Observation> const& frame_obs, in
                                    double pose_noise_std, double min_confidence) {
     // Group by camera; within each camera, find the reference marker's own
     // detection (at most one expected per camera per frame).
+    //
+    // frame_obs may legitimately contain non-POSITION entries too -- e.g. when
+    // the source ObservationSet was loaded with use_relative_observations=true,
+    // every marker (including the reference marker) also carries a PAIR_DIFF
+    // entry against its own skeleton-tree parent marker (session_reader.cpp's
+    // general-purpose within-person relative pairs, unrelated to this
+    // function's own ref_marker_id). Skipping non-POSITION entries here is
+    // what stops that PAIR_DIFF entry from silently winning the
+    // last-write-wins ref_obs_by_camera lookup below and poisoning every
+    // resulting pair's rel.position with the parent marker's own pixel
+    // offset baked in.
     std::unordered_map<int, Observation const*> ref_obs_by_camera;
     for (Observation const& obs : frame_obs) {
+        if (obs.mode != MeasurementMode::POSITION) {
+            continue;
+        }
         if (obs.marker_id == ref_marker_id && obs.confidence >= min_confidence) {
             ref_obs_by_camera[obs.camera_id] = &obs;
         }
@@ -22,6 +36,9 @@ build_ref_marker_pair_observations(std::vector<Observation> const& frame_obs, in
     result.reserve(frame_obs.size());
 
     for (Observation const& obs : frame_obs) {
+        if (obs.mode != MeasurementMode::POSITION) {
+            continue;  // see the ref_obs_by_camera loop above -- same reasoning
+        }
         if (obs.marker_id == ref_marker_id) {
             continue;  // the reference marker is never paired with itself
         }

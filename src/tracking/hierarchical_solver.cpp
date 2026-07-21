@@ -183,9 +183,22 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
         double const t_end = t_start + parent_ctx.dt;
         double const t_effective = t_start + parent_ctx.dt / 2.0;
 
+        // Only MeasurementMode::POSITION entries -- parent_ctx.observations was loaded
+        // by SessionReader with this person's own use_relative_observations setting,
+        // which (independent of anything hierarchical-solver-specific) also emits a
+        // PAIR_DIFF entry for every marker against its own skeleton-tree parent marker
+        // (e.g. MRK-wrist.R paired against MRK-elbow.R). Letting that reach
+        // build_ref_marker_pair_observations() below made its ref_obs_by_camera lookup
+        // pick up the wrist-vs-elbow PAIR_DIFF entry instead of the wrist's own absolute
+        // position (last-write-wins, and the PAIR_DIFF entry is appended after the
+        // position one) -- poisoning every finger's own rel.position with elbow's pixel
+        // offset baked in, silently, every frame. See relative_observations.hpp's own
+        // doc comment for the defensive filter on that side too.
         auto all_raw_obs = parent_ctx.observations.get_all_in_range(t_start, t_end);
         std::vector<Observation> raw_for_stage;
         for (auto const& obs : all_raw_obs) {
+            if (obs.mode != MeasurementMode::POSITION)
+                continue;
             if (obs.marker_id == ref_marker_id || stage_marker_ids.count(obs.marker_id) > 0)
                 raw_for_stage.push_back(obs);
         }

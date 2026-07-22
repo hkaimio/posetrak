@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from app.mcp.db import get_run_cameras, get_run_markers
+from app.mcp.db import get_run_cameras, get_run_markers, get_run_stages
 
 
 # Noise values considered suspiciously large (worth flagging in get_run_info)
@@ -125,6 +125,36 @@ def get_run_info(conn: sqlite3.Connection, run_id: str) -> str:
     if persons:
         for p in persons:
             lines.append(f"Person:   {p['person_name']} (id={p['person_id']})")
+
+    lines.append("")
+    person_ids = [p["person_id"] for p in persons] if persons else [0]
+    any_stages = False
+    for pid in person_ids:
+        stages = get_run_stages(conn, run_id, pid)
+        if not stages:
+            continue
+        any_stages = True
+        pname = next(
+            (p["person_name"] for p in persons if p["person_id"] == pid and p["person_name"]),
+            None,
+        )
+        label = f"person {pid}" + (f" ({pname})" if pname else "")
+        lines.append(f"Hierarchical stages, {label}:")
+        for s in stages:
+            timing = ""
+            if s["started_at"]:
+                timing += f"  started={s['started_at']}"
+            if s["completed_at"]:
+                timing += f"  completed={s['completed_at']}"
+            lines.append(f"  {s['group_name']:<10} {s['status']}{timing}")
+    if not any_stages:
+        lines.append("Hierarchical stages: none (monolithic run)")
+    else:
+        lines.append(
+            "  NOTE: NIS/cov_condition_number/n_inlier_observations below reflect the "
+            "PARENT (body-only) filter instance only -- use get_filter_stats' per-stage "
+            "section for the child stages' own observation quality."
+        )
 
     lines.append("")
     lines.append("Tracker config:")

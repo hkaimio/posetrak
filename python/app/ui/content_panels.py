@@ -288,7 +288,48 @@ _CFG_SQL = (
 )
 
 
-def _cfg_text(cfg: sqlite3.Row | None, cfg_id: str | None) -> str:
+def _get_config_stage_groups(conn: sqlite3.Connection, tracker_config_id: str | None) -> list[str]:
+    """Group names with tracker_config_stages rows for this config.
+
+    Existence-based hierarchical-mode toggle (see
+    docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md):
+    non-empty means this config runs hierarchically, empty means monolithic.
+    """
+    if not tracker_config_id:
+        return []
+    rows = conn.execute(
+        "SELECT group_name FROM tracker_config_stages WHERE tracker_config_id=? "
+        "ORDER BY group_name",
+        (tracker_config_id,),
+    ).fetchall()
+    return [r["group_name"] for r in rows]
+
+
+def _get_run_stage_rows(
+    conn: sqlite3.Connection, run_id: str | None, person_id: int = 0
+) -> list[sqlite3.Row]:
+    """tracking_run_stages rows for a run/person -- the actual per-stage status
+    of a completed (or in-progress) hierarchical run, as opposed to
+    _get_config_stage_groups()'s config-level declaration of which stages a
+    hierarchical config *would* run."""
+    if not run_id:
+        return []
+    return conn.execute(
+        "SELECT group_name, status, started_at, completed_at "
+        "FROM tracking_run_stages WHERE run_id=? AND person_id=? ORDER BY group_name",
+        (run_id, person_id),
+    ).fetchall()
+
+
+def _stages_text(stage_rows: list[sqlite3.Row]) -> str:
+    if not stage_rows:
+        return "none (monolithic run)"
+    return "\n".join(f"{r['group_name']}: {r['status']}" for r in stage_rows)
+
+
+def _cfg_text(
+    cfg: sqlite3.Row | None, cfg_id: str | None, hierarchical_groups: list[str] | None = None
+) -> str:
     if cfg is None:
         return (cfg_id[:12] + "…" if cfg_id else "—")
     parts = [cfg["name"] or (cfg_id[:8] if cfg_id else "?")]
@@ -320,6 +361,8 @@ def _cfg_text(cfg: sqlite3.Row | None, cfg_id: str | None) -> str:
         n = cfg["cross_person_max_n"]
         n_suffix = f"×{n}" if n is not None else ""
         parts.append(f"xperson@{cfg['cross_person_max_world_mm']}mm{n_suffix}")
+    if hierarchical_groups:
+        parts.append(f"hier:{','.join(hierarchical_groups)}")
     return "\n".join(parts)
 
 
@@ -5652,6 +5695,14 @@ class _RunInfoPane(QWidget):
         run_box.inner_layout().addLayout(run_form)
         root.addWidget(run_box)
 
+        # --- Hierarchical stages (hidden entirely for monolithic runs) ---
+        self._stages_box = _CollapsibleBox("Hierarchical stages", expanded=False)
+        self._ri_stages = QLabel("—")
+        self._ri_stages.setWordWrap(True)
+        self._stages_box.inner_layout().addWidget(self._ri_stages)
+        self._stages_box.setVisible(False)
+        root.addWidget(self._stages_box)
+
         # --- IDs (UUIDs / SHA for cross-referencing) ---
         ids_box, self._id_widgets = _build_run_ids_group()
         root.addWidget(ids_box)
@@ -5672,6 +5723,14 @@ class _RunInfoPane(QWidget):
         frame_form.addRow("NIS / DOF:", self._fi_nis)
         frame_form.addRow("Cov cond #:", self._fi_cov)
         frame_box.inner_layout().addLayout(frame_form)
+        self._fi_hier_note = QLabel(
+            "NIS / cov cond # above reflect the parent (body-only) filter only "
+            "-- see Hierarchical stages for per-stage status."
+        )
+        self._fi_hier_note.setWordWrap(True)
+        self._fi_hier_note.setStyleSheet("color: palette(placeholder-text); font-size: 10px;")
+        self._fi_hier_note.setVisible(False)
+        frame_box.inner_layout().addWidget(self._fi_hier_note)
         copy_frame_btn = _action_btn("⎘ Copy frame ID")
         copy_frame_btn.setToolTip(
             "Copy db path, run/trial/capture IDs, and the current step/timestamp "
@@ -5715,6 +5774,9 @@ class _RunInfoPane(QWidget):
         for lbl in (self._fi_step, self._fi_time, self._fi_inliers,
                     self._fi_nis, self._fi_cov):
             lbl.setText("—")
+        self._ri_stages.setText("—")
+        self._stages_box.setVisible(False)
+        self._fi_hier_note.setVisible(False)
         self._nis_chart.set_data([], [])
         self._cov_chart.set_data([], [])
         self._run_row = None
@@ -5750,7 +5812,15 @@ class _RunInfoPane(QWidget):
         # Tracker config params
         cfg_id = run["tracker_config_id"]
         cfg = self._conn.execute(_CFG_SQL, (cfg_id,)).fetchone() if cfg_id else None
-        self._ri_cfg.setText(_cfg_text(cfg, cfg_id))
+        hier_groups = _get_config_stage_groups(self._conn, cfg_id)
+        self._ri_cfg.setText(_cfg_text(cfg, cfg_id, hier_groups))
+
+        # Hierarchical stages (actual per-run status, not just the config's declaration)
+        stage_rows = _get_run_stage_rows(self._conn, run_id, person_id=0)
+        if stage_rows:
+            self._ri_stages.setText(_stages_text(stage_rows))
+            self._stages_box.setVisible(True)
+            self._fi_hier_note.setVisible(True)
 
         # Load per-frame stats
         rows = self._conn.execute(
@@ -6371,9 +6441,15 @@ class TrackingRunPanel(QWidget):
             form.addRow("Cameras:", cam_lbl)
         except Exception:
             pass
-        cfg_lbl = QLabel(_cfg_text(cfg, cfg_id))
+        hier_groups = _get_config_stage_groups(self._conn, cfg_id)
+        cfg_lbl = QLabel(_cfg_text(cfg, cfg_id, hier_groups))
         cfg_lbl.setWordWrap(True)
         form.addRow("Config:", cfg_lbl)
+        stage_rows = _get_run_stage_rows(self._conn, self._run_id, person_id=0)
+        if stage_rows:
+            stages_lbl = QLabel(_stages_text(stage_rows))
+            stages_lbl.setWordWrap(True)
+            form.addRow("Stages:", stages_lbl)
         if run["notes"]:
             notes_lbl = QLabel(run["notes"])
             notes_lbl.setWordWrap(True)

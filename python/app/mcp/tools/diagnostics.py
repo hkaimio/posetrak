@@ -7,10 +7,13 @@ import sqlite3
 import numpy as np
 
 from app.mcp.db import (
-    OBS_ACTUAL_X, OBS_ACTUAL_Y, OBS_OUTLIER, OBS_PAD, OBS_PRED_X, OBS_PRED_Y, OBS_USED,
+    OBS_ACTUAL_X, OBS_ACTUAL_Y, OBS_MAHAL, OBS_OUTLIER, OBS_PAD, OBS_PRED_X, OBS_PRED_Y,
+    OBS_USED,
     decode_obs_blob,
+    get_marker_groups,
     get_run_cameras,
     get_run_markers,
+    get_run_stages,
     get_steps_in_range,
     marker_indices,
     short_label,
@@ -20,6 +23,70 @@ _NIS_HIGH = 1.5   # filter is overconfident (surprised by observations)
 _NIS_LOW  = 0.3   # filter is very underconfident (accepting everything)
 _COV_COND_WARN = 1_000_000
 _GAP_HIGHLIGHT = 30  # pixels
+
+
+def _per_stage_obs_summary(
+    conn: sqlite3.Connection, run_id: str, start_s: float, end_s: float, stages
+) -> list[str]:
+    """Bucket obs_blob entries by skeleton group for each hierarchical stage.
+
+    NIS and cov_condition_number are filter-instance-wide scalars that only
+    exist for the parent (see get_filter_stats' own docstring) -- a child
+    stage's own observation quality has to come from obs_blob instead, which
+    does have per-marker granularity. Reports n_present/n_inlier/n_outlier
+    and mean Mahalanobis distance over inliers, per stage.
+    """
+    run = conn.execute(
+        "SELECT skeleton_id FROM tracking_runs WHERE id = ?", (run_id,)
+    ).fetchone()
+    if run is None:
+        return []
+    marker_groups = get_marker_groups(conn, run["skeleton_id"])
+    camera_ids, _ = get_run_cameras(conn, run_id)
+    marker_names = get_run_markers(conn, run_id)
+    n_cam, n_mrk = len(camera_ids), len(marker_names)
+    steps = get_steps_in_range(conn, run_id, start_s, end_s)
+
+    lines: list[str] = ["", "Per-stage observation summary (from obs_blob, not NIS):"]
+    for stage in stages:
+        group = stage["group_name"]
+        group_marker_idx = [
+            i for i, m in enumerate(marker_names) if group in marker_groups.get(m, [])
+        ]
+        if not group_marker_idx:
+            lines.append(f"  {group:<10} (no markers found for this group)")
+            continue
+
+        n_present = n_inlier = n_outlier = 0
+        mahal_sum = 0.0
+        for step, _ts in steps:
+            obs_row = conn.execute(
+                "SELECT obs_blob FROM tracking_obs_results "
+                "WHERE run_id = ? AND person_id = 0 AND tracker_step = ?",
+                (run_id, step),
+            ).fetchone()
+            if obs_row is None:
+                continue
+            blob = decode_obs_blob(obs_row["obs_blob"], n_cam, n_mrk)
+            for midx in group_marker_idx:
+                for ci in range(n_cam):
+                    ax = blob[ci, midx, OBS_ACTUAL_X]
+                    if np.isnan(ax):
+                        continue
+                    n_present += 1
+                    if blob[ci, midx, OBS_USED] > 0.5:
+                        n_inlier += 1
+                        mahal_sum += blob[ci, midx, OBS_MAHAL]
+                    elif blob[ci, midx, OBS_OUTLIER] > 0.5:
+                        n_outlier += 1
+
+        mean_mahal = mahal_sum / n_inlier if n_inlier else 0.0
+        lines.append(
+            f"  {group:<10} status={stage['status']:<9} "
+            f"present={n_present:>6} inlier={n_inlier:>6} outlier={n_outlier:>5} "
+            f"mean_mahal(inliers)={mean_mahal:.2f}"
+        )
+    return lines
 
 
 def get_filter_stats(
@@ -100,13 +167,24 @@ def get_filter_stats(
         f"Filter statistics: {start_s}s – {end_s}s  ({len(rows)} steps)",
         "",
     ]
+    stages = get_run_stages(conn, run_id, person_id=0)
+    if stages:
+        header.append(
+            "NOTE: this run is hierarchical (has child stages). NIS/DOF and "
+            "cov_condition_number below reflect the PARENT (body-only) filter "
+            "instance only -- see the per-stage section at the end for the "
+            "child stages' own observation quality."
+        )
+        header.append("")
     if summary:
         header.append("Anomaly summary:")
         for s in summary:
             header.append(f"  • {s}")
         header.append("")
 
-    return "\n".join(header + lines)
+    footer = _per_stage_obs_summary(conn, run_id, start_s, end_s, stages) if stages else []
+
+    return "\n".join(header + lines + footer)
 
 
 def get_observation_gaps(

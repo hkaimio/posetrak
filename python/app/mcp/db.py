@@ -11,6 +11,7 @@ import sqlite3
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 # ---------------------------------------------------------------------------
 # HALPE-133 keypoint index → name (body landmarks relevant for diagnostics)
@@ -177,6 +178,71 @@ def marker_indices(marker_names: list[str], targets: list[str]) -> dict[str, int
             f"Available: {marker_names}"
         )
     return {t: idx_map[t] for t in targets}
+
+
+def get_run_stages(
+    conn: sqlite3.Connection, run_id: str, person_id: int = 0
+) -> list[sqlite3.Row]:
+    """Return tracking_run_stages rows for a run/person, ordered by group_name.
+
+    Empty list means this run is monolithic -- the existence-based
+    hierarchical-mode toggle used throughout this feature (see
+    hierarchical_solver.hpp: "a tracker_config_id with any tracker_config_stages
+    rows runs hierarchically; one without runs monolithic"). Non-empty means
+    the run has one or more child stages (e.g. HandL/HandR) merged into the
+    same tracking_results/tracking_obs_results rows the parent wrote. Callers
+    surfacing per-DOF or per-marker confidence on such a run must label
+    parent-only scalars accordingly and consult COV_DIAG_HIERARCHICAL_CAVEAT.
+    """
+    return conn.execute(
+        """SELECT group_name, status, started_at, completed_at
+           FROM tracking_run_stages WHERE run_id = ? AND person_id = ?
+           ORDER BY group_name""",
+        (run_id, person_id),
+    ).fetchall()
+
+
+def get_marker_groups(conn: sqlite3.Connection, skeleton_id: str) -> dict[str, list[str]]:
+    """Return marker name -> list of skeleton group names it belongs to.
+
+    Parses the skeleton's own `groups:` YAML section (the same source
+    python/tools/upgrade_skeleton_hand_groups.py and the C++ SkeletonGroup
+    machinery read) -- a marker can belong to more than one group, e.g. a
+    wrist marker shared between "main" and "HandL"/"HandR" (parent-wins per
+    ResultWriter::patch_obs_results()). Returns {} if the skeleton has no
+    groups: section at all (pre-hierarchical-solver skeletons).
+    """
+    row = conn.execute(
+        "SELECT yaml_content FROM skeletons WHERE id = ?", (skeleton_id,)
+    ).fetchone()
+    if row is None:
+        return {}
+    skel = yaml.safe_load(row["yaml_content"])
+    out: dict[str, list[str]] = {}
+    for group in skel.get("groups") or []:
+        for marker in group.get("markers") or []:
+            out.setdefault(marker, []).append(group["name"])
+    return out
+
+
+# cov_diag mixed semantics: a hierarchical-solver child stage's merge
+# (ResultWriter::patch_frame(), see src/tracking/hierarchical_solver.cpp)
+# deliberately does NOT patch cov_diag for the DOFs it solves -- doing so
+# needs a parallel error_index mapping between the parent's and child's
+# layouts that doesn't exist yet (see the design doc's PR 6 row). So on a
+# hierarchical run, cov_diag entries for hand/finger DOFs are whatever the
+# PARENT's own full-skeleton-width expansion produced for them at write time
+# (a rest-pose placeholder, not a real per-DOF uncertainty) -- never a
+# measure of the child stage's own confidence. Only cov_diag for the
+# parent's own group's (e.g. "main") DOFs is meaningful. Any tool surfacing
+# cov_diag-derived confidence must carry this caveat whenever
+# get_run_stages() is non-empty for the run being inspected.
+COV_DIAG_HIERARCHICAL_CAVEAT = (
+    "cov_diag for hand/finger DOFs on a hierarchical run is NOT a real "
+    "confidence value -- the child stage's merge doesn't patch it, so it "
+    "still holds the parent's own rest-pose placeholder. Only trust "
+    "cov_diag-derived stats for the parent group's own DOFs on such a run."
+)
 
 
 def get_steps_in_range(

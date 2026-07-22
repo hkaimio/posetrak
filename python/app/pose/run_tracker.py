@@ -7,6 +7,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import yaml
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -94,6 +96,46 @@ NIS_FEEDBACK_LIMB_JOINTS: list[str] = (
 # spine1/spine2 per that note's Phase 1; extend only if the same pattern is confirmed
 # on other chains (e.g. neck).
 POSE_REG_SPINE_CHAIN: list[str] = ["spine1", "spine2"]
+
+# Hierarchical solver (docs/roadmap/features/hierarchical-solver/
+# hierarchical-solver-design.md) per-stage tuning overrides: tracker_config_stages
+# columns that build_stage_tracker_config() (src/tracking/hierarchical_solver.cpp)
+# actually applies. min_inliers_ratio/max_innovation_norm exist as DB columns but
+# have no TrackerConfig field to receive them yet -- deliberately not exposed here
+# so the UI never implies they do something.
+_STAGE_OVERRIDE_COLUMNS: list[tuple[str, str]] = [
+    ("process_noise_std", "Process σ"),
+    ("process_noise_vel_std", "Proc-vel σ"),
+    ("velocity_half_life_s", "Vel half-life"),
+    ("pose_noise_std", "Pose σ"),
+    ("calib_noise_std", "Calib σ"),
+    ("outlier_threshold", "Outlier thr"),
+    ("init_joint_std", "Init-joint σ"),
+    ("init_velocity_std", "Init-vel σ"),
+]
+
+
+def discover_stage_groups(conn: sqlite3.Connection, skeleton_ids: list[str]) -> list[str]:
+    """Group names with a freeflyer_joint declared, across the given skeletons'
+    own groups: YAML sections -- the hierarchical-solver child-stage candidates.
+    Union across skeletons, first-seen order; skeletons sharing the usual
+    HandL/HandR naming convention just union to the same two names.
+    """
+    seen: dict[str, None] = {}
+    for skel_id in skeleton_ids:
+        row = conn.execute(
+            "SELECT yaml_content FROM skeletons WHERE id=?", (skel_id,)
+        ).fetchone()
+        if row is None:
+            continue
+        try:
+            skel = yaml.safe_load(row[0]) or {}
+        except yaml.YAMLError:
+            continue
+        for group in skel.get("groups") or []:
+            if group.get("freeflyer_joint"):
+                seen.setdefault(group["name"], None)
+    return list(seen.keys())
 
 # Soft joint-limit repulsion Phase 1 scope -- prototyping only, see
 # docs/roadmap/features/soft-joint-limits/soft-joint-limits-design.md. Scoped to the
@@ -387,6 +429,45 @@ class RunTrackerWidget(QWidget):
         self._cross_person_min_conf.setEnabled(False)
         self._cross_person_max_n.setEnabled(False)
 
+        # ---- Hierarchical solver (child stages) --------------------------
+        self._hierarchical_enabled = QCheckBox()
+        self._hierarchical_enabled.setToolTip(
+            "Run named skeleton groups (e.g. HandL/HandR) as separate fixed-root\n"
+            "child stages after the main pass, merged into the same tracking_results\n"
+            "rows -- see docs/roadmap/features/hierarchical-solver/\n"
+            "hierarchical-solver-design.md. Only groups with a freeflyer_joint\n"
+            "declared in the skeleton's groups: section are eligible; use Refresh\n"
+            "after changing a person's skeleton."
+        )
+        self._hierarchical_enabled.toggled.connect(self._on_hierarchical_toggled)
+
+        hier_refresh_btn = QPushButton("↻ Refresh stages")
+        hier_refresh_btn.setToolTip(
+            "Re-scan currently selected skeletons for eligible child-stage groups."
+        )
+        hier_refresh_btn.clicked.connect(self._refresh_stage_table)
+
+        hier_row_widget = QWidget()
+        hier_row = QHBoxLayout(hier_row_widget)
+        hier_row.setContentsMargins(0, 0, 0, 0)
+        hier_row.addWidget(self._hierarchical_enabled)
+        hier_row.addWidget(hier_refresh_btn)
+        hier_row.addStretch(1)
+
+        self._stage_table = QTableWidget(0, 2 + len(_STAGE_OVERRIDE_COLUMNS))
+        self._stage_table.setHorizontalHeaderLabels(
+            ["On", "Group"] + [label for _, label in _STAGE_OVERRIDE_COLUMNS]
+        )
+        self._stage_table.verticalHeader().setVisible(False)
+        self._stage_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._stage_table.setToolTip(
+            "One row per eligible skeleton group. 'On' includes it as a child stage\n"
+            "for this run. Numeric columns override this stage's own tuning\n"
+            "(blank = inherit the main config's value for that field)."
+        )
+        self._stage_table.setMinimumHeight(90)
+        self._stage_table.setVisible(False)
+
         config_form = QFormLayout()
         config_form.addRow("Process noise std:", self._proc_noise_std)
         config_form.addRow("Velocity noise std:", self._proc_vel_noise)
@@ -422,6 +503,8 @@ class RunTrackerWidget(QWidget):
         config_form.addRow("Cross-person distance (mm):", self._cross_person_max_world_mm)
         config_form.addRow("Cross-person min confidence:", self._cross_person_min_conf)
         config_form.addRow("Cross-person max count:", self._cross_person_max_n)
+        config_form.addRow("Hierarchical solver:", hier_row_widget)
+        config_form.addRow(self._stage_table)
 
         config_box = QGroupBox("Tracker configuration")
         config_box.setLayout(config_form)
@@ -934,6 +1017,11 @@ class RunTrackerWidget(QWidget):
             QMessageBox.critical(self, "Cannot run tracker", err)
             return
 
+        stage_err = self._validate_stage_overrides()
+        if stage_err:
+            QMessageBox.critical(self, "Cannot run tracker", stage_err)
+            return
+
         out_dir = self._resolve_out_dir(primary_seq_id, primary_skel_id)
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1028,6 +1116,64 @@ class RunTrackerWidget(QWidget):
         )
         skel_name = (self._skeleton_name(skel_id) or "skeleton").replace(" ", "_")
         return db_dir / "posetrak_results" / shot / skel_name / "tracking"
+
+    def _on_hierarchical_toggled(self, checked: bool) -> None:
+        self._stage_table.setVisible(checked)
+        if checked:
+            self._refresh_stage_table()
+
+    def _refresh_stage_table(self) -> None:
+        if self._conn is None:
+            return
+        skeleton_ids = [
+            sid for row in range(self._people_table.rowCount())
+            if (sid := self._row_skeleton_id(row)) is not None
+        ]
+        groups = discover_stage_groups(self._conn, skeleton_ids)
+        self._stage_table.setRowCount(len(groups))
+        for i, group in enumerate(groups):
+            chk_container = QWidget()
+            chk_layout = QHBoxLayout(chk_container)
+            chk_layout.setContentsMargins(0, 0, 0, 0)
+            chk_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            chk = QCheckBox()
+            chk.setChecked(True)
+            chk_layout.addWidget(chk)
+            self._stage_table.setCellWidget(i, 0, chk_container)
+
+            name_item = QTableWidgetItem(group)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self._stage_table.setItem(i, 1, name_item)
+
+            for j, (_field, _label) in enumerate(_STAGE_OVERRIDE_COLUMNS):
+                edit = QLineEdit()
+                edit.setPlaceholderText("inherit")
+                self._stage_table.setCellWidget(i, 2 + j, edit)
+
+    def _stage_row_enabled(self, row: int) -> bool:
+        container = self._stage_table.cellWidget(row, 0)
+        chk = container.findChild(QCheckBox) if container else None
+        return chk is not None and chk.isChecked()
+
+    def _validate_stage_overrides(self) -> str | None:
+        """Return an error message if any enabled stage's override field isn't a
+        valid number (or blank, meaning inherit), else None."""
+        if not self._hierarchical_enabled.isChecked():
+            return None
+        for i in range(self._stage_table.rowCount()):
+            if not self._stage_row_enabled(i):
+                continue
+            group = self._stage_table.item(i, 1).text()
+            for j, (_field, label) in enumerate(_STAGE_OVERRIDE_COLUMNS):
+                edit = self._stage_table.cellWidget(i, 2 + j)
+                text = edit.text().strip() if edit else ""
+                if not text:
+                    continue
+                try:
+                    float(text)
+                except ValueError:
+                    return f"Stage '{group}': '{label}' is not a number: {text!r}"
+        return None
 
     def _create_config(self) -> str:
         import datetime as dt
@@ -1133,6 +1279,25 @@ class RunTrackerWidget(QWidget):
                     self._nis_feedback_max_mult.value(),
                 ),
             )
+            if self._hierarchical_enabled.isChecked():
+                for i in range(self._stage_table.rowCount()):
+                    if not self._stage_row_enabled(i):
+                        continue
+                    group_name = self._stage_table.item(i, 1).text()
+                    overrides = []
+                    for j, (_field, _label) in enumerate(_STAGE_OVERRIDE_COLUMNS):
+                        edit = self._stage_table.cellWidget(i, 2 + j)
+                        text = edit.text().strip() if edit else ""
+                        overrides.append(float(text) if text else None)
+                    self._conn.execute(
+                        "INSERT INTO tracker_config_stages"
+                        " (tracker_config_id, group_name, process_noise_std,"
+                        "  process_noise_vel_std, velocity_half_life_s, pose_noise_std,"
+                        "  calib_noise_std, outlier_threshold, init_joint_std,"
+                        "  init_velocity_std)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (config_id, group_name, *overrides),
+                    )
         return config_id
 
     def _on_output(self, line: str) -> None:

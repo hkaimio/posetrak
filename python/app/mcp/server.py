@@ -95,6 +95,10 @@ def get_run_info(run_id: str) -> str:
     maximum accepted pixel gap), camera list with labels, time range,
     and all skeleton markers with their obs_blob indices.
 
+    If this is a hierarchical-solver run (has hand/finger child stages),
+    also lists each stage's group name, status, and timing -- absent
+    entirely for monolithic runs.
+
     Start here when beginning a diagnostic session for a specific run.
     """
     with _conn() as conn:
@@ -115,7 +119,13 @@ def get_filter_stats(run_id: str, start_s: float, end_s: float) -> str:
     least one direction (often the depth direction when cameras have poor
     parallax for a particular marker).
 
-    Anomalous windows are summarised at the top of the output.
+    Anomalous windows are summarised at the top of the output. On a
+    hierarchical-solver run (hand/finger child stages), the NIS/cov_condition
+    scalars above only ever reflect the parent (body-only) filter instance --
+    a per-stage observation summary (inlier/outlier counts and mean
+    Mahalanobis distance from obs_blob, bucketed by skeleton group) is
+    appended for each child stage instead, since NIS itself doesn't exist
+    per-stage.
     """
     with _conn() as conn:
         return _diag.get_filter_stats(conn, run_id, start_s, end_s)

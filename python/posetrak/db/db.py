@@ -19,8 +19,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 6
-SESSION_SCHEMA_VERSION: Final[int] = 37
+REGISTRY_SCHEMA_VERSION: Final[int] = 7
+SESSION_SCHEMA_VERSION: Final[int] = 38
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -199,6 +199,8 @@ def create_registry(path: Path) -> sqlite3.Connection:
     _apply_schema(conn, _REGISTRY_SCHEMA_SQL, REGISTRY_SCHEMA_VERSION)
     from posetrak.db.manage_skeleton import seed_default_skeletons
     seed_default_skeletons(conn)
+    from posetrak.db.manage_config import seed_baseline_tracker_config
+    seed_baseline_tracker_config(conn)
     return conn
 
 
@@ -240,6 +242,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 5
     if actual == 5:
         _migrate_registry_v5_to_v6(conn)
+        actual = 6
+    if actual == 6:
+        _migrate_registry_v6_to_v7(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -466,6 +471,56 @@ def _migrate_registry_v5_to_v6(conn: sqlite3.Connection) -> None:
         PRAGMA user_version = 6;
         COMMIT;
     """)
+
+
+def _migrate_registry_v6_to_v7(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 6 to 7.
+
+    v7 catches up tracker_configs to the full current column set and adds
+    is_named (the config-improvements design's named/reusable-config flag --
+    see docs/roadmap/features/configuration-improvements/config-improvements-design.md).
+
+    The registry's own migration chain had stopped tracking tracker_configs
+    columns after v6 (velocity_mode_camera_ids/velocity_measurement_noise_std)
+    -- every column added since (pose_noise_std at session-schema v22 onward,
+    ~35 columns total) was only ever added via ALTER TABLE in the *session*
+    migration chain, never here. A registry DB created or last opened before
+    this point could therefore be missing most of tracker_configs' current
+    columns. Fixed generically, the same principle as manage_config.py's
+    edit_config() fix: build a reference copy of tracker_configs from the
+    *current* registry_schema.sql in an in-memory DB, diff its columns
+    against this connection's actual columns, and ALTER TABLE ADD COLUMN
+    whatever's missing -- including is_named, with no special-casing needed.
+    A future schema addition needs no matching registry migration written
+    by hand to stay caught up.
+    """
+    ref = sqlite3.connect(":memory:")
+    try:
+        ref.executescript(_REGISTRY_SCHEMA_SQL.read_text(encoding="utf-8"))
+        ref_columns = list(ref.execute("PRAGMA table_info(tracker_configs)"))
+    finally:
+        ref.close()
+
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(tracker_configs)")}
+    for row in ref_columns:
+        # PRAGMA table_info columns: cid, name, type, notnull, dflt_value, pk.
+        col_name, col_type, notnull, dflt_value = row[1], row[2], row[3], row[4]
+        if col_name in existing:
+            continue
+        ddl = f"{col_name} {col_type}"
+        if notnull:
+            ddl += " NOT NULL"
+        if dflt_value is not None:
+            ddl += f" DEFAULT {dflt_value}"
+        conn.execute(f"ALTER TABLE tracker_configs ADD COLUMN {ddl}")
+    conn.execute("PRAGMA user_version = 7")
+    conn.commit()
+
+    # This registry predates the baseline config (it's only ever seeded by
+    # create_registry(), which this DB didn't go through); back-fill it here
+    # so the default-config resolution chain has somewhere to terminate.
+    from posetrak.db.manage_config import seed_baseline_tracker_config
+    seed_baseline_tracker_config(conn)
 
 
 def _migrate_session_v9_to_v10(conn: sqlite3.Connection) -> None:
@@ -1020,6 +1075,32 @@ def _migrate_session_v36_to_v37(conn: sqlite3.Connection) -> None:
     conn.executescript(sql)
 
 
+def _migrate_session_v37_to_v38(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 37 to 38.
+
+    v38 adds tracker_configs.is_named (explicit flag distinguishing a
+    user-saved, browsable named config from an auto-generated per-run
+    snapshot) and captures.default_tracker_config_id /
+    trials.default_tracker_config_id (the default-config-per-scope
+    resolution chain: trial falls through to capture, then to a checked-in
+    baseline config). See
+    docs/roadmap/features/configuration-improvements/config-improvements-design.md.
+    """
+    existing = _tracker_config_columns(conn)
+    if "is_named" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN is_named INTEGER NOT NULL DEFAULT 0"
+        )
+    existing_captures = {row[1] for row in conn.execute("PRAGMA table_info(captures)")}
+    if "default_tracker_config_id" not in existing_captures:
+        conn.execute("ALTER TABLE captures ADD COLUMN default_tracker_config_id TEXT")
+    existing_trials = {row[1] for row in conn.execute("PRAGMA table_info(trials)")}
+    if "default_tracker_config_id" not in existing_trials:
+        conn.execute("ALTER TABLE trials ADD COLUMN default_tracker_config_id TEXT")
+    _set_schema_version(conn, 38)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1151,6 +1232,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 36
     if actual == 36:
         _migrate_session_v36_to_v37(conn)
+        actual = 37
+    if actual == 37:
+        _migrate_session_v37_to_v38(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

@@ -154,7 +154,15 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     -- docs/roadmap/features/error-improvements/phase5-cross-person-plan.md.
     cross_person_max_world_mm         REAL,  -- 3D marker-pair distance gate (mm); NULL/0 = disabled
     cross_person_min_confidence       REAL,  -- Min keypoint confidence for both people's detections
-    cross_person_max_n                INTEGER  -- Max cross-person anchors per pair per camera per frame
+    cross_person_max_n                INTEGER, -- Max cross-person anchors per pair per camera per frame
+    -- Added in schema migration v38 (session)/v7 (registry): explicit flag
+    -- distinguishing a user-saved, browsable named config, set via an
+    -- explicit "Save as..." action, from an auto-generated per-run
+    -- snapshot. name alone can't reliably signal this -- nothing stops an
+    -- auto-generated label from coincidentally matching a real name, or a
+    -- user from picking a short, timestamp-shaped name on purpose. See
+    -- docs/roadmap/features/configuration-improvements/config-improvements-design.md.
+    is_named                          INTEGER NOT NULL DEFAULT 0
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

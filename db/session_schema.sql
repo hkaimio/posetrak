@@ -67,24 +67,36 @@ CREATE TABLE IF NOT EXISTS extrinsic_entries (
 -- A capture is a single continuous camera recording within a session.
 -- extrinsic_calibration_id is nullable: captures may be created before extrinsics are imported.
 -- shot_id FK columns in other tables reference captures(id) (historical naming).
+-- default_tracker_config_id -- references tracker_configs(id) (registry table,
+--   also embedded in this session DB -- see the SELF-CONTAINMENT REQUIREMENT
+--   header). Added in schema migration v38. Resolved trial -> capture ->
+--   a checked-in baseline config when starting a new tracking run; NULL
+--   falls through to the next level. Never mutated in place once set --
+--   "editing" the default always creates a new tracker_configs row via
+--   manage_config.edit_config() and repoints this column to it. See
+--   docs/roadmap/features/configuration-improvements/config-improvements-design.md.
 CREATE TABLE IF NOT EXISTS captures (
     id                       TEXT PRIMARY KEY,
     session_id               TEXT NOT NULL REFERENCES mocap_sessions(id),
     extrinsic_calibration_id TEXT REFERENCES extrinsic_calibrations(id),
     capture_number           INTEGER NOT NULL,
     label                    TEXT,
-    notes                    TEXT
+    notes                    TEXT,
+    default_tracker_config_id TEXT
 );
 
 -- A trial is a named, bounded time window within a capture: one technique, one attempt.
 -- The user-facing unit of analysis (e.g. "shomenuchi shihonage take 1").
+-- default_tracker_config_id -- see captures.default_tracker_config_id above;
+--   resolved before the capture-level default when starting a new run.
 CREATE TABLE IF NOT EXISTS trials (
     id           TEXT PRIMARY KEY,
     capture_id   TEXT NOT NULL REFERENCES captures(id),
     name         TEXT,
     time_start_s REAL,
     time_end_s   REAL,
-    notes        TEXT
+    notes        TEXT,
+    default_tracker_config_id TEXT
 );
 
 -- Video files associated with a capture, one per camera.

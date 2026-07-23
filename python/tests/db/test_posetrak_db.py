@@ -110,6 +110,78 @@ def test_open_registry_wrong_version(tmp_path: Path) -> None:
         open_registry(db_path)
 
 
+def test_migrate_registry_v6_to_v7_catches_up_stale_columns_and_adds_is_named(
+    tmp_path: Path,
+) -> None:
+    """v6->v7 catches up tracker_configs to every column added since v6 via
+    the session migration chain (never previously mirrored into the
+    registry's own chain -- see db.py's _migrate_registry_v6_to_v7 doc
+    comment) and adds is_named. Simulates a registry created back when v6
+    was current: drop a handful of representative post-v6 columns and
+    is_named, then confirm open_registry() adds them all back, preserving
+    existing data.
+    """
+    db_path = tmp_path / "reg.db"
+    conn = create_registry(db_path)
+    conn.execute(
+        "INSERT INTO tracker_configs (id, name, parent_id, created_at, alpha, is_named) "
+        "VALUES ('cfg1', 'old-config', NULL, '2020-01-01', 0.5, 1)"
+    )
+    conn.commit()
+
+    # Downgrade to a pre-v22 tracker_configs shape (drop every column added
+    # since, plus is_named) and roll the version pragma back to 6.
+    conn.executescript("""
+        BEGIN;
+        CREATE TABLE tracker_configs_old (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            parent_id TEXT REFERENCES tracker_configs(id),
+            created_at TEXT NOT NULL,
+            alpha REAL, beta REAL, kappa REAL,
+            process_noise_std REAL, process_noise_vel_std REAL,
+            velocity_half_life_s REAL, measurement_noise_std REAL,
+            outlier_threshold REAL, tracker_fps REAL,
+            ik_max_iterations INTEGER, ik_tolerance REAL,
+            init_position_std REAL, init_orientation_std REAL,
+            init_joint_std REAL, init_velocity_std REAL,
+            min_cameras_for_init INTEGER,
+            velocity_mode_camera_ids TEXT, velocity_measurement_noise_std REAL,
+            notes TEXT
+        );
+        INSERT INTO tracker_configs_old
+            (id, name, parent_id, created_at, alpha)
+            SELECT id, name, parent_id, created_at, alpha FROM tracker_configs;
+        DROP TABLE tracker_configs;
+        ALTER TABLE tracker_configs_old RENAME TO tracker_configs;
+        PRAGMA user_version = 6;
+        COMMIT;
+    """)
+    conn.close()
+
+    conn = open_registry(db_path)
+    assert get_schema_version(conn) == REGISTRY_SCHEMA_VERSION
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tracker_configs)")}
+    assert {"pose_noise_std", "cross_person_max_n", "is_named",
+            "pose_reg_joint_names"} <= cols
+
+    row = conn.execute(
+        "SELECT alpha, is_named, pose_noise_std FROM tracker_configs WHERE id = 'cfg1'"
+    ).fetchone()
+    assert row["alpha"] == pytest.approx(0.5)
+    assert row["is_named"] == 0  # column re-added with its schema default, not the old value
+    assert row["pose_noise_std"] is None
+
+    # The baseline config gets backfilled for pre-existing registries too.
+    from posetrak.db.manage_config import BASELINE_CONFIG_ID
+    baseline = conn.execute(
+        "SELECT id FROM tracker_configs WHERE id = ?", (BASELINE_CONFIG_ID,)
+    ).fetchone()
+    assert baseline is not None
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # create_session
 # ---------------------------------------------------------------------------
@@ -326,6 +398,99 @@ def test_migrate_session_v36_to_v37_adds_hierarchical_solver_tables(tmp_path: Pa
             "INSERT INTO tracking_run_stages (run_id, person_id, group_name, status)"
             " VALUES ('run1', 0, 'HandR', 'not-a-real-status')"
         )
+    conn.close()
+
+
+def test_create_session_includes_config_default_columns(tmp_path: Path) -> None:
+    """A freshly created session DB should have tracker_configs.is_named and
+    captures/trials.default_tracker_config_id (v38, config-improvements)."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+
+    config_cols = {row[1] for row in conn.execute("PRAGMA table_info(tracker_configs)")}
+    assert "is_named" in config_cols
+
+    capture_cols = {row[1] for row in conn.execute("PRAGMA table_info(captures)")}
+    assert "default_tracker_config_id" in capture_cols
+
+    trial_cols = {row[1] for row in conn.execute("PRAGMA table_info(trials)")}
+    assert "default_tracker_config_id" in trial_cols
+    conn.close()
+
+
+def test_migrate_session_v37_to_v38_adds_config_default_columns(tmp_path: Path) -> None:
+    """v37->v38 adds tracker_configs.is_named and captures/trials.
+    default_tracker_config_id to a session DB created before this feature.
+
+    See docs/roadmap/features/configuration-improvements/config-improvements-design.md.
+    """
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+
+    conn.execute(
+        "INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO captures (id, session_id, capture_number) VALUES ('shot1', 'sess1', 1)"
+    )
+    conn.execute(
+        "INSERT INTO trials (id, capture_id, name) VALUES ('trial1', 'shot1', 'take 1')"
+    )
+    conn.commit()
+
+    # Downgrade to the pre-v38 shape: drop the new columns and roll the
+    # version pragma back, simulating a session created before this feature.
+    # Goes via "CREATE TABLE ... AS SELECT" (an auto-generated, comment-free
+    # schema) rather than ALTER TABLE ... DROP COLUMN directly against the
+    # real tables: SQLite's DROP COLUMN does a naive text rewrite of the
+    # table's *stored* CREATE TABLE SQL, and a bare comma inside one of this
+    # schema's own descriptive `--` comments (there are many) can corrupt
+    # that rewrite -- confirmed independent of anything this migration
+    # touches. CREATE TABLE ... AS SELECT strips comments entirely, sidestepping it.
+    # Foreign keys off for this block only: dropping captures/tracker_configs
+    # while trials/tracking_runs still reference them (even transiently,
+    # mid-script) trips FK enforcement; PRAGMA foreign_keys can't be toggled
+    # inside a transaction, so it's set outside the executescript() below.
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.executescript("""
+        BEGIN;
+        CREATE TABLE tracker_configs_old AS SELECT * FROM tracker_configs;
+        ALTER TABLE tracker_configs_old DROP COLUMN is_named;
+        DROP TABLE tracker_configs;
+        ALTER TABLE tracker_configs_old RENAME TO tracker_configs;
+
+        CREATE TABLE captures_old AS SELECT * FROM captures;
+        ALTER TABLE captures_old DROP COLUMN default_tracker_config_id;
+        DROP TABLE captures;
+        ALTER TABLE captures_old RENAME TO captures;
+
+        CREATE TABLE trials_old AS SELECT * FROM trials;
+        ALTER TABLE trials_old DROP COLUMN default_tracker_config_id;
+        DROP TABLE trials;
+        ALTER TABLE trials_old RENAME TO trials;
+
+        PRAGMA user_version = 37;
+        COMMIT;
+    """)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+
+    config_cols = {row[1] for row in conn.execute("PRAGMA table_info(tracker_configs)")}
+    assert "is_named" in config_cols
+    capture_cols = {row[1] for row in conn.execute("PRAGMA table_info(captures)")}
+    assert "default_tracker_config_id" in capture_cols
+    trial_cols = {row[1] for row in conn.execute("PRAGMA table_info(trials)")}
+    assert "default_tracker_config_id" in trial_cols
+
+    # Existing rows survive the migration untouched.
+    trial_row = conn.execute(
+        "SELECT name, default_tracker_config_id FROM trials WHERE id = 'trial1'"
+    ).fetchone()
+    assert trial_row["name"] == "take 1"
+    assert trial_row["default_tracker_config_id"] is None
     conn.close()
 
 

@@ -2,25 +2,26 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import sys
 from pathlib import Path
 
 import yaml
-from PySide6.QtCore import QThread, Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QProcess, QThread, Qt, Signal
+from PySide6.QtGui import QDoubleValidator, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -29,12 +30,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from posetrak.db.manage_config import BASELINE_CONFIG_ID, edit_config, list_configs
 from posetrak.tracker.runner import MultiPersonResult, PersonRunSpec, TrackerResult, default_binary_path
 from posetrak.tracker.runner import run_multi_person_tracker as _run_multi_person_tracker
 from posetrak.tracker.runner import run_tracker as _run_tracker
@@ -142,6 +145,58 @@ def discover_stage_groups(conn: sqlite3.Connection, skeleton_ids: list[str]) -> 
 # joints diagnosed as overshooting their own ball-joint limits during a fast bilateral
 # motion; extend only if the same saturation pattern is confirmed on other joints.
 SOFT_LIMIT_JOINT_NAMES: list[str] = ["upper_arm.L", "upper_arm.R"]
+
+
+# ---------------------------------------------------------------------------
+# Numeric field widget
+# ---------------------------------------------------------------------------
+
+
+class NumericLineEdit(QLineEdit):
+    """Validated plain-text numeric field, replacing QDoubleSpinBox/QSpinBox
+    for most tracker-config values.
+
+    See docs/roadmap/features/configuration-improvements/config-improvements-design.md,
+    B2: spin-box up/down arrows have no natural step size for a std-dev or a
+    noise scale the user types a specific tuned number into, so a plain
+    validated field is clearer for most of this dialog's fields. Small,
+    genuinely-bounded integer *counts* (e.g. max cross-pair count) are a
+    reasonable exception and stay QSpinBox elsewhere in this file.
+
+    Exposes the same value()/setValue()/valueChanged surface QDoubleSpinBox
+    has, so it drops into existing wiring code (``.valueChanged.connect``,
+    ``.setEnabled``, ``.setToolTip``) unchanged.
+    """
+
+    valueChanged = Signal(float)
+
+    def __init__(
+        self, default: float, minimum: float, maximum: float, decimals: int = 4, parent=None
+    ) -> None:
+        super().__init__(parent)
+        validator = QDoubleValidator(minimum, maximum, decimals, self)
+        validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        self.setValidator(validator)
+        self._decimals = decimals
+        self.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.textChanged.connect(lambda _text: self.valueChanged.emit(self.value()))
+        self.setValue(default)
+
+    def value(self) -> float:
+        text = self.text().strip()
+        if not text or text in ("-", "."):
+            return 0.0
+        try:
+            return float(text)
+        except ValueError:
+            return 0.0
+
+    def setValue(self, value: float) -> None:  # noqa: N802 (matches QDoubleSpinBox's API)
+        self.setText(f"{value:.{self._decimals}f}")
+
+
+def _numeric(default: float, mn: float, mx: float, decimals: int) -> NumericLineEdit:
+    return NumericLineEdit(default, mn, mx, decimals)
 
 
 # ---------------------------------------------------------------------------
@@ -260,48 +315,77 @@ class RunTrackerWidget(QWidget):
         # _show_multi_results() -- the table itself may change before the
         # run finishes if the user starts editing it again).
         self._multi_run_labels: list[str] | None = None
+        # Which named tracker_configs row (if any) the dialog was last
+        # loaded from / saved as -- see _open_load_config_dialog()/
+        # _open_save_as_dialog(). None means "factory defaults" (
+        # manage_config.BASELINE_CONFIG_ID), matching a session/capture/
+        # trial with no default_tracker_config_id set yet (Phase 3).
+        self._loaded_config_id: str | None = None
+        self._loaded_config_name: str | None = None
 
-        # ---- Configuration group ----------------------------------------
-        self._proc_noise_std  = _float_spin(0.1,   0.0, 1000.0, 4)
-        self._proc_vel_noise  = _float_spin(0.5,   0.0, 1000.0, 4)
-        self._vel_half_life   = _float_spin(0.25,  0.0,   10.0, 4)
+        # ---- Configuration: load/save bar --------------------------------
+        self._config_status_label = QLabel()
+        self._config_status_label.setToolTip(
+            "Which saved configuration this dialog's current values are based on.\n"
+            "Starting a run always saves a fresh, unnamed snapshot of the current\n"
+            "values -- use \"Save as…\" to keep a named, reusable copy."
+        )
+        load_config_btn = QPushButton("Load…")
+        load_config_btn.setToolTip("Load a previously saved, named tracker configuration.")
+        load_config_btn.clicked.connect(self._open_load_config_dialog)
+        save_as_config_btn = QPushButton("Save as…")
+        save_as_config_btn.setToolTip(
+            "Save the current tab values as a new named, reusable configuration."
+        )
+        save_as_config_btn.clicked.connect(self._open_save_as_dialog)
 
-        self._vel_noise_gain_joint = _float_spin(0.0, 0.0, 100.0, 3)
+        config_header = QHBoxLayout()
+        config_header.addWidget(QLabel("Configuration:"))
+        config_header.addWidget(self._config_status_label, 1)
+        config_header.addWidget(load_config_btn)
+        config_header.addWidget(save_as_config_btn)
+
+        # ---- Configuration: tabs ------------------------------------------
+        self._proc_noise_std  = _numeric(0.1,   0.0, 1000.0, 4)
+        self._proc_vel_noise  = _numeric(0.5,   0.0, 1000.0, 4)
+        self._vel_half_life   = _numeric(0.25,  0.0,   10.0, 4)
+
+        self._vel_noise_gain_joint = _numeric(0.0, 0.0, 100.0, 3)
         self._vel_noise_gain_joint.setToolTip(
             "Adaptive process noise (Phase 1): scales each joint DOF's own process noise\n"
             "by (1 + gain * |its velocity| / reference velocity). 0 = disabled (static noise,\n"
             "matches pre-Phase-1 behaviour)."
         )
-        self._vel_noise_ref_joint = _float_spin(1.0, 1.0e-3, 1000.0, 3)
+        self._vel_noise_ref_joint = _numeric(1.0, 1.0e-3, 1000.0, 3)
         self._vel_noise_ref_joint.setToolTip("Reference velocity for the joint gain above (rad/s).")
-        self._vel_noise_gain_root = _float_spin(0.0, 0.0, 100.0, 3)
+        self._vel_noise_gain_root = _numeric(0.0, 0.0, 100.0, 3)
         self._vel_noise_gain_root.setToolTip(
             "Same as the joint gain above, but for the root's position/orientation DOFs\n"
             "(separate knob: root moves in metres/rad, joints in radians)."
         )
-        self._vel_noise_ref_root = _float_spin(1.0, 1.0e-3, 1000.0, 3)
+        self._vel_noise_ref_root = _numeric(1.0, 1.0e-3, 1000.0, 3)
         self._vel_noise_ref_root.setToolTip(
             "Reference velocity for the root gain above (m/s for position, rad/s for orientation)."
         )
-        self._vel_noise_gain_proximal = _float_spin(0.0, 0.0, 100.0, 3)
+        self._vel_noise_gain_proximal = _numeric(0.0, 0.0, 100.0, 3)
         self._vel_noise_gain_proximal.setToolTip(
             "Independent adaptive process noise gain for ADAPTIVE_NOISE_PROXIMAL_JOINTS\n"
             "(shoulder/upper_arm/forearm, hip/knee) -- excluded from the torso gain above\n"
             "to avoid over-loosening fast normal gestures, so give them their own,\n"
             "separately-tuned gain here instead of none at all. 0 = disabled."
         )
-        self._vel_noise_ref_proximal = _float_spin(1.0, 1.0e-3, 1000.0, 3)
+        self._vel_noise_ref_proximal = _numeric(1.0, 1.0e-3, 1000.0, 3)
         self._vel_noise_ref_proximal.setToolTip(
             "Reference velocity for the proximal-limb gain above (rad/s)."
         )
-        self._vel_noise_gain_distal = _float_spin(0.0, 0.0, 100.0, 3)
+        self._vel_noise_gain_distal = _numeric(0.0, 0.0, 100.0, 3)
         self._vel_noise_gain_distal.setToolTip(
             "Independent adaptive process noise gain for ADAPTIVE_NOISE_DISTAL_JOINTS\n"
             "(wrist/hand/fingers, ankle/foot/toe) -- kept separate from the proximal scope\n"
             "above since distal joints are typically more accurate but move faster, so\n"
             "warrant their own (likely higher) reference velocity. 0 = disabled."
         )
-        self._vel_noise_ref_distal = _float_spin(1.0, 1.0e-3, 1000.0, 3)
+        self._vel_noise_ref_distal = _numeric(1.0, 1.0e-3, 1000.0, 3)
         self._vel_noise_ref_distal.setToolTip(
             "Reference velocity for the distal-limb gain above (rad/s)."
         )
@@ -315,38 +399,38 @@ class RunTrackerWidget(QWidget):
             ref.setEnabled(False)
             gain.valueChanged.connect(lambda v, r=ref: r.setEnabled(v > 0.0))
 
-        self._pose_reg_equal_split = _float_spin(0.0, 0.0, 10.0, 4)
+        self._pose_reg_equal_split = _numeric(0.0, 0.0, 10.0, 4)
         self._pose_reg_equal_split.setToolTip(
             "Pose regularization: pseudo-measurement pulling POSE_REG_SPINE_CHAIN's joint\n"
             "angles toward each other, per axis (stiffness = this std, radians; smaller =\n"
             "stronger pull). 0 = disabled."
         )
-        self._pose_reg_rest_pose = _float_spin(0.0, 0.0, 10.0, 4)
+        self._pose_reg_rest_pose = _numeric(0.0, 0.0, 10.0, 4)
         self._pose_reg_rest_pose.setToolTip(
             "Pose regularization: pseudo-measurement pulling POSE_REG_SPINE_CHAIN's joint\n"
             "angles toward zero, per axis (stiffness = this std, radians). 0 = disabled."
         )
 
-        self._soft_limit_margin = _float_spin(0.0, 0.0, 1.5, 4)
+        self._soft_limit_margin = _numeric(0.0, 0.0, 1.5, 4)
         self._soft_limit_margin.setToolTip(
             "Soft joint-limit repulsion: width (radians) of the soft zone just inside\n"
             "each SOFT_LIMIT_JOINT_NAMES axis's hard limit. Only matters if the noise std\n"
             "below is nonzero."
         )
-        self._soft_limit_noise_std = _float_spin(0.0, 0.0, 10.0, 4)
+        self._soft_limit_noise_std = _numeric(0.0, 0.0, 10.0, 4)
         self._soft_limit_noise_std.setToolTip(
             "Soft joint-limit repulsion: pseudo-measurement pulling SOFT_LIMIT_JOINT_NAMES's\n"
             "joint angles away from their own hard limits once inside the margin above\n"
             "(stiffness = this std, radians; smaller = stronger pull). 0 = disabled."
         )
 
-        self._nis_feedback_threshold = _float_spin(1.5, 0.1, 100.0, 2)
+        self._nis_feedback_threshold = _numeric(1.5, 0.1, 100.0, 2)
         self._nis_feedback_threshold.setToolTip(
             "NIS-feedback safety net (Mechanism B): windowed NIS/DOF for the 'core' and\n"
             "'limbs' scopes above this triggers a temporary process-noise multiplier.\n"
             "Only takes effect if 'Enable NIS feedback' is checked."
         )
-        self._nis_feedback_max_mult = _float_spin(10.0, 1.0, 1000.0, 1)
+        self._nis_feedback_max_mult = _numeric(10.0, 1.0, 1000.0, 1)
         self._nis_feedback_max_mult.setToolTip("Cap on the variance-domain multiplier above.")
         self._nis_feedback_enabled = QCheckBox()
         self._nis_feedback_enabled.setToolTip(
@@ -359,10 +443,10 @@ class RunTrackerWidget(QWidget):
         self._nis_feedback_threshold.setEnabled(False)
         self._nis_feedback_max_mult.setEnabled(False)
 
-        self._pose_noise      = _float_spin(0.0,   0.0, 1.0e6,  2)
-        self._calib_noise     = _float_spin(60.0,  0.0, 1.0e6,  2)
-        self._outlier_thresh  = _float_spin(4.0,   0.1,   50.0, 2)
-        self._tracker_fps     = _float_spin(120.0, 1.0,  500.0, 1)
+        self._pose_noise      = _numeric(0.0,   0.0, 1.0e6,  2)
+        self._calib_noise     = _numeric(60.0,  0.0, 1.0e6,  2)
+        self._outlier_thresh  = _numeric(4.0,   0.1,   50.0, 2)
+        self._tracker_fps     = _numeric(120.0, 1.0,  500.0, 1)
 
         self._vel_cam_label = QLabel("None")
         vel_cam_edit_btn = QPushButton("Edit…")
@@ -378,14 +462,14 @@ class RunTrackerWidget(QWidget):
             "Emit child-minus-parent pixel observations alongside absolute positions.\n"
             "Calibration error cancels in the difference; requires pose_noise_std > 0."
         )
-        self._relative_min_conf = _float_spin(0.5, 0.0, 1.0, 2)
+        self._relative_min_conf = _numeric(0.5, 0.0, 1.0, 2)
         self._relative_min_conf.setToolTip(
             "Minimum keypoint confidence for both child and parent to form a relative pair."
         )
         self._use_relative.toggled.connect(self._relative_min_conf.setEnabled)
         self._relative_min_conf.setEnabled(False)
 
-        self._cross_pair_max_px = _float_spin(0.0, 0.0, 9999.0, 1)
+        self._cross_pair_max_px = _numeric(0.0, 0.0, 9999.0, 1)
         self._cross_pair_max_px.setToolTip(
             "Pixel radius for spatial cross-pair relative observations.\n"
             "Pairs of visible markers within this distance and > 2 skeleton hops apart\n"
@@ -402,13 +486,13 @@ class RunTrackerWidget(QWidget):
         )
         self._cross_pair_max_n.setEnabled(False)
 
-        self._cross_person_max_world_mm = _float_spin(0.0, 0.0, 99999.0, 1)
+        self._cross_person_max_world_mm = _numeric(0.0, 0.0, 99999.0, 1)
         self._cross_person_max_world_mm.setToolTip(
             "3D world-space marker-pair distance gate (mm) for cross-person\n"
             "PAIR_DIFF anchoring between people tracked together below\n"
             "(e.g. ukemi throws, handshakes). 0 = disabled (Phase 5)."
         )
-        self._cross_person_min_conf = _float_spin(0.5, 0.0, 1.0, 2)
+        self._cross_person_min_conf = _numeric(0.5, 0.0, 1.0, 2)
         self._cross_person_min_conf.setToolTip(
             "Minimum keypoint confidence for both people's detections to form\n"
             "a cross-person anchor."
@@ -466,53 +550,71 @@ class RunTrackerWidget(QWidget):
             "(blank = inherit the main config's value for that field)."
         )
         self._stage_table.setMinimumHeight(90)
-        self._stage_table.setVisible(False)
 
-        config_form = QFormLayout()
-        config_form.addRow("Process noise std:", self._proc_noise_std)
-        config_form.addRow("Velocity noise std:", self._proc_vel_noise)
-        config_form.addRow("Velocity half-life (s):", self._vel_half_life)
-        config_form.addRow("Adaptive noise gain (joint):", self._vel_noise_gain_joint)
-        config_form.addRow("Adaptive noise ref vel (joint, rad/s):", self._vel_noise_ref_joint)
-        config_form.addRow("Adaptive noise gain (root):", self._vel_noise_gain_root)
-        config_form.addRow("Adaptive noise ref vel (root, m/s, rad/s):", self._vel_noise_ref_root)
-        config_form.addRow("Adaptive noise gain (proximal):", self._vel_noise_gain_proximal)
-        config_form.addRow(
-            "Adaptive noise ref vel (proximal, rad/s):", self._vel_noise_ref_proximal
-        )
-        config_form.addRow("Adaptive noise gain (distal):", self._vel_noise_gain_distal)
-        config_form.addRow("Adaptive noise ref vel (distal, rad/s):", self._vel_noise_ref_distal)
-        config_form.addRow("Pose reg equal-split std (spine1/2, rad):", self._pose_reg_equal_split)
-        config_form.addRow("Pose reg rest-pose std (spine1/2, rad):", self._pose_reg_rest_pose)
-        config_form.addRow("Soft joint-limit margin (upper_arm, rad):", self._soft_limit_margin)
-        config_form.addRow(
-            "Soft joint-limit noise std (upper_arm, rad):", self._soft_limit_noise_std
-        )
-        config_form.addRow("Enable NIS feedback (core+limbs):", self._nis_feedback_enabled)
-        config_form.addRow("NIS feedback threshold:", self._nis_feedback_threshold)
-        config_form.addRow("NIS feedback max multiplier:", self._nis_feedback_max_mult)
-        config_form.addRow("Pose noise std (px in model):", self._pose_noise)
-        config_form.addRow("Calib noise std (px in video):", self._calib_noise)
-        config_form.addRow("Outlier threshold:", self._outlier_thresh)
-        config_form.addRow("Tracker FPS:", self._tracker_fps)
-        config_form.addRow("Velocity cameras:", vel_cam_row)
-        config_form.addRow("Relative observations:", self._use_relative)
-        config_form.addRow("Relative min confidence:", self._relative_min_conf)
-        config_form.addRow("Cross-pair radius (px):", self._cross_pair_max_px)
-        config_form.addRow("Cross-pair max count:", self._cross_pair_max_n)
-        config_form.addRow("Cross-person distance (mm):", self._cross_person_max_world_mm)
-        config_form.addRow("Cross-person min confidence:", self._cross_person_min_conf)
-        config_form.addRow("Cross-person max count:", self._cross_person_max_n)
-        config_form.addRow("Hierarchical solver:", hier_row_widget)
-        config_form.addRow(self._stage_table)
+        # ---- Assemble tabs (vertical, left side) -------------------------
+        self._summary_text = QPlainTextEdit()
+        self._summary_text.setReadOnly(True)
+        summary_mono = QFont("Monospace")
+        summary_mono.setStyleHint(QFont.StyleHint.Monospace)
+        self._summary_text.setFont(summary_mono)
 
-        config_box = QGroupBox("Tracker configuration")
-        config_box.setLayout(config_form)
+        ukf_form = QFormLayout()
+        ukf_form.addRow("Process noise std:", self._proc_noise_std)
+        ukf_form.addRow("Velocity noise std:", self._proc_vel_noise)
+        ukf_form.addRow("Velocity half-life (s):", self._vel_half_life)
+        ukf_form.addRow("Tracker FPS:", self._tracker_fps)
+        ukf_form.addRow("Velocity cameras:", vel_cam_row)
 
-        config_scroll = QScrollArea()
-        config_scroll.setWidgetResizable(True)
-        config_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        config_scroll.setWidget(config_box)
+        obs_form = QFormLayout()
+        obs_form.addRow("Pose noise std (px in model):", self._pose_noise)
+        obs_form.addRow("Calib noise std (px in video):", self._calib_noise)
+        obs_form.addRow("Outlier threshold:", self._outlier_thresh)
+        obs_form.addRow("Relative observations:", self._use_relative)
+        obs_form.addRow("Relative min confidence:", self._relative_min_conf)
+        obs_form.addRow("Cross-pair radius (px):", self._cross_pair_max_px)
+        obs_form.addRow("Cross-pair max count:", self._cross_pair_max_n)
+
+        adaptive_form = QFormLayout()
+        adaptive_form.addRow("Gain (joint/core):", self._vel_noise_gain_joint)
+        adaptive_form.addRow("Reference vel (joint/core, rad/s):", self._vel_noise_ref_joint)
+        adaptive_form.addRow("Gain (root):", self._vel_noise_gain_root)
+        adaptive_form.addRow("Reference vel (root, m/s, rad/s):", self._vel_noise_ref_root)
+        adaptive_form.addRow("Gain (proximal):", self._vel_noise_gain_proximal)
+        adaptive_form.addRow("Reference vel (proximal, rad/s):", self._vel_noise_ref_proximal)
+        adaptive_form.addRow("Gain (distal):", self._vel_noise_gain_distal)
+        adaptive_form.addRow("Reference vel (distal, rad/s):", self._vel_noise_ref_distal)
+
+        posereg_form = QFormLayout()
+        posereg_form.addRow("Equal-split std (spine1/2, rad):", self._pose_reg_equal_split)
+        posereg_form.addRow("Rest-pose std (spine1/2, rad):", self._pose_reg_rest_pose)
+        posereg_form.addRow("Soft-limit margin (upper_arm, rad):", self._soft_limit_margin)
+        posereg_form.addRow("Soft-limit noise std (upper_arm, rad):", self._soft_limit_noise_std)
+
+        nis_form = QFormLayout()
+        nis_form.addRow("Enable NIS feedback (core+limbs):", self._nis_feedback_enabled)
+        nis_form.addRow("NIS feedback threshold:", self._nis_feedback_threshold)
+        nis_form.addRow("NIS feedback max multiplier:", self._nis_feedback_max_mult)
+
+        crossperson_form = QFormLayout()
+        crossperson_form.addRow("Cross-person distance (mm):", self._cross_person_max_world_mm)
+        crossperson_form.addRow("Cross-person min confidence:", self._cross_person_min_conf)
+        crossperson_form.addRow("Cross-person max count:", self._cross_person_max_n)
+
+        hierarchical_layout = QVBoxLayout()
+        hierarchical_layout.addWidget(hier_row_widget)
+        hierarchical_layout.addWidget(self._stage_table)
+
+        self._config_tabs = QTabWidget()
+        self._config_tabs.setTabPosition(QTabWidget.TabPosition.West)
+        self._config_tabs.addTab(self._summary_text, "Summary")
+        self._config_tabs.addTab(_tab_page(ukf_form), "UKF && process model")
+        self._config_tabs.addTab(_tab_page(obs_form), "Observations && outliers")
+        self._config_tabs.addTab(_tab_page(adaptive_form), "Adaptive process noise")
+        self._config_tabs.addTab(_tab_page(posereg_form), "Pose reg. && joint limits")
+        self._config_tabs.addTab(_tab_page(nis_form), "NIS feedback")
+        self._config_tabs.addTab(_tab_page(crossperson_form), "Cross-person coupling")
+        self._config_tabs.addTab(_tab_page(hierarchical_layout), "Hierarchical solver")
+        self._config_tabs.currentChanged.connect(self._on_config_tab_changed)
 
         # ---- People group -------------------------------------------------
         # Person names are only defined per detection run (sequence_persons is
@@ -628,16 +730,20 @@ class RunTrackerWidget(QWidget):
         self._results_box.setVisible(False)
 
         # ---- Root layout ------------------------------------------------
-        # Only the (long) tracker-configuration section scrolls -- people,
-        # run controls, the Run button, and progress/results always stay
-        # visible without needing to resize the window.
+        # Only the tracker-configuration tabs stretch to fill extra space --
+        # people, run controls, the Run button, and progress/results always
+        # stay visible without needing to resize the window.
         root = QVBoxLayout(self)
         root.addWidget(people_box)
         root.addWidget(run_box)
-        root.addWidget(config_scroll, 1)
+        root.addLayout(config_header)
+        root.addWidget(self._config_tabs, 1)
         root.addWidget(self._run_btn)
         root.addWidget(self._prog_box)
         root.addWidget(self._results_box)
+
+        self._update_config_status_label()
+        self._refresh_summary()
 
     # ------------------------------------------------------------------
     # Public API
@@ -976,6 +1082,266 @@ class RunTrackerWidget(QWidget):
             self._binary_edit.setText(path)
 
     # ------------------------------------------------------------------
+    # Configuration load/save (config-improvements design doc, phase 2)
+    # ------------------------------------------------------------------
+
+    def _on_config_tab_changed(self, index: int) -> None:
+        if index == 0:  # Summary
+            self._refresh_summary()
+
+    def _update_config_status_label(self) -> None:
+        if self._loaded_config_name:
+            self._config_status_label.setText(f'Based on "{self._loaded_config_name}"')
+        else:
+            self._config_status_label.setText("Based on factory defaults (unsaved)")
+
+    def _open_load_config_dialog(self) -> None:
+        if self._conn is None:
+            return
+        rows = [r for r in list_configs(self._conn) if r["is_named"]]
+        if not rows:
+            QMessageBox.information(
+                self, "No saved configs", "No named tracker configurations are saved yet."
+            )
+            return
+        rows.sort(key=lambda r: r["created_at"], reverse=True)
+        labels = [f"{r['name']}  ({r['created_at'][:19]})" for r in rows]
+        choice, ok = QInputDialog.getItem(
+            self, "Load configuration", "Configuration:", labels, 0, False
+        )
+        if not ok:
+            return
+        row = rows[labels.index(choice)]
+        self._apply_config_row(row)
+        self._loaded_config_id = row["id"]
+        self._loaded_config_name = row["name"]
+        self._update_config_status_label()
+        self._refresh_summary()
+
+    def _open_save_as_dialog(self) -> None:
+        if self._conn is None:
+            return
+        name, ok = QInputDialog.getText(self, "Save configuration", "Name:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        base = self._loaded_config_id or BASELINE_CONFIG_ID
+        new_id = edit_config(self._conn, base, is_named=True, name=name,
+                             **self._collect_config_overrides())
+        self._sync_stage_overrides(new_id)
+        self._loaded_config_id = new_id
+        self._loaded_config_name = name
+        self._update_config_status_label()
+        QMessageBox.information(self, "Saved", f'Configuration saved as "{name}".')
+
+    def _apply_config_row(self, row: sqlite3.Row) -> None:
+        """Populate every tab widget from a loaded tracker_configs row."""
+        def g(col: str, default: object = None) -> object:
+            try:
+                value = row[col]
+            except (IndexError, KeyError):
+                return default
+            return default if value is None else value
+
+        self._proc_noise_std.setValue(float(g("process_noise_std", 0.0)))
+        self._proc_vel_noise.setValue(float(g("process_noise_vel_std", 0.0)))
+        self._vel_half_life.setValue(float(g("velocity_half_life_s", 0.0)))
+        self._tracker_fps.setValue(float(g("tracker_fps", 120.0)))
+        self._pose_noise.setValue(float(g("pose_noise_std", 0.0)))
+        self._calib_noise.setValue(float(g("measurement_noise_std", 0.0)))
+        self._outlier_thresh.setValue(float(g("outlier_threshold", 4.0)))
+
+        self._use_relative.setChecked(bool(g("use_relative_observations", 0)))
+        self._relative_min_conf.setValue(float(g("relative_min_confidence", 0.5)))
+
+        self._cross_pair_max_px.setValue(float(g("cross_pair_max_px", 0.0)))
+        self._cross_pair_max_n.setValue(int(g("cross_pair_max_n", 10)))
+
+        self._cross_person_max_world_mm.setValue(float(g("cross_person_max_world_mm", 0.0)))
+        self._cross_person_min_conf.setValue(float(g("cross_person_min_confidence", 0.5)))
+        self._cross_person_max_n.setValue(int(g("cross_person_max_n", 10)))
+
+        self._vel_noise_gain_joint.setValue(float(g("process_noise_vel_gain_joint", 0.0)))
+        self._vel_noise_ref_joint.setValue(float(g("process_noise_vel_ref_joint", 1.0)))
+        self._vel_noise_gain_root.setValue(float(g("process_noise_vel_gain_root", 0.0)))
+        self._vel_noise_ref_root.setValue(float(g("process_noise_vel_ref_root", 1.0)))
+
+        scopes_json = g("process_noise_vel_scopes")
+        scopes = json.loads(scopes_json) if scopes_json else []
+        proximal = next((s for s in scopes if s.get("name") == "proximal"), None)
+        distal = next((s for s in scopes if s.get("name") == "distal"), None)
+        self._vel_noise_gain_proximal.setValue(float(proximal["gain"]) if proximal else 0.0)
+        self._vel_noise_ref_proximal.setValue(float(proximal["vel_ref"]) if proximal else 1.0)
+        self._vel_noise_gain_distal.setValue(float(distal["gain"]) if distal else 0.0)
+        self._vel_noise_ref_distal.setValue(float(distal["vel_ref"]) if distal else 1.0)
+
+        self._pose_reg_equal_split.setValue(float(g("pose_reg_equal_split_noise_std", 0.0)))
+        self._pose_reg_rest_pose.setValue(float(g("pose_reg_rest_pose_noise_std", 0.0)))
+
+        self._soft_limit_margin.setValue(float(g("soft_limit_margin_rad", 0.0)))
+        self._soft_limit_noise_std.setValue(float(g("soft_limit_noise_std", 0.0)))
+
+        self._nis_feedback_enabled.setChecked(bool(g("nis_feedback_scopes")))
+        self._nis_feedback_threshold.setValue(float(g("nis_feedback_threshold", 1.5)))
+        self._nis_feedback_max_mult.setValue(float(g("nis_feedback_max_multiplier", 10.0)))
+
+        vel_cam_json = g("velocity_mode_camera_ids")
+        self._velocity_cam_indices = set(json.loads(vel_cam_json)) if vel_cam_json else set()
+        self._update_velocity_cam_label()
+
+    def _collect_config_overrides(self) -> dict:
+        """Build the tracker_configs override dict from current tab values,
+        for edit_config() -- shared by _start_tracking()'s per-run snapshot
+        and _open_save_as_dialog()'s named save. List/dict values pass
+        through as plain Python objects; edit_config()'s own _encode() JSON-
+        encodes them.
+        """
+        vel_ids = sorted(self._velocity_cam_indices) if self._velocity_cam_indices else None
+        use_rel = 1 if self._use_relative.isChecked() else 0
+        rel_min_conf = self._relative_min_conf.value() if use_rel else None
+
+        cross_px = self._cross_pair_max_px.value()
+        cross_px_val = cross_px if cross_px > 0.0 else None
+        cross_n = self._cross_pair_max_n.value() if cross_px_val else None
+
+        cross_person_mm = self._cross_person_max_world_mm.value()
+        cross_person_mm_val = cross_person_mm if cross_person_mm > 0.0 else None
+        cross_person_min_conf = self._cross_person_min_conf.value() if cross_person_mm_val else None
+        cross_person_n = self._cross_person_max_n.value() if cross_person_mm_val else None
+
+        joint_gain = self._vel_noise_gain_joint.value()
+        joint_names = ADAPTIVE_NOISE_CORE_JOINTS if joint_gain > 0.0 else None
+
+        vel_scopes = []
+        if self._vel_noise_gain_proximal.value() > 0.0:
+            vel_scopes.append({
+                "name": "proximal",
+                "joint_names": ADAPTIVE_NOISE_PROXIMAL_JOINTS,
+                "gain": self._vel_noise_gain_proximal.value(),
+                "vel_ref": self._vel_noise_ref_proximal.value(),
+            })
+        if self._vel_noise_gain_distal.value() > 0.0:
+            vel_scopes.append({
+                "name": "distal",
+                "joint_names": ADAPTIVE_NOISE_DISTAL_JOINTS,
+                "gain": self._vel_noise_gain_distal.value(),
+                "vel_ref": self._vel_noise_ref_distal.value(),
+            })
+
+        pose_reg_equal_split = self._pose_reg_equal_split.value()
+        pose_reg_rest_pose = self._pose_reg_rest_pose.value()
+        pose_reg_enabled = pose_reg_equal_split > 0.0 or pose_reg_rest_pose > 0.0
+
+        soft_limit_noise_std = self._soft_limit_noise_std.value()
+        soft_limit_enabled = soft_limit_noise_std > 0.0
+
+        nis_scopes = None
+        if self._nis_feedback_enabled.isChecked():
+            nis_scopes = [
+                {"name": "core", "joint_names": ADAPTIVE_NOISE_CORE_JOINTS},
+                {"name": "limbs", "joint_names": NIS_FEEDBACK_LIMB_JOINTS},
+            ]
+
+        return dict(
+            process_noise_std=self._proc_noise_std.value(),
+            process_noise_vel_std=self._proc_vel_noise.value(),
+            velocity_half_life_s=self._vel_half_life.value(),
+            measurement_noise_std=self._calib_noise.value(),
+            pose_noise_std=self._pose_noise.value(),
+            outlier_threshold=self._outlier_thresh.value(),
+            tracker_fps=self._tracker_fps.value(),
+            velocity_mode_camera_ids=vel_ids,
+            use_relative_observations=use_rel,
+            relative_min_confidence=rel_min_conf,
+            cross_pair_max_px=cross_px_val,
+            cross_pair_max_n=cross_n,
+            cross_person_max_world_mm=cross_person_mm_val,
+            cross_person_min_confidence=cross_person_min_conf,
+            cross_person_max_n=cross_person_n,
+            process_noise_vel_gain_joint=joint_gain,
+            process_noise_vel_ref_joint=self._vel_noise_ref_joint.value(),
+            process_noise_vel_gain_root=self._vel_noise_gain_root.value(),
+            process_noise_vel_ref_root=self._vel_noise_ref_root.value(),
+            process_noise_vel_joint_names=joint_names,
+            process_noise_vel_scopes=vel_scopes or None,
+            pose_reg_joint_names=POSE_REG_SPINE_CHAIN if pose_reg_enabled else None,
+            pose_reg_equal_split_noise_std=pose_reg_equal_split,
+            pose_reg_rest_pose_noise_std=pose_reg_rest_pose,
+            soft_limit_joint_names=SOFT_LIMIT_JOINT_NAMES if soft_limit_enabled else None,
+            soft_limit_margin_rad=self._soft_limit_margin.value(),
+            soft_limit_noise_std=soft_limit_noise_std,
+            nis_feedback_scopes=nis_scopes,
+            nis_feedback_threshold=self._nis_feedback_threshold.value(),
+            nis_feedback_max_multiplier=self._nis_feedback_max_mult.value(),
+        )
+
+    def _refresh_summary(self) -> None:
+        lines = [self._config_status_label.text(), ""]
+        lines.append(f"Process noise std: {self._proc_noise_std.value():g}")
+        lines.append(f"Velocity noise std: {self._proc_vel_noise.value():g}")
+        lines.append(f"Velocity half-life (s): {self._vel_half_life.value():g}")
+        lines.append(f"Tracker FPS: {self._tracker_fps.value():g}")
+        lines.append(f"Velocity-mode cameras: {self._vel_cam_label.text()}")
+        lines.append("")
+        lines.append(f"Pose noise std: {self._pose_noise.value():g}")
+        lines.append(f"Calib noise std: {self._calib_noise.value():g}")
+        lines.append(f"Outlier threshold: {self._outlier_thresh.value():g}")
+        lines.append(
+            f"Relative observations: {'on' if self._use_relative.isChecked() else 'off'}"
+        )
+        if self._use_relative.isChecked():
+            lines.append(f"  min confidence: {self._relative_min_conf.value():g}")
+        if self._cross_pair_max_px.value() > 0.0:
+            lines.append(
+                f"Cross-pair radius: {self._cross_pair_max_px.value():g}px, "
+                f"max {self._cross_pair_max_n.value()}"
+            )
+        lines.append("")
+        if self._vel_noise_gain_joint.value() > 0.0:
+            lines.append(f"Adaptive noise (core): gain {self._vel_noise_gain_joint.value():g}")
+        if self._vel_noise_gain_root.value() > 0.0:
+            lines.append(f"Adaptive noise (root): gain {self._vel_noise_gain_root.value():g}")
+        if self._vel_noise_gain_proximal.value() > 0.0:
+            lines.append(
+                f"Adaptive noise (proximal): gain {self._vel_noise_gain_proximal.value():g}"
+            )
+        if self._vel_noise_gain_distal.value() > 0.0:
+            lines.append(
+                f"Adaptive noise (distal): gain {self._vel_noise_gain_distal.value():g}"
+            )
+        if self._pose_reg_equal_split.value() > 0.0 or self._pose_reg_rest_pose.value() > 0.0:
+            lines.append(
+                f"Pose regularization: equal-split {self._pose_reg_equal_split.value():g}, "
+                f"rest-pose {self._pose_reg_rest_pose.value():g}"
+            )
+        if self._soft_limit_noise_std.value() > 0.0:
+            lines.append(
+                f"Soft joint limits: margin {self._soft_limit_margin.value():g}, "
+                f"noise {self._soft_limit_noise_std.value():g}"
+            )
+        if self._nis_feedback_enabled.isChecked():
+            lines.append(
+                f"NIS feedback: threshold {self._nis_feedback_threshold.value():g}, "
+                f"max multiplier {self._nis_feedback_max_mult.value():g}"
+            )
+        if self._cross_person_max_world_mm.value() > 0.0:
+            lines.append(
+                f"Cross-person coupling: {self._cross_person_max_world_mm.value():g}mm, "
+                f"min conf {self._cross_person_min_conf.value():g}, "
+                f"max {self._cross_person_max_n.value()}"
+            )
+        if self._hierarchical_enabled.isChecked():
+            enabled_groups = [
+                self._stage_table.item(i, 1).text()
+                for i in range(self._stage_table.rowCount())
+                if self._stage_row_enabled(i)
+            ]
+            lines.append(
+                f"Hierarchical solver stages: {', '.join(enabled_groups) or '(none enabled)'}"
+            )
+        self._summary_text.setPlainText("\n".join(lines))
+
+    # ------------------------------------------------------------------
     # Tracking
     # ------------------------------------------------------------------
 
@@ -1025,7 +1391,11 @@ class RunTrackerWidget(QWidget):
         out_dir = self._resolve_out_dir(primary_seq_id, primary_skel_id)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        config_id = self._create_config()
+        base = self._loaded_config_id or BASELINE_CONFIG_ID
+        config_id = edit_config(
+            self._conn, base, is_named=False, **self._collect_config_overrides()
+        )
+        self._sync_stage_overrides(config_id)
         self._run_id = None
         self._multi_run_labels = None
 
@@ -1118,7 +1488,6 @@ class RunTrackerWidget(QWidget):
         return db_dir / "posetrak_results" / shot / skel_name / "tracking"
 
     def _on_hierarchical_toggled(self, checked: bool) -> None:
-        self._stage_table.setVisible(checked)
         if checked:
             self._refresh_stage_table()
 
@@ -1175,130 +1544,36 @@ class RunTrackerWidget(QWidget):
                     return f"Stage '{group}': '{label}' is not a number: {text!r}"
         return None
 
-    def _create_config(self) -> str:
-        import datetime as dt
-        import json
-        from posetrak.db.db import generate_id
-        config_id = generate_id()
-        now = dt.datetime.now(dt.timezone.utc).isoformat()
-        vel_ids = sorted(self._velocity_cam_indices) if self._velocity_cam_indices else None
-        vel_ids_json = json.dumps(vel_ids) if vel_ids is not None else None
-        use_rel = 1 if self._use_relative.isChecked() else 0
-        rel_min_conf = self._relative_min_conf.value() if use_rel else None
-        cross_px = self._cross_pair_max_px.value()
-        cross_n = self._cross_pair_max_n.value() if cross_px > 0.0 else None
-        cross_px_val = cross_px if cross_px > 0.0 else None
-        cross_person_mm = self._cross_person_max_world_mm.value()
-        cross_person_mm_val = cross_person_mm if cross_person_mm > 0.0 else None
-        cross_person_min_conf = self._cross_person_min_conf.value() if cross_person_mm_val else None
-        cross_person_n = self._cross_person_max_n.value() if cross_person_mm_val else None
-        joint_gain = self._vel_noise_gain_joint.value()
-        joint_names_json = json.dumps(ADAPTIVE_NOISE_CORE_JOINTS) if joint_gain > 0.0 else None
-        vel_scopes = []
-        if self._vel_noise_gain_proximal.value() > 0.0:
-            vel_scopes.append({
-                "name": "proximal",
-                "joint_names": ADAPTIVE_NOISE_PROXIMAL_JOINTS,
-                "gain": self._vel_noise_gain_proximal.value(),
-                "vel_ref": self._vel_noise_ref_proximal.value(),
-            })
-        if self._vel_noise_gain_distal.value() > 0.0:
-            vel_scopes.append({
-                "name": "distal",
-                "joint_names": ADAPTIVE_NOISE_DISTAL_JOINTS,
-                "gain": self._vel_noise_gain_distal.value(),
-                "vel_ref": self._vel_noise_ref_distal.value(),
-            })
-        vel_scopes_json = json.dumps(vel_scopes) if vel_scopes else None
-        pose_reg_equal_split = self._pose_reg_equal_split.value()
-        pose_reg_rest_pose = self._pose_reg_rest_pose.value()
-        pose_reg_enabled = pose_reg_equal_split > 0.0 or pose_reg_rest_pose > 0.0
-        pose_reg_joint_names_json = json.dumps(POSE_REG_SPINE_CHAIN) if pose_reg_enabled else None
-        soft_limit_margin = self._soft_limit_margin.value()
-        soft_limit_noise_std = self._soft_limit_noise_std.value()
-        soft_limit_enabled = soft_limit_noise_std > 0.0
-        soft_limit_joint_names_json = (
-            json.dumps(SOFT_LIMIT_JOINT_NAMES) if soft_limit_enabled else None
-        )
-        nis_feedback_scopes_json = None
-        if self._nis_feedback_enabled.isChecked():
-            nis_feedback_scopes_json = json.dumps([
-                {"name": "core", "joint_names": ADAPTIVE_NOISE_CORE_JOINTS},
-                {"name": "limbs", "joint_names": NIS_FEEDBACK_LIMB_JOINTS},
-            ])
+    def _sync_stage_overrides(self, config_id: str) -> None:
+        """Replace *config_id*'s tracker_config_stages rows with the stage
+        table's current values. Always deletes first: edit_config() already
+        copied the base config's own stage rows forward (if any), and this
+        run's stage selection may add, drop, or re-tune any of them.
+        """
         with self._conn:
             self._conn.execute(
-                "INSERT INTO tracker_configs"
-                " (id, name, parent_id, created_at,"
-                "  process_noise_std, process_noise_vel_std, velocity_half_life_s,"
-                "  measurement_noise_std, pose_noise_std, outlier_threshold, tracker_fps,"
-                "  velocity_mode_camera_ids,"
-                "  use_relative_observations, relative_min_confidence,"
-                "  cross_pair_max_px, cross_pair_max_n,"
-                "  cross_person_max_world_mm, cross_person_min_confidence, cross_person_max_n,"
-                "  process_noise_vel_gain_joint, process_noise_vel_ref_joint,"
-                "  process_noise_vel_gain_root, process_noise_vel_ref_root,"
-                "  process_noise_vel_joint_names,"
-                "  process_noise_vel_scopes,"
-                "  pose_reg_joint_names, pose_reg_equal_split_noise_std, pose_reg_rest_pose_noise_std,"
-                "  soft_limit_joint_names, soft_limit_margin_rad, soft_limit_noise_std,"
-                "  nis_feedback_scopes, nis_feedback_threshold, nis_feedback_max_multiplier)"
-                " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                "         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    config_id, "ui-run", now,
-                    self._proc_noise_std.value(),
-                    self._proc_vel_noise.value(),
-                    self._vel_half_life.value(),
-                    self._calib_noise.value(),   # stored in legacy column for compat
-                    self._pose_noise.value(),
-                    self._outlier_thresh.value(),
-                    self._tracker_fps.value(),
-                    vel_ids_json,
-                    use_rel,
-                    rel_min_conf,
-                    cross_px_val,
-                    cross_n,
-                    cross_person_mm_val,
-                    cross_person_min_conf,
-                    cross_person_n,
-                    joint_gain,
-                    self._vel_noise_ref_joint.value(),
-                    self._vel_noise_gain_root.value(),
-                    self._vel_noise_ref_root.value(),
-                    joint_names_json,
-                    vel_scopes_json,
-                    pose_reg_joint_names_json,
-                    pose_reg_equal_split,
-                    pose_reg_rest_pose,
-                    soft_limit_joint_names_json,
-                    soft_limit_margin,
-                    soft_limit_noise_std,
-                    nis_feedback_scopes_json,
-                    self._nis_feedback_threshold.value(),
-                    self._nis_feedback_max_mult.value(),
-                ),
+                "DELETE FROM tracker_config_stages WHERE tracker_config_id = ?", (config_id,)
             )
-            if self._hierarchical_enabled.isChecked():
-                for i in range(self._stage_table.rowCount()):
-                    if not self._stage_row_enabled(i):
-                        continue
-                    group_name = self._stage_table.item(i, 1).text()
-                    overrides = []
-                    for j, (_field, _label) in enumerate(_STAGE_OVERRIDE_COLUMNS):
-                        edit = self._stage_table.cellWidget(i, 2 + j)
-                        text = edit.text().strip() if edit else ""
-                        overrides.append(float(text) if text else None)
-                    self._conn.execute(
-                        "INSERT INTO tracker_config_stages"
-                        " (tracker_config_id, group_name, process_noise_std,"
-                        "  process_noise_vel_std, velocity_half_life_s, pose_noise_std,"
-                        "  calib_noise_std, outlier_threshold, init_joint_std,"
-                        "  init_velocity_std)"
-                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (config_id, group_name, *overrides),
-                    )
-        return config_id
+            if not self._hierarchical_enabled.isChecked():
+                return
+            for i in range(self._stage_table.rowCount()):
+                if not self._stage_row_enabled(i):
+                    continue
+                group_name = self._stage_table.item(i, 1).text()
+                overrides = []
+                for j, (_field, _label) in enumerate(_STAGE_OVERRIDE_COLUMNS):
+                    edit = self._stage_table.cellWidget(i, 2 + j)
+                    text = edit.text().strip() if edit else ""
+                    overrides.append(float(text) if text else None)
+                self._conn.execute(
+                    "INSERT INTO tracker_config_stages"
+                    " (tracker_config_id, group_name, process_noise_std,"
+                    "  process_noise_vel_std, velocity_half_life_s, pose_noise_std,"
+                    "  calib_noise_std, outlier_threshold, init_joint_std,"
+                    "  init_velocity_std)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (config_id, group_name, *overrides),
+                )
 
     def _on_output(self, line: str) -> None:
         m = re.match(r"\s*Progress:\s*(\d+)/(\d+)\s*\(([0-9.]+)%\)", line)
@@ -1502,12 +1777,18 @@ class RunTrackerDialog(QDialog):
 # ---------------------------------------------------------------------------
 
 
-def _float_spin(default: float, mn: float, mx: float, decimals: int) -> QDoubleSpinBox:
-    spin = QDoubleSpinBox()
-    spin.setRange(mn, mx)
-    spin.setDecimals(decimals)
-    spin.setValue(default)
-    return spin
+def _tab_page(content: QFormLayout | QVBoxLayout | QWidget) -> QScrollArea:
+    """Wrap a layout or widget in a scrollable page for one QTabWidget tab."""
+    if isinstance(content, QWidget):
+        page = content
+    else:
+        page = QWidget()
+        page.setLayout(content)
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+    scroll.setWidget(page)
+    return scroll
 
 
 # Windows NTSTATUS codes with the Error severity bits set (top two bits) are

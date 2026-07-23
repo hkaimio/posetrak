@@ -154,17 +154,16 @@ def edit_config(
     to NULL this way). Also copies every ``tracker_config_stages`` row
     belonging to *config_id*, unchanged, so a hierarchical config's per-stage
     overrides survive an edit of its base row. The new row's ``parent_id``
-    is set to *config_id*; its ``name`` is copied from the source row
-    unchanged (renaming is a separate, higher-level concern -- see the
-    config-improvements design doc's "editing a named config" section).
+    is set to *config_id*.
 
-    ``is_named`` is deliberately **not** carried forward from the source row
-    like the tuning columns are -- every edit defaults to an unnamed,
-    auto-generated per-run snapshot (``is_named=0``) regardless of whether
-    the source was a named template, matching the design doc's "editing a
-    named config produces an unnamed working copy" rule. Pass
-    ``is_named=True`` explicitly (e.g. from a "Save"/"Save as..." action) to
-    produce a named row instead.
+    ``name`` and ``is_named`` are deliberately **not** carried forward from
+    the source row like the tuning columns are -- every edit defaults to the
+    source's own name and an unnamed, auto-generated per-run snapshot
+    (``is_named=0``) regardless of whether the source was itself a named
+    template, matching the design doc's "editing a named config produces an
+    unnamed working copy" rule. Pass ``is_named=True`` explicitly (e.g. from
+    a "Save"/"Save as..." action) to produce a named row instead, and
+    ``name=...`` to give it a different name than the source ("Save as...").
 
     Parameters
     ----------
@@ -175,12 +174,12 @@ def edit_config(
     **overrides:
         Any ``tracker_configs`` tuning-column name to override, e.g.
         ``alpha=0.5``, ``pose_reg_joint_names=["spine1", "spine2"]``, plus
-        the special ``is_named`` (bool, see above -- not a tuning column,
-        never carried forward). List/dict override values are JSON-encoded
-        automatically. Unknown column names raise ``sqlite3.OperationalError``
-        when the INSERT runs (not validated ahead of time -- keeps this
-        function from needing its own copy of the column list to validate
-        against).
+        the two special, non-tuning keys ``is_named`` (bool) and ``name``
+        (str, defaults to the source row's own name) described above. List/
+        dict override values are JSON-encoded automatically. Unknown column
+        names raise ``sqlite3.OperationalError`` when the INSERT runs (not
+        validated ahead of time -- keeps this function from needing its own
+        copy of the column list to validate against).
 
     Returns
     -------
@@ -201,6 +200,7 @@ def edit_config(
     new_id = generate_id()
     created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     is_named = 1 if overrides.pop("is_named", False) else 0
+    name = overrides.pop("name", None) or row["name"]
 
     columns = _tuning_columns(registry)
     values = [
@@ -213,7 +213,7 @@ def edit_config(
             "INSERT INTO tracker_configs (id, name, parent_id, created_at, is_named, "
             + ", ".join(columns) + ") VALUES ("
             + ", ".join(["?"] * (5 + len(columns))) + ")",
-            (new_id, row["name"], config_id, created_at, is_named, *values),
+            (new_id, name, config_id, created_at, is_named, *values),
         )
 
         stage_columns = _stage_columns(registry)

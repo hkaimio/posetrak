@@ -240,6 +240,28 @@ def test_edit_config_is_named_true_produces_named_row(
     assert row["is_named"] == 1
 
 
+def test_edit_config_name_override_produces_save_as_semantics(
+    registry_db: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """Passing name=... gives the new row a different name than the source
+    -- the "Save as..." case, distinct from "Save" (no name kwarg, keeps
+    the source's own name)."""
+    toml_path = _write_toml(tmp_path)
+    orig_id = create_config_from_toml(registry_db, "base", toml_path)
+
+    same_name_id = edit_config(registry_db, orig_id, alpha=0.5, is_named=True)
+    same_name_row = registry_db.execute(
+        "SELECT name FROM tracker_configs WHERE id = ?", (same_name_id,)
+    ).fetchone()
+    assert same_name_row["name"] == "base"
+
+    renamed_id = edit_config(registry_db, orig_id, alpha=0.5, is_named=True, name="tuned-base")
+    renamed_row = registry_db.execute(
+        "SELECT name FROM tracker_configs WHERE id = ?", (renamed_id,)
+    ).fetchone()
+    assert renamed_row["name"] == "tuned-base"
+
+
 def test_create_config_from_toml_is_named_false_opt_out(
     registry_db: sqlite3.Connection, tmp_path: Path
 ) -> None:

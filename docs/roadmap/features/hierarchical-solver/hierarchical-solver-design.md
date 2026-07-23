@@ -5,10 +5,25 @@
 PRs 1–7 done and integration-tested against real production data as of
 2026-07-22 (see the PR 7 status note near the end of the implementation
 plan for what that confirmed). PR 8 (Python/UI/MCP surfacing) drafted the
-same day — all three surfaces implemented and unit-tested — but not yet
-live-verified; that needs an interactive session, out of scope for
-source-only work. Builds directly on two existing design docs already in
-the repo, which this doc does not duplicate:
+same day — all three surfaces implemented and unit-tested — and
+live-verified by Harri 2026-07-23: every UI setting exercised individually
+in `content_panels.py`/`run_tracker.py`, including refresh, works as
+implemented. **Not exercised**: an actual end-to-end hierarchical run
+launched from `run_tracker.py`'s own UI — deliberately skipped as
+disproportionately slow to run and hard to validate as UI-driven rather
+than config-file-driven; the CLI path already carries that coverage via
+PR 7. Harri separately flagged `run_tracker.py`'s tracker-configuration
+dialog as too complex, independent of the hierarchical solver's own
+fields — tracked as a follow-on UI redesign, not a gap in this feature.
+
+With PR 8 live-verified, a source-reading pass looking for what's left
+before calling the feature closed found one real, previously
+undocumented bug — see "cov_diag is not just unmerged, it's the wrong
+length" below — **fixed 2026-07-23** alongside a new, centralized
+`SkeletonLayout::build_error_index_map_from()` (the error-index sibling of
+`build_index_map_from()` PR 6 needed but didn't have). Builds directly on
+two existing design docs already in the repo, which this doc does not
+duplicate:
 
 - `docs/hierarchical-ukf-design.md` — root-cause analysis (why fingers
   destabilize the body chain) and a survey of solution options. Written
@@ -792,11 +807,12 @@ Sequenced as PR-sized units, each with an acceptance gate, checked
 | 6, prerequisite — **done** | `python/tools/upgrade_skeleton_hand_groups.py`: applies the design doc's reviewed `HandL`/`HandR` corrections (phantom `palm.01-04.{L,R}`/`MRK-thumb2.{L,R}` references removed, `freeflyer_joint`/`ref_marker` added) to a skeleton YAML file or every matching row in a registry/session DB (content-addressed `skeletons` rows are never mutated in place — inserts a new row with `parent_id` set to the original). **Shipped a real bug in its first version**: it assumed every skeleton's `palm.*` references were phantom, and corrupted `tests/data/Harri_skeleton-regress-test.yaml`/`Harri_skeleton-shouldery-rot.yaml`, whose `palm.0N.{L,R}` are real, load-bearing joints (a different, unreviewed hand topology) — caught via `git diff` before committing, reverted, and fixed by checking joint existence directly instead of hardcoding the pattern, skipping the hand-group corrections entirely (with a printed note) whenever real `palm.*` joints are present. Applied to all 6 tracked skeleton YAML files. | New pytest suite (9 cases), including a regression test for the exact bug above. Commit `ddbeba7` (script) + `1558cd9` (applied to tracked skeletons). Full C++ suite (288/2980) and `python/tests/db` (253 passed) clean afterward. |
 | 6 — **done, not yet integration-tested** | CLI/config plumbing: `src/tracking/hierarchical_solver.cpp`'s `build_stage_tracker_config()` (per-stage tuning resolution, NULL = inherit) + `run_hierarchical_child_stages()` (the existence-based toggle from gap 2, and the full per-stage driver — builds the fixed-root child `Tracker`, streams the parent's smoothed `freeflyer_joint` trajectory, builds each frame's `PAIR_DIFF`+own-position observations, runs forward pass + smoothing, merges into the parent's `tracking_results`/`tracking_obs_results` rows, tracks `tracking_run_stages` status). Wired into both of `cli/track.cpp`'s DB paths after `finalize_person_context()`. `cov_diag` is deliberately not merged yet — needs a parallel `error_index` mapping between layouts that doesn't exist. Also fixed a real, unrelated bug discovered while working out the exact frame alignment this needed: every RTS-smoothed `tracking_results`/`smoothed_*.csv` row was mislabeled by one `tracker_step`, for every `--smooth` run ever, because a warm-up `track_frame()` call before the main loop fed the smoother cache without a filtered-row counterpart. | New `[hierarchical_solver]` suite (3 cases) covering `build_stage_tracker_config()`'s inherit/override/partial-override behavior — the one piece usable without a full DB-backed `Tracker` fixture. The orchestration driver itself compiles and integrates cleanly (full suite green) but has **no automated test of its own yet** — PR 7's integration test, against real production data, is the first end-to-end exercise. Commits `58946db` (dead `HierarchicalConfig` scaffolding removed), `271650f` (smoothed-frame off-by-one fix), `99cf8b1` (DB-layer additions), `5b1d4d6` (this PR). |
 | 7 — **done, 2026-07-22** | Integration test found and fixed two implementation bugs in PR 6 (parent DB rows not expanded to full-skeleton width; a second RTS-smoothing off-by-one in the child stage's own merge — see commits `772e3f9`), then a **third, more serious bug**: `SessionReader::load_observations()` (independent of anything hierarchical-solver-specific — this fires whenever `use_relative_observations` is on) appends an extra `PAIR_DIFF` observation for every marker against its own skeleton-tree parent marker, alongside that marker's normal absolute-position observation. The child stage's `raw_for_stage` filtered by `marker_id` only, so both the wrist's real position observation and its unrelated `PAIR_DIFF`-vs-elbow observation reached `build_ref_marker_pair_observations()`; that function's reference-marker lookup is last-write-wins per camera and the `PAIR_DIFF` entry sorts after the position entry, so it silently won — every finger's own `PAIR_DIFF` observation ended up built against "wrist pixel minus elbow pixel" instead of the wrist's real pixel position, baking a roughly-constant, elbow-offset-sized error into `hand.{L,R}`'s orientation from the very first frame of every run (visible to the eye as "the wrist looks rotated ~90 degrees, in a way that's hard to pin to one axis" — exactly what a large, frame-independent pixel offset produces). Fixed in commit `44f5d6a` by having both `raw_for_stage` and `build_ref_marker_pair_observations()` itself skip non-`POSITION` observations. | Fix verified against real production data: `hand.R`'s rotation vs. an independent main-group-only tracker of the same person/window went from ~127° mean disagreement (136° on frame 1) to ~44° (2.3° on frame 1) after the fix. Acceptance gate closed against the actual named criterion — see the 2026-07-22 status note below for the arm-jerk analysis that confirms it and the one caveat that's a known, documented design limitation rather than an open bug. |
-| 8 — **drafted, 2026-07-22, not yet live-verified** | All three surfaces implemented. MCP (`python/app/mcp/`): `db.py` gains `get_run_stages()`/`get_marker_groups()` + a documented `COV_DIAG_HIERARCHICAL_CAVEAT`; `get_run_info()` lists per-stage group/status/timing; `get_filter_stats()` labels its scalars parent-only on a hierarchical run and appends a per-stage summary (inlier/outlier counts, mean Mahalanobis distance from `obs_blob`, bucketed by skeleton group — NIS itself doesn't exist per-stage). `content_panels.py`: `_RunInfoPane` gets a "Hierarchical stages" box + a parent-only note on its NIS/cov cond # fields; `TrackingRunPanel`'s sidebar gets a matching row; `_cfg_text()` appends `hier:GroupA,GroupB` when the run's config has `tracker_config_stages` rows. `run_tracker.py`: a "Hierarchical solver" toggle + per-stage table (rows auto-discovered from the selected skeletons' own `groups:` YAML — any group with a `freeflyer_joint` declared) with enable/disable and optional numeric overrides (blank = inherit); `_create_config()` inserts the corresponding `tracker_config_stages` rows. | New headless pytest suites (24 cases) cover every surface's pure DB-query/formatting logic without needing a running Qt app or MCP client — verified against real production data for the MCP tools specifically (`get_run_info`/`get_filter_stats` smoke-tested against today's fixed hierarchical runs, output confirmed sane). **Still needs the live UI walkthrough CLAUDE.md requires** — actual widget rendering, and running an end-to-end hierarchical tracking job from the `run_tracker.py` UI — before PR 8 itself can be called done. |
+| 8 — **drafted, 2026-07-22, not yet live-verified** | All three surfaces implemented. MCP (`python/app/mcp/`): `db.py` gains `get_run_stages()`/`get_marker_groups()` + a documented `COV_DIAG_HIERARCHICAL_CAVEAT`; `get_run_info()` lists per-stage group/status/timing; `get_filter_stats()` labels its scalars parent-only on a hierarchical run and appends a per-stage summary (inlier/outlier counts, mean Mahalanobis distance from `obs_blob`, bucketed by skeleton group — NIS itself doesn't exist per-stage). `content_panels.py`: `_RunInfoPane` gets a "Hierarchical stages" box + a parent-only note on its NIS/cov cond # fields; `TrackingRunPanel`'s sidebar gets a matching row; `_cfg_text()` appends `hier:GroupA,GroupB` when the run's config has `tracker_config_stages` rows. `run_tracker.py`: a "Hierarchical solver" toggle + per-stage table (rows auto-discovered from the selected skeletons' own `groups:` YAML — any group with a `freeflyer_joint` declared) with enable/disable and optional numeric overrides (blank = inherit); `_create_config()` inserts the corresponding `tracker_config_stages` rows. | New headless pytest suites (24 cases) cover every surface's pure DB-query/formatting logic without needing a running Qt app or MCP client — verified against real production data for the MCP tools specifically (`get_run_info`/`get_filter_stats` smoke-tested against today's fixed hierarchical runs, output confirmed sane). **Live-verified 2026-07-23** (Harri): every widget/setting in `content_panels.py`'s "Hierarchical stages" box and `run_tracker.py`'s per-stage table exercised individually, including refresh, against real hierarchical run data — renders and behaves as implemented. Not exercised: launching an actual tracking job through `run_tracker.py`'s own UI (see the top-of-doc status note) — the CLI path covers that end-to-end case via PR 7 instead. |
 
 PRs 1–7 are pure C++/DB/CLI and can proceed without live UI access. PR 8
-cannot be verified from source reading alone and needs an interactive
-session — flagged explicitly rather than silently skipped or guessed at.
+needed an interactive session for its widget-level claims and got one
+2026-07-23 (Harri) — see the row above for exactly what was and wasn't
+exercised.
 
 **Status (2026-07-21): PRs 1–5 done.** Not a UI-verification gap (none
 of PRs 1–5 need one). PR 2 (teaching `Tracker` a fixed-root mode) turned
@@ -926,6 +942,159 @@ adjacent-frame jerk (a double-difference metric) an unreliable comparison
 metric on its own; the coarse-differenced version above is not sensitive
 to it. Not investigated further — flagged here in case it matters for
 some other use of this codebase's determinism.
+
+## `cov_diag` is not just unmerged, it's the wrong length (found and fixed 2026-07-23)
+
+PR 6's row and the MCP `COV_DIAG_HIERARCHICAL_CAVEAT` comment
+(`python/app/mcp/db.py:228-245`) both describe the `cov_diag` gap as
+"child DOFs still hold the parent's own rest-pose placeholder" — implying
+`cov_diag` is expanded to full-skeleton width at write time, same as
+`state`, just with uninformative placeholder values in the child-owned
+range. Reading the actual write path shows that's not what happens.
+
+`multi_person_tracker.cpp:522-530` (forward pass) and the equivalent
+smoothed-frame block (`:610-622`) both expand `state` to full-skeleton
+width via `expand_state_to_full_layout(...).to_error_vector()` before
+writing, but pass `result.covariance`/`it->covariance` to
+`ResultWriter::write_frame()`/`write_smoothed_frame()` **unexpanded** —
+sized to `ctx.layout`, the parent's own group-scoped layout (e.g.
+`"main"`'s ~40 DOF), not the full skeleton's. The code comment at that
+line says so explicitly: *"covariance is written as-is (sized to
+ctx.layout...)"*. So on a hierarchical run, `cov_diag` isn't full-width
+with placeholders in the child range — it's genuinely shorter than
+`state`, by exactly the finger DOF count.
+
+That matters because the only decoder that currently reads `cov_diag`
+back out, `SkeletonLayout.decode_cov_diag()`
+(`python/posetrak/db/skeleton_layout.py:578-655`), assumes the blob is
+full-skeleton width: it derives `K` from the blob's own length, then
+walks `self._joints` — the **full** skeleton's joint list, same one used
+to decode `state` — incrementing a running `error_idx` per active joint
+and indexing into the (short) `joint_pos_flat`/`joint_vel_flat` arrays
+with it, falling back to `0.0` only once `error_idx` runs past the
+buffer's actual length. Because finger joints are interleaved in the
+skeleton's declaration order rather than trailing it (e.g. `hand.L`'s
+finger children appear before `shoulder.R` in a typical depth-first
+joint YAML), every joint that comes after the first hand/finger joint in
+schema order gets read from whatever slot `error_idx` lands on in the
+truncated buffer — not necessarily `0.0`, and not necessarily its own
+value. **This means the caveat's own claim — "only trust cov_diag for
+the parent group's own DOFs" — likely overstates what's safe**: DOFs in
+`main` that are declared after the first hand/finger joint in the
+skeleton file are also at risk of misattributed, not just missing,
+`cov_diag` values on a hierarchical run.
+
+Not yet hit by anything user-facing: `content_panels.py`/`run_tracker.py`
+(PR 8, live-verified above) never read `cov_diag` at all. The only
+current reader is the `tracker_debug.py` Marimo analysis notebook. It's
+also untested — the existing Python `cov_diag` fixtures
+(`python/tests/db/test_load_session.py`) only construct full-width blobs
+sized to the total skeleton DOF count; nothing exercises a
+hierarchical-run-shaped (short) blob.
+
+**Correction to an earlier draft of this section**: it first claimed fix 2
+below could reuse `state_indices`' own `merge_map`
+(`parent_layout.build_index_map_from(child_layout)`) unchanged for
+`cov_diag`. That's wrong, found by reading `skeleton_layout.hpp`/`.cpp`
+more carefully — confirms PR 6's original "needs a parallel error_index
+mapping that doesn't exist" claim rather than shortcutting it:
+`JointDesc` carries **two separate, independently-computed indices**,
+`state_index` (paired with `storage_dof_count`, always 0/1/3 per joint)
+and `error_index` (paired with `active_dof_count`, 0-3 — fewer than
+`storage_dof_count` whenever a SPHERICAL joint has an axis locked by
+equal limits, per this codebase's own "SPHERICAL joints always occupy 3
+state slots even if some DOFs are locked" design decision).
+`build_index_map_from()` (`skeleton_layout.cpp:260-280`) is built
+strictly on `state_index`/`storage_dof_count` — it says so in its own
+loop (`for i in 0..storage_dof_count: map.push_back(desc->state_index +
+i)`). `error_state_dim()` (`skeleton_layout.hpp:136-140`) is computed
+from `joint_active_dof_count_`, a different running total. Confirmed on
+the Python decode side too: `decode_cov_diag()` derives its per-joint
+`active_count` from `ji.active_mask`, not a fixed 1/3 — it is genuinely
+walking the error-index scheme, not the storage one. So `state_indices`
+and any future `cov_diag_indices` are only guaranteed to coincide when no
+joint in the relevant groups has a locked axis; nothing today confirms
+that holds for the production `HandL`/`HandR`/`main` skeletons, and nothing
+should assume it does.
+
+**Two independent fixes, not one**, since the length mismatch and the
+"child DOFs have no real confidence" gap are separate problems, and both
+now need the same missing piece of infrastructure:
+
+1. **Make `cov_diag` full-skeleton width at write time**, mirroring
+   `expand_state_to_full_layout()` for the diagonal — fill the
+   child-owned error-DOF range with a placeholder variance (e.g.
+   `init_joint_std²`) instead of leaving it out of the buffer entirely,
+   and place the parent's own known variances at their correct
+   full-layout error-state slots. Doing this *correctly* (not just
+   changing the buffer's length) needs an `error_index`-based sibling of
+   `build_index_map_from()` — call it `build_error_index_map_from()` —
+   since the existing one is `state_index`-based and would misplace any
+   joint after a partially-locked SPHERICAL joint, i.e. the same
+   misattribution failure mode as the current bug, just relocated. This
+   is a new, small, well-scoped addition to `SkeletonLayout` itself (the
+   class CLAUDE.md designates as "the single source of truth for all
+   joint-to-state-vector index mapping" — this belongs there, not as an
+   ad hoc index computation in `multi_person_tracker.cpp`), with its own
+   unit tests, most usefully against a fixture skeleton with at least one
+   partially-locked SPHERICAL joint so the state/error divergence is
+   actually exercised.
+2. **Merge each child stage's own covariance diagonal into the parent's
+   `cov_diag`** for the DOFs that stage solves, giving real per-DOF hand
+   confidence instead of a placeholder — a direct follow-on use of the
+   same `build_error_index_map_from()` from fix 1, applied in
+   `hierarchical_solver.cpp::run_one_stage()` alongside the existing
+   `state_indices` merge, sourced from the child tracker's own
+   `result.covariance.diagonal()` / `child_smoothed[i].covariance.diagonal()`.
+
+Fix 1 is the higher-priority half: it's a correctness bug (silently wrong
+or misattributed values), not just a documented limitation. It is not,
+however, as cheap as first estimated — it needs the new
+`SkeletonLayout` method, not just a padding loop. Fix 2 is a real
+improvement but not a blocker — the placeholder-with-caveat state from
+fix 1 alone is honest and matches what PR 6 always intended to ship.
+
+**Both done, 2026-07-23.** `SkeletonLayout::build_error_index_map_from()`
+added (`include/posetrak/core/skeleton_layout.hpp` /
+`src/core/skeleton_layout.cpp`), mirroring `build_index_map_from()` but
+keyed on `error_index`/`active_dof_count`, with a
+`std::invalid_argument` if a shared joint's `active_dof_count` differs
+between the two layouts. A companion `error_blob_index(error_index,
+is_velocity)` accessor centralizes the root-offset arithmetic into the
+error-state vector / covariance diagonal
+(`[root_pos_ori(r), joint_pos(K), root_vel_angvel(r), joint_vel(K)]`),
+so callers never hand-roll `2*r + K + ...` themselves. New
+`[skeleton_layout]` tests added against a dedicated fixture skeleton
+with a locked SPHERICAL axis on `wrist.L` (mirroring the real,
+already-live pattern on this codebase's own finger joints, e.g.
+`f_index.01.L`'s locked y-axis in
+`tests/data/Harri_skeleton-regress-test.yaml`) — the only way to
+actually exercise the state/error divergence rather than merely assert
+it can't happen. Full suite: 293/294 test cases (one pre-existing,
+unrelated Windows file-handle-release flake in
+`test_statistics_tracker.cpp`, documented earlier in this doc).
+
+Fix 1 landed in `multi_person_tracker.cpp`'s forward-pass and
+smoothed-frame write sites: a new `expand_cov_diag_to_full_layout()`
+(`hierarchical_solver.hpp`/`.cpp`, alongside `expand_state_to_full_layout()`)
+expands the parent stage's own covariance diagonal to full-skeleton
+`error_state_dim()` width, filling every not-yet-solved DOF with a
+placeholder variance from the run's own `init_joint_std²`/
+`init_velocity_std²`, and copying the parent's own known variances into
+their correct full-layout slots via the new error-index map (not the
+old, storage-indexed `merge_map`). Fix 2 landed in
+`hierarchical_solver.cpp::run_one_stage()`: both the forward-pass and
+smoothing-pass merge blocks now compute `cov_diag_indices`/
+`cov_diag_values` alongside the existing `state_indices`/`state_values`,
+sourced from `child_tracker.covariance().diagonal()` /
+`child_smoothed[i].covariance.diagonal()`, and pass them to
+`ResultWriter::patch_frame()` — so a completed child stage's DOFs now
+carry that stage's own real per-DOF confidence, not the parent's
+placeholder. `db/session_schema.sql`'s `tracking_results` comment and
+`python/app/mcp/db.py`'s `COV_DIAG_HIERARCHICAL_CAVEAT` were updated to
+describe the fixed behavior — check a DOF's owning group's
+`tracking_run_stages.status` to know whether its `cov_diag` entry is
+real yet, rather than inferring it from the value.
 
 ## Explicitly out of scope for this proposal
 

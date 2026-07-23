@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation started 2026-07-24, phases 0-1 done. Written in response to
+Implementation started 2026-07-24, phases 0-2 done. Written in response to
 Harri's brief (`confg-improvement-brief.md`, this directory) plus a
 codebase investigation done before drafting this doc — several of the
 brief's proposed mechanisms turned out to already exist in the registry
@@ -96,6 +96,80 @@ the full run doesn't complete end-to-end in this environment for reasons
 confirmed unrelated to this change (a pre-existing crash partway through
 the GUI/app test directories, reproduced identically on a clean `git
 stash` of this work).
+
+**Phase 2 — done.** `RunTrackerWidget` (`python/app/pose/run_tracker.py`)
+restructured per B1/B2/B3.
+
+- **B1**: the single `QScrollArea`/`QFormLayout` replaced by a
+  `QTabWidget` with `setTabPosition(QTabWidget.West)` — Summary (a
+  read-only rollup, refreshed via `currentChanged` whenever it becomes
+  active, plus once at construction), UKF & process model, Observations &
+  outliers, Adaptive process noise, Pose reg. & joint limits, NIS
+  feedback, Cross-person coupling, and Hierarchical solver stages
+  (the pre-existing `_stage_table`, promoted from a form row into its own
+  tab). No "Initialization" tab and no `alpha`/`beta`/`kappa`/
+  `near_limit_*` fields anywhere, per Harri's review decision recorded
+  above — those stay config-file-only.
+- **B2**: new `NumericLineEdit` (`QLineEdit` + `QDoubleValidator`,
+  right-aligned) with a `value()`/`setValue()`/`valueChanged` surface
+  matching `QDoubleSpinBox`'s, so it's a drop-in replacement everywhere
+  `_float_spin()` was used (now removed) — every existing
+  `.valueChanged.connect(...)`/`.setEnabled(...)` wire-up needed no other
+  change. `cross_pair_max_n`/`cross_person_max_n` stay `QSpinBox` (small,
+  genuinely-bounded integer counts — the design doc's stated exception).
+- **B3**: a "Configuration:" bar above the tabs with a status label,
+  "Load…" (lists `is_named=1` rows via `list_configs()`, newest first,
+  applies the chosen row's values to every tab via `_apply_config_row()`),
+  and "Save as…" (prompts a name, writes via `edit_config(...,
+  is_named=True, name=...)`). `_start_tracking()`'s old bespoke
+  `_create_config()` — a hand-rolled `INSERT` covering only the columns
+  this dialog had widgets for — is gone, replaced by
+  `_collect_config_overrides()` (the same override-dict shape, values only,
+  no manual JSON encoding — `edit_config()`'s own `_encode()` handles that
+  now) feeding `edit_config(conn, loaded_config_id or BASELINE_CONFIG_ID,
+  is_named=False, **overrides)`. This is a genuine behavior improvement,
+  not just a refactor: any tuning column this dialog has no widget for
+  (`alpha`/`beta`/`kappa`, init-std, `min_cameras_for_init`) now correctly
+  carries forward from whatever was loaded (e.g. a config tuned via the
+  CLI) instead of always resetting to `NULL` as the old raw `INSERT` did.
+- `edit_config()` gained one more small extension beyond Phase 1: an
+  optional `name=...` override (previously the new row always kept the
+  source's own name), needed for "Save as…" to actually rename — with its
+  own test (`test_edit_config_name_override_produces_save_as_semantics`)
+  distinguishing "Save" semantics (no `name=`, keeps the source's name,
+  extends its version series) from "Save as…" (renames, starts/joins a
+  different series).
+- `_sync_stage_overrides()` (replacing the stage-table-to-DB half of the
+  old `_create_config()`) always `DELETE`s a config's own
+  `tracker_config_stages` rows before re-inserting from the stage table --
+  necessary because `edit_config()` already copies the *source* config's
+  stage rows forward, which would otherwise collide (same
+  `(tracker_config_id, group_name)` primary key) with this run's own
+  stage selection. Verified directly: loading a config that already has a
+  `HandL` stage row, then starting a run with only `HandR` enabled,
+  produces a new config whose stages are exactly `{HandR}` — the copied-
+  forward `HandL` is gone, and the *original* loaded config's own `HandL`
+  row is untouched.
+- Incidental fix: `_export_bvh()` used `QProcess` without it ever being
+  imported anywhere in the file — a pre-existing `NameError` waiting to
+  happen the first time BVH export was actually used. Added to the
+  `PySide6.QtCore` import while already touching that line.
+
+Verified: widget constructs headlessly (`QT_QPA_PLATFORM=offscreen`) with
+all 8 tabs present and the Summary tab populated; `NumericLineEdit`'s
+value/setValue/valueChanged round-trips correctly; a full collect-overrides
+→ `edit_config` → save → `_apply_config_row` round trip against a real
+in-memory registry DB reproduces every tweaked value exactly, including a
+JSON-encoded `process_noise_vel_scopes` list; the stage-override
+DELETE-before-INSERT behavior above. Existing tests
+(`test_run_tracker.py`, `test_run_tracker_hierarchical.py`, both pure-
+helper-function coverage that doesn't touch the widget's internal layout)
+still pass unchanged. `python/tests/db` + both `run_tracker` test files:
+268/270 (same 2 pre-existing, unrelated failures). The full
+`python/tests/app`/`python/tests` run still doesn't complete end-to-end in
+this environment; reconfirmed via a second `git stash` comparison that the
+crash point is byte-for-byte identical with and without this phase's
+changes.
 
 ## The brief, in short
 
@@ -483,7 +557,7 @@ the existing 4-tuple flag, not a replacement — existing scripts/tests
 |---|---|---|
 | 0 — **done** | Fix `manage_config.edit_config()`/`create_config_from_toml()` to be column-set-complete and `tracker_config_stages`-aware, generically (via row-keys, not a hardcoded parameter list). New pytest coverage for "edit preserves every column, including stage overrides." | — |
 | 1 — **done** | Schema: `captures.default_tracker_config_id`, `trials.default_tracker_config_id`, `tracker_configs.is_named`, a checked-in baseline `tracker_configs` row (`is_named=1`) the chain terminates in. | 0 |
-| 2 | GUI: restructure `RunTrackerWidget` into vertical tabs (B1), add the numeric-field widget (B2) across all tabs, add the config picker/save-as (B3). No schema change beyond phase 1. | 0, 1 |
+| 2 — **done** | GUI: restructure `RunTrackerWidget` into vertical tabs (B1), add the numeric-field widget (B2) across all tabs, add the config picker/save-as (B3). No schema change beyond phase 1. | 0, 1 |
 | 3 | GUI: "Default tracker config" row + Edit/Change on `TrialPanel`/`CapturePanel` (C). | 1, 2 |
 | 4 | Schema: `capture_persons` + nullable `capture_person_id` on `detection_track_assignments`/`sequence_persons` (D1, D2). | — (independent of 0-3) |
 | 5 | GUI: `CapturePanel` persons section, `main.py` assignment picker, `RunTrackerDialog` people-table data-source switch (D3). | 4, and ideally 2 (so the redesigned dialog isn't touched twice) |

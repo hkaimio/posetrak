@@ -183,6 +183,48 @@ class SkeletonLayout {
     /// @throws std::invalid_argument if any joint in subset is not present in this layout.
     std::vector<int> build_index_map_from(SkeletonLayout const& subset) const;
 
+    /// @brief Build an ERROR-STATE DOF index map from a subset layout into this
+    /// (full) layout -- the error_index/active_dof_count analogue of
+    /// build_index_map_from() (which is state_index/storage_dof_count based).
+    ///
+    /// Storage indexing and error-state indexing diverge whenever a joint has a
+    /// locked axis (a SPHERICAL joint with an equal-limits axis, e.g. this
+    /// codebase's own ball-jointed finger phalanges): storage always reserves 3
+    /// slots per SPHERICAL joint, but a locked axis contributes no slot to the
+    /// error state / UKF covariance. Do NOT reuse build_index_map_from()'s map
+    /// for anything indexed into a covariance matrix or its diagonal -- it will
+    /// silently misalign the moment a locked axis is involved. Use
+    /// error_blob_index() to turn an entry of this map into an absolute offset
+    /// into an error-state vector or covariance diagonal.
+    ///
+    /// The returned vector has one entry per active DOF in @p subset, in the
+    /// same order subset's own error_index assignment used. Entry i is the
+    /// layout-relative error_index (joint-block-only -- see error_blob_index()
+    /// for the absolute offset) in THIS layout that corresponds to subset's
+    /// i-th active joint DOF.
+    ///
+    /// @throws std::invalid_argument if any joint in subset is not present in
+    ///         this layout, or if a shared joint's active_dof_count differs
+    ///         between the two layouts (active_dof_count is a property of the
+    ///         joint's own limits, not the layout, so a mismatch means the two
+    ///         layouts were not built from the same skeleton).
+    std::vector<int> build_error_index_map_from(SkeletonLayout const& subset) const;
+
+    /// @brief Absolute offset of a layout-relative error_index (this layout's
+    /// own joint block) within this layout's error-state vector / covariance
+    /// diagonal:
+    /// [root_pos(3), root_ori(3), joint_pos(joint_active_dof_count()),
+    ///  root_vel(3), root_angvel(3), joint_vel(joint_active_dof_count())].
+    /// This is the dimension the UKF's covariance matrix (and therefore
+    /// tracking_results.cov_diag) actually uses -- see error_state_dim().
+    /// @param error_index A layout-relative error_index for a joint in THIS
+    ///        layout (e.g. one entry of build_error_index_map_from()'s result).
+    /// @param is_velocity False for the position sub-block, true for velocity.
+    int error_blob_index(int error_index, bool is_velocity) const {
+        int const r = root_error_dof_count();
+        return is_velocity ? 2 * r + joint_active_dof_count_ + error_index : r + error_index;
+    }
+
     /// @brief Slice a full-skeleton State to match this (subset) layout's dimensions.
     ///
     /// If the input state already matches this layout's size, returns a copy.

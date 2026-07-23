@@ -65,6 +65,39 @@ TrackerConfig build_stage_tracker_config(TrackerConfig const& parent_config,
 State expand_state_to_full_layout(State const& compact, SkeletonLayout const& compact_layout,
                                   SkeletonLayout const& full_layout);
 
+/// @brief Expand a compact-layout covariance diagonal to full-skeleton
+/// error-state width for DB storage, the cov_diag analogue of
+/// expand_state_to_full_layout().
+///
+/// Unlike state (which is storage-indexed and expanded via
+/// SkeletonLayout::build_index_map_from()), a covariance diagonal is
+/// error-state-indexed -- narrower than storage whenever a joint has a
+/// locked axis (see SkeletonLayout::build_error_index_map_from()'s doc
+/// comment) -- so it needs the error_index-based sibling mapping, not
+/// build_index_map_from()'s map. Every full-layout error-state slot that
+/// @p compact_layout doesn't own (i.e. every not-yet-solved child stage's
+/// DOFs) is filled with a placeholder variance derived from the tracker
+/// config's own init_joint_std/init_velocity_std, matching the convention
+/// expand_state_to_full_layout() uses for state (rest-pose defaults).
+/// Both layouts must have a floating root (this expands a *parent* stage's
+/// own cov_diag; only the skeleton's true root owner calls this).
+///
+/// @param compact_diag Covariance diagonal produced by a Tracker scoped to
+///        @p compact_layout (i.e. compact_layout.error_state_dim() wide).
+/// @param compact_layout The Tracker's own (possibly group-scoped) layout.
+/// @param full_layout Full-skeleton layout; must be a superset of compact_layout.
+/// @param placeholder_pos_variance Variance placeholder for unsolved position DOFs
+///        (typically init_joint_std² from the run's TrackerConfig).
+/// @param placeholder_vel_variance Variance placeholder for unsolved velocity DOFs
+///        (typically init_velocity_std² from the run's TrackerConfig).
+/// @return A vector sized for full_layout.error_state_dim().
+/// @throws std::invalid_argument if either layout lacks a floating root.
+Eigen::VectorXd expand_cov_diag_to_full_layout(Eigen::VectorXd const& compact_diag,
+                                               SkeletonLayout const& compact_layout,
+                                               SkeletonLayout const& full_layout,
+                                               double placeholder_pos_variance,
+                                               double placeholder_vel_variance);
+
 /// @brief Run every hierarchical-solver child stage for one person, after
 /// their parent (main) forward pass + RTS smoothing has completed.
 ///
@@ -81,15 +114,18 @@ State expand_state_to_full_layout(State const& compact, SkeletonLayout const& co
 ///  3. Runs a full forward pass (initialize_with_fixed_root() on the first
 ///     frame, set_external_root_transform()+track_frame() thereafter) and
 ///     its own RTS smoothing pass.
-///  4. Merges every frame's state into the SAME tracking_results rows the
-///     parent's own ResultWriter already wrote (both is_smoothed families),
-///     via a new attach-mode ResultWriter + SkeletonLayout::
-///     build_index_map_from() to translate the child's compact joint_angles/
-///     joint_velocities indices into the parent layout's index space.
-///     cov_diag is deliberately NOT merged in this version -- see the
-///     design doc's cov_diag semantics note; child-DOF variances would need
-///     a parallel error_index (not state_index) mapping this PR doesn't
-///     build. Per-observation results are merged into obs_blob via
+///  4. Merges every frame's state AND cov_diag into the SAME tracking_results
+///     rows the parent's own ResultWriter already wrote (both is_smoothed
+///     families), via a new attach-mode ResultWriter. State uses
+///     SkeletonLayout::build_index_map_from() (storage_index-based) to
+///     translate the child's compact joint_angles/joint_velocities indices
+///     into the parent layout's index space; cov_diag uses the separate
+///     build_error_index_map_from() (error_index-based -- diverges from the
+///     state map whenever a joint has a locked axis, see that method's doc
+///     comment), replacing the placeholder variance
+///     expand_cov_diag_to_full_layout() wrote at the parent's own write time
+///     with this stage's own real per-DOF confidence. Per-observation
+///     results are merged into obs_blob via
 ///     reconstruct_pair_diff_absolute() + ResultWriter::patch_obs_results(),
 ///     with parent_owned_markers set to the markers shared between the
 ///     parent's active group(s) and this stage (parent-wins).

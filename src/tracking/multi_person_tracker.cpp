@@ -17,6 +17,20 @@
 
 namespace posetrak {
 
+namespace {
+
+/// @brief Wrap a covariance diagonal back into a diagonal MatrixXd, matching
+/// what ResultWriter::write_frame()/write_smoothed_frame() expect (they only
+/// ever read .diagonal() themselves, but keep the MatrixXd signature since
+/// most callers pass a real UKF posterior covariance, not a diagonal-only one).
+Eigen::MatrixXd diag_to_covariance_matrix(Eigen::VectorXd const& diag) {
+    Eigen::MatrixXd cov = Eigen::MatrixXd::Zero(diag.size(), diag.size());
+    cov.diagonal() = diag;
+    return cov;
+}
+
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // CSV export helpers (moved verbatim from cli/track.cpp)
 // ---------------------------------------------------------------------------
@@ -519,15 +533,24 @@ void step_person_context(PersonContext& ctx, int step, bool verbose, bool quiet,
         if (dmin > 0.0)
             cov_cond = dmax / dmin;
     }
-    // Hierarchical mode: expand this person's group-scoped state to full-skeleton
-    // width before writing -- see PersonContext::full_layout's doc comment. The
-    // covariance is written as-is (sized to *ctx.layout*, the tracker's own
-    // working layout); hierarchical_solver.cpp deliberately doesn't merge cov_diag.
+    // Hierarchical mode: expand this person's group-scoped state AND covariance
+    // diagonal to full-skeleton width before writing -- see PersonContext::
+    // full_layout's doc comment. Child-owned DOF ranges get a placeholder
+    // variance (matching state's rest-pose-default convention) until a child
+    // stage's own merge (run_hierarchical_child_stages()) overwrites them with
+    // real values -- see the design doc's cov_diag semantics note.
     Eigen::VectorXd const state_vec =
         ctx.full_layout ? expand_state_to_full_layout(result.state, *ctx.layout, *ctx.full_layout)
                               .to_error_vector()
                         : result.state.to_error_vector();
-    ctx.result_writer->write_frame(step, t_effective, state_vec, result.covariance,
+    Eigen::MatrixXd const cov_for_write =
+        ctx.full_layout && result.covariance.size() > 0
+            ? diag_to_covariance_matrix(expand_cov_diag_to_full_layout(
+                  result.covariance.diagonal(), *ctx.layout, *ctx.full_layout,
+                  ctx.tracker_config.init_joint_std * ctx.tracker_config.init_joint_std,
+                  ctx.tracker_config.init_velocity_std * ctx.tracker_config.init_velocity_std))
+            : result.covariance;
+    ctx.result_writer->write_frame(step, t_effective, state_vec, cov_for_write,
                                    result.tracking_lost, result.update_info.num_inliers, cov_cond,
                                    result.update_info.nis, result.update_info.nis_dof);
     if (!result.update_info.observations.empty())
@@ -617,8 +640,16 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
                         ? expand_state_to_full_layout(it->state, *ctx.layout, *ctx.full_layout)
                               .to_error_vector()
                         : it->state.to_error_vector();
+                Eigen::MatrixXd const cov_for_write =
+                    ctx.full_layout && it->covariance.size() > 0
+                        ? diag_to_covariance_matrix(expand_cov_diag_to_full_layout(
+                              it->covariance.diagonal(), *ctx.layout, *ctx.full_layout,
+                              ctx.tracker_config.init_joint_std * ctx.tracker_config.init_joint_std,
+                              ctx.tracker_config.init_velocity_std *
+                                  ctx.tracker_config.init_velocity_std))
+                        : it->covariance;
                 ctx.result_writer->write_smoothed_frame(step_idx++, it->timestamp, state_vec,
-                                                        it->covariance);
+                                                        cov_for_write);
             }
         }
 

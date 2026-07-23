@@ -347,6 +347,208 @@ TEST_CASE("build_index_map_from: throws when subset joint not in this layout",
 }
 
 // ---------------------------------------------------------------------------
+// Tests: build_error_index_map_from
+// ---------------------------------------------------------------------------
+//
+// Locks wrist.L's middle axis (SPHERICAL, in "main") so its active_dof_count
+// (2) differs from its storage_dof_count (3) -- exactly the "ball joint with
+// one equal-limits axis" pattern already live in this codebase's own finger
+// joints (e.g. f_index.01.L's y-axis in tests/data/Harri_skeleton-regress-
+// test.yaml). This makes state_index and error_index diverge for every joint
+// that follows wrist.L in traversal order (finger1.L, finger2.L, shoulder.R,
+// elbow.R, wrist.R, finger1.R, finger2.R), so a test built on this fixture
+// actually exercises the divergence build_index_map_from() cannot handle.
+
+static Skeleton create_test_skeleton_with_locked_wrist_axis() {
+    Skeleton skel;
+
+    uint32_t hips =
+        skel.add_joint("hips", std::nullopt, JointType::SPHERICAL, Eigen::Vector3d::Zero(), "main");
+    uint32_t spine =
+        skel.add_joint("spine", hips, JointType::SPHERICAL, Eigen::Vector3d(0, 0.1, 0), "main");
+    uint32_t left_shoulder = skel.add_joint("shoulder.L", spine, JointType::SPHERICAL,
+                                            Eigen::Vector3d(0.2, 0.1, 0), "main");
+    uint32_t left_elbow = skel.add_joint("elbow.L", left_shoulder, JointType::REVOLUTE,
+                                         Eigen::Vector3d(0.3, 0, 0), "main");
+    uint32_t left_wrist = skel.add_joint("wrist.L", left_elbow, JointType::SPHERICAL,
+                                         Eigen::Vector3d(0.3, 0, 0), "main");
+    // Lock the middle (y) axis: min == max.
+    std::array<Eigen::Vector2d, 3> wrist_limits;
+    wrist_limits[0] = Eigen::Vector2d(-1.0, 1.0);
+    wrist_limits[1] = Eigen::Vector2d(0.0, 0.0);  // locked
+    wrist_limits[2] = Eigen::Vector2d(-1.0, 1.0);
+    skel.set_joint_limits(left_wrist, wrist_limits, 3);
+    skel.add_joint("finger1.L", left_wrist, JointType::REVOLUTE, Eigen::Vector3d(0.1, 0, 0),
+                   "HandL");
+    skel.add_joint("finger2.L", left_wrist, JointType::REVOLUTE, Eigen::Vector3d(0.1, 0.05, 0),
+                   "HandL");
+
+    uint32_t right_shoulder = skel.add_joint("shoulder.R", spine, JointType::SPHERICAL,
+                                             Eigen::Vector3d(-0.2, 0.1, 0), "main");
+    uint32_t right_elbow = skel.add_joint("elbow.R", right_shoulder, JointType::REVOLUTE,
+                                          Eigen::Vector3d(-0.3, 0, 0), "main");
+    uint32_t right_wrist = skel.add_joint("wrist.R", right_elbow, JointType::SPHERICAL,
+                                          Eigen::Vector3d(-0.3, 0, 0), "main");
+    skel.add_joint("finger1.R", right_wrist, JointType::REVOLUTE, Eigen::Vector3d(-0.1, 0, 0),
+                   "HandR");
+    skel.add_joint("finger2.R", right_wrist, JointType::REVOLUTE, Eigen::Vector3d(-0.1, 0.05, 0),
+                   "HandR");
+
+    return skel;
+}
+
+TEST_CASE("locked wrist fixture: wrist.L active_dof_count is 2, storage_dof_count is 3",
+          "[skeleton_layout]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(create_test_skeleton_with_locked_wrist_axis()));
+    auto const* wrist_l = layout->get_joint("wrist.L");
+    REQUIRE(wrist_l != nullptr);
+    REQUIRE(wrist_l->storage_dof_count == 3u);
+    REQUIRE(wrist_l->active_dof_count == 2u);
+}
+
+TEST_CASE("build_error_index_map_from: state_index and error_index diverge after a locked axis",
+          "[skeleton_layout]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(create_test_skeleton_with_locked_wrist_axis()));
+
+    // wrist.L itself: state_index 7 (3 slots: 7,8,9), error_index 7 (2 slots: 7,8 --
+    // the locked middle axis contributes no error-state slot).
+    auto const* wrist_l = layout->get_joint("wrist.L");
+    REQUIRE(wrist_l->state_index == 7u);
+    REQUIRE(wrist_l->error_index == 7u);
+
+    // shoulder.R comes after wrist.L and its 2 excluded (finger) siblings in
+    // traversal order. state_index accounts for all 3 wrist.L storage slots
+    // (10,11,12 already consumed by fingers) -> shoulder.R state_index == 12.
+    // error_index only advances by wrist.L's 2 active slots -> shoulder.R
+    // error_index == 11, one less than state_index. This is exactly the
+    // divergence build_index_map_from() cannot represent.
+    auto const* shoulder_r = layout->get_joint("shoulder.R");
+    REQUIRE(shoulder_r != nullptr);
+    REQUIRE(shoulder_r->state_index == 12u);
+    REQUIRE(shoulder_r->error_index == 11u);
+}
+
+TEST_CASE("build_error_index_map_from: main subset into full layout, locked-axis fixture",
+          "[skeleton_layout]") {
+    Skeleton skel = create_test_skeleton_with_locked_wrist_axis();
+    auto full = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    auto main = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"main"});
+
+    // Sanity: state_index-based map still walks storage slots 1:1, unaware of
+    // the locked axis -- this is build_index_map_from()'s known limitation,
+    // not a bug in it; it's simply the wrong tool for a covariance/error-state
+    // merge, which is exactly why build_error_index_map_from() exists.
+    auto state_map = full->build_index_map_from(*main);
+    REQUIRE(state_map.size() == 17u);
+
+    auto error_map = full->build_error_index_map_from(*main);
+    // main's active DOF count is 16 (17 storage slots minus wrist.L's 1 locked axis).
+    REQUIRE(error_map.size() == 16u);
+
+    // main layout error-index order:
+    //   spine(0,1,2) -> full 0,1,2
+    //   shoulder.L(3,4,5) -> full 3,4,5
+    //   elbow.L(6) -> full 6
+    //   wrist.L(7,8) -> full 7,8            (only 2 active axes, not 3)
+    //   shoulder.R(9,10,11) -> full 11,12,13
+    //   elbow.R(12) -> full 14
+    //   wrist.R(13,14,15) -> full 15,16,17
+    std::vector<int> expected = {
+        0,  1,  2,   // spine
+        3,  4,  5,   // shoulder.L
+        6,           // elbow.L
+        7,  8,       // wrist.L (locked middle axis excluded)
+        11, 12, 13,  // shoulder.R
+        14,          // elbow.R
+        15, 16, 17   // wrist.R
+    };
+    REQUIRE(error_map == expected);
+}
+
+TEST_CASE("build_error_index_map_from: HandL subset into full layout, locked-axis fixture",
+          "[skeleton_layout]") {
+    Skeleton skel = create_test_skeleton_with_locked_wrist_axis();
+    auto full = SkeletonLayout::from_full_skeleton(std::make_shared<const Skeleton>(skel));
+    auto hand_l = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"HandL"});
+
+    auto error_map = full->build_error_index_map_from(*hand_l);
+
+    // finger1.L/finger2.L are unaffected by wrist.L's locked axis themselves
+    // (both REVOLUTE, single active DOF each), but their full-layout
+    // error_index (9, 10) is now one less than their full-layout state_index
+    // (10, 11) because wrist.L only contributed 2 error-state slots ahead of
+    // them instead of 3.
+    REQUIRE(error_map.size() == 2u);
+    REQUIRE(error_map[0] == 9);   // finger1.L
+    REQUIRE(error_map[1] == 10);  // finger2.L
+}
+
+TEST_CASE("build_error_index_map_from: reflexive -- full into full yields identity",
+          "[skeleton_layout]") {
+    auto full = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(create_test_skeleton_with_locked_wrist_axis()));
+
+    auto map = full->build_error_index_map_from(*full);
+
+    REQUIRE(map.size() == static_cast<size_t>(full->joint_active_dof_count()));
+    for (size_t i = 0; i < map.size(); ++i) {
+        REQUIRE(map[i] == static_cast<int>(i));
+    }
+}
+
+TEST_CASE("build_error_index_map_from: throws when subset joint not in this layout",
+          "[skeleton_layout]") {
+    Skeleton skel = create_test_skeleton();
+    auto main = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"main"});
+    auto hand_l = SkeletonLayout::from_groups(std::make_shared<const Skeleton>(skel), {"HandL"});
+
+    REQUIRE_THROWS_AS(main->build_error_index_map_from(*hand_l), std::invalid_argument);
+}
+
+TEST_CASE("build_error_index_map_from: throws when active_dof_count mismatches between layouts",
+          "[skeleton_layout]") {
+    // Build "main" from a skeleton where wrist.L has a locked axis, and a full
+    // layout from a DIFFERENT skeleton object where it doesn't -- same joint
+    // name, different active_dof_count, must be rejected rather than silently
+    // producing a map that misaligns by one slot per divergent joint.
+    auto full_unlocked = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(create_test_skeleton()));
+    auto main_locked = SkeletonLayout::from_groups(
+        std::make_shared<const Skeleton>(create_test_skeleton_with_locked_wrist_axis()), {"main"});
+
+    REQUIRE_THROWS_AS(full_unlocked->build_error_index_map_from(*main_locked),
+                      std::invalid_argument);
+}
+
+// ---------------------------------------------------------------------------
+// Tests: error_blob_index
+// ---------------------------------------------------------------------------
+
+TEST_CASE("error_blob_index: floating-root layout offsets position and velocity blocks",
+          "[skeleton_layout]") {
+    auto layout = SkeletonLayout::from_full_skeleton(
+        std::make_shared<const Skeleton>(create_test_skeleton()));
+    // root_error_dof_count() == 6, joint_active_dof_count() == 21.
+    REQUIRE(layout->error_blob_index(0, /*is_velocity=*/false) == 6);
+    REQUIRE(layout->error_blob_index(20, /*is_velocity=*/false) == 26);
+    REQUIRE(layout->error_blob_index(0, /*is_velocity=*/true) == 33);   // 2*6 + 21 + 0
+    REQUIRE(layout->error_blob_index(20, /*is_velocity=*/true) == 53);  // 2*6 + 21 + 20
+    // error_state_dim() is 54 (0..53), so the last velocity index is in range.
+    REQUIRE(layout->error_state_dim() == 54);
+}
+
+TEST_CASE("error_blob_index: fixed-root (child) layout has no root offset", "[skeleton_layout]") {
+    auto layout = SkeletonLayout::from_groups(
+        std::make_shared<const Skeleton>(create_test_skeleton()), {"HandL"});
+    // root_error_dof_count() == 0, joint_active_dof_count() == 2.
+    REQUIRE(layout->error_blob_index(0, /*is_velocity=*/false) == 0);
+    REQUIRE(layout->error_blob_index(0, /*is_velocity=*/true) == 2);  // 2*0 + 2 + 0
+    REQUIRE(layout->error_state_dim() == 4);
+}
+
+// ---------------------------------------------------------------------------
 // Tests: error handling
 // ---------------------------------------------------------------------------
 

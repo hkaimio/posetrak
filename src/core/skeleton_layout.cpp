@@ -279,6 +279,36 @@ std::vector<int> SkeletonLayout::build_index_map_from(SkeletonLayout const& subs
     return map;
 }
 
+std::vector<int> SkeletonLayout::build_error_index_map_from(SkeletonLayout const& subset) const {
+    // Joints are matched by name only. Caller must ensure both layouts were
+    // derived from the same Skeleton -- this function cannot verify that.
+    std::vector<int> map;
+    map.reserve(static_cast<size_t>(subset.joint_active_dof_count_));
+
+    for (auto const& subdesc : subset.joints_) {
+        JointDesc const* desc = get_joint(subdesc.name);
+        if (!desc) {
+            throw std::invalid_argument(
+                fmt::format("SkeletonLayout::build_error_index_map_from: joint '{}' exists in "
+                            "subset but not in this layout",
+                            subdesc.name));
+        }
+        if (desc->active_dof_count != subdesc.active_dof_count) {
+            throw std::invalid_argument(fmt::format(
+                "SkeletonLayout::build_error_index_map_from: joint '{}' has active_dof_count "
+                "{} in subset but {} in this layout -- active_dof_count is a property of the "
+                "joint's own limits, so this means the two layouts were not built from the "
+                "same skeleton",
+                subdesc.name, subdesc.active_dof_count, desc->active_dof_count));
+        }
+        // One entry per active DOF of this joint
+        for (int i = 0; i < subdesc.active_dof_count; ++i) {
+            map.push_back(desc->error_index + i);
+        }
+    }
+    return map;
+}
+
 int SkeletonLayout::parent_marker_id(int marker_id) const {
     auto it = marker_to_parent_marker_.find(marker_id);
     if (it == marker_to_parent_marker_.end())

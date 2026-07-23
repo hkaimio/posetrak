@@ -225,23 +225,28 @@ def get_marker_groups(conn: sqlite3.Connection, skeleton_id: str) -> dict[str, l
     return out
 
 
-# cov_diag mixed semantics: a hierarchical-solver child stage's merge
-# (ResultWriter::patch_frame(), see src/tracking/hierarchical_solver.cpp)
-# deliberately does NOT patch cov_diag for the DOFs it solves -- doing so
-# needs a parallel error_index mapping between the parent's and child's
-# layouts that doesn't exist yet (see the design doc's PR 6 row). So on a
-# hierarchical run, cov_diag entries for hand/finger DOFs are whatever the
-# PARENT's own full-skeleton-width expansion produced for them at write time
-# (a rest-pose placeholder, not a real per-DOF uncertainty) -- never a
-# measure of the child stage's own confidence. Only cov_diag for the
-# parent's own group's (e.g. "main") DOFs is meaningful. Any tool surfacing
-# cov_diag-derived confidence must carry this caveat whenever
-# get_run_stages() is non-empty for the run being inspected.
+# cov_diag on a hierarchical run (fixed 2026-07-23; see
+# docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md):
+# the parent stage expands cov_diag to full-skeleton error-state width at
+# write time (SkeletonLayout::error_state_dim(), see db/session_schema.sql's
+# tracking_results comment), filling every DOF it doesn't own with a
+# placeholder variance derived from the run's tracker_configs.init_joint_std/
+# init_velocity_std -- NOT a real per-DOF uncertainty. Each child stage then
+# patches its own owned DOFs with its real solved covariance
+# (hierarchical_solver.cpp's run_one_stage(), via
+# SkeletonLayout::build_error_index_map_from()). So a DOF's cov_diag entry is
+# only a real confidence value once that DOF's owning group's stage has
+# completed -- check get_run_stages()' status for that group, don't infer it
+# from the blob itself (a placeholder and a genuinely tiny real variance are
+# not distinguishable by value alone). Any tool surfacing cov_diag-derived
+# confidence should carry this caveat whenever get_run_stages() is non-empty
+# for the run being inspected.
 COV_DIAG_HIERARCHICAL_CAVEAT = (
-    "cov_diag for hand/finger DOFs on a hierarchical run is NOT a real "
-    "confidence value -- the child stage's merge doesn't patch it, so it "
-    "still holds the parent's own rest-pose placeholder. Only trust "
-    "cov_diag-derived stats for the parent group's own DOFs on such a run."
+    "cov_diag for a DOF on a hierarchical run is only a real confidence "
+    "value once that DOF's owning group's stage status is 'complete' (see "
+    "get_run_stages()) -- until then it still holds a placeholder variance "
+    "from the run's own init_joint_std/init_velocity_std, not a real "
+    "per-DOF uncertainty."
 )
 
 

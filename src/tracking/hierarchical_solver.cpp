@@ -64,6 +64,48 @@ State expand_state_to_full_layout(State const& compact, SkeletonLayout const& co
     return full;
 }
 
+Eigen::VectorXd expand_cov_diag_to_full_layout(Eigen::VectorXd const& compact_diag,
+                                               SkeletonLayout const& compact_layout,
+                                               SkeletonLayout const& full_layout,
+                                               double placeholder_pos_variance,
+                                               double placeholder_vel_variance) {
+    if (!compact_layout.has_floating_root() || !full_layout.has_floating_root()) {
+        throw std::invalid_argument(
+            "expand_cov_diag_to_full_layout: both layouts must have a floating root -- this "
+            "expands a parent stage's own cov_diag, which always owns the skeleton's true root");
+    }
+
+    int const r = full_layout.root_error_dof_count();  // == compact_layout's, checked above
+    int const k_full = full_layout.joint_active_dof_count();
+    int const k_compact = compact_layout.joint_active_dof_count();
+    Eigen::VectorXd full = Eigen::VectorXd::Zero(full_layout.error_state_dim());
+
+    // Layout (see error_blob_index()'s doc comment):
+    //   [root_pos_ori(r), joint_pos(K), root_vel_angvel(r), joint_vel(K)]
+    int const full_root_vel_start = r + k_full;
+    int const compact_root_vel_start = r + k_compact;
+
+    // Root pose/velocity pass through unchanged.
+    full.segment(0, r) = compact_diag.segment(0, r);
+    full.segment(full_root_vel_start, r) = compact_diag.segment(compact_root_vel_start, r);
+
+    // Joint blocks: placeholder everywhere, then overwrite with compact_layout's
+    // own known variances at their correct full-layout error-state slots.
+    full.segment(r, k_full).setConstant(placeholder_pos_variance);
+    full.segment(full_root_vel_start + r, k_full).setConstant(placeholder_vel_variance);
+
+    auto error_map = full_layout.build_error_index_map_from(compact_layout);
+    for (size_t i = 0; i < error_map.size(); ++i) {
+        int const full_error_idx = error_map[i];
+        int const compact_error_idx = static_cast<int>(i);
+        full[full_layout.error_blob_index(full_error_idx, /*is_velocity=*/false)] =
+            compact_diag[compact_layout.error_blob_index(compact_error_idx, /*is_velocity=*/false)];
+        full[full_layout.error_blob_index(full_error_idx, /*is_velocity=*/true)] =
+            compact_diag[compact_layout.error_blob_index(compact_error_idx, /*is_velocity=*/true)];
+    }
+    return full;
+}
+
 namespace {
 
 /// @brief Markers declared in both the parent's active group(s) and this
@@ -168,6 +210,16 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
     std::vector<int> child_tracked_steps;
     child_tracked_steps.reserve(parent_smoothed.size());
 
+    // State merge uses build_index_map_from() (storage_index-based); cov_diag
+    // merge needs the separate error_index-based map -- see
+    // SkeletonLayout::build_error_index_map_from()'s doc comment for why
+    // these two are not interchangeable (they diverge whenever a joint has a
+    // locked axis). Both layouts are fixed for the whole stage, so compute
+    // once rather than per frame.
+    auto const merge_map = parent_layout.build_index_map_from(*child_layout);
+    auto const error_map = parent_layout.build_error_index_map_from(*child_layout);
+    int const n_dof_full = parent_layout.total_storage_dof_count();
+
     for (size_t i = 0; i < parent_smoothed.size(); ++i) {
         auto pose_opt = traj_stream.next();
         if (!pose_opt.has_value()) {
@@ -246,8 +298,6 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
         }
 
         // ---- Merge state into the parent's tracking_results row (is_smoothed=0). ----
-        auto merge_map = parent_layout.build_index_map_from(*child_layout);
-        int const n_dof_full = parent_layout.total_storage_dof_count();
         Eigen::VectorXd const& child_angles = merged_state->joint_angles();
         Eigen::VectorXd const& child_vels = merged_state->joint_velocities();
 
@@ -262,7 +312,30 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
             state_indices.push_back(12 + n_dof_full + full_idx);
             state_values.push_back(child_vels[static_cast<Eigen::Index>(j)]);
         }
-        stage_writer.patch_frame(tracker_step, /*is_smoothed=*/false, state_indices, state_values);
+
+        // ---- Merge cov_diag: this stage's own covariance for the DOFs it solves,
+        //      replacing the placeholder expand_cov_diag_to_full_layout() wrote at
+        //      the parent's own write time. ----
+        Eigen::VectorXd const child_cov_diag = child_tracker.covariance().diagonal();
+        std::vector<int> cov_diag_indices;
+        std::vector<double> cov_diag_values;
+        cov_diag_indices.reserve(2 * error_map.size());
+        cov_diag_values.reserve(2 * error_map.size());
+        for (size_t j = 0; j < error_map.size(); ++j) {
+            int const full_error_idx = error_map[j];
+            int const child_error_idx = static_cast<int>(j);
+            cov_diag_indices.push_back(
+                parent_layout.error_blob_index(full_error_idx, /*is_velocity=*/false));
+            cov_diag_values.push_back(child_cov_diag[child_layout->error_blob_index(
+                child_error_idx, /*is_velocity=*/false)]);
+            cov_diag_indices.push_back(
+                parent_layout.error_blob_index(full_error_idx, /*is_velocity=*/true));
+            cov_diag_values.push_back(child_cov_diag[child_layout->error_blob_index(
+                child_error_idx, /*is_velocity=*/true)]);
+        }
+
+        stage_writer.patch_frame(tracker_step, /*is_smoothed=*/false, state_indices, state_values,
+                                 cov_diag_indices, cov_diag_values);
     }
 
     // ---- Smoothing pass: merge into is_smoothed=1 rows. ----
@@ -273,8 +346,8 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
             "track_frame() calls succeeded -- child_tracked_steps bookkeeping is out of sync",
             group->name, child_smoothed.size(), child_tracked_steps.size()));
     }
-    auto merge_map = parent_layout.build_index_map_from(*child_layout);
-    int const n_dof_full = parent_layout.total_storage_dof_count();
+    // merge_map/error_map/n_dof_full computed once above the forward-pass loop
+    // -- reused here unchanged (both layouts are fixed for the whole stage).
     for (size_t i = 0; i < child_smoothed.size(); ++i) {
         int const tracker_step = child_tracked_steps[i];
         Eigen::VectorXd const& child_angles = child_smoothed[i].state.joint_angles();
@@ -291,7 +364,27 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
             state_indices.push_back(12 + n_dof_full + full_idx);
             state_values.push_back(child_vels[static_cast<Eigen::Index>(j)]);
         }
-        stage_writer.patch_frame(tracker_step, /*is_smoothed=*/true, state_indices, state_values);
+
+        Eigen::VectorXd const child_cov_diag = child_smoothed[i].covariance.diagonal();
+        std::vector<int> cov_diag_indices;
+        std::vector<double> cov_diag_values;
+        cov_diag_indices.reserve(2 * error_map.size());
+        cov_diag_values.reserve(2 * error_map.size());
+        for (size_t j = 0; j < error_map.size(); ++j) {
+            int const full_error_idx = error_map[j];
+            int const child_error_idx = static_cast<int>(j);
+            cov_diag_indices.push_back(
+                parent_layout.error_blob_index(full_error_idx, /*is_velocity=*/false));
+            cov_diag_values.push_back(child_cov_diag[child_layout->error_blob_index(
+                child_error_idx, /*is_velocity=*/false)]);
+            cov_diag_indices.push_back(
+                parent_layout.error_blob_index(full_error_idx, /*is_velocity=*/true));
+            cov_diag_values.push_back(child_cov_diag[child_layout->error_blob_index(
+                child_error_idx, /*is_velocity=*/true)]);
+        }
+
+        stage_writer.patch_frame(tracker_step, /*is_smoothed=*/true, state_indices, state_values,
+                                 cov_diag_indices, cov_diag_values);
     }
 
     stage_writer.set_stage_status(group->name, "complete", /*set_started=*/false,

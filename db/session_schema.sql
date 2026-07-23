@@ -246,8 +246,42 @@ CREATE TABLE IF NOT EXISTS tracking_run_persons (
 );
 
 -- Per-frame tracking results
--- state    : little-endian float64 blob — full UKF state vector
--- cov_diag : little-endian float64 blob — diagonal of covariance matrix
+-- state    : little-endian float64 blob, STORAGE-indexed:
+--              [root_pos(3), root_axis_angle(3), joint_angles(K_storage),
+--               root_vel(3), root_angvel(3), joint_velocities(K_storage)]
+--            where K_storage = SkeletonLayout::total_storage_dof_count() --
+--            every SPHERICAL joint always occupies 3 slots here, even if one
+--            of its axes is locked by equal limits.
+-- cov_diag : little-endian float64 blob, ERROR-STATE-indexed (the diagonal
+--            of the UKF's own covariance matrix):
+--              [root_pos(3), root_ori(3), joint_pos(K_active),
+--               root_vel(3), root_angvel(3), joint_vel(K_active)]
+--            where K_active = SkeletonLayout::joint_active_dof_count() -- a
+--            locked SPHERICAL axis contributes no slot here. K_active <
+--            K_storage whenever any joint in the skeleton has a locked axis,
+--            so state and cov_diag are NOT the same length in general and
+--            must never be indexed with the same offset arithmetic; see
+--            SkeletonLayout::build_index_map_from() (state, storage-indexed)
+--            vs. build_error_index_map_from() (cov_diag, error-indexed).
+--
+-- Hierarchical solver runs (see tracking_run_stages below and
+-- docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md):
+-- each row still spans the person's FULL, unmodified skeleton -- there is no
+-- separate run/row per stage -- even though every stage's own Tracker only
+-- estimates a subset of joints (e.g. "main", "HandL", "HandR"). Each stage
+-- read-modify-writes only the index range it owns:
+--   * The first stage to write a row (the one holding the skeleton's true
+--     floating root) expands both state and cov_diag to full width before
+--     writing. State's not-yet-solved range is filled with rest-pose
+--     defaults; cov_diag's is filled with a placeholder variance derived
+--     from the run's own tracker_configs.init_joint_std/init_velocity_std
+--     (NOT a real per-DOF uncertainty).
+--   * Every later stage (e.g. a hand child) patches its own owned range in
+--     both blobs with its real solved values -- state via
+--     build_index_map_from(), cov_diag via build_error_index_map_from().
+-- Whether a given DOF's cov_diag entry is a real value or still the
+-- placeholder is NOT recoverable by sniffing the blob -- check
+-- tracking_run_stages.status for that DOF's owning group instead.
 CREATE TABLE IF NOT EXISTS tracking_results (
     run_id                TEXT    NOT NULL REFERENCES tracking_runs(id),
     person_id             INTEGER NOT NULL,

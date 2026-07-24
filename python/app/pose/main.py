@@ -1,8 +1,11 @@
 """main.py — PoseExtractionWindow: main GUI for the pose extraction pipeline."""
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -79,7 +82,13 @@ class _ComboBox(QComboBox):
 
 
 class DetectionJob(BackgroundJob):
-    camera_progress = Signal(int, int)   # cameras_done, cameras_total
+    # cameras_done, cameras_total, phase label -- the label distinguishes
+    # the pose-detection pass from the (separate, later) hand-refinement
+    # pass, since both drive the same "N/M cameras" indicator and it would
+    # otherwise read "100%" throughout hand refinement (detection's own
+    # cameras-done count never resets, and hand refinement previously had
+    # no per-camera-completion signal of its own at all).
+    camera_progress = Signal(int, int, str)
 
     def __init__(
         self,
@@ -111,43 +120,62 @@ class DetectionJob(BackgroundJob):
         from app.pose.detection_pipeline import DetectionPipeline
 
         session = open_session(Path(self._session_path))
-
-        det = YOLOv11Detector(
-            model_name=f"{self._detector_name}.pt",
-            conf=self._detector_conf,
-        )
-        est = RTMPoseEstimator(model_name=self._pose_model_name)
-
-        def on_progress(done: int, total: int, cam_id: str) -> None:
-            pct = int(done / max(total, 1) * 100)
-            self.progress.emit(pct, f"{cam_id}  {done}/{total} frames")
-
-        def on_camera_done(done: int, total: int) -> None:
-            self.camera_progress.emit(done, total)
-
-        pipeline = DetectionPipeline(
-            session=session,
-            shot_id=self._shot_id,
-            sync_config_id=self._sync_config_id,
-            time_start_s=self._time_start_s,
-            time_end_s=self._time_end_s,
-            detector=det,
-            estimator=est,
-        )
-        result = pipeline.run(on_progress=on_progress, on_camera_done=on_camera_done)
-
-        if self._refine_hands:
-            from posetrak.detection.hand_refinement import HandRefinementPipeline
-
-            def on_hand_progress(done: int, total: int, cam_id: str) -> None:
-                pct = int(done / max(total, 1) * 100)
-                self.progress.emit(pct, f"hands: {cam_id}  {done}/{total} frames")
-
-            hand_pipeline = HandRefinementPipeline(session)
-            n_refined = hand_pipeline.run(
-                result.detection_run_id, pipeline.cameras, on_progress=on_hand_progress
+        try:
+            det = YOLOv11Detector(
+                model_name=f"{self._detector_name}.pt",
+                conf=self._detector_conf,
             )
-            self.progress.emit(100, f"hands: {n_refined} refined")
+            est = RTMPoseEstimator(model_name=self._pose_model_name)
+
+            def on_progress(done: int, total: int, cam_id: str) -> None:
+                pct = int(done / max(total, 1) * 100)
+                self.progress.emit(pct, f"{cam_id}  {done}/{total} frames")
+
+            def on_camera_done(done: int, total: int) -> None:
+                self.camera_progress.emit(done, total, "Pose detection")
+
+            pipeline = DetectionPipeline(
+                session=session,
+                shot_id=self._shot_id,
+                sync_config_id=self._sync_config_id,
+                time_start_s=self._time_start_s,
+                time_end_s=self._time_end_s,
+                detector=det,
+                estimator=est,
+            )
+            result = pipeline.run(on_progress=on_progress, on_camera_done=on_camera_done)
+
+            if self._refine_hands:
+                from posetrak.detection.hand_refinement import HandRefinementPipeline
+
+                def on_hand_progress(done: int, total: int, cam_id: str) -> None:
+                    pct = int(done / max(total, 1) * 100)
+                    self.progress.emit(pct, f"hands: {cam_id}  {done}/{total} frames")
+
+                def on_hand_camera_done(done: int, total: int) -> None:
+                    self.camera_progress.emit(done, total, "Hand refinement")
+
+                # Reset the cameras-done indicator to 0 for this new phase --
+                # otherwise it stays at the pose-detection pass's 100% for
+                # however long hand refinement takes, implying "already done"
+                # for a phase that hasn't started yet.
+                self.camera_progress.emit(0, len(pipeline.cameras), "Hand refinement")
+                hand_pipeline = HandRefinementPipeline(session)
+                n_refined = hand_pipeline.run(
+                    result.detection_run_id, pipeline.cameras, on_progress=on_hand_progress,
+                    on_camera_done=on_hand_camera_done,
+                )
+                self.progress.emit(100, f"hands: {n_refined} refined")
+        finally:
+            # Close deterministically here rather than leaving it to whenever
+            # the GC finalizes this thread-local connection -- otherwise its
+            # teardown (which can still touch the WAL file, e.g. an implicit
+            # checkpoint) races against the main thread, which starts reading
+            # the same session file the instant `finished` below is handled
+            # (e.g. RunTrackerWidget/PoseExtractionWindow re-querying the new
+            # run). Emitting `finished` only after this returns guarantees
+            # the main thread never observes this connection mid-teardown.
+            session.close()
 
         self.finished.emit(result.detection_run_id)
 
@@ -585,7 +613,15 @@ class PoseExtractionWindow(QMainWindow):
             return
         from posetrak.db.manage_person import list_persons
 
-        names = [p["name"] for p in list_persons(self._session, self._shot_id)]
+        try:
+            names = [p["name"] for p in list_persons(self._session, self._shot_id)]
+        except sqlite3.Error:
+            # Never let this (a convenience pre-fill, not load-bearing data)
+            # take down the run-selection handler it's called from -- that
+            # handler also drives the stitcher/frame-view state for the
+            # newly finished detection run.
+            _log.exception("_populate_known_persons: failed to list capture_persons")
+            return
         for name in names:
             if self._person_combo.findText(name) < 0:
                 self._person_combo.addItem(name)
@@ -676,9 +712,9 @@ class PoseExtractionWindow(QMainWindow):
         self._cam_progress_bar.setValue(pct)
         self._cam_progress_label.setText(msg)
 
-    def _on_camera_progress(self, done: int, total: int) -> None:
+    def _on_camera_progress(self, done: int, total: int, phase: str) -> None:
         self._total_progress_bar.setValue(int(done / max(total, 1) * 100))
-        self._total_progress_label.setText(f"{done}/{total} cameras")
+        self._total_progress_label.setText(f"{phase}: {done}/{total} cameras")
 
     def _on_job_finished(self, run_id: str) -> None:
         self._set_controls_enabled(True)

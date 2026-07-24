@@ -214,12 +214,19 @@ class HandRefinementPipeline:
         run_id: str,
         cameras: list[CameraInfo],
         on_progress: ProgressCallback | None = None,
+        on_camera_done: Callable[[int, int], None] | None = None,
     ) -> int:
         """Refine hands for every camera in *cameras* for run *run_id*.
 
         Returns the number of (frame, track, side) hand detections that
         passed the gate and were written. No-ops (returns 0) if the run's
         pose model isn't the 133-point whole-body layout.
+
+        *on_camera_done* (done, total), if given, fires after each camera
+        finishes -- mirrors DetectionPipeline.run()'s own callback of the
+        same name, so a caller driving one combined "N/M cameras" progress
+        indicator across both the detection and hand-refinement passes
+        doesn't need two different callback shapes.
         """
         row = self._session.execute(
             "SELECT pose_model FROM detection_runs WHERE id=?", (run_id,)
@@ -230,10 +237,12 @@ class HandRefinementPipeline:
             return 0
 
         total_refined = 0
-        for cam in cameras:
+        for i, cam in enumerate(cameras):
             if self._stop_event.is_set():
                 break
             total_refined += self._process_camera(run_id, cam, on_progress)
+            if on_camera_done:
+                on_camera_done(i + 1, len(cameras))
         return total_refined
 
     def _process_camera(
@@ -278,14 +287,14 @@ class HandRefinementPipeline:
                         n_refined += 1
                 frames_done += 1
                 if on_progress:
-                    on_progress(frames_done, total, cam.camera_instance_id)
+                    on_progress(frames_done, total, cam.label or cam.camera_instance_id)
                 if len(updates) >= 200:
                     self._flush(updates)
                     updates.clear()
         self._flush(updates)
         _log.info(
             "_process_camera: %s done — %d/%d frames, %d hands refined",
-            cam.camera_instance_id, frames_done, total, n_refined,
+            cam.label or cam.camera_instance_id, frames_done, total, n_refined,
         )
         return n_refined
 

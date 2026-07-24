@@ -215,3 +215,42 @@ def test_empty_frame_no_crash(session):
     assert len(dets) == 0
     spans = read_track_spans(session, run_id, ids["svid"])
     assert len(spans) == 0
+
+
+# ---------------------------------------------------------------------------
+# CameraInfo.label (progress/log messages should show a camera's name, not
+# just its UUID -- see hand-detection-refinement live-review feedback)
+# ---------------------------------------------------------------------------
+
+
+def test_load_cameras_populates_label_from_camera_instances(session):
+    from posetrak.detection.pipeline import DetectionPipeline
+
+    session.execute(
+        "INSERT INTO camera_models (id, manufacturer, model_name) VALUES ('cm1', 'GoPro', 'Hero11 Mini')"
+    )
+    session.execute(
+        "INSERT INTO camera_instances (id, camera_model_id, label) VALUES (?, 'cm1', ?)",
+        (_CAM_ID, "gopro-11_mini_01"),
+    )
+    session.commit()
+
+    pipeline = DetectionPipeline(
+        session=session, shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        time_start_s=0.0, time_end_s=1.0, detector=None, estimator=None,
+    )
+    assert len(pipeline.cameras) == 1
+    assert pipeline.cameras[0].label == "gopro-11_mini_01"
+
+
+def test_load_cameras_falls_back_to_uuid_when_camera_instance_missing(session):
+    """No camera_instances row for this camera_instance_id (e.g. a stale
+    reference) -- label should fall back to the UUID, not be blank."""
+    from posetrak.detection.pipeline import DetectionPipeline
+
+    pipeline = DetectionPipeline(
+        session=session, shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        time_start_s=0.0, time_end_s=1.0, detector=None, estimator=None,
+    )
+    assert len(pipeline.cameras) == 1
+    assert pipeline.cameras[0].label == _CAM_ID

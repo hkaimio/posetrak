@@ -344,3 +344,35 @@ class TestHandRefinementPipelineRun:
         assert len(rows) == 1
         assert rows[0]["region_type"] == "full_body"
         assert bytes(rows[0]["keypoints"]) == original_bytes
+
+    def test_run_calls_on_camera_done_once_per_camera(self, session, monkeypatch):
+        """on_camera_done(done, total) should fire after each camera, so a
+        caller can drive a combined "N/M cameras" progress indicator across
+        this pass too, not just the initial detection pass (DetectionPipeline
+        already has this via its own on_camera_done)."""
+        run_id = create_detection_run(
+            session, shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+            time_start_s=0.0, time_end_s=1.0,
+            detector_model="yolo11x", pose_model="rtmpose-l-133kp",
+        )
+        monkeypatch.setattr(
+            "posetrak.detection.hand_refinement.iter_frames",
+            lambda path, first, last: iter([]),
+        )
+        monkeypatch.setattr(HandRefinementPipeline, "_get_hand_model", lambda self: object())
+
+        # Two cameras, no detection_keypoints rows for either -- _process_camera()
+        # returns 0 immediately for each, but on_camera_done should still fire twice.
+        cams = [
+            CameraInfo(
+                shot_video_id=f"sv{i}", camera_instance_id=f"cam{i}",
+                file_path="/fake/video.mp4", actual_fps=30.0,
+                ref_frame=0, ref_timestamp_s=0.0,
+            )
+            for i in range(2)
+        ]
+        calls: list[tuple[int, int]] = []
+        pipeline = HandRefinementPipeline(session)
+        pipeline.run(run_id, cameras=cams, on_camera_done=lambda done, total: calls.append((done, total)))
+
+        assert calls == [(1, 2), (2, 2)]

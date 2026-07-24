@@ -26,6 +26,13 @@ class CameraInfo:
     actual_fps: float
     ref_frame: int          # sync anchor frame number
     ref_timestamp_s: float  # sync anchor global time
+    # Human-readable camera label (e.g. "gopro-11_mini_01") for progress/log
+    # messages -- camera_instance_id is a UUID, not something a user reading
+    # a progress bar can identify a camera by. Defaults to "" (not the UUID
+    # itself) so call sites that predate this field but never display it
+    # (pose_worker.py's single-camera background-refinement path, tests)
+    # don't need updating; _load_cameras() below always sets a real value.
+    label: str = ""
 
 
 @dataclass
@@ -155,8 +162,10 @@ class DetectionPipeline:
         sync_table = SyncTable(sync_points, fps_by_video)
 
         cam_rows = self._session.execute(
-            "SELECT sv.id, sv.camera_instance_id, sv.file_path, sv.actual_fps "
+            "SELECT sv.id, sv.camera_instance_id, sv.file_path, sv.actual_fps,"
+            "       COALESCE(ci.label, sv.camera_instance_id) AS camera_label "
             "FROM capture_videos sv "
+            "LEFT JOIN camera_instances ci ON ci.id = sv.camera_instance_id "
             "WHERE sv.id IN (SELECT DISTINCT shot_video_id FROM sync_points WHERE sync_config_id = ?) "
             "  AND sv.shot_id = ? "
             "ORDER BY sv.camera_instance_id",
@@ -175,6 +184,7 @@ class DetectionPipeline:
                 actual_fps=fps,
                 ref_frame=ref_frame,
                 ref_timestamp_s=ref_ts,
+                label=row["camera_label"],
             ))
 
         _log.info(
@@ -218,8 +228,9 @@ class DetectionPipeline:
         first_frame, last_frame = self._frame_range(cam)
         total = max(1, last_frame - first_frame)
         _log.info(
-            "_process_camera: %s  file=%s  frames %d–%d (%d total)  fps=%.2f",
-            cam.camera_instance_id, cam.file_path, first_frame, last_frame, total, cam.actual_fps,
+            "_process_camera: %s (%s)  file=%s  frames %d–%d (%d total)  fps=%.2f",
+            cam.label or cam.camera_instance_id, cam.camera_instance_id,
+            cam.file_path, first_frame, last_frame, total, cam.actual_fps,
         )
 
         writer = DetectionBatchWriter(
@@ -249,11 +260,14 @@ class DetectionPipeline:
                 frames_done += 1
 
                 if on_progress:
-                    on_progress(frames_done, total, cam.camera_instance_id)
+                    on_progress(frames_done, total, cam.label or cam.camera_instance_id)
         finally:
             writer.finalise()
 
-        _log.info("_process_camera: %s done — %d frames", cam.camera_instance_id, frames_done)
+        _log.info(
+            "_process_camera: %s done — %d frames",
+            cam.label or cam.camera_instance_id, frames_done,
+        )
         return frames_done
 
     def _iter_frames(

@@ -494,6 +494,80 @@ def test_migrate_session_v37_to_v38_adds_config_default_columns(tmp_path: Path) 
     conn.close()
 
 
+def test_migrate_session_v38_to_v39_adds_capture_persons(tmp_path: Path) -> None:
+    """v38->v39 adds capture_persons plus a nullable capture_person_id link
+    on sequence_persons/detection_track_assignments to a session DB created
+    before this feature.
+
+    See docs/roadmap/features/configuration-improvements/config-improvements-design.md,
+    "Person model: promote identity to capture level".
+    """
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+
+    conn.execute(
+        "INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO captures (id, session_id, capture_number) VALUES ('cap1', 'sess1', 1)"
+    )
+    conn.execute(
+        "INSERT INTO sync_configs (id, shot_id) VALUES ('sync1', 'cap1')"
+    )
+    conn.execute(
+        "INSERT INTO pose_observation_sequences "
+        "(id, shot_id, sync_config_id, time_start_s, time_end_s) "
+        "VALUES ('seq1', 'cap1', 'sync1', 0.0, 1.0)"
+    )
+    conn.execute(
+        "INSERT INTO sequence_persons (sequence_id, person_id, person_name) "
+        "VALUES ('seq1', 0, 'Alice')"
+    )
+    conn.commit()
+
+    # Downgrade to the pre-v39 shape: drop capture_persons entirely and the
+    # capture_person_id column, roll the version pragma back. See
+    # test_migrate_session_v37_to_v38_adds_config_default_columns's own
+    # comment above for why this goes via CREATE TABLE ... AS SELECT rather
+    # than ALTER TABLE ... DROP COLUMN directly.
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.executescript("""
+        BEGIN;
+        DROP TABLE capture_persons;
+
+        CREATE TABLE sequence_persons_old AS SELECT * FROM sequence_persons;
+        ALTER TABLE sequence_persons_old DROP COLUMN capture_person_id;
+        DROP TABLE sequence_persons;
+        ALTER TABLE sequence_persons_old RENAME TO sequence_persons;
+
+        PRAGMA user_version = 38;
+        COMMIT;
+    """)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "capture_persons" in tables
+    seq_persons_cols = {row[1] for row in conn.execute("PRAGMA table_info(sequence_persons)")}
+    assert "capture_person_id" in seq_persons_cols
+    assignment_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(detection_track_assignments)")
+    }
+    assert "capture_person_id" in assignment_cols
+
+    # Existing rows survive the migration untouched.
+    seq_person_row = conn.execute(
+        "SELECT person_name, capture_person_id FROM sequence_persons "
+        "WHERE sequence_id = 'seq1' AND person_id = 0"
+    ).fetchone()
+    assert seq_person_row["person_name"] == "Alice"
+    assert seq_person_row["capture_person_id"] is None
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------

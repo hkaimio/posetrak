@@ -20,7 +20,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 7
-SESSION_SCHEMA_VERSION: Final[int] = 38
+SESSION_SCHEMA_VERSION: Final[int] = 39
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1101,6 +1101,51 @@ def _migrate_session_v37_to_v38(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v38_to_v39(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 38 to 39.
+
+    v39 adds capture_persons (named performers defined once per capture,
+    replacing the previous per-detection-run-only free-text person_name)
+    plus a nullable capture_persons.id link on sequence_persons and
+    detection_track_assignments -- additive, not a replacement: person_name
+    keeps working unchanged for rows that predate this feature. See
+    docs/roadmap/features/configuration-improvements/config-improvements-design.md,
+    "Person model: promote identity to capture level".
+    """
+    existing_tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "capture_persons" not in existing_tables:
+        conn.execute(
+            "CREATE TABLE capture_persons ("
+            "    id                  TEXT PRIMARY KEY,"
+            "    capture_id          TEXT NOT NULL REFERENCES captures(id),"
+            "    name                TEXT NOT NULL,"
+            "    default_skeleton_id TEXT,"
+            "    notes               TEXT,"
+            "    created_at          TEXT NOT NULL"
+            ")"
+        )
+    existing_seq_persons = {row[1] for row in conn.execute("PRAGMA table_info(sequence_persons)")}
+    if "capture_person_id" not in existing_seq_persons:
+        conn.execute(
+            "ALTER TABLE sequence_persons ADD COLUMN capture_person_id TEXT "
+            "REFERENCES capture_persons(id)"
+        )
+    existing_assignments = {
+        row[1] for row in conn.execute("PRAGMA table_info(detection_track_assignments)")
+    }
+    if "capture_person_id" not in existing_assignments:
+        conn.execute(
+            "ALTER TABLE detection_track_assignments ADD COLUMN capture_person_id TEXT "
+            "REFERENCES capture_persons(id)"
+        )
+    _set_schema_version(conn, 39)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1235,6 +1280,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 37
     if actual == 37:
         _migrate_session_v37_to_v38(conn)
+        actual = 38
+    if actual == 38:
+        _migrate_session_v38_to_v39(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

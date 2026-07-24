@@ -2,7 +2,8 @@
 
 ## Status
 
-Implementation started 2026-07-24, phases 0-3 done. Written in response to
+Implementation started 2026-07-24, phases 0-3 done (plus three rounds of
+live-review fixes on top, see below), phase 4 done. Written in response to
 Harri's brief (`confg-improvement-brief.md`, this directory) plus a
 codebase investigation done before drafting this doc — several of the
 brief's proposed mechanisms turned out to already exist in the registry
@@ -422,6 +423,29 @@ Run Tracker dialog (not just the trial/capture default-config dialog round
 Full run: `test_run_tracker*.py` + `test_content_panels_hierarchical.py` +
 `python/tests/db`: 302/304 (same 2 pre-existing, unrelated failures).
 
+**Phase 4 — done.** Schema (D1, D2): new `capture_persons` table
+(`db/session_schema.sql`) plus a nullable `capture_person_id` column on
+`sequence_persons` and `detection_track_assignments`, additive alongside
+their existing free-text `person_name` (old rows keep working unchanged
+with `capture_person_id IS NULL`). Session schema version bumped 38→39 via
+new `_migrate_session_v38_to_v39()` (`python/posetrak/db/db.py`), following
+the same generic-diff-and-backfill shape as the v37→v38 migration. New
+`python/posetrak/db/manage_person.py`: `create_person()`,
+`find_or_create_person()` (exact case-sensitive name match within a
+capture, else creates — the quick-create path phase 5's "+ New person…"
+picker will use), `list_persons()`, `get_person()`, `rename_person()`,
+`set_default_skeleton()`, `delete_person()` (refuses with a clear
+`ValueError` if any `sequence_persons`/`detection_track_assignments` row
+still references the person, mirroring the project's existing
+detection-run-immutability principle and the same "refuse instead of
+crash on an FK violation" precedent as `finalise_to_db`). New tests:
+`test_manage_person.py` (17 cases covering create/list/find-or-create/
+rename/set-default-skeleton/delete, including both delete-refusal paths)
+and a migration test in `test_posetrak_db.py` mirroring the v37→v38 one
+(downgrade a fresh session to the pre-v39 shape, re-open, confirm the new
+table/column exist and existing rows survive untouched). Full
+`python/tests/db` run: 284/286 (same 2 pre-existing, unrelated failures).
+
 ## The brief, in short
 
 1. The tracker-configuration dialog (`RunTrackerDialog` /
@@ -810,7 +834,7 @@ the existing 4-tuple flag, not a replacement — existing scripts/tests
 | 1 — **done** | Schema: `captures.default_tracker_config_id`, `trials.default_tracker_config_id`, `tracker_configs.is_named`, a checked-in baseline `tracker_configs` row (`is_named=1`) the chain terminates in. | 0 |
 | 2 — **done** | GUI: restructure `RunTrackerWidget` into vertical tabs (B1), add the numeric-field widget (B2) across all tabs, add the config picker/save-as (B3). No schema change beyond phase 1. | 0, 1 |
 | 3 — **done** | GUI: "Default tracker config" row + Edit/Change on `TrialPanel`/`CapturePanel` (C). | 1, 2 |
-| 4 | Schema: `capture_persons` + nullable `capture_person_id` on `detection_track_assignments`/`sequence_persons` (D1, D2). | — (independent of 0-3) |
+| 4 — **done** | Schema: `capture_persons` + nullable `capture_person_id` on `detection_track_assignments`/`sequence_persons` (D1, D2). | — (independent of 0-3) |
 | 5 | GUI: `CapturePanel` persons section, `main.py` assignment picker, `RunTrackerDialog` people-table data-source switch (D3). | 4, and ideally 2 (so the redesigned dialog isn't touched twice) |
 | 6 | Python CLI: person-by-name resolution (E). | 4 |
 

@@ -99,6 +99,23 @@ CREATE TABLE IF NOT EXISTS trials (
     default_tracker_config_id TEXT
 );
 
+-- Named performers, defined once per capture rather than per detection run --
+-- trials within one capture are near-certain to share the same physical
+-- performers (see
+-- docs/roadmap/features/configuration-improvements/config-improvements-design.md,
+-- "Person model: promote identity to capture level"). A trial-level override
+-- of an existing capture person's skeleton belongs to tracking_run_persons,
+-- not here.
+-- default_skeleton_id -- references registry: skeletons(id); nullable until assigned.
+CREATE TABLE IF NOT EXISTS capture_persons (
+    id                  TEXT PRIMARY KEY,
+    capture_id          TEXT NOT NULL REFERENCES captures(id),
+    name                TEXT NOT NULL,
+    default_skeleton_id TEXT,
+    notes               TEXT,
+    created_at          TEXT NOT NULL
+);
+
 -- Video files associated with a capture, one per camera.
 -- camera_instance_id     -- references registry: camera_instances(id)
 -- camera_mode_id         -- references registry: camera_modes(id); nullable until wizard sets it
@@ -181,10 +198,16 @@ CREATE TABLE IF NOT EXISTS pose_observation_sequences (
 
 -- Maps integer person_id → human-readable person name within a sequence.
 -- Written by finalise_to_db so assignment colours can be restored on reopen.
+-- capture_person_id -- links to this capture's named performer (nullable:
+--   NULL for rows written before the person model existed, or where the
+--   free-text name wasn't matched to a capture_persons row); person_name
+--   stays the display/CSV-export field regardless, mirroring the linked
+--   row's name when set.
 CREATE TABLE IF NOT EXISTS sequence_persons (
-    sequence_id TEXT    NOT NULL REFERENCES pose_observation_sequences(id),
-    person_id   INTEGER NOT NULL,
-    person_name TEXT    NOT NULL,
+    sequence_id       TEXT    NOT NULL REFERENCES pose_observation_sequences(id),
+    person_id         INTEGER NOT NULL,
+    person_name       TEXT    NOT NULL,
+    capture_person_id TEXT    REFERENCES capture_persons(id),
     PRIMARY KEY (sequence_id, person_id)
 );
 
@@ -468,13 +491,16 @@ CREATE TABLE IF NOT EXISTS frame_cache_entries (
 
 -- Explicit track_id → person_name assignments from the pose extraction UI.
 -- Allows restoring assignments when a detection run is reopened.
+-- capture_person_id -- see sequence_persons.capture_person_id above; same
+--   nullable, additive-not-replacing relationship to person_name.
 CREATE TABLE IF NOT EXISTS detection_track_assignments (
-    detection_run_id TEXT    NOT NULL REFERENCES detection_runs(id),
-    shot_video_id    TEXT    NOT NULL,
-    track_id         INTEGER NOT NULL,
-    person_name      TEXT    NOT NULL,
-    first_frame      INTEGER NOT NULL,
-    last_frame       INTEGER NOT NULL,
+    detection_run_id  TEXT    NOT NULL REFERENCES detection_runs(id),
+    shot_video_id     TEXT    NOT NULL,
+    track_id          INTEGER NOT NULL,
+    person_name       TEXT    NOT NULL,
+    capture_person_id TEXT    REFERENCES capture_persons(id),
+    first_frame       INTEGER NOT NULL,
+    last_frame        INTEGER NOT NULL,
     PRIMARY KEY (detection_run_id, shot_video_id, track_id, first_frame)
 );
 -- Segmentation masks for interactive Cutie init widget.

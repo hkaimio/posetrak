@@ -8,13 +8,20 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+def _tracker_binary_name(platform: str = sys.platform) -> str:
+    """posetrak-tracker's executable filename for *platform* -- Windows
+    builds produce a ``.exe``, everything else doesn't."""
+    return "posetrak-tracker.exe" if platform == "win32" else "posetrak-tracker"
+
+
 # Development build fallback: optbuild relative to repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_DEVBUILD_BINARY = _REPO_ROOT / "optbuild" / "cli" / "posetrak-tracker"
+_DEVBUILD_BINARY = _REPO_ROOT / "optbuild" / "cli" / _tracker_binary_name()
 
 
 @dataclass
@@ -48,9 +55,10 @@ def default_binary_path() -> Path:
     """Return the tracker binary path.
 
     Prefers ~/.posetrak/posetrak-tracker (installed location) and falls back
-    to optbuild/cli/posetrak-tracker (developer build).
+    to optbuild/cli/posetrak-tracker (developer build). Both get a ``.exe``
+    suffix on Windows, where the built binary actually has one.
     """
-    user_bin = Path.home() / ".posetrak" / "posetrak-tracker"
+    user_bin = Path.home() / ".posetrak" / _tracker_binary_name()
     if user_bin.exists():
         return user_bin
     return _DEVBUILD_BINARY

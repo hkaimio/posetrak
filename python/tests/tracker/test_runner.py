@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from posetrak.tracker.runner import PersonRunSpec, _build_multi_person_args
+from posetrak.tracker.runner import PersonRunSpec, _build_multi_person_args, _tracker_binary_name
 
 
 def test_build_multi_person_args_repeats_person_flag_with_four_values_each():
@@ -52,3 +52,12 @@ def test_build_multi_person_args_appends_optional_flags():
     assert "--end-time" in args
     assert args[args.index("--end-time") + 1] == "9.0"
     assert args[-1] == "--smooth"
+
+
+def test_tracker_binary_name_adds_exe_suffix_on_windows():
+    assert _tracker_binary_name("win32") == "posetrak-tracker.exe"
+
+
+def test_tracker_binary_name_no_suffix_elsewhere():
+    assert _tracker_binary_name("linux") == "posetrak-tracker"
+    assert _tracker_binary_name("darwin") == "posetrak-tracker"

@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 import yaml
-from PySide6.QtCore import QProcess, QThread, Qt, Signal
+from PySide6.QtCore import QPoint, QProcess, QRect, QThread, Qt, Signal
 from PySide6.QtGui import QDoubleValidator, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -30,6 +30,10 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStyle,
+    QStyleOptionTab,
+    QStylePainter,
+    QTabBar,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -37,7 +41,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from posetrak.db.manage_config import BASELINE_CONFIG_ID, edit_config, list_configs
+from posetrak.db.manage_config import (
+    BASELINE_CONFIG_ID,
+    edit_config,
+    list_configs,
+    resolve_default_tracker_config,
+    set_default_tracker_config,
+)
 from posetrak.tracker.runner import MultiPersonResult, PersonRunSpec, TrackerResult, default_binary_path
 from posetrak.tracker.runner import run_multi_person_tracker as _run_multi_person_tracker
 from posetrak.tracker.runner import run_tracker as _run_tracker
@@ -200,130 +210,106 @@ def _numeric(default: float, mn: float, mx: float, decimals: int) -> NumericLine
 
 
 # ---------------------------------------------------------------------------
-# Background thread
+# Horizontal-text tab bar (for a West-positioned QTabWidget)
 # ---------------------------------------------------------------------------
 
 
-class _TrackerThread(QThread):
-    """Runs run_tracker() in a background thread and emits Qt signals."""
+class _HorizontalTabBar(QTabBar):
+    """QTabBar for a West-positioned QTabWidget whose tab labels still read
+    left-to-right, instead of Qt's default of rotating tab text 90 degrees
+    to fit a vertical strip.
 
-    line_output = Signal(str)
-    # exit_code as `object`, not `int`: on Windows, a process killed before
-    # main() runs (e.g. a missing DLL dependency) reports its NTSTATUS code
-    # as the return code, which is always > INT32_MAX -- marshalling that
-    # into a C++ `int` signal argument overflows (a real crash reported as
-    # "libshiboken: Overflow" once, traced to exactly this).
-    tracking_finished = Signal(object, str)  # exit_code, run_id (empty str if None)
-
-    def __init__(
-        self,
-        *,
-        session_path: str,
-        sequence_id: str,
-        skeleton_id: str,
-        config_id: str,
-        output_dir: Path,
-        binary_path: Path,
-        person_id: int,
-        start_time: float,
-        end_time: float,
-        smooth: bool,
-    ) -> None:
-        super().__init__()
-        self._kwargs = dict(
-            session_path=Path(session_path),
-            sequence_id=sequence_id,
-            skeleton_id=skeleton_id,
-            config_id=config_id,
-            output_dir=output_dir,
-            binary_path=binary_path,
-            person_id=person_id,
-            start_time=start_time,
-            end_time=end_time,
-            smooth=smooth,
-        )
-
-    def run(self) -> None:
-        result: TrackerResult = _run_tracker(**self._kwargs, on_progress=self.line_output.emit)
-        self.tracking_finished.emit(result.exit_code, result.run_id or "")
-
-
-class _MultiPersonTrackerThread(QThread):
-    """Runs run_multi_person_tracker() in a background thread and emits Qt signals.
-
-    Mirrors _TrackerThread above but for the ``--person``-mode multi-person
-    CLI path (Stage 1 of the cross-person relative observations plan -- see
-    docs/roadmap/features/error-improvements/phase5-cross-person-plan.md).
+    Plain ``setTabPosition(QTabWidget.West)`` gives a vertical strip of
+    tabs, which is what was asked for (all tab names visible down the left
+    side, like Blender's or Visual Studio's settings dialogs) -- but Qt
+    also rotates each tab's *text* to run bottom-to-top by default, which
+    means only a few characters of a longer tab name fit before the tab's
+    (fixed, content-driven) height runs out, and most of a wide dialog's
+    height goes unused. Blender/VS keep the tab *shape* vertical but the
+    *label* horizontal. Achieving that isn't exposed as a QTabWidget/QTabBar
+    property -- it needs overriding tabSizeHint() (report a shape as if this
+    were a horizontal, North-positioned bar, so there's enough width for
+    upright text) and paintEvent() (draw each tab's shape normally, but
+    rotate the *painter* -90° only while drawing that tab's label, so the
+    label paints upright inside the rotated-to-vertical tab). This is a
+    well-known Qt/PySide recipe, not project-specific cleverness.
     """
 
-    line_output = Signal(str)
-    # run_ids: list[str | None], one per PersonRunSpec passed in, same order.
-    tracking_finished = Signal(object, object)  # exit_code, run_ids
+    def tabSizeHint(self, index: int):
+        size = super().tabSizeHint(index)
+        size.transpose()
+        return size
 
-    def __init__(
-        self,
-        *,
-        session_path: str,
-        persons: list[PersonRunSpec],
-        output_dir: Path,
-        binary_path: Path,
-        start_time: float,
-        end_time: float,
-        smooth: bool,
-    ) -> None:
-        super().__init__()
-        self._kwargs = dict(
-            session_path=Path(session_path),
-            persons=persons,
-            output_dir=output_dir,
-            binary_path=binary_path,
-            start_time=start_time,
-            end_time=end_time,
-            smooth=smooth,
-        )
+    def paintEvent(self, event) -> None:
+        painter = QStylePainter(self)
+        option = QStyleOptionTab()
+        for index in range(self.count()):
+            self.initStyleOption(option, index)
+            painter.drawControl(QStyle.ControlElement.CE_TabBarTabShape, option)
+            painter.save()
 
-    def run(self) -> None:
-        result: MultiPersonResult = _run_multi_person_tracker(
-            **self._kwargs, on_progress=self.line_output.emit
-        )
-        self.tracking_finished.emit(result.exit_code, result.run_ids)
+            size = option.rect.size()
+            size.transpose()
+            rect = QRect(QPoint(), size)
+            rect.moveCenter(option.rect.center())
+            option.rect = rect
+
+            # Qt's own CE_TabBarTabLabel drawing already rotates the painter
+            # by -90 for a West-shaped tab (see qcommonstyle.cpp) before
+            # drawing the label -- rotating by -90 again here (the intuitive
+            # choice, since West tabs read top-to-bottom) actually compounds
+            # to -180, i.e. upside-down, right-to-left text. +90 cancels the
+            # style's own -90 back to the identity, leaving the label
+            # genuinely horizontal.
+            center = self.tabRect(index).center()
+            painter.translate(center)
+            painter.rotate(90)
+            painter.translate(-center)
+            painter.drawControl(QStyle.ControlElement.CE_TabBarTabLabel, option)
+            painter.restore()
 
 
 # ---------------------------------------------------------------------------
-# Widget
+# Tracker-config editor (tabs + load/save)
 # ---------------------------------------------------------------------------
 
 
-class RunTrackerWidget(QWidget):
-    """Configure and run the posetrak tracker against an open session database."""
+class TrackerConfigWidget(QWidget):
+    """Vertical-tab tracker-config editor with a load/save bar.
 
-    run_finished = Signal(str)  # emits tracking_run_id on successful completion
+    Extracted from RunTrackerWidget (config-improvements design doc, phase 3)
+    so it can be reused standalone -- editing a session/capture/trial's
+    *default* tracker config (see DefaultConfigDialog below) has nothing to
+    do with people/detection runs/starting a tracking run, and embedding the
+    whole of RunTrackerWidget just to reach its config tabs would drag all of
+    that unrelated machinery along for the ride.
+
+    The Hierarchical solver stages tab needs to know which skeletons are in
+    play to discover eligible child-stage groups -- callers supply that via
+    set_skeleton_ids() (RunTrackerWidget pushes its people table's current
+    skeleton selection; DefaultConfigDialog isn't tied to any one person's
+    skeleton choice, so it pushes every skeleton in the session instead).
+    """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._conn: sqlite3.Connection | None = None
-        self._session_path: str | None = None
-        self._run_id: str | None = None
-        self._thread: _TrackerThread | _MultiPersonTrackerThread | None = None
-        self._bvh_process = None
-        self._sequence_cameras: list[str] = []
-        self._velocity_cam_indices: set[int] = set()
-        # (skeleton_id, display name), refreshed once per set_session() and
-        # shared by every person row's skeleton combo.
-        self._all_skeletons: list[tuple[str, str]] = []
-        # Display label per person row, captured at run start (for
-        # _show_multi_results() -- the table itself may change before the
-        # run finishes if the user starts editing it again).
-        self._multi_run_labels: list[str] | None = None
-        # Which named tracker_configs row (if any) the dialog was last
+        self._skeleton_ids: list[str] = []
+        # Which named tracker_configs row (if any) this widget was last
         # loaded from / saved as -- see _open_load_config_dialog()/
-        # _open_save_as_dialog(). None means "factory defaults" (
-        # manage_config.BASELINE_CONFIG_ID), matching a session/capture/
-        # trial with no default_tracker_config_id set yet (Phase 3).
-        self._loaded_config_id: str | None = None
-        self._loaded_config_name: str | None = None
+        # _open_save_as_dialog()/load_config_row(). None means "factory
+        # defaults" (manage_config.BASELINE_CONFIG_ID).
+        self.loaded_config_id: str | None = None
+        self.loaded_config_name: str | None = None
+        # Snapshot of collect_config_overrides()/collect_stage_snapshot() at
+        # the moment loaded_config_id was last set -- lets the status label
+        # tell "loaded, untouched" from "loaded, then edited" (see
+        # _is_dirty()/_update_config_status_label()) instead of always
+        # saying "Based on X" regardless of whether X's values still match.
+        self._loaded_snapshot: dict | None = None
+        self._loaded_stage_snapshot: tuple = ()
 
-        # ---- Configuration: load/save bar --------------------------------
+        # ---- Load/save bar ------------------------------------------------
         self._config_status_label = QLabel()
         self._config_status_label.setToolTip(
             "Which saved configuration this dialog's current values are based on.\n"
@@ -345,7 +331,7 @@ class RunTrackerWidget(QWidget):
         config_header.addWidget(load_config_btn)
         config_header.addWidget(save_as_config_btn)
 
-        # ---- Configuration: tabs ------------------------------------------
+        # ---- Tabs -----------------------------------------------------
         self._proc_noise_std  = _numeric(0.1,   0.0, 1000.0, 4)
         self._proc_vel_noise  = _numeric(0.5,   0.0, 1000.0, 4)
         self._vel_half_life   = _numeric(0.25,  0.0,   10.0, 4)
@@ -455,6 +441,8 @@ class RunTrackerWidget(QWidget):
         vel_cam_row = QHBoxLayout()
         vel_cam_row.addWidget(self._vel_cam_label, 1)
         vel_cam_row.addWidget(vel_cam_edit_btn)
+        self._sequence_cameras: list[str] = []
+        self._velocity_cam_indices: set[int] = set()
 
         self._use_relative = QCheckBox()
         self._use_relative.setChecked(False)
@@ -605,7 +593,13 @@ class RunTrackerWidget(QWidget):
         hierarchical_layout.addWidget(self._stage_table)
 
         self._config_tabs = QTabWidget()
+        self._config_tabs.setTabBar(_HorizontalTabBar())
         self._config_tabs.setTabPosition(QTabWidget.TabPosition.West)
+        # Without this, a too-narrow window silently collapses the tab strip
+        # to scroll arrows (names hidden) instead of the tab bar honestly
+        # reporting the width it needs -- defeating the point of West tabs
+        # (all names visible at once, Blender/VS-style).
+        self._config_tabs.setUsesScrollButtons(False)
         self._config_tabs.addTab(self._summary_text, "Summary")
         self._config_tabs.addTab(_tab_page(ukf_form), "UKF && process model")
         self._config_tabs.addTab(_tab_page(obs_form), "Observations && outliers")
@@ -615,6 +609,665 @@ class RunTrackerWidget(QWidget):
         self._config_tabs.addTab(_tab_page(crossperson_form), "Cross-person coupling")
         self._config_tabs.addTab(_tab_page(hierarchical_layout), "Hierarchical solver")
         self._config_tabs.currentChanged.connect(self._on_config_tab_changed)
+
+        root = QVBoxLayout(self)
+        root.addLayout(config_header)
+        root.addWidget(self._config_tabs, 1)
+
+        # Generic dirty-tracking: any tuning field changing should flip the
+        # status label from "<name>" to "<name> (modified)" (see
+        # _update_config_status_label()/_is_dirty()) -- connecting via
+        # findChildren() rather than one-by-one avoids this list silently
+        # going stale as fields are added above. Stage-table cell widgets
+        # are created later by _refresh_stage_table() and wire themselves.
+        for w in self.findChildren(NumericLineEdit):
+            w.valueChanged.connect(self._update_config_status_label)
+        for w in self.findChildren(QCheckBox):
+            w.toggled.connect(self._update_config_status_label)
+        for w in self.findChildren(QSpinBox):
+            w.valueChanged.connect(self._update_config_status_label)
+
+        self._update_config_status_label()
+        self._refresh_summary()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def set_connection(self, conn: sqlite3.Connection | None) -> None:
+        self._conn = conn
+
+    def set_skeleton_ids(self, skeleton_ids: list[str]) -> None:
+        """Skeletons currently in play, for Hierarchical solver stage
+        discovery -- pushed by the caller (RunTrackerWidget's people table),
+        not queried by this widget, since it has no notion of "people" of
+        its own (DefaultConfigDialog never calls this)."""
+        self._skeleton_ids = skeleton_ids
+
+    def load_config_row(self, config_id: str, name: str | None, row: sqlite3.Row) -> None:
+        """Apply an already-fetched tracker_configs row and record it as
+        loaded -- for a caller (DefaultConfigDialog) that resolves which row
+        to start from itself, rather than going through the "Load…" picker.
+        """
+        self._apply_config_row(row)
+        self.loaded_config_id = config_id
+        self.loaded_config_name = name
+        self._load_stage_overrides(config_id)
+        self._capture_loaded_snapshot()
+        self._update_config_status_label()
+        self._refresh_summary()
+
+    def collect_overrides(self) -> dict:
+        return self._collect_config_overrides()
+
+    def sync_stage_overrides(self, config_id: str) -> None:
+        self._sync_stage_overrides(config_id)
+
+    def validate_stage_overrides(self) -> str | None:
+        return self._validate_stage_overrides()
+
+    def edit_velocity_cameras_context(self, sequence_cameras: list[str]) -> None:
+        """Supply the current trial's camera labels, for the velocity-mode
+        camera picker -- pushed by RunTrackerWidget whenever the selected
+        trial changes, mirroring set_skeleton_ids() above."""
+        self._sequence_cameras = sequence_cameras
+        self._velocity_cam_indices = set()
+        self._update_velocity_cam_label()
+
+    @property
+    def velocity_cam_indices(self) -> set[int]:
+        return self._velocity_cam_indices
+
+    # ------------------------------------------------------------------
+    # Velocity-mode cameras
+    # ------------------------------------------------------------------
+
+    def _update_velocity_cam_label(self) -> None:
+        if not self._velocity_cam_indices or not self._sequence_cameras:
+            self._vel_cam_label.setText("None")
+        else:
+            names = [
+                self._sequence_cameras[i]
+                for i in sorted(self._velocity_cam_indices)
+                if i < len(self._sequence_cameras)
+            ]
+            self._vel_cam_label.setText(", ".join(names) if names else "None")
+
+    def _edit_velocity_cameras(self) -> None:
+        if not self._sequence_cameras:
+            QMessageBox.information(self, "No cameras", "Select a sequence with cameras first.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Velocity mode cameras")
+        layout = QVBoxLayout(dlg)
+        label = QLabel(
+            "Cameras in velocity mode use keypoint displacement between frames as the "
+            "measurement instead of absolute position. Select cameras with poor or "
+            "uncertain absolute calibration."
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        checkboxes: list[QCheckBox] = []
+        for i, cam_label in enumerate(self._sequence_cameras):
+            cb = QCheckBox(cam_label)
+            cb.setChecked(i in self._velocity_cam_indices)
+            checkboxes.append(cb)
+            layout.addWidget(cb)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._velocity_cam_indices = {i for i, cb in enumerate(checkboxes) if cb.isChecked()}
+            self._update_velocity_cam_label()
+
+    # ------------------------------------------------------------------
+    # Configuration load/save (config-improvements design doc, phase 2)
+    # ------------------------------------------------------------------
+
+    def _on_config_tab_changed(self, index: int) -> None:
+        if index == 0:  # Summary
+            self._refresh_summary()
+
+    def _update_config_status_label(self) -> None:
+        if self.loaded_config_id is None:
+            self._config_status_label.setText("Based on factory defaults (unsaved)")
+            return
+        label = self.loaded_config_name or "(unnamed snapshot)"
+        if self._is_dirty():
+            label += " (modified)"
+        self._config_status_label.setText(label)
+
+    def _capture_loaded_snapshot(self) -> None:
+        """Record the tab values as of the last load/save, for _is_dirty()."""
+        self._loaded_snapshot = self._collect_config_overrides()
+        self._loaded_stage_snapshot = self._collect_stage_snapshot()
+
+    def _is_dirty(self) -> bool:
+        """Whether the tabs' current values differ from loaded_config_id's,
+        as of when it was loaded/saved -- see _capture_loaded_snapshot()."""
+        if self._loaded_snapshot is None:
+            return False
+        return (
+            self._collect_config_overrides() != self._loaded_snapshot
+            or self._collect_stage_snapshot() != self._loaded_stage_snapshot
+        )
+
+    def _collect_stage_snapshot(self) -> tuple:
+        """Serialize the stage table's current enabled rows + override text,
+        for _is_dirty() -- deliberately independent of dict/JSON ordering
+        concerns _collect_config_overrides() doesn't have to worry about."""
+        if not self._hierarchical_enabled.isChecked():
+            return ()
+        rows = []
+        for i in range(self._stage_table.rowCount()):
+            if not self._stage_row_enabled(i):
+                continue
+            group = self._stage_table.item(i, 1).text()
+            values = []
+            for j, (_field, _label) in enumerate(_STAGE_OVERRIDE_COLUMNS):
+                edit = self._stage_table.cellWidget(i, 2 + j)
+                values.append(edit.text().strip() if edit else "")
+            rows.append((group, tuple(values)))
+        return tuple(sorted(rows))
+
+    def _open_load_config_dialog(self) -> None:
+        if self._conn is None:
+            return
+        rows = [r for r in list_configs(self._conn) if r["is_named"]]
+        if not rows:
+            QMessageBox.information(
+                self, "No saved configs", "No named tracker configurations are saved yet."
+            )
+            return
+        rows.sort(key=lambda r: r["created_at"], reverse=True)
+        labels = [f"{r['name']}  ({r['created_at'][:19]})" for r in rows]
+        choice, ok = QInputDialog.getItem(
+            self, "Load configuration", "Configuration:", labels, 0, False
+        )
+        if not ok:
+            return
+        row = rows[labels.index(choice)]
+        self.load_config_row(row["id"], row["name"], row)
+
+    def _open_save_as_dialog(self) -> None:
+        if self._conn is None:
+            return
+        name, ok = QInputDialog.getText(self, "Save configuration", "Name:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        base = self.loaded_config_id or BASELINE_CONFIG_ID
+        new_id = edit_config(self._conn, base, is_named=True, name=name,
+                             **self._collect_config_overrides())
+        self._sync_stage_overrides(new_id)
+        self.loaded_config_id = new_id
+        self.loaded_config_name = name
+        self._capture_loaded_snapshot()
+        self._update_config_status_label()
+        QMessageBox.information(self, "Saved", f'Configuration saved as "{name}".')
+
+    def _apply_config_row(self, row: sqlite3.Row) -> None:
+        """Populate every tab widget from a loaded tracker_configs row."""
+        def g(col: str, default: object = None) -> object:
+            try:
+                value = row[col]
+            except (IndexError, KeyError):
+                return default
+            return default if value is None else value
+
+        self._proc_noise_std.setValue(float(g("process_noise_std", 0.0)))
+        self._proc_vel_noise.setValue(float(g("process_noise_vel_std", 0.0)))
+        self._vel_half_life.setValue(float(g("velocity_half_life_s", 0.0)))
+        self._tracker_fps.setValue(float(g("tracker_fps", 120.0)))
+        self._pose_noise.setValue(float(g("pose_noise_std", 0.0)))
+        self._calib_noise.setValue(float(g("measurement_noise_std", 0.0)))
+        self._outlier_thresh.setValue(float(g("outlier_threshold", 4.0)))
+
+        self._use_relative.setChecked(bool(g("use_relative_observations", 0)))
+        self._relative_min_conf.setValue(float(g("relative_min_confidence", 0.5)))
+
+        self._cross_pair_max_px.setValue(float(g("cross_pair_max_px", 0.0)))
+        self._cross_pair_max_n.setValue(int(g("cross_pair_max_n", 10)))
+
+        self._cross_person_max_world_mm.setValue(float(g("cross_person_max_world_mm", 0.0)))
+        self._cross_person_min_conf.setValue(float(g("cross_person_min_confidence", 0.5)))
+        self._cross_person_max_n.setValue(int(g("cross_person_max_n", 10)))
+
+        self._vel_noise_gain_joint.setValue(float(g("process_noise_vel_gain_joint", 0.0)))
+        self._vel_noise_ref_joint.setValue(float(g("process_noise_vel_ref_joint", 1.0)))
+        self._vel_noise_gain_root.setValue(float(g("process_noise_vel_gain_root", 0.0)))
+        self._vel_noise_ref_root.setValue(float(g("process_noise_vel_ref_root", 1.0)))
+
+        scopes_json = g("process_noise_vel_scopes")
+        scopes = json.loads(scopes_json) if scopes_json else []
+        proximal = next((s for s in scopes if s.get("name") == "proximal"), None)
+        distal = next((s for s in scopes if s.get("name") == "distal"), None)
+        self._vel_noise_gain_proximal.setValue(float(proximal["gain"]) if proximal else 0.0)
+        self._vel_noise_ref_proximal.setValue(float(proximal["vel_ref"]) if proximal else 1.0)
+        self._vel_noise_gain_distal.setValue(float(distal["gain"]) if distal else 0.0)
+        self._vel_noise_ref_distal.setValue(float(distal["vel_ref"]) if distal else 1.0)
+
+        self._pose_reg_equal_split.setValue(float(g("pose_reg_equal_split_noise_std", 0.0)))
+        self._pose_reg_rest_pose.setValue(float(g("pose_reg_rest_pose_noise_std", 0.0)))
+
+        self._soft_limit_margin.setValue(float(g("soft_limit_margin_rad", 0.0)))
+        self._soft_limit_noise_std.setValue(float(g("soft_limit_noise_std", 0.0)))
+
+        self._nis_feedback_enabled.setChecked(bool(g("nis_feedback_scopes")))
+        self._nis_feedback_threshold.setValue(float(g("nis_feedback_threshold", 1.5)))
+        self._nis_feedback_max_mult.setValue(float(g("nis_feedback_max_multiplier", 10.0)))
+
+        vel_cam_json = g("velocity_mode_camera_ids")
+        self._velocity_cam_indices = set(json.loads(vel_cam_json)) if vel_cam_json else set()
+        self._update_velocity_cam_label()
+
+    def _collect_config_overrides(self) -> dict:
+        """Build the tracker_configs override dict from current tab values,
+        for edit_config() -- shared by RunTrackerWidget's per-run snapshot
+        and _open_save_as_dialog()'s named save. List/dict values pass
+        through as plain Python objects; edit_config()'s own _encode() JSON-
+        encodes them.
+        """
+        vel_ids = sorted(self._velocity_cam_indices) if self._velocity_cam_indices else None
+        use_rel = 1 if self._use_relative.isChecked() else 0
+        rel_min_conf = self._relative_min_conf.value() if use_rel else None
+
+        cross_px = self._cross_pair_max_px.value()
+        cross_px_val = cross_px if cross_px > 0.0 else None
+        cross_n = self._cross_pair_max_n.value() if cross_px_val else None
+
+        cross_person_mm = self._cross_person_max_world_mm.value()
+        cross_person_mm_val = cross_person_mm if cross_person_mm > 0.0 else None
+        cross_person_min_conf = self._cross_person_min_conf.value() if cross_person_mm_val else None
+        cross_person_n = self._cross_person_max_n.value() if cross_person_mm_val else None
+
+        joint_gain = self._vel_noise_gain_joint.value()
+        joint_names = ADAPTIVE_NOISE_CORE_JOINTS if joint_gain > 0.0 else None
+
+        vel_scopes = []
+        if self._vel_noise_gain_proximal.value() > 0.0:
+            vel_scopes.append({
+                "name": "proximal",
+                "joint_names": ADAPTIVE_NOISE_PROXIMAL_JOINTS,
+                "gain": self._vel_noise_gain_proximal.value(),
+                "vel_ref": self._vel_noise_ref_proximal.value(),
+            })
+        if self._vel_noise_gain_distal.value() > 0.0:
+            vel_scopes.append({
+                "name": "distal",
+                "joint_names": ADAPTIVE_NOISE_DISTAL_JOINTS,
+                "gain": self._vel_noise_gain_distal.value(),
+                "vel_ref": self._vel_noise_ref_distal.value(),
+            })
+
+        pose_reg_equal_split = self._pose_reg_equal_split.value()
+        pose_reg_rest_pose = self._pose_reg_rest_pose.value()
+        pose_reg_enabled = pose_reg_equal_split > 0.0 or pose_reg_rest_pose > 0.0
+
+        soft_limit_noise_std = self._soft_limit_noise_std.value()
+        soft_limit_enabled = soft_limit_noise_std > 0.0
+
+        nis_scopes = None
+        if self._nis_feedback_enabled.isChecked():
+            nis_scopes = [
+                {"name": "core", "joint_names": ADAPTIVE_NOISE_CORE_JOINTS},
+                {"name": "limbs", "joint_names": NIS_FEEDBACK_LIMB_JOINTS},
+            ]
+
+        return dict(
+            process_noise_std=self._proc_noise_std.value(),
+            process_noise_vel_std=self._proc_vel_noise.value(),
+            velocity_half_life_s=self._vel_half_life.value(),
+            measurement_noise_std=self._calib_noise.value(),
+            pose_noise_std=self._pose_noise.value(),
+            outlier_threshold=self._outlier_thresh.value(),
+            tracker_fps=self._tracker_fps.value(),
+            velocity_mode_camera_ids=vel_ids,
+            use_relative_observations=use_rel,
+            relative_min_confidence=rel_min_conf,
+            cross_pair_max_px=cross_px_val,
+            cross_pair_max_n=cross_n,
+            cross_person_max_world_mm=cross_person_mm_val,
+            cross_person_min_confidence=cross_person_min_conf,
+            cross_person_max_n=cross_person_n,
+            process_noise_vel_gain_joint=joint_gain,
+            process_noise_vel_ref_joint=self._vel_noise_ref_joint.value(),
+            process_noise_vel_gain_root=self._vel_noise_gain_root.value(),
+            process_noise_vel_ref_root=self._vel_noise_ref_root.value(),
+            process_noise_vel_joint_names=joint_names,
+            process_noise_vel_scopes=vel_scopes or None,
+            pose_reg_joint_names=POSE_REG_SPINE_CHAIN if pose_reg_enabled else None,
+            pose_reg_equal_split_noise_std=pose_reg_equal_split,
+            pose_reg_rest_pose_noise_std=pose_reg_rest_pose,
+            soft_limit_joint_names=SOFT_LIMIT_JOINT_NAMES if soft_limit_enabled else None,
+            soft_limit_margin_rad=self._soft_limit_margin.value(),
+            soft_limit_noise_std=soft_limit_noise_std,
+            nis_feedback_scopes=nis_scopes,
+            nis_feedback_threshold=self._nis_feedback_threshold.value(),
+            nis_feedback_max_multiplier=self._nis_feedback_max_mult.value(),
+        )
+
+    def _refresh_summary(self) -> None:
+        lines = [self._config_status_label.text(), ""]
+        lines.append(f"Process noise std: {self._proc_noise_std.value():g}")
+        lines.append(f"Velocity noise std: {self._proc_vel_noise.value():g}")
+        lines.append(f"Velocity half-life (s): {self._vel_half_life.value():g}")
+        lines.append(f"Tracker FPS: {self._tracker_fps.value():g}")
+        lines.append(f"Velocity-mode cameras: {self._vel_cam_label.text()}")
+        lines.append("")
+        lines.append(f"Pose noise std: {self._pose_noise.value():g}")
+        lines.append(f"Calib noise std: {self._calib_noise.value():g}")
+        lines.append(f"Outlier threshold: {self._outlier_thresh.value():g}")
+        lines.append(
+            f"Relative observations: {'on' if self._use_relative.isChecked() else 'off'}"
+        )
+        if self._use_relative.isChecked():
+            lines.append(f"  min confidence: {self._relative_min_conf.value():g}")
+        if self._cross_pair_max_px.value() > 0.0:
+            lines.append(
+                f"Cross-pair radius: {self._cross_pair_max_px.value():g}px, "
+                f"max {self._cross_pair_max_n.value()}"
+            )
+        lines.append("")
+        if self._vel_noise_gain_joint.value() > 0.0:
+            lines.append(f"Adaptive noise (core): gain {self._vel_noise_gain_joint.value():g}")
+        if self._vel_noise_gain_root.value() > 0.0:
+            lines.append(f"Adaptive noise (root): gain {self._vel_noise_gain_root.value():g}")
+        if self._vel_noise_gain_proximal.value() > 0.0:
+            lines.append(
+                f"Adaptive noise (proximal): gain {self._vel_noise_gain_proximal.value():g}"
+            )
+        if self._vel_noise_gain_distal.value() > 0.0:
+            lines.append(
+                f"Adaptive noise (distal): gain {self._vel_noise_gain_distal.value():g}"
+            )
+        if self._pose_reg_equal_split.value() > 0.0 or self._pose_reg_rest_pose.value() > 0.0:
+            lines.append(
+                f"Pose regularization: equal-split {self._pose_reg_equal_split.value():g}, "
+                f"rest-pose {self._pose_reg_rest_pose.value():g}"
+            )
+        if self._soft_limit_noise_std.value() > 0.0:
+            lines.append(
+                f"Soft joint limits: margin {self._soft_limit_margin.value():g}, "
+                f"noise {self._soft_limit_noise_std.value():g}"
+            )
+        if self._nis_feedback_enabled.isChecked():
+            lines.append(
+                f"NIS feedback: threshold {self._nis_feedback_threshold.value():g}, "
+                f"max multiplier {self._nis_feedback_max_mult.value():g}"
+            )
+        if self._cross_person_max_world_mm.value() > 0.0:
+            lines.append(
+                f"Cross-person coupling: {self._cross_person_max_world_mm.value():g}mm, "
+                f"min conf {self._cross_person_min_conf.value():g}, "
+                f"max {self._cross_person_max_n.value()}"
+            )
+        if self._hierarchical_enabled.isChecked():
+            enabled_groups = [
+                self._stage_table.item(i, 1).text()
+                for i in range(self._stage_table.rowCount())
+                if self._stage_row_enabled(i)
+            ]
+            lines.append(
+                f"Hierarchical solver stages: {', '.join(enabled_groups) or '(none enabled)'}"
+            )
+        self._summary_text.setPlainText("\n".join(lines))
+
+    # ------------------------------------------------------------------
+    # Hierarchical solver stages
+    # ------------------------------------------------------------------
+
+    def _on_hierarchical_toggled(self, checked: bool) -> None:
+        if checked:
+            self._refresh_stage_table()
+
+    def _refresh_stage_table(self) -> None:
+        if self._conn is None:
+            return
+        groups = discover_stage_groups(self._conn, self._skeleton_ids)
+        self._stage_table.setRowCount(len(groups))
+        for i, group in enumerate(groups):
+            chk_container = QWidget()
+            chk_layout = QHBoxLayout(chk_container)
+            chk_layout.setContentsMargins(0, 0, 0, 0)
+            chk_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            chk = QCheckBox()
+            chk.setChecked(True)
+            chk.toggled.connect(self._update_config_status_label)
+            chk_layout.addWidget(chk)
+            self._stage_table.setCellWidget(i, 0, chk_container)
+
+            name_item = QTableWidgetItem(group)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self._stage_table.setItem(i, 1, name_item)
+
+            for j, (_field, _label) in enumerate(_STAGE_OVERRIDE_COLUMNS):
+                edit = QLineEdit()
+                edit.setPlaceholderText("inherit")
+                edit.textChanged.connect(lambda _text: self._update_config_status_label())
+                self._stage_table.setCellWidget(i, 2 + j, edit)
+
+    def _load_stage_overrides(self, config_id: str) -> None:
+        """Populate the Hierarchical solver tab from *config_id*'s existing
+        tracker_config_stages rows (if any), and set the enable checkbox and
+        each discovered group's own checkbox to match.
+
+        Without this, loading an already-hierarchical config (e.g. a
+        trial's default that has stages configured) always showed an empty,
+        disabled table -- indistinguishable from "no stages configured" --
+        and saving from that state (_sync_stage_overrides() always rebuilds
+        from the table, discarding whatever was in the DB) silently deleted
+        the real stage selection.
+        """
+        if self._conn is None:
+            return
+        saved = {
+            r["group_name"]: r
+            for r in self._conn.execute(
+                "SELECT * FROM tracker_config_stages WHERE tracker_config_id = ?",
+                (config_id,),
+            ).fetchall()
+        }
+        self._hierarchical_enabled.blockSignals(True)
+        self._hierarchical_enabled.setChecked(bool(saved))
+        self._hierarchical_enabled.blockSignals(False)
+        self._refresh_stage_table()
+        for i in range(self._stage_table.rowCount()):
+            group = self._stage_table.item(i, 1).text()
+            saved_row = saved.get(group)
+            container = self._stage_table.cellWidget(i, 0)
+            chk = container.findChild(QCheckBox) if container else None
+            if chk is not None:
+                chk.setChecked(saved_row is not None)
+            if saved_row is None:
+                continue
+            for j, (field, _label) in enumerate(_STAGE_OVERRIDE_COLUMNS):
+                edit = self._stage_table.cellWidget(i, 2 + j)
+                value = saved_row[field]
+                if edit is not None and value is not None:
+                    edit.setText(f"{value:g}")
+
+    def _stage_row_enabled(self, row: int) -> bool:
+        container = self._stage_table.cellWidget(row, 0)
+        chk = container.findChild(QCheckBox) if container else None
+        return chk is not None and chk.isChecked()
+
+    def _validate_stage_overrides(self) -> str | None:
+        """Return an error message if any enabled stage's override field isn't a
+        valid number (or blank, meaning inherit), else None."""
+        if not self._hierarchical_enabled.isChecked():
+            return None
+        for i in range(self._stage_table.rowCount()):
+            if not self._stage_row_enabled(i):
+                continue
+            group = self._stage_table.item(i, 1).text()
+            for j, (_field, label) in enumerate(_STAGE_OVERRIDE_COLUMNS):
+                edit = self._stage_table.cellWidget(i, 2 + j)
+                text = edit.text().strip() if edit else ""
+                if not text:
+                    continue
+                try:
+                    float(text)
+                except ValueError:
+                    return f"Stage '{group}': '{label}' is not a number: {text!r}"
+        return None
+
+    def _sync_stage_overrides(self, config_id: str) -> None:
+        """Replace *config_id*'s tracker_config_stages rows with the stage
+        table's current values. Always deletes first: edit_config() already
+        copied the base config's own stage rows forward (if any), and this
+        run's stage selection may add, drop, or re-tune any of them.
+        """
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM tracker_config_stages WHERE tracker_config_id = ?", (config_id,)
+            )
+            if not self._hierarchical_enabled.isChecked():
+                return
+            for i in range(self._stage_table.rowCount()):
+                if not self._stage_row_enabled(i):
+                    continue
+                group_name = self._stage_table.item(i, 1).text()
+                overrides = []
+                for j, (_field, _label) in enumerate(_STAGE_OVERRIDE_COLUMNS):
+                    edit = self._stage_table.cellWidget(i, 2 + j)
+                    text = edit.text().strip() if edit else ""
+                    overrides.append(float(text) if text else None)
+                self._conn.execute(
+                    "INSERT INTO tracker_config_stages"
+                    " (tracker_config_id, group_name, process_noise_std,"
+                    "  process_noise_vel_std, velocity_half_life_s, pose_noise_std,"
+                    "  calib_noise_std, outlier_threshold, init_joint_std,"
+                    "  init_velocity_std)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (config_id, group_name, *overrides),
+                )
+
+
+# ---------------------------------------------------------------------------
+# Background thread
+# ---------------------------------------------------------------------------
+
+
+class _TrackerThread(QThread):
+    """Runs run_tracker() in a background thread and emits Qt signals."""
+
+    line_output = Signal(str)
+    # exit_code as `object`, not `int`: on Windows, a process killed before
+    # main() runs (e.g. a missing DLL dependency) reports its NTSTATUS code
+    # as the return code, which is always > INT32_MAX -- marshalling that
+    # into a C++ `int` signal argument overflows (a real crash reported as
+    # "libshiboken: Overflow" once, traced to exactly this).
+    tracking_finished = Signal(object, str)  # exit_code, run_id (empty str if None)
+
+    def __init__(
+        self,
+        *,
+        session_path: str,
+        sequence_id: str,
+        skeleton_id: str,
+        config_id: str,
+        output_dir: Path,
+        binary_path: Path,
+        person_id: int,
+        start_time: float,
+        end_time: float,
+        smooth: bool,
+    ) -> None:
+        super().__init__()
+        self._kwargs = dict(
+            session_path=Path(session_path),
+            sequence_id=sequence_id,
+            skeleton_id=skeleton_id,
+            config_id=config_id,
+            output_dir=output_dir,
+            binary_path=binary_path,
+            person_id=person_id,
+            start_time=start_time,
+            end_time=end_time,
+            smooth=smooth,
+        )
+
+    def run(self) -> None:
+        result: TrackerResult = _run_tracker(**self._kwargs, on_progress=self.line_output.emit)
+        self.tracking_finished.emit(result.exit_code, result.run_id or "")
+
+
+class _MultiPersonTrackerThread(QThread):
+    """Runs run_multi_person_tracker() in a background thread and emits Qt signals.
+
+    Mirrors _TrackerThread above but for the ``--person``-mode multi-person
+    CLI path (Stage 1 of the cross-person relative observations plan -- see
+    docs/roadmap/features/error-improvements/phase5-cross-person-plan.md).
+    """
+
+    line_output = Signal(str)
+    # run_ids: list[str | None], one per PersonRunSpec passed in, same order.
+    tracking_finished = Signal(object, object)  # exit_code, run_ids
+
+    def __init__(
+        self,
+        *,
+        session_path: str,
+        persons: list[PersonRunSpec],
+        output_dir: Path,
+        binary_path: Path,
+        start_time: float,
+        end_time: float,
+        smooth: bool,
+    ) -> None:
+        super().__init__()
+        self._kwargs = dict(
+            session_path=Path(session_path),
+            persons=persons,
+            output_dir=output_dir,
+            binary_path=binary_path,
+            start_time=start_time,
+            end_time=end_time,
+            smooth=smooth,
+        )
+
+    def run(self) -> None:
+        result: MultiPersonResult = _run_multi_person_tracker(
+            **self._kwargs, on_progress=self.line_output.emit
+        )
+        self.tracking_finished.emit(result.exit_code, result.run_ids)
+
+
+# ---------------------------------------------------------------------------
+# Widget
+# ---------------------------------------------------------------------------
+
+
+class RunTrackerWidget(QWidget):
+    """Configure and run the posetrak tracker against an open session database."""
+
+    run_finished = Signal(str)  # emits tracking_run_id on successful completion
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._conn: sqlite3.Connection | None = None
+        self._session_path: str | None = None
+        self._run_id: str | None = None
+        self._thread: _TrackerThread | _MultiPersonTrackerThread | None = None
+        self._bvh_process = None
+        self._sequence_cameras: list[str] = []
+        # (skeleton_id, display name), refreshed once per set_session() and
+        # shared by every person row's skeleton combo.
+        self._all_skeletons: list[tuple[str, str]] = []
+        # Display label per person row, captured at run start (for
+        # _show_multi_results() -- the table itself may change before the
+        # run finishes if the user starts editing it again).
+        self._multi_run_labels: list[str] | None = None
+
+        self._config_widget = TrackerConfigWidget()
 
         # ---- People group -------------------------------------------------
         # Person names are only defined per detection run (sequence_persons is
@@ -692,6 +1345,14 @@ class RunTrackerWidget(QWidget):
         run_box.setLayout(run_form)
 
         # ---- Run button -------------------------------------------------
+        self._set_trial_default_chk = QCheckBox("Set as trial default")
+        self._set_trial_default_chk.setToolTip(
+            "After this run starts, make its tracker configuration this\n"
+            "trial's default -- future runs in this trial will start from\n"
+            "it (see the trial's \"Default tracker config\" row), instead of\n"
+            "needing to be set up by hand each time."
+        )
+
         self._run_btn = QPushButton("Run Tracker")
         self._run_btn.setEnabled(False)
         self._run_btn.clicked.connect(self._start_tracking)
@@ -730,20 +1391,20 @@ class RunTrackerWidget(QWidget):
         self._results_box.setVisible(False)
 
         # ---- Root layout ------------------------------------------------
-        # Only the tracker-configuration tabs stretch to fill extra space --
-        # people, run controls, the Run button, and progress/results always
-        # stay visible without needing to resize the window.
+        # Only the tracker-configuration widget stretches to fill extra
+        # space -- people, run controls, the Run button, and progress/
+        # results always stay visible without needing to resize the window.
+        # People first (who's being tracked), then the (usually much taller)
+        # configuration tabs, then the run-mechanics controls (output dir,
+        # binary path) immediately above the button that starts the run.
         root = QVBoxLayout(self)
         root.addWidget(people_box)
+        root.addWidget(self._config_widget, 1)
         root.addWidget(run_box)
-        root.addLayout(config_header)
-        root.addWidget(self._config_tabs, 1)
+        root.addWidget(self._set_trial_default_chk)
         root.addWidget(self._run_btn)
         root.addWidget(self._prog_box)
         root.addWidget(self._results_box)
-
-        self._update_config_status_label()
-        self._refresh_summary()
 
     # ------------------------------------------------------------------
     # Public API
@@ -753,6 +1414,7 @@ class RunTrackerWidget(QWidget):
         """Supply open session connection and the path to its .db file."""
         self._conn = conn
         self._session_path = session_path
+        self._config_widget.set_connection(conn)
         self._refresh_skeletons()
         self._refresh_trials()
         self._update_run_btn()
@@ -945,7 +1607,9 @@ class RunTrackerWidget(QWidget):
             lambda _index=None, r=row: self._refresh_detection_run_combo(r)
         )
 
-        self._people_table.setCellWidget(row, 2, self._make_skeleton_combo())
+        skeleton_combo = self._make_skeleton_combo()
+        skeleton_combo.currentIndexChanged.connect(self._update_run_btn)
+        self._people_table.setCellWidget(row, 2, skeleton_combo)
 
         if removable:
             remove_btn = QPushButton("✕")
@@ -1002,6 +1666,12 @@ class RunTrackerWidget(QWidget):
                 self, "No other people", "No other person names found for this trial."
             )
 
+    def _current_skeleton_ids(self) -> list[str]:
+        return [
+            sid for row in range(self._people_table.rowCount())
+            if (sid := self._row_skeleton_id(row)) is not None
+        ]
+
     def _update_run_btn(self) -> None:
         ok = (
             len(self._all_skeletons) > 0
@@ -1009,6 +1679,7 @@ class RunTrackerWidget(QWidget):
             and self._row_detection_run_data(0) is not None
         )
         self._run_btn.setEnabled(ok)
+        self._config_widget.set_skeleton_ids(self._current_skeleton_ids())
 
     def _on_trial_changed(self) -> None:
         trial_id = self._current_trial_id()
@@ -1018,58 +1689,40 @@ class RunTrackerWidget(QWidget):
             self._sequence_cameras = self._cameras_for_trial(trial_id)
         else:
             self._sequence_cameras = []
-        self._velocity_cam_indices = set()
-        self._update_velocity_cam_label()
+        self._config_widget.edit_velocity_cameras_context(self._sequence_cameras)
         self._update_run_btn()
+        self._load_trial_default_config(trial_id)
 
-    def _update_velocity_cam_label(self) -> None:
-        if not self._velocity_cam_indices or not self._sequence_cameras:
-            self._vel_cam_label.setText("None")
-        else:
-            names = [
-                self._sequence_cameras[i]
-                for i in sorted(self._velocity_cam_indices)
-                if i < len(self._sequence_cameras)
-            ]
-            self._vel_cam_label.setText(", ".join(names) if names else "None")
-
-    def _edit_velocity_cameras(self) -> None:
-        if not self._sequence_cameras:
-            QMessageBox.information(self, "No cameras", "Select a sequence with cameras first.")
+    def _load_trial_default_config(self, trial_id: str | None) -> None:
+        """Load *trial_id*'s resolved default tracker config into the config
+        widget, so a run started without touching Load…/a saved config
+        starts from the trial's own tuned default rather than silently
+        falling back to factory defaults -- see
+        manage_config.resolve_default_tracker_config(). Called after
+        _update_run_btn() has already pushed this trial's skeleton
+        selection, so the Hierarchical solver tab can discover the right
+        stage groups for the loaded default's stage rows (if any).
+        """
+        if self._conn is None or trial_id is None:
             return
+        resolved_id = resolve_default_tracker_config(self._conn, trial_id=trial_id)
+        row = self._conn.execute(
+            "SELECT * FROM tracker_configs WHERE id = ?", (resolved_id,)
+        ).fetchone()
+        if row is None:
+            return
+        name = row["name"] if row["is_named"] else None
+        self._config_widget.load_config_row(resolved_id, name, row)
 
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Velocity mode cameras")
-        layout = QVBoxLayout(dlg)
-        label = QLabel(
-            "Cameras in velocity mode use keypoint displacement between frames as the "
-            "measurement instead of absolute position. Select cameras with poor or "
-            "uncertain absolute calibration."
-        )
-        label.setWordWrap(True)
-        layout.addWidget(label)
-
-        checkboxes: list[QCheckBox] = []
-        for i, cam_label in enumerate(self._sequence_cameras):
-            cb = QCheckBox(cam_label)
-            cb.setChecked(i in self._velocity_cam_indices)
-            checkboxes.append(cb)
-            layout.addWidget(cb)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
-        layout.addWidget(buttons)
-
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self._velocity_cam_indices = {i for i, cb in enumerate(checkboxes) if cb.isChecked()}
-            self._update_velocity_cam_label()
-
-    # ------------------------------------------------------------------
-    # Browse helpers
-    # ------------------------------------------------------------------
+    def _maybe_set_trial_default(self, config_id: str) -> None:
+        """If "Set as trial default" is checked, repoint the current
+        trial's default_tracker_config_id to *config_id* -- the snapshot
+        just created for this run."""
+        if not self._set_trial_default_chk.isChecked():
+            return
+        trial_id = self._current_trial_id()
+        if trial_id is not None:
+            set_default_tracker_config(self._conn, config_id, trial_id=trial_id)
 
     def _browse_out_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select output directory")
@@ -1080,270 +1733,6 @@ class RunTrackerWidget(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "Select posetrak binary", "", "All files (*)")
         if path:
             self._binary_edit.setText(path)
-
-    # ------------------------------------------------------------------
-    # Configuration load/save (config-improvements design doc, phase 2)
-    # ------------------------------------------------------------------
-
-    def _on_config_tab_changed(self, index: int) -> None:
-        if index == 0:  # Summary
-            self._refresh_summary()
-
-    def _update_config_status_label(self) -> None:
-        if self._loaded_config_name:
-            self._config_status_label.setText(f'Based on "{self._loaded_config_name}"')
-        else:
-            self._config_status_label.setText("Based on factory defaults (unsaved)")
-
-    def _open_load_config_dialog(self) -> None:
-        if self._conn is None:
-            return
-        rows = [r for r in list_configs(self._conn) if r["is_named"]]
-        if not rows:
-            QMessageBox.information(
-                self, "No saved configs", "No named tracker configurations are saved yet."
-            )
-            return
-        rows.sort(key=lambda r: r["created_at"], reverse=True)
-        labels = [f"{r['name']}  ({r['created_at'][:19]})" for r in rows]
-        choice, ok = QInputDialog.getItem(
-            self, "Load configuration", "Configuration:", labels, 0, False
-        )
-        if not ok:
-            return
-        row = rows[labels.index(choice)]
-        self._apply_config_row(row)
-        self._loaded_config_id = row["id"]
-        self._loaded_config_name = row["name"]
-        self._update_config_status_label()
-        self._refresh_summary()
-
-    def _open_save_as_dialog(self) -> None:
-        if self._conn is None:
-            return
-        name, ok = QInputDialog.getText(self, "Save configuration", "Name:")
-        name = name.strip()
-        if not ok or not name:
-            return
-        base = self._loaded_config_id or BASELINE_CONFIG_ID
-        new_id = edit_config(self._conn, base, is_named=True, name=name,
-                             **self._collect_config_overrides())
-        self._sync_stage_overrides(new_id)
-        self._loaded_config_id = new_id
-        self._loaded_config_name = name
-        self._update_config_status_label()
-        QMessageBox.information(self, "Saved", f'Configuration saved as "{name}".')
-
-    def _apply_config_row(self, row: sqlite3.Row) -> None:
-        """Populate every tab widget from a loaded tracker_configs row."""
-        def g(col: str, default: object = None) -> object:
-            try:
-                value = row[col]
-            except (IndexError, KeyError):
-                return default
-            return default if value is None else value
-
-        self._proc_noise_std.setValue(float(g("process_noise_std", 0.0)))
-        self._proc_vel_noise.setValue(float(g("process_noise_vel_std", 0.0)))
-        self._vel_half_life.setValue(float(g("velocity_half_life_s", 0.0)))
-        self._tracker_fps.setValue(float(g("tracker_fps", 120.0)))
-        self._pose_noise.setValue(float(g("pose_noise_std", 0.0)))
-        self._calib_noise.setValue(float(g("measurement_noise_std", 0.0)))
-        self._outlier_thresh.setValue(float(g("outlier_threshold", 4.0)))
-
-        self._use_relative.setChecked(bool(g("use_relative_observations", 0)))
-        self._relative_min_conf.setValue(float(g("relative_min_confidence", 0.5)))
-
-        self._cross_pair_max_px.setValue(float(g("cross_pair_max_px", 0.0)))
-        self._cross_pair_max_n.setValue(int(g("cross_pair_max_n", 10)))
-
-        self._cross_person_max_world_mm.setValue(float(g("cross_person_max_world_mm", 0.0)))
-        self._cross_person_min_conf.setValue(float(g("cross_person_min_confidence", 0.5)))
-        self._cross_person_max_n.setValue(int(g("cross_person_max_n", 10)))
-
-        self._vel_noise_gain_joint.setValue(float(g("process_noise_vel_gain_joint", 0.0)))
-        self._vel_noise_ref_joint.setValue(float(g("process_noise_vel_ref_joint", 1.0)))
-        self._vel_noise_gain_root.setValue(float(g("process_noise_vel_gain_root", 0.0)))
-        self._vel_noise_ref_root.setValue(float(g("process_noise_vel_ref_root", 1.0)))
-
-        scopes_json = g("process_noise_vel_scopes")
-        scopes = json.loads(scopes_json) if scopes_json else []
-        proximal = next((s for s in scopes if s.get("name") == "proximal"), None)
-        distal = next((s for s in scopes if s.get("name") == "distal"), None)
-        self._vel_noise_gain_proximal.setValue(float(proximal["gain"]) if proximal else 0.0)
-        self._vel_noise_ref_proximal.setValue(float(proximal["vel_ref"]) if proximal else 1.0)
-        self._vel_noise_gain_distal.setValue(float(distal["gain"]) if distal else 0.0)
-        self._vel_noise_ref_distal.setValue(float(distal["vel_ref"]) if distal else 1.0)
-
-        self._pose_reg_equal_split.setValue(float(g("pose_reg_equal_split_noise_std", 0.0)))
-        self._pose_reg_rest_pose.setValue(float(g("pose_reg_rest_pose_noise_std", 0.0)))
-
-        self._soft_limit_margin.setValue(float(g("soft_limit_margin_rad", 0.0)))
-        self._soft_limit_noise_std.setValue(float(g("soft_limit_noise_std", 0.0)))
-
-        self._nis_feedback_enabled.setChecked(bool(g("nis_feedback_scopes")))
-        self._nis_feedback_threshold.setValue(float(g("nis_feedback_threshold", 1.5)))
-        self._nis_feedback_max_mult.setValue(float(g("nis_feedback_max_multiplier", 10.0)))
-
-        vel_cam_json = g("velocity_mode_camera_ids")
-        self._velocity_cam_indices = set(json.loads(vel_cam_json)) if vel_cam_json else set()
-        self._update_velocity_cam_label()
-
-    def _collect_config_overrides(self) -> dict:
-        """Build the tracker_configs override dict from current tab values,
-        for edit_config() -- shared by _start_tracking()'s per-run snapshot
-        and _open_save_as_dialog()'s named save. List/dict values pass
-        through as plain Python objects; edit_config()'s own _encode() JSON-
-        encodes them.
-        """
-        vel_ids = sorted(self._velocity_cam_indices) if self._velocity_cam_indices else None
-        use_rel = 1 if self._use_relative.isChecked() else 0
-        rel_min_conf = self._relative_min_conf.value() if use_rel else None
-
-        cross_px = self._cross_pair_max_px.value()
-        cross_px_val = cross_px if cross_px > 0.0 else None
-        cross_n = self._cross_pair_max_n.value() if cross_px_val else None
-
-        cross_person_mm = self._cross_person_max_world_mm.value()
-        cross_person_mm_val = cross_person_mm if cross_person_mm > 0.0 else None
-        cross_person_min_conf = self._cross_person_min_conf.value() if cross_person_mm_val else None
-        cross_person_n = self._cross_person_max_n.value() if cross_person_mm_val else None
-
-        joint_gain = self._vel_noise_gain_joint.value()
-        joint_names = ADAPTIVE_NOISE_CORE_JOINTS if joint_gain > 0.0 else None
-
-        vel_scopes = []
-        if self._vel_noise_gain_proximal.value() > 0.0:
-            vel_scopes.append({
-                "name": "proximal",
-                "joint_names": ADAPTIVE_NOISE_PROXIMAL_JOINTS,
-                "gain": self._vel_noise_gain_proximal.value(),
-                "vel_ref": self._vel_noise_ref_proximal.value(),
-            })
-        if self._vel_noise_gain_distal.value() > 0.0:
-            vel_scopes.append({
-                "name": "distal",
-                "joint_names": ADAPTIVE_NOISE_DISTAL_JOINTS,
-                "gain": self._vel_noise_gain_distal.value(),
-                "vel_ref": self._vel_noise_ref_distal.value(),
-            })
-
-        pose_reg_equal_split = self._pose_reg_equal_split.value()
-        pose_reg_rest_pose = self._pose_reg_rest_pose.value()
-        pose_reg_enabled = pose_reg_equal_split > 0.0 or pose_reg_rest_pose > 0.0
-
-        soft_limit_noise_std = self._soft_limit_noise_std.value()
-        soft_limit_enabled = soft_limit_noise_std > 0.0
-
-        nis_scopes = None
-        if self._nis_feedback_enabled.isChecked():
-            nis_scopes = [
-                {"name": "core", "joint_names": ADAPTIVE_NOISE_CORE_JOINTS},
-                {"name": "limbs", "joint_names": NIS_FEEDBACK_LIMB_JOINTS},
-            ]
-
-        return dict(
-            process_noise_std=self._proc_noise_std.value(),
-            process_noise_vel_std=self._proc_vel_noise.value(),
-            velocity_half_life_s=self._vel_half_life.value(),
-            measurement_noise_std=self._calib_noise.value(),
-            pose_noise_std=self._pose_noise.value(),
-            outlier_threshold=self._outlier_thresh.value(),
-            tracker_fps=self._tracker_fps.value(),
-            velocity_mode_camera_ids=vel_ids,
-            use_relative_observations=use_rel,
-            relative_min_confidence=rel_min_conf,
-            cross_pair_max_px=cross_px_val,
-            cross_pair_max_n=cross_n,
-            cross_person_max_world_mm=cross_person_mm_val,
-            cross_person_min_confidence=cross_person_min_conf,
-            cross_person_max_n=cross_person_n,
-            process_noise_vel_gain_joint=joint_gain,
-            process_noise_vel_ref_joint=self._vel_noise_ref_joint.value(),
-            process_noise_vel_gain_root=self._vel_noise_gain_root.value(),
-            process_noise_vel_ref_root=self._vel_noise_ref_root.value(),
-            process_noise_vel_joint_names=joint_names,
-            process_noise_vel_scopes=vel_scopes or None,
-            pose_reg_joint_names=POSE_REG_SPINE_CHAIN if pose_reg_enabled else None,
-            pose_reg_equal_split_noise_std=pose_reg_equal_split,
-            pose_reg_rest_pose_noise_std=pose_reg_rest_pose,
-            soft_limit_joint_names=SOFT_LIMIT_JOINT_NAMES if soft_limit_enabled else None,
-            soft_limit_margin_rad=self._soft_limit_margin.value(),
-            soft_limit_noise_std=soft_limit_noise_std,
-            nis_feedback_scopes=nis_scopes,
-            nis_feedback_threshold=self._nis_feedback_threshold.value(),
-            nis_feedback_max_multiplier=self._nis_feedback_max_mult.value(),
-        )
-
-    def _refresh_summary(self) -> None:
-        lines = [self._config_status_label.text(), ""]
-        lines.append(f"Process noise std: {self._proc_noise_std.value():g}")
-        lines.append(f"Velocity noise std: {self._proc_vel_noise.value():g}")
-        lines.append(f"Velocity half-life (s): {self._vel_half_life.value():g}")
-        lines.append(f"Tracker FPS: {self._tracker_fps.value():g}")
-        lines.append(f"Velocity-mode cameras: {self._vel_cam_label.text()}")
-        lines.append("")
-        lines.append(f"Pose noise std: {self._pose_noise.value():g}")
-        lines.append(f"Calib noise std: {self._calib_noise.value():g}")
-        lines.append(f"Outlier threshold: {self._outlier_thresh.value():g}")
-        lines.append(
-            f"Relative observations: {'on' if self._use_relative.isChecked() else 'off'}"
-        )
-        if self._use_relative.isChecked():
-            lines.append(f"  min confidence: {self._relative_min_conf.value():g}")
-        if self._cross_pair_max_px.value() > 0.0:
-            lines.append(
-                f"Cross-pair radius: {self._cross_pair_max_px.value():g}px, "
-                f"max {self._cross_pair_max_n.value()}"
-            )
-        lines.append("")
-        if self._vel_noise_gain_joint.value() > 0.0:
-            lines.append(f"Adaptive noise (core): gain {self._vel_noise_gain_joint.value():g}")
-        if self._vel_noise_gain_root.value() > 0.0:
-            lines.append(f"Adaptive noise (root): gain {self._vel_noise_gain_root.value():g}")
-        if self._vel_noise_gain_proximal.value() > 0.0:
-            lines.append(
-                f"Adaptive noise (proximal): gain {self._vel_noise_gain_proximal.value():g}"
-            )
-        if self._vel_noise_gain_distal.value() > 0.0:
-            lines.append(
-                f"Adaptive noise (distal): gain {self._vel_noise_gain_distal.value():g}"
-            )
-        if self._pose_reg_equal_split.value() > 0.0 or self._pose_reg_rest_pose.value() > 0.0:
-            lines.append(
-                f"Pose regularization: equal-split {self._pose_reg_equal_split.value():g}, "
-                f"rest-pose {self._pose_reg_rest_pose.value():g}"
-            )
-        if self._soft_limit_noise_std.value() > 0.0:
-            lines.append(
-                f"Soft joint limits: margin {self._soft_limit_margin.value():g}, "
-                f"noise {self._soft_limit_noise_std.value():g}"
-            )
-        if self._nis_feedback_enabled.isChecked():
-            lines.append(
-                f"NIS feedback: threshold {self._nis_feedback_threshold.value():g}, "
-                f"max multiplier {self._nis_feedback_max_mult.value():g}"
-            )
-        if self._cross_person_max_world_mm.value() > 0.0:
-            lines.append(
-                f"Cross-person coupling: {self._cross_person_max_world_mm.value():g}mm, "
-                f"min conf {self._cross_person_min_conf.value():g}, "
-                f"max {self._cross_person_max_n.value()}"
-            )
-        if self._hierarchical_enabled.isChecked():
-            enabled_groups = [
-                self._stage_table.item(i, 1).text()
-                for i in range(self._stage_table.rowCount())
-                if self._stage_row_enabled(i)
-            ]
-            lines.append(
-                f"Hierarchical solver stages: {', '.join(enabled_groups) or '(none enabled)'}"
-            )
-        self._summary_text.setPlainText("\n".join(lines))
-
-    # ------------------------------------------------------------------
-    # Tracking
-    # ------------------------------------------------------------------
 
     def _start_tracking(self) -> None:
         if self._conn is None or self._session_path is None:
@@ -1383,7 +1772,7 @@ class RunTrackerWidget(QWidget):
             QMessageBox.critical(self, "Cannot run tracker", err)
             return
 
-        stage_err = self._validate_stage_overrides()
+        stage_err = self._config_widget.validate_stage_overrides()
         if stage_err:
             QMessageBox.critical(self, "Cannot run tracker", stage_err)
             return
@@ -1391,11 +1780,12 @@ class RunTrackerWidget(QWidget):
         out_dir = self._resolve_out_dir(primary_seq_id, primary_skel_id)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        base = self._loaded_config_id or BASELINE_CONFIG_ID
+        base = self._config_widget.loaded_config_id or BASELINE_CONFIG_ID
         config_id = edit_config(
-            self._conn, base, is_named=False, **self._collect_config_overrides()
+            self._conn, base, is_named=False, **self._config_widget.collect_overrides()
         )
-        self._sync_stage_overrides(config_id)
+        self._config_widget.sync_stage_overrides(config_id)
+        self._maybe_set_trial_default(config_id)
         self._run_id = None
         self._multi_run_labels = None
 
@@ -1486,94 +1876,6 @@ class RunTrackerWidget(QWidget):
         )
         skel_name = (self._skeleton_name(skel_id) or "skeleton").replace(" ", "_")
         return db_dir / "posetrak_results" / shot / skel_name / "tracking"
-
-    def _on_hierarchical_toggled(self, checked: bool) -> None:
-        if checked:
-            self._refresh_stage_table()
-
-    def _refresh_stage_table(self) -> None:
-        if self._conn is None:
-            return
-        skeleton_ids = [
-            sid for row in range(self._people_table.rowCount())
-            if (sid := self._row_skeleton_id(row)) is not None
-        ]
-        groups = discover_stage_groups(self._conn, skeleton_ids)
-        self._stage_table.setRowCount(len(groups))
-        for i, group in enumerate(groups):
-            chk_container = QWidget()
-            chk_layout = QHBoxLayout(chk_container)
-            chk_layout.setContentsMargins(0, 0, 0, 0)
-            chk_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            chk = QCheckBox()
-            chk.setChecked(True)
-            chk_layout.addWidget(chk)
-            self._stage_table.setCellWidget(i, 0, chk_container)
-
-            name_item = QTableWidgetItem(group)
-            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self._stage_table.setItem(i, 1, name_item)
-
-            for j, (_field, _label) in enumerate(_STAGE_OVERRIDE_COLUMNS):
-                edit = QLineEdit()
-                edit.setPlaceholderText("inherit")
-                self._stage_table.setCellWidget(i, 2 + j, edit)
-
-    def _stage_row_enabled(self, row: int) -> bool:
-        container = self._stage_table.cellWidget(row, 0)
-        chk = container.findChild(QCheckBox) if container else None
-        return chk is not None and chk.isChecked()
-
-    def _validate_stage_overrides(self) -> str | None:
-        """Return an error message if any enabled stage's override field isn't a
-        valid number (or blank, meaning inherit), else None."""
-        if not self._hierarchical_enabled.isChecked():
-            return None
-        for i in range(self._stage_table.rowCount()):
-            if not self._stage_row_enabled(i):
-                continue
-            group = self._stage_table.item(i, 1).text()
-            for j, (_field, label) in enumerate(_STAGE_OVERRIDE_COLUMNS):
-                edit = self._stage_table.cellWidget(i, 2 + j)
-                text = edit.text().strip() if edit else ""
-                if not text:
-                    continue
-                try:
-                    float(text)
-                except ValueError:
-                    return f"Stage '{group}': '{label}' is not a number: {text!r}"
-        return None
-
-    def _sync_stage_overrides(self, config_id: str) -> None:
-        """Replace *config_id*'s tracker_config_stages rows with the stage
-        table's current values. Always deletes first: edit_config() already
-        copied the base config's own stage rows forward (if any), and this
-        run's stage selection may add, drop, or re-tune any of them.
-        """
-        with self._conn:
-            self._conn.execute(
-                "DELETE FROM tracker_config_stages WHERE tracker_config_id = ?", (config_id,)
-            )
-            if not self._hierarchical_enabled.isChecked():
-                return
-            for i in range(self._stage_table.rowCount()):
-                if not self._stage_row_enabled(i):
-                    continue
-                group_name = self._stage_table.item(i, 1).text()
-                overrides = []
-                for j, (_field, _label) in enumerate(_STAGE_OVERRIDE_COLUMNS):
-                    edit = self._stage_table.cellWidget(i, 2 + j)
-                    text = edit.text().strip() if edit else ""
-                    overrides.append(float(text) if text else None)
-                self._conn.execute(
-                    "INSERT INTO tracker_config_stages"
-                    " (tracker_config_id, group_name, process_noise_std,"
-                    "  process_noise_vel_std, velocity_half_life_s, pose_noise_std,"
-                    "  calib_noise_std, outlier_threshold, init_joint_std,"
-                    "  init_velocity_std)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (config_id, group_name, *overrides),
-                )
 
     def _on_output(self, line: str) -> None:
         m = re.match(r"\s*Progress:\s*(\d+)/(\d+)\s*\(([0-9.]+)%\)", line)
@@ -1755,9 +2057,15 @@ class RunTrackerDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Run Tracker")
-        self.setMinimumWidth(640)
-        self.setMinimumHeight(420)
-        self.resize(700, 650)
+        # Wide enough for the widest Hierarchical-solver-tab-included config
+        # tab strip (West-positioned, horizontal labels -- see
+        # _HorizontalTabBar) to show every tab name at once instead of
+        # falling back to scroll arrows; tall enough for its 8 tab rows plus
+        # the People/Run groups above and the Run button below without
+        # needing an immediate manual resize.
+        self.setMinimumWidth(900)
+        self.setMinimumHeight(700)
+        self.resize(980, 820)
 
         self._widget = RunTrackerWidget()
         self._widget.set_session(conn, session_path)
@@ -1770,6 +2078,180 @@ class RunTrackerDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(self._widget, 1)
         layout.addWidget(buttons)
+
+
+class DefaultConfigDialog(QDialog):
+    """Edit the default tracker config for a capture or trial.
+
+    Config-improvements design doc, phase 3, section C: loads the resolved
+    effective default (this scope's own, else its capture's, else the
+    checked-in baseline -- see manage_config.resolve_default_tracker_config())
+    into a standalone TrackerConfigWidget, and on "Set as default" always
+    produces a *new* tracker_configs row via edit_config() (copy-on-write,
+    matching the design doc's "editing a default is always copy-on-write,
+    never in-place mutation") and repoints *only* this scope's own
+    default_tracker_config_id -- never the other level's. The embedded
+    widget's own "Load…"/"Save as…" buttons still work as usual, for loading
+    a totally different named template as the new default, or additionally
+    saving the tweaked default under a name for reuse elsewhere; neither of
+    those repoints this scope's default by itself -- only "Set as default"
+    does that.
+
+    Exactly one of *trial_id*/*capture_id* must be given.
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        trial_id: str | None = None,
+        capture_id: str | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        if (trial_id is None) == (capture_id is None):
+            raise ValueError("DefaultConfigDialog: supply exactly one of trial_id/capture_id")
+        self._conn = conn
+        self._trial_id = trial_id
+        self._capture_id = capture_id
+
+        self.setWindowTitle("Edit Default Tracker Configuration")
+        self.setMinimumWidth(560)
+        self.setMinimumHeight(420)
+        self.resize(640, 600)
+
+        from posetrak.db.manage_config import resolve_default_tracker_config
+
+        resolved_id = resolve_default_tracker_config(
+            conn, trial_id=trial_id, capture_id=capture_id
+        )
+        row = conn.execute(
+            "SELECT * FROM tracker_configs WHERE id = ?", (resolved_id,)
+        ).fetchone()
+
+        self._config_widget = TrackerConfigWidget()
+        self._config_widget.set_connection(conn)
+        # A default isn't tied to any one person's skeleton choice (that's
+        # picked per-run), so offer every skeleton's eligible stage groups
+        # here rather than none -- without this, the Hierarchical solver tab
+        # had nothing to discover and stages could never be set from this
+        # dialog at all.
+        all_skeleton_ids = [r["id"] for r in conn.execute("SELECT id FROM skeletons").fetchall()]
+        self._config_widget.set_skeleton_ids(all_skeleton_ids)
+        self._config_widget.load_config_row(
+            resolved_id, row["name"] if row["is_named"] else None, row
+        )
+
+        set_default_btn = QPushButton("Set as default")
+        set_default_btn.setToolTip(
+            "Save the current tab values as a new configuration and make it this\n"
+            "scope's default -- never mutates the configuration in place."
+        )
+        set_default_btn.clicked.connect(self._set_as_default)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        buttons.rejected.connect(self.reject)
+        buttons.addButton(set_default_btn, QDialogButtonBox.ButtonRole.AcceptRole)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._config_widget, 1)
+        layout.addWidget(buttons)
+
+    def _set_as_default(self) -> None:
+        from posetrak.db.manage_config import set_default_tracker_config
+
+        base = self._config_widget.loaded_config_id or BASELINE_CONFIG_ID
+        new_id = edit_config(self._conn, base, is_named=False, **self._config_widget.collect_overrides())
+        self._config_widget.sync_stage_overrides(new_id)
+        set_default_tracker_config(
+            self._conn, new_id, trial_id=self._trial_id, capture_id=self._capture_id
+        )
+        self.accept()
+
+
+def build_default_config_row(
+    conn: sqlite3.Connection,
+    *,
+    trial_id: str | None = None,
+    capture_id: str | None = None,
+    parent: QWidget | None = None,
+) -> QWidget:
+    """Build a "Default tracker config: ‹name› [Edit] [Change…]" row for a
+    TrialPanel or CapturePanel (config-improvements design doc, phase 3,
+    section C). Exactly one of *trial_id*/*capture_id* should be given.
+
+    "Edit" opens DefaultConfigDialog (tweak values, "Set as default" saves a
+    new copy-on-write row and repoints this scope). "Change…" repoints to an
+    existing *named* configuration directly, with no new row created --
+    distinct from "Edit", which always creates one even if nothing was
+    changed (matching the design doc's "editing a default is always
+    copy-on-write" rule -- "Change…" is not an edit, so it isn't bound by
+    that rule).
+    """
+    from posetrak.db.manage_config import resolve_default_tracker_config, set_default_tracker_config
+
+    row_widget = QWidget(parent)
+    row = QHBoxLayout(row_widget)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.addWidget(QLabel("Default tracker config:"))
+    status_label = QLabel()
+    row.addWidget(status_label, 1)
+    edit_btn = QPushButton("Edit…")
+    change_btn = QPushButton("Change…")
+    row.addWidget(edit_btn)
+    row.addWidget(change_btn)
+
+    def _refresh_status() -> None:
+        resolved_id = resolve_default_tracker_config(
+            conn, trial_id=trial_id, capture_id=capture_id
+        )
+        cfg_row = conn.execute(
+            "SELECT name, is_named FROM tracker_configs WHERE id = ?", (resolved_id,)
+        ).fetchone()
+        if cfg_row is None:
+            status_label.setText("(unresolved)")
+            return
+        own = conn.execute(
+            "SELECT default_tracker_config_id FROM "
+            + ("trials" if trial_id is not None else "captures")
+            + " WHERE id = ?",
+            (trial_id if trial_id is not None else capture_id,),
+        ).fetchone()
+        source = "" if own and own["default_tracker_config_id"] else " (inherited)"
+        name = cfg_row["name"] if cfg_row["is_named"] else "(unnamed snapshot)"
+        status_label.setText(f"{name}{source}")
+
+    def _on_edit() -> None:
+        dlg = DefaultConfigDialog(
+            conn, trial_id=trial_id, capture_id=capture_id, parent=row_widget
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            _refresh_status()
+
+    def _on_change() -> None:
+        rows = [r for r in list_configs(conn) if r["is_named"]]
+        if not rows:
+            QMessageBox.information(
+                row_widget, "No saved configs", "No named tracker configurations are saved yet."
+            )
+            return
+        rows.sort(key=lambda r: r["created_at"], reverse=True)
+        labels = [f"{r['name']}  ({r['created_at'][:19]})" for r in rows]
+        choice, ok = QInputDialog.getItem(
+            row_widget, "Change default configuration", "Configuration:", labels, 0, False
+        )
+        if not ok:
+            return
+        chosen = rows[labels.index(choice)]
+        set_default_tracker_config(
+            conn, chosen["id"], trial_id=trial_id, capture_id=capture_id
+        )
+        _refresh_status()
+
+    edit_btn.clicked.connect(_on_edit)
+    change_btn.clicked.connect(_on_change)
+    _refresh_status()
+    return row_widget
 
 
 # ---------------------------------------------------------------------------

@@ -301,6 +301,39 @@ def seed_baseline_tracker_config(conn: sqlite3.Connection) -> str:
     return BASELINE_CONFIG_ID
 
 
+def name_existing_config(conn: sqlite3.Connection, config_id: str, name: str) -> None:
+    """Give an already-existing tracker_configs row a name, in place.
+
+    Deliberately **not** a copy-on-write like edit_config() -- this is the
+    "Save config" action on a tracking run's info pane, which names the
+    *exact* row that run's tracker_config_id already points to (so its
+    provenance link is unchanged, not superseded by a new row) rather than
+    deriving a new one. No tuning value changes, so the immutability
+    concern edit_config()'s copy-on-write exists for doesn't apply here.
+
+    Parameters
+    ----------
+    conn:
+        Open connection to a posetrak registry or session database.
+    config_id:
+        ID of the existing ``tracker_configs`` row to name.
+    name:
+        The name to give it (overwrites any existing name).
+
+    Raises
+    ------
+    ValueError
+        If *config_id* does not refer to an existing ``tracker_configs`` row.
+    """
+    with conn:
+        cur = conn.execute(
+            "UPDATE tracker_configs SET name = ?, is_named = 1 WHERE id = ?",
+            (name, config_id),
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"tracker_configs row not found: {config_id!r}")
+
+
 def list_configs(
     registry: sqlite3.Connection,
     *,
@@ -329,3 +362,118 @@ def list_configs(
     return registry.execute(
         "SELECT * FROM tracker_configs ORDER BY created_at"
     ).fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Default-config resolution chain (config-improvements design doc, phase 3)
+# ---------------------------------------------------------------------------
+
+
+def resolve_default_tracker_config(
+    session: sqlite3.Connection,
+    *,
+    trial_id: str | None = None,
+    capture_id: str | None = None,
+) -> str:
+    """Resolve the effective default ``tracker_configs`` id for a trial or capture.
+
+    Resolution order: the trial's own ``default_tracker_config_id`` (if
+    *trial_id* given), else its capture's, else the checked-in baseline
+    config (:data:`BASELINE_CONFIG_ID`) -- seeded into *session* on demand if
+    not already present, so this always resolves to a row that actually
+    exists in *session* even for a session DB the baseline was never
+    otherwise copied into (see the design doc's self-containment note).
+
+    Parameters
+    ----------
+    session:
+        Open connection to a posetrak session (or registry) database.
+    trial_id:
+        Trial to resolve for. Falls through to its own capture if the trial
+        has no default set.
+    capture_id:
+        Capture to resolve for directly. Ignored if *trial_id* is given and
+        that trial has its own default set; otherwise used as the trial's
+        fallback if *trial_id* was given, or resolved directly if not.
+
+    Returns
+    -------
+    str
+        A ``tracker_configs.id`` guaranteed to exist in *session*.
+
+    Raises
+    ------
+    ValueError
+        If *trial_id* is given but no such trial exists, or if neither
+        *trial_id* nor *capture_id* is given.
+    """
+    if trial_id is not None:
+        row = session.execute(
+            "SELECT default_tracker_config_id, capture_id FROM trials WHERE id = ?",
+            (trial_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"trial not found: {trial_id!r}")
+        if row["default_tracker_config_id"]:
+            return row["default_tracker_config_id"]
+        capture_id = row["capture_id"]
+    elif capture_id is None:
+        raise ValueError("resolve_default_tracker_config: must supply trial_id or capture_id")
+
+    if capture_id is not None:
+        crow = session.execute(
+            "SELECT default_tracker_config_id FROM captures WHERE id = ?",
+            (capture_id,),
+        ).fetchone()
+        if crow is not None and crow["default_tracker_config_id"]:
+            return crow["default_tracker_config_id"]
+
+    seed_baseline_tracker_config(session)
+    return BASELINE_CONFIG_ID
+
+
+def set_default_tracker_config(
+    session: sqlite3.Connection,
+    config_id: str,
+    *,
+    trial_id: str | None = None,
+    capture_id: str | None = None,
+) -> None:
+    """Repoint a trial's or capture's ``default_tracker_config_id``.
+
+    Exactly one of *trial_id*/*capture_id* should be given -- this never
+    touches the other level, matching the design doc's "editing a
+    capture-level default never silently changes what a trial-level
+    override resolves to, and vice versa."
+
+    Parameters
+    ----------
+    session:
+        Open connection to a posetrak session (or registry) database.
+    config_id:
+        The ``tracker_configs.id`` to set as the default.
+    trial_id:
+        Trial to update, if repointing a trial-level default.
+    capture_id:
+        Capture to update, if repointing a capture-level default.
+
+    Raises
+    ------
+    ValueError
+        If neither or both of *trial_id*/*capture_id* are given.
+    """
+    if (trial_id is None) == (capture_id is None):
+        raise ValueError(
+            "set_default_tracker_config: supply exactly one of trial_id/capture_id"
+        )
+    with session:
+        if trial_id is not None:
+            session.execute(
+                "UPDATE trials SET default_tracker_config_id = ? WHERE id = ?",
+                (config_id, trial_id),
+            )
+        else:
+            session.execute(
+                "UPDATE captures SET default_tracker_config_id = ? WHERE id = ?",
+                (config_id, capture_id),
+            )

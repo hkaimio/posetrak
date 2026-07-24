@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -199,12 +200,14 @@ def _build_run_ids_group() -> tuple["_CollapsibleBox", dict]:
         "detection": _id_row_widget(None),
         "trial":     _id_row_widget(None),
         "capture":   _id_row_widget(None),
+        "config":    _id_row_widget(None),
     }
     form.addRow("Run:", widgets["run"])
     form.addRow("Skeleton:", widgets["skeleton"])
     form.addRow("Detection:", widgets["detection"])
     form.addRow("Trial:", widgets["trial"])
     form.addRow("Capture:", widgets["capture"])
+    form.addRow("Config:", widgets["config"])
     box.inner_layout().addLayout(form)
     return box, widgets
 
@@ -214,7 +217,7 @@ def _populate_run_ids(
     run: sqlite3.Row,
 ) -> None:
     """Fill ID widgets from a row that has run_id, skeleton_id, detection_run_id,
-    trial_id, trial_name, capture_id, capture_label columns."""
+    trial_id, trial_name, capture_id, capture_label, tracker_config_id columns."""
     _set_id_widget(widgets["run"],       run["run_id"])
     _set_id_widget(widgets["skeleton"],  run["skeleton_id"])
     _set_id_widget(widgets["detection"], run["detection_run_id"])
@@ -222,6 +225,7 @@ def _populate_run_ids(
                    extra_tooltip=run["trial_name"] or "")
     _set_id_widget(widgets["capture"],   run["capture_id"],
                    extra_tooltip=run["capture_label"] or "")
+    _set_id_widget(widgets["config"],    run["tracker_config_id"])
 
 
 def _frame_identifier_text(
@@ -366,6 +370,61 @@ def _cfg_text(
     return "\n".join(parts)
 
 
+def _save_run_config_dialog(
+    parent: QWidget,
+    conn: sqlite3.Connection,
+    cfg_id: str | None,
+    cfg_name: str | None,
+) -> None:
+    """"Save config" action shared by _RunInfoPane and TrackingRunPanel:
+    prompts for a name and names *cfg_id* -- the exact tracker_configs row
+    this run's tracker_config_id already points to -- in place via
+    manage_config.name_existing_config(), so it becomes loadable/settable
+    as a default elsewhere without deriving a new row or touching any
+    tuning value. See config-improvements design doc, "Save config".
+    """
+    if not cfg_id:
+        return
+    from posetrak.db.manage_config import name_existing_config
+
+    name, ok = QInputDialog.getText(
+        parent, "Save configuration", "Name:", text=cfg_name or ""
+    )
+    name = name.strip()
+    if not ok or not name:
+        return
+    name_existing_config(conn, cfg_id, name)
+    QMessageBox.information(parent, "Saved", f'Configuration saved as "{name}".')
+
+
+def _set_run_config_as_trial_default(
+    parent: QWidget,
+    conn: sqlite3.Connection,
+    cfg_id: str | None,
+    trial_id: str | None,
+) -> None:
+    """"Set as trial default" action shared by _RunInfoPane and
+    TrackingRunPanel: repoints *trial_id*'s default_tracker_config_id to
+    *cfg_id* -- the exact tracker_configs row this run used -- so future
+    runs in this trial (RunTrackerWidget auto-loads the trial's resolved
+    default when the trial is selected) start from it instead of factory
+    defaults or whatever an earlier run happened to leave behind.
+    """
+    if not cfg_id or not trial_id:
+        return
+    from posetrak.db.manage_config import set_default_tracker_config
+
+    if QMessageBox.question(
+        parent,
+        "Set as trial default",
+        "Make this run's configuration the default for its trial?\n\n"
+        "Future tracking runs started for this trial will start from it.",
+    ) != QMessageBox.StandardButton.Yes:
+        return
+    set_default_tracker_config(conn, cfg_id, trial_id=trial_id)
+    QMessageBox.information(parent, "Done", "Set as this trial's default configuration.")
+
+
 def _fmt_time(s: float | None) -> str:
     return f"{s:.3f} s" if s is not None else "—"
 
@@ -467,6 +526,10 @@ class CapturePanel(QWidget):
             root.addWidget(self._scrubber, 1)
         else:
             root.addWidget(QLabel("No videos attached to this capture."), 1)
+
+        # Default tracker config (config-improvements design doc, phase 3)
+        from app.pose.run_tracker import build_default_config_row
+        root.addWidget(build_default_config_row(self._conn, capture_id=self._capture_id, parent=self))
 
         # Bottom toolbar
         toolbar = QHBoxLayout()
@@ -745,6 +808,10 @@ class TrialPanel(QWidget):
         info_form = QFormLayout()
         info_form.addRow("Time range:", QLabel(time_str))
         vbox.addLayout(info_form)
+
+        # Default tracker config (config-improvements design doc, phase 3)
+        from app.pose.run_tracker import build_default_config_row
+        vbox.addWidget(build_default_config_row(self._conn, trial_id=self._trial_id, parent=self))
 
         # Segmentation section
         seg_box = _section("Segmentation")
@@ -5658,6 +5725,9 @@ class _RunInfoPane(QWidget):
         self._run_row: sqlite3.Row | None = None
         self._cur_step: int | None = None
         self._cur_ts: float | None = None
+        self._current_cfg_id: str | None = None
+        self._current_cfg_name: str | None = None
+        self._current_trial_id: str | None = None
         self.setMinimumWidth(self._MIN_WIDTH)
         self._build()
 
@@ -5693,6 +5763,22 @@ class _RunInfoPane(QWidget):
         run_form.addRow("Config:", self._ri_cfg)
         run_form.addRow("Notes:", self._ri_notes)
         run_box.inner_layout().addLayout(run_form)
+        self._save_cfg_btn = _action_btn("Save config…", enabled=False)
+        self._save_cfg_btn.setToolTip(
+            "Give this run's tracker configuration a name so it can be reused\n"
+            "(loaded, or set as a trial/capture default) later. Names the\n"
+            "config actually used for this run in place -- doesn't create a\n"
+            "new configuration or change any of its tuning values."
+        )
+        self._save_cfg_btn.clicked.connect(self._on_save_config)
+        run_box.inner_layout().addWidget(self._save_cfg_btn)
+        self._set_trial_default_btn = _action_btn("Set as trial default", enabled=False)
+        self._set_trial_default_btn.setToolTip(
+            "Make this run's tracker configuration the default for its\n"
+            "trial, so future runs in this trial start from it."
+        )
+        self._set_trial_default_btn.clicked.connect(self._on_set_trial_default)
+        run_box.inner_layout().addWidget(self._set_trial_default_btn)
         root.addWidget(run_box)
 
         # --- Hierarchical stages (hidden entirely for monolithic runs) ---
@@ -5782,6 +5868,11 @@ class _RunInfoPane(QWidget):
         self._run_row = None
         self._cur_step = None
         self._cur_ts = None
+        self._current_cfg_id = None
+        self._current_cfg_name = None
+        self._current_trial_id = None
+        self._save_cfg_btn.setEnabled(False)
+        self._set_trial_default_btn.setEnabled(False)
 
         if not run_id:
             return
@@ -5814,6 +5905,11 @@ class _RunInfoPane(QWidget):
         cfg = self._conn.execute(_CFG_SQL, (cfg_id,)).fetchone() if cfg_id else None
         hier_groups = _get_config_stage_groups(self._conn, cfg_id)
         self._ri_cfg.setText(_cfg_text(cfg, cfg_id, hier_groups))
+        self._current_cfg_id = cfg_id
+        self._current_cfg_name = cfg["name"] if cfg and cfg["name"] else None
+        self._current_trial_id = run["trial_id"]
+        self._save_cfg_btn.setEnabled(bool(cfg_id))
+        self._set_trial_default_btn.setEnabled(bool(cfg_id and self._current_trial_id))
 
         # Hierarchical stages (actual per-run status, not just the config's declaration)
         stage_rows = _get_run_stage_rows(self._conn, run_id, person_id=0)
@@ -5886,6 +5982,16 @@ class _RunInfoPane(QWidget):
             _db_path_of(self._conn), self._run_row, self._cur_step, self._cur_ts,
         )
         QApplication.clipboard().setText(text)
+
+    def _on_save_config(self) -> None:
+        _save_run_config_dialog(self, self._conn, self._current_cfg_id, self._current_cfg_name)
+        if self._run_row is not None:
+            self.load_run(self._run_row["run_id"])
+
+    def _on_set_trial_default(self) -> None:
+        _set_run_config_as_trial_default(
+            self, self._conn, self._current_cfg_id, self._current_trial_id
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -6445,6 +6551,30 @@ class TrackingRunPanel(QWidget):
         cfg_lbl = QLabel(_cfg_text(cfg, cfg_id, hier_groups))
         cfg_lbl.setWordWrap(True)
         form.addRow("Config:", cfg_lbl)
+        save_cfg_btn = _action_btn("Save config…", enabled=bool(cfg_id))
+        save_cfg_btn.setToolTip(
+            "Give this run's tracker configuration a name so it can be reused\n"
+            "(loaded, or set as a trial/capture default) later. Names the\n"
+            "config actually used for this run in place -- doesn't create a\n"
+            "new configuration or change any of its tuning values."
+        )
+        save_cfg_btn.clicked.connect(
+            lambda: _save_run_config_dialog(
+                self, self._conn, cfg_id, cfg["name"] if cfg and cfg["name"] else None
+            )
+        )
+        form.addRow(save_cfg_btn)
+        set_trial_default_btn = _action_btn(
+            "Set as trial default", enabled=bool(cfg_id and run["trial_id"])
+        )
+        set_trial_default_btn.setToolTip(
+            "Make this run's tracker configuration the default for its\n"
+            "trial, so future runs in this trial start from it."
+        )
+        set_trial_default_btn.clicked.connect(
+            lambda: _set_run_config_as_trial_default(self, self._conn, cfg_id, run["trial_id"])
+        )
+        form.addRow(set_trial_default_btn)
         stage_rows = _get_run_stage_rows(self._conn, self._run_id, person_id=0)
         if stage_rows:
             stages_lbl = QLabel(_stages_text(stage_rows))

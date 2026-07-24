@@ -15,7 +15,10 @@ from posetrak.db.manage_config import (
     create_config_from_toml,
     edit_config,
     list_configs,
+    name_existing_config,
+    resolve_default_tracker_config,
     seed_baseline_tracker_config,
+    set_default_tracker_config,
 )
 
 
@@ -304,6 +307,50 @@ def test_seed_baseline_tracker_config_idempotent(registry_db: sqlite3.Connection
     assert count == 1
 
 
+# ---------------------------------------------------------------------------
+# name_existing_config
+# ---------------------------------------------------------------------------
+
+
+def test_name_existing_config_names_in_place(
+    registry_db: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """name_existing_config() sets name/is_named on the SAME row -- no new
+    row, no parent_id set, unlike edit_config()'s copy-on-write."""
+    toml_path = _write_toml(tmp_path)
+    config_id = create_config_from_toml(registry_db, "ui-run", toml_path, is_named=False)
+    count_before = registry_db.execute("SELECT COUNT(*) FROM tracker_configs").fetchone()[0]
+
+    name_existing_config(registry_db, config_id, "my-tuned-run")
+
+    count_after = registry_db.execute("SELECT COUNT(*) FROM tracker_configs").fetchone()[0]
+    assert count_after == count_before  # no new row created
+
+    row = registry_db.execute(
+        "SELECT name, is_named, parent_id FROM tracker_configs WHERE id = ?", (config_id,)
+    ).fetchone()
+    assert row["name"] == "my-tuned-run"
+    assert row["is_named"] == 1
+    assert row["parent_id"] is None
+
+
+def test_name_existing_config_can_rename(registry_db: sqlite3.Connection, tmp_path: Path) -> None:
+    """Calling it again overwrites the previous name."""
+    toml_path = _write_toml(tmp_path)
+    config_id = create_config_from_toml(registry_db, "base", toml_path, is_named=False)
+    name_existing_config(registry_db, config_id, "first-name")
+    name_existing_config(registry_db, config_id, "second-name")
+    row = registry_db.execute(
+        "SELECT name FROM tracker_configs WHERE id = ?", (config_id,)
+    ).fetchone()
+    assert row["name"] == "second-name"
+
+
+def test_name_existing_config_invalid_id_raises(registry_db: sqlite3.Connection) -> None:
+    with pytest.raises(ValueError, match="tracker_configs"):
+        name_existing_config(registry_db, "00000000-0000-0000-0000-000000000000", "x")
+
+
 def test_edit_config_preserves_post_v21_columns(
     registry_db: sqlite3.Connection, tmp_path: Path
 ) -> None:
@@ -457,3 +504,114 @@ def test_list_configs_filter_by_name(registry_db: sqlite3.Connection, tmp_path: 
     assert rows[0]["name"] == "alpha_run"
     rows_no_match = list_configs(registry_db, name="nonexistent")
     assert rows_no_match == []
+
+
+# ---------------------------------------------------------------------------
+# resolve_default_tracker_config / set_default_tracker_config
+# ---------------------------------------------------------------------------
+
+
+def _make_capture_and_trial(conn: sqlite3.Connection) -> tuple[str, str]:
+    """Insert a minimal mocap_sessions -> captures -> trials chain; return
+    (capture_id, trial_id)."""
+    conn.execute(
+        "INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO captures (id, session_id, capture_number) VALUES ('cap1', 'sess1', 1)"
+    )
+    conn.execute(
+        "INSERT INTO trials (id, capture_id, name) VALUES ('trial1', 'cap1', 'take 1')"
+    )
+    conn.commit()
+    return "cap1", "trial1"
+
+
+def test_resolve_default_tracker_config_falls_back_to_baseline(
+    session_db: sqlite3.Connection,
+) -> None:
+    """With no default set at either level, resolves to the baseline config,
+    seeding it into the session DB on demand (session DBs aren't seeded at
+    creation, unlike registries)."""
+    capture_id, trial_id = _make_capture_and_trial(session_db)
+    assert session_db.execute(
+        "SELECT COUNT(*) FROM tracker_configs WHERE id = ?", (BASELINE_CONFIG_ID,)
+    ).fetchone()[0] == 0
+
+    resolved = resolve_default_tracker_config(session_db, trial_id=trial_id)
+    assert resolved == BASELINE_CONFIG_ID
+    assert session_db.execute(
+        "SELECT COUNT(*) FROM tracker_configs WHERE id = ?", (BASELINE_CONFIG_ID,)
+    ).fetchone()[0] == 1
+
+
+def test_resolve_default_tracker_config_uses_trial_default(
+    session_db: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """A trial's own default_tracker_config_id wins over its capture's."""
+    capture_id, trial_id = _make_capture_and_trial(session_db)
+    toml_path = _write_toml(tmp_path)
+    trial_cfg = create_config_from_toml(session_db, "trial-specific", toml_path)
+    capture_cfg = create_config_from_toml(session_db, "capture-specific", toml_path)
+    set_default_tracker_config(session_db, capture_cfg, capture_id=capture_id)
+    set_default_tracker_config(session_db, trial_cfg, trial_id=trial_id)
+
+    assert resolve_default_tracker_config(session_db, trial_id=trial_id) == trial_cfg
+
+
+def test_resolve_default_tracker_config_falls_through_to_capture(
+    session_db: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """No trial-level default -> falls through to the capture's default."""
+    capture_id, trial_id = _make_capture_and_trial(session_db)
+    toml_path = _write_toml(tmp_path)
+    capture_cfg = create_config_from_toml(session_db, "capture-specific", toml_path)
+    set_default_tracker_config(session_db, capture_cfg, capture_id=capture_id)
+
+    assert resolve_default_tracker_config(session_db, trial_id=trial_id) == capture_cfg
+
+
+def test_resolve_default_tracker_config_unknown_trial_raises(
+    session_db: sqlite3.Connection,
+) -> None:
+    with pytest.raises(ValueError, match="trial"):
+        resolve_default_tracker_config(session_db, trial_id="nonexistent")
+
+
+def test_resolve_default_tracker_config_requires_a_scope(
+    session_db: sqlite3.Connection,
+) -> None:
+    with pytest.raises(ValueError, match="trial_id or capture_id"):
+        resolve_default_tracker_config(session_db)
+
+
+def test_set_default_tracker_config_repoints_only_its_own_scope(
+    session_db: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """Setting a trial's default never touches its capture's, and vice versa."""
+    capture_id, trial_id = _make_capture_and_trial(session_db)
+    toml_path = _write_toml(tmp_path)
+    trial_cfg = create_config_from_toml(session_db, "trial-cfg", toml_path)
+
+    set_default_tracker_config(session_db, trial_cfg, trial_id=trial_id)
+
+    trial_row = session_db.execute(
+        "SELECT default_tracker_config_id FROM trials WHERE id = ?", (trial_id,)
+    ).fetchone()
+    capture_row = session_db.execute(
+        "SELECT default_tracker_config_id FROM captures WHERE id = ?", (capture_id,)
+    ).fetchone()
+    assert trial_row["default_tracker_config_id"] == trial_cfg
+    assert capture_row["default_tracker_config_id"] is None
+
+
+def test_set_default_tracker_config_requires_exactly_one_scope(
+    session_db: sqlite3.Connection, tmp_path: Path
+) -> None:
+    capture_id, trial_id = _make_capture_and_trial(session_db)
+    toml_path = _write_toml(tmp_path)
+    cfg = create_config_from_toml(session_db, "cfg", toml_path)
+    with pytest.raises(ValueError, match="exactly one"):
+        set_default_tracker_config(session_db, cfg)
+    with pytest.raises(ValueError, match="exactly one"):
+        set_default_tracker_config(session_db, cfg, trial_id=trial_id, capture_id=capture_id)

@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation started 2026-07-24, phases 0-2 done. Written in response to
+Implementation started 2026-07-24, phases 0-3 done. Written in response to
 Harri's brief (`confg-improvement-brief.md`, this directory) plus a
 codebase investigation done before drafting this doc — several of the
 brief's proposed mechanisms turned out to already exist in the registry
@@ -170,6 +170,257 @@ still pass unchanged. `python/tests/db` + both `run_tracker` test files:
 this environment; reconfirmed via a second `git stash` comparison that the
 crash point is byte-for-byte identical with and without this phase's
 changes.
+
+**Phase 3 — done.** Two new manage_config.py functions implement the
+resolution chain from section A3: `resolve_default_tracker_config(session,
+*, trial_id=..., capture_id=...)` (trial's own default → its capture's →
+the baseline, seeding the baseline into *session* on demand -- session DBs
+aren't auto-seeded, unlike registries, so this is what actually closes that
+gap in practice for phase 3's purposes) and `set_default_tracker_config(...)`
+(repoints exactly one of trial/capture, never both, matching "a
+capture-level edit never silently changes what a trial-level override
+resolves to"). Both have direct tests
+(`test_manage_config.py`), including the fall-through and
+scope-isolation cases.
+
+On the GUI side, editing a session/capture/trial's *default* config has
+nothing to do with people/detection runs/starting a run, so embedding all
+of `RunTrackerWidget` just to reach its config tabs would drag in a lot of
+unrelated machinery. Extracted the config-tabs-and-load/save portion into
+a standalone `TrackerConfigWidget(QWidget)`
+(`python/app/pose/run_tracker.py`) with a small public surface
+(`set_connection`, `set_skeleton_ids`, `edit_velocity_cameras_context`,
+`collect_overrides`, `sync_stage_overrides`, `validate_stage_overrides`,
+`load_config_row`, plus public `loaded_config_id`/`loaded_config_name`
+attributes).
+`RunTrackerWidget` now embeds one `TrackerConfigWidget` instance instead of
+building its tabs inline, delegating to it wherever it previously called
+its own (now-removed) config methods directly — pure extraction, no
+behavior change, reverified with the same collect/apply round-trip test
+plus the existing `run_tracker` test files, all still green.
+
+New `DefaultConfigDialog(QDialog)` wraps a standalone `TrackerConfigWidget`:
+resolves the effective default for a trial or capture, loads it, and its
+one dialog-level action — "Set as default" — always creates a new
+`tracker_configs` row via `edit_config()` (copy-on-write, never mutates the
+resolved row in place) and repoints only that scope's own
+`default_tracker_config_id`. The embedded widget's own "Load…"/"Save as…"
+still work unchanged inside this dialog (e.g. to load a totally different
+named template, or to additionally save the tweaked default under a name
+for reuse elsewhere) but neither of those repoints the scope's default by
+themselves — only "Set as default" does. New
+`build_default_config_row(conn, *, trial_id=..., capture_id=...)` builds
+the actual "Default tracker config: ‹name› [Edit] [Change…]" row: "Edit"
+opens `DefaultConfigDialog`; "Change…" is a lighter-weight action (no
+`DefaultConfigDialog`, no new row) that lists named configs and repoints
+directly — deliberately not bound by the copy-on-write rule since it isn't
+an edit. The status label distinguishes a scope's own default ("‹name›")
+from one inherited from its capture ("‹name› (inherited)"), verified
+directly against a real session DB for all three cases (own, inherited,
+falls through to baseline).
+
+Wired into both `TrialPanel` and `CapturePanel`
+(`python/app/ui/content_panels.py`) — additive rows, no other layout
+changes; both panels construct cleanly with real (if minimal) DB fixtures
+in a headless Qt session. New
+`python/tests/app/test_run_tracker_default_config.py` (8 cases) covers the
+extracted `TrackerConfigWidget`, `DefaultConfigDialog` (including the
+scope-isolation case end-to-end against a real session DB, and re-opening
+after "Set as default" resolving to the newly-set config rather than the
+baseline again), and `build_default_config_row`'s three status-label
+cases. Full run: `python/tests/app/test_run_tracker*.py` +
+`test_content_panels_hierarchical.py` + `python/tests/db`: 292/294 (same 2
+pre-existing, unrelated failures as every earlier phase).
+
+**Live-review fixes, 2026-07-24 (Harri).** Two issues found trying phases
+0-3 in the actual UI, both fixed:
+
+1. **No way to save the config an existing tracking run actually used.**
+   New `manage_config.name_existing_config(conn, config_id, name)` —
+   deliberately **not** `edit_config()`'s copy-on-write: this names the
+   *exact* row a run's `tracker_config_id` already points to, in place, so
+   the run's own provenance link is unchanged rather than superseded by a
+   new row, and no tuning value is touched (only `name`/`is_named`). Wired
+   into both `_RunInfoPane` (the live sidebar shown while scrubbing a
+   tracking run, e.g. from `PersonPanel`) and `TrackingRunPanel` (the
+   dedicated full-page run view) via a shared `_save_run_config_dialog()`
+   helper — both showed the same `_cfg_text()`/ID-group pattern already, so
+   fixing it in one place without the other would have left them
+   inconsistent. `_build_run_ids_group()`/`_populate_run_ids()` (already
+   shared by both panels) gained a "Config:" row alongside the existing
+   Run/Skeleton/Detection/Trial/Capture ones. New tests in
+   `test_manage_config.py` (in-place naming, rename-overwrites-previous,
+   invalid-id error).
+2. **Vertical tabs rotated their text vertically too.** Plain
+   `QTabWidget.setTabPosition(West)` gives Qt's default behavior of
+   rotating each tab's *label* 90° to fit the vertical strip — matching
+   neither the request nor Blender's/Visual Studio's settings dialogs,
+   where the tab *shape* is vertical but the *label* stays upright. New
+   `_HorizontalTabBar(QTabBar)` (a standard, well-known Qt/PySide recipe,
+   not project-specific): overrides `tabSizeHint()` to report a
+   transposed size (so the tab has room for upright text) and
+   `paintEvent()` to draw each tab's shape normally but rotate the
+   *painter* -90° only while drawing that tab's label. Wired into
+   `TrackerConfigWidget`'s `_config_tabs` via `setTabBar()`. Verified
+   visually, not just by absence of a crash: grabbed a headless
+   (`QT_QPA_PLATFORM=offscreen`) render of both the fixed widget and a
+   plain unfixed `QTabWidget` built the same way. The unfixed one stacks
+   glyphs vertically per tab (very tall per-tab, needs scroll arrows,
+   most tabs not visible at once) — reproducing exactly the reported bug.
+   The fixed one lays glyphs out horizontally per tab, with all 8 tabs
+   visible without scrolling. (Rendered glyphs are tofu boxes in this
+   headless environment's font-less offscreen platform, not real letters —
+   irrelevant to the layout/orientation comparison being checked.)
+
+**Live-review fixes round 2, 2026-07-24 (Harri).** A second UI pass, this
+time actually running the app rather than a headless screenshot diff, found
+the first round's tab-text fix was itself wrong, plus three deeper bugs in
+the phase 0-3 work:
+
+1. **Tab text was upside-down and mirrored (read right-to-left).** The
+   round-1 fix rotated the painter -90° before drawing each tab's label,
+   reasoning "West tabs read top-to-bottom, so rotate -90°" — but Qt's own
+   `CE_TabBarTabLabel` drawing (`qcommonstyle.cpp`) *already* rotates the
+   painter -90° internally for a West-shaped tab before drawing the label,
+   regardless of what our own `paintEvent()` does first. Our extra -90°
+   compounded with the style's own -90° to -180° total — upside-down text
+   that also reads backwards, exactly the reported symptom. The fix is
+   `+90°`, not `-90°`: it cancels the style's own -90° back to identity,
+   leaving the label genuinely horizontal. This is the standard, widely-used
+   recipe for this exact problem (matches the commonly-cited
+   Qt/PySide `+90°` solution for West-shaped `QTabBar`s), not a guess.
+   The round-1 headless screenshot comparison didn't catch this because the
+   offscreen platform in this environment renders only tofu boxes, not real
+   glyphs (confirmed by grabbing a plain unstyled `QLabel` — same tofu) —
+   which can distinguish "horizontal layout" from "vertical stack" but not
+   "right-side up" from "upside-down and mirrored", since a 180° rotation of
+   a horizontal run of boxes still looks like a horizontal run of boxes.
+   Genuine visual confirmation of *this* class of bug needs a real windowed
+   session or a font that actually rasterizes in this sandbox; the fix here
+   instead rests on tracing the exact Qt source behavior that explains the
+   reported symptom precisely (double rotation → 180°), which is a stronger
+   argument than another screenshot would have been anyway.
+
+2. **Hierarchical solver settings vanished when editing a trial's default
+   config.** Two compounding bugs, both in code from phase 3:
+   - `DefaultConfigDialog` never called `set_skeleton_ids()` on its embedded
+     `TrackerConfigWidget` (deliberately, per its own docstring — a default
+     isn't tied to one person's skeleton choice). But that left
+     `discover_stage_groups()` with an empty skeleton list, so the
+     Hierarchical solver tab could never discover *any* eligible group —
+     the checkbox could be ticked but the table stayed permanently empty.
+     Fixed by passing every skeleton in the session instead of none (a
+     default isn't skeleton-specific, but "no skeletons" was never the
+     right substitute for "not skeleton-specific" — "all skeletons in the
+     session" is).
+   - `TrackerConfigWidget.load_config_row()` never read back a config's
+     existing `tracker_config_stages` rows — it always left the enable
+     checkbox unchecked and the table empty, regardless of what was
+     actually saved. Combined with `_sync_stage_overrides()` always
+     rebuilding a config's stage rows from the table's *current* state
+     (deleting whatever was there first), re-saving an already-hierarchical
+     default without ever seeing its real stage selection silently deleted
+     it. New `TrackerConfigWidget._load_stage_overrides()`, called from
+     `load_config_row()`: checks the enable box iff any stage rows exist,
+     populates the table via the existing `discover_stage_groups()` path,
+     then overlays the saved per-group enabled state and override values.
+3. **Run Tracker dialog always started from factory defaults, never the
+   trial's own default.** `RunTrackerWidget` never loaded anything into its
+   `TrackerConfigWidget` on trial selection — starting a run always based
+   the snapshot on `BASELINE_CONFIG_ID` unless the user manually used
+   "Load…", which only lists *named* configs (most trial defaults are
+   unnamed auto-generated snapshots, so usually nothing to pick). New
+   `_load_trial_default_config()`, called from `_on_trial_changed()`,
+   resolves and loads the trial's effective default (same
+   `resolve_default_tracker_config()` chain the trial/capture panels'
+   "Default tracker config" row already uses) so the config tabs start
+   already reflecting it — at which point they're the same always-editable
+   tabs they've been since phase 3, so this alone also addressed Harri's
+   related "can't adjust the configuration, only load a named one" report:
+   the tabs were editable the whole time, there was just nothing useful
+   loaded into them to start from.
+4. **The "Based on X" status label didn't distinguish "loaded, untouched"
+   from "loaded, then edited".** It always read `Based on "X"` regardless
+   of whether the tab values still matched X. New dirty-tracking: a
+   snapshot of `collect_overrides()` plus a serialized stage-table snapshot
+   is captured whenever `loaded_config_id` is set (load or save), and every
+   tuning field's change signal (wired generically via `findChildren()`
+   rather than one-by-one, so new fields can't silently fall outside the
+   check) triggers a label recompute. Unmodified: bare config name (or
+   `(unnamed snapshot)`). Modified: name + ` (modified)`. Never loaded:
+   unchanged `Based on factory defaults (unsaved)`.
+5. **No way to promote a run's config to be its trial's default.** New
+   `manage_config`-backed action, `_set_run_config_as_trial_default()`
+   (shared, like `_save_run_config_dialog()`, between `_RunInfoPane` and
+   `TrackingRunPanel`): a "Set as trial default" button next to "Save
+   config…" repoints the trial's `default_tracker_config_id` to the exact
+   config the viewed run used. Mirrored in `RunTrackerWidget` itself as a
+   "Set as trial default" checkbox next to the Run button — checking it
+   repoints the trial's default to the fresh snapshot `_start_tracking()`
+   creates for that run (factored into `_maybe_set_trial_default()` so the
+   checkbox's effect is unit-testable without spinning up the tracker
+   thread).
+
+Full run: `python/tests/app/test_run_tracker*.py` +
+`test_content_panels_hierarchical.py` + `python/tests/db`: 301/303 (same 2
+pre-existing, unrelated failures as every earlier phase). 8 new cases added
+to `test_run_tracker_default_config.py` covering the status-label dirty
+transition, stage-override load/save round-trip, `DefaultConfigDialog`
+discovering stages from all session skeletons, and both the auto-loaded and
+explicitly-set trial-default paths.
+
+**Deferred: per-skeleton hierarchical eligibility.** Harri raised that a
+future multi-person (or multi-object) run may mix skeletons with different
+hierarchical-solver support, and one shared "enable hierarchical tracking"
+checkbox on the config doesn't obviously generalize to that — likely wants
+a per-skeleton eligibility concept alongside the current per-config one.
+Noted as a real open question, not addressed here; needs its own design
+discussion rather than a quick fix.
+
+**Live-review fixes round 3, 2026-07-24 (Harri).** Live-running the actual
+Run Tracker dialog (not just the trial/capture default-config dialog round
+2 tested) surfaced one more real bug plus two layout complaints:
+
+1. **Stage table stayed empty after selecting a hierarchical skeleton and
+   pressing "Refresh stages" in the Run Tracker dialog.** Root cause: a
+   person row's Skeleton `QComboBox` (`RunTrackerWidget._insert_person_row()`)
+   had no `currentIndexChanged` connection at all — unlike the adjacent
+   Person combo, which does refresh its detection-run combo on change.
+   Changing a row's skeleton never reached
+   `TrackerConfigWidget.set_skeleton_ids()`, so "Refresh stages" kept
+   discovering groups for whichever skeleton the combo happened to default
+   to at row-creation time (alphabetically first), not whatever the user
+   actually selected. Round 2's `DefaultConfigDialog` fix (passing every
+   session skeleton) didn't cover this path since the Run Tracker dialog's
+   `TrackerConfigWidget` *is* meant to track a specific selection here.
+   Fixed by wiring the skeleton combo's `currentIndexChanged` to the same
+   `_update_run_btn()` already responsible for pushing
+   `_current_skeleton_ids()` into the config widget. New regression test
+   (`test_person_row_skeleton_change_updates_config_widget_skeleton_ids`)
+   — verified it actually fails without the fix (reverted the one-line
+   connect, watched it fail with the expected `['skel-hier'] !=
+   ['skel-plain']`, restored it) before trusting it as a guard.
+2. **Run Tracker dialog's default size was too small, hiding tab names.**
+   `_HorizontalTabBar` (round 1) reports an honest, wider size hint for
+   horizontal-label West tabs, but the dialog's old default
+   (`640×420`, resized to `700×650`) was sized for the pre-round-1 narrow
+   vertical-text tabs. Too little width made Qt fall back to scroll
+   arrows, hiding most tab names — a second, layout-level way to reproduce
+   "can't see all the tabs" distinct from round 1's rotation bug. Fixed by
+   both raising the dialog's default/minimum size (`900×700` minimum,
+   opens at `980×820`) and calling
+   `self._config_tabs.setUsesScrollButtons(False)` so an undersized window
+   forces the layout to honestly request more room instead of silently
+   collapsing the tab strip.
+3. **Pane order.** Reordered `RunTrackerWidget`'s root layout: People →
+   configuration tabs (still the only stretching widget) → Run (output
+   directory / binary path) → Set-as-trial-default checkbox → Run button →
+   progress/results, matching the request to read top-to-bottom as "who,
+   how, then go" rather than the previous People/Run-mechanics/config
+   ordering.
+
+Full run: `test_run_tracker*.py` + `test_content_panels_hierarchical.py` +
+`python/tests/db`: 302/304 (same 2 pre-existing, unrelated failures).
 
 ## The brief, in short
 
@@ -558,7 +809,7 @@ the existing 4-tuple flag, not a replacement — existing scripts/tests
 | 0 — **done** | Fix `manage_config.edit_config()`/`create_config_from_toml()` to be column-set-complete and `tracker_config_stages`-aware, generically (via row-keys, not a hardcoded parameter list). New pytest coverage for "edit preserves every column, including stage overrides." | — |
 | 1 — **done** | Schema: `captures.default_tracker_config_id`, `trials.default_tracker_config_id`, `tracker_configs.is_named`, a checked-in baseline `tracker_configs` row (`is_named=1`) the chain terminates in. | 0 |
 | 2 — **done** | GUI: restructure `RunTrackerWidget` into vertical tabs (B1), add the numeric-field widget (B2) across all tabs, add the config picker/save-as (B3). No schema change beyond phase 1. | 0, 1 |
-| 3 | GUI: "Default tracker config" row + Edit/Change on `TrialPanel`/`CapturePanel` (C). | 1, 2 |
+| 3 — **done** | GUI: "Default tracker config" row + Edit/Change on `TrialPanel`/`CapturePanel` (C). | 1, 2 |
 | 4 | Schema: `capture_persons` + nullable `capture_person_id` on `detection_track_assignments`/`sequence_persons` (D1, D2). | — (independent of 0-3) |
 | 5 | GUI: `CapturePanel` persons section, `main.py` assignment picker, `RunTrackerDialog` people-table data-source switch (D3). | 4, and ideally 2 (so the redesigned dialog isn't touched twice) |
 | 6 | Python CLI: person-by-name resolution (E). | 4 |

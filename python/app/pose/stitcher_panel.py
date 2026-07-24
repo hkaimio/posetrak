@@ -450,9 +450,32 @@ class StitcherPanel(QWidget):
                     "fps": float(r["actual_fps"] or 30.0),
                 }
 
+        self._populate_known_persons()
         self._stitcher.load_run(self._conn, self._run_id)
         self._restore_assignments()
         self._last_applied = dict(self._assignments)
+
+    def _populate_known_persons(self) -> None:
+        """Offer this capture's already-defined capture_persons (config-
+        improvements design doc, "Person model") in the person combo up
+        front, not just names already assigned in the currently loaded run
+        -- mirrors PoseExtractionWindow's own _populate_known_persons()
+        (app/pose/main.py) for this embedded panel, which has its own
+        separate person combo/stitcher pair rather than sharing that
+        window's."""
+        if not self._shot_id:
+            return
+        from posetrak.db.manage_person import list_persons
+
+        try:
+            names = [p["name"] for p in list_persons(self._conn, self._shot_id)]
+        except sqlite3.Error:
+            return
+        for name in names:
+            if self._person_combo.findText(name) < 0:
+                self._person_combo.addItem(name)
+        if names:
+            self._refresh_persons()
 
     def _restore_assignments(self) -> None:
         rows = self._conn.execute(

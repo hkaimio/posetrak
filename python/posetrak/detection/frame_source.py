@@ -76,7 +76,20 @@ def _iter_frames_av(path: str, first_frame: int, last_frame: int):
     with av.open(path) as container:
         _log.debug("_iter_frames_av: opened ok")
         stream = container.streams.video[0]
-        stream.thread_type = "AUTO"
+        # NOT "AUTO": every call here decodes only [first_frame, last_frame)
+        # and then the `with` block above closes the container -- i.e.
+        # always closes *before* the decoder reaches the file's real EOF.
+        # With threaded decoding enabled, that close (avcodec_free_context())
+        # can hang indefinitely waiting on an FFmpeg-internal decode worker
+        # thread that's still mid-frame and never gets flushed -- confirmed
+        # live via py-spy: the main decode thread parked in
+        # avcodec_free_context()/avpriv_split_xiph_headers on a condition
+        # variable, an FFmpeg-spawned worker thread (visible as its own OS
+        # thread, created via beginthreadex) stuck inside av_parser_iterate.
+        # Single-threaded decode has no such worker thread to leak, so
+        # closing early is always safe -- the seek() below already avoids
+        # most of the cost multi-threaded decode would have saved anyway.
+        stream.thread_type = "NONE"
         time_base = float(stream.time_base)
         # Use the container's own fps for seek/pts arithmetic — never
         # actual_fps from the DB, which may reflect real-world capture rate

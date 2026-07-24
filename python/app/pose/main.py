@@ -567,8 +567,31 @@ class PoseExtractionWindow(QMainWindow):
         self._stitcher.set_sync_table(run_sync_table)
         self._frame_view.set_sync_table(run_sync_table)
 
+        self._populate_known_persons()
         self._stitcher.load_run(self._session, run_id)
         self._restore_finalised_assignments(run_id)
+
+    def _populate_known_persons(self) -> None:
+        """Offer this capture's already-defined capture_persons (config-
+        improvements design doc, "Person model") in the person combo up
+        front, not just names already assigned in the currently loaded run
+        -- reusing an existing person is then just picking their name from
+        the dropdown instead of retyping it. Additive: never removes
+        anything already in the combo (matches the combo's existing
+        accumulate-across-runs behaviour), and typing a brand-new name is
+        still accepted (finalise_to_db() creates a capture_persons row for
+        it automatically)."""
+        if self._session is None or self._shot_id is None:
+            return
+        from posetrak.db.manage_person import list_persons
+
+        names = [p["name"] for p in list_persons(self._session, self._shot_id)]
+        for name in names:
+            if self._person_combo.findText(name) < 0:
+                self._person_combo.addItem(name)
+        if names:
+            all_names = [self._person_combo.itemText(i) for i in range(self._person_combo.count())]
+            self._stitcher.set_known_persons(all_names)
 
     def _restore_finalised_assignments(self, run_id: str) -> None:
         """Restore track→person assignments saved at finalise time.

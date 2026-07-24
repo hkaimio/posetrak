@@ -198,3 +198,78 @@ def test_refinalise_refuses_once_sequence_has_edits(session):
     assert session.execute(
         "SELECT count(*) FROM pose_observation_edits WHERE sequence_id=?", (seq_id,)
     ).fetchone()[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# capture_person_id resolution (config-improvements design doc, "Person
+# model: promote identity to capture level")
+# ---------------------------------------------------------------------------
+
+
+def test_finalise_creates_capture_person_and_links_both_tables(session):
+    session.execute(
+        "INSERT INTO detection_keypoints"
+        " (detection_run_id, shot_video_id, video_frame, track_id, region_type, keypoints, noise_scale)"
+        " VALUES ('run1', ?, 0, 1, 'full_body', ?, 0.5)",
+        (_SVID, _kp(1.0, 133)),
+    )
+    session.commit()
+
+    assignment = TrackAssignment(
+        shot_video_id=_SVID, track_id=1, person_name="alice",
+        first_frame=0, last_frame=0,
+    )
+    seq_ids = finalise_to_db(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        assignments=[assignment], pose_model="rtmpose-l-133kp",
+    )
+    seq_id = seq_ids[0]
+
+    from posetrak.db.manage_person import get_person, list_persons
+
+    persons = list_persons(session, _SHOT_ID)
+    assert len(persons) == 1
+    assert persons[0]["name"] == "alice"
+    person_id = persons[0]["id"]
+
+    seq_person = session.execute(
+        "SELECT capture_person_id FROM sequence_persons WHERE sequence_id = ?", (seq_id,)
+    ).fetchone()
+    assert seq_person["capture_person_id"] == person_id
+
+    assignment_row = session.execute(
+        "SELECT capture_person_id FROM detection_track_assignments "
+        "WHERE detection_run_id = 'run1'"
+    ).fetchone()
+    assert assignment_row["capture_person_id"] == person_id
+    assert get_person(session, person_id) is not None
+
+
+def test_finalise_reuses_existing_capture_person_across_runs(session):
+    """The same name finalised from a second detection run in the same
+    capture must resolve to the same capture_persons row, not create a
+    second one -- otherwise identity wouldn't actually carry across runs."""
+    from posetrak.db.manage_person import create_person, list_persons
+
+    existing_id = create_person(session, _SHOT_ID, "alice")
+
+    session.execute(
+        "INSERT INTO detection_keypoints"
+        " (detection_run_id, shot_video_id, video_frame, track_id, region_type, keypoints, noise_scale)"
+        " VALUES ('run1', ?, 0, 1, 'full_body', ?, 0.5)",
+        (_SVID, _kp(1.0, 133)),
+    )
+    session.commit()
+
+    assignment = TrackAssignment(
+        shot_video_id=_SVID, track_id=1, person_name="alice",
+        first_frame=0, last_frame=0,
+    )
+    finalise_to_db(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        assignments=[assignment], pose_model="rtmpose-l-133kp",
+    )
+
+    persons = list_persons(session, _SHOT_ID)
+    assert len(persons) == 1
+    assert persons[0]["id"] == existing_id

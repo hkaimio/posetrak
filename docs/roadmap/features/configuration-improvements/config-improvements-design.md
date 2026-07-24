@@ -3,7 +3,7 @@
 ## Status
 
 Implementation started 2026-07-24, phases 0-3 done (plus three rounds of
-live-review fixes on top, see below), phase 4 done. Written in response to
+live-review fixes on top, see below), phases 4-5 done. Written in response to
 Harri's brief (`confg-improvement-brief.md`, this directory) plus a
 codebase investigation done before drafting this doc — several of the
 brief's proposed mechanisms turned out to already exist in the registry
@@ -446,6 +446,65 @@ and a migration test in `test_posetrak_db.py` mirroring the v37→v38 one
 table/column exist and existing rows survive untouched). Full
 `python/tests/db` run: 284/286 (same 2 pre-existing, unrelated failures).
 
+**Phase 5 — done.** GUI (D3), built on phase 4's schema:
+
+- **`CapturePanel` "Persons" section**: new `_CapturePersonsSection`
+  (`content_panels.py`) -- a `QListWidget` of this capture's
+  `capture_persons` (name + default skeleton, or "(no default skeleton)"),
+  with Add.../Rename.../Default skeleton…/Remove acting on whichever row is
+  selected. "Remove" surfaces `delete_person()`'s refusal (person still
+  referenced by detection/tracking data) as a `QMessageBox.critical` rather
+  than letting the `ValueError` propagate. Added to `CapturePanel` right
+  after its existing default-tracker-config row.
+- **`main.py`'s person picker**: rather than rewriting the existing
+  free-text/editable combo + stitcher/conflict-resolution UI (complex,
+  working, and unrelated to this feature), the combo is now *pre-populated*
+  from the current capture's `capture_persons` on run selection
+  (`_populate_known_persons()`), so reusing an existing person is picking
+  their name from the dropdown instead of retyping it -- additive, same
+  accumulate-don't-clear behaviour the combo already had. The actual
+  identity link is resolved once, at the existing single choke point both
+  `sequence_persons` and `detection_track_assignments` are written from:
+  `finalise.py`'s `finalise_to_db()` now calls
+  `manage_person.find_or_create_person()` per assigned name and writes the
+  resulting id as `capture_person_id` on both tables (auto-creating a row
+  for a name typed fresh rather than picked from the list). This delivers
+  the design's actual goal -- identity defined once, reused across
+  detection runs in a capture -- without touching the stitcher/frame-view
+  machinery at all.
+- **`RunTrackerWidget`'s people table data source switch**: `_on_trial_changed()`
+  now resolves the selected trial's capture and calls
+  `manage_person.list_persons()`; if any exist, `_insert_capture_person_rows()`
+  builds one row per person *with observations in this trial*
+  (`_detection_runs_for_capture_person()` matches by `capture_person_id`,
+  falling back to an exact `person_name` match for pre-migration rows) --
+  a checkbox (person name as its label) for whether to include them, a
+  detection-run picker (only enabled when more than one exists for that
+  person in this trial), and a skeleton combo pre-filled from the person's
+  own `default_skeleton_id`. If the capture has *no* `capture_persons`
+  defined yet, the table falls back to the original free-text-name
+  discovery unchanged (row 0 mandatory, "Add person…" visible) -- existing
+  captures that haven't adopted the person model keep working exactly as
+  before. `_row_included()`/`_row_person_name()` abstract over which mode
+  built a given row so `_current_skeleton_ids()`, `_update_run_btn()`, and
+  `_start_tracking()`'s person-collection loop work unmodified in both.
+- New test files: `test_run_tracker_person_model.py` (5 cases: capture-persons
+  mode used when defined, legacy fallback when not, multi-detection-run
+  picker enabling, a person with no observations in this trial being
+  skipped rather than producing a dead row, unchecking a row excluding it
+  from both skeleton discovery and the Run button's enablement),
+  `test_capture_persons_section.py` (8 cases covering the list/add/rename/
+  set-default-skeleton/remove actions, including the remove-refused path),
+  plus two new cases in `test_finalise.py` (a fresh name creates and links
+  a `capture_persons` row on both tables; the same name from a second
+  detection run in the same capture reuses the existing row rather than
+  creating a second one).
+
+Full run: `test_run_tracker*.py` + `test_content_panels_hierarchical.py` +
+`test_capture_persons_section.py` + `test_finalise.py` + `python/tests/db`
++ `python/tests/tracker`: 341/343 (same 2 pre-existing, unrelated
+failures).
+
 ## The brief, in short
 
 1. The tracker-configuration dialog (`RunTrackerDialog` /
@@ -835,7 +894,7 @@ the existing 4-tuple flag, not a replacement — existing scripts/tests
 | 2 — **done** | GUI: restructure `RunTrackerWidget` into vertical tabs (B1), add the numeric-field widget (B2) across all tabs, add the config picker/save-as (B3). No schema change beyond phase 1. | 0, 1 |
 | 3 — **done** | GUI: "Default tracker config" row + Edit/Change on `TrialPanel`/`CapturePanel` (C). | 1, 2 |
 | 4 — **done** | Schema: `capture_persons` + nullable `capture_person_id` on `detection_track_assignments`/`sequence_persons` (D1, D2). | — (independent of 0-3) |
-| 5 | GUI: `CapturePanel` persons section, `main.py` assignment picker, `RunTrackerDialog` people-table data-source switch (D3). | 4, and ideally 2 (so the redesigned dialog isn't touched twice) |
+| 5 — **done** | GUI: `CapturePanel` persons section, `main.py` assignment picker, `RunTrackerDialog` people-table data-source switch (D3). | 4, and ideally 2 (so the redesigned dialog isn't touched twice) |
 | 6 | Python CLI: person-by-name resolution (E). | 4 |
 
 Phases 0-3 (config-only) are independently shippable and deliver the bulk of

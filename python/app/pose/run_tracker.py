@@ -48,6 +48,7 @@ from posetrak.db.manage_config import (
     resolve_default_tracker_config,
     set_default_tracker_config,
 )
+from posetrak.db.manage_person import list_persons
 from posetrak.tracker.runner import MultiPersonResult, PersonRunSpec, TrackerResult, default_binary_path
 from posetrak.tracker.runner import run_multi_person_tracker as _run_multi_person_tracker
 from posetrak.tracker.runner import run_tracker as _run_tracker
@@ -1298,22 +1299,26 @@ class RunTrackerWidget(QWidget):
         self._people_table.verticalHeader().setVisible(False)
         self._people_table.setMinimumHeight(90)
         self._people_table.setToolTip(
-            "Row 1 is the primary person and can't be removed. \"Add person…\"\n"
-            "tracks another named person from the same trial alongside them,\n"
-            "interleaved frame-by-frame (enables cross-person anchoring if\n"
-            "Cross-person distance above is set > 0). Each person keeps their\n"
-            "own detection run and skeleton."
+            "If this trial's capture has defined persons (CapturePanel's\n"
+            "Persons section), one row per person is listed with a checkbox\n"
+            "for whether to include them in this run. Otherwise, row 1 is\n"
+            "the primary person and can't be removed; \"Add person…\" tracks\n"
+            "another named person from the same trial alongside them.\n"
+            "Either way, tracking multiple people together interleaves them\n"
+            "frame-by-frame (enables cross-person anchoring if Cross-person\n"
+            "distance above is set > 0), and each keeps their own detection\n"
+            "run and skeleton."
         )
 
-        add_person_btn = QPushButton("Add person…")
-        add_person_btn.clicked.connect(self._add_person_row)
+        self._add_person_btn = QPushButton("Add person…")
+        self._add_person_btn.clicked.connect(self._add_person_row)
 
         people_layout = QVBoxLayout()
         people_layout.addLayout(trial_form)
         people_layout.addWidget(self._people_table)
         add_person_row = QHBoxLayout()
         add_person_row.addStretch()
-        add_person_row.addWidget(add_person_btn)
+        add_person_row.addWidget(self._add_person_btn)
         people_layout.addLayout(add_person_row)
 
         people_box = QGroupBox("People")
@@ -1546,6 +1551,33 @@ class RunTrackerWidget(QWidget):
             (trial_id, person_name),
         ).fetchall())
 
+    def _capture_id_for_trial(self, trial_id: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT capture_id FROM trials WHERE id = ?", (trial_id,)
+        ).fetchone()
+        return row["capture_id"] if row is not None else None
+
+    def _detection_runs_for_capture_person(
+        self, trial_id: str, capture_person_id: str, name: str
+    ) -> list[sqlite3.Row]:
+        """Detection runs in *trial_id* with observations for the capture
+        person *capture_person_id* -- matches by that link where set,
+        falling back to an exact person_name match for sequences written
+        before capture_persons existed (capture_person_id IS NULL)."""
+        return list(self._conn.execute(
+            "SELECT dr.id AS detection_run_id, dr.created_at, dr.detector_model,"
+            "       dr.pose_model, dr.status,"
+            "       pos.id AS seq_id, pos.time_start_s, pos.time_end_s"
+            " FROM detection_runs dr"
+            " JOIN pose_observation_sequences pos ON pos.detection_run_id = dr.id"
+            " JOIN sequence_persons sp ON sp.sequence_id = pos.id"
+            " WHERE dr.trial_id = ? AND sp.person_id = 0"
+            "   AND (sp.capture_person_id = ?"
+            "        OR (sp.capture_person_id IS NULL AND sp.person_name = ?))"
+            " ORDER BY dr.created_at DESC",
+            (trial_id, capture_person_id, name),
+        ).fetchall())
+
     @staticmethod
     def _detection_run_label(r: sqlite3.Row) -> str:
         label = f"{r['created_at'][:19]}  ({r['detector_model']}/{r['pose_model']})"
@@ -1585,6 +1617,23 @@ class RunTrackerWidget(QWidget):
     def _row_skeleton_id(self, row: int) -> str | None:
         combo = self._people_table.cellWidget(row, 2)
         return combo.currentData() if combo is not None else None
+
+    def _row_included(self, row: int) -> bool:
+        """Whether *row* should be tracked. Column 0 holds a QComboBox
+        (person picker) in the legacy free-text-person mode -- always
+        included, no per-row opt-out -- or a QCheckBox (person name as its
+        label) in the capture_persons mode, where inclusion is the whole
+        point of the checkbox. See _insert_capture_person_rows()."""
+        widget = self._people_table.cellWidget(row, 0)
+        if isinstance(widget, QCheckBox):
+            return widget.isChecked()
+        return True
+
+    def _row_person_name(self, row: int) -> str:
+        widget = self._people_table.cellWidget(row, 0)
+        if widget is None:
+            return ""
+        return widget.text() if isinstance(widget, QCheckBox) else widget.currentText()
 
     def _insert_person_row(
         self, trial_id: str, used_names: set[str], *, removable: bool
@@ -1666,17 +1715,60 @@ class RunTrackerWidget(QWidget):
                 self, "No other people", "No other person names found for this trial."
             )
 
+    def _insert_capture_person_rows(self, trial_id: str, persons: list[sqlite3.Row]) -> None:
+        """Populate the people table from *persons* (the trial's capture's
+        defined capture_persons), one row per person with observations in
+        this trial -- data-source switch described in the config-improvements
+        design doc, "Person model", D3. Unlike the legacy free-text mode,
+        the roster here is fixed (defined via CapturePanel's Persons
+        section, not ad hoc per run): each row is a checkbox for whether to
+        include that person in this run, a detection-run picker (only
+        enabled when more than one exists for this person in this trial),
+        and a skeleton combo pre-filled from the person's own default.
+        """
+        for person in persons:
+            detection_runs = self._detection_runs_for_capture_person(
+                trial_id, person["id"], person["name"]
+            )
+            if not detection_runs:
+                continue  # nothing to track for this person in this trial
+
+            row = self._people_table.rowCount()
+            self._people_table.insertRow(row)
+
+            include_chk = QCheckBox(person["name"])
+            include_chk.setChecked(True)
+            include_chk.toggled.connect(self._update_run_btn)
+            self._people_table.setCellWidget(row, 0, include_chk)
+
+            dr_combo = QComboBox()
+            for r in detection_runs:
+                dr_combo.addItem(
+                    self._detection_run_label(r),
+                    (r["seq_id"], r["time_start_s"], r["time_end_s"], r["detection_run_id"]),
+                )
+            dr_combo.setEnabled(len(detection_runs) > 1)
+            dr_combo.currentIndexChanged.connect(self._update_run_btn)
+            self._people_table.setCellWidget(row, 1, dr_combo)
+
+            skeleton_combo = self._make_skeleton_combo()
+            if person["default_skeleton_id"]:
+                idx = skeleton_combo.findData(person["default_skeleton_id"])
+                if idx >= 0:
+                    skeleton_combo.setCurrentIndex(idx)
+            skeleton_combo.currentIndexChanged.connect(self._update_run_btn)
+            self._people_table.setCellWidget(row, 2, skeleton_combo)
+
     def _current_skeleton_ids(self) -> list[str]:
         return [
             sid for row in range(self._people_table.rowCount())
-            if (sid := self._row_skeleton_id(row)) is not None
+            if self._row_included(row) and (sid := self._row_skeleton_id(row)) is not None
         ]
 
     def _update_run_btn(self) -> None:
-        ok = (
-            len(self._all_skeletons) > 0
-            and self._people_table.rowCount() > 0
-            and self._row_detection_run_data(0) is not None
+        ok = len(self._all_skeletons) > 0 and any(
+            self._row_included(row) and self._row_detection_run_data(row) is not None
+            for row in range(self._people_table.rowCount())
         )
         self._run_btn.setEnabled(ok)
         self._config_widget.set_skeleton_ids(self._current_skeleton_ids())
@@ -1685,7 +1777,19 @@ class RunTrackerWidget(QWidget):
         trial_id = self._current_trial_id()
         self._people_table.setRowCount(0)
         if trial_id is not None:
-            self._insert_person_row(trial_id, used_names=set(), removable=False)
+            capture_id = self._capture_id_for_trial(trial_id)
+            persons = list_persons(self._conn, capture_id) if capture_id else []
+            if persons:
+                self._insert_capture_person_rows(trial_id, persons)
+                self._add_person_btn.setVisible(False)
+            else:
+                # No capture_persons defined for this capture yet (not
+                # adopted, or a pre-existing capture) -- fall back to the
+                # original free-text-name discovery so existing captures
+                # keep working unchanged until someone defines persons for
+                # them via CapturePanel's Persons section.
+                self._insert_person_row(trial_id, used_names=set(), removable=False)
+                self._add_person_btn.setVisible(True)
             self._sequence_cameras = self._cameras_for_trial(trial_id)
         else:
             self._sequence_cameras = []
@@ -1752,18 +1856,26 @@ class RunTrackerWidget(QWidget):
 
         people: list[tuple[str, str, float, float, str]] = []
         for row in range(self._people_table.rowCount()):
+            if not self._row_included(row):
+                continue
             data = self._row_detection_run_data(row)
             skel_id = self._row_skeleton_id(row)
             if data is None or skel_id is None:
                 QMessageBox.critical(
                     self, "Cannot run tracker",
-                    "Every person needs both a detection run and a skeleton selected.",
+                    "Every included person needs both a detection run and a skeleton selected.",
                 )
                 return
             seq_id, t0, t1, _dr_id = data
-            person_name = self._people_table.cellWidget(row, 0).currentText()
+            person_name = self._row_person_name(row)
             dr_label = self._people_table.cellWidget(row, 1).currentText()
             people.append((seq_id, skel_id, t0, t1, f"{person_name} — {dr_label}"))
+
+        if not people:
+            QMessageBox.critical(
+                self, "Cannot run tracker", "Include at least one person to track."
+            )
+            return
 
         primary_seq_id, primary_skel_id, time_start_s, time_end_s, _ = people[0]
 

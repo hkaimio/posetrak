@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from posetrak.db.db import generate_id
+from posetrak.db.manage_person import find_or_create_person
 from app.setup.db_context import SyncPoint, SyncTable
 
 
@@ -152,10 +153,18 @@ def finalise_to_db(
         by_person[asgn.person_name].append(asgn)
 
     seq_ids: list[str] = []
+    # Resolves each assigned name to this capture's capture_persons row
+    # (config-improvements design doc, "Person model"), creating one if this
+    # is the first time that name's been used in this capture -- reused
+    # below for both sequence_persons and detection_track_assignments so a
+    # person's identity carries across detection runs within the capture.
+    capture_person_ids: dict[str, str] = {}
 
     for person_name, person_assignments in by_person.items():
         seq_id = generate_id()
         seq_ids.append(seq_id)
+        capture_person_id = find_or_create_person(session, shot_id, person_name)
+        capture_person_ids[person_name] = capture_person_id
 
         session.execute(
             "INSERT INTO pose_observation_sequences "
@@ -168,9 +177,10 @@ def finalise_to_db(
 
         # One person per sequence — person_id is always 0 within the sequence
         session.execute(
-            "INSERT OR IGNORE INTO sequence_persons (sequence_id, person_id, person_name) "
-            "VALUES (?, 0, ?)",
-            (seq_id, person_name),
+            "INSERT OR IGNORE INTO sequence_persons "
+            "(sequence_id, person_id, person_name, capture_person_id) "
+            "VALUES (?, 0, ?, ?)",
+            (seq_id, person_name, capture_person_id),
         )
 
         # Keyed by (camera_instance_id, video_frame, source) so that adjacent
@@ -232,11 +242,12 @@ def finalise_to_db(
     )
     session.executemany(
         "INSERT INTO detection_track_assignments "
-        "(detection_run_id, shot_video_id, track_id, person_name, first_frame, last_frame) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "(detection_run_id, shot_video_id, track_id, person_name, capture_person_id, "
+        " first_frame, last_frame) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
             (detection_run_id, a.shot_video_id, a.track_id,
-             a.person_name, a.first_frame, a.last_frame)
+             a.person_name, capture_person_ids[a.person_name], a.first_frame, a.last_frame)
             for a in assignments
         ],
     )

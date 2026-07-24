@@ -430,6 +430,155 @@ def _fmt_time(s: float | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Capture persons (config-improvements design doc, "Person model", D3)
+# ---------------------------------------------------------------------------
+
+
+class _CapturePersonsSection(QWidget):
+    """"Persons" list for CapturePanel: this capture's named performers
+    (config-improvements design doc, "Person model: promote identity to
+    capture level"), with add/rename/set-default-skeleton/remove.
+
+    Deliberately a flat QListWidget, not a table -- one row per person is
+    all there is to show here (name + optional default skeleton, folded
+    into one label); Edit/Remove act on whichever row is selected rather
+    than embedding per-row buttons, keeping this in line with the list
+    widgets already used elsewhere in this file.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, capture_id: str, parent=None) -> None:
+        super().__init__(parent)
+        self._conn = conn
+        self._capture_id = capture_id
+        self._skeleton_names: dict[str, str] = {}
+        self._build()
+        self._refresh()
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        box = QGroupBox("Persons")
+        box_layout = QVBoxLayout(box)
+
+        self._list = QListWidget()
+        self._list.setToolTip(
+            "Performers defined once for this capture, reusable across all\n"
+            "its trials -- Run Tracker's people list is built from this\n"
+            "roster once at least one is defined here."
+        )
+        self._list.itemSelectionChanged.connect(self._update_button_states)
+        box_layout.addWidget(self._list)
+
+        btn_row = QHBoxLayout()
+        self._add_btn = QPushButton("Add…")
+        self._add_btn.clicked.connect(self._on_add)
+        self._rename_btn = QPushButton("Rename…")
+        self._rename_btn.clicked.connect(self._on_rename)
+        self._skeleton_btn = QPushButton("Default skeleton…")
+        self._skeleton_btn.clicked.connect(self._on_set_default_skeleton)
+        self._remove_btn = QPushButton("Remove")
+        self._remove_btn.clicked.connect(self._on_remove)
+        btn_row.addWidget(self._add_btn)
+        btn_row.addWidget(self._rename_btn)
+        btn_row.addWidget(self._skeleton_btn)
+        btn_row.addWidget(self._remove_btn)
+        box_layout.addLayout(btn_row)
+
+        root.addWidget(box)
+        self._update_button_states()
+
+    def _update_button_states(self) -> None:
+        has_selection = self._list.currentItem() is not None
+        self._rename_btn.setEnabled(has_selection)
+        self._skeleton_btn.setEnabled(has_selection)
+        self._remove_btn.setEnabled(has_selection)
+
+    def _selected_person_id(self) -> str | None:
+        item = self._list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def _refresh(self) -> None:
+        from posetrak.db.manage_person import list_persons
+
+        self._skeleton_names = {
+            r["id"]: r["name"] for r in self._conn.execute("SELECT id, name FROM skeletons")
+        }
+        selected_id = self._selected_person_id()
+        self._list.clear()
+        for person in list_persons(self._conn, self._capture_id):
+            skel_name = self._skeleton_names.get(person["default_skeleton_id"])
+            label = person["name"]
+            label += f"  —  {skel_name}" if skel_name else "  —  (no default skeleton)"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, person["id"])
+            self._list.addItem(item)
+            if person["id"] == selected_id:
+                self._list.setCurrentItem(item)
+        self._update_button_states()
+
+    def _on_add(self) -> None:
+        from posetrak.db.manage_person import create_person
+
+        name, ok = QInputDialog.getText(self, "Add person", "Name:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        create_person(self._conn, self._capture_id, name)
+        self._refresh()
+
+    def _on_rename(self) -> None:
+        from posetrak.db.manage_person import rename_person
+
+        person_id = self._selected_person_id()
+        if person_id is None:
+            return
+        current = self._list.currentItem().text().split("  —  ")[0]
+        name, ok = QInputDialog.getText(self, "Rename person", "Name:", text=current)
+        name = name.strip()
+        if not ok or not name:
+            return
+        rename_person(self._conn, person_id, name)
+        self._refresh()
+
+    def _on_set_default_skeleton(self) -> None:
+        from posetrak.db.manage_person import set_default_skeleton
+
+        person_id = self._selected_person_id()
+        if person_id is None:
+            return
+        if not self._skeleton_names:
+            QMessageBox.information(self, "No skeletons", "No skeletons are available yet.")
+            return
+        labels = ["(none)"] + list(self._skeleton_names.values())
+        ids = [None] + list(self._skeleton_names.keys())
+        choice, ok = QInputDialog.getItem(
+            self, "Default skeleton", "Skeleton:", labels, 0, False
+        )
+        if not ok:
+            return
+        set_default_skeleton(self._conn, person_id, ids[labels.index(choice)])
+        self._refresh()
+
+    def _on_remove(self) -> None:
+        from posetrak.db.manage_person import delete_person
+
+        person_id = self._selected_person_id()
+        if person_id is None:
+            return
+        if QMessageBox.question(
+            self, "Remove person", "Remove this person?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            delete_person(self._conn, person_id)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Cannot remove person", str(exc))
+            return
+        self._refresh()
+
+
+# ---------------------------------------------------------------------------
 # CapturePanel
 # ---------------------------------------------------------------------------
 
@@ -530,6 +679,9 @@ class CapturePanel(QWidget):
         # Default tracker config (config-improvements design doc, phase 3)
         from app.pose.run_tracker import build_default_config_row
         root.addWidget(build_default_config_row(self._conn, capture_id=self._capture_id, parent=self))
+
+        # Persons (config-improvements design doc, phase 5)
+        root.addWidget(_CapturePersonsSection(self._conn, self._capture_id, parent=self))
 
         # Bottom toolbar
         toolbar = QHBoxLayout()

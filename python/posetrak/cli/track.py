@@ -5,16 +5,25 @@ import datetime
 import json
 import sqlite3
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
 
 from posetrak.cli._output import fail, print_record, print_table
 from posetrak.db.db import generate_id, open_session, resolve_id_prefix
+from posetrak.db.manage_config import resolve_default_tracker_config
 from posetrak.export.bvh import export_bvh
 from posetrak.export.gltf import export_gltf
 from posetrak.export.usd import export_usd
-from posetrak.tracker.runner import TrackerResult, default_binary_path, run_tracker
+from posetrak.tracker.runner import (
+    MultiPersonResult,
+    PersonRunSpec,
+    TrackerResult,
+    default_binary_path,
+    run_multi_person_tracker,
+    run_tracker,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +357,224 @@ def cmd_run(
         click.echo(result.run_id)
     else:
         click.echo("(no tracking_run_id emitted by binary)", err=True)
+
+
+# ---------------------------------------------------------------------------
+# track run-persons
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ResolvedPerson:
+    name: str
+    sequence_id: str
+    skeleton_id: str
+    time_start_s: float
+    time_end_s: float
+
+
+def resolve_trial_persons(
+    conn: sqlite3.Connection, trial_id: str, names: list[str]
+) -> list[ResolvedPerson]:
+    """Resolve *names* -- this trial's capture's ``capture_persons`` -- to
+    the (sequence, skeleton, time range) a ``--person`` 4-tuple needs.
+
+    A scripted equivalent of ``RunTrackerWidget``'s capture-persons people
+    table (config-improvements design doc, "Person model": E, CLI): each
+    name must have exactly one detection run's observations in this trial
+    to auto-select from (matching by ``capture_person_id``, falling back to
+    an exact ``person_name`` match for pre-migration rows), and a
+    ``default_skeleton_id`` set -- both ambiguity and a missing default are
+    reported per-name rather than picked arbitrarily, since a script has no
+    one to ask. Use the lower-level ``--person <seq> <skel> <config> <id>``
+    flag directly for anything this can't resolve unambiguously.
+
+    Raises
+    ------
+    ValueError
+        If *trial_id* doesn't exist, a name isn't a defined person for this
+        trial's capture, that person has no default skeleton, or that
+        person's observations in this trial are missing or ambiguous.
+    """
+    trial_row = conn.execute(
+        "SELECT capture_id FROM trials WHERE id = ?", (trial_id,)
+    ).fetchone()
+    if trial_row is None:
+        raise ValueError(f"trial not found: {trial_id!r}")
+    capture_id = trial_row["capture_id"]
+
+    resolved: list[ResolvedPerson] = []
+    for name in names:
+        person_row = conn.execute(
+            "SELECT id, default_skeleton_id FROM capture_persons"
+            " WHERE capture_id = ? AND name = ?",
+            (capture_id, name),
+        ).fetchone()
+        if person_row is None:
+            raise ValueError(
+                f"No person named {name!r} defined for this trial's capture "
+                f"({capture_id!r}). Define one via CapturePanel's Persons "
+                "section first."
+            )
+        if not person_row["default_skeleton_id"]:
+            raise ValueError(
+                f"Person {name!r} has no default skeleton set. Set one via "
+                "CapturePanel's Persons section, or use --person directly."
+            )
+
+        seq_rows = conn.execute(
+            "SELECT pos.id AS seq_id, pos.time_start_s, pos.time_end_s"
+            " FROM detection_runs dr"
+            " JOIN pose_observation_sequences pos ON pos.detection_run_id = dr.id"
+            " JOIN sequence_persons sp ON sp.sequence_id = pos.id"
+            " WHERE dr.trial_id = ? AND sp.person_id = 0"
+            "   AND (sp.capture_person_id = ?"
+            "        OR (sp.capture_person_id IS NULL AND sp.person_name = ?))"
+            " ORDER BY dr.created_at DESC",
+            (trial_id, person_row["id"], name),
+        ).fetchall()
+        if not seq_rows:
+            raise ValueError(
+                f"No detection-run observations for {name!r} in trial {trial_id!r}."
+            )
+        if len(seq_rows) > 1:
+            raise ValueError(
+                f"Ambiguous: {len(seq_rows)} detection runs have observations "
+                f"for {name!r} in trial {trial_id!r}. Use --person <seq> <skel> "
+                "<config> <id> directly to pick one."
+            )
+        seq_row = seq_rows[0]
+        resolved.append(ResolvedPerson(
+            name=name,
+            sequence_id=seq_row["seq_id"],
+            skeleton_id=person_row["default_skeleton_id"],
+            time_start_s=seq_row["time_start_s"],
+            time_end_s=seq_row["time_end_s"],
+        ))
+    return resolved
+
+
+@track_group.command("run-persons")
+@click.option("--trial", "trial_id", required=True, help="Trial ID (prefix accepted).")
+@click.option(
+    "--persons", required=True,
+    help="Comma-separated capture_persons names to track together (e.g. Alice,Bob).",
+)
+@click.option(
+    "--config", "base_config_id", default=None,
+    help="Base tracker config ID (prefix accepted). Defaults to the trial's own "
+         "resolved default (see 'Default tracker config' in the trial/capture panels).",
+)
+@click.option("--output-dir", default=None, help="Output directory. Default: <session-dir>/posetrak_results/<capture>/<trial>/tracking")
+@click.option("--no-smooth", is_flag=True, default=False, help="Disable RTS smoothing.")
+@click.option("--binary", default=None, help="Path to posetrak-tracker binary.")
+@click.pass_context
+def cmd_run_persons(
+    ctx: click.Context,
+    trial_id: str,
+    persons: str,
+    base_config_id: str | None,
+    output_dir: str | None,
+    no_smooth: bool,
+    binary: str | None,
+) -> None:
+    """Run the tracker for named persons in a trial, resolved automatically.
+
+    Higher-level alternative to 'track run': resolves each of --persons'
+    comma-separated names against this trial's capture's capture_persons
+    (see CapturePanel's Persons section) to a sequence/skeleton instead of
+    requiring the caller to already know them. Additive to the existing
+    --person 4-tuple mechanism (cli/track.cpp), not a replacement -- use
+    'track run' directly for anything this can't resolve unambiguously.
+
+    Example:
+
+        posetrak -s session.db track run-persons \\
+            --trial <trial-id> --persons Alice,Bob
+    """
+    session_path: str | None = ctx.obj.get("session")
+    if session_path is None:
+        fail("--session / POSETRAK_SESSION_DB is required for 'track run-persons'.")
+
+    try:
+        conn = open_session(Path(session_path))
+    except (FileNotFoundError, ValueError) as exc:
+        fail(str(exc))
+
+    try:
+        trial_id = resolve_id_prefix(conn, "trials", trial_id)
+    except ValueError as exc:
+        fail(str(exc))
+
+    names = [n.strip() for n in persons.split(",") if n.strip()]
+    if not names:
+        fail("--persons must list at least one name.")
+
+    try:
+        resolved = resolve_trial_persons(conn, trial_id, names)
+    except ValueError as exc:
+        fail(str(exc))
+
+    if base_config_id is not None:
+        try:
+            config_id = resolve_id_prefix(conn, "tracker_configs", base_config_id)
+        except ValueError as exc:
+            fail(str(exc))
+    else:
+        config_id = resolve_default_tracker_config(conn, trial_id=trial_id)
+
+    # Default output dir
+    if output_dir:
+        out_path = Path(output_dir)
+    else:
+        trial_row = conn.execute(
+            "SELECT cap.label AS capture_label, cap.capture_number, t.name AS trial_name"
+            " FROM trials t JOIN captures cap ON cap.id = t.capture_id"
+            " WHERE t.id = ?",
+            (trial_id,),
+        ).fetchone()
+        capture_label = trial_row["capture_label"] or f"capture{trial_row['capture_number']:03d}"
+        trial_label = (trial_row["trial_name"] or trial_id[:8]).replace(" ", "_")
+        out_path = Path(session_path).parent / "posetrak_results" / capture_label / trial_label / "tracking"
+
+    out_path.mkdir(parents=True, exist_ok=True)
+    conn.close()
+
+    binary_path = Path(binary) if binary else default_binary_path()
+    if not binary_path.exists():
+        fail(
+            f"Tracker binary not found: {binary_path}\n"
+            "Build with: meson setup optbuild --buildtype=release && meson compile -C optbuild"
+        )
+
+    person_specs = [
+        PersonRunSpec(r.sequence_id, r.skeleton_id, config_id, 0) for r in resolved
+    ]
+
+    click.echo(f"Trial:      {trial_id}", err=True)
+    for r in resolved:
+        click.echo(f"  {r.name}: sequence={r.sequence_id} skeleton={r.skeleton_id}", err=True)
+    click.echo(f"Config:     {config_id}", err=True)
+    click.echo(f"Output dir: {out_path}", err=True)
+    click.echo(f"Binary:     {binary_path}", err=True)
+    click.echo("", err=True)
+
+    result: MultiPersonResult = run_multi_person_tracker(
+        Path(session_path),
+        person_specs,
+        out_path,
+        binary_path=binary_path,
+        start_time=resolved[0].time_start_s,
+        end_time=resolved[0].time_end_s,
+        smooth=not no_smooth,
+        on_progress=lambda line: click.echo(line, err=True),
+    )
+
+    if result.exit_code != 0:
+        sys.exit(result.exit_code)
+
+    for name, run_id in zip(names, result.run_ids):
+        click.echo(f"{name}: {run_id or '(no tracking_run_id emitted)'}")
 
 
 # ---------------------------------------------------------------------------

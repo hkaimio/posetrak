@@ -3,7 +3,8 @@
 ## Status
 
 Implementation started 2026-07-24, phases 0-3 done (plus three rounds of
-live-review fixes on top, see below), phases 4-5 done. Written in response to
+live-review fixes on top, see below), phases 4-6 done -- the full proposal
+is implemented. Written in response to
 Harri's brief (`confg-improvement-brief.md`, this directory) plus a
 codebase investigation done before drafting this doc — several of the
 brief's proposed mechanisms turned out to already exist in the registry
@@ -505,6 +506,40 @@ Full run: `test_run_tracker*.py` + `test_content_panels_hierarchical.py` +
 + `python/tests/tracker`: 341/343 (same 2 pre-existing, unrelated
 failures).
 
+**Phase 6 — done.** CLI (E): new `posetrak track run-persons --trial <id>
+--persons Alice,Bob` (`python/posetrak/cli/track.py`), additive alongside
+the existing `track run` (single sequence/skeleton) and the C++ CLI's own
+`--person <seq> <skel> <config> <id>` 4-tuple, neither of which changed.
+Pure resolution function `resolve_trial_persons()`: for each name, looks up
+the trial's capture's `capture_persons` row (error naming the trial's
+capture if not found), requires a `default_skeleton_id` (error suggesting
+the GUI or `--person` directly if unset), then finds this trial's detection
+runs with observations for that person (matching `capture_person_id`,
+falling back to an exact `person_name` match for pre-migration rows) --
+exactly one auto-selects, zero or more than one is a descriptive error
+naming the count and pointing at `--person` for the ambiguous case (a
+script has no one to ask, unlike the GUI's picker). The command resolves
+every name, then runs them all together in one `run_multi_person_tracker()`
+call (works for a single name too, per that function's own docstring),
+using the trial's own resolved default tracker config
+(`resolve_default_tracker_config()`) unless `--config` overrides it, and
+the first resolved person's sequence time range for `--start-time`/
+`--end-time` (matching `RunTrackerWidget._start_tracking()`'s own
+primary-person-sets-the-range convention). New tests in `test_track.py`:
+`TestResolveTrialPersons` (7 cases against the pure function -- single and
+multiple persons, unknown trial, undefined person, missing default
+skeleton, ambiguous detection runs, zero observations) and
+`TestTrackRunPersons` (8 cases at the CLI-invocation level, mirroring
+`TestTrackRun`'s own mocking-`run_multi_person_tracker`/`default_binary_path`
+pattern -- basic run, trial-default config resolution, multiple names,
+each error path surfacing as a non-zero exit with the right message, no
+session).
+
+Full run: `python/tests/cli` + `python/tests/db` + `python/tests/tracker`:
+426/428 (same 2 pre-existing, unrelated failures).
+
+Phases 0-6 of this proposal are now all done.
+
 ## The brief, in short
 
 1. The tracker-configuration dialog (`RunTrackerDialog` /
@@ -895,7 +930,7 @@ the existing 4-tuple flag, not a replacement — existing scripts/tests
 | 3 — **done** | GUI: "Default tracker config" row + Edit/Change on `TrialPanel`/`CapturePanel` (C). | 1, 2 |
 | 4 — **done** | Schema: `capture_persons` + nullable `capture_person_id` on `detection_track_assignments`/`sequence_persons` (D1, D2). | — (independent of 0-3) |
 | 5 — **done** | GUI: `CapturePanel` persons section, `main.py` assignment picker, `RunTrackerDialog` people-table data-source switch (D3). | 4, and ideally 2 (so the redesigned dialog isn't touched twice) |
-| 6 | Python CLI: person-by-name resolution (E). | 4 |
+| 6 — **done** | Python CLI: person-by-name resolution (E). | 4 |
 
 Phases 0-3 (config-only) are independently shippable and deliver the bulk of
 the brief's first, more urgent complaint (dialog complexity + hidden

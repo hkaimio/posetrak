@@ -80,6 +80,9 @@ docs/.doctrees/
 *.tmp
 *.bak
 *.backup
+
+# Machine-local notes (test-data paths/IDs specific to this dev machine)
+LOCAL-TEST-DATA-NOTES.md
 # Debug CSV files from tests
 ik_iterations.csv
 ik_root_updates.csv

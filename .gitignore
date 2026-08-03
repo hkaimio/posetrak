@@ -6,6 +6,9 @@ _build/
 # Meson subprojects (downloaded dependencies)
 subprojects/*/
 subprojects/packagecache/
+subprojects/.wraplock
+subprojects/*.tar.*
+subprojects/*.zip
 # But keep the wrap files
 !subprojects/*.wrap
 
@@ -41,6 +44,7 @@ test_results/
 tracking_tests/
 tracking_output/
 *.log
+python/logs/
 
 # Coverage
 *.gcov
@@ -68,6 +72,9 @@ docs/.doctrees/
 *.hdf5
 *.mp4
 *.avi
+
+# Model weights (downloaded, not project artifacts)
+*.pt
 
 # Temporary
 *.tmp

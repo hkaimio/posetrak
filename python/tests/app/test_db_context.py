@@ -307,6 +307,41 @@ def test_commit_page_preserves_writes(
     assert row is not None
 
 
+def test_commit_page_survives_external_commit_on_shared_connection(
+    ctx: DBContext,
+    session_conn: sqlite3.Connection,
+) -> None:
+    """Dialogs opened from a wizard page (e.g. inline camera creation) share
+    the session connection and call ``conn.commit()`` directly, which ends
+    the whole transaction and drops our savepoint out from under us.
+    ``commit_page()`` must not raise "no such savepoint" in that case.
+    """
+    ctx.begin_page()
+    shot_id = ctx.create_shot("keeper", 1)
+    session_conn.commit()  # simulates an inline dialog's direct commit()
+    ctx.commit_page()
+
+    row = session_conn.execute(
+        "SELECT id FROM captures WHERE id = ?", (shot_id,)
+    ).fetchone()
+    assert row is not None
+
+
+def test_rollback_page_survives_external_commit_on_shared_connection(
+    ctx: DBContext,
+    session_conn: sqlite3.Connection,
+) -> None:
+    ctx.begin_page()
+    shot_id = ctx.create_shot("already-durable", 2)
+    session_conn.commit()  # simulates an inline dialog's direct commit()
+    ctx.rollback_page()  # must not raise; write is already durable
+
+    row = session_conn.execute(
+        "SELECT id FROM captures WHERE id = ?", (shot_id,)
+    ).fetchone()
+    assert row is not None
+
+
 # ---------------------------------------------------------------------------
 # DBContext sync anchor CRUD
 # ---------------------------------------------------------------------------

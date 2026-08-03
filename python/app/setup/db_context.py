@@ -258,20 +258,32 @@ class DBContext:
         self._savepoint_active = True
 
     def commit_page(self) -> None:
-        """Release the current page savepoint (makes writes durable)."""
-        self._conn.execute("RELEASE SAVEPOINT wizard_page")
+        """Release the current page savepoint (makes writes durable).
+
+        The savepoint can be invalidated out from under us: dialogs opened
+        from a page (e.g. inline camera/mode creation) share this connection
+        and call ``conn.commit()`` directly, which ends the whole transaction
+        and silently drops our savepoint along with it. When that has
+        happened there is nothing left to release — the writes are already
+        durable — so we just clear the flag instead of raising.
+        """
+        if self._conn.in_transaction:
+            self._conn.execute("RELEASE SAVEPOINT wizard_page")
         self._savepoint_active = False
 
     def rollback_page(self) -> None:
         """Roll back all writes since the last ``begin_page()``.
 
         No-op if no savepoint is currently active (e.g. cleanupPage called
-        after the page was already committed and the user later closes the wizard).
+        after the page was already committed and the user later closes the
+        wizard), or if the savepoint was already invalidated by an external
+        ``conn.commit()`` (see ``commit_page()``).
         """
         if not self._savepoint_active:
             return
-        self._conn.execute("ROLLBACK TO SAVEPOINT wizard_page")
-        self._conn.execute("RELEASE SAVEPOINT wizard_page")
+        if self._conn.in_transaction:
+            self._conn.execute("ROLLBACK TO SAVEPOINT wizard_page")
+            self._conn.execute("RELEASE SAVEPOINT wizard_page")
         self._savepoint_active = False
 
     # ------------------------------------------------------------------

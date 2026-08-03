@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime
 import struct
 import sys
+import threading
 import zlib
 import sqlite3
 from pathlib import Path
@@ -50,6 +51,7 @@ from PySide6.QtWidgets import (
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "pipeline" / "calibration"))
 from calibrate_intrinsics import (
+    CalibrationCancelled,
     CalibrationResult,
     UndistortionMaps,
     _aruco_dicts,
@@ -71,11 +73,19 @@ class _CalibThread(QThread):
     frames_collected = Signal(list)   # emitted after video scan, before detection
     succeeded = Signal(object, object)   # (CalibrationResult, UndistortionMaps)
     failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, config: dict, preloaded_frames=None, parent=None) -> None:
         super().__init__(parent)
         self._config = config
         self._preloaded_frames = preloaded_frames
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cooperative cancellation. Checked at frame/image granularity
+        inside the scan and detection loops; does not interrupt the final
+        (fast) cv2 calibration call once detection has finished."""
+        self._cancel_event.set()
 
     def run(self) -> None:
         def log(msg: str) -> None:
@@ -94,11 +104,16 @@ class _CalibThread(QThread):
                     skip=config["skip"],
                     use_global_metric=config["use_global_metric"],
                     log_fn=log,
+                    cancel_event=self._cancel_event,
                 )
                 self.frames_collected.emit(list(frames))
 
-            result, maps = run_intrinsics_pipeline(**config, preloaded_frames=frames, log_fn=log)
+            result, maps = run_intrinsics_pipeline(
+                **config, preloaded_frames=frames, log_fn=log, cancel_event=self._cancel_event
+            )
             self.succeeded.emit(result, maps)
+        except CalibrationCancelled:
+            self.cancelled.emit()
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
 
@@ -289,9 +304,11 @@ class IntrinsicsCalibDialog(QDialog):
 
         self._rows = QSpinBox(); self._rows.setRange(3, 30); self._rows.setValue(7)
         self._cols = QSpinBox(); self._cols.setRange(3, 30); self._cols.setValue(10)
+        self._rows_label = QLabel()
+        self._cols_label = QLabel()
         rc_row = QHBoxLayout()
-        rc_row.addWidget(QLabel("Rows:")); rc_row.addWidget(self._rows)
-        rc_row.addWidget(QLabel("Cols:")); rc_row.addWidget(self._cols)
+        rc_row.addWidget(self._rows_label); rc_row.addWidget(self._rows)
+        rc_row.addWidget(self._cols_label); rc_row.addWidget(self._cols)
         rc_row.addStretch()
 
         self._square_size = QDoubleSpinBox()
@@ -385,8 +402,17 @@ class IntrinsicsCalibDialog(QDialog):
         self._run_btn.setEnabled(False)
         self._run_btn.clicked.connect(self._on_run)
 
+        self._cancel_run_btn = QPushButton("Cancel")
+        self._cancel_run_btn.setVisible(False)
+        self._cancel_run_btn.setToolTip(
+            "Stop the current scan/detection without closing this dialog "
+            "(the cached sharp-frame list, if any, is kept)."
+        )
+        self._cancel_run_btn.clicked.connect(self._on_cancel_run)
+
         run_row = QHBoxLayout()
         run_row.addWidget(self._run_btn)
+        run_row.addWidget(self._cancel_run_btn)
         run_row.addWidget(self._progress_bar, 1)
 
         root.addLayout(run_row)
@@ -460,6 +486,31 @@ class IntrinsicsCalibDialog(QDialog):
             self._charuco_widget.setEnabled(enabled)
         self._fisheye_cb.setEnabled(True)
         self._fisheye_cb.setToolTip("Use cv2.fisheye instead of the standard radial-tangential model.")
+
+        # Checkerboard and ChArUco give "rows"/"cols" different meanings in the
+        # underlying OpenCV calls: cv2.findChessboardCorners wants internal
+        # corner counts (squares - 1 per dimension), while cv2.aruco.CharucoBoard
+        # wants the number of full squares. Relabel so switching pattern type
+        # doesn't silently target the wrong board geometry.
+        if is_charuco:
+            self._rows_label.setText("Rows (squares):")
+            self._cols_label.setText("Cols (squares):")
+            grid_tip = (
+                "Number of full squares in the ChArUco board, vertical × horizontal.\n"
+                "Unlike the checkerboard pattern below, this counts squares, not\n"
+                "internal corners (matches cv2.aruco.CharucoBoard's squaresY/squaresX)."
+            )
+        else:
+            self._rows_label.setText("Rows (internal corners):")
+            self._cols_label.setText("Cols (internal corners):")
+            grid_tip = (
+                "Number of internal corners per row/column — one less than the\n"
+                "number of squares in each dimension (cv2.findChessboardCorners'\n"
+                "patternSize convention). E.g. an 8×11-square board is 7×10 here."
+            )
+        for w in (self._rows_label, self._cols_label, self._rows, self._cols):
+            w.setToolTip(grid_tip)
+
         self._update_run_enabled()
 
     def _update_run_enabled(self) -> None:
@@ -476,6 +527,8 @@ class IntrinsicsCalibDialog(QDialog):
         self._save_btn.setEnabled(False)
         self._run_btn.setEnabled(False)
         self._progress_bar.setVisible(True)
+        self._cancel_run_btn.setVisible(True)
+        self._cancel_run_btn.setEnabled(True)
 
         is_charuco = self._pattern_combo.currentText().startswith("ChArUco")
         config = {
@@ -506,7 +559,21 @@ class IntrinsicsCalibDialog(QDialog):
         self._thread.frames_collected.connect(self._on_frames_collected)
         self._thread.succeeded.connect(self._on_succeeded)
         self._thread.failed.connect(self._on_failed)
+        self._thread.cancelled.connect(self._on_cancelled)
         self._thread.start()
+
+    def _on_cancel_run(self) -> None:
+        if self._thread and self._thread.isRunning():
+            self._append_log("Cancelling…")
+            self._thread.cancel()
+            self._cancel_run_btn.setEnabled(False)
+
+    def _on_cancelled(self) -> None:
+        self._progress_bar.setVisible(False)
+        self._run_btn.setEnabled(True)
+        self._cancel_run_btn.setVisible(False)
+        self._cancel_run_btn.setEnabled(True)
+        self._append_log("Calibration cancelled.")
 
     def _append_log(self, msg: str) -> None:
         self._log.appendPlainText(msg)
@@ -544,6 +611,8 @@ class IntrinsicsCalibDialog(QDialog):
         self._maps = maps
         self._progress_bar.setVisible(False)
         self._run_btn.setEnabled(True)
+        self._cancel_run_btn.setVisible(False)
+        self._cancel_run_btn.setEnabled(True)
         self._save_btn.setEnabled(True)
 
         video_path = self._input_path.text().strip()
@@ -576,6 +645,8 @@ class IntrinsicsCalibDialog(QDialog):
     def _on_failed(self, msg: str) -> None:
         self._progress_bar.setVisible(False)
         self._run_btn.setEnabled(True)
+        self._cancel_run_btn.setVisible(False)
+        self._cancel_run_btn.setEnabled(True)
         self._append_log(f"\nERROR: {msg}")
         QMessageBox.critical(self, "Calibration failed", msg)
 

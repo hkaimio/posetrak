@@ -10,6 +10,7 @@ import cv2
 import h5py
 import click
 import numpy as np
+from collections import deque
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Optional, Tuple, List
@@ -58,6 +59,35 @@ class UndistortionMaps:
     mapy: np.ndarray
 
 
+class CalibrationCancelled(Exception):
+    """Raised when a cancel_event is set during a long-running scan/detection pass."""
+
+
+def _check_cancelled(cancel_event) -> None:
+    """Raise CalibrationCancelled if *cancel_event* (a threading.Event) is set.
+
+    *cancel_event* is duck-typed (only needs ``is_set()``) so this module has
+    no hard dependency on ``threading``; callers such as a Qt worker thread
+    pass their own event object.
+    """
+    if cancel_event is not None and cancel_event.is_set():
+        raise CalibrationCancelled()
+
+
+def _sharpness_metric(gray: np.ndarray, max_width: int = 640) -> float:
+    """Laplacian-variance sharpness score, computed on a downscaled copy.
+
+    Downscaling cuts the cost of the Laplacian roughly quadratically while
+    leaving the relative sharp/blurry ranking of frames unchanged, since the
+    result is only ever compared against neighbouring frames or a threshold.
+    """
+    h, w = gray.shape[:2]
+    if w > max_width:
+        scale = max_width / w
+        gray = cv2.resize(gray, (max_width, max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+    return cv2.Laplacian(gray, cv2.CV_64F).var()
+
+
 def find_sharp_frames(
     video_path: Path,
     window: int = 10,
@@ -66,6 +96,7 @@ def find_sharp_frames(
     use_global_metric: bool = False,
     log_fn=None,
     save_debug: bool = False,
+    cancel_event=None,
 ) -> List[int]:
     """Find frames in a video that are sharp enough for calibration.
 
@@ -76,15 +107,20 @@ def find_sharp_frames(
         window: Window size for finding local maxima
         threshold: Minimum sharpness threshold (normalized if use_global_metric=True,
                    raw Laplacian variance otherwise)
-        skip: Process every nth frame (1 = process all frames)
+        skip: Process every nth frame (1 = process all frames). Skipped frames
+              are advanced with grab() rather than read(), which decodes the
+              frame but skips the color-convert/copy read() also pays for.
         use_global_metric: If True, normalize sharpness across entire video;
                           if False, use raw Laplacian values for local comparison
+        cancel_event: Optional threading.Event; if set, raises CalibrationCancelled
+                      at the next opportunity.
 
     Returns:
         List of frame indices that are sharp local maxima
 
     Raises:
         IOError: If video file cannot be opened
+        CalibrationCancelled: If cancel_event is set while scanning
     """
     log = log_fn or print
     cap = cv2.VideoCapture(str(video_path))
@@ -95,23 +131,26 @@ def find_sharp_frames(
     frame_indices = []
     frame_count = 0
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    try:
+        while True:
+            _check_cancelled(cancel_event)
+            if frame_count % skip == 0:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                laplacians.append(_sharpness_metric(gray))
+                frame_indices.append(frame_count)
 
-        if frame_count % skip == 0:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            laplacian = cv2.Laplacian(gray, cv2.CV_64F).var()
-            laplacians.append(laplacian)
-            frame_indices.append(frame_count)
+                if len(frame_indices) % 100 == 0:
+                    log(f"Processed {len(frame_indices)} frames (total: {frame_count})")
+            else:
+                if not cap.grab():
+                    break
 
-            if len(frame_indices) % 100 == 0:
-                log(f"Processed {len(frame_indices)} frames (total: {frame_count})")
-
-        frame_count += 1
-
-    cap.release()
+            frame_count += 1
+    finally:
+        cap.release()
 
     laplacians_array = np.array(laplacians)
 
@@ -134,6 +173,44 @@ def find_sharp_frames(
 
     log(f"Found {len(maxima)} sharp frames out of {len(frame_indices)} analyzed ({frame_count} total)")
     return maxima
+
+
+def _iter_wanted_frames(video_path: Path, wanted_indices: List[int], log_fn=None, cancel_event=None):
+    """Sequentially walk *video_path*, yielding (frame_idx, frame) for each
+    index in *wanted_indices*.
+
+    Retrieving frames by seeking (``cap.set(CAP_PROP_POS_FRAMES, ...)``) forces
+    the decoder back to the nearest keyframe and re-decodes forward for every
+    target frame, which is expensive on long-GOP footage (e.g. GoPro
+    H.264/H.265). Walking forward once and using grab() (decode without the
+    color-convert/copy that read() does) to skip past unwanted frames decodes
+    the stream once instead of once per seek.
+    """
+    log = log_fn or print
+    wanted = set(wanted_indices)
+    if not wanted:
+        return
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise IOError(f"Cannot open video file: {video_path}")
+    frame_count = 0
+    remaining = len(wanted)
+    try:
+        while remaining > 0:
+            _check_cancelled(cancel_event)
+            if frame_count in wanted:
+                ret, frame = cap.read()
+                if not ret:
+                    log(f"Warning: Failed to read frame {frame_count}")
+                    break
+                yield frame_count, frame
+                remaining -= 1
+            else:
+                if not cap.grab():
+                    break
+            frame_count += 1
+    finally:
+        cap.release()
 
 
 def extract_checkerboard_corners(
@@ -176,6 +253,7 @@ def process_video_for_checkerboards(
     skip: int = 1,
     use_global_metric: bool = False,
     log_fn=None,
+    cancel_event=None,
 ) -> List[Tuple[int, np.ndarray, np.ndarray]]:
     """Extract checkerboard frames and corners from a video.
 
@@ -187,35 +265,33 @@ def process_video_for_checkerboards(
         threshold: Sharpness threshold
         skip: Process every nth frame
         use_global_metric: Use global normalized metric instead of local comparison
+        cancel_event: Optional threading.Event to abort the scan early.
 
     Returns:
         List of tuples (frame_idx, frame, corners) for each detected checkerboard
 
     Raises:
         IOError: If video file cannot be opened
+        CalibrationCancelled: If cancel_event is set while scanning
     """
     log = log_fn or print
-    sharp_frames = find_sharp_frames(video_path, window, threshold, skip, use_global_metric, log_fn=log_fn)
+    sharp_frames = find_sharp_frames(
+        video_path, window, threshold, skip, use_global_metric, log_fn=log_fn, cancel_event=cancel_event
+    )
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise IOError(f"Cannot open video file: {video_path}")
-
+    total = len(sharp_frames)
+    log(f"Checking {total} candidate frames for a checkerboard…")
     checkerboards = []
-
-    for frame_idx in sharp_frames:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
-        if not ret:
-            log(f"Warning: Failed to read frame {frame_idx}")
-            continue
-
+    checked = 0
+    for frame_idx, frame in _iter_wanted_frames(video_path, sharp_frames, log_fn=log_fn, cancel_event=cancel_event):
         corners = extract_checkerboard_corners(frame, rows, cols)
+        checked += 1
         if corners is not None:
             log(f"Checkerboard detected in frame {frame_idx}")
             checkerboards.append((frame_idx, frame, corners))
+        if checked % 10 == 0 or checked == total:
+            log(f"Checked {checked}/{total} candidate frames ({len(checkerboards)} detected so far)")
 
-    cap.release()
     return checkerboards
 
 
@@ -224,6 +300,7 @@ def process_images_for_checkerboards(
     rows: int,
     cols: int,
     log_fn=None,
+    cancel_event=None,
 ) -> List[Tuple[str, np.ndarray, np.ndarray]]:
     """Extract checkerboards from images in a directory.
 
@@ -231,6 +308,7 @@ def process_images_for_checkerboards(
         image_dir: Path to directory containing images
         rows: Number of internal corners in rows
         cols: Number of internal corners in columns
+        cancel_event: Optional threading.Event to abort the scan early.
 
     Returns:
         List of tuples (filename, image, corners) for each detected checkerboard
@@ -243,9 +321,11 @@ def process_images_for_checkerboards(
     if not image_files:
         raise ValueError(f"No image files found in {image_dir}")
 
+    total = len(image_files)
     checkerboards = []
 
-    for img_path in sorted(image_files):
+    for i, img_path in enumerate(sorted(image_files), start=1):
+        _check_cancelled(cancel_event)
         image = cv2.imread(str(img_path))
         if image is None:
             log(f"Warning: Failed to read {img_path}")
@@ -255,6 +335,8 @@ def process_images_for_checkerboards(
         if corners is not None:
             log(f"Checkerboard detected in {img_path.name}")
             checkerboards.append((img_path.name, image, corners))
+        if i % 10 == 0 or i == total:
+            log(f"Checked {i}/{total} images ({len(checkerboards)} detected so far)")
 
     return checkerboards
 
@@ -603,6 +685,7 @@ def process_video_for_charuco(
     use_global_metric: bool = False,
     min_corners: int = 6,
     log_fn=None,
+    cancel_event=None,
 ) -> List[Tuple[int, np.ndarray, np.ndarray, np.ndarray]]:
     """Extract ChArUco frames from *video_path*.
 
@@ -611,26 +694,22 @@ def process_video_for_charuco(
     """
     log = log_fn or print
     sharp_frames = find_sharp_frames(
-        video_path, window, threshold, skip, use_global_metric, log_fn=log_fn
+        video_path, window, threshold, skip, use_global_metric, log_fn=log_fn, cancel_event=cancel_event
     )
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise IOError(f"Cannot open video file: {video_path}")
-
+    total = len(sharp_frames)
+    log(f"Checking {total} candidate frames for a ChArUco board…")
     results = []
-    for frame_idx in sharp_frames:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
-        if not ret:
-            log(f"Warning: Failed to read frame {frame_idx}")
-            continue
+    checked = 0
+    for frame_idx, frame in _iter_wanted_frames(video_path, sharp_frames, log_fn=log_fn, cancel_event=cancel_event):
         corners, ids = extract_charuco_corners(frame, board, min_corners)
+        checked += 1
         if corners is not None:
             log(f"ChArUco detected in frame {frame_idx} ({len(ids)} corners)")
             results.append((frame_idx, frame, corners, ids))
+        if checked % 10 == 0 or checked == total:
+            log(f"Checked {checked}/{total} candidate frames ({len(results)} detected so far)")
 
-    cap.release()
     return results
 
 
@@ -639,6 +718,7 @@ def process_images_for_charuco(
     board,
     min_corners: int = 6,
     log_fn=None,
+    cancel_event=None,
 ) -> List[Tuple[str, np.ndarray, np.ndarray, np.ndarray]]:
     """Detect ChArUco corners in images from a directory.
 
@@ -651,8 +731,10 @@ def process_images_for_charuco(
     if not files:
         raise ValueError(f"No image files found in {image_dir}")
 
+    total = len(files)
     results = []
-    for img_path in sorted(files):
+    for i, img_path in enumerate(sorted(files), start=1):
+        _check_cancelled(cancel_event)
         img = cv2.imread(str(img_path))
         if img is None:
             log(f"Warning: Failed to read {img_path}")
@@ -661,6 +743,8 @@ def process_images_for_charuco(
         if corners is not None:
             log(f"ChArUco detected in {img_path.name} ({len(ids)} corners)")
             results.append((img_path.name, img, corners, ids))
+        if i % 10 == 0 or i == total:
+            log(f"Checked {i}/{total} images ({len(results)} detected so far)")
 
     return results
 
@@ -829,31 +913,79 @@ def collect_sharp_frames(
     skip: int = 1,
     use_global_metric: bool = False,
     log_fn=None,
+    cancel_event=None,
 ) -> List[np.ndarray]:
     """Scan *video_path* for sharp frames and return them as BGR arrays.
 
-    This is the slow step (reads every frame to compute sharpness).
     Cache the result and pass as *preloaded_frames* to
     :func:`run_intrinsics_pipeline` to skip video scanning on re-runs
     with changed board or model parameters.
+
+    In the default (local-maxima) mode this makes a single sequential pass
+    over the video: each decoded frame's sharpness is held in a sliding
+    window of neighbours, so a frame that turns out to be a local maximum is
+    already in memory — no second, seek-based pass is needed to retrieve it.
+    Global-metric mode needs the sharpness distribution of the whole video
+    before it can normalize and threshold it, so it falls back to two
+    sequential passes (still no seeking — see :func:`_iter_wanted_frames`).
+
+    *cancel_event* (a threading.Event) lets a caller abort a long scan early;
+    :class:`CalibrationCancelled` is raised at the next checkpoint.
     """
     log = log_fn or print
-    sharp_indices = find_sharp_frames(
-        video_path, window, threshold, skip, use_global_metric, log_fn=log_fn
-    )
+
+    if use_global_metric:
+        sharp_indices = find_sharp_frames(
+            video_path, window, threshold, skip, use_global_metric=True,
+            log_fn=log_fn, cancel_event=cancel_event,
+        )
+        frames = [
+            frame for _, frame in
+            _iter_wanted_frames(video_path, sharp_indices, log_fn=log_fn, cancel_event=cancel_event)
+        ]
+        log(f"Loaded {len(frames)} sharp frames.")
+        return frames
+
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise IOError(f"Cannot open video file: {video_path}")
+
+    buffer_size = 2 * window + 1
+    buffer: deque = deque(maxlen=buffer_size)
     frames: List[np.ndarray] = []
-    for frame_idx in sharp_indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
-        if ret:
-            frames.append(frame)
-        else:
-            log(f"Warning: Failed to read frame {frame_idx}")
-    cap.release()
-    log(f"Loaded {len(frames)} sharp frames.")
+    frame_count = 0
+    analyzed = 0
+
+    try:
+        while True:
+            _check_cancelled(cancel_event)
+            if frame_count % skip == 0:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                metric = _sharpness_metric(gray)
+                buffer.append((frame_count, frame, metric))
+                analyzed += 1
+                if analyzed % 100 == 0:
+                    log(f"Processed {analyzed} frames (total: {frame_count})")
+
+                if len(buffer) == buffer_size:
+                    center_idx, center_frame, center_metric = buffer[window]
+                    window_metrics = [m for _, _, m in buffer]
+                    is_unique_max = window_metrics.count(center_metric) == 1
+                    if center_metric == max(window_metrics) and center_metric > threshold and is_unique_max:
+                        log(f"Sharp frame at index {center_idx} (score {center_metric:.2f})")
+                        frames.append(center_frame)
+            else:
+                if not cap.grab():
+                    break
+
+            frame_count += 1
+    finally:
+        cap.release()
+
+    log(f"Found {len(frames)} sharp frames out of {analyzed} analyzed ({frame_count} total).")
     return frames
 
 
@@ -862,14 +994,19 @@ def _detect_checkerboard_in_frames(
     rows: int,
     cols: int,
     log_fn=None,
+    cancel_event=None,
 ) -> List[Tuple[int, np.ndarray, np.ndarray]]:
     log = log_fn or print
+    total = len(frames)
     results = []
     for i, frame in enumerate(frames):
+        _check_cancelled(cancel_event)
         corners = extract_checkerboard_corners(frame, rows, cols)
         if corners is not None:
             log(f"Checkerboard detected in frame {i}")
             results.append((i, frame, corners))
+        if (i + 1) % 10 == 0 or (i + 1) == total:
+            log(f"Checked {i + 1}/{total} frames ({len(results)} detected so far)")
     return results
 
 
@@ -878,14 +1015,19 @@ def _detect_charuco_in_frames(
     board,
     min_corners: int = 6,
     log_fn=None,
+    cancel_event=None,
 ) -> List[Tuple[int, np.ndarray, np.ndarray, np.ndarray]]:
     log = log_fn or print
+    total = len(frames)
     results = []
     for i, frame in enumerate(frames):
+        _check_cancelled(cancel_event)
         corners, ids = extract_charuco_corners(frame, board, min_corners)
         if corners is not None:
             log(f"ChArUco detected in frame {i} ({len(ids)} corners)")
             results.append((i, frame, corners, ids))
+        if (i + 1) % 10 == 0 or (i + 1) == total:
+            log(f"Checked {i + 1}/{total} frames ({len(results)} detected so far)")
     return results
 
 
@@ -904,6 +1046,7 @@ def run_intrinsics_pipeline(
     use_global_metric: bool = False,
     preloaded_frames: Optional[List[np.ndarray]] = None,
     log_fn=None,
+    cancel_event=None,
 ) -> Tuple[CalibrationResult, UndistortionMaps]:
     """Run the full intrinsics calibration pipeline.
 
@@ -924,9 +1067,15 @@ def run_intrinsics_pipeline(
         window, threshold, skip, use_global_metric:
                            Passed to find_sharp_frames (video mode only).
         log_fn:            Optional callable for progress messages.  Defaults to print.
+        cancel_event:      Optional threading.Event to abort detection early. Not
+                           checked once the (fast, non-interruptible) final
+                           cv2 calibration call has started.
 
     Returns:
         (CalibrationResult, UndistortionMaps)
+
+    Raises:
+        CalibrationCancelled: If cancel_event is set during detection.
     """
     log = log_fn or print
     input_path = Path(input_path)
@@ -942,15 +1091,20 @@ def run_intrinsics_pipeline(
         )
         if preloaded_frames is not None:
             log(f"Detecting ChArUco patterns in {len(preloaded_frames)} cached frames…")
-            detections = _detect_charuco_in_frames(preloaded_frames, board, log_fn=log_fn)
+            detections = _detect_charuco_in_frames(
+                preloaded_frames, board, log_fn=log_fn, cancel_event=cancel_event
+            )
         elif input_path.is_file():
             log("Scanning video for ChArUco boards…")
             detections = process_video_for_charuco(
-                input_path, board, window, threshold, skip, use_global_metric, log_fn=log_fn
+                input_path, board, window, threshold, skip, use_global_metric,
+                log_fn=log_fn, cancel_event=cancel_event,
             )
         else:
             log("Scanning image directory for ChArUco boards…")
-            detections = process_images_for_charuco(input_path, board, log_fn=log_fn)
+            detections = process_images_for_charuco(
+                input_path, board, log_fn=log_fn, cancel_event=cancel_event
+            )
 
         if not detections:
             raise ValueError("No ChArUco boards detected. "
@@ -962,6 +1116,7 @@ def run_intrinsics_pipeline(
         first_img = detections[0][1]
         image_size = (first_img.shape[1], first_img.shape[0])
 
+        _check_cancelled(cancel_event)
         return calibrate_camera_charuco(
             all_corners, all_ids, board, image_size, use_fisheye=use_fisheye, log_fn=log_fn
         )
@@ -969,16 +1124,19 @@ def run_intrinsics_pipeline(
     else:  # checkerboard
         if preloaded_frames is not None:
             log(f"Detecting checkerboard patterns in {len(preloaded_frames)} cached frames…")
-            detections = _detect_checkerboard_in_frames(preloaded_frames, rows, cols, log_fn=log_fn)
+            detections = _detect_checkerboard_in_frames(
+                preloaded_frames, rows, cols, log_fn=log_fn, cancel_event=cancel_event
+            )
         elif input_path.is_file():
             log("Scanning video for checkerboard corners…")
             detections = process_video_for_checkerboards(
-                input_path, rows, cols, window, threshold, skip, use_global_metric, log_fn=log_fn
+                input_path, rows, cols, window, threshold, skip, use_global_metric,
+                log_fn=log_fn, cancel_event=cancel_event,
             )
         else:
             log("Scanning image directory for checkerboard corners…")
             detections = process_images_for_checkerboards(
-                input_path, rows, cols, log_fn=log_fn
+                input_path, rows, cols, log_fn=log_fn, cancel_event=cancel_event
             )
 
         if not detections:
@@ -997,6 +1155,7 @@ def run_intrinsics_pipeline(
         object_points = [objp for _ in detections]
         image_points = [d[2] for d in detections]
 
+        _check_cancelled(cancel_event)
         log("Running camera calibration…")
         return calibrate_camera(
             image_points, object_points, image_size,

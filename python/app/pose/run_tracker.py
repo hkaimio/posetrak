@@ -1450,21 +1450,47 @@ class RunTrackerWidget(QWidget):
                 break
         self._trial_combo.setEnabled(False)
 
-        person_combo = self._people_table.cellWidget(0, 0)
-        if person_combo is not None:
-            for i in range(person_combo.count()):
-                if person_combo.itemData(i) == row["person_name"]:
-                    person_combo.setCurrentIndex(i)
-                    break
-            person_combo.setEnabled(False)
+        # Column 0 holds a QComboBox (legacy free-text-person mode, one row)
+        # or a QCheckBox per row (capture_persons mode, one row per defined
+        # person) -- see _row_included()/_row_person_name(). Find whichever
+        # row matches this sequence's person.
+        target_row: int | None = None
+        for r in range(self._people_table.rowCount()):
+            widget = self._people_table.cellWidget(r, 0)
+            if isinstance(widget, QCheckBox):
+                if widget.text() == row["person_name"]:
+                    target_row = r
+            elif widget is not None:
+                for i in range(widget.count()):
+                    if widget.itemData(i) == row["person_name"]:
+                        widget.setCurrentIndex(i)
+                        target_row = r
+                        break
+            if target_row is not None:
+                break
 
-        dr_combo = self._people_table.cellWidget(0, 1)
-        if dr_combo is not None:
-            for i in range(dr_combo.count()):
-                if dr_combo.itemData(i)[3] == row["detection_run_id"]:
-                    dr_combo.setCurrentIndex(i)
-                    break
-            dr_combo.setEnabled(False)
+        if target_row is not None:
+            # This view locks onto a single sequence's person -- drop every
+            # other row so only the matched one remains, then lock it.
+            while self._people_table.rowCount() > 1:
+                if target_row == 0:
+                    self._people_table.removeRow(1)
+                else:
+                    self._people_table.removeRow(0)
+                    target_row -= 1
+
+            person_widget = self._people_table.cellWidget(target_row, 0)
+            if isinstance(person_widget, QCheckBox):
+                person_widget.setChecked(True)
+            person_widget.setEnabled(False)
+
+            dr_combo = self._people_table.cellWidget(target_row, 1)
+            if dr_combo is not None:
+                for i in range(dr_combo.count()):
+                    if dr_combo.itemData(i)[3] == row["detection_run_id"]:
+                        dr_combo.setCurrentIndex(i)
+                        break
+                dr_combo.setEnabled(False)
 
         self._update_run_btn()
 

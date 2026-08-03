@@ -78,7 +78,7 @@ def test_validate_writes_shot(qapp, tmp_path) -> None:
 
     # Manually configure shot entry with a probed video
     page._shots.clear()
-    entry = ShotEntry(shot_number=1, label="walk")
+    entry = ShotEntry(label="walk")
     ve = VideoEntry(path="/fake/cam1.mp4", probe=_fake_probe(frames=600))
     entry.videos.append(ve)
     page._shots.append(entry)
@@ -109,15 +109,17 @@ def test_validate_writes_multiple_shots(qapp, tmp_path) -> None:
 
     page._shots.clear()
     for i in range(3):
-        entry = ShotEntry(shot_number=i + 1, label=f"shot{i+1}")
+        entry = ShotEntry(label=f"shot{i+1}")
         page._shots.append(entry)
 
     page.initializePage()
     result = page.validatePage()
 
     assert result is True
-    count = conn.execute("SELECT COUNT(*) FROM captures").fetchone()[0]
-    assert count == 3
+    rows = conn.execute(
+        "SELECT capture_number FROM captures ORDER BY capture_number"
+    ).fetchall()
+    assert [r["capture_number"] for r in rows] == [1, 2, 3]
     conn.close()
 
 
@@ -141,14 +143,14 @@ def test_cleanup_rolls_back(qapp, tmp_path) -> None:
     page = ShotsPage()
     _make_wizard_mock(page, conn, session_id)
 
-    entry = ShotEntry(shot_number=1)
+    entry = ShotEntry()
     page._shots = [entry]
     page.initializePage()
 
     # Directly write a shot (simulating partial progress) then clean up
     ctx = DBContext(conn, session_id)
     ctx.begin_page()
-    ctx.create_shot("partial", 99)
+    ctx.create_shot("partial")
     ctx.rollback_page()
 
     count = conn.execute("SELECT COUNT(*) FROM captures").fetchone()[0]
@@ -162,7 +164,7 @@ def test_cleanup_rolls_back(qapp, tmp_path) -> None:
 
 
 def test_shot_entry_defaults(qapp) -> None:
-    e = ShotEntry(shot_number=5)
+    e = ShotEntry()
     assert e.label == ""
     assert e.videos == []
 

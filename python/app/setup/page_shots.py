@@ -40,7 +40,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
     QWizardPage,
@@ -68,7 +67,6 @@ class VideoEntry:
 @dataclass
 class ShotEntry:
     """One shot (take) with zero or more associated video files."""
-    shot_number: int
     label: str = ""
     videos: list[VideoEntry] = field(default_factory=list)
 
@@ -449,13 +447,6 @@ class _ShotPanel(QGroupBox):
         self._video_rows: dict[str, _VideoRow] = {}  # path → row widget
         self._workers: list[_ProbeWorker] = []
 
-        self._num_spin = QSpinBox()
-        self._num_spin.setRange(1, 9999)
-        self._num_spin.setValue(entry.shot_number)
-        self._num_spin.valueChanged.connect(
-            lambda v: setattr(self._entry, "shot_number", v)
-        )
-
         self._label_edit = QLineEdit(entry.label)
         self._label_edit.setPlaceholderText("Optional label (e.g. 'walk 1')")
         self._label_edit.textChanged.connect(
@@ -472,7 +463,6 @@ class _ShotPanel(QGroupBox):
         self._remove_shot_btn.setVisible(show_remove_btn)
 
         header = QFormLayout()
-        header.addRow("Shot #:", self._num_spin)
         header.addRow("Label:", self._label_edit)
 
         btn_row = QHBoxLayout()
@@ -492,20 +482,17 @@ class _ShotPanel(QGroupBox):
         main.addWidget(self._video_container)
 
         self._update_title()
-        self._num_spin.valueChanged.connect(lambda _: self._update_title())
         self._label_edit.textChanged.connect(lambda _: self._update_title())
 
     def _update_title(self) -> None:
         label = self._entry.label
-        title = f"Shot {self._entry.shot_number}"
-        if label:
-            title += f" — {label}"
+        title = f"Shot — {label}" if label else "Shot"
         self.setTitle(title)
 
     def _add_videos(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            f"Add videos to Shot {self._entry.shot_number}",
+            "Add videos to shot",
             "",
             "Video files (*.mp4 *.mov *.avi *.mkv *.mts *.m2ts);;All files (*)",
         )
@@ -622,10 +609,7 @@ class ShotsPage(QWizardPage):
 
         try:
             for entry in self._shots:
-                shot_id = ctx.create_shot(
-                    label=entry.label or f"Shot {entry.shot_number}",
-                    shot_number=entry.shot_number,
-                )
+                shot_id = ctx.create_shot(label=entry.label)
                 new_shot_ids.append(shot_id)
                 for ve in entry.videos:
                     probe = ve.probe
@@ -669,9 +653,7 @@ class ShotsPage(QWizardPage):
     # ------------------------------------------------------------------
 
     def _add_shot(self) -> None:
-        shot_number = (max(e.shot_number for e in self._shots) + 1
-                       if self._shots else 1)
-        entry = ShotEntry(shot_number=shot_number)
+        entry = ShotEntry()
         self._shots.append(entry)
 
         ctx = getattr(self.wizard(), "db_context", None) if self.wizard() else None

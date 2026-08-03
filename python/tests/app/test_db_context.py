@@ -121,7 +121,7 @@ def test_sync_table_single_anchor_zero_fps_snaps_to_anchor() -> None:
 
 
 def test_create_shot_inserts_row(ctx: DBContext, session_conn: sqlite3.Connection) -> None:
-    shot_id = ctx.create_shot("test-shot", shot_number=1)
+    shot_id = ctx.create_shot("test-shot")
     row = session_conn.execute(
         "SELECT label, capture_number FROM captures WHERE id = ?", (shot_id,)
     ).fetchone()
@@ -140,7 +140,7 @@ def test_create_shot_video_inserts_row(
     session_conn: sqlite3.Connection,
     cam_instance_id: str,
 ) -> None:
-    shot_id = ctx.create_shot("s1", shot_number=1)
+    shot_id = ctx.create_shot("s1")
     vid_id = ctx.create_shot_video(
         shot_id, cam_instance_id, "/path/to/video.mp4",
         fps=120.0, frame_count=1000, width=1920, height=1080,
@@ -166,7 +166,7 @@ def test_get_shot_videos_returns_list(
     ctx: DBContext,
     cam_instance_id: str,
 ) -> None:
-    shot_id = ctx.create_shot("s1", shot_number=1)
+    shot_id = ctx.create_shot("s1")
     ctx.create_shot_video(shot_id, cam_instance_id, "/v1.mp4", 120.0, 500, 1920, 1080)
 
     videos = ctx.get_shot_videos(shot_id)
@@ -178,7 +178,7 @@ def test_get_shot_videos_returns_list(
 
 
 def test_get_shot_videos_empty(ctx: DBContext) -> None:
-    shot_id = ctx.create_shot("empty", shot_number=1)
+    shot_id = ctx.create_shot("empty")
     assert ctx.get_shot_videos(shot_id) == []
 
 
@@ -192,7 +192,7 @@ def test_write_and_read_sync_config(
     session_conn: sqlite3.Connection,
     cam_instance_id: str,
 ) -> None:
-    shot_id = ctx.create_shot("s1", 1)
+    shot_id = ctx.create_shot("s1")
     vid_id = ctx.create_shot_video(shot_id, cam_instance_id, "/v.mp4", 120.0, 1000, 1920, 1080)
 
     pt = SyncPoint(cam_instance_id, vid_id, video_frame=50, timestamp_s=0.5)
@@ -213,7 +213,7 @@ def test_get_active_sync_prefers_led_auto(
     ctx: DBContext,
     cam_instance_id: str,
 ) -> None:
-    shot_id = ctx.create_shot("s1", 1)
+    shot_id = ctx.create_shot("s1")
     vid_id = ctx.create_shot_video(shot_id, cam_instance_id, "/v.mp4", 120.0, 1000, 1920, 1080)
 
     pt_rough = SyncPoint(cam_instance_id, vid_id, video_frame=10, timestamp_s=0.1)
@@ -229,7 +229,7 @@ def test_get_active_sync_prefers_led_auto(
 
 
 def test_get_active_sync_no_config_returns_none(ctx: DBContext) -> None:
-    shot_id = ctx.create_shot("s1", 1)
+    shot_id = ctx.create_shot("s1")
     assert ctx.get_active_sync(shot_id) is None
 
 
@@ -243,7 +243,7 @@ def test_write_extrinsics_inserts_rows(
     session_conn: sqlite3.Connection,
     cam_instance_id: str,
 ) -> None:
-    shot_id = ctx.create_shot("s1", 1)
+    shot_id = ctx.create_shot("s1")
     R = np.eye(3, dtype=np.float64)
     t = np.array([1.0, 2.0, 3.0], dtype=np.float64)
     entry = ExtrinsicEntry(cam_instance_id, R, t)
@@ -284,7 +284,7 @@ def test_rollback_page_undoes_writes(
     session_conn: sqlite3.Connection,
 ) -> None:
     ctx.begin_page()
-    shot_id = ctx.create_shot("will-be-rolled-back", 99)
+    shot_id = ctx.create_shot("will-be-rolled-back")
     ctx.rollback_page()
 
     row = session_conn.execute(
@@ -298,7 +298,7 @@ def test_commit_page_preserves_writes(
     session_conn: sqlite3.Connection,
 ) -> None:
     ctx.begin_page()
-    shot_id = ctx.create_shot("keeper", 1)
+    shot_id = ctx.create_shot("keeper")
     ctx.commit_page()
 
     row = session_conn.execute(
@@ -317,7 +317,7 @@ def test_commit_page_survives_external_commit_on_shared_connection(
     ``commit_page()`` must not raise "no such savepoint" in that case.
     """
     ctx.begin_page()
-    shot_id = ctx.create_shot("keeper", 1)
+    shot_id = ctx.create_shot("keeper")
     session_conn.commit()  # simulates an inline dialog's direct commit()
     ctx.commit_page()
 
@@ -332,7 +332,7 @@ def test_rollback_page_survives_external_commit_on_shared_connection(
     session_conn: sqlite3.Connection,
 ) -> None:
     ctx.begin_page()
-    shot_id = ctx.create_shot("already-durable", 2)
+    shot_id = ctx.create_shot("already-durable")
     session_conn.commit()  # simulates an inline dialog's direct commit()
     ctx.rollback_page()  # must not raise; write is already durable
 
@@ -352,7 +352,7 @@ def shot_and_videos(
     ctx: DBContext, cam_instance_id: str, session_conn: sqlite3.Connection
 ) -> tuple[str, str, str]:
     """Return (shot_id, video_id_a, video_id_b) for anchor tests."""
-    shot_id = ctx.create_shot("anchor-test", shot_number=1)
+    shot_id = ctx.create_shot("anchor-test")
     vid_a = ctx.create_shot_video(shot_id, cam_instance_id, "/a.mp4", 30.0, 900, 1920, 1080)
     # second camera instance
     session_conn.execute(

@@ -290,12 +290,21 @@ class DBContext:
     # Writes
     # ------------------------------------------------------------------
 
-    def create_shot(self, label: str, shot_number: int) -> str:
-        """Insert a ``captures`` row and return its ID."""
+    def create_shot(self, label: str) -> str:
+        """Insert a ``captures`` row and return its ID.
+
+        ``capture_number`` is assigned automatically as one past the highest
+        existing number in this session (starting at 1).
+        """
         shot_id = generate_id()
+        max_num = self._conn.execute(
+            "SELECT MAX(capture_number) FROM captures WHERE session_id = ?",
+            (self._session_id,),
+        ).fetchone()[0]
+        capture_number = 1 if max_num is None else max_num + 1
         self._conn.execute(
             "INSERT INTO captures (id, session_id, capture_number, label) VALUES (?, ?, ?, ?)",
-            (shot_id, self._session_id, shot_number, label),
+            (shot_id, self._session_id, capture_number, label),
         )
         return shot_id
 

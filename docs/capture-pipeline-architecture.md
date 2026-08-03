@@ -1197,7 +1197,7 @@ All writes go through a `DBContext` object owned by the wizard. Pages call metho
 ```python
 class DBContext:
     conn: sqlite3.Connection
-    def create_shot(self, label: str, shot_number: int) -> str
+    def create_shot(self, label: str) -> str
     def create_shot_video(self, shot_id: str, cam_instance_id: str,
                           path: str, fps: float, frame_count: int,
                           width: int, height: int) -> str

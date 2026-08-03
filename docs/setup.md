@@ -4,12 +4,16 @@
 
 | Component | Linux | Windows |
 |---|---|---|
-| C++ tracker (`posetrak` exe) | Build from source | Use cross-compiled exe |
+| C++ tracker (`posetrak` exe) | Build from source | Build from source (native MSVC) or use a cross-compiled exe |
 | Python tools (UI, pose extraction, DB) | `uv sync` | `uv sync` |
-| Development (edit & rebuild) | Full support | Not recommended¹ |
+| Development (edit & rebuild) | Full support | Full support¹ |
 
-¹ Native MSVC builds fail due to Pinocchio/Eigen template depth limits.
-  Cross-compile on Linux instead (see [Windows: C++ tracker](#windows-c-tracker)).
+¹ Native MSVC development is fully supported — see
+  [CONTRIBUTING.md's "Windows (native, MSVC)"](../CONTRIBUTING.md#windows-native-msvc)
+  section and `setup-windows.ps1`. If you'd rather not maintain a native Windows
+  toolchain at all, cross-compiling from Linux/WSL (below) still works and produces
+  a runnable exe without installing MSVC/Pinocchio/Boost on the Windows machine —
+  just without the ability to edit and rebuild there.
 
 ---
 
@@ -94,8 +98,16 @@ four MinGW runtime DLLs (see [Windows: C++ tracker](#windows-c-tracker)).
 
 ### C++ tracker
 
-The recommended approach is to use an exe cross-compiled on Linux (see above).
-Copy the following files into a single directory on the Windows machine:
+**For development (edit & rebuild), build natively with MSVC** — see
+[CONTRIBUTING.md's "Windows (native, MSVC)"](../CONTRIBUTING.md#windows-native-msvc)
+section, or just run `setup-windows.ps1` from the repo root. This needs Visual
+Studio 2022+ (C++ desktop workload) and a small conda environment for Pinocchio/Boost
+headers, but produces both a debug (`builddir/`) and release (`optbuild/`) build you
+can iterate on locally.
+
+**If you only need to *run* the tracker** (no local edit/rebuild), an exe
+cross-compiled on Linux avoids installing any of that. Copy the following files into
+a single directory on the Windows machine:
 
 | File | Source (on the Linux build machine) |
 |---|---|
@@ -140,6 +152,20 @@ uv sync
 
 This installs the core posetrak package and the base dependencies (PySide6, OpenCV,
 NumPy, pandas, etc.) needed for `posetrak-ui`, `posetrak-db`, and `posetrak-pose`.
+
+### pre-commit hooks
+
+`pre-commit` is deliberately **not** in any `uv` dependency group (it's a repo tool,
+not a package dependency), so install and register it separately once per clone:
+
+```bash
+uv pip install pre-commit
+pre-commit install
+```
+
+This registers the hooks at `.git/hooks/pre-commit` (end-of-file/whitespace fixers,
+clang-format for C++). Do this before making your first commit in a new workarea —
+see `CLAUDE.md`'s Git conventions.
 
 ### Optional dependency groups
 

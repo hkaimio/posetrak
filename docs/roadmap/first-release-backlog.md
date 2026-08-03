@@ -1,9 +1,9 @@
 # First-release backlog
 
-Captured 2026-07-15 (Harri). Six items identified as needed before a first
-release — one expected to meaningfully improve tracking quality, the rest
-tech debt / UX. Not sequenced here beyond the note on each; see individual
-design docs (linked below) for anything already scoped in more detail.
+Captured 2026-07-15 (Harri), item 7 added 2026-08-03. One item expected to
+meaningfully improve tracking quality, the rest tech debt / UX. Not sequenced
+here beyond the note on each; see individual design docs (linked below) for
+anything already scoped in more detail.
 
 ## 1. Cross-person relative observations
 
@@ -77,3 +77,26 @@ non-additive schema migration (PK rebuild), plus either a new UI dispatch
 point or a real convergence of the YOLO and segmentation-driven pose
 pipelines. Explicitly postponed until after hand-detection-refinement;
 now back on the table.
+
+## 7. Finish Windows build DX improvements
+
+Native Windows (MSVC) setup is now fully working and documented
+(`CONTRIBUTING.md`'s "Windows (native, MSVC)" section, `setup-windows.ps1`), and
+a `.wraplock`/wrap-cache mechanism already exists under `subprojects/`. Two
+originally-planned items from that effort are still outstanding:
+
+- **Pre-seed the meson wrap cache in the repo.** `meson setup` currently still
+  downloads every wrap dependency (Catch2, fmt, nlohmann_json, etc.) fresh on
+  first setup, which is the biggest remaining chunk of "clone → first build"
+  time on a new machine. Commit the downloaded wrap archives (or point Meson's
+  cache dir at a repo-tracked location) so `meson setup` hits a local cache
+  instead of the network.
+- **Add a `.vsconfig` file at the repo root** listing
+  `Microsoft.VisualStudio.Workload.NativeDesktop` so the Visual Studio installer
+  can install exactly the right workload in one click, instead of a new
+  contributor having to guess which workload includes the C++ toolchain.
+
+(The originally-planned "trim Boost to a curated header subset committed to the
+repo" item was superseded by the current approach — fetching full Pinocchio +
+Boost via a dedicated conda environment — which turned out simpler to keep in
+sync with the Linux/WSL Pinocchio version than a hand-curated subset.)

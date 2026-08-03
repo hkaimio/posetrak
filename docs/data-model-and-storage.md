@@ -359,6 +359,32 @@ to reproduce a tracking run are reachable from `TrackingRun`:
 - per-person skeletons (via `TrackingRunPerson`)
 - tracker config
 
+### Detection runs are append-only; never mutate or re-finalise an old one
+Every real entry point (`RunDetectionDialog`, `CutieInitPanel`'s "Queue Pose") creates a
+brand-new `detection_runs` row per invocation — detection runs are meant to be immutable
+historical records once tracking or manual keypoint editing has happened against their
+sequences. Retroactively adding rows to an old run's `detection_keypoints` (e.g. to test a
+new pipeline stage such as hand-detection refinement against existing production data), or
+calling `finalise_to_db` a second time against a `detection_run_id` whose sequences already
+have `tracking_runs` or `pose_observation_edits`, breaks that invariant.
+
+`finalise_to_db` (`python/app/pose/finalise.py`) enforces the second half of this: before its
+delete-and-regenerate cascade over a detection run's existing sequences, it checks each
+sequence for `tracking_runs` or `pose_observation_edits` rows and raises `RuntimeError` if any
+exist, rather than deleting edit history out from under the user. This is deliberate, not a
+missing feature — re-finalising *is* expected and unguarded during the normal
+stitch → finalise → notice a mistake → restitch → finalise loop, which happens entirely
+*before* anyone has tracked or edited the result; the guard only blocks re-finalising *after*
+real downstream work exists. (Before this guard existed, re-running against an edited run's
+sequences hit a raw `sqlite3.IntegrityError: FOREIGN KEY constraint failed` instead, since
+the cascade never accounted for `pose_observation_edits`.)
+
+To test a new detection/pipeline stage against an existing session's data without violating
+this: create a fresh `detection_runs` row and copy the old run's `detection_keypoints` /
+`detection_track_assignments` / `person_detections` rows onto it via `INSERT...SELECT` (cheap,
+and leaves the original run byte-for-byte unchanged) rather than mutating the original in
+place.
+
 ### Multi-person tracking via `TrackingRunPerson`
 A single tracking run can track any number of persons simultaneously.
 `TrackingRunPerson` maps each `person_id` (matching the `person_id` in `PoseObservation`)

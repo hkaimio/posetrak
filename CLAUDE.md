@@ -189,7 +189,40 @@ lets a user inspect or correct motion capture data belongs here.
 When adding new UI features, always check which application context the feature
 belongs to before creating new widgets.
 
-Data lives on `/mnt/d/mocap/` (Windows drive mount).
+Capture data (session databases, videos) lives outside the repo on a large data
+drive; the exact path is machine-specific — check the current machine's local
+setup notes rather than assuming a fixed path.
+
+### Data model invariants
+
+See `docs/data-model-and-storage.md` §3 ("Key Design Decisions Embedded in the
+Model") for the full list. The one most likely to bite an assistant working on
+the pose/detection pipeline:
+
+- **Detection runs are append-only.** Every real entry point creates a brand-new
+  `detection_runs` row per invocation. Never retroactively mutate an old run's
+  `detection_keypoints`, and never call `finalise_to_db` a second time against a
+  run whose sequences already have `tracking_runs` or `pose_observation_edits`
+  (it now refuses with `RuntimeError` rather than corrupting data). To test a new
+  pipeline stage against existing session data, create a fresh `detection_runs`
+  row and copy the old run's rows onto it via `INSERT...SELECT` instead of
+  mutating the original in place.
+
+### Design principle: automation vs. prior human edits
+
+When a new automated write-path can conflict with a prior human edit (e.g. an
+auto-redetect feature overwriting a manual keypoint edit), and the "correct"
+precedence seems to depend on timing/context that isn't cheaply available in the
+data model (recency isn't tracked, or tracking it would require a schema/merge
+rewrite touching every existing row) — don't reach for a global precedence
+reorder or a timestamp-tracking schema change. Instead scope the resolution to
+*the moment of the automated write* (clear only what that write's own premise
+says is stale) plus an explicit user-facing mode toggle for whether the
+automation should run at all. Confirm with the user which category of prior
+edit the automation is allowed to override before assuming. See the "Auto-detect
+vs keep existing state" toggle in
+`docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md`
+for a worked example of both the failed first approach and why it failed.
 
 ## Code Style
 

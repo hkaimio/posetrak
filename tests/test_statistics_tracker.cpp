@@ -143,7 +143,9 @@ TEST_CASE("StatisticsTracker basic functionality", "[io][statistics]") {
         REQUIRE(data_line.find("0,0") != std::string::npos);    // frame, timestamp
         REQUIRE(data_line.find("5,4,1") != std::string::npos);  // obs, inliers, outliers
 
-        // Cleanup
+        // Cleanup -- close the handle first: Windows (unlike POSIX) refuses to
+        // remove a file while it's still open.
+        file.close();
         std::filesystem::remove(temp_path);
     }
 
@@ -194,7 +196,9 @@ TEST_CASE("StatisticsTracker basic functionality", "[io][statistics]") {
         REQUIRE(summary.contains("outlier_rate"));
         REQUIRE(summary.contains("duration_seconds"));
 
-        // Cleanup
+        // Cleanup -- close the handle first: Windows (unlike POSIX) refuses to
+        // remove a file while it's still open.
+        file.close();
         std::filesystem::remove(temp_path);
     }
 }

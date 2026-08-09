@@ -70,6 +70,7 @@ from app.setup.extrinsics_solver import (
     CamCalibState,
     CamPosObs,
     ControlPoint,
+    ObsPoint,
     _Cancelled,
     _proj_matrix,
     _undistort_pts,
@@ -1448,8 +1449,13 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         )
         if not path:
             return
+        # A version-1 file (no per-observation frame_idx) falls back to each
+        # camera's current scrub position — see load_control_points'
+        # docstring and the design doc's "Per-control-point, per-frame
+        # observations" section.
+        default_frame_by_id = {vid: self._current_frame_for(vid) for vid in self._states_by_id}
         try:
-            cps = load_control_points(path, self._states)
+            cps = load_control_points(path, self._states, default_frame_by_id)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Load failed", str(exc))
             return
@@ -1538,11 +1544,22 @@ class ExtrinsicsAutoCalibDialog(QDialog):
     # Camera click → record observation
     # ------------------------------------------------------------------
 
+    def _current_frame_for(self, vid: str) -> int:
+        """Current scrub position for *vid*, or 0 for an image-only camera."""
+        scrub = self._scrub_bars.get(vid)
+        return scrub.current_frame if scrub is not None else 0
+
     def _on_cam_click(self, vid: str, x: float, y: float) -> None:
         if self._selected_cp_idx is None:
             return
         cp = self._control_points[self._selected_cp_idx]
-        cp.obs[vid] = (x, y)
+        # Per docs/roadmap/features/extrinsics-improvements/
+        # extrinsics-improvements-design.md, "Per-control-point, per-frame
+        # observations": record whichever frame this camera is currently
+        # scrubbed to, independently of every other camera and every other
+        # control point. Re-placing this same point on this same camera at
+        # a different scrub position overwrites frame_idx along with px/py.
+        cp.obs[vid] = ObsPoint(frame_idx=self._current_frame_for(vid), px=x, py=y)
         self._refresh_cp_list_labels()
         self._refresh_markers()
 
@@ -1590,7 +1607,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             color = _CP_COLORS[i % len(_CP_COLORS)]
             is_selected = (i == self._selected_cp_idx)
             mlabel = cp.name if is_selected else ""
-            for vid, (x, y) in cp.obs.items():
+            for vid, obs in cp.obs.items():
+                x, y = obs.px, obs.py
                 if vid in self._cam_widgets:
                     self._cam_widgets[vid].add_marker(x, y, color, mlabel, selected=is_selected)
                     if is_selected:
@@ -1713,7 +1731,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 self._cp_3d[cp.name] = cp.world_xyz.astype(np.float64)
                 continue
             solved_obs = []
-            for vid, (px, py) in cp.obs.items():
+            for vid, obs in cp.obs.items():
+                px, py = obs.px, obs.py
                 s = state_by_id.get(vid)
                 if s is None or s.R is None:
                     continue

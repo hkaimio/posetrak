@@ -93,3 +93,95 @@ def test_mixed_video_and_image_cameras(qapp, fake_conn) -> None:
         assert set(dlg._cam_panes) == {"cam_A", "cam_B"}
     finally:
         dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — per-control-point, per-frame observations
+# ---------------------------------------------------------------------------
+
+
+def test_current_frame_for_video_backed_camera_returns_scrub_position(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", file_path="/nonexistent/cam_A.mp4")]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._scrub_bars["cam_A"].seek(37)
+        assert dlg._current_frame_for("cam_A") == 37
+    finally:
+        dlg.done(0)
+
+
+def test_current_frame_for_image_only_camera_returns_zero(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", file_path=None)]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        assert dlg._current_frame_for("cam_A") == 0
+    finally:
+        dlg.done(0)
+
+
+def test_on_cam_click_records_current_scrub_frame(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", file_path="/nonexistent/cam_A.mp4")]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._add_control_point()
+        dlg._scrub_bars["cam_A"].seek(50)  # within [0, last_frame=99]
+        dlg._on_cam_click("cam_A", 10.0, 20.0)
+
+        cp = dlg._control_points[0]
+        assert cp.obs["cam_A"].frame_idx == 50
+        assert cp.obs["cam_A"].px == 10.0
+        assert cp.obs["cam_A"].py == 20.0
+    finally:
+        dlg.done(0)
+
+
+def test_on_cam_click_twice_at_different_frames_overwrites_frame_idx(qapp, fake_conn) -> None:
+    """R4: placing the same point again on the same camera at a different scrub
+    position overwrites that camera's ObsPoint (new frame, new pixel)."""
+    states = [_make_state("cam_A", file_path="/nonexistent/cam_A.mp4")]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._add_control_point()
+        dlg._scrub_bars["cam_A"].seek(20)
+        dlg._on_cam_click("cam_A", 10.0, 20.0)
+
+        dlg._scrub_bars["cam_A"].seek(80)
+        dlg._on_cam_click("cam_A", 15.0, 25.0)
+
+        cp = dlg._control_points[0]
+        assert cp.obs["cam_A"].frame_idx == 80
+        assert cp.obs["cam_A"].px == 15.0
+        assert cp.obs["cam_A"].py == 25.0
+    finally:
+        dlg.done(0)
+
+
+def test_on_cam_click_different_cameras_keep_independent_frames(qapp, fake_conn) -> None:
+    states = [
+        _make_state("cam_A", file_path="/nonexistent/cam_A.mp4"),
+        _make_state("cam_B", file_path="/nonexistent/cam_B.mp4"),
+    ]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._add_control_point()
+        dlg._scrub_bars["cam_A"].seek(20)
+        dlg._on_cam_click("cam_A", 1.0, 1.0)
+        dlg._scrub_bars["cam_B"].seek(80)
+        dlg._on_cam_click("cam_B", 2.0, 2.0)
+
+        cp = dlg._control_points[0]
+        assert cp.obs["cam_A"].frame_idx == 20
+        assert cp.obs["cam_B"].frame_idx == 80
+    finally:
+        dlg.done(0)
+
+
+def test_on_cam_click_image_only_camera_records_frame_zero(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", file_path=None)]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._add_control_point()
+        dlg._on_cam_click("cam_A", 5.0, 6.0)
+        assert dlg._control_points[0].obs["cam_A"].frame_idx == 0
+    finally:
+        dlg.done(0)

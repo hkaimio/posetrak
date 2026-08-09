@@ -56,10 +56,28 @@ class CamCalibState:
 
 
 @dataclass
+class ObsPoint:
+    """One control point's observation in one camera.
+
+    See docs/roadmap/features/extrinsics-improvements/
+    extrinsics-improvements-design.md, "Per-control-point, per-frame
+    observations" — `frame_idx` records which video frame the point was
+    placed on for this camera (independent of every other camera's frame,
+    and independent of any other control point's frame in this same
+    camera). Only `px`/`py` (distorted pixel coordinates, same convention
+    as before) feed the solver; `frame_idx` is provenance for the UI and
+    the saved file.
+    """
+    frame_idx: int
+    px: float
+    py: float
+
+
+@dataclass
 class ControlPoint:
     name: str
     # distorted pixel observations per camera; solver undistorts before use
-    obs: dict[str, tuple[float, float]] = field(default_factory=dict)
+    obs: dict[str, ObsPoint] = field(default_factory=dict)
     # if set, this point's 3D position is fixed in the BA
     world_xyz: np.ndarray | None = None
 
@@ -382,7 +400,7 @@ def init_poses_pnp(
         for cp in control_points:
             if cp.world_xyz is None or s.video_id not in cp.obs:
                 continue
-            px, py = cp.obs[s.video_id]
+            px, py = cp.obs[s.video_id].px, cp.obs[s.video_id].py
             undist = _undistort_pts(np.array([[px, py]], dtype=np.float32), s)
             _log.debug(
                 "init_poses_pnp: %s / %s  world=(%.3f, %.3f, %.3f)  "
@@ -637,7 +655,8 @@ def _undistort_control_obs(
 ) -> dict[str, tuple[float, float]]:
     """Return undistorted pixel coords for a control point's observations."""
     result = {}
-    for vid, (px, py) in cp.obs.items():
+    for vid, obs in cp.obs.items():
+        px, py = obs.px, obs.py
         if vid not in state_by_id:
             continue
         pts_u = _undistort_pts(np.array([[px, py]], dtype=np.float32), state_by_id[vid])
@@ -1274,7 +1293,8 @@ def run_calibration(
             xyz_str = (f"world=({cp.world_xyz[0]:.3f},{cp.world_xyz[1]:.3f},"
                        f"{cp.world_xyz[2]:.3f})" if cp.world_xyz is not None else "free")
             obs_str = ", ".join(
-                f"{vid}=({px:.1f},{py:.1f})" for vid, (px, py) in cp.obs.items()
+                f"{vid}@f{obs.frame_idx}=({obs.px:.1f},{obs.py:.1f})"
+                for vid, obs in cp.obs.items()
             )
             _log.debug("  CP %s [%s]  obs: %s", cp.name, xyz_str, obs_str or "(none)")
 
@@ -1358,7 +1378,8 @@ def run_calibration(
         _log.debug("Per-CP reprojection errors after BA:")
         for cp in control_points:
             parts = []
-            for vid, (px, py) in cp.obs.items():
+            for vid, obs in cp.obs.items():
+                px, py = obs.px, obs.py
                 s = state_by_id.get(vid)
                 if s is None or s.R is None:
                     continue
@@ -1432,19 +1453,25 @@ def save_control_points(
 
     Observations are stored by camera label (not video_id) so the file is
     portable across sessions.  video_id is stored alongside for reference.
+
+    Version 2 (see docs/roadmap/features/extrinsics-improvements/
+    extrinsics-improvements-design.md, "Per-control-point, per-frame
+    observations"): each observation is ``[frame_idx, px, py]`` instead of
+    version 1's ``[px, py]``, recording which video frame the point was
+    placed on for that camera.
     """
     import json
 
     label_by_id = {s.video_id: s.label for s in states}
     data = {
-        "version": 1,
+        "version": 2,
         "control_points": [
             {
                 "name": cp.name,
                 "world_xyz": cp.world_xyz.tolist() if cp.world_xyz is not None else None,
                 "obs": {
-                    label_by_id.get(vid, vid): [px, py]
-                    for vid, (px, py) in cp.obs.items()
+                    label_by_id.get(vid, vid): [obs.frame_idx, obs.px, obs.py]
+                    for vid, obs in cp.obs.items()
                 },
             }
             for cp in control_points
@@ -1457,21 +1484,30 @@ def save_control_points(
 def load_control_points(
     path: str,
     states: list[CamCalibState],
+    default_frame_by_id: dict[str, int] | None = None,
 ) -> list[ControlPoint]:
     """Load control points from a JSON file saved by save_control_points.
 
     Observations are matched to current cameras by label; unmatched labels are
     silently skipped so files can be shared across sessions with different
     camera subsets.
+
+    Supports both file versions:
+      - Version 2: ``obs`` values are ``[frame_idx, px, py]``.
+      - Version 1: ``obs`` values are ``[px, py]`` (no frame recorded). Each
+        loaded observation's ``frame_idx`` falls back to
+        ``default_frame_by_id[video_id]`` — typically the camera's current
+        scrub position, passed by the caller — or 0 if not given.
     """
     import json
 
     id_by_label = {s.label: s.video_id for s in states}
+    default_frame_by_id = default_frame_by_id or {}
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
 
     version = data.get("version", 1)
-    if version != 1:
+    if version not in (1, 2):
         raise ValueError(f"Unsupported control-point file version: {version}")
 
     result: list[ControlPoint] = []
@@ -1479,9 +1515,15 @@ def load_control_points(
         cp = ControlPoint(name=rec["name"])
         if rec.get("world_xyz") is not None:
             cp.world_xyz = np.array(rec["world_xyz"], dtype=np.float64)
-        for label, (px, py) in rec.get("obs", {}).items():
+        for label, values in rec.get("obs", {}).items():
             vid = id_by_label.get(label)
-            if vid is not None:
-                cp.obs[vid] = (float(px), float(py))
+            if vid is None:
+                continue
+            if version == 2:
+                frame_idx, px, py = values
+            else:
+                px, py = values
+                frame_idx = default_frame_by_id.get(vid, 0)
+            cp.obs[vid] = ObsPoint(frame_idx=int(frame_idx), px=float(px), py=float(py))
         result.append(cp)
     return result

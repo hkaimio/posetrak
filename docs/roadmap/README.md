@@ -13,7 +13,7 @@ python docs/roadmap/generate_readme.py
 
 #### Extrinsics Calibration Improvements
 
-**Status:** 🚧 In progress (15%) · **Categories:** `calibration`, `ui` · **Last updated:** 2026-08-06
+**Status:** 🚧 In progress (40%) · **Categories:** `calibration`, `ui` · **Last updated:** 2026-08-09
 
 Improvements to multi-camera extrinsic calibration: scrubbing calibration frames directly from capture video instead of a pre-extracted PNG folder, per-control-point per-frame observations, ArUco/ChArUco marker detection to anchor the coordinate system and provide a rigid marker-pose bundle-adjustment residual, and persisted fiducial markers for recalibration reuse.
 

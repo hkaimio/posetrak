@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Hand Detection Refinement"
 status = "in_progress"
 progress_pct = 85
@@ -11,7 +11,7 @@ redetection triggered when a user edits a wrist/elbow during interactive editing
 categories = ["detection-pipeline", "tracker-core"]
 target_release = "TBD"
 last_updated = 2026-08-06
-+++
+```
 
 # Hand Detection Refinement — Implementation Status
 

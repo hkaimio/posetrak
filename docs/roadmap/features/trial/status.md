@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Trial Concept Refactoring"
 status = "in_progress"
 progress_pct = 60
@@ -11,7 +11,7 @@ its detection/tracking runs directly instead of embedding the full detection edi
 categories = ["ui", "data-model", "cli"]
 target_release = "TBD"
 last_updated = 2026-08-06
-+++
+```
 
 # Trial Concept Refactoring — Implementation Status
 

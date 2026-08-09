@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Pose Regularization for Kinematically Redundant Chains"
 status = "proposal"
 description = """
@@ -10,7 +10,7 @@ specific traced divergence where a saturated spine joint triggered a tracking cr
 categories = ["tracker-core", "ukf-tuning"]
 target_release = "TBD"
 last_updated = 2026-08-06
-+++
+```
 
 # Pose Regularization — Implementation Status
 

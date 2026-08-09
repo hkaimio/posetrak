@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Posetrak CLI"
 status = "in_progress"
 progress_pct = 70
@@ -11,7 +11,7 @@ diagnostic server's write-capable workflow tools.
 categories = ["cli"]
 target_release = "TBD"
 last_updated = 2026-08-06
-+++
+```
 
 # Posetrak CLI — Implementation Status
 

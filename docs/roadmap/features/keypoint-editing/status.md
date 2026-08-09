@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Keypoint Editing"
 status = "in_progress"
 progress_pct = 90
@@ -11,7 +11,7 @@ toolbar. Lets a user fix bad detections before tracking without leaving the app.
 categories = ["ui", "detection-pipeline"]
 target_release = "TBD"
 last_updated = 2026-08-06
-+++
+```
 
 # Keypoint Editing — Implementation Status
 

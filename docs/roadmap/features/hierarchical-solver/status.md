@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Hierarchical Body/Hand Solver"
 status = "in_progress"
 progress_pct = 90
@@ -11,7 +11,7 @@ the fingers) and dominate the cross-person contact-pair budget.
 categories = ["tracker-core"]
 target_release = "TBD"
 last_updated = 2026-08-06
-+++
+```
 
 # Hierarchical Body/Hand Solver — Implementation Status
 

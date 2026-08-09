@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Segmentation Reuse (Time-Range-Scoped Bbox Source)"
 status = "proposal"
 description = """
@@ -10,7 +10,7 @@ one-off script to copy detections across runs.
 categories = ["detection-pipeline", "data-model"]
 target_release = "TBD"
 last_updated = 2026-08-06
-+++
+```
 
 # Segmentation Reuse — Implementation Status
 

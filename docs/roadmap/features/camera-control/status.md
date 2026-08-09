@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Camera Control"
 status = "proposal"
 description = """
@@ -10,7 +10,7 @@ error-prone per-camera button presses.
 categories = ["capture-hardware"]
 target_release = "TBD"
 last_updated = 2026-08-06
-+++
+```
 
 # Camera Control — Implementation Status
 

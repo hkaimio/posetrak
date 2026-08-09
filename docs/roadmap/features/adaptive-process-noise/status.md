@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Adaptive Process Noise"
 status = "in_progress"
 progress_pct = 40
@@ -11,7 +11,7 @@ fast-motion tracking.
 categories = ["tracker-core", "ukf-tuning"]
 target_release = "TBD"
 last_updated = 2026-08-06
-+++
+```
 
 # Adaptive Process Noise — Implementation Status
 

@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Tracker Configuration Improvements"
 status = "complete"
 description = """
@@ -9,7 +9,7 @@ configuration dialog with tooltips replacing the old single monolithic parameter
 categories = ["ui", "data-model"]
 target_release = "TBD"
 last_updated = 2026-08-06
-+++
+```
 
 # Tracker Configuration Improvements — Implementation Status
 

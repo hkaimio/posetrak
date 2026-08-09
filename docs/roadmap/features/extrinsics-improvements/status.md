@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Extrinsics Calibration Improvements"
 status = "in_progress"
 progress_pct = 40
@@ -11,7 +11,7 @@ bundle-adjustment residual, and persisted fiducial markers for recalibration reu
 categories = ["calibration", "ui"]
 target_release = "TBD"
 last_updated = 2026-08-09
-+++
+```
 
 # Extrinsics Calibration Improvements — Implementation Status
 

@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Swing-Twist Joint Orientation & Limits"
 status = "proposal"
 description = """
@@ -10,7 +10,7 @@ can't inadvertently produce an unreasonable total rotation.
 categories = ["tracker-core", "ukf-tuning"]
 target_release = "TBD"
 last_updated = 2026-08-06
-+++
+```
 
 # Swing-Twist Joint Limits — Implementation Status
 

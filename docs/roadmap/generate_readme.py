@@ -2,9 +2,12 @@
 """Generate docs/roadmap/README.md from each feature's status.md frontmatter.
 
 Each feature lives in docs/roadmap/features/<slug>/ and must have a status.md
-whose first lines are a TOML frontmatter block delimited by `+++`:
+whose first lines are a TOML frontmatter block, fenced with ```toml (NOT bare
+`+++` delimiters -- GitHub has no special handling for TOML frontmatter, so a
+bare `+++` block just renders as an ordinary paragraph and visually collapses
+onto one line; a fenced code block renders correctly on every Markdown host):
 
-    +++
+    ```toml
     name = "Human-readable feature name"
     status = "proposal"          # proposal | in_progress | complete | released
     progress_pct = 42            # optional int, only meaningful for in_progress
@@ -12,7 +15,7 @@ whose first lines are a TOML frontmatter block delimited by `+++`:
     categories = ["tracker-core", "ukf-tuning"]
     target_release = "v1.0"      # or "TBD" if not yet scheduled
     last_updated = 2026-08-06    # bare TOML date, no quotes
-    +++
+    ```
 
     # Rest of the document is free-form status prose (implementation status,
     # known issues, etc).
@@ -85,13 +88,19 @@ class Feature:
         return self.categories[0] if self.categories else "uncategorized"
 
 
+FRONTMATTER_FENCE = "```toml"
+
+
 def _extract_frontmatter(text: str, source: Path) -> str:
-    if not text.startswith("+++"):
-        raise ValueError(f"{source}: missing leading '+++' TOML frontmatter delimiter")
-    end = text.find("\n+++", 3)
+    if not text.startswith(FRONTMATTER_FENCE):
+        raise ValueError(
+            f"{source}: missing leading '{FRONTMATTER_FENCE}' frontmatter fence"
+        )
+    body = text[len(FRONTMATTER_FENCE) :]
+    end = body.find("\n```")
     if end == -1:
-        raise ValueError(f"{source}: unterminated frontmatter (no closing '+++' line)")
-    return text[3:end]
+        raise ValueError(f"{source}: unterminated frontmatter (no closing '```' line)")
+    return body[:end]
 
 
 def load_feature(folder: Path) -> Feature | None:

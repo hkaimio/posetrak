@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Measurement Error Model Improvements"
 status = "in_progress"
 progress_pct = 85
@@ -11,7 +11,7 @@ cross-person relative observations for contact/interaction (grabs, throws, hands
 categories = ["tracker-core", "measurement-model"]
 target_release = "TBD"
 last_updated = 2026-08-06
-+++
+```
 
 # Measurement Error Model Improvements — Implementation Status
 

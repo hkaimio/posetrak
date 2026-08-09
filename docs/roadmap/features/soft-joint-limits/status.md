@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Soft Joint-Limit Repulsion"
 status = "proposal"
 description = """
@@ -10,7 +10,7 @@ near-limit overshoot worse, not better, for a fast bilateral arm-raise.
 categories = ["tracker-core", "ukf-tuning"]
 target_release = "TBD"
 last_updated = 2026-08-06
-+++
+```
 
 # Soft Joint-Limit Repulsion — Implementation Status
 

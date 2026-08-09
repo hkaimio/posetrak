@@ -1,4 +1,4 @@
-+++
+```toml
 name = "Pose Detection Improvements (Aikido Capture)"
 status = "proposal"
 description = """
@@ -10,7 +10,7 @@ bias. Companion analysis covers marker-augmentation as a complementary, non-mark
 categories = ["detection-pipeline"]
 target_release = "TBD"
 last_updated = 2026-08-06
-+++
+```
 
 # Pose Detection Improvements — Implementation Status
 

@@ -11,105 +11,60 @@ from app.setup.pair_scrubber import PairScrubber, _VideoPane
 
 # ---------------------------------------------------------------------------
 # _VideoPane — internal pane
+#
+# The slider/label/FrameReader scrub logic these tests used to exercise
+# directly now lives in the shared VideoScrubBar (see test_video_scrub_bar.py)
+# -- these tests just confirm _VideoPane delegates to it correctly and drives
+# its CameraCell.
 # ---------------------------------------------------------------------------
 
 
 def test_video_pane_constructs(qapp) -> None:
     pane = _VideoPane("Test")
-    assert pane._total_frames == 1
-    assert pane._current_frame == 0
-    assert pane._reader is None
+    assert pane.total_frames == 1
+    assert pane.current_frame == 0
+    assert not pane.is_loaded
 
 
-def test_video_pane_step_clamps_at_zero(qapp) -> None:
+def test_video_pane_step_delegates_to_scrub_bar(qapp) -> None:
     pane = _VideoPane("Test")
-    pane._total_frames = 100
-    pane._current_frame = 0
-    pane.step(-10)
-    assert pane._current_frame == 0
-
-
-def test_video_pane_step_clamps_at_max(qapp) -> None:
-    pane = _VideoPane("Test")
-    pane._total_frames = 100
-    pane._current_frame = 99
-    pane.step(10)
-    assert pane._current_frame == 99
-
-
-def test_video_pane_step_moves_forward(qapp) -> None:
-    pane = _VideoPane("Test")
-    pane._total_frames = 100
-    pane._current_frame = 50
+    pane._scrub._total_frames = 100
+    pane._scrub._current_frame = 50
     pane.step(5)
-    assert pane._current_frame == 55
+    assert pane.current_frame == 55
 
 
-def test_video_pane_step_moves_backward(qapp) -> None:
+def test_video_pane_seek_delegates_to_scrub_bar(qapp) -> None:
     pane = _VideoPane("Test")
-    pane._total_frames = 100
-    pane._current_frame = 50
-    pane.step(-15)
-    assert pane._current_frame == 35
-
-
-def test_video_pane_seek_clamps_negative(qapp) -> None:
-    pane = _VideoPane("Test")
-    pane._total_frames = 100
-    pane._current_frame = 50
-    pane.seek(-5)
-    assert pane._current_frame == 0
-
-
-def test_video_pane_seek_clamps_beyond_max(qapp) -> None:
-    pane = _VideoPane("Test")
-    pane._total_frames = 100
-    pane._current_frame = 0
-    pane.seek(200)
-    assert pane._current_frame == 99
-
-
-def test_video_pane_seek_to_valid_frame(qapp) -> None:
-    pane = _VideoPane("Test")
-    pane._total_frames = 100
+    pane._scrub._total_frames = 100
     pane.seek(42)
-    assert pane._current_frame == 42
+    assert pane.current_frame == 42
 
 
-def test_video_pane_frame_label_updates_on_seek(qapp) -> None:
+def test_video_pane_frame_changed_signal_propagates(qapp) -> None:
     pane = _VideoPane("Test")
-    pane._total_frames = 100
-    pane._slider.setMaximum(99)
-    pane._seek(77)
-    assert "77" in pane._frame_label.text()
-
-
-def test_video_pane_slider_updates_on_seek(qapp) -> None:
-    pane = _VideoPane("Test")
-    pane._total_frames = 100
-    pane._slider.setMaximum(99)
-    pane._seek(33)
-    assert pane._slider.value() == 33
-
-
-def test_video_pane_frame_changed_signal(qapp) -> None:
-    pane = _VideoPane("Test")
-    pane._total_frames = 100
-    pane._slider.setMaximum(99)
+    pane._scrub._total_frames = 100
+    pane._scrub._slider.setMaximum(99)
     received: list[int] = []
     pane.frame_changed.connect(received.append)
-    pane._seek(10)
+    pane.seek(10)
     assert received == [10]
 
 
-def test_video_pane_step_no_signal_when_clamped(qapp) -> None:
+def test_video_pane_load_missing_file_updates_cell_label_unaffected(qapp) -> None:
     pane = _VideoPane("Test")
-    pane._total_frames = 100
-    pane._current_frame = 0
-    received: list[int] = []
-    pane.frame_changed.connect(received.append)
-    pane.step(-1)  # already at 0, should not emit
-    assert received == []
+    pane.load("/nonexistent/video.mp4", 300, initial_frame=10)
+    assert pane.total_frames == 300
+    assert pane.current_frame == 10
+    assert pane.is_loaded
+    pane.unload()
+
+
+def test_video_pane_unload_clears_display(qapp) -> None:
+    pane = _VideoPane("Test")
+    pane.load("/nonexistent/video.mp4", 300, initial_frame=10)
+    pane.unload()
+    assert not pane.is_loaded
 
 
 # ---------------------------------------------------------------------------
@@ -151,14 +106,14 @@ def test_pair_scrubber_target_frame_is_zero_initially(qapp) -> None:
 def test_set_reference_does_not_crash_with_missing_file(qapp) -> None:
     ps = PairScrubber()
     ps.set_reference("/nonexistent/video.mp4", 300, "Cam A")
-    assert ps._ref_pane._total_frames == 300
+    assert ps._ref_pane.total_frames == 300
     ps.shutdown()
 
 
 def test_set_target_does_not_crash_with_missing_file(qapp) -> None:
     ps = PairScrubber()
     ps.set_target("/nonexistent/video.mp4", 200, "Cam B")
-    assert ps._tgt_pane._total_frames == 200
+    assert ps._tgt_pane.total_frames == 200
     ps.shutdown()
 
 

@@ -16,59 +16,41 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
-    QInputDialog,
-    QLabel,
     QPushButton,
     QSizePolicy,
-    QSlider,
     QVBoxLayout,
     QWidget,
 )
 
 from app.setup.camera_cell import CameraCell
-from app.setup.video_reader import FrameReader
+from app.setup.video_scrub_bar import VideoScrubBar
 
 
 class _VideoPane(QWidget):
-    """One side of the pair scrubber: camera cell + slider + frame label."""
+    """One side of the pair scrubber: camera cell + video scrub bar.
+
+    The slider/label/"Go to…"/``FrameReader`` machinery lives in the shared
+    ``VideoScrubBar`` (see ``video_scrub_bar.py``); this class only wires a
+    decoded frame to its ``CameraCell`` display.
+    """
 
     frame_changed = Signal(int)
 
     def __init__(self, side_label: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._total_frames = 1
-        self._current_frame = 0
-        self._reader: FrameReader | None = None
-
         self._cell = CameraCell(label=side_label, parent=self)
         self._cell.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
 
-        self._slider = QSlider(Qt.Orientation.Horizontal)
-        self._slider.setMinimum(0)
-        self._slider.setMaximum(0)
-        self._slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._slider.sliderMoved.connect(self._on_slider_moved)
-
-        self._frame_label = QLabel("frame —")
-        self._frame_label.setStyleSheet("font-family: monospace; font-size: 11px;")
-        self._frame_label.setFixedWidth(90)
-
-        self._goto_btn = QPushButton("Go to…")
-        self._goto_btn.setFixedWidth(54)
-        self._goto_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._goto_btn.clicked.connect(self._on_goto)
-
-        slider_row = QHBoxLayout()
-        slider_row.addWidget(self._slider)
-        slider_row.addWidget(self._frame_label)
-        slider_row.addWidget(self._goto_btn)
+        self._scrub = VideoScrubBar(self)
+        self._scrub.frame_ready.connect(self._on_frame_ready)
+        self._scrub.frame_changed.connect(self.frame_changed)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._cell, stretch=1)
-        layout.addLayout(slider_row)
+        layout.addWidget(self._scrub)
 
     # ------------------------------------------------------------------
     # Public
@@ -76,40 +58,31 @@ class _VideoPane(QWidget):
 
     def load(self, file_path: str, total_frames: int, initial_frame: int = 0) -> None:
         """Load a new video file, replacing any previously loaded one."""
-        self._stop_reader()
-        self._total_frames = max(total_frames, 1)
-        self._current_frame = max(0, min(initial_frame, self._total_frames - 1))
-
-        self._slider.setMaximum(self._total_frames - 1)
-        self._slider.setValue(self._current_frame)
-        self._frame_label.setText(f"frame {self._current_frame}")
-
-        self._reader = FrameReader(file_path, self)
-        self._reader.frame_ready.connect(self._on_frame_ready)
-        self._reader.start()
-        self._reader.request(self._current_frame)
+        self._scrub.load(file_path, total_frames, initial_frame)
 
     def unload(self) -> None:
         """Stop the reader and clear the display."""
-        self._stop_reader()
+        self._scrub.unload()
         self._cell.set_frame(None)
-        self._slider.setMaximum(0)
-        self._slider.setValue(0)
-        self._frame_label.setText("frame —")
 
     @property
     def current_frame(self) -> int:
-        return self._current_frame
+        return self._scrub.current_frame
+
+    @property
+    def total_frames(self) -> int:
+        return self._scrub.total_frames
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._scrub.is_loaded
 
     def step(self, delta: int) -> None:
         """Advance by *delta* frames (negative = backwards)."""
-        new_frame = max(0, min(self._total_frames - 1, self._current_frame + delta))
-        if new_frame != self._current_frame:
-            self._seek(new_frame)
+        self._scrub.step(delta)
 
     def seek(self, frame: int) -> None:
-        frame = max(0, min(self._total_frames - 1, frame))
-        self._seek(frame)
+        self._scrub.seek(frame)
 
     def set_overlays(self, overlays: list) -> None:
         self._cell.set_overlays(overlays)
@@ -119,34 +92,8 @@ class _VideoPane(QWidget):
     # Private
     # ------------------------------------------------------------------
 
-    def _seek(self, frame: int) -> None:
-        self._current_frame = frame
-        self._slider.setValue(frame)
-        self._frame_label.setText(f"frame {frame}")
-        if self._reader is not None:
-            self._reader.request(frame)
-        self.frame_changed.emit(frame)
-
-    def _on_slider_moved(self, value: int) -> None:
-        self._seek(value)
-
-    def _on_goto(self) -> None:
-        value, ok = QInputDialog.getInt(
-            self, "Go to frame", "Frame number:",
-            value=self._current_frame,
-            min=0, max=max(0, self._total_frames - 1),
-        )
-        if ok:
-            self._seek(value)
-
     def _on_frame_ready(self, frame_idx: int, frame_data) -> None:
-        if frame_idx == self._current_frame:
-            self._cell.set_frame(frame_data)
-
-    def _stop_reader(self) -> None:
-        if self._reader is not None:
-            self._reader.shutdown()
-            self._reader = None
+        self._cell.set_frame(frame_data)
 
 
 class PairScrubber(QWidget):
@@ -248,9 +195,7 @@ class PairScrubber(QWidget):
         self.frames_changed.emit(self._ref_pane.current_frame, self._tgt_pane.current_frame)
 
     def _update_mark_btn(self) -> None:
-        has_ref = self._ref_pane._reader is not None
-        has_tgt = self._tgt_pane._reader is not None
-        self._mark_btn.setEnabled(has_ref and has_tgt)
+        self._mark_btn.setEnabled(self._ref_pane.is_loaded and self._tgt_pane.is_loaded)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         key = event.key()

@@ -582,6 +582,44 @@ real depth variation when in use.
   don't have the rig yet. What changes is that it is no longer the
   recommended *sole* mechanism for fixing the world frame.
 
+**Self-describing rig via an embedded QR code.** Rather than the user
+having to locate and load the right `MarkerRigConfig` file for whatever
+physical rig is in front of them (a manual pairing that's easy to get wrong
+once more than one rig exists — a travel rig and a larger fixed-venue one,
+say), print a QR code directly on the rig and read the geometry from the
+rig itself. `cv2.QRCodeDetector` is already available in this project's
+OpenCV build (checked: 4.13, core `objdetect` module — no new dependency,
+same situation `cv2.aruco` was already in). This only needs to be read
+*once* per rig, the same one-shot nature as picking "one camera + frame
+with a confident detection" already is for the ChArUco anchor (§4) — not a
+per-camera or per-frame requirement.
+
+The practical way to keep the QR small and reliably scannable is to encode
+geometry *parametrically* for common physical shapes rather than as raw
+corner coordinates. A box (exactly tomorrow's planned cardboard-box
+experiment) needs only its outer dimensions, one marker size, and a
+marker-ID-per-face mapping — the four corners of each face's marker follow
+automatically from the box geometry, no need to enumerate 3D points at all:
+
+```json
+{"v": 1, "shape": "box", "dict": "DICT_4X4_50",
+ "dims_m": [0.20, 0.20, 0.20], "marker_size_m": 0.08,
+ "faces": {"+x": "12", "-x": "13", "+y": "14", "-y": "15", "+z": "16", "-z": "17"}}
+```
+
+This is a compact *source* format that expands into the same
+`MarkerRigConfig` (resolved per-marker corner coordinates) the file-based
+loader already produces — detection/anchoring code only ever consumes the
+resolved form, so it doesn't matter whether that form came from a hand-
+edited JSON file or a decoded QR code, and adding a second parametric shape
+later (e.g. a tetrahedron/tent fold) touches only the small expansion
+function, not the solver-facing code. An `"shape": "explicit"` variant
+(raw per-marker corner arrays, matching `MarkerRigConfig` directly) remains
+available as a fallback for irregular, non-parametric geometries, at the
+cost of a denser/larger QR code. Resolves the "rig config authoring UX"
+open question below for the common case; hand-edited JSON remains available
+for one-off or irregular rigs where a QR isn't worth designing for.
+
 #### Tier B — Scattered ArUco tags (redundancy / mid-session drift recovery)
 
 Ordinary size-known ArUco markers placed around the capture room (not part
@@ -742,14 +780,21 @@ the rest of the dialog behaving exactly as it does today.
 
 ### Phase 8 — Portable non-planar calibration rig (§9, Tier A)
 
-- `MarkerRigConfig` + JSON loader (`fiducial_markers.py`), versioned like
+- `MarkerRigConfig` (resolved, per-marker corner coordinates) + a parametric
+  expander for `"box"`-shape descriptors (§9) + a JSON loader for both that
+  and the `"explicit"` fallback form, versioned like
   `save_control_points`/`load_control_points`.
 - `MarkerRigDetector`: `ArucoDetector` + `cv2.aruco.Board` +
   `estimate_rig_pose()`, tolerating partial marker visibility.
 - `anchor_from_marker_rig()`, mirroring `anchor_from_charuco_board()` (§4).
-- UI: rig config picker (or a small in-app rig-geometry editor, TBD — see
-  *Open questions*) + "Detect rig" per camera + "Set origin & axes from rig"
-  action, parallel to the existing ChArUco controls.
+- QR-code rig-geometry reader: `cv2.QRCodeDetector` decode → parse the
+  `"box"`/`"explicit"` payload → same `MarkerRigConfig` the file loader
+  produces. One-shot per rig, same as picking one confident-detection
+  frame already is for the ChArUco anchor.
+- UI: "Load rig config" (file) alongside "Scan rig QR code" (camera-driven,
+  reusing whichever camera/frame is currently being viewed) + "Detect rig"
+  per camera + "Set origin & axes from rig" action, parallel to the
+  existing ChArUco controls.
 
 **Validation:** using a physical rig with markers on ≥2 non-coplanar faces,
 verify a single camera's rig detection never exhibits the Phase-4 "no
@@ -757,7 +802,9 @@ positive-Z solution" failure regardless of viewing angle (this is the
 concrete regression test for §9's stated motivation); verify solved rig
 corner spacing matches the rig's known geometry within tolerance; verify
 partial visibility (some faces occluded from a given camera) still produces
-a usable pose from whichever markers are visible.
+a usable pose from whichever markers are visible; verify a `"box"`-shape QR
+code decodes to the same `MarkerRigConfig` as an equivalent hand-written
+`"explicit"` JSON file for the same physical box.
 
 ### Phase 9 — Scattered-tag redundancy + single-camera re-anchor (§9, Tier B)
 
@@ -827,12 +874,14 @@ touching any other camera's already-solved pose.
   open here. Whatever shape gets built, the config format only needs each
   marker's corner coordinates in a rig-local frame, so the software side
   doesn't need to change once a physical design is chosen.
-- **Rig config authoring UX is open**: hand-editing a JSON of corner
-  coordinates is workable for a first version (matching how
-  `save_control_points` files are already hand-portable), but a rig with
-  more than a few markers may warrant a small geometry editor or a
-  from-measurements calculator (panel dimensions + fold angles → corner
-  coordinates) — revisit once a physical rig design exists to build against.
+- **Rig config authoring UX** — largely resolved for the common case by the
+  QR-code approach above (parametric shape descriptor, read directly off
+  the physical rig); still open is exactly which parametric shape
+  primitives beyond `"box"` are worth adding (a tent/pyramid fold and an
+  L-frame are the other candidates mentioned in this section) versus
+  leaving anything more irregular to the `"explicit"`/hand-edited-JSON
+  fallback. Revisit once a physical rig design exists to build against —
+  tomorrow's cardboard-box experiment is exactly a `"box"`-shape test case.
 - **`init_poses_pnp`'s planar-ambiguity helper extraction (§9, Tier B)**
   should land as part of Phase 9, not deferred — both the existing
   multi-camera init path and the new single-camera re-anchor path need

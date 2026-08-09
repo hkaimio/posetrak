@@ -48,7 +48,15 @@ tags scattered around the room for mid-session drift/bump recovery (Phase
 9), and the existing manual control points, unchanged. ChArUco detection
 (Phase 4) is not removed — it remains available as a supplementary accuracy
 aid and boardless fallback, just no longer the recommended sole anchor.
-Phases 8-9 are design-only; not started.
+Tier A's design also gained a same-day refinement: the rig's geometry can
+be printed on the rig itself as a QR code (`cv2.QRCodeDetector`, already
+available, no new dependency) and read automatically, using a compact
+parametric shape descriptor (starting with `"box"` — dimensions + marker
+size + one marker ID per face) rather than raw corner coordinates, so the
+user never has to locate/pair a config file with a specific physical rig.
+Phases 8-9 are design-only; not started. First physical experiment planned
+for 2026-08-10: a plain cardboard box with one ArUco marker per face — a
+direct real-world test of the `"box"` parametric shape.
 
 ## Phase summary
 

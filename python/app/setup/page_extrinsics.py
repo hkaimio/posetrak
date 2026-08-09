@@ -1444,6 +1444,15 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             "negated together so the world frame stays right-handed."
         )
 
+        self._charuco_legacy_pattern_cb = QCheckBox("Legacy pattern (calib.io / older boards)")
+        self._charuco_legacy_pattern_cb.setToolTip(
+            "Boards generated before OpenCV 4.7's ChArUco marker-placement "
+            "change (calib.io's generator among them) need this checked. "
+            "If \"Detect ChArUco\" finds nothing, try toggling this before "
+            "suspecting the board itself -- ArUco markers still detect "
+            "fine either way, only the checkerboard-corner step is affected."
+        )
+
         self._charuco_status_label = QLabel("No board detected yet.")
         self._charuco_status_label.setWordWrap(True)
         self._charuco_status_label.setStyleSheet("color: #666; font-size: 10px;")
@@ -1461,6 +1470,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         layout.addLayout(squares_row)
         layout.addLayout(length_row)
         layout.addWidget(self._charuco_face_up_cb)
+        layout.addWidget(self._charuco_legacy_pattern_cb)
         layout.addWidget(self._charuco_status_label)
         layout.addLayout(btn_row)
         return group
@@ -1928,6 +1938,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             squares_y=self._charuco_squares_y_spin.value(),
             square_length=self._charuco_square_length_spin.value(),
             marker_length=self._charuco_marker_length_spin.value(),
+            legacy_pattern=self._charuco_legacy_pattern_cb.isChecked(),
         )
 
     def _on_detect_charuco_clicked(self, vid: str) -> None:
@@ -1940,7 +1951,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         detection = self._make_charuco_detector().detect(state.image, video_id=vid, frame_idx=frame_idx)
         if detection is None:
             self._status_label.setText(
-                f"No ChArUco board detected in {state.label} (frame {frame_idx})."
+                f"No ChArUco board detected in {state.label} (frame {frame_idx}). "
+                f"If the board is definitely visible, try swapping Squares X/Y "
+                f"or toggling \"Legacy pattern\" before suspecting the board itself."
             )
             return
 

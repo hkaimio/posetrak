@@ -7,12 +7,16 @@ extrinsics-improvements-design.md, section 4.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
 
 from app.setup.extrinsics_solver import CamCalibState
 from app.setup.page_extrinsics import ExtrinsicsAutoCalibDialog
+
+_REAL_BOARD_IMAGE = Path(__file__).parent.parent / "data" / "charuco_board_sample.png"
 
 
 def _render_board_image(squares_x=5, squares_y=7, square_length=0.04, marker_length=0.02) -> np.ndarray:
@@ -270,4 +274,46 @@ def test_solve_includes_charuco_control_points(qapp, fake_conn, monkeypatch) -> 
     finally:
         if dlg._solve_thread is not None:
             dlg._solve_thread.wait(2000)
+        dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Legacy-pattern checkbox (found necessary via a real UI test against a
+# calib.io-generated board, 2026-08-09 -- see CharucoDetector's docstring
+# and status.md's Phase 4 notes).
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_pattern_checkbox_defaults_unchecked(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", _render_board_image())]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        assert not dlg._charuco_legacy_pattern_cb.isChecked()
+    finally:
+        dlg.done(0)
+
+
+@pytest.mark.skipif(not _REAL_BOARD_IMAGE.exists(), reason="real board fixture image not present")
+def test_legacy_pattern_checkbox_required_for_real_calibio_board(qapp, fake_conn) -> None:
+    """End-to-end through the actual dialog widgets: the same board that
+    failed to detect at all during live testing until legacy_pattern was
+    set."""
+    img = cv2.imread(str(_REAL_BOARD_IMAGE))
+    states = [_make_state("cam_A", img)]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._charuco_squares_x_spin.setValue(11)
+        dlg._charuco_squares_y_spin.setValue(8)
+        dlg._charuco_square_length_spin.setValue(0.02)
+        dlg._charuco_marker_length_spin.setValue(0.015)
+
+        dlg._charuco_legacy_pattern_cb.setChecked(False)
+        dlg._on_detect_charuco_clicked("cam_A")
+        assert "cam_A" not in dlg._charuco_detections
+
+        dlg._charuco_legacy_pattern_cb.setChecked(True)
+        dlg._on_detect_charuco_clicked("cam_A")
+        assert "cam_A" in dlg._charuco_detections
+        assert len(dlg._charuco_detections["cam_A"].corners) >= 8
+    finally:
         dlg.done(0)

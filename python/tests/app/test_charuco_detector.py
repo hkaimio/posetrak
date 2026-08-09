@@ -8,12 +8,16 @@ deviation from that section's original solvePnP-based phrasing.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
 
 from app.setup.extrinsics_solver import CamCalibState, ObsPoint, run_calibration
 from app.setup.fiducial_markers import CharucoBoardDetection, CharucoDetector, anchor_from_charuco_board
+
+_REAL_BOARD_IMAGE = Path(__file__).parent.parent / "data" / "charuco_board_sample.png"
 
 
 def _render_board_image(
@@ -245,3 +249,80 @@ def test_anchored_board_corners_solve_unposed_cameras():
     assert solved.R is not None
     np.testing.assert_allclose(solved.R, R_true, atol=1e-4)
     np.testing.assert_allclose(solved.t.flatten(), t_true, atol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Real-photo regression: a calib.io-generated board, photographed at an
+# angle on a tiled floor, found not to detect at all during live UI testing
+# (2026-08-09). Traced to two settings gotchas, neither a board-size/
+# hardware problem -- see CharucoDetector's docstring for both. Locked in
+# here so this exact board's correct settings are never lost, and so a
+# future change to CharucoDetector can't silently reintroduce either
+# failure mode without a test noticing.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _REAL_BOARD_IMAGE.exists(), reason="real board fixture image not present")
+class TestRealPhotographedBoard:
+    """DICT_4X4_50, calib.io board: 20mm squares, 15mm markers.
+
+    OpenCV's squares_x/squares_y turned out to be swapped relative to how
+    calib.io's generator labels the board (11 wide x 8 tall, not 8x11), and
+    calib.io's boards need legacy_pattern=True -- OpenCV changed the
+    ChArUco marker-placement convention in 4.7 and calib.io's generator
+    predates that change. Both failures are silent: ArUco marker detection
+    itself succeeds either way (so the image/lighting/settings don't look
+    broken), only the chessboard-corner interpolation step quietly finds
+    nothing.
+    """
+
+    CORRECT_KWARGS = dict(
+        dictionary="DICT_4X4_50", squares_x=11, squares_y=8,
+        square_length=0.02, marker_length=0.015, legacy_pattern=True,
+    )
+
+    def _load(self) -> np.ndarray:
+        img = cv2.imread(str(_REAL_BOARD_IMAGE))
+        assert img is not None, f"failed to load {_REAL_BOARD_IMAGE}"
+        return img
+
+    def test_correct_settings_detect_the_board(self):
+        detector = CharucoDetector(**self.CORRECT_KWARGS)
+        detection = detector.detect(self._load())
+        assert detection is not None
+        assert len(detection.corners) >= 8
+
+    def test_default_legacy_pattern_false_fails_on_this_board(self):
+        """Locks in the exact silent failure this diagnostic found: same
+        geometry, only legacy_pattern differs."""
+        kwargs = dict(self.CORRECT_KWARGS, legacy_pattern=False)
+        detector = CharucoDetector(**kwargs)
+        detection = detector.detect(self._load())
+        assert detection is None
+
+    def test_swapped_squares_xy_fails_even_with_legacy_pattern(self):
+        """Locks in the other silent failure: right dictionary and legacy
+        flag, wrong axis assignment."""
+        kwargs = dict(self.CORRECT_KWARGS, squares_x=8, squares_y=11)
+        detector = CharucoDetector(**kwargs)
+        detection = detector.detect(self._load())
+        assert detection is None
+
+    def test_detected_corners_are_metric_and_z_zero(self):
+        detector = CharucoDetector(**self.CORRECT_KWARGS)
+        detection = detector.detect(self._load())
+        for c in detection.corners:
+            assert c.local_xyz[2] == 0.0
+        # Board-local spacing must match the declared 20mm square size --
+        # spot-check via two corners one row apart in the (11,8) layout
+        # (corner ids increase along a row, wrapping every squares_x - 1).
+        by_id = {c.corner_id: c for c in detection.corners}
+        common_ids = sorted(by_id)
+        # Any two adjacent ids that are one grid step apart along a row.
+        for cid in common_ids:
+            if cid + 1 in by_id and (cid % 10) != 9:  # stay within one row (10 corners/row for 11 squares wide)
+                dist = np.linalg.norm(by_id[cid].local_xyz - by_id[cid + 1].local_xyz)
+                assert dist == pytest.approx(0.02, abs=1e-6)  # local_xyz is float32
+                break
+        else:
+            pytest.fail("no adjacent same-row corner pair found in this crop to spot-check spacing")

@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -79,7 +80,13 @@ from app.setup.extrinsics_solver import (
     run_calibration,
     save_control_points,
 )
-from app.setup.fiducial_markers import ArucoDetector, merge_detections_into_groups
+from app.setup.fiducial_markers import (
+    ArucoDetector,
+    CharucoBoardDetection,
+    CharucoDetector,
+    anchor_from_charuco_board,
+    merge_detections_into_groups,
+)
 from app.setup.video_scrub_bar import VideoScrubBar
 from posetrak.db.db import generate_id as _generate_id
 from posetrak.db.import_extrinsics import import_extrinsics
@@ -110,6 +117,10 @@ _ARUCO_DICTIONARY_CHOICES = [
 
 # Gold, distinct from _CP_COLORS, for drawn ArUco marker corner overlays.
 _ARUCO_MARKER_COLOR = QColor(255, 200, 40)
+
+# Cyan, distinct from both _CP_COLORS and _ARUCO_MARKER_COLOR, for drawn
+# ChArUco board corner overlays.
+_CHARUCO_CORNER_COLOR = QColor(0, 210, 230)
 
 # ---------------------------------------------------------------------------
 # Label-matching helpers (mirrors calibrate_from_exports.py — kept in sync)
@@ -1060,6 +1071,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._scrub_bars: dict[str, VideoScrubBar] = {}
         self._cam_panes: dict[str, QWidget] = {}
         self._marker_groups: dict[str, MarkerGroup] = {}
+        self._charuco_detections: dict[str, CharucoBoardDetection] = {}
+        self._charuco_anchored: bool = False
+        self._charuco_board_face_up: bool = True
         for state in states:
             w = _ClickableImageWidget(state.label)
             if state.image is not None:
@@ -1100,12 +1114,18 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 self._scrub_bars[vid] = scrub
                 pane_layout.addWidget(scrub)
 
-            # ArUco detection (Phase 3, works on video- and image-sourced
-            # cameras alike, since it just needs the currently displayed
-            # frame): one button per camera, acting on that camera only.
-            detect_btn = QPushButton("Detect ArUco")
-            detect_btn.clicked.connect(lambda _checked, v=vid: self._on_detect_aruco_clicked(v))
-            pane_layout.addWidget(detect_btn)
+            # Fiducial detection (Phases 3/4), works on video- and
+            # image-sourced cameras alike since it just needs the currently
+            # displayed frame: one row of buttons per camera, each acting
+            # on that camera only.
+            detect_row = QHBoxLayout()
+            aruco_btn = QPushButton("Detect ArUco")
+            aruco_btn.clicked.connect(lambda _checked, v=vid: self._on_detect_aruco_clicked(v))
+            charuco_btn = QPushButton("Detect ChArUco")
+            charuco_btn.clicked.connect(lambda _checked, v=vid: self._on_detect_charuco_clicked(v))
+            detect_row.addWidget(aruco_btn)
+            detect_row.addWidget(charuco_btn)
+            pane_layout.addLayout(detect_row)
 
             self._cam_panes[vid] = pane
 
@@ -1304,6 +1324,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         v.addWidget(cp_group, 1)
         v.addWidget(xyz_group)
         v.addWidget(self._build_aruco_group())
+        v.addWidget(self._build_charuco_group())
         v.addWidget(self._build_intrinsics_group())
         return panel
 
@@ -1362,6 +1383,86 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         layout.addLayout(size_row)
         layout.addWidget(self._marker_table)
         layout.addWidget(clear_btn)
+        return group
+
+    def _build_charuco_group(self) -> QGroupBox:
+        """ChArUco board detection + coordinate-system anchoring (Phase 4).
+
+        See docs/roadmap/features/extrinsics-improvements/
+        extrinsics-improvements-design.md, section 4, and status.md's
+        Phase 4 notes for why "Set origin & axes from board" doesn't need
+        a reference camera or its intrinsics.
+        """
+        group = QGroupBox("ChArUco Board")
+        layout = QVBoxLayout(group)
+
+        hint = QLabel(
+            "Click \"Detect ChArUco\" under a camera to find the board in "
+            "its current frame. Once detected in at least one camera, "
+            "\"Set origin & axes\" fixes the world coordinate system to "
+            "the board's own geometry -- scale, origin, and axes together."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #666; font-size: 10px;")
+
+        dict_row = QHBoxLayout()
+        dict_row.addWidget(QLabel("Dictionary:"))
+        self._charuco_dict_combo = QComboBox()
+        self._charuco_dict_combo.addItems(_ARUCO_DICTIONARY_CHOICES)
+        dict_row.addWidget(self._charuco_dict_combo, 1)
+
+        squares_row = QHBoxLayout()
+        squares_row.addWidget(QLabel("Squares X/Y:"))
+        self._charuco_squares_x_spin = QSpinBox()
+        self._charuco_squares_x_spin.setRange(2, 50)
+        self._charuco_squares_x_spin.setValue(5)
+        self._charuco_squares_y_spin = QSpinBox()
+        self._charuco_squares_y_spin.setRange(2, 50)
+        self._charuco_squares_y_spin.setValue(7)
+        squares_row.addWidget(self._charuco_squares_x_spin)
+        squares_row.addWidget(self._charuco_squares_y_spin)
+
+        length_row = QHBoxLayout()
+        length_row.addWidget(QLabel("Square/marker (m):"))
+        self._charuco_square_length_spin = QDoubleSpinBox()
+        self._charuco_square_length_spin.setRange(0.001, 5.0)
+        self._charuco_square_length_spin.setDecimals(4)
+        self._charuco_square_length_spin.setSingleStep(0.005)
+        self._charuco_square_length_spin.setValue(0.04)
+        self._charuco_marker_length_spin = QDoubleSpinBox()
+        self._charuco_marker_length_spin.setRange(0.001, 5.0)
+        self._charuco_marker_length_spin.setDecimals(4)
+        self._charuco_marker_length_spin.setSingleStep(0.005)
+        self._charuco_marker_length_spin.setValue(0.02)
+        length_row.addWidget(self._charuco_square_length_spin)
+        length_row.addWidget(self._charuco_marker_length_spin)
+
+        self._charuco_face_up_cb = QCheckBox("Board face up (+Z is world up)")
+        self._charuco_face_up_cb.setChecked(True)
+        self._charuco_face_up_cb.setToolTip(
+            "Unchecked: the board is mounted face-down; Y and Z are "
+            "negated together so the world frame stays right-handed."
+        )
+
+        self._charuco_status_label = QLabel("No board detected yet.")
+        self._charuco_status_label.setWordWrap(True)
+        self._charuco_status_label.setStyleSheet("color: #666; font-size: 10px;")
+
+        anchor_btn = QPushButton("Set origin && axes from board")
+        anchor_btn.clicked.connect(self._on_anchor_from_board)
+        clear_btn = QPushButton("Clear board detections")
+        clear_btn.clicked.connect(self._on_clear_charuco)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(anchor_btn)
+        btn_row.addWidget(clear_btn)
+
+        layout.addWidget(hint)
+        layout.addLayout(dict_row)
+        layout.addLayout(squares_row)
+        layout.addLayout(length_row)
+        layout.addWidget(self._charuco_face_up_cb)
+        layout.addWidget(self._charuco_status_label)
+        layout.addLayout(btn_row)
         return group
 
     def _build_intrinsics_group(self) -> QGroupBox:
@@ -1726,6 +1827,21 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                     label = mg.marker_id if corner_idx == 0 else ""
                     w.add_marker(obs.px, obs.py, _ARUCO_MARKER_COLOR, label, selected=False)
 
+        # ChArUco board corners (Phase 4) -- same shared clear/redraw pass.
+        # Labeled only once (corner 0 across all cameras) to avoid clutter
+        # from potentially dozens of corners.
+        labeled_once = False
+        for det in self._charuco_detections.values():
+            for c in det.corners:
+                w = self._cam_widgets.get(c.video_id)
+                if w is None:
+                    continue
+                label = ""
+                if not labeled_once:
+                    label = "board"
+                    labeled_once = True
+                w.add_marker(c.px, c.py, _CHARUCO_CORNER_COLOR, label, selected=False)
+
     # ------------------------------------------------------------------
     # ArUco marker detection (Phase 3)
     # ------------------------------------------------------------------
@@ -1802,6 +1918,96 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             mg.size = value if value > 0 else self._current_default_size()
 
     # ------------------------------------------------------------------
+    # ChArUco board detection + anchoring (Phase 4)
+    # ------------------------------------------------------------------
+
+    def _make_charuco_detector(self) -> CharucoDetector:
+        return CharucoDetector(
+            dictionary=self._charuco_dict_combo.currentText(),
+            squares_x=self._charuco_squares_x_spin.value(),
+            squares_y=self._charuco_squares_y_spin.value(),
+            square_length=self._charuco_square_length_spin.value(),
+            marker_length=self._charuco_marker_length_spin.value(),
+        )
+
+    def _on_detect_charuco_clicked(self, vid: str) -> None:
+        state = self._states_by_id.get(vid)
+        if state is None or state.image is None:
+            QMessageBox.warning(self, "Detect ChArUco", "No image loaded for this camera yet.")
+            return
+
+        frame_idx = self._current_frame_for(vid)
+        detection = self._make_charuco_detector().detect(state.image, video_id=vid, frame_idx=frame_idx)
+        if detection is None:
+            self._status_label.setText(
+                f"No ChArUco board detected in {state.label} (frame {frame_idx})."
+            )
+            return
+
+        self._charuco_detections[vid] = detection
+        self._refresh_charuco_status()
+        self._refresh_markers()
+        self._status_label.setText(
+            f"Detected {len(detection.corners)} board corners in "
+            f"{state.label} (frame {frame_idx})."
+        )
+
+    def _on_anchor_from_board(self) -> None:
+        if not self._charuco_detections:
+            QMessageBox.warning(
+                self, "Set origin & axes",
+                "Detect the ChArUco board in at least one camera first.",
+            )
+            return
+        self._charuco_board_face_up = self._charuco_face_up_cb.isChecked()
+        self._charuco_anchored = True
+        self._refresh_charuco_status()
+        self._refresh_markers()
+        n_corners = len(self._charuco_control_points())
+        self._status_label.setText(
+            f"World coordinate system anchored from the ChArUco board "
+            f"({n_corners} corners across {len(self._charuco_detections)} camera(s))."
+        )
+
+    def _on_clear_charuco(self) -> None:
+        self._charuco_detections.clear()
+        self._charuco_anchored = False
+        self._refresh_charuco_status()
+        self._refresh_markers()
+
+    def _refresh_charuco_status(self) -> None:
+        if not self._charuco_detections:
+            self._charuco_status_label.setText("No board detected yet.")
+            return
+        n_corners = len(self._charuco_control_points())
+        state_str = "anchored (fixed world coordinates)" if self._charuco_anchored else "detected, not yet anchored"
+        self._charuco_status_label.setText(
+            f"Board {state_str}: {n_corners} corner(s) across "
+            f"{len(self._charuco_detections)} camera(s)."
+        )
+
+    def _charuco_control_points(self) -> list[ControlPoint]:
+        """Every detected board corner as a ControlPoint -- free until
+        ``_on_anchor_from_board`` is clicked, fixed (``world_xyz`` set)
+        afterward. Always freshly derived from the raw per-camera
+        detections rather than cached, so there's no stale duplicate state
+        to keep in sync (same pattern as ``_marker_groups``).
+        """
+        if self._charuco_anchored:
+            return anchor_from_charuco_board(
+                self._charuco_detections, board_face_up=self._charuco_board_face_up
+            )
+        cps: dict[int, ControlPoint] = {}
+        for det in self._charuco_detections.values():
+            for c in det.corners:
+                cp = cps.get(c.corner_id)
+                if cp is None:
+                    cp = ControlPoint(name=f"charuco_c{c.corner_id}")
+                    cps[c.corner_id] = cp
+                cp.obs[c.video_id] = ObsPoint(frame_idx=c.frame_idx, px=c.px, py=c.py)
+        return list(cps.values())
+
+    # ------------------------------------------------------------------
     # Solve
     # ------------------------------------------------------------------
 
@@ -1825,8 +2031,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         cp_only = not self._sift_check.isChecked()
         active_states = [s for s in self._states if s.video_id not in self._excluded_cameras]
+        all_cps = self._control_points + self._charuco_control_points()
         self._solve_thread = _SolveThread(
-            active_states, self._control_points,
+            active_states, all_cps,
             cam_pos_obs=self._cam_pos_obs or None,
             marker_groups=list(self._marker_groups.values()) or None,
             refine_intrinsics=self._refine_intrinsics or None,

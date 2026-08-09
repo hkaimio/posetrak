@@ -70,6 +70,7 @@ from app.setup.extrinsics_solver import (
     CamCalibState,
     CamPosObs,
     ControlPoint,
+    MarkerGroup,
     ObsPoint,
     _Cancelled,
     _proj_matrix,
@@ -78,6 +79,7 @@ from app.setup.extrinsics_solver import (
     run_calibration,
     save_control_points,
 )
+from app.setup.fiducial_markers import ArucoDetector, merge_detections_into_groups
 from app.setup.video_scrub_bar import VideoScrubBar
 from posetrak.db.db import generate_id as _generate_id
 from posetrak.db.import_extrinsics import import_extrinsics
@@ -95,6 +97,19 @@ _CP_COLORS = [
     QColor(200, 80, 200),
     QColor(0, 200, 200),
 ]
+
+# Curated subset of cv2.aruco's dictionaries -- the full ARUCO_DICTIONARIES
+# map (fiducial_markers.py) has ~20 entries; these are the ones actually
+# common in printed calibration markers.
+_ARUCO_DICTIONARY_CHOICES = [
+    "DICT_4X4_50", "DICT_4X4_100", "DICT_4X4_250",
+    "DICT_5X5_50", "DICT_5X5_100", "DICT_5X5_250",
+    "DICT_6X6_50", "DICT_6X6_100", "DICT_6X6_250",
+    "DICT_ARUCO_ORIGINAL",
+]
+
+# Gold, distinct from _CP_COLORS, for drawn ArUco marker corner overlays.
+_ARUCO_MARKER_COLOR = QColor(255, 200, 40)
 
 # ---------------------------------------------------------------------------
 # Label-matching helpers (mirrors calibrate_from_exports.py — kept in sync)
@@ -939,6 +954,7 @@ class _SolveThread(QThread):
         states: list[CamCalibState],
         control_points: list[ControlPoint],
         cam_pos_obs: list[CamPosObs] | None = None,
+        marker_groups: list[MarkerGroup] | None = None,
         refine_intrinsics: set[str] | None = None,
         locked_cameras: set[str] | None = None,
         cp_only: bool = False,
@@ -949,6 +965,7 @@ class _SolveThread(QThread):
         self._states = states
         self._control_points = control_points
         self._cam_pos_obs = cam_pos_obs or []
+        self._marker_groups = marker_groups or []
         self._refine_intrinsics = refine_intrinsics or set()
         self._locked_cameras = locked_cameras or set()
         self._cp_only = cp_only
@@ -963,6 +980,7 @@ class _SolveThread(QThread):
             result = run_calibration(
                 self._states, self._control_points,
                 cam_pos_obs=self._cam_pos_obs or None,
+                marker_groups=self._marker_groups or None,
                 refine_intrinsics=self._refine_intrinsics or None,
                 locked_cameras=self._locked_cameras or None,
                 progress_cb=lambda msg: self.progress.emit(msg),
@@ -1041,6 +1059,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._cam_widgets: dict[str, _ClickableImageWidget] = {}
         self._scrub_bars: dict[str, VideoScrubBar] = {}
         self._cam_panes: dict[str, QWidget] = {}
+        self._marker_groups: dict[str, MarkerGroup] = {}
         for state in states:
             w = _ClickableImageWidget(state.label)
             if state.image is not None:
@@ -1058,6 +1077,11 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             )
             self._cam_widgets[vid] = w
 
+            pane = QWidget()
+            pane_layout = QVBoxLayout(pane)
+            pane_layout.setContentsMargins(0, 0, 0, 0)
+            pane_layout.addWidget(w, 1)
+
             if state.file_path:
                 # Video-sourced camera (see docs/roadmap/features/
                 # extrinsics-improvements/extrinsics-improvements-design.md,
@@ -1074,15 +1098,16 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 total_frames = max(state.last_frame - state.first_frame + 1, 1)
                 scrub.load(state.file_path, total_frames, initial_frame=0)
                 self._scrub_bars[vid] = scrub
-
-                pane = QWidget()
-                pane_layout = QVBoxLayout(pane)
-                pane_layout.setContentsMargins(0, 0, 0, 0)
-                pane_layout.addWidget(w, 1)
                 pane_layout.addWidget(scrub)
-                self._cam_panes[vid] = pane
-            else:
-                self._cam_panes[vid] = w
+
+            # ArUco detection (Phase 3, works on video- and image-sourced
+            # cameras alike, since it just needs the currently displayed
+            # frame): one button per camera, acting on that camera only.
+            detect_btn = QPushButton("Detect ArUco")
+            detect_btn.clicked.connect(lambda _checked, v=vid: self._on_detect_aruco_clicked(v))
+            pane_layout.addWidget(detect_btn)
+
+            self._cam_panes[vid] = pane
 
         self._build_ui()
 
@@ -1278,8 +1303,66 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         v.setContentsMargins(0, 0, 0, 0)
         v.addWidget(cp_group, 1)
         v.addWidget(xyz_group)
+        v.addWidget(self._build_aruco_group())
         v.addWidget(self._build_intrinsics_group())
         return panel
+
+    def _build_aruco_group(self) -> QGroupBox:
+        """ArUco marker detection settings + detected-marker list (Phase 3).
+
+        See docs/roadmap/features/extrinsics-improvements/
+        extrinsics-improvements-design.md, section 3.
+        """
+        group = QGroupBox("ArUco Markers")
+        layout = QVBoxLayout(group)
+
+        hint = QLabel(
+            "Click \"Detect ArUco\" under a camera to find markers in its "
+            "current frame. A marker's 4 corners act as one control-point "
+            "group; give it a size (below) to also recover its rigid "
+            "world pose once ≥2 cameras have seen it."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #666; font-size: 10px;")
+
+        dict_row = QHBoxLayout()
+        dict_row.addWidget(QLabel("Dictionary:"))
+        self._aruco_dict_combo = QComboBox()
+        self._aruco_dict_combo.addItems(_ARUCO_DICTIONARY_CHOICES)
+        dict_row.addWidget(self._aruco_dict_combo, 1)
+
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel("Default size:"))
+        self._aruco_default_size_spin = QDoubleSpinBox()
+        self._aruco_default_size_spin.setRange(0.0, 5.0)
+        self._aruco_default_size_spin.setDecimals(4)
+        self._aruco_default_size_spin.setSingleStep(0.005)
+        self._aruco_default_size_spin.setSuffix(" m")
+        self._aruco_default_size_spin.setToolTip(
+            "0 = unknown size: marker corners still contribute as free "
+            "control points, but no rigid pose is solved for it."
+        )
+        size_row.addWidget(self._aruco_default_size_spin, 1)
+
+        self._marker_table = QTableWidget(0, 3)
+        self._marker_table.setHorizontalHeaderLabels(["Marker", "Cameras", "Size override (m)"])
+        hdr = self._marker_table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._marker_table.verticalHeader().setVisible(False)
+        self._marker_table.setMinimumHeight(80)
+        self._marker_table.setMaximumHeight(140)
+
+        clear_btn = QPushButton("Clear markers")
+        clear_btn.clicked.connect(self._on_clear_markers)
+
+        layout.addWidget(hint)
+        layout.addLayout(dict_row)
+        layout.addLayout(size_row)
+        layout.addWidget(self._marker_table)
+        layout.addWidget(clear_btn)
+        return group
 
     def _build_intrinsics_group(self) -> QGroupBox:
         group = QGroupBox("Camera Intrinsics")
@@ -1631,6 +1714,93 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 px_, py_ = proj.reshape(2)
                 w.add_proj_marker(float(px_), float(py_), color, selected=is_selected)
 
+        # ArUco marker corners (Phase 3) -- same clear/redraw pass as CPs
+        # above (clear_markers() clears both, so they must share one pass
+        # rather than each calling clear_markers() independently).
+        for mg in self._marker_groups.values():
+            for vid, corners in mg.obs.items():
+                w = self._cam_widgets.get(vid)
+                if w is None:
+                    continue
+                for corner_idx, obs in corners.items():
+                    label = mg.marker_id if corner_idx == 0 else ""
+                    w.add_marker(obs.px, obs.py, _ARUCO_MARKER_COLOR, label, selected=False)
+
+    # ------------------------------------------------------------------
+    # ArUco marker detection (Phase 3)
+    # ------------------------------------------------------------------
+
+    def _current_default_size(self) -> float | None:
+        """0 in the spin box means "unknown" -- see its tooltip."""
+        value = self._aruco_default_size_spin.value()
+        return value if value > 0 else None
+
+    def _size_for_marker(self, marker_id: str) -> float | None:
+        """Per-marker override from the table, falling back to the default."""
+        for row in range(self._marker_table.rowCount()):
+            if self._marker_table.item(row, 0).text() != marker_id:
+                continue
+            spin = self._marker_table.cellWidget(row, 2)
+            if spin is not None and spin.value() > 0:
+                return spin.value()
+            break
+        return self._current_default_size()
+
+    def _on_detect_aruco_clicked(self, vid: str) -> None:
+        state = self._states_by_id.get(vid)
+        if state is None or state.image is None:
+            QMessageBox.warning(self, "Detect ArUco", "No image loaded for this camera yet.")
+            return
+
+        dictionary = self._aruco_dict_combo.currentText()
+        detector = ArucoDetector(dictionary=dictionary, default_size=self._current_default_size())
+        frame_idx = self._current_frame_for(vid)
+        detections = detector.detect(state.image, video_id=vid, frame_idx=frame_idx)
+
+        # Re-resolve each detection's size against any existing per-marker
+        # override *before* merging, so a marker already given a custom
+        # size in the table keeps it rather than reverting to the default.
+        for det in detections:
+            size = self._size_for_marker(det.marker_id)
+            merge_detections_into_groups([det], self._marker_groups, size=size)
+
+        self._refresh_marker_table()
+        self._refresh_markers()
+        self._status_label.setText(
+            f"Detected {len(detections)} ArUco marker(s) in "
+            f"{self._states_by_id[vid].label} (frame {frame_idx})."
+        )
+
+    def _on_clear_markers(self) -> None:
+        self._marker_groups.clear()
+        self._refresh_marker_table()
+        self._refresh_markers()
+
+    def _refresh_marker_table(self) -> None:
+        self._marker_table.setRowCount(0)
+        for marker_id, mg in sorted(self._marker_groups.items()):
+            row = self._marker_table.rowCount()
+            self._marker_table.insertRow(row)
+            self._marker_table.setItem(row, 0, QTableWidgetItem(marker_id))
+            n_cams = len(mg.cameras_observing())
+            self._marker_table.setItem(row, 1, QTableWidgetItem(str(n_cams)))
+
+            spin = QDoubleSpinBox()
+            spin.setRange(0.0, 5.0)
+            spin.setDecimals(4)
+            spin.setSingleStep(0.005)
+            spin.setToolTip("0 = use the default size above")
+            spin.setValue(mg.size or 0.0)
+            spin.valueChanged.connect(
+                lambda value, m=marker_id: self._on_marker_size_override_changed(m, value)
+            )
+            self._marker_table.setCellWidget(row, 2, spin)
+
+    def _on_marker_size_override_changed(self, marker_id: str, value: float) -> None:
+        mg = self._marker_groups.get(marker_id)
+        if mg is not None:
+            mg.size = value if value > 0 else self._current_default_size()
+
     # ------------------------------------------------------------------
     # Solve
     # ------------------------------------------------------------------
@@ -1658,6 +1828,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._solve_thread = _SolveThread(
             active_states, self._control_points,
             cam_pos_obs=self._cam_pos_obs or None,
+            marker_groups=list(self._marker_groups.values()) or None,
             refine_intrinsics=self._refine_intrinsics or None,
             locked_cameras=self._locked_cameras or None,
             cp_only=cp_only,
@@ -1706,6 +1877,11 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 f"  Disconnected: {', '.join(result.unsolved)}"
                 f" — add control points shared with a solved camera to connect them."
             )
+        if result.marker_poses:
+            for marker_id, mp in sorted(result.marker_poses.items()):
+                lines.append(
+                    f"  Marker {marker_id}: rms {mp.rms_reprojection_px:.2f} px"
+                )
         self._status_label.setText("\n".join(lines))
         self._accept_btn.setEnabled(n_solved > 0)
 

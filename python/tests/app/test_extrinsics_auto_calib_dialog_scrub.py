@@ -55,7 +55,10 @@ def test_image_only_camera_gets_no_scrub_bar(qapp, fake_conn) -> None:
     dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
     try:
         assert "cam_A" not in dlg._scrub_bars
-        assert dlg._cam_panes["cam_A"] is dlg._cam_widgets["cam_A"]
+        # The pane always wraps the image widget (it also carries the
+        # "Detect ArUco" button, added regardless of file_path -- Phase 3),
+        # but it is a distinct container, not the widget itself.
+        assert dlg._cam_panes["cam_A"] is not dlg._cam_widgets["cam_A"]
     finally:
         dlg.done(0)
 

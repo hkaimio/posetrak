@@ -357,6 +357,43 @@ charuco_board_sample.png` (a real cropped photo of the board) plus
 regression tests proving both the correct settings work and either
 gotcha alone reproduces the exact failure found live.
 
+### Second live-test finding, fixed (2026-08-09): still nothing on the full camera frame
+
+With the settings above confirmed correct (verified by cropping the board
+directly out of the real capture video), detection *still* found nothing
+against the full camera frame the real workflow actually hands it. Root
+cause, again found by testing against real data rather than guessing: a
+third, independent gotcha — `cv2.aruco`'s `minMarkerPerimeterRate`
+defaults to 3% of the frame's larger dimension, which rejects a
+calibration board's markers as "too small" once the camera frame is a
+full 3840px-tall 4K capture and the board only occupies a modest region
+of it (confirmed directly: plain marker detection went from 3/28 to 28/28
+markers found on the exact same real frame, changing only this one
+setting). Fixed in `setup: fix (Ch)ArUco detection failing on markers
+small relative to a full 4K frame`:
+
+- Both `ArucoDetector` and `CharucoDetector` gained a
+  `min_marker_perimeter_rate` parameter (default `None` = OpenCV's own
+  3%, so existing callers/tests are unaffected).
+- The dialog gained a "Min marker size (%)" spin box in both the ArUco
+  and ChArUco panels, **defaulting to 1%** rather than OpenCV's 3% — this
+  project's actual use case (room-scale multi-camera rigs, markers seen
+  from across a room) hits this default mismatch far more often than a
+  typical close-up desk-calibration scenario cv2's own default assumes.
+
+New fixture `python/tests/data/charuco_board_small_in_4k_frame.png` (a
+real 3840px-tall crop of the actual capture frame, cropped in width only
+since the bug depends on the frame's *height* staying large) locks in the
+exact failure for both detectors, plus dialog-level tests through the
+actual spin box widgets.
+
+**Two real, independent gotchas found via two rounds of live testing on
+real data, not one** — worth remembering if detection ever silently fails
+again on different footage: check settings (dictionary/axes/legacy
+pattern) *and* marker-size-vs-frame-resolution as separate possible
+causes, since either alone produces the identical symptom (zero
+detections, no error).
+
 ### Not yet done
 
 - Camera-pose accuracy hasn't been validated against real multi-camera

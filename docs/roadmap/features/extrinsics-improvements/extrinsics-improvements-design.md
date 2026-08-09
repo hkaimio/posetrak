@@ -23,24 +23,29 @@ This has three practical problems:
    control point in the one frame that was exported, that point simply can't
    be placed for that camera — there's no way to pull a different, cleaner
    frame for just that one point.
-3. **All correspondences are manual clicks.** SIFT gives free (but ambiguous
-   and occasionally wrong) point correspondences for the pairwise bootstrap;
-   there is no automatic, unambiguous fiducial marker detection, and no way
+3. **All correspondences are manual clicks, and the automatic fallback isn't
+   usable in practice.** The SIFT pairwise bootstrap is meant to reduce
+   manual work, but in real use it has not proven reliable enough to depend
+   on — in practice control points are placed almost entirely by hand today.
+   There is no automatic, *unambiguous* fiducial marker detection, and no way
    to give the solver metrically-known geometry short of manually entering
    `world_xyz` for hand-picked points.
-
-HarrI: In reality SIFT is worse than "occassionally wrong" - I have not found it to be usable in tis current form.
 
 This document proposes: (a) scrubbing calibration frames directly from the
 already-known capture videos, with independent frame choice per camera and
 per control point; (b) ChArUco board detection, optionally anchoring the
 world coordinate system; (c) ArUco marker detection as correlated groups of
-control points, usable both as an accuracy aid for calibration itself and,
-critically, as **persistent physical scene fiducials** that make
-recalibration after a rig change fast; and (d) a detector abstraction so
-other marker families (AprilTag, …) can be added without touching the solver.
-
-HArri: Additional possible future use case for atuco markers would be support for moving cameras. I.e. instead of doing extrinsics calibration only once, the tracker app would check at every frame whether the markers have moved and adjust extrinsics. Also, aruco markers maight be used also for object tracking, so it cannot be assumed that all markers remain static between frames at different global time stamps.
+control points, usable both as an accuracy aid for calibration itself and as
+**persistent physical scene fiducials** that make recalibration after a rig
+change fast; and (d) a detector abstraction so other marker families
+(AprilTag, …) can be added without touching the solver. Point (c) is
+deliberately framed as *this feature's* use of marker detection, not the only
+one ever intended: two related future directions — continuous, per-frame
+extrinsics correction by re-checking marker positions instead of calibrating
+once, and marker-based motion capture of objects that move during a
+trial — are called out in §3 and §6 so this design doesn't back itself into
+an assumption ("a marker's pose is fixed for all time") that those directions
+would need to undo.
 
 ## Current state (grounding)
 
@@ -86,8 +91,13 @@ Relevant existing pieces this design builds on or must change:
   as an alternate/legacy path, not as the only path).
 - **R2 — Per-camera frame scrubbing.** Each camera has its own independent
   scrub control; the frame shown for camera A is unrelated to the frame
-  shown for camera B.
-  Harri: See my commetn above that some aruco markers might intentionally be attached to moving objects
+  shown for camera B. This is safe specifically because *this* feature's
+  markers are the static-scene-fixture case (§6) — nothing being calibrated
+  against is expected to move between one camera's chosen frame and
+  another's. A future feature that detects markers attached to moving
+  objects would need cross-camera time alignment (i.e. the existing
+  synchronization data, not independent per-camera scrubbing) for that
+  separate use case — see §3 and §6.
 - **R3 — Per-control-point frame choice.** Placing a control point in a
   given camera records *which frame* it was placed on for that camera;
   different control points may use different frames, including for the
@@ -122,37 +132,59 @@ Relevant existing pieces this design builds on or must change:
 
 ### 1. Frame source & scrubbing
 
-**Recommendation: direct per-camera random-seek reads via OpenCV
-`VideoCapture`, not the frame-cache infrastructure built for keypoint
-editing.** The keypoint-editing feature's `frame_cache_entries` /
-`WideCropExtractWorker` machinery exists because that workflow scrubs
-*constantly*, across an entire trial, for every person, every session.
-Extrinsics calibration is a one-off, low-frequency activity — a handful of
-frames per camera, once per rig setup. Building or reusing a persistent
-cache is unwarranted complexity for this usage pattern.
+**Recommendation: reuse the video-scrubbing machinery the sync page already
+has, rather than building a new frame source or a new scrub widget.** This
+project already scrubs individual camera videos by frame in more than one
+place, and the pieces are already factored out of the page that uses them:
 
-Harri: we already have scrubbing in multiple places (e.g. syncing videos, so likely code & UI logic with these can be shared)
+- `app/setup/video_reader.py`'s `FrameReader` — a small `QThread` that owns
+  one `cv2.VideoCapture` per file, coalesces rapid seek requests (only the
+  most recently requested frame is ever decoded), and reports back via a
+  `frame_ready` signal. This is already the project's answer to "random-seek
+  one video file from a Qt widget."
+- `app/setup/pair_scrubber.py`'s `_VideoPane` — wraps a `FrameReader` +
+  `CameraCell` + `QSlider` + frame-number label + "Go to…" button + arrow-key
+  frame stepping into one reusable unit, currently used twice per
+  `PairScrubber` (reference/target sides) for marking sync anchors.
+- `_ROISelectDialog` (`page_sync.py`) additionally rolls its **own**,
+  independent `QSlider` + `cv2.VideoCapture` wiring for the LED-ROI-picking
+  step — i.e. there are already two separate scrub-control implementations
+  in the codebase before this feature adds a third.
 
-Concretely:
+Extrinsics calibration needs an **N-camera grid** of independent scrub
+panes, not `PairScrubber`'s fixed two-pane (reference/target) layout, so it
+can't use `PairScrubber` directly — but the *pane* itself (`_VideoPane`) is
+exactly the reusable unit needed per camera. Concretely:
 
-- A new small helper (`python/app/setup/video_frame_source.py`) wraps
-  `cv2.VideoCapture` per `capture_videos.file_path`, exposing
-  `get_frame(frame_idx) -> np.ndarray`, with a small per-camera LRU (a few
-  dozen frames) since a user scrubbing near one spot will re-request nearby
-  frames repeatedly.
-- Each camera gets its own scrub widget (slider + spin box) bound to
-  `[first_video_frame, last_video_frame]` from that camera's
-  `capture_videos` row. Seeking is debounced (seek-on-release or after a
-  short idle gap while dragging) to avoid hammering the decoder.
-- **Known risk, flagged for early validation, not solved here**: random
-  seeks into long-GOP consumer codecs (GoPro H.264/H.265) can be slow —
-  potentially hundreds of ms per seek depending on keyframe interval. Phase
-  1 should measure this against real capture footage before committing
-  further; if unacceptable, fall back to decoding a bounded window around
-  the last position rather than true random access.
+- Promote `_VideoPane` out of `pair_scrubber.py` (where it is currently a
+  private, module-local class) into a small shared module — the natural home
+  is alongside `FrameReader` in `video_reader.py` — so it can be tiled
+  N-across in a new extrinsics camera grid, reused unchanged by
+  `PairScrubber`, and available to fold `_ROISelectDialog`'s bespoke slider
+  into as a follow-up cleanup (not required for this feature, but a direct
+  consequence of there being a shared component to consolidate onto).
+- Each camera's pane is bound to `[first_video_frame, last_video_frame]`
+  from that camera's `capture_videos` row, exactly as `_reload_scrubber_ref`/
+  `_reload_scrubber_tgt` (`page_sync.py:1614`) already do today.
+- `_ClickableImageWidget` (`page_extrinsics.py:300`) — the zoom-on-drag
+  control-point placement widget — keeps its own interaction model (it does
+  meaningfully more than `CameraCell`'s plain overlay painting: press-drag
+  zoom for precise placement), but is driven by the shared pane's decoded
+  frame instead of a single image loaded once from disk.
 - `CamCalibState.image` (`extrinsics_solver.py:37`) changes meaning from "the
   one loaded image" to "the frame currently displayed in this camera's
-  widget" — refreshed on every scrub, not loaded once.
+  pane" — refreshed on every scrub, not loaded once.
+
+**Seek performance**: random seeks into long-GOP consumer codecs (GoPro
+H.264/H.265) are already known to be slow in this codebase — the sync
+feature hits exactly this today. That feature's requirement is stricter than
+this one, though: sync anchors need frame-accurate placement and are placed
+often during a session, while extrinsics calibration needs only a handful of
+one-off placements per camera. Given that, current performance is presumed
+adequate for this feature without separate measurement — reusing the sync
+page's scrub machinery rather than reinventing it means this feature
+automatically inherits whatever perf work is done there later, instead of
+needing its own.
 
 ### 2. Per-control-point, per-frame observations
 
@@ -221,6 +253,24 @@ class FiducialDetection:
 class FiducialDetector(Protocol):
     def detect(self, image: np.ndarray) -> list[FiducialDetection]: ...
 ```
+
+**`FiducialDetector.detect()` is deliberately per-frame and stateless — it
+makes no claim about whether a detected marker is fixed in the scene or
+moving.** It answers only "what markers were seen where in *this* frame,"
+the same way a pose detector reports keypoints for one frame without judging
+whether the tracked person is standing still. Whether a marker's pose should
+be treated as constant is a decision made by whatever *consumes* the
+detections, not by the detector: this feature's calibration workflow (§6) is
+one such consumer, and it chooses to collapse a static board/marker's
+detections across a session into one fixed pose. Two future consumers of the
+exact same detector output would decide differently — continuous per-frame
+extrinsics correction (checking a static marker's apparent position every
+frame to catch a camera that's drifted or been bumped) and marker-based
+motion capture (a marker deliberately attached to something that moves, read
+as a per-frame time series like any other tracked point) — and neither would
+require changing this detection layer, only adding a new consumer of it.
+This is called out explicitly so a future moving-marker feature is a new
+consumer, not a rework of `FiducialDetector`/`FiducialDetection`.
 
 - **`ArucoDetector`** wraps `cv2.aruco.ArucoDetector` with a configurable
   dictionary (e.g. `DICT_4X4_50`). Accepts an optional `size_by_id: dict[str,
@@ -319,12 +369,21 @@ things really are different in kind:
   no existence outside "the calibration run currently being worked on."
   They stay exactly as they are today: a portable JSON file, not part of the
   database.
-- **Scene fiducial markers** are physically real objects fixed in the
-  capture space. Their entire value (per the feature request: "recalibration
-  is easy after modifying camera rig") is that a *future*, different
+- **Scene fiducial markers**, as this feature defines and uses them, are
+  physically real objects fixed in the capture space for the life of a
+  session. Their entire value (per the feature request: "recalibration is
+  easy after modifying camera rig") is that a *future*, different
   calibration run can look them up and reuse their known pose — this is a
   **result to persist and query**, not a working file to remember to
-  re-load by hand.
+  re-load by hand. This scoping is deliberate: `scene_fiducial_markers`
+  below stores one pose per marker because that is exactly what this
+  feature needs, not because a marker's pose is assumed constant in
+  general. A future feature reading markers as a per-frame time series
+  (continuous extrinsics correction, or marker-based motion capture of a
+  moving object — see §3) is a different consumer with a different
+  storage shape (more like `pose_observations`, keyed by frame, than a
+  single fixed row) and is out of scope here; nothing in this table's design
+  should be read as ruling that out later.
 
 **Recommendation: a new session-DB table, not a sidecar file.** Every other
 calibration artifact in this project already lives in the DB
@@ -395,13 +454,16 @@ the existing convention for this kind of field
 ## Phased implementation plan
 
 ### Phase 1 — Video frame source
-- `video_frame_source.py`: per-camera random-seek reads keyed by
-  `capture_videos.file_path` + frame index, small LRU cache.
+- Promote `_VideoPane` from `pair_scrubber.py` into a shared module
+  alongside `FrameReader` (`video_reader.py`); `PairScrubber` switches to the
+  promoted class with no behavior change.
 - Replace the directory-glob PNG loading path
   (`_load_states_from_images`, `page_extrinsics.py:122`) with a capture
-  picker that resolves each camera's video file and opens a per-camera
-  scrub widget (slider + spin box bound to `[first_video_frame,
-  last_video_frame]`) instead of a single static image.
+  picker that resolves each camera's video file and tiles one `_VideoPane`
+  per camera in a new grid, bound to `[first_video_frame,
+  last_video_frame]` from that camera's `capture_videos` row.
+- `_ClickableImageWidget` reads its displayed frame from the corresponding
+  pane instead of a single image loaded once from disk.
 - `CamCalibState.image` becomes "current scrub position's frame,"
   refreshed on scrub.
 
@@ -409,8 +471,9 @@ the existing convention for this kind of field
 independently; verify the displayed frame's content matches the expected
 timestamp (spot-check against a visible event in the footage, e.g. a clap or
 light change); verify existing manual-control-point click-to-place workflow
-is functionally unaffected; measure random-seek latency against real
-capture footage (flags the codec-seek-speed open question below).
+is functionally unaffected; verify `PairScrubber` (sync page) still behaves
+identically after `_VideoPane` is promoted, since it's now a shared
+dependency rather than a page-local class.
 
 ### Phase 2 — Per-control-point, per-frame observations
 - `ControlPoint.obs` → `dict[video_id, ObsPoint]` (`frame_idx`, `px`, `py`);
@@ -451,10 +514,11 @@ free-point behavior rather than an ill-conditioned single-view pose solve.
 - Wire generated corners into the BA as `FiducialControlPoint`s.
 
 **Validation:** calibrate a rig with a ChArUco board visible from ≥3
-cameras; compare per-camera reprojection error against the current
-SIFT+manual-control-point baseline on the same footage; verify the anchor
-action reproduces the board's own known square size when measured in the
-solved world coordinates.
+cameras; compare per-camera reprojection error against today's real-world
+workflow on the same footage (manually-placed control points — per the SIFT
+finding in *Open questions*, not a SIFT-assisted result that doesn't reflect
+actual usage); verify the anchor action reproduces the board's own known
+square size when measured in the solved world coordinates.
 
 ### Phase 5 — Scene marker persistence + recalibration reuse
 - `scene_fiducial_markers` table + migration.
@@ -481,27 +545,39 @@ AprilTag input on test footage.
 
 - **Registry- vs. session-level scoping** for `scene_fiducial_markers` —
   deferred to a follow-up once a concrete cross-session reuse case exists
-  (§6).
-
-  Harri: OK with that
+  (§6). Confirmed as the right call for now.
 - **Rigid marker-pose BA residual (§5) is new solver machinery**, not just
   new input data — worth a small synthetic-data prototype before Phase 3's
   UI work, per this project's existing practice of validating BA changes
-  before building on top of them.
-  Harri: OK
-- **Video random-seek performance** on long-GOP consumer codecs (GoPros) is
-  unmeasured; Phase 1 should check this early and fall back to a bounded
-  prefetch window if true random access proves too slow.
-  Harri: Other parts of the app (setting sync frames at least) already use random seek. It is slow but I think the need for random seeks in exterinsics calibration is smaller and less frequent that for sync frames 8which by definiton require frame accurate placement) -> I think current perf is OK for this but the scrubbing machinery should share code & UI logic with syncing videos for UI consistency & so that it inherits possible future optimizations.
-- **Whether board/marker corners should outright replace the SIFT pairwise
-  bootstrap** when present, rather than just supplementing it, is likely
-  scene-dependent (textureless environments benefit most). Left as an
-  internal solver heuristic (prefer labeled correspondences when available)
-  rather than a user-facing toggle for the first version.
-  Harri: As I said, I haven't found the SIFT bootstrap useful in practice. I almost never use it.
+  before building on top of them. Confirmed.
+- **Video random-seek performance** is resolved, not open: reuse the sync
+  page's existing scrub machinery (§1) rather than measuring or optimizing
+  seek speed separately. Sync anchor placement already does random seeks
+  more often and with a stricter (frame-accurate) requirement than
+  extrinsics calibration ever will, so current performance is presumed
+  adequate here without dedicated measurement — and sharing the code means
+  this feature automatically inherits any future seek optimization made for
+  syncing, rather than needing its own.
+- **The SIFT pairwise bootstrap is not a baseline worth preserving as-is.**
+  Real usage has found it unreliable enough that control points are placed
+  almost entirely by hand today — it is not a "sometimes helps" fallback in
+  practice. This raises the bar for §3's board/marker correspondences: they
+  should be positioned as the primary automatic-correspondence mechanism
+  going forward, with SIFT retained only as a legacy/manual-heavy path for
+  boardless setups, not as the thing this feature merely "supplements."
+  Phase 4's validation should compare against the current all-manual
+  workflow (SIFT bootstrap not meaningfully contributing, matching real
+  usage), not an idealized SIFT-assisted baseline.
 - **Marker size input UX** — a single global default plus a per-ID override
   table (shown once more than one distinct size is entered) is proposed in
   Phase 3; revisit if real usage shows most rigs mix many different sizes.
-  Harri: OK for now.
-
-Harri: As I hinted in many places, marker based mcoap is something that I am plannign as future addition. So fiducial markers will then be used both for calibration and attached to moving objects. Worth keeping in mind so that there are no big surprises/redesign needed.
+  Confirmed as good enough for now.
+- **Marker-based motion capture is a planned future direction, not a
+  hypothetical.** Fiducial markers are expected to eventually be attached to
+  moving objects and tracked per-frame, in addition to this feature's static
+  scene-fixture use. §3 and §6 already scope the detector layer as
+  per-frame/stateless and the persistence layer as this-feature-specific for
+  exactly this reason, so that a future moving-marker feature is a new
+  consumer of `FiducialDetector` output rather than a redesign of it. Flagged
+  here so that assumption stays visible to whoever picks up that future
+  work, not just buried in §3/§6's prose.

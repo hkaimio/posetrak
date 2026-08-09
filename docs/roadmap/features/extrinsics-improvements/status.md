@@ -1,7 +1,7 @@
 ```toml
 name = "Extrinsics Calibration Improvements"
 status = "in_progress"
-progress_pct = 55
+progress_pct = 65
 description = """
 Improvements to multi-camera extrinsic calibration: scrubbing calibration frames directly from \
 capture video instead of a pre-extracted PNG folder, per-control-point per-frame observations, \
@@ -20,22 +20,25 @@ the problem statement, requirements, and full technical design.
 
 ## Current state
 
-Phases 1, 2, and 3 implemented (2026-08-09), grounded against the
-pre-existing `python/app/setup/extrinsics_solver.py` / `page_extrinsics.py`
-/ `posetrak/db/import_extrinsics.py` implementation and
+Phases 1-4 implemented (2026-08-09), grounded against the pre-existing
+`python/app/setup/extrinsics_solver.py` / `page_extrinsics.py` /
+`posetrak/db/import_extrinsics.py` implementation and
 `docs/extrinsics-calibration-design.md`. Phase 3 landed with one
 significant, prominently-flagged scoping deviation from the design doc's
-section 5 — see "Phase 3 notes" below before assuming it matches that
-section literally. Phases 4-6 remain design-only.
+section 5, and Phase 4 with a smaller one from section 4 — see each
+phase's notes below before assuming either matches the design doc
+literally. Manual, real-footage UI testing (see "UI testing feedback"
+below) has confirmed Phases 1-3 work in the live app; Phase 4 has not yet
+had a live pass. Phases 5-6 remain design-only.
 
 ## Phase summary
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| 1 | Video frame source: per-camera random-seek reads, scrub UI replacing PNG-directory loading | ✅ Done |
-| 2 | Per-control-point, per-frame observations (`ObsPoint`, file format v2) | ✅ Done |
-| 3 | ArUco marker detection + rigid marker-pose BA residual | ✅ Done, with a scoping deviation — see "Phase 3 notes" (decoupled post-pass, not a joint BA parameter block) |
-| 4 | ChArUco board detection + coordinate-system anchoring | ⬜ Not started |
+| 1 | Video frame source: per-camera random-seek reads, scrub UI replacing PNG-directory loading | ✅ Done, live-tested |
+| 2 | Per-control-point, per-frame observations (`ObsPoint`, file format v2) | ✅ Done, live-tested |
+| 3 | ArUco marker detection + rigid marker-pose BA residual | ✅ Done, live-tested (detection confirmed working) — see "Phase 3 notes" for a scoping deviation (decoupled post-pass, not a joint BA parameter block) |
+| 4 | ChArUco board detection + coordinate-system anchoring | ✅ Done, not yet live-tested — see "Phase 4 notes" for a scoping deviation (no solvePnP / reference camera needed) |
 | 5 | `scene_fiducial_markers` persistence + recalibration reuse | ⬜ Not started |
 | 6 | AprilTag detector backend (extensibility proof) | ⬜ Not started |
 | 7 | Global timeline scrub (§8) — jump every camera to the same synced instant | ⬜ Not started (design added 2026-08-09 from UI-testing feedback) |
@@ -252,10 +255,91 @@ actually forwards marker groups to `run_calibration`).
   rather than the design doc's "shown only once more than one distinct
   size has been entered" progressive-disclosure idea — functionally
   equivalent, simpler to implement, not revisited.
-- No manual UI validation yet against a real printed marker / real
-  multi-camera footage (Phase 3's stated validation criterion in the
-  design doc) — everything above is unit/integration-tested against
-  synthetic data and rendered test images, not exercised live in the app.
+- ~~No manual UI validation yet against a real printed marker / real
+  multi-camera footage~~ — confirmed working live (2026-08-09, see "UI
+  testing feedback" below): ArUco detection tested against real footage
+  in the running app. Full accuracy validation (solved corner spacing vs.
+  known size, camera-pose comparison against a manual-CP baseline) not
+  yet done.
+
+## Phase 4 notes
+
+Implemented as two commits (`setup: ChArUco board detection +
+coordinate-system anchoring (Phase 4, detector layer)` and `setup: wire
+ChArUco board detection + anchoring into the extrinsics UI (Phase 4, UI
+layer)`):
+
+- New `CharucoDetector` (`fiducial_markers.py`) wraps
+  `cv2.aruco.CharucoBoard`/`CharucoDetector` (dictionary, squares X/Y,
+  square/marker length all configurable). Every detected corner has an
+  exact, pre-known board-local `(x, y, 0)` — no size ambiguity, unlike a
+  plain ArUco marker.
+- `ExtrinsicsAutoCalibDialog`: a "Detect ChArUco" button per camera pane
+  (alongside Phase 3's "Detect ArUco"), a "ChArUco Board" panel (board
+  geometry settings, a face-up/face-down checkbox, status line, "Set
+  origin & axes from board", "Clear board detections"), and board corners
+  drawn as a cyan overlay.
+- Before anchoring, detected board corners behave exactly like unknown-size
+  ArUco markers: free `ControlPoint`s contributing correspondences to
+  camera-pose solving. Clicking "Set origin & axes from board" is the
+  Phase-4-specific action: it fixes every detected corner's `world_xyz`
+  to the board's own (metric, known) local coordinates, promoting them
+  from free to fixed control points in place.
+
+### Scoping deviation from the design doc — smaller than Phase 3's, but read this too
+
+The design doc's section 4 describes anchoring as: pick one camera+frame,
+`solvePnP` the board's pose *in that camera's frame*, then map every
+corner through *that* pose to get world coordinates. That doesn't
+actually work as literally stated — a camera's own world pose is exactly
+what calibration is trying to solve, so a solvePnP result expressed in an
+*unsolved* camera's own frame isn't "world" coordinates at all, it's
+still camera-relative, and treating it as world coordinates would silently
+bake that one camera's arbitrary-at-that-point frame in as ground truth.
+
+The implemented mechanism (`anchor_from_charuco_board`) sidesteps this
+rather than trying to fix it in place: **the board's own local coordinate
+frame is used directly as the world frame** (it is already metric, via
+`square_length`), with the only user-facing choice being whether the
+board's own +Z is world +Z ("face up") or flipped ("face down", negating
+Y and Z together to stay right-handed). This achieves the design's stated
+goal exactly — scale, origin, and axes fixed together in one action — via
+a mechanism that never needs a camera's intrinsics or an unsolved
+camera's pose at all, and is simpler than the originally-sketched
+mechanism, not just different from it. `CharucoDetector.estimate_board_pose`
+(`solvePnP`, per-camera) is still implemented per the design's section-3
+sketch, but only as a diagnostic building block — it is not on the
+anchoring critical path. Unlike Phase 3's deviation, this one isn't a
+capability trade-off (nothing is deferred or weaker) — it's a corrected
+mechanism for the same result.
+
+### Test coverage
+
+`test_charuco_detector.py` (16 cases, real
+`cv2.aruco.CharucoBoard.generateImage`-rendered board images, no mocks):
+detection correctness (corner count, metric spacing, Z=0 plane), graceful
+`None` on a blank image or mismatched board geometry,
+`estimate_board_pose`'s rotation-matrix sanity, `anchor_from_charuco_board`'s
+fixed-CP construction (single/multi-camera merging, partial corner
+overlap, face-up/face-down axis flip), and a full `run_calibration` PnP
+integration test that solves an entirely unposed synthetic camera from
+scratch using only anchored board corners (R within 1e-4, t within
+1e-3 of the known truth). `test_extrinsics_charuco_ui.py` (15 cases,
+dialog-level) covers the same detect/anchor/clear flow through the actual
+UI methods, plus overlay drawing and a spy-based confirmation that Match
+& Solve forwards the anchored corners.
+
+### Not yet done
+
+- No live UI test yet against a real printed/displayed ChArUco board —
+  everything above is unit/integration-tested against synthetic data and
+  rendered test images only. Flagged the same way Phase 3's ArUco
+  detection was, before its own live test confirmed it working.
+- No test yet of the "detected but not anchored" board corners actually
+  improving camera-pose solving via the free-CP path (mirrors Phase 3's
+  analogous, already-covered case for unknown-size ArUco markers — the
+  underlying mechanism is identical and already tested there, but not
+  re-verified specifically with ChArUco corners as the input).
 
 ## Known open questions (see design doc for detail)
 
@@ -276,3 +360,6 @@ actually forwards marker groups to `run_calibration`).
   to become a true joint BA parameter block to meaningfully improve camera
   pose accuracy (not just produce their own clean pose after the fact).
   Only real-footage testing can answer this.
+- **New from Phase 4**: no live UI test yet against a real printed/displayed
+  ChArUco board (see "Phase 4 notes" above) — the mechanism is unit- and
+  integration-tested against synthetic/rendered data only.

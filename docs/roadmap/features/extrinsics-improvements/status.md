@@ -454,6 +454,71 @@ the live failure, or whether the user's next attempt (now with duplicate-id
 guidance in hand) still needs a value search to find this specific board's
 working band on this specific camera/lighting.
 
+**Confirmed (2026-08-09, next round)**: the duplicate-id fix above was it —
+raising `min_marker_perimeter_rate` back up from the UI's earlier 1.0%
+default (which the user had already tried unsuccessfully before this fix
+existed) got a clean detection. Note the earlier 1.0% *default* itself
+wasn't the problem; what was fixed is that the guidance and floor now steer
+users away from the false "lower is safer" attractor in the first place.
+
+### Fourth live-testing round: board markers double-counted as plain ArUco, "unsolved cameras," sidebar too crowded
+
+Three separate findings from the first live session where detection actually
+worked end-to-end:
+
+**1. ChArUco board's own markers also showing up in the plain ArUco marker
+list.** Both detectors read the same dictionary, so a board's ~44 sub-markers
+are indistinguishable from "real" scene markers to `ArucoDetector` unless
+something excludes them. Considered recommending a different dictionary per
+role (still the simplest, most robust fix if a project's ChArUco board and
+scene markers can be planned together) but that doesn't help a project that
+already committed to one dictionary for both, so added an automatic filter as
+well: `CharucoDetector.expected_marker_ids()` returns the board's own ids, and
+`_on_detect_aruco_clicked()` in `page_extrinsics.py` excludes them from the
+plain-ArUco results whenever a board has actually been detected (not just
+"same dictionary happens to be selected in both panels" — gated on
+`self._charuco_detections` being non-empty, since two fresh panels both
+default to `DICT_4X4_50` and would otherwise wrongly filter a project that
+has never touched the ChArUco panel at all; this over-eager first version was
+caught by the existing test suite failing 12 tests before ever reaching the
+user). Status text now reports how many markers were excluded and why.
+**Recommendation to the user**: use a different dictionary for the two roles
+if convenient (simplest, avoids the filter's edge cases entirely); the
+automatic filter exists as a safety net when that isn't practical.
+
+**2. "All cameras remain unsolved" after Match & Solve, despite the board
+being detected.** Not a bug — traced through `init_poses_pnp()`'s requirement
+of ≥4 world-xyz control point observations **per camera**: a ChArUco
+detection (or anchor) only supplies world-position points to a camera if
+`Detect ChArUco` was actually clicked *under that camera*, exactly like a
+manual control point. `Set origin & axes` fixes the world coordinate system
+from whichever detections already exist, but doesn't retroactively give
+un-detected cameras anything to solve from. This was already true of the
+design but not obvious from the UI, which only ever showed one aggregate
+"detected" count. Fixed by making the requirement visible instead of by
+changing solver behavior: `_build_charuco_group()`'s hint text now says this
+explicitly, and `_refresh_charuco_status()` / the anchor status message now
+name which specific cameras are still missing a detection.
+
+**3. Sidebar too crowded** once the ArUco and ChArUco panels joined the
+pre-existing Control Points / World Position / Camera Intrinsics groups in
+the fixed-width side panel — description text and tables clipped vertically,
+the intrinsics calibration combo box too narrow to read. Fixed exactly per
+the user's own suggestions: `ArUco Markers`, `ChArUco Board`, and
+`Camera Intrinsics` are now collapsible (`QGroupBox.setCheckable`, via new
+`_make_collapsible()`/`_set_layout_items_visible()` helpers — the latter
+recurses into nested row layouts so unchecking a group hides everything in
+it, not just its top-level children); `Control Points` and `World Position`
+stay always-visible since they weren't reported as crowded and are the
+primary controls. The whole right-hand panel is now wrapped in a
+`QScrollArea` (`setWidgetResizable(True)`) as a fallback for whatever still
+doesn't fit. `_build_intrinsics_group()` is restructured from one cramped
+row per camera to three lines (camera label, intrinsics-selector combo alone
+on its own line, then the three checkboxes on a third line), with a
+`QFrame.Shape.HLine` separator between cameras. Covered by
+`test_extrinsics_panel_layout.py` (collapsibility, content hiding, scroll
+wrapper presence, un-squeezed combo, separator count).
+
 ### Not yet done
 
 - Camera-pose accuracy hasn't been validated against real multi-camera

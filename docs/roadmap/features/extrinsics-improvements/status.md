@@ -1,7 +1,7 @@
 ```toml
 name = "Extrinsics Calibration Improvements"
 status = "in_progress"
-progress_pct = 40
+progress_pct = 55
 description = """
 Improvements to multi-camera extrinsic calibration: scrubbing calibration frames directly from \
 capture video instead of a pre-extracted PNG folder, per-control-point per-frame observations, \
@@ -20,10 +20,13 @@ the problem statement, requirements, and full technical design.
 
 ## Current state
 
-Phases 1 and 2 implemented (2026-08-09), grounded against the pre-existing
-`python/app/setup/extrinsics_solver.py` / `page_extrinsics.py` /
-`posetrak/db/import_extrinsics.py` implementation and
-`docs/extrinsics-calibration-design.md`. Phases 3-6 remain design-only.
+Phases 1, 2, and 3 implemented (2026-08-09), grounded against the
+pre-existing `python/app/setup/extrinsics_solver.py` / `page_extrinsics.py`
+/ `posetrak/db/import_extrinsics.py` implementation and
+`docs/extrinsics-calibration-design.md`. Phase 3 landed with one
+significant, prominently-flagged scoping deviation from the design doc's
+section 5 — see "Phase 3 notes" below before assuming it matches that
+section literally. Phases 4-6 remain design-only.
 
 ## Phase summary
 
@@ -31,7 +34,7 @@ Phases 1 and 2 implemented (2026-08-09), grounded against the pre-existing
 |-------|-------------|--------|
 | 1 | Video frame source: per-camera random-seek reads, scrub UI replacing PNG-directory loading | ✅ Done |
 | 2 | Per-control-point, per-frame observations (`ObsPoint`, file format v2) | ✅ Done |
-| 3 | ArUco marker detection + rigid marker-pose BA residual | 🔶 In progress (synthetic-data residual prototype validated; detection/UI/`run_calibration` integration not started) |
+| 3 | ArUco marker detection + rigid marker-pose BA residual | ✅ Done, with a scoping deviation — see "Phase 3 notes" (decoupled post-pass, not a joint BA parameter block) |
 | 4 | ChArUco board detection + coordinate-system anchoring | ⬜ Not started |
 | 5 | `scene_fiducial_markers` persistence + recalibration reuse | ⬜ Not started |
 | 6 | AprilTag detector backend (extensibility proof) | ⬜ Not started |
@@ -144,7 +147,9 @@ placement), but worth a follow-up: e.g. only drawing a point's marker when
 the camera's displayed frame matches `obs.frame_idx`, or dimming/badging it
 otherwise.
 
-## Phase 3 progress — synthetic-data BA prototype (not yet Phase 3 proper)
+## Phase 3 notes
+
+### Synthetic-data BA prototype (preparatory step, landed first)
 
 Implemented as one commit, `setup: synthetic-data prototype for the rigid
 marker-pose BA residual`, answering the "Open questions" item below before
@@ -152,15 +157,12 @@ starting Phase 3's actual ArUco-detection/UI work:
 
 - `marker_local_corners(size)`, `project_marker_corners(...)`, and
   `solve_marker_pose(corner_obs, states_by_id, size)` added to
-  `extrinsics_solver.py`, **deliberately not wired into `run_calibration`**
-  — a marker's four corners are treated as one rigid 6-DOF pose parameter
-  (the same shape as a camera pose's own rvec/tvec), recovered via
-  `least_squares` over every camera's corner residuals jointly, seeded by a
-  single-camera `solvePnP`.
+  `extrinsics_solver.py` as a self-contained prototype — a marker's four
+  corners are treated as one rigid 6-DOF pose parameter (the same shape as
+  a camera pose's own rvec/tvec), recovered via `least_squares` over every
+  camera's corner residuals jointly, seeded by a single-camera `solvePnP`.
 - Scope of the prototype: camera poses are fixed (as if already solved by
-  the rest of `run_calibration`) — only the marker's own pose is being
-  recovered. Joint refinement of camera + marker poses together is Phase
-  3's actual integration work, not this prototype's job.
+  the rest of `run_calibration`) — only the marker's own pose is recovered.
 - Validated against a synthetic 3-camera rig
   (`test_marker_pose_prototype.py`, 12 cases, all passing): exact recovery
   (four marker orientations, atol 1e-5) from noise-free projections; 2
@@ -168,21 +170,109 @@ starting Phase 3's actual ArUco-detection/UI work:
   no solved pose is correctly excluded from the ≥2-camera count rather
   than crashing; convergence holds under 0.5px Gaussian pixel noise; and
   the result doesn't depend on a good initial guess.
-- **Result: the residual math checks out.** This resolves the "worth a
-  small synthetic-data prototype before committing" open question — Phase
-  3 proper can now wire this into `run_calibration`'s parameter vector with
-  reasonable confidence in the underlying math, rather than discovering a
-  sign error or a Jacobian issue after building UI on top of it.
+- **Result: the residual math checks out.** This resolved the "worth a
+  small synthetic-data prototype before committing" open question before
+  any UI work began, per the design doc's own recommendation.
+
+### Full implementation (two commits)
+
+`setup: ArUco marker detection + solver integration (Phase 3, data/solver
+layer)` and `setup: wire ArUco marker detection into the extrinsics
+calibration UI (Phase 3, UI layer)`:
+
+- New `app/setup/fiducial_markers.py`: `MarkerCornerObs`, `FiducialDetection`,
+  `FiducialDetector` protocol, and `ArucoDetector` (wraps
+  `cv2.aruco.ArucoDetector`; configurable dictionary, optional
+  `default_size`/`size_by_id`). Corner order (top-left, top-right,
+  bottom-right, bottom-left) was verified against real `cv2.aruco` output
+  via `cv2.aruco.generateImageMarker`-rendered test images, not just
+  assumed to match the prototype's `marker_local_corners()` convention —
+  it does.
+- `extrinsics_solver.MarkerGroup`: one physical marker's corner
+  observations across cameras; `as_control_points()` represents its 4
+  corners as independent free `ControlPoint`s.
+- `ExtrinsicsAutoCalibDialog`: a "Detect ArUco" button per camera pane
+  (video- or image-sourced), an "ArUco Markers" panel (dictionary combo,
+  default-size spin box, per-marker size-override table, "Clear markers"),
+  marker corners drawn as a gold overlay alongside manual control points,
+  and `marker_groups` threaded through to `run_calibration` on solve.
+
+### Scoping deviation from the design doc — read this before assuming §5's joint-BA design shipped as originally sketched
+
+**Every detected marker's corners — known size or not — contribute to
+camera-pose solving as four independent free control points**
+(`MarkerGroup.as_control_points()`), reusing the existing,
+already-tested free-CP/DLT-triangulation machinery. This alone delivers
+real R6 value: automatic, correctly-labeled correspondences, no manual
+clicking, usable to supplement or substitute for a weak SIFT bootstrap.
+
+**What did *not* ship**: the design doc's section 5 sketched a marker's
+corners as *replacing* four free points with a single rigid 6-DOF
+parameter *inside* `run_bundle_adjustment`'s own joint optimization, so a
+known-size marker could also help *correct* camera poses via its metric
+constraint. That would mean injecting a new parameter type into
+`run_bundle_adjustment`'s existing dense parameter-vector/Jacobian
+machinery — real, risky surgery on tested, complex numerical code.
+Instead, known-size markers get a **decoupled post-pass**
+(`solve_marker_groups()`, called once after camera poses are already
+solved): their corners still go through the free-CP path like every other
+marker during the main solve, and *afterward*, using those now-fixed
+camera poses, the validated `solve_marker_pose()` prototype recovers a
+clean, correctly-scaled rigid pose — stored in the new
+`CalibResult.marker_poses`, ready for Phase 5's persistence.
+
+**Practical consequence**: a known-size marker's metric information does
+not currently help *improve* camera pose accuracy beyond what its 4 free
+corner points already contribute (same as an unknown-size marker); it only
+produces a clean rigid pose *after* the fact. If real-world testing shows
+camera poses need that extra constraint (e.g. too few SIFT features and
+only a couple of known-size markers to anchor scale), true joint
+optimization is the flagged follow-up — not attempted here, deliberately,
+to keep this phase's risk bounded to already-validated pieces (the
+free-CP path and the synthetic-data-tested `solve_marker_pose`).
+
+### Test coverage
+
+`test_fiducial_markers.py` (15 cases, real `cv2.aruco` round-trips, no
+mocks), `test_marker_groups.py` (10 cases, including a full
+`run_calibration` integration test using locked/pre-posed synthetic
+cameras + `cp_only=True` so it needs no real footage or SIFT), and
+`test_extrinsics_aruco_ui.py` (14 cases, dialog-level: detect button,
+table population, scrub-frame capture, size override persistence across
+re-detection, redetect-overwrite, multi-camera accumulation, marker/CP
+overlay coexistence, and a spy-based confirmation that Match & Solve
+actually forwards marker groups to `run_calibration`).
+
+### Not addressed in Phase 3 (unchanged from the open questions below)
+
+- The SIFT pairwise bootstrap is untouched — ArUco corners are *added*
+  alongside whatever SIFT correspondences exist, not used to replace SIFT
+  outright. Still a live open question (see below).
+- Per-marker size override UX ships as an always-visible table column
+  rather than the design doc's "shown only once more than one distinct
+  size has been entered" progressive-disclosure idea — functionally
+  equivalent, simpler to implement, not revisited.
+- No manual UI validation yet against a real printed marker / real
+  multi-camera footage (Phase 3's stated validation criterion in the
+  design doc) — everything above is unit/integration-tested against
+  synthetic data and rendered test images, not exercised live in the app.
 
 ## Known open questions (see design doc for detail)
 
 - Registry- vs. session-level scoping for `scene_fiducial_markers`.
 - ~~The rigid marker-pose BA residual (Phase 3) is new solver machinery and
   should be prototyped against synthetic data before UI work begins.~~
-  Done — see "Phase 3 progress" above.
+  Done — see "Phase 3 notes" above.
 - Video random-seek performance on long-GOP consumer codecs (GoPros) is
   unmeasured — check early in Phase 1.
 - Whether board/marker corners should replace the SIFT pairwise bootstrap
-  outright, vs. only supplement it, is left as an internal heuristic for now.
-- Marker size input UX (global default + override table) may need revisiting
-  once real rigs are tried.
+  outright, vs. only supplement it, is left as an internal heuristic for
+  now — Phase 3 did not touch this either way (see "Phase 3 notes").
+- Marker size input UX (global default + override table) shipped as an
+  always-visible table in Phase 3, not the progressive-disclosure version
+  originally sketched — may still need revisiting once real rigs are tried.
+- **New from Phase 3**: whether the decoupled marker-pose post-pass's
+  accuracy is sufficient in practice, or whether known-size markers need
+  to become a true joint BA parameter block to meaningfully improve camera
+  pose accuracy (not just produce their own clean pose after the fact).
+  Only real-footage testing can answer this.

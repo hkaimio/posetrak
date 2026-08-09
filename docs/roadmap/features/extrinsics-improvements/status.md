@@ -1,7 +1,7 @@
 +++
 name = "Extrinsics Calibration Improvements"
 status = "in_progress"
-progress_pct = 15
+progress_pct = 33
 description = """
 Improvements to multi-camera extrinsic calibration: scrubbing calibration frames directly from \
 capture video instead of a pre-extracted PNG folder, per-control-point per-frame observations, \
@@ -10,7 +10,7 @@ bundle-adjustment residual, and persisted fiducial markers for recalibration reu
 """
 categories = ["calibration", "ui"]
 target_release = "TBD"
-last_updated = 2026-08-06
+last_updated = 2026-08-09
 +++
 
 # Extrinsics Calibration Improvements — Implementation Status
@@ -20,17 +20,17 @@ the problem statement, requirements, and full technical design.
 
 ## Current state
 
-Phase 1 implemented (2026-08-09), grounded against the pre-existing
+Phases 1 and 2 implemented (2026-08-09), grounded against the pre-existing
 `python/app/setup/extrinsics_solver.py` / `page_extrinsics.py` /
 `posetrak/db/import_extrinsics.py` implementation and
-`docs/extrinsics-calibration-design.md`. Phases 2-6 remain design-only.
+`docs/extrinsics-calibration-design.md`. Phases 3-6 remain design-only.
 
 ## Phase summary
 
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 1 | Video frame source: per-camera random-seek reads, scrub UI replacing PNG-directory loading | ✅ Done |
-| 2 | Per-control-point, per-frame observations (`ObsPoint`, file format v2) | ⬜ Not started |
+| 2 | Per-control-point, per-frame observations (`ObsPoint`, file format v2) | ✅ Done |
 | 3 | ArUco marker detection + rigid marker-pose BA residual | ⬜ Not started |
 | 4 | ChArUco board detection + coordinate-system anchoring | ⬜ Not started |
 | 5 | `scene_fiducial_markers` persistence + recalibration reuse | ⬜ Not started |
@@ -56,15 +56,14 @@ Implemented as two commits:
   secondary "Auto-calibrate (image folder)…" action, per the design
   doc's R1 ("may remain as an alternate/legacy path").
 
-**Scope note**: every control point placed in a session currently uses
-whatever frame each camera happens to be scrubbed to *at solve time* —
-there is no independent per-control-point frame record yet (that's
-Phase 2's `ObsPoint`). Placing point A while camera 1 is on frame 100,
-then scrubbing camera 1 to frame 250 before placing point B, will
-silently move point A's effective frame too, since today's `ControlPoint`
-has no frame field of its own. This is a real, known interim limitation,
-not an oversight — flagging it here so it isn't mistaken for Phase 1
-already covering R3/R4.
+**Scope note (resolved in Phase 2, see below)**: every control point placed
+in a session used to use whatever frame each camera happened to be scrubbed
+to *at solve time* — there was no independent per-control-point frame
+record. Placing point A while camera 1 was on frame 100, then scrubbing
+camera 1 to frame 250 before placing point B, would silently move point A's
+effective frame too, since `ControlPoint` had no frame field of its own.
+Flagged at the time so it wasn't mistaken for Phase 1 already covering R3/R4
+— Phase 2's `ObsPoint` is exactly the fix.
 
 **Known pre-existing issue found while testing, not fixed (out of
 scope for this change)**: three tests in `test_pair_scrubber.py`
@@ -76,7 +75,47 @@ assertion (no `ps.shutdown()` reached), which can later abort the whole
 `pytest` process with "QThread: Destroyed while thread still running"
 when enough such leaks accumulate across a full suite run. Reproduced
 against the same file/test suite pre-Phase-1; unrelated to the
-`VideoScrubBar` extraction. Worth a follow-up, not addressed here.
+`VideoScrubBar` extraction. Still present and still unrelated after Phase
+2 (re-confirmed the same three, and only those three, fail when running
+Phase 2's test files alongside `test_pair_scrubber.py`). Worth a follow-up,
+not addressed here.
+
+## Phase 2 notes
+
+Implemented as one commit, `setup: track per-control-point, per-camera
+frame index`:
+
+- `ObsPoint(frame_idx, px, py)` replaces the plain `(px, py)` tuple in
+  `ControlPoint.obs`. `frame_idx` is provenance for the UI and the saved
+  file only — every solver-facing consumer (`init_poses_pnp`,
+  `_undistort_control_obs`, `compute_cp_errors`, the BA's observation list)
+  reads only `.px`/`.py`, proven by a synthetic-camera PnP test that solves
+  to a bit-identical pose regardless of what `frame_idx` values the
+  observations carry.
+- `ExtrinsicsAutoCalibDialog._on_cam_click` now records the clicked
+  camera's *current* `VideoScrubBar` position into the new observation;
+  re-clicking the same point on the same camera at a different scrub
+  position overwrites its `ObsPoint` — R4's "different/later frame for the
+  same point in the same camera" case.
+- `save_control_points`/`load_control_points` bumped to file version 2
+  (`obs` values become `[frame_idx, px, py]`); version 1 files still load,
+  with `frame_idx` defaulting to a caller-supplied `default_frame_by_id`
+  (wired to each camera's current scrub position when loading from the
+  dialog) or 0 if none is given.
+
+**Known limitation, not addressed here**: `_refresh_markers` still draws
+every placed control point's marker on whatever frame a camera is
+*currently* displaying, regardless of which frame that observation was
+actually recorded on (`obs.frame_idx`). This was already true before Phase
+2 in a lesser form (there was no `frame_idx` to compare against at all);
+Phase 2 makes the mismatch meaningful without resolving it — a marker whose
+own point moved between frame 100 and frame 250 will still be drawn at its
+frame-100 pixel position even while the camera is scrubbed to frame 250,
+which can look wrong for exactly the occlusion/motion case R4 was written
+for. Not part of Phase 2's stated scope (data model + file format +
+placement), but worth a follow-up: e.g. only drawing a point's marker when
+the camera's displayed frame matches `obs.frame_idx`, or dimming/badging it
+otherwise.
 
 ## Known open questions (see design doc for detail)
 

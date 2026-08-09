@@ -1,7 +1,7 @@
 +++
 name = "Extrinsics Calibration Improvements"
 status = "in_progress"
-progress_pct = 33
+progress_pct = 40
 description = """
 Improvements to multi-camera extrinsic calibration: scrubbing calibration frames directly from \
 capture video instead of a pre-extracted PNG folder, per-control-point per-frame observations, \
@@ -31,7 +31,7 @@ Phases 1 and 2 implemented (2026-08-09), grounded against the pre-existing
 |-------|-------------|--------|
 | 1 | Video frame source: per-camera random-seek reads, scrub UI replacing PNG-directory loading | ✅ Done |
 | 2 | Per-control-point, per-frame observations (`ObsPoint`, file format v2) | ✅ Done |
-| 3 | ArUco marker detection + rigid marker-pose BA residual | ⬜ Not started |
+| 3 | ArUco marker detection + rigid marker-pose BA residual | 🔶 In progress (synthetic-data residual prototype validated; detection/UI/`run_calibration` integration not started) |
 | 4 | ChArUco board detection + coordinate-system anchoring | ⬜ Not started |
 | 5 | `scene_fiducial_markers` persistence + recalibration reuse | ⬜ Not started |
 | 6 | AprilTag detector backend (extensibility proof) | ⬜ Not started |
@@ -117,11 +117,42 @@ placement), but worth a follow-up: e.g. only drawing a point's marker when
 the camera's displayed frame matches `obs.frame_idx`, or dimming/badging it
 otherwise.
 
+## Phase 3 progress — synthetic-data BA prototype (not yet Phase 3 proper)
+
+Implemented as one commit, `setup: synthetic-data prototype for the rigid
+marker-pose BA residual`, answering the "Open questions" item below before
+starting Phase 3's actual ArUco-detection/UI work:
+
+- `marker_local_corners(size)`, `project_marker_corners(...)`, and
+  `solve_marker_pose(corner_obs, states_by_id, size)` added to
+  `extrinsics_solver.py`, **deliberately not wired into `run_calibration`**
+  — a marker's four corners are treated as one rigid 6-DOF pose parameter
+  (the same shape as a camera pose's own rvec/tvec), recovered via
+  `least_squares` over every camera's corner residuals jointly, seeded by a
+  single-camera `solvePnP`.
+- Scope of the prototype: camera poses are fixed (as if already solved by
+  the rest of `run_calibration`) — only the marker's own pose is being
+  recovered. Joint refinement of camera + marker poses together is Phase
+  3's actual integration work, not this prototype's job.
+- Validated against a synthetic 3-camera rig
+  (`test_marker_pose_prototype.py`, 12 cases, all passing): exact recovery
+  (four marker orientations, atol 1e-5) from noise-free projections; 2
+  cameras are sufficient; a single camera correctly raises; a camera with
+  no solved pose is correctly excluded from the ≥2-camera count rather
+  than crashing; convergence holds under 0.5px Gaussian pixel noise; and
+  the result doesn't depend on a good initial guess.
+- **Result: the residual math checks out.** This resolves the "worth a
+  small synthetic-data prototype before committing" open question — Phase
+  3 proper can now wire this into `run_calibration`'s parameter vector with
+  reasonable confidence in the underlying math, rather than discovering a
+  sign error or a Jacobian issue after building UI on top of it.
+
 ## Known open questions (see design doc for detail)
 
 - Registry- vs. session-level scoping for `scene_fiducial_markers`.
-- The rigid marker-pose BA residual (Phase 3) is new solver machinery and
-  should be prototyped against synthetic data before UI work begins.
+- ~~The rigid marker-pose BA residual (Phase 3) is new solver machinery and
+  should be prototyped against synthetic data before UI work begins.~~
+  Done — see "Phase 3 progress" above.
 - Video random-seek performance on long-GOP consumer codecs (GoPros) is
   unmeasured — check early in Phase 1.
 - Whether board/marker corners should replace the SIFT pairwise bootstrap

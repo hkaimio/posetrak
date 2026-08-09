@@ -35,6 +35,33 @@ Phases 1 and 2 implemented (2026-08-09), grounded against the pre-existing
 | 4 | ChArUco board detection + coordinate-system anchoring | ⬜ Not started |
 | 5 | `scene_fiducial_markers` persistence + recalibration reuse | ⬜ Not started |
 | 6 | AprilTag detector backend (extensibility proof) | ⬜ Not started |
+| 7 | Global timeline scrub (§8) — jump every camera to the same synced instant | ⬜ Not started (design added 2026-08-09 from UI-testing feedback) |
+
+## UI testing feedback (2026-08-09, Phases 1-2)
+
+Harri ran the Phase 1/2 UI checklist. One bug found and fixed, one
+improvement proposal captured as Phase 7 above (§8 in the design doc).
+
+- **Bug, fixed** (`setup: fix "Go to..." frame-seek button using PyQt-style
+  keyword names`): `VideoScrubBar._on_goto()`'s `QInputDialog.getInt()` call
+  used `min=`/`max=` (the PyQt5/6 keyword spelling); PySide6 names the same
+  parameters `minValue=`/`maxValue=` and raised `AttributeError: unsupported
+  keyword 'min'` on every click. This was carried over verbatim from
+  `pair_scrubber._VideoPane`'s original `_on_goto()` (confirmed via `git
+  log` — predates the `VideoScrubBar` extraction), never caught before
+  because no prior test exercised the real `QInputDialog.getInt()` call.
+  Fixed; new tests call the real API (via a `QTimer.singleShot` to close
+  the resulting modal dialog) to catch this class of bug going forward, not
+  just a stub.
+- **Improvement proposal, captured as design (Phase 7 / §8), not yet
+  implemented**: since a capture has almost always already been through the
+  sync wizard page by the time extrinsics calibration runs, a single global
+  timeline scrub — driving every camera's `VideoScrubBar` to its own
+  locally-synced frame for the same instant, via the existing `SyncTable` —
+  would replace "hunt for a good calibration moment across N independent
+  sliders" with one drag, while leaving each camera's own slider available
+  afterward for per-point fine adjustment exactly as today.
+- Everything else on the Phase 1/2 checklist: OK.
 
 ## Phase 1 notes
 

@@ -451,6 +451,57 @@ the existing convention for this kind of field
    history, so there is no reason to keep stale rows around once a fresh
    solve has produced a new one.
 
+### 8. Global timeline scrub (convenience layer over §1)
+
+Added after Phase 1/2 UI testing (2026-08-09): §1 gives each camera its own
+independent scrub bar, which is exactly right for placing control points at
+different frames per camera (R3/R4). But by the time extrinsics calibration
+runs, the capture has almost always already been through the session's sync
+wizard page — the same `SyncTable` that page uses to line up all cameras on
+one global clock already exists and is queryable
+(`DBContext.get_active_sync(shot_id)`, `db_context.py:776`). Finding a good
+calibration *moment* (e.g. a frame where a person or board is clearly
+visible and stationary in every view) is currently a per-camera hunt-and-
+peck across N independent sliders; a global timeline scrub that jumps every
+camera to its locally-synced frame for the same instant would make that a
+single drag, with each camera's own slider still available afterward for
+per-point, per-camera fine adjustment exactly as before.
+
+- **UI**: one additional scrub control above the per-camera grid, labeled
+  something like "Global timeline (synced)". Dragging it computes, for each
+  camera with sync data, that camera's own frame via
+  `SyncTable.lookup(timestamp_s, shot_video_id)` (the same call
+  `page_sync.py`'s `_frame_at_playhead` already makes,
+  `page_sync.py:1634`) and calls that camera's existing `VideoScrubBar.seek()`
+  — it does not replace the per-camera sliders, only drives them to a shared
+  starting point.
+- **Real implementation gotcha, worth flagging now rather than discovering
+  mid-implementation**: `SyncTable` is keyed by `shot_video_id` — i.e.
+  `capture_videos.id`, the video *row's* own primary key — while
+  `CamCalibState.video_id` (§1, and everywhere else in this feature) is the
+  camera *label* (`_load_states_from_capture` sets
+  `video_id=r["cam_label"]`, matching the pre-existing
+  `_load_states_from_images` convention). Wiring the global scrub needs an
+  explicit `capture_videos.id → camera label` lookup (one extra query
+  against `capture_videos`/`camera_instances`, the same join
+  `_load_states_from_capture` already does) to translate between the two —
+  not a blocker, just not a direct drop-in of `SyncTable.lookup()`'s result.
+- **Time range**: derive the global slider's min/max from
+  `SyncTable.frame_to_global_time()` (`db_context.py:156`) applied to each
+  camera's own `first_frame`/`last_frame`, taking the union across cameras
+  — a camera that starts recording later than another shouldn't shrink the
+  range for cameras that were already rolling, it should just clamp (via
+  `VideoScrubBar.seek()`'s existing clamping) when the global position falls
+  outside that particular camera's own footage.
+- **Graceful degradation**: `get_active_sync()` returns `None` when a
+  capture has no sync config yet (e.g. calibration done before the sync
+  step, or sync never run for this capture) — the global scrub bar should
+  simply not appear in that case, falling back to today's per-camera-only
+  scrubbing with no behavior change.
+- **Out of scope for this addition**: the global scrub is a convenience for
+  finding a shared moment, not a new control-point concept — it doesn't
+  change `ObsPoint`, the file format, or anything solver-facing from §2.
+
 ## Phased implementation plan
 
 ### Phase 1 — Video frame source
@@ -540,6 +591,30 @@ displaced marker is flagged rather than silently trusted.
 **Validation:** swap the detector backend via configuration only; verify the
 same downstream BA/persistence code path (§3, §5) runs unmodified against
 AprilTag input on test footage.
+
+### Phase 7 — Global timeline scrub (§8; UI-testing feedback, not originally scoped)
+
+- Resolve `capture_videos.id → camera label` for the current capture (same
+  join `_load_states_from_capture` already does) so `SyncTable` lookups
+  (keyed by `shot_video_id`) can drive `VideoScrubBar`s (keyed by camera
+  label).
+- Add one global scrub control to `ExtrinsicsAutoCalibDialog`, shown only
+  when `DBContext.get_active_sync(shot_id)` returns a `SyncTable` (hidden
+  entirely otherwise — no sync config yet is a normal, expected state, not
+  an error).
+- Range: union of every camera's own frame range converted to global time
+  via `SyncTable.frame_to_global_time()`.
+- Dragging it calls `SyncTable.lookup(timestamp_s, shot_video_id)` per
+  camera and seeks that camera's `VideoScrubBar` — each camera's own slider
+  remains independently draggable afterward, unchanged from §1/§2.
+
+**Validation:** open a capture that has been through the sync wizard page;
+verify the global scrub bar appears and dragging it moves every camera to
+the same real-world instant (spot-check against a visible synced event,
+e.g. a clap); verify each camera's slider can still be moved independently
+afterward without affecting the others (R2 unchanged); open a capture with
+no sync config and verify the global scrub bar simply doesn't appear, with
+the rest of the dialog behaving exactly as it does today.
 
 ## Open questions
 

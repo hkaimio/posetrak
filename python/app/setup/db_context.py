@@ -263,12 +263,28 @@ class DBContext:
         The savepoint can be invalidated out from under us: dialogs opened
         from a page (e.g. inline camera/mode creation) share this connection
         and call ``conn.commit()`` directly, which ends the whole transaction
-        and silently drops our savepoint along with it. When that has
-        happened there is nothing left to release — the writes are already
-        durable — so we just clear the flag instead of raising.
+        and silently drops our savepoint along with it. ``conn.in_transaction``
+        alone can't detect this reliably: if the page goes on to write more
+        rows after that external commit (e.g. ``validatePage()``'s own
+        ``create_shot()`` / ``create_shot_video()`` calls), SQLite silently
+        opens a fresh implicit transaction for them, so ``in_transaction``
+        reads True again by the time we get here even though the *savepoint
+        itself* is long gone. Attempt the RELEASE regardless and treat "no
+        such savepoint" specifically as already-invalidated — the writes
+        made before the external commit are already durable in that case —
+        rather than raising.
         """
         if self._conn.in_transaction:
-            self._conn.execute("RELEASE SAVEPOINT wizard_page")
+            try:
+                self._conn.execute("RELEASE SAVEPOINT wizard_page")
+            except sqlite3.OperationalError as exc:
+                if "no such savepoint" not in str(exc):
+                    raise
+                _log.warning(
+                    "commit_page: wizard_page savepoint already gone (likely "
+                    "an inline dialog's conn.commit() mid-page) -- writes up "
+                    "to that point are already durable, continuing"
+                )
         self._savepoint_active = False
 
     def rollback_page(self) -> None:
@@ -276,14 +292,33 @@ class DBContext:
 
         No-op if no savepoint is currently active (e.g. cleanupPage called
         after the page was already committed and the user later closes the
-        wizard), or if the savepoint was already invalidated by an external
-        ``conn.commit()`` (see ``commit_page()``).
+        wizard).
+
+        If the savepoint was invalidated by an external ``conn.commit()``
+        (see ``commit_page()``), rows written *before* that commit are
+        already durable and can't be undone here — this is a known,
+        narrower gap than a full per-page rollback, not a crash to guard
+        against silently: any rows this page itself wrote *after* the
+        external commit remain uncommitted (SQLite's implicit transaction
+        for them is still open) and are rolled back via a plain
+        ``conn.rollback()`` in that case, same end effect as "Back" for the
+        no-external-commit path, just without a savepoint to name.
         """
         if not self._savepoint_active:
             return
         if self._conn.in_transaction:
-            self._conn.execute("ROLLBACK TO SAVEPOINT wizard_page")
-            self._conn.execute("RELEASE SAVEPOINT wizard_page")
+            try:
+                self._conn.execute("ROLLBACK TO SAVEPOINT wizard_page")
+                self._conn.execute("RELEASE SAVEPOINT wizard_page")
+            except sqlite3.OperationalError as exc:
+                if "no such savepoint" not in str(exc):
+                    raise
+                _log.warning(
+                    "rollback_page: wizard_page savepoint already gone "
+                    "(likely an inline dialog's conn.commit() mid-page) -- "
+                    "rolling back only the writes made since then"
+                )
+                self._conn.rollback()
         self._savepoint_active = False
 
     # ------------------------------------------------------------------

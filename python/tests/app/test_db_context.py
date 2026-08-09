@@ -342,6 +342,58 @@ def test_rollback_page_survives_external_commit_on_shared_connection(
     assert row is not None
 
 
+def test_commit_page_survives_writes_after_external_commit(
+    ctx: DBContext,
+    session_conn: sqlite3.Connection,
+) -> None:
+    """Regression for the real capture-wizard failure: an inline dialog's
+    conn.commit() mid-page, followed by *more* page writes (validatePage()'s
+    own create_shot()/create_shot_video() calls) before commit_page(). Those
+    later writes silently re-open an implicit transaction, so
+    conn.in_transaction reads True again even though the wizard_page
+    savepoint itself was dropped by the earlier commit() -- commit_page()
+    must still not raise "no such savepoint", and every write (both sides
+    of the external commit) must end up durable.
+    """
+    ctx.begin_page()
+    shot_id_1 = ctx.create_shot("before-external-commit")
+    session_conn.commit()  # simulates an inline "Register Camera..." dialog
+    shot_id_2 = ctx.create_shot("after-external-commit")  # e.g. validatePage()
+    ctx.commit_page()  # must not raise
+
+    for shot_id in (shot_id_1, shot_id_2):
+        row = session_conn.execute(
+            "SELECT id FROM captures WHERE id = ?", (shot_id,)
+        ).fetchone()
+        assert row is not None
+
+
+def test_rollback_page_after_writes_following_external_commit(
+    ctx: DBContext,
+    session_conn: sqlite3.Connection,
+) -> None:
+    """Same interleaving as above, but via "Back" (rollback_page()) instead
+    of "Next" (commit_page()). The write made before the external commit is
+    already durable and can't be undone; the write made *after* it is still
+    in an open (savepoint-less) transaction and must be rolled back.
+    """
+    ctx.begin_page()
+    shot_id_1 = ctx.create_shot("already-durable")
+    session_conn.commit()  # simulates an inline dialog's direct commit()
+    shot_id_2 = ctx.create_shot("should-be-rolled-back")
+    ctx.rollback_page()  # must not raise
+
+    row1 = session_conn.execute(
+        "SELECT id FROM captures WHERE id = ?", (shot_id_1,)
+    ).fetchone()
+    assert row1 is not None
+
+    row2 = session_conn.execute(
+        "SELECT id FROM captures WHERE id = ?", (shot_id_2,)
+    ).fetchone()
+    assert row2 is None
+
+
 # ---------------------------------------------------------------------------
 # DBContext sync anchor CRUD
 # ---------------------------------------------------------------------------

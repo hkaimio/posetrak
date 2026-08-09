@@ -17,6 +17,7 @@ this same detection layer, not a rework of it).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -24,6 +25,8 @@ import cv2
 import numpy as np
 
 from app.setup.extrinsics_solver import ControlPoint, MarkerGroup, ObsPoint, marker_local_corners
+
+_log = logging.getLogger(__name__)
 
 # ArUco dictionary name -> cv2.aruco constant, exposed for UI population.
 ARUCO_DICTIONARIES: dict[str, int] = {
@@ -102,6 +105,8 @@ class ArucoDetector:
         if min_marker_perimeter_rate is not None:
             params.minMarkerPerimeterRate = min_marker_perimeter_rate
         self._cv_detector = cv2.aruco.ArucoDetector(aruco_dict, params)
+        self.dictionary = dictionary
+        self.min_marker_perimeter_rate = min_marker_perimeter_rate
         self.default_size = default_size
         self.size_by_id = dict(size_by_id or {})
 
@@ -110,7 +115,16 @@ class ArucoDetector:
 
     def detect(self, image: np.ndarray, video_id: str = "", frame_idx: int = 0) -> list[FiducialDetection]:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-        corners, ids, _ = self._cv_detector.detectMarkers(gray)
+        corners, ids, rejected = self._cv_detector.detectMarkers(gray)
+        found_ids = [] if ids is None else sorted(int(i) for i in ids.ravel())
+        _log.info(
+            "ArucoDetector.detect video_id=%r frame_idx=%d image_shape=%s "
+            "dictionary=%s min_marker_perimeter_rate=%s -> %d marker(s) found "
+            "%s (%d rejected candidates)",
+            video_id, frame_idx, gray.shape, self.dictionary,
+            self.min_marker_perimeter_rate, len(found_ids), found_ids,
+            0 if rejected is None else len(rejected),
+        )
         detections: list[FiducialDetection] = []
         if ids is None:
             return detections
@@ -217,7 +231,13 @@ class CharucoDetector:
             params = cv2.aruco.DetectorParameters()
             params.minMarkerPerimeterRate = min_marker_perimeter_rate
             self._cv_detector.setDetectorParameters(params)
+        self.dictionary = dictionary
+        self.squares_x = squares_x
+        self.squares_y = squares_y
         self.square_length = square_length
+        self.marker_length = marker_length
+        self.legacy_pattern = legacy_pattern
+        self.min_marker_perimeter_rate = min_marker_perimeter_rate
 
     def board_corner_local_xyz(self, corner_id: int) -> np.ndarray:
         return self._board.getChessboardCorners()[corner_id].copy()
@@ -228,12 +248,61 @@ class CharucoDetector:
         """Returns ``None`` if no board (or too few / collinear corners to
         be useful) is found -- not an error, the same "wrote nothing for
         that frame" graceful degradation as any other sparse detection in
-        this project."""
+        this project.
+
+        Every call logs the exact configuration and result at INFO level,
+        and logs a WARNING with the found-vs-expected marker IDs when it's
+        about to return ``None`` -- see the class docstring's "gotchas"
+        list for what a mismatch there usually means. This is deliberately
+        on the hot path (not gated behind a verbose flag): board detection
+        happens a handful of times per calibration session, not per frame
+        of video, so the log volume is negligible.
+        """
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-        charuco_corners, charuco_ids, _marker_corners, _marker_ids = self._cv_detector.detectBoard(gray)
+        charuco_corners, charuco_ids, marker_corners, marker_ids = self._cv_detector.detectBoard(gray)
+        found_marker_ids = [] if marker_ids is None else sorted(int(i) for i in marker_ids.ravel())
+        expected_ids = sorted(int(i) for i in self._board.getIds())
+        n_corners = 0 if charuco_ids is None else len(charuco_ids)
+
+        _log.info(
+            "CharucoDetector.detect video_id=%r frame_idx=%d image_shape=%s "
+            "dictionary=%s squares=(%d,%d) square_length=%.4f marker_length=%.4f "
+            "legacy_pattern=%s min_marker_perimeter_rate=%s "
+            "-> %d/%d expected ArUco marker(s) found %s, %d charuco corner(s)",
+            video_id, frame_idx, gray.shape,
+            self.dictionary, self.squares_x, self.squares_y,
+            self.square_length, self.marker_length,
+            self.legacy_pattern, self.min_marker_perimeter_rate,
+            len(found_marker_ids), len(expected_ids), found_marker_ids, n_corners,
+        )
+
         if charuco_ids is None or len(charuco_ids) < 4:
+            unexpected = sorted(set(found_marker_ids) - set(expected_ids))
+            _log.warning(
+                "CharucoDetector.detect: only %d charuco corner(s) (need >= 4) for "
+                "video_id=%r frame_idx=%d. Found %d ArUco marker(s) %s of this "
+                "board's %d expected ids %s%s. If markers are found but few/no "
+                "corners come out: (a) legacy_pattern may still be wrong for this "
+                "board -- a wrong pattern maps found marker ids to the wrong grid "
+                "positions, so detectBoard() can't interpolate any corners even "
+                "though the markers themselves decoded fine; (b) the found markers "
+                "may be too few or too scattered/non-adjacent for interpolation "
+                "(cv2.aruco.CharucoParameters.minMarkers, default 2, requires "
+                "neighbouring markers around a corner); (c) try lowering "
+                "min_marker_perimeter_rate further if few markers were found at all.",
+                n_corners, video_id, frame_idx, len(found_marker_ids), found_marker_ids,
+                len(expected_ids), expected_ids,
+                f" (found {len(unexpected)} id(s) NOT belonging to this board: {unexpected}"
+                f" -- likely a different marker/board sharing this dictionary, "
+                f"not this board's own markers)" if unexpected else "",
+            )
             return None
         if self._board.checkCharucoCornersCollinear(charuco_ids):
+            _log.warning(
+                "CharucoDetector.detect: %d charuco corner(s) found for video_id=%r "
+                "frame_idx=%d but they are collinear (degenerate) -- ids=%s",
+                n_corners, video_id, frame_idx, sorted(int(i) for i in charuco_ids.ravel()),
+            )
             return None
 
         board_corners = self._board.getChessboardCorners()

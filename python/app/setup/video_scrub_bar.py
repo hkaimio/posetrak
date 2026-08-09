@@ -135,7 +135,7 @@ class VideoScrubBar(QWidget):
         value, ok = QInputDialog.getInt(
             self, "Go to frame", "Frame number:",
             value=self._current_frame,
-            min=0, max=max(0, self._total_frames - 1),
+            minValue=0, maxValue=max(0, self._total_frames - 1),
         )
         if ok:
             self._seek(value)

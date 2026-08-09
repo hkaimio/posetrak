@@ -135,3 +135,81 @@ def test_unload_resets_label_and_slider(qapp) -> None:
     bar.unload()
     assert bar._frame_label.text() == "frame —"
     assert bar._slider.maximum() == 0
+
+
+# ---------------------------------------------------------------------------
+# "Go to..." dialog
+#
+# Regression for a real bug found in UI testing: QInputDialog.getInt() was
+# called with min=/max= (PyQt-style keyword names) instead of PySide6's
+# minValue=/maxValue=, raising "AttributeError: unsupported keyword 'min'"
+# every time the button was clicked. QInputDialog.getInt() itself is not
+# exercised here (it blocks on a modal dialog) -- these patch the staticmethod
+# to confirm _on_goto() calls it with argument names PySide6 actually accepts,
+# and that the returned value is applied on "ok".
+# ---------------------------------------------------------------------------
+
+
+def test_goto_calls_get_int_with_pyside6_keyword_names(qapp, monkeypatch) -> None:
+    from app.setup import video_scrub_bar as module
+
+    calls: list[dict] = []
+
+    def fake_get_int(*args, **kwargs):
+        calls.append(kwargs)
+        return 42, True
+
+    monkeypatch.setattr(module.QInputDialog, "getInt", fake_get_int)
+
+    bar = VideoScrubBar()
+    bar._total_frames = 100
+    bar._on_goto()
+
+    assert len(calls) == 1
+    assert "minValue" in calls[0]
+    assert "maxValue" in calls[0]
+    assert "min" not in calls[0]
+    assert "max" not in calls[0]
+    assert bar.current_frame == 42
+
+
+def test_goto_cancelled_does_not_seek(qapp, monkeypatch) -> None:
+    from app.setup import video_scrub_bar as module
+
+    monkeypatch.setattr(
+        module.QInputDialog, "getInt", lambda *a, **kw: (999, False)
+    )
+
+    bar = VideoScrubBar()
+    bar._total_frames = 100
+    bar._current_frame = 10
+    bar._on_goto()
+
+    assert bar.current_frame == 10  # unchanged -- dialog was cancelled
+
+
+def test_goto_real_qinputdialog_does_not_raise(qapp) -> None:
+    """End-to-end regression: call the *real* QInputDialog.getInt() (not a
+    stub) and confirm the min=/max= vs. minValue=/maxValue= mismatch is
+    actually gone. Argument-binding errors like the original
+    "unsupported keyword 'min'" AttributeError happen before the modal
+    dialog is ever shown, so a QTimer.singleShot to close it is only needed
+    to let the (otherwise blocking) call return once opened with valid
+    arguments.
+    """
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QInputDialog
+
+    def close_dialog():
+        for w in QApplication.topLevelWidgets():
+            if isinstance(w, QInputDialog):
+                w.reject()
+
+    bar = VideoScrubBar()
+    bar._total_frames = 100
+    bar._current_frame = 5
+
+    QTimer.singleShot(0, close_dialog)
+    bar._on_goto()  # must not raise AttributeError
+
+    assert bar.current_frame == 5  # rejected -- unchanged

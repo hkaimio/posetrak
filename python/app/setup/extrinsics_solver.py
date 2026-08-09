@@ -1527,3 +1527,151 @@ def load_control_points(
             cp.obs[vid] = ObsPoint(frame_idx=int(frame_idx), px=float(px), py=float(py))
         result.append(cp)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 prototype — rigid marker-pose residual (NOT yet wired into
+# run_calibration / bundle_adjustment)
+# ---------------------------------------------------------------------------
+#
+# See docs/roadmap/features/extrinsics-improvements/
+# extrinsics-improvements-design.md, section 5 ("Rigid marker-group
+# residual") and the matching "Open questions" entry: a size-known ArUco
+# marker's four corners should contribute a single 6-DOF rigid-body pose
+# parameter to the BA (its own rvec/tvec, the same shape as a camera pose),
+# not four independent free points -- but that is new solver machinery, not
+# just new input data, so it gets validated here against synthetic
+# multi-camera data before Phase 3 wires up real ArUco detection or touches
+# `bundle_adjustment`'s parameter vector.
+#
+# Scope of this prototype: camera poses are already solved and held FIXED
+# (exactly the assumption the eventual integration makes when a marker
+# piggybacks on the rest of run_calibration's solved cameras) -- only the
+# marker's own 6 DOF are recovered, from per-corner pixel observations
+# across >= 2 cameras. Validated in test_marker_pose_prototype.py.
+
+
+def marker_local_corners(size: float) -> np.ndarray:
+    """Corner offsets (4, 3) for a square planar marker of side length
+    *size*, centred at the local origin, lying in the local XY plane (Z=0).
+
+    Order matches cv2.aruco's convention (top-left, top-right, bottom-right,
+    bottom-left, clockwise as seen facing the marker) -- re-verify against
+    real ``cv2.aruco.ArucoDetector`` output when Phase 3 wires up actual
+    detection.  This prototype only needs a *consistent* order among corner
+    index / local offset / observed pixel, not necessarily the final one.
+    """
+    half = size / 2.0
+    return np.array([
+        [-half, half, 0.0],
+        [half, half, 0.0],
+        [half, -half, 0.0],
+        [-half, -half, 0.0],
+    ], dtype=np.float64)
+
+
+def project_marker_corners(
+    rvec_m: np.ndarray,
+    tvec_m: np.ndarray,
+    local_corners: np.ndarray,
+    state: CamCalibState,
+) -> np.ndarray:
+    """Project a marker's corners into one camera.
+
+    *rvec_m*/*tvec_m* is the marker's own pose (marker-local -> world);
+    *state.R*/*state.t* is the camera's already-solved pose (world ->
+    camera), exactly as produced by the rest of ``run_calibration``.
+
+    Returns (4, 2) pixel coordinates.  No distortion is applied -- ``state.K``
+    is assumed to already be the undistorted matrix, matching the convention
+    the rest of this module uses for BA-space residuals (see
+    ``_undistort_control_obs``).
+    """
+    R_m, _ = cv2.Rodrigues(np.asarray(rvec_m, dtype=np.float64))
+    world_corners = (R_m @ local_corners.T).T + np.asarray(tvec_m, dtype=np.float64)
+    rvec_cam, _ = cv2.Rodrigues(state.R)
+    proj, _ = cv2.projectPoints(
+        world_corners, rvec_cam, state.t.reshape(3, 1), state.K, np.zeros(4)
+    )
+    return proj.reshape(-1, 2)
+
+
+def solve_marker_pose(
+    corner_obs: dict[str, np.ndarray],
+    states_by_id: dict[str, CamCalibState],
+    size: float,
+    initial_guess: tuple[np.ndarray, np.ndarray] | None = None,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Recover a rigid marker's world pose from per-camera corner observations.
+
+    Parameters
+    ----------
+    corner_obs:
+        ``video_id -> (4, 2)`` observed pixel coordinates for that camera,
+        in the same corner order as ``marker_local_corners()``.  Cameras
+        must already have a solved ``state.R`` / ``state.t`` (as if from
+        the rest of ``run_calibration``'s BA).
+    size:
+        Marker side length, in the same units as the camera poses'
+        translation vectors.
+    initial_guess:
+        Optional ``(rvec, tvec)`` to seed the optimiser.  Defaults to a
+        single-camera ``solvePnP`` against the first camera in
+        *corner_obs*, converted from that camera's frame into world frame.
+
+    Returns
+    -------
+    (rvec, tvec, rms_reprojection_error_px)
+        ``rvec``/``tvec`` map marker-local coordinates to world coordinates.
+
+    Raises
+    ------
+    ValueError
+        If fewer than 2 cameras (with a solved pose) have observations --
+        a single view cannot resolve a planar target's pose unambiguously.
+    """
+    local_corners = marker_local_corners(size)
+    cams = [
+        (vid, states_by_id[vid])
+        for vid in corner_obs
+        if vid in states_by_id and states_by_id[vid].R is not None
+    ]
+    if len(cams) < 2:
+        raise ValueError(
+            "solve_marker_pose needs >= 2 cameras with a solved pose and "
+            f"corner observations; got {len(cams)}"
+        )
+
+    if initial_guess is None:
+        vid0, state0 = cams[0]
+        obj_pts = local_corners.reshape(-1, 1, 3)
+        img_pts = corner_obs[vid0].reshape(-1, 1, 2).astype(np.float64)
+        ok, rvec_cf, tvec_cf = cv2.solvePnP(obj_pts, img_pts, state0.K, np.zeros(4))
+        if not ok:
+            raise RuntimeError(f"solve_marker_pose: initial PnP failed against {vid0}")
+        # rvec_cf/tvec_cf map marker-local -> camera0's own frame; convert to
+        # world frame via camera0's solved pose (world -> cam0):
+        #   world = R0^T @ (cam0 - t0)  =>  R_m_world = R0^T @ R_cf,
+        #   t_m_world = R0^T @ (tvec_cf - t0)
+        R_cf, _ = cv2.Rodrigues(rvec_cf)
+        R_m_world = state0.R.T @ R_cf
+        t_m_world = state0.R.T @ (tvec_cf.flatten() - state0.t.flatten())
+        rvec0 = cv2.Rodrigues(R_m_world)[0].flatten()
+        tvec0 = t_m_world
+    else:
+        rvec0, tvec0 = (np.asarray(v, dtype=np.float64) for v in initial_guess)
+
+    def residuals(x: np.ndarray) -> np.ndarray:
+        rvec_m, tvec_m = x[:3], x[3:]
+        parts = [
+            (project_marker_corners(rvec_m, tvec_m, local_corners, state)
+             - corner_obs[vid]).ravel()
+            for vid, state in cams
+        ]
+        return np.concatenate(parts)
+
+    x0 = np.concatenate([rvec0, tvec0])
+    result = least_squares(residuals, x0, method="lm")
+    rvec, tvec = result.x[:3], result.x[3:]
+    rms = float(np.sqrt(np.mean(result.fun ** 2)))
+    return rvec, tvec, rms

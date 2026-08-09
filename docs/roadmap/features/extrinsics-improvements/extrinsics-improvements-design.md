@@ -502,7 +502,131 @@ per-point, per-camera fine adjustment exactly as before.
   finding a shared moment, not a new control-point concept — it doesn't
   change `ObsPoint`, the file format, or anything solver-facing from §2.
 
+### 9. Multi-instrument world-frame anchoring (added after Phase 4 live testing)
+
+Live testing of Phase 4 (2026-08-09, see `status.md`'s fourth and fifth
+live-testing rounds) surfaced two structural risks in relying on a single
+flat ChArUco board as the *sole* mechanism for establishing the world
+coordinate frame, not just implementation bugs within that mechanism:
+
+1. **Spatial concentration bias.** A board that occupies a small region of
+   the capture volume gives the bundle adjustment a point cluster with
+   almost no depth variation and a narrow visual-angle spread. BA weights
+   every pixel residual equally, so it fits that tight cluster very well —
+   small angular errors in the recovered camera orientation are invisible
+   at the board's own distance, but get lever-armed into large positional
+   errors anywhere else in the working volume. This isn't a detection bug;
+   it's inherent to anchoring from one small, planar object, however well
+   it's detected.
+2. **Single point of failure.** World-frame anchoring depended on every
+   camera either detecting the board directly or chaining through one that
+   did. One camera's detection failing for a physical reason (surface
+   reflections, in the round that prompted this section) silently
+   propagated a flipped or disconnected pose through the whole chain, with
+   only a colored table cell as evidence — see §4's `init_poses_pnp` planar-
+   pose-ambiguity handling and its `C_z > 0` heuristic, which cannot recover
+   from this because it assumes a *correct* axis convention already exists,
+   not because the ambiguity-handling itself is broken.
+
+There is also a real-world portability constraint driving the shape of the
+fix: sessions frequently happen at remote locations (this project's stated
+use case is aikido, captured wherever a dojo/room is available), which rules
+out a large purpose-built calibration frame as the primary instrument — it
+has to travel well.
+
+**Revised strategy: three complementary anchoring tiers, all expressed
+through the `ControlPoint.world_xyz` fixed/free mechanism §2–§5 already
+define — no new BA residual type, only new sources of fixed points and one
+new way to seed `init_poses_pnp`.**
+
+#### Tier A — Portable non-planar calibration rig (primary anchor)
+
+A foldable, physically compact rig carrying ArUco markers across multiple
+**non-coplanar** faces (e.g. a tent/pyramid fold, a hinged multi-panel
+frame, an L-shape) — small enough to travel, opens to a rig geometry with
+real depth variation when in use.
+
+- Modeled with `cv2.aruco.Board` — the *generic* board class (distinct from
+  `CharucoBoard`), which accepts arbitrary per-marker 3D corner coordinates
+  rather than a flat grid. The rig's layout (each marker ID's four corners
+  in a rig-local frame) is a small, versionable config: `MarkerRigConfig`
+  (new, `fiducial_markers.py`) — `{rig_id, marker_corners: dict[marker_id,
+  4×xyz]}` — loaded from JSON the same way `save_control_points`/
+  `load_control_points` already version their file format. Measured once
+  from the rig's physical dimensions/fold geometry (a hinge-angle + panel-
+  size calculation) or itself established once via a precise one-off
+  multi-camera capture and reused thereafter; either way this is a one-time
+  cost per physical rig, not a per-session one.
+- `MarkerRigDetector` (new, `fiducial_markers.py`) wraps `ArucoDetector` +
+  `cv2.aruco.Board` + `solvePnP`, exposing `estimate_rig_pose(detections, K,
+  dist) -> (R, t) | None` — same shape as `CharucoDetector`'s
+  `estimate_board_pose`. Detecting only a subset of the rig's markers (folded
+  partway, or some faces occluded from a given camera) is expected and
+  handled the same way `CharucoDetector.detectBoard()` already tolerates
+  missing corners — `cv2.aruco.Board.matchImagePoints()` works from whichever
+  marker corners were actually found.
+- Because the marker set spans genuine depth, not a plane, there is **no
+  IPPE-style tilt/planar ambiguity to resolve at all** — this removes the
+  entire class of failure found in Phase 4 live testing (§4's "no positive-Z
+  solution" case), rather than adding another layer of disambiguation on top
+  of it.
+- Anchoring action generalizes §4's `anchor_from_charuco_board` into
+  `anchor_from_marker_rig`: same shape (rig-local corner `xyz` → world `xyz`
+  via the one solved rig pose → fixed `ControlPoint`s), different geometry
+  source. Sets scale + origin + axes from a single rig detection, same as
+  the board does today.
+- ChArUco is **not removed** — it remains available as a supplementary,
+  *non-anchoring* accuracy aid once the world frame is otherwise established
+  (its corner grid is denser than a handful of rig-marker corners, useful
+  for local refinement), and as a boardless-rig fallback for setups that
+  don't have the rig yet. What changes is that it is no longer the
+  recommended *sole* mechanism for fixing the world frame.
+
+#### Tier B — Scattered ArUco tags (redundancy / mid-session drift recovery)
+
+Ordinary size-known ArUco markers placed around the capture room (not part
+of the rig), meant to survive the whole session even if a camera gets
+bumped.
+
+- **Already mostly supported.** `solve_marker_groups()` (§5, shipped in
+  Phase 3) already recovers a size-known marker's rigid world pose as a
+  decoupled post-pass once cameras are solved from Tier A — no new solver
+  machinery needed to capture these tags' positions the first time.
+- **New, and small**: a "re-anchor one camera from known marker poses"
+  action, for the case a camera is physically moved mid-session and
+  shouldn't require redoing the whole rig-based calibration. Reuses
+  `init_poses_pnp`'s PnP-plus-planar-disambiguation logic (§4), seeded with
+  previously-solved tags' corners as fixed control points instead of the
+  board/rig. A single scattered tag is still a planar target, so the
+  existing `C_z`/IPPE handling in `init_poses_pnp` is directly relevant
+  here and should be *reused*, not reimplemented — this is the motivation
+  for factoring that disambiguation logic out of `init_poses_pnp` into a
+  small shared helper (`_resolve_planar_pnp_pose_ambiguity` or similar) that
+  both the existing per-session init path and this new single-camera
+  re-anchor path call.
+- **This directly closes a gap identified in live testing**: today,
+  `MarkerGroup.as_control_points()` (§3) always yields *free* points — there
+  is no path from "this marker was detected" to "treat it as a fixed point
+  at a known/previously-solved world position." Tier B requires exactly that
+  path: once a tag's pose is known (from the Tier-A-anchored solve), its
+  corners need to be constructible as fixed `ControlPoint`s the same way
+  `anchor_from_charuco_board` already does for board corners.
+- Persistence: `scene_fiducial_markers` (§6) already models this generically
+  enough (`marker_type` is a free-text enum) — no schema change needed to
+  store a scattered tag's solved pose there, or even a whole rig's solved
+  placement should that ever prove worth persisting (lower priority, since a
+  portable rig is expected to be repositioned fresh each session, unlike
+  wall-mounted tags in a venue used repeatedly).
+
+#### Tier C — Manual control points (unchanged)
+
+The existing "World position" panel (surveyed points, hand-clicked per
+camera, §2) remains available for ad hoc known points and needs no changes
+for this addendum.
+
 ## Phased implementation plan
+
+
 
 ### Phase 1 — Video frame source
 - Promote `_VideoPane` from `pair_scrubber.py` into a shared module
@@ -616,6 +740,45 @@ afterward without affecting the others (R2 unchanged); open a capture with
 no sync config and verify the global scrub bar simply doesn't appear, with
 the rest of the dialog behaving exactly as it does today.
 
+### Phase 8 — Portable non-planar calibration rig (§9, Tier A)
+
+- `MarkerRigConfig` + JSON loader (`fiducial_markers.py`), versioned like
+  `save_control_points`/`load_control_points`.
+- `MarkerRigDetector`: `ArucoDetector` + `cv2.aruco.Board` +
+  `estimate_rig_pose()`, tolerating partial marker visibility.
+- `anchor_from_marker_rig()`, mirroring `anchor_from_charuco_board()` (§4).
+- UI: rig config picker (or a small in-app rig-geometry editor, TBD — see
+  *Open questions*) + "Detect rig" per camera + "Set origin & axes from rig"
+  action, parallel to the existing ChArUco controls.
+
+**Validation:** using a physical rig with markers on ≥2 non-coplanar faces,
+verify a single camera's rig detection never exhibits the Phase-4 "no
+positive-Z solution" failure regardless of viewing angle (this is the
+concrete regression test for §9's stated motivation); verify solved rig
+corner spacing matches the rig's known geometry within tolerance; verify
+partial visibility (some faces occluded from a given camera) still produces
+a usable pose from whichever markers are visible.
+
+### Phase 9 — Scattered-tag redundancy + single-camera re-anchor (§9, Tier B)
+
+- Factor `init_poses_pnp`'s planar-pose-ambiguity handling (§4's `C_z`/IPPE
+  logic) out into a shared helper usable outside the full multi-camera init
+  path.
+- New: fixed-`ControlPoint` construction from an already-solved
+  `MarkerGroup`'s pose (closing the "detected marker → free points only"
+  gap identified in live testing), so a scattered tag with a known pose can
+  seed future solves the same way board/rig corners do.
+- New: single-camera re-anchor action — given one camera's fresh detection
+  of already-known-pose tags, recover just that camera's extrinsics without
+  re-running the full session calibration.
+
+**Validation:** after a Tier-A-anchored solve with several scattered tags
+visible, verify each tag's recovered pose persists correctly
+(`scene_fiducial_markers`); simulate a bumped camera (perturb its pose,
+re-detect the same tags from a fresh frame) and verify the single-camera
+re-anchor action recovers a pose close to the camera's original one, without
+touching any other camera's already-solved pose.
+
 ## Open questions
 
 - **Registry- vs. session-level scoping** for `scene_fiducial_markers` —
@@ -656,3 +819,27 @@ the rest of the dialog behaving exactly as it does today.
   consumer of `FiducialDetector` output rather than a redesign of it. Flagged
   here so that assumption stays visible to whoever picks up that future
   work, not just buried in §3/§6's prose.
+- **Physical rig geometry (§9, Tier A) is not yet designed.** This addendum
+  specifies the *software* shape (`cv2.aruco.Board`, `MarkerRigConfig`,
+  detection/anchoring flow) but not the fold pattern, panel count/size, or
+  marker placement of the physical object itself — that's an industrial-
+  design/fabrication question, not a software one, and is intentionally left
+  open here. Whatever shape gets built, the config format only needs each
+  marker's corner coordinates in a rig-local frame, so the software side
+  doesn't need to change once a physical design is chosen.
+- **Rig config authoring UX is open**: hand-editing a JSON of corner
+  coordinates is workable for a first version (matching how
+  `save_control_points` files are already hand-portable), but a rig with
+  more than a few markers may warrant a small geometry editor or a
+  from-measurements calculator (panel dimensions + fold angles → corner
+  coordinates) — revisit once a physical rig design exists to build against.
+- **`init_poses_pnp`'s planar-ambiguity helper extraction (§9, Tier B)**
+  should land as part of Phase 9, not deferred — both the existing
+  multi-camera init path and the new single-camera re-anchor path need
+  identical handling, and duplicating it would let them drift (one fixed,
+  one not) exactly the way this whole addendum is trying to avoid.
+- **Rig pose persistence (§9, Tier A) is deliberately deferred**, unlike
+  scattered tags (Tier B), since a portable rig is expected to be
+  repositioned fresh each session rather than left in place between
+  sessions. Revisit if real usage shows rigs staying put across multiple
+  sessions in the same venue.

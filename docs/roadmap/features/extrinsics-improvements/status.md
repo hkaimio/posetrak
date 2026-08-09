@@ -6,7 +6,9 @@ description = """
 Improvements to multi-camera extrinsic calibration: scrubbing calibration frames directly from \
 capture video instead of a pre-extracted PNG folder, per-control-point per-frame observations, \
 ArUco/ChArUco marker detection to anchor the coordinate system and provide a rigid marker-pose \
-bundle-adjustment residual, and persisted fiducial markers for recalibration reuse.
+bundle-adjustment residual, persisted fiducial markers for recalibration reuse, and (added after \
+Phase 4 live testing) a portable non-planar calibration rig plus scattered-tag redundancy as a \
+more robust alternative to anchoring the world frame from a single flat ChArUco board alone.
 """
 categories = ["calibration", "ui"]
 target_release = "TBD"
@@ -31,6 +33,23 @@ literally. Manual, real-footage UI testing has confirmed Phases 1-4 work
 in the live app (Phase 4 needed one settings fix along the way — see its
 notes). Phases 5-6 remain design-only.
 
+**Design addendum (2026-08-09, §9)**: live testing of Phase 4 surfaced two
+structural risks in anchoring the world frame from a single flat ChArUco
+board alone — spatial-concentration bias (a small board gives BA a point
+cluster with little depth variation, so small angular errors there become
+large positional errors elsewhere in the volume) and single-point-of-failure
+(one camera's board detection failing, e.g. from reflections, silently
+propagates a broken pose through anything chained to it — see the sixth
+live-testing round below). Combined with a hard portability requirement
+(sessions happen at remote locations, ruling out a large purpose-built
+frame), the design doc's §9 now adds a three-tier anchoring strategy: a
+portable non-planar calibration rig as the primary anchor (Phase 8), ArUco
+tags scattered around the room for mid-session drift/bump recovery (Phase
+9), and the existing manual control points, unchanged. ChArUco detection
+(Phase 4) is not removed — it remains available as a supplementary accuracy
+aid and boardless fallback, just no longer the recommended sole anchor.
+Phases 8-9 are design-only; not started.
+
 ## Phase summary
 
 | Phase | Description | Status |
@@ -42,6 +61,8 @@ notes). Phases 5-6 remain design-only.
 | 5 | `scene_fiducial_markers` persistence + recalibration reuse | ⬜ Not started |
 | 6 | AprilTag detector backend (extensibility proof) | ⬜ Not started |
 | 7 | Global timeline scrub (§8) — jump every camera to the same synced instant | ⬜ Not started (design added 2026-08-09 from UI-testing feedback) |
+| 8 | Portable non-planar calibration rig — primary world-frame anchor (§9, Tier A) | ⬜ Not started (design added 2026-08-09 from Phase 4 live-testing feedback) |
+| 9 | Scattered-tag redundancy + single-camera re-anchor (§9, Tier B) | ⬜ Not started (design added 2026-08-09 from Phase 4 live-testing feedback) |
 
 ## UI testing feedback (2026-08-09, Phases 1-2)
 
@@ -537,6 +558,51 @@ in `_on_detect_aruco_clicked` (finding 1 above) logs a warning and skips the
 exclusion rather than breaking plain ArUco detection over an unrelated
 board misconfiguration. Regression-tested in `test_charuco_detector.py` and
 `test_extrinsics_charuco_ui.py`.
+
+### Sixth live-testing round: one camera's board reflections broke the whole session's world frame — led to the §9 design addendum
+
+With the crash above fixed, the board detected cleanly across most cameras,
+but one camera (surface reflections off the board in that view) could not
+detect it. Two symptoms followed:
+
+- **Solved camera positions never had positive world Z**, even though every
+  camera is physically above the board. Root cause, diagnosed from
+  `init_poses_pnp`'s own logic (`extrinsics_solver.py:562-609`): the planar-
+  pose ambiguity `cv2.SOLVEPNP_IPPE` resolves is a *tilt* ambiguity (two
+  locally-optimal orientations, both physically in front of the camera), not
+  a full mirror-reflection through the plane — it does not guarantee one
+  candidate solution per side of the board. Both real, physically-valid
+  interpretations of a camera's view place it on the board's *actual*
+  physical side; if the world +Z axis convention established when anchoring
+  the board (the "Board face up" checkbox) doesn't match how the board was
+  actually lying, then *every* valid solution reports negative Z, because
+  the code's own `C_z > 0` preference assumes the axis convention is already
+  correct — it can only pick between genuinely ambiguous solutions, it
+  can't fix a wrong axis convention. The code comment describing this as
+  "two valid solutions (above/below floor)" is an oversimplification worth
+  fixing if this area gets touched again.
+- **The camera without its own board detection reported a huge aggregate
+  reprojection error while every individual control point looked fine.**
+  These are two different numbers: the per-camera summary line comes from
+  `compute_reprojection_errors()`, evaluated against SIFT-triangulated
+  points; the `CP:` figure (and the DEBUG "Per-CP reprojection errors after
+  BA" log block) comes from `compute_cp_errors()`, evaluated only against a
+  camera's *own* control-point observations. A camera with no board
+  detection of its own has no entries in the CP-error path at all — not a
+  good number, no number — so the CP-based view shows nothing wrong while
+  the SIFT-point view absorbs the full cost of that camera's pose having
+  been chained in from a neighbor with no board-anchored constraint of its
+  own to correct it.
+
+Both symptoms trace back to the same root cause: one camera lacked a direct,
+board-anchored pose and inherited an unconstrained one through chaining, and
+nothing surfaced this as clearly as it should have (a colored table cell,
+not an explicit warning). This — plus the pre-existing concern that a small
+board concentrates the calibration points in a tiny region of the capture
+volume, biasing the whole solve toward that region — is what prompted the
+design doc's new §9 (portable non-planar calibration rig as primary anchor +
+scattered ArUco tags for redundancy), added the same day. See the design
+doc for the full three-tier strategy; Phases 8-9 there are design-only.
 
 ### Not yet done
 

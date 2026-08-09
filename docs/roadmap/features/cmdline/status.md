@@ -1,3 +1,18 @@
++++
+name = "Posetrak CLI"
+status = "in_progress"
+progress_pct = 70
+description = """
+Click-based command-line interface consolidating the project's scattered entry points: \
+session/camera/skeleton/config management, detection and tracking runs, BVH/glTF/USD export, \
+and trial import/export for moving work between machines. Also the transport for the MCP \
+diagnostic server's write-capable workflow tools.
+"""
+categories = ["cli"]
+target_release = "TBD"
+last_updated = 2026-08-06
++++
+
 # Posetrak CLI — Implementation Status
 
 See [cli-design.md](cli-design.md) for the full requirements and design.

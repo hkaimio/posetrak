@@ -1,3 +1,18 @@
++++
+name = "Keypoint Editing"
+status = "in_progress"
+progress_pct = 90
+description = """
+Interactive per-keypoint correction UI for pose observations in the main posetrak viewer/editor: \
+crop-grid overlay editing with mouse/keyboard interaction, a timeline view with keyframe \
+interpolation and multi-keypoint selection, copy/paste, zoom/pan, and a keypoint-placement \
+toolbar. Lets a user fix bad detections before tracking without leaving the app.
+"""
+categories = ["ui", "detection-pipeline"]
+target_release = "TBD"
+last_updated = 2026-08-06
++++
+
 # Keypoint Editing — Implementation Status
 
 See:

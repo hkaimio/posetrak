@@ -1,3 +1,18 @@
++++
+name = "Extrinsics Calibration Improvements"
+status = "in_progress"
+progress_pct = 15
+description = """
+Improvements to multi-camera extrinsic calibration: scrubbing calibration frames directly from \
+capture video instead of a pre-extracted PNG folder, per-control-point per-frame observations, \
+ArUco/ChArUco marker detection to anchor the coordinate system and provide a rigid marker-pose \
+bundle-adjustment residual, and persisted fiducial markers for recalibration reuse.
+"""
+categories = ["calibration", "ui"]
+target_release = "TBD"
+last_updated = 2026-08-06
++++
+
 # Extrinsics Calibration Improvements — Implementation Status
 
 See [extrinsics-improvements-design.md](extrinsics-improvements-design.md) for

@@ -1420,10 +1420,14 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         layout = QVBoxLayout(group)
 
         hint = QLabel(
-            "Click \"Detect ChArUco\" under a camera to find the board in "
-            "its current frame. Once detected in at least one camera, "
-            "\"Set origin & axes\" fixes the world coordinate system to "
-            "the board's own geometry -- scale, origin, and axes together."
+            "Click \"Detect ChArUco\" under EACH camera that can see the "
+            "board (scrub to a frame where it's visible first) -- a camera "
+            "only gets usable world-position points from cameras where you "
+            "actually clicked Detect, same as a manual control point. "
+            "\"Set origin & axes\" then fixes the world coordinate system "
+            "from whichever detections exist so far -- scale, origin, and "
+            "axes together -- but only cameras with their own detection "
+            "will solve from it."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666; font-size: 10px;")
@@ -1935,6 +1939,25 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         frame_idx = self._current_frame_for(vid)
         detections = detector.detect(state.image, video_id=vid, frame_idx=frame_idx)
 
+        # A ChArUco board's own markers are ordinary ArUco markers of the
+        # same dictionary, so "Detect ArUco" would otherwise also decode
+        # every one of the board's ~N sub-markers as if they were separate
+        # standalone markers, flooding the marker table. Exclude them only
+        # when there is real evidence a board is actually in play in this
+        # session (self._charuco_detections non-empty, i.e. "Detect
+        # ChArUco" has genuinely found something) *and* the two panels
+        # share a dictionary -- gating on detections-so-far, not just a
+        # dictionary-combo match, avoids wrongly excluding low-numbered
+        # ids just because both panels happen to still be at their default
+        # dictionary with no ChArUco board actually used at all (a numeric
+        # id collision with an *unused* board config is coincidental, not
+        # the same physical marker).
+        n_before = len(detections)
+        if self._charuco_detections and dictionary == self._charuco_dict_combo.currentText():
+            board_ids = self._make_charuco_detector().expected_marker_ids()
+            detections = [d for d in detections if d.marker_id not in board_ids]
+        n_excluded = n_before - len(detections)
+
         # Re-resolve each detection's size against any existing per-marker
         # override *before* merging, so a marker already given a custom
         # size in the table keeps it rather than reverting to the default.
@@ -1944,9 +1967,10 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         self._refresh_marker_table()
         self._refresh_markers()
+        excl_str = f" ({n_excluded} belonging to the ChArUco board excluded)" if n_excluded else ""
         self._status_label.setText(
             f"Detected {len(detections)} ArUco marker(s) in "
-            f"{self._states_by_id[vid].label} (frame {frame_idx})."
+            f"{self._states_by_id[vid].label} (frame {frame_idx}){excl_str}."
         )
 
     def _on_clear_markers(self) -> None:
@@ -2034,10 +2058,22 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._refresh_charuco_status()
         self._refresh_markers()
         n_corners = len(self._charuco_control_points())
-        self._status_label.setText(
+        n_detected = len(self._charuco_detections)
+        n_total = len(self._states)
+        msg = (
             f"World coordinate system anchored from the ChArUco board "
-            f"({n_corners} corners across {len(self._charuco_detections)} camera(s))."
+            f"({n_corners} corners across {n_detected}/{n_total} camera(s))."
         )
+        if n_detected < n_total:
+            missing = [
+                s.label for s in self._states if s.video_id not in self._charuco_detections
+            ]
+            msg += (
+                f" Cameras with NO detection yet ({', '.join(missing)}) will stay "
+                f"unsolved from this board alone -- run \"Detect ChArUco\" under "
+                f"them too, or rely on SIFT/other control points for them."
+            )
+        self._status_label.setText(msg)
 
     def _on_clear_charuco(self) -> None:
         self._charuco_detections.clear()
@@ -2050,11 +2086,23 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             self._charuco_status_label.setText("No board detected yet.")
             return
         n_corners = len(self._charuco_control_points())
+        n_detected = len(self._charuco_detections)
+        n_total = len(self._states)
         state_str = "anchored (fixed world coordinates)" if self._charuco_anchored else "detected, not yet anchored"
-        self._charuco_status_label.setText(
+        text = (
             f"Board {state_str}: {n_corners} corner(s) across "
-            f"{len(self._charuco_detections)} camera(s)."
+            f"{n_detected}/{n_total} camera(s)."
         )
+        if n_detected < n_total:
+            missing = [
+                s.label for s in self._states if s.video_id not in self._charuco_detections
+            ]
+            text += (
+                f" No detection yet in: {', '.join(missing)} -- those camera(s) "
+                f"will NOT solve from this board until you run \"Detect ChArUco\" "
+                f"under them too."
+            )
+        self._charuco_status_label.setText(text)
 
     def _charuco_control_points(self) -> list[ControlPoint]:
         """Every detected board corner as a ControlPoint -- free until

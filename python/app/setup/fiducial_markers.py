@@ -246,6 +246,16 @@ class CharucoDetector:
     def board_corner_local_xyz(self, corner_id: int) -> np.ndarray:
         return self._board.getChessboardCorners()[corner_id].copy()
 
+    def expected_marker_ids(self) -> set[str]:
+        """This board's own ArUco marker ids (as ``ArucoDetector``-style
+        string ids), for callers that want to tell a board's own markers
+        apart from unrelated ArUco markers sharing the same dictionary --
+        see ``page_extrinsics.py``'s "Detect ArUco" handler, which excludes
+        these so the board's ~44 sub-markers don't flood the plain-ArUco
+        marker list every time the board is also in frame.
+        """
+        return {str(int(i)) for i in self._board.getIds()}
+
     def detect(
         self, image: np.ndarray, video_id: str = "", frame_idx: int = 0
     ) -> CharucoBoardDetection | None:

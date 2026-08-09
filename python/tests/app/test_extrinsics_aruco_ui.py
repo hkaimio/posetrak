@@ -294,3 +294,72 @@ def test_min_marker_size_reaches_arucodetector(qapp, fake_conn, monkeypatch) -> 
         assert captured["min_marker_perimeter_rate"] == pytest.approx(0.025)
     finally:
         dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# ChArUco board markers double-counted as plain ArUco markers -- raised
+# directly (2026-08-09): a ChArUco board's own markers are ordinary ArUco
+# markers of the same dictionary, so "Detect ArUco" would otherwise also
+# decode every one of the board's own sub-markers as if they were separate
+# standalone markers.
+# ---------------------------------------------------------------------------
+
+
+def _fake_charuco_detection() -> "CharucoBoardDetection":
+    from app.setup.fiducial_markers import CharucoBoardDetection, CharucoCornerObs
+    import numpy as _np
+    return CharucoBoardDetection(corners=[
+        CharucoCornerObs(corner_id=0, video_id="cam_B", frame_idx=0, px=1.0, py=1.0,
+                          local_xyz=_np.zeros(3))
+    ])
+
+
+def test_aruco_marker_not_excluded_when_charuco_never_used(qapp, fake_conn) -> None:
+    """A fresh dialog's ArUco and ChArUco panels default to the same
+    dictionary -- that alone must not exclude anything, since the user may
+    never touch the ChArUco panel at all."""
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        assert dlg._aruco_dict_combo.currentText() == dlg._charuco_dict_combo.currentText()
+        assert not dlg._charuco_detections  # never used
+
+        dlg._on_detect_aruco_clicked("cam_A")
+        assert "3" in dlg._marker_groups
+    finally:
+        dlg.done(0)
+
+
+def test_aruco_marker_excluded_once_matching_board_detected(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        # Same default dictionary on both panels, and evidence the board
+        # has genuinely been used (a real detection recorded somewhere).
+        dlg._charuco_detections["cam_B"] = _fake_charuco_detection()
+
+        dlg._on_detect_aruco_clicked("cam_A")
+
+        assert "3" not in dlg._marker_groups
+        assert "belonging to the ChArUco board excluded" in dlg._status_label.text()
+    finally:
+        dlg.done(0)
+
+
+def test_aruco_marker_not_excluded_when_dictionaries_differ(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._charuco_detections["cam_B"] = _fake_charuco_detection()
+        # Point the ChArUco panel at a different dictionary than ArUco's.
+        other = next(
+            i for i in range(dlg._charuco_dict_combo.count())
+            if dlg._charuco_dict_combo.itemText(i) != dlg._aruco_dict_combo.currentText()
+        )
+        dlg._charuco_dict_combo.setCurrentIndex(other)
+
+        dlg._on_detect_aruco_clicked("cam_A")
+
+        assert "3" in dlg._marker_groups
+    finally:
+        dlg.done(0)

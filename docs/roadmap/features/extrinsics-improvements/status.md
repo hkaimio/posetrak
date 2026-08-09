@@ -27,9 +27,9 @@ Phases 1-4 implemented (2026-08-09), grounded against the pre-existing
 significant, prominently-flagged scoping deviation from the design doc's
 section 5, and Phase 4 with a smaller one from section 4 — see each
 phase's notes below before assuming either matches the design doc
-literally. Manual, real-footage UI testing (see "UI testing feedback"
-below) has confirmed Phases 1-3 work in the live app; Phase 4 has not yet
-had a live pass. Phases 5-6 remain design-only.
+literally. Manual, real-footage UI testing has confirmed Phases 1-4 work
+in the live app (Phase 4 needed one settings fix along the way — see its
+notes). Phases 5-6 remain design-only.
 
 ## Phase summary
 
@@ -38,7 +38,7 @@ had a live pass. Phases 5-6 remain design-only.
 | 1 | Video frame source: per-camera random-seek reads, scrub UI replacing PNG-directory loading | ✅ Done, live-tested |
 | 2 | Per-control-point, per-frame observations (`ObsPoint`, file format v2) | ✅ Done, live-tested |
 | 3 | ArUco marker detection + rigid marker-pose BA residual | ✅ Done, live-tested (detection confirmed working) — see "Phase 3 notes" for a scoping deviation (decoupled post-pass, not a joint BA parameter block) |
-| 4 | ChArUco board detection + coordinate-system anchoring | ✅ Done, not yet live-tested — see "Phase 4 notes" for a scoping deviation (no solvePnP / reference camera needed) |
+| 4 | ChArUco board detection + coordinate-system anchoring | ✅ Done, live-tested (detection confirmed working after a settings fix, see "Phase 4 notes") — also see there for a scoping deviation (no solvePnP / reference camera needed) |
 | 5 | `scene_fiducial_markers` persistence + recalibration reuse | ⬜ Not started |
 | 6 | AprilTag detector backend (extensibility proof) | ⬜ Not started |
 | 7 | Global timeline scrub (§8) — jump every camera to the same synced instant | ⬜ Not started (design added 2026-08-09 from UI-testing feedback) |
@@ -329,12 +329,41 @@ dialog-level) covers the same detect/anchor/clear flow through the actual
 UI methods, plus overlay drawing and a spy-based confirmation that Match
 & Solve forwards the anchored corners.
 
+### Live-test finding, fixed (2026-08-09): board never detected
+
+First live pass found the board undetected from every camera. Diagnosed
+against a cropped photo of the actual printed board (not a guess) —
+neither camera footage nor board size (small board, plausible initial
+suspicion) was the cause. Two silent settings gotchas, both fixed in
+`setup: fix ChArUco detection failing silently on real (calib.io) boards`:
+
+- **`squares_x`/`squares_y` axis mismatch**: OpenCV's own axis convention
+  didn't match how the board generator (calib.io) labels rows vs. columns
+  on the page — this board is `(11, 8)` in OpenCV's terms, not the `8x11`
+  the generator's own page implied.
+- **Missing legacy-pattern support**: `CharucoDetector` had no way to
+  request OpenCV's pre-4.7 ChArUco marker-placement convention, which
+  calib.io's generator (and other older tools) still uses. Added a
+  `legacy_pattern` parameter plus a dialog checkbox
+  ("Legacy pattern (calib.io / older boards)").
+
+Both are silent failures — ArUco marker detection succeeds regardless
+(26/26 markers found in the diagnostic image every time), only chessboard-
+corner interpolation depends on getting both settings right, so nothing
+about the failure *looked* like a settings problem. Now documented
+directly on `CharucoDetector`'s docstring and the "no board detected"
+status message, and locked in with `python/tests/data/
+charuco_board_sample.png` (a real cropped photo of the board) plus
+regression tests proving both the correct settings work and either
+gotcha alone reproduces the exact failure found live.
+
 ### Not yet done
 
-- No live UI test yet against a real printed/displayed ChArUco board —
-  everything above is unit/integration-tested against synthetic data and
-  rendered test images only. Flagged the same way Phase 3's ArUco
-  detection was, before its own live test confirmed it working.
+- Camera-pose accuracy hasn't been validated against real multi-camera
+  footage yet — detection now works, but the design doc's stated Phase 4
+  validation criterion (compare reprojection error against a manual-CP
+  baseline, verify the anchor reproduces the board's known square size)
+  is still open.
 - No test yet of the "detected but not anchored" board corners actually
   improving camera-pose solving via the free-CP path (mirrors Phase 3's
   analogous, already-covered case for unknown-size ArUco markers — the
@@ -360,6 +389,8 @@ UI methods, plus overlay drawing and a spy-based confirmation that Match
   to become a true joint BA parameter block to meaningfully improve camera
   pose accuracy (not just produce their own clean pose after the fact).
   Only real-footage testing can answer this.
-- **New from Phase 4**: no live UI test yet against a real printed/displayed
-  ChArUco board (see "Phase 4 notes" above) — the mechanism is unit- and
-  integration-tested against synthetic/rendered data only.
+- ~~New from Phase 4: no live UI test yet against a real printed/displayed
+  ChArUco board.~~ Done — detection confirmed live (2026-08-09) after
+  fixing the axis-order/legacy-pattern settings gotchas (see "Phase 4
+  notes" above). Camera-pose accuracy against real multi-camera footage
+  is still open.

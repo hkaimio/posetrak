@@ -117,13 +117,17 @@ class ArucoDetector:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
         corners, ids, rejected = self._cv_detector.detectMarkers(gray)
         found_ids = [] if ids is None else sorted(int(i) for i in ids.ravel())
+        duplicate_ids = sorted({i for i in found_ids if found_ids.count(i) > 1})
         _log.info(
             "ArucoDetector.detect video_id=%r frame_idx=%d image_shape=%s "
             "dictionary=%s min_marker_perimeter_rate=%s -> %d marker(s) found "
-            "%s (%d rejected candidates)",
+            "%s (%d rejected candidates)%s",
             video_id, frame_idx, gray.shape, self.dictionary,
             self.min_marker_perimeter_rate, len(found_ids), found_ids,
             0 if rejected is None else len(rejected),
+            f" [DUPLICATE ids: {duplicate_ids} -- same id decoded from more than one "
+            f"candidate quad; if min_marker_perimeter_rate is very low this is "
+            f"often a false positive, not two real markers]" if duplicate_ids else "",
         )
         detections: list[FiducialDetection] = []
         if ids is None:
@@ -263,17 +267,19 @@ class CharucoDetector:
         found_marker_ids = [] if marker_ids is None else sorted(int(i) for i in marker_ids.ravel())
         expected_ids = sorted(int(i) for i in self._board.getIds())
         n_corners = 0 if charuco_ids is None else len(charuco_ids)
+        duplicate_ids = sorted({i for i in found_marker_ids if found_marker_ids.count(i) > 1})
 
         _log.info(
             "CharucoDetector.detect video_id=%r frame_idx=%d image_shape=%s "
             "dictionary=%s squares=(%d,%d) square_length=%.4f marker_length=%.4f "
             "legacy_pattern=%s min_marker_perimeter_rate=%s "
-            "-> %d/%d expected ArUco marker(s) found %s, %d charuco corner(s)",
+            "-> %d/%d expected ArUco marker(s) found %s, %d charuco corner(s)%s",
             video_id, frame_idx, gray.shape,
             self.dictionary, self.squares_x, self.squares_y,
             self.square_length, self.marker_length,
             self.legacy_pattern, self.min_marker_perimeter_rate,
             len(found_marker_ids), len(expected_ids), found_marker_ids, n_corners,
+            f" [DUPLICATE ids: {duplicate_ids}]" if duplicate_ids else "",
         )
 
         if charuco_ids is None or len(charuco_ids) < 4:
@@ -281,20 +287,30 @@ class CharucoDetector:
             _log.warning(
                 "CharucoDetector.detect: only %d charuco corner(s) (need >= 4) for "
                 "video_id=%r frame_idx=%d. Found %d ArUco marker(s) %s of this "
-                "board's %d expected ids %s%s. If markers are found but few/no "
+                "board's %d expected ids %s%s%s. If markers are found but few/no "
                 "corners come out: (a) legacy_pattern may still be wrong for this "
                 "board -- a wrong pattern maps found marker ids to the wrong grid "
                 "positions, so detectBoard() can't interpolate any corners even "
                 "though the markers themselves decoded fine; (b) the found markers "
                 "may be too few or too scattered/non-adjacent for interpolation "
                 "(cv2.aruco.CharucoParameters.minMarkers, default 2, requires "
-                "neighbouring markers around a corner); (c) try lowering "
-                "min_marker_perimeter_rate further if few markers were found at all.",
+                "neighbouring markers around a corner); (c) if min_marker_perimeter_rate "
+                "is already low, try RAISING it instead -- going too low is not "
+                "always better, it can flood detection with false-positive/"
+                "misdecoded markers (see the duplicate-id warning above, if any) "
+                "that confuse corner interpolation as badly as finding too few "
+                "markers does; there is usually a narrow working band, not a "
+                "one-directional dial.",
                 n_corners, video_id, frame_idx, len(found_marker_ids), found_marker_ids,
                 len(expected_ids), expected_ids,
                 f" (found {len(unexpected)} id(s) NOT belonging to this board: {unexpected}"
                 f" -- likely a different marker/board sharing this dictionary, "
                 f"not this board's own markers)" if unexpected else "",
+                f" (DUPLICATE ids decoded more than once: {duplicate_ids} -- a strong "
+                f"sign min_marker_perimeter_rate is set too low: the same physical "
+                f"marker, or scene noise, is being picked up multiple times as "
+                f"different candidate quads that all decode to the same id, which "
+                f"confuses detectBoard()'s corner interpolation)" if duplicate_ids else "",
             )
             return None
         if self._board.checkCharucoCornersCollinear(charuco_ids):

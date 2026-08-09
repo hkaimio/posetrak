@@ -1378,7 +1378,12 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             "frame's larger dimension. OpenCV's own default is 3%, which "
             "misses markers photographed from across a room in a full "
             "4K/similar frame -- lower this if \"Detect\" finds nothing "
-            "despite the marker clearly being visible."
+            "despite the marker clearly being visible.\n\n"
+            "Going too low is not always better: past a point it starts "
+            "accepting false-positive/misdecoded quads, which can break "
+            "detection just as badly as too few real markers. If the log "
+            "shows the same marker id decoded more than once, you've gone "
+            "too low -- raise this back up rather than lowering it further."
         )
         min_size_row.addWidget(self._aruco_min_marker_pct_spin, 1)
 
@@ -1484,7 +1489,14 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             "frame's larger dimension. OpenCV's own default is 3%, which "
             "misses a board photographed from across a room in a full "
             "4K/similar frame -- lower this if \"Detect ChArUco\" finds "
-            "nothing despite the board clearly being visible."
+            "nothing despite the board clearly being visible.\n\n"
+            "Going too low is not always better: past a point it starts "
+            "accepting false-positive/misdecoded quads, which breaks corner "
+            "interpolation just as badly as too few real markers -- often "
+            "with MORE markers found overall but still zero corners. If the "
+            "log shows the same marker id decoded more than once, you've "
+            "gone too low; raise this back up rather than lowering it "
+            "further. There is usually only a narrow working range."
         )
         min_size_row.addWidget(self._charuco_min_marker_pct_spin, 1)
 
@@ -1994,8 +2006,11 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             self._status_label.setText(
                 f"No ChArUco board detected in {state.label} (frame {frame_idx}). "
                 f"If the board is definitely visible, try swapping Squares X/Y, "
-                f"toggling \"Legacy pattern\", or lowering \"Min marker size\" "
-                f"(small in a full-resolution frame) before suspecting the board itself."
+                f"toggling \"Legacy pattern\", or adjusting \"Min marker size\" "
+                f"(small in a full-resolution frame) before suspecting the board "
+                f"itself -- see the app log for exactly which markers were found. "
+                f"Note: lowering \"Min marker size\" too far can also break "
+                f"detection (false-positive markers), not just too high a value."
             )
             return
 

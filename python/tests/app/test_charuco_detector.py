@@ -8,6 +8,7 @@ deviation from that section's original solvePnP-based phrasing.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import cv2
@@ -388,3 +389,25 @@ class TestBoardSmallInFullFrame:
         lowered = ArucoDetector(dictionary="DICT_4X4_50", min_marker_perimeter_rate=0.01)
 
         assert len(lowered.detect(img)) > len(default.detect(img))
+
+    def test_min_marker_perimeter_rate_has_a_narrow_working_band_not_a_direction(self, caplog):
+        """Found via a third live-testing round (2026-08-09): going too low
+        is not simply "safer" than OpenCV's too-high default. Below the
+        board's own working band, cv2 starts accepting false-positive/
+        misdecoded quads -- MORE raw marker detections than the working
+        rate, yet still zero corners, because the same id gets decoded
+        from more than one candidate quad, which confuses detectBoard()'s
+        interpolation. This is a real, reproduced-on-our-own-fixture
+        instance of exactly that shape of failure, not a hypothetical."""
+        img = self._load()
+        working = CharucoDetector(**self.CORRECT_KWARGS, min_marker_perimeter_rate=0.01)
+        too_low = CharucoDetector(**self.CORRECT_KWARGS, min_marker_perimeter_rate=0.005)
+
+        working_detection = working.detect(img)
+        assert working_detection is not None
+        assert len(working_detection.corners) >= 8
+
+        with caplog.at_level(logging.WARNING, logger="app.setup.fiducial_markers"):
+            too_low_detection = too_low.detect(img)
+        assert too_low_detection is None
+        assert "DUPLICATE" in caplog.text

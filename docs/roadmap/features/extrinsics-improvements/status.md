@@ -394,6 +394,35 @@ pattern) *and* marker-size-vs-frame-resolution as separate possible
 causes, since either alone produces the identical symptom (zero
 detections, no error).
 
+### Third live-testing round: still failing with both fixes applied — added diagnostic logging instead of guessing further
+
+With both settings fixes above confirmed correct and applied, detection
+*still* failed on real footage — but this time `ArucoDetector` found
+*some* of the board's own markers while `CharucoDetector` still produced
+zero corners, a symptom shape the first two fixes can't distinguish from
+"still a wrong setting, just a different one." Debugging further by proxy
+(screenshots, back-and-forth round trips) doesn't scale, so — requested
+directly and implemented in `setup: add diagnostic logging to (Ch)ArUco
+detection` — `CharucoDetector.detect()`/`ArucoDetector.detect()` now log,
+on every call, the exact configuration used and how many of the board's
+own expected marker ids were actually found (vs. how many exist); when
+about to return `None`, a `WARNING` additionally lists any found ids that
+do **not** belong to this board at all (a direct, mechanical check for
+"a stray marker from elsewhere in the scene, sharing this dictionary, is
+confusing detection" — plausible here, since the live-test room has
+several other ArUco markers visible in frame using this same
+`DICT_4X4_50`) plus the concrete next things to check. Both log at
+INFO/WARNING unconditionally (not behind a verbose flag) since detection
+runs a handful of times per session, not per video frame. Already
+verified against the real problem frame — `app.setup` (and its children)
+are already bumped to `DEBUG` in `main.py`, so this needed no logging
+configuration changes to actually surface in the running app's console
+and `logs/posetrak-setup.log`.
+
+**Root cause of this third round is not yet identified** — the logging
+exists so the next live attempt's actual log output can pin it down
+directly instead of another round of remote guessing.
+
 ### Not yet done
 
 - Camera-pose accuracy hasn't been validated against real multi-camera

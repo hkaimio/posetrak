@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -121,6 +122,32 @@ _ARUCO_MARKER_COLOR = QColor(255, 200, 40)
 # Cyan, distinct from both _CP_COLORS and _ARUCO_MARKER_COLOR, for drawn
 # ChArUco board corner overlays.
 _CHARUCO_CORNER_COLOR = QColor(0, 210, 230)
+
+
+def _set_layout_items_visible(layout, visible: bool) -> None:
+    """Recursively show/hide every widget in *layout*, including nested
+    row layouts (QHBoxLayout rows built with addLayout()). Used by
+    _make_collapsible() below."""
+    for i in range(layout.count()):
+        item = layout.itemAt(i)
+        w = item.widget()
+        if w is not None:
+            w.setVisible(visible)
+        elif item.layout() is not None:
+            _set_layout_items_visible(item.layout(), visible)
+
+
+def _make_collapsible(group: QGroupBox) -> None:
+    """Turn *group* into a collapsible section: clicking its title
+    checkbox shows/hides its content while keeping the frame and title
+    visible. Added after UI testing found the right-hand panel too
+    crowded once the ArUco/ChArUco sections joined the existing Control
+    Points/World Position/Camera Intrinsics ones (2026-08-09)."""
+    group.setCheckable(True)
+    group.setChecked(True)
+    layout = group.layout()
+    group.toggled.connect(lambda checked: _set_layout_items_visible(layout, checked))
+
 
 # ---------------------------------------------------------------------------
 # Label-matching helpers (mirrors calibrate_from_exports.py — kept in sync)
@@ -1172,7 +1199,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(cam_scroll)
         splitter.addWidget(cp_panel)
-        splitter.setSizes([900, 280])
+        splitter.setSizes([900, 300])
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
 
@@ -1319,14 +1346,32 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         xyz_layout.addLayout(xyz_form)
         xyz_layout.addWidget(self._xyz_apply_btn)
 
+        aruco_group = self._build_aruco_group()
+        charuco_group = self._build_charuco_group()
+        intrinsics_group = self._build_intrinsics_group()
+        # Collapsible: each of these three sections got real complaints
+        # about not fitting (UI testing, 2026-08-09) once the panel had to
+        # hold all of them at once alongside Control Points/World Position.
+        for grp in (aruco_group, charuco_group, intrinsics_group):
+            _make_collapsible(grp)
+
         v = QVBoxLayout(panel)
         v.setContentsMargins(0, 0, 0, 0)
         v.addWidget(cp_group, 1)
         v.addWidget(xyz_group)
-        v.addWidget(self._build_aruco_group())
-        v.addWidget(self._build_charuco_group())
-        v.addWidget(self._build_intrinsics_group())
-        return panel
+        v.addWidget(aruco_group)
+        v.addWidget(charuco_group)
+        v.addWidget(intrinsics_group)
+
+        # Vertical scroll fallback: collapsing sections covers most cases,
+        # but if everything is expanded at once on a short window, scroll
+        # rather than silently clip/squish widgets.
+        scroll = QScrollArea()
+        scroll.setWidget(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFixedWidth(300)
+        return scroll
 
     def _build_aruco_group(self) -> QGroupBox:
         """ArUco marker detection settings + detected-marker list (Phase 3).
@@ -1528,17 +1573,26 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         return group
 
     def _build_intrinsics_group(self) -> QGroupBox:
+        """One block per camera, stacked over 3 lines rather than a single
+        wide row -- a single-row layout (label + combo + 3 checkboxes)
+        made the intrinsics-calibration combo too narrow to read its own
+        text once the panel's fixed width had to also fit the ArUco/
+        ChArUco sections (found via UI testing, 2026-08-09)."""
         group = QGroupBox("Camera Intrinsics")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(2)
+        layout.setSpacing(6)
 
-        for state in self._states:
-            row = QHBoxLayout()
-            row.setSpacing(4)
-            lbl = QLabel(state.label)
-            lbl.setFixedWidth(80)
+        for i, state in enumerate(self._states):
+            if i > 0:
+                sep = QFrame()
+                sep.setFrameShape(QFrame.Shape.HLine)
+                sep.setFrameShadow(QFrame.Shadow.Sunken)
+                layout.addWidget(sep)
+
+            lbl = QLabel(f"<b>{state.label}</b>")
             lbl.setToolTip(state.label)
+
             combo = QComboBox()
             combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self._populate_intrinsics_combo(state, combo)
@@ -1547,6 +1601,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 lambda _idx, v=vid, c=combo: self._on_intrinsics_changed(v, c.currentData())
             )
             self._intrinsics_combos[state.video_id] = combo
+
             refine_cb = QCheckBox("Refine")
             refine_cb.setToolTip("Optimise fx/fy for this camera during bundle adjustment")
             refine_cb.toggled.connect(
@@ -1573,12 +1628,16 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                     else self._excluded_cameras.discard(v)
                 )
             )
-            row.addWidget(lbl)
-            row.addWidget(combo, 1)
-            row.addWidget(refine_cb)
-            row.addWidget(lock_cb)
-            row.addWidget(excl_cb)
-            layout.addLayout(row)
+            checkbox_row = QHBoxLayout()
+            checkbox_row.setSpacing(8)
+            checkbox_row.addWidget(refine_cb)
+            checkbox_row.addWidget(lock_cb)
+            checkbox_row.addWidget(excl_cb)
+            checkbox_row.addStretch()
+
+            layout.addWidget(lbl)
+            layout.addWidget(combo)
+            layout.addLayout(checkbox_row)
 
         return group
 

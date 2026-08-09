@@ -519,6 +519,25 @@ on its own line, then the three checkboxes on a third line), with a
 `test_extrinsics_panel_layout.py` (collapsibility, content hiding, scroll
 wrapper presence, un-squeezed combo, separator count).
 
+### Fifth live-testing round: opaque crash on an invalid board size (square_length <= marker_length)
+
+Trying `_on_detect_charuco_clicked` against a newly-configured board (larger
+board, new dimensions typed in) crashed with `cv2.error` / `SystemError:
+<class 'cv2.aruco.CharucoBoard'> returned a result with an exception set` —
+`cv2.aruco.CharucoBoard`'s own constructor enforces `square_length >
+marker_length` (and `squares_x/y > 1`), but via a C++ assertion that
+surfaces to Python as an opaque `SystemError`, not a catchable `ValueError`,
+and definitely not something to show a user. `CharucoDetector.__init__` in
+`fiducial_markers.py` now validates these up front and raises a plain
+`ValueError` with an actionable message ("square_length must be greater
+than marker_length -- got these two swapped?"). Both `page_extrinsics.py`
+call sites now handle it: `_on_detect_charuco_clicked` shows the message via
+`QMessageBox.warning` instead of crashing; the ArUco/ChArUco overlap filter
+in `_on_detect_aruco_clicked` (finding 1 above) logs a warning and skips the
+exclusion rather than breaking plain ArUco detection over an unrelated
+board misconfiguration. Regression-tested in `test_charuco_detector.py` and
+`test_extrinsics_charuco_ui.py`.
+
 ### Not yet done
 
 - Camera-pose accuracy hasn't been validated against real multi-camera

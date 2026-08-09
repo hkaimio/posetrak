@@ -2013,8 +2013,20 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # the same physical marker).
         n_before = len(detections)
         if self._charuco_detections and dictionary == self._charuco_dict_combo.currentText():
-            board_ids = self._make_charuco_detector().expected_marker_ids()
-            detections = [d for d in detections if d.marker_id not in board_ids]
+            try:
+                board_ids = self._make_charuco_detector().expected_marker_ids()
+            except ValueError:
+                # An invalid ChArUco board config (e.g. square_length <=
+                # marker_length) shouldn't break plain ArUco detection --
+                # this exclusion is a convenience, not the primary action
+                # here. _on_detect_charuco_clicked() surfaces the same
+                # error to the user when it's actually relevant.
+                _log.warning(
+                    "Skipping ChArUco marker-overlap exclusion: current "
+                    "ChArUco board settings are invalid", exc_info=True
+                )
+            else:
+                detections = [d for d in detections if d.marker_id not in board_ids]
         n_excluded = n_before - len(detections)
 
         # Re-resolve each detection's size against any existing per-marker
@@ -2084,7 +2096,12 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             return
 
         frame_idx = self._current_frame_for(vid)
-        detection = self._make_charuco_detector().detect(state.image, video_id=vid, frame_idx=frame_idx)
+        try:
+            detector = self._make_charuco_detector()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Detect ChArUco", f"Invalid ChArUco board settings: {exc}")
+            return
+        detection = detector.detect(state.image, video_id=vid, frame_idx=frame_idx)
         if detection is None:
             self._status_label.setText(
                 f"No ChArUco board detected in {state.label} (frame {frame_idx}). "

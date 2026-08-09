@@ -225,6 +225,25 @@ class CharucoDetector:
     ) -> None:
         if dictionary not in ARUCO_DICTIONARIES:
             raise ValueError(f"Unknown ArUco dictionary: {dictionary!r}")
+        # cv2.aruco.CharucoBoard's own constructor enforces these same
+        # constraints, but does so via a C++ assertion that surfaces to
+        # Python as an opaque `SystemError: ... returned a result with an
+        # exception set` -- not the ValueError callers would normally
+        # catch, and not a message a UI can show a user. Check up front so
+        # a bad size (most commonly: square/marker length swapped or equal)
+        # fails with something actionable instead.
+        if squares_x <= 1 or squares_y <= 1:
+            raise ValueError(
+                f"squares_x and squares_y must each be > 1, got "
+                f"({squares_x}, {squares_y})"
+            )
+        if marker_length <= 0:
+            raise ValueError(f"marker_length must be > 0, got {marker_length!r}")
+        if square_length <= marker_length:
+            raise ValueError(
+                f"square_length ({square_length!r}) must be greater than "
+                f"marker_length ({marker_length!r}) -- got these two swapped?"
+            )
         aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICTIONARIES[dictionary])
         self._board = cv2.aruco.CharucoBoard(
             (squares_x, squares_y), square_length, marker_length, aruco_dict

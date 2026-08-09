@@ -91,6 +91,31 @@ def test_unknown_dictionary_raises():
         CharucoDetector(dictionary="DICT_NOT_A_REAL_ONE")
 
 
+def test_square_length_not_greater_than_marker_length_raises_valueerror():
+    """cv2.aruco.CharucoBoard enforces square_length > marker_length itself,
+    but via a C++ assertion that surfaces to Python as an opaque
+    `SystemError`, not a catchable/presentable ValueError. A live user hit
+    this after mistyping the two lengths (or swapping them) for a new
+    board -- validate up front instead."""
+    with pytest.raises(ValueError, match="square_length"):
+        CharucoDetector(square_length=0.015, marker_length=0.02)
+
+
+def test_equal_square_and_marker_length_raises_valueerror():
+    with pytest.raises(ValueError, match="square_length"):
+        CharucoDetector(square_length=0.02, marker_length=0.02)
+
+
+def test_zero_marker_length_raises_valueerror():
+    with pytest.raises(ValueError, match="marker_length"):
+        CharucoDetector(square_length=0.04, marker_length=0.0)
+
+
+def test_single_square_board_raises_valueerror():
+    with pytest.raises(ValueError, match="squares_x"):
+        CharucoDetector(squares_x=1, squares_y=7)
+
+
 def test_mismatched_board_geometry_fails_to_detect_cleanly():
     """A detector configured for the wrong board size doesn't find (enough
     of) the real board -- degrades to None rather than misreading garbage

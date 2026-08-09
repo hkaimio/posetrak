@@ -369,3 +369,58 @@ def test_min_marker_size_required_for_board_small_in_full_frame(qapp, fake_conn)
         assert len(dlg._charuco_detections["cam_A"].corners) >= 8
     finally:
         dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Invalid board settings (square_length <= marker_length) -- found via a
+# live test (2026-08-09) where cv2.aruco.CharucoBoard's own C++ assertion
+# surfaced as an opaque `SystemError` instead of a message the UI could
+# show. See CharucoDetector's validation in fiducial_markers.py.
+# ---------------------------------------------------------------------------
+
+
+def test_detect_with_square_length_not_greater_than_marker_length_shows_warning(
+    qapp, fake_conn, monkeypatch
+) -> None:
+    states = [_make_state("cam_A", _render_board_image())]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._charuco_square_length_spin.setValue(0.015)
+        dlg._charuco_marker_length_spin.setValue(0.02)
+
+        warnings = []
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics.QMessageBox.warning",
+            lambda *a, **k: warnings.append(a),
+        )
+        dlg._on_detect_charuco_clicked("cam_A")  # must not raise
+
+        assert len(warnings) == 1
+        assert "cam_A" not in dlg._charuco_detections
+    finally:
+        dlg.done(0)
+
+
+def test_aruco_detect_with_invalid_charuco_settings_does_not_crash(qapp, fake_conn) -> None:
+    """The ArUco/ChArUco marker-overlap exclusion (page_extrinsics.py's
+    _on_detect_aruco_clicked) also builds a CharucoDetector as a
+    convenience filter -- an invalid ChArUco config there must not break
+    plain ArUco detection, which has nothing to do with the board."""
+    states = [_make_state("cam_A", _render_board_image())]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        # Pretend a board has already been "detected" so the exclusion path
+        # is taken, then make the current settings invalid.
+        from app.setup.fiducial_markers import CharucoBoardDetection, CharucoCornerObs
+
+        dlg._charuco_detections["cam_A"] = CharucoBoardDetection(corners=[
+            CharucoCornerObs(corner_id=0, video_id="cam_A", frame_idx=0, px=1.0, py=1.0,
+                              local_xyz=np.zeros(3))
+        ])
+        dlg._charuco_square_length_spin.setValue(0.02)
+        dlg._charuco_marker_length_spin.setValue(0.02)
+        assert dlg._aruco_dict_combo.currentText() == dlg._charuco_dict_combo.currentText()
+
+        dlg._on_detect_aruco_clicked("cam_A")  # must not raise
+    finally:
+        dlg.done(0)

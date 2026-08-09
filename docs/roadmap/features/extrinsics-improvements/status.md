@@ -419,9 +419,40 @@ are already bumped to `DEBUG` in `main.py`, so this needed no logging
 configuration changes to actually surface in the running app's console
 and `logs/posetrak-setup.log`.
 
-**Root cause of this third round is not yet identified** — the logging
-exists so the next live attempt's actual log output can pin it down
-directly instead of another round of remote guessing.
+**Root cause of this third round, identified from the very next log
+output**: the new logging paid off immediately. The real log showed
+39/44 expected marker ids found — plenty — but with `min_marker_perimeter_rate`
+turned down to the UI spin box's own floor (0.1%) chasing "more markers
+found," and several ids appearing *more than once* in the found list (1,
+3, 23, and 37 each decoded twice, 37 three times). Reproduced the
+identical signature on our own fixture: 0.01-0.015 detects cleanly, while
+0.008 and below all produce *more* raw markers than the working rate,
+duplicate ids among them, and zero corners regardless. Fixed in
+`setup: detect and warn about duplicate marker ids from too-low
+min_marker_perimeter_rate`:
+
+- **The real lesson**: `min_marker_perimeter_rate` has a **narrow working
+  band**, not a "lower is always safer than OpenCV's too-high default"
+  direction. Too high misses real markers (rounds 2's problem); too far
+  below the board's own sweet spot starts accepting false-positive/
+  misdecoded quads, and when the same id gets decoded from more than one
+  candidate location, `detectBoard()`'s corner interpolation can't
+  resolve the ambiguity — silently producing zero corners despite *more*
+  raw markers being found than at the working rate.
+- Both detectors now compute and log duplicate ids on every call; the
+  ChArUco failure `WARNING` explicitly calls this out as a signal to
+  **raise** the rate back up, replacing the previous (actively misleading
+  in this exact case) "try lowering it further" suggestion. Both spin box
+  tooltips and the "no board detected" status message carry the same
+  warning now.
+- Locked in as a regression test against our own fixture (not a
+  hypothetical): 0.01 works, 0.005 finds more markers yet still produces
+  zero corners with the duplicate-id warning present in the log.
+
+**Not yet confirmed**: whether this was the *complete* explanation for
+the live failure, or whether the user's next attempt (now with duplicate-id
+guidance in hand) still needs a value search to find this specific board's
+working band on this specific camera/lighting.
 
 ### Not yet done
 

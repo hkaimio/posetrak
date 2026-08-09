@@ -255,3 +255,42 @@ def test_solve_thread_receives_marker_groups(qapp, fake_conn, monkeypatch) -> No
         if dlg._solve_thread is not None:
             dlg._solve_thread.wait(2000)
         dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Min marker size (%) -- same underlying cv2 setting and default-too-strict
+# problem as ChArUco's (see test_extrinsics_charuco_ui.py and
+# CharucoDetector's docstring); ArucoDetector needed the identical fix
+# since a ChArUco board's markers are ordinary ArUco markers under the hood.
+# ---------------------------------------------------------------------------
+
+
+def test_min_marker_size_spin_defaults_lower_than_opencv_default(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A")]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        assert dlg._aruco_min_marker_pct_spin.value() < 3.0  # cv2's own default is 3%
+    finally:
+        dlg.done(0)
+
+
+def test_min_marker_size_reaches_arucodetector(qapp, fake_conn, monkeypatch) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._aruco_min_marker_pct_spin.setValue(2.5)
+
+        captured = {}
+        from app.setup import page_extrinsics as module
+        orig = module.ArucoDetector.__init__
+
+        def spy_init(self, *args, **kwargs):
+            captured["min_marker_perimeter_rate"] = kwargs.get("min_marker_perimeter_rate")
+            return orig(self, *args, **kwargs)
+
+        monkeypatch.setattr(module.ArucoDetector, "__init__", spy_init)
+        dlg._on_detect_aruco_clicked("cam_A")
+
+        assert captured["min_marker_perimeter_rate"] == pytest.approx(0.025)
+    finally:
+        dlg.done(0)

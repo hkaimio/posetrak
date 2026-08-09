@@ -317,3 +317,55 @@ def test_legacy_pattern_checkbox_required_for_real_calibio_board(qapp, fake_conn
         assert len(dlg._charuco_detections["cam_A"].corners) >= 8
     finally:
         dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Min marker size (%) -- found necessary via a second live-testing round
+# against a full 4K camera frame (2026-08-09), where the board's markers
+# were too small relative to the frame for cv2.aruco's own default
+# minMarkerPerimeterRate. See CharucoDetector's docstring and status.md's
+# Phase 4 notes.
+# ---------------------------------------------------------------------------
+
+
+_REAL_BOARD_SMALL_IN_4K_IMAGE = (
+    Path(__file__).parent.parent / "data" / "charuco_board_small_in_4k_frame.png"
+)
+
+
+def test_min_marker_size_spin_defaults_lower_than_opencv_default(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", _render_board_image())]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        assert dlg._charuco_min_marker_pct_spin.value() < 3.0  # cv2's own default is 3%
+    finally:
+        dlg.done(0)
+
+
+@pytest.mark.skipif(
+    not _REAL_BOARD_SMALL_IN_4K_IMAGE.exists(), reason="real 4K-frame fixture image not present"
+)
+def test_min_marker_size_required_for_board_small_in_full_frame(qapp, fake_conn) -> None:
+    """End-to-end through the actual dialog widgets: the same real 4K frame
+    that found nothing at cv2's own default even with axis/legacy-pattern
+    already correct."""
+    img = cv2.imread(str(_REAL_BOARD_SMALL_IN_4K_IMAGE))
+    states = [_make_state("cam_A", img)]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._charuco_squares_x_spin.setValue(11)
+        dlg._charuco_squares_y_spin.setValue(8)
+        dlg._charuco_square_length_spin.setValue(0.02)
+        dlg._charuco_marker_length_spin.setValue(0.015)
+        dlg._charuco_legacy_pattern_cb.setChecked(True)
+
+        dlg._charuco_min_marker_pct_spin.setValue(3.0)  # cv2's own default
+        dlg._on_detect_charuco_clicked("cam_A")
+        assert "cam_A" not in dlg._charuco_detections
+
+        dlg._charuco_min_marker_pct_spin.setValue(1.0)
+        dlg._on_detect_charuco_clicked("cam_A")
+        assert "cam_A" in dlg._charuco_detections
+        assert len(dlg._charuco_detections["cam_A"].corners) >= 8
+    finally:
+        dlg.done(0)

@@ -18,6 +18,9 @@ from app.setup.extrinsics_solver import CamCalibState, ObsPoint, run_calibration
 from app.setup.fiducial_markers import CharucoBoardDetection, CharucoDetector, anchor_from_charuco_board
 
 _REAL_BOARD_IMAGE = Path(__file__).parent.parent / "data" / "charuco_board_sample.png"
+_REAL_BOARD_SMALL_IN_4K_IMAGE = (
+    Path(__file__).parent.parent / "data" / "charuco_board_small_in_4k_frame.png"
+)
 
 
 def _render_board_image(
@@ -326,3 +329,62 @@ class TestRealPhotographedBoard:
                 break
         else:
             pytest.fail("no adjacent same-row corner pair found in this crop to spot-check spacing")
+
+
+# ---------------------------------------------------------------------------
+# Real-frame regression: the same board, same footage, but as it actually
+# appears in a full 4K (3840px-tall) camera frame rather than a tight
+# hand-crop -- found not to detect at all during a second live-testing
+# round (2026-08-09), even with the axis/legacy-pattern settings from the
+# first round already correct. Traced to cv2.aruco's
+# minMarkerPerimeterRate default (0.03) rejecting markers this small
+# relative to the frame -- a third, independent gotcha, not a regression
+# of the first two. See CharucoDetector's docstring.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not _REAL_BOARD_SMALL_IN_4K_IMAGE.exists(), reason="real 4K-frame fixture image not present"
+)
+class TestBoardSmallInFullFrame:
+    """Same board/settings as TestRealPhotographedBoard, but the fixture
+    here is a real 3840px-tall camera frame with the board occupying only
+    a small fraction of it (cropped in width only, to keep the fixture
+    file smaller, without touching the height that actually triggers the
+    bug -- minMarkerPerimeterRate is relative to the image's larger
+    dimension)."""
+
+    CORRECT_KWARGS = dict(
+        dictionary="DICT_4X4_50", squares_x=11, squares_y=8,
+        square_length=0.02, marker_length=0.015, legacy_pattern=True,
+    )
+
+    def _load(self) -> np.ndarray:
+        img = cv2.imread(str(_REAL_BOARD_SMALL_IN_4K_IMAGE))
+        assert img is not None, f"failed to load {_REAL_BOARD_SMALL_IN_4K_IMAGE}"
+        assert max(img.shape[:2]) > 3000  # the bug only reproduces at real camera-frame scale
+        return img
+
+    def test_default_min_marker_perimeter_rate_finds_nothing(self):
+        """Locks in the exact silent failure this diagnostic found: same
+        board, same correct axis/legacy-pattern settings as
+        TestRealPhotographedBoard, only the image scale differs."""
+        detector = CharucoDetector(**self.CORRECT_KWARGS)
+        assert detector.detect(self._load()) is None
+
+    def test_lowered_min_marker_perimeter_rate_detects_the_board(self):
+        detector = CharucoDetector(**self.CORRECT_KWARGS, min_marker_perimeter_rate=0.01)
+        detection = detector.detect(self._load())
+        assert detection is not None
+        assert len(detection.corners) >= 8
+
+    def test_arucodetector_has_the_same_gotcha_and_fix(self):
+        """The underlying cv2 setting affects plain ArUco detection too --
+        this project's ArucoDetector needed the identical fix."""
+        from app.setup.fiducial_markers import ArucoDetector
+
+        img = self._load()
+        default = ArucoDetector(dictionary="DICT_4X4_50")
+        lowered = ArucoDetector(dictionary="DICT_4X4_50", min_marker_perimeter_rate=0.01)
+
+        assert len(lowered.detect(img)) > len(default.detect(img))

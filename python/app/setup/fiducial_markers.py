@@ -68,6 +68,24 @@ class ArucoDetector:
     ``default_size``; otherwise it is left ``None`` and the marker's corners
     are treated as free, independently-triangulated correspondences (see
     ``MarkerGroup.as_control_points()``).
+
+    **A third real gotcha, found via a live test against a full 4K
+    (3840-tall) camera frame** (see ``CharucoDetector``'s own docstring for
+    the first two, and status.md's Phase 4 notes for the full story):
+    ``cv2.aruco``'s ``minMarkerPerimeterRate`` default (0.03) rejects any
+    marker whose perimeter is under 3% of the image's larger dimension --
+    for a 3840px-tall frame that's ~115px, easily bigger than a
+    calibration-board-sized marker photographed from across a room. This
+    is a silent failure with no error, and it *looks* identical to the
+    ChArUco settings gotchas (zero detections) despite being an unrelated
+    cause -- a real frame in this project's own test data went from 3/28
+    markers found to 28/28 by lowering this to 0.01 alone, no other
+    setting changed. ``min_marker_perimeter_rate`` below defaults to
+    ``None`` (OpenCV's own 0.03) for backward compatibility; the UI
+    defaults its own spin box lower, since this project's real use case
+    (a board or marker seen from across a room, not held up to the lens)
+    hits this far more often than a typical close-up desk-calibration
+    scenario cv2's own default was tuned for.
     """
 
     def __init__(
@@ -75,11 +93,14 @@ class ArucoDetector:
         dictionary: str = "DICT_4X4_50",
         default_size: float | None = None,
         size_by_id: dict[str, float] | None = None,
+        min_marker_perimeter_rate: float | None = None,
     ) -> None:
         if dictionary not in ARUCO_DICTIONARIES:
             raise ValueError(f"Unknown ArUco dictionary: {dictionary!r}")
         aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICTIONARIES[dictionary])
         params = cv2.aruco.DetectorParameters()
+        if min_marker_perimeter_rate is not None:
+            params.minMarkerPerimeterRate = min_marker_perimeter_rate
         self._cv_detector = cv2.aruco.ArucoDetector(aruco_dict, params)
         self.default_size = default_size
         self.size_by_id = dict(size_by_id or {})
@@ -164,6 +185,14 @@ class CharucoDetector:
       assumes the *new* pattern otherwise, and marker detection succeeds
       (so it doesn't look broken) while chessboard-corner interpolation
       quietly finds nothing.
+
+    **A third gotcha, found next, against a full 4K camera frame rather
+    than a tightly-cropped photo**: ``min_marker_perimeter_rate`` -- see
+    ``ArucoDetector``'s docstring, the same underlying cv2 setting applies
+    here since a ChArUco board's markers are ordinary ArUco markers.
+    Default ``None`` uses OpenCV's own 0.03; a board photographed from
+    across a room in a multi-thousand-pixel-tall frame usually needs this
+    lowered (0.01 resolved the real case that motivated this).
     """
 
     def __init__(
@@ -174,6 +203,7 @@ class CharucoDetector:
         square_length: float = 0.04,
         marker_length: float = 0.02,
         legacy_pattern: bool = False,
+        min_marker_perimeter_rate: float | None = None,
     ) -> None:
         if dictionary not in ARUCO_DICTIONARIES:
             raise ValueError(f"Unknown ArUco dictionary: {dictionary!r}")
@@ -183,6 +213,10 @@ class CharucoDetector:
         )
         self._board.setLegacyPattern(legacy_pattern)
         self._cv_detector = cv2.aruco.CharucoDetector(self._board)
+        if min_marker_perimeter_rate is not None:
+            params = cv2.aruco.DetectorParameters()
+            params.minMarkerPerimeterRate = min_marker_perimeter_rate
+            self._cv_detector.setDetectorParameters(params)
         self.square_length = square_length
 
     def board_corner_local_xyz(self, corner_id: int) -> np.ndarray:

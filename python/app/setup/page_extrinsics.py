@@ -1365,6 +1365,23 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         )
         size_row.addWidget(self._aruco_default_size_spin, 1)
 
+        min_size_row = QHBoxLayout()
+        min_size_row.addWidget(QLabel("Min marker size:"))
+        self._aruco_min_marker_pct_spin = QDoubleSpinBox()
+        self._aruco_min_marker_pct_spin.setRange(0.1, 10.0)
+        self._aruco_min_marker_pct_spin.setDecimals(2)
+        self._aruco_min_marker_pct_spin.setSingleStep(0.1)
+        self._aruco_min_marker_pct_spin.setValue(1.0)
+        self._aruco_min_marker_pct_spin.setSuffix(" %")
+        self._aruco_min_marker_pct_spin.setToolTip(
+            "Smallest marker cv2.aruco will accept, as a percentage of the "
+            "frame's larger dimension. OpenCV's own default is 3%, which "
+            "misses markers photographed from across a room in a full "
+            "4K/similar frame -- lower this if \"Detect\" finds nothing "
+            "despite the marker clearly being visible."
+        )
+        min_size_row.addWidget(self._aruco_min_marker_pct_spin, 1)
+
         self._marker_table = QTableWidget(0, 3)
         self._marker_table.setHorizontalHeaderLabels(["Marker", "Cameras", "Size override (m)"])
         hdr = self._marker_table.horizontalHeader()
@@ -1381,6 +1398,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         layout.addWidget(hint)
         layout.addLayout(dict_row)
         layout.addLayout(size_row)
+        layout.addLayout(min_size_row)
         layout.addWidget(self._marker_table)
         layout.addWidget(clear_btn)
         return group
@@ -1453,6 +1471,23 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             "fine either way, only the checkerboard-corner step is affected."
         )
 
+        min_size_row = QHBoxLayout()
+        min_size_row.addWidget(QLabel("Min marker size:"))
+        self._charuco_min_marker_pct_spin = QDoubleSpinBox()
+        self._charuco_min_marker_pct_spin.setRange(0.1, 10.0)
+        self._charuco_min_marker_pct_spin.setDecimals(2)
+        self._charuco_min_marker_pct_spin.setSingleStep(0.1)
+        self._charuco_min_marker_pct_spin.setValue(1.0)
+        self._charuco_min_marker_pct_spin.setSuffix(" %")
+        self._charuco_min_marker_pct_spin.setToolTip(
+            "Smallest marker cv2.aruco will accept, as a percentage of the "
+            "frame's larger dimension. OpenCV's own default is 3%, which "
+            "misses a board photographed from across a room in a full "
+            "4K/similar frame -- lower this if \"Detect ChArUco\" finds "
+            "nothing despite the board clearly being visible."
+        )
+        min_size_row.addWidget(self._charuco_min_marker_pct_spin, 1)
+
         self._charuco_status_label = QLabel("No board detected yet.")
         self._charuco_status_label.setWordWrap(True)
         self._charuco_status_label.setStyleSheet("color: #666; font-size: 10px;")
@@ -1471,6 +1506,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         layout.addLayout(length_row)
         layout.addWidget(self._charuco_face_up_cb)
         layout.addWidget(self._charuco_legacy_pattern_cb)
+        layout.addLayout(min_size_row)
         layout.addWidget(self._charuco_status_label)
         layout.addLayout(btn_row)
         return group
@@ -1879,7 +1915,11 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             return
 
         dictionary = self._aruco_dict_combo.currentText()
-        detector = ArucoDetector(dictionary=dictionary, default_size=self._current_default_size())
+        detector = ArucoDetector(
+            dictionary=dictionary,
+            default_size=self._current_default_size(),
+            min_marker_perimeter_rate=self._aruco_min_marker_pct_spin.value() / 100.0,
+        )
         frame_idx = self._current_frame_for(vid)
         detections = detector.detect(state.image, video_id=vid, frame_idx=frame_idx)
 
@@ -1939,6 +1979,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             square_length=self._charuco_square_length_spin.value(),
             marker_length=self._charuco_marker_length_spin.value(),
             legacy_pattern=self._charuco_legacy_pattern_cb.isChecked(),
+            min_marker_perimeter_rate=self._charuco_min_marker_pct_spin.value() / 100.0,
         )
 
     def _on_detect_charuco_clicked(self, vid: str) -> None:
@@ -1952,8 +1993,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         if detection is None:
             self._status_label.setText(
                 f"No ChArUco board detected in {state.label} (frame {frame_idx}). "
-                f"If the board is definitely visible, try swapping Squares X/Y "
-                f"or toggling \"Legacy pattern\" before suspecting the board itself."
+                f"If the board is definitely visible, try swapping Squares X/Y, "
+                f"toggling \"Legacy pattern\", or lowering \"Min marker size\" "
+                f"(small in a full-resolution frame) before suspecting the board itself."
             )
             return
 

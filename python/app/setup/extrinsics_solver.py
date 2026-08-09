@@ -46,6 +46,13 @@ class CamCalibState:
     R: np.ndarray | None = None       # world→cam rotation (3×3)
     t: np.ndarray | None = None       # world→cam translation (3×1)
     calib_id: str | None = None       # intrinsics_calibrations.id currently in use
+    # Video-scrubbing source (see docs/roadmap/features/extrinsics-improvements/
+    # extrinsics-improvements-design.md, "Frame source & scrubbing").  Set when
+    # `image` came from a capture video rather than a pre-exported still frame;
+    # `image` is refreshed as the camera's scrub position changes.
+    file_path: str | None = None      # capture_videos.file_path
+    first_frame: int = 0              # capture_videos.first_video_frame
+    last_frame: int = 0               # capture_videos.last_video_frame
 
 
 @dataclass

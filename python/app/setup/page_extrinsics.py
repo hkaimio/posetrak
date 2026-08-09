@@ -77,6 +77,7 @@ from app.setup.extrinsics_solver import (
     run_calibration,
     save_control_points,
 )
+from app.setup.video_scrub_bar import VideoScrubBar
 from posetrak.db.db import generate_id as _generate_id
 from posetrak.db.import_extrinsics import import_extrinsics
 
@@ -205,21 +206,7 @@ def _load_states_from_images(
             ).fetchone()
             if ic is None:
                 continue
-            fx, fy, cx, cy = ic["fx"], ic["fy"], ic["cx"], ic["cy"]
-            K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
-            K_orig = K.copy()
-            if ic["matrix_original"]:
-                vals = struct.unpack("<9d", bytes(ic["matrix_original"]))
-                K_orig = np.array(vals).reshape(3, 3)
-            if ic["dist_coeffs"]:
-                n = len(bytes(ic["dist_coeffs"])) // 8
-                dist = np.array(struct.unpack(f"<{n}d", bytes(ic["dist_coeffs"]))).reshape(1, -1)
-            else:
-                dist = np.zeros((1, 4))
-            intrinsics[label] = {
-                "K": K, "K_orig": K_orig, "dist": dist,
-                "fisheye": ic["distortion_model"] == "fisheye",
-            }
+            intrinsics[label] = _resolve_intrinsics(ic)
     finally:
         conn.row_factory = old_factory
 
@@ -254,6 +241,103 @@ def _load_states_from_images(
         ))
         print(f"  LOAD {db_label} ({img.shape[1]}×{img.shape[0]}) from {png.name}")
     return states
+
+
+def _resolve_intrinsics(ic: sqlite3.Row) -> dict:
+    """Build the K/K_orig/dist/fisheye dict used by CamCalibState from an
+    intrinsics_calibrations row."""
+    fx, fy, cx, cy = ic["fx"], ic["fy"], ic["cx"], ic["cy"]
+    K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+    K_orig = K.copy()
+    if ic["matrix_original"]:
+        vals = struct.unpack("<9d", bytes(ic["matrix_original"]))
+        K_orig = np.array(vals).reshape(3, 3)
+    if ic["dist_coeffs"]:
+        n = len(bytes(ic["dist_coeffs"])) // 8
+        dist = np.array(struct.unpack(f"<{n}d", bytes(ic["dist_coeffs"]))).reshape(1, -1)
+    else:
+        dist = np.zeros((1, 4))
+    return {
+        "K": K, "K_orig": K_orig, "dist": dist,
+        "fisheye": ic["distortion_model"] == "fisheye",
+    }
+
+
+def _load_states_from_capture(
+    conn: sqlite3.Connection,
+    shot_id: str,
+) -> list[CamCalibState]:
+    """Load CamCalibState list directly from this capture's video files.
+
+    Unlike ``_load_states_from_images``, no filename matching is needed:
+    ``capture_videos.camera_instance_id`` already links each video file
+    directly to its camera instance, so intrinsics resolve without going
+    through a camera label round-trip.
+
+    ``CamCalibState.image`` is left ``None`` — the caller is expected to
+    populate it by scrubbing to an initial frame per camera (see
+    ``ExtrinsicsAutoCalibDialog``, which wires a ``VideoScrubBar`` per camera
+    using the ``file_path``/``first_frame``/``last_frame`` fields set here).
+
+    Priority for picking the intrinsics calibration (same as
+    ``_load_states_from_images``):
+      1. Per-video override in capture_videos.intrinsics_calibration_id
+      2. Mode default (camera_modes.default_intrinsics_calibration_id)
+      3. Latest calibration for the camera's mode
+    """
+    old_factory = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT cv.file_path, cv.first_video_frame, cv.last_video_frame,
+                   cv.intrinsics_calibration_id AS cv_calib_id,
+                   ci.label AS cam_label,
+                   cm.id AS camera_mode_id,
+                   cm.default_intrinsics_calibration_id AS mode_default_calib_id
+            FROM capture_videos cv
+            JOIN camera_instances ci ON ci.id = cv.camera_instance_id
+            LEFT JOIN camera_modes cm ON cm.id = cv.camera_mode_id
+            WHERE cv.shot_id = ?
+            ORDER BY ci.label
+            """,
+            (shot_id,),
+        ).fetchall()
+
+        states: list[CamCalibState] = []
+        for r in rows:
+            calib_id = r["cv_calib_id"] or r["mode_default_calib_id"]
+            if calib_id is None and r["camera_mode_id"] is not None:
+                latest = conn.execute(
+                    "SELECT id FROM intrinsics_calibrations WHERE camera_mode_id = ?"
+                    " ORDER BY calibrated_at DESC LIMIT 1",
+                    (r["camera_mode_id"],),
+                ).fetchone()
+                calib_id = latest["id"] if latest else None
+            if calib_id is None:
+                _log.warning(
+                    "  SKIP %s — no intrinsics calibration available", r["cam_label"]
+                )
+                continue
+
+            ic = conn.execute(
+                "SELECT * FROM intrinsics_calibrations WHERE id = ?", (calib_id,)
+            ).fetchone()
+            if ic is None:
+                continue
+
+            states.append(CamCalibState(
+                video_id=r["cam_label"],
+                label=r["cam_label"],
+                calib_id=calib_id,
+                file_path=r["file_path"],
+                first_frame=r["first_video_frame"],
+                last_frame=r["last_video_frame"],
+                **_resolve_intrinsics(ic),
+            ))
+        return states
+    finally:
+        conn.row_factory = old_factory
 
 
 def _write_extrinsics_to_db(
@@ -954,6 +1038,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._states_by_id = {s.video_id: s for s in states}
 
         self._cam_widgets: dict[str, _ClickableImageWidget] = {}
+        self._scrub_bars: dict[str, VideoScrubBar] = {}
+        self._cam_panes: dict[str, QWidget] = {}
         for state in states:
             w = _ClickableImageWidget(state.label)
             if state.image is not None:
@@ -969,9 +1055,43 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             w.customContextMenuRequested.connect(
                 lambda pos, v=vid: self._on_cam_context_menu(v, pos)
             )
-            self._cam_widgets[state.video_id] = w
+            self._cam_widgets[vid] = w
+
+            if state.file_path:
+                # Video-sourced camera (see docs/roadmap/features/
+                # extrinsics-improvements/extrinsics-improvements-design.md,
+                # "Frame source & scrubbing"): add a scrub bar below the
+                # image and refresh both the widget and the CamCalibState's
+                # `image` as the user scrubs, so control-point placement and
+                # the SIFT/BA solve both see whatever frame is displayed.
+                scrub = VideoScrubBar()
+                scrub.frame_ready.connect(
+                    lambda idx, frame, v=vid, widget=w: self._on_scrub_frame_ready(
+                        v, widget, frame
+                    )
+                )
+                total_frames = max(state.last_frame - state.first_frame + 1, 1)
+                scrub.load(state.file_path, total_frames, initial_frame=0)
+                self._scrub_bars[vid] = scrub
+
+                pane = QWidget()
+                pane_layout = QVBoxLayout(pane)
+                pane_layout.setContentsMargins(0, 0, 0, 0)
+                pane_layout.addWidget(w, 1)
+                pane_layout.addWidget(scrub)
+                self._cam_panes[vid] = pane
+            else:
+                self._cam_panes[vid] = w
 
         self._build_ui()
+
+    def _on_scrub_frame_ready(
+        self, video_id: str, widget: "_ClickableImageWidget", frame: np.ndarray
+    ) -> None:
+        widget.set_image(frame)
+        state = self._states_by_id.get(video_id)
+        if state is not None:
+            state.image = frame
 
     # ------------------------------------------------------------------
     # Layout
@@ -979,7 +1099,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
     def _build_ui(self) -> None:
         # Camera grid — fills available space
-        n = len(self._cam_widgets)
+        n = len(self._cam_panes)
         ncols = 1 if n == 1 else (2 if n <= 4 else 3)
 
         cam_container = QWidget()
@@ -989,9 +1109,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         grid.setContentsMargins(4, 4, 4, 4)
         for col in range(ncols):
             grid.setColumnStretch(col, 1)
-        for i, (vid, w) in enumerate(self._cam_widgets.items()):
+        for i, (vid, pane) in enumerate(self._cam_panes.items()):
             row, col = divmod(i, ncols)
-            grid.addWidget(w, row, col)
+            grid.addWidget(pane, row, col)
             grid.setRowStretch(row, 1)
 
         cam_scroll = QScrollArea()
@@ -1960,6 +2080,18 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self.imported.emit(calib_id)
         self.accept()
 
+    def done(self, result: int) -> None:  # noqa: N802
+        """Shut down any per-camera video scrub bars before the dialog closes.
+
+        Covers accept, reject, and the window-close button alike, since
+        QDialog funnels all of them through ``done()``. Without this, a
+        VideoScrubBar's FrameReader QThread can still be running when Qt
+        destroys the (parented) widget tree, which aborts the process.
+        """
+        for scrub in self._scrub_bars.values():
+            scrub.unload()
+        super().done(result)
+
 
 # ---------------------------------------------------------------------------
 # Core widget
@@ -1986,16 +2118,24 @@ class ExtrinsicsImportWidget(QWidget):
         self._path_label.setStyleSheet("color: grey;")
         browse_btn = QPushButton("Browse TOML…")
         browse_btn.clicked.connect(self._browse)
-        self._auto_btn = QPushButton("Auto-calibrate…")
+        self._auto_video_btn = QPushButton("Auto-calibrate…")
+        self._auto_video_btn.clicked.connect(self._on_auto_calibrate_video)
+        self._auto_video_btn.setToolTip(
+            "Run semi-automatic calibration by scrubbing this capture's video "
+            "files directly — no still-frame export needed."
+        )
+        self._auto_btn = QPushButton("Auto-calibrate (image folder)…")
         self._auto_btn.clicked.connect(self._on_auto_calibrate)
         self._auto_btn.setToolTip(
-            "Run SIFT-based automatic calibration from exported PNG frames."
+            "Legacy path: run calibration from a directory of previously "
+            "exported PNG frames instead of scrubbing video directly."
         )
 
         file_row = QHBoxLayout()
         file_row.addWidget(QLabel("TOML file:"))
         file_row.addWidget(self._path_label, 1)
         file_row.addWidget(browse_btn)
+        file_row.addWidget(self._auto_video_btn)
         file_row.addWidget(self._auto_btn)
 
         # ---- Existing calibrations info ----
@@ -2072,7 +2212,47 @@ class ExtrinsicsImportWidget(QWidget):
         if path:
             self._load_toml(Path(path))
 
+    def _on_auto_calibrate_video(self) -> None:
+        """Primary auto-calibration path: scrub this capture's own video files.
+
+        See docs/roadmap/features/extrinsics-improvements/
+        extrinsics-improvements-design.md, "Frame source & scrubbing" — no
+        still-frame export step is needed; each camera gets its own
+        VideoScrubBar in the calibration dialog.
+        """
+        if self._conn is None or self._session_id is None:
+            QMessageBox.warning(self, "No session", "Open a session before auto-calibrating.")
+            return
+        if not self._shot_ids:
+            QMessageBox.warning(
+                self, "No shot",
+                "No capture/shot ID available — cannot look up camera video files."
+            )
+            return
+
+        states = _load_states_from_capture(self._conn, self._shot_ids[0])
+        if not states:
+            QMessageBox.warning(
+                self, "No cameras",
+                "No cameras with both a video file and an intrinsics calibration "
+                "were found for this capture.\n\n"
+                "Make sure video files are registered for this capture and "
+                "intrinsics are calibrated for its cameras.",
+            )
+            return
+
+        dlg = ExtrinsicsAutoCalibDialog(
+            states,
+            self._conn,
+            self._session_id,
+            self._shot_ids,
+            parent=self,
+        )
+        dlg.imported.connect(self._on_auto_imported)
+        dlg.exec()
+
     def _on_auto_calibrate(self) -> None:
+        """Legacy auto-calibration path: load a directory of exported PNG frames."""
         if self._conn is None or self._session_id is None:
             QMessageBox.warning(self, "No session", "Open a session before auto-calibrating.")
             return

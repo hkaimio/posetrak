@@ -96,6 +96,57 @@ class CamPosObs:
 
 
 @dataclass
+class MarkerGroup:
+    """One physical ArUco marker's corner observations across cameras.
+
+    See docs/roadmap/features/extrinsics-improvements/
+    extrinsics-improvements-design.md, sections 3 and 5. Detected corners
+    accumulate here across however many cameras/detect-clicks find this
+    ``marker_id``; ``size`` (if known) drives the rigid-pose post-pass in
+    ``solve_marker_groups`` -- see that function's docstring for how this
+    differs from the design's originally-sketched joint-BA parameter block.
+    """
+    marker_id: str
+    size: float | None = None  # None = unknown; corners contribute as free points only
+    obs: dict[str, dict[int, ObsPoint]] = field(default_factory=dict)  # video_id -> {corner_index: ObsPoint}
+
+    def cameras_observing(self) -> set[str]:
+        """video_ids with all 4 corners observed (partial detections don't count)."""
+        return {vid for vid, corners in self.obs.items() if len(corners) == 4}
+
+    def as_control_points(self) -> list["ControlPoint"]:
+        """Represent this marker's 4 corners as independent free ControlPoints.
+
+        This is how *every* detected marker -- known size or not -- helps
+        constrain camera poses during the ordinary SIFT+CP bundle
+        adjustment: each corner becomes its own DLT-triangulated free point,
+        reusing the existing, unmodified free-CP machinery instead of new
+        solver code. A marker observed by fewer than 2 cameras degrades
+        gracefully here for free, the same way any other single-observation
+        free CP already does (skipped by run_bundle_adjustment's own
+        ``len(solved_obs) >= 2`` check) -- no special-casing needed.
+        """
+        cps = []
+        for corner_idx in range(4):
+            cp = ControlPoint(name=f"aruco_{self.marker_id}_c{corner_idx}")
+            for vid, corners in self.obs.items():
+                obs = corners.get(corner_idx)
+                if obs is not None:
+                    cp.obs[vid] = obs
+            cps.append(cp)
+        return cps
+
+
+@dataclass
+class MarkerPoseResult:
+    """A rigid marker's solved world pose (see ``solve_marker_groups``)."""
+    rvec: np.ndarray
+    tvec: np.ndarray
+    size: float
+    rms_reprojection_px: float
+
+
+@dataclass
 class PairMatch:
     vid_a: str
     vid_b: str
@@ -115,6 +166,7 @@ class CalibResult:
     unsolved: list[str]                       # video_ids with no pose
     pair_matches: dict[tuple[str, str], PairMatch]  # SIFT matches per camera pair
     cp_reprojection_errors: dict[str, dict] = field(default_factory=dict)  # CP residuals
+    marker_poses: dict[str, MarkerPoseResult] = field(default_factory=dict)  # marker_id → solved pose
 
 
 # ---------------------------------------------------------------------------
@@ -1246,6 +1298,7 @@ def run_calibration(
     states: list[CamCalibState],
     control_points: list[ControlPoint] | None = None,
     cam_pos_obs: list[CamPosObs] | None = None,
+    marker_groups: list[MarkerGroup] | None = None,
     refine_intrinsics: set[str] | None = None,
     locked_cameras: set[str] | None = None,
     sift_ratio: float = 0.75,
@@ -1271,6 +1324,17 @@ def run_calibration(
     5. Bundle adjustment with high CP weights (1000× for world-xyz, 100× for free).
        SIFT points subsampled to ≤ 300 when CPs are present.
 
+    ``marker_groups`` (Phase 3, see docs/roadmap/features/
+    extrinsics-improvements/extrinsics-improvements-design.md, sections 3/5):
+    every marker's corners -- known size or not -- are folded into the
+    control-point list as free points (``MarkerGroup.as_control_points()``)
+    before stage 0, so they contribute to camera-pose solving exactly like a
+    manually-clicked free CP would, no new solver code needed for that part.
+    After the BA, known-size markers additionally get a dedicated rigid-pose
+    solve (``solve_marker_groups()`` -- see its docstring for why this is a
+    decoupled post-pass rather than a joint BA parameter block), returned as
+    ``CalibResult.marker_poses``.
+
     Raises _Cancelled if cancel_event is set mid-run.
     """
     def _prog(msg: str) -> None:
@@ -1285,11 +1349,15 @@ def run_calibration(
     n = len(states)
     locked = locked_cameras or set()
 
+    all_cps: list[ControlPoint] = list(control_points or [])
+    for mg in marker_groups or []:
+        all_cps.extend(mg.as_control_points())
+
     # --- Debug dump: CP and camera inventory ---
-    if control_points and _log.isEnabledFor(logging.DEBUG):
+    if all_cps and _log.isEnabledFor(logging.DEBUG):
         _log.debug("run_calibration: %d cameras: %s",
                    n, [s.label for s in states])
-        for cp in control_points:
+        for cp in all_cps:
             xyz_str = (f"world=({cp.world_xyz[0]:.3f},{cp.world_xyz[1]:.3f},"
                        f"{cp.world_xyz[2]:.3f})" if cp.world_xyz is not None else "free")
             obs_str = ", ".join(
@@ -1299,10 +1367,10 @@ def run_calibration(
             _log.debug("  CP %s [%s]  obs: %s", cp.name, xyz_str, obs_str or "(none)")
 
     # --- Stage 0: PnP initialisation from world-xyz CPs ---
-    if control_points:
+    if all_cps:
         _prog("Initialising cameras from control points (PnP)…")
         unlocked = [s for s in states if s.video_id not in locked]
-        pnp_ids = init_poses_pnp(unlocked, control_points, pnp_ransac_px=pnp_ransac_px)
+        pnp_ids = init_poses_pnp(unlocked, all_cps, pnp_ransac_px=pnp_ransac_px)
         if pnp_ids:
             _log.info("PnP pre-initialised %d cameras: %s", len(pnp_ids), pnp_ids)
 
@@ -1348,7 +1416,7 @@ def run_calibration(
 
     # --- Stage 4: Bundle adjustment ---
     points_3d = run_bundle_adjustment(
-        states, points_3d, control_points,
+        states, points_3d, all_cps,
         cam_pos_obs=cam_pos_obs,
         refine_intrinsics=refine_intrinsics,
         locked_cameras=locked_cameras,
@@ -1359,7 +1427,7 @@ def run_calibration(
 
     _prog("Computing reprojection errors…")
     errors = compute_reprojection_errors(states, points_3d)
-    cp_errors = compute_cp_errors(states, control_points) if control_points else {}
+    cp_errors = compute_cp_errors(states, all_cps) if all_cps else {}
 
     # Log solved camera world positions and per-CP residuals for debugging.
     _log.info("Solved camera positions (world XYZ):")
@@ -1373,10 +1441,10 @@ def run_calibration(
             lock_str = "  [LOCKED]" if s.video_id in locked else ""
             _log.info("  %-30s  (%.3f, %.3f, %.3f)%s%s", s.label, C[0], C[1], C[2], err_str, lock_str)
 
-    if control_points and _log.isEnabledFor(logging.DEBUG):
+    if all_cps and _log.isEnabledFor(logging.DEBUG):
         state_by_id = {s.video_id: s for s in states}
         _log.debug("Per-CP reprojection errors after BA:")
-        for cp in control_points:
+        for cp in all_cps:
             parts = []
             for vid, obs in cp.obs.items():
                 px, py = obs.px, obs.py
@@ -1398,6 +1466,15 @@ def run_calibration(
                            "fixed" if cp.world_xyz is not None else "free",
                            "  ".join(parts))
 
+    marker_poses = solve_marker_groups(marker_groups or [], states)
+    if marker_poses:
+        _log.info("Solved %d marker pose(s):", len(marker_poses))
+        for marker_id, mp in marker_poses.items():
+            _log.info(
+                "  marker %-10s rms=%.2fpx  t=(%.3f, %.3f, %.3f)",
+                marker_id, mp.rms_reprojection_px, mp.tvec[0], mp.tvec[1], mp.tvec[2],
+            )
+
     return CalibResult(
         cameras={s.video_id: s for s in states},
         points_3d=points_3d,
@@ -1405,6 +1482,7 @@ def run_calibration(
         unsolved=unsolved,
         pair_matches=pair_matches_filtered,
         cp_reprojection_errors=cp_errors,
+        marker_poses=marker_poses,
     )
 
 
@@ -1675,3 +1753,56 @@ def solve_marker_pose(
     rvec, tvec = result.x[:3], result.x[3:]
     rms = float(np.sqrt(np.mean(result.fun ** 2)))
     return rvec, tvec, rms
+
+
+def solve_marker_groups(
+    marker_groups: list[MarkerGroup],
+    states: list[CamCalibState],
+) -> dict[str, MarkerPoseResult]:
+    """Solve each known-size marker's rigid world pose, using cameras
+    already solved by the rest of ``run_calibration``.
+
+    **Scoping note (Phase 3)**: this is a decoupled post-pass, not a joint
+    bundle-adjustment parameter block as originally sketched in the design
+    doc's section 5. Every marker's corners -- known size or not -- already
+    contribute to camera-pose solving via ``MarkerGroup.as_control_points()``'s
+    free-point path, folded into ``run_calibration``'s own control-point
+    list before this function ever runs; this function *additionally*
+    recovers a clean, correctly-scaled rigid pose for markers whose size is
+    known, using the validated ``solve_marker_pose()`` from the Phase 3
+    synthetic-data prototype (see
+    ``docs/roadmap/features/extrinsics-improvements/status.md``, "Phase 3
+    progress"). Joint optimisation of camera + marker poses together (so a
+    rigid marker could also help *correct* camera poses, not just pick up a
+    pose from already-solved ones) is real future work if this decoupled
+    approach's accuracy proves insufficient in practice -- not attempted
+    here, to avoid invasive changes to ``run_bundle_adjustment``'s existing
+    parameter-vector/Jacobian machinery within this phase.
+
+    Markers with no size, or fewer than 2 cameras with all 4 corners
+    observed, are skipped -- both are already-expected states (an
+    unknown-size marker was never meant to get a rigid pose; an
+    under-observed one can't resolve a planar target's pose unambiguously,
+    same caveat as a single-view ``solvePnP``), not errors.
+    """
+    states_by_id = {s.video_id: s for s in states if s.R is not None}
+    results: dict[str, MarkerPoseResult] = {}
+    for mg in marker_groups:
+        if mg.size is None:
+            continue
+        usable = {
+            vid: np.array([[corners[i].px, corners[i].py] for i in range(4)])
+            for vid, corners in mg.obs.items()
+            if len(corners) == 4 and vid in states_by_id
+        }
+        if len(usable) < 2:
+            continue
+        try:
+            rvec, tvec, rms = solve_marker_pose(usable, states_by_id, mg.size)
+        except (ValueError, RuntimeError) as exc:
+            _log.warning("marker %s: pose solve failed, skipping: %s", mg.marker_id, exc)
+            continue
+        results[mg.marker_id] = MarkerPoseResult(
+            rvec=rvec, tvec=tvec, size=mg.size, rms_reprojection_px=rms
+        )
+    return results

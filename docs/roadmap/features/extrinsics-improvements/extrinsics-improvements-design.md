@@ -620,6 +620,39 @@ cost of a denser/larger QR code. Resolves the "rig config authoring UX"
 open question below for the common case; hand-edited JSON remains available
 for one-off or irregular rigs where a QR isn't worth designing for.
 
+**Rig geometry from an orbit video (self-calibration).** Both the QR/`"box"`
+path above and plain hand-measurement assume the rig's geometry is either
+trivial to parametrize or easy to measure with a ruler — not true for an
+irregular fold (a tent shape, an L-frame) or for a rig built without
+precise fabrication. A third source needs no measurement at all: **a video
+of one moving camera orbiting the rig once**, reusing existing solver
+machinery rather than adding new math. Sampled frames from that video are
+treated exactly like `run_calibration`/`solve_marker_groups` already treat
+a multi-camera rig's simultaneous frame — each sampled frame is an
+unknown-pose "camera" (same physical device, known intrinsics from its own
+prior intrinsics calibration, just a different pose per frame), and the
+existing marker-rigid-pose BA solves all per-frame poses and every marker's
+rigid pose jointly. Gauge freedom (the whole solve is only defined up to a
+rigid transform) is fixed by designating one marker — or the rig's own
+geometric center — as the rig-local origin, the same kind of one-off manual
+choice §4's board anchoring already asks for ("which corner is the
+origin"). The result is a resolved `MarkerRigConfig`, produced directly
+from footage instead of typed in by hand or measured with a ruler.
+
+This is new *input*, not new BA machinery — `solve_marker_groups`'s rigid
+marker-pose residual (§5, shipped in Phase 3) doesn't care whether the
+poses it's jointly solving belong to distinct simultaneous cameras or to
+one camera's sequential frames, only that each marker's corners are
+observed from ≥2 sufficiently different viewpoints. The one new risk this
+does introduce is sequential-SfM drift (frame-chain error accumulating
+around a full orbit) that a genuinely simultaneous multi-camera solve
+can't have — worth a real cross-check rather than trusting the video method
+in isolation: where a synchronized multi-camera capture *also* sees the
+rig (as it naturally will during ordinary Tier A anchoring), running
+`solve_marker_groups` on that footage gives a second, independent
+measurement of the same physical rig's marker geometry to compare the
+video-derived config against.
+
 #### Tier B — Scattered ArUco tags (redundancy / mid-session drift recovery)
 
 Ordinary size-known ArUco markers placed around the capture room (not part
@@ -791,6 +824,15 @@ the rest of the dialog behaving exactly as it does today.
   `"box"`/`"explicit"` payload → same `MarkerRigConfig` the file loader
   produces. One-shot per rig, same as picking one confident-detection
   frame already is for the ChArUco anchor.
+- Rig-from-video self-calibration (prototype first, as a standalone
+  `python/tools/` script against real orbit-video footage, before any UI
+  wiring — per this project's existing practice of validating solver-facing
+  code against real data before building UI on top of it): sample frames
+  from a single-camera orbit video, run the existing marker-rigid-pose BA
+  treating each sampled frame as an unknown-pose camera, gauge-fix on one
+  designated marker or the rig center, emit a resolved `MarkerRigConfig`.
+  Only promote to a UI action ("Characterize rig from video…") once the
+  prototype's cross-check (below) confirms it's accurate enough to trust.
 - UI: "Load rig config" (file) alongside "Scan rig QR code" (camera-driven,
   reusing whichever camera/frame is currently being viewed) + "Detect rig"
   per camera + "Set origin & axes from rig" action, parallel to the
@@ -804,7 +846,11 @@ corner spacing matches the rig's known geometry within tolerance; verify
 partial visibility (some faces occluded from a given camera) still produces
 a usable pose from whichever markers are visible; verify a `"box"`-shape QR
 code decodes to the same `MarkerRigConfig` as an equivalent hand-written
-`"explicit"` JSON file for the same physical box.
+`"explicit"` JSON file for the same physical box; verify the orbit-video
+self-calibration's resolved `MarkerRigConfig` agrees, within tolerance, with
+an independent `MarkerRigConfig` derived from a synchronized multi-camera
+capture of the same physical rig (the video method's own cross-check,
+since sequential-SfM drift has no other way to self-diagnose).
 
 ### Phase 9 — Scattered-tag redundancy + single-camera re-anchor (§9, Tier B)
 
@@ -873,15 +919,20 @@ touching any other camera's already-solved pose.
   design/fabrication question, not a software one, and is intentionally left
   open here. Whatever shape gets built, the config format only needs each
   marker's corner coordinates in a rig-local frame, so the software side
-  doesn't need to change once a physical design is chosen.
-- **Rig config authoring UX** — largely resolved for the common case by the
-  QR-code approach above (parametric shape descriptor, read directly off
-  the physical rig); still open is exactly which parametric shape
-  primitives beyond `"box"` are worth adding (a tent/pyramid fold and an
-  L-frame are the other candidates mentioned in this section) versus
-  leaving anything more irregular to the `"explicit"`/hand-edited-JSON
-  fallback. Revisit once a physical rig design exists to build against —
-  tomorrow's cardboard-box experiment is exactly a `"box"`-shape test case.
+  doesn't need to change once a physical design is chosen. Note that
+  *acquiring* an already-built rig's config is no longer a blocker on this
+  question either way — the orbit-video self-calibration method above works
+  for any marker layout, parametric or not, so an irregular fold doesn't
+  need its own parametric shape primitive just to become usable.
+- **Rig config authoring UX** — resolved for regular shapes by the QR-code
+  approach above (parametric shape descriptor, read directly off the
+  physical rig) and, for irregular or unmeasured rigs, by the orbit-video
+  self-calibration method — between the two, hand-measuring a rig's
+  geometry should no longer be necessary in practice. Still open: exactly
+  which parametric shape primitives beyond `"box"` are worth adding (a
+  tent/pyramid fold and an L-frame are the other candidates mentioned in
+  this section) versus always falling back to video self-calibration for
+  anything non-box-shaped.
 - **`init_poses_pnp`'s planar-ambiguity helper extraction (§9, Tier B)**
   should land as part of Phase 9, not deferred — both the existing
   multi-camera init path and the new single-camera re-anchor path need

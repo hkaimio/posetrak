@@ -7,12 +7,13 @@ Improvements to multi-camera extrinsic calibration: scrubbing calibration frames
 capture video instead of a pre-extracted PNG folder, per-control-point per-frame observations, \
 ArUco/ChArUco marker detection to anchor the coordinate system and provide a rigid marker-pose \
 bundle-adjustment residual, persisted fiducial markers for recalibration reuse, and (added after \
-Phase 4 live testing) a portable non-planar calibration rig plus scattered-tag redundancy as a \
-more robust alternative to anchoring the world frame from a single flat ChArUco board alone.
+Phase 4 live testing) a portable non-planar calibration rig -- characterizable from a single \
+orbit video, not just measured or hand-typed -- plus scattered-tag redundancy as a more robust \
+alternative to anchoring the world frame from a single flat ChArUco board alone.
 """
 categories = ["calibration", "ui"]
 target_release = "TBD"
-last_updated = 2026-08-09
+last_updated = 2026-08-11
 ```
 
 # Extrinsics Calibration Improvements — Implementation Status
@@ -54,9 +55,52 @@ available, no new dependency) and read automatically, using a compact
 parametric shape descriptor (starting with `"box"` — dimensions + marker
 size + one marker ID per face) rather than raw corner coordinates, so the
 user never has to locate/pair a config file with a specific physical rig.
-Phases 8-9 are design-only; not started. First physical experiment planned
-for 2026-08-10: a plain cardboard box with one ArUco marker per face — a
-direct real-world test of the `"box"` parametric shape.
+
+**Test captures acquired (2026-08-11) and continuation plan.** Harri shot
+two real captures with the same 3 cameras: **capture 1** has a cardboard
+box (one 4x4 ArUco marker per face — the Tier A rig prototype) plus 6
+scattered 5x5 ArUco tags around the room (Tier B), and a separate video of
+one camera orbiting the box; **capture 2** removes the box, keeps the same
+6 scattered tags at the same physical positions, but the cameras have been
+moved. Capture 1 also has reflective dots added to the box, and in capture
+2 the target person picks the box up and carries it. These two captures
+drive a concrete, ordered implementation plan (agreed 2026-08-11):
+
+1. **Rig geometry from the orbit video** — a new design element (design
+   doc, Tier A subsection "Rig geometry from an orbit video
+   (self-calibration)"): treat sampled video frames as unknown-pose
+   "cameras" and reuse the existing marker-rigid-pose BA
+   (`solve_marker_groups`, shipped in Phase 3) to solve per-frame poses and
+   the box's marker geometry jointly, gauge-fixed on one designated marker.
+   No new solver machinery — new caller of already-tested code. Prototype
+   as a standalone script against capture 1's orbit video before any UI
+   work, and cross-check its output against `solve_marker_groups` run on
+   capture 1's synchronized 3-camera footage of the same box (an
+   independent, drift-free measurement of the same physical geometry) —
+   this is now Phase 8's validation criterion for the video-derived path.
+2. **Phase 8 core**, exercised against capture 1: `MarkerRigConfig` +
+   `MarkerRigDetector` + `anchor_from_marker_rig`, anchoring the world frame
+   from the box across all 3 cameras.
+3. **Phase 5 persistence**, exercised against capture 1: once cameras are
+   anchored via the box, `solve_marker_groups`'s existing post-pass already
+   recovers the 6 scattered tags' world poses — persist them to
+   `scene_fiducial_markers`.
+4. **Phase 9 re-anchor**, validated against capture 2: load the tag poses
+   persisted in step 3, solve capture 2's (moved) cameras from *only* those
+   previously-known tags — no board, no rig, no manual points. This is the
+   direct real-data test of §9's central motivation (robustness to a single
+   anchoring instrument failing or being unavailable) and the milestone that
+   closes out the addendum.
+
+The reflective dots and the lifted-box portion of capture 2 are **not**
+part of this plan — they're test data for a distinct, not-yet-scoped future
+feature (per-frame tracking of a moving rigid body via markers, already
+called out as deliberately out of scope in the design doc's §3/§6). Kept in
+reserve rather than folded into Phases 8/9, which are calibration
+(fixed-pose) problems, not motion-capture ones; will get its own design doc
+when picked up.
+
+Phases 8-9 are design-only; not started, per the plan above.
 
 ## Phase summary
 

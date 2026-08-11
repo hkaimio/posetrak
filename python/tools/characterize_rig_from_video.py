@@ -108,29 +108,80 @@ _EDGE_PAIRS = [(0, 1), (1, 2), (2, 3), (3, 0)]
 # ---------------------------------------------------------------------------
 
 
-def _load_intrinsics(conn: sqlite3.Connection, camera_label: str) -> dict:
-    """Resolve one camera_instances.label to K/K_orig/dist/fisheye, preferring
-    the model's default calibration, else the most recently calibrated mode.
+def _load_intrinsics(conn: sqlite3.Connection, camera_label: str, camera_mode: str | None) -> dict:
+    """Resolve one camera_instances.label (+ optional camera_mode substring)
+    to K/K_orig/dist/fisheye.
+
+    **Deliberately does not silently pick "a" calibration when a camera
+    model has more than one recording mode.** A camera_instances row can
+    have several camera_modes (e.g. this registry's ACE2 Pro has distinct
+    "MEGA mode 4K 120 fps" and "4K 120 fps linear" modes -- genuinely
+    different FOV/distortion profiles, not just different resolutions), each
+    with its own default_intrinsics_calibration_id. Picking "whichever
+    default was calibrated most recently" across modes (an earlier version
+    of this function did exactly that) can silently apply the wrong mode's
+    calibration to footage shot in a different mode -- a wrong-FOV
+    intrinsics error that would corrupt the whole rig-geometry solve without
+    ever raising an error. So: if more than one camera_modes row exists for
+    this camera's model, --camera-mode (a case-insensitive substring against
+    camera_modes.notes) is required to disambiguate; if it doesn't narrow
+    things to exactly one mode, this lists the candidates and exits rather
+    than guessing.
     """
     conn.row_factory = sqlite3.Row
-    row = conn.execute(
+    modes = conn.execute(
         """
-        SELECT ic.*, (cm.default_intrinsics_calibration_id = ic.id) AS is_default
+        SELECT cm.id, cm.width_px, cm.height_px, cm.nominal_fps, cm.notes,
+               cm.default_intrinsics_calibration_id
         FROM camera_instances ci
         JOIN camera_modes cm ON cm.camera_model_id = ci.camera_model_id
-        JOIN intrinsics_calibrations ic ON ic.camera_mode_id = cm.id
         WHERE ci.label = ?
-        ORDER BY is_default DESC, ic.calibrated_at DESC
-        LIMIT 1
         """,
         (camera_label,),
-    ).fetchone()
+    ).fetchall()
+    if not modes:
+        raise SystemExit(
+            f"error: no camera_modes found for camera_instances.label={camera_label!r}. "
+            f"Check --camera-label matches the registry exactly (case-sensitive)."
+        )
+    if camera_mode:
+        needle = camera_mode.lower()
+        modes = [m for m in modes if needle in (m["notes"] or "").lower()]
+    if len(modes) != 1:
+        lines = "\n".join(
+            f"  id={m['id']}  {m['width_px']}x{m['height_px']}@{m['nominal_fps']}fps  "
+            f"notes={m['notes']!r}  default_calib={m['default_intrinsics_calibration_id']}"
+            for m in (modes if len(modes) > 1 else conn.execute(
+                "SELECT cm.id, cm.width_px, cm.height_px, cm.nominal_fps, cm.notes, "
+                "cm.default_intrinsics_calibration_id FROM camera_instances ci "
+                "JOIN camera_modes cm ON cm.camera_model_id = ci.camera_model_id "
+                "WHERE ci.label = ?", (camera_label,)
+            ).fetchall())
+        )
+        raise SystemExit(
+            f"error: {camera_label!r} has {len(modes)} matching camera_modes for "
+            f"--camera-mode={camera_mode!r} (need exactly 1). Candidates:\n{lines}\n"
+            f"Pass --camera-mode with a substring of the intended mode's notes."
+        )
+    mode = modes[0]
+    calib_id = mode["default_intrinsics_calibration_id"]
+    if calib_id is not None:
+        row = conn.execute("SELECT * FROM intrinsics_calibrations WHERE id = ?", (calib_id,)).fetchone()
+    else:
+        row = None
+    if row is None:
+        row = conn.execute(
+            "SELECT * FROM intrinsics_calibrations WHERE camera_mode_id = ? "
+            "ORDER BY calibrated_at DESC LIMIT 1",
+            (mode["id"],),
+        ).fetchone()
     if row is None:
         raise SystemExit(
-            f"error: no intrinsics_calibrations found for camera_instances.label="
-            f"{camera_label!r} in {conn}. Check --camera-label matches the "
-            f"registry exactly (case-sensitive)."
+            f"error: camera_modes.id={mode['id']} ({mode['notes']!r}) has no "
+            f"intrinsics_calibrations at all."
         )
+    print(f"Camera mode: {mode['notes']!r} ({mode['width_px']}x{mode['height_px']}"
+          f"@{mode['nominal_fps']}fps), calibration id={row['id']} calibrated_at={row['calibrated_at']}")
     fx, fy, cx, cy = row["fx"], row["fy"], row["cx"], row["cy"]
     K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
     K_orig = K.copy()
@@ -338,6 +389,14 @@ def _triangulate_corner(
 
 
 def main() -> None:
+    # extrinsics_solver's progress_cb messages and log lines contain non-ASCII
+    # characters (e.g. '↔' in match_all_pairs) that crash a plain print() on
+    # Windows' default cp1252 console encoding -- reconfigure stdout/stderr to
+    # tolerate them instead of erroring out mid-run.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
     parser = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -347,6 +406,11 @@ def main() -> None:
     parser.add_argument("--camera-label", required=True,
                          help="camera_instances.label to look up intrinsics for (must have a "
                               "calibrated camera_modes/intrinsics_calibrations row)")
+    parser.add_argument("--camera-mode", default=None,
+                         help="Case-insensitive substring of the camera_modes.notes to use "
+                              "(e.g. \"linear\" vs \"MEGA\" for an Insta360 ACE2 Pro). Required "
+                              "whenever the camera model has more than one recording mode -- the "
+                              "script lists candidates and exits rather than guessing.")
     parser.add_argument("--dict", default="DICT_4X4_50", help="ArUco dictionary (default: DICT_4X4_50)")
     parser.add_argument("--marker-size", type=float, default=0.15,
                          help="Physical marker side length in metres (default: 0.15)")
@@ -389,7 +453,7 @@ def main() -> None:
 
     conn = sqlite3.connect(f"file:{args.registry_db}?mode=ro", uri=True)
     try:
-        intr = _load_intrinsics(conn, args.camera_label)
+        intr = _load_intrinsics(conn, args.camera_label, args.camera_mode)
     finally:
         conn.close()
 

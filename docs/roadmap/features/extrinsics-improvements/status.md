@@ -102,6 +102,52 @@ when picked up.
 
 Phases 8-9 are design-only; not started, per the plan above.
 
+**Orbit-video self-calibration prototype (2026-08-11), step 1 of the plan
+above.** `python/tools/characterize_rig_from_video.py` (see its own header
+for the full approach) run against both of the box orbit videos from the
+2026-08-10 test captures, against the real `registry.db` intrinsics:
+
+- **OnePlus 9 Pro orbit video: clean end-to-end success.** 10 sampled
+  frames, all 10 solved; 5 of the box's 6 markers recovered with edge
+  lengths within ~4% of the configured 0.15m marker size; camera-to-rig
+  distances (1.3-2.0m) plausible for the physical orbit. ~60s runtime for
+  45 SIFT pairs — cheaper than the design doc's "expect this to be slow"
+  caveat worried.
+- **ACE2 Pro orbit video: surfaced a real triangulation-robustness gap, not
+  just a bug.** First run: only 8/10 frames solved (weaker SIFT
+  connectivity than the OnePlus footage, matching Harri's own note that
+  this camera's lighting is worse), and 2 of the 4 recovered markers had
+  catastrophically wrong edge lengths (up to 12m, for a 0.15m marker) —
+  traced to marker corners triangulated from only 2 solved cameras with no
+  sanity check at all before being trusted. Fixed by adding a per-corner
+  reprojection-error check to `_triangulate_corner` (same idea
+  `extrinsics_solver.triangulate_pair` already applies to SIFT points, just
+  previously missing from both of this codebase's free-CP triangulation
+  paths) — corners that don't reproject within 10px in every observing
+  camera are now dropped rather than trusted.
+- **The reprojection filter caught the worst case but didn't fully fix this
+  particular run**: re-running after the fix left only 1 of 5 markers with
+  all 4 corners surviving, and the *remaining* edges still showed a 126%
+  relative spread. Diagnosis: reprojection error alone doesn't catch a
+  different, more fundamental problem — a marker triangulated from only 2
+  cameras at a narrow parallax angle (nearly-parallel viewing rays, e.g.
+  two orbit samples taken close together in time) can reproject
+  acceptably well at *many* different depths along the ray, so a
+  low-reprojection-error triangulation can still have large real-world
+  position error. This is a standard photogrammetry failure mode
+  (triangulation uncertainty depends on baseline/parallax angle, not just
+  reprojection residual at the found solution), not specific to this
+  script, but nothing in either existing free-CP triangulation path in
+  `extrinsics_solver.py` currently checks for it either.
+- **Not yet resolved — needs a decision before Phase 8 core work starts**:
+  whether to (a) increase `--num-samples` for weak-texture/weak-connectivity
+  footage so more marker corners get 3+ camera observations at varied
+  angles, (b) add an explicit parallax-angle check alongside the
+  reprojection-error one, or (c) treat this as acceptable for now and rely
+  on the OnePlus-derived rig config as the primary source, using ACE2 Pro
+  only as a (currently unreliable) secondary cross-check. No implementation
+  decision made yet.
+
 ## Phase summary
 
 | Phase | Description | Status |

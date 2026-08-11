@@ -354,6 +354,7 @@ def _proj_matrix(state: CamCalibState) -> np.ndarray:
 
 def _triangulate_corner(
     obs_by_video: dict[str, ObsPoint], states_by_id: dict[str, CamCalibState],
+    max_reprojection_px: float = 10.0,
 ) -> np.ndarray | None:
     """DLT-triangulate one marker corner from every solved camera that
     observed it. Same SVD approach extrinsics_solver.py already uses twice
@@ -361,16 +362,29 @@ def _triangulate_corner(
     here in tool-script-local form rather than importing those private
     (underscore-prefixed) internals, per this directory's existing
     standalone-script convention (see detect_aruco.py's header).
+
+    **Unlike either of those two existing call sites, this rejects the
+    result outright if any observing camera's reprojection error exceeds
+    *max_reprojection_px*** (the same threshold/idea `triangulate_pair`
+    already applies to SIFT points, just not something either existing
+    free-CP triangulation path currently checks). Found necessary live,
+    not speculatively: a marker seen by only 2 solved "frame-cameras" at a
+    poor triangulation angle produced multi-metre corner errors (a 0.15m
+    marker with a 12m "edge") with nothing to catch it before it silently
+    corrupted the scale estimate and the rig config — see status.md's
+    orbit-video prototype notes.
     """
     rows = []
+    proj_inputs: list[tuple[np.ndarray, np.ndarray]] = []  # (P, undistorted px)
     for vid, obs in obs_by_video.items():
         state = states_by_id.get(vid)
         if state is None or state.R is None:
             continue
-        px, py = _undistort_px(obs.px, obs.py, state)
+        px_u = _undistort_px(obs.px, obs.py, state)
         P = _proj_matrix(state)
-        rows.append(px * P[2] - P[0])
-        rows.append(py * P[2] - P[1])
+        rows.append(px_u[0] * P[2] - P[0])
+        rows.append(px_u[1] * P[2] - P[1])
+        proj_inputs.append((P, px_u))
     if len(rows) < 4:  # need >= 2 cameras
         return None
     A = np.array(rows, dtype=np.float64)
@@ -380,7 +394,17 @@ def _triangulate_corner(
     h = Vt[-1]
     if abs(h[3]) < 1e-10:
         return None
-    return (h[:3] / h[3]).astype(np.float64)
+    xyz = (h[:3] / h[3]).astype(np.float64)
+
+    xyz_h = np.append(xyz, 1.0)
+    for P, px_u in proj_inputs:
+        proj_h = P @ xyz_h
+        if abs(proj_h[2]) < 1e-9:
+            return None
+        proj = proj_h[:2] / proj_h[2]
+        if np.linalg.norm(proj - px_u) > max_reprojection_px:
+            return None
+    return xyz
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +548,12 @@ def main() -> None:
                 if corner_idx in corners
             }
             corners_network[marker_id].append(_triangulate_corner(obs_by_video, states_by_id))
+
+    n_corners_total = sum(len(cs) for cs in corners_network.values())
+    n_corners_ok = sum(1 for cs in corners_network.values() for c in cs if c is not None)
+    print(f"Triangulated {n_corners_ok}/{n_corners_total} marker corners "
+          f"({n_corners_total - n_corners_ok} missing or rejected as a bad-conditioned/"
+          f"outlier triangulation — see max_reprojection_px in _triangulate_corner).")
 
     # --- Scale: median network-unit edge length vs. the known marker size. ---
     edge_lengths: list[float] = []

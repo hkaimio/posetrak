@@ -430,9 +430,31 @@ this dialog — that's Phase 9's UI, a separate, not-yet-started increment.
 
 This closes out the three original gaps from Harri's status check
 (ArUco-locked-to-world-position, rig support, cross-capture reuse) for
-both the CLI and the GUI. What's left for Phase 9 specifically is its own
-GUI action ("Re-anchor from known scene markers") — the CLI's `reanchor`
-command already covers the same functionality headlessly.
+both the CLI and the GUI.
+
+**Phase 9 GUI wiring implemented (2026-08-12)** — "Load from scene
+markers…" added to the same panel (renamed "Marker Rig / Scene Markers")
+rather than a separate one, since Tier A and Tier B turned out to share
+the identical detect/anchor mechanism end to end: the new button just
+reconstructs a `MarkerRigConfig` from this session's already-persisted
+`scene_marker_bodies` rows (mirroring the CLI's `reanchor` command's own
+query) and reuses every existing detect/anchor/overlay/solve code path
+unchanged. A new `_rig_source` flag ("file" vs "scene_markers")
+distinguishes the two load paths for exactly one purpose: only a
+file-loaded rig persists a *new* `scene_marker_bodies` row on Accept — a
+scene-markers-sourced config's rows already exist and their own geometry
+hasn't changed by re-anchoring a different capture from them. 5 new
+tests. Full regression sweep (632 tests) passes except the two
+already-confirmed pre-existing failures.
+
+Both Phase 8 and Phase 9 are now implemented at every layer (core,
+CLI, GUI) that this design doc's phased plan called for. Not done: a
+scattered-tag-size input in this dialog (the GUI still relies on the
+CLI's `--tag-size` for the initial `anchor-rig` solve that populates
+`scene_marker_bodies` in the first place — "Load from scene markers"
+consumes those rows but nothing in the GUI creates sized scattered-tag
+rows yet), and the previously-noted `init_poses_pnp` planar-ambiguity
+helper extraction for genuinely single-tag re-anchoring.
 
 **`posetrak marker-body` CLI group implemented (2026-08-12)** —
 `import`/`list`/`show`/`export`, mirroring `posetrak skeleton`'s
@@ -500,7 +522,7 @@ columns instead) plus its `(session_id, label)` uniqueness constraint.
 | 6 | AprilTag detector backend (extensibility proof) | ⬜ Not started |
 | 7 | Global timeline scrub (§8) — jump every camera to the same synced instant | ⬜ Not started (design added 2026-08-09 from UI-testing feedback) |
 | 8 | Portable non-planar calibration rig — primary world-frame anchor (§9, Tier A) | ✅ Core + CLI (`anchor-rig`) + GUI panel done, validated against real capture-1 footage (2026-08-12); `"box"` parametric shape and QR scanning deliberately deferred |
-| 9 | Scattered-tag redundancy + single-camera re-anchor (§9, Tier B) | 🟡 Re-anchor mechanism validated against real capture-2 footage (2026-08-12), reusing Phase 8's anchor_from_marker_rig unmodified; no UI wiring, one camera's data quality still under investigation |
+| 9 | Scattered-tag redundancy + single-camera re-anchor (§9, Tier B) | 🟡 Multi-camera re-anchor: core + CLI (`reanchor`) + GUI ("Load from scene markers…") all done, reusing Phase 8's `anchor_from_marker_rig` unmodified; genuinely single-camera re-anchor (planar-ambiguity helper extraction) and GUI scattered-tag-size input still open; one camera's data quality on real footage still under investigation |
 
 ## UI testing feedback (2026-08-09, Phases 1-2)
 

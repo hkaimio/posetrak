@@ -95,6 +95,7 @@ from posetrak.cli.session import (  # noqa: E402
     sync_group,
 )
 from posetrak.cli.skeleton import skeleton_group  # noqa: E402
+from posetrak.cli.marker_body import marker_body_group  # noqa: E402
 from posetrak.cli.config import config_group  # noqa: E402
 from posetrak.cli.pose import pose_group  # noqa: E402
 from posetrak.cli.detect import detect_group  # noqa: E402
@@ -108,6 +109,7 @@ main.add_command(camera_mode_group, "camera-mode")
 main.add_command(camera_group, "camera")
 main.add_command(calib_group, "calib")
 main.add_command(skeleton_group, "skeleton")
+main.add_command(marker_body_group, "marker-body")
 main.add_command(config_group, "config")
 main.add_command(session_group, "session")
 main.add_command(capture_group, "capture")

@@ -428,6 +428,15 @@ the existing convention for this kind of field
 (`extrinsic_calibrations.method`, `tracking_runs.method`) — adding
 `apriltag` later needs no migration.
 
+**Superseded (2026-08-12) by §10's `scene_marker_bodies`.** The
+per-*marker* schema above predates Phase 8/9's real implementation and the
+marker-body-definition format work — §10 revises this to one row per
+*body instance* (a rigid multi-marker body needs only one solved pose, not
+one per marker) and generalizes `marker_type`/`marker_id` into a proper
+`marker_body_definitions` reference for anything beyond a lone tag. The
+reasoning above (ephemeral CPs vs. a persisted, queryable result; why a DB
+table and not a file) still holds — only the table shape changed.
+
 ### 7. Recalibration workflow
 
 1. Starting a new calibration in a session that already has
@@ -695,6 +704,239 @@ The existing "World position" panel (surveyed points, hand-clicked per
 camera, §2) remains available for ad hoc known points and needs no changes
 for this addendum.
 
+### 10. Marker body definitions: format and storage
+
+Added 2026-08-12, while planning the UI/persistence work needed to turn
+Phases 8-9's already-validated core mechanism (see status.md) into a real
+feature. Phase 8's rig, Phase 9's scattered tags, and (not yet in scope,
+but deliberately not foreclosed — see §3's forward-compatibility note) a
+future marker-based motion-capture object attached to a moving skeleton
+joint are all the same underlying concept: **a named rigid body carrying
+one or more fiducial markers at fixed positions in a body-local frame.** A
+single scattered tag is the degenerate case (one marker, trivial local
+frame). This section defines the file format and storage for that
+concept, superseding §6's original `scene_fiducial_markers` sketch (see
+that section for a forward pointer) with a design worked out against real
+footage and real authoring concerns, not speculatively.
+
+#### Format choice: YAML, mirroring `docs/skeleton-format.md`
+
+This project already has an established, working precedent for "a named,
+versioned, human-authored geometric definition, stored as YAML and
+imported into the registry DB as a text blob": skeleton definitions
+(`docs/skeleton-format.md`, the `skeletons` table, `import_skeleton()`).
+Marker body definitions follow the identical pattern rather than
+inventing a new one — same authoring workflow (edit a `.yaml` file, import
+it), same storage shape (`yaml_content TEXT` in a DB row), and, per
+Harri's own stated hope, a plausible future convergence path: a skeleton
+joint could eventually reference (or splice in) a marker body's resolved
+marker list, since both use the same "named point(s), offset from a local
+origin" shape at their core (see "Forward compatibility" below).
+
+#### Canonical schema
+
+The file format is always **fully resolved** — a flat list of markers,
+each with an explicit body-local position. There is deliberately no
+shape-parsing (no `"box"`, `"tetrahedron"`, etc.) inside the format or its
+loader. This revises this design's earlier sketch (§9 Tier A's QR-code
+subsection originally proposed a compact `"box"` JSON shape the *loader*
+itself would expand): that approach carries a real, hard-to-catch risk —
+expanding a parametric shape requires *assuming* how each physical marker
+is mounted (which printed corner is "up" on that face), and a wrong
+assumption silently rotates that marker's corner correspondence with no
+error raised anywhere (this exact risk is why `load_rig_config`'s
+implementation deferred the `"box"` shape entirely — see its docstring).
+Keeping the loader dumb and the file always literal (mirroring skeleton
+YAML's own precedent — `skeleton_loader.cpp` never interprets "generate a
+humanoid," it only ever walks a flat joint list) moves shape generation to
+a separate, inspectable, testable **offline generator** step whose
+*output* — not its intent — is what actually gets loaded and trusted. A
+compact QR-embeddable descriptor (the original §9 idea) can still exist,
+just as one *input* format for such a generator, not as something the
+marker-body loader parses directly.
+
+```yaml
+name: "aikido-calib-box-v1"          # unique, stable identifier for this physical design
+description: "Foldable cardboard calibration rig, ~50x33x31cm"  # optional, documentation only
+units: "meters"
+
+slots: ["top"]                        # OPTIONAL -- only present for a template (see "Templating" below)
+
+markers:
+  - name: "top"                       # stable, human-facing label, unique within this body.
+                                       # Used for UI/debug/logging -- never used to match a real
+                                       # detection (that's type+dictionary+id, see below).
+    type: "aruco"                     # "aruco" | "apriltag" | "reflective_dot" | ... (open enum,
+                                       # mirrors FiducialDetection.marker_type already in fiducial_markers.py)
+    dictionary: "DICT_4X4_50"         # only meaningful for coded types (aruco/apriltag)
+    id: "4"                           # the decoded marker id within `dictionary` -- the ONLY field
+                                       # a real detection is matched against, together with
+                                       # type+dictionary. String, matching MarkerCornerObs.marker_id.
+    size: 0.145                       # side length, metres (aruco/apriltag only)
+    center: [0.0, 0.0, 0.0]           # body-local marker-plane center
+    normal: [0.0, 0.0, 1.0]           # body-local outward face normal (unit vector)
+    up: [0.0, 1.0, 0.0]               # body-local "up" edge hint (~perpendicular to normal;
+                                       # Gram-Schmidt-corrected at load time, same approach the
+                                       # box rig config's gravity-up reframing already used --
+                                       # doesn't need to be exact)
+    # corners: [[x,y,z], ...]         # ALTERNATIVE to center/normal/up -- raw (4,3) corners in
+                                       # the same TL/TR/BR/BL order marker_local_corners() uses.
+                                       # Overrides center/normal/up if both given. This is the
+                                       # provenance-preserving form for solved (not designed)
+                                       # geometry -- e.g. what an orbit-video self-calibration
+                                       # produces directly, with no lossy round-trip through an
+                                       # idealized planar description.
+
+  - name: "dot_top_left"
+    type: "reflective_dot"
+    center: [0.041, 0.038, 0.002]     # a point only -- no size/normal/up/id/dictionary; a
+                                       # reflective dot is never decoded, so it has no identity of
+                                       # its own beyond its name and its position in this body's
+                                       # own known geometry (see "Reflective dots" below).
+```
+
+Required/optional fields are **type-discriminated** (aruco/apriltag need
+orientation+size+id+dictionary; `reflective_dot` needs only a point),
+mirroring skeleton format's own precedent of joint-`type`-specific fields
+(`axis` for `revolute`, `limits.x/y/z` for `spherical`) rather than
+inventing a new pattern.
+
+#### `name` vs. `id` — why both exist
+
+An earlier draft of this schema used one field for both jobs and was
+caught as a real conflict (Harri, 2026-08-12): a body carrying markers
+from two different dictionaries (exactly this project's actual box —
+ArUco corners *and* reflective dots, see below) can have two markers that
+legitimately share the same numeric `id` in different dictionaries, or a
+human author may simply want a friendlier label than a bare dictionary id.
+`name` is the body-author's own stable identifier (drives UI/debug/
+`ControlPoint` naming); `id`, only meaningful together with
+`type`+`dictionary`, is the literal value a real detection is matched
+against. Any future loader/detector code keys its detection-matching
+lookup on `(type, dictionary, id)`; `name` never participates in that
+lookup.
+
+#### Reflective dots
+
+The project's actual calibration box already carries both ArUco markers
+and reflective dots (added 2026-08-11 for a future marker-based
+motion-capture direction, per §3's forward-compatibility note). A
+reflective dot has no decodable identity — its correspondence across
+cameras/frames can only come from the body's own known rigid geometry,
+once *some* marker on the same body (an ArUco corner, typically) has
+already solved a pose for it. This is exactly why dots belong in the
+*same* body definition file as the coded markers rather than a separate
+format: the coded markers anchor the body, and the dots ride along,
+predictable from that one shared pose — the same mechanism conventional
+reflective-marker motion-capture systems use. This isn't designed further
+here (matching, tracking, and reprojecting dots per-frame is squarely the
+future marker-based-mocap feature this design has repeatedly deferred,
+most recently in §3/§9) — only the *definition format*'s ability to
+describe a dot's position is in scope now.
+
+#### Templating (deferred, syntax reserved only)
+
+A real use case, not yet needed (Harri, 2026-08-12): multiple physical
+copies of the same rig *shape* (e.g. several identical cubes),
+distinguished only by which marker ids are printed on each copy. Building
+the full mechanism now would be speculative — consistent with this
+project's repeated preference (see §6's original scoping reasoning, and
+CLAUDE.md's "automation vs. prior human edits" principle for the same
+shape of call elsewhere) for deferring a generalization until a concrete
+second case exists. What *is* worth doing now is reserving the syntax so
+a future loader change is additive, not a breaking rewrite of files people
+have already authored:
+
+- `slots:` at the top of a definition lists symbolic names an *instance*
+  must supply real ids for.
+- A marker's `id:` becomes a structured `{slot: "name"}` reference instead
+  of a literal string — unambiguous by YAML node shape (a mapping, not a
+  scalar), not by string-sigil convention.
+- A definition using only literal `id:` values (today's case,
+  exclusively) is immediately usable and self-contained; one using
+  `slot:` references is a **template**, not usable until a (not-yet-built)
+  `marker_body_instances` table supplies a slot→id mapping.
+
+Nothing about today's format or loader needs to anticipate the instance
+tier beyond accepting this reserved shape; building `marker_body_instances`
+is out of scope until a second physical copy of some rig actually exists.
+
+#### Storage: registry-scoped `marker_body_definitions`
+
+```sql
+CREATE TABLE IF NOT EXISTS marker_body_definitions (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    yaml_content TEXT NOT NULL,
+    source       TEXT,             -- e.g. "orbit_video_self_calibration" or an authoring file path
+    created_at   TEXT NOT NULL,
+    notes        TEXT
+);
+```
+
+Directly mirrors `skeletons` (`id`, `yaml_content TEXT NOT NULL`, `notes`)
+— same import shape (`import_marker_body()` reading a `.yaml` file,
+analogous to `import_skeleton()`). Registry-scoped, not session-scoped
+(unlike `skeletons`, whose `person_label`/`parent_id` columns suggest
+per-person calibrated variants): a physical rig's *design* doesn't get a
+per-session variant the way a skeleton's bone lengths do — it's copied
+into a session DB unchanged, on demand, the same way
+`camera_models`/`intrinsics_calibrations` already are.
+
+#### Storage: session-scoped `scene_marker_bodies` (supersedes §6's `scene_fiducial_markers`)
+
+Revised from §6's per-*marker* sketch to per-*body-instance*: a rigid
+multi-marker body only ever needs **one** solved pose — every marker's
+world position then follows from `definition + pose`, exactly matching
+how `anchor_from_marker_rig` already treats a whole rig as a single
+transform. A lone scattered tag needs no `marker_body_definitions` row at
+all (its local geometry is always just `marker_local_corners(size)` —
+nothing to author), so `marker_body_definition_id` is nullable, with
+inline columns covering that common case directly (agreed with Harri,
+2026-08-12 — a bespoke one-marker YAML definition per scattered tag id
+would be pure authoring overhead for zero benefit):
+
+```sql
+CREATE TABLE IF NOT EXISTS scene_marker_bodies (
+    id                         TEXT PRIMARY KEY,
+    session_id                 TEXT NOT NULL REFERENCES mocap_sessions(id),
+    label                      TEXT NOT NULL,   -- user-chosen, e.g. "calib-box", "wall-tag-north"
+    marker_body_definition_id  TEXT REFERENCES marker_body_definitions(id),  -- NULL for a lone tag
+    marker_type                TEXT,            -- only used when marker_body_definition_id IS NULL
+    dictionary                 TEXT,            -- ditto
+    marker_id                  TEXT,            -- ditto
+    marker_size                REAL,            -- ditto
+    R                          BLOB NOT NULL,   -- body-local -> world rotation, float64[9] row-major
+    t                          BLOB NOT NULL,   -- body-local -> world translation, float64[3]
+    is_primary_anchor          INTEGER NOT NULL DEFAULT 0,
+    source_extrinsic_calibration_id TEXT REFERENCES extrinsic_calibrations(id),
+    updated_at                 TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS scene_marker_bodies_unique
+    ON scene_marker_bodies (session_id, label);
+```
+
+This single table covers every scenario this design needs:
+- The calibration rig itself: one row, `R = I, t = 0, is_primary_anchor =
+  1` (its own local frame *is* the world frame for that capture, per Tier
+  A's anchoring mechanism).
+- Each scattered tag: one row per tag, `marker_body_definition_id` NULL,
+  pose from `solve_marker_pose()`.
+- Cross-capture reuse (Tier B / Phase 9): a later session's solve reads
+  these rows as fixed anchor input — exactly what
+  `test_reanchor_capture2.py` already does today from a hand-carried file
+  (see status.md's 2026-08-12 entries), minus the manual file-carrying.
+
+#### Forward compatibility with skeleton joints
+
+Not designed here — explicitly future work, same as §3/§6 already flag
+for marker-based motion capture generally — but the per-marker fields
+above (`name`, body-local `center`) were chosen close enough to skeleton
+format's own marker fields (`name`, `offset`) that a future feature could
+plausibly let a skeleton joint reference a `marker_body_definitions` row,
+or splice its resolved markers into the skeleton's own `markers:` list
+with `parent: <joint>`, without this format needing to change first.
+
 ## Phased implementation plan
 
 
@@ -767,11 +1009,14 @@ actual usage); verify the anchor action reproduces the board's own known
 square size when measured in the solved world coordinates.
 
 ### Phase 5 — Scene marker persistence + recalibration reuse
-- `scene_fiducial_markers` table + migration.
-- Write path: upsert marker poses after any successful solve that included
-  fiducial markers.
+- `scene_marker_bodies` table + migration (§10 — supersedes the earlier
+  `scene_fiducial_markers` sketch).
+- Write path: upsert one row per solved marker body (rig or lone tag)
+  after any successful solve that included fiducial markers.
 - Read path: "Load scene markers as fixed control points" on a new
-  calibration run, plus residual-based flagging of markers whose
+  calibration run (via `anchor_from_marker_rig`, no new anchoring code —
+  each persisted body's `definition + R/t` is just another
+  `MarkerRigConfig` source), plus residual-based flagging of markers whose
   detected-vs-predicted reprojection is high.
 
 **Validation:** run calibration A and verify markers are persisted; move one
@@ -813,64 +1058,84 @@ the rest of the dialog behaving exactly as it does today.
 
 ### Phase 8 — Portable non-planar calibration rig (§9, Tier A)
 
-- `MarkerRigConfig` (resolved, per-marker corner coordinates) + a parametric
-  expander for `"box"`-shape descriptors (§9) + a JSON loader for both that
-  and the `"explicit"` fallback form, versioned like
-  `save_control_points`/`load_control_points`.
-- `MarkerRigDetector`: `ArucoDetector` + `cv2.aruco.Board` +
-  `estimate_rig_pose()`, tolerating partial marker visibility.
-- `anchor_from_marker_rig()`, mirroring `anchor_from_charuco_board()` (§4).
-- QR-code rig-geometry reader: `cv2.QRCodeDetector` decode → parse the
-  `"box"`/`"explicit"` payload → same `MarkerRigConfig` the file loader
-  produces. One-shot per rig, same as picking one confident-detection
-  frame already is for the ChArUco anchor.
-- Rig-from-video self-calibration (prototype first, as a standalone
-  `python/tools/` script against real orbit-video footage, before any UI
-  wiring — per this project's existing practice of validating solver-facing
-  code against real data before building UI on top of it): sample frames
-  from a single-camera orbit video, run the existing marker-rigid-pose BA
-  treating each sampled frame as an unknown-pose camera, gauge-fix on one
-  designated marker or the rig center, emit a resolved `MarkerRigConfig`.
-  Only promote to a UI action ("Characterize rig from video…") once the
-  prototype's cross-check (below) confirms it's accurate enough to trust.
-- UI: "Load rig config" (file) alongside "Scan rig QR code" (camera-driven,
-  reusing whichever camera/frame is currently being viewed) + "Detect rig"
-  per camera + "Set origin & axes from rig" action, parallel to the
-  existing ChArUco controls.
+**Core already implemented and validated against real capture-1 footage
+(2026-08-12, standalone scripts — see status.md).** Remaining work is
+switching the loader from the prototype's ad hoc JSON to §10's YAML
+format, plus UI wiring:
 
-**Validation:** using a physical rig with markers on ≥2 non-coplanar faces,
-verify a single camera's rig detection never exhibits the Phase-4 "no
-positive-Z solution" failure regardless of viewing angle (this is the
-concrete regression test for §9's stated motivation); verify solved rig
-corner spacing matches the rig's known geometry within tolerance; verify
-partial visibility (some faces occluded from a given camera) still produces
-a usable pose from whichever markers are visible; verify a `"box"`-shape QR
-code decodes to the same `MarkerRigConfig` as an equivalent hand-written
-`"explicit"` JSON file for the same physical box; verify the orbit-video
-self-calibration's resolved `MarkerRigConfig` agrees, within tolerance, with
-an independent `MarkerRigConfig` derived from a synchronized multi-camera
-capture of the same physical rig (the video method's own cross-check,
-since sequential-SfM drift has no other way to self-diagnose).
+- `load_marker_body()`: YAML loader for §10's format (`center`/`normal`/
+  `up` and `corners` marker forms; `slot:` id references parsed but
+  rejected with a clear "template not yet supported" error, per §10's
+  deferred-templating note) — replaces `load_rig_config`'s JSON
+  `"explicit"` shape. No parametric shape expansion in the loader itself
+  (§10) — a `"box"`-shape *offline generator* producing this YAML is
+  separate, optional tooling, not a loader responsibility.
+- `MarkerRigDetector` and `anchor_from_marker_rig()`: already implemented
+  (`fiducial_markers.py`), no changes needed beyond consuming
+  `MarkerRigConfig` from the new loader instead of the old one.
+- `marker_body_definitions` table + migration (§10) + registry↔session
+  copy (mirroring `camera_models`/`intrinsics_calibrations`).
+- Rig-from-video self-calibration: prototype already validated
+  (`tools/characterize_rig_from_video.py`) against real orbit-video
+  footage, cross-checked against a synchronized multi-camera solve of the
+  same physical rig (see status.md, 2026-08-11/12) — output format needs
+  updating to emit §10 YAML instead of the prototype's JSON. Promoting
+  this to a UI action ("Characterize rig from video…") is a separate,
+  lower-priority follow-up, not required for the rest of Phase 8.
+- UI: "Load rig config" (file or registry picker) + "Detect rig" per
+  camera + "Set origin & axes from rig" action, parallel to the existing
+  ChArUco controls. QR-code scanning (reading a compact descriptor off
+  the physical rig, expanding it into §10 YAML) deferred — not required
+  for a first usable version, since a file/registry picker already
+  removes the "which config goes with this rig" problem the QR idea was
+  meant to solve, at lower implementation cost.
+
+**Validation:** using the real physical rig already characterized this
+session, verify the UI's "Detect rig" + "Set origin & axes from rig" flow
+reproduces the same solved camera positions/reprojection errors already
+recorded in status.md's 2026-08-12 capture-1 test (no regression from
+re-implementing against §10's format); verify a single camera's rig
+detection never exhibits the Phase-4 "no positive-Z solution" failure
+regardless of viewing angle (already confirmed at the script level, per
+status.md — this re-confirms it end-to-end through the UI); verify
+partial visibility (some faces occluded from a given camera) still
+produces a usable pose from whichever markers are visible.
 
 ### Phase 9 — Scattered-tag redundancy + single-camera re-anchor (§9, Tier B)
 
-- Factor `init_poses_pnp`'s planar-pose-ambiguity handling (§4's `C_z`/IPPE
-  logic) out into a shared helper usable outside the full multi-camera init
-  path.
-- New: fixed-`ControlPoint` construction from an already-solved
-  `MarkerGroup`'s pose (closing the "detected marker → free points only"
-  gap identified in live testing), so a scattered tag with a known pose can
-  seed future solves the same way board/rig corners do.
-- New: single-camera re-anchor action — given one camera's fresh detection
-  of already-known-pose tags, recover just that camera's extrinsics without
-  re-running the full session calibration.
+**Multi-camera re-anchor mechanism already validated against real
+capture-2 footage (2026-08-12, standalone script — see status.md):**
+`anchor_from_marker_rig()` needed zero new code — a set of previously-solved
+scattered tags is already just another `MarkerRigConfig` source as far as
+that function is concerned. Remaining work is persistence + UI, plus the
+still-open single-camera case:
 
-**Validation:** after a Tier-A-anchored solve with several scattered tags
-visible, verify each tag's recovered pose persists correctly
-(`scene_fiducial_markers`); simulate a bumped camera (perturb its pose,
-re-detect the same tags from a fresh frame) and verify the single-camera
-re-anchor action recovers a pose close to the camera's original one, without
-touching any other camera's already-solved pose.
+- Per-corner triangulation + reprojection-check for scattered tags (already
+  implemented as part of the capture-1 test script,
+  `tools/test_rig_anchor_capture1.py`'s `--save-scattered-tags`) becomes
+  the real write path once `scene_marker_bodies` (§10, Phase 5) exists —
+  same triangulation logic, writing DB rows instead of a JSON file.
+- Read path: "Re-anchor from known scene markers" action — loads this
+  session's (or a prior session's, once the registry-vs-session scoping
+  question below is resolved) `scene_marker_bodies` rows and calls
+  `anchor_from_marker_rig()` unchanged.
+- **Still not attempted**: the *single-camera* re-anchor case specifically
+  (one bumped/moved camera, re-anchored alone without re-running the whole
+  session). Unlike the multi-camera case just validated, a *lone* scattered
+  tag is still a planar target for that one camera — this is exactly where
+  §4's `init_poses_pnp` planar-pose-ambiguity handling (`C_z`/IPPE logic)
+  remains relevant and should be factored out into a shared helper, per
+  the original phase plan below. Not yet re-evaluated in light of this
+  session's findings; still believed necessary.
+
+**Validation:** ~~after a Tier-A-anchored solve with several scattered tags
+visible, verify each tag's recovered pose persists correctly~~ — done at
+the script level (status.md, 2026-08-12); re-verify through the UI/DB path
+once built. Simulate a bumped camera (perturb its pose, re-detect the same
+tags from a fresh frame) and verify the single-camera re-anchor action
+recovers a pose close to the camera's original one, without touching any
+other camera's already-solved pose — this part is still untested at any
+level.
 
 ## Open questions
 
@@ -924,22 +1189,44 @@ touching any other camera's already-solved pose.
   question either way — the orbit-video self-calibration method above works
   for any marker layout, parametric or not, so an irregular fold doesn't
   need its own parametric shape primitive just to become usable.
-- **Rig config authoring UX** — resolved for regular shapes by the QR-code
-  approach above (parametric shape descriptor, read directly off the
-  physical rig) and, for irregular or unmeasured rigs, by the orbit-video
-  self-calibration method — between the two, hand-measuring a rig's
-  geometry should no longer be necessary in practice. Still open: exactly
-  which parametric shape primitives beyond `"box"` are worth adding (a
-  tent/pyramid fold and an L-frame are the other candidates mentioned in
-  this section) versus always falling back to video self-calibration for
-  anything non-box-shaped.
+- **Rig config authoring UX — superseded by §10.** The canonical format is
+  now §10's YAML (`center`/`normal`/`up` or `corners`, always fully
+  resolved); a `"box"`-shape descriptor (QR-embeddable or otherwise) is
+  reframed as one *optional offline generator* that produces this YAML,
+  not a loader-level shape — see §10's "Canonical schema" for why the
+  earlier loader-level approach was revised. The underlying authoring
+  paths are otherwise unchanged: hand-measurement, a future parametric
+  generator, or orbit-video self-calibration (validated 2026-08-11/12, see
+  status.md) all just need to produce §10-shaped YAML. Still open: which
+  parametric generators beyond a `"box"` one are worth building (tent/
+  pyramid, L-frame) versus always falling back to video self-calibration
+  or hand-measurement for anything non-box-shaped.
 - **`init_poses_pnp`'s planar-ambiguity helper extraction (§9, Tier B)**
   should land as part of Phase 9, not deferred — both the existing
   multi-camera init path and the new single-camera re-anchor path need
   identical handling, and duplicating it would let them drift (one fixed,
   one not) exactly the way this whole addendum is trying to avoid.
-- **Rig pose persistence (§9, Tier A) is deliberately deferred**, unlike
-  scattered tags (Tier B), since a portable rig is expected to be
-  repositioned fresh each session rather than left in place between
-  sessions. Revisit if real usage shows rigs staying put across multiple
-  sessions in the same venue.
+- **Rig pose persistence (§9, Tier A) — no longer a separate deferral,
+  superseded by §10.** This was previously deliberately skipped since a
+  portable rig is expected to be repositioned fresh each session rather
+  than left in place. §10's unified `scene_marker_bodies` table ended up
+  covering the rig's own row (`R=I, t=0, is_primary_anchor=1`) at no extra
+  schema cost, since every solve needs a body-instance table regardless —
+  so the rig's pose *is* persisted now, it's just that nothing yet reads
+  it back across sessions (a rig is not currently expected to still be in
+  the same physical place next session, so there's no read-path use for
+  it yet). Revisit only if real usage shows rigs staying put across
+  multiple sessions in the same venue.
+- **Templating (§10) is deliberately syntax-only for now** — `slots:`/
+  `{slot: "name"}` are reserved in the YAML format, but `marker_body_
+  instances` (the table that would resolve a template into a concrete,
+  usable definition) is not designed or built. Revisit once a second
+  physical copy of some rig design actually exists (Harri, 2026-08-12).
+- **Reflective-dot correspondence/tracking (§10) is out of scope beyond
+  the definition format.** §10 lets a marker body describe a dot's
+  position; nothing yet matches a detected dot in an image to the right
+  `name` (no decoded id to key on, unlike ArUco/AprilTag), predicts its
+  expected image position from an already-solved body pose, or tracks it
+  per-frame for a moving object. This is squarely the future marker-based
+  motion-capture feature §3/§6/§9 have repeatedly flagged as deliberately
+  out of scope, not a gap in this addendum specifically.

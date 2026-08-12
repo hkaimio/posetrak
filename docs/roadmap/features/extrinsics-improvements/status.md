@@ -318,8 +318,68 @@ using only ordinary tags anchored in a prior capture.
   doesn't depend on resolving this, and further diagnosis is better scoped
   as its own follow-up.
 
-**Not yet done**: `scene_fiducial_markers` persistence; any UI wiring;
-the oneplus data-quality root cause above.
+**Not yet done**: `scene_fiducial_markers` persistence (see below — now
+superseded by `scene_marker_bodies`); any UI wiring; the oneplus
+data-quality root cause above.
+
+**Marker body definition format designed (2026-08-12), before continuing
+to UI/persistence work.** Prompted by Harri's status check ("where are we
+with implementing this feature") confirming three concrete UI gaps
+(ArUco markers can't be locked to a known world position; calibration rigs
+aren't supported in the UI; cross-capture marker reuse isn't available in
+the UI) — all three reduce to the same missing piece: a proper format and
+storage story for "a named rigid body carrying known markers," which the
+prototype scripts had so far handled ad hoc (raw JSON, hand-carried
+files). Worked out with Harri over several rounds; full write-up in
+extrinsics-improvements-design.md §10 ("Marker body definitions: format
+and storage"), which now supersedes §6's original `scene_fiducial_markers`
+sketch. Highlights:
+
+- **YAML, not JSON** — mirrors `docs/skeleton-format.md`'s existing
+  precedent (a named, versioned, human-authored definition stored as a
+  `yaml_content` text blob in a registry-DB row, imported from a `.yaml`
+  file) rather than inventing a new pattern, and keeps a plausible future
+  door open to a skeleton joint referencing the same marker-list shape
+  (Harri's stated long-term hope).
+- **The canonical format is always fully-resolved** — a flat per-marker
+  list (`center`/`normal`/`up`, or raw `corners`), never a parametric
+  shape the loader itself interprets. This is a direct revision of the
+  earlier `"box"`-JSON idea (§9's QR-code subsection): expanding a shape
+  requires *assuming* physical marker mounting orientation, which is
+  exactly the risk `load_rig_config` already deferred building for (see
+  its docstring). A `"box"` generator can still exist, just as an offline
+  tool producing this YAML, never as loader-level parsing.
+- **`name` vs `id` separated** — caught live as a real conflict, not a
+  style preference: a body with markers from two different dictionaries
+  (this project's actual box, which already has both ArUco corners and
+  reflective dots) can have two markers that legitimately share a numeric
+  `id`. `name` is the stable, human-facing label; `id` (with `type`+
+  `dictionary`) is the only thing matched against a real detection.
+- **`type` added, separate from `dictionary`** — mirrors the
+  `FiducialDetection.marker_type` string already in `fiducial_markers.py`
+  (`"aruco"`, `"charuco"`, `"apriltag"`, ...), extended with
+  `"reflective_dot"`. Required fields are type-discriminated, same pattern
+  skeleton format already uses for joint-type-specific fields.
+- **Templating reserved, not built** — Harri flagged a real but
+  not-yet-needed use case (several physical copies of the same rig shape,
+  distinguished only by which marker ids are printed). `slots:` plus a
+  structured `id: {slot: "name"}` reference are reserved in the format so
+  a future `marker_body_instances` table is additive later, without
+  building it now — same "defer until a concrete second case exists" call
+  this design doc already made once for `scene_fiducial_markers`'s own
+  registry/session scoping.
+- **`scene_marker_bodies` replaces `scene_fiducial_markers`** — one row
+  per solved *body instance* (rig or lone tag), not per marker, since a
+  rigid multi-marker body only ever needs one pose. A lone scattered tag
+  needs no YAML definition at all (`marker_body_definition_id` NULL,
+  inline dictionary/id/size columns) — building a bespoke one-marker
+  definition file per tag id would be pure overhead, agreed with Harri.
+
+**Not yet done**: any of this is implemented — `import_marker_body()`,
+the `marker_body_definitions`/`scene_marker_bodies` migrations, and
+updating the existing prototype scripts (`characterize_rig_from_video.py`,
+`test_rig_anchor_capture1.py`, `test_reanchor_capture2.py`) to read/write
+§10's YAML instead of their current ad hoc JSON are all still ahead.
 
 ## Phase summary
 

@@ -381,6 +381,15 @@ updating the existing prototype scripts (`characterize_rig_from_video.py`,
 `test_rig_anchor_capture1.py`, `test_reanchor_capture2.py`) to read/write
 §10's YAML instead of their current ad hoc JSON are all still ahead.
 
+**CRUD layer implemented (2026-08-12)** — `python/posetrak/db/
+manage_marker_body.py`: `import_marker_body()`/`import_marker_body_str()`
+(mirrors `manage_skeleton.import_skeleton()` exactly — content-addressed
+id, idempotent), `copy_marker_body_to_session()` (reuses
+`_copy_rows_if_missing()`), `upsert_scene_marker_body()` (upserts by
+`(session_id, label)` — current believed pose, not history) and
+`read_scene_marker_body_pose()`. 20 new tests. Nothing calls any of this
+yet — no prototype-script or UI wiring.
+
 **DB migration implemented (2026-08-12)** — `marker_body_definitions`
 (registry v7→v8, embedded into every session DB the same way
 camera_models/skeletons/tracker_configs already are) and

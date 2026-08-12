@@ -147,6 +147,7 @@ def upsert_scene_marker_body(
     R: np.ndarray,
     t: np.ndarray,
     *,
+    group_name: str | None = None,
     marker_body_definition_id: str | None = None,
     marker_type: str | None = None,
     dictionary: str | None = None,
@@ -164,12 +165,12 @@ def upsert_scene_marker_body(
     ``scene_marker_bodies``' schema itself leaves both nullable rather
     than modelling them as a SQL-level exclusive-or.
 
-    Upserts by ``(session_id, label)``: re-solving the same body under the
-    same label overwrites its pose in place. This table represents
-    "current believed pose," not a history — the same reasoning already
-    established for the design doc's original ``scene_fiducial_markers``
-    sketch (section 7's recalibration workflow: "existing marker → overwrite
-    pose unconditionally").
+    Upserts by ``(session_id, group_name, label)``: re-solving the same
+    body under the same group and label overwrites its pose in place.
+    This table represents "current believed pose," not a history — the
+    same reasoning already established for the design doc's original
+    ``scene_fiducial_markers`` sketch (section 7's recalibration workflow:
+    "existing marker → overwrite pose unconditionally").
 
     Parameters
     ----------
@@ -178,11 +179,21 @@ def upsert_scene_marker_body(
     session_id:
         ``mocap_sessions.id`` this pose belongs to.
     label:
-        User-facing label for this body instance, unique within the
-        session (e.g. ``"calib-box"``, ``"wall-tag-north"``).
+        User-facing label for this body instance, unique within
+        ``(session_id, group_name)`` (e.g. ``"calib-box"``,
+        ``"wall-tag-north"``).
     R, t:
         Body-local → world rotation (3×3) and translation (3,), any
         array-like accepted by ``np.asarray``.
+    group_name:
+        User-chosen name grouping every marker anchored together in one
+        physical space (e.g. ``"room7"``) — lets a later capture in the
+        same room select just that group instead of every stored marker
+        in the session (design doc section 9). ``None``/omitted means
+        ungrouped, stored as ``''`` (not NULL — see session_schema.sql's
+        column comment for why this matters for the uniqueness
+        constraint). Two different groups may reuse the same *label*
+        without colliding.
     is_primary_anchor:
         True for the instrument that defined this session's world frame
         (``R = I, t = 0`` for that one row, by construction).
@@ -190,18 +201,20 @@ def upsert_scene_marker_body(
     Returns
     -------
     str
-        The row's id — a freshly generated one for a new label, or the
-        existing row's id if *label* already had one for this session.
+        The row's id — a freshly generated one for a new (group, label)
+        pair, or the existing row's id if that pair already had one for
+        this session.
     """
     from posetrak.db.db import generate_id
 
+    group_name = group_name or ""
     R_blob = struct.pack("<9d", *np.asarray(R, dtype=np.float64).flatten())
     t_blob = struct.pack("<3d", *np.asarray(t, dtype=np.float64).flatten())
     updated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     existing = session.execute(
-        "SELECT id FROM scene_marker_bodies WHERE session_id = ? AND label = ?",
-        (session_id, label),
+        "SELECT id FROM scene_marker_bodies WHERE session_id = ? AND group_name = ? AND label = ?",
+        (session_id, group_name, label),
     ).fetchone()
 
     with session:
@@ -223,13 +236,13 @@ def upsert_scene_marker_body(
             row_id = generate_id()
             session.execute(
                 "INSERT INTO scene_marker_bodies "
-                "(id, session_id, label, marker_body_definition_id, marker_type, dictionary, "
-                " marker_id, marker_size, R, t, is_primary_anchor, "
+                "(id, session_id, label, group_name, marker_body_definition_id, marker_type, "
+                " dictionary, marker_id, marker_size, R, t, is_primary_anchor, "
                 " source_extrinsic_calibration_id, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    row_id, session_id, label, marker_body_definition_id, marker_type, dictionary,
-                    marker_id, marker_size, R_blob, t_blob, int(is_primary_anchor),
+                    row_id, session_id, label, group_name, marker_body_definition_id, marker_type,
+                    dictionary, marker_id, marker_size, R_blob, t_blob, int(is_primary_anchor),
                     source_extrinsic_calibration_id, updated_at,
                 ),
             )
@@ -238,15 +251,72 @@ def upsert_scene_marker_body(
 
 
 def list_scene_marker_bodies(session: sqlite3.Connection, session_id: str) -> list[sqlite3.Row]:
-    """Return all ``scene_marker_bodies`` rows for *session_id*, ordered by label."""
+    """Return all ``scene_marker_bodies`` rows for *session_id*, ordered by
+    group name then label -- across every group, e.g. for the manager
+    dialog's "everything, for troubleshooting" view."""
     return session.execute(
-        "SELECT * FROM scene_marker_bodies WHERE session_id = ? ORDER BY label",
+        "SELECT * FROM scene_marker_bodies WHERE session_id = ? ORDER BY group_name, label",
         (session_id,),
     ).fetchall()
 
 
-def delete_scene_marker_body(session: sqlite3.Connection, session_id: str, label: str) -> bool:
-    """Delete one ``scene_marker_bodies`` row by ``(session_id, label)``.
+def list_scene_marker_group_names(session: sqlite3.Connection, session_id: str) -> list[sqlite3.Row]:
+    """Return every named group (``group_name != ''``) this session has
+    loadable scene markers under, with a marker count and the most recent
+    update time -- for populating a "pick which room's markers to load"
+    UI (design doc section 9; the GUI's ``_SceneMarkerGroupPickerDialog``
+    and the CLI's `extrinsics scene-marker groups`).
+
+    Only counts loadable scattered-tag rows (``marker_body_definition_id
+    IS NULL`` and dictionary/marker_id/marker_size all set), matching
+    ``list_scene_marker_bodies_by_group``'s own filter -- a rig's own
+    anchor row wouldn't be loaded from this group anyway, so counting it
+    here would overstate how many tags actually come back.
+
+    Rows still stuck at the ungrouped default (``group_name == ''``,
+    written before this feature existed or via a caller that didn't
+    bother naming a group) are deliberately excluded -- there's no name
+    to show for them; ``list_scene_marker_bodies_by_group(..., None)``
+    is how to reach them.
+    """
+    return session.execute(
+        "SELECT group_name, COUNT(*) AS n_markers, MAX(updated_at) AS last_updated "
+        "FROM scene_marker_bodies "
+        "WHERE session_id = ? AND group_name != '' AND marker_body_definition_id IS NULL "
+        "AND dictionary IS NOT NULL AND marker_id IS NOT NULL AND marker_size IS NOT NULL "
+        "GROUP BY group_name ORDER BY last_updated DESC",
+        (session_id,),
+    ).fetchall()
+
+
+def list_scene_marker_bodies_by_group(
+    session: sqlite3.Connection, session_id: str, group_name: str | None,
+) -> list[sqlite3.Row]:
+    """Return the loadable scattered-tag rows for one named group (or the
+    ungrouped default when *group_name* is ``None``/``''``) -- the
+    filtered counterpart to ``list_scene_marker_bodies``, used by "From
+    Scene Markers…"/`reanchor` once a group has been chosen.
+
+    Same loadable-row filter as ``list_scene_marker_group_names`` uses to
+    count: a rig's own anchor row is never returned here (design doc
+    section 9 -- see status.md's 2026-08-12 "rig markers leaking into
+    scene markers" entry for why that matters).
+    """
+    return session.execute(
+        "SELECT * FROM scene_marker_bodies "
+        "WHERE session_id = ? AND group_name = ? AND marker_body_definition_id IS NULL "
+        "AND dictionary IS NOT NULL AND marker_id IS NOT NULL AND marker_size IS NOT NULL "
+        "ORDER BY label",
+        (session_id, group_name or ""),
+    ).fetchall()
+
+
+def delete_scene_marker_body(
+    session: sqlite3.Connection, session_id: str, label: str, group_name: str | None = None,
+) -> bool:
+    """Delete one ``scene_marker_bodies`` row by ``(session_id, group_name,
+    label)`` -- *group_name* defaults to the ungrouped ``''``, so callers
+    that never adopted named groups keep working unchanged.
 
     For pruning stale/wrong entries -- e.g. a portable calibration rig's
     own anchor row, or a scattered tag whose physical position has moved
@@ -262,8 +332,8 @@ def delete_scene_marker_body(session: sqlite3.Connection, session_id: str, label
     """
     with session:
         cur = session.execute(
-            "DELETE FROM scene_marker_bodies WHERE session_id = ? AND label = ?",
-            (session_id, label),
+            "DELETE FROM scene_marker_bodies WHERE session_id = ? AND group_name = ? AND label = ?",
+            (session_id, group_name or "", label),
         )
     return cur.rowcount > 0
 

@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMessageBox,
     QPushButton,
@@ -103,6 +104,8 @@ from posetrak.db.manage_marker_body import (
     import_marker_body,
     list_marker_bodies,
     list_scene_marker_bodies,
+    list_scene_marker_bodies_by_group,
+    list_scene_marker_group_names,
     upsert_scene_marker_body,
 )
 
@@ -1093,6 +1096,79 @@ class _RegistryRigPickerDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Scene marker group picker -- "From Scene Markers…" needs to know *which*
+# named group (e.g. a room) to load once more than one exists for the
+# session, rather than loading every stored marker from every room
+# indiscriminately. See status.md's 2026-08-12 "how do I select which
+# scene markers" entry.
+# ---------------------------------------------------------------------------
+
+
+class _SceneMarkerGroupPickerDialog(QDialog):
+    """Picker listing named scene-marker groups (plus an explicit
+    "(ungrouped)" row when ungrouped markers also exist) for a session."""
+
+    _UNGROUPED_LABEL = "(ungrouped)"
+
+    def __init__(
+        self, groups: list[sqlite3.Row], has_ungrouped: bool, parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Pick Scene Marker Group")
+        self.setMinimumSize(480, 280)
+        self._selected_group_name: str | None = None
+        self._has_selection = False
+
+        rows: list[tuple[str, str, str]] = [
+            (g["group_name"], str(g["n_markers"]), (g["last_updated"] or "")[:19]) for g in groups
+        ]
+        if has_ungrouped:
+            rows.append((self._UNGROUPED_LABEL, "", ""))
+        self._row_names = [r[0] for r in rows]
+
+        self._table = QTableWidget(len(rows), 3)
+        self._table.setHorizontalHeaderLabels(["Name", "Markers", "Last updated"])
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        for i, (name, n_markers, updated) in enumerate(rows):
+            self._table.setItem(i, 0, QTableWidgetItem(name))
+            self._table.setItem(i, 1, QTableWidgetItem(n_markers))
+            self._table.setItem(i, 2, QTableWidgetItem(updated))
+        self._table.doubleClicked.connect(self.accept)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._table)
+        layout.addWidget(buttons)
+
+    def accept(self) -> None:
+        row_idx = self._table.currentRow()
+        if row_idx < 0:
+            return
+        name = self._row_names[row_idx]
+        self._selected_group_name = None if name == self._UNGROUPED_LABEL else name
+        self._has_selection = True
+        super().accept()
+
+    def selected_group_name(self) -> str | None:
+        """``None`` for "(ungrouped)" -- the same sentinel
+        ``list_scene_marker_bodies_by_group``/``upsert_scene_marker_body``
+        already use, not a special case here."""
+        return self._selected_group_name
+
+
+# ---------------------------------------------------------------------------
 # Scene marker manager (view + delete scene_marker_bodies rows) -- for
 # pruning stale entries, e.g. a portable rig's own anchor row once it has
 # been physically removed from the scene, or a scattered tag whose position
@@ -1119,14 +1195,14 @@ class _SceneMarkerManagerDialog(QDialog):
         self._conn = conn
         self._session_id = session_id
 
-        self._table = QTableWidget(0, 8)
+        self._table = QTableWidget(0, 9)
         self._table.setHorizontalHeaderLabels(
-            ["Label", "Source", "Dictionary", "Marker ID", "Size (m)", "Primary anchor",
-             "Updated", "Rig match?"]
+            ["Label", "Group", "Source", "Dictionary", "Marker ID", "Size (m)",
+             "Primary anchor", "Updated", "Rig match?"]
         )
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for col in range(1, 8):
+        for col in range(1, 9):
             hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -1182,15 +1258,16 @@ class _SceneMarkerManagerDialog(QDialog):
             if not r["marker_body_definition_id"] and r["dictionary"] and r["marker_id"]:
                 rig_match = rig_marker_owners.get((r["dictionary"], r["marker_id"]), "")
             self._table.setItem(i, 0, QTableWidgetItem(r["label"]))
-            self._table.setItem(i, 1, QTableWidgetItem(source))
-            self._table.setItem(i, 2, QTableWidgetItem(r["dictionary"] or ""))
-            self._table.setItem(i, 3, QTableWidgetItem(r["marker_id"] or ""))
+            self._table.setItem(i, 1, QTableWidgetItem(r["group_name"] or "(ungrouped)"))
+            self._table.setItem(i, 2, QTableWidgetItem(source))
+            self._table.setItem(i, 3, QTableWidgetItem(r["dictionary"] or ""))
+            self._table.setItem(i, 4, QTableWidgetItem(r["marker_id"] or ""))
             size = r["marker_size"]
-            self._table.setItem(i, 4, QTableWidgetItem(f"{size:.4f}" if size is not None else ""))
-            self._table.setItem(i, 5, QTableWidgetItem("yes" if r["is_primary_anchor"] else ""))
-            self._table.setItem(i, 6, QTableWidgetItem((r["updated_at"] or "")[:19]))
+            self._table.setItem(i, 5, QTableWidgetItem(f"{size:.4f}" if size is not None else ""))
+            self._table.setItem(i, 6, QTableWidgetItem("yes" if r["is_primary_anchor"] else ""))
+            self._table.setItem(i, 7, QTableWidgetItem((r["updated_at"] or "")[:19]))
             match_item = QTableWidgetItem(f"possibly \"{rig_match}\"" if rig_match else "")
-            self._table.setItem(i, 7, match_item)
+            self._table.setItem(i, 8, match_item)
             if rig_match:
                 match_item.setToolTip(
                     "This marker's (dictionary, id) matches a marker belonging to rig "
@@ -1198,7 +1275,7 @@ class _SceneMarkerManagerDialog(QDialog):
                     "was excluded, and will go stale whenever that rig moves. Consider "
                     "deleting it."
                 )
-                for col in range(8):
+                for col in range(9):
                     item = self._table.item(i, col)
                     item.setBackground(QColor(255, 232, 191))
 
@@ -1206,16 +1283,21 @@ class _SceneMarkerManagerDialog(QDialog):
         row_idxs = sorted({idx.row() for idx in self._table.selectedIndexes()}, reverse=True)
         if not row_idxs:
             return
-        labels = [self._rows[i]["label"] for i in row_idxs]
+        # (label, group_name) pairs, not labels alone -- two different
+        # groups may share a label since this feature's group_name
+        # addition (2026-08-12), and deleting must target only the
+        # selected row's own group.
+        targets = [(self._rows[i]["label"], self._rows[i]["group_name"]) for i in row_idxs]
         reply = QMessageBox.question(
             self, "Delete Scene Marker(s)",
-            f"Permanently delete {len(labels)} scene marker(s)?\n\n" + "\n".join(labels),
+            f"Permanently delete {len(targets)} scene marker(s)?\n\n"
+            + "\n".join(f"{label} ({group or '(ungrouped)'})" for label, group in targets),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        for label in labels:
-            delete_scene_marker_body(self._conn, self._session_id, label)
+        for label, group in targets:
+            delete_scene_marker_body(self._conn, self._session_id, label, group_name=group)
         self._refresh()
 
 
@@ -1842,6 +1924,20 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         )
         load_scene_btn.clicked.connect(self._on_load_rig_from_scene_markers)
 
+        group_name_row = QHBoxLayout()
+        group_name_row.addWidget(QLabel("Scene marker group:"))
+        self._scene_marker_group_edit = QLineEdit()
+        self._scene_marker_group_edit.setPlaceholderText("e.g. room7 (optional)")
+        self._scene_marker_group_edit.setToolTip(
+            "Name for this physical space's scene markers -- both the "
+            "rig's own anchor row and any sized ArUco markers detected "
+            "in the panel above are saved under this name on Accept. A "
+            "later capture in the same room can then pick this name from "
+            "\"From Scene Markers…\" instead of every room's markers in "
+            "the session loading together. Leave blank to stay ungrouped."
+        )
+        group_name_row.addWidget(self._scene_marker_group_edit, 1)
+
         manage_btn = QPushButton("Manage Scene Markers…")
         manage_btn.setToolTip(
             "View every scene marker stored for this session (including "
@@ -1908,6 +2004,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         layout.addWidget(load_btn)
         layout.addWidget(registry_btn)
         layout.addWidget(load_scene_btn)
+        layout.addLayout(group_name_row)
         layout.addWidget(manage_btn)
         layout.addLayout(min_size_row)
         layout.addLayout(min_cams_row)
@@ -2692,32 +2789,69 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._detect_and_anchor_rig(show_warnings=False)
 
     def _on_load_rig_from_scene_markers(self) -> None:
-        """Reconstruct a virtual rig config from this session's already-
-        persisted scattered tags (design doc section 9 Tier B) -- the CLI's
-        `extrinsics reanchor` command does the identical query/construction;
-        see its docstring. No physical rig or config file needed: once
-        loaded, this uses exactly the same detect/anchor buttons and
-        ``anchor_from_marker_rig`` call as a real rig does.
+        """Pick which named group of this session's already-persisted
+        scattered tags to re-anchor from (design doc section 9 Tier B,
+        and its 2026-08-12 addendum -- see status.md's "how do I select
+        which scene markers" entry): with markers from several rooms
+        potentially stored in one session, loading everything
+        indiscriminately would mix rooms together and silently let
+        colliding marker ids from different rooms clobber each other.
+
+        If nothing has ever been given a name (``--name``/the panel's
+        "Scene marker group name" field), there's nothing to disambiguate
+        -- skip the picker and load the ungrouped set directly, same
+        zero-friction behaviour as before this existed.
         """
         old_factory = self._conn.row_factory
         self._conn.row_factory = sqlite3.Row
         try:
-            rows = self._conn.execute(
-                "SELECT * FROM scene_marker_bodies WHERE session_id = ? "
-                "AND marker_body_definition_id IS NULL AND dictionary IS NOT NULL "
-                "AND marker_id IS NOT NULL AND marker_size IS NOT NULL",
-                (self._session_id,),
-            ).fetchall()
+            named_groups = list_scene_marker_group_names(self._conn, self._session_id)
+            ungrouped_rows = list_scene_marker_bodies_by_group(self._conn, self._session_id, None)
         finally:
             self._conn.row_factory = old_factory
 
-        if not rows:
+        if not named_groups and not ungrouped_rows:
             QMessageBox.warning(
                 self, "Load From Scene Markers",
                 "No previously-solved scattered tags found for this session. "
                 "Anchor a capture from a rig first with a known tag size "
                 "(the CLI's `anchor-rig --tag-size` covers this today; this "
                 "dialog doesn't have a scattered-tag-size UI of its own yet).",
+            )
+            return
+
+        if not named_groups:
+            self._load_rig_config_from_scene_marker_group(None)
+            return
+
+        dlg = _SceneMarkerGroupPickerDialog(named_groups, bool(ungrouped_rows), self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._load_rig_config_from_scene_marker_group(dlg.selected_group_name())
+
+    def _load_rig_config_from_scene_marker_group(self, group_name: str | None) -> None:
+        """The group-selection-taking half of
+        ``_on_load_rig_from_scene_markers``, split out so it doesn't
+        require mocking ``_SceneMarkerGroupPickerDialog`` to exercise or
+        reuse. Reconstructs a virtual rig config from one named group's
+        stored tags -- the CLI's `extrinsics reanchor --name` command
+        does the identical query/construction; see its docstring. No
+        physical rig or config file needed: once loaded, this uses
+        exactly the same detect/anchor buttons and
+        ``anchor_from_marker_rig`` call as a real rig does.
+        """
+        old_factory = self._conn.row_factory
+        self._conn.row_factory = sqlite3.Row
+        try:
+            rows = list_scene_marker_bodies_by_group(self._conn, self._session_id, group_name)
+        finally:
+            self._conn.row_factory = old_factory
+
+        group_label = group_name or "(ungrouped)"
+        if not rows:
+            QMessageBox.warning(
+                self, "Load From Scene Markers",
+                f"No scene markers found in group {group_label!r}.",
             )
             return
 
@@ -2731,13 +2865,13 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             marker_dictionaries[row["marker_id"]] = row["dictionary"]
 
         config = MarkerRigConfig(
-            rig_id="scene markers", marker_corners=marker_corners,
+            rig_id=f"scene markers ({group_label})", marker_corners=marker_corners,
             marker_dictionaries=marker_dictionaries,
         )
         self._apply_loaded_rig_config(config, definition_id=None, source="scene_markers")
         self._status_label.setText(
-            f"Loaded {len(marker_corners)} previously-known scene marker(s) for "
-            f"re-anchoring. {self._status_label.text()}"
+            f"Loaded {len(marker_corners)} previously-known scene marker(s) from "
+            f"group {group_label!r} for re-anchoring. {self._status_label.text()}"
         )
 
     def _on_rig_min_marker_pct_changed(self, _value: float) -> None:
@@ -3367,11 +3501,12 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # whose own geometry hasn't changed, so there's nothing new to
         # persist there; only the cameras' poses changed, already captured
         # by the extrinsic_calibrations row above.
+        group_name = self._scene_marker_group_edit.text().strip() or None
         if self._rig_anchored and self._rig_config is not None and self._rig_source == "file":
             try:
                 upsert_scene_marker_body(
                     self._conn, self._session_id, label=f"rig:{self._rig_config.rig_id}",
-                    R=np.eye(3), t=np.zeros(3),
+                    R=np.eye(3), t=np.zeros(3), group_name=group_name,
                     marker_body_definition_id=self._rig_definition_id, is_primary_anchor=True,
                     source_extrinsic_calibration_id=calib_id,
                 )
@@ -3398,7 +3533,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 R, _ = cv2.Rodrigues(mp.rvec)
                 upsert_scene_marker_body(
                     self._conn, self._session_id, label=f"tag:{marker_id}",
-                    R=R, t=mp.tvec,
+                    R=R, t=mp.tvec, group_name=group_name,
                     marker_type="aruco", dictionary=dictionary, marker_id=marker_id,
                     marker_size=mp.size, source_extrinsic_calibration_id=calib_id,
                 )

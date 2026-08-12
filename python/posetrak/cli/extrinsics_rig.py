@@ -44,6 +44,7 @@ from app.setup.fiducial_markers import (
 from posetrak.db.manage_marker_body import (
     delete_scene_marker_body,
     list_scene_marker_bodies,
+    list_scene_marker_group_names,
     upsert_scene_marker_body,
 )
 from posetrak.cli.session import extrinsics_group, _open_session_required, _resolve
@@ -195,6 +196,10 @@ def _label_to_instance_id(conn: sqlite3.Connection) -> dict[str, str]:
 @click.option("--method", default="rig-anchor", show_default=True)
 @click.option("--capture", default=None, metavar="UUID",
               help="captures.id to link (sets extrinsic_calibration_id)")
+@click.option("--name", "group_name", default=None, metavar="NAME",
+              help="Name grouping this room's scene markers (e.g. 'room7') so a later "
+                   "capture can pick it by name via 'reanchor --name' or the GUI's "
+                   "\"From Scene Markers…\". Omit to leave them ungrouped.")
 @click.pass_obj
 def extrinsics_anchor_rig(
     obj: dict,
@@ -207,6 +212,7 @@ def extrinsics_anchor_rig(
     min_marker_perimeter_rate: float,
     method: str,
     capture: str | None,
+    group_name: str | None,
 ) -> None:
     """Anchor a capture's cameras from a portable calibration rig.
 
@@ -287,7 +293,7 @@ def extrinsics_anchor_rig(
         # anchor_from_marker_rig's docstring).
         upsert_scene_marker_body(
             conn, session_id, label=f"rig:{rig_config.rig_id}",
-            R=np.eye(3), t=np.zeros(3),
+            R=np.eye(3), t=np.zeros(3), group_name=group_name,
             marker_body_definition_id=body_id, is_primary_anchor=True,
             source_extrinsic_calibration_id=calib_id,
         )
@@ -297,7 +303,7 @@ def extrinsics_anchor_rig(
             for marker_id, pose in result.marker_poses.items():
                 R, _ = cv2.Rodrigues(pose.rvec)
                 upsert_scene_marker_body(
-                    conn, session_id, label=f"tag:{marker_id}",
+                    conn, session_id, label=f"tag:{marker_id}", group_name=group_name,
                     R=R, t=pose.tvec,
                     marker_type="aruco", dictionary=scattered_dict, marker_id=marker_id,
                     marker_size=pose.size, source_extrinsic_calibration_id=calib_id,
@@ -335,6 +341,10 @@ def extrinsics_anchor_rig(
 @click.option("--method", default="reanchor", show_default=True)
 @click.option("--capture", default=None, metavar="UUID",
               help="captures.id to link (sets extrinsic_calibration_id)")
+@click.option("--name", "group_name", default=None, metavar="NAME",
+              help="Only re-anchor from this named group's markers (see 'anchor-rig "
+                   "--name' and 'extrinsics scene-marker groups'). Omit to use the "
+                   "ungrouped default -- markers saved without a --name.")
 @click.pass_obj
 def extrinsics_reanchor(
     obj: dict,
@@ -344,6 +354,7 @@ def extrinsics_reanchor(
     min_marker_perimeter_rate: float,
     method: str,
     capture: str | None,
+    group_name: str | None,
 ) -> None:
     """Re-anchor a capture's cameras from previously-solved scattered tags.
 
@@ -363,17 +374,19 @@ def extrinsics_reanchor(
         try:
             tag_rows = conn.execute(
                 "SELECT * FROM scene_marker_bodies WHERE session_id = ? "
-                "AND marker_body_definition_id IS NULL AND dictionary = ? "
+                "AND marker_body_definition_id IS NULL AND dictionary = ? AND group_name = ? "
                 "AND marker_id IS NOT NULL AND marker_size IS NOT NULL",
-                (session_id, tag_dict),
+                (session_id, tag_dict, group_name or ""),
             ).fetchall()
         finally:
             conn.row_factory = old_factory
 
         if not tag_rows:
+            group_str = f", group={group_name!r}" if group_name else ""
             raise click.ClickException(
                 f"No previously-solved scattered tags found for this session "
-                f"(dictionary={tag_dict!r}). Run 'anchor-rig' with --tag-size first."
+                f"(dictionary={tag_dict!r}{group_str}). Run 'anchor-rig' with --tag-size "
+                f"first, or check 'extrinsics scene-marker groups' for the right --name."
             )
 
         from app.setup.extrinsics_solver import marker_local_corners
@@ -454,7 +467,7 @@ def scene_marker_group() -> None:
 @click.option("--session", "session_row", required=True, metavar="UUID", help="mocap_sessions.id")
 @click.pass_obj
 def scene_marker_list(obj: dict, session_row: str) -> None:
-    """List every scene marker stored for a session."""
+    """List every scene marker stored for a session, across every group."""
     conn = _open_session_required(obj)
     try:
         session_id = _resolve(conn, "mocap_sessions", session_row)
@@ -470,19 +483,51 @@ def scene_marker_list(obj: dict, session_row: str) -> None:
     print_table(
         [dict(r) for r in rows],
         columns=[
-            "label", "marker_body_definition_id", "marker_type", "dictionary",
+            "label", "group_name", "marker_body_definition_id", "marker_type", "dictionary",
             "marker_id", "marker_size", "is_primary_anchor", "updated_at",
         ],
         json_mode=obj["json_mode"],
     )
 
 
+@scene_marker_group.command("groups")
+@click.option("--session", "session_row", required=True, metavar="UUID", help="mocap_sessions.id")
+@click.pass_obj
+def scene_marker_groups(obj: dict, session_row: str) -> None:
+    """List named scene-marker groups for a session (e.g. one per room),
+    with a marker count and last-updated time -- for picking the right
+    --name for 'reanchor'. Markers saved without --name don't appear
+    here; they're the "ungrouped" default 'reanchor' uses when --name is
+    omitted."""
+    conn = _open_session_required(obj)
+    try:
+        session_id = _resolve(conn, "mocap_sessions", session_row)
+        rows = list_scene_marker_group_names(conn, session_id)
+    finally:
+        conn.close()
+
+    if not rows:
+        if not obj["json_mode"]:
+            click.echo("No named scene-marker groups stored for this session.")
+        return
+
+    print_table(
+        [dict(r) for r in rows],
+        columns=["group_name", "n_markers", "last_updated"],
+        json_mode=obj["json_mode"],
+    )
+
+
 @scene_marker_group.command("delete")
 @click.option("--session", "session_row", required=True, metavar="UUID", help="mocap_sessions.id")
+@click.option("--group", "group_name", default=None, metavar="NAME",
+              help="The marker's group (see 'scene-marker groups'). Omit for the "
+                   "ungrouped default -- markers saved without --name.")
 @click.argument("label", metavar="LABEL")
 @click.pass_obj
-def scene_marker_delete(obj: dict, session_row: str, label: str) -> None:
-    """Delete one stored scene marker by its label (see 'scene-marker list').
+def scene_marker_delete(obj: dict, session_row: str, group_name: str | None, label: str) -> None:
+    """Delete one stored scene marker by its (group, label) (see
+    'scene-marker list'/'scene-marker groups').
 
     For pruning stale entries -- e.g. a portable rig's own anchor row
     ("rig:<name>") once it's been physically removed from the scene, or a
@@ -491,10 +536,13 @@ def scene_marker_delete(obj: dict, session_row: str, label: str) -> None:
     conn = _open_session_required(obj)
     try:
         session_id = _resolve(conn, "mocap_sessions", session_row)
-        deleted = delete_scene_marker_body(conn, session_id, label)
+        deleted = delete_scene_marker_body(conn, session_id, label, group_name=group_name)
     finally:
         conn.close()
 
     if not deleted:
-        raise click.ClickException(f"No scene marker found with label {label!r} for this session.")
+        group_str = f" in group {group_name!r}" if group_name else ""
+        raise click.ClickException(
+            f"No scene marker found with label {label!r}{group_str} for this session."
+        )
     click.echo(f"Deleted scene marker {label!r}.")

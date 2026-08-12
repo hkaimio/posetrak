@@ -412,6 +412,52 @@ iter_frames` instead of a fifth duplicated rotation-aware reader.
   real video; the I/O-heavy command bodies validated against real data
   instead, consistent with this feature's practice throughout.
 
+**Named scene-marker groups implemented -- answers "how do I select which
+scene markers to load" (2026-08-12)** — with `scene_marker_bodies` still
+completely flat per-session, a session with markers from many rooms (a
+calibration rig re-used per room, each room's own permanent wall tags)
+had no way to load just one room's tags: "From Scene Markers…"/`reanchor`
+queried every stored row for the session unconditionally, and two rooms
+reusing the same tag id would silently clobber each other's stored pose
+(same `(session_id, label)` uniqueness for both). Discussed two designs
+(explicit name vs. grouping by originating capture); Harri chose an
+explicit, user-chosen **name** (not "room" -- his term) saved at anchor
+time and picked from a list at load time.
+
+Schema (session v40→v41): new `scene_marker_bodies.group_name TEXT NOT
+NULL DEFAULT ''` column, uniqueness widened from `(session_id, label)` to
+`(session_id, group_name, label)`. Deliberately `''` for the ungrouped
+default, not NULL -- SQLite's unique index treats every NULL as distinct
+from every other NULL, which would have silently defeated the point of
+adding this column to begin with (two ungrouped rows with the same label
+would no longer collide). `upsert_scene_marker_body()`/
+`delete_scene_marker_body()` both gained a `group_name` parameter
+(`None`/omitted normalizes to `''`); two new read helpers,
+`list_scene_marker_group_names()` (distinct named groups + marker count +
+last-updated, for populating a picker) and
+`list_scene_marker_bodies_by_group()` (the actual filtered load).
+
+CLI: `anchor-rig`/`reanchor` gained `--name` (write-time group, read-time
+filter); new `extrinsics scene-marker groups` command; `scene-marker
+delete` gained `--group` (now required for correctness once two groups
+can share a label -- deleting used to match by label alone, which after
+this schema change could have hit the wrong group's row if not scoped).
+
+GUI: a "Scene marker group:" text field in the rig panel feeds
+`group_name` into both of `_on_accept`'s persistence calls (rig anchor +
+sized ArUco markers). "From Scene Markers…" now checks whether any named
+groups exist first: none yet → loads the ungrouped set directly, zero
+extra clicks (same as before this existed); one or more → opens a new
+`_SceneMarkerGroupPickerDialog` (name, marker count, last updated, plus
+an explicit "(ungrouped)" row when ungrouped data also exists) before
+loading just that group. The manager dialog gained a "Group" column and
+now scopes deletes to the selected row's own group, not just its label.
+
+19 new tests (schema migration, CRUD, CLI groups/delete --group, GUI
+picker dialog + load flow + Accept persistence). Full regression sweep
+(1616 tests) passes with the same pre-existing exclusions as prior
+entries.
+
 **Eighth live-testing round: deleting the rig's scene-marker row didn't
 stop it "coming back" -- root cause was Detect ArUco, not From Scene
 Markers (2026-08-12)** — Harri deleted the `rig:<id>` row via the new

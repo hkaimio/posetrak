@@ -625,7 +625,7 @@ def test_create_session_includes_marker_body_tables(tmp_path: Path) -> None:
 
     body_cols = {row[1] for row in conn.execute("PRAGMA table_info(scene_marker_bodies)")}
     assert body_cols == {
-        "id", "session_id", "label", "marker_body_definition_id",
+        "id", "session_id", "label", "group_name", "marker_body_definition_id",
         "marker_type", "dictionary", "marker_id", "marker_size",
         "R", "t", "is_primary_anchor", "source_extrinsic_calibration_id", "updated_at",
     }
@@ -707,6 +707,58 @@ def test_migrate_session_v39_to_v40_adds_marker_body_tables(tmp_path: Path) -> N
             "INSERT INTO scene_marker_bodies "
             "(id, session_id, label, R, t, updated_at) "
             "VALUES ('smb3', 'sess1', 'calib-box', X'00', X'00', '2026-01-01')"
+        )
+    conn.close()
+
+
+def test_migrate_session_v40_to_v41_adds_group_name(tmp_path: Path) -> None:
+    """v40->v41 adds scene_marker_bodies.group_name, defaulting existing
+    rows to '' (not NULL -- see db.py's _migrate_session_v40_to_v41 for
+    why), and widens the unique index to (session_id, group_name, label)
+    so two same-named groups' tags with the same id can't collide but two
+    *different* groups' tags with the same id now can coexist."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("PRAGMA user_version = 40")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(scene_marker_bodies)")}
+    assert "group_name" in cols
+
+    conn.execute(
+        "INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    # Legacy-style insert with no group_name given -- must default to ''.
+    conn.execute(
+        "INSERT INTO scene_marker_bodies (id, session_id, label, R, t, updated_at) "
+        "VALUES ('smb1', 'sess1', 'tag:3', X'00', X'00', '2026-01-01')"
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT group_name FROM scene_marker_bodies WHERE id = 'smb1'"
+    ).fetchone()
+    assert row["group_name"] == ""
+
+    # Two different named groups may reuse the same label without colliding.
+    conn.execute(
+        "INSERT INTO scene_marker_bodies (id, session_id, label, group_name, R, t, updated_at) "
+        "VALUES ('smb2', 'sess1', 'tag:3', 'room7', X'00', X'00', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO scene_marker_bodies (id, session_id, label, group_name, R, t, updated_at) "
+        "VALUES ('smb3', 'sess1', 'tag:3', 'room8', X'00', X'00', '2026-01-01')"
+    )
+    conn.commit()
+
+    # But the same group_name + label combination is still unique.
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO scene_marker_bodies (id, session_id, label, group_name, R, t, updated_at) "
+            "VALUES ('smb4', 'sess1', 'tag:3', 'room7', X'00', X'00', '2026-01-01')"
         )
     conn.close()
 

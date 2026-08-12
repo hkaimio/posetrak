@@ -20,7 +20,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 8
-SESSION_SCHEMA_VERSION: Final[int] = 40
+SESSION_SCHEMA_VERSION: Final[int] = 41
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1230,6 +1230,38 @@ def _migrate_session_v39_to_v40(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v40_to_v41(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 40 to 41.
+
+    v41 adds ``scene_marker_bodies.group_name`` -- a user-chosen name
+    grouping every marker anchored together in one physical space (e.g.
+    "room7"), so a later capture in the same room can pick that name from
+    a list instead of every room's markers in the session loading
+    together indiscriminately (see docs/roadmap/features/
+    extrinsics-improvements/extrinsics-improvements-design.md, section 9,
+    and status.md's 2026-08-12 "how do I select which scene markers"
+    entry). ``''`` (not NULL -- see session_schema.sql's column comment
+    for why) for legacy/ungrouped rows written before this existed. The
+    table's uniqueness moves from (session_id, label) to (session_id,
+    group_name, label) so two rooms can reuse the same tag id without
+    colliding.
+    """
+    existing_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(scene_marker_bodies)")
+    }
+    if "group_name" not in existing_cols:
+        conn.execute(
+            "ALTER TABLE scene_marker_bodies ADD COLUMN group_name TEXT NOT NULL DEFAULT ''"
+        )
+        conn.execute("DROP INDEX IF EXISTS scene_marker_bodies_unique")
+        conn.execute(
+            "CREATE UNIQUE INDEX scene_marker_bodies_unique "
+            "ON scene_marker_bodies (session_id, group_name, label)"
+        )
+    _set_schema_version(conn, 41)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1370,6 +1402,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 39
     if actual == 39:
         _migrate_session_v39_to_v40(conn)
+        actual = 40
+    if actual == 40:
+        _migrate_session_v40_to_v41(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

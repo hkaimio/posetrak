@@ -234,3 +234,79 @@ def test_scene_marker_delete_missing_label_errors(
          "--session", session_id, "nonexistent"],
     )
     assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# scene-marker groups / delete --group (group_name, 2026-08-12)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def session_with_named_groups(tmp_path: Path):
+    """Two named groups ("room7", "room8") each with one tag reusing the
+    same marker id, plus one ungrouped tag. Returns (db_path, session_id)."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    session_id = create_mocap_session(conn, location="lab")
+    upsert_scene_marker_body(
+        conn, session_id, label="tag:3", R=np.eye(3), t=np.zeros(3), group_name="room7",
+        marker_type="aruco", dictionary="DICT_5X5_50", marker_id="3", marker_size=0.1,
+    )
+    upsert_scene_marker_body(
+        conn, session_id, label="tag:3", R=np.eye(3), t=np.array([9.0, 0.0, 0.0]),
+        group_name="room8",
+        marker_type="aruco", dictionary="DICT_5X5_50", marker_id="3", marker_size=0.1,
+    )
+    upsert_scene_marker_body(
+        conn, session_id, label="tag:9", R=np.eye(3), t=np.zeros(3),
+        marker_type="aruco", dictionary="DICT_5X5_50", marker_id="9", marker_size=0.1,
+    )
+    conn.commit()
+    conn.close()
+    return db_path, session_id
+
+
+def test_scene_marker_groups_lists_named_groups_only(
+    cli_runner: CliRunner, session_with_named_groups,
+) -> None:
+    db_path, session_id = session_with_named_groups
+    result = cli_runner.invoke(
+        main,
+        ["--session", str(db_path), "extrinsics", "scene-marker", "groups",
+         "--session", session_id],
+    )
+    assert result.exit_code == 0, result.output
+    assert "room7" in result.output
+    assert "room8" in result.output
+
+
+def test_scene_marker_groups_empty_when_none_named(
+    cli_runner: CliRunner, session_with_scene_markers,
+) -> None:
+    db_path, session_id = session_with_scene_markers
+    result = cli_runner.invoke(
+        main,
+        ["--session", str(db_path), "extrinsics", "scene-marker", "groups",
+         "--session", session_id],
+    )
+    assert result.exit_code == 0, result.output
+    assert "No named scene-marker groups" in result.output
+
+
+def test_scene_marker_delete_scoped_to_group(
+    cli_runner: CliRunner, session_with_named_groups,
+) -> None:
+    db_path, session_id = session_with_named_groups
+    result = cli_runner.invoke(
+        main,
+        ["--session", str(db_path), "extrinsics", "scene-marker", "delete",
+         "--session", session_id, "--group", "room7", "tag:3"],
+    )
+    assert result.exit_code == 0, result.output
+
+    result = cli_runner.invoke(
+        main,
+        ["--session", str(db_path), "extrinsics", "scene-marker", "list", "--session", session_id],
+    )
+    # room8's tag:3 (same label, different group) must survive.
+    assert result.output.count("tag:3") == 1

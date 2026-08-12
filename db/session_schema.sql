@@ -88,6 +88,16 @@ CREATE TABLE IF NOT EXISTS scene_marker_bodies (
     id                               TEXT PRIMARY KEY,
     session_id                       TEXT NOT NULL REFERENCES mocap_sessions(id),
     label                            TEXT NOT NULL,
+    -- User-chosen name grouping every marker anchored together in one
+    -- physical space (e.g. "room7") -- '' (not NULL -- SQLite's unique
+    -- index treats every NULL as distinct, which would silently defeat
+    -- this column's role in the uniqueness constraint below) for
+    -- legacy/ungrouped rows. Lets a later capture in the same room pick
+    -- "room7" from a list instead of the session's markers from every
+    -- room loading together indiscriminately. Part of (session_id,
+    -- group_name, label)'s uniqueness so two rooms can reuse the same
+    -- tag id without colliding.
+    group_name                       TEXT NOT NULL DEFAULT '',
     marker_body_definition_id        TEXT,
     marker_type                      TEXT,
     dictionary                       TEXT,
@@ -100,7 +110,7 @@ CREATE TABLE IF NOT EXISTS scene_marker_bodies (
     updated_at                       TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS scene_marker_bodies_unique
-    ON scene_marker_bodies (session_id, label);
+    ON scene_marker_bodies (session_id, group_name, label);
 
 -- A capture is a single continuous camera recording within a session.
 -- extrinsic_calibration_id is nullable: captures may be created before extrinsics are imported.

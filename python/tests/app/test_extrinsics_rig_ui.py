@@ -16,7 +16,11 @@ from PySide6.QtWidgets import QMessageBox
 
 from app.setup.extrinsics_solver import CalibResult, CamCalibState, MarkerGroup, MarkerPoseResult
 from app.setup.fiducial_markers import ARUCO_DICTIONARIES
-from app.setup.page_extrinsics import ExtrinsicsAutoCalibDialog, _SceneMarkerManagerDialog
+from app.setup.page_extrinsics import (
+    ExtrinsicsAutoCalibDialog,
+    _SceneMarkerGroupPickerDialog,
+    _SceneMarkerManagerDialog,
+)
 from posetrak.db.manage_marker_body import import_marker_body, upsert_scene_marker_body
 
 _ONE_MARKER_RIG_YAML = """\
@@ -480,7 +484,7 @@ def test_load_from_scene_markers_populates_config(qapp, fake_conn) -> None:
         dlg._on_load_rig_from_scene_markers()
 
         assert dlg._rig_config is not None
-        assert dlg._rig_config.rig_id == "scene markers"
+        assert dlg._rig_config.rig_id == "scene markers ((ungrouped))"
         assert set(dlg._rig_config.marker_corners) == {"3"}
         assert dlg._rig_config.marker_dictionaries["3"] == "DICT_4X4_50"
         assert dlg._rig_source == "scene_markers"
@@ -852,10 +856,216 @@ def test_manager_dialog_flags_row_matching_rig_geometry(qapp, fake_conn, rig_yam
     dlg = _SceneMarkerManagerDialog(fake_conn, "sess1")
     try:
         rows_by_label = {
-            dlg._table.item(i, 0).text(): dlg._table.item(i, 7).text()
+            dlg._table.item(i, 0).text(): dlg._table.item(i, 8).text()
             for i in range(dlg._table.rowCount())
         }
         assert "test-rig" in rows_by_label["tag:3"]
         assert rows_by_label["tag:99"] == ""
+    finally:
+        dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Scene marker groups (group_name, 2026-08-12) -- named groups (e.g. one per
+# room) so "From Scene Markers…" can load a specific room's markers instead
+# of every stored marker in the session loading together indiscriminately.
+# ---------------------------------------------------------------------------
+
+
+def test_load_from_scene_markers_no_named_groups_skips_picker(qapp, fake_conn) -> None:
+    """Nothing has ever been named -- load the ungrouped set directly, no
+    picker needed (same zero-friction behaviour as before this existed)."""
+    _seed_scene_marker_tag(fake_conn, "sess1")
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._on_load_rig_from_scene_markers()
+        assert dlg._rig_config is not None
+        assert set(dlg._rig_config.marker_corners) == {"3"}
+    finally:
+        dlg.done(0)
+
+
+def test_load_from_scene_markers_with_named_groups_opens_picker(qapp, fake_conn, monkeypatch) -> None:
+    _seed_scene_marker_tag(fake_conn, "sess1", marker_id="3")
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:7", R=np.eye(3), t=np.array([1.0, 0.0, 0.0]),
+        group_name="room7",
+        marker_type="aruco", dictionary="DICT_4X4_50", marker_id="7", marker_size=0.1,
+    )
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        from PySide6.QtWidgets import QDialog as _QDialog
+
+        opened = []
+
+        def fake_exec(self):
+            opened.append(self)
+            return _QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr(_SceneMarkerGroupPickerDialog, "exec", fake_exec)
+        dlg._on_load_rig_from_scene_markers()
+
+        assert len(opened) == 1
+        assert dlg._rig_config is None  # rejected -> nothing loaded
+    finally:
+        dlg.done(0)
+
+
+def test_load_rig_config_from_scene_marker_group_loads_named_group(qapp, fake_conn) -> None:
+    fake_conn.execute(
+        "INSERT OR IGNORE INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    fake_conn.commit()
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:7", R=np.eye(3), t=np.zeros(3), group_name="room7",
+        marker_type="aruco", dictionary="DICT_4X4_50", marker_id="7", marker_size=0.1,
+    )
+    states = [_make_state("cam_A", image=None)]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_scene_marker_group("room7")
+
+        assert dlg._rig_config is not None
+        assert set(dlg._rig_config.marker_corners) == {"7"}
+        assert "room7" in dlg._status_label.text()
+    finally:
+        dlg.done(0)
+
+
+def test_load_rig_config_from_scene_marker_group_different_groups_dont_mix(
+    qapp, fake_conn,
+) -> None:
+    fake_conn.execute(
+        "INSERT OR IGNORE INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    fake_conn.commit()
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:3", R=np.eye(3), t=np.zeros(3), group_name="room7",
+        marker_type="aruco", dictionary="DICT_4X4_50", marker_id="3", marker_size=0.1,
+    )
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:9", R=np.eye(3), t=np.zeros(3), group_name="room8",
+        marker_type="aruco", dictionary="DICT_4X4_50", marker_id="9", marker_size=0.1,
+    )
+    states = [_make_state("cam_A", image=None)]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_scene_marker_group("room7")
+        assert set(dlg._rig_config.marker_corners) == {"3"}
+    finally:
+        dlg.done(0)
+
+
+def test_group_picker_dialog_lists_groups_and_ungrouped_option(qapp, fake_conn) -> None:
+    from posetrak.db.manage_marker_body import (
+        list_scene_marker_bodies_by_group,
+        list_scene_marker_group_names,
+    )
+    fake_conn.execute(
+        "INSERT OR IGNORE INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    fake_conn.commit()
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:3", R=np.eye(3), t=np.zeros(3), group_name="room7",
+        marker_type="aruco", dictionary="DICT_4X4_50", marker_id="3", marker_size=0.1,
+    )
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:9", R=np.eye(3), t=np.zeros(3),
+        marker_type="aruco", dictionary="DICT_4X4_50", marker_id="9", marker_size=0.1,
+    )
+    named = list_scene_marker_group_names(fake_conn, "sess1")
+    ungrouped = list_scene_marker_bodies_by_group(fake_conn, "sess1", None)
+
+    dlg = _SceneMarkerGroupPickerDialog(named, bool(ungrouped))
+    try:
+        names = {dlg._table.item(i, 0).text() for i in range(dlg._table.rowCount())}
+        assert names == {"room7", "(ungrouped)"}
+    finally:
+        dlg.done(0)
+
+
+def test_group_picker_dialog_selecting_ungrouped_returns_none(qapp, fake_conn) -> None:
+    dlg = _SceneMarkerGroupPickerDialog([], True)
+    try:
+        dlg._table.selectRow(0)
+        dlg.accept()
+        assert dlg.selected_group_name() is None
+    finally:
+        dlg.done(0)
+
+
+def test_group_picker_dialog_selecting_named_group_returns_name(qapp, fake_conn) -> None:
+    from posetrak.db.manage_marker_body import list_scene_marker_group_names
+    fake_conn.execute(
+        "INSERT OR IGNORE INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    fake_conn.commit()
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:3", R=np.eye(3), t=np.zeros(3), group_name="room7",
+        marker_type="aruco", dictionary="DICT_4X4_50", marker_id="3", marker_size=0.1,
+    )
+    named = list_scene_marker_group_names(fake_conn, "sess1")
+    dlg = _SceneMarkerGroupPickerDialog(named, False)
+    try:
+        dlg._table.selectRow(0)
+        dlg.accept()
+        assert dlg.selected_group_name() == "room7"
+    finally:
+        dlg.done(0)
+
+
+def test_accept_persists_group_name(qapp, fake_conn) -> None:
+    _seed_session_and_camera(fake_conn)
+    states = [_make_state("cam_A", _render_marker_image(9))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._scene_marker_group_edit.setText("room7")
+        dlg._marker_groups["9"] = MarkerGroup(marker_id="9", size=0.1, dictionary="DICT_5X5_50")
+        rvec, _ = cv2.Rodrigues(np.eye(3))
+        mp = MarkerPoseResult(
+            rvec=rvec, tvec=np.array([1.0, 2.0, 3.0]), size=0.1, rms_reprojection_px=0.5
+        )
+        states[0].R = np.eye(3)
+        states[0].t = np.zeros((3, 1))
+        dlg._result = CalibResult(
+            cameras={"cam_A": states[0]}, points_3d=[], reprojection_errors={},
+            unsolved=[], pair_matches={}, marker_poses={"9": mp},
+        )
+
+        dlg._on_accept()
+
+        row = fake_conn.execute(
+            "SELECT group_name FROM scene_marker_bodies WHERE session_id = 'sess1' "
+            "AND label = 'tag:9'"
+        ).fetchone()
+        assert row[0] == "room7"
+    finally:
+        dlg.done(0)
+
+
+def test_accept_blank_group_name_stays_ungrouped(qapp, fake_conn, rig_yaml_path) -> None:
+    _seed_session_and_camera(fake_conn)
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_path(rig_yaml_path)  # auto-anchors (marker "3" visible)
+        assert dlg._rig_anchored
+        assert dlg._scene_marker_group_edit.text() == ""
+
+        states[0].R = np.eye(3)
+        states[0].t = np.zeros((3, 1))
+        dlg._result = CalibResult(
+            cameras={"cam_A": states[0]}, points_3d=[], reprojection_errors={},
+            unsolved=[], pair_matches={},
+        )
+        dlg._on_accept()
+
+        row = fake_conn.execute(
+            "SELECT group_name FROM scene_marker_bodies WHERE session_id = 'sess1' "
+            "AND label = 'rig:test-rig'"
+        ).fetchone()
+        assert row[0] == ""
     finally:
         dlg.done(0)

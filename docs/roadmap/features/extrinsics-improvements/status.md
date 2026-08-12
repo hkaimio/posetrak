@@ -381,6 +381,18 @@ updating the existing prototype scripts (`characterize_rig_from_video.py`,
 `test_rig_anchor_capture1.py`, `test_reanchor_capture2.py`) to read/write
 §10's YAML instead of their current ad hoc JSON are all still ahead.
 
+**`posetrak marker-body` CLI group implemented (2026-08-12)** —
+`import`/`list`/`show`/`export`, mirroring `posetrak skeleton`'s
+structure directly. This is the first real, permanent entry point for
+marker body definitions — replacing the throwaway `test_*.py` prototype
+scripts' ad hoc JSON handling with actual production CLI, per Harri's
+question about the path to GUI/CLI. Manually smoke-tested end-to-end
+against a real registry via the installed `posetrak` console script; 11
+new tests. Next: promote the rig-anchor/re-anchor logic the prototype
+scripts already validated into real `posetrak extrinsics` commands using
+this DB layer instead of JSON files — replacing the scripts outright, not
+updating them in place.
+
 **YAML loader implemented (2026-08-12)** — `load_marker_body_yaml()`/
 `load_marker_body_yaml_file()` in `fiducial_markers.py` parse section 10's
 canonical format into `MarkerRigConfig`. `center`/`normal`/`up` resolves

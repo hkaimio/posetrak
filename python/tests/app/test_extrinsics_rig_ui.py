@@ -767,3 +767,95 @@ def test_on_manage_scene_markers_opens_dialog(qapp, fake_conn, monkeypatch) -> N
         assert opened == [True]
     finally:
         dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# A loaded physical rig's own markers must never leak into "Detect ArUco"
+# as ordinary scattered tags (2026-08-12) -- Harri's report: a deleted
+# "rig:<id>" scene marker still "came back" because its individual
+# corner markers had separately been saved as "tag:<id>" rows via Detect
+# ArUco, which had no rig exclusion (unlike the ChArUco one it already had).
+# ---------------------------------------------------------------------------
+
+
+def test_aruco_marker_excluded_when_matches_loaded_rig(qapp, fake_conn, rig_yaml_path) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_path(rig_yaml_path)  # rig's own marker id "3", DICT_4X4_50
+
+        dlg._on_detect_aruco_clicked("cam_A")
+
+        assert "3" not in dlg._marker_groups
+        assert "belonging to the ChArUco board/rig excluded" in dlg._status_label.text()
+    finally:
+        dlg.done(0)
+
+
+def test_aruco_marker_not_excluded_for_scene_markers_source(qapp, fake_conn) -> None:
+    """A "From Scene Markers…" config's own marker ids ARE ordinary
+    scattered tags -- they must stay detectable/refreshable via "Detect
+    ArUco", unlike a genuine physical rig's markers."""
+    _seed_scene_marker_tag(fake_conn, "sess1", marker_id="3", dictionary="DICT_4X4_50")
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._on_load_rig_from_scene_markers()
+        assert dlg._rig_source == "scene_markers"
+
+        dlg._on_detect_aruco_clicked("cam_A")
+
+        assert "3" in dlg._marker_groups
+    finally:
+        dlg.done(0)
+
+
+def test_loading_rig_purges_matching_marker_groups_detected_earlier(
+    qapp, fake_conn, rig_yaml_path
+) -> None:
+    """Click order shouldn't matter: if "Detect ArUco" ran before the rig
+    was loaded (no exclusion could have applied yet), loading the rig
+    retroactively purges any of its own markers already sitting in
+    _marker_groups."""
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._on_detect_aruco_clicked("cam_A")
+        assert "3" in dlg._marker_groups
+
+        dlg._load_rig_config_from_path(rig_yaml_path)
+
+        assert "3" not in dlg._marker_groups
+    finally:
+        dlg.done(0)
+
+
+def test_manager_dialog_flags_row_matching_rig_geometry(qapp, fake_conn, rig_yaml_path) -> None:
+    """A "tag:<id>" row whose (dictionary, marker_id) matches a known
+    rig's own marker is flagged, even though nothing in the row itself
+    says it came from a rig -- helps find stale leaked-in rows like
+    Harri's report."""
+    import_marker_body(fake_conn, rig_yaml_path, name="test-rig")
+    fake_conn.execute(
+        "INSERT OR IGNORE INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    fake_conn.commit()
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:3", R=np.eye(3), t=np.zeros(3),
+        marker_type="aruco", dictionary="DICT_4X4_50", marker_id="3", marker_size=0.1,
+    )
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:99", R=np.eye(3), t=np.zeros(3),
+        marker_type="aruco", dictionary="DICT_5X5_50", marker_id="99", marker_size=0.1,
+    )
+
+    dlg = _SceneMarkerManagerDialog(fake_conn, "sess1")
+    try:
+        rows_by_label = {
+            dlg._table.item(i, 0).text(): dlg._table.item(i, 7).text()
+            for i in range(dlg._table.rowCount())
+        }
+        assert "test-rig" in rows_by_label["tag:3"]
+        assert rows_by_label["tag:99"] == ""
+    finally:
+        dlg.done(0)

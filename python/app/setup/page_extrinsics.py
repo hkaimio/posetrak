@@ -1119,13 +1119,14 @@ class _SceneMarkerManagerDialog(QDialog):
         self._conn = conn
         self._session_id = session_id
 
-        self._table = QTableWidget(0, 7)
+        self._table = QTableWidget(0, 8)
         self._table.setHorizontalHeaderLabels(
-            ["Label", "Source", "Dictionary", "Marker ID", "Size (m)", "Primary anchor", "Updated"]
+            ["Label", "Source", "Dictionary", "Marker ID", "Size (m)", "Primary anchor",
+             "Updated", "Rig match?"]
         )
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for col in range(1, 7):
+        for col in range(1, 8):
             hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -1152,12 +1153,34 @@ class _SceneMarkerManagerDialog(QDialog):
         self._conn.row_factory = sqlite3.Row
         try:
             rows = list_scene_marker_bodies(self._conn, self._session_id)
+            body_rows = list_marker_bodies(self._conn)
         finally:
             self._conn.row_factory = old_factory
+
+        # (dictionary, marker_id) -> owning rig's name, decoded from every
+        # marker_body_definitions row this session knows about -- lets a
+        # "tag:<id>" row that's actually a rig's own marker (leaked in
+        # before the "Detect ArUco" exclusion fix, or from before that fix
+        # existed) be spotted even though nothing marks it as such in the
+        # row itself. Best-effort: an unparseable YAML is skipped, not
+        # fatal to the rest of the table.
+        rig_marker_owners: dict[tuple[str, str], str] = {}
+        for body in body_rows:
+            try:
+                config = load_marker_body_yaml(body["yaml_content"])
+            except Exception:  # noqa: BLE001
+                continue
+            for mid in config.marker_corners:
+                dict_name = config.marker_dictionaries.get(mid, "DICT_4X4_50")
+                rig_marker_owners[(dict_name, mid)] = body["name"] or config.rig_id
+
         self._rows = rows
         self._table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             source = "rig anchor" if r["marker_body_definition_id"] else (r["marker_type"] or "")
+            rig_match = ""
+            if not r["marker_body_definition_id"] and r["dictionary"] and r["marker_id"]:
+                rig_match = rig_marker_owners.get((r["dictionary"], r["marker_id"]), "")
             self._table.setItem(i, 0, QTableWidgetItem(r["label"]))
             self._table.setItem(i, 1, QTableWidgetItem(source))
             self._table.setItem(i, 2, QTableWidgetItem(r["dictionary"] or ""))
@@ -1166,6 +1189,18 @@ class _SceneMarkerManagerDialog(QDialog):
             self._table.setItem(i, 4, QTableWidgetItem(f"{size:.4f}" if size is not None else ""))
             self._table.setItem(i, 5, QTableWidgetItem("yes" if r["is_primary_anchor"] else ""))
             self._table.setItem(i, 6, QTableWidgetItem((r["updated_at"] or "")[:19]))
+            match_item = QTableWidgetItem(f"possibly \"{rig_match}\"" if rig_match else "")
+            self._table.setItem(i, 7, match_item)
+            if rig_match:
+                match_item.setToolTip(
+                    "This marker's (dictionary, id) matches a marker belonging to rig "
+                    f"\"{rig_match}\" -- likely leaked in via \"Detect ArUco\" before it "
+                    "was excluded, and will go stale whenever that rig moves. Consider "
+                    "deleting it."
+                )
+                for col in range(8):
+                    item = self._table.item(i, col)
+                    item.setBackground(QColor(255, 232, 191))
 
     def _on_delete_selected(self) -> None:
         row_idxs = sorted({idx.row() for idx in self._table.selectedIndexes()}, reverse=True)
@@ -2349,6 +2384,25 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 )
             else:
                 detections = [d for d in detections if d.marker_id not in board_ids]
+
+        # A currently-loaded *physical* rig's own markers must never leak
+        # into "Detect ArUco"'s output as if they were separate scattered
+        # scene tags -- giving one a size here and letting it flow through
+        # to scene_marker_bodies on Accept creates a stale "tag:<id>" row
+        # that silently goes wrong every time the rig is relocated for a
+        # different capture (see status.md's 2026-08-12 "rig markers
+        # leaking into scene markers" entry -- this is the fix). Exclude
+        # by (dictionary, marker_id), known exactly from the loaded
+        # config, not guessed from a numeric coincidence like the ChArUco
+        # case above. Only for source == "file": a "From Scene Markers…"
+        # config's marker ids ARE ordinary scattered tags, meant to stay
+        # redetectable/refreshable here.
+        if self._rig_config is not None and self._rig_source == "file":
+            rig_ids_for_dict = {
+                mid for mid in self._rig_config.marker_corners
+                if self._rig_config.marker_dictionaries.get(mid, "DICT_4X4_50") == dictionary
+            }
+            detections = [d for d in detections if d.marker_id not in rig_ids_for_dict]
         n_excluded = n_before - len(detections)
 
         # Re-resolve each detection's size against any existing per-marker
@@ -2362,7 +2416,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         self._refresh_marker_table()
         self._refresh_markers()
-        excl_str = f" ({n_excluded} belonging to the ChArUco board excluded)" if n_excluded else ""
+        excl_str = f" ({n_excluded} belonging to the ChArUco board/rig excluded)" if n_excluded else ""
         self._status_label.setText(
             f"Detected {len(detections)} ArUco marker(s) in "
             f"{self._states_by_id[vid].label} (frame {frame_idx}){excl_str}."
@@ -2619,6 +2673,22 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._rig_source = source
         self._rig_detections_by_camera = {}
         self._rig_anchored = False
+
+        # If "Detect ArUco" already ran before this rig was loaded, any of
+        # its own markers picked up there (no exclusion existed to stop
+        # it -- see _on_detect_aruco_clicked) are sitting in
+        # _marker_groups as if they were ordinary scattered tags. Purge
+        # them now so a stale/moving-target "tag:<id>" row can't reach
+        # scene_marker_bodies on Accept regardless of click order.
+        if source == "file":
+            for mid in list(self._marker_groups):
+                mg = self._marker_groups[mid]
+                if mid in config.marker_corners and config.marker_dictionaries.get(
+                    mid, "DICT_4X4_50"
+                ) == mg.dictionary:
+                    del self._marker_groups[mid]
+            self._refresh_marker_table()
+
         self._detect_and_anchor_rig(show_warnings=False)
 
     def _on_load_rig_from_scene_markers(self) -> None:

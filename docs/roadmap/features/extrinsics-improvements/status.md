@@ -412,6 +412,38 @@ iter_frames` instead of a fifth duplicated rotation-aware reader.
   real video; the I/O-heavy command bodies validated against real data
   instead, consistent with this feature's practice throughout.
 
+**Eighth live-testing round: deleting the rig's scene-marker row didn't
+stop it "coming back" -- root cause was Detect ArUco, not From Scene
+Markers (2026-08-12)** — Harri deleted the `rig:<id>` row via the new
+manager dialog, but the rig still got detected/included the next time
+"From Scene Markers…" was loaded, even after an app restart (so genuinely
+persisted, not stale in-memory dialog state). Root cause: `_on_detect_aruco_clicked`
+had no rig-marker exclusion (only a ChArUco-board one), so if the rig's
+own corner markers were ever picked up there (same/no dictionary
+separation needed -- just needs "Detect ArUco" to have run over an image
+showing the rig at some point) and given a size, each one got saved as
+its own ordinary `tag:<id>` row on Accept, indistinguishable from a real
+scattered tag -- deleting only the `rig:<id>` row (the one obviously
+rig-named entry) never touched these. Fixed at the source: loading a
+physical rig (Tier A, `_rig_source == "file"`) now excludes its own
+`(dictionary, marker_id)`s from "Detect ArUco" output going forward, and
+retroactively purges any of its markers already sitting in
+`_marker_groups` from before it was loaded (click order shouldn't
+matter). Doesn't apply to a "From Scene Markers…" config -- those marker
+ids are ordinary scattered tags, meant to stay redetectable there. To
+help find rows already polluted before this fix existed, the scene
+marker manager dialog now decodes every known `marker_body_definitions`
+row's own markers and flags any non-rig-anchor row whose (dictionary,
+marker_id) matches one, with a tooltip explaining why. 5 new tests. Full
+regression sweep (1594 tests) passes with the same pre-existing
+exclusions as prior entries.
+
+Also asked how "From Scene Markers…" picks which markers to load when a
+session has scene markers from many different rooms/captures — no
+selection UI exists today (queries every `scene_marker_bodies` row for
+the session, no grouping concept at all) — this needs a real design
+decision (see below) before it can be built; not yet resolved.
+
 **Seventh live-testing round: a moved rig got auto-anchored from a stray
 single-camera glimpse; added a scene-marker manager (2026-08-12)** — in a
 second capture where the physical calibration rig had been removed from

@@ -341,7 +341,7 @@ def test_aruco_marker_excluded_once_matching_board_detected(qapp, fake_conn) -> 
         dlg._on_detect_aruco_clicked("cam_A")
 
         assert "3" not in dlg._marker_groups
-        assert "belonging to the ChArUco board excluded" in dlg._status_label.text()
+        assert "belonging to the ChArUco board/rig excluded" in dlg._status_label.text()
     finally:
         dlg.done(0)
 

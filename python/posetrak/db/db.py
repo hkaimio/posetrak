@@ -19,8 +19,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 7
-SESSION_SCHEMA_VERSION: Final[int] = 39
+REGISTRY_SCHEMA_VERSION: Final[int] = 8
+SESSION_SCHEMA_VERSION: Final[int] = 40
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -245,6 +245,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 6
     if actual == 6:
         _migrate_registry_v6_to_v7(conn)
+        actual = 7
+    if actual == 7:
+        _migrate_registry_v7_to_v8(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -259,8 +262,9 @@ def create_session(path: Path) -> sqlite3.Connection:
 
     The session database is self-contained: it embeds a full copy of the
     registry tables (camera_models, camera_modes, camera_instances,
-    intrinsics_calibrations, skeletons, tracker_configs) so the DB remains
-    usable even when the registry file is not accessible.
+    intrinsics_calibrations, skeletons, tracker_configs,
+    marker_body_definitions) so the DB remains usable even when the
+    registry file is not accessible.
 
     Parameters
     ----------
@@ -521,6 +525,30 @@ def _migrate_registry_v6_to_v7(conn: sqlite3.Connection) -> None:
     # so the default-config resolution chain has somewhere to terminate.
     from posetrak.db.manage_config import seed_baseline_tracker_config
     seed_baseline_tracker_config(conn)
+
+
+def _migrate_registry_v7_to_v8(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 7 to 8.
+
+    v8 adds marker_body_definitions -- a named, reusable rigid body
+    carrying one or more fiducial markers at fixed positions (portable
+    calibration rigs, future marker-cluster objects). Same
+    content-addressed (SHA-256 of yaml_content) id convention as
+    skeletons. See docs/roadmap/features/extrinsics-improvements/
+    extrinsics-improvements-design.md, section 10.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS marker_body_definitions ("
+        "    id           TEXT PRIMARY KEY,"
+        "    name         TEXT NOT NULL,"
+        "    yaml_content TEXT NOT NULL,"
+        "    source       TEXT,"
+        "    created_at   TEXT NOT NULL,"
+        "    notes        TEXT"
+        ")"
+    )
+    _set_schema_version(conn, 8)
+    conn.commit()
 
 
 def _migrate_session_v9_to_v10(conn: sqlite3.Connection) -> None:
@@ -1146,6 +1174,62 @@ def _migrate_session_v38_to_v39(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v39_to_v40(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 39 to 40.
+
+    v40 adds marker_body_definitions (mirrored from the registry, same
+    embedding create_session() already does for camera_models/skeletons/
+    tracker_configs -- see the SELF-CONTAINMENT REQUIREMENT header in
+    session_schema.sql) and scene_marker_bodies (this session's solved
+    marker-body poses: the portable calibration rig's own anchor pose,
+    and/or ordinary scattered scene tags). One row per solved body
+    instance, not per marker. See docs/roadmap/features/
+    extrinsics-improvements/extrinsics-improvements-design.md, section 10
+    -- supersedes that design doc's earlier scene_fiducial_markers sketch,
+    which was never implemented.
+    """
+    existing_tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "marker_body_definitions" not in existing_tables:
+        conn.execute(
+            "CREATE TABLE marker_body_definitions ("
+            "    id           TEXT PRIMARY KEY,"
+            "    name         TEXT NOT NULL,"
+            "    yaml_content TEXT NOT NULL,"
+            "    source       TEXT,"
+            "    created_at   TEXT NOT NULL,"
+            "    notes        TEXT"
+            ")"
+        )
+    if "scene_marker_bodies" not in existing_tables:
+        conn.execute(
+            "CREATE TABLE scene_marker_bodies ("
+            "    id                               TEXT PRIMARY KEY,"
+            "    session_id                       TEXT NOT NULL REFERENCES mocap_sessions(id),"
+            "    label                            TEXT NOT NULL,"
+            "    marker_body_definition_id        TEXT,"
+            "    marker_type                      TEXT,"
+            "    dictionary                       TEXT,"
+            "    marker_id                        TEXT,"
+            "    marker_size                      REAL,"
+            "    R                                BLOB NOT NULL,"
+            "    t                                BLOB NOT NULL,"
+            "    is_primary_anchor                INTEGER NOT NULL DEFAULT 0,"
+            "    source_extrinsic_calibration_id  TEXT REFERENCES extrinsic_calibrations(id),"
+            "    updated_at                       TEXT NOT NULL"
+            ")"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX scene_marker_bodies_unique "
+            "ON scene_marker_bodies (session_id, label)"
+        )
+    _set_schema_version(conn, 40)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1283,6 +1367,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 38
     if actual == 38:
         _migrate_session_v38_to_v39(conn)
+        actual = 39
+    if actual == 39:
+        _migrate_session_v39_to_v40(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

@@ -64,6 +64,44 @@ CREATE TABLE IF NOT EXISTS extrinsic_entries (
     PRIMARY KEY (extrinsic_calibration_id, camera_instance_id)
 );
 
+-- Solved marker-body poses for this session: the portable calibration
+-- rig's own anchor pose, and/or ordinary scattered scene tags. One row per
+-- solved body INSTANCE, not per marker -- a rigid multi-marker body only
+-- ever needs one pose, since every marker's world position follows from
+-- definition + this pose (see anchor_from_marker_rig in
+-- app/setup/fiducial_markers.py). marker_body_definition_id is NULL for a
+-- lone scattered tag -- its local geometry is always just a single
+-- marker's own square, nothing worth a bespoke YAML definition for -- and
+-- the marker_type/dictionary/marker_id/marker_size columns cover that case
+-- inline instead. See docs/roadmap/features/extrinsics-improvements/
+-- extrinsics-improvements-design.md, section 10 (supersedes that design
+-- doc's earlier scene_fiducial_markers sketch, which was never
+-- implemented).
+-- marker_body_definition_id -- references marker_body_definitions(id),
+--   embedded in this session DB (see the SELF-CONTAINMENT REQUIREMENT
+--   header above) -- not a SQL REFERENCES constraint, matching this file's
+--   existing convention for columns pointing at a registry-origin table
+--   (e.g. extrinsic_entries.camera_instance_id above).
+-- R and t are little-endian float64 blobs (R: 9 elements row-major, t: 3
+--   elements), body-local -> world, same convention as extrinsic_entries.
+CREATE TABLE IF NOT EXISTS scene_marker_bodies (
+    id                               TEXT PRIMARY KEY,
+    session_id                       TEXT NOT NULL REFERENCES mocap_sessions(id),
+    label                            TEXT NOT NULL,
+    marker_body_definition_id        TEXT,
+    marker_type                      TEXT,
+    dictionary                       TEXT,
+    marker_id                        TEXT,
+    marker_size                      REAL,
+    R                                BLOB NOT NULL,
+    t                                BLOB NOT NULL,
+    is_primary_anchor                INTEGER NOT NULL DEFAULT 0,
+    source_extrinsic_calibration_id  TEXT REFERENCES extrinsic_calibrations(id),
+    updated_at                       TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS scene_marker_bodies_unique
+    ON scene_marker_bodies (session_id, label);
+
 -- A capture is a single continuous camera recording within a session.
 -- extrinsic_calibration_id is nullable: captures may be created before extrinsics are imported.
 -- shot_id FK columns in other tables reference captures(id) (historical naming).

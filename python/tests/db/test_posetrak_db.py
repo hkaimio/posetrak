@@ -182,6 +182,48 @@ def test_migrate_registry_v6_to_v7_catches_up_stale_columns_and_adds_is_named(
     conn.close()
 
 
+def test_create_registry_includes_marker_body_definitions(tmp_path: Path) -> None:
+    """A freshly created registry DB should have marker_body_definitions
+    (section 10 of the extrinsics-improvements design doc), same column
+    shape as skeletons' content-addressed-id convention."""
+    db_path = tmp_path / "reg.db"
+    conn = create_registry(db_path)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(marker_body_definitions)")}
+    assert cols == {"id", "name", "yaml_content", "source", "created_at", "notes"}
+    conn.close()
+
+
+def test_migrate_registry_v7_to_v8_adds_marker_body_definitions(tmp_path: Path) -> None:
+    """v7->v8 adds marker_body_definitions to a registry created before
+    this feature existed. See db.py's _migrate_registry_v7_to_v8."""
+    db_path = tmp_path / "reg.db"
+    conn = create_registry(db_path)
+    conn.executescript("""
+        BEGIN;
+        DROP TABLE marker_body_definitions;
+        PRAGMA user_version = 7;
+        COMMIT;
+    """)
+    conn.close()
+
+    conn = open_registry(db_path)
+    assert get_schema_version(conn) == REGISTRY_SCHEMA_VERSION
+
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "marker_body_definitions" in tables
+
+    conn.execute(
+        "INSERT INTO marker_body_definitions (id, name, yaml_content, created_at) "
+        "VALUES ('body1', 'test-rig', 'name: test-rig\\nmarkers: []\\n', '2026-01-01')"
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT name FROM marker_body_definitions WHERE id = 'body1'"
+    ).fetchone()
+    assert row["name"] == "test-rig"
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # create_session
 # ---------------------------------------------------------------------------
@@ -565,6 +607,107 @@ def test_migrate_session_v38_to_v39_adds_capture_persons(tmp_path: Path) -> None
     ).fetchone()
     assert seq_person_row["person_name"] == "Alice"
     assert seq_person_row["capture_person_id"] is None
+    conn.close()
+
+
+def test_create_session_includes_marker_body_tables(tmp_path: Path) -> None:
+    """A freshly created session DB should have marker_body_definitions
+    (embedded from the registry, same as camera_models/skeletons/
+    tracker_configs) and scene_marker_bodies (session-scoped solved
+    poses). See extrinsics-improvements-design.md, section 10."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+
+    definition_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(marker_body_definitions)")
+    }
+    assert definition_cols == {"id", "name", "yaml_content", "source", "created_at", "notes"}
+
+    body_cols = {row[1] for row in conn.execute("PRAGMA table_info(scene_marker_bodies)")}
+    assert body_cols == {
+        "id", "session_id", "label", "marker_body_definition_id",
+        "marker_type", "dictionary", "marker_id", "marker_size",
+        "R", "t", "is_primary_anchor", "source_extrinsic_calibration_id", "updated_at",
+    }
+    conn.close()
+
+
+def test_migrate_session_v39_to_v40_adds_marker_body_tables(tmp_path: Path) -> None:
+    """v39->v40 adds marker_body_definitions and scene_marker_bodies to a
+    session DB created before this feature existed. See db.py's
+    _migrate_session_v39_to_v40."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+
+    conn.executescript("""
+        BEGIN;
+        DROP TABLE scene_marker_bodies;
+        DROP TABLE marker_body_definitions;
+        PRAGMA user_version = 39;
+        COMMIT;
+    """)
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"marker_body_definitions", "scene_marker_bodies"} <= tables
+
+    # Exercise the real FK chain (mocap_sessions -> scene_marker_bodies,
+    # extrinsic_calibrations -> scene_marker_bodies) plus both the
+    # rig-anchor case (a real marker_body_definitions row) and the lone-tag
+    # case (marker_body_definition_id NULL, inline dictionary/id/size) --
+    # both scene_marker_bodies "modes" the design doc describes.
+    conn.execute(
+        "INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO extrinsic_calibrations (id, session_id, calibrated_at) "
+        "VALUES ('extr1', 'sess1', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO marker_body_definitions (id, name, yaml_content, created_at) "
+        "VALUES ('body1', 'calib-box', 'name: calib-box\\nmarkers: []\\n', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO scene_marker_bodies "
+        "(id, session_id, label, marker_body_definition_id, R, t, "
+        " is_primary_anchor, source_extrinsic_calibration_id, updated_at) "
+        "VALUES ('smb1', 'sess1', 'calib-box', 'body1', X'00', X'00', "
+        " 1, 'extr1', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO scene_marker_bodies "
+        "(id, session_id, label, marker_type, dictionary, marker_id, marker_size, "
+        " R, t, source_extrinsic_calibration_id, updated_at) "
+        "VALUES ('smb2', 'sess1', 'wall-tag-north', 'aruco', 'DICT_5X5_50', '3', 0.1, "
+        " X'00', X'00', 'extr1', '2026-01-01')"
+    )
+    conn.commit()
+
+    rig_row = conn.execute(
+        "SELECT marker_body_definition_id, is_primary_anchor FROM scene_marker_bodies "
+        "WHERE id = 'smb1'"
+    ).fetchone()
+    assert rig_row["marker_body_definition_id"] == "body1"
+    assert rig_row["is_primary_anchor"] == 1
+
+    tag_row = conn.execute(
+        "SELECT marker_body_definition_id, dictionary, marker_id FROM scene_marker_bodies "
+        "WHERE id = 'smb2'"
+    ).fetchone()
+    assert tag_row["marker_body_definition_id"] is None
+    assert tag_row["dictionary"] == "DICT_5X5_50"
+    assert tag_row["marker_id"] == "3"
+
+    # session_id + label is unique.
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO scene_marker_bodies "
+            "(id, session_id, label, R, t, updated_at) "
+            "VALUES ('smb3', 'sess1', 'calib-box', X'00', X'00', '2026-01-01')"
+        )
     conn.close()
 
 

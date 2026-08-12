@@ -75,6 +75,21 @@ CREATE TABLE IF NOT EXISTS skeletons (
     notes        TEXT
 );
 
+-- Marker body definitions: a named, reusable rigid body carrying one or
+-- more fiducial markers at fixed positions (portable calibration rigs,
+-- future marker-cluster objects) -- id is SHA-256 of yaml_content, same
+-- content-addressed convention as skeletons above. See
+-- docs/roadmap/features/extrinsics-improvements/
+-- extrinsics-improvements-design.md, section 10.
+CREATE TABLE IF NOT EXISTS marker_body_definitions (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    yaml_content TEXT NOT NULL,
+    source       TEXT,
+    created_at   TEXT NOT NULL,
+    notes        TEXT
+);
+
 -- UKF / tracker configuration snapshots
 CREATE TABLE IF NOT EXISTS tracker_configs (
     id                     TEXT PRIMARY KEY,

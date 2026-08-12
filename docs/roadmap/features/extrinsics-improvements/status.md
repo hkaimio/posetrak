@@ -13,7 +13,7 @@ alternative to anchoring the world frame from a single flat ChArUco board alone.
 """
 categories = ["calibration", "ui"]
 target_release = "TBD"
-last_updated = 2026-08-11
+last_updated = 2026-08-12
 ```
 
 # Extrinsics Calibration Improvements — Implementation Status
@@ -148,6 +148,82 @@ for the full approach) run against both of the box orbit videos from the
   only as a (currently unreliable) secondary cross-check. No implementation
   decision made yet.
 
+**More samples made it worse, not better (2026-08-11), and marker size
+was measured (2026-08-12).** Two follow-ups resolved the open question
+above and changed direction:
+
+- Re-ran both orbit videos at 24 samples (up from 10). Result: a clear
+  regression on **both** cameras, not an improvement — OnePlus went from
+  5/5 clean markers to 1/5 (13/20 corners rejected by the reprojection
+  filter) with individual camera CP errors as high as 19.5±10.2px (vs.
+  1.7-3.8px at 10 samples); ACE2 Pro went from a partial result to 0/20
+  corners surviving at all. Root cause: sampling more frames from the
+  *same* clip shrinks the baseline between adjacent samples, and
+  `chain_poses_bfs` has no awareness of how well-conditioned a given
+  SIFT-matched pair's baseline is — more samples added mostly
+  short-baseline, noise-amplifying pose-chain edges, not new information.
+  **Lesson for reuse**: for this method, sample count needs to match the
+  physical baseline the orbit actually covers, not be maximized — "more
+  samples" is not a safe default fix.
+- Harri measured the actual printed marker size with calipers: **0.145m**,
+  not the 0.15m nominal design size the orbit-video runs assumed. Comparing
+  the (axis-corrected) 10-sample OnePlus result against a physical tape
+  measurement of the box (49.5 x 31 x 33.5cm) showed a consistent ~5-7%
+  *overestimate* on both real (non-guessed) axes — the same-direction bias
+  across independent axes is the signature of a single multiplicative
+  cause, and 0.15/0.145 = 1.034 explains roughly two-thirds of it on its
+  own. The remainder is presumed to be ordinary triangulation noise from
+  only 10 samples.
+- **Decision (2026-08-12, per Harri):** for production use, a hand-measured
+  physical rig with its geometry stored in a config file is the safer
+  default — the orbit-video method is better framed as a fallback/
+  self-calibration tool for rigs that can't be pre-measured, not the
+  primary path. This doesn't waste the orbit-video work: the 10-sample
+  OnePlus result, rescaled by 0.145/0.15, *is* the config now in use (see
+  below) — its corner order came from real detections, so reusing it
+  avoids a real, separate risk a hand-derived config would have carried
+  (see `load_rig_config`'s docstring).
+
+**Phase 8 core implemented and validated against real capture-1 footage
+(2026-08-12).** `MarkerRigConfig` / `MarkerRigDetector` /
+`anchor_from_marker_rig` added to `fiducial_markers.py` (15 new synthetic
+tests, `test_marker_rig.py`), generalizing `anchor_from_charuco_board`'s
+already-established mechanism (the instrument's own local frame becomes
+the world frame directly) to a non-planar rig — no `solvePnP`-based
+anchoring needed, same simplification Phase 4 already found. Only the
+`"explicit"` rig-config shape is implemented; the `"box"` parametric shape
+is deliberately deferred (see `load_rig_config`'s docstring — expanding it
+requires *assuming* each physical marker's mounted orientation, a real,
+hard-to-detect risk the `"explicit"` form sidesteps when the corner
+geometry comes from real detections instead).
+
+`python/tools/test_rig_anchor_capture1.py` (new, standalone, no
+session-DB import needed — extrinsics calibration doesn't require sync)
+ran the box rig config (`tools/rig_configs/box_2026-08-10.json`, the
+rescaled orbit-video result above) against one real frame from each of
+capture 1's 3 cameras (ace2pro frame 2069, gopro-11_mini_01 frame 1257,
+oneplus9pro-01 frame 386, portrait mode):
+
+- **All 3 cameras PnP-initialised directly from the rig anchor** (12 world
+  CPs each — no SIFT chaining needed at all, though SIFT still ran
+  alongside as usual). CP reprojection errors: 3.0-4.6px mean (max
+  8.6-15.0px) — comparable to the earlier ChArUco-anchored runs.
+- **Solved camera positions span both signs of world Z**
+  (ace2pro/gopro at Z ≈ -1.6/-1.8, oneplus at Z ≈ +2.1) **with no
+  ambiguity-resolution branch involved at all** — this is the concrete,
+  real-data confirmation of §9's central motivation (see the sixth
+  live-testing round above): a genuinely non-planar anchor has no
+  IPPE-style tilt ambiguity to resolve in the first place.
+- All 5 rig markers detected across the 3 cameras (each camera saw only
+  3 of 5 — box faces aren't all visible from any one viewpoint, handled
+  gracefully as designed); 5 scattered ArUco tags also recovered (2
+  cameras each) as free-CP world centroids — a Phase 5/Tier B precursor,
+  printed only, no `scene_fiducial_markers` persistence yet.
+
+**Not yet done**: Phase 9 re-anchor validation against capture 2 (cameras
+moved, no rig, only the scattered tags — the direct test of §9's other
+half); `scene_fiducial_markers` persistence; any UI wiring.
+
 ## Phase summary
 
 | Phase | Description | Status |
@@ -159,7 +235,7 @@ for the full approach) run against both of the box orbit videos from the
 | 5 | `scene_fiducial_markers` persistence + recalibration reuse | ⬜ Not started |
 | 6 | AprilTag detector backend (extensibility proof) | ⬜ Not started |
 | 7 | Global timeline scrub (§8) — jump every camera to the same synced instant | ⬜ Not started (design added 2026-08-09 from UI-testing feedback) |
-| 8 | Portable non-planar calibration rig — primary world-frame anchor (§9, Tier A) | ⬜ Not started (design added 2026-08-09 from Phase 4 live-testing feedback) |
+| 8 | Portable non-planar calibration rig — primary world-frame anchor (§9, Tier A) | 🟡 Core implemented + validated against real capture-1 footage (2026-08-12); no UI wiring yet, `"box"` shape deferred |
 | 9 | Scattered-tag redundancy + single-camera re-anchor (§9, Tier B) | ⬜ Not started (design added 2026-08-09 from Phase 4 live-testing feedback) |
 
 ## UI testing feedback (2026-08-09, Phases 1-2)

@@ -250,7 +250,9 @@ def extrinsics_anchor_rig(
             rig_dets = rig_detector.detect(img, video_id=spec.label, frame_idx=spec.frame_idx)
             rig_detections_by_camera[spec.label] = rig_dets
             scattered_dets = scattered_detector.detect(img, video_id=spec.label, frame_idx=spec.frame_idx)
-            merge_detections_into_groups(scattered_dets, scattered_groups, size=tag_size)
+            merge_detections_into_groups(
+                scattered_dets, scattered_groups, size=tag_size, dictionary=scattered_dict
+            )
             click.echo(f"{spec.label}: {len(rig_dets)} rig marker(s), "
                        f"{len(scattered_dets)} scattered tag detection(s)")
 

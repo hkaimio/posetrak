@@ -108,6 +108,11 @@ class MarkerGroup:
     """
     marker_id: str
     size: float | None = None  # None = unknown; corners contribute as free points only
+    # ArUco dictionary this marker was decoded from -- carried along so a
+    # solved pose (once it has a real size, see solve_marker_groups) can be
+    # persisted to scene_marker_bodies with enough information to redetect
+    # it later (design doc section 9 Tier B); not used by the solve itself.
+    dictionary: str = "DICT_4X4_50"
     obs: dict[str, dict[int, ObsPoint]] = field(default_factory=dict)  # video_id -> {corner_index: ObsPoint}
 
     def cameras_observing(self) -> set[str]:

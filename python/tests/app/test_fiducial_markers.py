@@ -190,3 +190,28 @@ def test_merge_different_markers_produce_different_groups():
         [_detection("3", "cam_A", 10), _detection("7", "cam_A", 10)], groups, size=None
     )
     assert set(groups) == {"3", "7"}
+
+
+def test_merge_defaults_dictionary_when_omitted():
+    groups: dict[str, MarkerGroup] = {}
+    merge_detections_into_groups([_detection("3", "cam_A", 10)], groups, size=None)
+    assert groups["3"].dictionary == "DICT_4X4_50"
+
+
+def test_merge_records_dictionary():
+    groups: dict[str, MarkerGroup] = {}
+    merge_detections_into_groups(
+        [_detection("3", "cam_A", 10)], groups, size=None, dictionary="DICT_5X5_50"
+    )
+    assert groups["3"].dictionary == "DICT_5X5_50"
+
+
+def test_merge_updates_dictionary():
+    groups: dict[str, MarkerGroup] = {}
+    merge_detections_into_groups(
+        [_detection("3", "cam_A", 10)], groups, size=None, dictionary="DICT_5X5_50"
+    )
+    merge_detections_into_groups(
+        [_detection("3", "cam_A", 10)], groups, size=None, dictionary="DICT_6X6_50"
+    )
+    assert groups["3"].dictionary == "DICT_6X6_50"

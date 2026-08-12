@@ -434,6 +434,7 @@ def merge_detections_into_groups(
     detections: list[FiducialDetection],
     groups: dict[str, MarkerGroup],
     size: float | None,
+    dictionary: str | None = None,
 ) -> None:
     """Fold one camera's detections into the accumulating marker-id -> MarkerGroup map.
 
@@ -448,15 +449,23 @@ def merge_detections_into_groups(
     *size* updates the group's size unconditionally (last detector settings
     used win) -- there is only one size per physical marker, so there is no
     meaningful "merge" between two different size values, just "whichever
-    was set most recently."
+    was set most recently." *dictionary*, if given, updates the group's
+    dictionary the same way -- left at ``MarkerGroup``'s own default when
+    omitted, for callers (existing tests, ``characterize_rig_from_video.py``)
+    that don't care about it.
     """
     for det in detections:
         group = groups.get(det.marker_id)
         if group is None:
-            group = MarkerGroup(marker_id=det.marker_id, size=size)
+            group = MarkerGroup(
+                marker_id=det.marker_id, size=size,
+                **({"dictionary": dictionary} if dictionary is not None else {}),
+            )
             groups[det.marker_id] = group
         else:
             group.size = size
+            if dictionary is not None:
+                group.dictionary = dictionary
         video_id = det.corners[0].video_id if det.corners else ""
         corners_by_index = {
             c.corner_index: ObsPoint(frame_idx=c.frame_idx, px=c.px, py=c.py)

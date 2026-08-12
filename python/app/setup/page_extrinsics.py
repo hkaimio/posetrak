@@ -1451,7 +1451,12 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             "Click \"Detect ArUco\" under a camera to find markers in its "
             "current frame. A marker's 4 corners act as one control-point "
             "group; give it a size (below) to also recover its rigid "
-            "world pose once ≥2 cameras have seen it."
+            "world pose once ≥2 cameras have seen it. A sized marker's "
+            "solved pose is saved to this session's scene markers on "
+            "Accept, so a later capture can re-anchor from it without a "
+            "physical rig (\"From Scene Markers…\" in the panel below) -- "
+            "use a dictionary here that's different from your rig's own "
+            "so the two can't be confused."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666; font-size: 10px;")
@@ -1471,7 +1476,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._aruco_default_size_spin.setSuffix(" m")
         self._aruco_default_size_spin.setToolTip(
             "0 = unknown size: marker corners still contribute as free "
-            "control points, but no rigid pose is solved for it."
+            "control points, but no rigid pose is solved for it, so it "
+            "won't be saved as a reusable scene marker either."
         )
         size_row.addWidget(self._aruco_default_size_spin, 1)
 
@@ -2227,7 +2233,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # size in the table keeps it rather than reverting to the default.
         for det in detections:
             size = self._size_for_marker(det.marker_id)
-            merge_detections_into_groups([det], self._marker_groups, size=size)
+            merge_detections_into_groups(
+                [det], self._marker_groups, size=size, dictionary=dictionary
+            )
 
         self._refresh_marker_table()
         self._refresh_markers()
@@ -3138,6 +3146,34 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             except Exception as exc:  # noqa: BLE001
                 _log.warning(
                     "Could not persist rig anchor to scene_marker_bodies: %s", exc, exc_info=True
+                )
+
+        # Persist every known-size marker's solved pose too (scattered
+        # tags, design doc section 9 Tier B) -- the CLI's `anchor-rig
+        # --tag-size` writes the identical rows from the identical
+        # `result.marker_poses` output; the GUI's route to a "known-size
+        # marker" is "Detect ArUco" + the marker-size table/default-size
+        # field rather than a --tag-size flag, but once a marker has a
+        # real size ``solve_marker_groups`` already solves it the same
+        # way (see that function's docstring), so this is just the
+        # missing write step, not new solving. A capture in a *different*
+        # session later reaches these same tags via "From Scene
+        # Markers…"/`reanchor`.
+        for marker_id, mp in self._result.marker_poses.items():
+            mg = self._marker_groups.get(marker_id)
+            dictionary = mg.dictionary if mg is not None else "DICT_4X4_50"
+            try:
+                R, _ = cv2.Rodrigues(mp.rvec)
+                upsert_scene_marker_body(
+                    self._conn, self._session_id, label=f"tag:{marker_id}",
+                    R=R, t=mp.tvec,
+                    marker_type="aruco", dictionary=dictionary, marker_id=marker_id,
+                    marker_size=mp.size, source_extrinsic_calibration_id=calib_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "Could not persist marker %s to scene_marker_bodies: %s",
+                    marker_id, exc, exc_info=True,
                 )
 
         if self._shot_ids:

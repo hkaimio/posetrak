@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 import pytest
 
-from app.setup.extrinsics_solver import CamCalibState
+from app.setup.extrinsics_solver import CalibResult, CamCalibState, MarkerGroup, MarkerPoseResult
 from app.setup.fiducial_markers import ARUCO_DICTIONARIES
 from app.setup.page_extrinsics import ExtrinsicsAutoCalibDialog
 from posetrak.db.manage_marker_body import import_marker_body
@@ -508,5 +508,81 @@ def test_load_rig_config_from_registry_row_invalid_yaml_shows_warning(
         dlg._load_rig_config_from_registry_row("not: [valid, yaml", "some-id")
         assert len(warned) == 1
         assert dlg._rig_config is None
+    finally:
+        dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Persisting sized ArUco markers ("Detect ArUco" + a real size, not a rig)
+# to scene_marker_bodies on Accept -- the GUI's own route to what the CLI's
+# `anchor-rig --tag-size` does, so a later capture can reuse them via "From
+# Scene Markers…"/`reanchor`. See _on_accept.
+# ---------------------------------------------------------------------------
+
+
+def _seed_session_and_camera(conn, session_id: str = "sess1", label: str = "cam_A") -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO mocap_sessions (id, recorded_at) VALUES (?, '2026-01-01')",
+        (session_id,),
+    )
+    conn.execute(
+        "INSERT INTO camera_models (id, manufacturer, model_name) VALUES ('model1', 'Test', 'Cam')"
+    )
+    conn.execute(
+        "INSERT INTO camera_instances (id, camera_model_id, label) VALUES ('inst1', 'model1', ?)",
+        (label,),
+    )
+    conn.commit()
+
+
+def test_accept_persists_sized_scattered_marker_pose(qapp, fake_conn) -> None:
+    _seed_session_and_camera(fake_conn)
+    states = [_make_state("cam_A", _render_marker_image(9))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._marker_groups["9"] = MarkerGroup(marker_id="9", size=0.1, dictionary="DICT_5X5_50")
+        rvec, _ = cv2.Rodrigues(np.eye(3))
+        mp = MarkerPoseResult(
+            rvec=rvec, tvec=np.array([1.0, 2.0, 3.0]), size=0.1, rms_reprojection_px=0.5
+        )
+        states[0].R = np.eye(3)
+        states[0].t = np.zeros((3, 1))
+        dlg._result = CalibResult(
+            cameras={"cam_A": states[0]}, points_3d=[], reprojection_errors={},
+            unsolved=[], pair_matches={}, marker_poses={"9": mp},
+        )
+
+        dlg._on_accept()
+
+        row = fake_conn.execute(
+            "SELECT dictionary, marker_id, marker_size FROM scene_marker_bodies "
+            "WHERE session_id = 'sess1' AND label = 'tag:9'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "DICT_5X5_50"
+        assert row[1] == "9"
+        assert row[2] == pytest.approx(0.1)
+    finally:
+        dlg.done(0)
+
+
+def test_accept_with_no_sized_markers_persists_nothing(qapp, fake_conn) -> None:
+    _seed_session_and_camera(fake_conn)
+    states = [_make_state("cam_A", _render_marker_image(9))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        states[0].R = np.eye(3)
+        states[0].t = np.zeros((3, 1))
+        dlg._result = CalibResult(
+            cameras={"cam_A": states[0]}, points_3d=[], reprojection_errors={},
+            unsolved=[], pair_matches={},
+        )
+
+        dlg._on_accept()
+
+        count = fake_conn.execute(
+            "SELECT COUNT(*) FROM scene_marker_bodies WHERE session_id = 'sess1'"
+        ).fetchone()[0]
+        assert count == 0
     finally:
         dlg.done(0)

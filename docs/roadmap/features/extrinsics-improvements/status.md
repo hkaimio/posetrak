@@ -412,6 +412,34 @@ iter_frames` instead of a fifth duplicated rotation-aware reader.
   real video; the I/O-heavy command bodies validated against real data
   instead, consistent with this feature's practice throughout.
 
+**GUI can now persist scattered scene tags too, closing the last Phase 9
+GUI gap (2026-08-12)** — Harri asked how to get scattered markers into
+`scene_marker_bodies` for reuse across captures; until now only the
+CLI's `anchor-rig --tag-size` could write those rows, even though the
+GUI already had the exact same underlying mechanism (the ArUco panel's
+"Detect ArUco" + per-marker size table/default-size field feeds sized
+markers into `solve_marker_groups` and produces the identical
+`CalibResult.marker_poses` the CLI persists). The only missing piece was
+the write step: `_on_accept` now also upserts every entry in
+`result.marker_poses` into `scene_marker_bodies` (`label = "tag:<id>"`),
+right after the rig-anchor persistence block, using the same
+`upsert_scene_marker_body` call the CLI makes. The one thing the GUI
+path needed that it didn't already track: which ArUco dictionary a
+marker came from (the CLI gets this from its own `--scattered-dict`
+option; the GUI's `MarkerGroup` had no equivalent). Added a `dictionary`
+field to `MarkerGroup`, threaded through `merge_detections_into_groups`
+as an optional keyword (defaults preserve every existing caller
+unchanged) and set from the ArUco panel's own dictionary combo at
+detect time. The ArUco panel's hint text and size-field tooltip now
+explain the reuse-across-captures behaviour and recommend a dictionary
+different from the rig's own, mirroring the CLI's differing defaults
+(`DICT_4X4_50` rig vs. `DICT_5X5_50` scattered) so the two can't be
+confused by id collision. 5 new tests (3 for `MarkerGroup.dictionary`/
+`merge_detections_into_groups`, 2 for the Accept-time write, one
+confirming nothing is written when no marker has a real size). Full
+regression sweep passes with the same pre-existing exclusions as the
+entry below.
+
 **Rig-panel UX rework after Harri's first live GUI test pass
 (2026-08-12)** — with the box rig config (`box_2026-08-10.yaml`) actually
 imported and used end-to-end for the first time, three real usability
@@ -570,7 +598,7 @@ columns instead) plus its `(session_id, label)` uniqueness constraint.
 | 6 | AprilTag detector backend (extensibility proof) | ⬜ Not started |
 | 7 | Global timeline scrub (§8) — jump every camera to the same synced instant | ⬜ Not started (design added 2026-08-09 from UI-testing feedback) |
 | 8 | Portable non-planar calibration rig — primary world-frame anchor (§9, Tier A) | ✅ Core + CLI (`anchor-rig`) + GUI panel done, validated against real capture-1 footage (2026-08-12); `"box"` parametric shape and QR scanning deliberately deferred |
-| 9 | Scattered-tag redundancy + single-camera re-anchor (§9, Tier B) | 🟡 Multi-camera re-anchor: core + CLI (`reanchor`) + GUI ("Load from scene markers…") all done, reusing Phase 8's `anchor_from_marker_rig` unmodified; genuinely single-camera re-anchor (planar-ambiguity helper extraction) and GUI scattered-tag-size input still open; one camera's data quality on real footage still under investigation |
+| 9 | Scattered-tag redundancy + single-camera re-anchor (§9, Tier B) | 🟡 Multi-camera re-anchor: core + CLI (`reanchor`) + GUI ("Load from scene markers…") all done, reusing Phase 8's `anchor_from_marker_rig` unmodified; GUI can now also write sized scattered tags to `scene_marker_bodies` on Accept (ArUco panel's existing size table, no separate UI needed); genuinely single-camera re-anchor (planar-ambiguity helper extraction) still open; one camera's data quality on real footage still under investigation |
 
 ## UI testing feedback (2026-08-09, Phases 1-2)
 

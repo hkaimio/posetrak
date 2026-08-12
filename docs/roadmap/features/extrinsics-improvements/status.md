@@ -381,6 +381,24 @@ updating the existing prototype scripts (`characterize_rig_from_video.py`,
 `test_rig_anchor_capture1.py`, `test_reanchor_capture2.py`) to read/write
 §10's YAML instead of their current ad hoc JSON are all still ahead.
 
+**YAML loader implemented (2026-08-12)** — `load_marker_body_yaml()`/
+`load_marker_body_yaml_file()` in `fiducial_markers.py` parse section 10's
+canonical format into `MarkerRigConfig`. `center`/`normal`/`up` resolves
+via the same Gram-Schmidt construction the box config's gravity-up
+reframing already used; raw `corners` is used as-is. `reflective_dot`
+entries land in a new `MarkerRigConfig.reflective_dots` field, parsed but
+not matched against anything yet (correspondence/tracking for dots stays
+future work). `MarkerRigConfig` also gained `marker_dictionaries` (empty
+= legacy single-dictionary behaviour, unchanged for `load_rig_config`-
+loaded configs); `MarkerRigDetector` now builds one `ArucoDetector` per
+distinct dictionary a body actually uses. This works with a plain bare-id
+lookup (no composite key needed) because the loader rejects a body where
+two coded markers share an id in *any* dictionary — the one case a
+bare-id lookup can't disambiguate — loudly, at load time. 38 new/updated
+tests. Nothing calls this loader from the prototype scripts yet (they
+still read `load_rig_config`'s JSON) or the DB CRUD layer above — those
+are the next two pieces to connect.
+
 **CRUD layer implemented (2026-08-12)** — `python/posetrak/db/
 manage_marker_body.py`: `import_marker_body()`/`import_marker_body_str()`
 (mirrors `manage_skeleton.import_skeleton()` exactly — content-addressed

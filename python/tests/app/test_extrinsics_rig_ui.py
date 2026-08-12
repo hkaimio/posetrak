@@ -16,6 +16,7 @@ import pytest
 from app.setup.extrinsics_solver import CamCalibState
 from app.setup.fiducial_markers import ARUCO_DICTIONARIES
 from app.setup.page_extrinsics import ExtrinsicsAutoCalibDialog
+from posetrak.db.manage_marker_body import import_marker_body
 
 _ONE_MARKER_RIG_YAML = """\
 name: test-rig
@@ -124,7 +125,9 @@ def test_detect_rig_finds_marker(qapp, fake_conn, rig_yaml_path) -> None:
         assert "cam_A" in dlg._rig_detections_by_camera
         assert len(dlg._rig_detections_by_camera["cam_A"]) == 1
         assert dlg._rig_detections_by_camera["cam_A"][0].marker_id == "3"
-        assert "not yet anchored" in dlg._rig_status_label.text()
+        # Loading a rig config with the marker already visible now
+        # auto-anchors immediately (see _apply_loaded_rig_config).
+        assert "anchored" in dlg._rig_status_label.text()
     finally:
         dlg.done(0)
 
@@ -148,22 +151,35 @@ def test_detect_rig_with_no_image_shows_warning_not_crash(qapp, fake_conn, monke
 
 def test_control_points_empty_before_anchor(qapp, fake_conn, rig_yaml_path) -> None:
     """Unlike ChArUco, a rig detection has no free/unanchored intermediate
-    state -- see _build_rig_group's docstring for why."""
-    states = [_make_state("cam_A", _render_marker_image(3))]
+    state -- see _build_rig_group's docstring for why. That intermediate
+    state can still occur transiently: the rig isn't visible in any
+    camera's frame at load time (so auto-anchor-on-load finds nothing),
+    then the user redetects a single camera by hand without also
+    re-running "Anchor Rig"."""
+    states = [_make_state("cam_A", image=None)]
     dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
     try:
-        dlg._load_rig_config_from_path(rig_yaml_path)
+        dlg._load_rig_config_from_path(rig_yaml_path)  # no image yet -> nothing auto-detected
+        assert not dlg._rig_anchored
+
+        # Now the camera "scrubs" to a frame where the marker is visible,
+        # and the user redetects just that camera.
+        dlg._states_by_id["cam_A"].image = _render_marker_image(3)
         dlg._on_detect_rig_clicked("cam_A")
+
+        assert dlg._rig_detections_by_camera["cam_A"]
+        assert not dlg._rig_anchored
         assert dlg._rig_control_points() == []
     finally:
         dlg.done(0)
 
 
 def test_anchor_without_detection_shows_warning(qapp, fake_conn, monkeypatch, rig_yaml_path) -> None:
-    states = [_make_state("cam_A", _render_marker_image(3))]
+    states = [_make_state("cam_A", image=None)]  # marker not visible -> nothing to detect
     dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
     try:
         dlg._load_rig_config_from_path(rig_yaml_path)
+        assert not dlg._rig_anchored
         warned = []
         monkeypatch.setattr(
             "app.setup.page_extrinsics.QMessageBox.warning",
@@ -249,6 +265,65 @@ def test_solve_includes_rig_control_points(qapp, fake_conn, rig_yaml_path, monke
     finally:
         if dlg._solve_thread is not None:
             dlg._solve_thread.wait(2000)
+        dlg.done(0)
+
+
+def test_load_rig_config_auto_anchors_when_marker_visible(qapp, fake_conn, rig_yaml_path) -> None:
+    """Loading a rig config now runs detect-across-all-cameras + anchor
+    immediately, collapsing what used to be three separate clicks (load,
+    per-camera detect, "Set origin & axes") into one -- per user feedback
+    after the first manual GUI test pass."""
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_path(rig_yaml_path)
+
+        assert dlg._rig_anchored
+        assert "cam_A" in dlg._rig_detections_by_camera
+        cps = dlg._rig_control_points()
+        assert len(cps) == 4
+        assert all(cp.world_xyz is not None for cp in cps)
+    finally:
+        dlg.done(0)
+
+
+def test_load_rig_config_no_marker_visible_stays_unanchored(qapp, fake_conn, rig_yaml_path) -> None:
+    states = [_make_state("cam_A", image=None)]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_path(rig_yaml_path)
+
+        assert dlg._rig_config is not None  # config still loaded
+        assert not dlg._rig_anchored
+        assert dlg._rig_detections_by_camera == {}
+    finally:
+        dlg.done(0)
+
+
+def test_anchor_rig_button_redetects_every_camera(qapp, fake_conn, rig_yaml_path) -> None:
+    """"Anchor Rig" always redetects fresh across every camera -- not just
+    an anchor of whatever was already detected -- so it also serves as
+    the "redo everything" action after scrubbing several cameras to
+    better frames, per user feedback."""
+    states = [
+        _make_state("cam_A", image=None),
+        _make_state("cam_B", image=None),
+    ]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_path(rig_yaml_path)
+        assert not dlg._rig_anchored
+
+        # Both cameras "scrub" to a frame showing the marker.
+        dlg._states_by_id["cam_A"].image = _render_marker_image(3)
+        dlg._states_by_id["cam_B"].image = _render_marker_image(3)
+        dlg._on_anchor_from_rig()
+
+        assert dlg._rig_anchored
+        assert "cam_A" in dlg._rig_detections_by_camera
+        assert "cam_B" in dlg._rig_detections_by_camera
+        assert "2/2" in dlg._rig_status_label.text()
+    finally:
         dlg.done(0)
 
 
@@ -385,5 +460,53 @@ def test_load_rig_config_from_file_sets_source_file(qapp, fake_conn, rig_yaml_pa
     try:
         dlg._load_rig_config_from_path(rig_yaml_path)
         assert dlg._rig_source == "file"
+    finally:
+        dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# "From Registry…" -- pick an already-imported marker_body_definitions row
+# without re-selecting its YAML file (the gap the user hit after a CLI
+# `marker-body import`: the dialog's in-memory state had no way to see a
+# rig that only existed in the DB).
+# ---------------------------------------------------------------------------
+
+
+def test_load_rig_config_from_registry_row_populates_state(qapp, fake_conn, rig_yaml_path) -> None:
+    definition_id = import_marker_body(fake_conn, rig_yaml_path, name="test-rig")
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        row = fake_conn.execute(
+            "SELECT yaml_content FROM marker_body_definitions WHERE id = ?", (definition_id,)
+        ).fetchone()
+
+        dlg._load_rig_config_from_registry_row(row[0], definition_id)
+
+        assert dlg._rig_config is not None
+        assert dlg._rig_config.rig_id == "test-rig"
+        assert dlg._rig_definition_id == definition_id
+        assert dlg._rig_source == "file"
+        # Same auto-detect-and-anchor behaviour as the file/registry-picker
+        # paths -- the marker is visible in cam_A's image.
+        assert dlg._rig_anchored
+    finally:
+        dlg.done(0)
+
+
+def test_load_rig_config_from_registry_row_invalid_yaml_shows_warning(
+    qapp, fake_conn, monkeypatch
+) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        warned = []
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics.QMessageBox.warning",
+            lambda *a, **kw: warned.append(a),
+        )
+        dlg._load_rig_config_from_registry_row("not: [valid, yaml", "some-id")
+        assert len(warned) == 1
+        assert dlg._rig_config is None
     finally:
         dlg.done(0)

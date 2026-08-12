@@ -41,6 +41,7 @@ import numpy as np
 from PySide6.QtCore import QRect, QThread, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -91,12 +92,17 @@ from app.setup.fiducial_markers import (
     MarkerRigDetector,
     anchor_from_charuco_board,
     anchor_from_marker_rig,
+    load_marker_body_yaml,
     load_marker_body_yaml_file,
     merge_detections_into_groups,
 )
 from app.setup.video_scrub_bar import VideoScrubBar
 from posetrak.db.import_extrinsics import import_extrinsics
-from posetrak.db.manage_marker_body import import_marker_body, upsert_scene_marker_body
+from posetrak.db.manage_marker_body import (
+    import_marker_body,
+    list_marker_bodies,
+    upsert_scene_marker_body,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1018,6 +1024,73 @@ class _SolveThread(QThread):
 
 
 # ---------------------------------------------------------------------------
+# Registry rig picker (used by the Marker Rig panel's "From Registry…"
+# button) -- mirrors page_skeleton.py's _RegistryPickerDialog exactly, just
+# listing marker_body_definitions instead of skeletons. Closes the gap
+# where a rig imported via `posetrak marker-body import` (or a prior GUI
+# session) had no way back into a new dialog instance short of re-picking
+# its original YAML file.
+# ---------------------------------------------------------------------------
+
+
+class _RegistryRigPickerDialog(QDialog):
+    """Simple picker listing already-imported marker_body_definitions."""
+
+    def __init__(self, conn: sqlite3.Connection, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Pick Rig from Registry")
+        self.setMinimumSize(560, 320)
+        self._selected_id: str | None = None
+        self._selected_yaml: str | None = None
+
+        rows = list_marker_bodies(conn)
+
+        self._table = QTableWidget(len(rows), 3)
+        self._table.setHorizontalHeaderLabels(["Name", "Source", "Created"])
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+
+        self._rows = rows
+        for i, r in enumerate(rows):
+            self._table.setItem(i, 0, QTableWidgetItem(r["name"] or ""))
+            self._table.setItem(i, 1, QTableWidgetItem(r["source"] or ""))
+            self._table.setItem(i, 2, QTableWidgetItem((r["created_at"] or "")[:10]))
+
+        self._table.doubleClicked.connect(self.accept)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._table)
+        layout.addWidget(buttons)
+
+    def accept(self) -> None:
+        rows = self._table.selectedItems()
+        if not rows:
+            return
+        row_idx = self._table.currentRow()
+        self._selected_id = self._rows[row_idx]["id"]
+        self._selected_yaml = self._rows[row_idx]["yaml_content"]
+        super().accept()
+
+    def selected_id(self) -> str | None:
+        return self._selected_id
+
+    def selected_yaml(self) -> str | None:
+        return self._selected_yaml
+
+
+# ---------------------------------------------------------------------------
 # Auto-calibration dialog
 # ---------------------------------------------------------------------------
 
@@ -1571,48 +1644,61 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         See docs/roadmap/features/extrinsics-improvements/
         extrinsics-improvements-design.md, section 9 (both tiers) and
-        section 10. Both "Load rig config…" (a marker_body_definitions
-        YAML file) and "Load from scene markers…" (this session's already-
-        persisted ``scene_marker_bodies`` rows, design doc section 9 Tier
-        B) populate the exact same detect/anchor machinery below --
-        they're the same underlying mechanism
-        (``anchor_from_marker_rig``), just two different sources for the
-        set of known marker positions, matching how the CLI's
-        `anchor-rig`/`reanchor` commands are also just two callers of the
-        same function.
+        section 10. All three load buttons -- "Load Config…" (a
+        marker_body_definitions YAML file), "From Registry…" (the same
+        kind of row, already imported into this session's DB by a prior
+        `posetrak marker-body import` or GUI load), and "From Scene
+        Markers…" (this session's already-persisted
+        ``scene_marker_bodies`` rows, design doc section 9 Tier B) -- feed
+        the same underlying mechanism (``anchor_from_marker_rig``), just
+        three different sources for the set of known marker positions,
+        matching how the CLI's `anchor-rig`/`reanchor` commands are also
+        just two callers of the same function.
 
-        Unlike the ChArUco panel, a rig detection has no "free, not yet
-        anchored" intermediate state: ``anchor_from_marker_rig`` always
-        assigns fixed ``world_xyz`` immediately, since the loaded
-        geometry -- from either source -- is already fully known with no
+        Loading immediately detects the rig in every camera's current
+        frame and anchors the world coordinate system from it if found
+        anywhere (see ``_apply_loaded_rig_config``/
+        ``_detect_and_anchor_rig``) -- collapsing what used to be four
+        separate clicks (load, detect under each camera, "Set origin &
+        axes", solve) into one for the common case. Unlike the ChArUco
+        panel, a rig detection has no "free, not yet anchored"
+        intermediate state to begin with: ``anchor_from_marker_rig``
+        always assigns fixed ``world_xyz`` immediately, since the loaded
+        geometry -- from any source -- is already fully known with no
         face-up/face-down choice to make (see that function's docstring).
-        So nothing from this panel contributes to a solve until "Set
-        origin & axes from rig" is clicked -- there's no equivalent of
-        ChArUco's "detected corners still help as free correspondences
-        before anchoring" behaviour here, deliberately, since building
-        that would need a genuinely new code path this phase doesn't need.
+        The per-camera "Detect Rig" buttons and the "Anchor Rig" button
+        below remain as an explicit redo, e.g. after scrubbing one or
+        more cameras to a frame where the rig is actually visible.
         """
         group = QGroupBox("Marker Rig / Scene Markers")
         layout = QVBoxLayout(group)
 
         hint = QLabel(
-            "Load a rig config (a marker body YAML, section 10 of the "
-            "design doc) OR load this session's previously-solved "
-            "scattered tags (no physical rig needed -- section 9 Tier B), "
-            "then click \"Detect Rig\" under each camera that can see the "
-            "loaded markers. \"Set origin & axes from rig\" fixes the "
-            "world coordinate system from whichever detections exist so "
-            "far -- the loaded markers are non-coplanar by design (a real "
-            "rig) or already known from a prior solve (scene markers), so "
-            "there's no board-style face-up/face-down ambiguity to resolve "
-            "either way."
+            "Load a rig config -- from a file, the registry, or this "
+            "session's previously-solved scattered tags (section 9 Tier "
+            "B, no physical rig needed) -- and it's immediately detected "
+            "in every camera's current frame and anchored if found "
+            "anywhere. Use \"Detect Rig\" under one camera to redetect "
+            "just that one after scrubbing to a different frame, or "
+            "\"Anchor Rig\" below to redo detection everywhere."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666; font-size: 10px;")
 
-        load_btn = QPushButton("Load rig config…")
+        load_btn = QPushButton("Load Config…")
+        load_btn.setToolTip(
+            "Load a rig config from a marker body YAML file (section 10 "
+            "of the design doc) and import it into this session's DB."
+        )
         load_btn.clicked.connect(self._on_load_rig_config)
-        load_scene_btn = QPushButton("Load from scene markers…")
+        registry_btn = QPushButton("From Registry…")
+        registry_btn.setToolTip(
+            "Pick a rig already imported into this session's DB -- e.g. "
+            "via `posetrak marker-body import`, or a prior GUI load -- "
+            "without re-selecting its YAML file."
+        )
+        registry_btn.clicked.connect(self._on_load_rig_from_registry)
+        load_scene_btn = QPushButton("From Scene Markers…")
         load_scene_btn.setToolTip(
             "Re-anchor from tags a previous \"anchor-rig\"/\"reanchor\" solve "
             "already persisted for this session (scene_marker_bodies) -- "
@@ -1620,9 +1706,6 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             "9 Tier B."
         )
         load_scene_btn.clicked.connect(self._on_load_rig_from_scene_markers)
-        load_row = QHBoxLayout()
-        load_row.addWidget(load_btn)
-        load_row.addWidget(load_scene_btn)
 
         min_size_row = QHBoxLayout()
         min_size_row.addWidget(QLabel("Min marker size:"))
@@ -1644,16 +1727,25 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._rig_status_label.setWordWrap(True)
         self._rig_status_label.setStyleSheet("color: #666; font-size: 10px;")
 
-        anchor_btn = QPushButton("Set origin && axes from rig")
+        anchor_btn = QPushButton("Anchor Rig")
+        anchor_btn.setToolTip(
+            "Redetect the rig in every camera's current frame and anchor "
+            "the world coordinate system from it -- the same thing "
+            "loading a rig config already does once; use this to redo it "
+            "after scrubbing cameras to better frames."
+        )
         anchor_btn.clicked.connect(self._on_anchor_from_rig)
-        clear_btn = QPushButton("Clear rig detections")
+        clear_btn = QPushButton("Clear")
+        clear_btn.setToolTip("Clear rig detections (keeps the loaded config).")
         clear_btn.clicked.connect(self._on_clear_rig)
         btn_row = QHBoxLayout()
         btn_row.addWidget(anchor_btn)
         btn_row.addWidget(clear_btn)
 
         layout.addWidget(hint)
-        layout.addLayout(load_row)
+        layout.addWidget(load_btn)
+        layout.addWidget(registry_btn)
+        layout.addWidget(load_scene_btn)
         layout.addLayout(min_size_row)
         layout.addWidget(self._rig_status_label)
         layout.addLayout(btn_row)
@@ -2334,22 +2426,61 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # access) -- detection/anchoring still works from the in-memory
         # config either way, just without DB persistence on Accept.
         try:
-            self._rig_definition_id = import_marker_body(
-                self._conn, Path(path), name=config.rig_id
-            )
+            definition_id = import_marker_body(self._conn, Path(path), name=config.rig_id)
         except Exception as exc:  # noqa: BLE001
             _log.warning("Could not import rig config into session DB: %s", exc, exc_info=True)
-            self._rig_definition_id = None
+            definition_id = None
 
+        self._apply_loaded_rig_config(config, definition_id=definition_id, source="file")
+
+    def _on_load_rig_from_registry(self) -> None:
+        """Pick an already-imported rig straight from the session DB's
+        ``marker_body_definitions`` -- covers a rig imported via
+        `posetrak marker-body import` (or a prior GUI session), which
+        otherwise had no way back into a fresh dialog short of re-picking
+        its original YAML file."""
+        dlg = _RegistryRigPickerDialog(self._conn, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._load_rig_config_from_registry_row(dlg.selected_yaml(), dlg.selected_id())
+
+    def _load_rig_config_from_registry_row(
+        self, yaml_content: str | None, definition_id: str | None
+    ) -> None:
+        """The picker-result-taking half of ``_on_load_rig_from_registry``,
+        split out so it doesn't require mocking ``_RegistryRigPickerDialog``
+        to exercise or reuse."""
+        try:
+            config = load_marker_body_yaml(yaml_content)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Load Rig From Registry", f"Could not load rig config: {exc}")
+            return
+        self._apply_loaded_rig_config(config, definition_id=definition_id, source="file")
+
+    def _apply_loaded_rig_config(
+        self, config: MarkerRigConfig, *, definition_id: str | None, source: str,
+    ) -> None:
+        """Common tail for every way of loading a rig (file, registry
+        pick, or reconstructed from scene markers): install the config/
+        detector, then immediately detect it across every camera's
+        current frame and anchor if found anywhere. Per user feedback,
+        loading and anchoring used to be four separate clicks (load,
+        detect under each camera, "Set origin & axes", solve) -- they now
+        collapse into one for the common case where the rig is already
+        visible in whatever frames are currently shown. The per-camera
+        "Detect Rig" buttons and the "Anchor Rig" button remain as an
+        explicit redo -- for one camera after scrubbing to a better
+        frame, or for all of them at once.
+        """
         self._rig_config = config
         self._rig_detector = MarkerRigDetector(
             config, min_marker_perimeter_rate=self._rig_min_marker_pct_spin.value() / 100.0,
         )
-        self._rig_source = "file"
+        self._rig_definition_id = definition_id
+        self._rig_source = source
         self._rig_detections_by_camera = {}
         self._rig_anchored = False
-        self._refresh_rig_status()
-        self._refresh_markers()
+        self._detect_and_anchor_rig(show_warnings=False)
 
     def _on_load_rig_from_scene_markers(self) -> None:
         """Reconstruct a virtual rig config from this session's already-
@@ -2390,22 +2521,14 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             marker_corners[row["marker_id"]] = (R @ local.T).T + t
             marker_dictionaries[row["marker_id"]] = row["dictionary"]
 
-        self._rig_config = MarkerRigConfig(
+        config = MarkerRigConfig(
             rig_id="scene markers", marker_corners=marker_corners,
             marker_dictionaries=marker_dictionaries,
         )
-        self._rig_detector = MarkerRigDetector(
-            self._rig_config,
-            min_marker_perimeter_rate=self._rig_min_marker_pct_spin.value() / 100.0,
-        )
-        self._rig_definition_id = None
-        self._rig_source = "scene_markers"
-        self._rig_detections_by_camera = {}
-        self._rig_anchored = False
-        self._refresh_rig_status()
-        self._refresh_markers()
+        self._apply_loaded_rig_config(config, definition_id=None, source="scene_markers")
         self._status_label.setText(
-            f"Loaded {len(marker_corners)} previously-known scene marker(s) for re-anchoring."
+            f"Loaded {len(marker_corners)} previously-known scene marker(s) for "
+            f"re-anchoring. {self._status_label.text()}"
         )
 
     def _on_rig_min_marker_pct_changed(self, _value: float) -> None:
@@ -2416,6 +2539,11 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             )
 
     def _on_detect_rig_clicked(self, vid: str) -> None:
+        """Redetect the rig in one camera only, e.g. after scrubbing to a
+        different frame. Doesn't require a separate re-anchor afterwards
+        if the rig is already anchored -- ``_rig_control_points()`` reads
+        ``_rig_detections_by_camera`` live on every call, so this camera's
+        updated detection is picked up by the very next Solve."""
         if self._rig_detector is None:
             QMessageBox.warning(self, "Detect Rig", "Load a rig config first.")
             return
@@ -2432,31 +2560,70 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             f"Detected {len(detections)} rig marker(s) in {state.label} (frame {frame_idx})."
         )
 
-    def _on_anchor_from_rig(self) -> None:
-        if self._rig_config is None or not any(self._rig_detections_by_camera.values()):
-            QMessageBox.warning(
-                self, "Set origin & axes", "Detect the rig in at least one camera first.",
+    def _detect_and_anchor_rig(self, *, show_warnings: bool) -> str:
+        """Detect the loaded rig across every camera's current frame and,
+        if found anywhere, anchor the world coordinate system from it --
+        the combined "Anchor Rig" action (also run automatically right
+        after loading a rig config; see ``_apply_loaded_rig_config``).
+        Always redetects fresh in every camera, so re-running it after
+        scrubbing several cameras to better frames is also how to redo
+        the whole rig in one click, not just the newly-loaded case.
+
+        Returns the resulting status message (also shown in the status
+        label); callers that want to prefix it with their own context
+        (e.g. "Loaded N scene markers…") can read it back.
+        """
+        if self._rig_config is None or self._rig_detector is None:
+            msg = "Load a rig config first."
+            if show_warnings:
+                QMessageBox.warning(self, "Anchor Rig", msg)
+            return msg
+
+        n_detected = 0
+        for state in self._states:
+            if state.image is None:
+                continue
+            frame_idx = self._current_frame_for(state.video_id)
+            detections = self._rig_detector.detect(
+                state.image, video_id=state.video_id, frame_idx=frame_idx
             )
-            return
+            self._rig_detections_by_camera[state.video_id] = detections
+            if detections:
+                n_detected += 1
+        n_total = len(self._states)
+
+        if n_detected == 0:
+            self._rig_anchored = False
+            self._refresh_rig_status()
+            self._refresh_markers()
+            msg = (
+                "The rig wasn't detected in any camera's current frame. Scrub "
+                "to a frame where it's visible, then click \"Anchor Rig\" "
+                "again (or \"Detect Rig\" under one camera to try just that one)."
+            )
+            if show_warnings:
+                QMessageBox.warning(self, "Anchor Rig", msg)
+            self._status_label.setText(msg)
+            return msg
+
         self._rig_anchored = True
         self._refresh_rig_status()
         self._refresh_markers()
         cps = self._rig_control_points()
-        cams_with_detection = [v for v, d in self._rig_detections_by_camera.items() if d]
-        n_cams = len(cams_with_detection)
-        n_total = len(self._states)
-        msg = (
-            f"World coordinate system anchored from the rig "
-            f"({len(cps)} corner(s) across {n_cams}/{n_total} camera(s))."
-        )
-        if n_cams < n_total:
+        msg = f"Rig anchored: {len(cps)} corner(s) across {n_detected}/{n_total} camera(s)."
+        if n_detected < n_total:
+            cams_with_detection = [v for v, d in self._rig_detections_by_camera.items() if d]
             missing = [s.label for s in self._states if s.video_id not in cams_with_detection]
             msg += (
-                f" Cameras with NO rig detection yet ({', '.join(missing)}) will stay "
-                f"unsolved from this rig alone -- run \"Detect Rig\" under them too, or "
-                f"rely on SIFT/other control points for them."
+                f" No detection in: {', '.join(missing)} -- scrub to a frame "
+                f"showing the rig there and use \"Detect Rig\" under that "
+                f"camera, or rely on SIFT/other control points for it."
             )
         self._status_label.setText(msg)
+        return msg
+
+    def _on_anchor_from_rig(self) -> None:
+        self._detect_and_anchor_rig(show_warnings=True)
 
     def _on_clear_rig(self) -> None:
         self._rig_detections_by_camera = {}

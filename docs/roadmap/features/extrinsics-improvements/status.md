@@ -412,6 +412,54 @@ iter_frames` instead of a fifth duplicated rotation-aware reader.
   real video; the I/O-heavy command bodies validated against real data
   instead, consistent with this feature's practice throughout.
 
+**Rig-panel UX rework after Harri's first live GUI test pass
+(2026-08-12)** — with the box rig config (`box_2026-08-10.yaml`) actually
+imported and used end-to-end for the first time, three real usability
+problems surfaced:
+
+- **Too many required clicks for the common case.** The original flow was
+  load → detect under each camera → "Set origin & axes from rig" → solve.
+  Loading a rig config now runs detection across every camera's *current*
+  frame and anchors immediately if found anywhere
+  (`_apply_loaded_rig_config` → `_detect_and_anchor_rig`), collapsing the
+  common case (rig already visible wherever cameras happen to be scrubbed)
+  to load → solve. The per-camera "Detect Rig" buttons stay, now serving
+  their real remaining purpose: redetecting one camera after scrubbing it
+  to a different frame — no separate re-anchor click needed afterward,
+  since `_rig_control_points()` already read `_rig_detections_by_camera`
+  live on every call. The renamed "Anchor Rig" button (previously "Set
+  origin && axes from rig") now also redetects fresh across *every*
+  camera before anchoring, so it doubles as the "redo everything" action
+  after scrubbing several cameras at once, not just the first-load case.
+- **Button text didn't fit the fixed 300px sidebar.** Renamed "Load rig
+  config…" → "Load Config…", "Set origin && axes from rig" → "Anchor
+  Rig", "Clear rig detections" → "Clear" (full explanation moved to
+  tooltips), and switched the three load buttons from two cramped
+  side-by-side rows to one full-width button per row.
+- **"What about anchor-rig in UI?"** — this was the same gap as the
+  `marker-body import`-then-"load a rig first" report just before it: the
+  dialog could only populate its in-memory rig state from a file picker
+  or from scene markers, with no way to reach a rig already sitting in
+  `marker_body_definitions` (imported via CLI or a prior GUI session)
+  without re-selecting its original YAML. Added a third load button,
+  "From Registry…", opening a `_RegistryRigPickerDialog` (a direct copy
+  of `page_skeleton.py`'s `_RegistryPickerDialog` pattern, listing
+  `list_marker_bodies()` rows) — picking a row loads it through the exact
+  same `_apply_loaded_rig_config` path as a file load, `_rig_source`
+  `"file"` included, so Accept-time persistence behaves identically.
+
+7 new/reworked dialog tests (auto-anchor-on-load, stays-unanchored when
+nothing visible, "Anchor Rig" redetecting every camera, both registry-
+picker paths); the pre-existing "detected but not anchored" transient-
+state test was reshaped to actually reach that state under the new
+auto-anchor behaviour (rig not visible at load time, then a manual
+per-camera redetect) rather than dropped. Full regression sweep passes
+(1569 tests, deselecting only pre-existing unrelated failures/hangs
+confirmed via `git stash` — two known DB test failures, three flaky
+`QTest` key-injection failures and one hang in `test_pair_scrubber.py`/
+`test_phase10.py`, and a `LedSyncResult.events_by_vid` crash + hang in
+`test_page_sync_led.py` — none touched by this change).
+
 **Phase 8 GUI wiring implemented (2026-08-12)** — a "Marker Rig" panel in
 `ExtrinsicsAutoCalibDialog`, mirroring the existing ChArUco panel's
 structure directly (per-camera "Detect Rig" button, "Load rig config…"

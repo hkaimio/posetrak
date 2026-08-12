@@ -381,6 +381,43 @@ updating the existing prototype scripts (`characterize_rig_from_video.py`,
 `test_rig_anchor_capture1.py`, `test_reanchor_capture2.py`) to read/write
 §10's YAML instead of their current ad hoc JSON are all still ahead.
 
+**`posetrak extrinsics anchor-rig`/`reanchor` implemented and validated
+against real data (2026-08-12) — prototype scripts fully retired.**
+Replaces `tools/test_rig_anchor_capture1.py`/`test_reanchor_capture2.py`
+outright (both removed), not "updated in place." Prep work first:
+extracted `page_extrinsics.py`'s private `_write_extrinsics_to_db` into
+`extrinsics_solver.write_extrinsics_to_db` (Qt-free, shared by GUI and
+CLI now — one write path, not two) and switched frame reading to the
+already-shared, already-tested `posetrak.detection.frame_source.
+iter_frames` instead of a fifth duplicated rotation-aware reader.
+
+- **`anchor-rig`**: detects a named marker body (rig) across given
+  cameras/frames, anchors the world frame, solves, writes straight to
+  `extrinsic_calibrations`/`extrinsic_entries`, and upserts the rig's own
+  anchor pose (+ any `--tag-size`'d scattered tags) into
+  `scene_marker_bodies`.
+- **`reanchor`**: re-anchors from previously-persisted `scene_marker_bodies`
+  tags, no physical rig needed — `anchor_from_marker_rig` reused completely
+  unmodified (Tier B).
+- **Verified end-to-end against the real registry and 2026-08-10 capture
+  footage**: converted `box_2026-08-10.json` to real section-10 YAML
+  (`tools/rig_configs/box_2026-08-10.yaml`) for this. `anchor-rig`
+  reproduced byte-identical camera positions to the original prototype's
+  already-validated run and correctly persisted both DB writes.
+  `reanchor` was also run against capture 2 (placeholder `--tag-size`, so
+  its solved numbers aren't meaningful this time, but the full mechanism —
+  DB read, rig-config construction, detection, anchoring, solve, write —
+  executed correctly end to end).
+- 10 new unit tests for the parsing/resolution helpers that don't need
+  real video; the I/O-heavy command bodies validated against real data
+  instead, consistent with this feature's practice throughout.
+
+**Not yet done**: GUI wiring (Phase 8/9's panel in `ExtrinsicsAutoCalibDialog`)
+is the one remaining piece from the original three gaps Harri's status
+check identified — ArUco-locked-to-world-position, rigs, and cross-capture
+reuse are all now real in the CLI; only the GUI front-end is still
+outstanding.
+
 **`posetrak marker-body` CLI group implemented (2026-08-12)** —
 `import`/`list`/`show`/`export`, mirroring `posetrak skeleton`'s
 structure directly. This is the first real, permanent entry point for

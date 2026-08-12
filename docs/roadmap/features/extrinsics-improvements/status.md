@@ -208,12 +208,37 @@ oneplus9pro-01 frame 386, portrait mode):
   CPs each — no SIFT chaining needed at all, though SIFT still ran
   alongside as usual). CP reprojection errors: 3.0-4.6px mean (max
   8.6-15.0px) — comparable to the earlier ChArUco-anchored runs.
-- **Solved camera positions span both signs of world Z**
+- **Solved camera positions initially came out with mixed-sign world Z**
   (ace2pro/gopro at Z ≈ -1.6/-1.8, oneplus at Z ≈ +2.1) **with no
   ambiguity-resolution branch involved at all** — this is the concrete,
   real-data confirmation of §9's central motivation (see the sixth
   live-testing round above): a genuinely non-planar anchor has no
-  IPPE-style tilt ambiguity to resolve in the first place.
+  IPPE-style tilt ambiguity to resolve in the first place. This claim is
+  about *coplanarity* specifically, confirmed independently in the log
+  (`init_poses_pnp`'s own "world CPs are coplanar" warning never fired for
+  any of the 3 cameras) — it does not by itself say anything about which
+  axis is "up" (see next point, caught live by Harri).
+- **"Z" in this config was not gravity-up, and mixed-sign camera Z was
+  briefly (and reasonably) mistaken for a red flag.** `characterize_
+  rig_from_video.py`'s reference-marker choice (`min(complete_ids)`, i.e.
+  "whichever marker id happens to be lowest") had no notion of which
+  physical face that marker actually was — for this config it picked
+  marker 0, one of the *side* faces, so the rig's Z axis was that face's
+  own horizontal outward normal, not gravity-up. Reframed
+  (`tools/rig_configs/box_2026-08-10.json`, rebuilt in place) onto marker
+  4 — confirmed physically to be the box's top face — as the reference,
+  matching this project's existing Z-up convention
+  (`extrinsics_solver.similarity_from_floor_plane`'s docstring). The
+  candidate frame's Z came out backwards on the first attempt (the other
+  4 markers landed at positive Z, i.e. "above" the top face) and was
+  corrected by flipping Y and Z together (an even number of axis flips,
+  keeping the frame right-handed rather than silently mirroring it) —
+  after which all 4 side markers landed consistently 13-14cm *below* the
+  top marker, matching the box's real geometry. Re-running the capture-1
+  test against the reframed config reproduced byte-identical reprojection
+  errors (confirming this was a pure relabelling, not a re-solve) and now
+  gives all 3 cameras positive Z (1.04-1.25m above the box top) —
+  consistent with tripod-mounted cameras above a box on the floor.
 - All 5 rig markers detected across the 3 cameras (each camera saw only
   3 of 5 — box faces aren't all visible from any one viewpoint, handled
   gracefully as designed); 5 scattered ArUco tags also recovered (2

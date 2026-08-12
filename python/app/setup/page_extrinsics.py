@@ -86,11 +86,16 @@ from app.setup.fiducial_markers import (
     ArucoDetector,
     CharucoBoardDetection,
     CharucoDetector,
+    MarkerRigConfig,
+    MarkerRigDetector,
     anchor_from_charuco_board,
+    anchor_from_marker_rig,
+    load_marker_body_yaml_file,
     merge_detections_into_groups,
 )
 from app.setup.video_scrub_bar import VideoScrubBar
 from posetrak.db.import_extrinsics import import_extrinsics
+from posetrak.db.manage_marker_body import import_marker_body, upsert_scene_marker_body
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +127,10 @@ _ARUCO_MARKER_COLOR = QColor(255, 200, 40)
 # Cyan, distinct from both _CP_COLORS and _ARUCO_MARKER_COLOR, for drawn
 # ChArUco board corner overlays.
 _CHARUCO_CORNER_COLOR = QColor(0, 210, 230)
+
+# Magenta, distinct from all of the above, for drawn portable-rig marker
+# corner overlays (Phase 8).
+_RIG_MARKER_COLOR = QColor(230, 60, 220)
 
 
 def _set_layout_items_visible(layout, visible: bool) -> None:
@@ -1065,6 +1074,13 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._charuco_detections: dict[str, CharucoBoardDetection] = {}
         self._charuco_anchored: bool = False
         self._charuco_board_face_up: bool = True
+        # Portable non-planar calibration rig (Phase 8, design doc section 9
+        # Tier A / section 10).
+        self._rig_config: MarkerRigConfig | None = None
+        self._rig_definition_id: str | None = None  # marker_body_definitions.id, once loaded
+        self._rig_detector: MarkerRigDetector | None = None
+        self._rig_detections_by_camera: dict[str, list] = {}
+        self._rig_anchored: bool = False
         for state in states:
             w = _ClickableImageWidget(state.label)
             if state.image is not None:
@@ -1114,8 +1130,11 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             aruco_btn.clicked.connect(lambda _checked, v=vid: self._on_detect_aruco_clicked(v))
             charuco_btn = QPushButton("Detect ChArUco")
             charuco_btn.clicked.connect(lambda _checked, v=vid: self._on_detect_charuco_clicked(v))
+            rig_btn = QPushButton("Detect Rig")
+            rig_btn.clicked.connect(lambda _checked, v=vid: self._on_detect_rig_clicked(v))
             detect_row.addWidget(aruco_btn)
             detect_row.addWidget(charuco_btn)
+            detect_row.addWidget(rig_btn)
             pane_layout.addLayout(detect_row)
 
             self._cam_panes[vid] = pane
@@ -1312,11 +1331,12 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         aruco_group = self._build_aruco_group()
         charuco_group = self._build_charuco_group()
+        rig_group = self._build_rig_group()
         intrinsics_group = self._build_intrinsics_group()
-        # Collapsible: each of these three sections got real complaints
-        # about not fitting (UI testing, 2026-08-09) once the panel had to
-        # hold all of them at once alongside Control Points/World Position.
-        for grp in (aruco_group, charuco_group, intrinsics_group):
+        # Collapsible: each of these sections got real complaints about not
+        # fitting (UI testing, 2026-08-09) once the panel had to hold all of
+        # them at once alongside Control Points/World Position.
+        for grp in (aruco_group, charuco_group, rig_group, intrinsics_group):
             _make_collapsible(grp)
 
         v = QVBoxLayout(panel)
@@ -1325,6 +1345,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         v.addWidget(xyz_group)
         v.addWidget(aruco_group)
         v.addWidget(charuco_group)
+        v.addWidget(rig_group)
         v.addWidget(intrinsics_group)
 
         # Vertical scroll fallback: collapsing sections covers most cases,
@@ -1533,6 +1554,75 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         layout.addWidget(self._charuco_legacy_pattern_cb)
         layout.addLayout(min_size_row)
         layout.addWidget(self._charuco_status_label)
+        layout.addLayout(btn_row)
+        return group
+
+    def _build_rig_group(self) -> QGroupBox:
+        """Portable non-planar calibration rig detection + anchoring (Phase 8).
+
+        See docs/roadmap/features/extrinsics-improvements/
+        extrinsics-improvements-design.md, section 9 Tier A and section 10.
+
+        Unlike the ChArUco panel, a rig detection has no "free, not yet
+        anchored" intermediate state: ``anchor_from_marker_rig`` always
+        assigns fixed ``world_xyz`` immediately, since a rig's local frame
+        is already fully known/measured with no face-up/face-down choice
+        to make (see that function's docstring). So nothing from this
+        panel contributes to a solve until "Set origin & axes from rig" is
+        clicked -- there's no equivalent of ChArUco's "detected corners
+        still help as free correspondences before anchoring" behaviour
+        here, deliberately, since building that would need a genuinely new
+        code path this phase doesn't need.
+        """
+        group = QGroupBox("Marker Rig")
+        layout = QVBoxLayout(group)
+
+        hint = QLabel(
+            "Load a rig config (a marker body YAML, section 10 of the "
+            "design doc), then click \"Detect Rig\" under each camera that "
+            "can see it. \"Set origin & axes from rig\" fixes the world "
+            "coordinate system from whichever detections exist so far -- a "
+            "rig's markers are non-coplanar by design, so there's no "
+            "board-style face-up/face-down ambiguity to resolve."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #666; font-size: 10px;")
+
+        load_btn = QPushButton("Load rig config…")
+        load_btn.clicked.connect(self._on_load_rig_config)
+
+        min_size_row = QHBoxLayout()
+        min_size_row.addWidget(QLabel("Min marker size:"))
+        self._rig_min_marker_pct_spin = QDoubleSpinBox()
+        self._rig_min_marker_pct_spin.setRange(0.1, 10.0)
+        self._rig_min_marker_pct_spin.setDecimals(2)
+        self._rig_min_marker_pct_spin.setSingleStep(0.1)
+        self._rig_min_marker_pct_spin.setValue(1.0)
+        self._rig_min_marker_pct_spin.setSuffix(" %")
+        self._rig_min_marker_pct_spin.setToolTip(
+            "Same gotcha as ArUco/ChArUco detection above -- see those "
+            "panels' tooltips for the full explanation. Changing this "
+            "rebuilds the rig detector immediately."
+        )
+        self._rig_min_marker_pct_spin.valueChanged.connect(self._on_rig_min_marker_pct_changed)
+        min_size_row.addWidget(self._rig_min_marker_pct_spin, 1)
+
+        self._rig_status_label = QLabel("No rig config loaded.")
+        self._rig_status_label.setWordWrap(True)
+        self._rig_status_label.setStyleSheet("color: #666; font-size: 10px;")
+
+        anchor_btn = QPushButton("Set origin && axes from rig")
+        anchor_btn.clicked.connect(self._on_anchor_from_rig)
+        clear_btn = QPushButton("Clear rig detections")
+        clear_btn.clicked.connect(self._on_clear_rig)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(anchor_btn)
+        btn_row.addWidget(clear_btn)
+
+        layout.addWidget(hint)
+        layout.addWidget(load_btn)
+        layout.addLayout(min_size_row)
+        layout.addWidget(self._rig_status_label)
         layout.addLayout(btn_row)
         return group
 
@@ -1927,6 +2017,20 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                     labeled_once = True
                 w.add_marker(c.px, c.py, _CHARUCO_CORNER_COLOR, label, selected=False)
 
+        # Rig marker corners (Phase 8) -- same shared clear/redraw pass.
+        labeled_once_rig = False
+        for vid, detections in self._rig_detections_by_camera.items():
+            w = self._cam_widgets.get(vid)
+            if w is None:
+                continue
+            for det in detections:
+                for c in det.corners:
+                    label = ""
+                    if not labeled_once_rig:
+                        label = "rig"
+                        labeled_once_rig = True
+                    w.add_marker(c.px, c.py, _RIG_MARKER_COLOR, label, selected=False)
+
     # ------------------------------------------------------------------
     # ArUco marker detection (Phase 3)
     # ------------------------------------------------------------------
@@ -2166,6 +2270,147 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         return list(cps.values())
 
     # ------------------------------------------------------------------
+    # Portable calibration rig detection + anchoring (Phase 8)
+    # ------------------------------------------------------------------
+
+    def _on_load_rig_config(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Rig Config", "", "Marker body YAML (*.yaml *.yml);;All files (*)"
+        )
+        if not path:
+            return
+        self._load_rig_config_from_path(path)
+
+    def _load_rig_config_from_path(self, path: str | Path) -> None:
+        """The path-taking half of ``_on_load_rig_config``, split out so it
+        doesn't require mocking ``QFileDialog`` to exercise or reuse."""
+        try:
+            config = load_marker_body_yaml_file(str(path))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Load Rig Config", f"Could not load rig config: {exc}")
+            return
+
+        # Importing (not just loading in memory) registers this rig in the
+        # session DB, content-addressed and idempotent
+        # (manage_marker_body.import_marker_body, same convention as
+        # skeletons) -- so the anchor this dialog produces can be persisted
+        # to scene_marker_bodies on Accept with a real
+        # marker_body_definition_id, the same as the CLI's `extrinsics
+        # anchor-rig` command already does, rather than only ever existing
+        # as an in-memory config. Not fatal if this fails (e.g. no write
+        # access) -- detection/anchoring still works from the in-memory
+        # config either way, just without DB persistence on Accept.
+        try:
+            self._rig_definition_id = import_marker_body(
+                self._conn, Path(path), name=config.rig_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("Could not import rig config into session DB: %s", exc, exc_info=True)
+            self._rig_definition_id = None
+
+        self._rig_config = config
+        self._rig_detector = MarkerRigDetector(
+            config, min_marker_perimeter_rate=self._rig_min_marker_pct_spin.value() / 100.0,
+        )
+        self._rig_detections_by_camera = {}
+        self._rig_anchored = False
+        self._refresh_rig_status()
+        self._refresh_markers()
+
+    def _on_rig_min_marker_pct_changed(self, _value: float) -> None:
+        if self._rig_config is not None:
+            self._rig_detector = MarkerRigDetector(
+                self._rig_config,
+                min_marker_perimeter_rate=self._rig_min_marker_pct_spin.value() / 100.0,
+            )
+
+    def _on_detect_rig_clicked(self, vid: str) -> None:
+        if self._rig_detector is None:
+            QMessageBox.warning(self, "Detect Rig", "Load a rig config first.")
+            return
+        state = self._states_by_id.get(vid)
+        if state is None or state.image is None:
+            QMessageBox.warning(self, "Detect Rig", "No image loaded for this camera yet.")
+            return
+        frame_idx = self._current_frame_for(vid)
+        detections = self._rig_detector.detect(state.image, video_id=vid, frame_idx=frame_idx)
+        self._rig_detections_by_camera[vid] = detections
+        self._refresh_rig_status()
+        self._refresh_markers()
+        self._status_label.setText(
+            f"Detected {len(detections)} rig marker(s) in {state.label} (frame {frame_idx})."
+        )
+
+    def _on_anchor_from_rig(self) -> None:
+        if self._rig_config is None or not any(self._rig_detections_by_camera.values()):
+            QMessageBox.warning(
+                self, "Set origin & axes", "Detect the rig in at least one camera first.",
+            )
+            return
+        self._rig_anchored = True
+        self._refresh_rig_status()
+        self._refresh_markers()
+        cps = self._rig_control_points()
+        cams_with_detection = [v for v, d in self._rig_detections_by_camera.items() if d]
+        n_cams = len(cams_with_detection)
+        n_total = len(self._states)
+        msg = (
+            f"World coordinate system anchored from the rig "
+            f"({len(cps)} corner(s) across {n_cams}/{n_total} camera(s))."
+        )
+        if n_cams < n_total:
+            missing = [s.label for s in self._states if s.video_id not in cams_with_detection]
+            msg += (
+                f" Cameras with NO rig detection yet ({', '.join(missing)}) will stay "
+                f"unsolved from this rig alone -- run \"Detect Rig\" under them too, or "
+                f"rely on SIFT/other control points for them."
+            )
+        self._status_label.setText(msg)
+
+    def _on_clear_rig(self) -> None:
+        self._rig_detections_by_camera = {}
+        self._rig_anchored = False
+        self._refresh_rig_status()
+        self._refresh_markers()
+
+    def _refresh_rig_status(self) -> None:
+        if self._rig_config is None:
+            self._rig_status_label.setText("No rig config loaded.")
+            return
+        cams_with_detection = [v for v, d in self._rig_detections_by_camera.items() if d]
+        n_cams = len(cams_with_detection)
+        n_total = len(self._states)
+        if n_cams == 0:
+            self._rig_status_label.setText(
+                f"Rig \"{self._rig_config.rig_id}\" loaded "
+                f"({len(self._rig_config.marker_corners)} marker(s) known) -- "
+                f"not yet detected in any camera."
+            )
+            return
+        state_str = "anchored (fixed world coordinates)" if self._rig_anchored else "detected, not yet anchored"
+        text = f"Rig \"{self._rig_config.rig_id}\" {state_str}: {n_cams}/{n_total} camera(s) have a detection."
+        if self._rig_anchored:
+            n_corners = len(self._rig_control_points())
+            text = (
+                f"Rig \"{self._rig_config.rig_id}\" {state_str}: {n_corners} corner(s) "
+                f"across {n_cams}/{n_total} camera(s)."
+            )
+        if n_cams < n_total:
+            missing = [s.label for s in self._states if s.video_id not in cams_with_detection]
+            text += f" No detection yet in: {', '.join(missing)}."
+        self._rig_status_label.setText(text)
+
+    def _rig_control_points(self) -> list[ControlPoint]:
+        """Every detected rig corner, fixed to its already-known world_xyz.
+
+        Unlike ``_charuco_control_points()``, there is no free/unanchored
+        intermediate state -- see ``_build_rig_group``'s docstring for why.
+        """
+        if not self._rig_anchored or self._rig_config is None:
+            return []
+        return anchor_from_marker_rig(self._rig_detections_by_camera, self._rig_config)
+
+    # ------------------------------------------------------------------
     # Solve
     # ------------------------------------------------------------------
 
@@ -2189,7 +2434,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         cp_only = not self._sift_check.isChecked()
         active_states = [s for s in self._states if s.video_id not in self._excluded_cameras]
-        all_cps = self._control_points + self._charuco_control_points()
+        all_cps = self._control_points + self._charuco_control_points() + self._rig_control_points()
         self._solve_thread = _SolveThread(
             active_states, all_cps,
             cam_pos_obs=self._cam_pos_obs or None,
@@ -2614,6 +2859,24 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Write failed", str(exc))
             return
+
+        # Persist the rig's own anchor pose (identity, by construction --
+        # see anchor_from_marker_rig's docstring) to scene_marker_bodies,
+        # same as the CLI's `extrinsics anchor-rig` command already does.
+        # Scattered-tag persistence (Tier B) is not wired into this dialog
+        # yet -- that's Phase 9's UI, a separate increment.
+        if self._rig_anchored and self._rig_config is not None:
+            try:
+                upsert_scene_marker_body(
+                    self._conn, self._session_id, label=f"rig:{self._rig_config.rig_id}",
+                    R=np.eye(3), t=np.zeros(3),
+                    marker_body_definition_id=self._rig_definition_id, is_primary_anchor=True,
+                    source_extrinsic_calibration_id=calib_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "Could not persist rig anchor to scene_marker_bodies: %s", exc, exc_info=True
+                )
 
         if self._shot_ids:
             with self._conn:

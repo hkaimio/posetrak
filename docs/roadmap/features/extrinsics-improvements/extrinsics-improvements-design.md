@@ -1078,10 +1078,10 @@ format, plus UI wiring:
 - Rig-from-video self-calibration: prototype already validated
   (`tools/characterize_rig_from_video.py`) against real orbit-video
   footage, cross-checked against a synchronized multi-camera solve of the
-  same physical rig (see status.md, 2026-08-11/12) — output format needs
-  updating to emit §10 YAML instead of the prototype's JSON. Promoting
-  this to a UI action ("Characterize rig from video…") is a separate,
-  lower-priority follow-up, not required for the rest of Phase 8.
+  same physical rig (see status.md, 2026-08-11/12) — **not yet promoted
+  into a permanent tool or UI action; deliberately deferred, see Open
+  Questions below** for what's missing before it should be (output format,
+  reference-frame/origin selection, axis orientation).
 - UI: "Load rig config" (file or registry picker) + "Detect rig" per
   camera + "Set origin & axes from rig" action, parallel to the existing
   ChArUco controls. QR-code scanning (reading a compact descriptor off
@@ -1139,6 +1139,29 @@ level.
 
 ## Open questions
 
+- **Rig-from-video self-calibration needs real polish before it's part of
+  posetrak proper, not just a validated prototype (Harri, 2026-08-12).**
+  `tools/characterize_rig_from_video.py` proved the *mechanism* works
+  against real footage (status.md, 2026-08-11/12), but three concrete gaps
+  need closing before it should become a permanent tool or UI action:
+  1. **Reference marker/origin selection is arbitrary.** `ref_id =
+     min(complete_ids)` — whichever marker id happens to be lowest, with
+     no regard for which physical face that is. This is exactly what
+     produced the box rig config's original wrong-axis frame (status.md's
+     "Z was backwards" entry) — a human had to notice it afterward and fix
+     it with a separate, one-off script, not something the tool itself
+     offered a way to control.
+  2. **No axis-orientation control at all.** No way to specify "this
+     direction is gravity-up," align to a known-vertical marker, or
+     supply a manual override — the tool has no concept of a "correct"
+     frame beyond "whatever the reference marker's own local axes happen
+     to be."
+  3. **Still emits the prototype's ad hoc JSON**, not §10 YAML.
+  Not scheduled — deliberately left as future work, since the mechanism
+  is validated and there's no immediate need pulling this forward (the
+  box rig config in current use was fixed by hand, once, per status.md).
+  Revisit if self-calibrating a *new* rig becomes a regular workflow
+  rather than a one-off.
 - **Registry- vs. session-level scoping** for `scene_fiducial_markers` —
   deferred to a follow-up once a concrete cross-session reuse case exists
   (§6). Confirmed as the right call for now.

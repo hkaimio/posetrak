@@ -381,6 +381,21 @@ updating the existing prototype scripts (`characterize_rig_from_video.py`,
 `test_rig_anchor_capture1.py`, `test_reanchor_capture2.py`) to read/write
 §10's YAML instead of their current ad hoc JSON are all still ahead.
 
+**DB migration implemented (2026-08-12)** — `marker_body_definitions`
+(registry v7→v8, embedded into every session DB the same way
+camera_models/skeletons/tracker_configs already are) and
+`scene_marker_bodies` (session v39→v40), per §10's schema. Both tables
+exist now, empty and unused: `import_marker_body()` (the
+`import_skeleton()`-equivalent CRUD helper) and the write/read paths that
+would actually populate `scene_marker_bodies` from a solve are still
+ahead, along with updating the prototype scripts to target the DB instead
+of ad hoc JSON files. 4 new tests
+(`python/tests/db/test_posetrak_db.py`) cover fresh-create, the
+pre-existing-DB migration path, and `scene_marker_bodies`' two real usage
+shapes (rig-anchor row with a real definition reference; lone-tag row
+with the inline `marker_type`/`dictionary`/`marker_id`/`marker_size`
+columns instead) plus its `(session_id, label)` uniqueness constraint.
+
 ## Phase summary
 
 | Phase | Description | Status |

@@ -1,0 +1,50 @@
+name: aikido-calib-box-2026-08-10
+description: Cardboard calibration box, orbit-video self-calibrated 2026-08-11, rescaled to measured 0.145m
+  marker size and reframed to gravity-up Z 2026-08-12 (see status.md).
+units: meters
+markers:
+- name: face_2
+  type: aruco
+  dictionary: DICT_4X4_50
+  id: '2'
+  corners:
+  - [-0.252786, 0.031874, -0.065538]
+  - [-0.25189, -0.113419, -0.074531]
+  - [-0.247258, -0.105992, -0.218441]
+  - [-0.248924, 0.03858, -0.208576]
+- name: face_4
+  type: aruco
+  dictionary: DICT_4X4_50
+  id: '4'
+  corners:
+  - [-0.076854, 0.072401, -0.000323]
+  - [0.076757, 0.072401, -0.000323]
+  - [0.074508, -0.072465, 0.000968]
+  - [-0.074412, -0.072338, -0.000323]
+- name: face_1
+  type: aruco
+  dictionary: DICT_4X4_50
+  id: '1'
+  corners:
+  - [-0.073407, -0.199272, -0.071431]
+  - [0.077423, -0.197356, -0.072068]
+  - [0.074552, -0.190332, -0.21024]
+  - [-0.073613, -0.19302, -0.210842]
+- name: face_0
+  type: aruco
+  dictionary: DICT_4X4_50
+  id: '0'
+  corners:
+  - [0.07915, 0.121007, -0.063206]
+  - [-0.07856, 0.121128, -0.059376]
+  - [-0.073075, 0.129305, -0.193048]
+  - [0.075407, 0.131723, -0.196338]
+- name: face_3
+  type: aruco
+  dictionary: DICT_4X4_50
+  id: '3'
+  corners:
+  - [0.255618, -0.108693, -0.071009]
+  - [0.258933, 0.03722, -0.063221]
+  - [0.253056, 0.042972, -0.207851]
+  - [0.250099, -0.10236, -0.215848]

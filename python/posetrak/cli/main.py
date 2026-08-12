@@ -102,6 +102,7 @@ from posetrak.cli.detect import detect_group  # noqa: E402
 from posetrak.cli.track import track_group  # noqa: E402
 from posetrak.cli.trial import trial_group, cmd_export, cmd_import  # noqa: E402
 from posetrak.cli.video import video_group  # noqa: E402
+import posetrak.cli.extrinsics_rig  # noqa: E402,F401 -- registers anchor-rig/reanchor on extrinsics_group
 
 main.add_command(registry_group, "registry")
 main.add_command(camera_model_group, "camera-model")

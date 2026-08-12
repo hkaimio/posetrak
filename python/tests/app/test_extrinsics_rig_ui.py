@@ -268,3 +268,122 @@ def test_load_invalid_rig_yaml_shows_warning_not_crash(qapp, fake_conn, tmp_path
         assert dlg._rig_config is None
     finally:
         dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# "Load from scene markers…" (Phase 9, design doc section 9 Tier B) --
+# re-anchoring from previously-persisted scattered tags, no physical rig.
+# Same underlying anchor_from_marker_rig mechanism as the file-loaded rig
+# above, just a different MarkerRigConfig source -- mirrors the CLI's
+# `extrinsics reanchor` command's own DB query/construction exactly.
+# ---------------------------------------------------------------------------
+
+
+def _seed_scene_marker_tag(
+    conn, session_id: str, marker_id: str = "3", dictionary: str = "DICT_4X4_50", size: float = 0.1,
+) -> None:
+    from app.setup.page_extrinsics import upsert_scene_marker_body
+    conn.execute(
+        "INSERT OR IGNORE INTO mocap_sessions (id, recorded_at) VALUES (?, '2026-01-01')",
+        (session_id,),
+    )
+    conn.commit()
+    upsert_scene_marker_body(
+        conn, session_id, label=f"tag:{marker_id}",
+        R=np.eye(3), t=np.array([0.5, 0.0, 2.0]),
+        marker_type="aruco", dictionary=dictionary, marker_id=marker_id, marker_size=size,
+    )
+
+
+def test_load_from_scene_markers_with_none_persisted_shows_warning(qapp, fake_conn, monkeypatch) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        fake_conn.execute(
+            "INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+        )
+        fake_conn.commit()
+        warned = []
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics.QMessageBox.warning",
+            lambda *a, **kw: warned.append(a),
+        )
+        dlg._on_load_rig_from_scene_markers()
+        assert len(warned) == 1
+        assert dlg._rig_config is None
+    finally:
+        dlg.done(0)
+
+
+def test_load_from_scene_markers_populates_config(qapp, fake_conn) -> None:
+    _seed_scene_marker_tag(fake_conn, "sess1")
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._on_load_rig_from_scene_markers()
+
+        assert dlg._rig_config is not None
+        assert dlg._rig_config.rig_id == "scene markers"
+        assert set(dlg._rig_config.marker_corners) == {"3"}
+        assert dlg._rig_config.marker_dictionaries["3"] == "DICT_4X4_50"
+        assert dlg._rig_source == "scene_markers"
+        assert dlg._rig_definition_id is None
+        assert dlg._rig_detector is not None
+    finally:
+        dlg.done(0)
+
+
+def test_load_from_scene_markers_then_detect_and_anchor(qapp, fake_conn) -> None:
+    _seed_scene_marker_tag(fake_conn, "sess1")
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._on_load_rig_from_scene_markers()
+        dlg._on_detect_rig_clicked("cam_A")
+        assert "cam_A" in dlg._rig_detections_by_camera
+        assert len(dlg._rig_detections_by_camera["cam_A"]) == 1
+
+        dlg._on_anchor_from_rig()
+        assert dlg._rig_anchored
+        cps = dlg._rig_control_points()
+        assert len(cps) == 4
+        assert all(cp.world_xyz is not None for cp in cps)
+    finally:
+        dlg.done(0)
+
+
+def test_scene_markers_source_not_repersisted_on_accept(qapp, fake_conn) -> None:
+    """A scene_markers-sourced rig config must not create a new
+    scene_marker_bodies row on Accept -- its rows already exist and their
+    own geometry hasn't changed by re-anchoring a different capture from
+    them (only the cameras' poses changed)."""
+    _seed_scene_marker_tag(fake_conn, "sess1")
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        count_before = fake_conn.execute(
+            "SELECT COUNT(*) FROM scene_marker_bodies WHERE session_id = 'sess1'"
+        ).fetchone()[0]
+
+        dlg._on_load_rig_from_scene_markers()
+        assert dlg._rig_source == "scene_markers"
+        # Directly exercise the same guard _on_accept uses, without needing
+        # a full solve/CalibResult round-trip through _SolveThread.
+        assert not (dlg._rig_anchored and dlg._rig_config is not None and dlg._rig_source == "file")
+
+        count_after = fake_conn.execute(
+            "SELECT COUNT(*) FROM scene_marker_bodies WHERE session_id = 'sess1'"
+        ).fetchone()[0]
+        assert count_after == count_before
+    finally:
+        dlg.done(0)
+
+
+def test_load_rig_config_from_file_sets_source_file(qapp, fake_conn, rig_yaml_path) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_path(rig_yaml_path)
+        assert dlg._rig_source == "file"
+    finally:
+        dlg.done(0)

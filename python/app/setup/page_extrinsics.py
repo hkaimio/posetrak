@@ -78,6 +78,7 @@ from app.setup.extrinsics_solver import (
     _proj_matrix,
     _undistort_pts,
     load_control_points,
+    marker_local_corners,
     run_calibration,
     save_control_points,
     write_extrinsics_to_db,
@@ -1081,6 +1082,12 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._rig_detector: MarkerRigDetector | None = None
         self._rig_detections_by_camera: dict[str, list] = {}
         self._rig_anchored: bool = False
+        # "file" (a real marker_body_definitions-backed rig -- persist an
+        # is_primary_anchor scene_marker_bodies row on Accept) or
+        # "scene_markers" (a virtual config reconstructed from already-
+        # persisted scattered tags, Tier B/section 9 -- those rows already
+        # exist, nothing new to persist for the config itself on Accept).
+        self._rig_source: str | None = None
         for state in states:
             w = _ClickableImageWidget(state.label)
             if state.image is not None:
@@ -1558,38 +1565,64 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         return group
 
     def _build_rig_group(self) -> QGroupBox:
-        """Portable non-planar calibration rig detection + anchoring (Phase 8).
+        """Portable non-planar calibration rig detection + anchoring
+        (Phase 8, Tier A), plus re-anchoring from previously-solved
+        scattered scene tags with no physical rig present (Phase 9, Tier B).
 
         See docs/roadmap/features/extrinsics-improvements/
-        extrinsics-improvements-design.md, section 9 Tier A and section 10.
+        extrinsics-improvements-design.md, section 9 (both tiers) and
+        section 10. Both "Load rig config…" (a marker_body_definitions
+        YAML file) and "Load from scene markers…" (this session's already-
+        persisted ``scene_marker_bodies`` rows, design doc section 9 Tier
+        B) populate the exact same detect/anchor machinery below --
+        they're the same underlying mechanism
+        (``anchor_from_marker_rig``), just two different sources for the
+        set of known marker positions, matching how the CLI's
+        `anchor-rig`/`reanchor` commands are also just two callers of the
+        same function.
 
         Unlike the ChArUco panel, a rig detection has no "free, not yet
         anchored" intermediate state: ``anchor_from_marker_rig`` always
-        assigns fixed ``world_xyz`` immediately, since a rig's local frame
-        is already fully known/measured with no face-up/face-down choice
-        to make (see that function's docstring). So nothing from this
-        panel contributes to a solve until "Set origin & axes from rig" is
-        clicked -- there's no equivalent of ChArUco's "detected corners
-        still help as free correspondences before anchoring" behaviour
-        here, deliberately, since building that would need a genuinely new
-        code path this phase doesn't need.
+        assigns fixed ``world_xyz`` immediately, since the loaded
+        geometry -- from either source -- is already fully known with no
+        face-up/face-down choice to make (see that function's docstring).
+        So nothing from this panel contributes to a solve until "Set
+        origin & axes from rig" is clicked -- there's no equivalent of
+        ChArUco's "detected corners still help as free correspondences
+        before anchoring" behaviour here, deliberately, since building
+        that would need a genuinely new code path this phase doesn't need.
         """
-        group = QGroupBox("Marker Rig")
+        group = QGroupBox("Marker Rig / Scene Markers")
         layout = QVBoxLayout(group)
 
         hint = QLabel(
             "Load a rig config (a marker body YAML, section 10 of the "
-            "design doc), then click \"Detect Rig\" under each camera that "
-            "can see it. \"Set origin & axes from rig\" fixes the world "
-            "coordinate system from whichever detections exist so far -- a "
-            "rig's markers are non-coplanar by design, so there's no "
-            "board-style face-up/face-down ambiguity to resolve."
+            "design doc) OR load this session's previously-solved "
+            "scattered tags (no physical rig needed -- section 9 Tier B), "
+            "then click \"Detect Rig\" under each camera that can see the "
+            "loaded markers. \"Set origin & axes from rig\" fixes the "
+            "world coordinate system from whichever detections exist so "
+            "far -- the loaded markers are non-coplanar by design (a real "
+            "rig) or already known from a prior solve (scene markers), so "
+            "there's no board-style face-up/face-down ambiguity to resolve "
+            "either way."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666; font-size: 10px;")
 
         load_btn = QPushButton("Load rig config…")
         load_btn.clicked.connect(self._on_load_rig_config)
+        load_scene_btn = QPushButton("Load from scene markers…")
+        load_scene_btn.setToolTip(
+            "Re-anchor from tags a previous \"anchor-rig\"/\"reanchor\" solve "
+            "already persisted for this session (scene_marker_bodies) -- "
+            "no physical rig or config file needed. See design doc section "
+            "9 Tier B."
+        )
+        load_scene_btn.clicked.connect(self._on_load_rig_from_scene_markers)
+        load_row = QHBoxLayout()
+        load_row.addWidget(load_btn)
+        load_row.addWidget(load_scene_btn)
 
         min_size_row = QHBoxLayout()
         min_size_row.addWidget(QLabel("Min marker size:"))
@@ -1620,7 +1653,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         btn_row.addWidget(clear_btn)
 
         layout.addWidget(hint)
-        layout.addWidget(load_btn)
+        layout.addLayout(load_row)
         layout.addLayout(min_size_row)
         layout.addWidget(self._rig_status_label)
         layout.addLayout(btn_row)
@@ -2312,10 +2345,68 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._rig_detector = MarkerRigDetector(
             config, min_marker_perimeter_rate=self._rig_min_marker_pct_spin.value() / 100.0,
         )
+        self._rig_source = "file"
         self._rig_detections_by_camera = {}
         self._rig_anchored = False
         self._refresh_rig_status()
         self._refresh_markers()
+
+    def _on_load_rig_from_scene_markers(self) -> None:
+        """Reconstruct a virtual rig config from this session's already-
+        persisted scattered tags (design doc section 9 Tier B) -- the CLI's
+        `extrinsics reanchor` command does the identical query/construction;
+        see its docstring. No physical rig or config file needed: once
+        loaded, this uses exactly the same detect/anchor buttons and
+        ``anchor_from_marker_rig`` call as a real rig does.
+        """
+        old_factory = self._conn.row_factory
+        self._conn.row_factory = sqlite3.Row
+        try:
+            rows = self._conn.execute(
+                "SELECT * FROM scene_marker_bodies WHERE session_id = ? "
+                "AND marker_body_definition_id IS NULL AND dictionary IS NOT NULL "
+                "AND marker_id IS NOT NULL AND marker_size IS NOT NULL",
+                (self._session_id,),
+            ).fetchall()
+        finally:
+            self._conn.row_factory = old_factory
+
+        if not rows:
+            QMessageBox.warning(
+                self, "Load From Scene Markers",
+                "No previously-solved scattered tags found for this session. "
+                "Anchor a capture from a rig first with a known tag size "
+                "(the CLI's `anchor-rig --tag-size` covers this today; this "
+                "dialog doesn't have a scattered-tag-size UI of its own yet).",
+            )
+            return
+
+        marker_corners: dict[str, np.ndarray] = {}
+        marker_dictionaries: dict[str, str] = {}
+        for row in rows:
+            R = np.array(struct.unpack("<9d", bytes(row["R"]))).reshape(3, 3)
+            t = np.array(struct.unpack("<3d", bytes(row["t"])))
+            local = marker_local_corners(row["marker_size"])
+            marker_corners[row["marker_id"]] = (R @ local.T).T + t
+            marker_dictionaries[row["marker_id"]] = row["dictionary"]
+
+        self._rig_config = MarkerRigConfig(
+            rig_id="scene markers", marker_corners=marker_corners,
+            marker_dictionaries=marker_dictionaries,
+        )
+        self._rig_detector = MarkerRigDetector(
+            self._rig_config,
+            min_marker_perimeter_rate=self._rig_min_marker_pct_spin.value() / 100.0,
+        )
+        self._rig_definition_id = None
+        self._rig_source = "scene_markers"
+        self._rig_detections_by_camera = {}
+        self._rig_anchored = False
+        self._refresh_rig_status()
+        self._refresh_markers()
+        self._status_label.setText(
+            f"Loaded {len(marker_corners)} previously-known scene marker(s) for re-anchoring."
+        )
 
     def _on_rig_min_marker_pct_changed(self, _value: float) -> None:
         if self._rig_config is not None:
@@ -2863,9 +2954,13 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # Persist the rig's own anchor pose (identity, by construction --
         # see anchor_from_marker_rig's docstring) to scene_marker_bodies,
         # same as the CLI's `extrinsics anchor-rig` command already does.
-        # Scattered-tag persistence (Tier B) is not wired into this dialog
-        # yet -- that's Phase 9's UI, a separate increment.
-        if self._rig_anchored and self._rig_config is not None:
+        # Only for a real, file-loaded rig (Tier A) -- a "scene_markers"
+        # source (Tier B, "Load from scene markers…") reconstructed its
+        # config from scene_marker_bodies rows that already exist and
+        # whose own geometry hasn't changed, so there's nothing new to
+        # persist there; only the cameras' poses changed, already captured
+        # by the extrinsic_calibrations row above.
+        if self._rig_anchored and self._rig_config is not None and self._rig_source == "file":
             try:
                 upsert_scene_marker_body(
                     self._conn, self._session_id, label=f"rig:{self._rig_config.rig_id}",

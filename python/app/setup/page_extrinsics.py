@@ -80,6 +80,7 @@ from app.setup.extrinsics_solver import (
     load_control_points,
     run_calibration,
     save_control_points,
+    write_extrinsics_to_db,
 )
 from app.setup.fiducial_markers import (
     ArucoDetector,
@@ -89,7 +90,6 @@ from app.setup.fiducial_markers import (
     merge_detections_into_groups,
 )
 from app.setup.video_scrub_bar import VideoScrubBar
-from posetrak.db.db import generate_id as _generate_id
 from posetrak.db.import_extrinsics import import_extrinsics
 
 
@@ -392,42 +392,6 @@ def _load_states_from_capture(
         return states
     finally:
         conn.row_factory = old_factory
-
-
-def _write_extrinsics_to_db(
-    result: CalibResult,
-    conn: sqlite3.Connection,
-    session_id: str,
-    label_to_instance_id: dict[str, str],
-    method: str = "auto-sift",
-) -> str:
-    """Write CalibResult directly to the DB.  Returns new extrinsic_calibration_id."""
-    calib_id = _generate_id()
-    calibrated_at = datetime.date.today().isoformat()
-    rows: list[tuple[str, str, bytes, bytes]] = []
-    for vid, s in result.cameras.items():
-        if s.R is None:
-            continue
-        instance_id = label_to_instance_id.get(s.label) or label_to_instance_id.get(vid)
-        if instance_id is None:
-            continue
-        R_blob = struct.pack("<9d", *s.R.flatten())
-        t_blob = struct.pack("<3d", *s.t.flatten())
-        rows.append((calib_id, instance_id, R_blob, t_blob))
-
-    with conn:
-        conn.execute(
-            "INSERT INTO extrinsic_calibrations (id, session_id, calibrated_at, method)"
-            " VALUES (?, ?, ?, ?)",
-            (calib_id, session_id, calibrated_at, method),
-        )
-        conn.executemany(
-            "INSERT INTO extrinsic_entries"
-            " (extrinsic_calibration_id, camera_instance_id, R, t)"
-            " VALUES (?, ?, ?, ?)",
-            rows,
-        )
-    return calib_id
 
 
 # ---------------------------------------------------------------------------
@@ -2644,7 +2608,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         label_to_id = {r["label"]: r["id"] for r in rows}
 
         try:
-            calib_id = _write_extrinsics_to_db(
+            calib_id = write_extrinsics_to_db(
                 self._result, self._conn, self._session_id, label_to_id
             )
         except Exception as exc:  # noqa: BLE001

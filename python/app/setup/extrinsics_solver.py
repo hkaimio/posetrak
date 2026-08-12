@@ -1518,6 +1518,78 @@ def to_toml_string(result: CalibResult) -> str:
     return "\n".join(lines)
 
 
+def write_extrinsics_to_db(
+    result: CalibResult,
+    conn,
+    session_id: str,
+    label_to_instance_id: dict[str, str],
+    method: str = "auto-sift",
+) -> str:
+    """Write a solved ``CalibResult`` directly to ``extrinsic_calibrations``/
+    ``extrinsic_entries``, bypassing the TOML round-trip
+    (``to_toml_string`` + ``posetrak.db.import_extrinsics.import_extrinsics``)
+    entirely.
+
+    This is the extraction of ``page_extrinsics.py``'s own
+    ``_write_extrinsics_to_db`` (previously private, GUI-only) into this
+    Qt-free module so a non-GUI caller (e.g. a CLI command) can use the
+    exact same write path instead of re-deriving it -- there is exactly
+    one way this project persists a solved calibration, not two.
+
+    Parameters
+    ----------
+    result:
+        A solved ``CalibResult`` (``run_calibration``'s return value).
+    conn:
+        Open connection to a posetrak session database.
+    session_id:
+        ``mocap_sessions.id`` this calibration belongs to.
+    label_to_instance_id:
+        Camera label (``CamCalibState.label``, or the raw ``video_id`` as a
+        fallback) -> ``camera_instances.id``. A camera with no entry here
+        is silently skipped, same as one with no solved pose.
+    method:
+        Stored in ``extrinsic_calibrations.method`` (default
+        ``"auto-sift"``, matching the GUI's own default).
+
+    Returns
+    -------
+    str
+        The newly created ``extrinsic_calibrations.id``.
+    """
+    import datetime
+    import struct
+
+    from posetrak.db.db import generate_id
+
+    calib_id = generate_id()
+    calibrated_at = datetime.date.today().isoformat()
+    rows: list[tuple[str, str, bytes, bytes]] = []
+    for vid, s in result.cameras.items():
+        if s.R is None:
+            continue
+        instance_id = label_to_instance_id.get(s.label) or label_to_instance_id.get(vid)
+        if instance_id is None:
+            continue
+        R_blob = struct.pack("<9d", *s.R.flatten())
+        t_blob = struct.pack("<3d", *s.t.flatten())
+        rows.append((calib_id, instance_id, R_blob, t_blob))
+
+    with conn:
+        conn.execute(
+            "INSERT INTO extrinsic_calibrations (id, session_id, calibrated_at, method)"
+            " VALUES (?, ?, ?, ?)",
+            (calib_id, session_id, calibrated_at, method),
+        )
+        conn.executemany(
+            "INSERT INTO extrinsic_entries"
+            " (extrinsic_calibration_id, camera_instance_id, R, t)"
+            " VALUES (?, ?, ?, ?)",
+            rows,
+        )
+    return calib_id
+
+
 # ---------------------------------------------------------------------------
 # Control-point file I/O (JSON)
 # ---------------------------------------------------------------------------

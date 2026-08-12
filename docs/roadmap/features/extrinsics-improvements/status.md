@@ -283,14 +283,43 @@ using only ordinary tags anchored in a prior capture.
   with the lens having refocused (different scene, different session)
   between the two captures rather than the calibration or the anchor being
   wrong in general.
-- **Not yet confirmed**: whether autofocus drift is really the cause.
-  Cheapest next check would be re-running with `refine_intrinsics={
-  "oneplus9pro-01"}` (already-existing `run_calibration` support) to see
-  if letting fx/fy float for just that camera recovers a low error —
-  strong evidence either way without needing new code.
+- **The autofocus/fx-fy-scale hypothesis is disproven, not confirmed.**
+  Re-ran with `refine_intrinsics={"oneplus9pro-01"}`
+  (`test_reanchor_capture2.py --refine-intrinsics`, new flag). Result:
+  error got *worse*, not better — 239.2±62.6px (max 330.1px), up from
+  36.6px — with fx/fy pushed -17.5%/-21.4% before `run_bundle_adjustment`'s
+  bounds stopped it. A genuine pure focal-length shift (simple optical
+  zoom from refocusing) should be *correctable* by floating fx/fy; making
+  it worse means the real mismatch isn't a simple fx/fy scale error.
+  Pulled and visually inspected the annotated frames for both captures
+  (oneplus capture-1 frame 386 and capture-2 frame 219) — both show tight,
+  correctly-localized marker corner boxes with no motion blur or
+  misdetection, ruling out a gross per-frame problem. `init_poses_pnp`'s
+  own initial RANSAC pass showed 12/16 inliers (75%) for oneplus in
+  capture 2 — already somewhat elevated before BA ever ran, similar to
+  gopro's 9/12 (75%), yet oneplus's final BA error is ~4x worse than
+  gopro's — so whatever is wrong is present in the raw correspondences,
+  not introduced by BA, and affects oneplus disproportionately more than
+  a shared cause (e.g. generally weaker capture-2 anchor data) would
+  predict on its own.
+- **Root cause still open.** Remaining candidates, none yet tested:
+  (a) a focus-distance-dependent shift in distortion coefficients or
+  principal point (not just focal length) — a real, known effect in
+  consumer phone lenses, and not something `refine_intrinsics` currently
+  touches (it only floats fx/fy); (b) a portrait-mode rotation/calibration
+  axis-convention mismatch whose visible impact depends on viewing
+  geometry (would explain differing severity between capture 1 and 2 for
+  the *same* camera/calibration without needing anything to differ between
+  runs); (c) the underlying capture-1-solved tag positions themselves
+  being subtly less accurate for whichever tags oneplus specifically
+  relies on, with oneplus's capture-2 viewing angle happening to be more
+  sensitive to that error than gopro's or ace2pro's. Not pursued further
+  this round -- the actual Phase 9 mechanism validation (previous entry)
+  doesn't depend on resolving this, and further diagnosis is better scoped
+  as its own follow-up.
 
 **Not yet done**: `scene_fiducial_markers` persistence; any UI wiring;
-confirming the oneplus autofocus-drift hypothesis above.
+the oneplus data-quality root cause above.
 
 ## Phase summary
 

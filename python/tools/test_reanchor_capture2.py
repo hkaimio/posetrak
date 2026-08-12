@@ -238,6 +238,10 @@ def main() -> None:
     parser.add_argument("--camera", action="append", required=True, dest="cameras")
     parser.add_argument("--tag-dict", default="DICT_5X5_50")
     parser.add_argument("--min-marker-perimeter-rate", type=float, default=0.01)
+    parser.add_argument("--refine-intrinsics", action="append", default=[], dest="refine_intrinsics",
+                         metavar="LABEL",
+                         help="Let run_calibration refine fx/fy for this camera label (repeatable) "
+                              "-- diagnostic for suspected intrinsics drift (e.g. autofocus)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -288,7 +292,19 @@ def main() -> None:
         print("error: no known tag was detected in any camera -- cannot re-anchor.", file=sys.stderr)
         sys.exit(1)
 
-    result = run_calibration(states, control_points=cps, cp_only=False)
+    refine = set(args.refine_intrinsics) or None
+    if refine:
+        print(f"Refining intrinsics (fx/fy) for: {sorted(refine)}")
+    result = run_calibration(states, control_points=cps, cp_only=False, refine_intrinsics=refine)
+
+    if refine:
+        print("\n=== Refined intrinsics ===")
+        for s in states:
+            if s.video_id in refine:
+                orig = intrinsics[s.label]["K"]
+                print(f"  {s.label:20s}  fx {orig[0,0]:.1f}->{s.K[0,0]:.1f}  "
+                      f"fy {orig[1,1]:.1f}->{s.K[1,1]:.1f}  "
+                      f"({100*(s.K[0,0]/orig[0,0]-1):+.1f}% / {100*(s.K[1,1]/orig[1,1]-1):+.1f}%)")
 
     print("\n=== Solved camera positions (capture 2, re-anchored) ===")
     for s in states:

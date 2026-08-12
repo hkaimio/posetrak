@@ -10,6 +10,16 @@ that was built), then use the now-solved cameras to recover the world
 positions of ordinary scattered ArUco tags (a Phase 5/Tier B precursor —
 no scene_fiducial_markers persistence yet, just prints/saves the poses).
 
+With --save-scattered-tags, each fully-triangulated tag's 4 corners are
+written out in the exact same rig-config JSON shape
+(MarkerRigConfig/load_rig_config) the box rig itself uses — the scattered
+tags become a "virtual rig" spanning the room, re-loadable by
+test_reanchor_capture2.py to re-anchor a *different* capture (moved
+cameras, no physical rig) via the unmodified anchor_from_marker_rig, per
+the design doc's section 9 Tier B ("re-anchor from known marker poses").
+No new anchoring code needed for that — this is the concrete reuse the
+design doc's Tier B section asked for.
+
 Takes exactly one frame per camera — this is a static-rig anchoring test,
 not a video-scrubbing one, so no sync/session-DB import is needed at all
 (extrinsics calibration frame choice is per-camera and independent, see
@@ -259,6 +269,12 @@ def main() -> None:
     parser.add_argument("--rig-dict", default="DICT_4X4_50")
     parser.add_argument("--scattered-dict", default="DICT_5X5_50")
     parser.add_argument("--min-marker-perimeter-rate", type=float, default=0.01)
+    parser.add_argument("--save-scattered-tags", default=None,
+                         help="Write fully-triangulated scattered-tag corners as a rig-config JSON "
+                              "(see module docstring) to this path")
+    parser.add_argument("--max-reprojection-px", type=float, default=10.0,
+                         help="Per-corner triangulation sanity check (default 10px, same as "
+                              "characterize_rig_from_video.py's) before trusting/saving a corner")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -339,18 +355,24 @@ def main() -> None:
         print(f"\nWARNING: {len(result.unsolved)} camera(s) unsolved: {result.unsolved}")
 
     # --- Scattered-tag world positions (Phase 5/Tier B precursor: no
-    # persistence, just a diagnostic dump of what solve_marker_groups would
-    # feed into scene_fiducial_markers). ---
-    print(f"\n=== Scattered tags (free-CP centroid, camera network scale) ===")
+    # scene_fiducial_markers persistence yet, but --save-scattered-tags
+    # writes full per-corner geometry as a reloadable rig config -- see
+    # module docstring). Each corner is independently DLT-triangulated then
+    # reprojection-checked (same idea as characterize_rig_from_video.py's
+    # _triangulate_corner -- a corner triangulated from only 2 cameras at a
+    # poor angle can look "cheap" but be badly wrong; reprojection error
+    # catches the worst cases even if it can't catch a narrow-parallax
+    # false-confidence case, see that script's status.md notes). ---
+    print(f"\n=== Scattered tags (per-corner triangulation, camera network scale) ===")
     states_by_id = {s.video_id: s for s in states}
+    tag_corners: dict[str, list[np.ndarray | None]] = {}
     for marker_id, mg in sorted(scattered_groups.items()):
         cameras_seeing = mg.cameras_observing()
         if len(cameras_seeing) < 2:
             print(f"  tag {marker_id}: only {len(cameras_seeing)} camera(s) with all 4 corners -- skipped")
             continue
-        cps_for_tag = mg.as_control_points()
-        centroids = []
-        for cp in cps_for_tag:
+        corners_xyz: list[np.ndarray | None] = []
+        for cp in mg.as_control_points():
             undist = {}
             for vid, obs in cp.obs.items():
                 s = states_by_id.get(vid)
@@ -360,23 +382,57 @@ def main() -> None:
                     np.array([[[obs.px, obs.py]]], dtype=np.float32), s.K_orig, s.dist, None, s.K,
                 ).reshape(2)
                 undist[vid] = pts_u
-            if len(undist) < 2:
-                continue
-            rows = []
-            for vid, (px, py) in undist.items():
-                s = states_by_id[vid]
-                P = s.K @ np.hstack([s.R, s.t.reshape(3, 1)])
-                rows.append(px * P[2] - P[0])
-                rows.append(py * P[2] - P[1])
-            A = np.array(rows)
-            _, _, Vt = np.linalg.svd(A)
-            h = Vt[-1]
-            if abs(h[3]) > 1e-10:
-                centroids.append(h[:3] / h[3])
-        if centroids:
-            centroid = np.mean(centroids, axis=0)
-            print(f"  tag {marker_id}: world ({centroid[0]:+.3f}, {centroid[1]:+.3f}, "
-                  f"{centroid[2]:+.3f})  ({len(cameras_seeing)} camera(s), {len(centroids)}/4 corners)")
+            xyz = None
+            if len(undist) >= 2:
+                rows, proj_inputs = [], []
+                for vid, (px, py) in undist.items():
+                    s = states_by_id[vid]
+                    P = s.K @ np.hstack([s.R, s.t.reshape(3, 1)])
+                    rows.append(px * P[2] - P[0])
+                    rows.append(py * P[2] - P[1])
+                    proj_inputs.append((P, np.array([px, py])))
+                A = np.array(rows)
+                _, _, Vt = np.linalg.svd(A)
+                h = Vt[-1]
+                if abs(h[3]) > 1e-10:
+                    candidate = h[:3] / h[3]
+                    xyz_h = np.append(candidate, 1.0)
+                    ok = True
+                    for P, px_u in proj_inputs:
+                        proj_h = P @ xyz_h
+                        if abs(proj_h[2]) < 1e-9 or np.linalg.norm(proj_h[:2] / proj_h[2] - px_u) > args.max_reprojection_px:
+                            ok = False
+                            break
+                    if ok:
+                        xyz = candidate
+            corners_xyz.append(xyz)
+        tag_corners[marker_id] = corners_xyz
+        n_ok = sum(c is not None for c in corners_xyz)
+        if n_ok == 4:
+            centroid = np.mean(corners_xyz, axis=0)
+            print(f"  tag {marker_id}: world centroid ({centroid[0]:+.3f}, {centroid[1]:+.3f}, "
+                  f"{centroid[2]:+.3f})  ({len(cameras_seeing)} camera(s), 4/4 corners)")
+        else:
+            print(f"  tag {marker_id}: only {n_ok}/4 corners triangulated cleanly -- "
+                  f"{'omitted from save' if args.save_scattered_tags else 'incomplete'}")
+
+    if args.save_scattered_tags:
+        complete = {mid: cs for mid, cs in tag_corners.items() if all(c is not None for c in cs)}
+        payload = {
+            "v": 1, "shape": "explicit", "rig_id": "scattered_tags_capture1",
+            "dict": args.scattered_dict,
+            "marker_corners": {mid: [c.tolist() for c in cs] for mid, cs in complete.items()},
+            "_provenance": {
+                "source": "test_rig_anchor_capture1.py",
+                "frame_convention": "Inherited from --rig-config's world frame (gravity-up Z, "
+                                     "anchored via the physical rig in this same solve).",
+                "n_tags_total": len(tag_corners), "n_tags_complete": len(complete),
+            },
+        }
+        with open(args.save_scattered_tags, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        print(f"\nSaved {len(complete)}/{len(tag_corners)} fully-triangulated scattered tag(s) to "
+              f"{args.save_scattered_tags}")
 
 
 if __name__ == "__main__":

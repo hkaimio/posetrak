@@ -245,9 +245,52 @@ oneplus9pro-01 frame 386, portrait mode):
   cameras each) as free-CP world centroids — a Phase 5/Tier B precursor,
   printed only, no `scene_fiducial_markers` persistence yet.
 
-**Not yet done**: Phase 9 re-anchor validation against capture 2 (cameras
-moved, no rig, only the scattered tags — the direct test of §9's other
-half); `scene_fiducial_markers` persistence; any UI wiring.
+**Phase 9 re-anchor validated against real capture-2 footage (2026-08-12) —
+mechanism confirmed, one camera's data quality flagged as suspect.**
+`tools/test_rig_anchor_capture1.py --save-scattered-tags` now
+DLT-triangulates each scattered tag's 4 corners individually (not just a
+centroid), reprojection-checked the same way
+`characterize_rig_from_video.py`'s `_triangulate_corner` already is, and
+writes survivors out in the same rig-config JSON shape the physical box
+rig uses (4/5 tags survived; tag 0 was triangulated from only 2 cameras
+and none of its corners passed the check — correctly excluded rather than
+trusted). New `python/tools/test_reanchor_capture2.py` loads that file and
+calls `anchor_from_marker_rig` **completely unmodified** — the scattered
+tags' already-solved geometry is just another rig config as far as that
+function is concerned, so Tier B needed no new anchoring code at all, only
+a new source of `MarkerRigConfig` input. This directly exercises the
+design doc's Tier B goal (design doc §9): recover a shared world frame in
+a *different* capture, with the physical rig absent and cameras moved,
+using only ordinary tags anchored in a prior capture.
+
+- **All 3 of capture 2's (moved) cameras solved**, all at positive world
+  Z (0.87-1.58m) — the gravity-up convention established in capture 1
+  propagated through correctly, and again no planar-pose-ambiguity branch
+  was involved.
+- **Accuracy was uneven across cameras, and the pattern points at one
+  camera's data, not the mechanism.** ace2pro: 3.5±1.3px (clean, matches
+  capture 1's quality). gopro: 9.2±6.6px (moderate — only 3 of 4 known
+  tags visible, fewer/weaker-parallax anchor points). oneplus: 36.6±11.6px
+  (max 64.2px) — and critically, the per-CP debug breakdown shows this
+  elevated error on **every single tag/corner oneplus observes**, not
+  concentrated on one bad tag. A uniform, all-correspondences-affected
+  error for one camera is the signature of that camera's own calibration
+  being wrong for this footage, not bad anchor geometry — and there's
+  already a named suspect: Harri flagged at the very start of this test
+  round that the OnePlus 9 Pro "has a habit to do sudden autofocusing
+  which may change its intrinsics." The identical stored calibration gave
+  a clean 3.0±2.8px for this same camera in capture 1, which is consistent
+  with the lens having refocused (different scene, different session)
+  between the two captures rather than the calibration or the anchor being
+  wrong in general.
+- **Not yet confirmed**: whether autofocus drift is really the cause.
+  Cheapest next check would be re-running with `refine_intrinsics={
+  "oneplus9pro-01"}` (already-existing `run_calibration` support) to see
+  if letting fx/fy float for just that camera recovers a low error —
+  strong evidence either way without needing new code.
+
+**Not yet done**: `scene_fiducial_markers` persistence; any UI wiring;
+confirming the oneplus autofocus-drift hypothesis above.
 
 ## Phase summary
 
@@ -261,7 +304,7 @@ half); `scene_fiducial_markers` persistence; any UI wiring.
 | 6 | AprilTag detector backend (extensibility proof) | ⬜ Not started |
 | 7 | Global timeline scrub (§8) — jump every camera to the same synced instant | ⬜ Not started (design added 2026-08-09 from UI-testing feedback) |
 | 8 | Portable non-planar calibration rig — primary world-frame anchor (§9, Tier A) | 🟡 Core implemented + validated against real capture-1 footage (2026-08-12); no UI wiring yet, `"box"` shape deferred |
-| 9 | Scattered-tag redundancy + single-camera re-anchor (§9, Tier B) | ⬜ Not started (design added 2026-08-09 from Phase 4 live-testing feedback) |
+| 9 | Scattered-tag redundancy + single-camera re-anchor (§9, Tier B) | 🟡 Re-anchor mechanism validated against real capture-2 footage (2026-08-12), reusing Phase 8's anchor_from_marker_rig unmodified; no UI wiring, one camera's data quality still under investigation |
 
 ## UI testing feedback (2026-08-09, Phases 1-2)
 

@@ -11,6 +11,7 @@ import pytest
 
 from posetrak.db.manage_marker_body import (
     copy_marker_body_to_session,
+    delete_scene_marker_body,
     import_marker_body,
     import_marker_body_str,
     list_marker_bodies,
@@ -269,3 +270,40 @@ def test_read_scene_marker_body_pose_nonidentity(session_db: sqlite3.Connection)
     R_read, t_read = read_scene_marker_body_pose(row)
     np.testing.assert_allclose(R_read, R_true)
     np.testing.assert_allclose(t_read, t_true)
+
+
+# ---------------------------------------------------------------------------
+# delete_scene_marker_body
+# ---------------------------------------------------------------------------
+
+
+def test_delete_scene_marker_body_removes_row(session_db: sqlite3.Connection) -> None:
+    _insert_session(session_db)
+    upsert_scene_marker_body(session_db, "sess1", "stale-tag", np.eye(3), np.zeros(3))
+    assert delete_scene_marker_body(session_db, "sess1", "stale-tag") is True
+    rows = list_scene_marker_bodies(session_db, "sess1")
+    assert rows == []
+
+
+def test_delete_scene_marker_body_missing_returns_false(session_db: sqlite3.Connection) -> None:
+    _insert_session(session_db)
+    assert delete_scene_marker_body(session_db, "sess1", "nonexistent") is False
+
+
+def test_delete_scene_marker_body_scoped_to_session(session_db: sqlite3.Connection) -> None:
+    _insert_session(session_db, "sess1")
+    _insert_session(session_db, "sess2")
+    upsert_scene_marker_body(session_db, "sess1", "tag-a", np.eye(3), np.zeros(3))
+    upsert_scene_marker_body(session_db, "sess2", "tag-a", np.eye(3), np.zeros(3))
+    delete_scene_marker_body(session_db, "sess1", "tag-a")
+    assert list_scene_marker_bodies(session_db, "sess1") == []
+    assert len(list_scene_marker_bodies(session_db, "sess2")) == 1
+
+
+def test_delete_scene_marker_body_leaves_other_labels(session_db: sqlite3.Connection) -> None:
+    _insert_session(session_db)
+    upsert_scene_marker_body(session_db, "sess1", "tag-a", np.eye(3), np.zeros(3))
+    upsert_scene_marker_body(session_db, "sess1", "tag-b", np.eye(3), np.zeros(3))
+    delete_scene_marker_body(session_db, "sess1", "tag-a")
+    rows = list_scene_marker_bodies(session_db, "sess1")
+    assert [r["label"] for r in rows] == ["tag-b"]

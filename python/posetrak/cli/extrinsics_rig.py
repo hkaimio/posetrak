@@ -41,8 +41,13 @@ from app.setup.fiducial_markers import (
     merge_detections_into_groups,
 )
 
-from posetrak.db.manage_marker_body import upsert_scene_marker_body
+from posetrak.db.manage_marker_body import (
+    delete_scene_marker_body,
+    list_scene_marker_bodies,
+    upsert_scene_marker_body,
+)
 from posetrak.cli.session import extrinsics_group, _open_session_required, _resolve
+from posetrak.cli._output import print_table
 from posetrak.db.db import set_capture_extrinsics
 
 
@@ -430,3 +435,66 @@ def extrinsics_reanchor(
             continue
         C = -s.R.T @ s.t.flatten()
         click.echo(f"  {s.label:20s}  ({C[0]:+.3f}, {C[1]:+.3f}, {C[2]:+.3f})")
+
+
+# ---------------------------------------------------------------------------
+# scene-marker (view/prune scene_marker_bodies -- e.g. a portable rig's own
+# anchor row once it's been physically removed, or a scattered tag whose
+# position has moved -- see design doc section 9)
+# ---------------------------------------------------------------------------
+
+
+@extrinsics_group.group("scene-marker")
+def scene_marker_group() -> None:
+    """Inspect and prune this session's stored scene markers
+    (scene_marker_bodies -- design doc section 9 Tier A/B anchors)."""
+
+
+@scene_marker_group.command("list")
+@click.option("--session", "session_row", required=True, metavar="UUID", help="mocap_sessions.id")
+@click.pass_obj
+def scene_marker_list(obj: dict, session_row: str) -> None:
+    """List every scene marker stored for a session."""
+    conn = _open_session_required(obj)
+    try:
+        session_id = _resolve(conn, "mocap_sessions", session_row)
+        rows = list_scene_marker_bodies(conn, session_id)
+    finally:
+        conn.close()
+
+    if not rows:
+        if not obj["json_mode"]:
+            click.echo("No scene markers stored for this session.")
+        return
+
+    print_table(
+        [dict(r) for r in rows],
+        columns=[
+            "label", "marker_body_definition_id", "marker_type", "dictionary",
+            "marker_id", "marker_size", "is_primary_anchor", "updated_at",
+        ],
+        json_mode=obj["json_mode"],
+    )
+
+
+@scene_marker_group.command("delete")
+@click.option("--session", "session_row", required=True, metavar="UUID", help="mocap_sessions.id")
+@click.argument("label", metavar="LABEL")
+@click.pass_obj
+def scene_marker_delete(obj: dict, session_row: str, label: str) -> None:
+    """Delete one stored scene marker by its label (see 'scene-marker list').
+
+    For pruning stale entries -- e.g. a portable rig's own anchor row
+    ("rig:<name>") once it's been physically removed from the scene, or a
+    scattered tag ("tag:<id>") whose physical position has moved.
+    """
+    conn = _open_session_required(obj)
+    try:
+        session_id = _resolve(conn, "mocap_sessions", session_row)
+        deleted = delete_scene_marker_body(conn, session_id, label)
+    finally:
+        conn.close()
+
+    if not deleted:
+        raise click.ClickException(f"No scene marker found with label {label!r} for this session.")
+    click.echo(f"Deleted scene marker {label!r}.")

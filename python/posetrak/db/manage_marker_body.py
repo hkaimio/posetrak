@@ -245,6 +245,29 @@ def list_scene_marker_bodies(session: sqlite3.Connection, session_id: str) -> li
     ).fetchall()
 
 
+def delete_scene_marker_body(session: sqlite3.Connection, session_id: str, label: str) -> bool:
+    """Delete one ``scene_marker_bodies`` row by ``(session_id, label)``.
+
+    For pruning stale/wrong entries -- e.g. a portable calibration rig's
+    own anchor row, or a scattered tag whose physical position has moved
+    -- rather than mutating a row in place, since there's no legitimate
+    "correct" R/t to replace a stale one with from this function's own
+    knowledge (see design doc section 9; ``upsert_scene_marker_body``
+    already covers the "resolve it again, same label" case).
+
+    Returns
+    -------
+    bool
+        True if a row was actually deleted, False if no row matched.
+    """
+    with session:
+        cur = session.execute(
+            "DELETE FROM scene_marker_bodies WHERE session_id = ? AND label = ?",
+            (session_id, label),
+        )
+    return cur.rowcount > 0
+
+
 def read_scene_marker_body_pose(row: sqlite3.Row) -> tuple[np.ndarray, np.ndarray]:
     """Decode a ``scene_marker_bodies`` row's R/t BLOBs into numpy arrays.
 

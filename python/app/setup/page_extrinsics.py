@@ -99,8 +99,10 @@ from app.setup.fiducial_markers import (
 from app.setup.video_scrub_bar import VideoScrubBar
 from posetrak.db.import_extrinsics import import_extrinsics
 from posetrak.db.manage_marker_body import (
+    delete_scene_marker_body,
     import_marker_body,
     list_marker_bodies,
+    list_scene_marker_bodies,
     upsert_scene_marker_body,
 )
 
@@ -1091,6 +1093,98 @@ class _RegistryRigPickerDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Scene marker manager (view + delete scene_marker_bodies rows) -- for
+# pruning stale entries, e.g. a portable rig's own anchor row once it has
+# been physically removed from the scene, or a scattered tag whose position
+# has moved (see status.md's 2026-08-12 "moved rig" entry). "From Scene
+# Markers…" itself keeps loading everything unfiltered by default -- this
+# is the escape hatch for when that default needs correcting, not a picker
+# shown on every load.
+# ---------------------------------------------------------------------------
+
+
+class _SceneMarkerManagerDialog(QDialog):
+    """Table of every ``scene_marker_bodies`` row for a session, with a
+    Delete button for pruning stale ones. Mirrors the registry pickers'
+    table-widget shape above, but is read/write (delete) rather than a
+    single-selection picker -- there is no "OK" result to return, changes
+    take effect immediately in the DB, same as ``manage_marker_body``'s
+    CLI equivalent (`extrinsics scene-marker delete`).
+    """
+
+    def __init__(self, conn: sqlite3.Connection, session_id: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Manage Scene Markers")
+        self.setMinimumSize(640, 360)
+        self._conn = conn
+        self._session_id = session_id
+
+        self._table = QTableWidget(0, 7)
+        self._table.setHorizontalHeaderLabels(
+            ["Label", "Source", "Dictionary", "Marker ID", "Size (m)", "Primary anchor", "Updated"]
+        )
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for col in range(1, 7):
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+
+        delete_btn = QPushButton("Delete Selected")
+        delete_btn.clicked.connect(self._on_delete_selected)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(delete_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._table)
+        layout.addLayout(btn_row)
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        old_factory = self._conn.row_factory
+        self._conn.row_factory = sqlite3.Row
+        try:
+            rows = list_scene_marker_bodies(self._conn, self._session_id)
+        finally:
+            self._conn.row_factory = old_factory
+        self._rows = rows
+        self._table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            source = "rig anchor" if r["marker_body_definition_id"] else (r["marker_type"] or "")
+            self._table.setItem(i, 0, QTableWidgetItem(r["label"]))
+            self._table.setItem(i, 1, QTableWidgetItem(source))
+            self._table.setItem(i, 2, QTableWidgetItem(r["dictionary"] or ""))
+            self._table.setItem(i, 3, QTableWidgetItem(r["marker_id"] or ""))
+            size = r["marker_size"]
+            self._table.setItem(i, 4, QTableWidgetItem(f"{size:.4f}" if size is not None else ""))
+            self._table.setItem(i, 5, QTableWidgetItem("yes" if r["is_primary_anchor"] else ""))
+            self._table.setItem(i, 6, QTableWidgetItem((r["updated_at"] or "")[:19]))
+
+    def _on_delete_selected(self) -> None:
+        row_idxs = sorted({idx.row() for idx in self._table.selectedIndexes()}, reverse=True)
+        if not row_idxs:
+            return
+        labels = [self._rows[i]["label"] for i in row_idxs]
+        reply = QMessageBox.question(
+            self, "Delete Scene Marker(s)",
+            f"Permanently delete {len(labels)} scene marker(s)?\n\n" + "\n".join(labels),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        for label in labels:
+            delete_scene_marker_body(self._conn, self._session_id, label)
+        self._refresh()
+
+
+# ---------------------------------------------------------------------------
 # Auto-calibration dialog
 # ---------------------------------------------------------------------------
 
@@ -1713,6 +1807,14 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         )
         load_scene_btn.clicked.connect(self._on_load_rig_from_scene_markers)
 
+        manage_btn = QPushButton("Manage Scene Markers…")
+        manage_btn.setToolTip(
+            "View every scene marker stored for this session (including "
+            "the rig's own anchor row) and delete stale/wrong ones -- e.g. "
+            "a tag whose physical position has moved."
+        )
+        manage_btn.clicked.connect(self._on_manage_scene_markers)
+
         min_size_row = QHBoxLayout()
         min_size_row.addWidget(QLabel("Min marker size:"))
         self._rig_min_marker_pct_spin = QDoubleSpinBox()
@@ -1728,6 +1830,25 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         )
         self._rig_min_marker_pct_spin.valueChanged.connect(self._on_rig_min_marker_pct_changed)
         min_size_row.addWidget(self._rig_min_marker_pct_spin, 1)
+
+        min_cams_row = QHBoxLayout()
+        min_cams_row.addWidget(QLabel("Min cameras to anchor:"))
+        self._rig_min_cameras_spin = QSpinBox()
+        self._rig_min_cameras_spin.setRange(1, 20)
+        self._rig_min_cameras_spin.setValue(2)
+        self._rig_min_cameras_spin.setToolTip(
+            "A physical rig set up to anchor this capture is normally "
+            "visible to several cameras at once; one glimpsed by only a "
+            "single stray camera is often left-over clutter from an "
+            "earlier capture instead (see status.md's 2026-08-12 "
+            "\"moved rig\" entry) -- auto-anchor (on load, and \"Anchor "
+            "Rig\" below) refuses below this count (clamped to however "
+            "many cameras this dialog actually has). Lower it if a single "
+            "camera genuinely is this capture's only view of the rig. "
+            "Doesn't apply to \"From Scene Markers…\" -- re-anchoring from "
+            "just one already-known tag there is the expected case."
+        )
+        min_cams_row.addWidget(self._rig_min_cameras_spin, 1)
 
         self._rig_status_label = QLabel("No rig config loaded.")
         self._rig_status_label.setWordWrap(True)
@@ -1752,7 +1873,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         layout.addWidget(load_btn)
         layout.addWidget(registry_btn)
         layout.addWidget(load_scene_btn)
+        layout.addWidget(manage_btn)
         layout.addLayout(min_size_row)
+        layout.addLayout(min_cams_row)
         layout.addWidget(self._rig_status_label)
         layout.addLayout(btn_row)
         return group
@@ -2465,6 +2588,14 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             return
         self._apply_loaded_rig_config(config, definition_id=definition_id, source="file")
 
+    def _on_manage_scene_markers(self) -> None:
+        """Open the view/delete dialog for this session's stored scene
+        markers -- for pruning stale entries (e.g. a rig's own anchor row
+        once it's been physically removed, or a moved tag), not something
+        needed on every normal "From Scene Markers…" load."""
+        dlg = _SceneMarkerManagerDialog(self._conn, self._session_id, self)
+        dlg.exec()
+
     def _apply_loaded_rig_config(
         self, config: MarkerRigConfig, *, definition_id: str | None, source: str,
     ) -> None:
@@ -2608,6 +2739,37 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 "The rig wasn't detected in any camera's current frame. Scrub "
                 "to a frame where it's visible, then click \"Anchor Rig\" "
                 "again (or \"Detect Rig\" under one camera to try just that one)."
+            )
+            if show_warnings:
+                QMessageBox.warning(self, "Anchor Rig", msg)
+            self._status_label.setText(msg)
+            return msg
+
+        # A physical rig (Tier A) set up to anchor this capture is
+        # normally visible to several cameras at once; one glimpsed by
+        # only a single stray camera is often left-over clutter from an
+        # earlier capture instead of this capture's intended anchor (see
+        # status.md's 2026-08-12 "moved rig" entry) -- refuse to
+        # auto-commit below the configured minimum. Doesn't apply to a
+        # "From Scene Markers…" config (Tier B): individually re-anchoring
+        # from just one already-known tag is the expected, common case
+        # there, not a red flag. Clamped to how many cameras this dialog
+        # actually has -- requiring more cameras than exist can never be
+        # satisfied, so it would otherwise silently defeat a genuinely
+        # small (1- or 2-camera) rig, not just a spuriously-visible one.
+        min_cameras = (
+            min(self._rig_min_cameras_spin.value(), n_total) if self._rig_source == "file" else 1
+        )
+        if n_detected < min_cameras:
+            self._rig_anchored = False
+            self._refresh_rig_status()
+            self._refresh_markers()
+            msg = (
+                f"Rig detected in only {n_detected}/{n_total} camera(s), below "
+                f"the minimum of {min_cameras} required to auto-anchor -- this "
+                f"is often a leftover/misplaced rig rather than this capture's "
+                f"intended anchor. If it's genuinely correct here, lower "
+                f"\"Min cameras to anchor\" and click \"Anchor Rig\" again."
             )
             if show_warnings:
                 QMessageBox.warning(self, "Anchor Rig", msg)

@@ -12,11 +12,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+from PySide6.QtWidgets import QMessageBox
 
 from app.setup.extrinsics_solver import CalibResult, CamCalibState, MarkerGroup, MarkerPoseResult
 from app.setup.fiducial_markers import ARUCO_DICTIONARIES
-from app.setup.page_extrinsics import ExtrinsicsAutoCalibDialog
-from posetrak.db.manage_marker_body import import_marker_body
+from app.setup.page_extrinsics import ExtrinsicsAutoCalibDialog, _SceneMarkerManagerDialog
+from posetrak.db.manage_marker_body import import_marker_body, upsert_scene_marker_body
 
 _ONE_MARKER_RIG_YAML = """\
 name: test-rig
@@ -327,6 +328,87 @@ def test_anchor_rig_button_redetects_every_camera(qapp, fake_conn, rig_yaml_path
         dlg.done(0)
 
 
+# ---------------------------------------------------------------------------
+# Min-cameras-to-anchor guard (2026-08-12) -- a physical rig glimpsed by
+# only one stray camera is often left-over clutter from an earlier capture,
+# not this capture's intended anchor (Harri's "moved rig" report). Doesn't
+# apply to a "From Scene Markers…" config, and is clamped to however many
+# cameras a dialog actually has (see _detect_and_anchor_rig).
+# ---------------------------------------------------------------------------
+
+
+def test_rig_seen_by_only_one_of_several_cameras_does_not_auto_anchor(
+    qapp, fake_conn, rig_yaml_path
+) -> None:
+    states = [
+        _make_state("cam_A", _render_marker_image(3)),  # sees the (moved) rig
+        _make_state("cam_B", image=None),
+        _make_state("cam_C", image=None),
+    ]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_path(rig_yaml_path)
+
+        assert not dlg._rig_anchored
+        assert "1/3" in dlg._rig_status_label.text() or "1/3" in dlg._status_label.text()
+        assert dlg._rig_control_points() == []
+    finally:
+        dlg.done(0)
+
+
+def test_rig_seen_by_only_one_camera_can_be_force_anchored_by_lowering_minimum(
+    qapp, fake_conn, rig_yaml_path
+) -> None:
+    states = [
+        _make_state("cam_A", _render_marker_image(3)),
+        _make_state("cam_B", image=None),
+    ]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_path(rig_yaml_path)
+        assert not dlg._rig_anchored
+
+        dlg._rig_min_cameras_spin.setValue(1)
+        dlg._on_anchor_from_rig()
+
+        assert dlg._rig_anchored
+        assert len(dlg._rig_control_points()) == 4
+    finally:
+        dlg.done(0)
+
+
+def test_min_cameras_guard_does_not_apply_to_scene_markers_source(qapp, fake_conn) -> None:
+    _seed_scene_marker_tag(fake_conn, "sess1")
+    states = [
+        _make_state("cam_A", _render_marker_image(3)),
+        _make_state("cam_B", image=None),
+    ]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._on_load_rig_from_scene_markers()
+
+        assert dlg._rig_anchored
+        assert len(dlg._rig_control_points()) == 4
+    finally:
+        dlg.done(0)
+
+
+def test_min_cameras_guard_clamped_to_available_cameras(qapp, fake_conn, rig_yaml_path) -> None:
+    """The default minimum (2) must not block a genuinely single-camera
+    dialog -- there's no way to satisfy "seen by >= 2 cameras" when only
+    one exists, so the guard clamps to the dialog's own camera count."""
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        assert dlg._rig_min_cameras_spin.value() == 2  # default, unchanged
+        dlg._load_rig_config_from_path(rig_yaml_path)
+
+        assert dlg._rig_anchored
+        assert len(dlg._rig_control_points()) == 4
+    finally:
+        dlg.done(0)
+
+
 def test_load_invalid_rig_yaml_shows_warning_not_crash(qapp, fake_conn, tmp_path, monkeypatch) -> None:
     bad_path = tmp_path / "bad_rig.yaml"
     bad_path.write_text("name: bad\nmarkers:\n  - name: a\n    type: aruco\n", encoding="utf-8")
@@ -584,5 +666,104 @@ def test_accept_with_no_sized_markers_persists_nothing(qapp, fake_conn) -> None:
             "SELECT COUNT(*) FROM scene_marker_bodies WHERE session_id = 'sess1'"
         ).fetchone()[0]
         assert count == 0
+    finally:
+        dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Manage Scene Markers dialog (2026-08-12) -- view/delete stored scene
+# markers, e.g. to prune a rig's stale anchor row once physically removed.
+# ---------------------------------------------------------------------------
+
+
+def test_manager_dialog_lists_stored_markers(qapp, fake_conn) -> None:
+    _seed_session_and_camera(fake_conn)
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="rig:calib-box", R=np.eye(3), t=np.zeros(3),
+        marker_body_definition_id="def1", is_primary_anchor=True,
+    )
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:7", R=np.eye(3), t=np.array([1.0, 2.0, 3.0]),
+        marker_type="aruco", dictionary="DICT_5X5_50", marker_id="7", marker_size=0.1,
+    )
+
+    dlg = _SceneMarkerManagerDialog(fake_conn, "sess1")
+    try:
+        assert dlg._table.rowCount() == 2
+        labels = {dlg._table.item(i, 0).text() for i in range(dlg._table.rowCount())}
+        assert labels == {"rig:calib-box", "tag:7"}
+    finally:
+        dlg.done(0)
+
+
+def test_manager_dialog_delete_removes_row(qapp, fake_conn, monkeypatch) -> None:
+    _seed_session_and_camera(fake_conn)
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="rig:calib-box", R=np.eye(3), t=np.zeros(3),
+        marker_body_definition_id="def1", is_primary_anchor=True,
+    )
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:7", R=np.eye(3), t=np.array([1.0, 2.0, 3.0]),
+        marker_type="aruco", dictionary="DICT_5X5_50", marker_id="7", marker_size=0.1,
+    )
+    monkeypatch.setattr(
+        "app.setup.page_extrinsics.QMessageBox.question",
+        lambda *a, **kw: QMessageBox.StandardButton.Yes,
+    )
+
+    dlg = _SceneMarkerManagerDialog(fake_conn, "sess1")
+    try:
+        dlg._table.selectRow(
+            next(i for i in range(dlg._table.rowCount()) if dlg._table.item(i, 0).text() == "rig:calib-box")
+        )
+        dlg._on_delete_selected()
+
+        assert dlg._table.rowCount() == 1
+        assert dlg._table.item(0, 0).text() == "tag:7"
+        rows = fake_conn.execute(
+            "SELECT label FROM scene_marker_bodies WHERE session_id = 'sess1'"
+        ).fetchall()
+        assert [r[0] for r in rows] == ["tag:7"]
+    finally:
+        dlg.done(0)
+
+
+def test_manager_dialog_delete_cancelled_keeps_row(qapp, fake_conn, monkeypatch) -> None:
+    _seed_session_and_camera(fake_conn)
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:7", R=np.eye(3), t=np.zeros(3),
+        marker_type="aruco", dictionary="DICT_5X5_50", marker_id="7", marker_size=0.1,
+    )
+    monkeypatch.setattr(
+        "app.setup.page_extrinsics.QMessageBox.question",
+        lambda *a, **kw: QMessageBox.StandardButton.No,
+    )
+
+    dlg = _SceneMarkerManagerDialog(fake_conn, "sess1")
+    try:
+        dlg._table.selectRow(0)
+        dlg._on_delete_selected()
+
+        assert dlg._table.rowCount() == 1
+        count = fake_conn.execute(
+            "SELECT COUNT(*) FROM scene_marker_bodies WHERE session_id = 'sess1'"
+        ).fetchone()[0]
+        assert count == 1
+    finally:
+        dlg.done(0)
+
+
+def test_on_manage_scene_markers_opens_dialog(qapp, fake_conn, monkeypatch) -> None:
+    _seed_session_and_camera(fake_conn)
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        opened = []
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics._SceneMarkerManagerDialog.exec",
+            lambda self: opened.append(True),
+        )
+        dlg._on_manage_scene_markers()
+        assert opened == [True]
     finally:
         dlg.done(0)

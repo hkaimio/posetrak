@@ -412,6 +412,46 @@ iter_frames` instead of a fifth duplicated rotation-aware reader.
   real video; the I/O-heavy command bodies validated against real data
   instead, consistent with this feature's practice throughout.
 
+**Seventh live-testing round: a moved rig got auto-anchored from a stray
+single-camera glimpse; added a scene-marker manager (2026-08-12)** — in a
+second capture where the physical calibration rig had been removed from
+the set, one camera still happened to catch it in frame. The just-added
+auto-anchor-on-load (previous entry) detected it there and silently
+anchored the world frame from the rig's new, arbitrary resting position
+instead of the intended wall-mounted scene markers — exactly the
+"automation vs. prior state" hazard CLAUDE.md's design-principle section
+describes, scoped here to the moment of the automated write rather than
+a global precedence rule. Fix: `_detect_and_anchor_rig` now refuses to
+auto-commit an anchor when a physical rig (Tier A, `_rig_source ==
+"file"`) is detected in fewer than a configurable minimum number of
+cameras (new "Min cameras to anchor" spinbox, default 2, clamped to
+however many cameras the dialog actually has so it can't block a
+genuinely 1-camera setup) — a rig properly set up to anchor a capture is
+normally visible to several cameras at once, so a single stray glimpse
+is a reasonable signal it's left-over clutter instead. Deliberately does
+**not** apply to a "From Scene Markers…" config (Tier B): re-anchoring
+from just one already-known tag is the expected, common case there, per
+Harri's explicit answer that the default should keep loading all stored
+scene markers unfiltered.
+
+Also asked how the app picks which stored scene markers to use, and
+whether multiple stored sets are handled — answer: no selection UI by
+design (Harri's preference: default to loading everything, minus the
+rig's own markers, which were never included to begin with). Added a
+"Manage Scene Markers…" dialog instead (`_SceneMarkerManagerDialog`,
+reachable from the panel) — a table of every stored `scene_marker_bodies`
+row for the session with a Delete button, for the "in case of problems"
+cleanup case Harri asked for (e.g. pruning a rig's stale anchor row
+after it's been physically removed, or a tag that's moved). Mirrors the
+CLI equivalent added alongside it: `posetrak extrinsics scene-marker
+list`/`delete`, plus a `delete_scene_marker_body()` CRUD helper in
+`manage_marker_body.py` (`list_scene_marker_bodies()` already existed,
+just had no GUI/CLI caller yet). 12 new tests (min-cameras guard, its
+scene-markers exemption, its available-cameras clamp, the manager
+dialog's list/delete/cancel, the CLI commands). Full regression sweep
+(1590 tests) passes with the same pre-existing exclusions as prior
+entries.
+
 **GUI can now persist scattered scene tags too, closing the last Phase 9
 GUI gap (2026-08-12)** — Harri asked how to get scattered markers into
 `scene_marker_bodies` for reuse across captures; until now only the

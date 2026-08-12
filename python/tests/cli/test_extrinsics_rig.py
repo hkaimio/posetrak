@@ -13,9 +13,12 @@ spec parsing and intrinsics-mode resolution against a synthetic session DB.
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import click
+import numpy as np
 import pytest
+from click.testing import CliRunner
 
 from posetrak.cli.extrinsics_rig import (
     _CameraSpec,
@@ -23,7 +26,9 @@ from posetrak.cli.extrinsics_rig import (
     _parse_camera_spec,
     _resolve_intrinsics,
 )
-from posetrak.db.db import create_session
+from posetrak.cli.main import main
+from posetrak.db.db import create_mocap_session, create_session, open_session
+from posetrak.db.manage_marker_body import upsert_scene_marker_body
 
 
 # ---------------------------------------------------------------------------
@@ -143,3 +148,89 @@ def test_resolve_intrinsics_mode_with_no_calibration_raises(tmp_path):
 def test_label_to_instance_id(session_with_two_modes):
     mapping = _label_to_instance_id(session_with_two_modes)
     assert mapping == {"insta_ace2_pro": "inst1"}
+
+
+# ---------------------------------------------------------------------------
+# scene-marker list / delete
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def session_with_scene_markers(tmp_path: Path):
+    """A session DB path with one mocap_sessions row and two scene markers
+    (a rig anchor + a scattered tag) already stored. Returns
+    (db_path, session_id)."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    session_id = create_mocap_session(conn, location="lab")
+    upsert_scene_marker_body(
+        conn, session_id, label="rig:calib-box", R=np.eye(3), t=np.zeros(3),
+        marker_body_definition_id="def1", is_primary_anchor=True,
+    )
+    upsert_scene_marker_body(
+        conn, session_id, label="tag:7", R=np.eye(3), t=np.array([1.0, 2.0, 3.0]),
+        marker_type="aruco", dictionary="DICT_5X5_50", marker_id="7", marker_size=0.1,
+    )
+    conn.commit()
+    conn.close()
+    return db_path, session_id
+
+
+def test_scene_marker_list_empty_session(cli_runner: CliRunner, session_db_path: Path) -> None:
+    conn = open_session(session_db_path)
+    session_id = create_mocap_session(conn, location="lab")
+    conn.commit()
+    conn.close()
+
+    result = cli_runner.invoke(
+        main,
+        ["--session", str(session_db_path), "extrinsics", "scene-marker", "list",
+         "--session", session_id],
+    )
+    assert result.exit_code == 0, result.output
+    assert "No scene markers" in result.output
+
+
+def test_scene_marker_list_shows_both(
+    cli_runner: CliRunner, session_with_scene_markers,
+) -> None:
+    db_path, session_id = session_with_scene_markers
+    result = cli_runner.invoke(
+        main,
+        ["--session", str(db_path), "extrinsics", "scene-marker", "list", "--session", session_id],
+    )
+    assert result.exit_code == 0, result.output
+    assert "rig:calib-box" in result.output
+    assert "tag:7" in result.output
+
+
+def test_scene_marker_delete_removes_row(
+    cli_runner: CliRunner, session_with_scene_markers,
+) -> None:
+    db_path, session_id = session_with_scene_markers
+    result = cli_runner.invoke(
+        main,
+        ["--session", str(db_path), "extrinsics", "scene-marker", "delete",
+         "--session", session_id, "rig:calib-box"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Deleted" in result.output
+
+    result = cli_runner.invoke(
+        main,
+        ["--session", str(db_path), "extrinsics", "scene-marker", "list", "--session", session_id],
+    )
+    assert "rig:calib-box" not in result.output
+    assert "tag:7" in result.output
+
+
+def test_scene_marker_delete_missing_label_errors(
+    cli_runner: CliRunner, session_with_scene_markers,
+) -> None:
+    db_path, session_id = session_with_scene_markers
+    result = cli_runner.invoke(
+        main,
+        ["--session", str(db_path), "extrinsics", "scene-marker", "delete",
+         "--session", session_id, "nonexistent"],
+    )
+    assert result.exit_code != 0

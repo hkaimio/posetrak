@@ -412,11 +412,27 @@ iter_frames` instead of a fifth duplicated rotation-aware reader.
   real video; the I/O-heavy command bodies validated against real data
   instead, consistent with this feature's practice throughout.
 
-**Not yet done**: GUI wiring (Phase 8/9's panel in `ExtrinsicsAutoCalibDialog`)
-is the one remaining piece from the original three gaps Harri's status
-check identified — ArUco-locked-to-world-position, rigs, and cross-capture
-reuse are all now real in the CLI; only the GUI front-end is still
-outstanding.
+**Phase 8 GUI wiring implemented (2026-08-12)** — a "Marker Rig" panel in
+`ExtrinsicsAutoCalibDialog`, mirroring the existing ChArUco panel's
+structure directly (per-camera "Detect Rig" button, "Load rig config…"
+file picker for section-10 YAML, "Set origin && axes from rig", "Clear
+rig detections"). One deliberate difference from ChArUco, documented on
+`_build_rig_group`'s docstring: a rig detection has no free/unanchored
+intermediate state, since `anchor_from_marker_rig` always assigns fixed
+world_xyz immediately (a rig's local frame has no face-up/face-down
+choice to make, unlike a flat board). Loading a rig config file also
+imports it into the session DB (content-addressed, idempotent) so Accept
+can persist the rig's anchor pose to `scene_marker_bodies` — the same
+write the CLI's `anchor-rig` command already does. 12 new dialog-level
+tests, using a real rendered ArUco marker image and a real rig-config
+YAML, not mocks. Scattered-tag persistence (Tier B) is **not** wired into
+this dialog — that's Phase 9's UI, a separate, not-yet-started increment.
+
+This closes out the three original gaps from Harri's status check
+(ArUco-locked-to-world-position, rig support, cross-capture reuse) for
+both the CLI and the GUI. What's left for Phase 9 specifically is its own
+GUI action ("Re-anchor from known scene markers") — the CLI's `reanchor`
+command already covers the same functionality headlessly.
 
 **`posetrak marker-body` CLI group implemented (2026-08-12)** —
 `import`/`list`/`show`/`export`, mirroring `posetrak skeleton`'s
@@ -483,7 +499,7 @@ columns instead) plus its `(session_id, label)` uniqueness constraint.
 | 5 | `scene_fiducial_markers` persistence + recalibration reuse | ⬜ Not started |
 | 6 | AprilTag detector backend (extensibility proof) | ⬜ Not started |
 | 7 | Global timeline scrub (§8) — jump every camera to the same synced instant | ⬜ Not started (design added 2026-08-09 from UI-testing feedback) |
-| 8 | Portable non-planar calibration rig — primary world-frame anchor (§9, Tier A) | 🟡 Core implemented + validated against real capture-1 footage (2026-08-12); no UI wiring yet, `"box"` shape deferred |
+| 8 | Portable non-planar calibration rig — primary world-frame anchor (§9, Tier A) | ✅ Core + CLI (`anchor-rig`) + GUI panel done, validated against real capture-1 footage (2026-08-12); `"box"` parametric shape and QR scanning deliberately deferred |
 | 9 | Scattered-tag redundancy + single-camera re-anchor (§9, Tier B) | 🟡 Re-anchor mechanism validated against real capture-2 footage (2026-08-12), reusing Phase 8's anchor_from_marker_rig unmodified; no UI wiring, one camera's data quality still under investigation |
 
 ## UI testing feedback (2026-08-09, Phases 1-2)

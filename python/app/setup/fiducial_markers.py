@@ -17,8 +17,10 @@ this same detection layer, not a rework of it).
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol
 
 import cv2
@@ -460,3 +462,172 @@ def merge_detections_into_groups(
             for c in det.corners
         }
         group.obs[video_id] = corners_by_index
+
+
+# ---------------------------------------------------------------------------
+# Portable non-planar calibration rig (Phase 8, design doc section 9 Tier A)
+# ---------------------------------------------------------------------------
+#
+# Unlike CharucoDetector's single flat board, a rig's markers are not
+# required to be coplanar -- genuine depth variation is the whole point (see
+# status.md's sixth live-testing round): a non-planar marker set has no
+# IPPE-style tilt/planar-pose ambiguity to resolve at all, which removes the
+# entire class of failure that motivated section 9, rather than adding
+# another layer of disambiguation on top of it.
+
+
+@dataclass
+class MarkerRigConfig:
+    """Resolved per-marker corner geometry for a portable calibration rig.
+
+    ``marker_corners``: marker_id -> (4, 3) rig-local xyz, in the same
+    corner order (top-left, top-right, bottom-right, bottom-left, as seen
+    facing the marker) real ``cv2.aruco`` detection uses -- see
+    ``ArucoDetector``'s docstring. This is deliberately the *resolved* form
+    only (no parametric shape descriptor here) -- see ``load_rig_config``
+    for how a compact source format (e.g. the design doc's ``"box"``
+    descriptor) expands into this.
+    """
+    rig_id: str
+    marker_corners: dict[str, np.ndarray] = field(default_factory=dict)
+
+
+def load_rig_config(path: str) -> MarkerRigConfig:
+    """Load a ``MarkerRigConfig`` from a rig-config JSON file.
+
+    Only the ``"explicit"`` shape (raw per-marker corner arrays, matching
+    ``MarkerRigConfig`` directly) is implemented so far. The design doc's
+    ``"box"`` parametric shape (dimensions + marker size + one marker ID per
+    face) is deliberately deferred: expanding it correctly requires
+    *assuming* how each physical marker is oriented on its face (which
+    printed corner is "up"), and a wrong assumption there would silently
+    rotate that marker's corner correspondence -- a real risk with no cheap
+    way to rule it out short of measuring each marker's mounted orientation
+    directly. The ``"explicit"`` form sidesteps this entirely when the
+    corner geometry instead comes from real detections (e.g. the orbit-video
+    self-calibration prototype, ``tools/characterize_rig_from_video.py`` --
+    its corner order is correct by construction, since it was never
+    assumed, only measured).
+    """
+    with open(path, encoding="utf-8") as f:
+        payload = json.load(f)
+    if payload.get("v") != 1:
+        raise ValueError(f"Unsupported rig config version: {payload.get('v')!r}")
+    shape = payload.get("shape")
+    if shape == "box":
+        raise NotImplementedError(
+            '"box" shape parametric expansion is not implemented yet (see '
+            "load_rig_config's docstring for why) -- use \"explicit\" for now."
+        )
+    if shape != "explicit":
+        raise ValueError(f"Unknown rig config shape: {shape!r}")
+    marker_corners = {
+        marker_id: np.array(corners, dtype=np.float64)
+        for marker_id, corners in payload["marker_corners"].items()
+    }
+    return MarkerRigConfig(rig_id=payload.get("rig_id", Path(path).stem), marker_corners=marker_corners)
+
+
+class MarkerRigDetector:
+    """Detects a portable calibration rig's own markers in an image.
+
+    Wraps ``ArucoDetector`` (raw marker detection) + a rig-local corner
+    lookup (``MarkerRigConfig``) -- corners are deliberately reported with
+    ``corner_local_xyz=None`` (see ``detect``'s docstring); rig-local
+    coordinates are looked up from ``self.config``, not carried on the
+    ``FiducialDetection`` itself, mirroring how ``CharucoDetector`` keeps
+    board-local coordinates on the detector/board rather than duplicating
+    them per detection.
+    """
+
+    def __init__(
+        self,
+        config: MarkerRigConfig,
+        dictionary: str = "DICT_4X4_50",
+        min_marker_perimeter_rate: float | None = None,
+    ) -> None:
+        self.config = config
+        self._aruco = ArucoDetector(
+            dictionary=dictionary, min_marker_perimeter_rate=min_marker_perimeter_rate,
+        )
+
+    def detect(self, image: np.ndarray, video_id: str = "", frame_idx: int = 0) -> list[FiducialDetection]:
+        """Detect ArUco markers, keeping only ones that belong to this rig.
+
+        A marker sharing this dictionary but not part of the rig (e.g. one
+        of the scattered Tier-B tags) is silently excluded here -- the same
+        "only this instrument's own markers" filtering
+        ``CharucoDetector.expected_marker_ids()`` already does for a
+        ChArUco board, generalized to a rig.
+        """
+        all_dets = self._aruco.detect(image, video_id=video_id, frame_idx=frame_idx)
+        return [d for d in all_dets if d.marker_id in self.config.marker_corners]
+
+    def estimate_rig_pose(
+        self, detections: list[FiducialDetection], K: np.ndarray, dist: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Diagnostic-only pose estimate (rig-local -> camera) via a single
+        multi-marker ``solvePnP`` across every corner of every detected rig
+        marker in one camera's view.
+
+        Not on ``anchor_from_marker_rig``'s critical path -- same reasoning
+        as ``CharucoDetector.estimate_board_pose``, see that docstring.
+        Useful as a quick per-camera sanity check (e.g. "does this camera's
+        detection alone look geometrically sane") before running a full
+        multi-camera solve.
+        """
+        obj_pts: list[np.ndarray] = []
+        img_pts: list[list[float]] = []
+        for det in detections:
+            corners_local = self.config.marker_corners.get(det.marker_id)
+            if corners_local is None:
+                continue
+            for c in det.corners:
+                obj_pts.append(corners_local[c.corner_index])
+                img_pts.append([c.px, c.py])
+        if len(obj_pts) < 4:
+            return None
+        obj_arr = np.array(obj_pts, dtype=np.float64)
+        img_arr = np.array(img_pts, dtype=np.float64)
+        ok, rvec, tvec = cv2.solvePnP(obj_arr, img_arr, K, dist)
+        if not ok:
+            return None
+        R, _ = cv2.Rodrigues(rvec)
+        return R, tvec.flatten()
+
+
+def anchor_from_marker_rig(
+    detections_by_camera: dict[str, list[FiducialDetection]],
+    config: MarkerRigConfig,
+) -> list[ControlPoint]:
+    """Turn accumulated per-camera rig-marker detections into a set of fixed
+    (``world_xyz``-set) ``ControlPoint``s -- one per physical marker corner
+    ever detected, each with observations from every camera that saw it.
+
+    Generalizes ``anchor_from_charuco_board``'s mechanism, not the design
+    doc's originally-sketched "solvePnP in one reference camera's frame"
+    approach: the rig's own local coordinate frame (already metric, from
+    however ``config`` was built/measured) is used *directly* as the world
+    frame, exactly like the ChArUco anchor's board-local-frame trick. This
+    still needs no camera intrinsics or an unsolved camera's pose to anchor
+    -- and unlike the ChArUco case, there is no face-up/face-down axis
+    choice to make here either, since a non-planar rig's own local frame has
+    no equivalent "which side is this facing" ambiguity in the first place.
+    """
+    by_key: dict[tuple[str, int], ControlPoint] = {}
+    for detections in detections_by_camera.values():
+        for det in detections:
+            corners_local = config.marker_corners.get(det.marker_id)
+            if corners_local is None:
+                continue
+            for c in det.corners:
+                key = (det.marker_id, c.corner_index)
+                cp = by_key.get(key)
+                if cp is None:
+                    cp = ControlPoint(
+                        name=f"rig_{det.marker_id}_c{c.corner_index}",
+                        world_xyz=corners_local[c.corner_index].copy(),
+                    )
+                    by_key[key] = cp
+                cp.obs[c.video_id] = ObsPoint(frame_idx=c.frame_idx, px=c.px, py=c.py)
+    return list(by_key.values())

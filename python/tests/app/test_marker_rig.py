@@ -140,7 +140,9 @@ def test_detect_filters_to_rig_markers_only(monkeypatch):
         _det("10", config, "camA", [(0, 0)] * 4),
         _det("99", config, "camA", [(0, 0)] * 4),  # not part of this rig
     ]
-    monkeypatch.setattr(detector._aruco, "detect", lambda *a, **kw: fake_dets)
+    monkeypatch.setattr(
+        detector._aruco_by_dict["DICT_4X4_50"], "detect", lambda *a, **kw: fake_dets
+    )
     result = detector.detect(np.zeros((10, 10, 3), np.uint8), video_id="camA")
     assert [d.marker_id for d in result] == ["10"]
 
@@ -149,7 +151,8 @@ def test_detect_empty_when_no_rig_markers_present(monkeypatch):
     config = _cube_rig_config()
     detector = MarkerRigDetector(config)
     monkeypatch.setattr(
-        detector._aruco, "detect", lambda *a, **kw: [_det("99", config, "camA", [(0, 0)] * 4)]
+        detector._aruco_by_dict["DICT_4X4_50"], "detect",
+        lambda *a, **kw: [_det("99", config, "camA", [(0, 0)] * 4)],
     )
     assert detector.detect(np.zeros((10, 10, 3), np.uint8)) == []
 

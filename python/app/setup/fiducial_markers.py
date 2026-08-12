@@ -25,6 +25,7 @@ from typing import Protocol
 
 import cv2
 import numpy as np
+import yaml
 
 from app.setup.extrinsics_solver import ControlPoint, MarkerGroup, ObsPoint, marker_local_corners
 
@@ -487,27 +488,42 @@ class MarkerRigConfig:
     only (no parametric shape descriptor here) -- see ``load_rig_config``
     for how a compact source format (e.g. the design doc's ``"box"``
     descriptor) expands into this.
+
+    ``marker_dictionaries``: marker_id -> its ArUco dictionary, populated
+    only by ``load_marker_body_yaml`` (design doc section 10 -- a body's
+    markers may span more than one dictionary; each marker's own
+    ``dictionary:`` field is what says which). Empty for configs loaded via
+    ``load_rig_config``'s older single-dictionary JSON shape, in which case
+    ``MarkerRigDetector`` falls back to its own ``dictionary`` constructor
+    argument for every marker, unchanged from before this field existed.
+
+    ``reflective_dots``: name -> body-local xyz, for ``type: reflective_dot``
+    entries (section 10). Not matched against ``marker_corners`` (a dot has
+    no decodable id) and not consumed by ``MarkerRigDetector``/
+    ``anchor_from_marker_rig`` at all yet -- correspondence/tracking for
+    dots is out of scope beyond storing their definition-time position (see
+    the design doc's "Reflective dots" subsection and its Open Questions
+    entry). Kept here so a marker body's dots survive the load/save
+    round-trip for whenever that future feature is built.
     """
     rig_id: str
     marker_corners: dict[str, np.ndarray] = field(default_factory=dict)
+    marker_dictionaries: dict[str, str] = field(default_factory=dict)
+    reflective_dots: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 def load_rig_config(path: str) -> MarkerRigConfig:
     """Load a ``MarkerRigConfig`` from a rig-config JSON file.
 
-    Only the ``"explicit"`` shape (raw per-marker corner arrays, matching
-    ``MarkerRigConfig`` directly) is implemented so far. The design doc's
-    ``"box"`` parametric shape (dimensions + marker size + one marker ID per
-    face) is deliberately deferred: expanding it correctly requires
-    *assuming* how each physical marker is oriented on its face (which
-    printed corner is "up"), and a wrong assumption there would silently
-    rotate that marker's corner correspondence -- a real risk with no cheap
-    way to rule it out short of measuring each marker's mounted orientation
-    directly. The ``"explicit"`` form sidesteps this entirely when the
-    corner geometry instead comes from real detections (e.g. the orbit-video
-    self-calibration prototype, ``tools/characterize_rig_from_video.py`` --
-    its corner order is correct by construction, since it was never
-    assumed, only measured).
+    **Superseded by ``load_marker_body_yaml``** (design doc section 10) --
+    kept only because the existing prototype scripts
+    (``tools/characterize_rig_from_video.py``, ``tools/
+    test_rig_anchor_capture1.py``) still read/write this JSON shape; new
+    marker body definitions should be authored as section 10's YAML
+    instead. Only the ``"explicit"`` shape (raw per-marker corner arrays,
+    matching ``MarkerRigConfig`` directly) is implemented; the ``"box"``
+    parametric shape was deliberately never built here for the same reason
+    documented on ``load_marker_body_yaml``.
     """
     with open(path, encoding="utf-8") as f:
         payload = json.load(f)
@@ -526,6 +542,184 @@ def load_rig_config(path: str) -> MarkerRigConfig:
         for marker_id, corners in payload["marker_corners"].items()
     }
     return MarkerRigConfig(rig_id=payload.get("rig_id", Path(path).stem), marker_corners=marker_corners)
+
+
+def _marker_corners_from_pose(
+    center: np.ndarray, normal: np.ndarray, up: np.ndarray, size: float,
+) -> np.ndarray:
+    """Resolve one marker's (4, 3) corners from its center + orientation.
+
+    ``normal`` becomes the marker's local Z axis (outward face normal);
+    ``up`` is Gram-Schmidt-corrected against it (doesn't need to be exactly
+    perpendicular) to give the local Y axis; the local X axis follows as
+    ``ey x ez`` to keep (X, Y, Z) right-handed -- the same construction the
+    box rig config's gravity-up reframing (status.md, 2026-08-12) already
+    used. Corner order matches ``marker_local_corners()``'s convention
+    (top-left, top-right, bottom-right, bottom-left).
+    """
+    ez = normal / np.linalg.norm(normal)
+    ey = up - np.dot(up, ez) * ez
+    ey = ey / np.linalg.norm(ey)
+    ex = np.cross(ey, ez)
+    hs = size / 2.0
+    return np.array([
+        center - ex * hs + ey * hs,   # top-left
+        center + ex * hs + ey * hs,   # top-right
+        center + ex * hs - ey * hs,   # bottom-right
+        center - ex * hs - ey * hs,   # bottom-left
+    ], dtype=np.float64)
+
+
+def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> MarkerRigConfig:
+    """Load a ``MarkerRigConfig`` from a marker body definition YAML string
+    (design doc section 10 -- the canonical, always-fully-resolved format;
+    see that section for the full schema and why it deliberately has no
+    parametric-shape parsing here, unlike ``load_rig_config``'s deferred
+    ``"box"`` JSON idea).
+
+    Each marker entry gives its geometry either as raw ``corners`` (a
+    (4, 3) array, used as-is -- the provenance-preserving form for solved,
+    not designed, geometry) or as ``center``/``normal``/``up``/``size``
+    (resolved via ``_marker_corners_from_pose``). ``type: reflective_dot``
+    entries are parsed into ``MarkerRigConfig.reflective_dots`` but never
+    fed into ``marker_corners`` -- see that field's docstring for why.
+
+    Parameters
+    ----------
+    yaml_content:
+        The YAML document text (e.g. a ``marker_body_definitions.
+        yaml_content`` DB column, or a file already read into memory).
+    rig_id:
+        Overrides the resolved ``MarkerRigConfig.rig_id``; defaults to the
+        document's own top-level ``name:``.
+
+    Raises
+    ------
+    ValueError
+        If two markers share a ``name`` (must be unique within one body),
+        two coded markers share an ``id`` regardless of dictionary (see
+        the message for why -- ``MarkerRigDetector``'s bare-id lookup
+        requires this), or a marker is missing a field its ``type``
+        requires.
+    NotImplementedError
+        If any marker uses a ``{slot: "..."}`` id reference -- templating
+        is reserved syntax (design doc section 10, "Templating"), not
+        resolvable without a not-yet-built ``marker_body_instances`` slot
+        mapping.
+    """
+    payload = yaml.safe_load(yaml_content) or {}
+    resolved_rig_id = rig_id or payload.get("name", "marker_body")
+
+    seen_names: set[str] = set()
+    seen_ids: set[str] = set()
+    marker_corners: dict[str, np.ndarray] = {}
+    marker_dictionaries: dict[str, str] = {}
+    reflective_dots: dict[str, np.ndarray] = {}
+
+    for entry in payload.get("markers") or []:
+        name = entry.get("name")
+        if not name:
+            raise ValueError(f"marker body {resolved_rig_id!r}: every marker needs a 'name'")
+        if name in seen_names:
+            raise ValueError(
+                f"marker body {resolved_rig_id!r}: duplicate marker name {name!r} -- "
+                "'name' must be unique within one body"
+            )
+        seen_names.add(name)
+
+        marker_type = entry.get("type")
+        if not marker_type:
+            raise ValueError(f"marker body {resolved_rig_id!r}: marker {name!r} has no 'type'")
+
+        if marker_type == "reflective_dot":
+            center = entry.get("center")
+            if center is None:
+                raise ValueError(
+                    f"marker body {resolved_rig_id!r}: reflective_dot {name!r} needs 'center'"
+                )
+            reflective_dots[name] = np.array(center, dtype=np.float64)
+            continue
+
+        # Coded marker types (aruco, apriltag, ...): need dictionary + id + geometry.
+        dictionary = entry.get("dictionary")
+        if not dictionary:
+            raise ValueError(
+                f"marker body {resolved_rig_id!r}: marker {name!r} (type={marker_type!r}) "
+                "needs a 'dictionary'"
+            )
+        raw_id = entry.get("id")
+        if isinstance(raw_id, dict):
+            raise NotImplementedError(
+                f"marker body {resolved_rig_id!r}: marker {name!r} uses a slot reference "
+                f"({raw_id!r}) -- templating is reserved syntax, not implemented yet "
+                "(see the design doc's 'Templating' subsection). Use a literal id for now."
+            )
+        if not raw_id and raw_id != 0:
+            raise ValueError(
+                f"marker body {resolved_rig_id!r}: marker {name!r} (type={marker_type!r}) "
+                "needs an 'id'"
+            )
+        marker_id = str(raw_id)
+        if marker_id in seen_ids:
+            raise ValueError(
+                f"marker body {resolved_rig_id!r}: duplicate marker id {marker_id!r} -- "
+                "MarkerRigDetector matches markers by bare id, so ids must be unique across "
+                "every dictionary in one body, not just within a single dictionary. If this "
+                "body genuinely needs the same id reused across two dictionaries, that needs "
+                "a composite-key lookup this loader doesn't implement yet."
+            )
+        seen_ids.add(marker_id)
+
+        if "corners" in entry:
+            corners = np.array(entry["corners"], dtype=np.float64)
+            if corners.shape != (4, 3):
+                raise ValueError(
+                    f"marker body {resolved_rig_id!r}: marker {name!r} 'corners' must be a "
+                    f"(4, 3) array, got shape {corners.shape}"
+                )
+        else:
+            center, normal, up, size = (
+                entry.get("center"), entry.get("normal"), entry.get("up"), entry.get("size"),
+            )
+            if center is None or normal is None or up is None or size is None:
+                raise ValueError(
+                    f"marker body {resolved_rig_id!r}: marker {name!r} needs either 'corners' "
+                    "or all of 'center'/'normal'/'up'/'size'"
+                )
+            corners = _marker_corners_from_pose(
+                np.array(center, dtype=np.float64), np.array(normal, dtype=np.float64),
+                np.array(up, dtype=np.float64), float(size),
+            )
+
+        marker_corners[marker_id] = corners
+        marker_dictionaries[marker_id] = dictionary
+
+    return MarkerRigConfig(
+        rig_id=resolved_rig_id,
+        marker_corners=marker_corners,
+        marker_dictionaries=marker_dictionaries,
+        reflective_dots=reflective_dots,
+    )
+
+
+def load_marker_body_yaml_file(path: str, *, rig_id: str | None = None) -> MarkerRigConfig:
+    """Load a ``MarkerRigConfig`` from a marker body definition YAML file
+    on disk. See ``load_marker_body_yaml`` for the format; this is a thin
+    file-reading wrapper around it, mirroring ``import_marker_body``/
+    ``import_marker_body_str``'s file/string pairing in
+    ``manage_marker_body.py``.
+
+    *rig_id*, if given, still takes priority over the YAML's own top-level
+    ``name:`` (same as calling ``load_marker_body_yaml`` directly) -- the
+    filename is only used as a last-resort fallback, when neither *rig_id*
+    nor the YAML itself supplies one.
+    """
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    config = load_marker_body_yaml(content, rig_id=rig_id)
+    if rig_id is None and config.rig_id == "marker_body":
+        config.rig_id = Path(path).stem
+    return config
 
 
 class MarkerRigDetector:
@@ -547,21 +741,46 @@ class MarkerRigDetector:
         min_marker_perimeter_rate: float | None = None,
     ) -> None:
         self.config = config
-        self._aruco = ArucoDetector(
-            dictionary=dictionary, min_marker_perimeter_rate=min_marker_perimeter_rate,
-        )
+        # A body's markers may span more than one ArUco dictionary
+        # (config.marker_dictionaries, populated by load_marker_body_yaml --
+        # see MarkerRigConfig's docstring); *dictionary* is only the
+        # fallback for markers with no per-marker entry there, which is
+        # every marker for a config loaded via the older load_rig_config
+        # JSON shape -- unchanged behaviour for those.
+        dictionaries_used = set(config.marker_dictionaries.values()) or {dictionary}
+        self._aruco_by_dict = {
+            dict_name: ArucoDetector(
+                dictionary=dict_name, min_marker_perimeter_rate=min_marker_perimeter_rate,
+            )
+            for dict_name in dictionaries_used
+        }
+        # Markers with no explicit per-marker dictionary use the fallback,
+        # so its detector must exist even if no marker's dictionary happens
+        # to equal it.
+        if dictionary not in self._aruco_by_dict:
+            self._aruco_by_dict[dictionary] = ArucoDetector(
+                dictionary=dictionary, min_marker_perimeter_rate=min_marker_perimeter_rate,
+            )
 
     def detect(self, image: np.ndarray, video_id: str = "", frame_idx: int = 0) -> list[FiducialDetection]:
         """Detect ArUco markers, keeping only ones that belong to this rig.
 
-        A marker sharing this dictionary but not part of the rig (e.g. one
-        of the scattered Tier-B tags) is silently excluded here -- the same
-        "only this instrument's own markers" filtering
+        Runs one ``ArucoDetector`` per distinct dictionary the config's
+        markers actually use and merges the results -- a marker sharing one
+        of those dictionaries but not part of the rig (e.g. one of the
+        scattered Tier-B tags) is silently excluded here -- the same "only
+        this instrument's own markers" filtering
         ``CharucoDetector.expected_marker_ids()`` already does for a
-        ChArUco board, generalized to a rig.
+        ChArUco board, generalized to a rig. Duplicate ids across different
+        dictionaries are rejected at load time (see
+        ``load_marker_body_yaml``), so a bare-id membership check here is
+        safe even when the rig spans more than one dictionary.
         """
-        all_dets = self._aruco.detect(image, video_id=video_id, frame_idx=frame_idx)
-        return [d for d in all_dets if d.marker_id in self.config.marker_corners]
+        merged: list[FiducialDetection] = []
+        for detector in self._aruco_by_dict.values():
+            all_dets = detector.detect(image, video_id=video_id, frame_idx=frame_idx)
+            merged.extend(d for d in all_dets if d.marker_id in self.config.marker_corners)
+        return merged
 
     def estimate_rig_pose(
         self, detections: list[FiducialDetection], K: np.ndarray, dist: np.ndarray

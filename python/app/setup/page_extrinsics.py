@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import datetime
 import logging
-import re
 import sqlite3
 import struct
 import threading
@@ -171,151 +170,8 @@ def _make_collapsible(group: QGroupBox) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Label-matching helpers (mirrors calibrate_from_exports.py — kept in sync)
-# ---------------------------------------------------------------------------
-
-_FNAME_RE_UI = re.compile(r"^.+?_\d{1,2}_\d{1,2}_\d{1,3}_(.+?)_\d+\.png$", re.IGNORECASE)
-
-
-def _ui_label_from_filename(fname: str) -> str | None:
-    m = _FNAME_RE_UI.match(fname)
-    return m.group(1).replace("_", " ") if m else None
-
-
-def _ui_normalise(label: str) -> str:
-    return re.sub(r"[-_.\s]+", " ", label).strip().lower()
-
-
-def _ui_match_label(file_label: str, db_labels: list[str]) -> str | None:
-    fl = _ui_normalise(file_label)
-    matches = [db for db in db_labels if _ui_normalise(db) == fl]
-    return matches[0] if matches else None
-
-
-# ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
-
-
-def _load_states_from_images(
-    images_dir: Path,
-    conn: sqlite3.Connection,
-    shot_id: str,
-) -> list[CamCalibState]:
-    """Load CamCalibState list by matching PNG files to calibrated cameras.
-
-    Searches ALL camera instances in the session DB that have any intrinsics
-    calibration — not just those with capture_videos entries for the current shot.
-    The session DB must be self-contained (all cameras and intrinsics used by the
-    session must be present there).  When adding intrinsics via the camera registry
-    dialog, they are mirrored to the session DB automatically.
-
-    Priority for picking the calibration:
-      1. Per-video override in capture_videos.intrinsics_calibration_id
-      2. Mode default (camera_modes.default_intrinsics_calibration_id)
-      3. Latest calibration for the camera's mode
-    """
-    final_calib: dict[str, str] = {}  # cam_label → calibration_id
-
-    old_factory = conn.row_factory
-    conn.row_factory = sqlite3.Row
-    try:
-        # Diagnostic: log session DB state before querying
-        n_models = conn.execute("SELECT COUNT(*) FROM camera_models").fetchone()[0]
-        n_modes  = conn.execute("SELECT COUNT(*) FROM camera_modes").fetchone()[0]
-        n_cals   = conn.execute("SELECT COUNT(*) FROM intrinsics_calibrations").fetchone()[0]
-        n_insts  = conn.execute("SELECT COUNT(*) FROM camera_instances").fetchone()[0]
-        _log.debug(
-            "_load_states: session DB has %d models, %d modes, %d calibrations, %d instances",
-            n_models, n_modes, n_cals, n_insts,
-        )
-        inst_labels = [r[0] for r in conn.execute("SELECT label FROM camera_instances").fetchall()]
-        _log.debug("  camera_instances labels: %s", inst_labels)
-
-        # Registry-wide search: any camera instance whose model has a calibrated mode.
-        # ORDER BY puts default calibrations first, then newest — first row per label wins.
-        for r in conn.execute(
-            """
-            SELECT ci.label AS cam_label, ic.id AS calib_id,
-                   (cm.default_intrinsics_calibration_id = ic.id) AS is_default
-            FROM camera_instances ci
-            JOIN camera_modes cm ON cm.camera_model_id = ci.camera_model_id
-            JOIN intrinsics_calibrations ic ON ic.camera_mode_id = cm.id
-            ORDER BY is_default DESC, ic.calibrated_at DESC
-            """
-        ).fetchall():
-            if r["cam_label"] not in final_calib:
-                final_calib[r["cam_label"]] = r["calib_id"]
-
-        _log.debug("  cameras with calibration via JOIN: %s", list(final_calib.keys()))
-
-        # Per-video override from capture_videos for this shot takes highest priority.
-        for r in conn.execute(
-            """
-            SELECT ci.label AS cam_label, cv.intrinsics_calibration_id
-            FROM capture_videos cv
-            JOIN camera_instances ci ON ci.id = cv.camera_instance_id
-            WHERE cv.shot_id = ? AND cv.intrinsics_calibration_id IS NOT NULL
-            """,
-            (shot_id,),
-        ).fetchall():
-            final_calib[r["cam_label"]] = r["intrinsics_calibration_id"]
-
-        # Collect all labels we know about (with or without intrinsics) for matching.
-        all_labels: set[str] = set(final_calib.keys())
-        for r in conn.execute(
-            """
-            SELECT ci.label AS cam_label
-            FROM capture_videos cv
-            JOIN camera_instances ci ON ci.id = cv.camera_instance_id
-            WHERE cv.shot_id = ?
-            """,
-            (shot_id,),
-        ).fetchall():
-            all_labels.add(r["cam_label"])
-
-        intrinsics: dict[str, dict] = {}
-        for label, calib_id in final_calib.items():
-            ic = conn.execute(
-                "SELECT * FROM intrinsics_calibrations WHERE id = ?", (calib_id,)
-            ).fetchone()
-            if ic is None:
-                continue
-            intrinsics[label] = _resolve_intrinsics(ic)
-    finally:
-        conn.row_factory = old_factory
-
-    all_labels_list = list(all_labels)
-    states: list[CamCalibState] = []
-    for png in sorted(images_dir.glob("*.png")):
-        file_label = _ui_label_from_filename(png.name)
-        if file_label is None:
-            print(f"  SKIP {png.name} — filename doesn't match expected pattern")
-            continue
-        db_label = _ui_match_label(file_label, all_labels_list)
-        if db_label is None:
-            print(f"  SKIP {png.name} — '{file_label}' not found in camera registry")
-            continue
-        if db_label not in intrinsics:
-            print(f"  SKIP {png.name} — '{db_label}' has no intrinsics calibration")
-            continue
-        img = cv2.imread(str(png))
-        if img is None:
-            print(f"  SKIP {png.name} — could not read image")
-            continue
-        intr = intrinsics[db_label]
-        states.append(CamCalibState(
-            video_id=db_label,
-            label=db_label,
-            K=intr["K"],
-            K_orig=intr["K_orig"],
-            dist=intr["dist"],
-            fisheye=intr["fisheye"],
-            image=img,
-            calib_id=final_calib.get(db_label),
-        ))
-        print(f"  LOAD {db_label} ({img.shape[1]}×{img.shape[0]}) from {png.name}")
-    return states
 
 
 def _resolve_intrinsics(ic: sqlite3.Row) -> dict:
@@ -344,7 +200,6 @@ def _load_states_from_capture(
 ) -> list[CamCalibState]:
     """Load CamCalibState list directly from this capture's video files.
 
-    Unlike ``_load_states_from_images``, no filename matching is needed:
     ``capture_videos.camera_instance_id`` already links each video file
     directly to its camera instance, so intrinsics resolve without going
     through a camera label round-trip.
@@ -354,8 +209,7 @@ def _load_states_from_capture(
     ``ExtrinsicsAutoCalibDialog``, which wires a ``VideoScrubBar`` per camera
     using the ``file_path``/``first_frame``/``last_frame`` fields set here).
 
-    Priority for picking the intrinsics calibration (same as
-    ``_load_states_from_images``):
+    Priority for picking the intrinsics calibration:
       1. Per-video override in capture_videos.intrinsics_calibration_id
       2. Mode default (camera_modes.default_intrinsics_calibration_id)
       3. Latest calibration for the camera's mode
@@ -3646,19 +3500,11 @@ class ExtrinsicsImportWidget(QWidget):
             "Run semi-automatic calibration by scrubbing this capture's video "
             "files directly — no still-frame export needed."
         )
-        self._auto_btn = QPushButton("Auto-calibrate (image folder)…")
-        self._auto_btn.clicked.connect(self._on_auto_calibrate)
-        self._auto_btn.setToolTip(
-            "Legacy path: run calibration from a directory of previously "
-            "exported PNG frames instead of scrubbing video directly."
-        )
-
         file_row = QHBoxLayout()
         file_row.addWidget(QLabel("TOML file:"))
         file_row.addWidget(self._path_label, 1)
         file_row.addWidget(browse_btn)
         file_row.addWidget(self._auto_video_btn)
-        file_row.addWidget(self._auto_btn)
 
         # ---- Existing calibrations info ----
         self._existing_label = QLabel()
@@ -3760,47 +3606,6 @@ class ExtrinsicsImportWidget(QWidget):
                 "were found for this capture.\n\n"
                 "Make sure video files are registered for this capture and "
                 "intrinsics are calibrated for its cameras.",
-            )
-            return
-
-        dlg = ExtrinsicsAutoCalibDialog(
-            states,
-            self._conn,
-            self._session_id,
-            self._shot_ids,
-            parent=self,
-        )
-        dlg.imported.connect(self._on_auto_imported)
-        dlg.exec()
-
-    def _on_auto_calibrate(self) -> None:
-        """Legacy auto-calibration path: load a directory of exported PNG frames."""
-        if self._conn is None or self._session_id is None:
-            QMessageBox.warning(self, "No session", "Open a session before auto-calibrating.")
-            return
-        if not self._shot_ids:
-            QMessageBox.warning(
-                self, "No shot",
-                "No capture/shot ID available — cannot look up camera intrinsics."
-            )
-            return
-
-        images_dir = QFileDialog.getExistingDirectory(
-            self, "Select exported frames directory"
-        )
-        if not images_dir:
-            return
-
-        states = _load_states_from_images(
-            Path(images_dir), self._conn, self._shot_ids[0],
-        )
-        if not states:
-            QMessageBox.warning(
-                self, "No cameras",
-                "No cameras with matching intrinsics found in the selected directory.\n\n"
-                "Make sure you have:\n"
-                " • exported frames using 'Export frames…' in the sync page\n"
-                " • intrinsics calibrated for the cameras in this session",
             )
             return
 

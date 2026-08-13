@@ -1244,7 +1244,9 @@ class CameraRegistryWidget(QDialog):
                     )
             sess.commit()
 
-            # Post-sync: verify the JOIN that _load_states_from_images relies on
+            # Post-sync: verify the camera_instance -> camera_mode ->
+            # intrinsics_calibrations JOIN other code relies on to resolve
+            # a camera's intrinsics still works after this sync.
             n_cams = sess.execute("""
                 SELECT COUNT(DISTINCT ci.id) FROM camera_instances ci
                 JOIN camera_modes cm ON cm.camera_model_id = ci.camera_model_id

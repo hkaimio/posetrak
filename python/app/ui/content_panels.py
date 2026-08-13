@@ -600,6 +600,7 @@ class CapturePanel(QWidget):
         self._start_label: QLabel | None = None
         self._end_label: QLabel | None = None
         self._detect_btn: QPushButton | None = None
+        self._ext_btn: QPushButton | None = None
         self._build()
 
     def shutdown(self) -> None:
@@ -701,8 +702,8 @@ class CapturePanel(QWidget):
         sync_btn = QPushButton("Set up sync…")
         sync_btn.clicked.connect(self._open_sync)
 
-        ext_btn = QPushButton("Extrinsics…")
-        ext_btn.clicked.connect(self._open_extrinsics)
+        self._ext_btn = QPushButton("Extrinsics…")
+        self._ext_btn.clicked.connect(self._open_extrinsics)
 
         self._detect_btn = QPushButton("New trial…")
         self._detect_btn.clicked.connect(self._open_new_trial_dialog)
@@ -717,10 +718,11 @@ class CapturePanel(QWidget):
         toolbar.addWidget(mark_end_btn)
         toolbar.addStretch()
         toolbar.addWidget(sync_btn)
-        toolbar.addWidget(ext_btn)
+        toolbar.addWidget(self._ext_btn)
         toolbar.addWidget(self._detect_btn)
 
         root.addLayout(toolbar)
+        self._refresh_extrinsics()
 
     def _mark_start(self) -> None:
         if self._scrubber is not None:
@@ -781,18 +783,53 @@ class CapturePanel(QWidget):
         self._scrubber.reload_sync(SyncTable(sync_pts, fps_by_video))
 
     def _open_extrinsics(self) -> None:
-        from app.setup.page_extrinsics import ExtrinsicsImportDialog
+        from app.setup.page_extrinsics import ExtrinsicsStatusDialog
         session_row = self._conn.execute(
             "SELECT id FROM mocap_sessions LIMIT 1"
         ).fetchone()
         if session_row is None:
             return
-        dlg = ExtrinsicsImportDialog(
+        dlg = ExtrinsicsStatusDialog(
             self._conn, session_row["id"],
             shot_ids=[self._capture_id],
             parent=self,
         )
         dlg.exec()
+        self._refresh_extrinsics()
+
+    def _refresh_extrinsics(self) -> None:
+        """Update the Extrinsics… button's text/tooltip to reflect whether
+        this session has a solved calibration -- mirrors _refresh_sync()'s
+        pattern (query current DB state, update a toolbar control), called
+        on panel build and whenever the status dialog closes. See
+        docs/roadmap/features/extrinsics-improvements/
+        extrinsics-ux-redesign.md, UX Phase 2."""
+        if self._ext_btn is None:
+            return
+        session_row = self._conn.execute("SELECT id FROM mocap_sessions LIMIT 1").fetchone()
+        if session_row is None:
+            self._ext_btn.setText("Extrinsics…")
+            self._ext_btn.setToolTip("")
+            return
+        session_id = session_row["id"]
+        calib = self._conn.execute(
+            "SELECT id FROM extrinsic_calibrations WHERE session_id = ? "
+            "ORDER BY calibrated_at DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        n_total = self._conn.execute(
+            "SELECT COUNT(*) FROM session_cameras WHERE session_id = ?", (session_id,)
+        ).fetchone()[0]
+        if calib is None:
+            self._ext_btn.setText("Extrinsics (not set)")
+            self._ext_btn.setToolTip("No extrinsics calibration yet for this session.")
+            return
+        n_solved = self._conn.execute(
+            "SELECT COUNT(*) FROM extrinsic_entries WHERE extrinsic_calibration_id = ?",
+            (calib["id"],),
+        ).fetchone()[0]
+        self._ext_btn.setText(f"Extrinsics ✓ ({n_solved}/{n_total})")
+        self._ext_btn.setToolTip(f"{n_solved} of {n_total} camera(s) solved for this session.")
 
     def _open_new_trial_dialog(self) -> None:
         dlg = _NewTrialDialog(

@@ -269,6 +269,47 @@ def _load_states_from_capture(
         conn.row_factory = old_factory
 
 
+def _open_auto_calibrate_dialog(
+    parent: QWidget,
+    conn: sqlite3.Connection,
+    session_id: str,
+    shot_ids: list[str],
+    on_imported,
+) -> None:
+    """Shared launcher for the GUI-native, video-scrubbing calibration
+    workflow -- both ``ExtrinsicsImportWidget``'s "Auto-calibrate…" button
+    and ``ExtrinsicsStatusDialog``'s "Calibrate…" button (UX Phase 2, see
+    docs/roadmap/features/extrinsics-improvements/
+    extrinsics-ux-redesign.md) open the exact same
+    ``ExtrinsicsAutoCalibDialog`` this way, so the "no shot"/"no cameras"
+    guard messages and camera-state loading only exist once.
+
+    *on_imported* is connected to the dialog's ``imported`` signal --
+    callers differ only in what they do afterward (refresh a label,
+    refresh a status screen).
+    """
+    if not shot_ids:
+        QMessageBox.warning(
+            parent, "No shot", "No capture/shot ID available — cannot look up camera video files."
+        )
+        return
+
+    states = _load_states_from_capture(conn, shot_ids[0])
+    if not states:
+        QMessageBox.warning(
+            parent, "No cameras",
+            "No cameras with both a video file and an intrinsics calibration "
+            "were found for this capture.\n\n"
+            "Make sure video files are registered for this capture and "
+            "intrinsics are calibrated for its cameras.",
+        )
+        return
+
+    dlg = ExtrinsicsAutoCalibDialog(states, conn, session_id, shot_ids, parent=parent)
+    dlg.imported.connect(on_imported)
+    dlg.exec()
+
+
 # ---------------------------------------------------------------------------
 # Clickable camera thumbnail with zoom-on-drag
 # ---------------------------------------------------------------------------
@@ -3470,6 +3511,139 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Status-first entry point (UX Phase 2, see docs/roadmap/features/
+# extrinsics-improvements/extrinsics-ux-redesign.md) -- replaces
+# unconditionally launching a TOML-editing screen ("Extrinsics…" used to
+# always open ExtrinsicsImportDialog directly) with a status view first:
+# what's solved, then explicit actions to change that.
+# ---------------------------------------------------------------------------
+
+
+class ExtrinsicsStatusDialog(QDialog):
+    """Per-camera solved/not-solved status for a session's extrinsics,
+    with explicit actions to (re)calibrate rather than dropping straight
+    into a TOML-import screen regardless of whether the user has a TOML
+    at all.
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        session_id: str,
+        shot_ids: list[str] | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Extrinsics")
+        self.setMinimumSize(520, 360)
+        self._conn = conn
+        self._session_id = session_id
+        self._shot_ids = shot_ids or []
+
+        self._summary_label = QLabel()
+        self._summary_label.setWordWrap(True)
+
+        self._table = QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels(["Camera", "Position (m)", "Source"])
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+
+        calibrate_btn = QPushButton("Calibrate…")
+        calibrate_btn.setToolTip(
+            "Run the GUI-native calibration workflow (scrub video, detect "
+            "markers/rig, solve)."
+        )
+        calibrate_btn.clicked.connect(self._on_calibrate)
+        import_btn = QPushButton("Import TOML…")
+        import_btn.setToolTip("Import a Pose2Sim calibration TOML file.")
+        import_btn.clicked.connect(self._on_import_toml)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(calibrate_btn)
+        btn_row.addWidget(import_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._summary_label)
+        layout.addWidget(self._table, 1)
+        layout.addLayout(btn_row)
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        old_factory = self._conn.row_factory
+        self._conn.row_factory = sqlite3.Row
+        try:
+            calib = self._conn.execute(
+                "SELECT id, calibrated_at, method FROM extrinsic_calibrations "
+                "WHERE session_id = ? ORDER BY calibrated_at DESC LIMIT 1",
+                (self._session_id,),
+            ).fetchone()
+            cams = self._conn.execute(
+                "SELECT ci.id, ci.label FROM session_cameras sc "
+                "JOIN camera_instances ci ON ci.id = sc.camera_instance_id "
+                "WHERE sc.session_id = ? ORDER BY ci.label",
+                (self._session_id,),
+            ).fetchall()
+            entries: dict[str, sqlite3.Row] = {}
+            if calib is not None:
+                for row in self._conn.execute(
+                    "SELECT camera_instance_id, R, t FROM extrinsic_entries "
+                    "WHERE extrinsic_calibration_id = ?",
+                    (calib["id"],),
+                ).fetchall():
+                    entries[row["camera_instance_id"]] = row
+        finally:
+            self._conn.row_factory = old_factory
+
+        n_total = len(cams)
+        n_solved = len(entries)
+        if calib is None:
+            self._summary_label.setText("No extrinsics calibration yet for this session.")
+        else:
+            date = (calib["calibrated_at"] or "")[:10]
+            method = calib["method"] or "?"
+            self._summary_label.setText(
+                f"{n_solved} / {n_total} camera(s) solved  ·  {method}  ·  {date}"
+            )
+
+        self._table.setRowCount(n_total)
+        for i, cam in enumerate(cams):
+            self._table.setItem(i, 0, QTableWidgetItem(cam["label"]))
+            entry = entries.get(cam["id"])
+            if entry is not None:
+                R = np.array(struct.unpack("<9d", bytes(entry["R"]))).reshape(3, 3)
+                t = np.array(struct.unpack("<3d", bytes(entry["t"])))
+                C = -R.T @ t  # camera center in world coords, same convention as write_extrinsics_to_db's callers
+                pos_text = f"{C[0]:+.2f}, {C[1]:+.2f}, {C[2]:+.2f}"
+                source = (calib["method"] or "?") if calib is not None else "?"
+            else:
+                pos_text = "—"
+                source = "not solved"
+            self._table.setItem(i, 1, QTableWidgetItem(pos_text))
+            self._table.setItem(i, 2, QTableWidgetItem(source))
+
+    def _on_calibrate(self) -> None:
+        _open_auto_calibrate_dialog(
+            self, self._conn, self._session_id, self._shot_ids,
+            lambda _calib_id: self._refresh(),
+        )
+
+    def _on_import_toml(self) -> None:
+        dlg = ExtrinsicsImportDialog(self._conn, self._session_id, self._shot_ids, parent=self)
+        dlg.exec()
+        self._refresh()
+
+
+# ---------------------------------------------------------------------------
 # Core widget
 # ---------------------------------------------------------------------------
 
@@ -3591,33 +3765,9 @@ class ExtrinsicsImportWidget(QWidget):
         if self._conn is None or self._session_id is None:
             QMessageBox.warning(self, "No session", "Open a session before auto-calibrating.")
             return
-        if not self._shot_ids:
-            QMessageBox.warning(
-                self, "No shot",
-                "No capture/shot ID available — cannot look up camera video files."
-            )
-            return
-
-        states = _load_states_from_capture(self._conn, self._shot_ids[0])
-        if not states:
-            QMessageBox.warning(
-                self, "No cameras",
-                "No cameras with both a video file and an intrinsics calibration "
-                "were found for this capture.\n\n"
-                "Make sure video files are registered for this capture and "
-                "intrinsics are calibrated for its cameras.",
-            )
-            return
-
-        dlg = ExtrinsicsAutoCalibDialog(
-            states,
-            self._conn,
-            self._session_id,
-            self._shot_ids,
-            parent=self,
+        _open_auto_calibrate_dialog(
+            self, self._conn, self._session_id, self._shot_ids, self._on_auto_imported
         )
-        dlg.imported.connect(self._on_auto_imported)
-        dlg.exec()
 
     def _on_auto_imported(self, calib_id: str) -> None:
         self._refresh_existing_label()

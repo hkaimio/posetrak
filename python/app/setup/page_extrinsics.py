@@ -176,6 +176,21 @@ def _make_collapsible(group: QGroupBox) -> None:
     group.toggled.connect(lambda checked: _set_layout_items_visible(layout, checked))
 
 
+def _centered_cell_widget(inner: QWidget) -> QWidget:
+    """Wrap *inner* (typically a bare, unlabelled QCheckBox) in a
+    zero-margin, centered container -- a checkbox added directly via
+    ``QTableWidget.setCellWidget`` otherwise sits left-aligned with its
+    own built-in indent, off-center under a centered column header. Used
+    by the per-camera results table's Refine/Lock/Excl columns (UX
+    Phase 4)."""
+    wrapper = QWidget()
+    layout = QHBoxLayout(wrapper)
+    layout.addWidget(inner)
+    layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    layout.setContentsMargins(0, 0, 0, 0)
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
@@ -1237,7 +1252,6 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._control_points: list[ControlPoint] = []
         self._selected_cp_idx: int | None = None
         self._intrinsics_combos: dict[str, QComboBox] = {}
-        self._intrinsics_detail_labels: dict[str, QLabel] = {}
         self._cam_pos_obs: list[CamPosObs] = []
         self._refine_intrinsics: set[str] = set()
         self._locked_cameras: set[str] = set()
@@ -1422,23 +1436,33 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         solve_row.addWidget(self._ransac_px_spin)
         solve_row.addWidget(self._status_label, 1)
 
-        # Camera positions table (shown after solve or DB load)
-        self._cam_pos_table = QTableWidget(0, 5)
+        # Per-camera results/settings table -- always visible, full width,
+        # one row per camera, populated immediately (not just after a
+        # solve/DB load): position/CP-error start at "—" until solved.
+        # Columns 5-8 (Intrinsics/Refine/Lock/Excl) used to be a separate
+        # "Camera Intrinsics" sidebar section; UX Phase 4 (see
+        # docs/roadmap/features/extrinsics-improvements/
+        # extrinsics-ux-redesign.md) folded them in here instead, so
+        # everything about one camera lives in one row.
+        self._cam_pos_table = QTableWidget(0, 9)
         self._cam_pos_table.setHorizontalHeaderLabels(
-            ["Camera", "X (m)", "Y (m)", "Z (m)", "CP error"]
+            ["Camera", "X (m)", "Y (m)", "Z (m)", "CP error",
+             "Intrinsics", "Refine", "Lock", "Excl"]
         )
         self._cam_pos_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
         )
-        for col in range(1, 5):
+        self._cam_pos_table.horizontalHeader().setSectionResizeMode(
+            5, QHeaderView.ResizeMode.Stretch
+        )
+        for col in (1, 2, 3, 4, 6, 7, 8):
             self._cam_pos_table.horizontalHeader().setSectionResizeMode(
                 col, QHeaderView.ResizeMode.ResizeToContents
             )
-        self._cam_pos_table.setMaximumHeight(140)
+        self._cam_pos_table.setMaximumHeight(180)
         self._cam_pos_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._cam_pos_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         self._cam_pos_table.setAlternatingRowColors(True)
-        self._cam_pos_table.setVisible(False)
 
         # Dialog buttons
         btn_box = QDialogButtonBox()
@@ -1453,6 +1477,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         root.addLayout(solve_row)
         root.addWidget(self._cam_pos_table)
         root.addWidget(btn_box)
+
+        self._populate_cam_pos_table_rows()
+        self._refresh_cam_pos_table()
 
     def _build_cp_panel(self) -> QWidget:
         panel = QWidget()
@@ -1526,11 +1553,15 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         aruco_group = self._build_aruco_group()
         charuco_group = self._build_charuco_group()
         rig_group = self._build_rig_group()
-        intrinsics_group = self._build_intrinsics_group()
         # Collapsible: each of these sections got real complaints about not
         # fitting (UI testing, 2026-08-09) once the panel had to hold all of
-        # them at once alongside Control Points/World Position.
-        for grp in (aruco_group, charuco_group, rig_group, intrinsics_group):
+        # them at once alongside Control Points/World Position. Camera
+        # Intrinsics used to be a fourth section here too, until UX Phase 4
+        # (see docs/roadmap/features/extrinsics-improvements/
+        # extrinsics-ux-redesign.md) folded it into the per-camera results
+        # table instead -- always visible there, full width, one row per
+        # camera with everything about that camera in one place.
+        for grp in (aruco_group, charuco_group, rig_group):
             _make_collapsible(grp)
 
         v = QVBoxLayout(panel)
@@ -1540,7 +1571,6 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         v.addWidget(aruco_group)
         v.addWidget(charuco_group)
         v.addWidget(rig_group)
-        v.addWidget(intrinsics_group)
 
         # Vertical scroll fallback: collapsing sections covers most cases,
         # but if everything is expanded at once on a short window, scroll
@@ -1915,34 +1945,25 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         layout.addLayout(btn_row)
         return group
 
-    def _build_intrinsics_group(self) -> QGroupBox:
-        """One block per camera, stacked over 3 lines rather than a single
-        wide row -- a single-row layout (label + combo + 3 checkboxes)
-        made the intrinsics-calibration combo too narrow to read its own
-        text once the panel's fixed width had to also fit the ArUco/
-        ChArUco sections (found via UI testing, 2026-08-09)."""
-        group = QGroupBox("Camera Intrinsics")
-        layout = QVBoxLayout(group)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(6)
+    def _populate_cam_pos_table_rows(self) -> None:
+        """Build the per-camera results table's Intrinsics/Refine/Lock/Excl
+        cell widgets once, at dialog build time (UX Phase 4 -- see
+        docs/roadmap/features/extrinsics-improvements/
+        extrinsics-ux-redesign.md; this replaces the old "Camera
+        Intrinsics" sidebar section, ``_build_intrinsics_group``).
 
-        for i, state in enumerate(self._states):
-            if i > 0:
-                sep = QFrame()
-                sep.setFrameShape(QFrame.Shape.HLine)
-                sep.setFrameShadow(QFrame.Shadow.Sunken)
-                layout.addWidget(sep)
-
-            lbl = QLabel(f"<b>{state.label}</b>")
-            lbl.setToolTip(state.label)
+        Unlike the plain-text Camera/Position/CP-error columns
+        (``_refresh_cam_pos_table``, re-run after every solve/DB load),
+        these don't need to be recreated on refresh: their own signal
+        handlers update the underlying state directly, and the camera set
+        itself never changes after the dialog is built.
+        """
+        self._cam_pos_table.setRowCount(len(self._states))
+        for row, state in enumerate(self._states):
+            vid = state.video_id
 
             combo = QComboBox()
-            combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            detail_label = QLabel()
-            detail_label.setStyleSheet("color: #666; font-size: 10px;")
             self._populate_intrinsics_combo(state, combo)
-            vid = state.video_id
-            self._intrinsics_detail_labels[vid] = detail_label
             self._intrinsics_combos[vid] = combo
             self._refresh_intrinsics_detail_label(vid)
             combo.currentIndexChanged.connect(
@@ -1951,8 +1972,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             combo.currentIndexChanged.connect(
                 lambda _idx, v=vid: self._refresh_intrinsics_detail_label(v)
             )
+            self._cam_pos_table.setCellWidget(row, 5, combo)
 
-            refine_cb = QCheckBox("Refine")
+            refine_cb = QCheckBox()
             refine_cb.setToolTip("Optimise fx/fy for this camera during bundle adjustment")
             refine_cb.toggled.connect(
                 lambda checked, v=vid: (
@@ -1960,7 +1982,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                     else self._refine_intrinsics.discard(v)
                 )
             )
-            lock_cb = QCheckBox("Lock")
+            self._cam_pos_table.setCellWidget(row, 6, _centered_cell_widget(refine_cb))
+
+            lock_cb = QCheckBox()
             lock_cb.setToolTip("Keep this camera's pose fixed in the next solve")
             lock_cb.setEnabled(state.R is not None)
             lock_cb.toggled.connect(
@@ -1970,7 +1994,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 )
             )
             self._lock_cbs[vid] = lock_cb
-            excl_cb = QCheckBox("Excl")
+            self._cam_pos_table.setCellWidget(row, 7, _centered_cell_widget(lock_cb))
+
+            excl_cb = QCheckBox()
             excl_cb.setToolTip("Exclude this camera from the next solve entirely")
             excl_cb.toggled.connect(
                 lambda checked, v=vid: (
@@ -1978,19 +2004,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                     else self._excluded_cameras.discard(v)
                 )
             )
-            checkbox_row = QHBoxLayout()
-            checkbox_row.setSpacing(8)
-            checkbox_row.addWidget(refine_cb)
-            checkbox_row.addWidget(lock_cb)
-            checkbox_row.addWidget(excl_cb)
-            checkbox_row.addStretch()
-
-            layout.addWidget(lbl)
-            layout.addWidget(combo)
-            layout.addWidget(detail_label)
-            layout.addLayout(checkbox_row)
-
-        return group
+            self._cam_pos_table.setCellWidget(row, 8, _centered_cell_widget(excl_cb))
 
     def _populate_intrinsics_combo(self, state: CamCalibState, combo: QComboBox) -> None:
         """Item text leads with the user's own notes (typed in when the
@@ -2041,13 +2055,16 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         """Show the technical details (date/RMS/model) for whichever
         intrinsics calibration is currently selected -- notes lead the
         combo item itself (see ``_populate_intrinsics_combo``), so this is
-        the only place these still show at all."""
-        label = self._intrinsics_detail_labels.get(video_id)
+        the only place these still show at all. As a tooltip on the combo
+        rather than a separate label since UX Phase 4 (see
+        docs/roadmap/features/extrinsics-improvements/
+        extrinsics-ux-redesign.md) moved this combo into a table cell,
+        where there's no room for a second line of text."""
         combo = self._intrinsics_combos.get(video_id)
-        if label is None or combo is None:
+        if combo is None:
             return
         detail = combo.currentData(Qt.ItemDataRole.UserRole + 1)
-        label.setText(detail or "")
+        combo.setToolTip(detail or "")
 
     def _on_intrinsics_changed(self, video_id: str, calib_id: str | None) -> None:
         if not calib_id:

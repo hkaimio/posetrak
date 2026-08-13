@@ -1,9 +1,9 @@
 # Extrinsics calibration UX redesign — draft proposal
 
-**Status: reviewed, one open question left** (per-camera calibration
-quality persistence — see "Open questions" at the end; non-blocking).
-Everything else is decided. Ready to turn into a phased implementation
-plan on request.
+**Status: reviewed, phased implementation plan drafted.** One open
+question left (per-camera calibration quality persistence — see "Open
+questions"; non-blocking, doesn't hold up starting). Ready to begin
+UX Phase 1 on request.
 
 ## Why this exists
 
@@ -477,6 +477,190 @@ enough to plan implementation around.
    History view and the status screen's quality column could eventually
    be. Fine to leave open and revisit whenever that tracker-side work is
    actually on deck.
+
+## Phased implementation plan
+
+Same shape as the rest of this feature's roadmap: each phase lands as its
+own self-contained, tested change. Numbered independently from the main
+design doc's Phases 1–9 (this is UI restructuring, not new capability) —
+labelled "UX Phase" throughout, including wherever these land in
+`status.md`, to keep the two numbering sequences from colliding.
+
+Ordered low-risk/high-visibility first, riskiest structural change
+(UX Phase 7) last, so each earlier phase's tests and live-testing pass
+give more confidence before the biggest rework starts. UX Phase 8 (D2) is
+listed for completeness but stays deferred per the Decided note above —
+not scoped in detail, not part of this round.
+
+### UX Phase 1 — Remove the legacy image-folder path
+
+- Delete `_on_auto_calibrate()`, the `Auto-calibrate (image folder)…`
+  button and its wiring in `ExtrinsicsImportWidget.__init__`, and
+  `_load_states_from_images` from `page_extrinsics.py`.
+- Drop now-unused imports; update or remove the descriptive (non-calling)
+  comment in `camera_registry.py` that references
+  `_load_states_from_images` if it goes stale.
+
+**Validation:** full regression sweep (no test currently references this
+path — confirmed during the design pass, so none should need updating);
+manual check that the file row now holds two buttons, not three, and
+reads less cramped.
+
+### UX Phase 2 — Status-first entry point
+
+- New status dialog in `page_extrinsics.py` (e.g. `ExtrinsicsStatusDialog`):
+  summary line (N/M cameras solved, method, date) + a per-camera table
+  (Camera / Position / Source), and `Calibrate…` / `Import TOML…` / `Close`
+  buttons (`History…` excluded — deferred).
+- `CapturePanel._open_extrinsics()` (`content_panels.py:783`) launches
+  this instead of `ExtrinsicsImportDialog` directly.
+- New `CapturePanel._refresh_extrinsics()`, mirroring the existing
+  `_refresh_sync()` (`content_panels.py:750`): queries whether the
+  session has a solved `extrinsic_calibrations` row, updates the
+  `Extrinsics…` button's text/tooltip. Called on panel build and whenever
+  the status dialog closes.
+- `Calibrate…` opens `ExtrinsicsAutoCalibDialog` unchanged at this phase;
+  `Import TOML…` opens the (not yet slimmed — see UX Phase 3)
+  `ExtrinsicsImportWidget`.
+
+**Validation:** new tests for the status dialog (correct camera list/
+positions/solved-state for a seeded session, with and without
+`extrinsic_entries` rows) and for `_refresh_extrinsics()`'s button-text
+behavior; manual check against one real session with extrinsics and one
+without.
+
+### UX Phase 3 — Split TOML import out cleanly
+
+- Remove the (now sole survivor, since UX Phase 1) `Auto-calibrate…`
+  video button from `ExtrinsicsImportWidget`'s file row — routing to the
+  GUI-native workflow now happens via the UX Phase 2 status dialog's
+  `Calibrate…` button instead.
+- `ExtrinsicsImportWidget` becomes purely: file-browse, existing-
+  calibrations label, camera-assignment table, `Import` button.
+- Check the pose-window entry point (`app/pose/main.py:452`, also opens
+  `ExtrinsicsImportDialog`) still makes sense pointed at this now-TOML-
+  only widget — it may want the same status-first treatment as
+  `CapturePanel`, or may be fine importing directly; note whichever way
+  this goes, don't silently change its behavior without checking.
+
+**Validation:** existing `ExtrinsicsImportWidget`/`ExtrinsicsImportDialog`
+tests updated for the removed button; manual re-verification of the TOML
+import flow end to end from both entry points.
+
+### UX Phase 4 — Fold Intrinsics into the per-camera results table
+
+- Extend `_cam_pos_table` (`page_extrinsics.py:1523`) with new columns:
+  Intrinsics (combo, notes-first per the 2026-08-13 fix — reuses
+  `_populate_intrinsics_combo`, detail text as a cell tooltip instead of
+  a separate label since table cells are tighter than the old sidebar
+  block), Refine, Lock, Excl (checkboxes, same `_refine_intrinsics`/
+  `_locked_cameras`/`_excluded_cameras` set-wiring as today).
+- Remove `_build_intrinsics_group()` and the "Camera Intrinsics"
+  collapsible sidebar section entirely.
+
+**Validation:** update `test_extrinsics_panel_layout.py`'s intrinsics
+tests to look for the combo/checkboxes in the results table; verify
+`_cam_pos_table` still populates correctly after a solve; live check that
+changing a camera's intrinsics from its new table cell still re-solves
+correctly.
+
+### UX Phase 5 — Explicit, always-named Save/Load Markers
+
+- New "Save Markers…" dialog: checklist of every `world_xyz`-eligible
+  item this session currently has (rig anchor, sized ArUco/ChArUco
+  markers with a solved pose — manually-anchored CPs are explicitly
+  **out of scope for this phase**, since saving those needs UX Phase 8/D2's
+  reference-image mechanism to be useful on reload; the picker only
+  offers what can actually be auto-redetected), default all-checked,
+  required name field (`Save` disabled until non-empty). Writes via
+  `upsert_scene_marker_body(..., group_name=name)` per checked item.
+- Removes `_scene_marker_group_edit` and Accept's implicit persistence —
+  saving becomes this one explicit action.
+- Rename "From Scene Markers…" → "Load Markers…"; `_SceneMarkerGroupPickerDialog`
+  drops its `(ungrouped)` row (see the residual, unconfirmed proposal in
+  Decided about pre-existing ungrouped data).
+- Confirm-before-clobber: before applying a loaded configuration, check
+  for an existing rig anchor or manually-anchored CPs from a different
+  source; if found, `QMessageBox.question` before replacing.
+- CLI: `anchor-rig`/`reanchor --name` becomes `required=True`.
+
+**Validation:** new tests — Save Markers picker eligibility/defaults/
+required-name enforcement; Load Markers always shows the named list, never
+an ungrouped fallback; confirm-before-clobber prompts correctly on both
+accept and cancel paths. CLI tests updated for `--name` now required.
+Full regression sweep.
+
+### UX Phase 6 — Sidebar reorg: Actions / Anchoring
+
+- Restructure `_build_cp_panel()` into two always-visible sidebar groups
+  (no tabs, no collapse-by-default, per Harri's iterative-workflow steer):
+  - **Actions**: ArUco detect (dictionary/size settings + button), ChArUco
+    detect (board settings + button), rig loading (Load Config…/From
+    Registry…/Load Markers…), manual-CP placement.
+  - **Anchoring**: rig Anchor button + min-cameras-to-anchor spinbox,
+    ChArUco "Set origin & axes," manual World Position XYZ fields +
+    Apply, Save Markers…/Manage Scene Markers….
+- Every per-action setting moves with its action, not as a separate peer
+  groupbox.
+
+**Validation:** update `test_extrinsics_panel_layout.py`'s section tests
+for the new two-groupbox structure; manual check the sidebar fits
+comfortably at 300px with the smaller sections; live re-test of the full
+rig-anchor and ArUco/ChArUco workflows end to end to confirm the move
+didn't change behavior, only location.
+
+### UX Phase 7 — Unified Data table
+
+- New full-width table below the camera grid, alongside UX Phase 4's
+  Cameras table: one row per data point — Type (marker/CP/rig-corner/
+  cam-pos-obs), Label, Cameras observing it, World position (if
+  anchored), Source.
+- Replaces `_cp_list` and `_marker_table` as the CP-selection-for-
+  placement mechanism: selecting a "CP" row arms click-to-place the same
+  way `_cp_list`'s selection does today. Rig-corner and cam-pos-obs rows
+  are read-only (populated by their own Action-section triggers, not
+  directly editable here) — both get list representation for the first
+  time; today they only exist as image overlays.
+
+**Validation:** the most invasive phase — plan for the widest live-
+testing pass of the whole plan. New tests for the table's population
+from every source (CPs, markers, rig detections, cam-pos-obs) and for
+CP-placement-via-table-selection behavioral parity with today's
+`_cp_list`-driven flow. Live re-test of every anchoring path (manual CP,
+rig, ChArUco, scattered tags) end to end against real capture footage
+before calling this phase done.
+
+### UX Phase 8 (deferred) — D2: manual CPs in saved configurations
+
+Not scoped in detail — per the Decided note above, scoping happens when
+this is actually picked up, not as part of this round. Placeholder shape
+only: a `scene_control_points`-like table (world position + reference
+image), the UX Phase 5 Save Markers picker extended to include anchoring
+CPs once this lands, and a Load Markers experience for manual points that
+shows the reference image and waits for a matching click instead of
+auto-detecting.
+
+**Validation:** TBD when scoped.
+
+### Phase summary
+
+| Phase | Description | Depends on |
+|-------|-------------|------------|
+| UX 1 | Remove legacy image-folder path | — |
+| UX 2 | Status-first entry point + `CapturePanel` button refresh | — |
+| UX 3 | Split TOML import out cleanly | UX 2 |
+| UX 4 | Fold Intrinsics into the per-camera results table | — |
+| UX 5 | Explicit, always-named Save/Load Markers + CLI `--name` required | — |
+| UX 6 | Sidebar reorg: Actions / Anchoring | UX 5 (moves its buttons) |
+| UX 7 | Unified Data table | UX 6 (lands in the reorganized sidebar's place) |
+| UX 8 | *(deferred)* D2: manual CPs in saved configurations | UX 5, UX 7 |
+
+UX 1/2/3 (entry point) and UX 4 (Cameras table) have no real dependencies
+on each other or on UX 5/6/7 — could land in either order, or in
+parallel, without conflict. UX 5 should land before UX 6 so "Actions"/
+"Anchoring" are organizing already-final button behavior, not something
+about to change again. UX 7 is sequenced last deliberately, per the
+ordering note above.
 
 With that, this document has enough resolved to become a phased
 implementation plan — happy to draft one (same shape as the rest of this

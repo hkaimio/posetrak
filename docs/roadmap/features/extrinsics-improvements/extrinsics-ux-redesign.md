@@ -78,9 +78,7 @@ still-frame export step). Grounding for removal:
 - It's the third button crammed into a file row that only has room for two,
   which is a large part of why that row is cramped in the first place.
 
-Proposed: remove it. Flagged as an open question below in case Harri knows
-of a use case (e.g. a capture with no usable video, only exported stills)
-that the video-scrubbing path can't cover.
+**Decided:** remove it.
 
 ### The `ExtrinsicsAutoCalibDialog` sidebar
 
@@ -219,8 +217,7 @@ confusingly, an entry point to the entire GUI-native workflow.
 
 Delete `_on_auto_calibrate()`, the `Auto-calibrate (image folder)…` button,
 and `_load_states_from_images` (if nothing else uses it once the button is
-gone). Confirm with Harri first (open question below) since this is a
-one-way deletion of a working, if unused, code path.
+gone). **Decided** — see below.
 
 ### D. Explicit save/load for scene markers, always named
 
@@ -273,52 +270,171 @@ auto-redetect toggle is the worked example) — scope the check to the
 moment of the write, ask rather than silently deciding, don't build a
 global precedence system for it.
 
+### D2. Manual control points belong in saved configurations too
+
+Everything above only covers marker-based anchors (rig instances, scattered
+ArUco tags). Harri's addition: a saved configuration should also be able to
+carry **manually-placed control points that fix world coordinates** — the
+case where a scene has no calibration rig but the user has typed in 3D
+coordinates for a few known points to anchor the frame directly. Two cases,
+worth distinguishing precisely because they get different treatment:
+
+- **(a) Anchoring CPs** — a control point with `world_xyz` set, used to fix
+  scale/origin. Valuable to save: this is exactly the same *kind* of thing
+  a rig or a scattered tag is (something with a known world position that a
+  later capture might want to reuse), just placed by hand instead of
+  detected.
+- **(b) Free CPs** — a control point with no `world_xyz`, added only to
+  help this particular solve (e.g. not enough markers visible in every
+  camera). **Not worth saving** — without a world position they're only
+  meaningful as pixel correspondences within the one solve they were placed
+  for; importing them into an unrelated later capture brings nothing.
+
+So the eligibility rule for "Save Markers…" (or whatever it ends up
+called — see below) extends cleanly: *any* control point with `world_xyz`
+set is eligible, regardless of whether it came from a rig, a detected tag,
+or a manual click. Free CPs never appear in the picker at all.
+
+The real complication is on the **load side**. A saved marker/tag has an
+ID an `ArucoDetector` can search for automatically — that's the whole
+mechanism "Load Markers…" relies on. A manually-placed point has no such
+signature; the only way a human can find "this same physical point" again
+in a new capture's camera views is to look at where it was the first time.
+That means a saved manual CP needs **a reference image** — a crop/thumbnail
+of the camera view it was placed in, showing roughly where it sits — and
+the load-side UI needs to show that reference next to the live camera
+panes so the user can click the matching spot (reusing the existing
+select-CP-then-click-on-camera interaction, just pre-seeded with the saved
+world position and a picture to match against instead of starting blind).
+
+This is real new scope, not a small addition to D:
+
+- A new place to store reference imagery per saved manual CP — a crop
+  BLOB (or a path, if this project's convention is to keep large binaries
+  out of the DB — worth checking that convention before deciding) tied to
+  which camera/frame it was captured from. Likely a new table (a manual CP
+  doesn't fit `scene_marker_bodies`' shape — no dictionary/marker_id, and
+  it needs the image column that table was never going to need), something
+  like `scene_control_points` (session_id, group_name, label, world_xyz,
+  reference_camera_label, reference_frame_idx, reference_image, created_at).
+- A "Load Markers…" experience that, for a manual CP, doesn't auto-detect
+  but instead surfaces the reference image and waits for the user to click
+  the corresponding point in a current camera view.
+
+Proposed: land this as its own follow-on phase, after the marker-only
+save/load flow in D lands and proves the picker/naming pattern works —
+same incremental, test-each-step approach the rest of this feature has
+used throughout. The eligibility rule (only `world_xyz`-set CPs) and the
+picker/name UI from D should carry over directly; only the reference-image
+storage and the load-side "match against a picture" interaction are new.
+
 ### E. Sidebar reorganization
 
-This is the part with real design forks — three concrete options, roughly
-increasing in how much they change:
+My original pass at this (three groupings — Anchor World Frame / Marker
+Detection / Cameras, in tabs) is superseded by a better model Harri
+proposed: organize by **role**, not by *which detector produced the data*.
+Three roles:
 
-**Option 1 — Regroup into fewer top-level sections.** Keep the flat
-collapsible-groupbox structure, but reduce six peers to three:
-- **"Anchor World Frame"**: Control Points + World Position + Marker
-  Rig/Scene Markers folded into one section (they're all ways to fix scale/
-  origin), probably as inner tabs (Manual / Rig / Scene Markers) rather
-  than three inner subsections.
-- **"Marker Detection"**: ArUco + ChArUco (detection settings that feed
-  free correspondences and/or the anchor).
-- **"Cameras"**: Intrinsics selection, unchanged.
+- **Data** — everything currently contributing to the solve: detected
+  ArUco/ChArUco markers, manually-placed control points, a loaded rig's
+  corners, and camera-position observations (one camera's manually-marked
+  sighting of another camera, the `CamPosObs`/`_on_cam_pos_set` mechanism
+  at `page_extrinsics.py:2311` — real, already-shipped, but currently has
+  no list representation at all, only the gold/cyan markers drawn directly
+  on camera images). All of these are "a data point that helps solve
+  camera poses"; today they're scattered across three separate,
+  inconsistent representations (`_cp_list`, `_marker_table`, and nothing
+  at all for rig corners or cam-pos observations beyond image overlays).
+- **Actions** — how you *add* data: detect ArUco, detect ChArUco, load a
+  rig, place a manual control point. Each action's own settings (ArUco
+  dictionary/size, ChArUco board dimensions, rig min-marker-%) live with
+  the action that uses them, not as separate peer sections.
+- **Anchoring** — how you *fix the world frame*: anchor from a loaded rig,
+  or give one or more control points explicit world coordinates. This is
+  the "commit" step — everything in Data can exist without anchoring
+  anything (free correspondences still help the SIFT solve); Anchoring is
+  specifically about which data points get a fixed `world_xyz`.
 
-Lowest-risk, smallest diff from today's code — still a scrollable sidebar,
-just fewer, more meaningful toggles. Doesn't fully solve "which of these
-are alternatives" but goes a long way.
+This is a real improvement over my original grouping: it separates "what
+do I have" from "how do I get more" from "how do I fix the frame," which
+is a cleaner match for how calibration actually gets used than grouping by
+detector type. It also surfaces a genuine current gap — a unified Data
+list would replace three inconsistent representations (a list widget, a
+table widget, and "nothing, look at the image overlay") with one, and
+would be the natural place for the "Save Markers…"/"Load Markers…" picker
+in D to draw its rows from (anything in Data with `world_xyz` set is
+exactly the D picker's eligibility set).
 
-**Option 2 — Tabs instead of a scrolling accordion.** Same three groupings
-as Option 1, but as actual `QTabWidget` tabs instead of collapsible
-sections — only one tab's content occupies the sidebar's height at a time,
-no scrolling. Slightly more code churn (tab widget + state preserved across
-tab switches) but a cleaner result — matches how the six sections were
-never meant to all be open simultaneously anyway (that's exactly what
-"collapsible" already assumes).
+**Where does Cameras/Intrinsics go?** It doesn't fit any of the three
+roles — it's not scene data, not an action that adds scene data, and not
+part of anchoring. Leaving it as a fourth, separate area is the
+straightforward answer, but it's worth asking directly: does per-camera
+intrinsics *selection* even belong in the extrinsics-calibration dialog at
+all, or is it just parked here because this dialog happened to need it and
+there was nowhere else convenient? Not proposing to move it — just
+flagging that "leave it as a fourth section" is an answer of convenience,
+not one derived from the Data/Actions/Anchoring model, and worth a
+deliberate yes/no rather than defaulting into it.
 
-**Option 3 — Reframe as a sequential flow.** 1) Anchor world frame → 2)
-Detect markers / configure SIFT → 3) Solve → 4) Review & Accept, with
-Back/Next and only the current step's controls visible. Most aligned with
-"progressive disclosure," but the current dialog's workflow isn't strictly
-sequential in practice (you go back to add a CP after seeing solve results,
-redetect a marker mid-review, etc.) — a step model would need an "any step,
-any time" escape hatch to not become more annoying than the current
-free-form layout. Biggest rework of the three.
+**Layout mechanism.** Harri's steer: list over tabs, and no
+progressive-disclosure/wizard model — extrinsics calibration is iterative
+in practice (add a CP after seeing solve results, redetect a marker
+mid-review, jump back and forth), so hiding things behind steps or tab
+switches fights how the work actually happens. Tabs (my original
+recommendation) are out for the same reason a wizard is out; my Option 3
+(sequential flow) is out for the same reason Harri already gave.
 
-**Recommendation: Option 2.** It solves the actual complaint (too much
-visible at once, unclear grouping) with a well-understood, low-risk Qt
-pattern, and doesn't fight the dialog's inherently non-linear workflow the
-way Option 3 would.
+The open constraint is fit: a **Data** list with useful columns (type,
+label, cameras observing it, world position if anchored, source) is
+wider than the sidebar's 300px allows to stay readable. Proposal to
+resolve that directly: don't put Data in the sidebar at all. This dialog
+already has a full-width table below the camera grid for solve results
+(`_cam_pos_table`, `page_extrinsics.py:1523`) — put the unified Data list
+there instead, full width, always visible, no tab/accordion hiding.
+That leaves the sidebar for just **Actions** and **Anchoring** — two
+compact, always-visible (not tabbed, not collapsed-by-default) sections,
+each considerably smaller than today's six, since their per-action
+settings (dictionary, board size, etc.) only need to be visible when
+that action's controls are, which a plain stacked layout already gives
+for free without needing tabs to achieve it.
+
+**Alternatives considered, now superseded:** my original three options
+(regroup-into-three / tabs / sequential wizard) are kept below only as a
+record of what was considered and why the Data/Actions/Anchoring model
+plus a full-width Data table is the better fit — not as live options.
+
+<details>
+<summary>Original options (superseded)</summary>
+
+**Option 1 — Regroup into fewer top-level sections**, keeping the flat
+collapsible-groupbox structure but reducing six peers to three grouped by
+detector type (Anchor World Frame / Marker Detection / Cameras).
+
+**Option 2 — Tabs instead of a scrolling accordion**, same three
+groupings as Option 1 but as `QTabWidget` tabs.
+
+**Option 3 — Reframe as a sequential flow** (Anchor → Detect → Solve →
+Review), with Back/Next and only the current step visible.
+
+All three grouped by *which detector produced the data* rather than by
+*role*, and Options 2/3 both hide sections behind switches/steps — the
+wrong direction for an iterative workflow per Harri's steer above.
+
+</details>
+
+## Decided
+
+- **Legacy image-folder path**: remove it (`Auto-calibrate (image
+  folder)…`, `_on_auto_calibrate`, `_load_states_from_images`).
 
 ## Open questions for Harri
 
-1. **Sidebar reorg**: Option 1, 2, or 3 above (or something else)?
-2. **Legacy image-folder path**: confirm removal, or is there a real case
-   (no usable video, only exported stills) it still covers?
+1. **Sidebar reorg — confirm the Data/Actions/Anchoring model** and the
+   full-width-table placement for Data. Any of today's controls that don't
+   obviously map to one of the three roles?
+2. **Cameras/Intrinsics placement**: a fourth, separate sidebar section (as
+   proposed), or does per-camera intrinsics selection belong somewhere
+   else entirely, outside this dialog?
 3. **Per-camera calibration quality**: is "position + solved/not-solved"
    enough for the status screen's first cut, or is per-camera reprojection
    error/observation count important enough to justify persisting it (a
@@ -332,6 +448,14 @@ way Option 3 would.
    Markers…" for cleanup/rename, or something else?
 5. **"History…" button** on the status screen — worth building now, or
    defer until something concrete needs it?
+6. **Manual CPs in saved configurations (D2)**: confirm this lands as its
+   own follow-on phase after D, not bundled into it. Reference-image
+   storage — a BLOB column, or a file path convention (worth checking
+   whether this project already has one for other captured imagery before
+   deciding)? And does the broadened save/load concept need a name change
+   from "Save Markers…"/"Load Markers…" now that it can carry manually
+   -placed points too (e.g. "Save Anchors…"/"Load Anchors…"), or does
+   "Markers" stay fine as an umbrella term?
 
 Once these are answered this becomes a phased implementation plan, same
 shape as the rest of this feature's roadmap — each phase landing with its

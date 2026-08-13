@@ -1,7 +1,9 @@
 # Extrinsics calibration UX redesign — draft proposal
 
-**Status: draft, not yet approved.** No implementation should start from this
-document until the open questions at the end are resolved with Harri.
+**Status: reviewed, one open question left** (per-camera calibration
+quality persistence — see "Open questions" at the end; non-blocking).
+Everything else is decided. Ready to turn into a phased implementation
+plan on request.
 
 ## Why this exists
 
@@ -369,16 +371,19 @@ would be the natural place for the "Save Markers…"/"Load Markers…" picker
 in D to draw its rows from (anything in Data with `world_xyz` set is
 exactly the D picker's eligibility set).
 
-**Where does Cameras/Intrinsics go?** It doesn't fit any of the three
-roles — it's not scene data, not an action that adds scene data, and not
-part of anchoring. Leaving it as a fourth, separate area is the
-straightforward answer, but it's worth asking directly: does per-camera
-intrinsics *selection* even belong in the extrinsics-calibration dialog at
-all, or is it just parked here because this dialog happened to need it and
-there was nowhere else convenient? Not proposing to move it — just
-flagging that "leave it as a fourth section" is an answer of convenience,
-not one derived from the Data/Actions/Anchoring model, and worth a
-deliberate yes/no rather than defaulting into it.
+**Where does Cameras/Intrinsics go? Decided** — it doesn't merge into
+Data/Actions/Anchoring at all (it isn't scene data, doesn't add scene
+data, and isn't part of anchoring — those three roles were never going
+to have a natural home for it). Instead: fold it into the **existing
+per-camera results table** (`_cam_pos_table`, currently Camera / X / Y /
+Z / CP error, one row per camera) as additional columns — intrinsics
+calibration selection (now notes-first, per the 2026-08-13 fix above) and
+the Refine/Lock/Excl settings that today live as three checkboxes per
+camera block in the sidebar's Intrinsics section. One row per camera,
+everything about that camera in one place, always visible, full width.
+This eliminates the "fourth section" question outright rather than
+answering it — there's no separate Cameras area left in the sidebar at
+all once this table carries it.
 
 **Layout mechanism.** Harri's steer: list over tabs, and no
 progressive-disclosure/wizard model — extrinsics calibration is iterative
@@ -394,13 +399,18 @@ wider than the sidebar's 300px allows to stay readable. Proposal to
 resolve that directly: don't put Data in the sidebar at all. This dialog
 already has a full-width table below the camera grid for solve results
 (`_cam_pos_table`, `page_extrinsics.py:1523`) — put the unified Data list
-there instead, full width, always visible, no tab/accordion hiding.
-That leaves the sidebar for just **Actions** and **Anchoring** — two
-compact, always-visible (not tabbed, not collapsed-by-default) sections,
-each considerably smaller than today's six, since their per-action
-settings (dictionary, board size, etc.) only need to be visible when
-that action's controls are, which a plain stacked layout already gives
-for free without needing tabs to achieve it.
+there too, full width, always visible, no tab/accordion hiding. So the
+full-width area below the camera grid ends up hosting **two** tables,
+different row granularities (one row per camera vs. one row per data
+point) rather than forced into one: the enriched per-camera **Cameras**
+table (position, CP error, intrinsics, refine/lock/excl) and the unified
+**Data** table (markers, CPs, rig corners, cam-pos observations). That
+leaves the sidebar for just **Actions** and **Anchoring** — two compact,
+always-visible (not tabbed, not collapsed-by-default) sections, each
+considerably smaller than today's six, since their per-action settings
+(dictionary, board size, etc.) only need to be visible when that action's
+controls are, which a plain stacked layout already gives for free without
+needing tabs to achieve it.
 
 **Alternatives considered, now superseded:** my original three options
 (regroup-into-three / tabs / sequential wizard) are kept below only as a
@@ -430,37 +440,45 @@ wrong direction for an iterative workflow per Harri's steer above.
 
 - **Legacy image-folder path**: remove it (`Auto-calibrate (image
   folder)…`, `_on_auto_calibrate`, `_load_states_from_images`).
+- **Sidebar reorg**: Data/Actions/Anchoring model confirmed.
+- **Cameras/Intrinsics placement**: no separate section at all — folds
+  into the existing per-camera results table as extra columns (position,
+  CP error, intrinsics selection, refine/lock/excl), full width, always
+  visible. See the revised §E above.
+- **CLI naming**: `anchor-rig`/`reanchor --name` becomes **required**,
+  matching the GUI's mandatory naming — "copy the GUI model to CLI."
+  Residual detail, not blocking: what to do with scene markers already
+  saved ungrouped (`group_name = ''`) in existing session DBs before this
+  change. Proposal, unconfirmed: leave them as-is, reachable only through
+  "Manage Scene Markers…" for cleanup — nothing forces a retroactive name
+  onto data that predates the requirement.
+- **"History…" button**: deferred, not in the first cut.
+- **D2 (manual CPs in saved configs)**: confirmed as its own follow-on
+  phase after D, not bundled into it. Its own sub-questions (reference-
+  image storage mechanism, "Save Markers…" vs. "Save Anchors…" naming)
+  stay open but non-blocking — they only need answers when D2 itself gets
+  scoped, not now.
 
 ## Open questions for Harri
 
-1. **Sidebar reorg — confirm the Data/Actions/Anchoring model** and the
-   full-width-table placement for Data. Any of today's controls that don't
-   obviously map to one of the three roles?
-2. **Cameras/Intrinsics placement**: a fourth, separate sidebar section (as
-   proposed), or does per-camera intrinsics selection belong somewhere
-   else entirely, outside this dialog?
-3. **Per-camera calibration quality**: is "position + solved/not-solved"
-   enough for the status screen's first cut, or is per-camera reprojection
-   error/observation count important enough to justify persisting it (a
-   schema addition to `extrinsic_entries`, and threading solve-time stats
-   through `write_extrinsics_to_db`)?
-4. **Always-named groups**: should the CLI's `anchor-rig`/`reanchor --name`
-   stay optional (ungrouped default) for power users, or should the CLI
-   also require `--name` for consistency with the GUI's new mandatory
-   naming? And what happens to scene markers already saved ungrouped in
-   existing session DBs — leave them reachable only via "Manage Scene
-   Markers…" for cleanup/rename, or something else?
-5. **"History…" button** on the status screen — worth building now, or
-   defer until something concrete needs it?
-6. **Manual CPs in saved configurations (D2)**: confirm this lands as its
-   own follow-on phase after D, not bundled into it. Reference-image
-   storage — a BLOB column, or a file path convention (worth checking
-   whether this project already has one for other captured imagery before
-   deciding)? And does the broadened save/load concept need a name change
-   from "Save Markers…"/"Load Markers…" now that it can carry manually
-   -placed points too (e.g. "Save Anchors…"/"Load Anchors…"), or does
-   "Markers" stay fine as an umbrella term?
+Only one substantive question left; everything else above is resolved
+enough to plan implementation around.
 
-Once these are answered this becomes a phased implementation plan, same
-shape as the rest of this feature's roadmap — each phase landing with its
-own tests against real data.
+1. **Per-camera calibration quality**: worth persisting (schema addition
+   to `extrinsic_entries`, threading solve-time stats through
+   `write_extrinsics_to_db`), or defer? Harri's lean: not sure, but it
+   could feed a better-grounded per-camera measurement-noise estimate for
+   the C++ tracker's UKF (`measurement_noise_std` in the `[tracking.ukf]`
+   config today is presumably one flat value or hand-tuned per camera —
+   real per-camera reprojection stats from calibration would let that be
+   derived instead of guessed). That's a real downstream use, but a
+   separate piece of work from this UI redesign — doesn't need to be
+   decided before starting A–E; only changes how rich the (deferred)
+   History view and the status screen's quality column could eventually
+   be. Fine to leave open and revisit whenever that tracker-side work is
+   actually on deck.
+
+With that, this document has enough resolved to become a phased
+implementation plan — happy to draft one (same shape as the rest of this
+feature's roadmap, each phase landing with its own tests against real
+data) whenever you want to move forward.

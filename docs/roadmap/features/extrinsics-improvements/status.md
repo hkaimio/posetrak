@@ -21,6 +21,16 @@ last_updated = 2026-08-12
 See [extrinsics-improvements-design.md](extrinsics-improvements-design.md) for
 the problem statement, requirements, and full technical design.
 
+**2026-08-13: feature work paused for a UX design round.** After nine
+rounds of live-testing feedback each patching one confusing thing in an
+increasingly crowded `ExtrinsicsAutoCalibDialog`, Harri asked for a UX
+design pass before any further feature additions — the capability
+(rig/marker anchoring, scene-marker groups) is there, but the entry point,
+the sidebar, and the scene-marker save/load flow all need restructuring.
+See [extrinsics-ux-redesign.md](extrinsics-ux-redesign.md) (draft, not yet
+approved) for the current-state inventory, problems, and proposed
+restructuring. No implementation until its open questions are resolved.
+
 ## Current state
 
 Phases 1-4 implemented (2026-08-09), grounded against the pre-existing

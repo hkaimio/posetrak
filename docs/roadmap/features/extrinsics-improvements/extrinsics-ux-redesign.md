@@ -97,7 +97,11 @@ still-frame export step). Grounding for removal:
    (min-marker-size%, min-cameras-to-anchor), status label, anchor/clear
    buttons.
 6. **Intrinsics** *(collapsible)* — per-camera calibration selection,
-   3 rows each.
+   3 rows each. *(2026-08-13, landed independently of this redesign: the
+   picker now leads with the calibration's own notes rather than
+   date/RMS/model — notes are what a user actually recognises a
+   calibration by; the technical summary moved to a detail label below,
+   shown for whichever item is selected.)*
 
 Above the splitter: a solve row (`Match & Solve`, `Cancel`, `Load from DB…`,
 a SIFT checkbox, a RANSAC threshold spinbox, a status label). Below: a

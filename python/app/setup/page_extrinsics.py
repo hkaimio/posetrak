@@ -2,11 +2,17 @@
 
 Public classes
 --------------
+ExtrinsicsStatusDialog
+    Status-first entry point (UX Phase 2): a per-camera solved/not-solved
+    summary, with "Calibrate…" (opens ExtrinsicsAutoCalibDialog) and
+    "Import TOML…" (opens ExtrinsicsImportDialog) actions. This is what
+    CapturePanel's "Extrinsics…" button opens.
+
 ExtrinsicsImportWidget
-    Reusable core widget.  Call ``set_session(conn, session_id, shot_ids)``
-    before showing.  Emits ``imported(str)`` with the new calibration ID on
-    success.  Includes an "Auto-calibrate…" button that opens
-    ExtrinsicsAutoCalibDialog.
+    Reusable core widget for TOML import only (as of UX Phase 3 — the
+    GUI-native workflow routes through ExtrinsicsStatusDialog instead).
+    Call ``set_session(conn, session_id, shot_ids)`` before showing. Emits
+    ``imported(str)`` with the new calibration ID on success.
 
 ExtrinsicsAutoCalibDialog
     Semi-automatic extrinsics dialog.  Takes a list of CamCalibState objects
@@ -20,8 +26,9 @@ ExtrinsicsPage
     Always completable — extrinsics are optional at wizard time.
 
 ExtrinsicsImportDialog
-    Standalone QDialog wrapping ExtrinsicsImportWidget, for use from the pose
-    extraction window (or any other context where the wizard is not running).
+    Standalone QDialog wrapping ExtrinsicsImportWidget (TOML import only),
+    for use from ExtrinsicsStatusDialog's "Import TOML…" button, the pose
+    extraction window, or any other context needing just a TOML import.
 """
 from __future__ import annotations
 
@@ -3664,21 +3671,21 @@ class ExtrinsicsImportWidget(QWidget):
         self._instances: list[sqlite3.Row] = []
 
         # ---- File row ----
+        # This widget is purely TOML import as of UX Phase 3 (see
+        # docs/roadmap/features/extrinsics-improvements/
+        # extrinsics-ux-redesign.md) -- the GUI-native, video-scrubbing
+        # workflow used to also launch from here ("Auto-calibrate…"), but
+        # now routes exclusively through ExtrinsicsStatusDialog's
+        # "Calibrate…" button (UX Phase 2), the same shared
+        # _open_auto_calibrate_dialog() helper either way.
         self._path_label = QLabel("No file selected.")
         self._path_label.setStyleSheet("color: grey;")
         browse_btn = QPushButton("Browse TOML…")
         browse_btn.clicked.connect(self._browse)
-        self._auto_video_btn = QPushButton("Auto-calibrate…")
-        self._auto_video_btn.clicked.connect(self._on_auto_calibrate_video)
-        self._auto_video_btn.setToolTip(
-            "Run semi-automatic calibration by scrubbing this capture's video "
-            "files directly — no still-frame export needed."
-        )
         file_row = QHBoxLayout()
         file_row.addWidget(QLabel("TOML file:"))
         file_row.addWidget(self._path_label, 1)
         file_row.addWidget(browse_btn)
-        file_row.addWidget(self._auto_video_btn)
 
         # ---- Existing calibrations info ----
         self._existing_label = QLabel()
@@ -3753,25 +3760,6 @@ class ExtrinsicsImportWidget(QWidget):
         )
         if path:
             self._load_toml(Path(path))
-
-    def _on_auto_calibrate_video(self) -> None:
-        """Primary auto-calibration path: scrub this capture's own video files.
-
-        See docs/roadmap/features/extrinsics-improvements/
-        extrinsics-improvements-design.md, "Frame source & scrubbing" — no
-        still-frame export step is needed; each camera gets its own
-        VideoScrubBar in the calibration dialog.
-        """
-        if self._conn is None or self._session_id is None:
-            QMessageBox.warning(self, "No session", "Open a session before auto-calibrating.")
-            return
-        _open_auto_calibrate_dialog(
-            self, self._conn, self._session_id, self._shot_ids, self._on_auto_imported
-        )
-
-    def _on_auto_imported(self, calib_id: str) -> None:
-        self._refresh_existing_label()
-        self.imported.emit(calib_id)
 
     def _do_import(self) -> None:
         self._set_status(None)

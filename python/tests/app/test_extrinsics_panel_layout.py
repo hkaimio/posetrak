@@ -158,3 +158,105 @@ def test_intrinsics_group_has_separator_between_multiple_cameras(qapp, fake_conn
         assert len(separators) == 1  # one separator between the two camera blocks
     finally:
         dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Intrinsics combo: notes lead, technical details move to a detail label
+# (2026-08-13) -- notes are what a user actually recognises a calibration
+# by; date/RMS/model were the only thing shown before, and weren't useful
+# for telling two calibrations of the same camera apart.
+# ---------------------------------------------------------------------------
+
+
+def _seed_intrinsics(
+    conn, label: str = "cam_A", *, notes: str | None, rms: float = 0.5, is_default: bool = False,
+) -> str:
+    from posetrak.db.db import generate_id
+    model_id, mode_id, inst_id, calib_id = (generate_id() for _ in range(4))
+    conn.execute(
+        "INSERT OR IGNORE INTO camera_models (id, manufacturer, model_name) VALUES (?, 'Test', 'Cam')",
+        (model_id,),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO camera_instances (id, camera_model_id, label) VALUES (?, ?, ?)",
+        (inst_id, model_id, label),
+    )
+    conn.execute(
+        "INSERT INTO camera_modes (id, camera_model_id, width_px, height_px, nominal_fps) "
+        "VALUES (?, ?, 1920, 1080, 30.0)",
+        (mode_id, model_id),
+    )
+    conn.execute(
+        "INSERT INTO intrinsics_calibrations "
+        "(id, camera_mode_id, calibrated_at, fx, fy, cx, cy, rms_error, notes) "
+        "VALUES (?, ?, '2026-08-01', 1000.0, 1000.0, 960.0, 540.0, ?, ?)",
+        (calib_id, mode_id, rms, notes),
+    )
+    if is_default:
+        conn.execute(
+            "UPDATE camera_modes SET default_intrinsics_calibration_id = ? WHERE id = ?",
+            (calib_id, mode_id),
+        )
+    conn.commit()
+    return calib_id
+
+
+def test_intrinsics_combo_leads_with_notes(qapp, fake_conn) -> None:
+    _seed_intrinsics(fake_conn, notes="tripod, wide lens")
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        combo = dlg._intrinsics_combos["cam_A"]
+        assert combo.itemText(0) == "tripod, wide lens"
+    finally:
+        dlg.done(0)
+
+
+def test_intrinsics_combo_falls_back_to_technical_summary_when_no_notes(qapp, fake_conn) -> None:
+    _seed_intrinsics(fake_conn, notes=None, rms=1.23)
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        combo = dlg._intrinsics_combos["cam_A"]
+        assert "1.23px" in combo.itemText(0)
+        assert "2026-08-01" in combo.itemText(0)
+    finally:
+        dlg.done(0)
+
+
+def test_intrinsics_combo_default_star_precedes_notes(qapp, fake_conn) -> None:
+    _seed_intrinsics(fake_conn, notes="main rig", is_default=True)
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        combo = dlg._intrinsics_combos["cam_A"]
+        assert combo.itemText(0) == "★ main rig"
+    finally:
+        dlg.done(0)
+
+
+def test_intrinsics_detail_label_shows_technical_summary_for_selected_item(
+    qapp, fake_conn,
+) -> None:
+    _seed_intrinsics(fake_conn, notes="tripod, wide lens", rms=0.87)
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        detail = dlg._intrinsics_detail_labels["cam_A"]
+        assert "0.87px" in detail.text()
+        assert "2026-08-01" in detail.text()
+    finally:
+        dlg.done(0)
+
+
+def test_intrinsics_detail_label_updates_on_selection_change(qapp, fake_conn) -> None:
+    _seed_intrinsics(fake_conn, notes="calib one", rms=0.10)
+    _seed_intrinsics(fake_conn, notes="calib two", rms=9.99)
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        combo = dlg._intrinsics_combos["cam_A"]
+        detail = dlg._intrinsics_detail_labels["cam_A"]
+        assert combo.count() == 2
+
+        for i in range(combo.count()):
+            combo.setCurrentIndex(i)
+            expected_rms = "0.10px" if combo.itemText(i) == "calib one" else "9.99px"
+            assert expected_rms in detail.text()
+    finally:
+        dlg.done(0)

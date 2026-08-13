@@ -1335,6 +1335,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._control_points: list[ControlPoint] = []
         self._selected_cp_idx: int | None = None
         self._intrinsics_combos: dict[str, QComboBox] = {}
+        self._intrinsics_detail_labels: dict[str, QLabel] = {}
         self._cam_pos_obs: list[CamPosObs] = []
         self._refine_intrinsics: set[str] = set()
         self._locked_cameras: set[str] = set()
@@ -2035,12 +2036,19 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
             combo = QComboBox()
             combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            detail_label = QLabel()
+            detail_label.setStyleSheet("color: #666; font-size: 10px;")
             self._populate_intrinsics_combo(state, combo)
             vid = state.video_id
+            self._intrinsics_detail_labels[vid] = detail_label
+            self._intrinsics_combos[vid] = combo
+            self._refresh_intrinsics_detail_label(vid)
             combo.currentIndexChanged.connect(
                 lambda _idx, v=vid, c=combo: self._on_intrinsics_changed(v, c.currentData())
             )
-            self._intrinsics_combos[state.video_id] = combo
+            combo.currentIndexChanged.connect(
+                lambda _idx, v=vid: self._refresh_intrinsics_detail_label(v)
+            )
 
             refine_cb = QCheckBox("Refine")
             refine_cb.setToolTip("Optimise fx/fy for this camera during bundle adjustment")
@@ -2077,17 +2085,28 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
             layout.addWidget(lbl)
             layout.addWidget(combo)
+            layout.addWidget(detail_label)
             layout.addLayout(checkbox_row)
 
         return group
 
     def _populate_intrinsics_combo(self, state: CamCalibState, combo: QComboBox) -> None:
+        """Item text leads with the user's own notes (typed in when the
+        calibration was created, ``intrinsics_calib_dialog.py``'s "Notes:"
+        field) rather than date/RMS/model -- notes are what a user
+        actually recognises a calibration by when picking among several
+        for the same camera; the technical fields fall back to being the
+        label only when no notes were given. The full technical string
+        (date/RMS/model/default) is stashed as each item's own data
+        (``UserRole + 1``, alongside the calib id already at the default
+        role) so ``_refresh_intrinsics_detail_label`` can show it for
+        whichever item is currently selected without a second query."""
         old_factory = self._conn.row_factory
         self._conn.row_factory = sqlite3.Row
         try:
             rows = self._conn.execute(
                 """
-                SELECT ic.id, ic.calibrated_at, ic.rms_error, ic.distortion_model,
+                SELECT ic.id, ic.calibrated_at, ic.rms_error, ic.distortion_model, ic.notes,
                        (cm.default_intrinsics_calibration_id = ic.id) AS is_default
                 FROM intrinsics_calibrations ic
                 JOIN camera_modes cm ON cm.id = ic.camera_mode_id
@@ -2107,11 +2126,26 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             rms = f"{r['rms_error']:.2f}px" if r["rms_error"] is not None else "?"
             model = r["distortion_model"] or "standard"
             star = "★ " if r["is_default"] else ""
-            text = f"{star}{date}  {rms}  {model}"
-            combo.addItem(text, userData=r["id"])
+            notes = (r["notes"] or "").strip()
+            label_text = notes if notes else f"{date}  {rms}  {model}"
+            detail_text = f"{date}  ·  {rms}  ·  {model}" + ("  ·  default" if r["is_default"] else "")
+            combo.addItem(f"{star}{label_text}", userData=r["id"])
+            combo.setItemData(combo.count() - 1, detail_text, Qt.ItemDataRole.UserRole + 1)
             if r["id"] == state.calib_id:
                 combo.setCurrentIndex(combo.count() - 1)
         combo.blockSignals(False)
+
+    def _refresh_intrinsics_detail_label(self, video_id: str) -> None:
+        """Show the technical details (date/RMS/model) for whichever
+        intrinsics calibration is currently selected -- notes lead the
+        combo item itself (see ``_populate_intrinsics_combo``), so this is
+        the only place these still show at all."""
+        label = self._intrinsics_detail_labels.get(video_id)
+        combo = self._intrinsics_combos.get(video_id)
+        if label is None or combo is None:
+            return
+        detail = combo.currentData(Qt.ItemDataRole.UserRole + 1)
+        label.setText(detail or "")
 
     def _on_intrinsics_changed(self, video_id: str, calib_id: str | None) -> None:
         if not calib_id:

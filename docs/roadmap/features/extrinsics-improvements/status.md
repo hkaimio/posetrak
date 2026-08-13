@@ -21,15 +21,57 @@ last_updated = 2026-08-12
 See [extrinsics-improvements-design.md](extrinsics-improvements-design.md) for
 the problem statement, requirements, and full technical design.
 
-**2026-08-13: feature work paused for a UX design round.** After nine
-rounds of live-testing feedback each patching one confusing thing in an
-increasingly crowded `ExtrinsicsAutoCalibDialog`, Harri asked for a UX
-design pass before any further feature additions — the capability
-(rig/marker anchoring, scene-marker groups) is there, but the entry point,
-the sidebar, and the scene-marker save/load flow all need restructuring.
-See [extrinsics-ux-redesign.md](extrinsics-ux-redesign.md) (draft, not yet
-approved) for the current-state inventory, problems, and proposed
-restructuring. No implementation until its open questions are resolved.
+**2026-08-13: feature work paused for a UX design round, then reviewed.**
+After nine rounds of live-testing feedback each patching one confusing
+thing in an increasingly crowded `ExtrinsicsAutoCalibDialog`, Harri asked
+for a UX design pass before any further feature additions. See
+[extrinsics-ux-redesign.md](extrinsics-ux-redesign.md) for the
+current-state inventory, problems, proposed restructuring, and the
+resulting 8-phase implementation plan (labelled "UX Phase" to avoid
+colliding with this doc's own Phase 1-9 numbering below).
+
+**2026-08-14: UX Phases 1-4 landed as an overnight batch.** Harri asked
+what would be a safe batch to run unsupervised; scoped to the four phases
+with no open design judgment calls left, additive/mechanical changes, and
+no breaking behavior (full reasoning in the chat, not reproduced here) --
+explicitly excluding UX Phase 5 (ships a CLI breaking change), 6 (depends
+on 5), and 7 (the widest structural change in the plan, needs a live-
+testing pass). All four commits, all with new tests, full regression
+sweep clean after each:
+
+- **UX Phase 1** (`c456d1c`): removed the legacy "Auto-calibrate (image
+  folder)…" path (`_on_auto_calibrate`, `_load_states_from_images`, its
+  filename-matching helpers) -- predates `VideoScrubBar`'s direct-video
+  scrubbing, no test referenced it.
+- **UX Phase 2** (`000ee13`): new `ExtrinsicsStatusDialog` -- per-camera
+  solved/not-solved summary + `Calibrate…`/`Import TOML…`/`Close`, now
+  what `CapturePanel`'s `Extrinsics…` button opens instead of jumping
+  straight into a TOML-import screen. New `CapturePanel._refresh_extrinsics()`
+  mirrors `_refresh_sync()`'s pattern, updating the button text/tooltip
+  (`Extrinsics ✓ (6/6)` vs `Extrinsics (not set)`). The "no shot"/"no
+  cameras" guard clauses + camera-state loading that used to live only in
+  `ExtrinsicsImportWidget._on_auto_calibrate_video` became a shared
+  `_open_auto_calibrate_dialog()` helper, used by both that button and
+  the new status dialog's `Calibrate…`.
+- **UX Phase 3** (`2799109`): `ExtrinsicsImportWidget` slimmed to pure
+  TOML import (dropped its now-redundant `Auto-calibrate…` video button,
+  which routes exclusively through the Phase 2 status dialog now).
+  `app/pose/main.py`'s separate `ExtrinsicsImportDialog` entry point left
+  deliberately unchanged -- gets the same slimmed widget, no other
+  behavior change.
+- **UX Phase 4** (`82b97e9`): removed the "Camera Intrinsics" sidebar
+  section entirely, folding intrinsics selection + Refine/Lock/Excl into
+  the existing per-camera results table (`_cam_pos_table`) as extra
+  columns -- one row per camera, everything about that camera in one
+  place. The table is now populated and visible from dialog construction
+  (position/CP-error columns show "—" until solved) rather than hidden
+  until the first solve/DB load, since Intrinsics/Refine/Lock/Excl are
+  needed before solving too. The technical detail (date/RMS/model) that
+  used to sit in a separate label under the sidebar combo moved to the
+  combo's own tooltip.
+
+UX Phases 5-7 still need Harri's review/direction before landing -- see
+extrinsics-ux-redesign.md's own status line.
 
 ## Current state
 

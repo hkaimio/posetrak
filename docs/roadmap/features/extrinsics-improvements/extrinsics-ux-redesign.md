@@ -1,9 +1,10 @@
 # Extrinsics calibration UX redesign — draft proposal
 
-**Status: reviewed, phased implementation plan drafted.** One open
-question left (per-camera calibration quality persistence — see "Open
-questions"; non-blocking, doesn't hold up starting). Ready to begin
-UX Phase 1 on request.
+**Status: UX Phases 1–4 landed (2026-08-14).** UX Phases 5–7 await
+Harri's review before starting (5 ships a CLI breaking change; 6 depends
+on 5; 7 is the widest structural change in the plan and needs a live-
+testing pass before/after). One open question remains, non-blocking
+(per-camera calibration quality persistence — see "Open questions").
 
 ## Why this exists
 
@@ -492,7 +493,15 @@ give more confidence before the biggest rework starts. UX Phase 8 (D2) is
 listed for completeness but stays deferred per the Decided note above —
 not scoped in detail, not part of this round.
 
-### UX Phase 1 — Remove the legacy image-folder path
+**2026-08-14: UX Phases 1–4 landed** (an overnight batch, deliberately
+scoped to the phases with no open design judgment calls left, additive/
+mechanical changes, and no breaking behavior — see status.md's dated
+entry for the reasoning). UX Phases 5–7 still need Harri's review before
+landing: 5 ships a CLI breaking change, 6 depends on 5, and 7 is the
+widest structural change in the whole plan and explicitly needs a live-
+testing pass. See status.md for details of what shipped.
+
+### UX Phase 1 — Remove the legacy image-folder path ✅ Done
 
 - Delete `_on_auto_calibrate()`, the `Auto-calibrate (image folder)…`
   button and its wiring in `ExtrinsicsImportWidget.__init__`, and
@@ -506,7 +515,7 @@ path — confirmed during the design pass, so none should need updating);
 manual check that the file row now holds two buttons, not three, and
 reads less cramped.
 
-### UX Phase 2 — Status-first entry point
+### UX Phase 2 — Status-first entry point ✅ Done
 
 - New status dialog in `page_extrinsics.py` (e.g. `ExtrinsicsStatusDialog`):
   summary line (N/M cameras solved, method, date) + a per-camera table
@@ -529,7 +538,7 @@ positions/solved-state for a seeded session, with and without
 behavior; manual check against one real session with extrinsics and one
 without.
 
-### UX Phase 3 — Split TOML import out cleanly
+### UX Phase 3 — Split TOML import out cleanly ✅ Done
 
 - Remove the (now sole survivor, since UX Phase 1) `Auto-calibrate…`
   video button from `ExtrinsicsImportWidget`'s file row — routing to the
@@ -547,7 +556,7 @@ without.
 tests updated for the removed button; manual re-verification of the TOML
 import flow end to end from both entry points.
 
-### UX Phase 4 — Fold Intrinsics into the per-camera results table
+### UX Phase 4 — Fold Intrinsics into the per-camera results table ✅ Done
 
 - Extend `_cam_pos_table` (`page_extrinsics.py:1523`) with new columns:
   Intrinsics (combo, notes-first per the 2026-08-13 fix — reuses

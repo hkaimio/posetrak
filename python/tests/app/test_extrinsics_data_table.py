@@ -191,6 +191,34 @@ def test_board_corner_rows_appear_after_charuco_detection(qapp, fake_conn) -> No
         dlg.done(0)
 
 
+def _render_board_image(squares_x=5, squares_y=7, square_length=0.04, marker_length=0.02) -> np.ndarray:
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    board = cv2.aruco.CharucoBoard((squares_x, squares_y), square_length, marker_length, aruco_dict)
+    gray = board.generateImage((500, 700), marginSize=30)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
+def test_board_corner_rows_world_position_populates_once_anchored(qapp, fake_conn) -> None:
+    """Companion to test_board_corner_rows_appear_after_charuco_detection
+    (free state) -- checks the anchored transition too, mirroring
+    test_rig_corner_rows_appear_once_anchored below for the rig case."""
+    states = [_make_state("cam_A", _render_board_image())]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._on_detect_charuco_clicked("cam_A")
+        rows_before = _rows_by_type(dlg, "Board corner")
+        assert rows_before
+        assert all(dlg._data_table.item(r, 3).text() == "" for r in rows_before)
+
+        dlg._on_anchor_from_board()
+
+        rows_after = _rows_by_type(dlg, "Board corner")
+        assert rows_after
+        assert all(dlg._data_table.item(r, 3).text() != "" for r in rows_after)
+    finally:
+        dlg.done(0)
+
+
 def test_rig_corner_rows_appear_once_anchored(qapp, fake_conn, rig_yaml_path) -> None:
     states = [_make_state("cam_A", _render_marker_image(3))]
     dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")

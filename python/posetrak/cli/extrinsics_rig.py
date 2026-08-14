@@ -196,10 +196,11 @@ def _label_to_instance_id(conn: sqlite3.Connection) -> dict[str, str]:
 @click.option("--method", default="rig-anchor", show_default=True)
 @click.option("--capture", default=None, metavar="UUID",
               help="captures.id to link (sets extrinsic_calibration_id)")
-@click.option("--name", "group_name", default=None, metavar="NAME",
+@click.option("--name", "group_name", required=True, metavar="NAME",
               help="Name grouping this room's scene markers (e.g. 'room7') so a later "
                    "capture can pick it by name via 'reanchor --name' or the GUI's "
-                   "\"From Scene Markers…\". Omit to leave them ungrouped.")
+                   "\"Load Markers…\". Required -- matches the GUI's Save Markers flow, "
+                   "which always asks for a name (see extrinsics-ux-redesign.md, UX Phase 5).")
 @click.pass_obj
 def extrinsics_anchor_rig(
     obj: dict,
@@ -212,7 +213,7 @@ def extrinsics_anchor_rig(
     min_marker_perimeter_rate: float,
     method: str,
     capture: str | None,
-    group_name: str | None,
+    group_name: str,
 ) -> None:
     """Anchor a capture's cameras from a portable calibration rig.
 
@@ -341,10 +342,11 @@ def extrinsics_anchor_rig(
 @click.option("--method", default="reanchor", show_default=True)
 @click.option("--capture", default=None, metavar="UUID",
               help="captures.id to link (sets extrinsic_calibration_id)")
-@click.option("--name", "group_name", default=None, metavar="NAME",
-              help="Only re-anchor from this named group's markers (see 'anchor-rig "
-                   "--name' and 'extrinsics scene-marker groups'). Omit to use the "
-                   "ungrouped default -- markers saved without a --name.")
+@click.option("--name", "group_name", required=True, metavar="NAME",
+              help="Re-anchor from this named group's markers (see 'anchor-rig --name' "
+                   "and 'extrinsics scene-marker groups'). Required -- matches the GUI's "
+                   "Load Markers… flow, which always picks a named config (see "
+                   "extrinsics-ux-redesign.md, UX Phase 5).")
 @click.pass_obj
 def extrinsics_reanchor(
     obj: dict,
@@ -354,7 +356,7 @@ def extrinsics_reanchor(
     min_marker_perimeter_rate: float,
     method: str,
     capture: str | None,
-    group_name: str | None,
+    group_name: str,
 ) -> None:
     """Re-anchor a capture's cameras from previously-solved scattered tags.
 
@@ -376,17 +378,17 @@ def extrinsics_reanchor(
                 "SELECT * FROM scene_marker_bodies WHERE session_id = ? "
                 "AND marker_body_definition_id IS NULL AND dictionary = ? AND group_name = ? "
                 "AND marker_id IS NOT NULL AND marker_size IS NOT NULL",
-                (session_id, tag_dict, group_name or ""),
+                (session_id, tag_dict, group_name),
             ).fetchall()
         finally:
             conn.row_factory = old_factory
 
         if not tag_rows:
-            group_str = f", group={group_name!r}" if group_name else ""
             raise click.ClickException(
                 f"No previously-solved scattered tags found for this session "
-                f"(dictionary={tag_dict!r}{group_str}). Run 'anchor-rig' with --tag-size "
-                f"first, or check 'extrinsics scene-marker groups' for the right --name."
+                f"(dictionary={tag_dict!r}, group={group_name!r}). Run 'anchor-rig' with "
+                f"--tag-size first, or check 'extrinsics scene-marker groups' for the "
+                f"right --name."
             )
 
         from app.setup.extrinsics_solver import marker_local_corners
@@ -496,9 +498,10 @@ def scene_marker_list(obj: dict, session_row: str) -> None:
 def scene_marker_groups(obj: dict, session_row: str) -> None:
     """List named scene-marker groups for a session (e.g. one per room),
     with a marker count and last-updated time -- for picking the right
-    --name for 'reanchor'. Markers saved without --name don't appear
-    here; they're the "ungrouped" default 'reanchor' uses when --name is
-    omitted."""
+    --name for 'reanchor'. 'anchor-rig'/'reanchor' both require --name
+    (design doc, UX Phase 5); groups from before that requirement was
+    added may still show an ungrouped ('') entry, prunable via
+    'scene-marker delete'."""
     conn = _open_session_required(obj)
     try:
         session_id = _resolve(conn, "mocap_sessions", session_row)

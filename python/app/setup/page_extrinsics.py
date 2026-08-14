@@ -1013,7 +1013,7 @@ class _RegistryRigPickerDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
-# Scene marker group picker -- "From Scene Markers…" needs to know *which*
+# Scene marker group picker -- "Load Markers…" needs to know *which*
 # named group (e.g. a room) to load once more than one exists for the
 # session, rather than loading every stored marker from every room
 # indiscriminately. See status.md's 2026-08-12 "how do I select which
@@ -1022,25 +1022,21 @@ class _RegistryRigPickerDialog(QDialog):
 
 
 class _SceneMarkerGroupPickerDialog(QDialog):
-    """Picker listing named scene-marker groups (plus an explicit
-    "(ungrouped)" row when ungrouped markers also exist) for a session."""
+    """Picker listing named scene-marker groups for a session. Always-
+    named as of UX Phase 5 (see docs/roadmap/features/
+    extrinsics-improvements/extrinsics-ux-redesign.md) -- there is no
+    ungrouped save target to fall back to anymore, so every row here is a
+    real name a user gave a "Save Markers…" configuration."""
 
-    _UNGROUPED_LABEL = "(ungrouped)"
-
-    def __init__(
-        self, groups: list[sqlite3.Row], has_ungrouped: bool, parent=None,
-    ) -> None:
+    def __init__(self, groups: list[sqlite3.Row], parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Pick Scene Marker Group")
         self.setMinimumSize(480, 280)
         self._selected_group_name: str | None = None
-        self._has_selection = False
 
         rows: list[tuple[str, str, str]] = [
             (g["group_name"], str(g["n_markers"]), (g["last_updated"] or "")[:19]) for g in groups
         ]
-        if has_ungrouped:
-            rows.append((self._UNGROUPED_LABEL, "", ""))
         self._row_names = [r[0] for r in rows]
 
         self._table = QTableWidget(len(rows), 3)
@@ -1073,15 +1069,10 @@ class _SceneMarkerGroupPickerDialog(QDialog):
         row_idx = self._table.currentRow()
         if row_idx < 0:
             return
-        name = self._row_names[row_idx]
-        self._selected_group_name = None if name == self._UNGROUPED_LABEL else name
-        self._has_selection = True
+        self._selected_group_name = self._row_names[row_idx]
         super().accept()
 
     def selected_group_name(self) -> str | None:
-        """``None`` for "(ungrouped)" -- the same sentinel
-        ``list_scene_marker_bodies_by_group``/``upsert_scene_marker_body``
-        already use, not a special case here."""
         return self._selected_group_name
 
 
@@ -1219,6 +1210,71 @@ class _SceneMarkerManagerDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Save Markers dialog -- explicit, always-named save action (UX Phase 5,
+# see docs/roadmap/features/extrinsics-improvements/
+# extrinsics-ux-redesign.md), replacing the old implicit
+# save-on-Accept-if-a-name-happened-to-be-typed-in flow.
+# ---------------------------------------------------------------------------
+
+
+class _SaveMarkersDialog(QDialog):
+    """Checklist of this session's currently anchored/solved items (a
+    file-sourced rig's own anchor, sized ArUco/ChArUco marker poses),
+    default all-checked, plus a required configuration name. Manually-
+    anchored control points are out of scope until UX Phase 8/D2 lands
+    (no reference-image mechanism yet to make them useful on reload --
+    see the design doc's D2 section)."""
+
+    def __init__(self, items: list[tuple[str, str]], parent=None) -> None:
+        """*items*: (label, note) pairs, e.g. ("rig:aikido-calib-box",
+        "primary anchor") or ("tag:12", "only 1 camera — check pose")."""
+        super().__init__(parent)
+        self.setWindowTitle("Save Markers")
+        self.setMinimumSize(420, 320)
+        self._checks: dict[str, QCheckBox] = {}
+
+        list_layout = QVBoxLayout()
+        for label, note in items:
+            text = f"{label}   ({note})" if note else label
+            cb = QCheckBox(text)
+            cb.setChecked(True)
+            self._checks[label] = cb
+            list_layout.addWidget(cb)
+        list_layout.addStretch()
+        list_widget = QWidget()
+        list_widget.setLayout(list_layout)
+        scroll = QScrollArea()
+        scroll.setWidget(list_widget)
+        scroll.setWidgetResizable(True)
+
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Configuration name:"))
+        self._name_edit = QLineEdit()
+        self._name_edit.setPlaceholderText("required, e.g. room7")
+        name_row.addWidget(self._name_edit, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        self._save_btn = buttons.addButton("Save", QDialogButtonBox.ButtonRole.AcceptRole)
+        self._save_btn.setEnabled(False)
+        self._name_edit.textChanged.connect(
+            lambda text: self._save_btn.setEnabled(bool(text.strip()))
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(scroll, 1)
+        layout.addLayout(name_row)
+        layout.addWidget(buttons)
+
+    def group_name(self) -> str:
+        return self._name_edit.text().strip()
+
+    def selected_labels(self) -> set[str]:
+        return {label for label, cb in self._checks.items() if cb.isChecked()}
+
+
+# ---------------------------------------------------------------------------
 # Auto-calibration dialog
 # ---------------------------------------------------------------------------
 
@@ -1253,6 +1309,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._selected_cp_idx: int | None = None
         self._intrinsics_combos: dict[str, QComboBox] = {}
         self._cam_pos_row_by_vid: dict[str, int] = {}
+        self._last_calib_id: str | None = None
         self._cam_pos_obs: list[CamPosObs] = []
         self._refine_intrinsics: set[str] = set()
         self._locked_cameras: set[str] = set()
@@ -1599,12 +1656,12 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             "Click \"Detect ArUco\" under a camera to find markers in its "
             "current frame. A marker's 4 corners act as one control-point "
             "group; give it a size (below) to also recover its rigid "
-            "world pose once ≥2 cameras have seen it. A sized marker's "
-            "solved pose is saved to this session's scene markers on "
-            "Accept, so a later capture can re-anchor from it without a "
-            "physical rig (\"From Scene Markers…\" in the panel below) -- "
-            "use a dictionary here that's different from your rig's own "
-            "so the two can't be confused."
+            "world pose once ≥2 cameras have seen it. Use \"Save "
+            "Markers…\" to persist a sized marker's solved pose to this "
+            "session's scene markers, so a later capture can re-anchor "
+            "from it without a physical rig (\"Load Markers…\" in the "
+            "panel below) -- use a dictionary here that's different from "
+            "your rig's own so the two can't be confused."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666; font-size: 10px;")
@@ -1801,13 +1858,13 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         section 10. All three load buttons -- "Load Config…" (a
         marker_body_definitions YAML file), "From Registry…" (the same
         kind of row, already imported into this session's DB by a prior
-        `posetrak marker-body import` or GUI load), and "From Scene
-        Markers…" (this session's already-persisted
-        ``scene_marker_bodies`` rows, design doc section 9 Tier B) -- feed
-        the same underlying mechanism (``anchor_from_marker_rig``), just
-        three different sources for the set of known marker positions,
-        matching how the CLI's `anchor-rig`/`reanchor` commands are also
-        just two callers of the same function.
+        `posetrak marker-body import` or GUI load), and "Load Markers…"
+        (this session's already-*saved* ``scene_marker_bodies`` rows,
+        design doc section 9 Tier B) -- feed the same underlying
+        mechanism (``anchor_from_marker_rig``), just three different
+        sources for the set of known marker positions, matching how the
+        CLI's `anchor-rig`/`reanchor` commands are also just two callers
+        of the same function.
 
         Loading immediately detects the rig in every camera's current
         frame and anchors the world coordinate system from it if found
@@ -1823,18 +1880,26 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         The per-camera "Detect Rig" buttons and the "Anchor Rig" button
         below remain as an explicit redo, e.g. after scrubbing one or
         more cameras to a frame where the rig is actually visible.
+
+        "Save Markers…"/"Load Markers…" (UX Phase 5, see
+        docs/roadmap/features/extrinsics-improvements/
+        extrinsics-ux-redesign.md) are the explicit, always-named
+        save/load actions that replaced the old implicit
+        save-on-Accept-if-a-name-happened-to-be-typed-in flow -- see
+        ``_on_save_markers``/``_SaveMarkersDialog``.
         """
         group = QGroupBox("Marker Rig / Scene Markers")
         layout = QVBoxLayout(group)
 
         hint = QLabel(
-            "Load a rig config -- from a file, the registry, or this "
-            "session's previously-solved scattered tags (section 9 Tier "
-            "B, no physical rig needed) -- and it's immediately detected "
-            "in every camera's current frame and anchored if found "
-            "anywhere. Use \"Detect Rig\" under one camera to redetect "
-            "just that one after scrubbing to a different frame, or "
-            "\"Anchor Rig\" below to redo detection everywhere."
+            "Load a rig config -- from a file, the registry, or a saved "
+            "marker configuration (section 9 Tier B, no physical rig "
+            "needed) -- and it's immediately detected in every camera's "
+            "current frame and anchored if found anywhere. Use \"Detect "
+            "Rig\" under one camera to redetect just that one after "
+            "scrubbing to a different frame, or \"Anchor Rig\" below to "
+            "redo detection everywhere. Once anchored, \"Save Markers…\" "
+            "lets a later capture reuse this without a physical rig."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666; font-size: 10px;")
@@ -1852,28 +1917,24 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             "without re-selecting its YAML file."
         )
         registry_btn.clicked.connect(self._on_load_rig_from_registry)
-        load_scene_btn = QPushButton("From Scene Markers…")
+        load_scene_btn = QPushButton("Load Markers…")
         load_scene_btn.setToolTip(
-            "Re-anchor from tags a previous \"anchor-rig\"/\"reanchor\" solve "
-            "already persisted for this session (scene_marker_bodies) -- "
-            "no physical rig or config file needed. See design doc section "
-            "9 Tier B."
+            "Re-anchor from a named configuration saved with \"Save "
+            "Markers…\" in an earlier capture -- no physical rig or "
+            "config file needed. See design doc section 9 Tier B."
         )
         load_scene_btn.clicked.connect(self._on_load_rig_from_scene_markers)
 
-        group_name_row = QHBoxLayout()
-        group_name_row.addWidget(QLabel("Scene marker group:"))
-        self._scene_marker_group_edit = QLineEdit()
-        self._scene_marker_group_edit.setPlaceholderText("e.g. room7 (optional)")
-        self._scene_marker_group_edit.setToolTip(
-            "Name for this physical space's scene markers -- both the "
-            "rig's own anchor row and any sized ArUco markers detected "
-            "in the panel above are saved under this name on Accept. A "
-            "later capture in the same room can then pick this name from "
-            "\"From Scene Markers…\" instead of every room's markers in "
-            "the session loading together. Leave blank to stay ungrouped."
+        self._save_markers_btn = QPushButton("Save Markers…")
+        self._save_markers_btn.setToolTip(
+            "Save the current anchor (a file-sourced rig, and/or any "
+            "sized ArUco/ChArUco markers from the last solve) under a "
+            "name, so a later capture can reuse it via \"Load Markers…\" "
+            "without a physical rig. Disabled until something is "
+            "anchored or solved."
         )
-        group_name_row.addWidget(self._scene_marker_group_edit, 1)
+        self._save_markers_btn.setEnabled(False)
+        self._save_markers_btn.clicked.connect(self._on_save_markers)
 
         manage_btn = QPushButton("Manage Scene Markers…")
         manage_btn.setToolTip(
@@ -1913,7 +1974,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             "Rig\" below) refuses below this count (clamped to however "
             "many cameras this dialog actually has). Lower it if a single "
             "camera genuinely is this capture's only view of the rig. "
-            "Doesn't apply to \"From Scene Markers…\" -- re-anchoring from "
+            "Doesn't apply to \"Load Markers…\" -- re-anchoring from "
             "just one already-known tag there is the expected case."
         )
         min_cams_row.addWidget(self._rig_min_cameras_spin, 1)
@@ -1941,7 +2002,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         layout.addWidget(load_btn)
         layout.addWidget(registry_btn)
         layout.addWidget(load_scene_btn)
-        layout.addLayout(group_name_row)
+        layout.addWidget(self._save_markers_btn)
         layout.addWidget(manage_btn)
         layout.addLayout(min_size_row)
         layout.addLayout(min_cams_row)
@@ -2462,15 +2523,15 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # A currently-loaded *physical* rig's own markers must never leak
         # into "Detect ArUco"'s output as if they were separate scattered
         # scene tags -- giving one a size here and letting it flow through
-        # to scene_marker_bodies on Accept creates a stale "tag:<id>" row
-        # that silently goes wrong every time the rig is relocated for a
-        # different capture (see status.md's 2026-08-12 "rig markers
-        # leaking into scene markers" entry -- this is the fix). Exclude
-        # by (dictionary, marker_id), known exactly from the loaded
-        # config, not guessed from a numeric coincidence like the ChArUco
-        # case above. Only for source == "file": a "From Scene Markers…"
-        # config's marker ids ARE ordinary scattered tags, meant to stay
-        # redetectable/refreshable here.
+        # to scene_marker_bodies via "Save Markers…" creates a stale
+        # "tag:<id>" row that silently goes wrong every time the rig is
+        # relocated for a different capture (see status.md's 2026-08-12
+        # "rig markers leaking into scene markers" entry -- this is the
+        # fix). Exclude by (dictionary, marker_id), known exactly from the
+        # loaded config, not guessed from a numeric coincidence like the
+        # ChArUco case above. Only for source == "file": a "Load
+        # Markers…" config's marker ids ARE ordinary scattered tags,
+        # meant to stay redetectable/refreshable here.
         if self._rig_config is not None and self._rig_source == "file":
             rig_ids_for_dict = {
                 mid for mid in self._rig_config.marker_corners
@@ -2720,13 +2781,134 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         """Open the view/delete dialog for this session's stored scene
         markers -- for pruning stale entries (e.g. a rig's own anchor row
         once it's been physically removed, or a moved tag), not something
-        needed on every normal "From Scene Markers…" load."""
+        needed on every normal "Load Markers…" load."""
         dlg = _SceneMarkerManagerDialog(self._conn, self._session_id, self)
         dlg.exec()
 
+    def _save_markers_items(self) -> list[tuple[str, str]]:
+        """(label, note) pairs eligible for "Save Markers…" -- a
+        file-sourced rig's own anchor, and any sized marker pose from the
+        last solve. Mirrors the eligibility rule the old implicit
+        Accept-time persistence used (see status.md's UX Phase 5 entry);
+        manually-anchored control points aren't included yet (UX Phase 8/
+        D2, deferred -- no reference-image mechanism to make them useful
+        on reload)."""
+        items: list[tuple[str, str]] = []
+        if self._rig_anchored and self._rig_config is not None and self._rig_source == "file":
+            items.append((f"rig:{self._rig_config.rig_id}", "primary anchor"))
+        if self._result is not None:
+            for marker_id in sorted(self._result.marker_poses):
+                mg = self._marker_groups.get(marker_id)
+                n_cams = len(mg.cameras_observing()) if mg is not None else 0
+                note = "only 1 camera — check pose" if n_cams <= 1 else ""
+                items.append((f"tag:{marker_id}", note))
+        return items
+
+    def _refresh_save_markers_button(self) -> None:
+        self._save_markers_btn.setEnabled(bool(self._save_markers_items()))
+
+    def _on_save_markers(self) -> None:
+        items = self._save_markers_items()
+        if not items:
+            QMessageBox.warning(
+                self, "Save Markers",
+                "Nothing anchored to save yet -- anchor a rig, or solve "
+                "with at least one sized marker, first.",
+            )
+            return
+        dlg = _SaveMarkersDialog(items, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected = dlg.selected_labels()
+        if not selected:
+            self._status_label.setText("Save Markers: nothing selected, nothing saved.")
+            return
+        self._save_markers(dlg.group_name(), selected)
+
+    def _save_markers(self, group_name: str, selected_labels: set[str]) -> None:
+        """Persist the checked items from a "Save Markers…" dialog -- the
+        same ``upsert_scene_marker_body`` calls ``_on_accept`` used to
+        make implicitly, now an explicit, reviewable action (UX Phase 5).
+        Works whether or not Accept has run yet: ``self._last_calib_id``
+        is only set once Accept succeeds, and ``source_extrinsic_calibration_id``
+        is nullable -- a marker saved straight after Solve, before
+        Accept, just doesn't link to a calibration row yet.
+        """
+        calib_id = self._last_calib_id
+        n_saved = 0
+        if (
+            self._rig_anchored and self._rig_config is not None
+            and self._rig_source == "file"
+            and f"rig:{self._rig_config.rig_id}" in selected_labels
+        ):
+            try:
+                upsert_scene_marker_body(
+                    self._conn, self._session_id, label=f"rig:{self._rig_config.rig_id}",
+                    R=np.eye(3), t=np.zeros(3), group_name=group_name,
+                    marker_body_definition_id=self._rig_definition_id, is_primary_anchor=True,
+                    source_extrinsic_calibration_id=calib_id,
+                )
+                n_saved += 1
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "Could not persist rig anchor to scene_marker_bodies: %s", exc, exc_info=True
+                )
+
+        if self._result is not None:
+            for marker_id, mp in self._result.marker_poses.items():
+                label = f"tag:{marker_id}"
+                if label not in selected_labels:
+                    continue
+                mg = self._marker_groups.get(marker_id)
+                dictionary = mg.dictionary if mg is not None else "DICT_4X4_50"
+                try:
+                    R, _ = cv2.Rodrigues(mp.rvec)
+                    upsert_scene_marker_body(
+                        self._conn, self._session_id, label=label,
+                        R=R, t=mp.tvec, group_name=group_name,
+                        marker_type="aruco", dictionary=dictionary, marker_id=marker_id,
+                        marker_size=mp.size, source_extrinsic_calibration_id=calib_id,
+                    )
+                    n_saved += 1
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning(
+                        "Could not persist marker %s to scene_marker_bodies: %s",
+                        marker_id, exc, exc_info=True,
+                    )
+
+        self._status_label.setText(f"Saved {n_saved} marker(s) as {group_name!r}.")
+
+    def _confirm_replace_existing_anchor(self) -> bool:
+        """Before loading a new rig/scene-marker config, warn if doing so
+        would replace something already anchored from a *different*
+        source -- a previously-loaded rig, or manually-anchored control
+        points (``World Position``). Same principle CLAUDE.md's
+        automation-vs-prior-state design section establishes elsewhere in
+        this codebase: scope the check to the moment of the write, ask
+        rather than silently deciding (UX Phase 5, see
+        docs/roadmap/features/extrinsics-improvements/
+        extrinsics-ux-redesign.md).
+
+        Returns True if it's fine to proceed (nothing anchored yet, or
+        the user confirmed replacing it).
+        """
+        manual_anchors = [cp for cp in self._control_points if cp.world_xyz is not None]
+        if not self._rig_anchored and not manual_anchors:
+            return True
+        if self._rig_anchored and self._rig_config is not None:
+            current = f"rig \"{self._rig_config.rig_id}\""
+        else:
+            current = f"{len(manual_anchors)} manually-anchored control point(s)"
+        reply = QMessageBox.question(
+            self, "Replace World-Frame Anchor",
+            f"This will replace the current world-frame anchor ({current}). Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
     def _apply_loaded_rig_config(
         self, config: MarkerRigConfig, *, definition_id: str | None, source: str,
-    ) -> None:
+    ) -> bool:
         """Common tail for every way of loading a rig (file, registry
         pick, or reconstructed from scene markers): install the config/
         detector, then immediately detect it across every camera's
@@ -2738,7 +2920,17 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         "Detect Rig" buttons and the "Anchor Rig" button remain as an
         explicit redo -- for one camera after scrubbing to a better
         frame, or for all of them at once.
+
+        Returns False without changing anything if the dialog already
+        has something anchored from a different source and the user
+        declined to replace it (``_confirm_replace_existing_anchor`` --
+        UX Phase 5, see docs/roadmap/features/extrinsics-improvements/
+        extrinsics-ux-redesign.md); callers that show their own follow-up
+        status message should skip it when this returns False.
         """
+        if not self._confirm_replace_existing_anchor():
+            return False
+
         self._rig_config = config
         self._rig_detector = MarkerRigDetector(
             config, min_marker_perimeter_rate=self._rig_min_marker_pct_spin.value() / 100.0,
@@ -2764,6 +2956,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             self._refresh_marker_table()
 
         self._detect_and_anchor_rig(show_warnings=False)
+        return True
 
     def _on_load_rig_from_scene_markers(self) -> None:
         """Pick which named group of this session's already-persisted
@@ -2774,39 +2967,33 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         indiscriminately would mix rooms together and silently let
         colliding marker ids from different rooms clobber each other.
 
-        If nothing has ever been given a name (``--name``/the panel's
-        "Scene marker group name" field), there's nothing to disambiguate
-        -- skip the picker and load the ungrouped set directly, same
-        zero-friction behaviour as before this existed.
+        Always named as of UX Phase 5 (see docs/roadmap/features/
+        extrinsics-improvements/extrinsics-ux-redesign.md) -- there is no
+        ungrouped fallback anymore; if nothing has ever been saved via
+        "Save Markers…" (or the CLI's `anchor-rig`/`reanchor --name`),
+        this just says so.
         """
         old_factory = self._conn.row_factory
         self._conn.row_factory = sqlite3.Row
         try:
             named_groups = list_scene_marker_group_names(self._conn, self._session_id)
-            ungrouped_rows = list_scene_marker_bodies_by_group(self._conn, self._session_id, None)
         finally:
             self._conn.row_factory = old_factory
 
-        if not named_groups and not ungrouped_rows:
+        if not named_groups:
             QMessageBox.warning(
-                self, "Load From Scene Markers",
-                "No previously-solved scattered tags found for this session. "
-                "Anchor a capture from a rig first with a known tag size "
-                "(the CLI's `anchor-rig --tag-size` covers this today; this "
-                "dialog doesn't have a scattered-tag-size UI of its own yet).",
+                self, "Load Markers",
+                "No saved marker configurations for this session yet. Use "
+                "\"Save Markers…\" after anchoring a capture to create one.",
             )
             return
 
-        if not named_groups:
-            self._load_rig_config_from_scene_marker_group(None)
-            return
-
-        dlg = _SceneMarkerGroupPickerDialog(named_groups, bool(ungrouped_rows), self)
+        dlg = _SceneMarkerGroupPickerDialog(named_groups, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         self._load_rig_config_from_scene_marker_group(dlg.selected_group_name())
 
-    def _load_rig_config_from_scene_marker_group(self, group_name: str | None) -> None:
+    def _load_rig_config_from_scene_marker_group(self, group_name: str) -> None:
         """The group-selection-taking half of
         ``_on_load_rig_from_scene_markers``, split out so it doesn't
         require mocking ``_SceneMarkerGroupPickerDialog`` to exercise or
@@ -2824,11 +3011,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         finally:
             self._conn.row_factory = old_factory
 
-        group_label = group_name or "(ungrouped)"
         if not rows:
             QMessageBox.warning(
-                self, "Load From Scene Markers",
-                f"No scene markers found in group {group_label!r}.",
+                self, "Load Markers", f"No scene markers found in group {group_name!r}.",
             )
             return
 
@@ -2842,13 +3027,14 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             marker_dictionaries[row["marker_id"]] = row["dictionary"]
 
         config = MarkerRigConfig(
-            rig_id=f"scene markers ({group_label})", marker_corners=marker_corners,
+            rig_id=f"scene markers ({group_name})", marker_corners=marker_corners,
             marker_dictionaries=marker_dictionaries,
         )
-        self._apply_loaded_rig_config(config, definition_id=None, source="scene_markers")
+        if not self._apply_loaded_rig_config(config, definition_id=None, source="scene_markers"):
+            return  # user declined to replace the existing anchor
         self._status_label.setText(
             f"Loaded {len(marker_corners)} previously-known scene marker(s) from "
-            f"group {group_label!r} for re-anchoring. {self._status_label.text()}"
+            f"group {group_name!r} for re-anchoring. {self._status_label.text()}"
         )
 
     def _on_rig_min_marker_pct_changed(self, _value: float) -> None:
@@ -2932,7 +3118,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # earlier capture instead of this capture's intended anchor (see
         # status.md's 2026-08-12 "moved rig" entry) -- refuse to
         # auto-commit below the configured minimum. Doesn't apply to a
-        # "From Scene Markers…" config (Tier B): individually re-anchoring
+        # "Load Markers…" config (Tier B): individually re-anchoring
         # from just one already-known tag is the expected, common case
         # there, not a red flag. Clamped to how many cameras this dialog
         # actually has -- requiring more cameras than exist can never be
@@ -2983,6 +3169,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._refresh_markers()
 
     def _refresh_rig_status(self) -> None:
+        self._refresh_save_markers_button()
         if self._rig_config is None:
             self._rig_status_label.setText("No rig config loaded.")
             return
@@ -3077,6 +3264,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._sift_matches = result.pair_matches
         self._solve_btn.setVisible(True)
         self._cancel_btn.setVisible(False)
+        self._refresh_save_markers_button()
         n_total = len(result.cameras)
         n_solved = n_total - len(result.unsolved)
 
@@ -3469,56 +3657,15 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             QMessageBox.critical(self, "Write failed", str(exc))
             return
 
-        # Persist the rig's own anchor pose (identity, by construction --
-        # see anchor_from_marker_rig's docstring) to scene_marker_bodies,
-        # same as the CLI's `extrinsics anchor-rig` command already does.
-        # Only for a real, file-loaded rig (Tier A) -- a "scene_markers"
-        # source (Tier B, "Load from scene markers…") reconstructed its
-        # config from scene_marker_bodies rows that already exist and
-        # whose own geometry hasn't changed, so there's nothing new to
-        # persist there; only the cameras' poses changed, already captured
-        # by the extrinsic_calibrations row above.
-        group_name = self._scene_marker_group_edit.text().strip() or None
-        if self._rig_anchored and self._rig_config is not None and self._rig_source == "file":
-            try:
-                upsert_scene_marker_body(
-                    self._conn, self._session_id, label=f"rig:{self._rig_config.rig_id}",
-                    R=np.eye(3), t=np.zeros(3), group_name=group_name,
-                    marker_body_definition_id=self._rig_definition_id, is_primary_anchor=True,
-                    source_extrinsic_calibration_id=calib_id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                _log.warning(
-                    "Could not persist rig anchor to scene_marker_bodies: %s", exc, exc_info=True
-                )
-
-        # Persist every known-size marker's solved pose too (scattered
-        # tags, design doc section 9 Tier B) -- the CLI's `anchor-rig
-        # --tag-size` writes the identical rows from the identical
-        # `result.marker_poses` output; the GUI's route to a "known-size
-        # marker" is "Detect ArUco" + the marker-size table/default-size
-        # field rather than a --tag-size flag, but once a marker has a
-        # real size ``solve_marker_groups`` already solves it the same
-        # way (see that function's docstring), so this is just the
-        # missing write step, not new solving. A capture in a *different*
-        # session later reaches these same tags via "From Scene
-        # Markers…"/`reanchor`.
-        for marker_id, mp in self._result.marker_poses.items():
-            mg = self._marker_groups.get(marker_id)
-            dictionary = mg.dictionary if mg is not None else "DICT_4X4_50"
-            try:
-                R, _ = cv2.Rodrigues(mp.rvec)
-                upsert_scene_marker_body(
-                    self._conn, self._session_id, label=f"tag:{marker_id}",
-                    R=R, t=mp.tvec, group_name=group_name,
-                    marker_type="aruco", dictionary=dictionary, marker_id=marker_id,
-                    marker_size=mp.size, source_extrinsic_calibration_id=calib_id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                _log.warning(
-                    "Could not persist marker %s to scene_marker_bodies: %s",
-                    marker_id, exc, exc_info=True,
-                )
+        # Scene-marker persistence used to happen here implicitly (only
+        # if a name happened to be typed into a text field). UX Phase 5
+        # (see docs/roadmap/features/extrinsics-improvements/
+        # extrinsics-ux-redesign.md) replaced that with the explicit
+        # "Save Markers…" action (_on_save_markers) -- track this
+        # calibration's id so Save Markers can link to it if used after
+        # Accept; it works before Accept too (using the last solve's
+        # result directly), in which case this stays whatever it was.
+        self._last_calib_id = calib_id
 
         if self._shot_ids:
             with self._conn:

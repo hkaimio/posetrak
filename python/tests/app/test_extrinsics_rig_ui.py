@@ -12,9 +12,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QDialog, QMessageBox
 
-from app.setup.extrinsics_solver import CalibResult, CamCalibState, MarkerGroup, MarkerPoseResult
+from app.setup.extrinsics_solver import (
+    CalibResult,
+    CamCalibState,
+    ControlPoint,
+    MarkerGroup,
+    MarkerPoseResult,
+)
 from app.setup.fiducial_markers import ARUCO_DICTIONARIES
 from app.setup.page_extrinsics import (
     ExtrinsicsAutoCalibDialog,
@@ -336,7 +342,7 @@ def test_anchor_rig_button_redetects_every_camera(qapp, fake_conn, rig_yaml_path
 # Min-cameras-to-anchor guard (2026-08-12) -- a physical rig glimpsed by
 # only one stray camera is often left-over clutter from an earlier capture,
 # not this capture's intended anchor (Harri's "moved rig" report). Doesn't
-# apply to a "From Scene Markers…" config, and is clamped to however many
+# apply to a "Load Markers…" config, and is clamped to however many
 # cameras a dialog actually has (see _detect_and_anchor_rig).
 # ---------------------------------------------------------------------------
 
@@ -382,14 +388,14 @@ def test_rig_seen_by_only_one_camera_can_be_force_anchored_by_lowering_minimum(
 
 
 def test_min_cameras_guard_does_not_apply_to_scene_markers_source(qapp, fake_conn) -> None:
-    _seed_scene_marker_tag(fake_conn, "sess1")
+    _seed_scene_marker_tag(fake_conn, "sess1", group_name="grp")
     states = [
         _make_state("cam_A", _render_marker_image(3)),
         _make_state("cam_B", image=None),
     ]
     dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
     try:
-        dlg._on_load_rig_from_scene_markers()
+        dlg._load_rig_config_from_scene_marker_group("grp")
 
         assert dlg._rig_anchored
         assert len(dlg._rig_control_points()) == 4
@@ -442,6 +448,7 @@ def test_load_invalid_rig_yaml_shows_warning_not_crash(qapp, fake_conn, tmp_path
 
 def _seed_scene_marker_tag(
     conn, session_id: str, marker_id: str = "3", dictionary: str = "DICT_4X4_50", size: float = 0.1,
+    group_name: str | None = None,
 ) -> None:
     from app.setup.page_extrinsics import upsert_scene_marker_body
     conn.execute(
@@ -451,7 +458,7 @@ def _seed_scene_marker_tag(
     conn.commit()
     upsert_scene_marker_body(
         conn, session_id, label=f"tag:{marker_id}",
-        R=np.eye(3), t=np.array([0.5, 0.0, 2.0]),
+        R=np.eye(3), t=np.array([0.5, 0.0, 2.0]), group_name=group_name,
         marker_type="aruco", dictionary=dictionary, marker_id=marker_id, marker_size=size,
     )
 
@@ -477,14 +484,14 @@ def test_load_from_scene_markers_with_none_persisted_shows_warning(qapp, fake_co
 
 
 def test_load_from_scene_markers_populates_config(qapp, fake_conn) -> None:
-    _seed_scene_marker_tag(fake_conn, "sess1")
+    _seed_scene_marker_tag(fake_conn, "sess1", group_name="grp")
     states = [_make_state("cam_A", _render_marker_image(3))]
     dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
     try:
-        dlg._on_load_rig_from_scene_markers()
+        dlg._load_rig_config_from_scene_marker_group("grp")
 
         assert dlg._rig_config is not None
-        assert dlg._rig_config.rig_id == "scene markers ((ungrouped))"
+        assert dlg._rig_config.rig_id == "scene markers (grp)"
         assert set(dlg._rig_config.marker_corners) == {"3"}
         assert dlg._rig_config.marker_dictionaries["3"] == "DICT_4X4_50"
         assert dlg._rig_source == "scene_markers"
@@ -495,11 +502,11 @@ def test_load_from_scene_markers_populates_config(qapp, fake_conn) -> None:
 
 
 def test_load_from_scene_markers_then_detect_and_anchor(qapp, fake_conn) -> None:
-    _seed_scene_marker_tag(fake_conn, "sess1")
+    _seed_scene_marker_tag(fake_conn, "sess1", group_name="grp")
     states = [_make_state("cam_A", _render_marker_image(3))]
     dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
     try:
-        dlg._on_load_rig_from_scene_markers()
+        dlg._load_rig_config_from_scene_marker_group("grp")
         dlg._on_detect_rig_clicked("cam_A")
         assert "cam_A" in dlg._rig_detections_by_camera
         assert len(dlg._rig_detections_by_camera["cam_A"]) == 1
@@ -518,7 +525,7 @@ def test_scene_markers_source_not_repersisted_on_accept(qapp, fake_conn) -> None
     scene_marker_bodies row on Accept -- its rows already exist and their
     own geometry hasn't changed by re-anchoring a different capture from
     them (only the cameras' poses changed)."""
-    _seed_scene_marker_tag(fake_conn, "sess1")
+    _seed_scene_marker_tag(fake_conn, "sess1", group_name="grp")
     states = [_make_state("cam_A", _render_marker_image(3))]
     dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
     try:
@@ -526,7 +533,7 @@ def test_scene_markers_source_not_repersisted_on_accept(qapp, fake_conn) -> None
             "SELECT COUNT(*) FROM scene_marker_bodies WHERE session_id = 'sess1'"
         ).fetchone()[0]
 
-        dlg._on_load_rig_from_scene_markers()
+        dlg._load_rig_config_from_scene_marker_group("grp")
         assert dlg._rig_source == "scene_markers"
         # Directly exercise the same guard _on_accept uses, without needing
         # a full solve/CalibResult round-trip through _SolveThread.
@@ -600,9 +607,12 @@ def test_load_rig_config_from_registry_row_invalid_yaml_shows_warning(
 
 # ---------------------------------------------------------------------------
 # Persisting sized ArUco markers ("Detect ArUco" + a real size, not a rig)
-# to scene_marker_bodies on Accept -- the GUI's own route to what the CLI's
-# `anchor-rig --tag-size` does, so a later capture can reuse them via "From
-# Scene Markers…"/`reanchor`. See _on_accept.
+# to scene_marker_bodies via the explicit "Save Markers…" action (UX Phase
+# 5, see docs/roadmap/features/extrinsics-improvements/
+# extrinsics-ux-redesign.md) -- the GUI's own route to what the CLI's
+# `anchor-rig --tag-size` does, so a later capture can reuse them via "Load
+# Markers…"/`reanchor --name`. Accept itself no longer persists anything;
+# see _save_markers_items/_save_markers.
 # ---------------------------------------------------------------------------
 
 
@@ -621,55 +631,285 @@ def _seed_session_and_camera(conn, session_id: str = "sess1", label: str = "cam_
     conn.commit()
 
 
-def test_accept_persists_sized_scattered_marker_pose(qapp, fake_conn) -> None:
+def _anchor_solved_sized_marker(dlg, states) -> None:
+    """Wires a single sized ArUco marker ('tag:9') into a dialog's
+    post-solve state, as if "Detect ArUco" + a real Solve had just run --
+    shared setup for the Save Markers tests below."""
+    dlg._marker_groups["9"] = MarkerGroup(marker_id="9", size=0.1, dictionary="DICT_5X5_50")
+    rvec, _ = cv2.Rodrigues(np.eye(3))
+    mp = MarkerPoseResult(
+        rvec=rvec, tvec=np.array([1.0, 2.0, 3.0]), size=0.1, rms_reprojection_px=0.5
+    )
+    states[0].R = np.eye(3)
+    states[0].t = np.zeros((3, 1))
+    dlg._result = CalibResult(
+        cameras={"cam_A": states[0]}, points_3d=[], reprojection_errors={},
+        unsolved=[], pair_matches={}, marker_poses={"9": mp},
+    )
+
+
+def test_save_markers_items_empty_when_nothing_anchored(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", _render_marker_image(9))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        assert dlg._save_markers_items() == []
+        assert not dlg._save_markers_btn.isEnabled()
+    finally:
+        dlg.done(0)
+
+
+def test_save_markers_items_lists_sized_marker_after_solve(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", _render_marker_image(9))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        _anchor_solved_sized_marker(dlg, states)
+        dlg._refresh_save_markers_button()
+
+        assert any(label == "tag:9" for label, _ in dlg._save_markers_items())
+        assert dlg._save_markers_btn.isEnabled()
+    finally:
+        dlg.done(0)
+
+
+def test_save_markers_directly_persists_selected_sized_marker(qapp, fake_conn) -> None:
     _seed_session_and_camera(fake_conn)
     states = [_make_state("cam_A", _render_marker_image(9))]
     dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
     try:
-        dlg._marker_groups["9"] = MarkerGroup(marker_id="9", size=0.1, dictionary="DICT_5X5_50")
-        rvec, _ = cv2.Rodrigues(np.eye(3))
-        mp = MarkerPoseResult(
-            rvec=rvec, tvec=np.array([1.0, 2.0, 3.0]), size=0.1, rms_reprojection_px=0.5
-        )
-        states[0].R = np.eye(3)
-        states[0].t = np.zeros((3, 1))
-        dlg._result = CalibResult(
-            cameras={"cam_A": states[0]}, points_3d=[], reprojection_errors={},
-            unsolved=[], pair_matches={}, marker_poses={"9": mp},
-        )
+        _anchor_solved_sized_marker(dlg, states)
 
-        dlg._on_accept()
+        dlg._save_markers("room7", {"tag:9"})
 
         row = fake_conn.execute(
-            "SELECT dictionary, marker_id, marker_size FROM scene_marker_bodies "
+            "SELECT dictionary, marker_id, marker_size, group_name FROM scene_marker_bodies "
             "WHERE session_id = 'sess1' AND label = 'tag:9'"
         ).fetchone()
         assert row is not None
         assert row[0] == "DICT_5X5_50"
         assert row[1] == "9"
         assert row[2] == pytest.approx(0.1)
+        assert row[3] == "room7"
     finally:
         dlg.done(0)
 
 
-def test_accept_with_no_sized_markers_persists_nothing(qapp, fake_conn) -> None:
+def test_save_markers_only_persists_selected_labels(qapp, fake_conn, rig_yaml_path) -> None:
+    """A file-sourced rig anchor is also eligible -- but only the labels
+    the caller (the "Save Markers…" dialog's checklist) actually selected
+    get written."""
     _seed_session_and_camera(fake_conn)
-    states = [_make_state("cam_A", _render_marker_image(9))]
+    states = [_make_state("cam_A", _render_marker_image(3))]
     dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
     try:
-        states[0].R = np.eye(3)
-        states[0].t = np.zeros((3, 1))
-        dlg._result = CalibResult(
-            cameras={"cam_A": states[0]}, points_3d=[], reprojection_errors={},
-            unsolved=[], pair_matches={},
-        )
+        dlg._load_rig_config_from_path(rig_yaml_path)  # auto-anchors (marker "3" visible)
+        assert dlg._rig_anchored
+        rig_label = f"rig:{dlg._rig_config.rig_id}"
+        assert (rig_label, "primary anchor") in dlg._save_markers_items()
 
-        dlg._on_accept()
+        dlg._save_markers("room7", set())  # nothing selected
 
         count = fake_conn.execute(
             "SELECT COUNT(*) FROM scene_marker_bodies WHERE session_id = 'sess1'"
         ).fetchone()[0]
         assert count == 0
+
+        dlg._save_markers("room7", {rig_label})
+
+        row = fake_conn.execute(
+            "SELECT group_name FROM scene_marker_bodies WHERE session_id = 'sess1' "
+            f"AND label = '{rig_label}'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "room7"
+    finally:
+        dlg.done(0)
+
+
+def test_on_save_markers_warns_when_nothing_eligible(qapp, fake_conn, monkeypatch) -> None:
+    states = [_make_state("cam_A", _render_marker_image(9))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        warned = []
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics.QMessageBox.warning",
+            lambda *a, **kw: warned.append(a),
+        )
+        dlg._on_save_markers()
+        assert len(warned) == 1
+    finally:
+        dlg.done(0)
+
+
+class _FakeSaveMarkersDialog:
+    """Stands in for _SaveMarkersDialog -- avoids constructing the real
+    checklist/name-field widget just to drive _on_save_markers's wiring."""
+
+    def __init__(self, items, parent=None) -> None:
+        self.items = items
+
+    def exec(self) -> int:
+        return QDialog.DialogCode.Accepted
+
+    def group_name(self) -> str:
+        return "room7"
+
+    def selected_labels(self) -> set[str]:
+        return {"tag:9"}
+
+
+def test_on_save_markers_opens_dialog_and_saves_selected(qapp, fake_conn, monkeypatch) -> None:
+    _seed_session_and_camera(fake_conn)
+    states = [_make_state("cam_A", _render_marker_image(9))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        _anchor_solved_sized_marker(dlg, states)
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics._SaveMarkersDialog", _FakeSaveMarkersDialog
+        )
+        dlg._on_save_markers()
+
+        row = fake_conn.execute(
+            "SELECT group_name FROM scene_marker_bodies WHERE session_id = 'sess1' "
+            "AND label = 'tag:9'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "room7"
+    finally:
+        dlg.done(0)
+
+
+def test_on_save_markers_nothing_selected_does_not_save(qapp, fake_conn, monkeypatch) -> None:
+    _seed_session_and_camera(fake_conn)
+    states = [_make_state("cam_A", _render_marker_image(9))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        _anchor_solved_sized_marker(dlg, states)
+
+        class _NothingSelectedDialog(_FakeSaveMarkersDialog):
+            def selected_labels(self) -> set[str]:
+                return set()
+
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics._SaveMarkersDialog", _NothingSelectedDialog
+        )
+        dlg._on_save_markers()
+
+        count = fake_conn.execute(
+            "SELECT COUNT(*) FROM scene_marker_bodies WHERE session_id = 'sess1'"
+        ).fetchone()[0]
+        assert count == 0
+    finally:
+        dlg.done(0)
+
+
+def test_on_solve_done_refreshes_save_markers_button(qapp, fake_conn) -> None:
+    """_refresh_save_markers_button() must run after a solve too, not just
+    after rig-anchor changes -- a sized marker only becomes eligible once
+    _result is populated (see _save_markers_items)."""
+    states = [_make_state("cam_A", _render_marker_image(9))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        assert not dlg._save_markers_btn.isEnabled()
+
+        rvec, _ = cv2.Rodrigues(np.eye(3))
+        mp = MarkerPoseResult(
+            rvec=rvec, tvec=np.array([1.0, 2.0, 3.0]), size=0.1, rms_reprojection_px=0.5
+        )
+        states[0].R = np.eye(3)
+        states[0].t = np.zeros((3, 1))
+        result = CalibResult(
+            cameras={"cam_A": states[0]}, points_3d=[], reprojection_errors={},
+            unsolved=[], pair_matches={}, marker_poses={"9": mp},
+        )
+        dlg._on_solve_done(result)
+
+        assert dlg._save_markers_btn.isEnabled()
+    finally:
+        dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Replacing an existing world-frame anchor (rig or manual control points)
+# with a newly-loaded one asks first (UX Phase 5's
+# _confirm_replace_existing_anchor -- CLAUDE.md's "automation vs. prior
+# human edits" design principle applied to loading a rig/scene-marker
+# config over something already anchored).
+# ---------------------------------------------------------------------------
+
+
+def test_confirm_replace_returns_true_when_nothing_anchored_yet(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        assert dlg._confirm_replace_existing_anchor() is True
+    finally:
+        dlg.done(0)
+
+
+def test_loading_new_rig_over_existing_anchor_asks_and_replaces_on_yes(
+    qapp, fake_conn, rig_yaml_path, monkeypatch
+) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_path(rig_yaml_path)  # auto-anchors
+        assert dlg._rig_anchored
+
+        asked = []
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics.QMessageBox.question",
+            lambda *a, **kw: (asked.append(a), QMessageBox.StandardButton.Yes)[1],
+        )
+        dlg._load_rig_config_from_path(rig_yaml_path)  # loading again should ask
+
+        assert len(asked) == 1
+        assert dlg._rig_anchored  # replaced, still anchored
+    finally:
+        dlg.done(0)
+
+
+def test_loading_new_rig_over_existing_anchor_declines_leaves_state_unchanged(
+    qapp, fake_conn, rig_yaml_path, monkeypatch
+) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_path(rig_yaml_path)
+        assert dlg._rig_anchored
+        original_config = dlg._rig_config
+
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics.QMessageBox.question",
+            lambda *a, **kw: QMessageBox.StandardButton.No,
+        )
+        result = dlg._apply_loaded_rig_config(
+            original_config, definition_id=dlg._rig_definition_id, source="file",
+        )
+
+        assert result is False
+        assert dlg._rig_config is original_config  # untouched
+        assert dlg._rig_anchored
+    finally:
+        dlg.done(0)
+
+
+def test_confirm_replace_triggers_on_manual_control_point_anchor(qapp, fake_conn, monkeypatch) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._control_points.append(
+            ControlPoint(name="manual_cp", world_xyz=np.array([1.0, 2.0, 3.0]))
+        )
+
+        asked = []
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics.QMessageBox.question",
+            lambda *a, **kw: (asked.append(a), QMessageBox.StandardButton.No)[1],
+        )
+        result = dlg._confirm_replace_existing_anchor()
+
+        assert len(asked) == 1
+        assert result is False
     finally:
         dlg.done(0)
 
@@ -797,14 +1037,14 @@ def test_aruco_marker_excluded_when_matches_loaded_rig(qapp, fake_conn, rig_yaml
 
 
 def test_aruco_marker_not_excluded_for_scene_markers_source(qapp, fake_conn) -> None:
-    """A "From Scene Markers…" config's own marker ids ARE ordinary
+    """A "Load Markers…" config's own marker ids ARE ordinary
     scattered tags -- they must stay detectable/refreshable via "Detect
     ArUco", unlike a genuine physical rig's markers."""
-    _seed_scene_marker_tag(fake_conn, "sess1", marker_id="3", dictionary="DICT_4X4_50")
+    _seed_scene_marker_tag(fake_conn, "sess1", marker_id="3", dictionary="DICT_4X4_50", group_name="grp")
     states = [_make_state("cam_A", _render_marker_image(3))]
     dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
     try:
-        dlg._on_load_rig_from_scene_markers()
+        dlg._load_rig_config_from_scene_marker_group("grp")
         assert dlg._rig_source == "scene_markers"
 
         dlg._on_detect_aruco_clicked("cam_A")
@@ -867,21 +1107,28 @@ def test_manager_dialog_flags_row_matching_rig_geometry(qapp, fake_conn, rig_yam
 
 # ---------------------------------------------------------------------------
 # Scene marker groups (group_name, 2026-08-12) -- named groups (e.g. one per
-# room) so "From Scene Markers…" can load a specific room's markers instead
+# room) so "Load Markers…" can load a specific room's markers instead
 # of every stored marker in the session loading together indiscriminately.
 # ---------------------------------------------------------------------------
 
 
-def test_load_from_scene_markers_no_named_groups_skips_picker(qapp, fake_conn) -> None:
-    """Nothing has ever been named -- load the ungrouped set directly, no
-    picker needed (same zero-friction behaviour as before this existed)."""
-    _seed_scene_marker_tag(fake_conn, "sess1")
+def test_load_from_scene_markers_no_named_groups_shows_warning(qapp, fake_conn, monkeypatch) -> None:
+    """Always-named as of UX Phase 5 (see docs/roadmap/features/
+    extrinsics-improvements/extrinsics-ux-redesign.md) -- an ungrouped
+    tag from before that requirement existed isn't a pickable config
+    anymore, so this warns instead of silently loading it."""
+    _seed_scene_marker_tag(fake_conn, "sess1")  # ungrouped
     states = [_make_state("cam_A", _render_marker_image(3))]
     dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
     try:
+        warned = []
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics.QMessageBox.warning",
+            lambda *a, **kw: warned.append(a),
+        )
         dlg._on_load_rig_from_scene_markers()
-        assert dlg._rig_config is not None
-        assert set(dlg._rig_config.marker_corners) == {"3"}
+        assert len(warned) == 1
+        assert dlg._rig_config is None
     finally:
         dlg.done(0)
 
@@ -958,11 +1205,12 @@ def test_load_rig_config_from_scene_marker_group_different_groups_dont_mix(
         dlg.done(0)
 
 
-def test_group_picker_dialog_lists_groups_and_ungrouped_option(qapp, fake_conn) -> None:
-    from posetrak.db.manage_marker_body import (
-        list_scene_marker_bodies_by_group,
-        list_scene_marker_group_names,
-    )
+def test_group_picker_dialog_lists_named_groups_only(qapp, fake_conn) -> None:
+    """Always-named as of UX Phase 5 -- no more "(ungrouped)" row; an
+    ungrouped tag from before that requirement existed just doesn't show
+    up here (see test_load_from_scene_markers_no_named_groups_shows_warning
+    for the "nothing to pick from" case)."""
+    from posetrak.db.manage_marker_body import list_scene_marker_group_names
     fake_conn.execute(
         "INSERT OR IGNORE INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
     )
@@ -974,24 +1222,13 @@ def test_group_picker_dialog_lists_groups_and_ungrouped_option(qapp, fake_conn) 
     upsert_scene_marker_body(
         fake_conn, "sess1", label="tag:9", R=np.eye(3), t=np.zeros(3),
         marker_type="aruco", dictionary="DICT_4X4_50", marker_id="9", marker_size=0.1,
-    )
+    )  # ungrouped -- must not appear
     named = list_scene_marker_group_names(fake_conn, "sess1")
-    ungrouped = list_scene_marker_bodies_by_group(fake_conn, "sess1", None)
 
-    dlg = _SceneMarkerGroupPickerDialog(named, bool(ungrouped))
+    dlg = _SceneMarkerGroupPickerDialog(named)
     try:
         names = {dlg._table.item(i, 0).text() for i in range(dlg._table.rowCount())}
-        assert names == {"room7", "(ungrouped)"}
-    finally:
-        dlg.done(0)
-
-
-def test_group_picker_dialog_selecting_ungrouped_returns_none(qapp, fake_conn) -> None:
-    dlg = _SceneMarkerGroupPickerDialog([], True)
-    try:
-        dlg._table.selectRow(0)
-        dlg.accept()
-        assert dlg.selected_group_name() is None
+        assert names == {"room7"}
     finally:
         dlg.done(0)
 
@@ -1007,7 +1244,7 @@ def test_group_picker_dialog_selecting_named_group_returns_name(qapp, fake_conn)
         marker_type="aruco", dictionary="DICT_4X4_50", marker_id="3", marker_size=0.1,
     )
     named = list_scene_marker_group_names(fake_conn, "sess1")
-    dlg = _SceneMarkerGroupPickerDialog(named, False)
+    dlg = _SceneMarkerGroupPickerDialog(named)
     try:
         dlg._table.selectRow(0)
         dlg.accept()
@@ -1016,56 +1253,11 @@ def test_group_picker_dialog_selecting_named_group_returns_name(qapp, fake_conn)
         dlg.done(0)
 
 
-def test_accept_persists_group_name(qapp, fake_conn) -> None:
-    _seed_session_and_camera(fake_conn)
-    states = [_make_state("cam_A", _render_marker_image(9))]
-    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+def test_group_picker_dialog_no_selection_accept_is_noop(qapp, fake_conn) -> None:
+    dlg = _SceneMarkerGroupPickerDialog([])
     try:
-        dlg._scene_marker_group_edit.setText("room7")
-        dlg._marker_groups["9"] = MarkerGroup(marker_id="9", size=0.1, dictionary="DICT_5X5_50")
-        rvec, _ = cv2.Rodrigues(np.eye(3))
-        mp = MarkerPoseResult(
-            rvec=rvec, tvec=np.array([1.0, 2.0, 3.0]), size=0.1, rms_reprojection_px=0.5
-        )
-        states[0].R = np.eye(3)
-        states[0].t = np.zeros((3, 1))
-        dlg._result = CalibResult(
-            cameras={"cam_A": states[0]}, points_3d=[], reprojection_errors={},
-            unsolved=[], pair_matches={}, marker_poses={"9": mp},
-        )
-
-        dlg._on_accept()
-
-        row = fake_conn.execute(
-            "SELECT group_name FROM scene_marker_bodies WHERE session_id = 'sess1' "
-            "AND label = 'tag:9'"
-        ).fetchone()
-        assert row[0] == "room7"
-    finally:
-        dlg.done(0)
-
-
-def test_accept_blank_group_name_stays_ungrouped(qapp, fake_conn, rig_yaml_path) -> None:
-    _seed_session_and_camera(fake_conn)
-    states = [_make_state("cam_A", _render_marker_image(3))]
-    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
-    try:
-        dlg._load_rig_config_from_path(rig_yaml_path)  # auto-anchors (marker "3" visible)
-        assert dlg._rig_anchored
-        assert dlg._scene_marker_group_edit.text() == ""
-
-        states[0].R = np.eye(3)
-        states[0].t = np.zeros((3, 1))
-        dlg._result = CalibResult(
-            cameras={"cam_A": states[0]}, points_3d=[], reprojection_errors={},
-            unsolved=[], pair_matches={},
-        )
-        dlg._on_accept()
-
-        row = fake_conn.execute(
-            "SELECT group_name FROM scene_marker_bodies WHERE session_id = 'sess1' "
-            "AND label = 'rig:test-rig'"
-        ).fetchone()
-        assert row[0] == ""
+        dlg.accept()  # nothing to select -- must not raise or set a name
+        assert dlg.selected_group_name() is None
+        assert dlg.result() != QDialog.DialogCode.Accepted
     finally:
         dlg.done(0)

@@ -2366,10 +2366,18 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 self._data_table.insertRow(row)
                 self._data_table.setItem(row, 0, QTableWidgetItem(kind))
                 self._data_table.setItem(row, 1, QTableWidgetItem(label))
+                # Camera order numbers (1-based, matching each camera's own
+                # row in the Cameras table via _cam_pos_row_by_vid) rather
+                # than a bare count -- lets a glance at this row and the
+                # Cameras table above it identify exactly which cameras,
+                # not just how many (Harri's 2026-08-14 follow-up).
+                cam_orders = sorted(
+                    self._cam_pos_row_by_vid[v] + 1 for v in cams if v in self._cam_pos_row_by_vid
+                )
                 cam_labels = sorted(
                     self._states_by_id[v].label if v in self._states_by_id else v for v in cams
                 )
-                cams_item = QTableWidgetItem(str(len(cams)))
+                cams_item = QTableWidgetItem(", ".join(str(n) for n in cam_orders))
                 if cam_labels:
                     cams_item.setToolTip(", ".join(cam_labels))
                 self._data_table.setItem(row, 2, cams_item)

@@ -96,7 +96,7 @@ def test_control_point_appears_as_a_row(qapp, fake_conn) -> None:
         assert len(rows) == 1
         row = rows[0]
         assert dlg._data_table.item(row, 1).text() == "CP1"
-        assert dlg._data_table.item(row, 2).text() == "0"
+        assert dlg._data_table.item(row, 2).text() == ""  # no cameras yet
         assert dlg._data_table.item(row, 3).text() == ""
         assert dlg._data_table.item(row, 4).text() == "manual"
     finally:
@@ -111,6 +111,26 @@ def test_cp_row_cameras_count_updates_on_placement(qapp, fake_conn) -> None:
 
         row = _rows_by_type(dlg, "CP")[0]
         assert dlg._data_table.item(row, 2).text() == "1"
+    finally:
+        dlg.done(0)
+
+
+def test_cameras_column_shows_camera_order_numbers_not_a_count(qapp, fake_conn) -> None:
+    """1-based order number matching each camera's own row in the Cameras
+    table (_cam_pos_row_by_vid), not a bare count -- so the column
+    identifies *which* cameras, not just how many (2026-08-14 follow-up).
+    A CP seen only by the 2nd and 3rd of three cameras must show "2, 3",
+    not a re-numbered "1, 2" of just the observing subset."""
+    dlg = ExtrinsicsAutoCalibDialog(
+        [_make_state("cam_A"), _make_state("cam_B"), _make_state("cam_C")], fake_conn, "sess1",
+    )
+    try:
+        dlg._add_control_point()
+        dlg._on_cam_click("cam_B", 1.0, 1.0)
+        dlg._on_cam_click("cam_C", 2.0, 2.0)
+
+        row = _rows_by_type(dlg, "CP")[0]
+        assert dlg._data_table.item(row, 2).text() == "2, 3"
     finally:
         dlg.done(0)
 

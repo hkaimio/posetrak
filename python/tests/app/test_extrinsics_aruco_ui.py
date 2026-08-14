@@ -74,7 +74,7 @@ def test_detect_button_finds_marker_and_populates_table(qapp, fake_conn) -> None
 
         assert set(dlg._marker_groups) == {"3"}
         row = _marker_row(dlg, "3")
-        assert dlg._data_table.item(row, 2).text() == "1"  # 1 camera
+        assert dlg._data_table.item(row, 2).text() == "1"  # cam_A is camera order #1
     finally:
         dlg.done(0)
 
@@ -163,7 +163,9 @@ def test_detecting_across_two_cameras_accumulates_one_group(qapp, fake_conn) -> 
         assert set(dlg._marker_groups) == {"3"}
         assert set(dlg._marker_groups["3"].obs) == {"cam_A", "cam_B"}
         row = _marker_row(dlg, "3")
-        assert dlg._data_table.item(row, 2).text() == "2"
+        # Camera order numbers (1-based, matching the Cameras table), not
+        # a bare count.
+        assert dlg._data_table.item(row, 2).text() == "1, 2"
     finally:
         dlg.done(0)
 

@@ -61,7 +61,6 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -1282,6 +1281,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._solve_thread: _SolveThread | None = None
         self._control_points: list[ControlPoint] = []
         self._selected_cp_idx: int | None = None
+        # Data table (UX Phase 7) row -> self._control_points index, for
+        # CP-type rows only -- see _refresh_data_table.
+        self._data_table_cp_rows: dict[int, int] = {}
         self._intrinsics_combos: dict[str, QComboBox] = {}
         self._cam_pos_row_by_vid: dict[str, int] = {}
         self._last_calib_id: str | None = None
@@ -1500,6 +1502,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._cam_pos_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         self._cam_pos_table.setAlternatingRowColors(True)
 
+        self._data_table = self._build_data_table()
+
         # Dialog buttons
         btn_box = QDialogButtonBox()
         self._accept_btn = btn_box.addButton("Accept", QDialogButtonBox.ButtonRole.AcceptRole)
@@ -1512,10 +1516,58 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         root.addWidget(splitter, 1)
         root.addLayout(solve_row)
         root.addWidget(self._cam_pos_table)
+        root.addWidget(self._data_table)
         root.addWidget(btn_box)
 
         self._populate_cam_pos_table_rows()
         self._refresh_cam_pos_table()
+        self._refresh_data_table()
+
+    def _build_data_table(self) -> QTableWidget:
+        """Unified Data table (UX Phase 7, see docs/roadmap/features/
+        extrinsics-improvements/extrinsics-ux-redesign.md): one row per
+        data point currently contributing to (or available to) the solve,
+        replacing the sidebar's old _cp_list/_marker_table as the place to
+        see and select control points/markers -- ChArUco/rig corners and
+        camera-position observations get list representation here for the
+        first time too, previously only visible as image overlays.
+
+        Built as its own method (unlike ``_cam_pos_table``, still inline
+        in ``_build_ui``) so relocating it -- e.g. back into the sidebar,
+        per Harri's own "I might want to transfer the data point table
+        back to the side bar" heads-up -- only means changing who calls
+        this and where the returned widget gets added to a layout, not
+        touching its construction.
+
+        Full rebuild on every refresh (``_refresh_data_table``), same
+        pattern ``_refresh_marker_table`` used -- rows are cheap to
+        recreate and there's no per-row identity to preserve across
+        refreshes the way ``_cam_pos_table``'s combo/checkbox cells need.
+
+        Deviation from the design doc's literal column list (Type/Label/
+        Cameras/World position/Source): adds a "Size (m)" column so
+        markers keep the per-marker size-override editing ``_marker_table``
+        used to provide -- dropping that editing capability entirely
+        would have been a real regression, not just a display change.
+        Similarly adds "Board corner" as its own Type alongside the doc's
+        marker/CP/rig-corner/cam-pos-obs -- ChArUco corners are a genuine
+        fifth data source, symmetrical with rig corners.
+        """
+        table = QTableWidget(0, 6)
+        table.setHorizontalHeaderLabels(
+            ["Type", "Label", "Cameras", "World position", "Source", "Size (m)"]
+        )
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for col in (0, 2, 3, 4, 5):
+            table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        table.setMaximumHeight(200)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        table.setAlternatingRowColors(True)
+        table.itemSelectionChanged.connect(self._on_data_table_selection_changed)
+        table.cellDoubleClicked.connect(self._on_data_table_double_clicked)
+        return table
 
     def _build_cp_panel(self) -> QWidget:
         panel = QWidget()
@@ -1526,17 +1578,14 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         cp_layout = QVBoxLayout(cp_group)
 
         hint = QLabel(
-            "Select a point, then press and drag on camera images to place it precisely. "
-            "Double-click a point to rename it. "
+            "Add a point, then press and drag on camera images to place it precisely. "
+            "Select its row in the Data table below the camera grid to arm it for "
+            "placement, or double-click that row to rename it. "
             "Right-click a camera to remove just that camera's observation. "
             "Set World position to fix scale / origin in BA."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666; font-size: 10px;")
-
-        self._cp_list = QListWidget()
-        self._cp_list.currentRowChanged.connect(self._on_cp_selected)
-        self._cp_list.itemDoubleClicked.connect(self._rename_control_point)
 
         add_del = QHBoxLayout()
         add_btn = QPushButton("Add")
@@ -1554,7 +1603,6 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         add_del.addWidget(save_btn)
 
         cp_layout.addWidget(hint)
-        cp_layout.addWidget(self._cp_list, 1)
         cp_layout.addLayout(add_del)
 
         # World position (optional)
@@ -1644,12 +1692,13 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         hint = QLabel(
             "Click \"Detect ArUco\" under a camera to find markers in its "
             "current frame. A marker's 4 corners act as one control-point "
-            "group; give it a size (below) to also recover its rigid "
+            "group; give it a size (its row's \"Size (m)\" column in the "
+            "Data table below the camera grid) to also recover its rigid "
             "world pose once ≥2 cameras have seen it. Use \"Save "
             "Markers…\" to persist a sized marker's solved pose to this "
             "session's scene markers, so a later capture can re-anchor "
-            "from it without a physical rig (\"Load Markers…\" in the "
-            "panel below) -- use a dictionary here that's different from "
+            "from it without a physical rig (\"Load Markers…\" in "
+            "Anchoring) -- use a dictionary here that's different from "
             "your rig's own so the two can't be confused."
         )
         hint.setWordWrap(True)
@@ -1697,16 +1746,6 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         )
         min_size_row.addWidget(self._aruco_min_marker_pct_spin, 1)
 
-        self._marker_table = QTableWidget(0, 3)
-        self._marker_table.setHorizontalHeaderLabels(["Marker", "Cameras", "Size override (m)"])
-        hdr = self._marker_table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self._marker_table.verticalHeader().setVisible(False)
-        self._marker_table.setMinimumHeight(80)
-        self._marker_table.setMaximumHeight(140)
-
         clear_btn = QPushButton("Clear markers")
         clear_btn.clicked.connect(self._on_clear_markers)
 
@@ -1714,7 +1753,6 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         layout.addLayout(dict_row)
         layout.addLayout(size_row)
         layout.addLayout(min_size_row)
-        layout.addWidget(self._marker_table)
         layout.addWidget(clear_btn)
         return group
 
@@ -2212,40 +2250,34 @@ class ExtrinsicsAutoCalibDialog(QDialog):
     # Control-point slots
     # ------------------------------------------------------------------
 
-    def _cp_list_label(self, cp: "ControlPoint") -> str:
-        kind = "fixed" if cp.world_xyz is not None else "free"
-        return f"{cp.name}  ({kind}, {len(cp.obs)} cam{'s' if len(cp.obs) != 1 else ''})"
-
-    def _refresh_cp_list_labels(self) -> None:
-        for row, cp in enumerate(self._control_points):
-            item = self._cp_list.item(row)
-            if item is not None:
-                item.setText(self._cp_list_label(cp))
-
     def _add_control_point(self) -> None:
         name = f"CP{len(self._control_points) + 1}"
         cp = ControlPoint(name=name)
         self._control_points.append(cp)
-        self._cp_list.addItem(self._cp_list_label(cp))
-        self._cp_list.setCurrentRow(len(self._control_points) - 1)
+        new_idx = len(self._control_points) - 1
+        self._refresh_data_table()
+        # Auto-select the new point's row, same as _cp_list.setCurrentRow()
+        # used to -- arms it for click-to-place immediately.
+        for row, cp_idx in self._data_table_cp_rows.items():
+            if cp_idx == new_idx:
+                self._data_table.selectRow(row)
+                break
 
-    def _rename_control_point(self, item) -> None:
-        row = self._cp_list.row(item)
-        if row < 0 or row >= len(self._control_points):
+    def _rename_control_point(self, cp_idx: int) -> None:
+        if cp_idx < 0 or cp_idx >= len(self._control_points):
             return
-        cp = self._control_points[row]
+        cp = self._control_points[cp_idx]
         name, ok = QInputDialog.getText(self, "Rename Control Point", "Name:", text=cp.name)
         if ok and name.strip():
             cp.name = name.strip()
-            item.setText(self._cp_list_label(cp))
+            self._refresh_data_table()
 
     def _delete_control_point(self) -> None:
-        row = self._cp_list.currentRow()
-        if row < 0:
+        if self._selected_cp_idx is None:
             return
-        self._control_points.pop(row)
-        self._cp_list.takeItem(row)
+        self._control_points.pop(self._selected_cp_idx)
         self._selected_cp_idx = None
+        self._refresh_data_table()
         self._refresh_markers()
 
     def _load_cp_file(self) -> None:
@@ -2276,10 +2308,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         if reply != QMessageBox.StandardButton.Yes:
             return
         self._control_points = cps
-        self._cp_list.clear()
-        for cp in cps:
-            self._cp_list.addItem(self._cp_list_label(cp))
         self._selected_cp_idx = None
+        self._refresh_data_table()
         self._refresh_markers()
         # Report how many observations matched current cameras
         matched = sum(len(cp.obs) for cp in cps)
@@ -2302,6 +2332,104 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             QMessageBox.warning(self, "Save failed", str(exc))
             return
         _log.info("Saved %d CPs to %s", len(self._control_points), path)
+
+    @staticmethod
+    def _format_world_xyz(xyz) -> str:
+        if xyz is None:
+            return ""
+        return f"{xyz[0]:.3f}, {xyz[1]:.3f}, {xyz[2]:.3f}"
+
+    def _refresh_data_table(self) -> None:
+        """Rebuild the unified Data table (UX Phase 7) from every current
+        source: manual control points, detected ArUco marker groups,
+        ChArUco board corners, rig corners, and camera-position
+        observations. Full rebuild every call, same as ``_refresh_marker_table``
+        used to do -- rows are cheap and there's no per-row cell-widget
+        identity worth preserving across refreshes (unlike
+        ``_cam_pos_table``'s combo/checkbox cells).
+
+        Restores the current CP selection (``self._selected_cp_idx``)
+        silently (``blockSignals``) afterward if still valid -- a plain
+        ``selectRow()`` here would re-emit ``itemSelectionChanged`` and
+        loop back into ``_on_data_table_selection_changed`` ->
+        ``_on_cp_selected`` -> callers of this very method (e.g.
+        ``_apply_xyz``), which would otherwise immediately clobber the
+        selection this rebuild just lost.
+        """
+        self._data_table.blockSignals(True)
+        try:
+            self._data_table.setRowCount(0)
+            self._data_table_cp_rows = {}
+
+            def add_row(kind: str, label: str, cams: set[str], xyz, source: str) -> int:
+                row = self._data_table.rowCount()
+                self._data_table.insertRow(row)
+                self._data_table.setItem(row, 0, QTableWidgetItem(kind))
+                self._data_table.setItem(row, 1, QTableWidgetItem(label))
+                cam_labels = sorted(
+                    self._states_by_id[v].label if v in self._states_by_id else v for v in cams
+                )
+                cams_item = QTableWidgetItem(str(len(cams)))
+                if cam_labels:
+                    cams_item.setToolTip(", ".join(cam_labels))
+                self._data_table.setItem(row, 2, cams_item)
+                self._data_table.setItem(row, 3, QTableWidgetItem(self._format_world_xyz(xyz)))
+                self._data_table.setItem(row, 4, QTableWidgetItem(source))
+                return row
+
+            for i, cp in enumerate(self._control_points):
+                row = add_row("CP", cp.name, set(cp.obs), cp.world_xyz, "manual")
+                self._data_table_cp_rows[row] = i
+
+            for marker_id, mg in sorted(self._marker_groups.items()):
+                mp = self._result.marker_poses.get(marker_id) if self._result is not None else None
+                row = add_row(
+                    "Marker", marker_id, mg.cameras_observing(),
+                    mp.tvec if mp is not None else None, mg.dictionary,
+                )
+                spin = QDoubleSpinBox()
+                spin.setRange(0.0, 5.0)
+                spin.setDecimals(4)
+                spin.setSingleStep(0.005)
+                spin.setToolTip("0 = use the ArUco panel's default size")
+                spin.setValue(mg.size or 0.0)
+                spin.valueChanged.connect(
+                    lambda value, m=marker_id: self._on_marker_size_override_changed(m, value)
+                )
+                self._data_table.setCellWidget(row, 5, spin)
+
+            for cp in self._charuco_control_points():
+                add_row("Board corner", cp.name, set(cp.obs), cp.world_xyz, "charuco")
+
+            for cp in self._rig_control_points():
+                source = f"rig:{self._rig_config.rig_id}" if self._rig_config is not None else "rig"
+                add_row("Rig corner", cp.name, set(cp.obs), cp.world_xyz, source)
+
+            for obs in self._cam_pos_obs:
+                add_row(
+                    "Cam pos obs", f"{obs.subject} seen by {obs.observer}",
+                    {obs.observer}, None, "manual",
+                )
+
+            if self._selected_cp_idx is not None:
+                for row, cp_idx in self._data_table_cp_rows.items():
+                    if cp_idx == self._selected_cp_idx:
+                        self._data_table.selectRow(row)
+                        break
+                else:
+                    self._selected_cp_idx = None
+        finally:
+            self._data_table.blockSignals(False)
+
+    def _on_data_table_selection_changed(self) -> None:
+        row = self._data_table.currentRow()
+        cp_idx = self._data_table_cp_rows.get(row)
+        self._on_cp_selected(cp_idx if cp_idx is not None else -1)
+
+    def _on_data_table_double_clicked(self, row: int, _col: int) -> None:
+        cp_idx = self._data_table_cp_rows.get(row)
+        if cp_idx is not None:
+            self._rename_control_point(cp_idx)
 
     def _on_cp_selected(self, row: int) -> None:
         self._selected_cp_idx = row if row >= 0 else None
@@ -2332,7 +2460,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._xyz_apply_btn.setEnabled(enabled)
         if not enabled and self._selected_cp_idx is not None:
             self._control_points[self._selected_cp_idx].world_xyz = None
-            self._refresh_cp_list_labels()
+            self._refresh_data_table()
 
     def _apply_xyz(self) -> None:
         if self._selected_cp_idx is None:
@@ -2343,7 +2471,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             self._xyz_y.value(),
             self._xyz_z.value(),
         ])
-        self._refresh_cp_list_labels()
+        self._refresh_data_table()
 
     # ------------------------------------------------------------------
     # Camera click → record observation
@@ -2365,7 +2493,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # control point. Re-placing this same point on this same camera at
         # a different scrub position overwrites frame_idx along with px/py.
         cp.obs[vid] = ObsPoint(frame_idx=self._current_frame_for(vid), px=x, py=y)
-        self._refresh_cp_list_labels()
+        self._refresh_data_table()
         self._refresh_markers()
 
     def _on_cam_pos_set(self, observer_vid: str, subject_label: str, x: float, y: float) -> None:
@@ -2377,6 +2505,11 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 break
         else:
             self._cam_pos_obs.append(CamPosObs(observer=observer_vid, subject=subject_label, pixel=(x, y)))
+        # First list representation for cam-pos observations (UX Phase 7,
+        # see docs/roadmap/features/extrinsics-improvements/
+        # extrinsics-ux-redesign.md) -- previously only visible as an
+        # image overlay.
+        self._refresh_data_table()
         # Show a cyan user-placed marker on the observer's widget.
         w = self._cam_widgets.get(observer_vid)
         if w is not None:
@@ -2402,7 +2535,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             return
         cp = self._control_points[self._selected_cp_idx]
         cp.obs.pop(vid, None)
-        self._refresh_cp_list_labels()
+        self._refresh_data_table()
         self._refresh_markers()
 
     def _refresh_markers(self) -> None:
@@ -2487,14 +2620,16 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         return value if value > 0 else None
 
     def _size_for_marker(self, marker_id: str) -> float | None:
-        """Per-marker override from the table, falling back to the default."""
-        for row in range(self._marker_table.rowCount()):
-            if self._marker_table.item(row, 0).text() != marker_id:
-                continue
-            spin = self._marker_table.cellWidget(row, 2)
-            if spin is not None and spin.value() > 0:
-                return spin.value()
-            break
+        """Per-marker override, falling back to the default. ``mg.size`` is
+        the authoritative value -- the Data table's per-marker "Size (m)"
+        spinbox (UX Phase 7) is just a live editor of it, kept in sync by
+        ``_on_marker_size_override_changed``. Reading it directly here
+        (rather than scanning a table widget, as before UX Phase 7)
+        works for a marker not yet in ``_marker_groups`` too (returns the
+        default), same as an empty/zero override always did."""
+        mg = self._marker_groups.get(marker_id)
+        if mg is not None and mg.size:
+            return mg.size
         return self._current_default_size()
 
     def _on_detect_aruco_clicked(self, vid: str) -> None:
@@ -2571,7 +2706,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 [det], self._marker_groups, size=size, dictionary=dictionary
             )
 
-        self._refresh_marker_table()
+        self._refresh_data_table()
         self._refresh_markers()
         excl_str = f" ({n_excluded} belonging to the ChArUco board/rig excluded)" if n_excluded else ""
         self._status_label.setText(
@@ -2581,28 +2716,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
     def _on_clear_markers(self) -> None:
         self._marker_groups.clear()
-        self._refresh_marker_table()
+        self._refresh_data_table()
         self._refresh_markers()
-
-    def _refresh_marker_table(self) -> None:
-        self._marker_table.setRowCount(0)
-        for marker_id, mg in sorted(self._marker_groups.items()):
-            row = self._marker_table.rowCount()
-            self._marker_table.insertRow(row)
-            self._marker_table.setItem(row, 0, QTableWidgetItem(marker_id))
-            n_cams = len(mg.cameras_observing())
-            self._marker_table.setItem(row, 1, QTableWidgetItem(str(n_cams)))
-
-            spin = QDoubleSpinBox()
-            spin.setRange(0.0, 5.0)
-            spin.setDecimals(4)
-            spin.setSingleStep(0.005)
-            spin.setToolTip("0 = use the default size above")
-            spin.setValue(mg.size or 0.0)
-            spin.valueChanged.connect(
-                lambda value, m=marker_id: self._on_marker_size_override_changed(m, value)
-            )
-            self._marker_table.setCellWidget(row, 2, spin)
 
     def _on_marker_size_override_changed(self, marker_id: str, value: float) -> None:
         mg = self._marker_groups.get(marker_id)
@@ -2693,6 +2808,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._refresh_markers()
 
     def _refresh_charuco_status(self) -> None:
+        self._refresh_data_table()
         if not self._charuco_detections:
             self._charuco_status_label.setText("No board detected yet.")
             return
@@ -2975,7 +3091,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                     mid, "DICT_4X4_50"
                 ) == mg.dictionary:
                     del self._marker_groups[mid]
-            self._refresh_marker_table()
+            self._refresh_data_table()
 
         self._detect_and_anchor_rig(show_warnings=False)
         return True
@@ -3192,6 +3308,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
     def _refresh_rig_status(self) -> None:
         self._refresh_save_markers_button()
+        self._refresh_data_table()
         if self._rig_config is None:
             self._rig_status_label.setText("No rig config loaded.")
             return
@@ -3287,6 +3404,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._solve_btn.setVisible(True)
         self._cancel_btn.setVisible(False)
         self._refresh_save_markers_button()
+        # Marker rows' World position column only has something to show
+        # once a solve has produced marker_poses (UX Phase 7).
+        self._refresh_data_table()
         n_total = len(result.cameras)
         n_solved = n_total - len(result.unsolved)
 

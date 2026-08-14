@@ -40,12 +40,28 @@ def fake_conn(tmp_path):
     conn.close()
 
 
+def _marker_rows(dlg) -> list[int]:
+    """Row indices of every "Marker"-type row in the unified Data table
+    (UX Phase 7) -- markers no longer get their own sidebar table."""
+    return [
+        row for row in range(dlg._data_table.rowCount())
+        if dlg._data_table.item(row, 0).text() == "Marker"
+    ]
+
+
+def _marker_row(dlg, marker_id: str) -> int:
+    for row in _marker_rows(dlg):
+        if dlg._data_table.item(row, 1).text() == marker_id:
+            return row
+    raise AssertionError(f"no Marker row for {marker_id!r} in the Data table")
+
+
 def test_dialog_starts_with_no_marker_groups(qapp, fake_conn) -> None:
     states = [_make_state("cam_A", _render_marker_image(3))]
     dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
     try:
         assert dlg._marker_groups == {}
-        assert dlg._marker_table.rowCount() == 0
+        assert _marker_rows(dlg) == []
     finally:
         dlg.done(0)
 
@@ -57,9 +73,8 @@ def test_detect_button_finds_marker_and_populates_table(qapp, fake_conn) -> None
         dlg._on_detect_aruco_clicked("cam_A")
 
         assert set(dlg._marker_groups) == {"3"}
-        assert dlg._marker_table.rowCount() == 1
-        assert dlg._marker_table.item(0, 0).text() == "3"
-        assert dlg._marker_table.item(0, 1).text() == "1"  # 1 camera
+        row = _marker_row(dlg, "3")
+        assert dlg._data_table.item(row, 2).text() == "1"  # 1 camera
     finally:
         dlg.done(0)
 
@@ -128,8 +143,9 @@ def test_redetecting_same_camera_overwrites_not_duplicates(qapp, fake_conn) -> N
         dlg._on_detect_aruco_clicked("cam_A")
 
         assert len(dlg._marker_groups) == 1
-        assert dlg._marker_table.rowCount() == 1
-        assert dlg._marker_table.item(0, 1).text() == "1"
+        assert len(_marker_rows(dlg)) == 1
+        row = _marker_row(dlg, "3")
+        assert dlg._data_table.item(row, 2).text() == "1"
     finally:
         dlg.done(0)
 
@@ -146,7 +162,8 @@ def test_detecting_across_two_cameras_accumulates_one_group(qapp, fake_conn) -> 
 
         assert set(dlg._marker_groups) == {"3"}
         assert set(dlg._marker_groups["3"].obs) == {"cam_A", "cam_B"}
-        assert dlg._marker_table.item(0, 1).text() == "2"
+        row = _marker_row(dlg, "3")
+        assert dlg._data_table.item(row, 2).text() == "2"
     finally:
         dlg.done(0)
 
@@ -159,7 +176,7 @@ def test_per_marker_size_override_widget_updates_group(qapp, fake_conn) -> None:
         dlg._on_detect_aruco_clicked("cam_A")
         assert dlg._marker_groups["3"].size == pytest.approx(0.05)
 
-        override_spin = dlg._marker_table.cellWidget(0, 2)
+        override_spin = dlg._data_table.cellWidget(_marker_row(dlg, "3"), 5)
         override_spin.setValue(0.2)
         assert dlg._marker_groups["3"].size == pytest.approx(0.2)
 
@@ -178,12 +195,12 @@ def test_size_override_persists_across_redetect(qapp, fake_conn) -> None:
     try:
         dlg._aruco_default_size_spin.setValue(0.05)
         dlg._on_detect_aruco_clicked("cam_A")
-        dlg._marker_table.cellWidget(0, 2).setValue(0.3)
+        dlg._data_table.cellWidget(_marker_row(dlg, "3"), 5).setValue(0.3)
 
-        dlg._on_detect_aruco_clicked("cam_A")  # re-detect same camera
+        dlg._on_detect_aruco_clicked("cam_A")  # re-detect same camera -- rebuilds the table
 
         assert dlg._marker_groups["3"].size == pytest.approx(0.3)
-        assert dlg._marker_table.cellWidget(0, 2).value() == pytest.approx(0.3)
+        assert dlg._data_table.cellWidget(_marker_row(dlg, "3"), 5).value() == pytest.approx(0.3)
     finally:
         dlg.done(0)
 
@@ -197,7 +214,7 @@ def test_clear_markers_empties_groups_and_table(qapp, fake_conn) -> None:
 
         dlg._on_clear_markers()
         assert dlg._marker_groups == {}
-        assert dlg._marker_table.rowCount() == 0
+        assert _marker_rows(dlg) == []
     finally:
         dlg.done(0)
 

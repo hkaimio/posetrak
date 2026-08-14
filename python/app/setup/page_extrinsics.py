@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -1293,6 +1294,13 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # Data table (UX Phase 7) row -> self._control_points index, for
         # CP-type rows only -- see _refresh_data_table.
         self._data_table_cp_rows: dict[int, int] = {}
+        # Data table (2026-08-14 follow-up) row -> (kind, payload) for
+        # EVERY row, driving the per-row-type detail pane -- see
+        # _refresh_data_table/_refresh_detail_pane.
+        self._data_table_row_info: dict[int, tuple[str, object]] = {}
+        self._detail_marker_id: str | None = None
+        self._detail_group_clear_fn = None
+        self._detail_camobs_payload: tuple[str, str] | None = None
         self._intrinsics_combos: dict[str, QComboBox] = {}
         self._cam_pos_row_by_vid: dict[str, int] = {}
         self._last_calib_id: str | None = None
@@ -1513,6 +1521,14 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         self._data_table = self._build_data_table()
 
+        # Data tab: the table plus a per-row-type detail pane beside it
+        # (2026-08-14 follow-up) -- see _build_detail_pane/_refresh_detail_pane.
+        data_tab = QWidget()
+        data_tab_layout = QHBoxLayout(data_tab)
+        data_tab_layout.setContentsMargins(0, 0, 0, 0)
+        data_tab_layout.addWidget(self._data_table, 1)
+        data_tab_layout.addWidget(self._build_detail_pane())
+
         # Cameras / Data tables share one tab container instead of
         # stacking on top of each other -- both used fixed setMaximumHeight
         # caps before (2026-08-14 follow-up); now the container sits in
@@ -1521,7 +1537,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # instead of a fixed guess neither table's row count may match.
         self._tables_tabs = QTabWidget()
         self._tables_tabs.addTab(self._cam_pos_table, "Cameras")
-        self._tables_tabs.addTab(self._data_table, "Data")
+        self._tables_tabs.addTab(data_tab, "Data")
 
         main_splitter = QSplitter(Qt.Orientation.Vertical)
         main_splitter.addWidget(splitter)
@@ -1595,6 +1611,164 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         table.cellDoubleClicked.connect(self._on_data_table_double_clicked)
         return table
 
+    def _build_detail_pane(self) -> QWidget:
+        """Per-row-type detail pane beside the Data table (2026-08-14
+        follow-up): different controls depending on the selected row's
+        Type.
+
+        - **CP**: World position controls -- moved here from the
+          sidebar's old standalone "World position (optional)" groupbox
+          (removed as redundant once every CP's controls live with its
+          row). Same widgets/wiring as before (``_xyz_enabled``/
+          ``_xyz_x``/``_xyz_y``/``_xyz_z``/``_xyz_apply_btn``,
+          ``_on_xyz_toggle``/``_apply_xyz``), just relocated.
+        - **Marker**: "Clear" removes just that one marker
+          (``_on_clear_single_marker``) -- unlike the ArUco panel's
+          "Clear markers", which clears all of them.
+        - **Rig corner** / **Board corner**: "Clear" removes the whole
+          detected rig/board (``_on_clear_rig``/``_on_clear_charuco``) --
+          individual corners aren't independently removable, so this is
+          a shortcut to the same action as the rig/board's own Clear
+          button, reachable from wherever the row happens to be selected.
+        - **Cam pos obs**: "Remove" deletes just that one observation
+          (``_on_remove_cam_pos_obs``) -- previously there was no way to
+          remove one at all, only overwrite it by dragging again.
+        - Nothing selected: a placeholder label.
+
+        Built once as a ``QStackedWidget`` with one page per row-type
+        (``_refresh_detail_pane`` only ever calls ``setCurrentIndex`` and
+        updates a page's own label/stored payload) rather than rebuilt on
+        every selection change -- keeps the World Position spinboxes'
+        identity, and the existing wiring into them, stable.
+        """
+        pane = QWidget()
+        pane.setFixedWidth(220)
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self._detail_stack = QStackedWidget()
+
+        empty_page = QLabel("Select a row above to see details.")
+        empty_page.setWordWrap(True)
+        empty_page.setStyleSheet("color: #666; font-size: 10px;")
+        empty_page.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._detail_stack.addWidget(empty_page)  # index 0
+
+        cp_page = QGroupBox("World position (optional)")
+        cp_layout = QVBoxLayout(cp_page)
+        self._xyz_enabled = QCheckBox("Fix 3-D position in BA")
+        self._xyz_enabled.stateChanged.connect(self._on_xyz_toggle)
+        self._xyz_x = QDoubleSpinBox()
+        self._xyz_y = QDoubleSpinBox()
+        self._xyz_z = QDoubleSpinBox()
+        for sb in (self._xyz_x, self._xyz_y, self._xyz_z):
+            sb.setRange(-1e6, 1e6)
+            sb.setDecimals(4)
+            sb.setSingleStep(0.1)
+            sb.setEnabled(False)
+        xyz_form = QHBoxLayout()
+        for lbl, sb in [("X", self._xyz_x), ("Y", self._xyz_y), ("Z", self._xyz_z)]:
+            xyz_form.addWidget(QLabel(lbl))
+            xyz_form.addWidget(sb)
+        self._xyz_apply_btn = QPushButton("Apply")
+        self._xyz_apply_btn.setEnabled(False)
+        self._xyz_apply_btn.clicked.connect(self._apply_xyz)
+        cp_layout.addWidget(self._xyz_enabled)
+        cp_layout.addLayout(xyz_form)
+        cp_layout.addWidget(self._xyz_apply_btn)
+        cp_layout.addStretch()
+        self._detail_stack.addWidget(cp_page)  # index 1
+
+        marker_page = QWidget()
+        marker_layout = QVBoxLayout(marker_page)
+        self._detail_marker_label = QLabel()
+        self._detail_marker_label.setWordWrap(True)
+        marker_clear_btn = QPushButton("Clear")
+        marker_clear_btn.setToolTip("Remove just this marker (keeps the others).")
+        marker_clear_btn.clicked.connect(
+            lambda: self._on_clear_single_marker(self._detail_marker_id)
+        )
+        marker_layout.addWidget(self._detail_marker_label)
+        marker_layout.addWidget(marker_clear_btn)
+        marker_layout.addStretch()
+        self._detail_stack.addWidget(marker_page)  # index 2
+
+        group_page = QWidget()
+        group_layout = QVBoxLayout(group_page)
+        self._detail_group_label = QLabel()
+        self._detail_group_label.setWordWrap(True)
+        self._detail_group_clear_btn = QPushButton("Clear")
+        self._detail_group_clear_btn.setToolTip(
+            "Individual corners aren't independently removable -- clears "
+            "the whole detected rig/board."
+        )
+        self._detail_group_clear_btn.clicked.connect(
+            lambda: self._detail_group_clear_fn() if self._detail_group_clear_fn else None
+        )
+        group_layout.addWidget(self._detail_group_label)
+        group_layout.addWidget(self._detail_group_clear_btn)
+        group_layout.addStretch()
+        self._detail_stack.addWidget(group_page)  # index 3
+
+        camobs_page = QWidget()
+        camobs_layout = QVBoxLayout(camobs_page)
+        self._detail_camobs_label = QLabel()
+        self._detail_camobs_label.setWordWrap(True)
+        camobs_remove_btn = QPushButton("Remove")
+        camobs_remove_btn.clicked.connect(
+            lambda: self._on_remove_cam_pos_obs(*self._detail_camobs_payload)
+            if self._detail_camobs_payload else None
+        )
+        camobs_layout.addWidget(self._detail_camobs_label)
+        camobs_layout.addWidget(camobs_remove_btn)
+        camobs_layout.addStretch()
+        self._detail_stack.addWidget(camobs_page)  # index 4
+
+        layout.addWidget(self._detail_stack)
+        return pane
+
+    def _refresh_detail_pane(self) -> None:
+        row = self._data_table.currentRow()
+        info = self._data_table_row_info.get(row)
+        if info is None:
+            self._detail_stack.setCurrentIndex(0)
+            return
+        kind, payload = info
+        if kind == "CP":
+            self._detail_stack.setCurrentIndex(1)
+        elif kind == "Marker":
+            self._detail_marker_id = payload
+            self._detail_marker_label.setText(f"Marker {payload}")
+            self._detail_stack.setCurrentIndex(2)
+        elif kind in ("Rig corner", "Board corner"):
+            self._detail_group_label.setText(kind)
+            self._detail_group_clear_fn = (
+                self._on_clear_rig if kind == "Rig corner" else self._on_clear_charuco
+            )
+            self._detail_stack.setCurrentIndex(3)
+        elif kind == "Cam pos obs":
+            observer, subject = payload
+            self._detail_camobs_payload = (observer, subject)
+            self._detail_camobs_label.setText(f"{subject} seen by {observer}")
+            self._detail_stack.setCurrentIndex(4)
+
+    def _on_clear_single_marker(self, marker_id: str | None) -> None:
+        if marker_id is None:
+            return
+        self._marker_groups.pop(marker_id, None)
+        self._refresh_data_table()
+        self._refresh_markers()
+
+    def _on_remove_cam_pos_obs(self, observer: str, subject: str) -> None:
+        self._cam_pos_obs = [
+            o for o in self._cam_pos_obs
+            if not (o.observer == observer and o.subject == subject)
+        ]
+        w = self._cam_widgets.get(observer)
+        if w is not None:
+            w.remove_user_cam_pos_marker(subject)
+        self._refresh_data_table()
+
     def _build_cp_panel(self) -> QWidget:
         panel = QWidget()
         panel.setFixedWidth(280)
@@ -1631,35 +1805,6 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         cp_layout.addWidget(hint)
         cp_layout.addLayout(add_del)
 
-        # World position (optional)
-        xyz_group = QGroupBox("World position (optional)")
-        xyz_layout = QVBoxLayout(xyz_group)
-
-        self._xyz_enabled = QCheckBox("Fix 3-D position in BA")
-        self._xyz_enabled.stateChanged.connect(self._on_xyz_toggle)
-
-        self._xyz_x = QDoubleSpinBox()
-        self._xyz_y = QDoubleSpinBox()
-        self._xyz_z = QDoubleSpinBox()
-        for sb in (self._xyz_x, self._xyz_y, self._xyz_z):
-            sb.setRange(-1e6, 1e6)
-            sb.setDecimals(4)
-            sb.setSingleStep(0.1)
-            sb.setEnabled(False)
-
-        xyz_form = QHBoxLayout()
-        for lbl, sb in [("X", self._xyz_x), ("Y", self._xyz_y), ("Z", self._xyz_z)]:
-            xyz_form.addWidget(QLabel(lbl))
-            xyz_form.addWidget(sb)
-
-        self._xyz_apply_btn = QPushButton("Apply")
-        self._xyz_apply_btn.setEnabled(False)
-        self._xyz_apply_btn.clicked.connect(self._apply_xyz)
-
-        xyz_layout.addWidget(self._xyz_enabled)
-        xyz_layout.addLayout(xyz_form)
-        xyz_layout.addWidget(self._xyz_apply_btn)
-
         aruco_group = self._build_aruco_group()
         charuco_group = self._build_charuco_group()
         charuco_anchor_group = self._build_charuco_anchor_group()
@@ -1685,9 +1830,13 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         actions_layout.addWidget(charuco_group)
         actions_layout.addWidget(rig_group)
 
+        # World position (optional) moved out of here entirely (2026-08-14
+        # follow-up) -- it's now the CP-row page of the Data tab's detail
+        # pane (_build_detail_pane), replacing a standalone sidebar
+        # section with something that only takes space when a CP is
+        # actually selected.
         anchoring_group = QGroupBox("Anchoring")
         anchoring_layout = QVBoxLayout(anchoring_group)
-        anchoring_layout.addWidget(xyz_group)
         anchoring_layout.addWidget(charuco_anchor_group)
         anchoring_layout.addWidget(rig_anchor_group)
 
@@ -2380,12 +2529,18 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         loop back into ``_on_data_table_selection_changed`` ->
         ``_on_cp_selected`` -> callers of this very method (e.g.
         ``_apply_xyz``), which would otherwise immediately clobber the
-        selection this rebuild just lost.
+        selection this rebuild just lost. Ends with an unconditional
+        ``_refresh_detail_pane()`` call (not blocked -- it only reads
+        state, doesn't re-emit selection signals) so the detail pane
+        always matches whatever ends up selected, including "nothing"
+        when a rebuild drops a non-CP row's selection (e.g. clearing the
+        very marker the detail pane was showing).
         """
         self._data_table.blockSignals(True)
         try:
             self._data_table.setRowCount(0)
             self._data_table_cp_rows = {}
+            self._data_table_row_info = {}
 
             def add_row(kind: str, label: str, cams: set[str], xyz, source: str) -> int:
                 row = self._data_table.rowCount()
@@ -2414,6 +2569,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             for i, cp in enumerate(self._control_points):
                 row = add_row("CP", cp.name, set(cp.obs), cp.world_xyz, "manual")
                 self._data_table_cp_rows[row] = i
+                self._data_table_row_info[row] = ("CP", i)
 
             for marker_id, mg in sorted(self._marker_groups.items()):
                 mp = self._result.marker_poses.get(marker_id) if self._result is not None else None
@@ -2421,6 +2577,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                     "Marker", marker_id, mg.cameras_observing(),
                     mp.tvec if mp is not None else None, mg.dictionary,
                 )
+                self._data_table_row_info[row] = ("Marker", marker_id)
                 spin = QDoubleSpinBox()
                 spin.setRange(0.0, 5.0)
                 spin.setDecimals(4)
@@ -2433,17 +2590,20 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 self._data_table.setCellWidget(row, 5, spin)
 
             for cp in self._charuco_control_points():
-                add_row("Board corner", cp.name, set(cp.obs), cp.world_xyz, "charuco")
+                row = add_row("Board corner", cp.name, set(cp.obs), cp.world_xyz, "charuco")
+                self._data_table_row_info[row] = ("Board corner", None)
 
             for cp in self._rig_control_points():
                 source = f"rig:{self._rig_config.rig_id}" if self._rig_config is not None else "rig"
-                add_row("Rig corner", cp.name, set(cp.obs), cp.world_xyz, source)
+                row = add_row("Rig corner", cp.name, set(cp.obs), cp.world_xyz, source)
+                self._data_table_row_info[row] = ("Rig corner", None)
 
             for obs in self._cam_pos_obs:
-                add_row(
+                row = add_row(
                     "Cam pos obs", f"{obs.subject} seen by {obs.observer}",
                     {obs.observer}, None, "manual",
                 )
+                self._data_table_row_info[row] = ("Cam pos obs", (obs.observer, obs.subject))
 
             if self._selected_cp_idx is not None:
                 for row, cp_idx in self._data_table_cp_rows.items():
@@ -2454,11 +2614,13 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                     self._selected_cp_idx = None
         finally:
             self._data_table.blockSignals(False)
+        self._refresh_detail_pane()
 
     def _on_data_table_selection_changed(self) -> None:
         row = self._data_table.currentRow()
         cp_idx = self._data_table_cp_rows.get(row)
         self._on_cp_selected(cp_idx if cp_idx is not None else -1)
+        self._refresh_detail_pane()
 
     def _on_data_table_double_clicked(self, row: int, _col: int) -> None:
         cp_idx = self._data_table_cp_rows.get(row)

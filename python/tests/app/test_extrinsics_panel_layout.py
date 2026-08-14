@@ -60,7 +60,7 @@ def _find_group(dlg: ExtrinsicsAutoCalibDialog, title: str) -> QGroupBox:
 
 @pytest.mark.parametrize(
     "title",
-    ["Control Points", "World position (optional)", "ArUco Markers", "ChArUco Board",
+    ["Control Points", "ArUco Markers", "ChArUco Board",
      "ChArUco Anchor", "Marker Rig / Scene Markers", "Rig Anchor"],
 )
 def test_no_sidebar_section_is_collapsible(qapp, fake_conn, title) -> None:
@@ -85,14 +85,33 @@ def test_actions_group_contains_control_points_aruco_charuco_and_rig_loading(
         dlg.done(0)
 
 
-def test_anchoring_group_contains_world_position_charuco_anchor_and_rig_anchor(
-    qapp, fake_conn,
-) -> None:
+def test_anchoring_group_contains_charuco_anchor_and_rig_anchor(qapp, fake_conn) -> None:
+    """World position (optional) moved out of Anchoring entirely
+    (2026-08-14 follow-up) -- it's now the CP-row page of the Data tab's
+    detail pane, not a standalone sidebar section. See
+    test_world_position_group_lives_in_the_detail_pane_not_the_sidebar."""
     dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
     try:
         anchoring = _find_group(dlg, "Anchoring")
         child_titles = {g.title() for g in anchoring.findChildren(QGroupBox)}
-        assert child_titles == {"World position (optional)", "ChArUco Anchor", "Rig Anchor"}
+        assert child_titles == {"ChArUco Anchor", "Rig Anchor"}
+    finally:
+        dlg.done(0)
+
+
+def test_world_position_group_lives_in_the_detail_pane_not_the_sidebar(qapp, fake_conn) -> None:
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        wp_group = _find_group(dlg, "World position (optional)")
+        assert not wp_group.isCheckable()
+        # Not a child of either sidebar group...
+        assert wp_group not in _find_group(dlg, "Actions").findChildren(QGroupBox)
+        assert wp_group not in _find_group(dlg, "Anchoring").findChildren(QGroupBox)
+        # ...but is a page of the Data tab's detail pane stack.
+        from PySide6.QtWidgets import QStackedWidget
+        stack = dlg.findChild(QStackedWidget)
+        assert stack is not None
+        assert wp_group in stack.findChildren(QGroupBox)
     finally:
         dlg.done(0)
 
@@ -162,7 +181,9 @@ def test_cam_pos_and_data_tables_share_a_tab_container(qapp, fake_conn) -> None:
         assert tabs is not None
         assert tabs.count() == 2
         assert tabs.widget(0) is dlg._cam_pos_table
-        assert tabs.widget(1) is dlg._data_table
+        # Tab 1 wraps the Data table plus its detail pane (2026-08-14
+        # follow-up), not the bare table.
+        assert dlg._data_table in tabs.widget(1).findChildren(type(dlg._data_table))
         assert [tabs.tabText(i) for i in range(2)] == ["Cameras", "Data"]
     finally:
         dlg.done(0)

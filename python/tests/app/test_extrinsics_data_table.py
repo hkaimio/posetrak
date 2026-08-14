@@ -396,3 +396,172 @@ def test_selection_survives_an_unrelated_data_table_refresh(qapp, fake_conn) -> 
         assert selected_rows == {expected_row}
     finally:
         dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Per-row-type detail pane (2026-08-14 follow-up, see
+# _build_detail_pane/_refresh_detail_pane): a QStackedWidget beside the
+# Data table -- index 0 empty placeholder, 1 CP (World position, moved
+# here from the old standalone sidebar groupbox), 2 Marker (Clear just
+# this one), 3 Rig/Board corner (Clear the whole detected feature), 4 Cam
+# pos obs (Remove just this one).
+# ---------------------------------------------------------------------------
+
+
+def test_detail_pane_shows_placeholder_with_nothing_selected(qapp, fake_conn) -> None:
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        assert dlg._detail_stack.currentIndex() == 0
+    finally:
+        dlg.done(0)
+
+
+def test_detail_pane_shows_world_position_for_cp_row(qapp, fake_conn) -> None:
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        dlg._add_control_point()  # auto-selects
+        assert dlg._detail_stack.currentIndex() == 1
+        assert dlg._xyz_enabled.isEnabled()
+    finally:
+        dlg.done(0)
+
+
+def test_detail_pane_shows_clear_for_marker_row(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._on_detect_aruco_clicked("cam_A")
+        row = _rows_by_type(dlg, "Marker")[0]
+        dlg._data_table.selectRow(row)
+
+        assert dlg._detail_stack.currentIndex() == 2
+        assert "3" in dlg._detail_marker_label.text()
+    finally:
+        dlg.done(0)
+
+
+def test_detail_pane_marker_clear_removes_just_that_marker(qapp, fake_conn) -> None:
+    states = [
+        _make_state("cam_A", _render_marker_image(3)),
+    ]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._marker_groups["3"] = MarkerGroup(marker_id="3", size=0.1, dictionary="DICT_4X4_50")
+        dlg._marker_groups["9"] = MarkerGroup(marker_id="9", size=0.1, dictionary="DICT_4X4_50")
+        dlg._refresh_data_table()
+        row = next(
+            r for r in _rows_by_type(dlg, "Marker") if dlg._data_table.item(r, 1).text() == "3"
+        )
+        dlg._data_table.selectRow(row)
+
+        dlg._on_clear_single_marker(dlg._detail_marker_id)
+
+        assert set(dlg._marker_groups) == {"9"}
+    finally:
+        dlg.done(0)
+
+
+def test_detail_pane_shows_clear_for_rig_corner_row(qapp, fake_conn, rig_yaml_path) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_path(rig_yaml_path)  # auto-anchors
+        row = _rows_by_type(dlg, "Rig corner")[0]
+        dlg._data_table.selectRow(row)
+
+        assert dlg._detail_stack.currentIndex() == 3
+        assert dlg._detail_group_label.text() == "Rig corner"
+
+        dlg._detail_group_clear_fn()  # same as clicking the pane's Clear button
+
+        assert not dlg._rig_anchored
+        assert dlg._rig_detections_by_camera == {}
+    finally:
+        dlg.done(0)
+
+
+def test_detail_pane_shows_clear_for_board_corner_row(qapp, fake_conn) -> None:
+    from app.setup.fiducial_markers import CharucoBoardDetection, CharucoCornerObs
+
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        dlg._charuco_detections["cam_A"] = CharucoBoardDetection(corners=[
+            CharucoCornerObs(corner_id=0, video_id="cam_A", frame_idx=0, px=1.0, py=1.0,
+                              local_xyz=np.zeros(3)),
+        ])
+        dlg._refresh_charuco_status()
+        row = _rows_by_type(dlg, "Board corner")[0]
+        dlg._data_table.selectRow(row)
+
+        assert dlg._detail_stack.currentIndex() == 3
+        assert dlg._detail_group_label.text() == "Board corner"
+
+        dlg._detail_group_clear_fn()
+
+        assert dlg._charuco_detections == {}
+    finally:
+        dlg.done(0)
+
+
+def test_detail_pane_shows_remove_for_cam_pos_obs_row(qapp, fake_conn) -> None:
+    dlg = ExtrinsicsAutoCalibDialog(
+        [_make_state("cam_A"), _make_state("cam_B")], fake_conn, "sess1",
+    )
+    try:
+        dlg._on_cam_pos_set("cam_A", "cam_B", 1.0, 2.0)
+        row = _rows_by_type(dlg, "Cam pos obs")[0]
+        dlg._data_table.selectRow(row)
+
+        assert dlg._detail_stack.currentIndex() == 4
+        assert dlg._detail_camobs_payload == ("cam_A", "cam_B")
+
+        dlg._on_remove_cam_pos_obs(*dlg._detail_camobs_payload)
+
+        assert dlg._cam_pos_obs == []
+        assert _rows_by_type(dlg, "Cam pos obs") == []
+    finally:
+        dlg.done(0)
+
+
+def test_removing_cam_pos_obs_only_clears_that_subject_marker(qapp, fake_conn) -> None:
+    """An observer that marked two different subjects must keep the other
+    one's marker after removing just one (remove_user_cam_pos_marker, not
+    clear_user_cam_pos_markers)."""
+    dlg = ExtrinsicsAutoCalibDialog(
+        [_make_state("cam_A"), _make_state("cam_B"), _make_state("cam_C")], fake_conn, "sess1",
+    )
+    try:
+        dlg._on_cam_pos_set("cam_A", "cam_B", 1.0, 2.0)
+        dlg._on_cam_pos_set("cam_A", "cam_C", 3.0, 4.0)
+
+        dlg._on_remove_cam_pos_obs("cam_A", "cam_B")
+
+        remaining = {(o.observer, o.subject) for o in dlg._cam_pos_obs}
+        assert remaining == {("cam_A", "cam_C")}
+        w = dlg._cam_widgets["cam_A"]
+        assert "cam_B" not in w._user_cam_pos_markers
+        assert "cam_C" in w._user_cam_pos_markers
+    finally:
+        dlg.done(0)
+
+
+def test_detail_pane_resets_after_clearing_the_selected_marker_via_bulk_clear(
+    qapp, fake_conn,
+) -> None:
+    """Clearing ALL markers (the ArUco panel's own "Clear markers", not
+    the detail pane's single-marker Clear) drops the marker row the
+    detail pane was showing -- it must fall back to the placeholder, not
+    keep pointing at a marker that no longer exists."""
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._on_detect_aruco_clicked("cam_A")
+        row = _rows_by_type(dlg, "Marker")[0]
+        dlg._data_table.selectRow(row)
+        assert dlg._detail_stack.currentIndex() == 2
+
+        dlg._on_clear_markers()
+
+        assert dlg._detail_stack.currentIndex() == 0
+    finally:
+        dlg.done(0)

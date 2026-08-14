@@ -1261,3 +1261,159 @@ def test_group_picker_dialog_no_selection_accept_is_noop(qapp, fake_conn) -> Non
         assert dlg.result() != QDialog.DialogCode.Accepted
     finally:
         dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# "Calib rig…" button-bar dialog (2026-08-14 follow-up, Harri: "charuco
+# board is closer to a calibration rig so I'd add charuco boards as an
+# option to the rig dialog... maybe it could be another tab in the
+# dialog"). Physical Rig tab tested here (see
+# test_extrinsics_charuco_ui.py for the ChArUco Board tab). See
+# _CalibRigDialog/_on_calib_rig_bulk.
+# ---------------------------------------------------------------------------
+
+
+def _default_charuco_settings() -> dict:
+    return {
+        "dictionary": "DICT_4X4_50", "squares_x": 5, "squares_y": 7,
+        "square_length": 0.04, "marker_length": 0.02,
+        "face_up": True, "legacy_pattern": False, "min_marker_pct": 1.0,
+    }
+
+
+def test_calib_rig_dialog_physical_tab_lists_registry_rigs(qapp, fake_conn, rig_yaml_path) -> None:
+    from app.setup.page_extrinsics import _CalibRigDialog
+
+    import_marker_body(fake_conn, rig_yaml_path, name="test-rig")
+    dlg = _CalibRigDialog(fake_conn, _default_charuco_settings())
+    try:
+        assert dlg._registry_table.rowCount() == 1
+        assert dlg._registry_table.item(0, 0).text() == "test-rig"
+    finally:
+        dlg.done(0)
+
+
+def test_calib_rig_dialog_ok_with_no_selection_warns(qapp, fake_conn, monkeypatch) -> None:
+    from app.setup.page_extrinsics import _CalibRigDialog
+
+    dlg = _CalibRigDialog(fake_conn, _default_charuco_settings())
+    try:
+        warned = []
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics.QMessageBox.warning",
+            lambda *a, **kw: warned.append(a),
+        )
+        dlg._on_ok()
+        assert len(warned) == 1
+        assert dlg.result_kind() == _CalibRigDialog.RESULT_NONE
+    finally:
+        dlg.done(0)
+
+
+def test_calib_rig_dialog_ok_with_registry_row_selected(qapp, fake_conn, rig_yaml_path) -> None:
+    from app.setup.page_extrinsics import _CalibRigDialog
+
+    import_marker_body(fake_conn, rig_yaml_path, name="test-rig")
+    dlg = _CalibRigDialog(fake_conn, _default_charuco_settings())
+    try:
+        dlg._registry_table.selectRow(0)
+        dlg._on_ok()
+        assert dlg.result_kind() == _CalibRigDialog.RESULT_REGISTRY
+        assert dlg.registry_yaml() is not None
+    finally:
+        dlg.done(0)
+
+
+def test_calib_rig_dialog_double_click_registry_row_accepts(qapp, fake_conn, rig_yaml_path) -> None:
+    from app.setup.page_extrinsics import _CalibRigDialog
+
+    import_marker_body(fake_conn, rig_yaml_path, name="test-rig")
+    dlg = _CalibRigDialog(fake_conn, _default_charuco_settings())
+    try:
+        dlg._registry_table.selectRow(0)
+        dlg._registry_table.doubleClicked.emit(dlg._registry_table.model().index(0, 0))
+        assert dlg.result_kind() == _CalibRigDialog.RESULT_REGISTRY
+        assert dlg.result() == QDialog.DialogCode.Accepted
+    finally:
+        dlg.done(0)
+
+
+def test_calib_rig_dialog_from_file_button_accepts_with_file_kind(
+    qapp, fake_conn, rig_yaml_path, monkeypatch,
+) -> None:
+    from app.setup.page_extrinsics import _CalibRigDialog
+
+    dlg = _CalibRigDialog(fake_conn, _default_charuco_settings())
+    try:
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics.QFileDialog.getOpenFileName",
+            lambda *a, **kw: (str(rig_yaml_path), ""),
+        )
+        dlg._on_from_file()
+        assert dlg.result_kind() == _CalibRigDialog.RESULT_FILE
+        assert dlg.file_path() == str(rig_yaml_path)
+        assert dlg.result() == QDialog.DialogCode.Accepted
+    finally:
+        dlg.done(0)
+
+
+def test_calib_rig_bulk_registry_loads_detects_and_anchors(qapp, fake_conn, rig_yaml_path, monkeypatch) -> None:
+    from app.setup.page_extrinsics import _CalibRigDialog
+
+    definition_id = import_marker_body(fake_conn, rig_yaml_path, name="test-rig")
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        def fake_exec(self):
+            self._registry_id = definition_id
+            row = fake_conn.execute(
+                "SELECT yaml_content FROM marker_body_definitions WHERE id = ?", (definition_id,)
+            ).fetchone()
+            self._registry_yaml = row[0]
+            self._result_kind = _CalibRigDialog.RESULT_REGISTRY
+            return QDialog.DialogCode.Accepted
+
+        monkeypatch.setattr(_CalibRigDialog, "exec", fake_exec)
+        dlg._on_calib_rig_bulk()
+
+        assert dlg._rig_config is not None
+        assert dlg._rig_config.rig_id == "test-rig"
+        assert dlg._rig_anchored  # marker "3" visible in cam_A -> auto-anchors
+    finally:
+        dlg.done(0)
+
+
+def test_calib_rig_bulk_file_loads_detects_and_anchors(qapp, fake_conn, rig_yaml_path, monkeypatch) -> None:
+    from app.setup.page_extrinsics import _CalibRigDialog
+
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        def fake_exec(self):
+            self._file_path = str(rig_yaml_path)
+            self._result_kind = _CalibRigDialog.RESULT_FILE
+            return QDialog.DialogCode.Accepted
+
+        monkeypatch.setattr(_CalibRigDialog, "exec", fake_exec)
+        dlg._on_calib_rig_bulk()
+
+        assert dlg._rig_config is not None
+        assert dlg._rig_config.rig_id == "test-rig"
+        assert dlg._rig_anchored
+    finally:
+        dlg.done(0)
+
+
+def test_calib_rig_bulk_cancelled_changes_nothing(qapp, fake_conn, monkeypatch) -> None:
+    from app.setup.page_extrinsics import _CalibRigDialog
+
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        monkeypatch.setattr(_CalibRigDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
+        dlg._on_calib_rig_bulk()
+
+        assert dlg._rig_config is None
+        assert not dlg._rig_anchored
+    finally:
+        dlg.done(0)

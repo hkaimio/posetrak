@@ -929,72 +929,6 @@ class _SolveThread(QThread):
             self.cancelled.emit()
 
 
-# ---------------------------------------------------------------------------
-# Registry rig picker (used by the Marker Rig panel's "From Registry…"
-# button) -- mirrors page_skeleton.py's _RegistryPickerDialog exactly, just
-# listing marker_body_definitions instead of skeletons. Closes the gap
-# where a rig imported via `posetrak marker-body import` (or a prior GUI
-# session) had no way back into a new dialog instance short of re-picking
-# its original YAML file.
-# ---------------------------------------------------------------------------
-
-
-class _RegistryRigPickerDialog(QDialog):
-    """Simple picker listing already-imported marker_body_definitions."""
-
-    def __init__(self, conn: sqlite3.Connection, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Pick Rig from Registry")
-        self.setMinimumSize(560, 320)
-        self._selected_id: str | None = None
-        self._selected_yaml: str | None = None
-
-        rows = list_marker_bodies(conn)
-
-        self._table = QTableWidget(len(rows), 3)
-        self._table.setHorizontalHeaderLabels(["Name", "Source", "Created"])
-        hdr = self._table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._table.verticalHeader().setVisible(False)
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-
-        self._rows = rows
-        for i, r in enumerate(rows):
-            self._table.setItem(i, 0, QTableWidgetItem(r["name"] or ""))
-            self._table.setItem(i, 1, QTableWidgetItem(r["source"] or ""))
-            self._table.setItem(i, 2, QTableWidgetItem((r["created_at"] or "")[:10]))
-
-        self._table.doubleClicked.connect(self.accept)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(self._table)
-        layout.addWidget(buttons)
-
-    def accept(self) -> None:
-        rows = self._table.selectedItems()
-        if not rows:
-            return
-        row_idx = self._table.currentRow()
-        self._selected_id = self._rows[row_idx]["id"]
-        self._selected_yaml = self._rows[row_idx]["yaml_content"]
-        super().accept()
-
-    def selected_id(self) -> str | None:
-        return self._selected_id
-
-    def selected_yaml(self) -> str | None:
-        return self._selected_yaml
-
 
 # ---------------------------------------------------------------------------
 # Scene marker group picker -- "Load Markers…" needs to know *which*
@@ -1348,6 +1282,253 @@ class _DetectMarkersDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Calibration Rig dialog -- anchor from a physical rig (file/registry) or
+# a ChArUco board, tabbed (2026-08-14 follow-up, Harri: "charuco board is
+# closer to a calibration rig so I'd add charuco boards as an option to
+# the rig dialog... maybe it could be another tab in the dialog"). The
+# button-bar counterpart to "Load Config…"/"From Registry…" (removed from
+# the sidebar) and to per-camera "Detect ChArUco" + "Set origin & axes"
+# (which stay, for redoing one camera or re-anchoring after scrubbing).
+# ---------------------------------------------------------------------------
+
+
+class _CalibRigDialog(QDialog):
+    """Two tabs, one result kind each:
+
+    - **Physical Rig**: a table of rigs already imported into this
+      session's DB (the sidebar's old "From Registry…" picker,
+      inlined) plus a "From file…" button. Picking a row and clicking OK yields
+      ``RESULT_REGISTRY``; "From file…" opens a file picker immediately
+      and, if a file is chosen, yields ``RESULT_FILE`` without needing a
+      separate OK click.
+    - **ChArUco Board**: the board settings that used to live in the
+      sidebar's "ChArUco Board" section (dictionary/squares/lengths/
+      face-up/legacy-pattern/min-marker-%), pre-filled from the caller's
+      current headless state. OK yields ``RESULT_CHARUCO``.
+
+    The caller (``_on_calib_rig_bulk``) dispatches on ``result_kind()``
+    and does the actual loading/detecting/anchoring -- this dialog only
+    collects a choice, same division of responsibility as
+    ``_DetectMarkersDialog``.
+    """
+
+    RESULT_NONE = 0
+    RESULT_FILE = 1
+    RESULT_REGISTRY = 2
+    RESULT_CHARUCO = 3
+
+    def __init__(self, conn: sqlite3.Connection, charuco_settings: dict, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Calibration Rig")
+        self.setMinimumSize(560, 420)
+        self._result_kind = self.RESULT_NONE
+        self._file_path: str | None = None
+        self._registry_id: str | None = None
+        self._registry_yaml: str | None = None
+
+        self._tabs = QTabWidget()
+        self._tabs.addTab(self._build_physical_tab(conn), "Physical Rig")
+        self._tabs.addTab(self._build_charuco_tab(charuco_settings), "ChArUco Board")
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_ok)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._tabs)
+        layout.addWidget(buttons)
+
+    def _build_physical_tab(self, conn: sqlite3.Connection) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        hint = QLabel(
+            "Pick a rig already imported into this session's DB, or load "
+            "one from a file. Either way it's immediately detected in "
+            "every camera's current frame and anchored if found anywhere."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #666; font-size: 10px;")
+
+        self._registry_rows = list_marker_bodies(conn)
+        self._registry_table = QTableWidget(len(self._registry_rows), 3)
+        self._registry_table.setHorizontalHeaderLabels(["Name", "Source", "Created"])
+        hdr = self._registry_table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._registry_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._registry_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._registry_table.verticalHeader().setVisible(False)
+        self._registry_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        for i, r in enumerate(self._registry_rows):
+            self._registry_table.setItem(i, 0, QTableWidgetItem(r["name"] or ""))
+            self._registry_table.setItem(i, 1, QTableWidgetItem(r["source"] or ""))
+            self._registry_table.setItem(i, 2, QTableWidgetItem((r["created_at"] or "")[:10]))
+        # Not self.accept directly -- must go through _on_ok so a
+        # double-click also populates registry_id()/registry_yaml()/
+        # result_kind(), same as clicking OK with a row selected.
+        self._registry_table.doubleClicked.connect(self._on_ok)
+
+        from_file_btn = QPushButton("From file…")
+        from_file_btn.clicked.connect(self._on_from_file)
+
+        min_size_row = QHBoxLayout()
+        min_size_row.addWidget(QLabel("Min marker size:"))
+        self._physical_min_pct_spin = QDoubleSpinBox()
+        self._physical_min_pct_spin.setRange(0.1, 10.0)
+        self._physical_min_pct_spin.setDecimals(2)
+        self._physical_min_pct_spin.setSingleStep(0.1)
+        self._physical_min_pct_spin.setSuffix(" %")
+        self._physical_min_pct_spin.setValue(1.0)
+        self._physical_min_pct_spin.setToolTip(
+            "Smallest marker cv2.aruco will accept, as a percentage of "
+            "the frame's larger dimension. Lower this if nothing is "
+            "found despite the rig clearly being visible."
+        )
+        min_size_row.addWidget(self._physical_min_pct_spin, 1)
+
+        layout.addWidget(hint)
+        layout.addWidget(self._registry_table)
+        layout.addWidget(from_file_btn)
+        layout.addLayout(min_size_row)
+        return tab
+
+    def _build_charuco_tab(self, settings: dict) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        dict_row = QHBoxLayout()
+        dict_row.addWidget(QLabel("Dictionary:"))
+        self._charuco_dict_combo = QComboBox()
+        self._charuco_dict_combo.addItems(_ARUCO_DICTIONARY_CHOICES)
+        self._charuco_dict_combo.setCurrentText(settings["dictionary"])
+        dict_row.addWidget(self._charuco_dict_combo, 1)
+
+        squares_row = QHBoxLayout()
+        squares_row.addWidget(QLabel("Squares X/Y:"))
+        self._charuco_squares_x_spin = QSpinBox()
+        self._charuco_squares_x_spin.setRange(2, 50)
+        self._charuco_squares_x_spin.setValue(settings["squares_x"])
+        self._charuco_squares_y_spin = QSpinBox()
+        self._charuco_squares_y_spin.setRange(2, 50)
+        self._charuco_squares_y_spin.setValue(settings["squares_y"])
+        squares_row.addWidget(self._charuco_squares_x_spin)
+        squares_row.addWidget(self._charuco_squares_y_spin)
+
+        length_row = QHBoxLayout()
+        length_row.addWidget(QLabel("Square/marker (m):"))
+        self._charuco_square_length_spin = QDoubleSpinBox()
+        self._charuco_square_length_spin.setRange(0.001, 5.0)
+        self._charuco_square_length_spin.setDecimals(4)
+        self._charuco_square_length_spin.setSingleStep(0.005)
+        self._charuco_square_length_spin.setValue(settings["square_length"])
+        self._charuco_marker_length_spin = QDoubleSpinBox()
+        self._charuco_marker_length_spin.setRange(0.001, 5.0)
+        self._charuco_marker_length_spin.setDecimals(4)
+        self._charuco_marker_length_spin.setSingleStep(0.005)
+        self._charuco_marker_length_spin.setValue(settings["marker_length"])
+        length_row.addWidget(self._charuco_square_length_spin)
+        length_row.addWidget(self._charuco_marker_length_spin)
+
+        self._charuco_face_up_cb = QCheckBox("Board face up (+Z is world up)")
+        self._charuco_face_up_cb.setChecked(settings["face_up"])
+        self._charuco_face_up_cb.setToolTip(
+            "Unchecked: the board is mounted face-down; Y and Z are "
+            "negated together so the world frame stays right-handed."
+        )
+
+        self._charuco_legacy_pattern_cb = QCheckBox("Legacy pattern (calib.io / older boards)")
+        self._charuco_legacy_pattern_cb.setChecked(settings["legacy_pattern"])
+        self._charuco_legacy_pattern_cb.setToolTip(
+            "Boards generated before OpenCV 4.7's ChArUco marker-placement "
+            "change (calib.io's generator among them) need this checked. "
+            "If nothing is found, try toggling this before suspecting the "
+            "board itself."
+        )
+
+        min_size_row = QHBoxLayout()
+        min_size_row.addWidget(QLabel("Min marker size:"))
+        self._charuco_min_marker_pct_spin = QDoubleSpinBox()
+        self._charuco_min_marker_pct_spin.setRange(0.1, 10.0)
+        self._charuco_min_marker_pct_spin.setDecimals(2)
+        self._charuco_min_marker_pct_spin.setSingleStep(0.1)
+        self._charuco_min_marker_pct_spin.setValue(settings["min_marker_pct"])
+        self._charuco_min_marker_pct_spin.setSuffix(" %")
+        self._charuco_min_marker_pct_spin.setToolTip(
+            "Smallest marker cv2.aruco will accept, as a percentage of the "
+            "frame's larger dimension. Lower this if nothing is found "
+            "despite the board clearly being visible -- but going too low "
+            "starts accepting false-positive/misdecoded quads instead."
+        )
+        min_size_row.addWidget(self._charuco_min_marker_pct_spin, 1)
+
+        layout.addLayout(dict_row)
+        layout.addLayout(squares_row)
+        layout.addLayout(length_row)
+        layout.addWidget(self._charuco_face_up_cb)
+        layout.addWidget(self._charuco_legacy_pattern_cb)
+        layout.addLayout(min_size_row)
+        layout.addStretch()
+        return tab
+
+    def _on_from_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Rig Config", "", "Marker body YAML (*.yaml *.yml);;All files (*)"
+        )
+        if not path:
+            return
+        self._file_path = path
+        self._result_kind = self.RESULT_FILE
+        self.accept()
+
+    def _on_ok(self) -> None:
+        if self._tabs.currentWidget() is self._tabs.widget(0):
+            row_idx = self._registry_table.currentRow()
+            if row_idx < 0:
+                QMessageBox.warning(
+                    self, "Calibration Rig",
+                    "Select a rig from the table, or use \"From file…\".",
+                )
+                return
+            self._registry_id = self._registry_rows[row_idx]["id"]
+            self._registry_yaml = self._registry_rows[row_idx]["yaml_content"]
+            self._result_kind = self.RESULT_REGISTRY
+        else:
+            self._result_kind = self.RESULT_CHARUCO
+        self.accept()
+
+    def result_kind(self) -> int:
+        return self._result_kind
+
+    def file_path(self) -> str | None:
+        return self._file_path
+
+    def registry_id(self) -> str | None:
+        return self._registry_id
+
+    def registry_yaml(self) -> str | None:
+        return self._registry_yaml
+
+    def physical_min_marker_pct(self) -> float:
+        return self._physical_min_pct_spin.value()
+
+    def charuco_settings(self) -> dict:
+        return {
+            "dictionary": self._charuco_dict_combo.currentText(),
+            "squares_x": self._charuco_squares_x_spin.value(),
+            "squares_y": self._charuco_squares_y_spin.value(),
+            "square_length": self._charuco_square_length_spin.value(),
+            "marker_length": self._charuco_marker_length_spin.value(),
+            "face_up": self._charuco_face_up_cb.isChecked(),
+            "legacy_pattern": self._charuco_legacy_pattern_cb.isChecked(),
+            "min_marker_pct": self._charuco_min_marker_pct_spin.value(),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Auto-calibration dialog
 # ---------------------------------------------------------------------------
 
@@ -1560,6 +1741,36 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             "without a physical rig (\"Load Markers…\")."
         )
         self._detect_markers_btn.clicked.connect(self._on_detect_markers_bulk)
+        self._calib_rig_btn = QPushButton("Calib rig…")
+        self._calib_rig_btn.setToolTip(
+            "Anchor the world coordinate system from a physical "
+            "calibration rig (file or already imported into this "
+            "session's DB) or a ChArUco board. Either way, immediately "
+            "detected and anchored across every camera with an image "
+            "loaded."
+        )
+        self._calib_rig_btn.clicked.connect(self._on_calib_rig_bulk)
+        self._load_markers_btn = QPushButton("Load markers…")
+        self._load_markers_btn.setToolTip(
+            "Re-anchor from a named configuration saved with \"Save "
+            "Markers…\" in an earlier capture -- no physical rig or "
+            "config file needed. See design doc section 9 Tier B."
+        )
+        self._load_markers_btn.clicked.connect(self._on_load_rig_from_scene_markers)
+        # self._save_markers_btn built here now (2026-08-14 follow-up,
+        # moved off the sidebar's Rig Anchor group onto the button bar
+        # next to "Load markers…") -- _on_save_markers/_SaveMarkersDialog
+        # themselves are unchanged, only where the button lives.
+        self._save_markers_btn = QPushButton("Save markers…")
+        self._save_markers_btn.setToolTip(
+            "Save the current anchor (a file-sourced rig, and/or any "
+            "sized ArUco/ChArUco markers from the last solve) under a "
+            "name, so a later capture can reuse it via \"Load markers…\" "
+            "without a physical rig. Disabled until something is "
+            "anchored or solved."
+        )
+        self._save_markers_btn.setEnabled(False)
+        self._save_markers_btn.clicked.connect(self._on_save_markers)
         self._sift_check = QCheckBox("SIFT matching")
         self._sift_check.setChecked(True)
         self._sift_check.setToolTip(
@@ -1589,6 +1800,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         solve_row.addWidget(self._cancel_btn)
         solve_row.addWidget(self._load_db_btn)
         solve_row.addWidget(self._detect_markers_btn)
+        solve_row.addWidget(self._calib_rig_btn)
+        solve_row.addWidget(self._load_markers_btn)
+        solve_row.addWidget(self._save_markers_btn)
         solve_row.addWidget(self._sift_check)
         solve_row.addWidget(QLabel("RANSAC:"))
         solve_row.addWidget(self._ransac_px_spin)
@@ -1912,9 +2126,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         cp_layout.addLayout(add_del)
 
         self._init_aruco_detect_settings()
-        charuco_group = self._build_charuco_group()
+        self._init_charuco_detect_settings()
         charuco_anchor_group = self._build_charuco_anchor_group()
-        rig_group = self._build_rig_group()
+        self._init_rig_detect_settings()
         rig_anchor_group = self._build_rig_anchor_group()
 
         # Actions / Anchoring (UX Phase 6, see docs/roadmap/features/
@@ -1928,15 +2142,18 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # *does* (detect/load vs. fix the world frame) so each group is
         # naturally smaller. Camera Intrinsics used to be a third crowded
         # section here too, until UX Phase 4 folded it into the
-        # per-camera results table instead. The "ArUco Markers" settings
-        # section is gone too (2026-08-14 follow-up) -- superseded by the
-        # button bar's "Detect markers…" dialog; see
-        # _init_aruco_detect_settings.
+        # per-camera results table instead. The "ArUco Markers"/"ChArUco
+        # Board"/"Marker Rig / Scene Markers" settings sections are gone
+        # too (2026-08-14 follow-up) -- superseded by the button bar's
+        # "Detect markers…"/"Calib rig…" dialogs; see
+        # _init_aruco_detect_settings/_init_charuco_detect_settings/
+        # _init_rig_detect_settings. Actions is left holding just Control
+        # Points as a result -- kept as its own group anyway (rather than
+        # promoted to a bare top-level widget) since UX Phase 8/D2 is
+        # expected to add manual-CP-anchoring actions here later.
         actions_group = QGroupBox("Actions")
         actions_layout = QVBoxLayout(actions_group)
         actions_layout.addWidget(cp_group, 1)
-        actions_layout.addWidget(charuco_group)
-        actions_layout.addWidget(rig_group)
 
         # World position (optional) moved out of here entirely (2026-08-14
         # follow-up) -- it's now the CP-row page of the Data tab's detail
@@ -1988,54 +2205,27 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._aruco_min_marker_pct_spin.setSingleStep(0.1)
         self._aruco_min_marker_pct_spin.setValue(1.0)
 
-    def _build_charuco_group(self) -> QGroupBox:
-        """ChArUco board detection settings (Phase 4) -- the Actions half
-        of the ChArUco feature (UX Phase 6, see docs/roadmap/features/
-        extrinsics-improvements/extrinsics-ux-redesign.md): dictionary/
-        board/detection settings and status live here; "Set origin &
-        axes from board" itself moved to ``_build_charuco_anchor_group``,
-        in the sidebar's Anchoring group.
+    def _init_charuco_detect_settings(self) -> None:
+        """ChArUco board settings (dictionary/squares/lengths/face-up/
+        legacy-pattern/min-marker-%) -- headless state, not shown
+        directly in the sidebar anymore (2026-08-14 follow-up removed
+        the standalone "ChArUco Board" settings section, folded into the
+        button bar's "Calib rig…" dialog's ChArUco Board tab instead;
+        mirrors ``_init_aruco_detect_settings``' reasoning exactly).
 
-        See docs/roadmap/features/extrinsics-improvements/
-        extrinsics-improvements-design.md, section 4, and status.md's
-        Phase 4 notes for why "Set origin & axes from board" doesn't need
-        a reference camera or its intrinsics.
+        The per-camera "Detect ChArUco" buttons under each camera
+        thumbnail keep using whatever was last confirmed in that dialog
+        (or these constructor defaults, if it's never been opened) --
+        see ``_on_calib_rig_bulk``/``_CalibRigDialog``.
         """
-        group = QGroupBox("ChArUco Board")
-        layout = QVBoxLayout(group)
-
-        hint = QLabel(
-            "Click \"Detect ChArUco\" under EACH camera that can see the "
-            "board (scrub to a frame where it's visible first) -- a camera "
-            "only gets usable world-position points from cameras where you "
-            "actually clicked Detect, same as a manual control point. "
-            "\"Set origin & axes\" then fixes the world coordinate system "
-            "from whichever detections exist so far -- scale, origin, and "
-            "axes together -- but only cameras with their own detection "
-            "will solve from it."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #666; font-size: 10px;")
-
-        dict_row = QHBoxLayout()
-        dict_row.addWidget(QLabel("Dictionary:"))
         self._charuco_dict_combo = QComboBox()
         self._charuco_dict_combo.addItems(_ARUCO_DICTIONARY_CHOICES)
-        dict_row.addWidget(self._charuco_dict_combo, 1)
-
-        squares_row = QHBoxLayout()
-        squares_row.addWidget(QLabel("Squares X/Y:"))
         self._charuco_squares_x_spin = QSpinBox()
         self._charuco_squares_x_spin.setRange(2, 50)
         self._charuco_squares_x_spin.setValue(5)
         self._charuco_squares_y_spin = QSpinBox()
         self._charuco_squares_y_spin.setRange(2, 50)
         self._charuco_squares_y_spin.setValue(7)
-        squares_row.addWidget(self._charuco_squares_x_spin)
-        squares_row.addWidget(self._charuco_squares_y_spin)
-
-        length_row = QHBoxLayout()
-        length_row.addWidget(QLabel("Square/marker (m):"))
         self._charuco_square_length_spin = QDoubleSpinBox()
         self._charuco_square_length_spin.setRange(0.001, 5.0)
         self._charuco_square_length_spin.setDecimals(4)
@@ -2046,71 +2236,27 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._charuco_marker_length_spin.setDecimals(4)
         self._charuco_marker_length_spin.setSingleStep(0.005)
         self._charuco_marker_length_spin.setValue(0.02)
-        length_row.addWidget(self._charuco_square_length_spin)
-        length_row.addWidget(self._charuco_marker_length_spin)
-
         self._charuco_face_up_cb = QCheckBox("Board face up (+Z is world up)")
         self._charuco_face_up_cb.setChecked(True)
-        self._charuco_face_up_cb.setToolTip(
-            "Unchecked: the board is mounted face-down; Y and Z are "
-            "negated together so the world frame stays right-handed."
-        )
-
         self._charuco_legacy_pattern_cb = QCheckBox("Legacy pattern (calib.io / older boards)")
-        self._charuco_legacy_pattern_cb.setToolTip(
-            "Boards generated before OpenCV 4.7's ChArUco marker-placement "
-            "change (calib.io's generator among them) need this checked. "
-            "If \"Detect ChArUco\" finds nothing, try toggling this before "
-            "suspecting the board itself -- ArUco markers still detect "
-            "fine either way, only the checkerboard-corner step is affected."
-        )
-
-        min_size_row = QHBoxLayout()
-        min_size_row.addWidget(QLabel("Min marker size:"))
         self._charuco_min_marker_pct_spin = QDoubleSpinBox()
         self._charuco_min_marker_pct_spin.setRange(0.1, 10.0)
         self._charuco_min_marker_pct_spin.setDecimals(2)
         self._charuco_min_marker_pct_spin.setSingleStep(0.1)
         self._charuco_min_marker_pct_spin.setValue(1.0)
-        self._charuco_min_marker_pct_spin.setSuffix(" %")
-        self._charuco_min_marker_pct_spin.setToolTip(
-            "Smallest marker cv2.aruco will accept, as a percentage of the "
-            "frame's larger dimension. OpenCV's own default is 3%, which "
-            "misses a board photographed from across a room in a full "
-            "4K/similar frame -- lower this if \"Detect ChArUco\" finds "
-            "nothing despite the board clearly being visible.\n\n"
-            "Going too low is not always better: past a point it starts "
-            "accepting false-positive/misdecoded quads, which breaks corner "
-            "interpolation just as badly as too few real markers -- often "
-            "with MORE markers found overall but still zero corners. If the "
-            "log shows the same marker id decoded more than once, you've "
-            "gone too low; raise this back up rather than lowering it "
-            "further. There is usually only a narrow working range."
-        )
-        min_size_row.addWidget(self._charuco_min_marker_pct_spin, 1)
+
+    def _build_charuco_anchor_group(self) -> QGroupBox:
+        """ChArUco anchor status + "Set origin & axes from board" --
+        detection settings moved out entirely (2026-08-14 follow-up, see
+        ``_init_charuco_detect_settings``); the status label moved here
+        alongside the anchor action it reports on, same relocation as
+        ``_rig_status_label`` in ``_build_rig_anchor_group``."""
+        group = QGroupBox("ChArUco Anchor")
+        layout = QVBoxLayout(group)
 
         self._charuco_status_label = QLabel("No board detected yet.")
         self._charuco_status_label.setWordWrap(True)
         self._charuco_status_label.setStyleSheet("color: #666; font-size: 10px;")
-
-        layout.addWidget(hint)
-        layout.addLayout(dict_row)
-        layout.addLayout(squares_row)
-        layout.addLayout(length_row)
-        layout.addWidget(self._charuco_face_up_cb)
-        layout.addWidget(self._charuco_legacy_pattern_cb)
-        layout.addLayout(min_size_row)
-        layout.addWidget(self._charuco_status_label)
-        return group
-
-    def _build_charuco_anchor_group(self) -> QGroupBox:
-        """"Set origin & axes from board" -- the Anchoring half of the
-        ChArUco feature (UX Phase 6, see docs/roadmap/features/
-        extrinsics-improvements/extrinsics-ux-redesign.md); detection
-        settings/status live in ``_build_charuco_group`` instead, in the
-        sidebar's Actions group."""
-        group = QGroupBox("ChArUco Anchor")
-        layout = QVBoxLayout(group)
 
         anchor_btn = QPushButton("Set origin && axes from board")
         anchor_btn.clicked.connect(self._on_anchor_from_board)
@@ -2120,128 +2266,39 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         btn_row.addWidget(anchor_btn)
         btn_row.addWidget(clear_btn)
 
+        layout.addWidget(self._charuco_status_label)
         layout.addLayout(btn_row)
         return group
 
-    def _build_rig_group(self) -> QGroupBox:
-        """Portable non-planar calibration rig detection + anchoring
-        (Phase 8, Tier A), plus re-anchoring from previously-solved
-        scattered scene tags with no physical rig present (Phase 9, Tier B).
-
-        See docs/roadmap/features/extrinsics-improvements/
-        extrinsics-improvements-design.md, section 9 (both tiers) and
-        section 10. All three load buttons -- "Load Config…" (a
-        marker_body_definitions YAML file), "From Registry…" (the same
-        kind of row, already imported into this session's DB by a prior
-        `posetrak marker-body import` or GUI load), and "Load Markers…"
-        (this session's already-*saved* ``scene_marker_bodies`` rows,
-        design doc section 9 Tier B) -- feed the same underlying
-        mechanism (``anchor_from_marker_rig``), just three different
-        sources for the set of known marker positions, matching how the
-        CLI's `anchor-rig`/`reanchor` commands are also just two callers
-        of the same function.
-
-        Loading immediately detects the rig in every camera's current
-        frame and anchors the world coordinate system from it if found
-        anywhere (see ``_apply_loaded_rig_config``/
-        ``_detect_and_anchor_rig``) -- collapsing what used to be four
-        separate clicks (load, detect under each camera, "Set origin &
-        axes", solve) into one for the common case. Unlike the ChArUco
-        panel, a rig detection has no "free, not yet anchored"
-        intermediate state to begin with: ``anchor_from_marker_rig``
-        always assigns fixed ``world_xyz`` immediately, since the loaded
-        geometry -- from any source -- is already fully known with no
-        face-up/face-down choice to make (see that function's docstring).
-        The per-camera "Detect Rig" buttons and the "Anchor Rig" button
-        below remain as an explicit redo, e.g. after scrubbing one or
-        more cameras to a frame where the rig is actually visible.
-
-        Rig loading (this method) is the Actions half of the feature (UX
-        Phase 6, see docs/roadmap/features/extrinsics-improvements/
-        extrinsics-ux-redesign.md); "Anchor Rig"/min-cameras-to-anchor/
-        "Save Markers…"/"Manage Scene Markers…" moved to
-        ``_build_rig_anchor_group``, in the sidebar's Anchoring group.
+    def _init_rig_detect_settings(self) -> None:
+        """Rig detection settings (min-marker-%) -- headless state, not
+        shown directly in the sidebar anymore (2026-08-14 follow-up
+        removed the standalone "Marker Rig / Scene Markers" loading
+        section; rig loading -- file, registry, or a saved marker
+        configuration -- moved to the button bar's "Calib rig…" dialog).
+        Mirrors ``_init_aruco_detect_settings``/``_init_charuco_detect_settings``.
         """
-        group = QGroupBox("Marker Rig / Scene Markers")
-        layout = QVBoxLayout(group)
-
-        hint = QLabel(
-            "Load a rig config -- from a file, the registry, or a saved "
-            "marker configuration (section 9 Tier B, no physical rig "
-            "needed) -- and it's immediately detected in every camera's "
-            "current frame and anchored if found anywhere. Use \"Detect "
-            "Rig\" under one camera to redetect just that one after "
-            "scrubbing to a different frame, or \"Anchor Rig\" (in "
-            "Anchoring below) to redo detection everywhere. Once "
-            "anchored, \"Save Markers…\" lets a later capture reuse this "
-            "without a physical rig."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #666; font-size: 10px;")
-
-        load_btn = QPushButton("Load Config…")
-        load_btn.setToolTip(
-            "Load a rig config from a marker body YAML file (section 10 "
-            "of the design doc) and import it into this session's DB."
-        )
-        load_btn.clicked.connect(self._on_load_rig_config)
-        registry_btn = QPushButton("From Registry…")
-        registry_btn.setToolTip(
-            "Pick a rig already imported into this session's DB -- e.g. "
-            "via `posetrak marker-body import`, or a prior GUI load -- "
-            "without re-selecting its YAML file."
-        )
-        registry_btn.clicked.connect(self._on_load_rig_from_registry)
-        load_scene_btn = QPushButton("Load Markers…")
-        load_scene_btn.setToolTip(
-            "Re-anchor from a named configuration saved with \"Save "
-            "Markers…\" in an earlier capture -- no physical rig or "
-            "config file needed. See design doc section 9 Tier B."
-        )
-        load_scene_btn.clicked.connect(self._on_load_rig_from_scene_markers)
-
-        min_size_row = QHBoxLayout()
-        min_size_row.addWidget(QLabel("Min marker size:"))
         self._rig_min_marker_pct_spin = QDoubleSpinBox()
         self._rig_min_marker_pct_spin.setRange(0.1, 10.0)
         self._rig_min_marker_pct_spin.setDecimals(2)
         self._rig_min_marker_pct_spin.setSingleStep(0.1)
         self._rig_min_marker_pct_spin.setValue(1.0)
-        self._rig_min_marker_pct_spin.setSuffix(" %")
-        self._rig_min_marker_pct_spin.setToolTip(
-            "Same gotcha as ArUco/ChArUco detection above -- see those "
-            "panels' tooltips for the full explanation. Changing this "
-            "rebuilds the rig detector immediately."
-        )
         self._rig_min_marker_pct_spin.valueChanged.connect(self._on_rig_min_marker_pct_changed)
-        min_size_row.addWidget(self._rig_min_marker_pct_spin, 1)
+
+    def _build_rig_anchor_group(self) -> QGroupBox:
+        """Rig anchor status + anchoring actions -- rig loading/detection
+        settings moved out entirely (2026-08-14 follow-up, see
+        ``_init_rig_detect_settings``); the status label moved here
+        alongside the anchor actions it reports on. "Save Markers…" also
+        moved out, onto the button bar next to "Load Markers…"
+        (``_on_save_markers``/``_SaveMarkersDialog`` themselves are
+        unchanged -- only where the button lives)."""
+        group = QGroupBox("Rig Anchor")
+        layout = QVBoxLayout(group)
 
         self._rig_status_label = QLabel("No rig config loaded.")
         self._rig_status_label.setWordWrap(True)
         self._rig_status_label.setStyleSheet("color: #666; font-size: 10px;")
-
-        layout.addWidget(hint)
-        layout.addWidget(load_btn)
-        layout.addWidget(registry_btn)
-        layout.addWidget(load_scene_btn)
-        layout.addLayout(min_size_row)
-        layout.addWidget(self._rig_status_label)
-        return group
-
-    def _build_rig_anchor_group(self) -> QGroupBox:
-        """Rig anchoring + scene-marker save/load management -- the
-        Anchoring half of the feature (UX Phase 6, see docs/roadmap/
-        features/extrinsics-improvements/extrinsics-ux-redesign.md);
-        rig loading/detection settings live in ``_build_rig_group``
-        instead, in the sidebar's Actions group.
-
-        "Save Markers…"/"Load Markers…" (UX Phase 5, see the same design
-        doc) are the explicit, always-named save/load actions that
-        replaced the old implicit save-on-Accept-if-a-name-happened-to-
-        be-typed-in flow -- see ``_on_save_markers``/``_SaveMarkersDialog``.
-        """
-        group = QGroupBox("Rig Anchor")
-        layout = QVBoxLayout(group)
 
         min_cams_row = QHBoxLayout()
         min_cams_row.addWidget(QLabel("Min cameras to anchor:"))
@@ -2277,17 +2334,6 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         btn_row.addWidget(anchor_btn)
         btn_row.addWidget(clear_btn)
 
-        self._save_markers_btn = QPushButton("Save Markers…")
-        self._save_markers_btn.setToolTip(
-            "Save the current anchor (a file-sourced rig, and/or any "
-            "sized ArUco/ChArUco markers from the last solve) under a "
-            "name, so a later capture can reuse it via \"Load Markers…\" "
-            "without a physical rig. Disabled until something is "
-            "anchored or solved."
-        )
-        self._save_markers_btn.setEnabled(False)
-        self._save_markers_btn.clicked.connect(self._on_save_markers)
-
         manage_btn = QPushButton("Manage Scene Markers…")
         manage_btn.setToolTip(
             "View every scene marker stored for this session (including "
@@ -2296,9 +2342,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         )
         manage_btn.clicked.connect(self._on_manage_scene_markers)
 
+        layout.addWidget(self._rig_status_label)
         layout.addLayout(min_cams_row)
         layout.addLayout(btn_row)
-        layout.addWidget(self._save_markers_btn)
         layout.addWidget(manage_btn)
         return group
 
@@ -3008,6 +3054,63 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         if mg is not None:
             mg.size = value if value > 0 else self._current_default_size()
 
+    def _on_calib_rig_bulk(self) -> None:
+        """"Calib rig…" (button bar, 2026-08-14 follow-up): pick a
+        physical rig (file/registry) or confirm ChArUco board settings
+        once, then load/detect/anchor -- the button-bar counterpart to
+        "Load Config…"/"From Registry…" (removed from the sidebar) and
+        to per-camera "Detect ChArUco" + "Set origin & axes" (which stay,
+        for redoing one camera or re-anchoring after scrubbing)."""
+        charuco_settings = {
+            "dictionary": self._charuco_dict_combo.currentText(),
+            "squares_x": self._charuco_squares_x_spin.value(),
+            "squares_y": self._charuco_squares_y_spin.value(),
+            "square_length": self._charuco_square_length_spin.value(),
+            "marker_length": self._charuco_marker_length_spin.value(),
+            "face_up": self._charuco_face_up_cb.isChecked(),
+            "legacy_pattern": self._charuco_legacy_pattern_cb.isChecked(),
+            "min_marker_pct": self._charuco_min_marker_pct_spin.value(),
+        }
+        dlg = _CalibRigDialog(self._conn, charuco_settings, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        kind = dlg.result_kind()
+        if kind == _CalibRigDialog.RESULT_FILE:
+            self._rig_min_marker_pct_spin.setValue(dlg.physical_min_marker_pct())
+            self._load_rig_config_from_path(dlg.file_path())
+        elif kind == _CalibRigDialog.RESULT_REGISTRY:
+            self._rig_min_marker_pct_spin.setValue(dlg.physical_min_marker_pct())
+            self._load_rig_config_from_registry_row(dlg.registry_yaml(), dlg.registry_id())
+        elif kind == _CalibRigDialog.RESULT_CHARUCO:
+            settings = dlg.charuco_settings()
+            self._charuco_dict_combo.setCurrentText(settings["dictionary"])
+            self._charuco_squares_x_spin.setValue(settings["squares_x"])
+            self._charuco_squares_y_spin.setValue(settings["squares_y"])
+            self._charuco_square_length_spin.setValue(settings["square_length"])
+            self._charuco_marker_length_spin.setValue(settings["marker_length"])
+            self._charuco_face_up_cb.setChecked(settings["face_up"])
+            self._charuco_legacy_pattern_cb.setChecked(settings["legacy_pattern"])
+            self._charuco_min_marker_pct_spin.setValue(settings["min_marker_pct"])
+
+            n_cameras = 0
+            for state in self._states:
+                if state.image is None:
+                    continue
+                n_cameras += 1
+                self._on_detect_charuco_clicked(state.video_id)
+            if self._charuco_detections:
+                self._on_anchor_from_board()
+                self._status_label.setText(
+                    f"ChArUco board detected in {len(self._charuco_detections)}/"
+                    f"{n_cameras} camera(s) with an image loaded, and anchored."
+                )
+            else:
+                self._status_label.setText(
+                    f"No ChArUco board found in any of {n_cameras} camera(s) "
+                    f"with an image loaded."
+                )
+
     # ------------------------------------------------------------------
     # ChArUco board detection + anchoring (Phase 4)
     # ------------------------------------------------------------------
@@ -3140,17 +3243,15 @@ class ExtrinsicsAutoCalibDialog(QDialog):
     # Portable calibration rig detection + anchoring (Phase 8)
     # ------------------------------------------------------------------
 
-    def _on_load_rig_config(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Load Rig Config", "", "Marker body YAML (*.yaml *.yml);;All files (*)"
-        )
-        if not path:
-            return
-        self._load_rig_config_from_path(path)
-
     def _load_rig_config_from_path(self, path: str | Path) -> None:
-        """The path-taking half of ``_on_load_rig_config``, split out so it
-        doesn't require mocking ``QFileDialog`` to exercise or reuse."""
+        """Load a rig config from a marker body YAML file. Reached via
+        the button bar's "Calib rig…" dialog -> "From file…"
+        (``_on_calib_rig_bulk``, 2026-08-14 follow-up) -- used to have
+        its own "Load Config…" sidebar button/wrapper
+        (``_on_load_rig_config``, now removed) opening the file picker
+        directly; split out from that wrapper originally so tests
+        wouldn't need to mock ``QFileDialog`` to exercise it, which is
+        exactly what let it survive that button's removal unchanged."""
         try:
             config = load_marker_body_yaml_file(str(path))
         except Exception as exc:  # noqa: BLE001
@@ -3175,23 +3276,19 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         self._apply_loaded_rig_config(config, definition_id=definition_id, source="file")
 
-    def _on_load_rig_from_registry(self) -> None:
-        """Pick an already-imported rig straight from the session DB's
-        ``marker_body_definitions`` -- covers a rig imported via
-        `posetrak marker-body import` (or a prior GUI session), which
-        otherwise had no way back into a fresh dialog short of re-picking
-        its original YAML file."""
-        dlg = _RegistryRigPickerDialog(self._conn, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._load_rig_config_from_registry_row(dlg.selected_yaml(), dlg.selected_id())
-
     def _load_rig_config_from_registry_row(
         self, yaml_content: str | None, definition_id: str | None
     ) -> None:
-        """The picker-result-taking half of ``_on_load_rig_from_registry``,
-        split out so it doesn't require mocking ``_RegistryRigPickerDialog``
-        to exercise or reuse."""
+        """Load an already-imported rig straight from the session DB's
+        ``marker_body_definitions`` -- covers a rig imported via
+        `posetrak marker-body import` (or a prior GUI session). Reached
+        via the button bar's "Calib rig…" dialog's Physical Rig tab
+        (``_on_calib_rig_bulk``, 2026-08-14 follow-up), which builds its
+        own inline registry table (``_CalibRigDialog._build_physical_tab``)
+        rather than opening a separate nested picker -- the sidebar's old
+        "From Registry…" button, its wrapper (``_on_load_rig_from_registry``),
+        and the now-unused ``_RegistryRigPickerDialog`` it opened are all
+        removed."""
         try:
             config = load_marker_body_yaml(yaml_content)
         except Exception as exc:  # noqa: BLE001

@@ -22,7 +22,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QGroupBox, QScrollArea, QSplitter
+from PySide6.QtWidgets import QGroupBox, QPushButton, QScrollArea, QSplitter
 
 from app.setup.extrinsics_solver import CamCalibState
 from app.setup.page_extrinsics import ExtrinsicsAutoCalibDialog
@@ -58,11 +58,7 @@ def _find_group(dlg: ExtrinsicsAutoCalibDialog, title: str) -> QGroupBox:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "title",
-    ["Control Points", "ChArUco Board",
-     "ChArUco Anchor", "Marker Rig / Scene Markers", "Rig Anchor"],
-)
+@pytest.mark.parametrize("title", ["Control Points", "ChArUco Anchor", "Rig Anchor"])
 def test_no_sidebar_section_is_collapsible(qapp, fake_conn, title) -> None:
     dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
     try:
@@ -71,17 +67,20 @@ def test_no_sidebar_section_is_collapsible(qapp, fake_conn, title) -> None:
         dlg.done(0)
 
 
-def test_actions_group_contains_control_points_charuco_and_rig_loading(
-    qapp, fake_conn,
-) -> None:
-    """"ArUco Markers" is gone from here (2026-08-14 follow-up) --
-    superseded by the button bar's "Detect markers…" dialog; see
-    test_aruco_settings_have_no_sidebar_group below."""
+def test_actions_group_contains_only_control_points(qapp, fake_conn) -> None:
+    """"ArUco Markers"/"ChArUco Board"/"Marker Rig / Scene Markers" are
+    all gone from here now (2026-08-14 follow-up) -- superseded by the
+    button bar's "Detect markers…"/"Calib rig…" dialogs; see
+    test_aruco_settings_have_no_sidebar_group and
+    test_charuco_and_rig_loading_settings_have_no_sidebar_group. Actions
+    is kept as its own group anyway (not promoted to a bare widget)
+    since UX Phase 8/D2 is expected to add manual-CP-anchoring actions
+    here later."""
     dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
     try:
         actions = _find_group(dlg, "Actions")
         child_titles = {g.title() for g in actions.findChildren(QGroupBox)}
-        assert child_titles == {"Control Points", "ChArUco Board", "Marker Rig / Scene Markers"}
+        assert child_titles == {"Control Points"}
     finally:
         dlg.done(0)
 
@@ -141,6 +140,46 @@ def test_detect_markers_button_is_on_the_button_bar(qapp, fake_conn) -> None:
         dlg.done(0)
 
 
+def test_charuco_and_rig_loading_settings_have_no_sidebar_group(qapp, fake_conn) -> None:
+    """"ChArUco Board" (detection settings) and "Marker Rig / Scene
+    Markers" (loading) removed entirely (2026-08-14 follow-up) -- folded
+    into the button bar's "Calib rig…" dialog instead
+    (_init_charuco_detect_settings/_init_rig_detect_settings). "ChArUco
+    Anchor"/"Rig Anchor" (the anchor actions + status) stay."""
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        with pytest.raises(AssertionError):
+            _find_group(dlg, "ChArUco Board")
+        with pytest.raises(AssertionError):
+            _find_group(dlg, "Marker Rig / Scene Markers")
+        assert dlg._charuco_dict_combo.parent() is None
+        assert dlg._rig_min_marker_pct_spin.parent() is None
+        # Status labels relocated into the Anchor groups, not lost.
+        assert dlg._charuco_status_label in _find_group(dlg, "ChArUco Anchor").findChildren(
+            type(dlg._charuco_status_label)
+        )
+        assert dlg._rig_status_label in _find_group(dlg, "Rig Anchor").findChildren(
+            type(dlg._rig_status_label)
+        )
+    finally:
+        dlg.done(0)
+
+
+def test_calib_rig_load_and_save_markers_buttons_are_on_the_button_bar(qapp, fake_conn) -> None:
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        assert dlg._calib_rig_btn.text() == "Calib rig…"
+        assert dlg._load_markers_btn.text() == "Load markers…"
+        assert dlg._save_markers_btn.text() == "Save markers…"
+        for btn in (dlg._calib_rig_btn, dlg._load_markers_btn, dlg._save_markers_btn):
+            assert not btn.isHidden()
+        # Not in the sidebar's Rig Anchor group anymore.
+        rig_anchor = _find_group(dlg, "Rig Anchor")
+        assert dlg._save_markers_btn not in rig_anchor.findChildren(type(dlg._save_markers_btn))
+    finally:
+        dlg.done(0)
+
+
 def test_intrinsics_has_no_sidebar_group(qapp, fake_conn) -> None:
     """UX Phase 4 (see docs/roadmap/features/extrinsics-improvements/
     extrinsics-ux-redesign.md) removed the "Camera Intrinsics" sidebar
@@ -155,17 +194,19 @@ def test_intrinsics_has_no_sidebar_group(qapp, fake_conn) -> None:
         dlg.done(0)
 
 
-def test_save_markers_and_manage_scene_markers_buttons_are_in_rig_anchor_group(
-    qapp, fake_conn,
-) -> None:
-    """"Save Markers…"/"Manage Scene Markers…" moved out of the rig
-    loading group into Rig Anchor (UX Phase 6) -- they're about
-    persisting/loading the anchor, not about detecting/loading the rig
-    config itself."""
+def test_manage_scene_markers_button_is_in_rig_anchor_group(qapp, fake_conn) -> None:
+    """"Save Markers…" moved again, off the sidebar entirely onto the
+    button bar (2026-08-14 follow-up, see
+    test_calib_rig_load_and_save_markers_buttons_are_on_the_button_bar);
+    "Manage Scene Markers…" stays in Rig Anchor -- it's a maintenance/
+    pruning action, not part of the core detect/anchor/save/load loop."""
     dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
     try:
         rig_anchor = _find_group(dlg, "Rig Anchor")
-        assert dlg._save_markers_btn in rig_anchor.findChildren(type(dlg._save_markers_btn))
+        manage_btns = [
+            b for b in rig_anchor.findChildren(QPushButton) if b.text() == "Manage Scene Markers…"
+        ]
+        assert len(manage_btns) == 1
     finally:
         dlg.done(0)
 

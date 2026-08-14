@@ -424,3 +424,112 @@ def test_aruco_detect_with_invalid_charuco_settings_does_not_crash(qapp, fake_co
         dlg._on_detect_aruco_clicked("cam_A")  # must not raise
     finally:
         dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# "Calib rig…" button-bar dialog's ChArUco Board tab (2026-08-14 follow-
+# up) -- bulk detect-across-every-camera + auto-anchor, the counterpart
+# to per-camera "Detect ChArUco" + "Set origin & axes" (which stay). See
+# _CalibRigDialog/_on_calib_rig_bulk; Physical Rig tab tested in
+# test_extrinsics_rig_ui.py.
+# ---------------------------------------------------------------------------
+
+
+def test_calib_rig_dialog_charuco_tab_prefilled_from_current_settings(qapp, fake_conn) -> None:
+    from app.setup.page_extrinsics import _CalibRigDialog
+
+    settings = {
+        "dictionary": "DICT_5X5_50", "squares_x": 6, "squares_y": 8,
+        "square_length": 0.05, "marker_length": 0.03,
+        "face_up": False, "legacy_pattern": True, "min_marker_pct": 2.5,
+    }
+    dlg = _CalibRigDialog(fake_conn, settings)
+    try:
+        assert dlg._charuco_dict_combo.currentText() == "DICT_5X5_50"
+        assert dlg._charuco_squares_x_spin.value() == 6
+        assert dlg._charuco_squares_y_spin.value() == 8
+        assert dlg._charuco_square_length_spin.value() == pytest.approx(0.05)
+        assert dlg._charuco_marker_length_spin.value() == pytest.approx(0.03)
+        assert not dlg._charuco_face_up_cb.isChecked()
+        assert dlg._charuco_legacy_pattern_cb.isChecked()
+        assert dlg._charuco_min_marker_pct_spin.value() == pytest.approx(2.5)
+    finally:
+        dlg.done(0)
+
+
+def test_calib_rig_dialog_charuco_tab_ok_yields_charuco_result(qapp, fake_conn) -> None:
+    from app.setup.page_extrinsics import _CalibRigDialog
+
+    settings = {
+        "dictionary": "DICT_4X4_50", "squares_x": 5, "squares_y": 7,
+        "square_length": 0.04, "marker_length": 0.02,
+        "face_up": True, "legacy_pattern": False, "min_marker_pct": 1.0,
+    }
+    dlg = _CalibRigDialog(fake_conn, settings)
+    try:
+        dlg._tabs.setCurrentIndex(1)  # ChArUco Board tab
+        dlg._on_ok()
+        assert dlg.result_kind() == _CalibRigDialog.RESULT_CHARUCO
+        assert dlg.charuco_settings()["dictionary"] == "DICT_4X4_50"
+    finally:
+        dlg.done(0)
+
+
+def test_calib_rig_bulk_charuco_detects_across_all_cameras_and_anchors(
+    qapp, fake_conn, monkeypatch,
+) -> None:
+    from PySide6.QtWidgets import QDialog
+    from app.setup.page_extrinsics import _CalibRigDialog
+
+    states = [
+        _make_state("cam_A", _render_board_image()),
+        _make_state("cam_B", _render_board_image()),
+        _make_state("cam_C", image=None),  # no image -- must be skipped, not warned about
+    ]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        def fake_exec(self):
+            self._result_kind = _CalibRigDialog.RESULT_CHARUCO
+            return QDialog.DialogCode.Accepted
+
+        monkeypatch.setattr(_CalibRigDialog, "exec", fake_exec)
+        # Defaults (5x7, 0.04/0.02) match the rendered board -- no need to
+        # override charuco_settings() for this test.
+        monkeypatch.setattr(_CalibRigDialog, "charuco_settings", lambda self: {
+            "dictionary": "DICT_4X4_50", "squares_x": 5, "squares_y": 7,
+            "square_length": 0.04, "marker_length": 0.02,
+            "face_up": True, "legacy_pattern": False, "min_marker_pct": 1.0,
+        })
+
+        dlg._on_calib_rig_bulk()
+
+        assert set(dlg._charuco_detections) == {"cam_A", "cam_B"}
+        assert dlg._charuco_anchored
+    finally:
+        dlg.done(0)
+
+
+def test_calib_rig_bulk_charuco_no_board_found_does_not_anchor(qapp, fake_conn, monkeypatch) -> None:
+    from PySide6.QtWidgets import QDialog
+    from app.setup.page_extrinsics import _CalibRigDialog
+
+    states = [_make_state("cam_A", image=None)]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        def fake_exec(self):
+            self._result_kind = _CalibRigDialog.RESULT_CHARUCO
+            return QDialog.DialogCode.Accepted
+
+        monkeypatch.setattr(_CalibRigDialog, "exec", fake_exec)
+        monkeypatch.setattr(_CalibRigDialog, "charuco_settings", lambda self: {
+            "dictionary": "DICT_4X4_50", "squares_x": 5, "squares_y": 7,
+            "square_length": 0.04, "marker_length": 0.02,
+            "face_up": True, "legacy_pattern": False, "min_marker_pct": 1.0,
+        })
+
+        dlg._on_calib_rig_bulk()  # must not raise or pop an "anchor" warning
+
+        assert dlg._charuco_detections == {}
+        assert not dlg._charuco_anchored
+    finally:
+        dlg.done(0)

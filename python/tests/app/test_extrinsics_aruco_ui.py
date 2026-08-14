@@ -382,3 +382,91 @@ def test_aruco_marker_not_excluded_when_dictionaries_differ(qapp, fake_conn) -> 
         assert "3" in dlg._marker_groups
     finally:
         dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# "Detect markers…" (button bar, 2026-08-14 follow-up) -- bulk ArUco
+# detection across every camera at once, the counterpart to the per-
+# camera "Detect ArUco" button. See _DetectMarkersDialog/
+# _on_detect_markers_bulk, _init_aruco_detect_settings.
+# ---------------------------------------------------------------------------
+
+
+def test_detect_markers_bulk_detects_across_every_camera_with_an_image(
+    qapp, fake_conn, monkeypatch,
+) -> None:
+    from PySide6.QtWidgets import QDialog
+    from app.setup.page_extrinsics import _DetectMarkersDialog
+
+    states = [
+        _make_state("cam_A", _render_marker_image(3)),
+        _make_state("cam_B", _render_marker_image(3)),
+        _make_state("cam_C", image=None),  # no image yet -- must be skipped, not warned about
+    ]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        monkeypatch.setattr(_DetectMarkersDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+        dlg._on_detect_markers_bulk()
+
+        assert set(dlg._marker_groups) == {"3"}
+        assert set(dlg._marker_groups["3"].obs) == {"cam_A", "cam_B"}
+        assert "2 camera(s)" in dlg._status_label.text()
+    finally:
+        dlg.done(0)
+
+
+def test_detect_markers_dialog_cancelled_detects_nothing(qapp, fake_conn, monkeypatch) -> None:
+    from PySide6.QtWidgets import QDialog
+
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        from app.setup.page_extrinsics import _DetectMarkersDialog
+
+        monkeypatch.setattr(_DetectMarkersDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
+        dlg._on_detect_markers_bulk()
+
+        assert dlg._marker_groups == {}
+    finally:
+        dlg.done(0)
+
+
+def test_detect_markers_dialog_prefilled_from_current_settings_and_writes_back(
+    qapp, fake_conn, monkeypatch,
+) -> None:
+    from PySide6.QtWidgets import QDialog
+    from app.setup.page_extrinsics import _DetectMarkersDialog
+
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._aruco_default_size_spin.setValue(0.03)
+
+        captured = {}
+
+        def fake_init(self, dictionary, default_size, min_marker_pct, parent=None):
+            captured["dictionary"] = dictionary
+            captured["default_size"] = default_size
+            captured["min_marker_pct"] = min_marker_pct
+            QDialog.__init__(self, parent)
+            self._chosen_size = 0.09
+
+        def fake_exec(self):
+            return QDialog.DialogCode.Accepted
+
+        monkeypatch.setattr(_DetectMarkersDialog, "__init__", fake_init)
+        monkeypatch.setattr(_DetectMarkersDialog, "exec", fake_exec)
+        monkeypatch.setattr(_DetectMarkersDialog, "dictionary", lambda self: "DICT_5X5_50")
+        monkeypatch.setattr(_DetectMarkersDialog, "default_size", lambda self: self._chosen_size)
+        monkeypatch.setattr(_DetectMarkersDialog, "min_marker_pct", lambda self: 2.0)
+
+        dlg._on_detect_markers_bulk()
+
+        # Pre-filled from the dialog's caller-side state...
+        assert captured["default_size"] == pytest.approx(0.03)
+        # ...and the accepted values written back afterward.
+        assert dlg._aruco_dict_combo.currentText() == "DICT_5X5_50"
+        assert dlg._aruco_default_size_spin.value() == pytest.approx(0.09)
+        assert dlg._aruco_min_marker_pct_spin.value() == pytest.approx(2.0)
+    finally:
+        dlg.done(0)

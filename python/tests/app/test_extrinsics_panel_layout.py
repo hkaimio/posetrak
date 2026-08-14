@@ -60,7 +60,7 @@ def _find_group(dlg: ExtrinsicsAutoCalibDialog, title: str) -> QGroupBox:
 
 @pytest.mark.parametrize(
     "title",
-    ["Control Points", "ArUco Markers", "ChArUco Board",
+    ["Control Points", "ChArUco Board",
      "ChArUco Anchor", "Marker Rig / Scene Markers", "Rig Anchor"],
 )
 def test_no_sidebar_section_is_collapsible(qapp, fake_conn, title) -> None:
@@ -71,16 +71,17 @@ def test_no_sidebar_section_is_collapsible(qapp, fake_conn, title) -> None:
         dlg.done(0)
 
 
-def test_actions_group_contains_control_points_aruco_charuco_and_rig_loading(
+def test_actions_group_contains_control_points_charuco_and_rig_loading(
     qapp, fake_conn,
 ) -> None:
+    """"ArUco Markers" is gone from here (2026-08-14 follow-up) --
+    superseded by the button bar's "Detect markers…" dialog; see
+    test_aruco_settings_have_no_sidebar_group below."""
     dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
     try:
         actions = _find_group(dlg, "Actions")
         child_titles = {g.title() for g in actions.findChildren(QGroupBox)}
-        assert child_titles == {
-            "Control Points", "ArUco Markers", "ChArUco Board", "Marker Rig / Scene Markers",
-        }
+        assert child_titles == {"Control Points", "ChArUco Board", "Marker Rig / Scene Markers"}
     finally:
         dlg.done(0)
 
@@ -112,6 +113,30 @@ def test_world_position_group_lives_in_the_detail_pane_not_the_sidebar(qapp, fak
         stack = dlg.findChild(QStackedWidget)
         assert stack is not None
         assert wp_group in stack.findChildren(QGroupBox)
+    finally:
+        dlg.done(0)
+
+
+def test_aruco_settings_have_no_sidebar_group(qapp, fake_conn) -> None:
+    """"ArUco Markers" removed entirely (2026-08-14 follow-up) -- its
+    dictionary/default-size/min-marker-% settings are headless state now
+    (_init_aruco_detect_settings), edited via the button bar's "Detect
+    markers…" dialog instead of a permanently-visible sidebar section."""
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        with pytest.raises(AssertionError):
+            _find_group(dlg, "ArUco Markers")
+        # The settings still exist, just not parented into any layout.
+        assert dlg._aruco_dict_combo.parent() is None
+    finally:
+        dlg.done(0)
+
+
+def test_detect_markers_button_is_on_the_button_bar(qapp, fake_conn) -> None:
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        assert dlg._detect_markers_btn.text() == "Detect markers…"
+        assert not dlg._detect_markers_btn.isHidden()
     finally:
         dlg.done(0)
 

@@ -1259,6 +1259,95 @@ class _SaveMarkersDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Detect Markers dialog -- bulk ArUco detection across every camera at
+# once (2026-08-14 follow-up, see docs/roadmap/features/
+# extrinsics-improvements/extrinsics-ux-redesign.md), the button-bar
+# counterpart to the per-camera "Detect ArUco" button. Owns the same
+# dictionary/default-size/min-marker-% settings that used to live in a
+# permanently-visible "ArUco Markers" sidebar section -- see
+# ExtrinsicsAutoCalibDialog._init_aruco_detect_settings/
+# _on_detect_markers_bulk.
+# ---------------------------------------------------------------------------
+
+
+class _DetectMarkersDialog(QDialog):
+    """Marker type (dictionary) + optional default size + min-marker-%,
+    confirmed once, then applied to a bulk detect-across-every-camera
+    pass. Pre-filled from whatever the dialog's caller currently has set
+    (so repeated opens remember the last choice); the caller writes the
+    accepted values back onto its own state after ``exec()``."""
+
+    def __init__(
+        self, dictionary: str, default_size: float, min_marker_pct: float, parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Detect Markers")
+        self.setMinimumWidth(360)
+
+        dict_row = QHBoxLayout()
+        dict_row.addWidget(QLabel("Dictionary:"))
+        self._dict_combo = QComboBox()
+        self._dict_combo.addItems(_ARUCO_DICTIONARY_CHOICES)
+        self._dict_combo.setCurrentText(dictionary)
+        dict_row.addWidget(self._dict_combo, 1)
+
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel("Default size:"))
+        self._size_spin = QDoubleSpinBox()
+        self._size_spin.setRange(0.0, 5.0)
+        self._size_spin.setDecimals(4)
+        self._size_spin.setSingleStep(0.005)
+        self._size_spin.setSuffix(" m")
+        self._size_spin.setValue(default_size)
+        self._size_spin.setToolTip(
+            "0 = unknown size: marker corners still contribute as free "
+            "control points, but no rigid pose is solved for it, so it "
+            "won't be saved as a reusable scene marker either."
+        )
+        size_row.addWidget(self._size_spin, 1)
+
+        min_size_row = QHBoxLayout()
+        min_size_row.addWidget(QLabel("Min marker size:"))
+        self._min_pct_spin = QDoubleSpinBox()
+        self._min_pct_spin.setRange(0.1, 10.0)
+        self._min_pct_spin.setDecimals(2)
+        self._min_pct_spin.setSingleStep(0.1)
+        self._min_pct_spin.setSuffix(" %")
+        self._min_pct_spin.setValue(min_marker_pct)
+        self._min_pct_spin.setToolTip(
+            "Smallest marker cv2.aruco will accept, as a percentage of "
+            "the frame's larger dimension. OpenCV's own default is 3%, "
+            "which misses markers photographed from across a room in a "
+            "full 4K/similar frame -- lower this if nothing is found "
+            "despite a marker clearly being visible. Going too low is "
+            "not always better -- past a point it starts accepting "
+            "false-positive/misdecoded quads."
+        )
+        min_size_row.addWidget(self._min_pct_spin, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(dict_row)
+        layout.addLayout(size_row)
+        layout.addLayout(min_size_row)
+        layout.addWidget(buttons)
+
+    def dictionary(self) -> str:
+        return self._dict_combo.currentText()
+
+    def default_size(self) -> float:
+        return self._size_spin.value()
+
+    def min_marker_pct(self) -> float:
+        return self._min_pct_spin.value()
+
+
+# ---------------------------------------------------------------------------
 # Auto-calibration dialog
 # ---------------------------------------------------------------------------
 
@@ -1455,6 +1544,22 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._load_db_btn = QPushButton("Load from DB…")
         self._load_db_btn.clicked.connect(self._on_load_from_db)
         self._load_db_btn.setToolTip("Load a previously saved calibration to inspect camera positions and CP errors.")
+        # Bulk data-entry actions (2026-08-14 follow-up) -- button bar is
+        # now their home instead of permanently-visible sidebar sections;
+        # see _init_aruco_detect_settings/_on_detect_markers_bulk.
+        self._detect_markers_btn = QPushButton("Detect markers…")
+        self._detect_markers_btn.setToolTip(
+            "Pick a marker dictionary and optional default size, then "
+            "detect ArUco markers across every camera with an image "
+            "loaded at once. A marker's 4 corners act as one control-"
+            "point group; give it a size (its row's \"Size (m)\" column "
+            "in the Data table) to also recover its rigid world pose "
+            "once ≥2 cameras have seen it. Use \"Save Markers…\" to "
+            "persist a sized marker's solved pose to this session's "
+            "scene markers, so a later capture can re-anchor from it "
+            "without a physical rig (\"Load Markers…\")."
+        )
+        self._detect_markers_btn.clicked.connect(self._on_detect_markers_bulk)
         self._sift_check = QCheckBox("SIFT matching")
         self._sift_check.setChecked(True)
         self._sift_check.setToolTip(
@@ -1483,6 +1588,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         solve_row.addWidget(self._solve_btn)
         solve_row.addWidget(self._cancel_btn)
         solve_row.addWidget(self._load_db_btn)
+        solve_row.addWidget(self._detect_markers_btn)
         solve_row.addWidget(self._sift_check)
         solve_row.addWidget(QLabel("RANSAC:"))
         solve_row.addWidget(self._ransac_px_spin)
@@ -1805,7 +1911,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         cp_layout.addWidget(hint)
         cp_layout.addLayout(add_del)
 
-        aruco_group = self._build_aruco_group()
+        self._init_aruco_detect_settings()
         charuco_group = self._build_charuco_group()
         charuco_anchor_group = self._build_charuco_anchor_group()
         rig_group = self._build_rig_group()
@@ -1822,11 +1928,13 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # *does* (detect/load vs. fix the world frame) so each group is
         # naturally smaller. Camera Intrinsics used to be a third crowded
         # section here too, until UX Phase 4 folded it into the
-        # per-camera results table instead.
+        # per-camera results table instead. The "ArUco Markers" settings
+        # section is gone too (2026-08-14 follow-up) -- superseded by the
+        # button bar's "Detect markers…" dialog; see
+        # _init_aruco_detect_settings.
         actions_group = QGroupBox("Actions")
         actions_layout = QVBoxLayout(actions_group)
         actions_layout.addWidget(cp_group, 1)
-        actions_layout.addWidget(aruco_group)
         actions_layout.addWidget(charuco_group)
         actions_layout.addWidget(rig_group)
 
@@ -1855,81 +1963,30 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         scroll.setFixedWidth(300)
         return scroll
 
-    def _build_aruco_group(self) -> QGroupBox:
-        """ArUco marker detection settings + detected-marker list (Phase 3).
+    def _init_aruco_detect_settings(self) -> None:
+        """ArUco detection settings (dictionary/default size/min-marker-%)
+        -- headless state, not shown directly in the sidebar anymore
+        (2026-08-14 follow-up removed the standalone "ArUco Markers"
+        settings section, redundant once "Detect markers…" existed).
 
-        See docs/roadmap/features/extrinsics-improvements/
-        extrinsics-improvements-design.md, section 3.
+        The "Detect markers…" button-bar dialog (``_DetectMarkersDialog``/
+        ``_on_detect_markers_bulk``) is where a user actually edits these
+        now: it pre-fills itself from whatever's here and writes back on
+        OK, so the per-camera "Detect ArUco" buttons under each camera
+        thumbnail keep using whatever was last chosen there (or these
+        constructor defaults, if the dialog has never been opened).
         """
-        group = QGroupBox("ArUco Markers")
-        layout = QVBoxLayout(group)
-
-        hint = QLabel(
-            "Click \"Detect ArUco\" under a camera to find markers in its "
-            "current frame. A marker's 4 corners act as one control-point "
-            "group; give it a size (its row's \"Size (m)\" column in the "
-            "Data table below the camera grid) to also recover its rigid "
-            "world pose once ≥2 cameras have seen it. Use \"Save "
-            "Markers…\" to persist a sized marker's solved pose to this "
-            "session's scene markers, so a later capture can re-anchor "
-            "from it without a physical rig (\"Load Markers…\" in "
-            "Anchoring) -- use a dictionary here that's different from "
-            "your rig's own so the two can't be confused."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #666; font-size: 10px;")
-
-        dict_row = QHBoxLayout()
-        dict_row.addWidget(QLabel("Dictionary:"))
         self._aruco_dict_combo = QComboBox()
         self._aruco_dict_combo.addItems(_ARUCO_DICTIONARY_CHOICES)
-        dict_row.addWidget(self._aruco_dict_combo, 1)
-
-        size_row = QHBoxLayout()
-        size_row.addWidget(QLabel("Default size:"))
         self._aruco_default_size_spin = QDoubleSpinBox()
         self._aruco_default_size_spin.setRange(0.0, 5.0)
         self._aruco_default_size_spin.setDecimals(4)
         self._aruco_default_size_spin.setSingleStep(0.005)
-        self._aruco_default_size_spin.setSuffix(" m")
-        self._aruco_default_size_spin.setToolTip(
-            "0 = unknown size: marker corners still contribute as free "
-            "control points, but no rigid pose is solved for it, so it "
-            "won't be saved as a reusable scene marker either."
-        )
-        size_row.addWidget(self._aruco_default_size_spin, 1)
-
-        min_size_row = QHBoxLayout()
-        min_size_row.addWidget(QLabel("Min marker size:"))
         self._aruco_min_marker_pct_spin = QDoubleSpinBox()
         self._aruco_min_marker_pct_spin.setRange(0.1, 10.0)
         self._aruco_min_marker_pct_spin.setDecimals(2)
         self._aruco_min_marker_pct_spin.setSingleStep(0.1)
         self._aruco_min_marker_pct_spin.setValue(1.0)
-        self._aruco_min_marker_pct_spin.setSuffix(" %")
-        self._aruco_min_marker_pct_spin.setToolTip(
-            "Smallest marker cv2.aruco will accept, as a percentage of the "
-            "frame's larger dimension. OpenCV's own default is 3%, which "
-            "misses markers photographed from across a room in a full "
-            "4K/similar frame -- lower this if \"Detect\" finds nothing "
-            "despite the marker clearly being visible.\n\n"
-            "Going too low is not always better: past a point it starts "
-            "accepting false-positive/misdecoded quads, which can break "
-            "detection just as badly as too few real markers. If the log "
-            "shows the same marker id decoded more than once, you've gone "
-            "too low -- raise this back up rather than lowering it further."
-        )
-        min_size_row.addWidget(self._aruco_min_marker_pct_spin, 1)
-
-        clear_btn = QPushButton("Clear markers")
-        clear_btn.clicked.connect(self._on_clear_markers)
-
-        layout.addWidget(hint)
-        layout.addLayout(dict_row)
-        layout.addLayout(size_row)
-        layout.addLayout(min_size_row)
-        layout.addWidget(clear_btn)
-        return group
 
     def _build_charuco_group(self) -> QGroupBox:
         """ChArUco board detection settings (Phase 4) -- the Actions half
@@ -2914,6 +2971,37 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._marker_groups.clear()
         self._refresh_data_table()
         self._refresh_markers()
+
+    def _on_detect_markers_bulk(self) -> None:
+        """"Detect markers…" (button bar, 2026-08-14 follow-up): confirm
+        dictionary/default-size/min-marker-% once, then run
+        ``_on_detect_aruco_clicked`` across every camera that currently
+        has an image -- the bulk counterpart to that per-camera button,
+        which stays for redoing just one camera after scrubbing."""
+        dlg = _DetectMarkersDialog(
+            self._aruco_dict_combo.currentText(),
+            self._aruco_default_size_spin.value(),
+            self._aruco_min_marker_pct_spin.value(),
+            self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._aruco_dict_combo.setCurrentText(dlg.dictionary())
+        self._aruco_default_size_spin.setValue(dlg.default_size())
+        self._aruco_min_marker_pct_spin.setValue(dlg.min_marker_pct())
+
+        n_before = len(self._marker_groups)
+        n_cameras = 0
+        for state in self._states:
+            if state.image is None:
+                continue
+            n_cameras += 1
+            self._on_detect_aruco_clicked(state.video_id)
+        n_after = len(self._marker_groups)
+        self._status_label.setText(
+            f"Detected markers across {n_cameras} camera(s) with an image "
+            f"loaded: {n_after} marker group(s) ({n_after - n_before} new)."
+        )
 
     def _on_marker_size_override_changed(self, marker_id: str, value: float) -> None:
         mg = self._marker_groups.get(marker_id)

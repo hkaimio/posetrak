@@ -194,6 +194,63 @@ capture footage, click-through of every anchoring path) before
 considering it fully proven, not just unit-tested. UX Phase 8/D2 (manual
 CPs in saved configurations) remains deferred behind that.
 
+**2026-08-14: UX Phase 7 follow-up -- Harri clicked through it live**
+("The UI seems to work now... I'd sitll like to iterate this... Did I
+forget some part of the functionality") **and asked for six more
+changes**, landed as five self-contained commits:
+
+- **Cameras column shows camera order numbers, not a count**
+  (`c05db45`): the Data table's "Cameras" column now shows each
+  observing camera's 1-based order number (matching its row in the
+  Cameras table), e.g. "2, 3" for a CP seen only by the 2nd and 3rd
+  camera, instead of a bare count that couldn't identify *which* cameras
+  without opening the tooltip.
+- **Cameras/Data tables into a tab container with adjustable height**
+  (`08be196`): the two tables used to stack on top of each other, each
+  capped at a fixed height. They now share one `QTabWidget` in its own
+  pane of a vertical `QSplitter` below the camera grid, height
+  adjustable by dragging the splitter handle.
+- **Per-row-type detail pane beside the Data table** (`a5fe6f7`): World
+  position controls for a selected CP (moved out of the sidebar's old
+  standalone groupbox, now the detail pane's CP page), "Clear" for a
+  Marker/Rig-corner/Board-corner row, "Remove" for a Cam pos obs row --
+  closing a real pre-existing gap (there was never a way to remove a
+  single camera-position observation before, only overwrite it by
+  dragging again).
+- **Bulk "Detect markers…" dialog + ArUco sidebar removed** (`49b55eb`):
+  new button-bar dialog confirms dictionary/default-size/min-marker-%
+  once, then detects across every camera with an image loaded. The
+  sidebar's "ArUco Markers" settings section is gone; its three settings
+  widgets are headless state now (`_init_aruco_detect_settings`), shared
+  between this dialog and the per-camera "Detect ArUco" button (which
+  stays, for redoing one camera after scrubbing).
+- **Tabbed "Calib rig…" dialog folds ChArUco into the rig workflow +
+  further sidebar removal + Save/Load Markers relocated** (`d10b61a`):
+  per Harri, "charuco board is closer to a calibration rig so I'd add
+  charuco boards as an option to the rig dialog." `_CalibRigDialog` has
+  a Physical Rig tab (DB registry table + "From file…", inlining what
+  the sidebar's "From Registry…"/"Load Config…" buttons used to open)
+  and a ChArUco Board tab (the old sidebar settings), both auto-
+  detecting + anchoring across every camera on OK. The sidebar's
+  "ChArUco Board" and "Marker Rig / Scene Markers" (loading) sections
+  are gone; "ChArUco Anchor"/"Rig Anchor" (the anchor actions) stay,
+  each gaining the status label the removed loading section used to
+  show. "Save markers…"/"Load markers…" also moved off the sidebar onto
+  the button bar. Dead code removed: `_on_load_rig_config`/
+  `_on_load_rig_from_registry`/`_RegistryRigPickerDialog`.
+
+Actions now holds only Control Points -- kept as its own sidebar group
+anyway (not promoted to a bare widget) since UX Phase 8/D2 is expected
+to add manual-CP-anchoring actions there later. New tests for every
+piece (tab structure, detail-pane dispatch per row-type, both bulk
+dialogs' mechanics and all three of `_on_calib_rig_bulk`'s result
+kinds). Full regression sweep clean after each commit, final state 1701
+passed, 19 skipped, 6 known pre-existing deselections.
+
+Still not live-tested against real capture footage -- this round is
+itself a response to Harri's *first* live click-through, so another pass
+is the natural next step before further iteration.
+
 ## Current state
 
 Phases 1-4 implemented (2026-08-09), grounded against the pre-existing

@@ -1,14 +1,18 @@
 # Extrinsics calibration UX redesign — draft proposal
 
-**Status: UX Phases 1–7 landed (2026-08-14).** Still awaiting the
-live-testing pass Phase 7 itself called for (real capture footage, click-
-through of every anchoring path) before considering it fully proven, not
-just unit-tested. Harri has flagged a possible follow-up: moving the Data
-table back into the sidebar (its construction was factored into its own
-`_build_data_table()` method in anticipation of this). UX Phase 8/D2
-(manual CPs in saved configurations) remains deferred behind that. One
-open question remains, non-blocking (per-camera calibration quality
-persistence — see "Open questions").
+**Status: UX Phases 1–7 landed (2026-08-14), plus a same-day follow-up
+round after Harri's first live click-through** (tab container for the
+Cameras/Data tables with adjustable height, a per-row-type detail pane,
+bulk "Detect markers…"/"Calib rig…" button-bar dialogs replacing most of
+the remaining sidebar settings sections, "Save markers…"/"Load
+markers…" moved to the button bar, and the Data table's Cameras column
+showing camera order numbers instead of a count -- see status.md's
+2026-08-14 follow-up entry for the five commits). Still awaiting a
+live-testing pass against real capture footage -- this round is itself a
+response to the first one, so another pass is the natural next step. UX
+Phase 8/D2 (manual CPs in saved configurations) remains deferred behind
+that. One open question remains, non-blocking (per-camera calibration
+quality persistence — see "Open questions").
 
 ## Why this exists
 

@@ -1,10 +1,11 @@
 # Extrinsics calibration UX redesign — draft proposal
 
-**Status: UX Phases 1–4 landed (2026-08-14).** UX Phases 5–7 await
-Harri's review before starting (5 ships a CLI breaking change; 6 depends
-on 5; 7 is the widest structural change in the plan and needs a live-
-testing pass before/after). One open question remains, non-blocking
-(per-camera calibration quality persistence — see "Open questions").
+**Status: UX Phases 1–5 landed (2026-08-14).** UX Phase 6 is next (sidebar
+reorg, depends on 5's now-final button set); UX Phase 7 (Unified Data
+table) is the widest structural change in the plan and needs a live-
+testing pass before/after, so it's sequenced last. One open question
+remains, non-blocking (per-camera calibration quality persistence — see
+"Open questions").
 
 ## Why this exists
 
@@ -573,7 +574,7 @@ tests to look for the combo/checkboxes in the results table; verify
 changing a camera's intrinsics from its new table cell still re-solves
 correctly.
 
-### UX Phase 5 — Explicit, always-named Save/Load Markers
+### UX Phase 5 — Explicit, always-named Save/Load Markers ✅ Done
 
 - New "Save Markers…" dialog: checklist of every `world_xyz`-eligible
   item this session currently has (rig anchor, sized ArUco/ChArUco

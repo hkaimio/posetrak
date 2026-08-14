@@ -70,8 +70,59 @@ sweep clean after each:
   used to sit in a separate label under the sidebar combo moved to the
   combo's own tooltip.
 
-UX Phases 5-7 still need Harri's review/direction before landing -- see
-extrinsics-ux-redesign.md's own status line.
+**2026-08-14: two corrections from live-testing the overnight batch
+(`87c680d`), then UX Phase 5 landed:**
+
+- `ExtrinsicsStatusDialog` and `CapturePanel`'s `Extrinsics…` button
+  counted every camera the *session* had ever registered
+  (`session_cameras`), not just the cameras with a video in the
+  *capture* the dialog/button was opened from. Both now scope to
+  `capture_videos` for the given `shot_id`(s) instead.
+- The per-camera results table's Intrinsics column combo showed date/RMS
+  only as a tooltip (2026-08-13 fix). Date and RMS now get their own
+  "Calib Date"/"Calib RMS" columns, updating live as the intrinsics
+  selection changes. The combo's own dropdown text still leads with the
+  calibration's notes (falling back to date+RMS when no notes were
+  given), per the original 2026-08-13 fix -- only the *always-visible*
+  detail moved out of the tooltip and into columns.
+
+**UX Phase 5 — Explicit, always-named Save/Load Markers:**
+
+- New "Save Markers…" button/dialog: checklist of everything this
+  session currently has eligible (a file-sourced rig's own anchor, any
+  sized ArUco/ChArUco marker pose from the last solve -- manually-
+  anchored control points stay out of scope, deferred to UX Phase 8/D2's
+  reference-image mechanism), default all-checked, required name field
+  (Save disabled until non-empty). Writes via `upsert_scene_marker_body`
+  per checked item, same as the implicit Accept-time persistence used to,
+  now an explicit, reviewable action that works whether Accept has run
+  yet or not.
+- Removed the implicit save-on-Accept-if-a-name-happened-to-be-typed-in
+  flow and its `_scene_marker_group_edit` field entirely -- Accept no
+  longer touches `scene_marker_bodies` at all.
+- Renamed "From Scene Markers…" → "Load Markers…"; always shows the named-
+  groups picker now (no more silent "ungrouped" fallback when nothing has
+  ever been named -- it warns instead, pointing at "Save Markers…").
+  `_SceneMarkerGroupPickerDialog` dropped its `(ungrouped)` row.
+- New confirm-before-clobber: loading a new rig/scene-marker config over
+  an existing rig anchor or manually-anchored control points now asks
+  first (`_confirm_replace_existing_anchor`) -- the same principle
+  CLAUDE.md's "automation vs. prior human edits" design section
+  establishes elsewhere in this codebase, applied here since there's no
+  cheap way to know whether the existing anchor is "the same session,
+  reloaded" or genuinely a different setup.
+- CLI: `anchor-rig`/`reanchor --name` changed from optional to
+  `required=True`, matching the GUI's now-required name field (per
+  Harri's "copy the GUI model to CLI" decision).
+
+New tests for the Save Markers dialog/eligibility/persistence, the
+confirm-before-clobber prompt (both accept and decline paths), the
+group-picker's dropped ungrouped row, and the "no named groups yet" warning
+path; existing tests referencing the removed implicit-persistence flow
+rewritten to use the new explicit `_save_markers`/`_on_save_markers` calls.
+Full regression sweep clean.
+
+UX Phase 6 is next -- see extrinsics-ux-redesign.md's own status line.
 
 ## Current state
 

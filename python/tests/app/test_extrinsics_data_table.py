@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QDoubleSpinBox
 from app.setup.extrinsics_solver import CalibResult, CamCalibState, MarkerGroup, MarkerPoseResult
 from app.setup.fiducial_markers import ARUCO_DICTIONARIES
 from app.setup.page_extrinsics import ExtrinsicsAutoCalibDialog
+from posetrak.db.manage_marker_body import upsert_scene_marker_body
 
 _ONE_MARKER_RIG_YAML = """\
 name: test-rig
@@ -251,6 +252,64 @@ def test_rig_corner_rows_appear_once_anchored(qapp, fake_conn, rig_yaml_path) ->
         for row in rows:
             assert dlg._data_table.item(row, 4).text() == "rig:test-rig"
             assert dlg._data_table.item(row, 3).text() != ""  # already fixed
+    finally:
+        dlg.done(0)
+
+
+def test_loaded_marker_config_rows_not_labeled_rig_corner(qapp, fake_conn) -> None:
+    """A "Load Markers…" config (Tier B, no physical rig) reuses the same
+    detector/anchor mechanism as a genuine rig -- but must not be shown
+    as "Rig corner" in the Data table, which reads as if a rig had been
+    saved/loaded too (Harri's 2026-08-14 report: saved only sized ArUco
+    markers, no rig, then saw "Rig corner" rows after loading that
+    config into another capture)."""
+    fake_conn.execute(
+        "INSERT OR IGNORE INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    fake_conn.commit()
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:3", R=np.eye(3), t=np.zeros(3), group_name="room7",
+        marker_type="aruco", dictionary="DICT_4X4_50", marker_id="3", marker_size=0.1,
+    )
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_scene_marker_group("room7")
+        assert dlg._rig_anchored
+        assert dlg._rig_source == "scene_markers"
+
+        assert _rows_by_type(dlg, "Rig corner") == []
+        rows = _rows_by_type(dlg, "Loaded marker corner")
+        assert len(rows) == 4  # one marker's 4 corners
+        for row in rows:
+            assert dlg._data_table.item(row, 4).text() == "scene markers (room7)"
+    finally:
+        dlg.done(0)
+
+
+def test_detail_pane_clear_works_for_loaded_marker_corner_row(qapp, fake_conn) -> None:
+    fake_conn.execute(
+        "INSERT OR IGNORE INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    fake_conn.commit()
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:3", R=np.eye(3), t=np.zeros(3), group_name="room7",
+        marker_type="aruco", dictionary="DICT_4X4_50", marker_id="3", marker_size=0.1,
+    )
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_scene_marker_group("room7")
+        row = _rows_by_type(dlg, "Loaded marker corner")[0]
+        dlg._data_table.selectRow(row)
+
+        assert dlg._detail_stack.currentIndex() == 3
+        assert dlg._detail_group_label.text() == "Loaded marker corner"
+
+        dlg._detail_group_clear_fn()
+
+        assert not dlg._rig_anchored
+        assert dlg._rig_detections_by_camera == {}
     finally:
         dlg.done(0)
 

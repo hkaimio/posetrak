@@ -1911,7 +1911,14 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         would have been a real regression, not just a display change.
         Similarly adds "Board corner" as its own Type alongside the doc's
         marker/CP/rig-corner/cam-pos-obs -- ChArUco corners are a genuine
-        fifth data source, symmetrical with rig corners.
+        fifth data source, symmetrical with rig corners. Splits "Rig
+        corner" further by ``_rig_source``: a "Load Markers…" config
+        (Tier B, no physical rig) shows as "Loaded marker corner" instead
+        -- both come from the same ``_rig_control_points()`` detector/
+        anchor mechanism, but showing "Rig corner" regardless of source
+        was confusing (2026-08-14, Harri: saved only sized ArUco markers,
+        no rig, then loading that config into another capture showed
+        "Rig corner" rows, looking like a rig had been saved/loaded too).
         """
         table = QTableWidget(0, 6)
         table.setHorizontalHeaderLabels(
@@ -1945,11 +1952,16 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         - **Marker**: "Clear" removes just that one marker
           (``_on_clear_single_marker``) -- unlike the ArUco panel's
           "Clear markers", which clears all of them.
-        - **Rig corner** / **Board corner**: "Clear" removes the whole
-          detected rig/board (``_on_clear_rig``/``_on_clear_charuco``) --
-          individual corners aren't independently removable, so this is
-          a shortcut to the same action as the rig/board's own Clear
-          button, reachable from wherever the row happens to be selected.
+        - **Rig corner** / **Loaded marker corner** / **Board corner**:
+          "Clear" removes the whole detected rig/config/board
+          (``_on_clear_rig``/``_on_clear_charuco``) -- individual corners
+          aren't independently removable, so this is a shortcut to the
+          same action as the rig/board's own Clear button, reachable
+          from wherever the row happens to be selected. "Rig corner" vs.
+          "Loaded marker corner" both come from ``_rig_control_points()``
+          (the same detector/anchor mechanism, see ``_rig_source`` --
+          only the label differs, by source: a genuine physical rig vs.
+          a "Load Markers…" config with no physical rig involved).
         - **Cam pos obs**: "Remove" deletes just that one observation
           (``_on_remove_cam_pos_obs``) -- previously there was no way to
           remove one at all, only overwrite it by dragging again.
@@ -2060,10 +2072,10 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             self._detail_marker_id = payload
             self._detail_marker_label.setText(f"Marker {payload}")
             self._detail_stack.setCurrentIndex(2)
-        elif kind in ("Rig corner", "Board corner"):
+        elif kind in ("Rig corner", "Loaded marker corner", "Board corner"):
             self._detail_group_label.setText(kind)
             self._detail_group_clear_fn = (
-                self._on_clear_rig if kind == "Rig corner" else self._on_clear_charuco
+                self._on_clear_charuco if kind == "Board corner" else self._on_clear_rig
             )
             self._detail_stack.setCurrentIndex(3)
         elif kind == "Cam pos obs":
@@ -2697,9 +2709,26 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 self._data_table_row_info[row] = ("Board corner", None)
 
             for cp in self._rig_control_points():
-                source = f"rig:{self._rig_config.rig_id}" if self._rig_config is not None else "rig"
-                row = add_row("Rig corner", cp.name, set(cp.obs), cp.world_xyz, source)
-                self._data_table_row_info[row] = ("Rig corner", None)
+                # A "Load Markers…" config (Tier B, _rig_source ==
+                # "scene_markers") reuses the same rig detector/anchor
+                # mechanism as a genuine physical rig, but it isn't one --
+                # labeling it "Rig corner" regardless of source was
+                # confusing (Harri: saved only sized ArUco markers, no
+                # rig, then loading that config into another capture
+                # showed "Rig corner" rows, looking like a rig had somehow
+                # been saved/loaded too). Distinguish by type, matching
+                # every other _rig_source == "file" check in this class.
+                if self._rig_source == "file":
+                    kind, source = "Rig corner", (
+                        f"rig:{self._rig_config.rig_id}" if self._rig_config is not None else "rig"
+                    )
+                else:
+                    kind, source = "Loaded marker corner", (
+                        self._rig_config.rig_id if self._rig_config is not None
+                        else "loaded markers"
+                    )
+                row = add_row(kind, cp.name, set(cp.obs), cp.world_xyz, source)
+                self._data_table_row_info[row] = (kind, None)
 
             for obs in self._cam_pos_obs:
                 row = add_row(

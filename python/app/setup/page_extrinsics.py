@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -423,6 +424,14 @@ class _ClickableImageWidget(QWidget):
     def set_user_cam_pos_marker(self, label: str, x: float, y: float) -> None:
         """Record a user-placed camera-position marker (cyan).  Persists across solves."""
         self._user_cam_pos_markers[label] = (x, y)
+        self.update()
+
+    def remove_user_cam_pos_marker(self, label: str) -> None:
+        """Remove one user-placed camera-position marker by its subject
+        label, leaving any others this widget still has (e.g. an observer
+        that marked several subject cameras) untouched -- see
+        _on_remove_cam_pos_obs (2026-08-14 follow-up)."""
+        self._user_cam_pos_markers.pop(label, None)
         self.update()
 
     def clear_user_cam_pos_markers(self) -> None:
@@ -1471,9 +1480,10 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         solve_row.addWidget(self._ransac_px_spin)
         solve_row.addWidget(self._status_label, 1)
 
-        # Per-camera results/settings table -- always visible, full width,
-        # one row per camera, populated immediately (not just after a
-        # solve/DB load): position/CP-error start at "—" until solved.
+        # Per-camera results/settings table -- always kept populated (not
+        # just after a solve/DB load, though its own tab (see _build_ui)
+        # only shows when selected): position/CP-error start at "—" until
+        # solved.
         # Columns 5-10 (Intrinsics/Calib Date/Calib RMS/Refine/Lock/Excl)
         # used to be a separate "Camera Intrinsics" sidebar section; UX
         # Phase 4 (see docs/roadmap/features/extrinsics-improvements/
@@ -1497,12 +1507,28 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             self._cam_pos_table.horizontalHeader().setSectionResizeMode(
                 col, QHeaderView.ResizeMode.ResizeToContents
             )
-        self._cam_pos_table.setMaximumHeight(180)
         self._cam_pos_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._cam_pos_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         self._cam_pos_table.setAlternatingRowColors(True)
 
         self._data_table = self._build_data_table()
+
+        # Cameras / Data tables share one tab container instead of
+        # stacking on top of each other -- both used fixed setMaximumHeight
+        # caps before (2026-08-14 follow-up); now the container sits in
+        # its own pane of a vertical QSplitter below the camera grid, so
+        # its height is user-adjustable by dragging the splitter handle
+        # instead of a fixed guess neither table's row count may match.
+        self._tables_tabs = QTabWidget()
+        self._tables_tabs.addTab(self._cam_pos_table, "Cameras")
+        self._tables_tabs.addTab(self._data_table, "Data")
+
+        main_splitter = QSplitter(Qt.Orientation.Vertical)
+        main_splitter.addWidget(splitter)
+        main_splitter.addWidget(self._tables_tabs)
+        main_splitter.setStretchFactor(0, 1)
+        main_splitter.setStretchFactor(1, 0)
+        main_splitter.setSizes([600, 220])
 
         # Dialog buttons
         btn_box = QDialogButtonBox()
@@ -1513,10 +1539,8 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         btn_box.rejected.connect(self.reject)
 
         root = QVBoxLayout(self)
-        root.addWidget(splitter, 1)
+        root.addWidget(main_splitter, 1)
         root.addLayout(solve_row)
-        root.addWidget(self._cam_pos_table)
-        root.addWidget(self._data_table)
         root.addWidget(btn_box)
 
         self._populate_cam_pos_table_rows()
@@ -1560,7 +1584,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         for col in (0, 2, 3, 4, 5):
             table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-        table.setMaximumHeight(200)
+        # No setMaximumHeight -- the tab container sits in its own pane of
+        # a vertical QSplitter (see _build_ui), so its height is user-
+        # adjustable by dragging the splitter handle instead.
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)

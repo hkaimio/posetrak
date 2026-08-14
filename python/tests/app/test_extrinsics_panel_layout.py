@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from PySide6.QtWidgets import QGroupBox, QScrollArea
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QGroupBox, QScrollArea, QSplitter
 
 from app.setup.extrinsics_solver import CamCalibState
 from app.setup.page_extrinsics import ExtrinsicsAutoCalibDialog
@@ -138,6 +139,57 @@ def test_right_panel_is_wrapped_in_a_scroll_area(qapp, fake_conn) -> None:
         # must now be wrapped in a second one, sized to be resizable.
         panel_scrolls = [s for s in scroll_areas if s.widgetResizable()]
         assert len(panel_scrolls) >= 1
+    finally:
+        dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Cameras/Data tab container + adjustable-height splitter (2026-08-14
+# follow-up) -- the two tables used to stack on top of each other, each
+# capped at a fixed setMaximumHeight; now they share one QTabWidget in its
+# own pane of a vertical QSplitter, so height is user-adjustable by
+# dragging the splitter handle instead of a fixed guess neither table's
+# row count may match.
+# ---------------------------------------------------------------------------
+
+
+def test_cam_pos_and_data_tables_share_a_tab_container(qapp, fake_conn) -> None:
+    from PySide6.QtWidgets import QTabWidget
+
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        tabs = dlg.findChild(QTabWidget)
+        assert tabs is not None
+        assert tabs.count() == 2
+        assert tabs.widget(0) is dlg._cam_pos_table
+        assert tabs.widget(1) is dlg._data_table
+        assert [tabs.tabText(i) for i in range(2)] == ["Cameras", "Data"]
+    finally:
+        dlg.done(0)
+
+
+def test_cameras_tab_shown_by_default(qapp, fake_conn) -> None:
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        assert not dlg._cam_pos_table.isHidden()
+    finally:
+        dlg.done(0)
+
+
+def test_tab_container_height_is_adjustable_via_splitter(qapp, fake_conn) -> None:
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        splitters = [
+            s for s in dlg.findChildren(QSplitter)
+            if s.orientation() == Qt.Orientation.Vertical
+        ]
+        assert len(splitters) == 1
+        vsplit = splitters[0]
+        assert vsplit.indexOf(dlg._tables_tabs) >= 0
+        # Neither table has a fixed setMaximumHeight cap anymore -- Qt's
+        # QWIDGETSIZE_MAX sentinel means "no cap set".
+        assert dlg._cam_pos_table.maximumHeight() >= 16000000
+        assert dlg._data_table.maximumHeight() >= 16000000
     finally:
         dlg.done(0)
 

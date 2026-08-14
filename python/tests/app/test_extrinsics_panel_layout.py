@@ -1,16 +1,20 @@
 """Tests for the right-hand panel layout fixes in ExtrinsicsAutoCalibDialog
-(collapsible sections, scroll fallback) and the per-camera results table.
+(section grouping, scroll fallback) and the per-camera results table.
 
 Raised directly via UI testing (2026-08-09): once the ArUco and ChArUco
 panels joined the pre-existing Control Points / World Position / Camera
 Intrinsics sections, the fixed-width sidebar no longer fit everything --
 text and tables were clipped vertically, and the intrinsics combo box was
-too narrow to read.
+too narrow to read. The original fix made the crowded sections
+collapsible; UX Phase 6 (2026-08-14, see docs/roadmap/features/
+extrinsics-improvements/extrinsics-ux-redesign.md) replaced that with an
+"Actions"/"Anchoring" regrouping instead -- no collapsing, no tabs, per
+Harri's steer against progressive disclosure for an iterative workflow.
 
-UX Phase 4 (2026-08-13, see docs/roadmap/features/extrinsics-improvements/
-extrinsics-ux-redesign.md) later removed "Camera Intrinsics" as a sidebar
-section entirely, folding it into the always-visible, full-width
-per-camera results table instead (Intrinsics/Refine/Lock/Excl columns).
+UX Phase 4 (2026-08-13, see the same design doc) removed "Camera
+Intrinsics" as a sidebar section entirely, folding it into the always-
+visible, full-width per-camera results table instead (Intrinsics/Refine/
+Lock/Excl columns).
 """
 
 from __future__ import annotations
@@ -47,48 +51,52 @@ def _find_group(dlg: ExtrinsicsAutoCalibDialog, title: str) -> QGroupBox:
 
 
 # ---------------------------------------------------------------------------
-# Collapsible sections
+# Actions / Anchoring sidebar groups (UX Phase 6) -- no collapsing, no
+# tabs; every section is always visible, split by what it does (detect/
+# load vs. fix the world frame) rather than hidden behind a checkbox.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("title", ["ArUco Markers", "ChArUco Board"])
-def test_section_is_collapsible_and_starts_expanded(qapp, fake_conn, title) -> None:
+@pytest.mark.parametrize(
+    "title",
+    ["Control Points", "World position (optional)", "ArUco Markers", "ChArUco Board",
+     "ChArUco Anchor", "Marker Rig / Scene Markers", "Rig Anchor"],
+)
+def test_no_sidebar_section_is_collapsible(qapp, fake_conn, title) -> None:
     dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
     try:
-        group = _find_group(dlg, title)
-        assert group.isCheckable()
-        assert group.isChecked()
+        assert not _find_group(dlg, title).isCheckable()
     finally:
         dlg.done(0)
 
 
-def test_unchecking_aruco_group_hides_its_content(qapp, fake_conn) -> None:
+def test_actions_group_contains_control_points_aruco_charuco_and_rig_loading(
+    qapp, fake_conn,
+) -> None:
     dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
-    dlg.show()
     try:
-        group = _find_group(dlg, "ArUco Markers")
-        assert not dlg._marker_table.isHidden()
-        group.setChecked(False)
-        assert dlg._marker_table.isHidden()
-        group.setChecked(True)
-        assert not dlg._marker_table.isHidden()
+        actions = _find_group(dlg, "Actions")
+        child_titles = {g.title() for g in actions.findChildren(QGroupBox)}
+        assert child_titles == {
+            "Control Points", "ArUco Markers", "ChArUco Board", "Marker Rig / Scene Markers",
+        }
     finally:
         dlg.done(0)
 
 
-def test_unchecking_charuco_group_hides_its_content(qapp, fake_conn) -> None:
+def test_anchoring_group_contains_world_position_charuco_anchor_and_rig_anchor(
+    qapp, fake_conn,
+) -> None:
     dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
-    dlg.show()
     try:
-        group = _find_group(dlg, "ChArUco Board")
-        assert not dlg._charuco_status_label.isHidden()
-        group.setChecked(False)
-        assert dlg._charuco_status_label.isHidden()
+        anchoring = _find_group(dlg, "Anchoring")
+        child_titles = {g.title() for g in anchoring.findChildren(QGroupBox)}
+        assert child_titles == {"World position (optional)", "ChArUco Anchor", "Rig Anchor"}
     finally:
         dlg.done(0)
 
 
-def test_intrinsics_has_no_collapsible_sidebar_group(qapp, fake_conn) -> None:
+def test_intrinsics_has_no_sidebar_group(qapp, fake_conn) -> None:
     """UX Phase 4 (see docs/roadmap/features/extrinsics-improvements/
     extrinsics-ux-redesign.md) removed the "Camera Intrinsics" sidebar
     section entirely -- it's folded into the always-visible, full-width
@@ -102,14 +110,17 @@ def test_intrinsics_has_no_collapsible_sidebar_group(qapp, fake_conn) -> None:
         dlg.done(0)
 
 
-def test_control_points_and_world_position_are_not_collapsible(qapp, fake_conn) -> None:
-    """Only the three sections that were actually reported as crowded are
-    collapsible -- Control Points and World Position stay always-visible
-    primary controls."""
+def test_save_markers_and_manage_scene_markers_buttons_are_in_rig_anchor_group(
+    qapp, fake_conn,
+) -> None:
+    """"Save Markers…"/"Manage Scene Markers…" moved out of the rig
+    loading group into Rig Anchor (UX Phase 6) -- they're about
+    persisting/loading the anchor, not about detecting/loading the rig
+    config itself."""
     dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
     try:
-        assert not _find_group(dlg, "Control Points").isCheckable()
-        assert not _find_group(dlg, "World position (optional)").isCheckable()
+        rig_anchor = _find_group(dlg, "Rig Anchor")
+        assert dlg._save_markers_btn in rig_anchor.findChildren(type(dlg._save_markers_btn))
     finally:
         dlg.done(0)
 

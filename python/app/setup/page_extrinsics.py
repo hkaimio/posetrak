@@ -151,31 +151,6 @@ _CHARUCO_CORNER_COLOR = QColor(0, 210, 230)
 _RIG_MARKER_COLOR = QColor(230, 60, 220)
 
 
-def _set_layout_items_visible(layout, visible: bool) -> None:
-    """Recursively show/hide every widget in *layout*, including nested
-    row layouts (QHBoxLayout rows built with addLayout()). Used by
-    _make_collapsible() below."""
-    for i in range(layout.count()):
-        item = layout.itemAt(i)
-        w = item.widget()
-        if w is not None:
-            w.setVisible(visible)
-        elif item.layout() is not None:
-            _set_layout_items_visible(item.layout(), visible)
-
-
-def _make_collapsible(group: QGroupBox) -> None:
-    """Turn *group* into a collapsible section: clicking its title
-    checkbox shows/hides its content while keeping the frame and title
-    visible. Added after UI testing found the right-hand panel too
-    crowded once the ArUco/ChArUco sections joined the existing Control
-    Points/World Position/Camera Intrinsics ones (2026-08-09)."""
-    group.setCheckable(True)
-    group.setChecked(True)
-    layout = group.layout()
-    group.toggled.connect(lambda checked: _set_layout_items_visible(layout, checked))
-
-
 def _centered_cell_widget(inner: QWidget) -> QWidget:
     """Wrap *inner* (typically a bare, unlabelled QCheckBox) in a
     zero-margin, centered container -- a checkbox added directly via
@@ -1613,29 +1588,43 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         aruco_group = self._build_aruco_group()
         charuco_group = self._build_charuco_group()
+        charuco_anchor_group = self._build_charuco_anchor_group()
         rig_group = self._build_rig_group()
-        # Collapsible: each of these sections got real complaints about not
-        # fitting (UI testing, 2026-08-09) once the panel had to hold all of
-        # them at once alongside Control Points/World Position. Camera
-        # Intrinsics used to be a fourth section here too, until UX Phase 4
-        # (see docs/roadmap/features/extrinsics-improvements/
-        # extrinsics-ux-redesign.md) folded it into the per-camera results
-        # table instead -- always visible there, full width, one row per
-        # camera with everything about that camera in one place.
-        for grp in (aruco_group, charuco_group, rig_group):
-            _make_collapsible(grp)
+        rig_anchor_group = self._build_rig_anchor_group()
+
+        # Actions / Anchoring (UX Phase 6, see docs/roadmap/features/
+        # extrinsics-improvements/extrinsics-ux-redesign.md): two always-
+        # visible sidebar groups, no tabs and no collapse-by-default --
+        # Harri's steer against progressive disclosure for what's usually
+        # an iterative workflow ("I don't believe in the 'progressive
+        # disclosure' model"). Supersedes the collapsible-groupbox
+        # treatment UI testing added on 2026-08-09: that patched crowding
+        # by hiding sections; this instead regroups by what a section
+        # *does* (detect/load vs. fix the world frame) so each group is
+        # naturally smaller. Camera Intrinsics used to be a third crowded
+        # section here too, until UX Phase 4 folded it into the
+        # per-camera results table instead.
+        actions_group = QGroupBox("Actions")
+        actions_layout = QVBoxLayout(actions_group)
+        actions_layout.addWidget(cp_group, 1)
+        actions_layout.addWidget(aruco_group)
+        actions_layout.addWidget(charuco_group)
+        actions_layout.addWidget(rig_group)
+
+        anchoring_group = QGroupBox("Anchoring")
+        anchoring_layout = QVBoxLayout(anchoring_group)
+        anchoring_layout.addWidget(xyz_group)
+        anchoring_layout.addWidget(charuco_anchor_group)
+        anchoring_layout.addWidget(rig_anchor_group)
 
         v = QVBoxLayout(panel)
         v.setContentsMargins(0, 0, 0, 0)
-        v.addWidget(cp_group, 1)
-        v.addWidget(xyz_group)
-        v.addWidget(aruco_group)
-        v.addWidget(charuco_group)
-        v.addWidget(rig_group)
+        v.addWidget(actions_group, 1)
+        v.addWidget(anchoring_group)
 
-        # Vertical scroll fallback: collapsing sections covers most cases,
-        # but if everything is expanded at once on a short window, scroll
-        # rather than silently clip/squish widgets.
+        # Vertical scroll fallback: the Actions/Anchoring split covers most
+        # cases, but if everything is expanded at once on a short window,
+        # scroll rather than silently clip/squish widgets.
         scroll = QScrollArea()
         scroll.setWidget(panel)
         scroll.setWidgetResizable(True)
@@ -1730,7 +1719,12 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         return group
 
     def _build_charuco_group(self) -> QGroupBox:
-        """ChArUco board detection + coordinate-system anchoring (Phase 4).
+        """ChArUco board detection settings (Phase 4) -- the Actions half
+        of the ChArUco feature (UX Phase 6, see docs/roadmap/features/
+        extrinsics-improvements/extrinsics-ux-redesign.md): dictionary/
+        board/detection settings and status live here; "Set origin &
+        axes from board" itself moved to ``_build_charuco_anchor_group``,
+        in the sidebar's Anchoring group.
 
         See docs/roadmap/features/extrinsics-improvements/
         extrinsics-improvements-design.md, section 4, and status.md's
@@ -1829,14 +1823,6 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._charuco_status_label.setWordWrap(True)
         self._charuco_status_label.setStyleSheet("color: #666; font-size: 10px;")
 
-        anchor_btn = QPushButton("Set origin && axes from board")
-        anchor_btn.clicked.connect(self._on_anchor_from_board)
-        clear_btn = QPushButton("Clear board detections")
-        clear_btn.clicked.connect(self._on_clear_charuco)
-        btn_row = QHBoxLayout()
-        btn_row.addWidget(anchor_btn)
-        btn_row.addWidget(clear_btn)
-
         layout.addWidget(hint)
         layout.addLayout(dict_row)
         layout.addLayout(squares_row)
@@ -1845,6 +1831,25 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         layout.addWidget(self._charuco_legacy_pattern_cb)
         layout.addLayout(min_size_row)
         layout.addWidget(self._charuco_status_label)
+        return group
+
+    def _build_charuco_anchor_group(self) -> QGroupBox:
+        """"Set origin & axes from board" -- the Anchoring half of the
+        ChArUco feature (UX Phase 6, see docs/roadmap/features/
+        extrinsics-improvements/extrinsics-ux-redesign.md); detection
+        settings/status live in ``_build_charuco_group`` instead, in the
+        sidebar's Actions group."""
+        group = QGroupBox("ChArUco Anchor")
+        layout = QVBoxLayout(group)
+
+        anchor_btn = QPushButton("Set origin && axes from board")
+        anchor_btn.clicked.connect(self._on_anchor_from_board)
+        clear_btn = QPushButton("Clear board detections")
+        clear_btn.clicked.connect(self._on_clear_charuco)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(anchor_btn)
+        btn_row.addWidget(clear_btn)
+
         layout.addLayout(btn_row)
         return group
 
@@ -1881,12 +1886,11 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         below remain as an explicit redo, e.g. after scrubbing one or
         more cameras to a frame where the rig is actually visible.
 
-        "Save Markers…"/"Load Markers…" (UX Phase 5, see
-        docs/roadmap/features/extrinsics-improvements/
-        extrinsics-ux-redesign.md) are the explicit, always-named
-        save/load actions that replaced the old implicit
-        save-on-Accept-if-a-name-happened-to-be-typed-in flow -- see
-        ``_on_save_markers``/``_SaveMarkersDialog``.
+        Rig loading (this method) is the Actions half of the feature (UX
+        Phase 6, see docs/roadmap/features/extrinsics-improvements/
+        extrinsics-ux-redesign.md); "Anchor Rig"/min-cameras-to-anchor/
+        "Save Markers…"/"Manage Scene Markers…" moved to
+        ``_build_rig_anchor_group``, in the sidebar's Anchoring group.
         """
         group = QGroupBox("Marker Rig / Scene Markers")
         layout = QVBoxLayout(group)
@@ -1897,9 +1901,10 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             "needed) -- and it's immediately detected in every camera's "
             "current frame and anchored if found anywhere. Use \"Detect "
             "Rig\" under one camera to redetect just that one after "
-            "scrubbing to a different frame, or \"Anchor Rig\" below to "
-            "redo detection everywhere. Once anchored, \"Save Markers…\" "
-            "lets a later capture reuse this without a physical rig."
+            "scrubbing to a different frame, or \"Anchor Rig\" (in "
+            "Anchoring below) to redo detection everywhere. Once "
+            "anchored, \"Save Markers…\" lets a later capture reuse this "
+            "without a physical rig."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666; font-size: 10px;")
@@ -1925,25 +1930,6 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         )
         load_scene_btn.clicked.connect(self._on_load_rig_from_scene_markers)
 
-        self._save_markers_btn = QPushButton("Save Markers…")
-        self._save_markers_btn.setToolTip(
-            "Save the current anchor (a file-sourced rig, and/or any "
-            "sized ArUco/ChArUco markers from the last solve) under a "
-            "name, so a later capture can reuse it via \"Load Markers…\" "
-            "without a physical rig. Disabled until something is "
-            "anchored or solved."
-        )
-        self._save_markers_btn.setEnabled(False)
-        self._save_markers_btn.clicked.connect(self._on_save_markers)
-
-        manage_btn = QPushButton("Manage Scene Markers…")
-        manage_btn.setToolTip(
-            "View every scene marker stored for this session (including "
-            "the rig's own anchor row) and delete stale/wrong ones -- e.g. "
-            "a tag whose physical position has moved."
-        )
-        manage_btn.clicked.connect(self._on_manage_scene_markers)
-
         min_size_row = QHBoxLayout()
         min_size_row.addWidget(QLabel("Min marker size:"))
         self._rig_min_marker_pct_spin = QDoubleSpinBox()
@@ -1959,6 +1945,33 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         )
         self._rig_min_marker_pct_spin.valueChanged.connect(self._on_rig_min_marker_pct_changed)
         min_size_row.addWidget(self._rig_min_marker_pct_spin, 1)
+
+        self._rig_status_label = QLabel("No rig config loaded.")
+        self._rig_status_label.setWordWrap(True)
+        self._rig_status_label.setStyleSheet("color: #666; font-size: 10px;")
+
+        layout.addWidget(hint)
+        layout.addWidget(load_btn)
+        layout.addWidget(registry_btn)
+        layout.addWidget(load_scene_btn)
+        layout.addLayout(min_size_row)
+        layout.addWidget(self._rig_status_label)
+        return group
+
+    def _build_rig_anchor_group(self) -> QGroupBox:
+        """Rig anchoring + scene-marker save/load management -- the
+        Anchoring half of the feature (UX Phase 6, see docs/roadmap/
+        features/extrinsics-improvements/extrinsics-ux-redesign.md);
+        rig loading/detection settings live in ``_build_rig_group``
+        instead, in the sidebar's Actions group.
+
+        "Save Markers…"/"Load Markers…" (UX Phase 5, see the same design
+        doc) are the explicit, always-named save/load actions that
+        replaced the old implicit save-on-Accept-if-a-name-happened-to-
+        be-typed-in flow -- see ``_on_save_markers``/``_SaveMarkersDialog``.
+        """
+        group = QGroupBox("Rig Anchor")
+        layout = QVBoxLayout(group)
 
         min_cams_row = QHBoxLayout()
         min_cams_row.addWidget(QLabel("Min cameras to anchor:"))
@@ -1979,10 +1992,6 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         )
         min_cams_row.addWidget(self._rig_min_cameras_spin, 1)
 
-        self._rig_status_label = QLabel("No rig config loaded.")
-        self._rig_status_label.setWordWrap(True)
-        self._rig_status_label.setStyleSheet("color: #666; font-size: 10px;")
-
         anchor_btn = QPushButton("Anchor Rig")
         anchor_btn.setToolTip(
             "Redetect the rig in every camera's current frame and anchor "
@@ -1998,16 +2007,29 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         btn_row.addWidget(anchor_btn)
         btn_row.addWidget(clear_btn)
 
-        layout.addWidget(hint)
-        layout.addWidget(load_btn)
-        layout.addWidget(registry_btn)
-        layout.addWidget(load_scene_btn)
+        self._save_markers_btn = QPushButton("Save Markers…")
+        self._save_markers_btn.setToolTip(
+            "Save the current anchor (a file-sourced rig, and/or any "
+            "sized ArUco/ChArUco markers from the last solve) under a "
+            "name, so a later capture can reuse it via \"Load Markers…\" "
+            "without a physical rig. Disabled until something is "
+            "anchored or solved."
+        )
+        self._save_markers_btn.setEnabled(False)
+        self._save_markers_btn.clicked.connect(self._on_save_markers)
+
+        manage_btn = QPushButton("Manage Scene Markers…")
+        manage_btn.setToolTip(
+            "View every scene marker stored for this session (including "
+            "the rig's own anchor row) and delete stale/wrong ones -- e.g. "
+            "a tag whose physical position has moved."
+        )
+        manage_btn.clicked.connect(self._on_manage_scene_markers)
+
+        layout.addLayout(min_cams_row)
+        layout.addLayout(btn_row)
         layout.addWidget(self._save_markers_btn)
         layout.addWidget(manage_btn)
-        layout.addLayout(min_size_row)
-        layout.addLayout(min_cams_row)
-        layout.addWidget(self._rig_status_label)
-        layout.addLayout(btn_row)
         return group
 
     def _populate_cam_pos_table_rows(self) -> None:

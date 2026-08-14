@@ -145,8 +145,54 @@ with group-membership tests for the new structure. Full regression sweep
 clean after both UX Phase 5 and 6 (1655 passed, 19 skipped, 6 known
 pre-existing deselections).
 
-UX Phase 7 (Unified Data table) is next -- the widest structural change
-in the plan, needs a live-testing pass before/after.
+**UX Phase 7 — Unified Data table** (Harri: "let's do 7 first and then
+fine tune the experience... I might want to transfer the data point
+table back to the side bar, so be prepared for that. Let's first
+implement it as you suggest in design"):
+
+- New full-width table below the camera grid, alongside UX Phase 4's
+  Cameras table: one row per data point currently contributing to (or
+  available to) the solve. Replaces the sidebar's `_cp_list` and
+  `_marker_table`, which gave three inconsistent representations (a list
+  widget, a table widget, and "nothing, look at the image overlay" for
+  rig corners/cam-pos observations) to what's really the same kind of
+  thing.
+- Selecting a CP-type row arms it for click-to-place, same behavior
+  `_cp_list`'s row selection gave; double-clicking one renames it.
+  Marker/Board corner/Rig corner/Cam pos obs rows are read-only.
+  Camera-position observations get list representation for the first
+  time -- previously only visible as an image overlay.
+- Two deliberate deviations from the design doc's literal column list
+  (Type/Label/Cameras/World position/Source): a "Size (m)" column so
+  markers keep the per-marker size-override editing `_marker_table` used
+  to provide (dropping it would have been a real regression, not just a
+  display change), and "Board corner" as its own Type alongside marker/
+  CP/rig-corner/cam-pos-obs -- ChArUco corners are a genuine fifth data
+  source, symmetrical with rig corners.
+- The table's construction was factored into its own
+  `_build_data_table()` method (unlike `_cam_pos_table`, still inline in
+  `_build_ui`) specifically so a future move -- e.g. back into the
+  sidebar, per Harri's own heads-up above -- only means changing who
+  calls it and where the widget lands in a layout, not touching its
+  construction.
+- The rebuild-during-selection-change hazard: `_refresh_data_table()`
+  does a full rebuild on every change, but doing that naively while a CP
+  row was selected (e.g. right after `_apply_xyz`) would immediately
+  lose the selection and disable the World Position panel the user just
+  used. Fixed by restoring the selection silently (`blockSignals`)
+  after every rebuild -- see the method's own docstring for the feedback-
+  loop reasoning.
+
+New tests in `test_extrinsics_data_table.py` covering population from
+every source, CP-selection-for-placement parity with the old `_cp_list`
+flow, rename/delete, and selection surviving an unrelated table refresh.
+Existing ArUco UI tests rewritten against the new table. Full regression
+sweep clean (1671 passed, 19 skipped, 6 known pre-existing deselections).
+
+Still awaiting the live-testing pass this phase itself calls for (real
+capture footage, click-through of every anchoring path) before
+considering it fully proven, not just unit-tested. UX Phase 8/D2 (manual
+CPs in saved configurations) remains deferred behind that.
 
 ## Current state
 

@@ -1,9 +1,14 @@
 # Extrinsics calibration UX redesign — draft proposal
 
-**Status: UX Phases 1–6 landed (2026-08-14).** UX Phase 7 (Unified Data
-table) is next -- the widest structural change in the plan, so it needs
-a live-testing pass before/after. One open question remains, non-blocking
-(per-camera calibration quality persistence — see "Open questions").
+**Status: UX Phases 1–7 landed (2026-08-14).** Still awaiting the
+live-testing pass Phase 7 itself called for (real capture footage, click-
+through of every anchoring path) before considering it fully proven, not
+just unit-tested. Harri has flagged a possible follow-up: moving the Data
+table back into the sidebar (its construction was factored into its own
+`_build_data_table()` method in anticipation of this). UX Phase 8/D2
+(manual CPs in saved configurations) remains deferred behind that. One
+open question remains, non-blocking (per-camera calibration quality
+persistence — see "Open questions").
 
 ## Why this exists
 
@@ -617,7 +622,7 @@ comfortably at 300px with the smaller sections; live re-test of the full
 rig-anchor and ArUco/ChArUco workflows end to end to confirm the move
 didn't change behavior, only location.
 
-### UX Phase 7 — Unified Data table
+### UX Phase 7 — Unified Data table ✅ Done
 
 - New full-width table below the camera grid, alongside UX Phase 4's
   Cameras table: one row per data point — Type (marker/CP/rig-corner/

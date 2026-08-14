@@ -1,11 +1,9 @@
 # Extrinsics calibration UX redesign — draft proposal
 
-**Status: UX Phases 1–5 landed (2026-08-14).** UX Phase 6 is next (sidebar
-reorg, depends on 5's now-final button set); UX Phase 7 (Unified Data
-table) is the widest structural change in the plan and needs a live-
-testing pass before/after, so it's sequenced last. One open question
-remains, non-blocking (per-camera calibration quality persistence — see
-"Open questions").
+**Status: UX Phases 1–6 landed (2026-08-14).** UX Phase 7 (Unified Data
+table) is next -- the widest structural change in the plan, so it needs
+a live-testing pass before/after. One open question remains, non-blocking
+(per-camera calibration quality persistence — see "Open questions").
 
 ## Why this exists
 
@@ -600,7 +598,7 @@ an ungrouped fallback; confirm-before-clobber prompts correctly on both
 accept and cancel paths. CLI tests updated for `--name` now required.
 Full regression sweep.
 
-### UX Phase 6 — Sidebar reorg: Actions / Anchoring
+### UX Phase 6 — Sidebar reorg: Actions / Anchoring ✅ Done
 
 - Restructure `_build_cp_panel()` into two always-visible sidebar groups
   (no tabs, no collapse-by-default, per Harri's iterative-workflow steer):

@@ -122,7 +122,31 @@ path; existing tests referencing the removed implicit-persistence flow
 rewritten to use the new explicit `_save_markers`/`_on_save_markers` calls.
 Full regression sweep clean.
 
-UX Phase 6 is next -- see extrinsics-ux-redesign.md's own status line.
+**UX Phase 6 — Sidebar reorg: Actions / Anchoring** (Harri: "The UI seems
+to work now. Proceed to 6"):
+
+- Replaced the collapsible-groupbox treatment (added 2026-08-09 for
+  crowding) with two always-visible groups -- no tabs, no collapse-by-
+  default, per Harri's steer against progressive disclosure for what's
+  usually an iterative workflow.
+- **Actions**: Control Points, ArUco Markers, ChArUco Board (detection
+  settings/status only), Marker Rig / Scene Markers (Load Config…/From
+  Registry…/Load Markers… + detection settings).
+- **Anchoring**: World position, ChArUco Anchor ("Set origin & axes from
+  board" + Clear), Rig Anchor (min-cameras-to-anchor, Anchor Rig/Clear,
+  Save Markers…, Manage Scene Markers…).
+- ChArUco Board and Marker Rig / Scene Markers each split into a
+  settings/loading half (Actions) and an anchor half (Anchoring); every
+  other section moved as a whole, unchanged internally. `_make_collapsible`/
+  `_set_layout_items_visible` removed as dead code.
+
+`test_extrinsics_panel_layout.py`'s collapsible-section tests replaced
+with group-membership tests for the new structure. Full regression sweep
+clean after both UX Phase 5 and 6 (1655 passed, 19 skipped, 6 known
+pre-existing deselections).
+
+UX Phase 7 (Unified Data table) is next -- the widest structural change
+in the plan, needs a live-testing pass before/after.
 
 ## Current state
 

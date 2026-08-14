@@ -1252,6 +1252,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._control_points: list[ControlPoint] = []
         self._selected_cp_idx: int | None = None
         self._intrinsics_combos: dict[str, QComboBox] = {}
+        self._cam_pos_row_by_vid: dict[str, int] = {}
         self._cam_pos_obs: list[CamPosObs] = []
         self._refine_intrinsics: set[str] = set()
         self._locked_cameras: set[str] = set()
@@ -1439,15 +1440,18 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # Per-camera results/settings table -- always visible, full width,
         # one row per camera, populated immediately (not just after a
         # solve/DB load): position/CP-error start at "—" until solved.
-        # Columns 5-8 (Intrinsics/Refine/Lock/Excl) used to be a separate
-        # "Camera Intrinsics" sidebar section; UX Phase 4 (see
-        # docs/roadmap/features/extrinsics-improvements/
+        # Columns 5-10 (Intrinsics/Calib Date/Calib RMS/Refine/Lock/Excl)
+        # used to be a separate "Camera Intrinsics" sidebar section; UX
+        # Phase 4 (see docs/roadmap/features/extrinsics-improvements/
         # extrinsics-ux-redesign.md) folded them in here instead, so
-        # everything about one camera lives in one row.
-        self._cam_pos_table = QTableWidget(0, 9)
+        # everything about one camera lives in one row. Calib Date/RMS
+        # show whichever intrinsics calibration is currently selected in
+        # the Intrinsics combo for that row (2026-08-14 follow-up: date/
+        # RMS moved from the combo's tooltip to their own columns).
+        self._cam_pos_table = QTableWidget(0, 11)
         self._cam_pos_table.setHorizontalHeaderLabels(
             ["Camera", "X (m)", "Y (m)", "Z (m)", "CP error",
-             "Intrinsics", "Refine", "Lock", "Excl"]
+             "Intrinsics", "Calib Date", "Calib RMS", "Refine", "Lock", "Excl"]
         )
         self._cam_pos_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
@@ -1455,7 +1459,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._cam_pos_table.horizontalHeader().setSectionResizeMode(
             5, QHeaderView.ResizeMode.Stretch
         )
-        for col in (1, 2, 3, 4, 6, 7, 8):
+        for col in (1, 2, 3, 4, 6, 7, 8, 9, 10):
             self._cam_pos_table.horizontalHeader().setSectionResizeMode(
                 col, QHeaderView.ResizeMode.ResizeToContents
             )
@@ -1961,16 +1965,17 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._cam_pos_table.setRowCount(len(self._states))
         for row, state in enumerate(self._states):
             vid = state.video_id
+            self._cam_pos_row_by_vid[vid] = row
 
             combo = QComboBox()
             self._populate_intrinsics_combo(state, combo)
             self._intrinsics_combos[vid] = combo
-            self._refresh_intrinsics_detail_label(vid)
+            self._refresh_intrinsics_detail(vid)
             combo.currentIndexChanged.connect(
                 lambda _idx, v=vid, c=combo: self._on_intrinsics_changed(v, c.currentData())
             )
             combo.currentIndexChanged.connect(
-                lambda _idx, v=vid: self._refresh_intrinsics_detail_label(v)
+                lambda _idx, v=vid: self._refresh_intrinsics_detail(v)
             )
             self._cam_pos_table.setCellWidget(row, 5, combo)
 
@@ -1982,7 +1987,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                     else self._refine_intrinsics.discard(v)
                 )
             )
-            self._cam_pos_table.setCellWidget(row, 6, _centered_cell_widget(refine_cb))
+            self._cam_pos_table.setCellWidget(row, 8, _centered_cell_widget(refine_cb))
 
             lock_cb = QCheckBox()
             lock_cb.setToolTip("Keep this camera's pose fixed in the next solve")
@@ -1994,7 +1999,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 )
             )
             self._lock_cbs[vid] = lock_cb
-            self._cam_pos_table.setCellWidget(row, 7, _centered_cell_widget(lock_cb))
+            self._cam_pos_table.setCellWidget(row, 9, _centered_cell_widget(lock_cb))
 
             excl_cb = QCheckBox()
             excl_cb.setToolTip("Exclude this camera from the next solve entirely")
@@ -2004,19 +2009,22 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                     else self._excluded_cameras.discard(v)
                 )
             )
-            self._cam_pos_table.setCellWidget(row, 8, _centered_cell_widget(excl_cb))
+            self._cam_pos_table.setCellWidget(row, 10, _centered_cell_widget(excl_cb))
 
     def _populate_intrinsics_combo(self, state: CamCalibState, combo: QComboBox) -> None:
         """Item text leads with the user's own notes (typed in when the
         calibration was created, ``intrinsics_calib_dialog.py``'s "Notes:"
-        field) rather than date/RMS/model -- notes are what a user
-        actually recognises a calibration by when picking among several
-        for the same camera; the technical fields fall back to being the
-        label only when no notes were given. The full technical string
-        (date/RMS/model/default) is stashed as each item's own data
-        (``UserRole + 1``, alongside the calib id already at the default
-        role) so ``_refresh_intrinsics_detail_label`` can show it for
-        whichever item is currently selected without a second query."""
+        field) rather than date/RMS -- notes are what a user actually
+        recognises a calibration by when picking among several for the
+        same camera; falls back to a terse date+RMS summary only when no
+        notes were given. Each item's structured detail (date/RMS/model/
+        default, ``UserRole + 1``, alongside the calib id already at the
+        default role) is stashed so ``_refresh_intrinsics_detail`` can
+        show it for whichever item is currently selected -- as the
+        dedicated "Calib Date"/"Calib RMS" table columns (2026-08-14: date
+        and RMS get their own columns rather than being buried in a
+        tooltip) plus the combo's own tooltip for the one field that
+        doesn't get a column, distortion model."""
         old_factory = self._conn.row_factory
         self._conn.row_factory = sqlite3.Row
         try:
@@ -2043,28 +2051,44 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             model = r["distortion_model"] or "standard"
             star = "★ " if r["is_default"] else ""
             notes = (r["notes"] or "").strip()
-            label_text = notes if notes else f"{date}  {rms}  {model}"
-            detail_text = f"{date}  ·  {rms}  ·  {model}" + ("  ·  default" if r["is_default"] else "")
+            label_text = notes if notes else f"{date}  {rms}"
             combo.addItem(f"{star}{label_text}", userData=r["id"])
-            combo.setItemData(combo.count() - 1, detail_text, Qt.ItemDataRole.UserRole + 1)
+            combo.setItemData(
+                combo.count() - 1,
+                {"date": date, "rms": rms, "model": model, "is_default": bool(r["is_default"])},
+                Qt.ItemDataRole.UserRole + 1,
+            )
             if r["id"] == state.calib_id:
                 combo.setCurrentIndex(combo.count() - 1)
         combo.blockSignals(False)
 
-    def _refresh_intrinsics_detail_label(self, video_id: str) -> None:
-        """Show the technical details (date/RMS/model) for whichever
-        intrinsics calibration is currently selected -- notes lead the
-        combo item itself (see ``_populate_intrinsics_combo``), so this is
-        the only place these still show at all. As a tooltip on the combo
-        rather than a separate label since UX Phase 4 (see
-        docs/roadmap/features/extrinsics-improvements/
-        extrinsics-ux-redesign.md) moved this combo into a table cell,
-        where there's no room for a second line of text."""
+    def _refresh_intrinsics_detail(self, video_id: str) -> None:
+        """Show whichever intrinsics calibration is currently selected
+        for *video_id*: date/RMS as their own "Calib Date"/"Calib RMS"
+        table columns (2026-08-14 -- moved out of a tooltip so they're
+        visible without hovering), plus the full detail (including
+        distortion model, which doesn't get its own column) as the
+        combo's tooltip."""
         combo = self._intrinsics_combos.get(video_id)
         if combo is None:
             return
         detail = combo.currentData(Qt.ItemDataRole.UserRole + 1)
-        combo.setToolTip(detail or "")
+        date_text = detail["date"] if detail else ""
+        rms_text = detail["rms"] if detail else ""
+        if detail:
+            model_text = detail["model"]
+            tooltip = f"{date_text}  ·  {rms_text}  ·  {model_text}"
+            if detail["is_default"]:
+                tooltip += "  ·  default"
+        else:
+            tooltip = ""
+        combo.setToolTip(tooltip)
+
+        row = self._cam_pos_row_by_vid.get(video_id)
+        if row is None:
+            return
+        self._cam_pos_table.setItem(row, 6, QTableWidgetItem(date_text))
+        self._cam_pos_table.setItem(row, 7, QTableWidgetItem(rms_text))
 
     def _on_intrinsics_changed(self, video_id: str, calib_id: str | None) -> None:
         if not calib_id:
@@ -3611,12 +3635,20 @@ class ExtrinsicsStatusDialog(QDialog):
                 "WHERE session_id = ? ORDER BY calibrated_at DESC LIMIT 1",
                 (self._session_id,),
             ).fetchone()
-            cams = self._conn.execute(
-                "SELECT ci.id, ci.label FROM session_cameras sc "
-                "JOIN camera_instances ci ON ci.id = sc.camera_instance_id "
-                "WHERE sc.session_id = ? ORDER BY ci.label",
-                (self._session_id,),
-            ).fetchall()
+            # Scoped to cameras with a video in *this* capture, not every
+            # camera the session has ever registered -- extrinsics are
+            # session-wide, but which cameras are actually relevant to
+            # look at here is this capture's own camera set.
+            if self._shot_ids:
+                placeholders = ",".join("?" for _ in self._shot_ids)
+                cams = self._conn.execute(
+                    f"SELECT DISTINCT ci.id, ci.label FROM capture_videos cv "
+                    f"JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
+                    f"WHERE cv.shot_id IN ({placeholders}) ORDER BY ci.label",
+                    self._shot_ids,
+                ).fetchall()
+            else:
+                cams = []
             entries: dict[str, sqlite3.Row] = {}
             if calib is not None:
                 for row in self._conn.execute(

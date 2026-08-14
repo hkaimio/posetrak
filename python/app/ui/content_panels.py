@@ -817,17 +817,29 @@ class CapturePanel(QWidget):
             "ORDER BY calibrated_at DESC LIMIT 1",
             (session_id,),
         ).fetchone()
-        n_total = self._conn.execute(
-            "SELECT COUNT(*) FROM session_cameras WHERE session_id = ?", (session_id,)
-        ).fetchone()[0]
+        # Scoped to cameras with a video in *this* capture, not every
+        # camera the session has ever registered -- same fix as
+        # ExtrinsicsStatusDialog's own camera query.
+        cam_ids = [
+            r[0] for r in self._conn.execute(
+                "SELECT DISTINCT camera_instance_id FROM capture_videos WHERE shot_id = ?",
+                (self._capture_id,),
+            ).fetchall()
+        ]
+        n_total = len(cam_ids)
         if calib is None:
             self._ext_btn.setText("Extrinsics (not set)")
             self._ext_btn.setToolTip("No extrinsics calibration yet for this session.")
             return
-        n_solved = self._conn.execute(
-            "SELECT COUNT(*) FROM extrinsic_entries WHERE extrinsic_calibration_id = ?",
-            (calib["id"],),
-        ).fetchone()[0]
+        if cam_ids:
+            placeholders = ",".join("?" for _ in cam_ids)
+            n_solved = self._conn.execute(
+                f"SELECT COUNT(*) FROM extrinsic_entries WHERE extrinsic_calibration_id = ? "
+                f"AND camera_instance_id IN ({placeholders})",
+                [calib["id"], *cam_ids],
+            ).fetchone()[0]
+        else:
+            n_solved = 0
         self._ext_btn.setText(f"Extrinsics ✓ ({n_solved}/{n_total})")
         self._ext_btn.setToolTip(f"{n_solved} of {n_total} camera(s) solved for this session.")
 

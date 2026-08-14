@@ -31,7 +31,14 @@ def _seed_session(conn: sqlite3.Connection, session_id: str = "sess1") -> None:
     conn.commit()
 
 
-def _seed_camera(conn: sqlite3.Connection, session_id: str, inst_id: str, label: str) -> None:
+def _seed_camera(
+    conn: sqlite3.Connection, session_id: str, inst_id: str, label: str,
+    capture_id: str = "cap1",
+) -> None:
+    """Registers a camera *and* gives it a video in *capture_id* --
+    ExtrinsicsStatusDialog scopes its camera list to cameras with a video
+    in the capture it was opened from, not every camera the session has
+    ever registered (2026-08-14 fix)."""
     conn.execute(
         "INSERT OR IGNORE INTO camera_models (id, manufacturer, model_name) "
         "VALUES ('model1', 'Test', 'Cam')"
@@ -41,8 +48,15 @@ def _seed_camera(conn: sqlite3.Connection, session_id: str, inst_id: str, label:
         (inst_id, label),
     )
     conn.execute(
-        "INSERT INTO session_cameras (session_id, camera_instance_id, label) VALUES (?, ?, ?)",
-        (session_id, inst_id, label),
+        "INSERT OR IGNORE INTO captures (id, session_id, capture_number) VALUES (?, ?, 1)",
+        (capture_id, session_id),
+    )
+    conn.execute(
+        "INSERT INTO capture_videos "
+        "(id, shot_id, camera_instance_id, file_path, first_video_frame, "
+        " last_video_frame, actual_fps) "
+        "VALUES (?, ?, ?, '/fake/video.mp4', 0, 1000, 30.0)",
+        (f"vid_{inst_id}", capture_id, inst_id),
     )
     conn.commit()
 
@@ -81,7 +95,7 @@ def _seed_entry(
 def test_no_calibration_shows_not_set_summary(qapp, fake_conn) -> None:
     _seed_session(fake_conn)
     _seed_camera(fake_conn, "sess1", "inst1", "cam_A")
-    dlg = ExtrinsicsStatusDialog(fake_conn, "sess1")
+    dlg = ExtrinsicsStatusDialog(fake_conn, "sess1", shot_ids=["cap1"])
     try:
         assert "No extrinsics calibration yet" in dlg._summary_label.text()
         assert dlg._table.rowCount() == 1
@@ -100,7 +114,7 @@ def test_calibration_with_all_cameras_solved(qapp, fake_conn) -> None:
     _seed_entry(fake_conn, "calib1", "inst1", t=np.array([1.0, 2.0, 3.0]))
     _seed_entry(fake_conn, "calib1", "inst2", t=np.array([4.0, 5.0, 6.0]))
 
-    dlg = ExtrinsicsStatusDialog(fake_conn, "sess1")
+    dlg = ExtrinsicsStatusDialog(fake_conn, "sess1", shot_ids=["cap1"])
     try:
         assert "2 / 2" in dlg._summary_label.text()
         assert "rig-anchor" in dlg._summary_label.text()
@@ -125,7 +139,7 @@ def test_calibration_with_partial_solve(qapp, fake_conn) -> None:
     _seed_calibration(fake_conn, "sess1")
     _seed_entry(fake_conn, "calib1", "inst1")  # only cam_A solved
 
-    dlg = ExtrinsicsStatusDialog(fake_conn, "sess1")
+    dlg = ExtrinsicsStatusDialog(fake_conn, "sess1", shot_ids=["cap1"])
     try:
         assert "1 / 2" in dlg._summary_label.text()
         rows = {
@@ -145,7 +159,7 @@ def test_uses_most_recent_calibration(qapp, fake_conn) -> None:
     _seed_calibration(fake_conn, "sess1", calib_id="new", method="rig-anchor", calibrated_at="2026-08-12")
     _seed_entry(fake_conn, "new", "inst1")
 
-    dlg = ExtrinsicsStatusDialog(fake_conn, "sess1")
+    dlg = ExtrinsicsStatusDialog(fake_conn, "sess1", shot_ids=["cap1"])
     try:
         assert "rig-anchor" in dlg._summary_label.text()
         assert "toml-import" not in dlg._summary_label.text()
@@ -159,7 +173,7 @@ def test_refresh_after_reopen_reflects_new_calibration(qapp, fake_conn) -> None:
     snapshot from __init__."""
     _seed_session(fake_conn)
     _seed_camera(fake_conn, "sess1", "inst1", "cam_A")
-    dlg = ExtrinsicsStatusDialog(fake_conn, "sess1")
+    dlg = ExtrinsicsStatusDialog(fake_conn, "sess1", shot_ids=["cap1"])
     try:
         assert "No extrinsics calibration yet" in dlg._summary_label.text()
 
@@ -168,6 +182,23 @@ def test_refresh_after_reopen_reflects_new_calibration(qapp, fake_conn) -> None:
         dlg._refresh()
 
         assert "1 / 1" in dlg._summary_label.text()
+    finally:
+        dlg.done(0)
+
+
+def test_camera_list_scoped_to_this_capture_not_whole_session(qapp, fake_conn) -> None:
+    """A camera registered for the session but only ever used in a
+    *different* capture shouldn't show up here -- extrinsics are
+    session-wide, but which cameras are relevant to this screen is this
+    capture's own camera set (2026-08-14 fix)."""
+    _seed_session(fake_conn)
+    _seed_camera(fake_conn, "sess1", "inst1", "cam_A", capture_id="cap1")
+    _seed_camera(fake_conn, "sess1", "inst2", "cam_B", capture_id="cap2")  # a different capture
+
+    dlg = ExtrinsicsStatusDialog(fake_conn, "sess1", shot_ids=["cap1"])
+    try:
+        labels = {dlg._table.item(i, 0).text() for i in range(dlg._table.rowCount())}
+        assert labels == {"cam_A"}
     finally:
         dlg.done(0)
 

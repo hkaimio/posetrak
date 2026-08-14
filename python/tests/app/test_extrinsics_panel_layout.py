@@ -136,14 +136,14 @@ def test_right_panel_is_wrapped_in_a_scroll_area(qapp, fake_conn) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_cam_pos_table_has_nine_columns(qapp, fake_conn) -> None:
+def test_cam_pos_table_has_eleven_columns(qapp, fake_conn) -> None:
     dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
     try:
-        assert dlg._cam_pos_table.columnCount() == 9
-        headers = [dlg._cam_pos_table.horizontalHeaderItem(i).text() for i in range(9)]
+        assert dlg._cam_pos_table.columnCount() == 11
+        headers = [dlg._cam_pos_table.horizontalHeaderItem(i).text() for i in range(11)]
         assert headers == [
             "Camera", "X (m)", "Y (m)", "Z (m)", "CP error",
-            "Intrinsics", "Refine", "Lock", "Excl",
+            "Intrinsics", "Calib Date", "Calib RMS", "Refine", "Lock", "Excl",
         ]
     finally:
         dlg.done(0)
@@ -173,7 +173,7 @@ def test_cam_pos_table_rows_have_intrinsics_combo_and_checkboxes(qapp, fake_conn
     try:
         assert isinstance(dlg._cam_pos_table.cellWidget(0, 5), QComboBox)
         assert dlg._cam_pos_table.cellWidget(0, 5) is dlg._intrinsics_combos["cam_A"]
-        for col in (6, 7, 8):
+        for col in (8, 9, 10):
             wrapper = dlg._cam_pos_table.cellWidget(0, col)
             assert wrapper.findChild(QCheckBox) is not None
     finally:
@@ -193,7 +193,7 @@ def test_cam_pos_table_refine_checkbox_updates_refine_set(qapp, fake_conn) -> No
 
     dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
     try:
-        refine_cb = dlg._cam_pos_table.cellWidget(0, 6).findChild(QCheckBox)
+        refine_cb = dlg._cam_pos_table.cellWidget(0, 8).findChild(QCheckBox)
         refine_cb.setChecked(True)
         assert "cam_A" in dlg._refine_intrinsics
         refine_cb.setChecked(False)
@@ -207,7 +207,7 @@ def test_cam_pos_table_excl_checkbox_updates_excluded_set(qapp, fake_conn) -> No
 
     dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
     try:
-        excl_cb = dlg._cam_pos_table.cellWidget(0, 8).findChild(QCheckBox)
+        excl_cb = dlg._cam_pos_table.cellWidget(0, 10).findChild(QCheckBox)
         excl_cb.setChecked(True)
         assert "cam_A" in dlg._excluded_cameras
     finally:
@@ -335,5 +335,53 @@ def test_intrinsics_detail_tooltip_updates_on_selection_change(qapp, fake_conn) 
             combo.setCurrentIndex(i)
             expected_rms = "0.10px" if combo.itemText(i) == "calib one" else "9.99px"
             assert expected_rms in combo.toolTip()
+    finally:
+        dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Calib Date / Calib RMS columns (2026-08-14 follow-up) -- date and RMS
+# moved out of the combo's tooltip into their own visible table columns,
+# updating live as the intrinsics selection changes.
+# ---------------------------------------------------------------------------
+
+
+def test_calib_date_and_rms_columns_populated_on_build(qapp, fake_conn) -> None:
+    _seed_intrinsics(fake_conn, notes="tripod, wide lens", rms=0.87)
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        assert dlg._cam_pos_table.item(0, 6).text() == "2026-08-01"
+        assert dlg._cam_pos_table.item(0, 7).text() == "0.87px"
+    finally:
+        dlg.done(0)
+
+
+def test_calib_date_and_rms_columns_update_on_selection_change(qapp, fake_conn) -> None:
+    _seed_intrinsics(fake_conn, notes="calib one", rms=0.10)
+    _seed_intrinsics(fake_conn, notes="calib two", rms=9.99)
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        combo = dlg._intrinsics_combos["cam_A"]
+        assert combo.count() == 2
+
+        for i in range(combo.count()):
+            combo.setCurrentIndex(i)
+            expected_rms = "0.10px" if combo.itemText(i) == "calib one" else "9.99px"
+            assert dlg._cam_pos_table.item(0, 7).text() == expected_rms
+    finally:
+        dlg.done(0)
+
+
+def test_calib_date_and_rms_columns_correct_row_for_multiple_cameras(qapp, fake_conn) -> None:
+    _seed_intrinsics(fake_conn, label="cam_A", notes="a", rms=1.11)
+    _seed_intrinsics(fake_conn, label="cam_B", notes="b", rms=2.22)
+    dlg = ExtrinsicsAutoCalibDialog(
+        [_make_state("cam_A"), _make_state("cam_B")], fake_conn, "sess1"
+    )
+    try:
+        row_a = dlg._cam_pos_row_by_vid["cam_A"]
+        row_b = dlg._cam_pos_row_by_vid["cam_B"]
+        assert dlg._cam_pos_table.item(row_a, 7).text() == "1.11px"
+        assert dlg._cam_pos_table.item(row_b, 7).text() == "2.22px"
     finally:
         dlg.done(0)

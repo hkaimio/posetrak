@@ -1,7 +1,7 @@
 ```toml
 name = "Extrinsics Calibration Improvements"
 status = "in_progress"
-progress_pct = 65
+progress_pct = 85
 description = """
 Improvements to multi-camera extrinsic calibration: scrubbing calibration frames directly from \
 capture video instead of a pre-extracted PNG folder, per-control-point per-frame observations, \
@@ -9,11 +9,13 @@ ArUco/ChArUco marker detection to anchor the coordinate system and provide a rig
 bundle-adjustment residual, persisted fiducial markers for recalibration reuse, and (added after \
 Phase 4 live testing) a portable non-planar calibration rig -- characterizable from a single \
 orbit video, not just measured or hand-typed -- plus scattered-tag redundancy as a more robust \
-alternative to anchoring the world frame from a single flat ChArUco board alone.
+alternative to anchoring the world frame from a single flat ChArUco board alone. Delivered end \
+to end as a native GUI calibration workflow (dialog, CLI, and user guide), not just backend \
+capability -- see extrinsics-ux-redesign.md for the current UI design.
 """
 categories = ["calibration", "ui"]
 target_release = "TBD"
-last_updated = 2026-08-12
+last_updated = 2026-08-15
 ```
 
 # Extrinsics Calibration Improvements — Implementation Status
@@ -1036,7 +1038,7 @@ columns instead) plus its `(session_id, label)` uniqueness constraint.
 | 2 | Per-control-point, per-frame observations (`ObsPoint`, file format v2) | ✅ Done, live-tested |
 | 3 | ArUco marker detection + rigid marker-pose BA residual | ✅ Done, live-tested (detection confirmed working) — see "Phase 3 notes" for a scoping deviation (decoupled post-pass, not a joint BA parameter block) |
 | 4 | ChArUco board detection + coordinate-system anchoring | ✅ Done, live-tested (detection confirmed working after a settings fix, see "Phase 4 notes") — also see there for a scoping deviation (no solvePnP / reference camera needed) |
-| 5 | `scene_fiducial_markers` persistence + recalibration reuse | ⬜ Not started |
+| 5 | Persistence + recalibration reuse (superseded design: `scene_marker_bodies`, not the original `scene_fiducial_markers` sketch — see §10) | ✅ Done, live-tested — CLI (`anchor-rig`/`reanchor`) + GUI ("Save markers…"/"Load markers…", 2026-08-15) both write/read it |
 | 6 | AprilTag detector backend (extensibility proof) | ⬜ Not started |
 | 7 | Global timeline scrub (§8) — jump every camera to the same synced instant | ⬜ Not started (design added 2026-08-09 from UI-testing feedback) |
 | 8 | Portable non-planar calibration rig — primary world-frame anchor (§9, Tier A) | ✅ Core + CLI (`anchor-rig`) + GUI panel done, validated against real capture-1 footage (2026-08-12); `"box"` parametric shape and QR scanning deliberately deferred |

@@ -251,6 +251,47 @@ Still not live-tested against real capture footage -- this round is
 itself a response to Harri's *first* live click-through, so another pass
 is the natural next step before further iteration.
 
+**2026-08-15: first real live-testing pass, and a real bug found --
+"purple marker mixup".** Harri did a full calibration pass (load rig,
+detect markers, solve, save calibration) and reported it worked as
+intended, but loading the saved markers into a different capture didn't:
+
+- **Data table mislabeling, fixed** (`de39fec`): a "Load Markers…"
+  config (Tier B, no physical rig) showed as "Rig corner" in the Data
+  table, same as a genuine physical rig -- both share the same
+  detector/anchor mechanism (`_rig_control_points()`), but the label
+  didn't distinguish `_rig_source`. Now shows "Loaded marker corner",
+  Source column showing the group name directly.
+- **Cross-dictionary marker misattribution, fixed** (`7934d51`) -- the
+  real bug, found after Harri clarified the rig (DICT_4X4_50) and the
+  saved scene markers (DICT_5X5_50) use *different* dictionaries, ruling
+  out the same-dictionary-id-reuse explanation floated first.
+  `MarkerRigDetector.__init__` unconditionally added a detector for its
+  *dictionary* constructor parameter's unused default ("DICT_4X4_50")
+  whenever the config didn't already use it -- even when every marker in
+  the config had its own explicit dictionary entry (true for every "Load
+  Markers…" config) and so never needed that fallback at all. The
+  spurious DICT_4X4_50 scan picked up the physical rig's own markers;
+  `detect()`'s membership filter checks only the bare numeric marker id,
+  not dictionary, so a rig marker whose id happened to numerically
+  coincide with a loaded scene marker's id silently passed through and
+  got misattributed with that marker's stale saved world position --
+  drawn purple (the rig-detection color) because it went through the rig
+  code path, matching Harri's report exactly. Fixed by only adding the
+  fallback detector when some marker in the config genuinely lacks a
+  per-marker dictionary entry (the real case it exists for -- an older
+  `load_rig_config` JSON-shaped config). Per Harri: reusing the *same*
+  marker id within one dictionary between a rig and scene markers would
+  be "an error in scene design" and isn't guarded against -- this fix is
+  scoped to the cross-dictionary coincidence only, not marker-id
+  uniqueness in general.
+
+New tests in `test_marker_rig.py` cover the exact reported scenario
+directly (a same-id marker in an unrelated dictionary is ignored) plus
+the genuine fallback case (a config with a marker missing its dictionary
+entry still gets one). Full regression sweep clean (1706 passed, 19
+skipped, 6 known pre-existing deselections).
+
 ## Current state
 
 Phases 1-4 implemented (2026-08-09), grounded against the pre-existing

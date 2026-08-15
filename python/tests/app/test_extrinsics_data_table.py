@@ -624,3 +624,293 @@ def test_detail_pane_resets_after_clearing_the_selected_marker_via_bulk_clear(
         assert dlg._detail_stack.currentIndex() == 0
     finally:
         dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Selecting a Data table row highlights the corresponding point(s) in
+# camera views (2026-08-15 follow-up) -- previously CP-only
+# (_selected_cp_idx), now every row type. _ClickableImageWidget._markers
+# entries are (x, y, color, label, selected) tuples; "selected" drives
+# the lighter-fill/thicker-ring paint treatment (_lighten_color).
+# ---------------------------------------------------------------------------
+
+
+def test_selecting_marker_row_highlights_its_corners_in_every_camera(qapp, fake_conn) -> None:
+    states = [
+        _make_state("cam_A", _render_marker_image(3)),
+        _make_state("cam_B", _render_marker_image(3)),
+    ]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._on_detect_aruco_clicked("cam_A")
+        dlg._on_detect_aruco_clicked("cam_B")
+        row = _rows_by_type(dlg, "Marker")[0]
+
+        dlg._data_table.selectRow(row)
+
+        for vid in ("cam_A", "cam_B"):
+            markers = dlg._cam_widgets[vid]._markers
+            assert markers  # something was drawn
+            assert all(m[4] for m in markers)  # every corner of this marker is selected
+    finally:
+        dlg.done(0)
+
+
+def test_selecting_board_corner_row_highlights_only_that_one_corner(qapp, fake_conn) -> None:
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        from app.setup.fiducial_markers import CharucoBoardDetection, CharucoCornerObs
+
+        dlg._charuco_detections["cam_A"] = CharucoBoardDetection(corners=[
+            CharucoCornerObs(corner_id=0, video_id="cam_A", frame_idx=0, px=1.0, py=1.0,
+                              local_xyz=np.zeros(3)),
+            CharucoCornerObs(corner_id=1, video_id="cam_A", frame_idx=0, px=2.0, py=2.0,
+                              local_xyz=np.zeros(3)),
+        ])
+        dlg._refresh_charuco_status()
+        rows = _rows_by_type(dlg, "Board corner")
+        assert len(rows) == 2
+        dlg._data_table.selectRow(rows[0])
+
+        markers = dlg._cam_widgets["cam_A"]._markers
+        selected = [m for m in markers if m[4]]
+        not_selected = [m for m in markers if not m[4]]
+        assert len(selected) == 1
+        assert len(not_selected) == 1
+    finally:
+        dlg.done(0)
+
+
+def test_selecting_loaded_marker_corner_row_highlights_only_that_one_corner(
+    qapp, fake_conn,
+) -> None:
+    fake_conn.execute(
+        "INSERT OR IGNORE INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    fake_conn.commit()
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:3", R=np.eye(3), t=np.zeros(3), group_name="room7",
+        marker_type="aruco", dictionary="DICT_4X4_50", marker_id="3", marker_size=0.1,
+    )
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_scene_marker_group("room7")
+        rows = _rows_by_type(dlg, "Loaded marker corner")
+        assert len(rows) == 4
+        dlg._data_table.selectRow(rows[0])
+
+        markers = dlg._cam_widgets["cam_A"]._markers
+        selected = [m for m in markers if m[4]]
+        assert len(selected) == 1
+    finally:
+        dlg.done(0)
+
+
+def test_selecting_rig_corner_row_highlights_only_that_one_corner(
+    qapp, fake_conn, rig_yaml_path,
+) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_path(rig_yaml_path)  # auto-anchors
+        rows = _rows_by_type(dlg, "Rig corner")
+        assert len(rows) == 4
+        dlg._data_table.selectRow(rows[0])
+
+        markers = dlg._cam_widgets["cam_A"]._markers
+        selected = [m for m in markers if m[4]]
+        assert len(selected) == 1
+    finally:
+        dlg.done(0)
+
+
+def test_selecting_cam_pos_obs_row_highlights_that_marker(qapp, fake_conn) -> None:
+    dlg = ExtrinsicsAutoCalibDialog(
+        [_make_state("cam_A"), _make_state("cam_B")], fake_conn, "sess1",
+    )
+    try:
+        dlg._on_cam_pos_set("cam_A", "cam_B", 1.0, 2.0)
+        row = _rows_by_type(dlg, "Cam pos obs")[0]
+
+        dlg._data_table.selectRow(row)
+
+        assert dlg._cam_widgets["cam_A"]._selected_cam_pos_subject == "cam_B"
+    finally:
+        dlg.done(0)
+
+
+def test_selection_highlight_clears_when_a_different_row_is_selected(qapp, fake_conn) -> None:
+    """Selecting a CP row after a Cam pos obs row must not leave the
+    latter's highlight stuck (_refresh_markers resets it for every
+    widget every call)."""
+    dlg = ExtrinsicsAutoCalibDialog(
+        [_make_state("cam_A"), _make_state("cam_B")], fake_conn, "sess1",
+    )
+    try:
+        dlg._on_cam_pos_set("cam_A", "cam_B", 1.0, 2.0)
+        dlg._data_table.selectRow(_rows_by_type(dlg, "Cam pos obs")[0])
+        assert dlg._cam_widgets["cam_A"]._selected_cam_pos_subject == "cam_B"
+
+        dlg._add_control_point()  # different row, different type
+
+        assert dlg._cam_widgets["cam_A"]._selected_cam_pos_subject is None
+    finally:
+        dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
+# Detail pane "Remove Corner"/"Remove Marker" for "Loaded marker corner"
+# rows (2026-08-15 follow-up, Harri: "add to the side pane option to
+# remove individual corner"). A physical rig's "Rig corner" rows only get
+# the blanket Clear -- see _build_detail_pane's docstring for why.
+# ---------------------------------------------------------------------------
+
+
+def _load_room7_markers(dlg, fake_conn) -> None:
+    fake_conn.execute(
+        "INSERT OR IGNORE INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')"
+    )
+    fake_conn.commit()
+    upsert_scene_marker_body(
+        fake_conn, "sess1", label="tag:3", R=np.eye(3), t=np.zeros(3), group_name="room7",
+        marker_type="aruco", dictionary="DICT_4X4_50", marker_id="3", marker_size=0.1,
+    )
+    dlg._load_rig_config_from_scene_marker_group("room7")
+
+
+def test_remove_buttons_visible_only_for_loaded_marker_corner(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        _load_room7_markers(dlg, fake_conn)
+        row = _rows_by_type(dlg, "Loaded marker corner")[0]
+        dlg._data_table.selectRow(row)
+
+        assert not dlg._detail_remove_corner_btn.isHidden()
+        assert not dlg._detail_remove_marker_btn.isHidden()
+    finally:
+        dlg.done(0)
+
+
+def test_remove_buttons_hidden_for_physical_rig_corner(qapp, fake_conn, rig_yaml_path) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        dlg._load_rig_config_from_path(rig_yaml_path)
+        row = _rows_by_type(dlg, "Rig corner")[0]
+        dlg._data_table.selectRow(row)
+
+        assert dlg._detail_remove_corner_btn.isHidden()
+        assert dlg._detail_remove_marker_btn.isHidden()
+    finally:
+        dlg.done(0)
+
+
+def test_remove_corner_excludes_just_that_corner(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        _load_room7_markers(dlg, fake_conn)
+        assert len(_rows_by_type(dlg, "Loaded marker corner")) == 4
+        row = _rows_by_type(dlg, "Loaded marker corner")[0]
+        dlg._data_table.selectRow(row)
+        removed_key = dlg._detail_rig_corner_key
+
+        dlg._on_remove_rig_corner()
+
+        assert removed_key in dlg._rig_excluded_corners
+        assert len(_rows_by_type(dlg, "Loaded marker corner")) == 3
+        remaining_keys = {
+            info[1] for row2, info in dlg._data_table_row_info.items()
+            if info[0] == "Loaded marker corner"
+        }
+        assert removed_key not in remaining_keys
+    finally:
+        dlg.done(0)
+
+
+def test_remove_marker_excludes_all_its_corners(qapp, fake_conn) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        _load_room7_markers(dlg, fake_conn)
+        row = _rows_by_type(dlg, "Loaded marker corner")[0]
+        dlg._data_table.selectRow(row)
+
+        dlg._on_remove_rig_marker()
+
+        assert "3" in dlg._rig_excluded_markers
+        assert _rows_by_type(dlg, "Loaded marker corner") == []
+    finally:
+        dlg.done(0)
+
+
+def test_remove_corner_leaves_the_solve_unaffected_by_that_corner(qapp, fake_conn) -> None:
+    """The exclusion is applied in _rig_control_points() itself, so
+    _on_solve's all_cps (built from that same method) doesn't include a
+    removed corner either -- not just the Data table display."""
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        _load_room7_markers(dlg, fake_conn)
+        assert len(dlg._rig_control_points()) == 4
+        row = _rows_by_type(dlg, "Loaded marker corner")[0]
+        dlg._data_table.selectRow(row)
+
+        dlg._on_remove_rig_corner()
+
+        assert len(dlg._rig_control_points()) == 3
+    finally:
+        dlg.done(0)
+
+
+def test_rig_exclusions_reset_when_a_new_config_is_loaded(
+    qapp, fake_conn, rig_yaml_path, monkeypatch,
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        _load_room7_markers(dlg, fake_conn)
+        row = _rows_by_type(dlg, "Loaded marker corner")[0]
+        dlg._data_table.selectRow(row)
+        dlg._on_remove_rig_corner()
+        assert dlg._rig_excluded_corners
+
+        # Already anchored from room7 -- loading a different config asks
+        # to confirm replacing it first (_confirm_replace_existing_anchor).
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics.QMessageBox.question",
+            lambda *a, **kw: QMessageBox.StandardButton.Yes,
+        )
+        dlg._load_rig_config_from_path(rig_yaml_path)  # a genuinely different config
+
+        assert dlg._rig_excluded_corners == set()
+        assert dlg._rig_excluded_markers == set()
+    finally:
+        dlg.done(0)
+
+
+def test_rig_exclusions_persist_across_clear_and_redetect(qapp, fake_conn) -> None:
+    """Clear (redetect) keeps the same loaded config -- a per-corner
+    exclusion is a judgment about that config's own markers, not about
+    one detection pass, so it should survive a Clear."""
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        _load_room7_markers(dlg, fake_conn)
+        row = _rows_by_type(dlg, "Loaded marker corner")[0]
+        dlg._data_table.selectRow(row)
+        dlg._on_remove_rig_corner()
+        excluded = set(dlg._rig_excluded_corners)
+        assert excluded
+
+        dlg._on_clear_rig()
+        dlg._on_anchor_from_rig()
+
+        assert dlg._rig_excluded_corners == excluded
+        assert len(_rows_by_type(dlg, "Loaded marker corner")) == 3
+    finally:
+        dlg.done(0)

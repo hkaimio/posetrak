@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import re
 import sqlite3
 import struct
 import threading
@@ -150,6 +151,33 @@ _CHARUCO_CORNER_COLOR = QColor(0, 210, 230)
 # Magenta, distinct from all of the above, for drawn portable-rig marker
 # corner overlays (Phase 8).
 _RIG_MARKER_COLOR = QColor(230, 60, 220)
+
+# Matches a rig/loaded-marker-config corner ControlPoint's name, as built
+# by anchor_from_marker_rig: f"rig_{marker_id}_c{corner_index}". Used to
+# recover (marker_id, corner_index) for per-row Data table tracking
+# (selection highlighting, per-corner/per-marker removal -- 2026-08-15
+# follow-up) without re-deriving it from _rig_detections_by_camera.
+_RIG_CORNER_NAME_RE = re.compile(r"^rig_(.+)_c(\d+)$")
+
+
+def _parse_rig_corner_name(name: str) -> tuple[str, int] | None:
+    m = _RIG_CORNER_NAME_RE.match(name)
+    if m is None:
+        return None
+    return m.group(1), int(m.group(2))
+
+
+def _lighten_color(color: QColor, amount: float = 0.45) -> QColor:
+    """Blend *color* toward white by *amount* (0 = unchanged, 1 = white)
+    -- used for the Data table's selected-row highlight in camera views
+    (2026-08-15 follow-up), alongside the existing thicker white-ring
+    treatment ``_ClickableImageWidget.paintEvent`` already draws for
+    ``selected=True`` markers."""
+    return QColor(
+        int(color.red() + (255 - color.red()) * amount),
+        int(color.green() + (255 - color.green()) * amount),
+        int(color.blue() + (255 - color.blue()) * amount),
+    )
 
 
 def _centered_cell_widget(inner: QWidget) -> QWidget:
@@ -382,6 +410,10 @@ class _ClickableImageWidget(QWidget):
         self._cam_pos_markers: list[tuple[float, float, str]] = []  # x, y, label
         # User-placed camera-position markers (cyan) — persists across solves
         self._user_cam_pos_markers: dict[str, tuple[float, float]] = {}  # label → (x, y)
+        # Which subject label's cam-pos marker is the currently-selected
+        # Data table row (2026-08-15 follow-up) -- draws an extra
+        # highlight ring, same idea as _markers' own selected=True.
+        self._selected_cam_pos_subject: str | None = None
         # Label of camera currently being dragged (None = normal CP drag)
         self._dragging_cam: str | None = None
 
@@ -412,6 +444,14 @@ class _ClickableImageWidget(QWidget):
     def set_selected_marker(self, pos: tuple[float, float] | None) -> None:
         """Set existing image-space position of the selected CP for this camera."""
         self._selected_marker_pos = pos
+
+    def set_selected_cam_pos_subject(self, label: str | None) -> None:
+        """Which of this widget's user-placed cam-pos markers (if any) is
+        the currently-selected "Cam pos obs" Data table row -- draws an
+        extra highlight ring around just that one (2026-08-15 follow-up).
+        """
+        self._selected_cam_pos_subject = label
+        self.update()
 
     def add_proj_marker(self, x: float, y: float, color: QColor, selected: bool = False) -> None:
         """Add a reprojection marker (open circle + crosshair) at image position (x, y)."""
@@ -701,25 +741,39 @@ class _ClickableImageWidget(QWidget):
             wx, wy = self._img_to_widget(mx, my)
             _draw_cam_icon(wx, wy, QColor(255, 210, 0), clabel)
 
-        # User-placed (cyan) — drawn on top with a white ring to distinguish
+        # User-placed (cyan) — drawn on top with a white ring to distinguish.
+        # A second, bigger/thicker ring plus a lighter icon color marks
+        # whichever one is the selected "Cam pos obs" Data table row
+        # (2026-08-15 follow-up), same treatment as _markers' selected=True.
         for clabel, (mx, my) in self._user_cam_pos_markers.items():
             wx, wy = self._img_to_widget(mx, my)
+            is_sel = clabel == self._selected_cam_pos_subject
+            if is_sel:
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(255, 255, 255), 2.5))
+                painter.drawEllipse(int(wx) - 13, int(wy) - 13, 26, 26)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(QColor(255, 255, 255), 1.5))
             painter.drawEllipse(int(wx) - 10, int(wy) - 10, 20, 20)
-            _draw_cam_icon(wx, wy, QColor(0, 220, 220), clabel)
+            icon_color = _lighten_color(QColor(0, 220, 220)) if is_sel else QColor(0, 220, 220)
+            _draw_cam_icon(wx, wy, icon_color, clabel)
 
-        # Manual control point markers (solid colored circles) — drawn on top
+        # Control point / detected marker overlays (solid colored circles)
+        # — drawn on top. selected=True (2026-08-15 follow-up: extended
+        # from CP-only to whichever row is selected in the Data table,
+        # any type) gets a lighter fill color, a bigger radius, a
+        # thicker white ring and border -- so the corresponding point(s)
+        # stand out in the camera views, not just in the table.
         for mx, my, color, mlabel, is_sel in self._markers:
             wx, wy = self._img_to_widget(mx, my)
             if is_sel:
-                # White outer ring to make selected CP visually distinct
+                # White outer ring to make the selected marker(s) visually distinct
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.setPen(QPen(QColor(255, 255, 255), 2.5))
                 painter.drawEllipse(int(wx) - 12, int(wy) - 12, 24, 24)
             r = 9 if is_sel else 7
-            painter.setBrush(color)
-            painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+            painter.setBrush(_lighten_color(color) if is_sel else color)
+            painter.setPen(QPen(QColor(255, 255, 255), 2.5 if is_sel else 1.5))
             painter.drawEllipse(int(wx) - r, int(wy) - r, r * 2, r * 2)
             if mlabel:
                 painter.setPen(QColor(255, 255, 255))
@@ -1570,7 +1624,14 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._data_table_row_info: dict[int, tuple[str, object]] = {}
         self._detail_marker_id: str | None = None
         self._detail_group_clear_fn = None
+        self._detail_rig_corner_key: tuple[str, int] | None = None
         self._detail_camobs_payload: tuple[str, str] | None = None
+        # (marker_id, corner_index)/marker_id exclusions for a "Loaded
+        # marker corner" config's per-corner/per-marker removal
+        # (2026-08-15 follow-up) -- filtered out of _rig_control_points()'s
+        # output; reset whenever a new rig/config is loaded or cleared.
+        self._rig_excluded_corners: set[tuple[str, int]] = set()
+        self._rig_excluded_markers: set[str] = set()
         self._intrinsics_combos: dict[str, QComboBox] = {}
         self._cam_pos_row_by_vid: dict[str, int] = {}
         self._last_calib_id: str | None = None
@@ -2029,15 +2090,34 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         group_layout = QVBoxLayout(group_page)
         self._detail_group_label = QLabel()
         self._detail_group_label.setWordWrap(True)
-        self._detail_group_clear_btn = QPushButton("Clear")
-        self._detail_group_clear_btn.setToolTip(
-            "Individual corners aren't independently removable -- clears "
-            "the whole detected rig/board."
+        # "Loaded marker corner" rows only (2026-08-15 follow-up, Harri:
+        # "add to the side pane option to remove individual corner ...
+        # or whole marker"): a physical rig's/board's corners still only
+        # get the blanket Clear below -- individually pruning a genuine
+        # rig's own geometry isn't a normal workflow the way pruning a
+        # stale/misdetected corner from a *loaded* marker config is.
+        self._detail_remove_corner_btn = QPushButton("Remove Corner")
+        self._detail_remove_corner_btn.setToolTip(
+            "Remove just this one corner from the loaded config for this "
+            "session -- e.g. a corner that's badly detected in some "
+            "camera. Keeps the marker's other 3 corners and every other "
+            "loaded marker."
         )
+        self._detail_remove_corner_btn.clicked.connect(self._on_remove_rig_corner)
+        self._detail_remove_marker_btn = QPushButton("Remove Marker")
+        self._detail_remove_marker_btn.setToolTip(
+            "Remove this marker's own 4 corners from the loaded config "
+            "for this session -- e.g. a marker that's moved since it was "
+            "saved. Keeps every other loaded marker."
+        )
+        self._detail_remove_marker_btn.clicked.connect(self._on_remove_rig_marker)
+        self._detail_group_clear_btn = QPushButton("Clear")
         self._detail_group_clear_btn.clicked.connect(
             lambda: self._detail_group_clear_fn() if self._detail_group_clear_fn else None
         )
         group_layout.addWidget(self._detail_group_label)
+        group_layout.addWidget(self._detail_remove_corner_btn)
+        group_layout.addWidget(self._detail_remove_marker_btn)
         group_layout.addWidget(self._detail_group_clear_btn)
         group_layout.addStretch()
         self._detail_stack.addWidget(group_page)  # index 3
@@ -2077,6 +2157,17 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             self._detail_group_clear_fn = (
                 self._on_clear_charuco if kind == "Board corner" else self._on_clear_rig
             )
+            is_loaded = kind == "Loaded marker corner"
+            self._detail_rig_corner_key = payload if is_loaded else None
+            self._detail_remove_corner_btn.setVisible(is_loaded)
+            self._detail_remove_marker_btn.setVisible(is_loaded)
+            self._detail_group_clear_btn.setToolTip(
+                "Removes every marker in this loaded config at once -- "
+                "use Remove Corner/Remove Marker above for just one."
+                if is_loaded else
+                "Individual corners aren't independently removable -- "
+                "clears the whole detected rig/board."
+            )
             self._detail_stack.setCurrentIndex(3)
         elif kind == "Cam pos obs":
             observer, subject = payload
@@ -2100,6 +2191,31 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         if w is not None:
             w.remove_user_cam_pos_marker(subject)
         self._refresh_data_table()
+
+    def _on_remove_rig_corner(self) -> None:
+        """"Remove Corner" (2026-08-15 follow-up, "Loaded marker corner"
+        rows only): drops just this one corner from ``_rig_control_points()``'s
+        output -- e.g. a corner that's badly detected in some camera --
+        keeping the marker's other 3 corners and every other loaded
+        marker. See ``_rig_excluded_corners``."""
+        if self._detail_rig_corner_key is None:
+            return
+        self._rig_excluded_corners.add(self._detail_rig_corner_key)
+        self._refresh_data_table()
+        self._refresh_markers()
+
+    def _on_remove_rig_marker(self) -> None:
+        """"Remove Marker" (2026-08-15 follow-up, "Loaded marker corner"
+        rows only): drops this marker's own 4 corners from
+        ``_rig_control_points()``'s output -- e.g. a marker that's moved
+        since it was saved -- keeping every other loaded marker. See
+        ``_rig_excluded_markers``."""
+        if self._detail_rig_corner_key is None:
+            return
+        marker_id, _corner_idx = self._detail_rig_corner_key
+        self._rig_excluded_markers.add(marker_id)
+        self._refresh_data_table()
+        self._refresh_markers()
 
     def _build_cp_panel(self) -> QWidget:
         panel = QWidget()
@@ -2706,7 +2822,13 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
             for cp in self._charuco_control_points():
                 row = add_row("Board corner", cp.name, set(cp.obs), cp.world_xyz, "charuco")
-                self._data_table_row_info[row] = ("Board corner", None)
+                # corner_id (int, from "charuco_c{id}") for selection
+                # highlighting in camera views (2026-08-15 follow-up) --
+                # matches anchor_from_charuco_board's own naming, and
+                # CharucoCornerObs.corner_id's own type (int), so the
+                # equality check in _refresh_markers is exact.
+                corner_id = int(cp.name.removeprefix("charuco_c"))
+                self._data_table_row_info[row] = ("Board corner", corner_id)
 
             for cp in self._rig_control_points():
                 # A "Load Markers…" config (Tier B, _rig_source ==
@@ -2728,7 +2850,12 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                         else "loaded markers"
                     )
                 row = add_row(kind, cp.name, set(cp.obs), cp.world_xyz, source)
-                self._data_table_row_info[row] = (kind, None)
+                # (marker_id, corner_index), parsed from anchor_from_marker_rig's
+                # own "rig_{marker_id}_c{corner_index}" naming -- drives both
+                # selection highlighting in camera views and, for a
+                # "Loaded marker corner" row, the detail pane's per-
+                # corner/per-marker removal (2026-08-15 follow-up).
+                self._data_table_row_info[row] = (kind, _parse_rig_corner_name(cp.name))
 
             for obs in self._cam_pos_obs:
                 row = add_row(
@@ -2867,8 +2994,16 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._refresh_markers()
 
     def _refresh_markers(self) -> None:
+        # Whichever Data table row is currently selected (2026-08-15
+        # follow-up: highlighting used to be CP-only, driven solely by
+        # _selected_cp_idx; every row type now gets the same treatment --
+        # see each block below for what "matches" means per type).
+        sel_row = self._data_table.currentRow()
+        sel_kind, sel_payload = self._data_table_row_info.get(sel_row, (None, None))
+
         for w in self._cam_widgets.values():
             w.clear_markers()
+            w.set_selected_cam_pos_subject(None)
         for i, cp in enumerate(self._control_points):
             color = _CP_COLORS[i % len(_CP_COLORS)]
             is_selected = (i == self._selected_cp_idx)
@@ -2899,19 +3034,26 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         # ArUco marker corners (Phase 3) -- same clear/redraw pass as CPs
         # above (clear_markers() clears both, so they must share one pass
-        # rather than each calling clear_markers() independently).
+        # rather than each calling clear_markers() independently). A
+        # selected "Marker" row highlights every corner of that whole
+        # marker group, across every camera that saw it.
         for mg in self._marker_groups.values():
+            is_selected_marker = sel_kind == "Marker" and mg.marker_id == sel_payload
             for vid, corners in mg.obs.items():
                 w = self._cam_widgets.get(vid)
                 if w is None:
                     continue
                 for corner_idx, obs in corners.items():
                     label = mg.marker_id if corner_idx == 0 else ""
-                    w.add_marker(obs.px, obs.py, _ARUCO_MARKER_COLOR, label, selected=False)
+                    w.add_marker(
+                        obs.px, obs.py, _ARUCO_MARKER_COLOR, label, selected=is_selected_marker,
+                    )
 
         # ChArUco board corners (Phase 4) -- same shared clear/redraw pass.
         # Labeled only once (corner 0 across all cameras) to avoid clutter
-        # from potentially dozens of corners.
+        # from potentially dozens of corners. A selected "Board corner"
+        # row highlights just that one corner (its own Data table row --
+        # see _refresh_data_table), not the whole board.
         labeled_once = False
         for det in self._charuco_detections.values():
             for c in det.corners:
@@ -2922,9 +3064,15 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                 if not labeled_once:
                     label = "board"
                     labeled_once = True
-                w.add_marker(c.px, c.py, _CHARUCO_CORNER_COLOR, label, selected=False)
+                is_selected_corner = sel_kind == "Board corner" and c.corner_id == sel_payload
+                w.add_marker(c.px, c.py, _CHARUCO_CORNER_COLOR, label, selected=is_selected_corner)
 
-        # Rig marker corners (Phase 8) -- same shared clear/redraw pass.
+        # Rig / loaded-marker-config corners (Phase 8, Tier B) -- same
+        # shared clear/redraw pass. A selected "Rig corner"/"Loaded
+        # marker corner" row highlights just that one corner, same as
+        # ChArUco above -- see _refresh_data_table for the (marker_id,
+        # corner_index) payload both this and the detail pane's Remove
+        # Corner/Remove Marker (2026-08-15 follow-up) key off.
         labeled_once_rig = False
         for vid, detections in self._rig_detections_by_camera.items():
             w = self._cam_widgets.get(vid)
@@ -2936,7 +3084,20 @@ class ExtrinsicsAutoCalibDialog(QDialog):
                     if not labeled_once_rig:
                         label = "rig"
                         labeled_once_rig = True
-                    w.add_marker(c.px, c.py, _RIG_MARKER_COLOR, label, selected=False)
+                    is_selected_corner = (
+                        sel_kind in ("Rig corner", "Loaded marker corner")
+                        and sel_payload == (det.marker_id, c.corner_index)
+                    )
+                    w.add_marker(c.px, c.py, _RIG_MARKER_COLOR, label, selected=is_selected_corner)
+
+        # Camera-position observations (UX Phase 7) -- separate drawing
+        # mechanism (_user_cam_pos_markers, not _markers), so its own
+        # highlight call rather than an add_marker(selected=...) above.
+        if sel_kind == "Cam pos obs" and sel_payload is not None:
+            observer, subject = sel_payload
+            w = self._cam_widgets.get(observer)
+            if w is not None:
+                w.set_selected_cam_pos_subject(subject)
 
     # ------------------------------------------------------------------
     # ArUco marker detection (Phase 3)
@@ -3487,6 +3648,11 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._rig_source = source
         self._rig_detections_by_camera = {}
         self._rig_anchored = False
+        # A per-corner/per-marker removal (2026-08-15 follow-up) is
+        # specific to the config it was made against -- a freshly loaded
+        # one (even a reload of "the same" rig/group) starts clean.
+        self._rig_excluded_corners = set()
+        self._rig_excluded_markers = set()
 
         # If "Detect ArUco" already ran before this rig was loaded, any of
         # its own markers picked up there (no exclusion existed to stop
@@ -3746,14 +3912,33 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._rig_status_label.setText(text)
 
     def _rig_control_points(self) -> list[ControlPoint]:
-        """Every detected rig corner, fixed to its already-known world_xyz.
+        """Every detected rig corner, fixed to its already-known world_xyz,
+        minus any corner/marker removed via the detail pane's "Remove
+        Corner"/"Remove Marker" (2026-08-15 follow-up, ``_rig_excluded_corners``/
+        ``_rig_excluded_markers`` -- filters here rather than mutating
+        ``_rig_detections_by_camera``/``_rig_config`` so a later "Anchor
+        Rig"/reload doesn't need to know about the exclusion separately;
+        this is the single place solving and display both read from).
 
         Unlike ``_charuco_control_points()``, there is no free/unanchored
         intermediate state -- see ``_build_rig_group``'s docstring for why.
         """
         if not self._rig_anchored or self._rig_config is None:
             return []
-        return anchor_from_marker_rig(self._rig_detections_by_camera, self._rig_config)
+        cps = anchor_from_marker_rig(self._rig_detections_by_camera, self._rig_config)
+        if not self._rig_excluded_corners and not self._rig_excluded_markers:
+            return cps
+        result = []
+        for cp in cps:
+            key = _parse_rig_corner_name(cp.name)
+            if key is None:
+                result.append(cp)
+                continue
+            marker_id, _corner_idx = key
+            if key in self._rig_excluded_corners or marker_id in self._rig_excluded_markers:
+                continue
+            result.append(cp)
+        return result
 
     # ------------------------------------------------------------------
     # Solve

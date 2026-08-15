@@ -315,6 +315,36 @@ concrete additions, landed in `69dea4a`:
 Full regression sweep clean (1719 passed, 19 skipped, 6 known
 pre-existing deselections).
 
+**2026-08-15, second sidebar-cleanup round** (Harri: "Let's then clean up
+the side bar. First: I think it would make sense to move the bottom
+toolbar buttons there"), landed in `cdf6b7c`:
+
+- Moved the button bar (Calib rig…/Detect markers…/Load markers…/Save
+  markers…/Load from DB…/Solve/Cancel/SIFT/RANSAC/status label) back
+  into the sidebar, replacing the Actions/Anchoring split with 4 flat
+  top-level sections: **Control Points** (unchanged), **Calibration rig
+  setup** (Calib rig… + the old "Rig Anchor" section's status/actions +
+  new "Manage rigs…"), **Markers** (Detect/Load/Save markers… + new
+  "Manage markers…"), **Solve** (SIFT/RANSAC/Solve/Cancel/Load from
+  DB…/status).
+- Removed the "ChArUco Anchor" section entirely -- per Harri, "it is
+  possible to use charuco board as calibration rig so I think that is
+  enough for now": "Calib rig…"'s ChArUco Board tab is now the only
+  anchor entry point (per-camera "Detect ChArUco" stays, unaffected).
+- Split the confusing "Manage Scene Markers…" (Harri: "I don't really
+  understand what it does") into two dialogs matching Harri's own mental
+  model ("we have calibration rigs and named saved scene marker sets") --
+  new `_RigRegistryManagerDialog` ("Manage rigs…", `marker_body_definitions`,
+  needed a new `delete_marker_body()` DB helper since none existed) and
+  the existing `_SceneMarkerManagerDialog` relocated to Markers
+  ("Manage markers…", unchanged internally).
+- Caught during review: the "Load from DB…" button had been left off
+  Harri's own subpane list -- placed in Solve, next to the other
+  "inspect a result" actions.
+
+Full regression sweep clean (1730 passed, 19 skipped, 6 known
+pre-existing deselections).
+
 ## Current state
 
 Phases 1-4 implemented (2026-08-09), grounded against the pre-existing

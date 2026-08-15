@@ -1014,6 +1014,131 @@ def test_on_manage_scene_markers_opens_dialog(qapp, fake_conn, monkeypatch) -> N
 
 
 # ---------------------------------------------------------------------------
+# Rig registry manager (view + delete + import marker_body_definitions
+# rows, 2026-08-15 follow-up) -- "Calibration rig setup"'s counterpart to
+# "Manage markers…"/_SceneMarkerManagerDialog above. See
+# _RigRegistryManagerDialog/_on_manage_rigs.
+# ---------------------------------------------------------------------------
+
+
+def test_rig_registry_manager_lists_imported_rigs(qapp, fake_conn, rig_yaml_path) -> None:
+    from app.setup.page_extrinsics import _RigRegistryManagerDialog
+
+    import_marker_body(fake_conn, rig_yaml_path, name="test-rig")
+    dlg = _RigRegistryManagerDialog(fake_conn)
+    try:
+        assert dlg._table.rowCount() == 1
+        assert dlg._table.item(0, 0).text() == "test-rig"
+    finally:
+        dlg.done(0)
+
+
+def test_rig_registry_manager_delete_removes_row(qapp, fake_conn, rig_yaml_path, monkeypatch) -> None:
+    from PySide6.QtWidgets import QMessageBox
+    from app.setup.page_extrinsics import _RigRegistryManagerDialog
+
+    import_marker_body(fake_conn, rig_yaml_path, name="test-rig")
+    monkeypatch.setattr(
+        "app.setup.page_extrinsics.QMessageBox.question",
+        lambda *a, **kw: QMessageBox.StandardButton.Yes,
+    )
+
+    dlg = _RigRegistryManagerDialog(fake_conn)
+    try:
+        dlg._table.selectRow(0)
+        dlg._on_delete_selected()
+
+        assert dlg._table.rowCount() == 0
+        assert fake_conn.execute(
+            "SELECT COUNT(*) FROM marker_body_definitions"
+        ).fetchone()[0] == 0
+    finally:
+        dlg.done(0)
+
+
+def test_rig_registry_manager_delete_cancelled_keeps_row(
+    qapp, fake_conn, rig_yaml_path, monkeypatch,
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+    from app.setup.page_extrinsics import _RigRegistryManagerDialog
+
+    import_marker_body(fake_conn, rig_yaml_path, name="test-rig")
+    monkeypatch.setattr(
+        "app.setup.page_extrinsics.QMessageBox.question",
+        lambda *a, **kw: QMessageBox.StandardButton.No,
+    )
+
+    dlg = _RigRegistryManagerDialog(fake_conn)
+    try:
+        dlg._table.selectRow(0)
+        dlg._on_delete_selected()
+
+        assert dlg._table.rowCount() == 1
+    finally:
+        dlg.done(0)
+
+
+def test_rig_registry_manager_from_file_imports_without_detecting(
+    qapp, fake_conn, rig_yaml_path, monkeypatch,
+) -> None:
+    from app.setup.page_extrinsics import _RigRegistryManagerDialog
+
+    monkeypatch.setattr(
+        "app.setup.page_extrinsics.QFileDialog.getOpenFileName",
+        lambda *a, **kw: (str(rig_yaml_path), ""),
+    )
+    dlg = _RigRegistryManagerDialog(fake_conn)
+    try:
+        dlg._on_from_file()
+
+        assert dlg._table.rowCount() == 1
+        assert dlg._table.item(0, 0).text() == "test-rig"
+    finally:
+        dlg.done(0)
+
+
+def test_rig_registry_manager_from_file_invalid_yaml_shows_warning(
+    qapp, fake_conn, tmp_path, monkeypatch,
+) -> None:
+    from app.setup.page_extrinsics import _RigRegistryManagerDialog
+
+    bad_path = tmp_path / "bad_rig.yaml"
+    bad_path.write_text("name: bad\nmarkers:\n  - name: a\n    type: aruco\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "app.setup.page_extrinsics.QFileDialog.getOpenFileName",
+        lambda *a, **kw: (str(bad_path), ""),
+    )
+    warned = []
+    monkeypatch.setattr(
+        "app.setup.page_extrinsics.QMessageBox.warning",
+        lambda *a, **kw: warned.append(a),
+    )
+    dlg = _RigRegistryManagerDialog(fake_conn)
+    try:
+        dlg._on_from_file()  # must not raise
+
+        assert len(warned) == 1
+        assert dlg._table.rowCount() == 0
+    finally:
+        dlg.done(0)
+
+
+def test_on_manage_rigs_opens_dialog(qapp, fake_conn, monkeypatch) -> None:
+    states = [_make_state("cam_A", _render_marker_image(3))]
+    dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")
+    try:
+        opened = []
+        monkeypatch.setattr(
+            "app.setup.page_extrinsics._RigRegistryManagerDialog.exec",
+            lambda self: opened.append(True),
+        )
+        dlg._on_manage_rigs()
+        assert opened == [True]
+    finally:
+        dlg.done(0)
+
+
+# ---------------------------------------------------------------------------
 # A loaded physical rig's own markers must never leak into "Detect ArUco"
 # as ordinary scattered tags (2026-08-12) -- Harri's report: a deleted
 # "rig:<id>" scene marker still "came back" because its individual

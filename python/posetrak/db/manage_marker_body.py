@@ -135,6 +135,32 @@ def list_marker_bodies(registry: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def delete_marker_body(registry: sqlite3.Connection, marker_body_definition_id: str) -> bool:
+    """Delete one ``marker_body_definitions`` row by id -- the registry
+    counterpart to :func:`delete_scene_marker_body`, backing the GUI's
+    "Manage rigs…" dialog (2026-08-15 follow-up, see docs/roadmap/
+    features/extrinsics-improvements/status.md).
+
+    No foreign-key enforcement on ``scene_marker_bodies.marker_body_definition_id``
+    or a past ``extrinsic_calibrations`` run's own rig reference -- same
+    "let the user prune, don't overprotect" precedent
+    :func:`delete_scene_marker_body` already establishes for stale scene
+    markers. A row that still has references just goes stale (they keep
+    working, they simply won't resolve back to a rig name/config
+    anymore), rather than the delete silently failing or cascading.
+
+    Returns
+    -------
+    bool
+        True if a row was actually deleted, False if no row matched.
+    """
+    with registry:
+        cur = registry.execute(
+            "DELETE FROM marker_body_definitions WHERE id = ?", (marker_body_definition_id,)
+        )
+    return cur.rowcount > 0
+
+
 # ---------------------------------------------------------------------------
 # scene_marker_bodies (session-scoped solved poses)
 # ---------------------------------------------------------------------------

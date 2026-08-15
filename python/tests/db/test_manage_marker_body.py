@@ -11,6 +11,7 @@ import pytest
 
 from posetrak.db.manage_marker_body import (
     copy_marker_body_to_session,
+    delete_marker_body,
     delete_scene_marker_body,
     import_marker_body,
     import_marker_body_str,
@@ -155,6 +156,53 @@ def test_list_marker_bodies_returns_all(registry_db: sqlite3.Connection, tmp_pat
     import_marker_body(registry_db, _write_yaml(tmp_path, name="b.yaml", content="name: b\nmarkers: []\n"))
     names = {r["name"] for r in list_marker_bodies(registry_db)}
     assert names == {"a", "b"}
+
+
+# ---------------------------------------------------------------------------
+# delete_marker_body -- backs the GUI's "Manage rigs…" dialog
+# (2026-08-15 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_delete_marker_body_removes_row(registry_db: sqlite3.Connection, tmp_path: Path) -> None:
+    body_id = import_marker_body(registry_db, _write_yaml(tmp_path))
+    assert delete_marker_body(registry_db, body_id) is True
+    assert list_marker_bodies(registry_db) == []
+
+
+def test_delete_marker_body_missing_returns_false(registry_db: sqlite3.Connection) -> None:
+    assert delete_marker_body(registry_db, "nonexistent-id") is False
+
+
+def test_delete_marker_body_leaves_other_rows(registry_db: sqlite3.Connection, tmp_path: Path) -> None:
+    id_a = import_marker_body(
+        registry_db, _write_yaml(tmp_path, name="a.yaml", content="name: a\nmarkers: []\n")
+    )
+    id_b = import_marker_body(
+        registry_db, _write_yaml(tmp_path, name="b.yaml", content="name: b\nmarkers: []\n")
+    )
+    delete_marker_body(registry_db, id_a)
+    remaining = list_marker_bodies(registry_db)
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == id_b
+
+
+def test_delete_marker_body_does_not_fail_when_still_referenced(
+    session_db: sqlite3.Connection, tmp_path: Path,
+) -> None:
+    """No FK enforcement -- a scene_marker_bodies row that still
+    references this id keeps working (just won't resolve back to a rig
+    name/config anymore), same "let the user prune, don't overprotect"
+    precedent delete_scene_marker_body already establishes."""
+    _insert_session(session_db)
+    body_id = import_marker_body(session_db, _write_yaml(tmp_path))
+    upsert_scene_marker_body(
+        session_db, "sess1", label=f"rig:{body_id}", R=np.eye(3), t=np.zeros(3),
+        marker_body_definition_id=body_id, is_primary_anchor=True,
+    )
+    assert delete_marker_body(session_db, body_id) is True
+    rows = list_scene_marker_bodies(session_db, "sess1")
+    assert len(rows) == 1  # untouched, just orphaned
 
 
 # ---------------------------------------------------------------------------

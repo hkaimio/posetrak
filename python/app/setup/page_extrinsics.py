@@ -108,6 +108,7 @@ from app.setup.fiducial_markers import (
 from app.setup.video_scrub_bar import VideoScrubBar
 from posetrak.db.import_extrinsics import import_extrinsics
 from posetrak.db.manage_marker_body import (
+    delete_marker_body,
     delete_scene_marker_body,
     import_marker_body,
     list_marker_bodies,
@@ -1182,6 +1183,108 @@ class _SceneMarkerManagerDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Rig registry manager (view + delete marker_body_definitions rows, plus
+# import a new one) -- the "Calibration rig setup" section's counterpart
+# to "Manage markers…"/_SceneMarkerManagerDialog above (2026-08-15
+# follow-up, Harri: "we have calibration rigs and named saved scene
+# marker sets, so I think adding 'Manage...' buttons to those sections
+# would be the logical UI"). Distinct table from _SceneMarkerManagerDialog's
+# -- this one is the YAML-imported rig *registry* (marker_body_definitions,
+# what "Calib rig…"'s Physical Rig tab lists), not a session's saved
+# marker positions (scene_marker_bodies, including a file-sourced rig's
+# own saved anchor-pose row).
+# ---------------------------------------------------------------------------
+
+
+class _RigRegistryManagerDialog(QDialog):
+    """Table of every ``marker_body_definitions`` row (rigs imported via
+    `posetrak marker-body import`, a prior "Calib rig…" load, or "From
+    file…" here), with Delete + an import shortcut that doesn't require
+    running a full detect/anchor cycle to add a rig to the registry."""
+
+    def __init__(self, conn: sqlite3.Connection, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Manage Calibration Rigs")
+        self.setMinimumSize(560, 320)
+        self._conn = conn
+
+        self._table = QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels(["Name", "Source", "Created"])
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+
+        from_file_btn = QPushButton("From file…")
+        from_file_btn.setToolTip(
+            "Import a marker body YAML file into this session's rig "
+            "registry, without detecting/anchoring it -- use \"Calib "
+            "rig…\" for that."
+        )
+        from_file_btn.clicked.connect(self._on_from_file)
+        delete_btn = QPushButton("Delete Selected")
+        delete_btn.clicked.connect(self._on_delete_selected)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(from_file_btn)
+        btn_row.addWidget(delete_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._table)
+        layout.addLayout(btn_row)
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self._rows = list_marker_bodies(self._conn)
+        self._table.setRowCount(len(self._rows))
+        for i, r in enumerate(self._rows):
+            self._table.setItem(i, 0, QTableWidgetItem(r["name"] or ""))
+            self._table.setItem(i, 1, QTableWidgetItem(r["source"] or ""))
+            self._table.setItem(i, 2, QTableWidgetItem((r["created_at"] or "")[:10]))
+
+    def _on_from_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Rig Config", "", "Marker body YAML (*.yaml *.yml);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            config = load_marker_body_yaml_file(path)
+            import_marker_body(self._conn, Path(path), name=config.rig_id)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Import Rig Config", f"Could not import rig config: {exc}")
+            return
+        self._refresh()
+
+    def _on_delete_selected(self) -> None:
+        row_idxs = sorted({idx.row() for idx in self._table.selectedIndexes()}, reverse=True)
+        if not row_idxs:
+            return
+        targets = [self._rows[i] for i in row_idxs]
+        reply = QMessageBox.question(
+            self, "Delete Rig(s)",
+            f"Permanently delete {len(targets)} rig(s) from the registry?\n\n"
+            + "\n".join(r["name"] for r in targets)
+            + "\n\nA past calibration or saved marker config that referenced one keeps "
+            "working -- it just won't resolve back to a rig name/config anymore.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        for r in targets:
+            delete_marker_body(self._conn, r["id"])
+        self._refresh()
+
+
+# ---------------------------------------------------------------------------
 # Save Markers dialog -- explicit, always-named save action (UX Phase 5,
 # see docs/roadmap/features/extrinsics-improvements/
 # extrinsics-ux-redesign.md), replacing the old implicit
@@ -1777,98 +1880,6 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
 
-        # Solve row
-        self._solve_btn = QPushButton("Match && Solve")
-        self._solve_btn.clicked.connect(self._on_solve)
-        self._cancel_btn = QPushButton("Cancel")
-        self._cancel_btn.clicked.connect(self._on_cancel_solve)
-        self._cancel_btn.setVisible(False)
-        self._load_db_btn = QPushButton("Load from DB…")
-        self._load_db_btn.clicked.connect(self._on_load_from_db)
-        self._load_db_btn.setToolTip("Load a previously saved calibration to inspect camera positions and CP errors.")
-        # Bulk data-entry actions (2026-08-14 follow-up) -- button bar is
-        # now their home instead of permanently-visible sidebar sections;
-        # see _init_aruco_detect_settings/_on_detect_markers_bulk.
-        self._detect_markers_btn = QPushButton("Detect markers…")
-        self._detect_markers_btn.setToolTip(
-            "Pick a marker dictionary and optional default size, then "
-            "detect ArUco markers across every camera with an image "
-            "loaded at once. A marker's 4 corners act as one control-"
-            "point group; give it a size (its row's \"Size (m)\" column "
-            "in the Data table) to also recover its rigid world pose "
-            "once ≥2 cameras have seen it. Use \"Save Markers…\" to "
-            "persist a sized marker's solved pose to this session's "
-            "scene markers, so a later capture can re-anchor from it "
-            "without a physical rig (\"Load Markers…\")."
-        )
-        self._detect_markers_btn.clicked.connect(self._on_detect_markers_bulk)
-        self._calib_rig_btn = QPushButton("Calib rig…")
-        self._calib_rig_btn.setToolTip(
-            "Anchor the world coordinate system from a physical "
-            "calibration rig (file or already imported into this "
-            "session's DB) or a ChArUco board. Either way, immediately "
-            "detected and anchored across every camera with an image "
-            "loaded."
-        )
-        self._calib_rig_btn.clicked.connect(self._on_calib_rig_bulk)
-        self._load_markers_btn = QPushButton("Load markers…")
-        self._load_markers_btn.setToolTip(
-            "Re-anchor from a named configuration saved with \"Save "
-            "Markers…\" in an earlier capture -- no physical rig or "
-            "config file needed. See design doc section 9 Tier B."
-        )
-        self._load_markers_btn.clicked.connect(self._on_load_rig_from_scene_markers)
-        # self._save_markers_btn built here now (2026-08-14 follow-up,
-        # moved off the sidebar's Rig Anchor group onto the button bar
-        # next to "Load markers…") -- _on_save_markers/_SaveMarkersDialog
-        # themselves are unchanged, only where the button lives.
-        self._save_markers_btn = QPushButton("Save markers…")
-        self._save_markers_btn.setToolTip(
-            "Save the current anchor (a file-sourced rig, and/or any "
-            "sized ArUco/ChArUco markers from the last solve) under a "
-            "name, so a later capture can reuse it via \"Load markers…\" "
-            "without a physical rig. Disabled until something is "
-            "anchored or solved."
-        )
-        self._save_markers_btn.setEnabled(False)
-        self._save_markers_btn.clicked.connect(self._on_save_markers)
-        self._sift_check = QCheckBox("SIFT matching")
-        self._sift_check.setChecked(True)
-        self._sift_check.setToolTip(
-            "Use SIFT feature matching to initialise camera poses.\n"
-            "Uncheck to use only control points (requires ≥4 world-xyz CPs per camera)."
-        )
-        self._ransac_px_spin = QDoubleSpinBox()
-        self._ransac_px_spin.setRange(1.0, 500.0)
-        self._ransac_px_spin.setSingleStep(1.0)
-        self._ransac_px_spin.setValue(8.0)
-        self._ransac_px_spin.setDecimals(1)
-        self._ransac_px_spin.setSuffix(" px")
-        self._ransac_px_spin.setToolTip(
-            "PnP RANSAC reprojection error threshold.\n"
-            "Increase if cameras with bad intrinsics or coplanar CPs fail to solve.\n"
-            "Large values allow wrong poses — use only for diagnosis."
-        )
-        self._ransac_px_spin.setMaximumWidth(90)
-        self._status_label = QLabel(
-            "Click 'Match & Solve' to run SIFT matching and bundle adjustment.  "
-            "Optionally add control points first (press a camera image to place one)."
-        )
-        self._status_label.setWordWrap(True)
-
-        solve_row = QHBoxLayout()
-        solve_row.addWidget(self._solve_btn)
-        solve_row.addWidget(self._cancel_btn)
-        solve_row.addWidget(self._load_db_btn)
-        solve_row.addWidget(self._detect_markers_btn)
-        solve_row.addWidget(self._calib_rig_btn)
-        solve_row.addWidget(self._load_markers_btn)
-        solve_row.addWidget(self._save_markers_btn)
-        solve_row.addWidget(self._sift_check)
-        solve_row.addWidget(QLabel("RANSAC:"))
-        solve_row.addWidget(self._ransac_px_spin)
-        solve_row.addWidget(self._status_label, 1)
-
         # Per-camera results/settings table -- always kept populated (not
         # just after a solve/DB load, though its own tab (see _build_ui)
         # only shows when selected): position/CP-error start at "—" until
@@ -1937,7 +1948,6 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         root = QVBoxLayout(self)
         root.addWidget(main_splitter, 1)
-        root.addLayout(solve_row)
         root.addWidget(btn_box)
 
         self._populate_cam_pos_table_rows()
@@ -2217,11 +2227,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._refresh_data_table()
         self._refresh_markers()
 
-    def _build_cp_panel(self) -> QWidget:
-        panel = QWidget()
-        panel.setFixedWidth(280)
-
-        # Control points list
+    def _build_cp_group(self) -> QGroupBox:
         cp_group = QGroupBox("Control Points")
         cp_layout = QVBoxLayout(cp_group)
 
@@ -2252,55 +2258,41 @@ class ExtrinsicsAutoCalibDialog(QDialog):
 
         cp_layout.addWidget(hint)
         cp_layout.addLayout(add_del)
+        return cp_group
 
+    def _build_cp_panel(self) -> QWidget:
+        """The sidebar: 4 always-visible top-level sections (2026-08-15
+        follow-up, Harri's second sidebar-cleanup round -- replacing the
+        Actions/Anchoring split from the round before, and moving the
+        button bar's buttons back here): Control Points, "Calibration
+        rig setup", "Markers", "Solve". No tabs, no collapse-by-default,
+        same steer against progressive disclosure as every prior round of
+        this sidebar. ChArUco has no section of its own anymore -- per
+        Harri, close enough to a calibration rig that "Calibration rig
+        setup"'s own "Calib rig…" button (its ChArUco Board tab) covers
+        it; see ``_init_charuco_detect_settings``'s docstring.
+        """
+        panel = QWidget()
+        panel.setFixedWidth(280)
+
+        cp_group = self._build_cp_group()
         self._init_aruco_detect_settings()
         self._init_charuco_detect_settings()
-        charuco_anchor_group = self._build_charuco_anchor_group()
         self._init_rig_detect_settings()
-        rig_anchor_group = self._build_rig_anchor_group()
-
-        # Actions / Anchoring (UX Phase 6, see docs/roadmap/features/
-        # extrinsics-improvements/extrinsics-ux-redesign.md): two always-
-        # visible sidebar groups, no tabs and no collapse-by-default --
-        # Harri's steer against progressive disclosure for what's usually
-        # an iterative workflow ("I don't believe in the 'progressive
-        # disclosure' model"). Supersedes the collapsible-groupbox
-        # treatment UI testing added on 2026-08-09: that patched crowding
-        # by hiding sections; this instead regroups by what a section
-        # *does* (detect/load vs. fix the world frame) so each group is
-        # naturally smaller. Camera Intrinsics used to be a third crowded
-        # section here too, until UX Phase 4 folded it into the
-        # per-camera results table instead. The "ArUco Markers"/"ChArUco
-        # Board"/"Marker Rig / Scene Markers" settings sections are gone
-        # too (2026-08-14 follow-up) -- superseded by the button bar's
-        # "Detect markers…"/"Calib rig…" dialogs; see
-        # _init_aruco_detect_settings/_init_charuco_detect_settings/
-        # _init_rig_detect_settings. Actions is left holding just Control
-        # Points as a result -- kept as its own group anyway (rather than
-        # promoted to a bare top-level widget) since UX Phase 8/D2 is
-        # expected to add manual-CP-anchoring actions here later.
-        actions_group = QGroupBox("Actions")
-        actions_layout = QVBoxLayout(actions_group)
-        actions_layout.addWidget(cp_group, 1)
-
-        # World position (optional) moved out of here entirely (2026-08-14
-        # follow-up) -- it's now the CP-row page of the Data tab's detail
-        # pane (_build_detail_pane), replacing a standalone sidebar
-        # section with something that only takes space when a CP is
-        # actually selected.
-        anchoring_group = QGroupBox("Anchoring")
-        anchoring_layout = QVBoxLayout(anchoring_group)
-        anchoring_layout.addWidget(charuco_anchor_group)
-        anchoring_layout.addWidget(rig_anchor_group)
+        rig_setup_group = self._build_rig_setup_group()
+        markers_group = self._build_markers_group()
+        solve_group = self._build_solve_group()
 
         v = QVBoxLayout(panel)
         v.setContentsMargins(0, 0, 0, 0)
-        v.addWidget(actions_group, 1)
-        v.addWidget(anchoring_group)
+        v.addWidget(cp_group)
+        v.addWidget(rig_setup_group)
+        v.addWidget(markers_group)
+        v.addWidget(solve_group, 1)
 
-        # Vertical scroll fallback: the Actions/Anchoring split covers most
-        # cases, but if everything is expanded at once on a short window,
-        # scroll rather than silently clip/squish widgets.
+        # Vertical scroll fallback: covers the case where all 4 sections
+        # together don't fit a short window -- scroll rather than
+        # silently clip/squish widgets.
         scroll = QScrollArea()
         scroll.setWidget(panel)
         scroll.setWidgetResizable(True)
@@ -2345,6 +2337,17 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         thumbnail keep using whatever was last confirmed in that dialog
         (or these constructor defaults, if it's never been opened) --
         see ``_on_calib_rig_bulk``/``_CalibRigDialog``.
+
+        ``_charuco_status_label`` is headless here too (2026-08-15
+        follow-up, sidebar reorg): the "ChArUco Anchor" section that used
+        to show it is gone entirely -- per Harri, ChArUco is "close
+        enough to a calibration rig" that the "Calibration rig setup"
+        section's own "Calib rig…" button (its ChArUco Board tab) is the
+        only anchor entry point now, with no separate manual "Set origin
+        & axes"/"Clear board detections" buttons anywhere; the shared
+        Solve section's status label reports the outcome instead. The
+        attribute stays because ``_refresh_charuco_status()`` still
+        writes to it unconditionally.
         """
         self._charuco_dict_combo = QComboBox()
         self._charuco_dict_combo.addItems(_ARUCO_DICTIONARY_CHOICES)
@@ -2372,31 +2375,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._charuco_min_marker_pct_spin.setDecimals(2)
         self._charuco_min_marker_pct_spin.setSingleStep(0.1)
         self._charuco_min_marker_pct_spin.setValue(1.0)
-
-    def _build_charuco_anchor_group(self) -> QGroupBox:
-        """ChArUco anchor status + "Set origin & axes from board" --
-        detection settings moved out entirely (2026-08-14 follow-up, see
-        ``_init_charuco_detect_settings``); the status label moved here
-        alongside the anchor action it reports on, same relocation as
-        ``_rig_status_label`` in ``_build_rig_anchor_group``."""
-        group = QGroupBox("ChArUco Anchor")
-        layout = QVBoxLayout(group)
-
         self._charuco_status_label = QLabel("No board detected yet.")
-        self._charuco_status_label.setWordWrap(True)
-        self._charuco_status_label.setStyleSheet("color: #666; font-size: 10px;")
-
-        anchor_btn = QPushButton("Set origin && axes from board")
-        anchor_btn.clicked.connect(self._on_anchor_from_board)
-        clear_btn = QPushButton("Clear board detections")
-        clear_btn.clicked.connect(self._on_clear_charuco)
-        btn_row = QHBoxLayout()
-        btn_row.addWidget(anchor_btn)
-        btn_row.addWidget(clear_btn)
-
-        layout.addWidget(self._charuco_status_label)
-        layout.addLayout(btn_row)
-        return group
 
     def _init_rig_detect_settings(self) -> None:
         """Rig detection settings (min-marker-%) -- headless state, not
@@ -2413,16 +2392,32 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         self._rig_min_marker_pct_spin.setValue(1.0)
         self._rig_min_marker_pct_spin.valueChanged.connect(self._on_rig_min_marker_pct_changed)
 
-    def _build_rig_anchor_group(self) -> QGroupBox:
-        """Rig anchor status + anchoring actions -- rig loading/detection
-        settings moved out entirely (2026-08-14 follow-up, see
-        ``_init_rig_detect_settings``); the status label moved here
-        alongside the anchor actions it reports on. "Save Markers…" also
-        moved out, onto the button bar next to "Load Markers…"
-        (``_on_save_markers``/``_SaveMarkersDialog`` themselves are
-        unchanged -- only where the button lives)."""
-        group = QGroupBox("Rig Anchor")
+    def _build_rig_setup_group(self) -> QGroupBox:
+        """"Calibration rig setup" -- one of the sidebar's 4 top-level
+        sections (2026-08-15 follow-up, replacing the Actions/Anchoring
+        split from the round before): the button-bar's "Calib rig…"
+        (moved back here) plus the rig-anchoring status/actions that
+        used to be "Rig Anchor"'s own section, plus a new "Manage
+        rigs…" -- Harri: "we have calibration rigs and named saved
+        scene marker sets, so I think adding 'Manage...' buttons to
+        those sections would be the logical UI." "Save Markers…" stays
+        on the button bar (Markers section instead, see
+        ``_build_markers_group``) -- it isn't rig-specific, a saved
+        config can be sized ArUco/ChArUco markers with no rig involved
+        at all.
+        """
+        group = QGroupBox("Calibration rig setup")
         layout = QVBoxLayout(group)
+
+        self._calib_rig_btn = QPushButton("Calib rig…")
+        self._calib_rig_btn.setToolTip(
+            "Anchor the world coordinate system from a physical "
+            "calibration rig (file or already imported into this "
+            "session's DB) or a ChArUco board. Either way, immediately "
+            "detected and anchored across every camera with an image "
+            "loaded."
+        )
+        self._calib_rig_btn.clicked.connect(self._on_calib_rig_bulk)
 
         self._rig_status_label = QLabel("No rig config loaded.")
         self._rig_status_label.setWordWrap(True)
@@ -2462,18 +2457,142 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         btn_row.addWidget(anchor_btn)
         btn_row.addWidget(clear_btn)
 
-        manage_btn = QPushButton("Manage Scene Markers…")
-        manage_btn.setToolTip(
-            "View every scene marker stored for this session (including "
-            "the rig's own anchor row) and delete stale/wrong ones -- e.g. "
-            "a tag whose physical position has moved."
+        manage_rigs_btn = QPushButton("Manage rigs…")
+        manage_rigs_btn.setToolTip(
+            "View every rig imported into this session's registry and "
+            "delete stale ones, or import one from a file without "
+            "detecting/anchoring it yet."
         )
-        manage_btn.clicked.connect(self._on_manage_scene_markers)
+        manage_rigs_btn.clicked.connect(self._on_manage_rigs)
 
+        layout.addWidget(self._calib_rig_btn)
         layout.addWidget(self._rig_status_label)
         layout.addLayout(min_cams_row)
         layout.addLayout(btn_row)
-        layout.addWidget(manage_btn)
+        layout.addWidget(manage_rigs_btn)
+        return group
+
+    def _build_markers_group(self) -> QGroupBox:
+        """"Markers" -- one of the sidebar's 4 top-level sections
+        (2026-08-15 follow-up): the button-bar's "Detect markers…"/
+        "Load markers…"/"Save markers…" (moved back here) plus a new
+        "Manage markers…" (relocated from "Rig Anchor", where it was
+        confusing -- Harri: "the 'manage scene markers' is bit odd - I
+        don't really understand what it does" -- since it lived
+        alongside rig-specific controls despite managing this session's
+        saved marker positions generally, rig-anchor snapshot rows
+        included). ``_on_save_markers``/``_on_load_rig_from_scene_markers``/
+        ``_on_manage_scene_markers`` themselves are unchanged -- only
+        where their buttons live.
+        """
+        group = QGroupBox("Markers")
+        layout = QVBoxLayout(group)
+
+        self._detect_markers_btn = QPushButton("Detect markers…")
+        self._detect_markers_btn.setToolTip(
+            "Pick a marker dictionary and optional default size, then "
+            "detect ArUco markers across every camera with an image "
+            "loaded at once. A marker's 4 corners act as one control-"
+            "point group; give it a size (its row's \"Size (m)\" column "
+            "in the Data table) to also recover its rigid world pose "
+            "once ≥2 cameras have seen it. Use \"Save Markers…\" to "
+            "persist a sized marker's solved pose to this session's "
+            "scene markers, so a later capture can re-anchor from it "
+            "without a physical rig (\"Load Markers…\")."
+        )
+        self._detect_markers_btn.clicked.connect(self._on_detect_markers_bulk)
+
+        self._load_markers_btn = QPushButton("Load markers…")
+        self._load_markers_btn.setToolTip(
+            "Re-anchor from a named configuration saved with \"Save "
+            "Markers…\" in an earlier capture -- no physical rig or "
+            "config file needed. See design doc section 9 Tier B."
+        )
+        self._load_markers_btn.clicked.connect(self._on_load_rig_from_scene_markers)
+
+        self._save_markers_btn = QPushButton("Save markers…")
+        self._save_markers_btn.setToolTip(
+            "Save the current anchor (a file-sourced rig, and/or any "
+            "sized ArUco/ChArUco markers from the last solve) under a "
+            "name, so a later capture can reuse it via \"Load markers…\" "
+            "without a physical rig. Disabled until something is "
+            "anchored or solved."
+        )
+        self._save_markers_btn.setEnabled(False)
+        self._save_markers_btn.clicked.connect(self._on_save_markers)
+
+        manage_markers_btn = QPushButton("Manage markers…")
+        manage_markers_btn.setToolTip(
+            "View every scene marker stored for this session (including "
+            "a file-sourced rig's own saved anchor row) and delete "
+            "stale/wrong ones -- e.g. a tag whose physical position has "
+            "moved."
+        )
+        manage_markers_btn.clicked.connect(self._on_manage_scene_markers)
+
+        layout.addWidget(self._detect_markers_btn)
+        layout.addWidget(self._load_markers_btn)
+        layout.addWidget(self._save_markers_btn)
+        layout.addWidget(manage_markers_btn)
+        return group
+
+    def _build_solve_group(self) -> QGroupBox:
+        """"Solve" -- one of the sidebar's 4 top-level sections
+        (2026-08-15 follow-up): SIFT/RANSAC settings, the Solve/Cancel
+        buttons, "Load from DB…", and the shared status label reporting
+        on the latest action (solve or otherwise -- every bulk
+        action/detect/anchor writes its own outcome here too, unchanged)."""
+        group = QGroupBox("Solve")
+        layout = QVBoxLayout(group)
+
+        self._sift_check = QCheckBox("SIFT matching")
+        self._sift_check.setChecked(True)
+        self._sift_check.setToolTip(
+            "Use SIFT feature matching to initialise camera poses.\n"
+            "Uncheck to use only control points (requires ≥4 world-xyz CPs per camera)."
+        )
+
+        ransac_row = QHBoxLayout()
+        ransac_row.addWidget(QLabel("RANSAC:"))
+        self._ransac_px_spin = QDoubleSpinBox()
+        self._ransac_px_spin.setRange(1.0, 500.0)
+        self._ransac_px_spin.setSingleStep(1.0)
+        self._ransac_px_spin.setValue(8.0)
+        self._ransac_px_spin.setDecimals(1)
+        self._ransac_px_spin.setSuffix(" px")
+        self._ransac_px_spin.setToolTip(
+            "PnP RANSAC reprojection error threshold.\n"
+            "Increase if cameras with bad intrinsics or coplanar CPs fail to solve.\n"
+            "Large values allow wrong poses — use only for diagnosis."
+        )
+        ransac_row.addWidget(self._ransac_px_spin, 1)
+
+        self._solve_btn = QPushButton("Match && Solve")
+        self._solve_btn.clicked.connect(self._on_solve)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.clicked.connect(self._on_cancel_solve)
+        self._cancel_btn.setVisible(False)
+        solve_btn_row = QHBoxLayout()
+        solve_btn_row.addWidget(self._solve_btn)
+        solve_btn_row.addWidget(self._cancel_btn)
+
+        self._load_db_btn = QPushButton("Load from DB…")
+        self._load_db_btn.clicked.connect(self._on_load_from_db)
+        self._load_db_btn.setToolTip(
+            "Load a previously saved calibration to inspect camera positions and CP errors."
+        )
+
+        self._status_label = QLabel(
+            "Click 'Match & Solve' to run SIFT matching and bundle adjustment.  "
+            "Optionally add control points first (press a camera image to place one)."
+        )
+        self._status_label.setWordWrap(True)
+
+        layout.addWidget(self._sift_check)
+        layout.addLayout(ransac_row)
+        layout.addLayout(solve_btn_row)
+        layout.addWidget(self._load_db_btn)
+        layout.addWidget(self._status_label)
         return group
 
     def _populate_cam_pos_table_rows(self) -> None:
@@ -3490,8 +3609,17 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         """Open the view/delete dialog for this session's stored scene
         markers -- for pruning stale entries (e.g. a rig's own anchor row
         once it's been physically removed, or a moved tag), not something
-        needed on every normal "Load Markers…" load."""
+        needed on every normal "Load Markers…" load. Lives in the
+        "Markers" sidebar section (2026-08-15 follow-up)."""
         dlg = _SceneMarkerManagerDialog(self._conn, self._session_id, self)
+        dlg.exec()
+
+    def _on_manage_rigs(self) -> None:
+        """Open the view/delete/import dialog for this session's rig
+        registry (``marker_body_definitions``) -- the "Calibration rig
+        setup" sidebar section's counterpart to "Manage markers…"
+        (2026-08-15 follow-up, see ``_RigRegistryManagerDialog``)."""
+        dlg = _RigRegistryManagerDialog(self._conn, self)
         dlg.exec()
 
     def _save_markers_items(self) -> list[tuple[str, str]]:

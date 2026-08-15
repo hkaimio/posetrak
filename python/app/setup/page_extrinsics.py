@@ -55,7 +55,6 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
-    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -1071,7 +1070,7 @@ class _SceneMarkerManagerDialog(QDialog):
 
     def __init__(self, conn: sqlite3.Connection, session_id: str, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Manage Scene Markers")
+        self.setWindowTitle("Manage Markers")
         self.setMinimumSize(640, 360)
         self._conn = conn
         self._session_id = session_id
@@ -1243,7 +1242,12 @@ class _RigRegistryManagerDialog(QDialog):
         self._refresh()
 
     def _refresh(self) -> None:
-        self._rows = list_marker_bodies(self._conn)
+        old_factory = self._conn.row_factory
+        self._conn.row_factory = sqlite3.Row
+        try:
+            self._rows = list_marker_bodies(self._conn)
+        finally:
+            self._conn.row_factory = old_factory
         self._table.setRowCount(len(self._rows))
         for i, r in enumerate(self._rows):
             self._table.setItem(i, 0, QTableWidgetItem(r["name"] or ""))
@@ -1474,7 +1478,13 @@ class _CalibRigDialog(QDialog):
     RESULT_REGISTRY = 2
     RESULT_CHARUCO = 3
 
-    def __init__(self, conn: sqlite3.Connection, charuco_settings: dict, parent=None) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        charuco_settings: dict,
+        parent=None,
+        physical_min_marker_pct: float = 1.0,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Calibration Rig")
         self.setMinimumSize(560, 420)
@@ -1484,7 +1494,7 @@ class _CalibRigDialog(QDialog):
         self._registry_yaml: str | None = None
 
         self._tabs = QTabWidget()
-        self._tabs.addTab(self._build_physical_tab(conn), "Physical Rig")
+        self._tabs.addTab(self._build_physical_tab(conn, physical_min_marker_pct), "Physical Rig")
         self._tabs.addTab(self._build_charuco_tab(charuco_settings), "ChArUco Board")
 
         buttons = QDialogButtonBox(
@@ -1497,7 +1507,7 @@ class _CalibRigDialog(QDialog):
         layout.addWidget(self._tabs)
         layout.addWidget(buttons)
 
-    def _build_physical_tab(self, conn: sqlite3.Connection) -> QWidget:
+    def _build_physical_tab(self, conn: sqlite3.Connection, min_marker_pct: float) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
@@ -1509,7 +1519,12 @@ class _CalibRigDialog(QDialog):
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666; font-size: 10px;")
 
-        self._registry_rows = list_marker_bodies(conn)
+        old_factory = conn.row_factory
+        conn.row_factory = sqlite3.Row
+        try:
+            self._registry_rows = list_marker_bodies(conn)
+        finally:
+            conn.row_factory = old_factory
         self._registry_table = QTableWidget(len(self._registry_rows), 3)
         self._registry_table.setHorizontalHeaderLabels(["Name", "Source", "Created"])
         hdr = self._registry_table.horizontalHeader()
@@ -1539,7 +1554,7 @@ class _CalibRigDialog(QDialog):
         self._physical_min_pct_spin.setDecimals(2)
         self._physical_min_pct_spin.setSingleStep(0.1)
         self._physical_min_pct_spin.setSuffix(" %")
-        self._physical_min_pct_spin.setValue(1.0)
+        self._physical_min_pct_spin.setValue(min_marker_pct)
         self._physical_min_pct_spin.setToolTip(
             "Smallest marker cv2.aruco will accept, as a percentage of "
             "the frame's larger dimension. Lower this if nothing is "
@@ -3380,7 +3395,12 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             "legacy_pattern": self._charuco_legacy_pattern_cb.isChecked(),
             "min_marker_pct": self._charuco_min_marker_pct_spin.value(),
         }
-        dlg = _CalibRigDialog(self._conn, charuco_settings, self)
+        dlg = _CalibRigDialog(
+            self._conn,
+            charuco_settings,
+            self,
+            physical_min_marker_pct=self._rig_min_marker_pct_spin.value(),
+        )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 

@@ -35,9 +35,22 @@ def _stream_rotation(stream) -> int:
 def _parse_displaymatrix(data: bytes) -> int:
     """Parse clockwise rotation from a DISPLAYMATRIX side-data blob.
 
-    Modern Android phones (Pixel 7+) store rotation as a 3×3 fixed-point
-    matrix in frame side data rather than a plain 'rotate' metadata tag.
-    The blob is 36 bytes: nine 32-bit little-endian integers (16.16 fixed).
+    Modern Android phones (Pixel 7+, OnePlus 10 Pro confirmed 2026-08-15)
+    store rotation as a 3×3 fixed-point matrix in frame side data rather
+    than a plain 'rotate' metadata tag. The blob is 36 bytes: nine 32-bit
+    little-endian integers (16.16 fixed).
+
+    No negation here, unlike FFmpeg's own ``av_display_rotation_get()``
+    (which returns degrees to rotate *counter*-clockwise) -- this function
+    returns clockwise degrees directly, matching ``_apply_rotation``'s own
+    convention. A stray negation here (matching FFmpeg's CCW convention
+    literally, then treating the result as clockwise degrees) previously
+    produced exactly 180° of extra rotation -- confirmed against a real
+    OnePlus 10 Pro portrait capture whose matrix is
+    ``[0, 65536, 0, -65536, 0, 0, 0, 0, 1<<30]``: the negated formula
+    computed 270° clockwise, which is empirically upside-down (verified by
+    comparing against the same frame read via a backend that auto-rotates
+    correctly); the un-negated formula below computes the correct 90°.
     """
     if len(data) < 36:
         return 0
@@ -46,7 +59,7 @@ def _parse_displaymatrix(data: bytes) -> int:
     scale_y = math.hypot(m[1], m[4])
     if scale_x == 0 or scale_y == 0:
         return 0
-    return round(-math.atan2(m[1] / scale_y, m[0] / scale_x) * 180 / math.pi) % 360
+    return round(math.atan2(m[1] / scale_y, m[0] / scale_x) * 180 / math.pi) % 360
 
 
 def _apply_rotation(img: np.ndarray, degrees: int) -> np.ndarray:

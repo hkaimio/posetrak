@@ -23,6 +23,36 @@ last_updated = 2026-08-15
 See [extrinsics-improvements-design.md](extrinsics-improvements-design.md) for
 the problem statement, requirements, and full technical design.
 
+**2026-08-15: the OnePlus rotation mismatch found — resolves the "root cause
+still open" mystery from the Phase 9 capture-2 validation below.** Found
+while investigating a full end-to-end tracking run: `posetrak.detection.
+frame_source._parse_displaymatrix()` (parses the DISPLAYMATRIX side-data
+rotation modern Android phones use, see its own docstring) carried a sign
+error — it matched FFmpeg's own `av_display_rotation_get()` literally
+(which returns *counter*-clockwise degrees), then treated the result as
+clockwise degrees without renegating, computing 270° where 90° was
+correct. A 180°-off clockwise rotation reads as upside-down, not sideways
+— confirmed empirically against a real OnePlus 10 Pro portrait capture by
+comparing frames read via this function against the same frames read via
+a backend that auto-rotates correctly (`cv2.VideoCapture` on Windows).
+Fixed by removing the stray negation; 9 new tests in the previously
+nonexistent `test_frame_source.py` (this module had no test coverage at
+all despite being described elsewhere as "already-tested").
+
+This directly explains candidate (b) from the "root cause still open" note
+below (a portrait-mode rotation/calibration axis-convention mismatch) —
+plausible mechanism: the extrinsics-calibration GUI's own frame reader
+(`app/setup/video_reader.py`'s `FrameReader`, plain `cv2.VideoCapture`, no
+manual rotation code) already auto-rotates correctly on this system, so
+intrinsics/extrinsics were calibrated against correctly-oriented frames,
+while `frame_source.iter_frames` (used by the actual pose-detection
+pipeline) fed keypoint detection incorrectly-rotated ones — a systematic
+pixel-space mismatch between the camera model and its own detections, on
+exactly the one portrait-oriented camera in the rig. Not yet re-run
+against real capture-2 footage to confirm the error drops to gopro/ace2pro
+levels; the mechanism match is strong but this is not yet closed out as
+empirically re-verified.
+
 **2026-08-13: feature work paused for a UX design round, then reviewed.**
 After nine rounds of live-testing feedback each patching one confusing
 thing in an increasingly crowded `ExtrinsicsAutoCalibDialog`, Harri asked

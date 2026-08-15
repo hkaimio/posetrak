@@ -1,43 +1,68 @@
 # Extrinsics calibration — user guide
 
-Extrinsic calibration finds where every camera in a capture actually is —
-its 3-D position and orientation — in a shared, real-world coordinate
-frame. Posetrak needs this to triangulate a person's body keypoints into
-3-D and to solve joint angles from multiple camera views: without it, each
-camera's 2-D detections have no way to be combined into one 3-D scene.
+Extrinsic calibration finds where every camera used in a capture actually
+is — its position and orientation — in a shared, real-world coordinate
+frame. Posetrak needs this both ways: to triangulate 2-D keypoint
+detections into an initial 3-D estimate, and, during tracking, to project
+the skeleton model's 3-D joint positions back into each camera's 2-D image
+plane to compare against what was actually detected. Without extrinsics,
+per-camera detections have no way to be related to each other or to one
+shared 3-D scene.
 
 There are existing external tools for this (Pose2Sim among them); if
-you've already calibrated a capture that way, you don't need this guide —
+you've already calibrated your camera setup that way, you don't need this guide —
 just import the resulting TOML file ("Import TOML…", below). This guide
 covers Posetrak's own native calibration workflow: detecting markers or a
 calibration rig directly in the capture's own video, with no separate
 calibration session or extra software needed.
 
+Extrinsics calibration must be redone every time a camera is moved in any
+way, so it's associated with each capture individually (a set of videos
+shot simultaneously), not automatically shared across the whole session.
+If you know the cameras haven't moved between captures, you can just
+point a new capture at an already-solved calibration instead of
+recalibrating. But if there's any risk they moved anyway — for example,
+if starting a camera means pressing a button on it — calibrate every
+capture. This can be largely automated using scene markers, which
+Posetrak can detect and re-anchor from automatically (see "Save markers
+for reuse in later captures," below).
+
 ## Concepts
 
 A few terms this guide uses throughout:
 
-- **Control point (CP)** — a point clicked/dragged by hand in a camera
-  view. A CP can be *free* (just a correspondence that helps the solver,
-  no known real-world position) or have a **world position** set, in
-  which case it also fixes scale and origin.
-- **Fiducial marker** — an ArUco or ChArUco marker/board detected
-  automatically. A detected ArUco marker's 4 corners act as one control-
-  point group; give the marker a real-world size and it also contributes
-  a rigid pose once seen by 2+ cameras.
-- **Calibration rig** — several fiducial markers mounted at known,
-  fixed positions relative to each other (ideally non-planar — see
-  Prerequisites), captured in a small config file. Detecting a rig
-  anywhere in frame anchors the whole world coordinate frame in one step,
-  no per-marker sizing needed.
+- **Control point (CP)** — a point in the scene used to relate camera
+  views to each other: when it's visible in two or more cameras, Posetrak
+  can use it to match those views. You can place control points by hand
+  (clicking the same physical detail in each camera view), or get them
+  automatically from detected fiducial markers — each marker corner
+  becomes its own CP. SIFT feature matching (see Solve, below) is a
+  separate, fully automatic way of finding correspondences between
+  cameras, useful for initializing poses, but it doesn't produce
+  individually-manageable CPs in the Data table the way markers do. A CP
+  can be *free* (just a correspondence that helps the solver, no known
+  real-world position) or have a **world position** set, which also
+  fixes scale and origin.
+- **Fiducial marker** — a standardized pattern that Posetrak can detect
+  automatically from the camera image. Posetrak currently supports ArUco
+  markers and ChArUco boards (a chessboard grid with ArUco markers
+  embedded, useful as a flat calibration target). A detected ArUco
+  marker's 4 corners act as one control-point group; give the marker a
+  real-world size and it also contributes a rigid pose once seen by 2+
+  cameras.
+- **Calibration rig** — several fiducial markers mounted on a rigid
+  object at known, fixed positions relative to each other (ideally
+  non-planar — see Prerequisites), with those positions captured in a
+  small config file. Detecting a rig anywhere in frame anchors the whole
+  world coordinate frame in one step, no per-marker sizing needed.
 - **Anchoring** — the act of fixing the world coordinate frame's origin,
   scale, and orientation. This happens automatically when a rig or
   ChArUco board is detected, or manually by giving one or more control
   points a world position.
 - **Scene markers** — fiducial markers that aren't part of a rig, saved
-  under a name so a *later* capture (different session, cameras possibly
-  moved) can re-anchor from them without a physical rig present. See
-  "Save markers…"/"Load markers…" below.
+  under a name so a *later* capture in the same session (cameras possibly
+  moved in between) can re-anchor from them without a physical rig
+  present. See "Save markers…"/"Load markers…" below.
 - **Camera-position observation** — one camera manually sighting roughly
   where another camera is, when both happen to see each other. A weak
   extra position constraint, not required for normal use.
@@ -220,9 +245,9 @@ pixels, typically)?
   solve entirely while diagnosing it.
 - If a camera's own intrinsics might be slightly off for this particular
   footage (e.g. a zoom lens that refocused between calibration and
-  capture), try **Refine** for that camera — lets the solver adjust its
-  focal length within the bundle adjustment instead of trusting the
-  stored intrinsics exactly.
+  capture), try selecting **Refine** for that camera — this lets the
+  solver adjust that camera's focal length within the bundle adjustment
+  instead of trusting the stored intrinsics exactly.
 - The solver is incremental — it optimizes from whatever's already
   solved rather than starting fresh each time. It often works best to
   start with a small number of control points, solve once, then add more
@@ -238,12 +263,14 @@ solved pose — default all-checked, plus a required name.
 > 📷 **Screenshot 8:** the "Save markers…" dialog with its checklist and
 > name field.
 
-Saved markers can be reloaded in a **different** capture via **Load
-markers…** (step 2), letting that capture re-anchor from the same
-physical points with no rig present and even if the cameras have moved —
-useful for a room with permanently-mounted tags, or reusing a portable
-rig's last-known scattered markers after the rig itself has been packed
-away.
+Saved marker locations can be reloaded in a **different capture** via
+**Load markers…** (step 2), letting that capture re-anchor from the same
+physical points. This is especially useful if you do many captures in
+the same room: attach ArUco markers to the walls or other fixed
+structures, save their positions once from an initial extrinsics
+calibration, then for every future capture just load those markers and
+calibrate from them — even if the cameras themselves have moved in
+between.
 
 ### 8. Housekeeping
 

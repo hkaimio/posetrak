@@ -79,5 +79,19 @@ explicit = true
 torch = { index = "pytorch-cu126" }
 torchvision = { index = "pytorch-cu126" }
 
+[tool.uv]
+# rtmlib declares a hard dependency on plain "onnxruntime", but we want
+# onnxruntime-gpu instead (see the dependencies list above) -- both
+# packages install files into the same "onnxruntime" import namespace,
+# so having pip/uv install both leaves a version-mismatched mix of files
+# on disk (ImportError: cannot import name 'OrtDeviceVendorId' from
+# onnxruntime.capi.onnxruntime_inference_collection, seen 2026-08-15).
+# This override makes uv treat rtmlib's "onnxruntime" requirement as
+# never needing to be installed as its own package, since
+# onnxruntime-gpu already satisfies the import at runtime.
+override-dependencies = [
+    "onnxruntime; sys_platform == 'never'",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]

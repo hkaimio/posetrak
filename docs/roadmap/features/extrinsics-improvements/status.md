@@ -292,6 +292,29 @@ the genuine fallback case (a config with a marker missing its dictionary
 entry still gets one). Full regression sweep clean (1706 passed, 19
 skipped, 6 known pre-existing deselections).
 
+**Same session: two more requests from the live-testing pass.** Harri
+asked whether "Loaded marker corner"/purple was intentional (yes --
+confirmed the reasoning: it reuses the same pre-anchored detector/anchor
+mechanism as a rig, unlike a fresh "Marker" detection) and asked for two
+concrete additions, landed in `69dea4a`:
+
+- Selecting a Data table row now highlights the corresponding point(s)
+  in every camera view (lighter fill, thicker white ring) -- previously
+  CP-only. A "Marker" row highlights the whole marker group; "Board
+  corner"/"Rig corner"/"Loaded marker corner" highlight just that one
+  corner; "Cam pos obs" highlights that one cam-pos marker.
+- The detail pane's "Loaded marker corner" page gained "Remove Corner"/
+  "Remove Marker" buttons (physical-rig "Rig corner" rows still only get
+  the blanket Clear -- pruning a genuine rig's own geometry isn't a
+  normal workflow the way pruning one stale corner from a *loaded*
+  config is). Backed by `_rig_excluded_corners`/`_rig_excluded_markers`,
+  filtered in `_rig_control_points()` itself so the actual solve
+  respects the exclusion too, not just the display. Resets on loading a
+  new config; persists across Clear+redetect of the same one.
+
+Full regression sweep clean (1719 passed, 19 skipped, 6 known
+pre-existing deselections).
+
 ## Current state
 
 Phases 1-4 implemented (2026-08-09), grounded against the pre-existing

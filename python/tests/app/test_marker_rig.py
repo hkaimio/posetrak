@@ -158,6 +158,68 @@ def test_detect_empty_when_no_rig_markers_present(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# MarkerRigDetector.__init__ -- doesn't scan a dictionary none of this
+# config's own markers use (2026-08-15, Harri's "purple marker mixup"
+# report): a fully dictionary-specified config (every marker_corners key
+# has its own marker_dictionaries entry -- what a "Load Markers…" config
+# always is, see page_extrinsics.py's
+# _load_rig_config_from_scene_marker_group) must not get a detector for
+# this class' unrelated *dictionary* default/fallback ("DICT_4X4_50"),
+# which used to be added unconditionally regardless of whether any marker
+# needed it. That spurious scan could pick up a marker from a completely
+# different rig/config in that dictionary and, because detect()'s
+# membership filter checks only the bare numeric id (not dictionary),
+# silently misattribute it as one of this config's own markers if the
+# ids happened to coincide.
+# ---------------------------------------------------------------------------
+
+
+def _scene_markers_style_config(dictionary: str = "DICT_5X5_50") -> MarkerRigConfig:
+    """A config shaped like _load_rig_config_from_scene_marker_group
+    builds -- every marker_corners key has an explicit marker_dictionaries
+    entry, unlike _cube_rig_config's (which leaves it empty, the older
+    load_rig_config JSON-shape case the fallback exists for)."""
+    return MarkerRigConfig(
+        rig_id="scene markers (room7)",
+        marker_corners={"3": marker_local_corners(_SIZE)},
+        marker_dictionaries={"3": dictionary},
+    )
+
+
+def test_fully_specified_config_does_not_scan_the_unused_default_dictionary():
+    config = _scene_markers_style_config("DICT_5X5_50")
+    detector = MarkerRigDetector(config)  # dictionary=... not overridden, defaults to DICT_4X4_50
+    assert set(detector._aruco_by_dict) == {"DICT_5X5_50"}
+
+
+def test_fully_specified_config_ignores_a_same_id_marker_from_another_dictionary(monkeypatch):
+    """The exact reported scenario: a physical rig's own DICT_4X4_50
+    marker "3" must not be mistaken for a loaded DICT_5X5_50 scene
+    marker "3" just because the numeric ids coincide."""
+    config = _scene_markers_style_config("DICT_5X5_50")
+    detector = MarkerRigDetector(config)
+    assert "DICT_4X4_50" not in detector._aruco_by_dict  # nothing to monkeypatch onto it
+
+    monkeypatch.setattr(
+        detector._aruco_by_dict["DICT_5X5_50"], "detect", lambda *a, **kw: [],
+    )
+    result = detector.detect(np.zeros((10, 10, 3), np.uint8), video_id="camA")
+    assert result == []
+
+
+def test_config_with_some_markers_missing_dictionary_still_gets_fallback():
+    """The genuine older-load_rig_config-JSON-shape case the fallback
+    exists for: a marker with no per-marker dictionary entry must still
+    be detectable via the constructor's *dictionary* default."""
+    config = MarkerRigConfig(
+        rig_id="mixed", marker_corners={"3": marker_local_corners(_SIZE)},
+        marker_dictionaries={},  # "3" has no explicit entry -- needs the fallback
+    )
+    detector = MarkerRigDetector(config)
+    assert "DICT_4X4_50" in detector._aruco_by_dict
+
+
+# ---------------------------------------------------------------------------
 # MarkerRigDetector.estimate_rig_pose (diagnostic-only)
 # ---------------------------------------------------------------------------
 

@@ -764,9 +764,29 @@ class MarkerRigDetector:
             for dict_name in dictionaries_used
         }
         # Markers with no explicit per-marker dictionary use the fallback,
-        # so its detector must exist even if no marker's dictionary happens
-        # to equal it.
-        if dictionary not in self._aruco_by_dict:
+        # so its detector must exist -- but only when some marker in this
+        # config actually needs it (no per-marker entry, i.e. an older
+        # load_rig_config JSON-shaped config). A fully-specified config
+        # (every one of its own markers has an explicit dictionary entry
+        # -- e.g. one reconstructed from saved scene markers, "Load
+        # Markers…", see page_extrinsics.py's
+        # _load_rig_config_from_scene_marker_group) never touches this
+        # fallback and must not get an extra detector for it: adding one
+        # anyway used to scan a dictionary this config's own markers don't
+        # use at all (this class' *dictionary* default, "DICT_4X4_50",
+        # regardless of what the caller's markers actually are), and
+        # detect()'s membership filter matches by bare marker id with no
+        # dictionary check -- so a marker from a completely different
+        # rig/config in that spuriously-scanned dictionary, sharing a
+        # numeric id purely by coincidence with one of this config's own
+        # markers, would silently pass through as if it were one of them.
+        # See status.md's 2026-08-15 "purple marker mixup" entry for the
+        # real report this fixes (a physical rig's own DICT_4X4_50 marker
+        # detected as if it were a loaded DICT_5X5_50 scene marker).
+        needs_fallback = any(
+            mid not in config.marker_dictionaries for mid in config.marker_corners
+        )
+        if needs_fallback and dictionary not in self._aruco_by_dict:
             self._aruco_by_dict[dictionary] = ArucoDetector(
                 dictionary=dictionary, min_marker_perimeter_rate=min_marker_perimeter_rate,
             )

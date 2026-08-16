@@ -1284,6 +1284,22 @@ class CutieInitPanel(QWidget):
             self._set_status("Failed to encode seed mask.")
             return
 
+        # first_frame/last_frame bound the job's own propagation range for
+        # its direction -- CutieWorker._run_forward only ever reads
+        # last_frame (init_frame -> last_frame) and _run_backward only
+        # ever reads first_frame (first_frame -> init_frame), so the bound
+        # the *other* direction would have used is irrelevant to actual
+        # propagation. Setting it to the current frame here (rather than
+        # always passing the full mark_start/mark_end range regardless of
+        # direction) makes TrackingJob.summary's "first-last" display
+        # correctly show which range *this* job actually covers instead of
+        # showing the same range for both a forward and a backward job
+        # queued from the same position.
+        if direction == "forward":
+            first_frame, last_frame = local_frame, self._local_frame_for(cam, self._mark_end)
+        else:
+            first_frame, last_frame = self._local_frame_for(cam, self._mark_start), local_frame
+
         from app.pose.job_queue_runner import TrackingJob
         import uuid
         job = TrackingJob(
@@ -1294,8 +1310,8 @@ class CutieInitPanel(QWidget):
             init_frame=local_frame,
             init_mask_png=buf.tobytes(),
             persons_ordered=list(self._persons),
-            first_frame=self._local_frame_for(cam, self._mark_start),
-            last_frame=self._local_frame_for(cam, self._mark_end),
+            first_frame=first_frame,
+            last_frame=last_frame,
             direction=direction,
             max_dim=self._frame_cache._max_dim,
         )

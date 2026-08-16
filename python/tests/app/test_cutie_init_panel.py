@@ -397,3 +397,51 @@ def test_no_sync_points_falls_back_to_legacy_per_camera_domain(qapp, capture_db)
         assert panel._local_frame_for(cam, 42) == 42
     finally:
         panel.shutdown()
+
+
+def test_queue_tracking_range_reflects_direction(qapp, synced_capture_db):
+    """A Cutie tracking pass only ever propagates in one direction from
+    the current frame -- CutieWorker._run_forward reads only last_frame
+    (init_frame -> last_frame) and _run_backward reads only first_frame
+    (first_frame -> init_frame). Forward should show current frame -> mark
+    end; backward, mark start -> current frame -- not the full mark_start-
+    mark_end range for both, which used to make the Job Queue list show
+    the identical range regardless of direction."""
+    import cv2
+    import numpy as np
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    synced_capture_db.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('seg1', 'cap1', 0.0, 1e9, '2026-01-01T00:00:00Z')"
+    )
+    ok, buf = cv2.imencode(".png", np.ones((4, 4), dtype=np.uint8))
+    assert ok
+    synced_capture_db.execute(
+        "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
+        "VALUES ('seg1', 'sv1', 150, ?)",
+        (buf.tobytes(),),
+    )
+    synced_capture_db.commit()
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        assert panel._cam_combo.currentData()["id"] == "sv1"
+        panel._scrubber.setValue(panel._to_units(5.0))  # sv1 local frame 150
+
+        # Trial range [2.0, 8.0)s @ 30fps -> sv1 local frames [60, 240].
+        panel._queue_tracking("forward")
+        fwd_job = panel._runner.jobs[-1]
+        assert fwd_job.direction == "forward"
+        assert fwd_job.init_frame == 150
+        assert fwd_job.first_frame == 150
+        assert fwd_job.last_frame == 240
+
+        panel._queue_tracking("backward")
+        bwd_job = panel._runner.jobs[-1]
+        assert bwd_job.direction == "backward"
+        assert bwd_job.init_frame == 150
+        assert bwd_job.first_frame == 60
+        assert bwd_job.last_frame == 150
+    finally:
+        panel.shutdown()

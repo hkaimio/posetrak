@@ -833,6 +833,74 @@ def test_migrate_session_v41_to_v42_makes_seg_quality_runs_capture_scoped(
     conn.close()
 
 
+def test_migrate_session_v41_to_v42_with_seg_masks_present(tmp_path: Path) -> None:
+    """seg_masks.seg_quality_run_id REFERENCES seg_quality_runs(id) -- every
+    real session has seg_masks rows once any segmentation has actually been
+    used. DROP TABLE seg_quality_runs (part of the rebuild) previously
+    raised "FOREIGN KEY constraint failed" the instant a child row existed,
+    with PRAGMA foreign_keys=ON (the default for every connection this
+    codebase opens) -- caught live, 2026-08-16, app failing at startup
+    against a real session. The migration's own test above never had
+    seg_masks rows, so it never exercised this path. Regression test for
+    the fix: bracket the rebuild in PRAGMA foreign_keys=OFF/ON."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("PRAGMA foreign_keys = OFF")  # setup only -- camera_models isn't the point here
+    conn.execute("DROP TABLE seg_quality_runs")
+    conn.execute(
+        "CREATE TABLE seg_quality_runs ("
+        "    id TEXT PRIMARY KEY, detection_run_id TEXT NOT NULL, created_at TEXT NOT NULL,"
+        "    quality_source TEXT NOT NULL DEFAULT 'cutie',"
+        "    erosion_px INTEGER NOT NULL DEFAULT 5, mask_dir TEXT, notes TEXT"
+        ")"
+    )
+    conn.execute("PRAGMA user_version = 41")
+
+    conn.execute("INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')")
+    conn.execute(
+        "INSERT INTO captures (id, session_id, capture_number) VALUES ('cap1', 'sess1', 1)"
+    )
+    conn.execute(
+        "INSERT INTO sync_configs (id, shot_id, created_by) VALUES ('sync1', 'cap1', 'x')"
+    )
+    conn.execute(
+        "INSERT INTO detection_runs "
+        "(id, shot_id, sync_config_id, time_start_s, time_end_s, "
+        " detector_model, pose_model, created_at) "
+        "VALUES ('run1', 'cap1', 'sync1', 5.0, 10.0, 'd', 'p', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO seg_quality_runs (id, detection_run_id, created_at) "
+        "VALUES ('seg1', 'run1', '2026-01-01')"
+    )
+    conn.execute("INSERT INTO camera_models (id) VALUES ('cm1')")
+    conn.execute(
+        "INSERT INTO camera_instances (id, camera_model_id, label) VALUES ('ci1', 'cm1', 'camA')"
+    )
+    conn.execute(
+        "INSERT INTO capture_videos (id, shot_id, camera_instance_id, file_path,"
+        " first_video_frame, last_video_frame, actual_fps)"
+        " VALUES ('sv1', 'cap1', 'ci1', '/x.mp4', 0, 100, 30.0)"
+    )
+    conn.execute(
+        "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
+        "VALUES ('seg1', 'sv1', 0, X'00')"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)  # must not raise IntegrityError
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    # The mask row's FK is still satisfied against the rebuilt table.
+    row = conn.execute(
+        "SELECT seg_quality_run_id FROM seg_masks WHERE shot_video_id='sv1'"
+    ).fetchone()
+    assert row["seg_quality_run_id"] == "seg1"
+    conn.close()
+
+
 def test_migrate_session_v41_to_v42_creates_table_when_missing(tmp_path: Path) -> None:
     """seg_quality_runs was never given its own numbered migration when it
     was originally introduced (only added to session_schema.sql for fresh

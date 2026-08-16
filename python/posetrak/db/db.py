@@ -1328,6 +1328,16 @@ def _migrate_session_v41_to_v42(conn: sqlite3.Connection) -> None:
         _set_schema_version(conn, 42)
         conn.commit()
         return
+    # seg_masks.seg_quality_run_id REFERENCES seg_quality_runs(id), and any
+    # real session has seg_masks rows -- with PRAGMA foreign_keys=ON (the
+    # default for every connection this codebase opens), DROP TABLE below
+    # raises "FOREIGN KEY constraint failed" the moment a child row still
+    # points at it, before the RENAME below ever gets a chance to restore
+    # the relationship under the same table name. Same off/on-around-the-
+    # rebuild pattern trial_export.py/registry.py already use for bulk
+    # copies; can't be set mid-transaction, so it brackets the whole
+    # executescript call rather than living inside its own BEGIN/COMMIT.
+    conn.execute("PRAGMA foreign_keys = OFF")
     conn.executescript(
         "BEGIN;\n"
         + target_ddl.replace("seg_quality_runs", "seg_quality_runs_new")
@@ -1344,6 +1354,7 @@ def _migrate_session_v41_to_v42(conn: sqlite3.Connection) -> None:
         COMMIT;
         """
     )
+    conn.execute("PRAGMA foreign_keys = ON")
     _set_schema_version(conn, 42)
     conn.commit()
 

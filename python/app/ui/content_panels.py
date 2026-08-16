@@ -799,24 +799,37 @@ class CapturePanel(QWidget):
 
     def _refresh_extrinsics(self) -> None:
         """Update the Extrinsics… button's text/tooltip to reflect whether
-        this session has a solved calibration -- mirrors _refresh_sync()'s
-        pattern (query current DB state, update a toolbar control), called
-        on panel build and whenever the status dialog closes. See
-        docs/roadmap/features/extrinsics-improvements/
-        extrinsics-ux-redesign.md, UX Phase 2."""
+        *this capture* is actually usable for tracking -- mirrors
+        _refresh_sync()'s pattern (query current DB state, update a
+        toolbar control), called on panel build and whenever the status
+        dialog closes. See docs/roadmap/features/extrinsics-improvements/
+        extrinsics-ux-redesign.md, UX Phase 2.
+
+        Gates on captures.extrinsic_calibration_id specifically -- the
+        exact FK run_tracker.py resolves (and already warns "⚠ no
+        extrinsics" against when unset, see _trial_label there) -- not on
+        "does any calibration exist anywhere in the session with entries
+        for cameras this capture happens to use." The two used to be
+        conflated: calibrating one capture links *that* capture's own
+        extrinsic_calibration_id, but a second capture sharing the same
+        physical cameras would still show a ✓ here (its cameras have
+        matching extrinsic_entries somewhere in the session) even though
+        its own link was never set and the tracker would fail on it with
+        "No extrinsic entries found" -- caught live, 2026-08-16. There is
+        no UI action to link a capture to an already-solved calibration
+        from a sibling capture without recalibrating -- ExtrinsicsStatusDialog
+        only offers Calibrate… and Import TOML… -- so this button is only
+        about whether that link has actually happened for *this* capture,
+        however it happened.
+        """
         if self._ext_btn is None:
             return
-        session_row = self._conn.execute("SELECT id FROM mocap_sessions LIMIT 1").fetchone()
-        if session_row is None:
-            self._ext_btn.setText("Extrinsics…")
-            self._ext_btn.setToolTip("")
-            return
-        session_id = session_row["id"]
-        calib = self._conn.execute(
-            "SELECT id FROM extrinsic_calibrations WHERE session_id = ? "
-            "ORDER BY calibrated_at DESC LIMIT 1",
-            (session_id,),
+        cap_row = self._conn.execute(
+            "SELECT extrinsic_calibration_id FROM captures WHERE id = ?",
+            (self._capture_id,),
         ).fetchone()
+        calib_id = cap_row["extrinsic_calibration_id"] if cap_row else None
+
         # Scoped to cameras with a video in *this* capture, not every
         # camera the session has ever registered -- same fix as
         # ExtrinsicsStatusDialog's own camera query.
@@ -827,21 +840,38 @@ class CapturePanel(QWidget):
             ).fetchall()
         ]
         n_total = len(cam_ids)
-        if calib is None:
+
+        if not calib_id:
             self._ext_btn.setText("Extrinsics (not set)")
-            self._ext_btn.setToolTip("No extrinsics calibration yet for this session.")
+            self._ext_btn.setToolTip(
+                "No extrinsics calibration linked to this capture yet. Calibrate…"
+            )
             return
+
         if cam_ids:
             placeholders = ",".join("?" for _ in cam_ids)
             n_solved = self._conn.execute(
                 f"SELECT COUNT(*) FROM extrinsic_entries WHERE extrinsic_calibration_id = ? "
                 f"AND camera_instance_id IN ({placeholders})",
-                [calib["id"], *cam_ids],
+                [calib_id, *cam_ids],
             ).fetchone()[0]
         else:
             n_solved = 0
-        self._ext_btn.setText(f"Extrinsics ✓ ({n_solved}/{n_total})")
-        self._ext_btn.setToolTip(f"{n_solved} of {n_total} camera(s) solved for this session.")
+
+        if n_solved == 0:
+            # Linked, but the linked calibration has no entries for any of
+            # this capture's own cameras -- e.g. an attempted-but-not-
+            # completed solve. Same "not usable" state as no link at all.
+            self._ext_btn.setText("Extrinsics (not set)")
+            self._ext_btn.setToolTip(
+                "Extrinsics calibration is linked to this capture but has no "
+                "solved cameras -- the attempt may not have completed. Re-run Calibrate…."
+            )
+            return
+
+        check = "✓" if n_solved == n_total else "⚠"
+        self._ext_btn.setText(f"Extrinsics {check} ({n_solved}/{n_total})")
+        self._ext_btn.setToolTip(f"{n_solved} of {n_total} camera(s) solved for this capture.")
 
     def _open_new_trial_dialog(self) -> None:
         dlg = _NewTrialDialog(

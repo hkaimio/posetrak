@@ -89,6 +89,19 @@ def _seed_entry(conn: sqlite3.Connection, calib_id: str, camera_instance_id: str
     conn.commit()
 
 
+def _link_capture(conn: sqlite3.Connection, capture_id: str, calib_id: str) -> None:
+    """The step page_extrinsics.py's Accept handler does (UPDATE captures
+    SET extrinsic_calibration_id) -- the exact FK run_tracker.py resolves.
+    Deliberately separate from _seed_calibration/_seed_entry: a
+    calibration having entries for this capture's cameras is not the same
+    thing as this capture actually being linked to it (2026-08-16 fix)."""
+    conn.execute(
+        "UPDATE captures SET extrinsic_calibration_id = ? WHERE id = ?",
+        (calib_id, capture_id),
+    )
+    conn.commit()
+
+
 def _make_panel(conn: sqlite3.Connection, capture_id: str) -> CapturePanel:
     panel = CapturePanel.__new__(CapturePanel)
     QWidget.__init__(panel)
@@ -98,12 +111,17 @@ def _make_panel(conn: sqlite3.Connection, capture_id: str) -> CapturePanel:
     return panel
 
 
-def test_no_session_shows_default_text(qapp, tmp_path: Path) -> None:
+def test_nonexistent_capture_shows_not_set(qapp, tmp_path: Path) -> None:
+    """A capture id with no matching captures row (shouldn't normally
+    happen -- CapturePanel is always built for a real capture) reads the
+    same as "not set" rather than a separate blank state, now that the
+    query goes straight to captures.extrinsic_calibration_id instead of
+    first checking whether the session has any rows at all."""
     conn = create_session(tmp_path / "no_session.db")
     try:
         panel = _make_panel(conn, "nonexistent-capture")
         panel._refresh_extrinsics()
-        assert panel._ext_btn.text() == "Extrinsics…"
+        assert panel._ext_btn.text() == "Extrinsics (not set)"
     finally:
         conn.close()
 
@@ -123,22 +141,27 @@ def test_session_with_full_calibration_shows_counts(qapp, session_db) -> None:
     _seed_calibration(session_db)
     _seed_entry(session_db, "calib1", "inst1")
     _seed_entry(session_db, "calib1", "inst2")
+    _link_capture(session_db, capture_id, "calib1")
 
     panel = _make_panel(session_db, capture_id)
     panel._refresh_extrinsics()
     assert panel._ext_btn.text() == "Extrinsics ✓ (2/2)"
 
 
-def test_session_with_partial_calibration_shows_counts(qapp, session_db) -> None:
+def test_session_with_partial_calibration_shows_warning_not_checkmark(qapp, session_db) -> None:
+    """Linked, but only some of this capture's cameras are solved -- a
+    distinct ⚠ state, not a checkmark (2026-08-16 fix: a checkmark used
+    to appear whenever any calibration existed, complete or not)."""
     capture_id = _make_capture(session_db)
     _seed_camera(session_db, "inst1", "cam_A")
     _seed_camera(session_db, "inst2", "cam_B")
     _seed_calibration(session_db)
     _seed_entry(session_db, "calib1", "inst1")  # only one of two solved
+    _link_capture(session_db, capture_id, "calib1")
 
     panel = _make_panel(session_db, capture_id)
     panel._refresh_extrinsics()
-    assert panel._ext_btn.text() == "Extrinsics ✓ (1/2)"
+    assert panel._ext_btn.text() == "Extrinsics ⚠ (1/2)"
 
 
 def test_camera_count_scoped_to_this_capture_not_whole_session(qapp, session_db) -> None:
@@ -154,6 +177,7 @@ def test_camera_count_scoped_to_this_capture_not_whole_session(qapp, session_db)
     _seed_calibration(session_db)
     _seed_entry(session_db, "calib1", "inst1")
     _seed_entry(session_db, "calib1", "inst2")
+    _link_capture(session_db, "cap1", "calib1")
 
     panel = _make_panel(session_db, capture_id)
     panel._refresh_extrinsics()
@@ -171,6 +195,54 @@ def test_refresh_extrinsics_reflects_new_calibration(qapp, session_db) -> None:
 
     _seed_calibration(session_db)
     _seed_entry(session_db, "calib1", "inst1")
+    _link_capture(session_db, capture_id, "calib1")
     panel._refresh_extrinsics()
 
     assert panel._ext_btn.text() == "Extrinsics ✓ (1/1)"
+
+
+def test_calibration_exists_for_camera_but_not_linked_to_this_capture(qapp, session_db) -> None:
+    """The exact bug reported live 2026-08-16: calibrating one capture
+    (linking *its* extrinsic_calibration_id) left a fully-solved
+    calibration in the session covering the same physical cameras, but a
+    second capture using those same cameras was never itself linked to
+    it. run_tracker.py resolves captures.extrinsic_calibration_id
+    directly and fails with "No extrinsic entries found" for the second
+    capture -- the button must not show a checkmark for it either."""
+    cap1 = _make_capture(session_db, "cap1")
+    session_db.execute(
+        "INSERT INTO captures (id, session_id, capture_number) VALUES ('cap2', 'sess1', 2)"
+    )
+    session_db.commit()
+    _seed_camera(session_db, "inst1", "cam_A", capture_id="cap1")
+    # cap2 uses the same physical camera instance, just a different capture/video.
+    session_db.execute(
+        "INSERT INTO capture_videos "
+        "(id, shot_id, camera_instance_id, file_path, first_video_frame, "
+        " last_video_frame, actual_fps) "
+        "VALUES ('vid_cap2_inst1', 'cap2', 'inst1', '/fake/video2.mp4', 0, 1000, 30.0)"
+    )
+    session_db.commit()
+    _seed_calibration(session_db)
+    _seed_entry(session_db, "calib1", "inst1")
+    _link_capture(session_db, "cap1", "calib1")  # only cap1 is linked
+
+    panel = _make_panel(session_db, "cap2")
+    panel._refresh_extrinsics()
+    assert panel._ext_btn.text() == "Extrinsics (not set)"
+    assert "linked to this capture" in panel._ext_btn.toolTip()
+
+
+def test_linked_calibration_with_no_solved_cameras_shows_not_set(qapp, session_db) -> None:
+    """Linked, but the linked calibration has zero entries for this
+    capture's cameras -- an attempted-but-not-completed solve. Must read
+    as "not set", not a checkmark."""
+    capture_id = _make_capture(session_db)
+    _seed_camera(session_db, "inst1", "cam_A")
+    _seed_calibration(session_db)
+    _link_capture(session_db, capture_id, "calib1")  # linked, but no entries at all
+
+    panel = _make_panel(session_db, capture_id)
+    panel._refresh_extrinsics()
+    assert panel._ext_btn.text() == "Extrinsics (not set)"
+    assert "may not have completed" in panel._ext_btn.toolTip()

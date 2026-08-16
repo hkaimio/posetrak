@@ -1,12 +1,14 @@
 # Segmentation as a reusable, time-range-scoped bbox source — design sketch
 
-> **Status (2026-07-14)**: Sketch only, not implemented. Explicitly postponed
-> — hand-detection-refinement Phase 2/3 (see
-> `docs/roadmap/features/hand-detection-refinement/`) takes priority.
-> Written up after a real-data test of that feature exposed that reusing an
-> existing segmentation across multiple detection runs is currently
-> impossible, which turned out to trace back to a data-model
-> misunderstanding rather than a small missing option.
+> **Status (2026-08-16)**: Gap 1 (the schema mismatch this doc diagnoses)
+> implemented and live-tested — see status.md for what landed and exactly
+> what's still open. Gaps 2 (pipeline convergence) and 3 (auto-assignment)
+> remain sketch-only, not implemented.
+>
+> Originally written up 2026-07-14 after a real-data test of
+> hand-detection-refinement exposed that reusing an existing segmentation
+> across multiple detection runs was currently impossible, tracing back to
+> this same data-model misunderstanding.
 
 ## Motivating misunderstanding
 

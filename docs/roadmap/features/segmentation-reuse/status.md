@@ -89,17 +89,40 @@ wiring is tested with `JobQueueRunner.start()` stubbed out and the finalise step
 against seeded DB state, the same pattern already used for gap 3's `CutieInitPanel` tests. A live
 run through the actual dialog is the natural next validation step.
 
+**2026-08-16 follow-up: global-time scrubbing in `CutieInitPanel`.** Live feedback from the first
+click-through: opening segmentation from a trial gave no indication of the trial's own start/end
+at all, and the scrubber was per-camera-video-frame-specific — worse than just "no trial
+indication," `_on_camera_changed` actually *reset* Mark Start/End to the new camera's full frame
+range on every camera switch, silently discarding whatever range had been marked.
+
+Fixed by re-basing the scrubber/marks onto global time (via the existing `SyncTable`, the same
+machinery `DetectionPipeline`/`RunDetectionDialog`'s gap-2 path already use) whenever the capture
+has a solved sync: scrubber min/max is computed once from the union of every camera's own footage
+range, marks are shared across cameras instead of reset on switch (`_local_frame_for`/
+`_global_units_for_local` convert at the one boundary that needs a specific camera's local frame:
+display, mask storage, job frame ranges), and `RangeBar` gained a second, amber band showing the
+opening trial's own bounds — informational only, never a constraint, since marks must stay freely
+adjustable (redo only part of a trial, or run wider than one trial on purpose). Marks default to
+the trial's bounds when one is known, full available range otherwise. Falls back to the exact
+pre-refactor per-camera-frame behaviour when no sync config has been solved for the capture yet.
+
+This also closes the `time_start_s`/`time_end_s` sentinel gap noted below: `_ensure_seg_run()` and
+`_resolve_or_create_detection_run()` now record the real marked range (seconds) instead of always
+`0.0`/`1e9`, whenever a sync table is available. `_queue_pose_jobs()` also switched from each
+camera's full track range to the marked range specifically, so narrowing/widening marks now
+actually controls what gets pose-extracted, not just what gets segmented.
+
+14 new tests in `test_cutie_init_panel.py` (trial-bounds default, free adjustability away from
+those bounds, the camera-switch bug directly, unit conversion round-trips, the real-range
+persistence, and the no-sync legacy fallback). Full regression sweep clean.
+
 ## Known issues / open questions
 
 - **Not yet live-tested end to end** — see "Current state" above.
-- An interactively-created segmentation's own `time_start_s`/`time_end_s` are set to `0.0`/a large
-  sentinel (effectively "covers the whole capture") rather than the actually-segmented range —
-  masks are stored per-frame regardless of range today, so this doesn't affect correctness, but it
-  means the containment check design doc's target vision describes can't yet distinguish "a short,
-  trial-specific segmentation" from "one that happens to cover everything." `RunDetectionDialog`'s
-  segmentation picker currently lists *every* segmentation for the capture unconditionally rather
-  than filtering by range containment against the trial being detected — narrowing both of these
-  to the real segmented range is real future work, not done here.
+- `RunDetectionDialog`'s segmentation picker still lists *every* segmentation for the capture
+  unconditionally rather than filtering/ranking by range containment against the trial being
+  detected, now that `time_start_s`/`time_end_s` are usually real values (2026-08-16 follow-up) —
+  the picker itself wasn't touched.
 - No UI for the case where more than one existing segmentation covers a trial's time range beyond
   "list them all in the combo, most recent first" — no smarter disambiguation.
 - Whether `keypoint_obs_quality` scoring stays keyed to the segmentation alone once one

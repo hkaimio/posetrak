@@ -20,7 +20,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 8
-SESSION_SCHEMA_VERSION: Final[int] = 41
+SESSION_SCHEMA_VERSION: Final[int] = 42
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1262,6 +1262,92 @@ def _migrate_session_v40_to_v41(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v41_to_v42(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 41 to 42.
+
+    v42 makes seg_quality_runs a time-range-scoped, capture-level resource
+    instead of being permanently 1:1 with one detection run -- adds
+    shot_id/trial_id/time_start_s/time_end_s (mirroring detection_runs'
+    own columns), drops the NOT NULL detection_run_id FK. Lets a
+    segmentation be created (and its masks used to drive pose extraction)
+    before any detection run exists for the capture -- previously the
+    only way to open the segmentation UI at all was to already have run
+    YOLO detection once, purely to get a detection_runs row to hang the
+    segmentation off of. See docs/roadmap/features/segmentation-reuse/
+    segmentation-reuse-design.md.
+
+    SQLite can't drop a NOT NULL column with the ALTER syntax this
+    codebase otherwise uses for additive migrations (v38-v41 above), so
+    the table is rebuilt (same shape as
+    db/migrations/024_pose_observations_source.sql). Existing rows
+    backfill their new shot_id/trial_id/time_start_s/time_end_s from
+    their (until now, 1:1) owning detection_runs row -- a reasonable
+    default since today's relationship means the owning run's own range
+    *is* the segmentation's range in every existing session. A
+    seg_quality_runs row whose detection_run_id no longer resolves (should
+    not happen given detection runs are append-only/never deleted, but not
+    airtight-verified across every existing session -- see the design
+    doc's own open question 5) is dropped by the join rather than kept
+    with a fabricated range.
+
+    seg_quality_runs itself may not exist at all yet: unlike every other
+    table this table's own introduction was never given its own numbered
+    migration (only added to session_schema.sql for fresh sessions), so a
+    session that has been incrementally migrated all the way from an old
+    schema version genuinely never got it created (confirmed via
+    test_session_v2_migrates_to_v3, a v2-schema session run through the
+    full migration chain to current). Handled here rather than filed as
+    yet another gap: if the table doesn't exist, just create it directly
+    in its v42 shape -- nothing to rebuild or backfill.
+    """
+    existing_tables = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    target_ddl = """
+        CREATE TABLE seg_quality_runs (
+            id             TEXT PRIMARY KEY,
+            shot_id        TEXT NOT NULL REFERENCES captures(id),
+            trial_id       TEXT REFERENCES trials(id),
+            time_start_s   REAL NOT NULL,
+            time_end_s     REAL NOT NULL,
+            created_at     TEXT NOT NULL,
+            quality_source TEXT NOT NULL DEFAULT 'cutie',
+            erosion_px     INTEGER NOT NULL DEFAULT 5,
+            mask_dir       TEXT,
+            notes          TEXT
+        );
+    """
+    if "seg_quality_runs" not in existing_tables:
+        conn.executescript(target_ddl)
+        _set_schema_version(conn, 42)
+        conn.commit()
+        return
+
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(seg_quality_runs)")}
+    if "shot_id" in existing_cols:
+        _set_schema_version(conn, 42)
+        conn.commit()
+        return
+    conn.executescript(
+        "BEGIN;\n"
+        + target_ddl.replace("seg_quality_runs", "seg_quality_runs_new")
+        + """
+        INSERT INTO seg_quality_runs_new
+            (id, shot_id, trial_id, time_start_s, time_end_s, created_at,
+             quality_source, erosion_px, mask_dir, notes)
+        SELECT sqr.id, dr.shot_id, dr.trial_id, dr.time_start_s, dr.time_end_s,
+               sqr.created_at, sqr.quality_source, sqr.erosion_px, sqr.mask_dir, sqr.notes
+        FROM seg_quality_runs sqr
+        JOIN detection_runs dr ON dr.id = sqr.detection_run_id;
+        DROP TABLE seg_quality_runs;
+        ALTER TABLE seg_quality_runs_new RENAME TO seg_quality_runs;
+        COMMIT;
+        """
+    )
+    _set_schema_version(conn, 42)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1405,6 +1491,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 40
     if actual == 40:
         _migrate_session_v40_to_v41(conn)
+        actual = 41
+    if actual == 41:
+        _migrate_session_v41_to_v42(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

@@ -138,8 +138,8 @@ def test_no_observations_and_no_edits_returns_empty(tmp_path):
 def seg_db(status_db):
     """Adds a seg_quality_run + per-keypoint quality for frame 1: kp0 outside, kp1 inside."""
     status_db.execute(
-        "INSERT INTO seg_quality_runs (id, detection_run_id, created_at)"
-        " VALUES ('sq1', 'run1', '2026-01-01T00:00:00Z')"
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at)"
+        " VALUES ('sq1', 'shot1', 0.0, 1e9, '2026-01-01T00:00:00Z')"
     )
     quality = np.array([0.0, 1.0, 0.5, -1.0], dtype=np.float32)
     status_db.execute(

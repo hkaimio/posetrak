@@ -77,13 +77,16 @@ log = logging.getLogger(__name__)
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS seg_quality_runs (
-    id               TEXT PRIMARY KEY,
-    detection_run_id TEXT NOT NULL,
-    created_at       TEXT NOT NULL,
-    quality_source   TEXT NOT NULL DEFAULT 'cutie',
-    erosion_px       INTEGER NOT NULL DEFAULT 5,
-    mask_dir         TEXT,
-    notes            TEXT
+    id             TEXT PRIMARY KEY,
+    shot_id        TEXT NOT NULL REFERENCES captures(id),
+    trial_id       TEXT REFERENCES trials(id),
+    time_start_s   REAL NOT NULL,
+    time_end_s     REAL NOT NULL,
+    created_at     TEXT NOT NULL,
+    quality_source TEXT NOT NULL DEFAULT 'cutie',
+    erosion_px     INTEGER NOT NULL DEFAULT 5,
+    mask_dir       TEXT,
+    notes          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS keypoint_obs_quality (
@@ -734,13 +737,22 @@ def main() -> None:
         debug_dir.mkdir(parents=True, exist_ok=True)
         log.info("Debug masks will be saved to: %s", debug_dir)
 
+    # Time-range-scoped on the capture now, not tied to this one detection
+    # run (see docs/roadmap/features/segmentation-reuse/
+    # segmentation-reuse-design.md) -- backfilled from the detection run
+    # this tool was pointed at, same as the v41->v42 migration does for
+    # pre-existing rows.
     conn.execute(
         "INSERT INTO seg_quality_runs "
-        "(id, detection_run_id, created_at, quality_source, erosion_px, mask_dir, notes) "
-        "VALUES (?, ?, ?, 'cutie', ?, ?, ?)",
+        "(id, shot_id, trial_id, time_start_s, time_end_s, created_at, "
+        " quality_source, erosion_px, mask_dir, notes) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'cutie', ?, ?, ?)",
         (
             seg_run_id,
-            args.detection_run_id,
+            run_row["shot_id"],
+            run_row["trial_id"],
+            run_row["time_start_s"],
+            run_row["time_end_s"],
             datetime.datetime.now(datetime.timezone.utc).isoformat(),
             args.erosion_px,
             str(debug_dir) if debug_dir else None,

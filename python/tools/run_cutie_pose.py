@@ -81,13 +81,16 @@ _PERSON_PANEL_W = 300  # fixed width per person panel
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS seg_quality_runs (
-    id               TEXT PRIMARY KEY,
-    detection_run_id TEXT NOT NULL,
-    created_at       TEXT NOT NULL,
-    quality_source   TEXT NOT NULL DEFAULT 'cutie',
-    erosion_px       INTEGER NOT NULL DEFAULT 5,
-    mask_dir         TEXT,
-    notes            TEXT
+    id             TEXT PRIMARY KEY,
+    shot_id        TEXT NOT NULL REFERENCES captures(id),
+    trial_id       TEXT REFERENCES trials(id),
+    time_start_s   REAL NOT NULL,
+    time_end_s     REAL NOT NULL,
+    created_at     TEXT NOT NULL,
+    quality_source TEXT NOT NULL DEFAULT 'cutie',
+    erosion_px     INTEGER NOT NULL DEFAULT 5,
+    mask_dir       TEXT,
+    notes          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS keypoint_obs_quality (
@@ -828,13 +831,18 @@ def main() -> None:
     )
     log.info("New detection run: %s", new_run_id)
 
-    # Create seg quality run
+    # Create seg quality run -- time-range-scoped on the capture now, not
+    # tied to new_run_id (see docs/roadmap/features/segmentation-reuse/
+    # segmentation-reuse-design.md); backfilled from the source run's own
+    # shot/time range, same as new_run_id itself inherits above.
     seg_run_id = str(uuid.uuid4())
     conn.execute(
         "INSERT INTO seg_quality_runs "
-        "(id, detection_run_id, created_at, quality_source, erosion_px, notes) "
-        "VALUES (?,?,?,'cutie',?,?)",
-        (seg_run_id, new_run_id,
+        "(id, shot_id, trial_id, time_start_s, time_end_s, created_at, "
+        " quality_source, erosion_px, notes) "
+        "VALUES (?,?,?,?,?,?,'cutie',?,?)",
+        (seg_run_id, src_row["shot_id"], src_row["trial_id"],
+         src_row["time_start_s"], src_row["time_end_s"],
          datetime.datetime.now(datetime.timezone.utc).isoformat(),
          args.erosion_px,
          f"cutie-rtmpose run from source {args.source_run_id[:8]}"),

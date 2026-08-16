@@ -236,7 +236,6 @@ def _resolve_plan(
     if scope in (ExportScope.DETECTION_ONLY, ExportScope.FULL):
         p.detection_run_ids |= _fetch_col(src, "detection_runs", "id", "shot_id",   p.capture_ids)
         p.detection_run_ids |= _fetch_col(src, "detection_runs", "id", "trial_id",  p.trial_ids)
-        p.seg_quality_ids   |= _fetch_col(src, "seg_quality_runs", "id", "detection_run_id", p.detection_run_ids)
         p.sequence_ids      |= _fetch_col(src, "pose_observation_sequences", "id", "detection_run_id", p.detection_run_ids)
         p.sequence_ids      |= _fetch_col(src, "pose_observation_sequences", "id", "shot_id", p.capture_ids)
 
@@ -273,9 +272,6 @@ def _resolve_plan(
                 p.capture_ids.add(row[0])
                 if row[1]:
                     p.detection_run_ids.add(row[1])
-                    p.seg_quality_ids |= _fetch_col(
-                        src, "seg_quality_runs", "id", "detection_run_id", {row[1]}
-                    )
                 if row[2]: p.sync_config_ids.add(row[2])
         except sqlite3.DatabaseError:
             pass
@@ -333,6 +329,14 @@ def _resolve_plan(
     # cameras → models
     p.camera_model_ids |= _fetch_col(src, "camera_instances", "camera_model_id", "id", p.camera_instance_ids)
     p.camera_model_ids |= _fetch_col(src, "camera_modes",     "camera_model_id", "id", p.camera_mode_ids)
+
+    # seg_quality_runs is capture-scoped (shot_id/trial_id of its own, see
+    # docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md),
+    # not tied to any one detection run -- fetched by shot_id once
+    # p.capture_ids is fully settled (every walk-up/walk-down pass above
+    # may still add captures), not tied to `scope`, since a segmentation
+    # can exist -- and be worth exporting -- before any detection run does.
+    p.seg_quality_ids |= _fetch_col(src, "seg_quality_runs", "id", "shot_id", p.capture_ids)
 
     return p
 

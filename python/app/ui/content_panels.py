@@ -960,7 +960,8 @@ class TrialPanel(QWidget):
 
     def _build(self) -> None:
         trial = self._conn.execute(
-            "SELECT t.id, t.name, t.time_start_s, t.time_end_s, c.label AS capture_label "
+            "SELECT t.id, t.capture_id, t.name, t.time_start_s, t.time_end_s, "
+            "       c.label AS capture_label "
             "FROM trials t JOIN captures c ON c.id = t.capture_id WHERE t.id = ?",
             (self._trial_id,),
         ).fetchone()
@@ -968,6 +969,10 @@ class TrialPanel(QWidget):
             self.setLayout(QVBoxLayout())
             self.layout().addWidget(QLabel("Trial not found."))
             return
+        self._capture_id = trial["capture_id"]
+
+        from posetrak.db.manage_person import list_persons
+        persons = list_persons(self._conn, self._capture_id)
 
         detection_runs = self._conn.execute(
             "SELECT id, detector_model, pose_model, status, created_at "
@@ -1017,11 +1022,17 @@ class TrialPanel(QWidget):
         # Segmentation section
         seg_box = _section("Segmentation")
         self._seg_btn = QPushButton(
-            "Create segmentation" if detection_runs else "No detection runs yet"
+            "Create segmentation" if persons else "Define persons for this capture first"
         )
-        self._seg_btn.setEnabled(bool(detection_runs))
+        self._seg_btn.setEnabled(bool(persons))
         self._seg_btn.setToolTip(
-            "Open interactive Cutie segmentation initialisation"
+            "Open interactive Cutie segmentation initialisation. Segmentation "
+            "labels masks by person, so the capture needs at least one person "
+            "defined first (Capture page) -- no detection run needed yet, "
+            "segmentation can seed pose extraction from scratch."
+            if persons else
+            "Define at least one person for this capture (Capture page) before "
+            "segmentation -- masks are labeled per person."
         )
         self._seg_btn.clicked.connect(self._on_open_seg_init)
         seg_box.inner_layout().addWidget(self._seg_btn)
@@ -1082,19 +1093,19 @@ class TrialPanel(QWidget):
         self.layout().addWidget(_scrollable(inner))
 
     def _on_open_seg_init(self) -> None:
-        row = self._conn.execute(
-            "SELECT id FROM detection_runs WHERE trial_id = ? ORDER BY created_at DESC LIMIT 1",
-            (self._trial_id,),
-        ).fetchone()
-        if not row:
-            return
+        # Capture-scoped now (see docs/roadmap/features/segmentation-reuse/
+        # segmentation-reuse-design.md) -- no detection_runs row required
+        # to exist first; the button's own enabled-state already gates on
+        # this capture having at least one person defined.
         from app.pose.cutie_init_panel import CutieInitPanel
         win = QWidget(self, Qt.WindowType.Window)
         win.setWindowTitle("Cutie Segmentation Init")
         win.resize(1200, 750)
         layout = QVBoxLayout(win)
         layout.setContentsMargins(0, 0, 0, 0)
-        panel = CutieInitPanel(self._conn, row["id"], parent=win)
+        panel = CutieInitPanel(
+            self._conn, self._capture_id, parent=win, trial_id=self._trial_id
+        )
         layout.addWidget(panel)
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         win.destroyed.connect(panel.shutdown)

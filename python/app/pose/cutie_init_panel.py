@@ -154,12 +154,24 @@ class CutieInitPanel(QWidget):
     def __init__(
         self,
         conn: sqlite3.Connection,
-        detection_run_id: str,
+        shot_id: str,
         parent: QWidget | None = None,
+        trial_id: str | None = None,
     ) -> None:
+        """*shot_id* is the capture this segmentation belongs to (see
+        docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md's
+        terminology note: ``capture_videos.shot_id`` etc. reference
+        ``captures``, not a separate shots table). No detection run needs
+        to exist yet -- segmentation is capture-scoped and independent of
+        any specific detection run; one gets created lazily, on demand,
+        when pose extraction is actually queued (``_resolve_or_create_detection_run``).
+        *trial_id* is optional provenance (which trial this panel happened
+        to be opened from) threaded onto any detection run created here;
+        not required for anything to function."""
         super().__init__(parent)
         self._conn = conn
-        self._run_id = detection_run_id
+        self._shot_id = shot_id
+        self._trial_id = trial_id
         self._frame_cache = FrameCache(max_frames=300, max_dim=1920)
 
         # Populated by _load_run()
@@ -479,15 +491,12 @@ class CutieInitPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _load_run(self) -> None:
-        run_row = self._conn.execute(
-            "SELECT shot_id FROM detection_runs WHERE id = ?",
-            (self._run_id,),
-        ).fetchone()
-        if run_row is None:
-            self._set_status("Detection run not found.")
-            return
-
-        shot_id = run_row["shot_id"]
+        shot_id = self._shot_id
+        # track_first/track_last: narrow the scrubber to whichever range any
+        # prior detection run on this capture already covers (falls back to
+        # the full video range below when none exists) -- scoped across
+        # every detection run for the capture now, not one specific run,
+        # since segmentation is no longer tied to a single detection run.
         cam_rows = self._conn.execute(
             "SELECT cv.id, cv.file_path, cv.first_video_frame, cv.last_video_frame, "
             "       cv.actual_fps, "
@@ -497,11 +506,12 @@ class CutieInitPanel(QWidget):
             "FROM capture_videos cv "
             "LEFT JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
             "LEFT JOIN person_tracks pt "
-            "       ON pt.shot_video_id = cv.id AND pt.detection_run_id = ? "
+            "       ON pt.shot_video_id = cv.id "
+            "       AND pt.detection_run_id IN (SELECT id FROM detection_runs WHERE shot_id = ?) "
             "WHERE cv.shot_id = ? "
             "GROUP BY cv.id "
             "ORDER BY label",
-            (self._run_id, shot_id),
+            (shot_id, shot_id),
         ).fetchall()
 
         self._cameras = [
@@ -520,18 +530,29 @@ class CutieInitPanel(QWidget):
 
         seg_row = self._conn.execute(
             "SELECT id FROM seg_quality_runs "
-            "WHERE detection_run_id = ? ORDER BY created_at DESC LIMIT 1",
-            (self._run_id,),
+            "WHERE shot_id = ? ORDER BY created_at DESC LIMIT 1",
+            (shot_id,),
         ).fetchone()
         if seg_row:
             self._seg_run_id = seg_row["id"]
 
-        person_rows = self._conn.execute(
-            "SELECT DISTINCT person_name FROM detection_track_assignments "
-            "WHERE detection_run_id = ? ORDER BY person_name",
-            (self._run_id,),
-        ).fetchall()
-        self._persons = [r["person_name"] for r in person_rows]
+        # Persons: capture-level definitions (can exist before any detection
+        # has run -- the real prerequisite for segmentation, not "detection
+        # already ran") union'd with any names already assigned to tracks
+        # from a prior detection run on this capture, so captures that went
+        # through the old detect-first flow keep working unchanged. See
+        # docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.
+        from posetrak.db.manage_person import list_persons
+        person_names = {r["name"] for r in list_persons(self._conn, shot_id)}
+        person_names |= {
+            r["person_name"] for r in self._conn.execute(
+                "SELECT DISTINCT dta.person_name FROM detection_track_assignments dta "
+                "JOIN detection_runs dr ON dr.id = dta.detection_run_id "
+                "WHERE dr.shot_id = ?",
+                (shot_id,),
+            ).fetchall()
+        }
+        self._persons = sorted(person_names)
 
         self._rebuild_camera_combo()
         self._rebuild_person_selector()
@@ -1091,26 +1112,26 @@ class CutieInitPanel(QWidget):
     def _resolve_or_create_detection_run(self, pose_model: str) -> str | None:
         """Return a detection_run_id to write pose results into, or None if cancelled.
 
-        Creates a new run silently if none exists; asks the user what to do
-        if a run with the same pose_model already exists for this shot.
+        Creates a new run silently if none exists for this capture yet;
+        asks the user what to do if a run with the same pose_model already
+        exists. No longer resolves shot_id/sync_config_id from a pre-
+        existing "parent" detection run -- the panel is capture-scoped
+        (self._shot_id) now, so this is the one place that still needs a
+        sync config to exist before it can create a fresh detection run.
         """
         from app.pose.db_cache import create_detection_run
         from PySide6.QtWidgets import QMessageBox
 
-        row = self._conn.execute(
-            "SELECT shot_id, sync_config_id, trial_id, time_start_s, time_end_s "
-            "FROM detection_runs WHERE id=?",
-            (self._run_id,),
+        shot_id = self._shot_id
+        sync_row = self._conn.execute(
+            "SELECT id FROM sync_configs WHERE shot_id = ? ORDER BY rowid DESC LIMIT 1",
+            (shot_id,),
         ).fetchone()
-        if row is None:
-            self._set_status("Could not find parent detection run.")
+        if sync_row is None:
+            self._set_status("No sync config for this capture yet — set one up first.")
             return None
-
-        shot_id       = row["shot_id"]
-        sync_cfg_id   = row["sync_config_id"]
-        trial_id      = row["trial_id"]       # propagate so new run sits under same trial
-        time_start_s  = row["time_start_s"]
-        time_end_s    = row["time_end_s"]
+        sync_cfg_id = sync_row["id"]
+        trial_id = self._trial_id
 
         existing = self._conn.execute(
             "SELECT id, created_at FROM detection_runs "
@@ -1129,9 +1150,15 @@ class CutieInitPanel(QWidget):
         pose_w, pose_h = _pm_hw[1], _pm_hw[0]
 
         if not existing:
+            # time_start_s/time_end_s are provenance metadata on
+            # detection_runs, not the actual per-camera frame gating (that's
+            # PoseExtractionJob.first_frame/last_frame, resolved per camera
+            # from cam["track_first"]/["track_last"] below) -- no single
+            # meaningful range to record without a parent run to inherit
+            # one from, so 0.0/0.0.
             return create_detection_run(
                 self._conn, shot_id, sync_cfg_id,
-                time_start_s or 0.0, time_end_s or 0.0,
+                0.0, 0.0,
                 detector_model="cutie-interactive",
                 pose_model=pose_model,
                 trial_id=trial_id,
@@ -1149,7 +1176,7 @@ class CutieInitPanel(QWidget):
             f"A <b>{pose_model}</b> detection run already exists<br>"
             f"(created {created}).<br><br>"
             f"<b>Update existing</b> — overwrites keypoints for the queued cameras/frames<br>"
-            f"<b>Create new</b> — adds a separate detection run for this trial"
+            f"<b>Create new</b> — adds a separate detection run for this capture"
         )
         update_btn = msg.addButton("Update existing", QMessageBox.ButtonRole.AcceptRole)
         new_btn    = msg.addButton("Create new run",  QMessageBox.ButtonRole.ActionRole)
@@ -1164,7 +1191,7 @@ class CutieInitPanel(QWidget):
 
         return create_detection_run(
             self._conn, shot_id, sync_cfg_id,
-            time_start_s or 0.0, time_end_s or 0.0,
+            0.0, 0.0,
             detector_model="cutie-interactive",
             pose_model=pose_model,
             trial_id=trial_id,
@@ -1369,16 +1396,26 @@ class CutieInitPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _ensure_seg_run(self) -> None:
-        """Create a seg_quality_run for this session if not already done."""
+        """Create a seg_quality_run for this capture if not already done.
+
+        time_start_s/time_end_s: an interactively-created segmentation
+        isn't scoped to a specific sub-range of the capture today (masks
+        are stored per-frame regardless of range) -- 0.0/a large sentinel
+        means "covers the whole capture," trivially satisfying any trial's
+        future containment check. Narrowing this to the actually-segmented
+        range is a real future refinement, not done here. See
+        docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.
+        """
         if self._seg_init_run_id is not None:
             return
         run_id = generate_id()
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         self._conn.execute(
             "INSERT INTO seg_quality_runs "
-            "(id, detection_run_id, created_at, quality_source, erosion_px) "
-            "VALUES (?, ?, ?, 'cutie-interactive', 5)",
-            (run_id, self._run_id, now),
+            "(id, shot_id, trial_id, time_start_s, time_end_s, created_at, "
+            " quality_source, erosion_px) "
+            "VALUES (?, ?, ?, 0.0, 1e9, ?, 'cutie-interactive', 5)",
+            (run_id, self._shot_id, self._trial_id, now),
         )
         self._conn.commit()
         self._seg_init_run_id = run_id

@@ -119,11 +119,15 @@ def _build_quality_cache(
     Uses the most recently created seg_run entry when multiple exist for the
     same (video_frame, track_id) (rare due to re-run fragmentation).
     """
-    # Get seg_quality_runs for this detection_run, ordered so latest is last
+    # seg_quality_runs is capture-scoped now, not tied to one detection run
+    # (see docs/roadmap/features/segmentation-reuse/
+    # segmentation-reuse-design.md) -- resolve via the detection run's own
+    # shot_id instead.
     seg_runs = conn.execute(
-        """SELECT id FROM seg_quality_runs
-           WHERE detection_run_id = ?
-           ORDER BY created_at""",
+        """SELECT sqr.id FROM seg_quality_runs sqr
+           JOIN detection_runs dr ON dr.shot_id = sqr.shot_id
+           WHERE dr.id = ?
+           ORDER BY sqr.created_at""",
         (detection_run_id,),
     ).fetchall()
     seg_run_ids = [r["id"] for r in seg_runs]

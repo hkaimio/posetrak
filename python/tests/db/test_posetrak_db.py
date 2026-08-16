@@ -763,6 +763,100 @@ def test_migrate_session_v40_to_v41_adds_group_name(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_migrate_session_v41_to_v42_makes_seg_quality_runs_capture_scoped(
+    tmp_path: Path,
+) -> None:
+    """v41->v42 gives seg_quality_runs its own shot_id/trial_id/time_start_s/
+    time_end_s (mirroring detection_runs' own columns) and drops the NOT
+    NULL detection_run_id FK, so a segmentation can be created before any
+    detection run exists (see docs/roadmap/features/segmentation-reuse/
+    segmentation-reuse-design.md). Existing rows backfill their new
+    columns from their (until now, 1:1) owning detection_runs row."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("DROP TABLE seg_quality_runs")
+    conn.execute(
+        "CREATE TABLE seg_quality_runs ("
+        "    id TEXT PRIMARY KEY, detection_run_id TEXT NOT NULL, created_at TEXT NOT NULL,"
+        "    quality_source TEXT NOT NULL DEFAULT 'cutie',"
+        "    erosion_px INTEGER NOT NULL DEFAULT 5, mask_dir TEXT, notes TEXT"
+        ")"
+    )
+    conn.execute("PRAGMA user_version = 41")
+
+    conn.execute("INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')")
+    conn.execute(
+        "INSERT INTO captures (id, session_id, capture_number) VALUES ('cap1', 'sess1', 1)"
+    )
+    conn.execute(
+        "INSERT INTO trials (id, capture_id, name, time_start_s, time_end_s) "
+        "VALUES ('trial1', 'cap1', 'T', 1.0, 2.0)"
+    )
+    conn.execute(
+        "INSERT INTO sync_configs (id, shot_id, created_by) VALUES ('sync1', 'cap1', 'x')"
+    )
+    conn.execute(
+        "INSERT INTO detection_runs "
+        "(id, shot_id, sync_config_id, trial_id, time_start_s, time_end_s, "
+        " detector_model, pose_model, created_at) "
+        "VALUES ('run1', 'cap1', 'sync1', 'trial1', 5.0, 10.0, 'd', 'p', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO seg_quality_runs (id, detection_run_id, created_at) "
+        "VALUES ('seg1', 'run1', '2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(seg_quality_runs)")}
+    assert "detection_run_id" not in cols
+    assert {"shot_id", "trial_id", "time_start_s", "time_end_s"} <= cols
+
+    row = conn.execute(
+        "SELECT shot_id, trial_id, time_start_s, time_end_s FROM seg_quality_runs WHERE id='seg1'"
+    ).fetchone()
+    assert row["shot_id"] == "cap1"
+    assert row["trial_id"] == "trial1"
+    assert row["time_start_s"] == 5.0
+    assert row["time_end_s"] == 10.0
+
+    # A segmentation can now be created directly, with no detection_runs
+    # row involved at all -- the whole point of the migration.
+    conn.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('seg2', 'cap1', 0.0, 1e9, '2026-01-02')"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_migrate_session_v41_to_v42_creates_table_when_missing(tmp_path: Path) -> None:
+    """seg_quality_runs was never given its own numbered migration when it
+    was originally introduced (only added to session_schema.sql for fresh
+    sessions) -- a session incrementally migrated from an old-enough
+    schema version genuinely never got the table created at all (caught
+    via test_session_v2_migrates_to_v3 failing when this migration was
+    first added). Simulates that: no seg_quality_runs table present at
+    v41, migration should create it fresh in its v42 shape rather than
+    trying (and failing) to rebuild a table that was never there."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("DROP TABLE seg_quality_runs")
+    conn.execute("PRAGMA user_version = 41")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(seg_quality_runs)")}
+    assert {"shot_id", "trial_id", "time_start_s", "time_end_s"} <= cols
+    assert "detection_run_id" not in cols
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------

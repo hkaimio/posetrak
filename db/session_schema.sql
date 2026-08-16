@@ -470,16 +470,27 @@ CREATE TABLE IF NOT EXISTS person_detections (
 CREATE INDEX IF NOT EXISTS idx_person_detections_run_video
     ON person_detections(detection_run_id, shot_video_id, video_frame);
 
--- Segmentation quality run: parameters and provenance for one add_seg_quality execution.
--- mask_dir: optional path to a directory containing per-video NPZ debug mask files.
+-- Segmentation quality run: parameters and provenance for one segmentation
+-- (Cutie interactive init, or the offline add_seg_quality tool).
+-- Time-range-scoped on the capture's own timeline, not tied to any one
+-- detection run -- a segmentation is reusable by any detection run/trial
+-- whose range it covers (containment: shot_id matches, and
+-- time_start_s <= trial.time_start_s AND time_end_s >= trial.time_end_s).
+-- See docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.
+-- trial_id is optional provenance (which trial this was created from), not
+-- a scoping constraint. mask_dir: optional path to a directory containing
+-- per-video NPZ debug mask files.
 CREATE TABLE IF NOT EXISTS seg_quality_runs (
-    id               TEXT PRIMARY KEY,
-    detection_run_id TEXT NOT NULL,  -- references detection_runs(id)
-    created_at       TEXT NOT NULL,
-    quality_source   TEXT NOT NULL DEFAULT 'cutie',
-    erosion_px       INTEGER NOT NULL DEFAULT 5,
-    mask_dir         TEXT,
-    notes            TEXT
+    id             TEXT PRIMARY KEY,
+    shot_id        TEXT NOT NULL REFERENCES captures(id),
+    trial_id       TEXT REFERENCES trials(id),
+    time_start_s   REAL NOT NULL,
+    time_end_s     REAL NOT NULL,
+    created_at     TEXT NOT NULL,
+    quality_source TEXT NOT NULL DEFAULT 'cutie',
+    erosion_px     INTEGER NOT NULL DEFAULT 5,
+    mask_dir       TEXT,
+    notes          TEXT
 );
 
 -- Per-keypoint segmentation quality scores, aligned with detection_keypoints.

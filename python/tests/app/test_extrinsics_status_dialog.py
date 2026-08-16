@@ -87,6 +87,19 @@ def _seed_entry(
     conn.commit()
 
 
+def _link_capture(conn: sqlite3.Connection, capture_id: str, calib_id: str) -> None:
+    """The step page_extrinsics.py's Accept handler does (UPDATE captures
+    SET extrinsic_calibration_id) -- the exact FK run_tracker.py resolves,
+    and now what ExtrinsicsStatusDialog._refresh() gates on too. A
+    calibration having entries for this capture's cameras is not the same
+    thing as this capture actually being linked to it (2026-08-16 fix)."""
+    conn.execute(
+        "UPDATE captures SET extrinsic_calibration_id = ? WHERE id = ?",
+        (calib_id, capture_id),
+    )
+    conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # ExtrinsicsStatusDialog
 # ---------------------------------------------------------------------------
@@ -97,7 +110,8 @@ def test_no_calibration_shows_not_set_summary(qapp, fake_conn) -> None:
     _seed_camera(fake_conn, "sess1", "inst1", "cam_A")
     dlg = ExtrinsicsStatusDialog(fake_conn, "sess1", shot_ids=["cap1"])
     try:
-        assert "No extrinsics calibration yet" in dlg._summary_label.text()
+        assert "No extrinsics calibration" in dlg._summary_label.text()
+        assert "linked to this capture" in dlg._summary_label.text()
         assert dlg._table.rowCount() == 1
         assert dlg._table.item(0, 0).text() == "cam_A"
         assert dlg._table.item(0, 1).text() == "—"
@@ -113,6 +127,7 @@ def test_calibration_with_all_cameras_solved(qapp, fake_conn) -> None:
     _seed_calibration(fake_conn, "sess1", method="rig-anchor", calibrated_at="2026-08-12T10:00:00")
     _seed_entry(fake_conn, "calib1", "inst1", t=np.array([1.0, 2.0, 3.0]))
     _seed_entry(fake_conn, "calib1", "inst2", t=np.array([4.0, 5.0, 6.0]))
+    _link_capture(fake_conn, "cap1", "calib1")
 
     dlg = ExtrinsicsStatusDialog(fake_conn, "sess1", shot_ids=["cap1"])
     try:
@@ -138,6 +153,7 @@ def test_calibration_with_partial_solve(qapp, fake_conn) -> None:
     _seed_camera(fake_conn, "sess1", "inst2", "cam_B")
     _seed_calibration(fake_conn, "sess1")
     _seed_entry(fake_conn, "calib1", "inst1")  # only cam_A solved
+    _link_capture(fake_conn, "cap1", "calib1")
 
     dlg = ExtrinsicsStatusDialog(fake_conn, "sess1", shot_ids=["cap1"])
     try:
@@ -152,17 +168,60 @@ def test_calibration_with_partial_solve(qapp, fake_conn) -> None:
         dlg.done(0)
 
 
-def test_uses_most_recent_calibration(qapp, fake_conn) -> None:
+def test_uses_linked_calibration_not_most_recent_in_session(qapp, fake_conn) -> None:
+    """Which calibration is shown is resolved via this capture's own
+    captures.extrinsic_calibration_id link, not "whichever row in the
+    session has the latest calibrated_at" -- a later calibration linked
+    to a *different* capture must not override this one (2026-08-16 fix:
+    _refresh() used to ORDER BY calibrated_at DESC LIMIT 1 across the
+    whole session, ignoring capture linkage entirely)."""
     _seed_session(fake_conn)
     _seed_camera(fake_conn, "sess1", "inst1", "cam_A")
     _seed_calibration(fake_conn, "sess1", calib_id="old", method="toml-import", calibrated_at="2026-01-01")
     _seed_calibration(fake_conn, "sess1", calib_id="new", method="rig-anchor", calibrated_at="2026-08-12")
+    _seed_entry(fake_conn, "old", "inst1")
     _seed_entry(fake_conn, "new", "inst1")
+    _link_capture(fake_conn, "cap1", "old")  # cap1 is linked to the *older* calibration
 
     dlg = ExtrinsicsStatusDialog(fake_conn, "sess1", shot_ids=["cap1"])
     try:
-        assert "rig-anchor" in dlg._summary_label.text()
-        assert "toml-import" not in dlg._summary_label.text()
+        assert "toml-import" in dlg._summary_label.text()
+        assert "rig-anchor" not in dlg._summary_label.text()
+    finally:
+        dlg.done(0)
+
+
+def test_calibration_exists_for_camera_but_not_linked_to_this_capture(qapp, fake_conn) -> None:
+    """The exact bug reported live 2026-08-16: a sibling capture sharing
+    the same physical camera got calibrated (linking *its own*
+    extrinsic_calibration_id), but this capture was never itself linked.
+    Even though a fully-solved calibration exists in the session covering
+    this capture's camera, the dialog must show "not linked" rather than
+    the sibling's solved positions -- the tracker resolves
+    captures.extrinsic_calibration_id per-capture and would fail here."""
+    _seed_session(fake_conn)
+    _seed_camera(fake_conn, "sess1", "inst1", "cam_A", capture_id="cap1")
+    fake_conn.execute(
+        "INSERT INTO captures (id, session_id, capture_number) VALUES ('cap2', 'sess1', 2)"
+    )
+    fake_conn.commit()
+    # cap2 uses the same physical camera instance as cap1.
+    fake_conn.execute(
+        "INSERT INTO capture_videos "
+        "(id, shot_id, camera_instance_id, file_path, first_video_frame, "
+        " last_video_frame, actual_fps) "
+        "VALUES ('vid_cap2_inst1', 'cap2', 'inst1', '/fake/video2.mp4', 0, 1000, 30.0)"
+    )
+    fake_conn.commit()
+    _seed_calibration(fake_conn, "sess1")
+    _seed_entry(fake_conn, "calib1", "inst1")
+    _link_capture(fake_conn, "cap2", "calib1")  # only cap2 is linked
+
+    dlg = ExtrinsicsStatusDialog(fake_conn, "sess1", shot_ids=["cap1"])
+    try:
+        assert "linked to this capture" in dlg._summary_label.text()
+        assert dlg._table.item(0, 1).text() == "—"
+        assert dlg._table.item(0, 2).text() == "not solved"
     finally:
         dlg.done(0)
 
@@ -175,10 +234,11 @@ def test_refresh_after_reopen_reflects_new_calibration(qapp, fake_conn) -> None:
     _seed_camera(fake_conn, "sess1", "inst1", "cam_A")
     dlg = ExtrinsicsStatusDialog(fake_conn, "sess1", shot_ids=["cap1"])
     try:
-        assert "No extrinsics calibration yet" in dlg._summary_label.text()
+        assert "No extrinsics calibration" in dlg._summary_label.text()
 
         _seed_calibration(fake_conn, "sess1")
         _seed_entry(fake_conn, "calib1", "inst1")
+        _link_capture(fake_conn, "cap1", "calib1")
         dlg._refresh()
 
         assert "1 / 1" in dlg._summary_label.text()

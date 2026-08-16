@@ -4662,11 +4662,38 @@ class ExtrinsicsStatusDialog(QDialog):
         old_factory = self._conn.row_factory
         self._conn.row_factory = sqlite3.Row
         try:
-            calib = self._conn.execute(
-                "SELECT id, calibrated_at, method FROM extrinsic_calibrations "
-                "WHERE session_id = ? ORDER BY calibrated_at DESC LIMIT 1",
-                (self._session_id,),
-            ).fetchone()
+            # Resolve via captures.extrinsic_calibration_id for *this*
+            # capture -- the exact FK run_tracker.py resolves -- not "the
+            # most recently calibrated row anywhere in the session".
+            # Calibrating a sibling capture (e.g. the one right after this
+            # one) used to make this dialog show that capture's solved
+            # camera positions here even though this capture was never
+            # itself linked to it, so a checkmark-fixed CapturePanel button
+            # could still open a dialog claiming cameras were solved
+            # (caught live, 2026-08-16 -- same root cause as the button
+            # fix, different call site).
+            calib = None
+            if self._shot_ids:
+                placeholders = ",".join("?" for _ in self._shot_ids)
+                calib_ids = {
+                    r[0] for r in self._conn.execute(
+                        f"SELECT DISTINCT extrinsic_calibration_id FROM captures "
+                        f"WHERE id IN ({placeholders}) "
+                        f"AND extrinsic_calibration_id IS NOT NULL",
+                        self._shot_ids,
+                    ).fetchall()
+                }
+                if calib_ids:
+                    # In practice shot_ids is always a single capture (the
+                    # only caller passes shot_ids=[capture_id]); if it ever
+                    # covers several captures linked to different
+                    # calibrations, showing any one of them is a reasonable
+                    # fallback for a status display.
+                    calib = self._conn.execute(
+                        "SELECT id, calibrated_at, method FROM extrinsic_calibrations "
+                        "WHERE id = ?",
+                        (next(iter(calib_ids)),),
+                    ).fetchone()
             # Scoped to cameras with a video in *this* capture, not every
             # camera the session has ever registered -- extrinsics are
             # session-wide, but which cameras are actually relevant to
@@ -4695,7 +4722,7 @@ class ExtrinsicsStatusDialog(QDialog):
         n_total = len(cams)
         n_solved = len(entries)
         if calib is None:
-            self._summary_label.setText("No extrinsics calibration yet for this session.")
+            self._summary_label.setText("No extrinsics calibration linked to this capture yet.")
         else:
             date = (calib["calibrated_at"] or "")[:10]
             method = calib["method"] or "?"

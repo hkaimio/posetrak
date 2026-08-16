@@ -479,7 +479,16 @@ CREATE INDEX IF NOT EXISTS idx_person_detections_run_video
 -- See docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.
 -- trial_id is optional provenance (which trial this was created from), not
 -- a scoping constraint. mask_dir: optional path to a directory containing
--- per-video NPZ debug mask files.
+-- per-video NPZ debug mask files. persons_json: JSON array of person
+-- names, index i = mask label i+1 (same convention tracking_runs.
+-- marker_names/active_camera_ids already use for an ordered string list
+-- in one column) -- the ordinal->name mapping baked into this
+-- segmentation's own mask labels at creation time, so a *different*
+-- caller reusing this segmentation later (gap 2, RunDetectionDialog)
+-- doesn't have to assume today's capture_persons order still matches
+-- whatever order was in effect when the masks were made. NULL for
+-- segmentations created before this column existed, or via the offline
+-- add_seg_quality.py tool (no interactive person labeling there).
 CREATE TABLE IF NOT EXISTS seg_quality_runs (
     id             TEXT PRIMARY KEY,
     shot_id        TEXT NOT NULL REFERENCES captures(id),
@@ -490,7 +499,8 @@ CREATE TABLE IF NOT EXISTS seg_quality_runs (
     quality_source TEXT NOT NULL DEFAULT 'cutie',
     erosion_px     INTEGER NOT NULL DEFAULT 5,
     mask_dir       TEXT,
-    notes          TEXT
+    notes          TEXT,
+    persons_json   TEXT
 );
 
 -- Per-keypoint segmentation quality scores, aligned with detection_keypoints.

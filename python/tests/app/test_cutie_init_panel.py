@@ -169,3 +169,57 @@ def test_resolve_or_create_detection_run_creates_fresh_run(qapp, capture_db):
         assert row["sync_config_id"] == "sync1"
     finally:
         panel.shutdown()
+
+
+def test_on_finalise_auto_assigns_from_persons_ordered(qapp, capture_db):
+    """_on_finalise() (segmentation-reuse gap 3): once a pose job has
+    completed, Finalise builds sequences straight from person_tracks +
+    self._persons, no manual stitcher pass. Simulates job completion by
+    writing the DB rows PoseWorker would have written and pointing
+    _pose_detection_run_id at the run, rather than driving a real
+    PoseWorker/JobQueueRunner thread (needs a real video + model)."""
+    import numpy as np
+
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    capture_db.execute(
+        "INSERT INTO sync_configs (id, shot_id, created_by) VALUES ('sync1', 'cap1', 'x')"
+    )
+    capture_db.execute(
+        "INSERT INTO detection_runs (id, shot_id, sync_config_id, time_start_s, time_end_s,"
+        " detector_model, pose_model, status, created_at)"
+        " VALUES ('run1', 'cap1', 'sync1', 0.0, 1.0, 'cutie-interactive', 'rtmpose-l-133kp',"
+        " 'complete', '2026-01-01')"
+    )
+    kp = np.zeros((133, 3), dtype=np.float32).tobytes()
+    capture_db.execute(
+        "INSERT INTO detection_keypoints"
+        " (detection_run_id, shot_video_id, video_frame, track_id, region_type,"
+        "  keypoints, noise_scale)"
+        " VALUES ('run1', 'sv1', 0, 1, 'full_body', ?, 0.5)",
+        (kp,),
+    )
+    capture_db.execute(
+        "INSERT INTO person_tracks"
+        " (id, detection_run_id, shot_video_id, track_id, first_frame, last_frame)"
+        " VALUES ('pt1', 'run1', 'sv1', 1, 0, 0)"
+    )
+    capture_db.commit()
+
+    panel = CutieInitPanel(capture_db, "cap1")
+    try:
+        assert panel._persons == ["Alice"]
+        panel._pose_detection_run_id = "run1"
+        panel._on_finalise()
+
+        seqs = capture_db.execute(
+            "SELECT id FROM pose_observation_sequences WHERE detection_run_id = 'run1'"
+        ).fetchall()
+        assert len(seqs) == 1
+        assignments = capture_db.execute(
+            "SELECT person_name, track_id FROM detection_track_assignments "
+            "WHERE detection_run_id = 'run1'"
+        ).fetchall()
+        assert [(r["person_name"], r["track_id"]) for r in assignments] == [("Alice", 1)]
+    finally:
+        panel.shutdown()

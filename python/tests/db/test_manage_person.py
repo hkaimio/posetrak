@@ -12,6 +12,7 @@ from posetrak.db.manage_person import (
     find_or_create_person,
     get_person,
     list_persons,
+    persons_ordered_for_seg_run,
     rename_person,
     set_default_skeleton,
 )
@@ -190,3 +191,50 @@ def test_delete_person_refuses_when_referenced_by_detection_track_assignments(
     with pytest.raises(ValueError, match="still referenced"):
         delete_person(session_db, person_id)
     assert get_person(session_db, person_id) is not None
+
+
+# ---------------------------------------------------------------------------
+# persons_ordered_for_seg_run (segmentation-reuse gap 2)
+# ---------------------------------------------------------------------------
+
+
+def test_persons_ordered_for_seg_run_reads_persisted_snapshot(session_db) -> None:
+    """The persisted persons_json wins even if capture_persons has since
+    changed -- the whole point: don't assume today's order still matches
+    what the masks were actually labeled with."""
+    capture_id = _make_capture(session_db)
+    create_person(session_db, capture_id, "Alice")
+    session_db.execute(
+        "INSERT INTO seg_quality_runs "
+        "(id, shot_id, time_start_s, time_end_s, created_at, persons_json) "
+        "VALUES ('seg1', ?, 0.0, 1e9, '2026-01-01', '[\"Bob\", \"Alice\"]')",
+        (capture_id,),
+    )
+    session_db.commit()
+    # A person added after the segmentation was created must not affect
+    # the persisted order.
+    create_person(session_db, capture_id, "Carol")
+
+    assert persons_ordered_for_seg_run(session_db, "seg1") == ["Bob", "Alice"]
+
+
+def test_persons_ordered_for_seg_run_falls_back_to_capture_persons(session_db) -> None:
+    """No persisted snapshot (older row, or the offline add_seg_quality.py
+    tool) -- falls back to today's capture_persons order, best-effort."""
+    capture_id = _make_capture(session_db)
+    create_person(session_db, capture_id, "Zoe")
+    create_person(session_db, capture_id, "Alice")
+    session_db.execute(
+        "INSERT INTO seg_quality_runs "
+        "(id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('seg1', ?, 0.0, 1e9, '2026-01-01')",
+        (capture_id,),
+    )
+    session_db.commit()
+
+    assert persons_ordered_for_seg_run(session_db, "seg1") == ["Alice", "Zoe"]
+
+
+def test_persons_ordered_for_seg_run_missing_row_raises(session_db) -> None:
+    with pytest.raises(ValueError, match="not found"):
+        persons_ordered_for_seg_run(session_db, "does-not-exist")

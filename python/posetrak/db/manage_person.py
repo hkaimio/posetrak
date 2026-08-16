@@ -13,6 +13,7 @@ capture-specific, and captures live in session DBs.
 from __future__ import annotations
 
 import datetime
+import json
 import sqlite3
 
 from posetrak.db.db import generate_id
@@ -89,6 +90,37 @@ def list_persons(session: sqlite3.Connection, capture_id: str) -> list[sqlite3.R
         "SELECT * FROM capture_persons WHERE capture_id = ? ORDER BY name",
         (capture_id,),
     ).fetchall()
+
+
+def persons_ordered_for_seg_run(session: sqlite3.Connection, seg_quality_run_id: str) -> list[str]:
+    """Return the ordinal->name mapping (index i = mask label i+1) a
+    segmentation's masks were labeled with.
+
+    Reads ``seg_quality_runs.persons_json`` -- the snapshot taken at mask-
+    creation time (see ``CutieInitPanel._ensure_seg_run``) -- so a caller
+    reusing this segmentation later doesn't have to assume today's
+    ``capture_persons`` order still matches whatever order was in effect
+    when the masks were made (see docs/roadmap/features/segmentation-reuse/
+    segmentation-reuse-design.md, gap 2). Falls back to today's
+    ``list_persons`` order for a segmentation created before this column
+    existed, or via the offline ``add_seg_quality.py`` tool (no
+    interactive person labeling there) -- best-effort, not guaranteed
+    correct for those older rows.
+
+    Raises
+    ------
+    ValueError
+        If *seg_quality_run_id* does not refer to an existing row.
+    """
+    row = session.execute(
+        "SELECT shot_id, persons_json FROM seg_quality_runs WHERE id = ?",
+        (seg_quality_run_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"seg_quality_runs row not found: {seg_quality_run_id!r}")
+    if row["persons_json"]:
+        return json.loads(row["persons_json"])
+    return [p["name"] for p in list_persons(session, row["shot_id"])]
 
 
 def get_person(session: sqlite3.Connection, person_id: str) -> sqlite3.Row | None:

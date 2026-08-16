@@ -20,7 +20,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 8
-SESSION_SCHEMA_VERSION: Final[int] = 42
+SESSION_SCHEMA_VERSION: Final[int] = 43
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1348,6 +1348,30 @@ def _migrate_session_v41_to_v42(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v42_to_v43(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 42 to 43.
+
+    v43 adds seg_quality_runs.persons_json -- a JSON array of person
+    names, index i = mask label i+1 (same "ordered string list as JSON in
+    one TEXT column" convention tracking_runs.marker_names/
+    active_camera_ids already use). Captures the ordinal->name mapping
+    baked into a segmentation's own mask labels at creation time, so a
+    *different* caller reusing an existing segmentation later (gap 2,
+    RunDetectionDialog's "use existing segmentation" bbox source) doesn't
+    have to assume today's capture_persons order still matches whatever
+    order was in effect when the masks were made. See docs/roadmap/
+    features/segmentation-reuse/segmentation-reuse-design.md. NULL for
+    existing rows -- there's no way to recover what order was actually
+    used after the fact; callers fall back to today's capture_persons
+    order for those (posetrak.db.manage_person.persons_ordered_for_seg_run).
+    """
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(seg_quality_runs)")}
+    if "persons_json" not in existing_cols:
+        conn.execute("ALTER TABLE seg_quality_runs ADD COLUMN persons_json TEXT")
+    _set_schema_version(conn, 43)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1494,6 +1518,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 41
     if actual == 41:
         _migrate_session_v41_to_v42(conn)
+        actual = 42
+    if actual == 42:
+        _migrate_session_v42_to_v43(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

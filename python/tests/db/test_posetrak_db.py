@@ -857,6 +857,25 @@ def test_migrate_session_v41_to_v42_creates_table_when_missing(tmp_path: Path) -
     conn.close()
 
 
+def test_migrate_session_v42_to_v43_adds_persons_json(tmp_path: Path) -> None:
+    """v42->v43 adds seg_quality_runs.persons_json (nullable) -- the
+    ordinal->name mapping baked into a segmentation's mask labels, so a
+    later caller reusing it doesn't have to assume today's
+    capture_persons order still matches (see docs/roadmap/features/
+    segmentation-reuse/segmentation-reuse-design.md, gap 2)."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("PRAGMA user_version = 42")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(seg_quality_runs)")}
+    assert "persons_json" in cols
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ Phase 4: correction workflow, RTMPose post-step.
 from __future__ import annotations
 
 import datetime
+import json
 import logging
 import sqlite3
 import time
@@ -387,6 +388,17 @@ class CutieInitPanel(QWidget):
         self._queue_pose_all_btn.clicked.connect(self._on_queue_pose_all)
         self._queue_pose_all_btn.setEnabled(False)
         pose_row.addWidget(self._queue_pose_all_btn)
+
+        self._finalise_btn = QPushButton("✓ Finalise")
+        self._finalise_btn.setToolTip(
+            "Build pose observation sequences directly from the segmentation's own "
+            "person labels -- no manual track-to-person stitching needed, since a "
+            "segmentation mask's labels are already stable per-person identities. "
+            "Open the Stitcher instead if a track needs correcting first."
+        )
+        self._finalise_btn.clicked.connect(self._on_finalise)
+        self._finalise_btn.setEnabled(False)
+        pose_row.addWidget(self._finalise_btn)
 
         pose_row.addStretch()
         track_vbox.addLayout(pose_row)    # second row inside the group box
@@ -1109,6 +1121,60 @@ class CutieInitPanel(QWidget):
         else:
             self._set_status("No seg masks found for any camera. Run segmentation first.")
 
+    def _on_finalise(self) -> None:
+        """Build pose observation sequences directly from the segmentation's
+        own person labels, no manual stitcher pass required -- see
+        docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md,
+        "Auto-assignment". Uses self._pose_detection_run_id, set to whichever
+        detection run the most recently finished pose job wrote into
+        (_on_job_finished); the queue mixes runs across pose models cleanly
+        in practice since each _resolve_or_create_detection_run call picks
+        one run per pose_model, so this is "the run for the pose model most
+        recently queued/completed," same run the live overlay already shows.
+        """
+        if self._pose_detection_run_id is None:
+            self._set_status("No pose extraction yet — queue pose extraction first.")
+            return
+        run_row = self._conn.execute(
+            "SELECT shot_id, sync_config_id, pose_model FROM detection_runs WHERE id=?",
+            (self._pose_detection_run_id,),
+        ).fetchone()
+        if run_row is None:
+            self._set_status("Detection run not found.")
+            return
+
+        from app.pose.finalise import auto_assign_and_finalise, conf_scale_for_model
+        from posetrak.db.manage_person import persons_ordered_for_seg_run
+
+        # Read the ordinal->name mapping from whichever seg run's masks
+        # were actually used (persisted at mask-creation time), not the
+        # live self._persons -- keeps this consistent with gap 2's
+        # RunDetectionDialog path, which has no in-memory self._persons to
+        # fall back on at all. Falls back to self._persons only if no seg
+        # run exists yet here (shouldn't happen -- pose extraction needs
+        # masks -- but avoids a hard crash over a defensive fallback).
+        run_ids = self._read_run_ids()
+        persons_ordered = (
+            persons_ordered_for_seg_run(self._conn, run_ids[0])
+            if run_ids else list(self._persons)
+        )
+
+        try:
+            seq_ids = auto_assign_and_finalise(
+                session=self._conn,
+                detection_run_id=self._pose_detection_run_id,
+                shot_id=run_row["shot_id"],
+                sync_config_id=run_row["sync_config_id"],
+                persons_ordered=persons_ordered,
+                pose_model=run_row["pose_model"],
+                confidence_scale=conf_scale_for_model(run_row["pose_model"]),
+            )
+        except Exception as exc:  # noqa: BLE001
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Finalise Error", str(exc))
+            return
+        self._set_status(f"Finalised {len(seq_ids)} person sequence(s).")
+
     def _resolve_or_create_detection_run(self, pose_model: str) -> str | None:
         """Return a detection_run_id to write pose results into, or None if cancelled.
 
@@ -1285,6 +1351,7 @@ class CutieInitPanel(QWidget):
                 if j.job_id == job_id:
                     self._pose_detection_run_id = j.detection_run_id
                     break
+            self._finalise_btn.setEnabled(True)
             self._refresh_queue_list()
             cam = self._cam_combo.currentData()
             if cam:
@@ -1403,7 +1470,14 @@ class CutieInitPanel(QWidget):
         are stored per-frame regardless of range) -- 0.0/a large sentinel
         means "covers the whole capture," trivially satisfying any trial's
         future containment check. Narrowing this to the actually-segmented
-        range is a real future refinement, not done here. See
+        range is a real future refinement, not done here.
+
+        persons_json snapshots self._persons -- the ordinal->name mapping
+        (index i = mask label i+1) actually in effect right now, the same
+        list _queue_pose_jobs threads through as persons_ordered. Lets a
+        *different* caller reuse this segmentation later without having to
+        assume today's capture_persons order still matches (gap 2,
+        RunDetectionDialog's "use existing segmentation" bbox source). See
         docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.
         """
         if self._seg_init_run_id is not None:
@@ -1413,9 +1487,9 @@ class CutieInitPanel(QWidget):
         self._conn.execute(
             "INSERT INTO seg_quality_runs "
             "(id, shot_id, trial_id, time_start_s, time_end_s, created_at, "
-            " quality_source, erosion_px) "
-            "VALUES (?, ?, ?, 0.0, 1e9, ?, 'cutie-interactive', 5)",
-            (run_id, self._shot_id, self._trial_id, now),
+            " quality_source, erosion_px, persons_json) "
+            "VALUES (?, ?, ?, 0.0, 1e9, ?, 'cutie-interactive', 5, ?)",
+            (run_id, self._shot_id, self._trial_id, now, json.dumps(list(self._persons))),
         )
         self._conn.commit()
         self._seg_init_run_id = run_id

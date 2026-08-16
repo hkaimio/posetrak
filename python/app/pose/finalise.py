@@ -254,3 +254,57 @@ def finalise_to_db(
 
     session.commit()
     return seq_ids
+
+
+def auto_assign_and_finalise(
+    session: sqlite3.Connection,
+    detection_run_id: str,
+    shot_id: str,
+    sync_config_id: str,
+    persons_ordered: list[str],
+    pose_model: str,
+    notes: str = "",
+    confidence_scale: float = 1.0,
+) -> list[str]:
+    """Finalise a segmentation-sourced detection run with no manual
+    stitcher pass, deriving track->person assignments directly from
+    person_tracks instead of building them interactively.
+
+    Works because a segmentation mask's per-person label is already a
+    stable identity -- mask label i+1 maps to persons_ordered[i], the same
+    convention app.pose.pose_worker._bboxes_from_mask uses when writing
+    detections, so track_id (== mask label) -> person name is a pure
+    lookup, not something that needs stitching across ambiguous YOLO
+    tracks. See docs/roadmap/features/segmentation-reuse/
+    segmentation-reuse-design.md, "Auto-assignment" (gap 3).
+
+    A track_id outside persons_ordered's range (stray/corrupt data) is
+    skipped rather than raising -- finalise_to_db still runs for whatever
+    valid assignments remain.
+    """
+    track_rows = session.execute(
+        "SELECT shot_video_id, track_id, first_frame, last_frame "
+        "FROM person_tracks WHERE detection_run_id = ?",
+        (detection_run_id,),
+    ).fetchall()
+    assignments = [
+        TrackAssignment(
+            shot_video_id=row["shot_video_id"],
+            track_id=row["track_id"],
+            person_name=persons_ordered[row["track_id"] - 1],
+            first_frame=row["first_frame"],
+            last_frame=row["last_frame"],
+        )
+        for row in track_rows
+        if 1 <= row["track_id"] <= len(persons_ordered)
+    ]
+    return finalise_to_db(
+        session=session,
+        detection_run_id=detection_run_id,
+        shot_id=shot_id,
+        sync_config_id=sync_config_id,
+        assignments=assignments,
+        pose_model=pose_model,
+        notes=notes,
+        confidence_scale=confidence_scale,
+    )

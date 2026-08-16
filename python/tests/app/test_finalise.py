@@ -15,7 +15,7 @@ import pytest
 
 from posetrak.db.db import create_session, generate_id
 
-from app.pose.finalise import TrackAssignment, finalise_to_db
+from app.pose.finalise import TrackAssignment, auto_assign_and_finalise, finalise_to_db
 
 _SHOT_ID = "test-shot-id"
 _SYNC_ID = "test-sync-id"
@@ -273,3 +273,88 @@ def test_finalise_reuses_existing_capture_person_across_runs(session):
     persons = list_persons(session, _SHOT_ID)
     assert len(persons) == 1
     assert persons[0]["id"] == existing_id
+
+
+# ---------------------------------------------------------------------------
+# auto_assign_and_finalise (segmentation-reuse gap 3)
+# ---------------------------------------------------------------------------
+
+
+def test_auto_assign_maps_track_id_to_persons_ordered(session):
+    """track_id N -> persons_ordered[N-1], the same mask-label convention
+    app.pose.pose_worker._bboxes_from_mask uses -- no manual stitching."""
+    for track_id, fill in [(1, 1.0), (2, 2.0)]:
+        session.execute(
+            "INSERT INTO detection_keypoints"
+            " (detection_run_id, shot_video_id, video_frame, track_id, region_type,"
+            "  keypoints, noise_scale)"
+            " VALUES ('run1', ?, 0, ?, 'full_body', ?, 0.5)",
+            (_SVID, track_id, _kp(fill, 133)),
+        )
+        session.execute(
+            "INSERT INTO person_tracks"
+            " (id, detection_run_id, shot_video_id, track_id, first_frame, last_frame)"
+            " VALUES (?, 'run1', ?, ?, 0, 0)",
+            (f"pt{track_id}", _SVID, track_id),
+        )
+    session.commit()
+
+    seq_ids = auto_assign_and_finalise(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        persons_ordered=["alice", "bob"], pose_model="rtmpose-l-133kp",
+    )
+    assert len(seq_ids) == 2
+
+    rows = session.execute(
+        "SELECT person_name, track_id FROM detection_track_assignments "
+        "WHERE detection_run_id = 'run1' ORDER BY track_id"
+    ).fetchall()
+    assert [(r["person_name"], r["track_id"]) for r in rows] == [
+        ("alice", 1), ("bob", 2),
+    ]
+
+    seq_persons = {
+        r["person_name"] for r in session.execute(
+            "SELECT person_name FROM sequence_persons WHERE sequence_id IN ({})".format(
+                ",".join("?" * len(seq_ids))
+            ),
+            seq_ids,
+        ).fetchall()
+    }
+    assert seq_persons == {"alice", "bob"}
+
+
+def test_auto_assign_skips_track_id_outside_persons_ordered(session):
+    """A stray track_id with no matching label is skipped, not fatal --
+    finalise_to_db still runs for whatever assignments remain valid."""
+    session.execute(
+        "INSERT INTO detection_keypoints"
+        " (detection_run_id, shot_video_id, video_frame, track_id, region_type,"
+        "  keypoints, noise_scale)"
+        " VALUES ('run1', ?, 0, 1, 'full_body', ?, 0.5)",
+        (_SVID, _kp(1.0, 133)),
+    )
+    session.execute(
+        "INSERT INTO person_tracks"
+        " (id, detection_run_id, shot_video_id, track_id, first_frame, last_frame)"
+        " VALUES ('pt1', 'run1', ?, 1, 0, 0)",
+        (_SVID,),
+    )
+    # track_id 5 has no corresponding entry in persons_ordered (len 1).
+    session.execute(
+        "INSERT INTO person_tracks"
+        " (id, detection_run_id, shot_video_id, track_id, first_frame, last_frame)"
+        " VALUES ('pt5', 'run1', ?, 5, 0, 0)",
+        (_SVID,),
+    )
+    session.commit()
+
+    seq_ids = auto_assign_and_finalise(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        persons_ordered=["alice"], pose_model="rtmpose-l-133kp",
+    )
+    assert len(seq_ids) == 1
+    rows = session.execute(
+        "SELECT person_name FROM detection_track_assignments WHERE detection_run_id = 'run1'"
+    ).fetchall()
+    assert [r["person_name"] for r in rows] == ["alice"]

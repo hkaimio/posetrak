@@ -46,6 +46,11 @@ class RunDetectionDialog(QDialog):
         self._session_path = session_path
         self._trial_id = trial_id
         self._job = None
+        self._seg_runner = None
+        self._seg_detection_run_id: str | None = None
+        self._seg_persons_ordered: list[str] = []
+        self._seg_jobs_total = 0
+        self._seg_jobs_done = 0
 
         if trial_id is not None:
             trial = conn.execute(
@@ -112,6 +117,38 @@ class RunDetectionDialog(QDialog):
         time_row.addWidget(self._end_spin)
         time_widget = self._make_row_widget(time_row)
         form.addRow("Time range:", time_widget)
+
+        # Bbox source: YOLO (default, always available) or an existing
+        # segmentation covering this capture, if any -- gap 2 of
+        # docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.
+        # Only shown when at least one segmentation exists, so the common
+        # case (no segmentation, YOLO-only) looks exactly as before.
+        seg_runs = self._conn.execute(
+            "SELECT id, created_at, persons_json FROM seg_quality_runs "
+            "WHERE shot_id = ? ORDER BY created_at DESC",
+            (self._capture_id,),
+        ).fetchall()
+        self._bbox_source_combo: QComboBox | None = None
+        if seg_runs:
+            import json as _json
+            self._bbox_source_combo = QComboBox()
+            self._bbox_source_combo.addItem("YOLO detection", None)
+            for r in seg_runs:
+                persons = _json.loads(r["persons_json"]) if r["persons_json"] else []
+                who = ", ".join(persons) if persons else "unlabeled"
+                created = str(r["created_at"])[:19].replace("T", " ")
+                self._bbox_source_combo.addItem(
+                    f"Segmentation ({who}) — {created}", r["id"]
+                )
+            self._bbox_source_combo.setToolTip(
+                "Source bboxes from an existing Cutie segmentation instead of "
+                "running YOLO -- masks give tighter, more accurate crops, and "
+                "results are finalised automatically (no manual track-to-person "
+                "stitching needed, since a segmentation's labels are already "
+                "stable per-person identities)."
+            )
+            self._bbox_source_combo.currentIndexChanged.connect(self._on_bbox_source_changed)
+            form.addRow("Bbox source:", self._bbox_source_combo)
 
         # Model selection
         self._detector_combo = QComboBox()
@@ -182,6 +219,13 @@ class RunDetectionDialog(QDialog):
 
     # ------------------------------------------------------------------
 
+    def _on_bbox_source_changed(self, _index: int) -> None:
+        """Detector/confidence are YOLO-only -- disable them (not hide, so
+        the layout doesn't jump) when an existing segmentation is chosen."""
+        is_yolo = self._bbox_source_combo.currentData() is None
+        self._detector_combo.setEnabled(is_yolo)
+        self._conf_spin.setEnabled(is_yolo)
+
     def _controls_enabled(self, enabled: bool) -> None:
         for w in [
             self._sync_combo,
@@ -192,6 +236,10 @@ class RunDetectionDialog(QDialog):
             w.setEnabled(enabled)
         if self._trial_name is not None:
             self._trial_name.setEnabled(enabled)
+        if self._bbox_source_combo is not None:
+            self._bbox_source_combo.setEnabled(enabled)
+            if enabled:
+                self._on_bbox_source_changed(self._bbox_source_combo.currentIndex())
 
     def _on_run(self) -> None:
         sync_id = self._sync_combo.currentData()
@@ -208,6 +256,11 @@ class RunDetectionDialog(QDialog):
         self._frame_bar.setValue(0)
         self._cam_bar.setValue(0)
         self._cam_label.setText("Starting…")
+
+        seg_run_id = self._bbox_source_combo.currentData() if self._bbox_source_combo else None
+        if seg_run_id is not None:
+            self._run_from_segmentation(seg_run_id, sync_id, start_s, end_s)
+            return
 
         from app.pose.main import DetectionJob
         self._job = DetectionJob(
@@ -226,6 +279,142 @@ class RunDetectionDialog(QDialog):
         self._job.finished.connect(self._on_finished)
         self._job.error.connect(self._on_error)
         self._job.start()
+
+    # ------------------------------------------------------------------
+    # Segmentation bbox source (gap 2, segmentation-reuse-design.md) --
+    # invokes the same PoseWorker/PoseExtractionJob/JobQueueRunner
+    # machinery CutieInitPanel already uses for its own "Queue Pose",
+    # rather than DetectionPipeline/DetectionJob (the design doc's option
+    # (a): much less work than teaching DetectionPipeline a second bbox
+    # source, and this dialog only needs a producer of detection_keypoints
+    # + person_tracks, which PoseWorker already is).
+    # ------------------------------------------------------------------
+
+    def _run_from_segmentation(
+        self, seg_run_id: str, sync_id: str, start_s: float, end_s: float,
+    ) -> None:
+        import uuid
+
+        from app.pose.db_cache import create_detection_run
+        from app.pose.job_queue_runner import JobQueueRunner
+        from app.pose.pose_worker import PoseExtractionJob
+        from app.setup.db_context import SyncPoint, SyncTable
+        from posetrak.db.manage_person import persons_ordered_for_seg_run
+
+        self._seg_persons_ordered = persons_ordered_for_seg_run(self._conn, seg_run_id)
+
+        self._seg_detection_run_id = create_detection_run(
+            self._conn, self._capture_id, sync_id, start_s, end_s,
+            detector_model="segmentation", pose_model=self._pose_combo.currentText(),
+            trial_id=self._trial_id,
+        )
+        self._conn.commit()
+
+        # Same global-time -> per-camera-frame conversion
+        # posetrak.detection.pipeline.DetectionPipeline._frame_range uses,
+        # so both bbox sources cover the same actual frames for a given
+        # time range.
+        sync_rows = self._conn.execute(
+            "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, sv.actual_fps "
+            "FROM sync_points sp JOIN capture_videos sv ON sv.id = sp.shot_video_id "
+            "WHERE sp.sync_config_id = ?",
+            (sync_id,),
+        ).fetchall()
+        points = [
+            SyncPoint(camera_instance_id="", shot_video_id=r["shot_video_id"],
+                      video_frame=r["video_frame"], timestamp_s=r["timestamp_s"])
+            for r in sync_rows
+        ]
+        fps_by_video = {r["shot_video_id"]: float(r["actual_fps"]) for r in sync_rows}
+        sync_table = SyncTable(points, fps_by_video)
+
+        cam_rows = self._conn.execute(
+            "SELECT cv.id, cv.file_path, COALESCE(ci.label, cv.camera_instance_id) AS label "
+            "FROM capture_videos cv LEFT JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
+            "WHERE cv.shot_id = ?",
+            (self._capture_id,),
+        ).fetchall()
+
+        db_path = ""
+        for row in self._conn.execute("PRAGMA database_list"):
+            if row[1] == "main":
+                db_path = row[2]
+                break
+
+        self._seg_runner = JobQueueRunner(db_path=db_path, parent=self)
+        self._seg_jobs_total = 0
+        self._seg_jobs_done = 0
+        for cam in cam_rows:
+            first = sync_table.lookup(start_s, cam["id"])
+            last = sync_table.lookup(end_s, cam["id"])
+            if first is None or last is None:
+                continue
+            job = PoseExtractionJob(
+                job_id=str(uuid.uuid4())[:8],
+                camera_label=cam["label"],
+                shot_video_id=cam["id"],
+                video_path=cam["file_path"],
+                detection_run_id=self._seg_detection_run_id,
+                seg_quality_run_id=seg_run_id,
+                persons_ordered=self._seg_persons_ordered,
+                first_frame=max(0, first),
+                last_frame=last,
+                pose_model=self._pose_combo.currentText(),
+                refine_hands=self._refine_hands_check.isChecked(),
+            )
+            self._seg_runner.enqueue(job)
+            self._seg_jobs_total += 1
+
+        if self._seg_jobs_total == 0:
+            QMessageBox.warning(
+                self, "No cameras", "No cameras with sync data for this time range."
+            )
+            self._controls_enabled(True)
+            return
+
+        self._cam_label.setText(f"0/{self._seg_jobs_total}")
+        self._seg_runner.progress.connect(self._on_seg_progress)
+        self._seg_runner.job_finished.connect(self._on_seg_job_finished)
+        self._seg_runner.job_failed.connect(self._on_seg_job_failed)
+        self._seg_runner.queue_done.connect(self._on_seg_queue_done)
+        self._seg_runner.start()
+
+    def _on_seg_progress(self, done: int, total: int) -> None:
+        self._frame_bar.setValue(int(done / max(total, 1) * 100))
+        self._frame_label.setText(f"{done}/{total} frames")
+
+    def _on_seg_job_finished(self, _job_id: str, _count: int) -> None:
+        self._seg_jobs_done += 1
+        self._cam_bar.setValue(int(self._seg_jobs_done / max(self._seg_jobs_total, 1) * 100))
+        self._cam_label.setText(f"{self._seg_jobs_done}/{self._seg_jobs_total}")
+
+    def _on_seg_job_failed(self, job_id: str, error: str) -> None:
+        # Non-fatal to the queue -- JobQueueRunner moves on to the next
+        # job on its own; surfaced so a silent partial failure isn't lost.
+        QMessageBox.warning(self, "Pose Extraction", f"Camera job {job_id} failed: {error}")
+
+    def _on_seg_queue_done(self) -> None:
+        from app.pose.finalise import auto_assign_and_finalise, conf_scale_for_model
+
+        run_row = self._conn.execute(
+            "SELECT shot_id, sync_config_id, pose_model FROM detection_runs WHERE id=?",
+            (self._seg_detection_run_id,),
+        ).fetchone()
+        try:
+            auto_assign_and_finalise(
+                session=self._conn,
+                detection_run_id=self._seg_detection_run_id,
+                shot_id=run_row["shot_id"],
+                sync_config_id=run_row["sync_config_id"],
+                persons_ordered=self._seg_persons_ordered,
+                pose_model=run_row["pose_model"],
+                confidence_scale=conf_scale_for_model(run_row["pose_model"]),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._controls_enabled(True)
+            QMessageBox.critical(self, "Finalise Error", str(exc))
+            return
+        self._on_finished(self._seg_detection_run_id)
 
     def _on_progress(self, pct: int, msg: str) -> None:
         self._frame_bar.setValue(pct)

@@ -1,9 +1,10 @@
 # Segmentation as a reusable, time-range-scoped bbox source — design sketch
 
-> **Status (2026-08-16)**: Gap 1 (the schema mismatch this doc diagnoses)
-> implemented and live-tested — see status.md for what landed and exactly
-> what's still open. Gaps 2 (pipeline convergence) and 3 (auto-assignment)
-> remain sketch-only, not implemented.
+> **Status (2026-08-16)**: All three gaps implemented and unit-tested,
+> option (a) chosen for gap 2's pipeline convergence (invoke
+> PoseWorker/PoseExtractionJob rather than teaching DetectionPipeline a
+> second bbox source) — see status.md for what landed, how, and what's
+> still open (notably: not yet live-tested against a real video/session).
 >
 > Originally written up 2026-07-14 after a real-data test of
 > hand-detection-refinement exposed that reusing an existing segmentation
@@ -164,10 +165,13 @@ source.
 1. ~~Capture-level vs. trial-level scoping for segmentation~~ — resolved:
    time-range-scoped (own `time_start_s`/`time_end_s`), reusable by any
    trial it fully contains. See terminology note above.
-2. Whether to converge the two pose-extraction pipelines (YOLO vs.
-   segmentation-driven) into one, or keep them separate and just add a
-   dispatch point in `RunDetectionDialog`. Affects how big this work
-   actually is.
+2. ~~Whether to converge the two pose-extraction pipelines...~~ — resolved
+   2026-08-16: kept separate, dispatch point added in `RunDetectionDialog`
+   (option (a)). `DetectionPipeline`/`DetectionJob` (YOLO) are untouched;
+   choosing a segmentation invokes `PoseWorker`/`PoseExtractionJob`/
+   `JobQueueRunner` instead. Properly unifying the two into one pipeline
+   with a pluggable bbox source remains the more honest long-term shape
+   per the reasoning below, just not done.
 3. What happens to `keypoint_obs_quality` (per-keypoint segmentation quality
    scores, currently keyed by `seg_run_id` alongside `detection_run_id`'s
    own `detection_keypoints`) once one segmentation can feed multiple
@@ -177,7 +181,13 @@ source.
 4. UI for the case where more than one existing segmentation covers a
    trial's range (e.g. a capture-spanning segmentation and a shorter
    trial-specific one both qualify) — needs a picker, not just "the"
-   segmentation for a trial.
+   segmentation for a trial. Partially addressed 2026-08-16:
+   `RunDetectionDialog`'s bbox-source combo does list every segmentation
+   for the capture (most recent first), so a picker exists -- but it
+   lists all of them unconditionally rather than filtering/ranking by
+   actual range containment against the trial being detected, since
+   time_start_s/time_end_s narrowing (open question below) isn't done
+   either.
 5. Migration path for existing sessions that already have
    `seg_quality_runs` rows tied to now-old detection runs — straightforward
    given the 1:1 relationship today (each existing row's new `shot_id` and

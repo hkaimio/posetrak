@@ -223,3 +223,177 @@ def test_on_finalise_auto_assigns_from_persons_ordered(qapp, capture_db):
         assert [(r["person_name"], r["track_id"]) for r in assignments] == [("Alice", 1)]
     finally:
         panel.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Global-time scrubbing (trial start/end visible + adjustable, camera
+# switches don't reset marks) -- see docs/roadmap/features/
+# segmentation-reuse/status.md's 2026-08-16 note.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def synced_capture_db(capture_db):
+    """Extends capture_db with a solved sync (sv2 starts 1s later than
+    sv1, both 30fps) and a trial spanning global time [2.0, 8.0)s."""
+    # capture_db's cameras are only 100 frames long -- widen to cover the
+    # sync points below (up to frame 300, 10s @ 30fps), otherwise the
+    # scrubber's computed global range gets clamped to a too-short window.
+    capture_db.execute("UPDATE capture_videos SET last_video_frame = 300")
+    capture_db.execute(
+        "INSERT INTO sync_configs (id, shot_id, created_by) VALUES ('sync1', 'cap1', 'x')"
+    )
+    for svid, ci, offset in (("sv1", "ci1", 0.0), ("sv2", "ci2", 1.0)):
+        capture_db.execute(
+            "INSERT INTO sync_points (sync_config_id, camera_instance_id, shot_video_id,"
+            " video_frame, timestamp_s) VALUES ('sync1', ?, ?, 0, ?)",
+            (ci, svid, offset),
+        )
+        capture_db.execute(
+            "INSERT INTO sync_points (sync_config_id, camera_instance_id, shot_video_id,"
+            " video_frame, timestamp_s) VALUES ('sync1', ?, ?, 300, ?)",
+            (ci, svid, offset + 10.0),
+        )
+    capture_db.execute(
+        "INSERT INTO trials (id, capture_id, name, time_start_s, time_end_s) "
+        "VALUES ('trial1', 'cap1', 'T', 2.0, 8.0)"
+    )
+    capture_db.commit()
+    return capture_db
+
+
+def test_marks_default_to_trial_bounds(qapp, synced_capture_db):
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        assert panel._sync_table is not None
+        assert panel._to_seconds(panel._mark_start) == pytest.approx(2.0)
+        assert panel._to_seconds(panel._mark_end) == pytest.approx(8.0)
+        assert "00:02.00" in panel._trial_range_label.text()
+    finally:
+        panel.shutdown()
+
+
+def test_marks_default_to_full_range_without_trial_id(qapp, synced_capture_db):
+    """No trial_id (opened from the Capture page, not a trial) -- marks
+    default to the full available range, not zero-width."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(synced_capture_db, "cap1")
+    try:
+        assert panel._sync_table is not None
+        assert panel._trial_range_label.text() == ""
+        assert panel._mark_start == panel._scrubber.minimum()
+        assert panel._mark_end == panel._scrubber.maximum()
+    finally:
+        panel.shutdown()
+
+
+def test_mark_start_end_freely_adjustable_away_from_trial_bounds(qapp, synced_capture_db):
+    """Explicit requirement: marks default to the trial's bounds but stay
+    freely adjustable -- rerun only part of a trial, or cover a wider
+    range than one trial on purpose."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        # Narrow to just part of the trial.
+        panel._scrubber.setValue(panel._to_units(3.0))
+        panel._on_mark_start()
+        panel._scrubber.setValue(panel._to_units(5.0))
+        panel._on_mark_end()
+        assert panel._to_seconds(panel._mark_start) == pytest.approx(3.0)
+        assert panel._to_seconds(panel._mark_end) == pytest.approx(5.0)
+
+        # Widen past the trial's own end -- also allowed.
+        panel._scrubber.setValue(panel._to_units(9.5))
+        panel._on_mark_end()
+        assert panel._to_seconds(panel._mark_end) == pytest.approx(9.5)
+    finally:
+        panel.shutdown()
+
+
+def test_camera_switch_preserves_marks_and_maps_to_correct_local_frame(qapp, synced_capture_db):
+    """The bug this whole feature fixes: switching cameras used to reset
+    Mark Start/End to the new camera's full range. With a sync table,
+    marks are global and switching only changes which local frame is
+    displayed for the same global instant."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        mark_start, mark_end = panel._mark_start, panel._mark_end
+        panel._scrubber.setValue(panel._to_units(5.0))
+
+        # sv1 is selected by default (alphabetically first); switch to sv2.
+        assert panel._cam_combo.currentData()["id"] == "sv1"
+        idx_sv2 = next(
+            i for i in range(panel._cam_combo.count())
+            if panel._cam_combo.itemData(i)["id"] == "sv2"
+        )
+        panel._cam_combo.setCurrentIndex(idx_sv2)
+
+        # Marks and scrubber position are untouched by the switch.
+        assert panel._mark_start == mark_start
+        assert panel._mark_end == mark_end
+        assert panel._scrubber.value() == panel._to_units(5.0)
+
+        # sv2 started 1s later than sv1 -- at global t=5.0, sv1's local
+        # frame is 150 (5.0*30) and sv2's is 120 ((5.0-1.0)*30).
+        cam_sv1 = next(c for c in panel._cameras if c["id"] == "sv1")
+        cam_sv2 = next(c for c in panel._cameras if c["id"] == "sv2")
+        assert panel._local_frame_for(cam_sv1, panel._to_units(5.0)) == 150
+        assert panel._local_frame_for(cam_sv2, panel._to_units(5.0)) == 120
+    finally:
+        panel.shutdown()
+
+
+def test_global_units_for_local_round_trips(qapp, synced_capture_db):
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(synced_capture_db, "cap1")
+    try:
+        cam_sv2 = next(c for c in panel._cameras if c["id"] == "sv2")
+        g = panel._to_units(6.0)
+        local = panel._local_frame_for(cam_sv2, g)
+        assert local == 150  # (6.0 - 1.0) * 30
+        assert panel._global_units_for_local(cam_sv2, local) == g
+    finally:
+        panel.shutdown()
+
+
+def test_ensure_seg_run_persists_real_marked_range(qapp, synced_capture_db):
+    """With a sync table, seg_quality_runs.time_start_s/time_end_s record
+    the actual selected range instead of the 0.0/1e9 "covers everything"
+    sentinel -- closes the gap flagged in status.md's 2026-08-16 note."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        panel._ensure_seg_run()
+        row = synced_capture_db.execute(
+            "SELECT time_start_s, time_end_s FROM seg_quality_runs WHERE id=?",
+            (panel._seg_init_run_id,),
+        ).fetchone()
+        assert row["time_start_s"] == pytest.approx(2.0)
+        assert row["time_end_s"] == pytest.approx(8.0)
+    finally:
+        panel.shutdown()
+
+
+def test_no_sync_points_falls_back_to_legacy_per_camera_domain(qapp, capture_db):
+    """capture_db has no sync_points at all -- the whole global-time
+    feature must stay inert, matching pre-refactor behaviour exactly."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(capture_db, "cap1")
+    try:
+        assert panel._sync_table is None
+        cam = panel._cam_combo.currentData()
+        assert panel._scrubber.minimum() == cam["track_first"]
+        assert panel._scrubber.maximum() == cam["track_last"]
+        # Legacy fallback: scrubber value IS the local frame directly.
+        assert panel._local_frame_for(cam, 42) == 42
+    finally:
+        panel.shutdown()

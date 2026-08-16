@@ -44,12 +44,24 @@ from posetrak.db.db import generate_id
 
 
 class RangeBar(QWidget):
-    """Horizontal timeline bar combining three layers of information:
+    """Horizontal timeline bar combining four layers of information:
 
     1. Mask coverage (lower 5 px) — teal segments where frames have stored masks.
     2. Selected tracking range (full height) — steel-blue fill between Mark Start/End.
-    3. Mark boundary ticks — bright blue.
-    4. Current frame position — white tick.
+    3. Trial range (top 3 px) — amber band showing the trial this panel was opened
+       from, if any -- purely informational, independent of the Mark Start/End
+       selection (see docs/roadmap/features/segmentation-reuse/status.md's
+       2026-08-16 note: segmentation is capture-scoped, so the selected range is
+       deliberately free to differ from the trial's own bounds -- redo just part
+       of a trial, or run wider than one trial on purpose).
+    4. Mark boundary ticks — bright blue.
+    5. Current frame position — white tick.
+
+    The bar's own coordinate space is whatever unit the caller uses when
+    calling set_range/set_selection/set_position/set_trial_range -- global-
+    time scrubber units when a sync table is available (see
+    CutieInitPanel._local_frame_for), or raw per-camera video frame indices
+    as a fallback when it isn't. The bar itself has no opinion on which.
     """
 
     HEIGHT = 14
@@ -62,6 +74,8 @@ class RangeBar(QWidget):
         self._sel_start = 0
         self._sel_end   = 1
         self._pos = 0
+        self._trial_start: int | None = None
+        self._trial_end: int | None = None
         # List of (first_frame, last_frame) contiguous covered runs.
         self._coverage_runs: list[tuple[int, int]] = []
 
@@ -71,6 +85,8 @@ class RangeBar(QWidget):
         self._sel_start = first
         self._sel_end   = self._last
         self._pos = first
+        self._trial_start = None
+        self._trial_end = None
         self._coverage_runs = []
         self.update()
 
@@ -79,19 +95,31 @@ class RangeBar(QWidget):
         self._sel_end   = end
         self.update()
 
+    def set_trial_range(self, start: int | None, end: int | None) -> None:
+        self._trial_start = start
+        self._trial_end = end
+        self.update()
+
     def set_position(self, frame: int) -> None:
         self._pos = frame
         self.update()
 
-    def set_covered_frames(self, frame_indices: list[int]) -> None:
-        """Compute contiguous runs from *frame_indices* and repaint."""
+    def set_covered_frames(self, frame_indices: list[int], gap_threshold: int = 1) -> None:
+        """Compute contiguous runs from *frame_indices* and repaint.
+
+        *gap_threshold*: max gap between consecutive values still counted as
+        one contiguous run -- 1 for raw per-camera frame indices (adjacent
+        frames differ by exactly 1); wider when *frame_indices* are in
+        global-time units instead, where adjacent video frames are spaced
+        by roughly (scale / fps) units, not 1.
+        """
         if not frame_indices:
             self._coverage_runs = []
             self.update()
             return
         import numpy as np
-        arr = np.array(sorted(frame_indices), dtype=np.int32)
-        breaks = np.where(np.diff(arr) > 1)[0]
+        arr = np.array(sorted(frame_indices), dtype=np.int64)
+        breaks = np.where(np.diff(arr) > gap_threshold)[0]
         starts = np.concatenate([[0], breaks + 1])
         ends   = np.concatenate([breaks + 1, [len(arr)]])
         self._coverage_runs = [
@@ -128,6 +156,17 @@ class RangeBar(QWidget):
         if x2 > x1:
             p.fillRect(x1, 0, x2 - x1, sel_h, QColor(70, 130, 180))
 
+        # Trial range — thin amber band at the very top, drawn over the
+        # selection so it stays visible regardless of overlap. Purely
+        # informational (see class docstring); independent of _sel_start/
+        # _sel_end.
+        if self._trial_start is not None and self._trial_end is not None:
+            trial_h = 3
+            tx1 = self._to_x(self._trial_start)
+            tx2 = self._to_x(self._trial_end)
+            if tx2 > tx1:
+                p.fillRect(tx1, 0, tx2 - tx1, trial_h, QColor(230, 160, 40))
+
         # Start / end tick marks — brighter blue, full height
         for xm in (x1, x2):
             p.fillRect(max(0, xm - 1), 0, 2, h, QColor(120, 180, 240))
@@ -151,6 +190,13 @@ class CutieInitPanel(QWidget):
     """
 
     closed = Signal()
+
+    #: Scrubber/RangeBar units per second of global time, when a sync
+    #: table is available (see _local_frame_for/_global_units_for_local).
+    #: 100 = centisecond precision -- comfortably finer than any real
+    #: frame spacing (30-120fps is ~3.3-0.8 units/frame) without needing
+    #: float slider values, which QSlider doesn't support.
+    _TIME_SCALE = 100
 
     def __init__(
         self,
@@ -179,6 +225,17 @@ class CutieInitPanel(QWidget):
         self._cameras: list[dict] = []
         self._seg_run_id: str | None = None
         self._persons: list[str] = []       # person names, index+1 = SAM label
+        # Global-time scrubbing (see _local_frame_for docstring): None
+        # means no sync config for this capture, falling back to the
+        # legacy per-camera-frame domain where each camera has its own
+        # scrubber range and switching cameras resets marks.
+        self._sync_config_id: str | None = None
+        self._sync_table = None
+        # (start_s, end_s) of self._trial_id, if it has a time range set --
+        # purely informational (RangeBar's amber band) plus the default
+        # Mark Start/End on load; never a constraint on the actual
+        # selection (see RangeBar's docstring).
+        self._trial_range_s: tuple[float, float] | None = None
 
         # Click interaction state
         self._controller = None             # ClickController; created lazily
@@ -426,18 +483,34 @@ class CutieInitPanel(QWidget):
         self._range_bar = RangeBar()
         vbox.addWidget(self._range_bar)
 
+        # Set once in _load_run() if self._trial_id has a time range --
+        # the amber band on the RangeBar is easy to miss on its own, so
+        # this spells it out in text too.
+        self._trial_range_label = QLabel("")
+        self._trial_range_label.setStyleSheet("font-size: 10px; color: #c98a28;")
+        vbox.addWidget(self._trial_range_label)
+
         mark_row = QHBoxLayout()
         mark_row.setSpacing(4)
 
         self._mark_start_btn = QPushButton("Mark Start")
         self._mark_start_btn.setMaximumWidth(90)
-        self._mark_start_btn.setToolTip("Set track-from to current frame")
+        self._mark_start_btn.setToolTip(
+            "Set the segmentation range's start to the current position. "
+            "Defaults to the trial's own start (if opened from a trial) but "
+            "is freely adjustable -- e.g. to redo only part of a trial, or "
+            "to cover a wider range than one trial on purpose."
+        )
         self._mark_start_btn.clicked.connect(self._on_mark_start)
         self._mark_start_label = QLabel("Start: —")
 
         self._mark_end_btn = QPushButton("Mark End")
         self._mark_end_btn.setMaximumWidth(90)
-        self._mark_end_btn.setToolTip("Set track-to to current frame")
+        self._mark_end_btn.setToolTip(
+            "Set the segmentation range's end to the current position. "
+            "Defaults to the trial's own end (if opened from a trial) but "
+            "is freely adjustable, same as Mark Start."
+        )
         self._mark_end_btn.clicked.connect(self._on_mark_end)
         self._mark_end_label = QLabel("End: —")
 
@@ -566,9 +639,167 @@ class CutieInitPanel(QWidget):
         }
         self._persons = sorted(person_names)
 
+        # self._sync_config_id: set whenever any sync_configs row exists
+        # for the capture (most recent by rowid) -- this alone is enough
+        # to create a detection run (the FK it needs), independent of
+        # whether sync has actually been solved yet.
+        # self._sync_table: additionally set only if that config has real
+        # sync_points -- gates global-time scrubbing specifically. A sync
+        # config can exist with nothing solved yet, in which case this
+        # stays None and everywhere below falls back to the legacy
+        # per-camera-frame domain.
+        self._sync_config_id = None
+        self._sync_table = None
+        sync_row = self._conn.execute(
+            "SELECT id FROM sync_configs WHERE shot_id = ? ORDER BY rowid DESC LIMIT 1",
+            (shot_id,),
+        ).fetchone()
+        if sync_row is not None:
+            self._sync_config_id = sync_row["id"]
+            self._sync_table = self._build_sync_table(sync_row["id"])
+
+        self._trial_range_s = None
+        if self._trial_id is not None:
+            trial_row = self._conn.execute(
+                "SELECT time_start_s, time_end_s FROM trials WHERE id = ?",
+                (self._trial_id,),
+            ).fetchone()
+            if (
+                trial_row is not None
+                and trial_row["time_start_s"] is not None
+                and trial_row["time_end_s"] is not None
+            ):
+                self._trial_range_s = (
+                    float(trial_row["time_start_s"]), float(trial_row["time_end_s"]),
+                )
+
+        self._setup_scrubber_range()
         self._rebuild_camera_combo()
         self._rebuild_person_selector()
         self._init_controller()
+
+    def _build_sync_table(self, sync_config_id: str):
+        """Return a SyncTable for *sync_config_id*, or None if it has no
+        sync_points (a sync_configs row can exist with nothing solved yet)."""
+        from app.setup.db_context import SyncPoint, SyncTable
+
+        rows = self._conn.execute(
+            "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, sv.actual_fps "
+            "FROM sync_points sp JOIN capture_videos sv ON sv.id = sp.shot_video_id "
+            "WHERE sp.sync_config_id = ?",
+            (sync_config_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        points = [
+            SyncPoint(camera_instance_id="", shot_video_id=r["shot_video_id"],
+                      video_frame=r["video_frame"], timestamp_s=r["timestamp_s"])
+            for r in rows
+        ]
+        fps_by_video = {r["shot_video_id"]: float(r["actual_fps"]) for r in rows}
+        return SyncTable(points, fps_by_video)
+
+    def _setup_scrubber_range(self) -> None:
+        """Set the scrubber's min/max/value and the RangeBar's range/trial
+        band/selection once, up front -- not per camera-switch, unlike the
+        legacy per-camera-frame domain this falls back to when no sync
+        table is available (handled instead in _on_camera_changed, the one
+        place that still needs a per-camera reset).
+        """
+        if self._sync_table is None or not self._cameras:
+            return  # legacy per-camera domain; _on_camera_changed sets it up
+
+        t_min: float | None = None
+        t_max: float | None = None
+        for cam in self._cameras:
+            t0 = self._sync_table.frame_to_global_time(cam["track_first"], cam["id"])
+            t1 = self._sync_table.frame_to_global_time(cam["track_last"], cam["id"])
+            if t0 is None or t1 is None:
+                continue
+            t_min = t0 if t_min is None else min(t_min, t0)
+            t_max = t1 if t_max is None else max(t_max, t1)
+        if t_min is None:
+            # No camera actually has sync data despite the table existing --
+            # fall back to the legacy per-camera domain.
+            self._sync_table = None
+            return
+
+        g_min, g_max = self._to_units(t_min), self._to_units(t_max)
+        self._scrubber.blockSignals(True)
+        self._scrubber.setMinimum(g_min)
+        self._scrubber.setMaximum(g_max)
+        self._scrubber.blockSignals(False)
+        self._range_bar.set_range(g_min, g_max)
+
+        if self._trial_range_s is not None:
+            t0_units = max(g_min, self._to_units(self._trial_range_s[0]))
+            t1_units = min(g_max, self._to_units(self._trial_range_s[1]))
+            self._range_bar.set_trial_range(t0_units, t1_units)
+            self._mark_start, self._mark_end = t0_units, t1_units
+            s0, s1 = self._trial_range_s
+            self._trial_range_label.setText(
+                f"Trial range: {self._fmt_mmss(s0)}–{self._fmt_mmss(s1)}"
+            )
+        else:
+            self._mark_start, self._mark_end = g_min, g_max
+            self._trial_range_label.setText("")
+
+        self._scrubber.blockSignals(True)
+        self._scrubber.setValue(self._mark_start)
+        self._scrubber.blockSignals(False)
+        self._range_bar.set_selection(self._mark_start, self._mark_end)
+        self._range_bar.set_position(self._mark_start)
+
+    # ------------------------------------------------------------------
+    # Global-time <-> per-camera-local-frame conversion
+    # ------------------------------------------------------------------
+
+    def _to_units(self, seconds: float) -> int:
+        return round(seconds * self._TIME_SCALE)
+
+    def _to_seconds(self, units: int) -> float:
+        return units / self._TIME_SCALE
+
+    @staticmethod
+    def _fmt_mmss(seconds: float) -> str:
+        mm, ss = divmod(max(0.0, seconds), 60)
+        return f"{int(mm):02d}:{ss:05.2f}"
+
+    def _local_frame_for(self, cam: dict, global_units: int | None = None) -> int:
+        """Convert a scrubber position to *cam*'s own local video frame index.
+
+        Without a sync table (legacy fallback), the scrubber's domain IS
+        already the current camera's local frame index, so this is the
+        identity function. With one, *global_units* (default: the
+        scrubber's current value) is global-time scrubber units, converted
+        via SyncTable.lookup(); if *cam* has no footage at that instant
+        (outside its own range), clamps to whichever edge is closer rather
+        than raising.
+        """
+        if global_units is None:
+            global_units = self._scrubber.value()
+        if self._sync_table is None:
+            return global_units
+        local = self._sync_table.lookup(self._to_seconds(global_units), cam["id"])
+        if local is not None:
+            return local
+        t0 = self._sync_table.frame_to_global_time(cam["first"], cam["id"])
+        t1 = self._sync_table.frame_to_global_time(cam["last"], cam["id"])
+        t = self._to_seconds(global_units)
+        if t1 is not None and t > t1:
+            return cam["last"]
+        return cam["first"]
+
+    def _global_units_for_local(self, cam: dict, local_frame: int) -> int:
+        """Inverse of _local_frame_for: cam's own local frame -> scrubber
+        units. Falls back to the current scrubber position (best-effort,
+        no-op) if the sync table has no data for this specific frame."""
+        if self._sync_table is None:
+            return local_frame
+        t = self._sync_table.frame_to_global_time(local_frame, cam["id"])
+        if t is None:
+            return self._scrubber.value()
+        return self._to_units(t)
 
     def _rebuild_camera_combo(self) -> None:
         self._cam_combo.blockSignals(True)
@@ -690,9 +921,9 @@ class CutieInitPanel(QWidget):
             return
 
         cam = self._cam_combo.currentData()
-        frame_idx = self._scrubber.value()
         if cam is None:
             return
+        frame_idx = self._local_frame_for(cam)
 
         # Encode if needed (lazy, also handles first click after scrub)
         self._ensure_encoded(cam, frame_idx)
@@ -715,7 +946,9 @@ class CutieInitPanel(QWidget):
             return
         self._controller.clear_person(self._selected_label)
         self._set_status(f"Cleared live clicks for person {self._selected_label}")
-        self._show_frame(self._scrubber.value())
+        cam = self._cam_combo.currentData()
+        if cam is not None:
+            self._show_frame(self._local_frame_for(cam))
 
     def _on_clear_all(self) -> None:
         """Remove all live SAM2 clicks for the current frame.
@@ -726,7 +959,9 @@ class CutieInitPanel(QWidget):
             return
         self._controller.clear_all()
         self._set_status("Cleared all live clicks")
-        self._show_frame(self._scrubber.value())
+        cam = self._cam_combo.currentData()
+        if cam is not None:
+            self._show_frame(self._local_frame_for(cam))
 
     # ------------------------------------------------------------------
     # Interaction — scrubbing
@@ -754,20 +989,31 @@ class CutieInitPanel(QWidget):
         except Exception:
             pass
 
-        self._scrubber.blockSignals(True)
-        self._scrubber.setMinimum(cam["track_first"])
-        self._scrubber.setMaximum(cam["track_last"])
-        self._scrubber.setValue(cam["track_first"])
-        self._scrubber.blockSignals(False)
+        if self._sync_table is None:
+            # No sync data for this capture -- legacy per-camera-frame
+            # domain: each camera has its own scrubber range, and
+            # switching resets it (there's no meaningful shared "same
+            # instant" without sync data to convert through).
+            self._scrubber.blockSignals(True)
+            self._scrubber.setMinimum(cam["track_first"])
+            self._scrubber.setMaximum(cam["track_last"])
+            self._scrubber.setValue(cam["track_first"])
+            self._scrubber.blockSignals(False)
+            self._mark_start = cam["track_first"]
+            self._mark_end   = cam["track_last"]
+            self._range_bar.set_range(cam["track_first"], cam["track_last"])
+            self._update_mark_labels(cam)
+            self._refresh_coverage_bar(cam)
+            self._show_frame(cam["track_first"])
+            return
 
-        # Reset marks to full track range for the new camera
-        self._mark_start = cam["track_first"]
-        self._mark_end   = cam["track_last"]
-        self._range_bar.set_range(cam["track_first"], cam["track_last"])
+        # Global-time domain: scrubber range/position and marks are shared
+        # across cameras (set once in _setup_scrubber_range) -- switching
+        # only changes which camera's local frame the current global
+        # position maps to, not the position/marks themselves.
         self._update_mark_labels(cam)
         self._refresh_coverage_bar(cam)
-
-        self._show_frame(cam["track_first"])
+        self._show_frame(self._local_frame_for(cam))
 
     def _on_frame_changed(self, frame_idx: int) -> None:
         # Frame changed: clear click state, show new frame.
@@ -775,7 +1021,9 @@ class CutieInitPanel(QWidget):
             self._controller.clear_all()
         self._encoded_frame_idx = -1
         self._range_bar.set_position(frame_idx)
-        self._show_frame(frame_idx)
+        cam = self._cam_combo.currentData()
+        if cam is not None:
+            self._show_frame(self._local_frame_for(cam, frame_idx))
         # If a person is selected, pre-warm encoder after scrubbing stops.
         if self._selected_label > 0:
             self._schedule_encode()
@@ -793,7 +1041,20 @@ class CutieInitPanel(QWidget):
             f"ORDER BY frame_idx",
             [*run_ids, cam["id"]],
         ).fetchall()
-        self._range_bar.set_covered_frames([r["frame_idx"] for r in rows])
+        local_frames = [r["frame_idx"] for r in rows]
+        if self._sync_table is None:
+            self._range_bar.set_covered_frames(local_frames)
+            return
+        # Local frame indices are ~1 apart; converted to global-time units
+        # they're spaced by roughly (scale / fps) instead -- a generous
+        # fixed 0.2s gap threshold comfortably covers any realistic fps
+        # without needing this camera's own fps for the math.
+        global_frames = []
+        for lf in local_frames:
+            t = self._sync_table.frame_to_global_time(lf, cam["id"])
+            if t is not None:
+                global_frames.append(self._to_units(t))
+        self._range_bar.set_covered_frames(global_frames, gap_threshold=self._TIME_SCALE // 5)
 
     def _on_mark_start(self) -> None:
         cam = self._cam_combo.currentData()
@@ -816,18 +1077,20 @@ class CutieInitPanel(QWidget):
         self._update_mark_labels(cam)
 
     def _update_mark_labels(self, cam: dict) -> None:
+        if self._sync_table is not None:
+            self._mark_start_label.setText(
+                f"Start: {self._fmt_mmss(self._to_seconds(self._mark_start))}"
+            )
+            self._mark_end_label.setText(
+                f"End: {self._fmt_mmss(self._to_seconds(self._mark_end))}"
+            )
+            return
         fps = cam.get("fps", 1) or 1
         first = cam["track_first"]
         ts = (self._mark_start - first) / fps
         te = (self._mark_end   - first) / fps
-        ms_mm, ms_ss = divmod(ts, 60)
-        me_mm, me_ss = divmod(te, 60)
-        self._mark_start_label.setText(
-            f"Start: {self._mark_start} ({int(ms_mm):02d}:{ms_ss:05.2f})"
-        )
-        self._mark_end_label.setText(
-            f"End: {self._mark_end} ({int(me_mm):02d}:{me_ss:05.2f})"
-        )
+        self._mark_start_label.setText(f"Start: {self._mark_start} ({self._fmt_mmss(ts)})")
+        self._mark_end_label.setText(f"End: {self._mark_end} ({self._fmt_mmss(te)})")
 
     def _schedule_encode(self) -> None:
         """Start/restart the debounce timer to encode the current frame."""
@@ -836,9 +1099,8 @@ class CutieInitPanel(QWidget):
     def _encode_current_frame(self) -> None:
         """Called by debounce timer: encode current frame if accessible."""
         cam = self._cam_combo.currentData()
-        frame_idx = self._scrubber.value()
         if cam is not None:
-            self._ensure_encoded(cam, frame_idx)
+            self._ensure_encoded(cam, self._local_frame_for(cam))
 
     def _ensure_encoded(self, cam: dict, frame_idx: int) -> None:
         """Encode the frame for SAM2 if not already done for this frame."""
@@ -1001,12 +1263,14 @@ class CutieInitPanel(QWidget):
         if cam is None or not self._persons:
             return
 
+        local_frame = self._local_frame_for(cam)
+
         # Seed mask: live SAM2 result or stored DB mask.
         seed_mask = None
         if self._controller and np.any(self._controller.get_mask()):
             seed_mask = self._controller.get_mask().copy()
         else:
-            seed_mask = self._load_stored_mask(cam["id"], self._scrubber.value())
+            seed_mask = self._load_stored_mask(cam["id"], local_frame)
 
         if seed_mask is None or not np.any(seed_mask):
             self._set_status("No mask on current frame — click to create one first.")
@@ -1027,11 +1291,11 @@ class CutieInitPanel(QWidget):
             camera_label=cam["label"],
             shot_video_id=cam["id"],
             video_path=cam["file_path"],
-            init_frame=self._scrubber.value(),
+            init_frame=local_frame,
             init_mask_png=buf.tobytes(),
             persons_ordered=list(self._persons),
-            first_frame=self._mark_start,
-            last_frame=self._mark_end,
+            first_frame=self._local_frame_for(cam, self._mark_start),
+            last_frame=self._local_frame_for(cam, self._mark_end),
             direction=direction,
             max_dim=self._frame_cache._max_dim,
         )
@@ -1098,6 +1362,11 @@ class CutieInitPanel(QWidget):
             # Prefer the interactive run; fall back to original batch run.
             seg_run_id = run_ids[0]
 
+            # Pose extraction covers the marked range now (converted to
+            # this camera's own local frames), same range segmentation
+            # itself was queued for -- not the camera's full track range
+            # unconditionally, so narrowing/widening the marks (Mark
+            # Start/Mark End) actually controls what gets extracted.
             job = PoseExtractionJob(
                 job_id=str(uuid.uuid4())[:8],
                 camera_label=cam["label"],
@@ -1106,8 +1375,8 @@ class CutieInitPanel(QWidget):
                 detection_run_id=detection_run_id,
                 seg_quality_run_id=seg_run_id,
                 persons_ordered=list(self._persons),
-                first_frame=cam["track_first"],
-                last_frame=cam["track_last"],
+                first_frame=self._local_frame_for(cam, self._mark_start),
+                last_frame=self._local_frame_for(cam, self._mark_end),
                 pose_model=pose_model,
                 overwrite_range=True,
                 refine_hands=refine_hands,
@@ -1182,22 +1451,30 @@ class CutieInitPanel(QWidget):
         asks the user what to do if a run with the same pose_model already
         exists. No longer resolves shot_id/sync_config_id from a pre-
         existing "parent" detection run -- the panel is capture-scoped
-        (self._shot_id) now, so this is the one place that still needs a
-        sync config to exist before it can create a fresh detection run.
+        (self._shot_id) now, so this needs a sync config to exist before
+        it can create a fresh detection run (reuses self._sync_config_id,
+        resolved once in _load_run rather than re-queried here).
         """
         from app.pose.db_cache import create_detection_run
         from PySide6.QtWidgets import QMessageBox
 
         shot_id = self._shot_id
-        sync_row = self._conn.execute(
-            "SELECT id FROM sync_configs WHERE shot_id = ? ORDER BY rowid DESC LIMIT 1",
-            (shot_id,),
-        ).fetchone()
-        if sync_row is None:
+        if self._sync_config_id is None:
             self._set_status("No sync config for this capture yet — set one up first.")
             return None
-        sync_cfg_id = sync_row["id"]
+        sync_cfg_id = self._sync_config_id
         trial_id = self._trial_id
+        # time_start_s/time_end_s: provenance metadata on detection_runs,
+        # not the actual per-camera frame gating (that's
+        # PoseExtractionJob.first_frame/last_frame, resolved per camera
+        # from the marked range in _queue_pose_jobs) -- but now that the
+        # marks are real global-time values when a sync table exists, this
+        # can record the actual requested range instead of always 0.0/0.0.
+        if self._sync_table is not None:
+            time_start_s = self._to_seconds(self._mark_start)
+            time_end_s = self._to_seconds(self._mark_end)
+        else:
+            time_start_s, time_end_s = 0.0, 0.0
 
         existing = self._conn.execute(
             "SELECT id, created_at FROM detection_runs "
@@ -1216,15 +1493,9 @@ class CutieInitPanel(QWidget):
         pose_w, pose_h = _pm_hw[1], _pm_hw[0]
 
         if not existing:
-            # time_start_s/time_end_s are provenance metadata on
-            # detection_runs, not the actual per-camera frame gating (that's
-            # PoseExtractionJob.first_frame/last_frame, resolved per camera
-            # from cam["track_first"]/["track_last"] below) -- no single
-            # meaningful range to record without a parent run to inherit
-            # one from, so 0.0/0.0.
             return create_detection_run(
                 self._conn, shot_id, sync_cfg_id,
-                0.0, 0.0,
+                time_start_s, time_end_s,
                 detector_model="cutie-interactive",
                 pose_model=pose_model,
                 trial_id=trial_id,
@@ -1257,7 +1528,7 @@ class CutieInitPanel(QWidget):
 
         return create_detection_run(
             self._conn, shot_id, sync_cfg_id,
-            0.0, 0.0,
+            time_start_s, time_end_s,
             detector_model="cutie-interactive",
             pose_model=pose_model,
             trial_id=trial_id,
@@ -1318,14 +1589,17 @@ class CutieInitPanel(QWidget):
         if len(self._db_flush_buffer) >= self._DB_FLUSH_EVERY:
             self._flush_masks()
 
-        # Advance scrubber to the last frame in the batch.
+        # Advance scrubber to the last frame in the batch (local frame index
+        # from the worker -> scrubber's own global-time units, or the
+        # identity conversion in the legacy per-camera-frame fallback).
         cam = self._cam_combo.currentData()
         if cam and svid == cam["id"] and batch:
             last_fi = batch[-1][0]
+            pos = self._global_units_for_local(cam, last_fi)
             self._scrubber.blockSignals(True)
-            self._scrubber.setValue(last_fi)
+            self._scrubber.setValue(pos)
             self._scrubber.blockSignals(False)
-            self._range_bar.set_position(last_fi)
+            self._range_bar.set_position(pos)
 
     def _on_track_progress(self, done: int, total: int) -> None:
         self._progress_bar.setMaximum(total)
@@ -1355,7 +1629,7 @@ class CutieInitPanel(QWidget):
             self._refresh_queue_list()
             cam = self._cam_combo.currentData()
             if cam:
-                self._show_frame(self._scrubber.value())
+                self._show_frame(self._local_frame_for(cam))
             self._set_status(f"Pose done — {units_written} frames with keypoints.")
         else:
             self._flush_masks()
@@ -1366,7 +1640,7 @@ class CutieInitPanel(QWidget):
             cam = self._cam_combo.currentData()
             if cam:
                 self._refresh_coverage_bar(cam)
-                self._show_frame(self._scrubber.value())
+                self._show_frame(self._local_frame_for(cam))
             self._refresh_queue_list()
             self._set_status(f"Segmentation done — {units_written} masks written.")
 
@@ -1465,12 +1739,14 @@ class CutieInitPanel(QWidget):
     def _ensure_seg_run(self) -> None:
         """Create a seg_quality_run for this capture if not already done.
 
-        time_start_s/time_end_s: an interactively-created segmentation
-        isn't scoped to a specific sub-range of the capture today (masks
-        are stored per-frame regardless of range) -- 0.0/a large sentinel
-        means "covers the whole capture," trivially satisfying any trial's
-        future containment check. Narrowing this to the actually-segmented
-        range is a real future refinement, not done here.
+        time_start_s/time_end_s: the current Mark Start/End range (global
+        time), converted to seconds -- reflects what the user actually
+        selected to segment (defaults to the trial's own bounds, but is
+        freely adjustable; see RangeBar's docstring). Falls back to
+        0.0/a large sentinel ("covers the whole capture," trivially
+        satisfying any trial's containment check) when there's no sync
+        table for this capture, since marks aren't real global-time values
+        in that legacy per-camera-frame fallback.
 
         persons_json snapshots self._persons -- the ordinal->name mapping
         (index i = mask label i+1) actually in effect right now, the same
@@ -1484,12 +1760,18 @@ class CutieInitPanel(QWidget):
             return
         run_id = generate_id()
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if self._sync_table is not None:
+            time_start_s = self._to_seconds(self._mark_start)
+            time_end_s = self._to_seconds(self._mark_end)
+        else:
+            time_start_s, time_end_s = 0.0, 1e9
         self._conn.execute(
             "INSERT INTO seg_quality_runs "
             "(id, shot_id, trial_id, time_start_s, time_end_s, created_at, "
             " quality_source, erosion_px, persons_json) "
-            "VALUES (?, ?, ?, 0.0, 1e9, ?, 'cutie-interactive', 5, ?)",
-            (run_id, self._shot_id, self._trial_id, now, json.dumps(list(self._persons))),
+            "VALUES (?, ?, ?, ?, ?, ?, 'cutie-interactive', 5, ?)",
+            (run_id, self._shot_id, self._trial_id, time_start_s, time_end_s,
+             now, json.dumps(list(self._persons))),
         )
         self._conn.commit()
         self._seg_init_run_id = run_id

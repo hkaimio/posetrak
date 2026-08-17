@@ -8,7 +8,7 @@ This is the problem that got me here. Professionally I've worked as a software e
 
 None of them held up — for exactly the reasons above. Most affordable motion tracking solutions are built around capturing a single person, and aikido breaks that assumption at every level.
 
-So I started writing small tools to fill the gaps: a Blender plugin to edit the raw pose detection data by hand, and scripts to run OpenSim's IK solver against Blender armatures and export the results as BVH files for other animation tools. These got the motion data where I wanted it, but the outliers and noise were still a problem — movements turned very jerky whenever a camera lost visibility of a key body part. So I went looking for ways to improve temporal stability with filtering, first by smoothing individual keypoint trajectories with a Kalman filter while still re-running inverse kinematics every frame to get the skeleton pose.
+So I started writing small tools to fill the gaps: a Blender plugin to edit the raw pose detection data by hand, and scripts to run OpenSim's IK solver against Blender armatures and export the results as BVH files for other animation tools. These got the motion data where I wanted it, but the outliers and noise were still a problem — movements turned very jerky whenever a camera lost visibility of a key body part. That sent me looking for ways to improve temporal stability with filtering, first by smoothing individual keypoint trajectories with a Kalman filter while still re-running inverse kinematics every frame to get the skeleton pose.
 
 The turning point was realizing those didn't need to be two separate steps. If the filter operated directly on the skeleton's joint angles instead of on individual 3D points, outlier rejection and temporal smoothing could work against the skeleton itself — triangulation and IK, run every frame, were actually just getting in the way.
 
@@ -20,7 +20,7 @@ Eventually the project diverged too far from its origins to keep bolting onto Po
 
 ## Posetrak now
 
-Posetrak now largely achieves the goals I started with: I can capture pair and multi-person aikido practice with equipment that's affordable for a serious hobbyist, and I've used it successfully on plenty of activities beyond aikido too. It's still very much a tool built for my own needs, though — polishing it into something more than that is a separate hurdle.
+Posetrak now largely achieves the goals I started with: I can capture pair and multi-person aikido practice with equipment that's affordable for a serious hobbyist, and I've used it successfully for plenty of activities beyond aikido too. It's still very much a tool built for my own needs, though — polishing it into something more than that is a separate hurdle.
 
 Looking ahead, I want to keep improving the solver and usability, and to add marker-based capture — my immediate use case there is better tracking of props like weapons. Single-camera and face mocap are both low on that list: for aikido specifically, I don't think single-camera capture is feasible until AI models have enough training material on close-contact multi-person scenes like this — which is, after all, the whole reason Posetrak exists. For now the focus stays on multi-camera.
 

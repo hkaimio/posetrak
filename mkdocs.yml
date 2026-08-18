@@ -13,8 +13,18 @@ docs_dir: docs
 # design/debug/planning docs and docs/roadmap/, docs/plans/ -- none of
 # that is reader-facing, so exclude everything by default and re-include
 # just the pages that are. See docs/doc-restructuring-plan.md.
+#
+# exclude_docs filters the *whole* built-site file manifest, not just
+# docs_dir content -- a bare "*" here also swallowed Material's own
+# theme assets (assets/stylesheets/*.css, assets/javascripts/*.js,
+# fonts, icons), which never come from docs_dir at all. Confirmed live:
+# every deployed page rendered unstyled until "!assets/" was added.
+# search/ and the sitemap are unaffected (generated after this filter
+# runs), which is why only CSS/JS looked broken, not search.
 exclude_docs: |
   *
+  !assets/
+  !assets/**
   !index.md
   !background.md
   !setup.md

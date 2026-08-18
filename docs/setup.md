@@ -6,14 +6,14 @@
 |---|---|---|
 | C++ tracker (`posetrak` exe) | Build from source | Build from source (native MSVC) or use a cross-compiled exe |
 | Python tools (UI, pose extraction, DB) | `uv sync` | `uv sync` |
-| Development (edit & rebuild) | Full support | Full support¹ |
+| Development (edit & rebuild) | Full support | Full support |
 
-¹ Native MSVC development is fully supported — see
-  [CONTRIBUTING.md's "Windows (native, MSVC)"](https://github.com/hkaimio/posetrak/blob/main/CONTRIBUTING.md#windows-native-msvc)
-  section and `setup-windows.ps1`. If you'd rather not maintain a native Windows
-  toolchain at all, cross-compiling from Linux/WSL (below) still works and produces
-  a runnable exe without installing MSVC/Pinocchio/Boost on the Windows machine —
-  just without the ability to edit and rebuild there.
+Native MSVC development is fully supported — see
+[CONTRIBUTING.md"](https://github.com/hkaimio/posetrak/blob/main/CONTRIBUTING.md#windows-native-msvc)
+section and `setup-windows.ps1`. If you'd rather not maintain a native Windows
+toolchain, cross-compiling from Linux/WSL (below) works, too, and produces
+a runnable exe without installing MSVC/Pinocchio/Boost on the Windows machine —
+just without the ability to edit and rebuild there.
 
 ---
 
@@ -41,7 +41,7 @@ sudo apt install robotpkg-pinocchio
 
 This installs headers to `/opt/openrobots/include/` — the path expected by `meson.build`.
 
-**Python** — install [uv](https://docs.astral.sh/uv/getting-started/installation/):
+**UV** — install [uv](https://docs.astral.sh/uv/getting-started/installation/):
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh

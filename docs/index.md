@@ -1,8 +1,8 @@
 # Posetrak
 
 Video-based skeletal motion capture using an Unscented Kalman Filter in joint
-space. Supports an arbitrary number of synchronized cameras, configurable
-skeleton definitions, and fisheye/wide-angle lenses.
+space. Supports an arbitrary number of synchronized cameras and configurable
+skeleton definitions, tracking results exported as BVH files.
 
 Multi-person, close-contact scenes — the kind that break most affordable
 motion capture — are the reason this project exists. See

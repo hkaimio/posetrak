@@ -4,6 +4,8 @@ Video-based skeletal motion capture using an Unscented Kalman Filter in joint sp
 Supports arbitrary number of synchronized cameras, configurable skeleton definitions,
 and fisheye/wide-angle lenses.
 
+See [Posetrak web page](https://hkaimio.github.io/posetrak/)
+
 ## Applications
 
 | Command | Description |

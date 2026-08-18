@@ -8,12 +8,14 @@ and fisheye/wide-angle lenses.
 
 | Command | Description |
 |---|---|
+| `posetrak-ui` | Main GUI: sessions, capture setup, pose extraction, tracking, keypoint editing |
 | `posetrak track config.toml` | Run the UKF tracker on a capture session |
 | `posetrak scale config.toml` | Post-process a bone-length calibration run |
-| `posetrak-ui` | Main viewer: sessions, tracking runs, keypoint editing |
-| `posetrak-pose` | Detection pipeline: YOLOX + RTMPose on video, track assignment |
-| `posetrak-db` | Database CLI: import, export, query sessions |
 | `posetrak-mcp` | Read-only MCP diagnostic server for tracking runs |
+
+`posetrak` also covers session/capture/detection management without the GUI
+(`posetrak session`, `posetrak detect`, `posetrak track`, etc.) — see
+[Architecture: Python apps](docs/architecture/python-apps.md) for the full CLI.
 
 ## Getting started
 
@@ -38,7 +40,7 @@ uv sync                    # base Python tools
 ## Documentation
 
 - [Setup guide](docs/setup.md) — prerequisites, build instructions, both platforms
-- [Architecture overview](docs/cpp-architecture-overview.md) — C++ tracker design
+- [Architecture overview](docs/architecture/overview.md) — system design, data model, the UKF solver
 - [Skeleton format](docs/skeleton-format.md) — YAML skeleton file format
 - [Python guidelines](docs/python-guidelines.md) — Python code conventions
 

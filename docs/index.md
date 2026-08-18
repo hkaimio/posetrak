@@ -12,12 +12,14 @@ motion capture — are the reason this project exists. See
 
 | Command | Description |
 |---|---|
+| `posetrak-ui` | Main GUI: sessions, capture setup, pose extraction, tracking, keypoint editing |
 | `posetrak track config.toml` | Run the UKF tracker on a capture session |
 | `posetrak scale config.toml` | Post-process a bone-length calibration run |
-| `posetrak-ui` | Main viewer: sessions, tracking runs, keypoint editing |
-| `posetrak-pose` | Detection pipeline: YOLOX + RTMPose on video, track assignment |
-| `posetrak-db` | Database CLI: import, export, query sessions |
 | `posetrak-mcp` | Read-only MCP diagnostic server for tracking runs |
+
+`posetrak` also covers session/capture/detection management without the GUI
+(`posetrak session`, `posetrak detect`, `posetrak track`, etc.) — see
+[Architecture: Python apps](architecture/python-apps.md) for the full CLI.
 
 ## Getting started
 

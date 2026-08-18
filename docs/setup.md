@@ -151,7 +151,7 @@ uv sync
 ```
 
 This installs the core posetrak package and the base dependencies (PySide6, OpenCV,
-NumPy, pandas, etc.) needed for `posetrak-ui`, `posetrak-db`, and `posetrak-pose`.
+NumPy, pandas, etc.) needed for `posetrak-ui` and the `posetrak` CLI.
 
 ### pre-commit hooks
 
@@ -246,9 +246,8 @@ Cutie's own model weights are downloaded automatically on first use via
 ### Running the applications
 
 ```bash
-uv run posetrak-ui            # Main viewer / editor
-uv run posetrak-pose          # Pose detection pipeline
-uv run posetrak-db --help     # Database CLI
+uv run posetrak-ui            # Main GUI: setup, pose extraction, tracking, editing
+uv run posetrak --help        # CLI: session, capture, detection, tracker, export/import
 uv run posetrak-mcp --db-path /path/to/session.db   # MCP diagnostic server
 
 # C++ tracker (Linux — from debug build)

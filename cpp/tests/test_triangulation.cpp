@@ -426,7 +426,7 @@ TEST_CASE("Triangulate full frame with multiple markers", "[triangulation]") {
 
 TEST_CASE("Triangulate markers for full skeleton pose", "[triangulation]") {
     // Load real skeleton
-    Skeleton skeleton = load_skeleton_from_yaml("tests/data/simple_humanoid.yaml");
+    Skeleton skeleton = load_skeleton_from_yaml("cpp/tests/data/simple_humanoid.yaml");
 
     TriangulationTestFixture fixture;
     fixture.setup_cameras(4);

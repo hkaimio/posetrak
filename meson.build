@@ -10,7 +10,7 @@ project('posetrak', 'cpp',
     'werror=false',  # Enable once code is stable
     'buildtype=release',
   ],
-  license: 'MIT',
+  license: 'Apache-2.0',
   meson_version: '>=0.63.0'
 )
 
@@ -29,7 +29,7 @@ add_project_arguments(
 if cpp.get_id() == 'msvc'
   # M_PI and friends are not defined by <cmath> on MSVC unless this is set
   # before the first include -- the MinGW cross build needs the equivalent
-  # define too (cross/mingw-w64-x86_64.ini), but that file only applies when
+  # define too (cpp/cross/mingw-w64-x86_64.ini), but that file only applies when
   # actually cross-compiling.
   add_project_arguments('-D_USE_MATH_DEFINES', language: 'cpp')
 
@@ -64,7 +64,7 @@ if cpp.get_id() == 'msvc'
   # _WIN32), so without this the macro is completely undefined and `#if WIN32`
   # fails with "invalid integer constant expression" the moment macros.hpp is
   # ever included. The MinGW cross build needs the same define for a different
-  # reason (cross/mingw-w64-x86_64.ini: GCC's own headers clear WIN32 after
+  # reason (cpp/cross/mingw-w64-x86_64.ini: GCC's own headers clear WIN32 after
   # Pinocchio's macros.hpp already needs it) -- __FUNCSIG__ genuinely exists on
   # MSVC, so unlike the cross build this needs no __FUNCSIG__ remap.
   add_project_arguments('-DWIN32=1', language: 'cpp')
@@ -212,10 +212,10 @@ if meson.is_cross_build()
   # Pinocchio's templates pull in Boost (math, type_traits).  The cross-compiler
   # does not search the Linux host's /usr/include, but adding it wholesale would
   # contaminate the build with Linux glibc headers (bits/libc-header-start.h etc).
-  # cross/include/ contains only a symlink to /usr/include/boost — the pure-C++
-  # Boost headers — so only those are exposed to the MinGW compiler.
-  # Requires: apt install libboost-dev  (symlink: cross/include/boost -> /usr/include/boost)
-  pinocchio_extra_incs += include_directories('cross/include', is_system: true)
+  # cpp/cross/include/ contains only a symlink to /usr/include/boost — the
+  # pure-C++ Boost headers — so only those are exposed to the MinGW compiler.
+  # Requires: apt install libboost-dev  (symlink: cpp/cross/include/boost -> /usr/include/boost)
+  pinocchio_extra_incs += include_directories('cpp/cross/include', is_system: true)
 endif
 
 pinocchio_deps = []
@@ -261,14 +261,14 @@ if get_option('enable_tests')
 endif
 
 # Include directories
-posetrak_inc = include_directories('include')
+posetrak_inc = include_directories('cpp/include')
 
 # Subdirectories
-subdir('src')
-subdir('cli')
+subdir('cpp/src')
+subdir('cpp/cli')
 
 if get_option('enable_tests')
-  subdir('tests')
+  subdir('cpp/tests')
 endif
 
 # Summary

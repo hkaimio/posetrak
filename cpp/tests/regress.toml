@@ -2,17 +2,16 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Step 0 baseline — parent-only tracking with active_joint_groups = ["main"]
-# No palm joints in "main" group. No child_filters configured.
-# Output: tracking_tests/rebuild-step0/
+# HEAD debug run — identical to harri-no-palms.toml but with export_debug = true
+# Output goes to tracking_tests/harri-no-palms-head (overwrites last run)
 
 [data]
-skeleton = "tests/data/harri-skeleton-bisect-testing.yaml"
+skeleton = "harri-skeleton-bisect-testing.yaml"
 cameras = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/Calib_scene.toml"
 observations_dir = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/pose"
-sync = "tests/cpp-python/sync_cpp-python-full.json"
+sync = "cpp/tests/cpp-python/sync_cpp-python-full.json"
 person_id = 0
-active_joint_groups = ["main"]
+active_joint_groups = ["main", "HandL", "HandR"]
 
 [tracking]
 process_noise_std = 0.15
@@ -20,7 +19,7 @@ measurement_noise_std = 20.0
 outlier_threshold = 4.0
 
 [tracking.initialization]
-python_state_path = "/home/harri/projects/posetrak/tests/cpp-python/initial_state.csv"
+# python_state_path = "/home/harri/projects/posetrak/tests/cpp-python/initial_state.csv"
 ik_max_iterations = 1000
 ik_tolerance = 0.02
 init_position_std = 1.0
@@ -35,10 +34,10 @@ beta = 2.0
 kappa = 0.0
 
 [output]
-directory = "/home/harri/projects/posetrak/tracking_tests/rebuild-step0"
+directory = "/home/harri/projects/posetrak/tracking_tests/harri-regress-latest"
 export_tracking_results = true
 export_statistics = true
-export_debug = false
+# export_debug = true
 
 [processing]
 start_time = 0.0

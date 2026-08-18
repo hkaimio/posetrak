@@ -35,7 +35,7 @@ SPDX-License-Identifier = "Apache-2.0"
 [[annotations]]
 path = [
     "marker 3D positions from tracking_results.csv",
-    "cross/include/boost",
+    "cpp/cross/include/boost",
 ]
 SPDX-FileCopyrightText = "2026 Harri Kaimio"
 SPDX-License-Identifier = "Apache-2.0"

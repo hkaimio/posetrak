@@ -196,7 +196,7 @@ _LEFT_FOOT_IDX  = frozenset({17, 18, 19})
 _RIGHT_FOOT_IDX = frozenset({20, 21, 22})
 _BODY17_IDX     = frozenset(range(17))
 
-# The default skeleton (tests/data/Harri_skeleton-regress-test.yaml) only
+# The default skeleton (cpp/tests/data/Harri_skeleton-regress-test.yaml) only
 # attaches markers to nose + ears — eyes and the 68 detailed face landmarks
 # aren't used by tracking. Splitting "Face" into that small, actually-useful
 # subset plus everything else keeps "Select Face" meaningful for editing

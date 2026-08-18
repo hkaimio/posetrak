@@ -8,34 +8,29 @@ A second subcommand `posetrak-tracker scale` post-processes a bone-length calibr
 
 ## Source layout
 
+All C++ code lives under `cpp/` (source, headers, CLI entry point, and tests
+are siblings there; the root `meson.build` still configures the whole build
+from the repo root the same way it always has -- only the paths inside it
+point into `cpp/` now):
+
 ```
-src/
+cpp/
+├── include/posetrak/     .hpp headers, one subdirectory per module below
+├── src/                  .cpp implementations, same module split as include/
+│   ├── core/             skeleton.cpp, skeleton_layout.cpp, state.cpp, observation.cpp, config.cpp
+│   ├── db/               session_reader.cpp, result_writer.cpp
+│   ├── filters/          ukf.cpp, sigma_points.cpp, process_model.cpp, rts_smoother.cpp
+│   ├── io/               observation_loader.cpp (JSON legacy + TOML), tracking_export.cpp, statistics_tracker.cpp
+│   ├── kinematics/       forward_kinematics.cpp (Pinocchio wrapper), inverse_kinematics.cpp, triangulation.cpp
+│   └── tracking/         tracker.cpp (initialize() + track_frame() orchestration)
 ├── cli/
-│   └── main.cpp                        posetrak-tracker track / scale entry points
-├── core/
-│   ├── skeleton.hpp/.cpp               kinematic tree: joints, markers, DOF types
-│   ├── skeleton_layout.hpp/.cpp        DOF index table (single source of truth)
-│   ├── state.hpp/.cpp                  error-state representation, quaternion ops
-│   ├── observation.hpp                 Observation, ObservationSet, ObservationSequence
-│   └── config.cpp                      TOML config loading
-├── db/
-│   ├── session_reader.hpp/.cpp         SQLite read-only access to session DB
-│   ├── result_writer.hpp/.cpp          writes tracking_results + tracking_obs_results
-│   └── blob_codec.hpp/.cpp             encode/decode float32/float64 blobs
-├── filters/
-│   ├── ukf.hpp/.cpp                    UnscentedKalmanFilter: error-state, Joseph form
-│   └── subset_ukf.hpp/.cpp             child filter for hierarchical tracking (experimental)
-├── io/
-│   ├── observation_loader.hpp/.cpp     loads from JSON (legacy) or TOML
-│   ├── tracking_export.hpp/.cpp        exports CSV results
-│   └── statistics_tracker.hpp/.cpp     per-frame outlier / NIS statistics
-├── kinematics/
-│   ├── forward_kinematics.hpp/.cpp     Pinocchio wrapper: State → marker world positions
-│   ├── inverse_kinematics.hpp/.cpp     damped least-squares IK for initialisation
-│   └── triangulation.hpp/.cpp          DLT multi-view triangulation
-└── tracking/
-    └── tracker.hpp/.cpp                Tracker: initialize() + track_frame() orchestration
+│   └── track.cpp         posetrak-tracker track / scale entry points
+└── tests/                Catch2 unit tests + tests/data/ fixtures + tests/cpp-python/ cross-check
 ```
+
+This omits some newer modules (`multi_person_tracker`, `hierarchical_solver`,
+`calibration/`) that have landed since this diagram was last drawn -- treat
+it as oriented, not exhaustive.
 
 ---
 
@@ -142,7 +137,7 @@ The tracker resolves all IDs against the session DB at startup.  The Python app 
 When invoked directly from the command line (not via the Python app), the tracker also accepts a TOML config file:
 
 ```bash
-optbuild/cli/posetrak-tracker track config.toml
+optbuild/cpp/cli/posetrak-tracker track config.toml
 ```
 
 Key sections:
@@ -167,7 +162,7 @@ See [UKF algorithm](algorithms/ukf.md) for the meaning of the UKF noise paramete
 meson setup optbuild -Dbuildtype=release   # optimised build for tracking
 meson compile -C optbuild
 
-optbuild/cli/posetrak-tracker track config.toml
+optbuild/cpp/cli/posetrak-tracker track config.toml
 ```
 
 Performance between debug and optimised builds is substantial.  Use `optbuild/` for actual tracking runs; the debug build in `builddir/` is adequate for unit tests.

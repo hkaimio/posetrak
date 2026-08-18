@@ -1,5 +1,5 @@
 {
-    "testMate.cpp.test.executables": "builddir/tests/test_posetrak",
+    "testMate.cpp.test.executables": "builddir/cpp/tests/test_posetrak",
     "testMate.cpp.test.workingDirectory": ".",
     "C_Cpp.intelliSenseEngine": "disabled",
     "C_Cpp.default.compileCommands": "/home/harri/projects/posetrak/builddir/compile_commands.json",

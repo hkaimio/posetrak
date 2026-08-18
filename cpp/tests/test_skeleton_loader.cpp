@@ -24,7 +24,7 @@ std::filesystem::path get_temp_test_dir() {
 }  // namespace
 
 TEST_CASE("Load simple humanoid skeleton", "[skeleton_loader]") {
-    Skeleton skeleton = load_skeleton_from_yaml("tests/data/simple_humanoid.yaml");
+    Skeleton skeleton = load_skeleton_from_yaml("cpp/tests/data/simple_humanoid.yaml");
 
     SECTION("Basic skeleton properties") {
         auto const& joints = skeleton.joints();
@@ -141,7 +141,7 @@ TEST_CASE("Load simple humanoid skeleton", "[skeleton_loader]") {
 }
 
 TEST_CASE("Load production Harri skeleton", "[skeleton_loader]") {
-    Skeleton skeleton = load_skeleton_from_yaml("tests/data/Harri_skeleton-shouldery-rot.yaml");
+    Skeleton skeleton = load_skeleton_from_yaml("cpp/tests/data/Harri_skeleton-shouldery-rot.yaml");
 
     auto const& joints = skeleton.joints();
     auto const& markers = skeleton.markers();
@@ -207,7 +207,7 @@ TEST_CASE("Load production Harri skeleton", "[skeleton_loader]") {
 
 TEST_CASE("Skeleton loader error handling", "[skeleton_loader][errors]") {
     SECTION("Non-existent file throws") {
-        REQUIRE_THROWS_AS(load_skeleton_from_yaml("tests/data/nonexistent.yaml"),
+        REQUIRE_THROWS_AS(load_skeleton_from_yaml("cpp/tests/data/nonexistent.yaml"),
                           std::runtime_error);
     }
 

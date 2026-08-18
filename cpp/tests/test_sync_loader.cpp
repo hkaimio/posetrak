@@ -14,7 +14,7 @@
 using namespace posetrak;
 
 TEST_CASE("Load synchronization metadata", "[sync_loader]") {
-    auto sync_data = load_sync_metadata("tests/data/sync_metadata.json");
+    auto sync_data = load_sync_metadata("cpp/tests/data/sync_metadata.json");
 
     SECTION("Correct number of cameras") {
         REQUIRE(sync_data.size() == 3);
@@ -55,7 +55,7 @@ TEST_CASE("Load synchronization metadata", "[sync_loader]") {
 
 TEST_CASE("Apply sync metadata to cameras", "[sync_loader]") {
     // Load cameras from calibration
-    auto cameras = load_cameras_from_toml("tests/data/pose2sim_camera_calib.toml");
+    auto cameras = load_cameras_from_toml("cpp/tests/data/pose2sim_camera_calib.toml");
 
     // Create minimal sync data for 2 cameras
     auto get_temp_dir = []() {
@@ -115,7 +115,7 @@ TEST_CASE("Sync loader error handling", "[sync_loader][errors]") {
     };
 
     SECTION("Non-existent file throws") {
-        REQUIRE_THROWS_AS(load_sync_metadata("tests/data/nonexistent_sync.json"),
+        REQUIRE_THROWS_AS(load_sync_metadata("cpp/tests/data/nonexistent_sync.json"),
                           std::runtime_error);
     }
 
@@ -412,7 +412,7 @@ TEST_CASE("Sync loader accepts 'syncpoints' key (no underscore)", "[sync_loader]
 
 TEST_CASE("Apply sync metadata sets FPS on cameras", "[sync_loader][fps]") {
     // Load cameras from calibration
-    auto cameras = load_cameras_from_toml("tests/data/pose2sim_camera_calib.toml");
+    auto cameras = load_cameras_from_toml("cpp/tests/data/pose2sim_camera_calib.toml");
 
     auto get_temp_dir = []() {
         static auto temp = std::filesystem::temp_directory_path() / "posetrak_tests";

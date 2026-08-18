@@ -15,7 +15,7 @@
 skeleton = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/Harri_skeleton-shouldery-rot.yaml"
 cameras = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/Calib_scene.toml"
 observations_dir = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/pose"
-sync = "tests/cpp-python/sync_cpp-python-full.json"  # Optional: camera-specific frame offsets
+sync = "cpp/tests/cpp-python/sync_cpp-python-full.json"  # Optional: camera-specific frame offsets
 person_id = 0
 active_joint_groups = ["main", "HandL", "HandR"]
 

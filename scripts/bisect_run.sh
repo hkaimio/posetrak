@@ -19,21 +19,21 @@ set -euo pipefail
 COMMIT="${1:?usage: bisect_run.sh <commit|HEAD> <label>}"
 LABEL="${2:?usage: bisect_run.sh <commit|HEAD> <label>}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TOML_TEMPLATE="$ROOT/tests/harri-no-palms.toml"
+TOML_TEMPLATE="$ROOT/cpp/tests/harri-no-palms-head-debug.toml"
 OUTPUT_DIR="$ROOT/tracking_tests/harri-no-palms-$LABEL"
 
 echo "=== Bisect run: commit=$COMMIT  label=$LABEL ==="
 echo "  Output: $OUTPUT_DIR"
 
 if [[ "$COMMIT" == "HEAD" ]]; then
-    BINARY="$ROOT/optbuild/cli/posetrak"
-    LD_PATH="$ROOT/optbuild/subprojects/fmt-12.0.0:$ROOT/optbuild/src:$ROOT/optbuild/subprojects/yaml-cpp-0.8.0:$ROOT/optbuild/subprojects/tomlplusplus-3.4.0/src:/opt/openrobots/lib"
+    BINARY="$ROOT/optbuild/cpp/cli/posetrak"
+    LD_PATH="$ROOT/optbuild/subprojects/fmt-12.0.0:$ROOT/optbuild/cpp/src:$ROOT/optbuild/subprojects/yaml-cpp-0.8.0:$ROOT/optbuild/subprojects/tomlplusplus-3.4.0/src:/opt/openrobots/lib"
     echo "  Binary: optbuild (HEAD already built)"
 else
     WORKTREE="$ROOT/../posetrak-bisect-$LABEL"
     BUILDDIR="$WORKTREE/build"
-    BINARY="$BUILDDIR/cli/posetrak"
-    LD_PATH="$BUILDDIR/subprojects/fmt-12.0.0:$BUILDDIR/src:$BUILDDIR/subprojects/yaml-cpp-0.8.0:$BUILDDIR/subprojects/tomlplusplus-3.4.0/src:/opt/openrobots/lib"
+    BINARY="$BUILDDIR/cpp/cli/posetrak"
+    LD_PATH="$BUILDDIR/subprojects/fmt-12.0.0:$BUILDDIR/cpp/src:$BUILDDIR/subprojects/yaml-cpp-0.8.0:$BUILDDIR/subprojects/tomlplusplus-3.4.0/src:/opt/openrobots/lib"
 
     cd "$ROOT"
     if [[ ! -d "$WORKTREE" ]]; then
@@ -62,7 +62,7 @@ else
     fi
 
     echo "  Compiling..."
-    ninja -C "$BUILDDIR" cli/posetrak -j"$(nproc)" 2>&1 | tail -3
+    ninja -C "$BUILDDIR" cpp/cli/posetrak -j"$(nproc)" 2>&1 | tail -3
     echo "  Build done."
     cd "$ROOT"
 fi

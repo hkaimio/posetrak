@@ -125,7 +125,7 @@ foreach ($dll in $runtimeDlls) {
 }
 
 function Copy-RuntimeDlls($Dir) {
-    foreach ($subdir in @("cli", "tests")) {
+    foreach ($subdir in @("cpp\cli", "cpp\tests")) {
         $target = Join-Path $RepoRoot "$Dir\$subdir"
         if (Test-Path $target) {
             Copy-Item -Force $runtimeDlls -Destination $target
@@ -168,5 +168,5 @@ Write-Host "changes needed to run them directly, including from the Python UI."
 Write-Host ""
 Write-Host "Rebuild:  meson compile -C builddir   /   meson compile -C optbuild"
 Write-Host "Test:     meson test -C builddir"
-Write-Host "(Re-run this script -- or just re-copy the two DLLs above into cli/ and tests/ --"
+Write-Host "(Re-run this script -- or just re-copy the two DLLs above into cpp/cli/ and cpp/tests/ --"
 Write-Host " if you ever delete and recreate either build directory.)"

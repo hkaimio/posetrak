@@ -8,7 +8,7 @@
             "name":"Rerun import",
             "type":"debugpy",
             "request":"launch",
-            "program":"${workspaceFolder}/scripts/visualize_tracking_results.py",
+            "program":"${workspaceFolder}/python/tools/visualize_tracking_results.py",
             "console":"integratedTerminal",
             "python": "${workspaceFolder}/.venv/bin/python",
             "args":[
@@ -16,8 +16,8 @@
                 "-o", "${workspaceFolder}/tracking_viz_cameras.rrd",
                 "--cameras", "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/Calib_scene.toml",
                 "--video-dir", "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/videos",
-                "--skeleton", "${workspaceFolder}/tests/data/Harri_skeleton-shouldery-rot.yaml",
-                "--sync", "${workspaceFolder}/tests/cpp-python/sync_cpp-python-full.json"
+                "--skeleton", "${workspaceFolder}/cpp/tests/data/Harri_skeleton-shouldery-rot.yaml",
+                "--sync", "${workspaceFolder}/cpp/tests/cpp-python/sync_cpp-python-full.json"
             ]
         },
             {
@@ -25,7 +25,7 @@
             "request": "launch",
             "name": "Custom launch",
             "targetCreateCommands": [
-                "target create ${workspaceFolder}/builddir/tests/test_posetrak"
+                "target create ${workspaceFolder}/builddir/cpp/tests/test_posetrak"
             ],
             "processCreateCommands": [
                 "process launch"
@@ -36,9 +36,9 @@
             "request": "launch",
             "name": "Posetrak lldb",
             "targetCreateCommands": [
-                "target create ${workspaceFolder}/builddir/cli/posetrak"
+                "target create ${workspaceFolder}/builddir/cpp/cli/posetrak"
             ],
-            "args": ["${workspaceFolder}/tests/regress-calibrate-timo.toml"],
+            "args": ["${workspaceFolder}/cpp/tests/regress-calibrate-timo.toml"],
             "processCreateCommands": [
                 "process launch"
             ]
@@ -48,7 +48,7 @@
         "miDebuggerPath": "/usr/bin/gdb",
         "type": "cppdbg",
         "request": "launch",
-        "program": "${workspaceRoot}/builddir/tests/test_posetrak",
+        "program": "${workspaceRoot}/builddir/cpp/tests/test_posetrak",
         "args": [],
         "cwd": "${workspaceRoot}"
     },
@@ -57,8 +57,8 @@
         "miDebuggerPath": "/usr/bin/gdb",
         "type": "cppdbg",
         "request": "launch",
-        "program": "${workspaceFolder}/builddir/cli/posetrak",
-        "args": ["${workspaceFolder}/tests/regress-calibrate-timo.toml"],
+        "program": "${workspaceFolder}/builddir/cpp/cli/posetrak",
+        "args": ["${workspaceFolder}/cpp/tests/regress-calibrate-timo.toml"],
         "cwd": "${workspaceRoot}"
     },
 

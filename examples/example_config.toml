@@ -5,10 +5,10 @@
 # Example Posetrak Configuration File
 
 [data]
-skeleton_path = "tests/data/skeleton_simple.yaml"
-cameras_path = "tests/data/cameras_3cam.toml"
-# sync_path = "tests/data/sync.json"  # Optional
-observations_dir = "tests/data/openpose_detections"
+skeleton_path = "cpp/tests/data/skeleton_simple.yaml"
+cameras_path = "cpp/tests/data/cameras_3cam.toml"
+# sync_path = "cpp/tests/data/sync.json"  # Optional
+observations_dir = "cpp/tests/data/openpose_detections"
 person_id = 0
 
 [tracking]

@@ -342,8 +342,8 @@ Similar structure but all components are velocities (6 for root, 3 for spherical
 
 ### C++ (Tracker)
 
-- **State storage**: `src/tracking/state.cpp` and `src/tracking/state.hpp`
-- **Pinocchio conversion**: `src/kinematics/forward_kinematics.cpp` (`state_to_config()` function)
+- **State storage**: `cpp/src/core/state.cpp` and `cpp/include/posetrak/core/state.hpp`
+- **Pinocchio conversion**: `cpp/src/kinematics/forward_kinematics.cpp` (`state_to_config()` function)
 - **CSV export**: Tracker outputs state vectors directly
 
 ### Python (Visualization)
@@ -373,5 +373,5 @@ Similar structure but all components are velocities (6 for root, 3 for spherical
 ## See Also
 
 - [Skeleton YAML Format](skeleton-format.md) - Defines joint hierarchy and rest poses
-- `src/kinematics/forward_kinematics.cpp` - Reference implementation
+- `cpp/src/kinematics/forward_kinematics.cpp` - Reference implementation
 - `scripts/visualize_tracking_results.py` - Python visualization example

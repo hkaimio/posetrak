@@ -20,14 +20,14 @@ meson compile -C "$BUILD_DIR"
 
 echo ""
 echo "==> Running tests..."
-LD_LIBRARY_PATH="$BUILD_DIR/subprojects/tomlplusplus-3.4.0/src:$BUILD_DIR/subprojects/fmt-12.0.0:$BUILD_DIR/src:/usr/lib/x86_64-linux-gnu" \
-  "$BUILD_DIR/tests/test_posetrak" --reporter compact
+LD_LIBRARY_PATH="$BUILD_DIR/subprojects/tomlplusplus-3.4.0/src:$BUILD_DIR/subprojects/fmt-12.0.0:$BUILD_DIR/cpp/src:/usr/lib/x86_64-linux-gnu" \
+  "$BUILD_DIR/cpp/tests/test_posetrak" --reporter compact
 
 echo ""
 echo "==> Generating coverage data..."
 lcov --capture \
-  --directory "$BUILD_DIR/src" \
-  --directory "$BUILD_DIR/tests" \
+  --directory "$BUILD_DIR/cpp/src" \
+  --directory "$BUILD_DIR/cpp/tests" \
   --output-file "$BUILD_DIR/coverage.info" \
   --ignore-errors mismatch,inconsistent \
   --quiet

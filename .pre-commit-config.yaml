@@ -19,13 +19,13 @@ repos:
         files: '^mkdocs\.yml$'
         args: ['--unsafe']
     -   id: end-of-file-fixer
-        # cross/include/boost is a symlink-target string (git mode 120000,
+        # cpp/cross/include/boost is a symlink-target string (git mode 120000,
         # checked out as a plain text file since this repo runs with
         # core.symlinks=false on Windows). Its content -- "/usr/include/boost",
         # no trailing newline -- IS the symlink target: adding a newline here
         # corrupts the actual symlink once checked out for real (Linux/WSL/
         # macOS, core.symlinks=true). Confirmed reproducing 2026-08-18.
-        exclude: '^cross/include/boost$'
+        exclude: '^cpp/cross/include/boost$'
     -   id: trailing-whitespace
 -   repo: https://github.com/pre-commit/mirrors-clang-format
     rev: ''  # Use the sha / tag you want to point at

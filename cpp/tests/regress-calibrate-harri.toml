@@ -2,14 +2,17 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# HEAD debug run — identical to harri-no-palms.toml but with export_debug = true
-# Output goes to tracking_tests/harri-no-palms-head (overwrites last run)
+# CP2 DoD test — track Harri with Harri's scalable skeleton in calibration mode.
+# Prismatic DOFs for spine/neck/arm/leg bones should drift from 0 toward
+# (nominal_bone_length − actual_bone_length) over the calibration sequence.
+# Check state_vectors.csv: prismatic DOF columns should show clear drift,
+# not stay at zero. Marker residuals should decrease as the filter adapts.
 
 [data]
-skeleton = "harri-skeleton-bisect-testing.yaml"
+skeleton = "harri-skeleton-bisect-testing-scalable.yaml"
 cameras = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/Calib_scene.toml"
 observations_dir = "/mnt/d/mocap/2026-01-11-kotegaesh-joint-space-test/pose"
-sync = "tests/cpp-python/sync_cpp-python-full.json"
+sync = "cpp/tests/cpp-python/sync_cpp-python-full.json"
 person_id = 0
 active_joint_groups = ["main", "HandL", "HandR"]
 
@@ -19,12 +22,11 @@ measurement_noise_std = 20.0
 outlier_threshold = 4.0
 
 [tracking.initialization]
-# python_state_path = "/home/harri/projects/posetrak/tests/cpp-python/initial_state.csv"
 ik_max_iterations = 1000
 ik_tolerance = 0.02
 init_position_std = 1.0
 init_orientation_std = 1.0
-init_joint_std = 1.0
+init_joint_std = 0.1
 init_velocity_std = 1.0
 min_cameras_for_init = 2
 
@@ -33,13 +35,16 @@ alpha = 0.1
 beta = 2.0
 kappa = 0.0
 
+[calibration]
+enabled = true
+prismatic_process_noise_std = 0.0001   # 0.1 mm/sqrt(s) — bone lengths drift slowly
+
 [output]
-directory = "/home/harri/projects/posetrak/tracking_tests/harri-regress-latest"
+directory = "/home/harri/projects/posetrak/tracking_tests/cp2-calibrate-harri"
 export_tracking_results = true
 export_statistics = true
-# export_debug = true
 
 [processing]
 start_time = 0.0
-end_time = 8
+end_time = 8.0
 tracker_fps = 120.0

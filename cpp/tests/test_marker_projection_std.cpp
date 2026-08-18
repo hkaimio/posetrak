@@ -129,7 +129,7 @@ double sigma_point_projection_std(std::shared_ptr<const SkeletonLayout> const& l
 
 TEST_CASE("marker_projection_std matches the sigma-point reprojection oracle after tracking",
           "[tracker][marker_projection_std]") {
-    Skeleton skeleton = load_skeleton_from_yaml("tests/data/simple_humanoid.yaml");
+    Skeleton skeleton = load_skeleton_from_yaml("cpp/tests/data/simple_humanoid.yaml");
 
     pinocchio::Model model;
     pinocchio::Data data;
@@ -267,7 +267,7 @@ TEST_CASE("marker_projection_std matches the sigma-point reprojection oracle aft
 
 TEST_CASE("marker_projection_std's SPHERICAL joint columns match a finite-difference check",
           "[tracker][marker_projection_std]") {
-    Skeleton skeleton = load_skeleton_from_yaml("tests/data/simple_humanoid.yaml");
+    Skeleton skeleton = load_skeleton_from_yaml("cpp/tests/data/simple_humanoid.yaml");
     pinocchio::Model model;
     pinocchio::Data data;
     PinocchioModelBuilder::build_model_and_data(skeleton, model, data);

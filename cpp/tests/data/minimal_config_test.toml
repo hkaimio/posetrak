@@ -5,6 +5,6 @@
 # Minimal config for testing default (non-hierarchical) loading.
 
 [data]
-skeleton = "tests/data/simple_humanoid.yaml"
-cameras = "tests/data/pose2sim_camera_calib.toml"
-observations_dir = "tests/data/openpose"
+skeleton = "cpp/tests/data/simple_humanoid.yaml"
+cameras = "cpp/tests/data/pose2sim_camera_calib.toml"
+observations_dir = "cpp/tests/data/openpose"

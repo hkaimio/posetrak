@@ -339,7 +339,7 @@ void create_fixture_db(fs::path const& path, int num_frames, double dt) {
     // ---- Skeleton: the real, trackable simple_humanoid fixture ----
     std::string yaml_content;
     {
-        std::ifstream f("tests/data/simple_humanoid.yaml");
+        std::ifstream f("cpp/tests/data/simple_humanoid.yaml");
         if (!f)
             throw std::runtime_error("Could not open tests/data/simple_humanoid.yaml");
         std::ostringstream ss;

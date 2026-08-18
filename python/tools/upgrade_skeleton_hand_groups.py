@@ -34,7 +34,7 @@ hand.L/forearm.L joint, regardless of exact hand topology:
 A skeleton with real palm.0N.{L,R} joints (fingers attach to those instead)
 is a different, unreviewed topology -- discovered mid-implementation when
 this script's first version blindly stripped palm.* references from
-tests/data/Harri_skeleton-regress-test.yaml and Harri_skeleton-shouldery-
+cpp/tests/data/Harri_skeleton-regress-test.yaml and Harri_skeleton-shouldery-
 rot.yaml, where they are real, load-bearing joints, not phantom references.
 For that case this script only applies correction 1 (unambiguous, safe
 regardless of topology) and reports the rest as skipped, rather than

@@ -82,7 +82,7 @@ in `meson.build` — none of this affects the Linux/WSL or MinGW cross paths):
 - `default_library=static` — this codebase has no `dllexport`/`dllimport`
   annotations, so as a shared library nothing would be exported and every
   consumer (the CLI, the tests) fails to link. The existing MinGW cross
-  build (`cross/mingw-w64-x86_64.ini`) already works around this the same
+  build (`cpp/cross/mingw-w64-x86_64.ini`) already works around this the same
   way, for the same reason.
 - `NOMINMAX`, `WIN32=1`, `BOOST_ALL_NO_LIB`, `_USE_MATH_DEFINES`, `/bigobj`
   (debug only) — Pinocchio/Eigen/MSVC preprocessor and object-format quirks;
@@ -90,10 +90,10 @@ in `meson.build` — none of this affects the Linux/WSL or MinGW cross paths):
   one fixes.
 
 **Alternative: MinGW cross-compile from WSL.** If you'd rather not maintain
-a native Windows toolchain at all, `cross/mingw-w64-x86_64.ini` cross-compiles
+a native Windows toolchain at all, `cpp/cross/mingw-w64-x86_64.ini` cross-compiles
 a `posetrak-tracker.exe` from a Linux/WSL host (`apt install mingw-w64
 libboost-dev`, then `meson setup winbuild --cross-file
-cross/mingw-w64-x86_64.ini`) — see the comments at the top of that file for
+cpp/cross/mingw-w64-x86_64.ini`) — see the comments at the top of that file for
 the exact steps and the four runtime DLLs it needs alongside the `.exe`.
 
 ## Coding Standards
@@ -126,7 +126,7 @@ the exact steps and the four runtime DLLs it needs alongside the `.exe`.
   - Include brief description of what the function does
   - Explain non-obvious implementation details
 - **Code formatting**: Run `clang-format` before committing
-  - In project root: `clang-format -i src/**/*.cpp include/**/*.hpp tests/**/*.cpp`
+  - In project root: `clang-format -i cpp/src/**/*.cpp cpp/include/**/*.hpp cpp/tests/**/*.cpp`
   - Verify with: `git diff` before committing
 
 ### Documentation Organization
@@ -225,7 +225,7 @@ meson compile -C builddir
 meson test -C builddir
 
 # Check formatting
-clang-format -i src/**/*.cpp include/**/*.hpp
+clang-format -i cpp/src/**/*.cpp cpp/include/**/*.hpp
 
 # Check for memory leaks (on new code)
 meson test -C builddir --wrap='valgrind --leak-check=full'

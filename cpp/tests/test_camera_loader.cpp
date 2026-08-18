@@ -14,7 +14,7 @@
 using namespace posetrak;
 
 TEST_CASE("Load Pose2Sim camera calibration", "[camera_loader]") {
-    auto cameras = load_cameras_from_toml("tests/data/pose2sim_camera_calib.toml");
+    auto cameras = load_cameras_from_toml("cpp/tests/data/pose2sim_camera_calib.toml");
 
     SECTION("Correct number of cameras loaded") {
         REQUIRE(cameras.size() == 6);
@@ -99,7 +99,7 @@ TEST_CASE("Camera loader error handling", "[camera_loader][errors]") {
     };
 
     SECTION("Non-existent file throws") {
-        REQUIRE_THROWS_AS(load_cameras_from_toml("tests/data/nonexistent.toml"),
+        REQUIRE_THROWS_AS(load_cameras_from_toml("cpp/tests/data/nonexistent.toml"),
                           std::runtime_error);
     }
 
@@ -147,7 +147,7 @@ TEST_CASE("Camera loader error handling", "[camera_loader][errors]") {
 }
 
 TEST_CASE("Camera loader handles different image sizes", "[camera_loader]") {
-    auto cameras = load_cameras_from_toml("tests/data/pose2sim_camera_calib.toml");
+    auto cameras = load_cameras_from_toml("cpp/tests/data/pose2sim_camera_calib.toml");
 
     SECTION("Cameras have different resolutions") {
         // cam1: 3840x2160 (4K)

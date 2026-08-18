@@ -106,7 +106,7 @@ TEST_CASE("Regression: write_calibrated_yaml produces stable offsets", "[scale_r
     };
 
     auto out = temp_dir() / "regression_output.yaml";
-    write_calibrated_yaml("tests/data/scale_group_test.yaml", out.string(), results);
+    write_calibrated_yaml("cpp/tests/data/scale_group_test.yaml", out.string(), results);
 
     REQUIRE(std::filesystem::exists(out));
     auto doc = YAML::LoadFile(out.string());
@@ -195,8 +195,8 @@ TEST_CASE("Regression: full pipeline round-trip is deterministic", "[scale_regre
 
     auto out1 = temp_dir() / "roundtrip1.yaml";
     auto out2 = temp_dir() / "roundtrip2.yaml";
-    write_calibrated_yaml("tests/data/scale_group_test.yaml", out1.string(), r1);
-    write_calibrated_yaml("tests/data/scale_group_test.yaml", out2.string(), r2);
+    write_calibrated_yaml("cpp/tests/data/scale_group_test.yaml", out1.string(), r1);
+    write_calibrated_yaml("cpp/tests/data/scale_group_test.yaml", out2.string(), r2);
 
     auto doc1 = YAML::LoadFile(out1.string());
     auto doc2 = YAML::LoadFile(out2.string());

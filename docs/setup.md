@@ -59,7 +59,7 @@ meson setup optbuild --buildtype=release
 meson compile -C optbuild
 ```
 
-The CLI is at `builddir/cli/posetrak-tracker` (debug) or `optbuild/cli/posetrak-tracker` (optimized).
+The CLI is at `builddir/cpp/cli/posetrak-tracker` (debug) or `optbuild/cpp/cli/posetrak-tracker` (optimized).
 
 ### Running C++ tests
 
@@ -85,11 +85,11 @@ build tools on the Windows machine.
 
 ```bash
 sudo apt install mingw-w64
-meson setup winbuild --cross-file cross/mingw-w64-x86_64.ini
+meson setup winbuild --cross-file cpp/cross/mingw-w64-x86_64.ini
 meson compile -C winbuild
 ```
 
-The exe is at `winbuild/cli/posetrak-tracker.exe`. Copy it to Windows together with the
+The exe is at `winbuild/cpp/cli/posetrak-tracker.exe`. Copy it to Windows together with the
 four MinGW runtime DLLs (see [Windows: C++ tracker](#c-tracker)).
 
 ---
@@ -111,7 +111,7 @@ a single directory on the Windows machine:
 
 | File | Source (on the Linux build machine) |
 |---|---|
-| `posetrak-tracker.exe` | `winbuild/cli/posetrak-tracker.exe` |
+| `posetrak-tracker.exe` | `winbuild/cpp/cli/posetrak-tracker.exe` |
 | `libgcc_s_seh-1.dll` | `/usr/lib/gcc/x86_64-w64-mingw32/13-win32/` |
 | `libstdc++-6.dll` | `/usr/lib/gcc/x86_64-w64-mingw32/13-win32/` |
 | `libgomp-1.dll` | `/usr/lib/gcc/x86_64-w64-mingw32/13-win32/` |
@@ -251,9 +251,9 @@ uv run posetrak --help        # CLI: session, capture, detection, tracker, expor
 uv run posetrak-mcp --db-path /path/to/session.db   # MCP diagnostic server
 
 # C++ tracker (Linux — from debug build)
-./builddir/cli/posetrak-tracker track config.toml
+./builddir/cpp/cli/posetrak-tracker track config.toml
 # C++ tracker (Linux — from optimized build)
-./optbuild/cli/posetrak-tracker track config.toml
+./optbuild/cpp/cli/posetrak-tracker track config.toml
 ```
 
 ### Running Python tests

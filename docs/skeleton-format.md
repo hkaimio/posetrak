@@ -361,7 +361,7 @@ The `skeleton_loader.cpp` reads the YAML and builds a Pinocchio model:
 - Spherical joints become `JointModelSpherical` (quaternion representation)
 - Rest orientation is baked into the SE3 placement of each joint frame
 
-See `src/io/skeleton_loader.cpp` and `src/kinematics/pinocchio_model_builder.cpp` for details.
+See `cpp/src/io/skeleton_loader.cpp` and `cpp/src/kinematics/pinocchio_model_builder.cpp` for details.
 
 ### Loading in Python (Visualization)
 

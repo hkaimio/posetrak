@@ -110,7 +110,7 @@ groups:
 def _real_palm_joints_skeleton_yaml() -> str:
     """A different topology from _matching_skeleton_yaml(): palm.01.{L,R} are
     REAL joints here (fingers attach to them, not directly to hand.{L,R}) --
-    this is the exact shape of tests/data/Harri_skeleton-regress-test.yaml,
+    this is the exact shape of cpp/tests/data/Harri_skeleton-regress-test.yaml,
     which an earlier version of this script corrupted by assuming palm.*
     references are always phantom. main's reference to palm.01.L/palm.01.R
     is legitimate here and must survive unchanged; HandL/HandR must NOT gain

@@ -19,7 +19,7 @@ from posetrak.db.skeleton_layout import SkeletonLayout
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
 
-SIMPLE_HUMANOID_YAML = (Path(__file__).parents[3] / "tests/data/simple_humanoid.yaml").read_text()
+SIMPLE_HUMANOID_YAML = (Path(__file__).parents[3] / "cpp/tests/data/simple_humanoid.yaml").read_text()
 
 MINIMAL_YAML = """\
 name: minimal

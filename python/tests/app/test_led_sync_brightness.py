@@ -46,7 +46,7 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT = Path(__file__).parents[3]
-_TEST_DATA_DIR = _REPO_ROOT / "tests/data"
+_TEST_DATA_DIR = _REPO_ROOT / "cpp/tests/data"
 _NPZ_SESSION_1 = _TEST_DATA_DIR / "led_brightness_01.npz"
 _NPZ_SESSION_2 = _TEST_DATA_DIR / "led_brightness_02.npz"
 

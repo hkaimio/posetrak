@@ -85,7 +85,7 @@ Joint limits define the allowable range of motion for each joint axis.  They app
 
 ### How limits are applied
 
-After sigma point propagation, the filter computes the **predicted mean state** from the weighted average of propagated sigma points.  Joint limits are applied to that mean state immediately, before the covariance is recomputed.  The implementation is in `ConstantVelocityModel::enforce_joint_limits()` (`src/filters/process_model.cpp`):
+After sigma point propagation, the filter computes the **predicted mean state** from the weighted average of propagated sigma points.  Joint limits are applied to that mean state immediately, before the covariance is recomputed.  The implementation is in `ConstantVelocityModel::enforce_joint_limits()` (`cpp/src/filters/process_model.cpp`):
 
 - **Revolute joints** (1 DOF): the single angle is clamped with `std::clamp(angle, min, max)`.
 - **Spherical joints** (3 DOF): each axis is clamped independently.  Axes where `min == max` are treated as **locked DOFs** and are set to exactly the limit value at every step.  Active axes (where `min < max`) are clamped to their range.

@@ -237,6 +237,6 @@ Possible additions in future versions:
 
 ## References
 
-- Camera model: `include/posetrak/core/camera.hpp`
+- Camera model: `cpp/include/posetrak/core/camera.hpp`
 - SyncPoint structure: `Camera::set_sync_points()` method
 - Floor semantics: `Camera::get_frame_at_time()` documentation

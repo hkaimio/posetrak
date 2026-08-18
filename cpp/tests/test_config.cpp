@@ -27,9 +27,9 @@ using Catch::Approx;
 /// past its file-existence checks first.
 static TrackerAppConfig make_valid_base_config() {
     TrackerAppConfig cfg;
-    cfg.skeleton_path = "tests/data/simple_humanoid.yaml";
-    cfg.cameras_path = "tests/data/pose2sim_camera_calib.toml";
-    cfg.observations_dir = "tests/data/openpose";
+    cfg.skeleton_path = "cpp/tests/data/simple_humanoid.yaml";
+    cfg.cameras_path = "cpp/tests/data/pose2sim_camera_calib.toml";
+    cfg.observations_dir = "cpp/tests/data/openpose";
     cfg.python_state_path = std::nullopt;
     cfg.process_noise_std = 0.5;
     cfg.calib_noise_std = 2.0;
@@ -56,11 +56,11 @@ static TrackerAppConfig make_valid_base_config() {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("TrackerAppConfig load minimal config applies defaults", "[config]") {
-    auto cfg = TrackerAppConfig::load("tests/data/minimal_config_test.toml");
+    auto cfg = TrackerAppConfig::load("cpp/tests/data/minimal_config_test.toml");
 
-    REQUIRE(cfg.skeleton_path == "tests/data/simple_humanoid.yaml");
-    REQUIRE(cfg.cameras_path == "tests/data/pose2sim_camera_calib.toml");
-    REQUIRE(cfg.observations_dir == "tests/data/openpose");
+    REQUIRE(cfg.skeleton_path == "cpp/tests/data/simple_humanoid.yaml");
+    REQUIRE(cfg.cameras_path == "cpp/tests/data/pose2sim_camera_calib.toml");
+    REQUIRE(cfg.observations_dir == "cpp/tests/data/openpose");
     REQUIRE(cfg.person_id == 0);
     REQUIRE(cfg.active_joint_groups.empty());
 

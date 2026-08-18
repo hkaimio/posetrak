@@ -30,7 +30,7 @@ def _(mo):
 
 @app.cell
 def _(Path, mo):
-    _default = str(Path(__file__).parents[3] / "tests/data/led_brightness_04.npz")
+    _default = str(Path(__file__).parents[3] / "cpp/tests/data/led_brightness_04.npz")
     npz_path = mo.ui.text(value=_default, label="NPZ path", full_width=True)
     npz_path
     return (npz_path,)

@@ -230,7 +230,7 @@ TEST_CASE("End-to-end tracking of synthetic sequence", "[tracker][integration]")
     fixture.setup_cameras(3, 4.0, 1.5);
 
     // Load simple skeleton
-    Skeleton skeleton = load_skeleton_from_yaml("tests/data/simple_humanoid.yaml");
+    Skeleton skeleton = load_skeleton_from_yaml("cpp/tests/data/simple_humanoid.yaml");
 
     // Build Pinocchio model
     pinocchio::Model model;
@@ -458,7 +458,7 @@ TEST_CASE("Fixed-root mode: child tracker holds an externally-injected root",
     TrackerIntegrationFixture fixture;
     fixture.setup_cameras(3, 4.0, 1.5);
 
-    Skeleton skeleton = load_skeleton_from_yaml("tests/data/simple_humanoid.yaml");
+    Skeleton skeleton = load_skeleton_from_yaml("cpp/tests/data/simple_humanoid.yaml");
     auto skeleton_ptr = std::make_shared<const Skeleton>(skeleton);
 
     int const num_frames = 10;
@@ -591,7 +591,7 @@ TEST_CASE(
     TrackerIntegrationFixture fixture;
     fixture.setup_cameras(3, 4.0, 1.5);
 
-    Skeleton skeleton = load_skeleton_from_yaml("tests/data/simple_humanoid.yaml");
+    Skeleton skeleton = load_skeleton_from_yaml("cpp/tests/data/simple_humanoid.yaml");
     auto skeleton_ptr = std::make_shared<const Skeleton>(skeleton);
 
     int const num_frames = 10;

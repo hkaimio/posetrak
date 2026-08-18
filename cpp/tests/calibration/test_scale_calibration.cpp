@@ -196,7 +196,7 @@ namespace {
 std::filesystem::path run_write_calibrated_yaml(std::vector<ScaleGroupResult> const& results,
                                                 std::string const& out_name) {
     auto out = temp_dir() / out_name;
-    write_calibrated_yaml("tests/data/scale_group_test.yaml", out.string(), results);
+    write_calibrated_yaml("cpp/tests/data/scale_group_test.yaml", out.string(), results);
     return out;
 }
 
@@ -322,7 +322,7 @@ TEST_CASE("write_calibrated_yaml handles missing scale group gracefully", "[scal
 
 TEST_CASE("write_calibrated_yaml throws on unwritable output path", "[scale_calibration]") {
     std::vector<ScaleGroupResult> results = {{"arm", 1.0, 0.0, true}};
-    CHECK_THROWS(write_calibrated_yaml("tests/data/scale_group_test.yaml",
+    CHECK_THROWS(write_calibrated_yaml("cpp/tests/data/scale_group_test.yaml",
                                        "/no_such_dir/xyz/out.yaml", results));
 }
 
@@ -340,7 +340,7 @@ TEST_CASE("write_calibrated_yaml scales bone_tip_offset of parent joint", "[scal
         {"forearm", 0.85, 0.0, true},
     };
     auto out = temp_dir() / "bone_tip_test.yaml";
-    write_calibrated_yaml("tests/data/scale_group_test.yaml", out.string(), results);
+    write_calibrated_yaml("cpp/tests/data/scale_group_test.yaml", out.string(), results);
 
     auto doc = YAML::LoadFile(out.string());
 

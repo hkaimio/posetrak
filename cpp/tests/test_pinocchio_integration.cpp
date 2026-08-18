@@ -209,7 +209,7 @@ TEST_CASE("ForwardKinematics handles spherical joints", "[forward_kinematics]") 
 TEST_CASE("ForwardKinematics validates against Python ground truth",
           "[forward_kinematics][integration]") {
     // Load full skeleton from YAML
-    std::string test_data_dir = "tests/data";
+    std::string test_data_dir = "cpp/tests/data";
     Skeleton skeleton =
         load_skeleton_from_yaml(test_data_dir + "/Harri_skeleton-shouldery-rot.yaml");
 

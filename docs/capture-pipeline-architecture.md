@@ -148,7 +148,7 @@ Files to **delete** (artefacts that should not be in version control):
 - `tracking_tests/` — test run outputs, should be in `.gitignore`
 - `tmp.txt`
 - Root-level `.csv`, `.log`, `.rrd` files (artefacts from old tracker runs)
-- `check_rerun_api.py`, `test_rerun_api.py` — old rerun experiments (check first)
+- ~~`check_rerun_api.py`, `test_rerun_api.py` — old rerun experiments~~ deleted 2026-08-19, along with three other superseded root-level scratch scripts from later explorations (`cutie_rtmpose_test.py`, `sam2_rtmpose_test.py`, `sam2_seg_test.py`) that hadn't existed yet when this list was written
 
 ### pyproject.toml changes
 

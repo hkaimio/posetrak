@@ -5,8 +5,9 @@
 """Tests for pipeline.pose.segmentation — CutieSegmentor and helpers.
 
 These tests cover the pure-Python logic (score computation, encode/decode,
-mask arithmetic) and do NOT require Cutie, YOLO, SAM, or a GPU.  The Cutie
-integration is covered by the manual test scripts (cutie_rtmpose_test.py).
+mask arithmetic) and do NOT require Cutie, a detector, SAM2, or a GPU.  The
+Cutie integration is covered by the manual tool script
+(python/tools/run_cutie_pose.py).
 """
 from __future__ import annotations
 

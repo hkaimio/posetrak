@@ -9,7 +9,7 @@ Posetrak is a multi-camera motion capture suite that estimates full-body 3-D ske
 | C++ tracker | C++20, Eigen, Pinocchio (FK), fmt |
 | Python apps (UI + CLI) | Python, PySide6 (Qt 6), Click |
 | Storage | SQLite (two files: registry + session) |
-| Person detection | YOLOv11 + ByteTrack, or SAM2 segmentation |
+| Person detection | YOLOX (rtmlib) + a lightweight IoU tracker, or SAM2 segmentation |
 | Pose estimation | RTMPose or VITpose++ |
 | Build | Meson, wrap-based dependency management |
 
@@ -62,7 +62,7 @@ Two detection pipelines are supported; both produce the same observation sequenc
 
 ```
 Video files
-    └── YOLOv11 + ByteTrack  →  person bboxes per frame
+    └── YOLOX + IoU tracker  →  person bboxes per frame
         RTMPose or VITpose++  →  keypoint blobs per bbox
         → detection_keypoints, person_detections, frame_cache_entries
         → [user stitches tracks to named persons]
@@ -115,7 +115,7 @@ Cross-database foreign keys are stored as TEXT IDs but cannot be enforced at the
 `extrinsic_calibrations`, `extrinsic_entries`, `intrinsics_calibrations` (mirrored from registry), `sync_configs`, `sync_points`.  Extrinsics live at the capture level so a mid-session re-calibration can be captured.
 
 **Layer 2 — detection pipeline (anonymous tracks)**
-`detection_runs` (linked to a trial via `trial_id`), `detection_keypoints`, `person_detections`, `person_tracks`, `frame_cache_entries` (JPEG crop blobs), `detection_track_assignments`, `keypoint_obs_quality`.  `track_id` in this layer is the ByteTrack ID — it carries no person identity.
+`detection_runs` (linked to a trial via `trial_id`), `detection_keypoints`, `person_detections`, `person_tracks`, `frame_cache_entries` (JPEG crop blobs), `detection_track_assignments`, `keypoint_obs_quality`.  `track_id` in this layer is the detector's own track ID (assigned by whichever detector produced the run — YOLOX + IoU tracker, or SAM2) — it carries no person identity.
 
 **Layer 3 — named person observations**
 `pose_observation_sequences`, `sequence_persons`, `pose_observations`, `pose_observation_edits`.  Produced by `finalise_to_db()` after the user completes stitching.  This is the input to the tracker.

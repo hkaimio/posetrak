@@ -1,5 +1,15 @@
 # Posetrak Pipeline UI — Requirements and Architecture
 
+**Status note (2026-08-19):** pre-implementation requirements doc — the
+five-separate-marimo-notebooks pipeline described below has since been
+replaced by the unified, DB-backed GUI apps (`posetrak-setup`,
+`posetrak-pose`, `posetrak-ui`) and CLI. "YOLO11" below refers to the
+now-removed `ultralytics` dependency; the current detector is
+`posetrak.detection.backends_rtmdet.YOLOXDetector` (see
+`docs/license-analysis.md`). Kept for historical reference of the
+original requirements analysis, not current architecture — see
+`docs/architecture/` instead.
+
 ## 1. Current Pipeline Overview
 
 The end-to-end pipeline from raw video to tracking output currently consists of five

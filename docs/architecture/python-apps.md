@@ -53,13 +53,16 @@ Session tree click
 | Module | Purpose |
 |---|---|
 | `detection_pipeline.py` | `DetectionPipeline` orchestrator |
-| `backends_yolo.py` | `YOLOv11Detector` |
-| `backends_rtmpose.py` | `RTMPoseEstimator` |
+| `backends_rtmpose.py` | `RTMPoseEstimator` (re-exports `posetrak.detection.backends_rtmpose`) |
 | `db_cache.py` | `DetectionBatchWriter`, read/write helpers, `read_observations_with_edits()` |
 | `finalise.py` | `finalise_to_db()` — produces `pose_observation_sequences` |
 | `stitcher_panel.py` | `StitcherPanel` — the track-to-person assignment grid |
 | `run_tracker.py` | `RunTrackerDialog` — launches `posetrak-tracker` subprocess |
 | `cutie_*.py` | Cutie video segmentation integration |
+
+The person-detector implementation itself (`YOLOXDetector`, rtmlib's YOLOX +
+a lightweight IoU tracker) lives in `python/posetrak/detection/backends_rtmdet.py`,
+shared with the `posetrak-pose`/`posetrak` CLIs rather than being GUI-specific.
 
 ### Setup wizard modules — `python/app/setup/`
 
@@ -114,7 +117,6 @@ python/
 │   │
 │   ├── pose/               Pose extraction (embedded in posetrak-ui)
 │   │   ├── detection_pipeline.py
-│   │   ├── backends_yolo.py
 │   │   ├── backends_rtmpose.py
 │   │   ├── db_cache.py
 │   │   ├── finalise.py

@@ -213,7 +213,7 @@ capture, extrinsics, sync, pose, and tracking-run commands. Migration plan:
 
 ### Absorb `app/pose/cli.py` (137 lines)
 
-The `run` and `list-runs` commands call `DetectionPipeline`, `YOLOv11Detector`,
+The `run` and `list-runs` commands call `DetectionPipeline`, `YOLOXDetector`,
 `RTMPoseEstimator`, and `list_detection_runs()` without any Qt. These become
 `posetrak detect run` and `posetrak detect list`.
 
@@ -259,10 +259,11 @@ The CLI calls it with a stderr printer. Also makes tracker invocation testable w
 
 ### Move detection backends to `posetrak/detection/`
 
-`DetectionPipeline`, `backends.py`, `backends_yolo.py`, `backends_rtmpose.py` currently live in
-`app/pose/`. Moving them to `posetrak/detection/` makes the library boundary explicit and the
-import paths cleaner for both the CLI and future MCP tools. Optional; can follow once the CLI is
-otherwise working.
+**Done** (as part of the ultralytics removal, see `docs/license-analysis.md`):
+`backends.py` and the detector backend (`backends_rtmdet.py`, replacing the old
+`backends_yolo.py`) now live in `posetrak/detection/`, with only a thin
+`app/pose/backends_rtmpose.py` re-export shim remaining for backwards
+compatibility. Import paths are cleaner for both the CLI and future MCP tools.
 
 ### Rename C++ binary
 
@@ -345,7 +346,7 @@ def populated_session(tmp_path, populated_registry): ...
 |---|---|
 | `registry`, `camera*`, `skeleton`, `config` | Round-trip: create → list → show; ID prefix resolution |
 | `session`, `capture`, `extrinsics`, `sync` | Create then query; `--json` output is valid JSONL |
-| `detect run` | Mock `YOLOv11Detector` / `RTMPoseEstimator`; verify DB writes |
+| `detect run` | Mock `YOLOXDetector` / `RTMPoseEstimator`; verify DB writes |
 | `track run` | Mock binary with echo script; verify output dir created |
 | `track export` | Run against fixture tracking run; verify output is parseable BVH/glTF |
 | Global | `--json` propagation; `--registry` / `--session` resolution; error exit codes |

@@ -339,7 +339,8 @@ python/app/pose/
     main.py                  # entry point: PoseExtractionWindow
     detection_pipeline.py    # QThread worker; orchestrates decode → detect → pose
     backends.py              # PersonDetector / PoseEstimator protocols + registry
-    backends_yolo.py         # YOLOv11 implementation
+    # detector implementation now lives in posetrak/detection/backends_rtmdet.py
+    # (YOLOXDetector, rtmlib -- see docs/license-analysis.md)
     backends_rtmpose.py      # RTMPose implementation
     db_cache.py              # read/write detection_runs, person_detections,
                              #   detection_keypoints, person_tracks, frame_cache_entries
@@ -411,7 +412,7 @@ def available_detectors() -> list[str]:
     return list(_detector_registry.keys())
 ```
 
-`YOLOv11Detector` and `RTMPoseEstimator` are the built-in implementations; other backends
+`YOLOXDetector` and `RTMPoseEstimator` are the built-in implementations; other backends
 register themselves by decorating with `@register_detector` / `@register_estimator`.
 
 ### 5.3 Detection pipeline (background worker)
@@ -640,7 +641,7 @@ feasible once the wand calibration is working.
 
 - `detection_pipeline.py`: decode + undistort + detect + pose → DB, no stitcher yet.
 - `db_cache.py`: write/read `detection_runs`, `detections`, `track_assignments`.
-- `backends_yolo.py` + `backends_rtmpose.py`: thin wrappers around existing rtmlib code.
+- `backends_rtmdet.py` + `backends_rtmpose.py`: thin wrappers around existing rtmlib code.
 - DB migration for the three new tables.
 - CLI entry point: `posetrak-pose run --shot <id> --sync <id> --start 12 --end 105`
   for scriptable use without the GUI.
@@ -673,7 +674,7 @@ Deliverable: Marimo notebook fully replaced.  Full old pipeline (steps 1–3) re
 
 | Existing component | Reuse |
 |---|---|
-| `poseanalysis.py` — `analyze_video_with_yolo_tracker` | Refactor into `YOLOv11Detector`; strip ipywidgets dependency |
+| `poseanalysis.py` — `analyze_video_with_yolo_tracker` | Refactor into `YOLOXDetector`; strip ipywidgets dependency |
 | `poseanalysis.py` — `VideoData` / `MultiVideoPoseDataset` | Replace with `DetectionPipeline`; DB replaces in-memory cache |
 | `poseanalysis.py` — `NamedPersonStitcher` | Replace with `StitcherWidget`; stitching state goes to DB |
 | `frame_cache.py` — PyAV decode + undistort | Reuse directly in `DetectionPipeline._process_camera` |

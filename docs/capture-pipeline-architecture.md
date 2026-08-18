@@ -1,5 +1,16 @@
 # Capture Pipeline: Current Process & Architecture Proposal
 
+**Status note (2026-08-19):** this is a pre-consolidation planning
+document — "Phase 0" below (repo layout, `posetrak` as an installable
+package) has long since happened, and the pose-extraction pipeline it
+describes (`pose_extraction.py`/`poseanalysis.py`, YOLO11 tracking via
+`ultralytics`) is the legacy Jupyter-widget-based pipeline, superseded
+by the current GUI's detection pipeline
+(`posetrak.detection.backends_rtmdet.YOLOXDetector`, no `ultralytics`
+dependency — see `docs/license-analysis.md`) and by the Cutie
+segmentation pipeline for multi-person scenes. Kept for historical
+reference; not current architecture.
+
 ---
 
 ## Phase 0: Repository consolidation and layout restructuring

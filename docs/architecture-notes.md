@@ -51,8 +51,8 @@ The session schema can be understood as four layers:
 
 ### Layer 2 — detection pipeline (raw, anonymous tracks)
 
-Run by the Python detection pipeline (`DetectionPipeline`, `backends_yolo.py`,
-`backends_rtmpose.py`).
+Run by the Python detection pipeline (`DetectionPipeline`,
+`posetrak/detection/backends_rtmdet.py`, `backends_rtmpose.py`).
 
 | Table | Key | Notes |
 |---|---|---|
@@ -66,7 +66,8 @@ Run by the Python detection pipeline (`DetectionPipeline`, `backends_yolo.py`,
 | `seg_quality_runs` / `seg_masks` | — | Segmentation quality run metadata and raw masks |
 
 `track_id` in this layer is the ID assigned by the person-tracking algorithm
-(YOLO ByteTrack or similar) and carries **no person identity**.
+(a lightweight IoU tracker on top of YOLOX, or SAM2) and carries **no person
+identity**.
 
 ### Layer 3 — named person observations (post-stitch)
 
@@ -105,7 +106,7 @@ Written by the C++ tracker via `ResultWriter`.
 capture_videos (file paths)
     ↓  VideoCapture (OpenCV)
 Raw frames
-    ↓  YOLOv11Detector  →  person bboxes + track_ids
+    ↓  YOLOXDetector    →  person bboxes + track_ids
     ↓  RTMPoseEstimator →  keypoint blobs per track
     ↓  _encode_crop()   →  JPEG crop at bbox
     ↓  DetectionBatchWriter (db_cache.py)
@@ -187,7 +188,7 @@ python/
     ├── pose/             # pose extraction UI
     │   ├── main.py       # PoseExtractionWindow (detection + stitching)
     │   ├── detection_pipeline.py  # DetectionPipeline orchestrator
-    │   ├── backends_yolo.py       # YOLOv11Detector
+    │   ├── (detector lives in posetrak/detection/backends_rtmdet.py -- YOLOXDetector)
     │   ├── backends_rtmpose.py    # RTMPoseEstimator
     │   ├── db_cache.py            # DetectionBatchWriter, read_*/write_* helpers
     │   ├── finalise.py            # finalise_to_db()

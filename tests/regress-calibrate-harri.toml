@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # CP2 DoD test — track Harri with Harri's scalable skeleton in calibration mode.
 # Prismatic DOFs for spine/neck/arm/leg bones should drift from 0 toward
 # (nominal_bone_length − actual_bone_length) over the calibration sequence.

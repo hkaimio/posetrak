@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration v16 → v17: add detection_run_id to frame_cache_entries primary key.
 --
 -- Allows PERSON_CROP entries from multiple detection runs on the same shot to

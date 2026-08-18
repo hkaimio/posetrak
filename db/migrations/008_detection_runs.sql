@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration: session schema v8 → v9
 -- Adds detection_runs and detection_keypoints tables for the integrated
 -- pose extraction pipeline, and extends person_detections / person_tracks /

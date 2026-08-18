@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration v34 → v35: add `source` to the pose_observations primary key.
 --
 -- Lets multiple detection sources (whole-body pass, refined hand passes)

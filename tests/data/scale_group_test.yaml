@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # Minimal skeleton with scale_groups for calibration unit tests.
 # Three scaled bones + one unscaled bone.
 name: "scale_test"

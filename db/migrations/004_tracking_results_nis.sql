@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration: session schema v4 → v5
 -- Adds nis_value and nis_dof columns to tracking_results for UKF consistency
 -- monitoring. nis_value is the Normalized Innovation Squared (should follow a

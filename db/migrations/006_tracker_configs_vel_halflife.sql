@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration: tracker_configs schema v7 (session) / v4 (registry)
 -- Adds velocity_half_life_s to tracker_configs for exponential velocity damping.
 -- NULL = no damping (backward compatible with all existing configurations).

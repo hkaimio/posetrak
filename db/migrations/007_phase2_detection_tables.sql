@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration: session schema v7 → v8
 -- Adds person_detections, person_tracks, and frame_cache_entries tables
 -- for the Phase 2 setup application (capture pipeline).

@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration 025: add cross-person relative observation columns to tracker_configs.
 --
 -- cross_person_max_world_mm   REAL     3D world-space marker-pair distance gate (mm)

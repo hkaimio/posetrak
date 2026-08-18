@@ -50,7 +50,7 @@ All dependencies available via Meson wraps:
 ### 1. Dependency Management Strategy
 **Decision**: Use Meson WrapDB for all possible dependencies, only system packages when mandatory.
 
-**Rationale**: 
+**Rationale**:
 - Ensures reproducible builds across systems
 - No version conflicts with system packages
 - Easier for contributors (no manual dependency installation)
@@ -73,7 +73,7 @@ All dependencies available via Meson wraps:
 ### 4. Test Runner
 **Decision**: Created `run_tests.sh` wrapper script.
 
-**Rationale**: 
+**Rationale**:
 - Conda library conflicts cause `GLIBCXX` version errors
 - Script prioritizes system libraries over conda
 - Documented in README for other users
@@ -105,7 +105,7 @@ All dependencies available via Meson wraps:
 ### 1. toml11 Not Available in WrapDB
 **Problem**: `meson wrap install toml11` failed.
 
-**Solution**: 
+**Solution**:
 - Searched WrapDB: `meson wrap search toml`
 - Found tomlplusplus as alternative
 - Updated meson.build to use tomlplusplus
@@ -116,7 +116,7 @@ All dependencies available via Meson wraps:
 
 **Root Cause**: Conda's older libstdc++ takes precedence over system libraries.
 
-**Solution**: 
+**Solution**:
 - Created `run_tests.sh` that sets `LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH`
 - Documented in README under "Known Issues"
 - Alternative: Users can deactivate conda before running tests
@@ -135,11 +135,11 @@ ninja: no work to do.
 1/2 posetrak / posetrak_tests        OK              0.00s
 2/2 catch2 / SelfTest                OK              0.08s
 
-Ok:                 2   
-Expected Fail:      0   
-Fail:               0   
-Unexpected Pass:    0   
-Skipped:            0   
+Ok:                 2
+Expected Fail:      0
+Fail:               0
+Unexpected Pass:    0
+Skipped:            0
 Timeout:            0
 ```
 

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # Simple Humanoid Skeleton for Joint-Space Tracking
 # 23 DOF: 1 root (6 DOF) + 4 spine (12 DOF) + 4 shoulders (12 DOF) + 2 elbows (2 DOF) + 2 wrists (6 DOF)
 # Total: 6 + 12 + 12 + 2 + 6 = 38... wait, let me recalculate

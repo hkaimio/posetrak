@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration 018: add seg_masks table for interactive Cutie init widget.
 --
 -- Stores a labeled segmentation mask (indexed PNG blob) per frame, keyed by

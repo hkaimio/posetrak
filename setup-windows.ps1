@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 <#
 .SYNOPSIS
     One-time (and re-run-safe) setup for building posetrak natively on

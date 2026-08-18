@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- 026_hierarchical_solver_stages.sql
 -- Hierarchical body/hand solver: per-stage run bookkeeping and per-stage
 -- tracker tuning. See

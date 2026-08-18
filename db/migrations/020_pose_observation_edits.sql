@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- 020_pose_observation_edits.sql
 -- Non-destructive keypoint edit overlay for post-stitch pose observations.
 --

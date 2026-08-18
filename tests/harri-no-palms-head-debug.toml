@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # Step 0 baseline — parent-only tracking with active_joint_groups = ["main"]
 # No palm joints in "main" group. No child_filters configured.
 # Output: tracking_tests/rebuild-step0/

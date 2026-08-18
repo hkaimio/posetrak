@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 BEGIN;
 ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_std REAL;
 PRAGMA user_version = 6;

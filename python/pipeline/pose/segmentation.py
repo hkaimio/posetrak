@@ -25,16 +25,16 @@ Initialization
 Two modes are supported:
 
 **Automatic (default):**
-  YOLO detects persons in the init frame; SAM generates per-person masks from
-  those bboxes; the masks are merged into a Cutie-format labeled init mask.
-  Requires ``ultralytics`` to be installed.
+  rtmlib's YOLOX detects persons in the init frame; SAM2 generates per-person
+  masks from those bboxes; the masks are merged into a Cutie-format labeled
+  init mask.  Requires ``rtmlib`` and ``sam2`` to be installed.
 
 **Manual:**
   The caller provides a pre-built ``(H, W)`` uint8 labeled mask directly via
   the ``init_mask`` parameter.  Pixel value 0 = background; value *k* = the
   *k*-th person in the ``persons`` dict (insertion order, 1-indexed).  This
   supports the UI workflow where the user clicks on each person once — faster
-  than stitching and eliminates the need for YOLO or SAM at runtime.
+  than stitching and eliminates the need for the detector or SAM2 at runtime.
 
 Typical usage — automatic init
 -------------------------------
@@ -75,7 +75,7 @@ or auto-detected relative to this project at ``../../tests/Cutie`` (i.e.
 ``/home/harri/projects/tests/Cutie`` by default).  It must be a clone of
 https://github.com/hkchengrex/Cutie with ``cutie-base-mega.pth`` in
 ``weights/``.  The Cutie venv (``<CUTIE_DIR>/venv/``) must have
-``ultralytics`` and ``rtmlib`` installed if automatic init is used.
+``sam2`` and ``rtmlib`` installed if automatic init is used.
 
 Legacy class
 ------------
@@ -253,7 +253,7 @@ class CutieSegmentor:
             frame where all persons are clearly visible and well-separated.
         persons:
             Ordered mapping from person ID to ``(4,)`` xyxy bbox in video
-            pixels.  Used for automatic YOLO+SAM init when ``init_mask`` is
+            pixels.  Used for automatic detector+SAM2 init when ``init_mask`` is
             ``None``.  When ``init_mask`` is provided, the dict keys define
             the person IDs and their order must match mask label indices
             (first key → label 1, second key → label 2, …).
@@ -502,60 +502,78 @@ class CutieSegmentor:
         persons: dict[str, np.ndarray],
         video_path: Path,
     ) -> np.ndarray:
-        """Run YOLO + SAM on *frame* to produce a labeled init mask.
+        """Run a detector + SAM2 on *frame* to produce a labeled init mask.
 
-        Persons are ordered by x-centre of their YOLO-detected bbox so that
-        left-to-right order is preserved regardless of the YOLO output order.
-        The ``persons`` dict provides a fallback: if YOLO finds fewer persons
-        than the dict has entries, the provided bboxes are used directly for
-        the missing ones.
+        Persons are ordered by x-centre of their detected bbox so that
+        left-to-right order is preserved regardless of detector output order.
+        The ``persons`` dict provides a fallback: if the detector finds fewer
+        persons than the dict has entries, the provided bboxes are used
+        directly for the missing ones.
 
         Returns
         -------
         ``(H, W)`` uint8 array, values 0..N (0 = background).
         """
         try:
-            from ultralytics import YOLO, SAM
+            from posetrak.detection.backends_rtmdet import _KNOWN_MODELS
+            from rtmlib.tools.object_detection import YOLOX
+            from sam2.build_sam import build_sam2_hf
+            from sam2.sam2_image_predictor import SAM2ImagePredictor
         except ImportError as exc:
             raise ImportError(
-                "ultralytics is required for automatic init.  "
-                "Install with: pip install ultralytics\n"
+                "rtmlib and sam2 are required for automatic init.  "
+                "Install with: pip install rtmlib sam2\n"
                 "Alternatively, pass init_mask= for manual initialisation."
             ) from exc
+
+        try:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            device = "cpu"
 
         h, w = frame.shape[:2]
         n_persons = len(persons)
 
-        # YOLO detection
-        yolo = YOLO("yolo11x.pt")
-        det = yolo(frame, classes=[0], conf=0.30, verbose=False)
+        # Detector: single-frame person detection, no tracking needed here.
+        url, input_size = _KNOWN_MODELS["yolox-x"]
+        yolox = YOLOX(
+            url, model_input_size=input_size, mode="human",
+            score_thr=0.30, backend="onnxruntime", device=device,
+        )
+        boxes_xyxy = yolox(frame)
 
-        if det and det[0].boxes is not None and len(det[0].boxes) >= n_persons:
-            bboxes = det[0].boxes.xyxy.cpu().numpy()
+        if boxes_xyxy is not None and len(boxes_xyxy) >= n_persons:
+            bboxes = np.asarray(boxes_xyxy, dtype=float)
             x_centers = (bboxes[:, 0] + bboxes[:, 2]) / 2
             bboxes = bboxes[np.argsort(x_centers)[:n_persons]]
         else:
             # Fall back to the bboxes supplied by the caller
             logger.warning(
-                "YOLO found fewer than %d persons; using provided bboxes", n_persons
+                "Detector found fewer than %d persons; using provided bboxes",
+                n_persons,
             )
             bboxes = np.array(list(persons.values()), dtype=float)
 
-        # SAM single-frame masks
-        sam = SAM("sam2.1_b.pt")
-        sam_res = sam(frame, bboxes=bboxes, imgsz=512, verbose=False)
+        # SAM2 single-frame masks, one box prompt at a time (SAM2ImagePredictor
+        # has no batched-box API); the image is only encoded once, reused for
+        # every box.
+        sam_model = build_sam2_hf("facebook/sam2.1-hiera-base-plus", device=device)
+        predictor = SAM2ImagePredictor(sam_model)
+        predictor.set_image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
         init_mask = np.zeros((h, w), dtype=np.uint8)
-        if sam_res and sam_res[0].masks is not None:
-            masks_raw = sam_res[0].masks.data.cpu().numpy()
-            for j in range(min(n_persons, len(masks_raw))):
-                m = masks_raw[j] > 0.5
-                if m.shape != (h, w):
-                    m = cv2.resize(
-                        m.astype(np.uint8), (w, h),
-                        interpolation=cv2.INTER_NEAREST,
-                    ).astype(bool)
-                init_mask[m] = j + 1   # higher index overwrites in overlap zone
+        for j, box in enumerate(bboxes[:n_persons]):
+            masks, _scores, _logits = predictor.predict(
+                box=np.asarray(box, dtype=np.float32), multimask_output=False,
+            )
+            m = masks[0] > 0.5
+            if m.shape != (h, w):
+                m = cv2.resize(
+                    m.astype(np.uint8), (w, h),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
+            init_mask[m] = j + 1   # higher index overwrites in overlap zone
 
         return init_mask
 
@@ -605,184 +623,3 @@ def _score_keypoints(
         # else stays SCORE_OUTSIDE
 
     return scores
-
-
-# ---------------------------------------------------------------------------
-# Legacy: SAM2Segmentor (superseded by CutieSegmentor)
-# ---------------------------------------------------------------------------
-
-class SAM2Segmentor:
-    """**Deprecated** — use :class:`CutieSegmentor` instead.
-
-    SAM2VideoPredictor-based segmentor.  Retained for reference only.
-    Known issues: identity collapse in multi-person scenes; gradual drift
-    undetectable by consecutive-frame IoU.
-    """
-
-    def __init__(
-        self,
-        model_name: str = "sam2.1_b.pt",
-        device: str = "cuda",
-        erosion_px: int = 5,
-        reinit_interval: int = 60,
-    ) -> None:
-        self._model_name = model_name
-        self._device = device
-        self._erosion_px = erosion_px
-        self._reinit_interval = reinit_interval
-        self._masks: dict[int, dict[str, np.ndarray]] = {}
-        self._person_ids: list[str] = []
-
-    def process_video(
-        self,
-        video_path: str | Path,
-        persons: dict[str, tuple[int, np.ndarray]],
-        start_frame: int = 0,
-        end_frame: int | None = None,
-        verbose: bool = False,
-    ) -> None:
-        try:
-            from ultralytics.models.sam import SAM2VideoPredictor
-        except ImportError as exc:
-            raise ImportError(
-                "ultralytics >= 8.3 is required for SAM2.  "
-                "Install with: pip install ultralytics"
-            ) from exc
-
-        video_path = str(video_path)
-        self._person_ids = list(persons.keys())
-        init_bboxes = np.array(
-            [persons[pid][1] for pid in self._person_ids], dtype=float
-        )
-
-        cap = cv2.VideoCapture(video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
-        if end_frame is None:
-            end_frame = total_frames
-
-        overrides = dict(
-            conf=0.25, task="segment", mode="predict", imgsz=512,
-            model=self._model_name, save=False, verbose=verbose,
-            device=self._device,
-        )
-        predictor = SAM2VideoPredictor(overrides=overrides)
-
-        abs_frame = 0
-        for result in predictor(
-            source=video_path, bboxes=init_bboxes, stream=True,
-        ):
-            if abs_frame < start_frame:
-                abs_frame += 1
-                continue
-            if abs_frame >= end_frame:
-                break
-
-            if result.masks is not None and len(result.masks) > 0:
-                masks_hw = result.masks.data.cpu().numpy()
-                frame_masks: dict[str, np.ndarray] = {}
-                for obj_idx, pid in enumerate(self._person_ids):
-                    if obj_idx < len(masks_hw):
-                        frame_masks[pid] = masks_hw[obj_idx].astype(bool)
-                self._masks[abs_frame] = frame_masks
-
-            abs_frame += 1
-
-    def get_mask(self, frame_idx: int, person_id: str) -> np.ndarray | None:
-        frame_data = self._masks.get(frame_idx)
-        if frame_data is None:
-            return None
-        return frame_data.get(person_id)
-
-    def get_keypoint_scores(
-        self,
-        frame_idx: int,
-        person_id: str,
-        keypoints_xy: np.ndarray,
-        erosion_px: int | None = None,
-    ) -> np.ndarray:
-        erosion_px = erosion_px if erosion_px is not None else self._erosion_px
-        mask = self.get_mask(frame_idx, person_id)
-        n = len(keypoints_xy)
-        if mask is None:
-            return np.full(n, SCORE_UNAVAILABLE, dtype=np.float32)
-        return _score_keypoints(mask, keypoints_xy, erosion_px)
-
-    def get_all_scores_for_frame(
-        self,
-        frame_idx: int,
-        keypoints_per_person: dict[str, np.ndarray],
-    ) -> dict[str, np.ndarray]:
-        return {
-            pid: self.get_keypoint_scores(frame_idx, pid, kpts)
-            for pid, kpts in keypoints_per_person.items()
-        }
-
-    def iter_scores(
-        self,
-        video_path: str | Path,
-        persons: dict[str, tuple[int, np.ndarray]],
-        keypoints_fn,
-        start_frame: int = 0,
-        end_frame: int | None = None,
-        verbose: bool = False,
-    ) -> Iterator[tuple[int, dict[str, np.ndarray]]]:
-        try:
-            from ultralytics.models.sam import SAM2VideoPredictor
-        except ImportError as exc:
-            raise ImportError(
-                "ultralytics >= 8.3 is required.  pip install ultralytics"
-            ) from exc
-
-        video_path = str(video_path)
-        person_ids = list(persons.keys())
-        init_bboxes = np.array(
-            [persons[pid][1] for pid in person_ids], dtype=float
-        )
-
-        if end_frame is None:
-            cap = cv2.VideoCapture(video_path)
-            end_frame = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            cap.release()
-
-        overrides = dict(
-            conf=0.25, task="segment", mode="predict", imgsz=512,
-            model=self._model_name, save=False, verbose=verbose,
-            device=self._device,
-        )
-        predictor = SAM2VideoPredictor(overrides=overrides)
-
-        abs_frame = 0
-        for result in predictor(source=video_path, bboxes=init_bboxes, stream=True):
-            if abs_frame < start_frame:
-                abs_frame += 1
-                continue
-            if abs_frame >= end_frame:
-                break
-
-            kpts_dict = keypoints_fn(abs_frame)
-            scores_dict: dict[str, np.ndarray] = {}
-
-            if result.masks is not None and len(result.masks) > 0:
-                masks_hw = result.masks.data.cpu().numpy()
-                for obj_idx, pid in enumerate(person_ids):
-                    if obj_idx >= len(masks_hw):
-                        continue
-                    mask = masks_hw[obj_idx].astype(bool)
-                    kpts = kpts_dict.get(pid)
-                    if kpts is None:
-                        continue
-                    scores_dict[pid] = _score_keypoints(
-                        mask, kpts, self._erosion_px
-                    )
-
-            yield abs_frame, scores_dict
-            abs_frame += 1
-
-    def _erode_mask(self, mask: np.ndarray, erosion_px: int) -> np.ndarray:
-        if erosion_px <= 0:
-            return mask
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (2 * erosion_px + 1, 2 * erosion_px + 1)
-        )
-        return cv2.erode(mask.astype(np.uint8), kernel).astype(bool)

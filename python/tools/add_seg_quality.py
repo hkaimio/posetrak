@@ -27,7 +27,7 @@ Usage
         [--debug-every 30]         # save every Nth frame's mask (default 30)
         [--cameras CAM_ID ...]     # process only these shot_video_ids (default: all)
 
-Requires: Cutie clone at CUTIE_DIR (or ../tests/Cutie), torch, ultralytics (SAM2).
+Requires: Cutie clone at CUTIE_DIR (or ../tests/Cutie), torch, sam2.
 This script must run inside the Cutie venv which has all these dependencies.
 """
 
@@ -252,13 +252,18 @@ def _build_init_mask(
     frame_bgr: np.ndarray,
     bboxes_by_person: dict[str, np.ndarray],
 ) -> np.ndarray:
-    """Run SAM2 on frame_bgr using bbox-centre point prompts to produce a labeled init mask.
+    """Run SAM2 on frame_bgr using bbox prompts to produce a labeled init mask.
 
-    Uses centre-point prompts rather than bbox prompts because in ultralytics ≥ 8.4,
-    passing multiple bboxes to SAM2 treats them as prompts for one object.  A flat
-    list of N centre points returns N separate masks.
+    One box prompt per person, run against a single shared image encoding
+    (SAM2ImagePredictor.set_image() once, predict(box=...) per person) --
+    replaces the old ultralytics.SAM-based version (see git history), which
+    needed centre-point prompts instead of bbox prompts to work around an
+    ultralytics >= 8.4 quirk where a batch of bboxes was treated as prompts
+    for a single object. sam2's own predictor has no such quirk; a plain
+    per-person box prompt loop works directly.
 
-    Falls back to filled bounding-box rectangles if SAM fails or returns too few masks.
+    Falls back to filled bounding-box rectangles if SAM2 fails or returns
+    too few masks.
 
     Parameters
     ----------
@@ -273,29 +278,33 @@ def _build_init_mask(
     ``(H, W)`` uint8 labeled mask.  0 = background; k = k-th person (1-indexed).
     """
     try:
-        from ultralytics import SAM
+        from sam2.build_sam import build_sam2_hf
+        from sam2.sam2_image_predictor import SAM2ImagePredictor
     except ImportError:
-        log.warning("ultralytics not available — using rectangle fallback for init mask")
+        log.warning("sam2 not available — using rectangle fallback for init mask")
         return _build_rect_init_mask(frame_bgr, bboxes_by_person)
 
     h, w = frame_bgr.shape[:2]
     names = list(bboxes_by_person.keys())
-    bboxes = np.array([bboxes_by_person[n] for n in names], dtype=float)
+    bboxes = np.array([bboxes_by_person[n] for n in names], dtype=np.float32)
 
     try:
-        sam = SAM("sam2.1_b.pt")
-        # Pass as float32 numpy array — ultralytics SAM returns N masks for N bboxes
-        # when given a float32 array (float64 silently triggers a different code path).
-        result = sam(frame_bgr, bboxes=bboxes.astype(np.float32), imgsz=512, verbose=False)
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        sam_model = build_sam2_hf("facebook/sam2.1-hiera-base-plus", device=device)
+        predictor = SAM2ImagePredictor(sam_model)
+        predictor.set_image(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+        masks_raw = []
+        for box in bboxes:
+            masks, _scores, _logits = predictor.predict(box=box, multimask_output=False)
+            masks_raw.append(masks[0] > 0.5)
     except Exception as exc:
-        log.warning("SAM failed (%s) — using rectangle fallback", exc)
+        log.warning("SAM2 failed (%s) — using rectangle fallback", exc)
         return _build_rect_init_mask(frame_bgr, bboxes_by_person)
 
     mask_out = np.zeros((h, w), dtype=np.uint8)
-    n_sam = 0
-    if result and result[0].masks is not None:
-        masks_raw = result[0].masks.data.cpu().numpy()  # (N_masks, H, W) bool
-        n_sam = len(masks_raw)
+    n_sam = len(masks_raw)
+    if n_sam:
         for j in range(min(len(names), n_sam)):
             m = masks_raw[j].astype(bool)
             if m.shape != (h, w):

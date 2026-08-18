@@ -28,7 +28,7 @@ def main() -> None:
 @click.option("--sync", required=True, help="Sync config ID (prefix accepted).")
 @click.option("--start", type=float, required=True, help="Processing start time in seconds (global).")
 @click.option("--end", type=float, required=True, help="Processing end time in seconds (global).")
-@click.option("--detector", default="yolo11x", show_default=True, help="Detector model name.")
+@click.option("--detector", default="yolox-x", show_default=True, help="Detector model name.")
 @click.option("--pose-model", default="rtmpose-l-133kp", show_default=True, help="Pose model name.")
 @click.option("--device", default="cuda", show_default=True, help="Inference device.")
 @click.option("--detector-conf", default=0.3, show_default=True, help="Detector confidence threshold.")
@@ -47,7 +47,7 @@ def run(session_db, shot, sync, start, end, detector, pose_model, device, detect
         posetrak-pose run --session-db session.db --shot <id> --sync <id> \\
             --start 12 --end 105
     """
-    from posetrak.detection.backends_yolo import YOLOv11Detector
+    from posetrak.detection.backends_rtmdet import YOLOXDetector
     from posetrak.detection.backends_rtmpose import RTMPoseEstimator
     from posetrak.detection.pipeline import DetectionPipeline
 
@@ -66,7 +66,7 @@ def run(session_db, shot, sync, start, end, detector, pose_model, device, detect
     click.echo(f"Device:      {device}")
     click.echo()
 
-    det = YOLOv11Detector(model_name=f"{detector}.pt", device=device, conf=detector_conf)
+    det = YOLOXDetector(model_name=detector, device=device, conf=detector_conf)
     est = RTMPoseEstimator(model_name=pose_model, device=device)
 
     def on_progress(done: int, total: int, cam_id: str) -> None:

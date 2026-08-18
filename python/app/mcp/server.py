@@ -256,11 +256,11 @@ def run_detection(
     sync_id: str,
     start_s: float,
     end_s: float,
-    detector_model: str = "yolo11x",
+    detector_model: str = "yolox-x",
     pose_model: str = "rtmpose-l-133kp",
     conf: float = 0.3,
 ) -> str:
-    """Run YOLO person detection + RTMPose pose estimation on a capture.
+    """Run person detection + RTMPose pose estimation on a capture.
 
     WRITE OPERATION — requires the server to be started with --mcp-allow-write.
 

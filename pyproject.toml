@@ -17,7 +17,6 @@ dependencies = [
     "rtmlib>=0.0.15",
     "scipy>=1.17.1",
     "lap>=0.5.12",
-    "ultralytics>=8.0",
     # onnxruntime-gpu satisfies rtmlib's onnxruntime requirement at runtime
     # (same import namespace). Pin to <1.26 while the system has CUDA 12.x;
     # 1.26+ requires CUDA 13 (cublasLt64_13.dll).
@@ -55,6 +54,16 @@ segmentation = [
     "omegaconf",
     "hydra-core",
     "timm",
+    # SAM2 for interactive/automatic segmentation-init masks (Apache-2.0;
+    # replaces ultralytics.SAM -- see docs/license-analysis.md). The PyPI
+    # "sam2" package is a third-party repackaging of Meta's own source
+    # (unmodified, Meta's original copyright headers intact) -- not an
+    # official Meta-maintained PyPI release.
+    "sam2>=1.1.0",
+    # huggingface_hub powers sam2's build_sam2_hf()/build_sam2_video_predictor_hf()
+    # checkpoint auto-download; sam2 itself doesn't declare it as a hard
+    # dependency since the import is lazy.
+    "huggingface_hub",
 ]
 analysis = [
     "marimo>=0.19",

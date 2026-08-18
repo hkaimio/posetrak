@@ -171,10 +171,10 @@ class TestDetectRun:
 
     @patch("posetrak.cli.detect.DetectionPipeline")
     @patch("posetrak.cli.detect.RTMPoseEstimator")
-    @patch("posetrak.cli.detect.YOLOv11Detector")
+    @patch("posetrak.cli.detect.YOLOXDetector")
     def test_run_creates_db_row(
         self,
-        mock_yolo_cls,
+        mock_det_cls,
         mock_rtm_cls,
         mock_pipeline_cls,
         seeded_session_db_path: Path,
@@ -191,7 +191,7 @@ class TestDetectRun:
         mock_det.name = "yolo11x"
         mock_det.version = "8.0.0"
         mock_det._conf = 0.3
-        mock_yolo_cls.return_value = mock_det
+        mock_det_cls.return_value = mock_det
 
         # Mock estimator
         mock_est = MagicMock()
@@ -228,10 +228,10 @@ class TestDetectRun:
 
     @patch("posetrak.cli.detect.DetectionPipeline")
     @patch("posetrak.cli.detect.RTMPoseEstimator")
-    @patch("posetrak.cli.detect.YOLOv11Detector")
+    @patch("posetrak.cli.detect.YOLOXDetector")
     def test_run_uses_correct_ids(
         self,
-        mock_yolo_cls,
+        mock_det_cls,
         mock_rtm_cls,
         mock_pipeline_cls,
         seeded_session_db_path: Path,
@@ -245,7 +245,7 @@ class TestDetectRun:
         mock_det.name = "yolo11x"
         mock_det.version = "8.0.0"
         mock_det._conf = 0.3
-        mock_yolo_cls.return_value = mock_det
+        mock_det_cls.return_value = mock_det
 
         mock_est = MagicMock()
         mock_est.name = "rtmpose-l-133kp"

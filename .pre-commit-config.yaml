@@ -7,6 +7,17 @@ repos:
     rev: v2.3.0
     hooks:
     -   id: check-yaml
+        # mkdocs.yml uses a `!!python/name:...` tag (Material for MkDocs'
+        # documented way to enable native mermaid rendering via
+        # pymdownx.superfences) that PyYAML's safe loader rejects as
+        # non-standard. --unsafe is the standard fix for exactly this
+        # MkDocs + pre-commit combination; scoped to just this file so
+        # everything else still gets strict validation.
+        exclude: '^mkdocs\.yml$'
+    -   id: check-yaml
+        name: check-yaml (mkdocs.yml, unsafe)
+        files: '^mkdocs\.yml$'
+        args: ['--unsafe']
     -   id: end-of-file-fixer
         # cross/include/boost is a symlink-target string (git mode 120000,
         # checked out as a plain text file since this repo runs with

@@ -70,6 +70,7 @@ perf.data*
 # Documentation
 docs/_build/
 docs/.doctrees/
+/site/
 
 # Data (large files)
 *.h5

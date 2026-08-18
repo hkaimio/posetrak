@@ -82,6 +82,9 @@ mcp-server = [
 usd = [
     "usd-core>=24.0",
 ]
+docs = [
+    "mkdocs-material>=9.5",
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu126"

@@ -9,7 +9,7 @@
 | Development (edit & rebuild) | Full support | Full support¹ |
 
 ¹ Native MSVC development is fully supported — see
-  [CONTRIBUTING.md's "Windows (native, MSVC)"](../CONTRIBUTING.md#windows-native-msvc)
+  [CONTRIBUTING.md's "Windows (native, MSVC)"](https://github.com/hkaimio/posetrak/blob/main/CONTRIBUTING.md#windows-native-msvc)
   section and `setup-windows.ps1`. If you'd rather not maintain a native Windows
   toolchain at all, cross-compiling from Linux/WSL (below) still works and produces
   a runnable exe without installing MSVC/Pinocchio/Boost on the Windows machine —
@@ -90,7 +90,7 @@ meson compile -C winbuild
 ```
 
 The exe is at `winbuild/cli/posetrak-tracker.exe`. Copy it to Windows together with the
-four MinGW runtime DLLs (see [Windows: C++ tracker](#windows-c-tracker)).
+four MinGW runtime DLLs (see [Windows: C++ tracker](#c-tracker)).
 
 ---
 
@@ -99,7 +99,7 @@ four MinGW runtime DLLs (see [Windows: C++ tracker](#windows-c-tracker)).
 ### C++ tracker
 
 **For development (edit & rebuild), build natively with MSVC** — see
-[CONTRIBUTING.md's "Windows (native, MSVC)"](../CONTRIBUTING.md#windows-native-msvc)
+[CONTRIBUTING.md's "Windows (native, MSVC)"](https://github.com/hkaimio/posetrak/blob/main/CONTRIBUTING.md#windows-native-msvc)
 section, or just run `setup-windows.ps1` from the repo root. This needs Visual
 Studio 2022+ (C++ desktop workload) and a small conda environment for Pinocchio/Boost
 headers, but produces both a debug (`builddir/`) and release (`optbuild/`) build you

@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+site_name: Posetrak
+site_description: Video-based multi-camera skeletal motion capture
+repo_url: https://github.com/hkaimio/posetrak
+repo_name: hkaimio/posetrak
+edit_uri: edit/main/docs/
+docs_dir: docs
+
+# Publish only an explicit allowlist. `docs/` also holds ~50 internal
+# design/debug/planning docs and docs/roadmap/, docs/plans/ -- none of
+# that is reader-facing, so exclude everything by default and re-include
+# just the pages that are. See docs/doc-restructuring-plan.md.
+exclude_docs: |
+  *
+  !index.md
+  !background.md
+  !setup.md
+  !roadmap.md
+  !skeleton-format.md
+  !state-vector-format.md
+  !sync-metadata-format.md
+  !user-guide/
+  !user-guide/*.md
+  user-guide/ug-pages-needed.md
+  !architecture/
+  !architecture/*.md
+  !architecture/algorithms/
+  !architecture/algorithms/*.md
+
+nav:
+  - Home: index.md
+  - Background: background.md
+  - Setup: setup.md
+  - User Guide:
+      - Your first capture: user-guide/first-capture.md
+      - Camera intrinsics: user-guide/camera-intrinsics.md
+      - Extrinsics calibration: user-guide/extrinsics-calibration.md
+      - Synchronizing videos: user-guide/synchronizing-videos.md
+      - Analyzing poses: user-guide/analyzing-poses.md
+      - Tracking & troubleshooting: user-guide/tracking-troubleshooting.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - C++ tracker: architecture/cpp-tracker.md
+      - Python apps: architecture/python-apps.md
+      - Data model: architecture/data-model.md
+      - UKF algorithm: architecture/algorithms/ukf.md
+  - Reference:
+      - Skeleton format: skeleton-format.md
+      - State vector format: state-vector-format.md
+      - Sync metadata format: sync-metadata-format.md
+  - Roadmap: roadmap.md
+  - Contributing: https://github.com/hkaimio/posetrak/blob/main/CONTRIBUTING.md
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - content.code.copy
+    - content.action.edit
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format

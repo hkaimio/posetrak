@@ -109,7 +109,7 @@ The canonical camera and marker ordering that indexes into the blob is stored on
 
 ### `TrackingResult.state`, `TrackingResult.cov_diag`
 
-See [state-vector-format.md](../reference/state-vector-format.md) for the full layout.
+See [state-vector-format.md](../state-vector-format.md) for the full layout.
 
 ### `TrackingObsResult.obs_blob`
 

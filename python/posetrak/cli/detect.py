@@ -9,7 +9,7 @@ import click
 
 from posetrak.cli._output import fail, print_jsonl, print_record, print_table
 from posetrak.db.db import open_session, resolve_id_prefix
-from posetrak.detection.backends_yolo import YOLOv11Detector
+from posetrak.detection.backends_rtmdet import YOLOXDetector
 from posetrak.detection.backends_rtmpose import RTMPoseEstimator
 from posetrak.detection.pipeline import DetectionPipeline
 
@@ -34,7 +34,7 @@ def detect_group() -> None:
 @click.option("--sync", required=True, help="Sync config ID (prefix accepted).")
 @click.option("--start", type=float, required=True, help="Start time in seconds (global).")
 @click.option("--end", type=float, required=True, help="End time in seconds (global).")
-@click.option("--detector", default="yolo11x", show_default=True, help="Detector model name.")
+@click.option("--detector", default="yolox-x", show_default=True, help="Detector model name.")
 @click.option(
     "--pose-model",
     default="rtmpose-l-133kp",
@@ -96,8 +96,8 @@ def cmd_run(
     click.echo(f"Pose model:  {pose_model}", err=True)
     click.echo("", err=True)
 
-    det = YOLOv11Detector(
-        model_name=f"{detector}.pt",
+    det = YOLOXDetector(
+        model_name=detector,
         device=None,  # auto-detect
         conf=conf,
     )

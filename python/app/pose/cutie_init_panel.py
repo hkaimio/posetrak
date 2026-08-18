@@ -858,7 +858,7 @@ class CutieInitPanel(QWidget):
                 self._sam_status_label.setText("SAM2 ready")
                 self._sam_status_label.setStyleSheet("font-size: 10px; color: #080;")
             else:
-                self._sam_status_label.setText("SAM2 not available — install ultralytics")
+                self._sam_status_label.setText("SAM2 not available — install sam2")
                 self._sam_status_label.setStyleSheet("font-size: 10px; color: #c60;")
         except Exception as e:
             self._sam_status_label.setText(f"SAM2 error: {e}")

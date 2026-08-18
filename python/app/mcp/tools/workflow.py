@@ -139,11 +139,11 @@ def run_detection(
     sync_id: str,
     start_s: float,
     end_s: float,
-    detector_model: str = "yolo11x",
+    detector_model: str = "yolox-x",
     pose_model: str = "rtmpose-l-133kp",
     conf: float = 0.3,
 ) -> str:
-    """Run YOLO detection + RTMPose estimation for a capture time range.
+    """Run person detection + RTMPose estimation for a capture time range.
 
     Opens a writable connection to *db_path* and calls DetectionPipeline.run().
     Imports are deferred so the tool fails gracefully when detection dependencies
@@ -151,7 +151,7 @@ def run_detection(
     """
     try:
         from posetrak.detection.backends_rtmpose import RTMPoseEstimator
-        from posetrak.detection.backends_yolo import YOLOv11Detector
+        from posetrak.detection.backends_rtmdet import YOLOXDetector
         from posetrak.detection.pipeline import DetectionPipeline
     except ImportError as exc:
         return f"Error: detection dependencies not available — {exc}"
@@ -159,7 +159,7 @@ def run_detection(
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
-        det = YOLOv11Detector(model_name=f"{detector_model}.pt", device=None, conf=conf)
+        det = YOLOXDetector(model_name=detector_model, device=None, conf=conf)
         est = RTMPoseEstimator(model_name=pose_model, device=None)
 
         pipeline = DetectionPipeline(

@@ -115,14 +115,14 @@ class DetectionJob(BackgroundJob):
 
     def run(self):
         from posetrak.db.db import open_session
-        from app.pose.backends_yolo import YOLOv11Detector
+        from posetrak.detection.backends_rtmdet import YOLOXDetector
         from app.pose.backends_rtmpose import RTMPoseEstimator
         from app.pose.detection_pipeline import DetectionPipeline
 
         session = open_session(Path(self._session_path))
         try:
-            det = YOLOv11Detector(
-                model_name=f"{self._detector_name}.pt",
+            det = YOLOXDetector(
+                model_name=self._detector_name,
                 conf=self._detector_conf,
             )
             est = RTMPoseEstimator(model_name=self._pose_model_name)
@@ -294,7 +294,7 @@ class PoseExtractionWindow(QMainWindow):
         row3.addSpacing(12)
         row3.addWidget(QLabel("Detector:"))
         self._detector_combo = _ComboBox()
-        self._detector_combo.addItems(["yolo11x", "yolo11l", "yolo11m"])
+        self._detector_combo.addItems(["yolox-x", "yolox-m", "yolox-tiny"])
         row3.addWidget(self._detector_combo)
         row3.addWidget(QLabel("Pose model:"))
         self._pose_combo = _ComboBox()

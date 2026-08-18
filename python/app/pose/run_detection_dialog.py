@@ -152,7 +152,7 @@ class RunDetectionDialog(QDialog):
 
         # Model selection
         self._detector_combo = QComboBox()
-        self._detector_combo.addItems(["yolo11x", "yolo11l", "yolo11m"])
+        self._detector_combo.addItems(["yolox-x", "yolox-m", "yolox-tiny"])
         form.addRow("Detector:", self._detector_combo)
 
         self._pose_combo = QComboBox()

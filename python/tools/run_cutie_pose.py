@@ -253,21 +253,28 @@ def _build_rect_init_mask(frame: np.ndarray, bboxes: dict[str, np.ndarray]) -> n
 
 def _build_init_mask(frame: np.ndarray, bboxes: dict[str, np.ndarray]) -> np.ndarray:
     try:
-        from ultralytics import SAM
+        from sam2.build_sam import build_sam2_hf
+        from sam2.sam2_image_predictor import SAM2ImagePredictor
     except ImportError:
         return _build_rect_init_mask(frame, bboxes)
     h, w = frame.shape[:2]
     names = list(bboxes.keys())
     bbs = np.array([bboxes[n] for n in names], dtype=np.float32)
     try:
-        sam = SAM("sam2.1_b.pt")
-        result = sam(frame, bboxes=bbs, imgsz=512, verbose=False)
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        sam_model = build_sam2_hf("facebook/sam2.1-hiera-base-plus", device=device)
+        predictor = SAM2ImagePredictor(sam_model)
+        predictor.set_image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        raw = []
+        for box in bbs:
+            masks, _scores, _logits = predictor.predict(box=box, multimask_output=False)
+            raw.append(masks[0] > 0.5)
     except Exception as exc:
-        log.warning("SAM failed (%s) — rectangle fallback", exc)
+        log.warning("SAM2 failed (%s) — rectangle fallback", exc)
         return _build_rect_init_mask(frame, bboxes)
     mask = np.zeros((h, w), dtype=np.uint8)
-    if result and result[0].masks is not None:
-        raw = result[0].masks.data.cpu().numpy()
+    if raw:
         for j in range(min(len(names), len(raw))):
             m = raw[j].astype(bool)
             if m.shape != (h, w):

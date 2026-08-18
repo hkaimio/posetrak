@@ -2,99 +2,10 @@
 
 ## Development Setup
 
-1. Install dependencies (see README.md)
-2. Set up build: `meson setup builddir`
-3. Build: `meson compile -C builddir`
-4. Run tests: `meson test -C builddir`
-
-The above is the Linux/WSL path, where Pinocchio is installed system-wide via
-robotpkg at `/opt/openrobots` (see `docs/pinocchio-header-only-analysis.md`).
-For native Windows, see the next section — the same `meson setup`/`compile`/
-`test` commands apply, just with a few extra options pointing at manually
-supplied Pinocchio/Boost headers.
-
-### Windows (native, MSVC)
-
-**One-time setup:**
-
-1. Visual Studio 2022 (or later) with the "Desktop development with C++"
-   workload.
-2. [Meson](https://mesonbuild.com/) and Ninja (`pip install meson ninja`, or
-   the standalone Meson MSI installer).
-3. Pinocchio 3.9.0 headers + a compiled Boost Serialization — easiest via a
-   dedicated conda environment (this project only needs the headers/libs,
-   not a Python installation of Pinocchio itself):
-   ```powershell
-   conda create -y -n posetrak-pinocchio -c conda-forge pinocchio=3.9.0
-   ```
-   **Match the version to whatever `/opt/openrobots` actually has** — check
-   the [openrobots package list](https://robotpkg.openrobots.org/) or ask
-   whoever maintains the Linux/WSL dev environment. A header-version
-   mismatch shows up as real compile errors (e.g. `Frame::parentJoint` not
-   existing — that field was `Frame::parent` before Pinocchio 3.0), not
-   something that just happens to link with slightly wrong behaviour.
-4. Run `setup-windows.ps1` (repo root). It configures and builds two build
-   directories — `builddir/` (debug, for day-to-day unit testing/debugging)
-   and `optbuild/` (release, for actual tracking runs — see the performance
-   note in the main `CLAUDE.md`/project instructions) — and copies the two
-   runtime DLLs described below next to each built `.exe`. The script is
-   idempotent; re-run it after a `meson.build`/`meson_options.txt` change
-   instead of hand-reconstructing the `-D...` flags below.
-
-**Manually, if you'd rather not use the script** (or need to see exactly
-what it does):
-```powershell
-$pinocchioEnv = "$env:USERPROFILE\miniconda3\envs\posetrak-pinocchio\Library"
-meson setup builddir  -Dbuildtype=debug   -Ddefault_library=static `
-  -Dpinocchio_includedir=$pinocchioEnv/include -Dboost_includedir=$pinocchioEnv/include -Dboost_libdir=$pinocchioEnv/lib
-meson setup optbuild   -Dbuildtype=release -Ddefault_library=static `
-  -Dpinocchio_includedir=$pinocchioEnv/include -Dboost_includedir=$pinocchioEnv/include -Dboost_libdir=$pinocchioEnv/lib
-meson compile -C builddir
-meson test    -C builddir
-```
-
-**Before running any built `.exe`**, copy the two runtime DLLs
-(`boost_serialization.dll`, `yaml-cpp.dll` — everything else links
-statically) into the same directory as the `.exe`:
-```powershell
-Copy-Item "$pinocchioEnv\bin\boost_serialization.dll", "$env:USERPROFILE\miniconda3\Library\bin\yaml-cpp.dll" -Destination builddir\cli
-Copy-Item "$pinocchioEnv\bin\boost_serialization.dll", "$env:USERPROFILE\miniconda3\Library\bin\yaml-cpp.dll" -Destination builddir\tests
-```
-(and the same into `optbuild\cli` / `optbuild\tests`). **Colocate, don't put
-on `PATH`**: Windows always searches an executable's own directory for its
-DLL dependencies first, so this is what makes the binary runnable
-standalone — including when the Python UI (`python/posetrak/tracker/runner.py`)
-launches `posetrak-tracker.exe` as a subprocess, which inherits whatever
-environment the UI happens to be running in and has no reason to know
-about this conda environment. Forgetting this step doesn't fail loudly:
-Windows kills the process at load time with `STATUS_DLL_NOT_FOUND`
-(`0xC0000135` / `3221225781`), which turns up as a `libshiboken: Overflow`
-warning when the huge exit code is marshalled back into a Qt `int` signal —
-if you see that, this is almost always why.
-
-**Why the extra options, if you're wondering what's Windows-specific and
-why** (all gated behind `cpp.get_id() == 'msvc'` / a native, non-cross build
-in `meson.build` — none of this affects the Linux/WSL or MinGW cross paths):
-- `pinocchio_includedir`/`boost_includedir`/`boost_libdir` — Linux/WSL finds
-  Pinocchio and Boost at fixed system paths (`/opt/openrobots`, the default
-  compiler include path); native Windows has neither, so these point at the
-  conda environment instead.
-- `default_library=static` — this codebase has no `dllexport`/`dllimport`
-  annotations, so as a shared library nothing would be exported and every
-  consumer (the CLI, the tests) fails to link. The existing MinGW cross
-  build (`cpp/cross/mingw-w64-x86_64.ini`) already works around this the same
-  way, for the same reason.
-- `NOMINMAX`, `WIN32=1`, `BOOST_ALL_NO_LIB`, `_USE_MATH_DEFINES`, `/bigobj`
-  (debug only) — Pinocchio/Eigen/MSVC preprocessor and object-format quirks;
-  see the comments beside each in `meson.build` for the specific error each
-  one fixes.
-
-**Alternative: MinGW cross-compile from WSL.** If you'd rather not maintain
-a native Windows toolchain at all, `cpp/cross/mingw-w64-x86_64.ini` cross-compiles
-a `posetrak-tracker.exe` from a Linux/WSL host (`apt install mingw-w64
-libboost-dev`, then `meson setup winbuild --cross-file
-cpp/cross/mingw-w64-x86_64.ini`) — see the comments at the top of that file for
-the exact steps and the four runtime DLLs it needs alongside the `.exe`.
+See the **[Setup guide](docs/setup.md)** for prerequisites and build
+instructions on both platforms, including the native-MSVC and cross-compiled
+paths for Windows. There's no separate contributor setup doc — it's the same
+one anyone building Posetrak from source uses.
 
 ## Coding Standards
 
@@ -181,7 +92,7 @@ private:
 
 Format:
 ```
-component: Short summary (50 chars or less)
+comp: Short summary (50 chars or less)
 
 More detailed explanation if needed. Wrap at 72 characters.
 Explain what and why, not how.
@@ -190,16 +101,13 @@ Explain what and why, not how.
 - Use imperative mood ("Add feature" not "Added feature")
 ```
 
-Component prefixes:
-- `core:` - Core models (State, Skeleton, Camera, etc.)
-- `kinematics:` - Forward/inverse kinematics
-- `filters:` - UKF and related filtering code
-- `tracking:` - Tracker implementation
-- `io:` - Input/output, serialization
-- `cli:` - Command-line interface
-- `tests:` - Test code
-- `build:` - Build system, dependencies
-- `docs:` - Documentation
+`comp` is whatever area the change affects — often a source directory
+(`core`, `kinematics`, `filters`, `tracking`, `cli`) or a general area
+(`doc`, `test`, `build`, `setup`, `ci`). There's no fixed list; pick
+whatever a reader would recognize years from now. Don't use ephemeral
+planning names from a task's own planning docs (`phase0`, `step3`) —
+commit messages record project history and must stay understandable
+without that context.
 
 Examples:
 ```
@@ -207,7 +115,7 @@ core: Add Camera class with fisheye distortion support
 
 filters: Implement UKF prediction step for joint-space state
 
-tests: Add unit tests for Skeleton DOF validation
+test: Add unit tests for Skeleton DOF validation
 ```
 
 ### Branch Strategy
@@ -233,7 +141,9 @@ meson test -C builddir --wrap='valgrind --leak-check=full'
 
 ## Implementation Workflow
 
-We're following a phased implementation plan (see [docs/cpp-implementation-plan.md](docs/cpp-implementation-plan.md)). Planning documents for each phase are in `docs/plans/`.
+Feature and task planning documents live under `docs/plans/<feature>/` and
+`docs/roadmap/`. See [docs/roadmap.md](docs/roadmap.md) for where the
+project is headed overall.
 
 **Note**: When referring to work in comments/commits, use descriptive names:
 - Write "Setup build system" not "Phase 0 setup"
@@ -242,7 +152,7 @@ We're following a phased implementation plan (see [docs/cpp-implementation-plan.
 
 ### Task Checklist
 
-Before moving to next phase:
+Before considering a task done:
 - [ ] All tasks complete
 - [ ] All tests pass
 - [ ] No memory leaks

@@ -21,23 +21,10 @@ See [Posetrak web page](https://hkaimio.github.io/posetrak/)
 
 ## Getting started
 
-See **[docs/setup.md](docs/setup.md)** for full platform-specific setup instructions.
-
-**Linux (development)** — build the C++ tracker from source, install the Python tools:
-
-```bash
-meson setup builddir       # configure (downloads deps via wraps)
-meson compile -C builddir  # build
-uv sync --group dev        # Python tools + test deps
-uv run pytest              # run Python tests
-./run_tests.sh             # run C++ tests
-```
-
-**Windows** — use the cross-compiled exe (see docs/setup.md), install Python tools:
-
-```bash
-uv sync                    # base Python tools
-```
+There's no packaged release yet — using Posetrak today means setting up a
+development environment and building/running from source. See
+**[docs/setup.md](docs/setup.md)** for the full setup guide (Linux and
+Windows, native build or cross-compiled exe).
 
 ## Documentation
 

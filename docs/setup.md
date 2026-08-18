@@ -1,5 +1,12 @@
 # Posetrak — Setup Guide
 
+There's no packaged release yet. For now, using Posetrak means setting up a
+development environment and building/running from source: clone the repo,
+install [uv](https://docs.astral.sh/uv/), and either build the C++ tracker
+yourself or use a cross-compiled Windows exe (below). A simpler install path
+will follow once there's an actual release package. This is also the guide
+contributors use — there's no separate developer setup doc.
+
 ## Platform overview
 
 | Component | Linux | Windows |
@@ -9,11 +16,11 @@
 | Development (edit & rebuild) | Full support | Full support |
 
 Native MSVC development is fully supported — see
-[CONTRIBUTING.md"](https://github.com/hkaimio/posetrak/blob/main/CONTRIBUTING.md#windows-native-msvc)
-section and `setup-windows.ps1`. If you'd rather not maintain a native Windows
-toolchain, cross-compiling from Linux/WSL (below) works, too, and produces
-a runnable exe without installing MSVC/Pinocchio/Boost on the Windows machine —
-just without the ability to edit and rebuild there.
+["Windows: C++ tracker"](#c-tracker) below and `setup-windows.ps1`. If you'd
+rather not maintain a native Windows toolchain, cross-compiling from Linux/WSL
+(below) works, too, and produces a runnable exe without installing
+MSVC/Pinocchio/Boost on the Windows machine — just without the ability to
+edit and rebuild there.
 
 ---
 
@@ -98,16 +105,85 @@ four MinGW runtime DLLs (see [Windows: C++ tracker](#c-tracker)).
 
 ### C++ tracker
 
-**For development (edit & rebuild), build natively with MSVC** — see
-[CONTRIBUTING.md's "Windows (native, MSVC)"](https://github.com/hkaimio/posetrak/blob/main/CONTRIBUTING.md#windows-native-msvc)
-section, or just run `setup-windows.ps1` from the repo root. This needs Visual
-Studio 2022+ (C++ desktop workload) and a small conda environment for Pinocchio/Boost
-headers, but produces both a debug (`builddir/`) and release (`optbuild/`) build you
-can iterate on locally.
+**Option A: build natively with MSVC** (for development — edit & rebuild locally).
 
-**If you only need to *run* the tracker** (no local edit/rebuild), an exe
-cross-compiled on Linux avoids installing any of that. Copy the following files into
-a single directory on the Windows machine:
+**One-time setup:**
+
+1. Visual Studio 2022 (or later) with the "Desktop development with C++"
+   workload.
+2. [Meson](https://mesonbuild.com/) and Ninja (`pip install meson ninja`, or
+   the standalone Meson MSI installer).
+3. Pinocchio 3.9.0 headers + a compiled Boost Serialization — easiest via a
+   dedicated conda environment (this project only needs the headers/libs,
+   not a Python installation of Pinocchio itself):
+   ```powershell
+   conda create -y -n posetrak-pinocchio -c conda-forge pinocchio=3.9.0
+   ```
+   **Match the version to whatever `/opt/openrobots` actually has** — check
+   the [openrobots package list](https://robotpkg.openrobots.org/) or ask
+   whoever maintains the Linux/WSL dev environment. A header-version
+   mismatch shows up as real compile errors (e.g. `Frame::parentJoint` not
+   existing — that field was `Frame::parent` before Pinocchio 3.0), not
+   something that just happens to link with slightly wrong behaviour.
+4. Run `setup-windows.ps1` (repo root). It configures and builds two build
+   directories — `builddir/` (debug, for day-to-day unit testing/debugging)
+   and `optbuild/` (release, for actual tracking runs — see the performance
+   note in `CLAUDE.md`) — and copies the two runtime DLLs described below
+   next to each built `.exe`. The script is idempotent; re-run it after a
+   `meson.build`/`meson_options.txt` change instead of hand-reconstructing
+   the `-D...` flags below.
+
+**Manually, if you'd rather not use the script** (or need to see exactly
+what it does):
+```powershell
+$pinocchioEnv = "$env:USERPROFILE\miniconda3\envs\posetrak-pinocchio\Library"
+meson setup builddir  -Dbuildtype=debug   -Ddefault_library=static `
+  -Dpinocchio_includedir=$pinocchioEnv/include -Dboost_includedir=$pinocchioEnv/include -Dboost_libdir=$pinocchioEnv/lib
+meson setup optbuild   -Dbuildtype=release -Ddefault_library=static `
+  -Dpinocchio_includedir=$pinocchioEnv/include -Dboost_includedir=$pinocchioEnv/include -Dboost_libdir=$pinocchioEnv/lib
+meson compile -C builddir
+meson test    -C builddir
+```
+
+**Before running any built `.exe`**, copy the two runtime DLLs
+(`boost_serialization.dll`, `yaml-cpp.dll` — everything else links
+statically) into the same directory as the `.exe`:
+```powershell
+Copy-Item "$pinocchioEnv\bin\boost_serialization.dll", "$env:USERPROFILE\miniconda3\Library\bin\yaml-cpp.dll" -Destination builddir\cli
+Copy-Item "$pinocchioEnv\bin\boost_serialization.dll", "$env:USERPROFILE\miniconda3\Library\bin\yaml-cpp.dll" -Destination builddir\tests
+```
+(and the same into `optbuild\cli` / `optbuild\tests`). **Colocate, don't put
+on `PATH`**: Windows always searches an executable's own directory for its
+DLL dependencies first, so this is what makes the binary runnable
+standalone — including when the Python UI (`python/posetrak/tracker/runner.py`)
+launches `posetrak-tracker.exe` as a subprocess, which inherits whatever
+environment the UI happens to be running in and has no reason to know
+about this conda environment. Forgetting this step doesn't fail loudly:
+Windows kills the process at load time with `STATUS_DLL_NOT_FOUND`
+(`0xC0000135` / `3221225781`), which turns up as a `libshiboken: Overflow`
+warning when the huge exit code is marshalled back into a Qt `int` signal —
+if you see that, this is almost always why.
+
+**Why the extra options, if you're wondering what's Windows-specific and
+why** (all gated behind `cpp.get_id() == 'msvc'` / a native, non-cross build
+in `meson.build` — none of this affects the Linux/WSL or MinGW cross paths):
+- `pinocchio_includedir`/`boost_includedir`/`boost_libdir` — Linux/WSL finds
+  Pinocchio and Boost at fixed system paths (`/opt/openrobots`, the default
+  compiler include path); native Windows has neither, so these point at the
+  conda environment instead.
+- `default_library=static` — this codebase has no `dllexport`/`dllimport`
+  annotations, so as a shared library nothing would be exported and every
+  consumer (the CLI, the tests) fails to link. The existing MinGW cross
+  build (`cpp/cross/mingw-w64-x86_64.ini`) already works around this the same
+  way, for the same reason.
+- `NOMINMAX`, `WIN32=1`, `BOOST_ALL_NO_LIB`, `_USE_MATH_DEFINES`, `/bigobj`
+  (debug only) — Pinocchio/Eigen/MSVC preprocessor and object-format quirks;
+  see the comments beside each in `meson.build` for the specific error each
+  one fixes.
+
+**Option B: run a cross-compiled exe** (no local edit/rebuild — skips
+installing MSVC/Pinocchio/Boost on the Windows machine entirely). Copy the
+following files into a single directory on the Windows machine:
 
 | File | Source (on the Linux build machine) |
 |---|---|
@@ -126,6 +202,12 @@ Verify with:
 ```
 posetrak-tracker.exe --help
 ```
+
+**Alternative: MinGW cross-compile from WSL.** If you'd rather not maintain a
+native Windows toolchain at all, `cpp/cross/mingw-w64-x86_64.ini` cross-compiles
+this same exe from a Linux/WSL host — see
+["Cross-compiling for Windows (on Linux)"](#cross-compiling-for-windows-on-linux)
+above for the exact steps.
 
 ### Python tools
 
@@ -173,16 +255,17 @@ Install only what you need:
 
 ```bash
 uv sync --group dev           # pytest, coverage — needed to run Python tests
-uv sync --group pose-app      # YOLO + RTMPose + PyAV — needed for pose extraction
+uv sync --group segmentation  # torch/torchvision — GPU inference, Cutie segmentation
 uv sync --group analysis      # Marimo + Plotly — for analysis notebooks
 uv sync --group mcp-server    # MCP server — for posetrak-mcp diagnostic tool
-uv sync --group pipeline      # Ultralytics — standalone pipeline tools
+uv sync --group tools         # standalone utility scripts in python/tools/
+uv sync --group docs          # MkDocs + Material — to build this site locally
 ```
 
 Multiple groups can be combined:
 
 ```bash
-uv sync --group dev --group pose-app
+uv sync --group dev --group segmentation
 ```
 
 ### GPU acceleration for pose extraction

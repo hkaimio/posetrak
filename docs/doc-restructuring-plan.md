@@ -2,6 +2,33 @@
 
 Analysis and proposed structure for the public documentation rewrite.
 
+**Update, 2026-08-19 — delivery mechanism decided (MkDocs + GitHub Pages).**
+The "Current state assessment" below is kept as the historical record of
+*why* things are organised the way they are; the "Proposed structure" and
+"Work order" sections have been superseded by "Publishing plan
+(MkDocs)" further down, which reflects what's actually being built.
+Headline changes from the original proposal:
+
+- No physical repository reorganisation (no `design/`/`archive/`/
+  `reference/` subdirectories) is required to publish. MkDocs's
+  `exclude_docs` config excludes everything except an explicit
+  allowlist at build time, so the ~50 internal design/debug/plan docs
+  stay exactly where they are and are simply never built into the site.
+  The `reference/` grouping below is still a good idea; it just isn't a
+  prerequisite for shipping.
+- `status-and-roadmap.md` (item 11, never started) is replaced by a
+  much shorter, hand-written `roadmap.md` seeded from `background.md`'s
+  own "Looking ahead" section rather than from `ui-status-and-roadmap.md`
+  or `docs/roadmap/features/` — both of which are internal working notes,
+  not reader-facing content, and the former is already stale (dated
+  2026-05-20, describing an app structure several sessions out of date).
+  `docs/roadmap/` is not published.
+- Most of the `architecture/` and `user-guide/` work below is **done**
+  (see the current directories) -- item 1-5 landed as planned; the
+  `user-guide/` pages exist under slightly different filenames than
+  originally proposed (e.g. `first-capture.md` instead of
+  `workflow-overview.md`) but cover the same ground.
+
 ---
 
 ## Current state assessment
@@ -102,7 +129,7 @@ These describe planned features; none is published as user-facing documentation 
 
 ---
 
-## Proposed structure
+## Proposed structure (original; superseded by "Publishing plan" below)
 
 ```
 README.md                         rewrite: what is it, quick feature list,
@@ -176,18 +203,63 @@ All "dead planning docs" and "debug notes" listed in the assessment above, plus
 
 ---
 
-## Work order
+## Work order (original; see "Publishing plan" for current status)
 
 | Priority | File | Source material | Status |
 |---|---|---|---|
-| 1 | `architecture/overview.md` | `architecture-notes.md`, CLAUDE.md | **Draft written** |
-| 2 | `architecture/cpp-tracker.md` | CLAUDE.md, `architecture-notes.md` §C++ | **Draft written** |
-| 3 | `architecture/python-apps.md` | `architecture-notes.md` §Python, `ui-status-and-roadmap.md` §1-2 | **Draft written** |
-| 4 | `architecture/data-model.md` | `data-model-and-storage.md` (trim) | **Draft written** |
-| 5 | `architecture/algorithms/ukf.md` | CLAUDE.md, `ukf-parameter-sweep.md` | **Draft written** |
-| 6 | `README.md` | rewrite from scratch | — |
-| 7 | `user-guide/installation.md` | CLAUDE.md build section | — |
-| 8 | `user-guide/workflow-overview.md` | `workflow-session-to-bvh.md` | — |
-| 9 | `reference/output-formats.md` | `state-vector-format.md`, tracker source | — |
-| 10 | `user-guide/configuration-reference.md` | `workflow-session-to-bvh.md` §8, tracker source | — |
-| 11 | `status-and-roadmap.md` | `ui-status-and-roadmap.md`, open-issues.md | — |
+| 1 | `architecture/overview.md` | `architecture-notes.md`, CLAUDE.md | **Done** |
+| 2 | `architecture/cpp-tracker.md` | CLAUDE.md, `architecture-notes.md` §C++ | **Done** |
+| 3 | `architecture/python-apps.md` | `architecture-notes.md` §Python, `ui-status-and-roadmap.md` §1-2 | **Done** |
+| 4 | `architecture/data-model.md` | `data-model-and-storage.md` (trim) | **Done** |
+| 5 | `architecture/algorithms/ukf.md` | CLAUDE.md, `ukf-parameter-sweep.md` | **Done** |
+| 6 | `README.md` | rewrite from scratch | **Done** |
+| 7 | `user-guide/*` (installation → `setup.md`, workflow-overview → `first-capture.md`, camera-setup → `camera-intrinsics.md` + `extrinsics-calibration.md` + `synchronizing-videos.md`, pose-extraction → `analyzing-poses.md`, troubleshooting → `tracking-troubleshooting.md`) | as noted per file | **Done**, different filenames than originally proposed |
+| 8 | `reference/output-formats.md` | `state-vector-format.md`, tracker source | not started |
+| 9 | `user-guide/configuration-reference.md` (tracker params) | `workflow-session-to-bvh.md` §8, tracker source | not started -- currently a TBD in `tracking-troubleshooting.md` |
+| 10 | ~~`status-and-roadmap.md`~~ → `roadmap.md` | `background.md` "Looking ahead" (not `ui-status-and-roadmap.md`/`open-issues.md` -- see update note at top) | not started |
+
+---
+
+## Publishing plan (MkDocs + GitHub Pages)
+
+Decided 2026-08-19. `docs_dir: docs` points straight at this directory;
+`exclude_docs` in `mkdocs.yml` excludes everything except an explicit
+allowlist, so nothing below needs to physically move for the site to
+ship. Deploy via GitHub Actions on push to `main`: install
+`mkdocs-material`, `mkdocs gh-deploy --force` (writes `gh-pages`, which
+GitHub Pages serves).
+
+Site nav:
+
+```
+Home                    NEW index.md, adapted from README.md
+Background              background.md, as-is
+Setup                   setup.md
+User Guide
+  ├─ Your first capture  user-guide/first-capture.md  (section landing page)
+  ├─ Camera intrinsics   user-guide/camera-intrinsics.md
+  ├─ Extrinsics calibration  user-guide/extrinsics-calibration.md
+  ├─ Synchronizing videos    user-guide/synchronizing-videos.md
+  ├─ Analyzing poses         user-guide/analyzing-poses.md
+  └─ Tracking & troubleshooting  user-guide/tracking-troubleshooting.md
+Architecture
+  ├─ Overview             architecture/overview.md
+  ├─ C++ tracker          architecture/cpp-tracker.md
+  ├─ Python apps          architecture/python-apps.md
+  ├─ Data model           architecture/data-model.md
+  └─ UKF algorithm        architecture/algorithms/ukf.md
+Reference                NEW section (no file moves needed)
+  ├─ Skeleton format      skeleton-format.md
+  ├─ State vector format  state-vector-format.md
+  └─ Sync metadata format sync-metadata-format.md
+Roadmap                  NEW roadmap.md
+Contributing             ../CONTRIBUTING.md
+```
+
+Known fix-before-publish item: `architecture/overview.md` and
+`architecture/python-apps.md` both still describe the pre-removal
+detector (`YOLOv11Detector`/ByteTrack) -- stale since the
+`remove-ultralytics-dependency` work landed. Also affects `setup.md`'s
+link to `../CONTRIBUTING.md`, which needs to become a normal in-site
+link once CONTRIBUTING.md is in the nav (both to be fixed alongside
+this rollout).

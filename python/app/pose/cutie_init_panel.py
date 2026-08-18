@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """cutie_init_panel.py — Interactive Cutie segmentation initialisation panel.
 
 Phase 1: video scrubber, camera selector, mask overlay from stored seg_masks.

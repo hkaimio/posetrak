@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration: registry schema v1 → v2
 -- Adds image dimensions and undistortion map columns to intrinsics_calibrations.
 -- All new columns are nullable so existing rows remain valid.

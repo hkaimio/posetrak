@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for Idea 3 (automated post-edit hand redetection), Phase 2:
 db_cache.write_hand_refinement/revert_hand_refinement and the
 STATUS_ORANGE ("came from a '.refined' source, not yet human-verified")

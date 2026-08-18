@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for app.setup.video_scrub_bar.VideoScrubBar.
 
 These cases were originally written against ``pair_scrubber._VideoPane``

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """filmstrip_stitcher.py — FilmstripStitcherWidget: timeline with filmstrip bars."""
 from __future__ import annotations
 

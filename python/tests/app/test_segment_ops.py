@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the pure segment split/merge/assign/detach logic in segment_ops.py.
 
 All tests operate on plain dicts — no Qt required.

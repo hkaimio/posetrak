@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the limb chain-placement tool: pick a limb, then click through
 its keypoints in order (shoulder->elbow->wrist->..., hip->knee->ankle->...),
 one click per keypoint, without re-picking from the toolbar each time.

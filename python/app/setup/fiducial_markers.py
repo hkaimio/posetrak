@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """fiducial_markers.py — Marker detection framework for extrinsics calibration.
 
 See docs/roadmap/features/extrinsics-improvements/

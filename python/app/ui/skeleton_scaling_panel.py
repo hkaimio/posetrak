@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """skeleton_scaling_panel.py — Interactive skeleton scaling dialog.
 
 Workflow

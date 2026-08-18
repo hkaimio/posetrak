@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 subdir('db')
 
 # Generated version header — rebuilt on every compile to capture current git state.

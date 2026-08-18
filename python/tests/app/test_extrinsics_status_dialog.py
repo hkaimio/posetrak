@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ExtrinsicsStatusDialog and _open_auto_calibrate_dialog
 (UX Phase 2, see docs/roadmap/features/extrinsics-improvements/
 extrinsics-ux-redesign.md): the status-first entry point that replaced

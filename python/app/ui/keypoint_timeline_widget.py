@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """keypoint_timeline_widget.py — dope-sheet style timeline for keypoint editing.
 
 Phases 12-13 of the keypoint-editing timeline view (see

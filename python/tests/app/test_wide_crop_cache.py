@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the wide-crop cluster-cache algorithms (geometry, clustering,
 gap-handling) in app.pose.wide_crop_cache.
 

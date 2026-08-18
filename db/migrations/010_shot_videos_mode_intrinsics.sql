@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration: session schema v10 → v11
 -- Moves camera_mode_id and intrinsics_calibration_id from session_cameras to shot_videos.
 -- Each shot_video now declares its own capture mode and intrinsics calibration, allowing

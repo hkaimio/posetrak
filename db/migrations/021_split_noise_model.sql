@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration 021: split measurement noise into pose and calibration components.
 --
 -- Adds pose_noise_std to tracker_configs (both registry and session DBs):

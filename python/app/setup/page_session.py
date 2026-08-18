@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """page_session.py — Wizard page 1: open or create a session database.
 
 The user either picks an existing ``.db`` file or provides a path for a new

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """timeline_status.py — per-(keypoint, frame) status for the keypoint-editing timeline.
 
 Status has two independent axes (see

@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """characterize_rig_from_video.py — Derive a portable calibration rig's
 marker geometry from a single video of one camera orbiting the rig.
 

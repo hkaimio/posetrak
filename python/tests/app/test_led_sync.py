@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for app.setup.led_sync (LED synchronisation algorithm)."""
 
 from __future__ import annotations

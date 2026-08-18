@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for RunDetectionDialog's segmentation bbox source (segmentation-
 reuse gap 2: docs/roadmap/features/segmentation-reuse/
 segmentation-reuse-design.md). This file had zero prior test coverage.

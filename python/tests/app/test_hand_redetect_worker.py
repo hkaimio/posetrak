@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for app.ui.hand_redetect_worker — Idea 3 (automated post-edit hand
 redetection).
 

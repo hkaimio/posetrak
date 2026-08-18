@@ -1,4 +1,9 @@
 #!/home/harri/projects/tests/Cutie/venv/bin/python
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """cutie_rtmpose_test.py — Cutie video segmentation + RTMPose-133 quality scoring.
 
 Replaces the per-frame SAM approach (sam2_yolo_test.py) with Cutie (XMem++),

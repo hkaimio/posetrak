@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for _blend_seg_mask (segmentation mask overlay) and its wiring into
 _display_crop_result.
 

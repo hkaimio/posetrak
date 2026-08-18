@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """runner.py — subprocess wrapper for the posetrak-tracker binary.
 
 Pure Python, no Qt. Both the CLI and the UI use this module; the UI runs it

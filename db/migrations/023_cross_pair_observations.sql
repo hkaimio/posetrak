@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration 023: add spatial cross-pair relative observation columns to tracker_configs.
 --
 -- cross_pair_max_px  REAL     Pixel-distance threshold for spatial RELATIVE pairs.

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the keypoint-placement toolbar (Phases 28-29): picking a
 keypoint from _KeypointPickerPanel, arming placement mode on the camera
 canvases, placing on click, and Esc-cancels-placement-first semantics.

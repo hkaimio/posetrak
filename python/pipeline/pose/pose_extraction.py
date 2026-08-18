@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """
 pose_extraction.py  —  Marimo app for Stage 1: Person Detection & Pose Extraction
 

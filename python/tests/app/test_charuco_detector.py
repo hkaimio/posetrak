@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for CharucoDetector / anchor_from_charuco_board (Phase 4).
 
 See docs/roadmap/features/extrinsics-improvements/

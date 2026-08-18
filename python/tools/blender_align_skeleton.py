@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """
 blender_align_skeleton.py — Align a template armature to a CC character armature in Blender.
 

@@ -1,4 +1,9 @@
 #!/home/harri/projects/tests/Cutie/venv/bin/python
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """run_cutie_pose.py — Cutie ROI + RTMPose detection pipeline.
 
 For each camera in a source detection run:

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """trial_export.py — Export and import trial data between posetrak session databases.
 
 All reads from the source DB use a read-only URI connection so corrupted or

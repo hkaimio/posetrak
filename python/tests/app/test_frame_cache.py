@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for app.setup.frame_cache (FrameCache, CacheKey, CacheType)."""
 
 from __future__ import annotations

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for Phase 14: multi-keyframe interpolation.
 
 Generalizes Phase 10's two-anchor `I` interpolation to N anchors: any

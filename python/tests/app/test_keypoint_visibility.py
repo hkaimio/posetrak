@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the keypoint-visibility feature (eye icon on each timeline row):
 
 - Clicking a row's eye icon hides/shows that keypoint (leaf) or every

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """cli.py — Command-line interface for the pose extraction pipeline."""
 from __future__ import annotations
 

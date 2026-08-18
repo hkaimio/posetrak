@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """import_sync_json.py — Import camera synchronisation data from a sync JSON file.
 
 The sync JSON file produced by the posetrak pipeline has the following

@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration: registry schema v4 → v5, session schema v9 → v10
 -- Adds default_intrinsics_calibration_id to camera_modes so the wizard can
 -- auto-select the preferred calibration when a mode is picked for a shot video.

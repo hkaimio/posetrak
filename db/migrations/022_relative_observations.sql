@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration 022: add relative observation mode columns to tracker_configs.
 --
 -- use_relative_observations  INTEGER  0/1 flag; when 1 the tracker emits an

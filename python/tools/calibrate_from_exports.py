@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """calibrate_from_exports.py — CLI wrapper for semi-automatic extrinsics calibration.
 
 Takes a directory of PNG frames exported from the sync UI (one per camera) plus

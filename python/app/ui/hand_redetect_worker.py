@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """hand_redetect_worker.py — Idea 3: automated hand redetection after a
 manual edit, in the interactive keypoint editor.
 

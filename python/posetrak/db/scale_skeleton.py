@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """scale_skeleton.py — Scale a skeleton YAML to match measured body dimensions.
 
 Scaling rules

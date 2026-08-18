@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """
 print_skeleton_joints.py — Print global 3D joint positions of a skeleton at rest pose.
 

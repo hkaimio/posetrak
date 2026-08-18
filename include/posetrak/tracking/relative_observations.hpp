@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file relative_observations.hpp
  * @brief Build PAIR_DIFF observations against a fixed reference marker.

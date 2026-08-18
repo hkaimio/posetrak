@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the per-camera VideoScrubBar wiring in ExtrinsicsAutoCalibDialog.
 
 See docs/roadmap/features/extrinsics-improvements/

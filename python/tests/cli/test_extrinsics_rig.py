@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the pure-Python pieces of posetrak.cli.extrinsics_rig.
 
 The commands themselves (anchor-rig, reanchor) are I/O-heavy -- real video

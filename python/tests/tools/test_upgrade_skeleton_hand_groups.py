@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for python/tools/upgrade_skeleton_hand_groups.py -- the
 hierarchical-solver skeleton groups: converter (see
 docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md and

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """manage_person.py — Session CRUD for capture-scoped named performers.
 
 ``capture_persons`` defines a performer once per capture (trials within one

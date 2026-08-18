@@ -1,12 +1,35 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v2.3.0
     hooks:
     -   id: check-yaml
     -   id: end-of-file-fixer
+        # cross/include/boost is a symlink-target string (git mode 120000,
+        # checked out as a plain text file since this repo runs with
+        # core.symlinks=false on Windows). Its content -- "/usr/include/boost",
+        # no trailing newline -- IS the symlink target: adding a newline here
+        # corrupts the actual symlink once checked out for real (Linux/WSL/
+        # macOS, core.symlinks=true). Confirmed reproducing 2026-08-18.
+        exclude: '^cross/include/boost$'
     -   id: trailing-whitespace
 -   repo: https://github.com/pre-commit/mirrors-clang-format
     rev: ''  # Use the sha / tag you want to point at
     hooks:
     -   id: clang-format
         exclude: '\.(json)$'
+-   repo: https://github.com/fsfe/reuse-tool
+    rev: v6.2.0
+    hooks:
+    -   id: reuse
+        # -X utf8: reuse's plain-text report can contain characters the
+        # default Windows console codepage (cp1252) can't encode, which
+        # crashes click.echo() with UnicodeEncodeError -- confirmed
+        # reproducing on this machine. Python's UTF-8 mode sidesteps it
+        # regardless of platform/locale; harmless where it isn't needed.
+        entry: python -X utf8 -m reuse lint
+        args: []
+        pass_filenames: false

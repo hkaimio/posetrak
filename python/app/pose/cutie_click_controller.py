@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """cutie_click_controller.py — SAM2-backed interactive click segmentation.
 
 Wraps Meta's own ``sam2`` package (Apache-2.0) with a stateful interface:

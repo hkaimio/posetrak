@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file test_skeleton_layout.cpp
  * @brief Unit tests for SkeletonLayout — precomputed DOF index table

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """filmstrip_bar.py — FilmstripBarItem: one detection-track segment rendered as a filmstrip."""
 from __future__ import annotations
 

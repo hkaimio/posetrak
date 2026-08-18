@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """sync_solver.py — Graph-based sync offset solver.
 
 Takes pairwise anchor observations (sync_anchors / sync_anchor_observations)

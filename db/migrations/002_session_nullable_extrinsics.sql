@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration: session schema v2 → v3
 -- Makes shots.extrinsic_calibration_id nullable so shots can be created before
 -- extrinsics are imported (e.g. during YAML project import).

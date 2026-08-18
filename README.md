@@ -11,7 +11,7 @@ and fisheye/wide-angle lenses.
 | `posetrak track config.toml` | Run the UKF tracker on a capture session |
 | `posetrak scale config.toml` | Post-process a bone-length calibration run |
 | `posetrak-ui` | Main viewer: sessions, tracking runs, keypoint editing |
-| `posetrak-pose` | Detection pipeline: YOLO + RTMPose on video, track assignment |
+| `posetrak-pose` | Detection pipeline: YOLOX + RTMPose on video, track assignment |
 | `posetrak-db` | Database CLI: import, export, query sessions |
 | `posetrak-mcp` | Read-only MCP diagnostic server for tracking runs |
 
@@ -44,4 +44,4 @@ uv sync                    # base Python tools
 
 ## License
 
-MIT
+Apache License 2.0 — see [LICENSE](LICENSE). This project is [REUSE](https://reuse.software/) compliant; per-file licensing is in [REUSE.toml](REUSE.toml) and file headers.

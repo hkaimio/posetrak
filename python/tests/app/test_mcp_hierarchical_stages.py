@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for PR8's hierarchical-solver awareness in the MCP server --
 get_run_stages()/get_marker_groups() in db.py, plus their consumers in
 get_run_info() and get_filter_stats(). See

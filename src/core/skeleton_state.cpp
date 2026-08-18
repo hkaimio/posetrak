@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 #include "posetrak/core/skeleton_state.hpp"
 
 #include <fmt/format.h>

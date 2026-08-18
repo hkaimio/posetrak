@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # C++ Tracker Configuration - Python Comparison Test
 # ====================================================
 # This config matches the Python test run exactly:

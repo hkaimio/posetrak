@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """sam2_rtmpose_test.py — SAM2 segmentation + RTMPose-133 keypoint quality analysis.
 
 Output: an MP4 video at the source frame rate showing every frame:

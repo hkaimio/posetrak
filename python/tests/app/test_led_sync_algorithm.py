@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Regression tests for the LED sync algorithm correctness.
 
 These tests validate that run_led_sync recovers the correct per-camera time

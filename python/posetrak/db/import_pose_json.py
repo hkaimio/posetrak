@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """import_pose_json.py — Import 2-D pose observations from OpenPose/Halpe JSON files.
 
 Pose JSON files follow the structure produced by the posetrak pipeline::

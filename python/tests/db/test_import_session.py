@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for session CRUD functions added to scripts/db/posetrak_db.py."""
 
 from __future__ import annotations

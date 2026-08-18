@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """posetrak_db_cli.py — Command-line interface for the posetrak database layer.
 
 Topics / Actions

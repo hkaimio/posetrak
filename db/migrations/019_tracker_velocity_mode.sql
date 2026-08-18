@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration 019: velocity-mode camera support in tracker_configs.
 --
 -- Adds two nullable columns to tracker_configs (present in both registry and session DBs):

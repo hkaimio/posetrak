@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """page_shots.py — Wizard page 2: define a single shot and add video files.
 
 The user defines one shot (take) and assigns video files to it.  After the

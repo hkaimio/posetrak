@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """backends.py — Detector and pose estimator protocol + registry.
 
 All pixel coordinates use original (distorted) video space.  Undistortion

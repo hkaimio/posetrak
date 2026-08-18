@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file tracker.hpp
  * @brief Main tracking interface orchestrating UKF-based pose tracking

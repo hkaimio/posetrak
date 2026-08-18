@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """DBContext — session-DB access layer for the setup wizard.
 
 All wizard pages read and write through this object; they do not open their

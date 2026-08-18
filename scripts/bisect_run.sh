@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # bisect_run.sh — build and run posetrak at a specific git commit, save results.
 #
 # Usage: bisect_run.sh <commit|HEAD> <label>

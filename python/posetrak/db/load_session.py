@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """load_session.py — Load posetrak session data from SQLite session databases.
 
 Provides DataFrame-oriented access to tracking results, cameras, sync points,

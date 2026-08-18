@@ -1,0 +1,54 @@
+version = 1
+SPDX-PackageName = "posetrak"
+SPDX-PackageSupplier = "Harri Kaimio <harri@kaimio.fi>"
+SPDX-PackageDownloadLocation = "https://github.com/hkaimio/posetrak"
+
+# Prose documentation. Kept out of per-file SPDX headers (unlike source code)
+# so narrative/blog-style docs (e.g. docs/background.md) don't carry visible
+# boilerplate at the top -- same license as the code either way.
+[[annotations]]
+path = "**/*.md"
+SPDX-FileCopyrightText = "2026 Harri Kaimio"
+SPDX-License-Identifier = "Apache-2.0"
+
+# File types with no comment syntax reuse can use for a real header (JSON,
+# CSV, PNG, NPZ), or types where a header risks confusing an external parser
+# (.wrap is Meson-specific INI-like syntax; uv.lock is machine-generated and
+# gets fully rewritten by `uv lock` anyway). Covers both real fixtures/data
+# and this project's actual JSON config files (e.g. rig configs).
+[[annotations]]
+path = [
+    "**/*.json",
+    "**/*.csv",
+    "**/*.png",
+    "**/*.npz",
+    "**/*.wrap",
+    "**/*.example",
+    "uv.lock",
+]
+SPDX-FileCopyrightText = "2026 Harri Kaimio"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Odd pre-existing filename with spaces (an exported marker-position CSV
+# checked into the repo root) and a tracked symlink into a cross-compile
+# toolchain's system headers -- neither can carry an inline header.
+[[annotations]]
+path = [
+    "marker 3D positions from tracking_results.csv",
+    "cross/include/boost",
+]
+SPDX-FileCopyrightText = "2026 Harri Kaimio"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Misc. plain-text/config files with no established comment convention reuse
+# recognises, or where a header risks being read as actual content (a bare
+# version string, a glob-pattern list).
+[[annotations]]
+path = [
+    ".clang-format-ignore",
+    ".python-version",
+    ".vscode/settings.vscode",
+    "docs/roadmap/features/hand-detection-refinement/hand-detect-test-frames.txt",
+]
+SPDX-FileCopyrightText = "2026 Harri Kaimio"
+SPDX-License-Identifier = "Apache-2.0"

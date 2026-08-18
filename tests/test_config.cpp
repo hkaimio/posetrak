@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file test_config.cpp
  * @brief Tests for TrackerAppConfig loading, including hierarchical tracking config.

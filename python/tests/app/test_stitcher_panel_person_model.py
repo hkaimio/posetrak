@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for StitcherPanel._populate_known_persons() (config-improvements
 design doc, "Person model", phase 5 gap): the main-viewer app's embedded
 stitching/assignment panel (app/pose/stitcher_panel.py) has its own,

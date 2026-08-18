@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """detection_pipeline.py — Synchronous detection + pose estimation pipeline.
 
 Implementation has moved to posetrak.detection.pipeline; this module

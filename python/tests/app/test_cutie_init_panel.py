@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for CutieInitPanel's capture-scoped construction (segmentation
 before any detection run exists) -- see docs/roadmap/features/
 segmentation-reuse/segmentation-reuse-design.md. This file had zero prior

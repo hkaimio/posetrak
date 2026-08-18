@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """MultiVideoScrubber — grid of CameraCell widgets for multi-camera scrubbing.
 
 Supports two navigation modes:

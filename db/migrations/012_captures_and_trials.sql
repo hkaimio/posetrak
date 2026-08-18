@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration: session schema v12 → v13
 -- Terminology update: "shot" → "capture" (a raw camera recording), plus a new
 -- "trials" table that represents a named, bounded time window within a capture

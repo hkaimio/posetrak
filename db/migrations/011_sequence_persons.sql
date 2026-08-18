@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration: session schema v11 → v12
 -- Adds sequence_persons to persist the person_name → person_id mapping that was
 -- previously only computed in-memory during finalise_to_db.  Without this table

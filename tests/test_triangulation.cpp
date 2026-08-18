@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 #include <posetrak/io/skeleton_loader.hpp>
 #include <posetrak/kinematics/forward_kinematics.hpp>
 #include <posetrak/kinematics/pinocchio_model_builder.hpp>

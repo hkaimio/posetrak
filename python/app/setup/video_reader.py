@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """video_reader.py — Background video frame decoder for Qt UI widgets."""
 
 from __future__ import annotations

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for app.setup.fiducial_markers (Phase 3: ArUco marker detection).
 
 See docs/roadmap/features/extrinsics-improvements/

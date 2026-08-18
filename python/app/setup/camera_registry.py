@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """camera_registry.py — Camera model / mode / instance management dialog.
 
 Opened from the setup wizard via the "Manage Cameras…" button.  Provides full

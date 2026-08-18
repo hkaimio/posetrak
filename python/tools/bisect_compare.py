@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Compare tracking results across bisect runs.
 
 Usage: python scripts/bisect_compare.py <label_a> <label_b> [--frame-range 680 730]

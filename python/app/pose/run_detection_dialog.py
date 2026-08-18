@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """run_detection_dialog.py — Modal dialog to configure and launch a detection run.
 
 Opens from CapturePanel (creates a new trial) or TrialPanel (uses an existing

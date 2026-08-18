@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for MarkerRigConfig / MarkerRigDetector / anchor_from_marker_rig
 (Phase 8, design doc section 9 Tier A -- portable non-planar calibration
 rig).

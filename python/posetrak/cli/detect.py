@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """detect.py — CLI commands for running and listing detection runs."""
 from __future__ import annotations
 

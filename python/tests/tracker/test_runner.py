@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the pure argument-building helper behind run_multi_person_tracker().
 
 The subprocess/progress-callback plumbing itself follows the project's usual

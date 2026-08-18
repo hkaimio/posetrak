@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """run_tracker.py — Widget and dialog for running the posetrak tracker binary."""
 
 from __future__ import annotations

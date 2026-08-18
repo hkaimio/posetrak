@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Synthetic-data validation for the Phase 3 rigid marker-pose BA residual.
 
 See docs/roadmap/features/extrinsics-improvements/

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 option('enable_tests', type: 'boolean', value: true,
        description: 'Build tests')
 

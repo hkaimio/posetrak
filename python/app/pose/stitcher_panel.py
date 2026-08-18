@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """stitcher_panel.py — Embeddable stitcher + assignment widget for a detection run.
 
 Used by TrialPanel in the unified shell.  Exposes is_dirty / apply() for

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """backends_rtmpose.py — RTMPose estimator backend.
 
 Implementation has moved to posetrak.detection.backends_rtmpose; this module

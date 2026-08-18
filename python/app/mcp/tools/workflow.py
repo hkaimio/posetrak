@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """workflow.py — MCP tools for listing captures/detection-runs and triggering
 detection/tracking pipelines.
 

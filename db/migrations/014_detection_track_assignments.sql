@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration v14 → v15: add detection_track_assignments table.
 --
 -- Records the explicit (track_id → person_name) mapping made in the pose

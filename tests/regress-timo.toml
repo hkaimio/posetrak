@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # HEAD debug run — identical to harri-no-palms.toml but with export_debug = true
 # Output goes to tracking_tests/harri-no-palms-head (overwrites last run)
 

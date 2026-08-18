@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Migration: session schema v3 → v4
 -- Adds pixels_are_undistorted to pose_observation_sequences.
 -- When 1 (default), stored keypoint coordinates are already in undistorted

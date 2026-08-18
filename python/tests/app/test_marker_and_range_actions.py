@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for three overnight-requested keypoint-editing UI additions:
 
 1. A single timestamp marker on the timeline ruler (red flag), and

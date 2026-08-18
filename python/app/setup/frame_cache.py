@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """FrameCache — central decoded-frame provider for the setup wizard UI.
 
 All widgets that display video pixels go through this class.  Frames are

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """BackgroundJob — QThread base class for long-running wizard operations.
 
 Subclass ``BackgroundJob``, override ``run()``, and emit ``progress`` and

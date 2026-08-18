@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """observation_merge.py — Merge multi-source pose_observations rows into one array.
 
 Phase 2 of hand-detection refinement lets pose_observations hold multiple rows

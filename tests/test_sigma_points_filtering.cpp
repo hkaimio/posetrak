@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file test_sigma_points_filtering.cpp
  * @brief Tests for sigma point generation with layout-based joint filtering.

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """backends_rtmpose.py — RTMPose estimator backend."""
 from __future__ import annotations
 

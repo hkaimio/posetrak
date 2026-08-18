@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 name: aikido-calib-box-2026-08-10
 description: Cardboard calibration box, orbit-video self-calibrated 2026-08-11, rescaled to measured 0.145m
   marker size and reframed to gravity-up Z 2026-08-12 (see status.md).

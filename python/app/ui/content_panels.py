@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """content_panels.py — Right-pane detail panels for each tree item type."""
 
 from __future__ import annotations

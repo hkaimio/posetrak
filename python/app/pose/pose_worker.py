@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """pose_worker.py — Segmentation-driven pose extraction as a queued job.
 
 Reads Cutie seg masks from the DB per frame, derives per-person tight

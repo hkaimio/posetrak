@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """skeleton_layout.py — Parse skeleton YAML and provide state-vector indexing + FK.
 
 This module mirrors the C++ SkeletonLayout class for use in Python analysis scripts.

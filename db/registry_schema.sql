@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2026 Harri Kaimio
+--
+-- SPDX-License-Identifier: Apache-2.0
+
 -- registry_schema.sql
 -- Schema for the posetrak registry database.
 -- user_version is set programmatically by posetrak_db.py, not here.

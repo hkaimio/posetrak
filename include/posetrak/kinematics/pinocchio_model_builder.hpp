@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file pinocchio_model_builder.hpp
  * @brief Build Pinocchio models from posetrak skeleton structures

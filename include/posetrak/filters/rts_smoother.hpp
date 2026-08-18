@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file rts_smoother.hpp
  * @brief Rauch-Tung-Striebel fixed-interval smoother for UKF pose estimates.

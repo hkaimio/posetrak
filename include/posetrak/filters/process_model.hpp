@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file process_model.hpp
  * @brief Process model for UKF prediction step

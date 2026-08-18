@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Stage 2 unit tests for the cross-person relative observations plan
  * (docs/roadmap/features/error-improvements/phase5-cross-person-plan.md):

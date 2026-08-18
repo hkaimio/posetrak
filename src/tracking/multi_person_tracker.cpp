@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 #include "posetrak/tracking/multi_person_tracker.hpp"
 
 #include <fmt/core.h>

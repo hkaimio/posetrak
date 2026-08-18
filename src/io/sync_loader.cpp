@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 #include <posetrak/io/sync_loader.hpp>
 
 #include <nlohmann/json.hpp>

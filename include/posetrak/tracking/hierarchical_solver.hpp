@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file hierarchical_solver.hpp
  * @brief CLI/config plumbing for the hierarchical solver's child stages --

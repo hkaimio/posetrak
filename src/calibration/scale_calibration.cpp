@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 #include "posetrak/calibration/scale_calibration.hpp"
 
 #include <yaml-cpp/yaml.h>

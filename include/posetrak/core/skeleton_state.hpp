@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file skeleton_state.hpp
  * @brief SkeletonState: compact State paired with a SkeletonLayout.

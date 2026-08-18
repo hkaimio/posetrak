@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file multi_person_tracker.hpp
  * @brief Per-person tracking pipeline shared by the single- and multi-person CLI paths,

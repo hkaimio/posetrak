@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Harri Kaimio
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * @file ukf.hpp
  * @brief Unscented Kalman Filter for pose tracking in joint space

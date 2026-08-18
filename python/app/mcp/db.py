@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared database helpers for the MCP server.
 
 Opens session DBs read-only and provides blob decoders so tools never

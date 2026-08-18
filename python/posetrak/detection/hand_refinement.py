@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """hand_refinement.py — Idea 2: hand-specific detection pass.
 
 Refines wrist/finger keypoints for an existing full-body detection run by

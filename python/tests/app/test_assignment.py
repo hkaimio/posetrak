@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for track segment assignment conflict detection.
 
 Each detection track can be split into segments identified by a 3-tuple key

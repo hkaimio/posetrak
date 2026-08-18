@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared pytest fixtures for the posetrak DB test suite."""
 
 from __future__ import annotations

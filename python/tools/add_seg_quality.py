@@ -1,4 +1,9 @@
 #!/home/harri/projects/tests/Cutie/venv/bin/python
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """add_seg_quality.py — Compute Cutie segmentation quality scores for a detection run.
 
 Runs Cutie (XMem++) video segmentation on each camera video of a detection run

@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """
 upgrade_skeleton_hand_groups.py — Correct the HandL/HandR groups: entries in a
 reallusion-style skeleton (the rig used throughout this codebase's production

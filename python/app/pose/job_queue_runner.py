@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """job_queue_runner.py — FIFO queue of Cutie tracking jobs.
 
 TrackingJob holds all parameters for one CutieWorker pass (including the

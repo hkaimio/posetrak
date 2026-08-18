@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for app.pose.finalise.finalise_to_db — multi-source write path.
 
 Phase 2 of hand-detection refinement lets detection_keypoints hold

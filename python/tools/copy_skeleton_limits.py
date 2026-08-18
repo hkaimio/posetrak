@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """
 copy_skeleton_limits.py — Copy DOF limits (and joint type) from a source skeleton YAML
 to a target skeleton YAML, matching joints by name.

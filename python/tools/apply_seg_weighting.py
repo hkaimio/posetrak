@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """apply_seg_weighting.py — Create quality-weighted pose_observation_sequences.
 
 For each pose_observation_sequences row linked to a detection_run, creates a

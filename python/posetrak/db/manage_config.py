@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """manage_config.py — Registry CRUD for tracker configuration snapshots.
 
 Tracker configurations capture the UKF and initialization parameters used

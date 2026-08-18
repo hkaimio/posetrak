@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for app.setup.pair_scrubber — PairScrubber and _VideoPane."""
 
 from __future__ import annotations

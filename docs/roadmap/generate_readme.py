@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate docs/roadmap/README.md from each feature's status.md frontmatter.
 
 Each feature lives in docs/roadmap/features/<slug>/ and must have a status.md

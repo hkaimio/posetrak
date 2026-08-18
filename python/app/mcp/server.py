@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Posetrak MCP diagnostic server.
 
 Exposes read-only tools for inspecting tracking runs in a session database.

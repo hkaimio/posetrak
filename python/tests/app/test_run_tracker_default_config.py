@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for phase 3 of the config-improvements design doc: the tracker-
 config-editor extraction (TrackerConfigWidget) and the trial/capture
 "Default tracker config" row (build_default_config_row/DefaultConfigDialog).

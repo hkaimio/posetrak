@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """frame_cache.py — LRU video frame cache backed by temp JPEG files.
 
 Decodes video frames on demand via OpenCV, caches them as JPEG files in a

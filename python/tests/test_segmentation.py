@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for pipeline.pose.segmentation — CutieSegmentor and helpers.
 
 These tests cover the pure-Python logic (score computation, encode/decode,

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the unified Data table (UX Phase 7, see docs/roadmap/features/
 extrinsics-improvements/extrinsics-ux-redesign.md): one row per data point
 currently contributing to (or available to) the solve -- control points,

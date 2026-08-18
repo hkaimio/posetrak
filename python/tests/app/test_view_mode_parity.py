@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for _apply_overlay / _compute_target_rect (content_panels.py) --
 the two helpers "View-mode parity" (keypoint-editing-design.md, Phase 32)
 factored out of _load_frame so every crop-source layer, in both view and

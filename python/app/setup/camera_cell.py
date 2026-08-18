@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """CameraCell — single-camera video display widget for the setup wizard.
 
 Displays one decoded video frame as a scaled image, then calls each

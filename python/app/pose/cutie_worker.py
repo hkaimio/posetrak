@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """cutie_worker.py — QThread wrapper for Cutie bidirectional mask propagation.
 
 Runs one tracking pass (forward or backward) on a single camera video,

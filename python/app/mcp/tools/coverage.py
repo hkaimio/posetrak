@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tools: get_camera_coverage, get_edit_coverage."""
 
 from __future__ import annotations

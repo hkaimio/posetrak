@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """intrinsics_calib_dialog.py — Intrinsics calibration from video / image directory.
 
 Opens a dialog that lets the user:

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """main_window.py — Shell window for the unified posetrak-ui application."""
 
 from __future__ import annotations

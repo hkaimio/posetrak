@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ObsPoint / ControlPoint and the control-point file format.
 
 Covers Phase 2 of docs/roadmap/features/extrinsics-improvements/

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """frame_source.py — Sequential BGR frame decoding with rotation correction.
 
 Extracted from ``pipeline.py`` so a later pass over the same run (e.g. the

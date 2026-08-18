@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for Phase 13: timeline selection (rubber-band, plain click) and
 Ctrl+click keyframe toggle, wired to PersonCropGridWidget's shared
 selection/range state.

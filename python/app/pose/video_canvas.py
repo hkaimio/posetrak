@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """video_canvas.py — Scaled video frame display with segmentation mask overlay.
 
 Displays a BGR video frame scaled to fit the widget (letterboxed), with an

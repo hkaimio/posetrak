@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for posetrak.detection.hand_refinement — Idea 2.
 
 Covers the pure crop/candidate-selection/gate logic in detect_hand_in_crop

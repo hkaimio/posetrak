@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """backends_rtmdet.py — YOLOX person detector backend (rtmlib, Apache-2.0).
 
 Replaces the old ultralytics-based YOLOv11Detector (see git history) as

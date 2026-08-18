@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Dialog-level tests for Phase 8's portable calibration rig detection +
 anchoring UI in ExtrinsicsAutoCalibDialog.
 

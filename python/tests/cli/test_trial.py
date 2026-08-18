@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for trial list / export / import CLI commands and the trial_export library."""
 
 from __future__ import annotations

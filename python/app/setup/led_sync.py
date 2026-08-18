@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """led_sync.py — LED-based multi-camera synchronisation algorithm.
 
 Extracts a per-frame brightness-change signal from a small ROI in each video,

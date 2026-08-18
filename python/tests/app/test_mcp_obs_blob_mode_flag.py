@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the obs_blob pad-field (index 7) mode flag added for the
 hierarchical solver's patch_obs_results() -- see
 docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md.

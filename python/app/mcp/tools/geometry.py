@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tool: get_camera_geometry — 3D positions, viewing directions, parallax table."""
 
 from __future__ import annotations

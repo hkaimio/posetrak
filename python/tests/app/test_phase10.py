@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for Phase 10: frame range selection (Shift+A/D) + linear interpolation (I)."""
 from __future__ import annotations
 

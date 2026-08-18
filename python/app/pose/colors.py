@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """colors.py — Shared color utilities for the pose UI."""
 from __future__ import annotations
 

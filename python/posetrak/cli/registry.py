@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Registry, camera-model, camera-mode, camera, and calib commands."""
 
 from __future__ import annotations

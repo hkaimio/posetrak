@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Overlay protocol and concrete overlay classes for CameraCell widgets.
 
 Each CameraCell holds a ``list[Overlay]``.  After rendering the video frame

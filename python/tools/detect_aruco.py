@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """detect_aruco.py — Detect ArUco markers in a video and write an annotated output.
 
 Reads frames from the input video (correcting for container rotation metadata),

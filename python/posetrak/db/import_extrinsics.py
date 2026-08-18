@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """import_extrinsics.py — Import extrinsic calibration from a Pose2Sim TOML file.
 
 Reads the ``rotation`` (Rodrigues 3-vector) and ``translation`` fields from

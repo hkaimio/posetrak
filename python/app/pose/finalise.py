@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """finalise.py — Convert detection keypoints into pose_observation_sequences."""
 from __future__ import annotations
 

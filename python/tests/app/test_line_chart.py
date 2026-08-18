@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for app.ui.content_panels._LineChart's log-scale Y-axis mapping.
 
 Covers _y_space() -- the linear-vs-log10 value transform used both for the

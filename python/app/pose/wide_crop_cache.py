@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Background wide-crop, person-cluster frame cache.
 
 Implements "Background wide-crop frame cache" from

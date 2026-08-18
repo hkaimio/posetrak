@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Pose keypoint model definitions: names, selection groups.
 
 Each PoseModel maps a model string (as stored in

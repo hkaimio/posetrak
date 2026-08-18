@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """session_tree.py — Tree widget displaying the session hierarchy."""
 
 from __future__ import annotations

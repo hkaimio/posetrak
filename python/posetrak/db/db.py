@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """posetrak_db.py — Core database access layer for the posetrak SQLite registry and session databases.
 
 This module handles:

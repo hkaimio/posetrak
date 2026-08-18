@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for load_marker_body_yaml / load_marker_body_yaml_file (design doc
 section 10 -- "Marker body definitions: format and storage").
 """

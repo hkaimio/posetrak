@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for phase 5 of the config-improvements design doc: RunTrackerWidget's
 people table switching its data source to a trial's capture's
 capture_persons when any are defined, falling back to the original

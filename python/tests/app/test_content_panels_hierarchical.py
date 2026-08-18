@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for PR8's hierarchical-solver-aware helpers in content_panels.py --
 _get_config_stage_groups(), _get_run_stage_rows(), _stages_text(), and
 _cfg_text()'s hierarchical_groups annotation. See

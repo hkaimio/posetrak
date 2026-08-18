@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """posetrak CLI — main entry point.
 
 Provides the top-level Click group with global options and wires in all

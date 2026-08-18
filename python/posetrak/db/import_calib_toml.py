@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Import Pose2Sim camera calibration TOML into the posetrak registry database.
 
 The Pose2Sim calibration TOML contains sections named ``cam1``, ``cam2``, …

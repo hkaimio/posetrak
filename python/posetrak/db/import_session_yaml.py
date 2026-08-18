@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """import_session_yaml.py — Import a capture project YAML into the session database.
 
 Reads a project YAML file and creates the corresponding posetrak DB records:

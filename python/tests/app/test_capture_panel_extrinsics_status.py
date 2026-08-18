@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for CapturePanel's Extrinsics… button status refresh (UX Phase 2,
 see docs/roadmap/features/extrinsics-improvements/
 extrinsics-ux-redesign.md): mirrors _refresh_sync()'s pattern of querying

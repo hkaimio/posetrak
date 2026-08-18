@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Dialog-level tests for Phase 4's ChArUco board detection + coordinate-
 system anchoring UI in ExtrinsicsAutoCalibDialog.
 

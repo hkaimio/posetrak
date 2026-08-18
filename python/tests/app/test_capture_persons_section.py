@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for _CapturePersonsSection (config-improvements design doc, phase 5,
 D3): CapturePanel's "Persons" list -- add/rename/set-default-skeleton/remove
 against a real session DB.

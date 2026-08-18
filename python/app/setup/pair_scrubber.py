@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """pair_scrubber.py — Two-camera side-by-side video scrubber for sync marking.
 
 Shows a reference video (left, fixed) and a target video (right, swappable).

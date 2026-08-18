@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """assignment.py — Pure functions for track-to-person assignment logic.
 
 Kept free of Qt imports so they can be unit-tested without a display.

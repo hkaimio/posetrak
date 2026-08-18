@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the number-key limb shortcuts (see PersonCropGridWidget._LIMB_SHORTCUT_KEYS
 and _handle_limb_shortcut):
 

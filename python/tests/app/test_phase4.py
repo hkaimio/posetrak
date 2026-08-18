@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for Phase 4 mouse interaction: hit-test, signals, drag-to-move, DB write."""
 from __future__ import annotations
 

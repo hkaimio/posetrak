@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """
 merge_skeleton.py — Combine a scaled skeleton's dimensions with a template skeleton's limits and markers.
 

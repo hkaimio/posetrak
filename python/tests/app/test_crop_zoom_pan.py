@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the crop-cell zoom/pan geometry in app.ui.content_panels.
 
 Covers the pure functions behind "Zoom and pan in the camera crop views"

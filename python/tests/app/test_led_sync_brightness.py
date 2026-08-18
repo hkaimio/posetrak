@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Regression tests for run_led_sync against real brightness data dumps.
 
 These tests load the .npz files recorded from the two Timo/Harri sessions

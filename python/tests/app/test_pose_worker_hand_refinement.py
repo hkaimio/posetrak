@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for PoseWorker's hand-refinement wiring (pose_worker.py).
 
 The segmentation-driven pose extraction path (PoseWorker, queued from

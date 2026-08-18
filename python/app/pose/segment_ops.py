@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """segment_ops.py — Pure-logic operations on segment/assignment dicts.
 
 All functions operate on plain Python dicts so they can be tested without Qt.

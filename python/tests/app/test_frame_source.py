@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for posetrak.detection.frame_source's rotation handling.
 
 _parse_displaymatrix in particular had zero test coverage despite being

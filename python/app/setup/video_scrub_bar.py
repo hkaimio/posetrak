@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """video_scrub_bar.py — Slider + frame label + "Go to…" scrub control.
 
 Extracted from ``pair_scrubber.py``'s ``_VideoPane`` (see

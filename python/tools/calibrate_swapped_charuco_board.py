@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """calibrate_swapped_charuco_board.py — Intrinsics calibration for a specific
 physical ChArUco board that has two of its four printed A4 quadrant pages
 glued in the wrong place.

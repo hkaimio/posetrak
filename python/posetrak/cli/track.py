@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """track.py — CLI commands for listing and exporting tracking runs."""
 from __future__ import annotations
 

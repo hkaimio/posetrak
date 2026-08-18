@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Skeleton commands: import, list, show, export, scale."""
 
 from __future__ import annotations

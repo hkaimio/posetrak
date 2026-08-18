@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for Phase 12: KeypointTimelineWidget skeleton (tree rows, camera tabs,
 flat-colored cells, playhead sync).  No selection/rubber-band interaction yet
 (that's Phase 13) — this covers the read-only tree/paint-geometry layer.

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """crop_editor.py — PersonCropGridWidget: multi-camera keypoint editing surface.
 
 Shows per-camera JPEG crops from frame_cache_entries with a keypoint overlay

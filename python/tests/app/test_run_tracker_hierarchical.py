@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for PR8's hierarchical-solver toggle support in run_tracker.py --
 discover_stage_groups(). See
 docs/roadmap/features/hierarchical-solver/hierarchical-solver-design.md.

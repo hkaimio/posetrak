@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """segmentation.py — Cutie-based per-person segmentation for keypoint quality scoring.
 
 This module is part of the pipeline described in

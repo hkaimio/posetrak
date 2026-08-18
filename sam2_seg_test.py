@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """sam2_seg_test.py — Visualise SAM2 segmentation masks + keypoint quality scores.
 
 For each sampled frame of test.mp4 this script saves a composite image:

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for _describe_windows_exit_code (app.pose.run_tracker).
 
 Regression coverage for a real crash: a tracker subprocess killed by

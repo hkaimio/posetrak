@@ -40,6 +40,7 @@ Design should be flexible
 
 - Characterizing the prop/other object
   - We already have a file format for defining a calibration rig
+    (python\app\setup\fiducial_markers.py)
   - Need a tool to capture geometry & markers from video/still images
   - After doing that, add the prop definition to the database and add it to
     the capture just like persons are added — the tracker then tries to
@@ -56,6 +57,7 @@ Design should be flexible
 
 ## Technical questions
 
+- For actual tracker markers should be very similar to markerless keypoint detections. Likely measurement noise will be smaller. Markers that return orintation might need special handling.
 - How to detect — many fiducial marker algorithms run on CPU and are
   relatively slow. Also likely needs to run at full resolution
 - How to assign detections without ID to actual markers? Should we have

@@ -234,7 +234,7 @@ CREATE TABLE capture_objects (
 ```
 
 The prop's *tracking skeleton* is generated from its marker body definition
-(§5.2) and imported into `skeletons` (content-addressed, like every
+(§5.3) and imported into `skeletons` (content-addressed, like every
 skeleton), so downstream tables need nothing new: a tracked object
 participates in a tracking run as an additional `tracking_run_persons` row
 whose `skeleton_id` is the generated prop skeleton. To make the object link
@@ -253,7 +253,31 @@ results/diagnostics/export path for no semantic gain; the existing
 analysis explicitly recommends keeping the orchestrator free of
 person-specific assumptions).
 
-Harri: How is the skeleton linked to marker_body_definitions and capture_object - what are their roles at different stages & Poasetrak components? I see that skeleon is needed as it is the interface towards tracker but it seems to me that some information is duplicated here.
+#### Definition vs. capture object vs. skeleton — roles and lifecycle
+
+(Raised in review, Harri 2026-08-19: the geometry seemingly lives in two
+places.) The three entities have disjoint roles per pipeline stage; the
+skeleton's copy of the geometry is a *derived, compiled* form, not a second
+authority:
+
+| Entity | Scope | Written by | Read by |
+|---|---|---|---|
+| `marker_body_definitions` | registry (global, one per physical design) | characterization (§6.1), once | **detection** (which dictionaries/ids to scan for, which detections belong to this body); the skeleton generator; drift/anchor tooling |
+| `capture_objects` | one capture | user, when setting up the capture (§6.2 step 1) | UI (session tree, run dialogs): "this physical body was present here, call it *bokken-A*". Carries no geometry — it links a capture to a definition, exactly as `capture_persons` links a capture to a person |
+| generated prop skeleton (`skeletons` row) | referenced per tracking run | the generator (§5.3), never by hand | **tracking only** — the C++ side keeps its single geometry interface (`Skeleton`/`SkeletonLayout`/FK) and never learns about marker bodies |
+
+The duplication is therefore a deterministic derivation (same definition →
+same generated YAML → same content hash), analogous to how skeleton YAML is
+already compiled to URDF/Pinocchio models internally — it can never diverge
+by editing, only by regeneration, and regeneration is idempotent.
+Provenance is kept in the generated YAML itself
+(`generated_from_marker_body: <definition id>` in the header, so the
+skeleton hash also pins its source); the run's
+`tracking_run_persons.skeleton_id` records which compiled form was used,
+same as for persons. Two rules keep the boundary clean: generated skeletons
+are never hand-edited (fix the definition, regenerate), and detection-time
+code never reads skeletons while tracking-time code never reads
+definitions.
 
 ### 4.3 Finalized observation layer
 
@@ -345,9 +369,60 @@ markers:
   1 px dot rightly dominates a 5 px interpolated spine keypoint. `crop_scale`
   is 1.0 for markers (detected on full frames, no crop pipeline).
 
-Harri: WHich parts of skeleton definitions will common structural, per-person or per capture/session? SKeletons need to be scaled for each person which might be tracked in multuiple sessions, sometimes with markers attached (maybe to different palces), sometimes markerless. And same skeleton structure (same bone hierarchy, but maybe also same marker placement structure) may be used commonly. Now all of this will be baked into a single skeleton object, identified by content hash. It likely  works but I see potential scalability issues, maybe also usability issues if user e.g. doers scaling in this makrer based session and wants to use the skeleton later in anpother session.
+### 5.2 Skeleton information lifecycle: structure vs. person scale vs. session markers
 
-### 5.2 Prop skeletons are generated, not authored
+(Raised in review, Harri 2026-08-19.) A person skeleton mixes information
+with three distinct lifetimes, and today all of it is baked into one
+content-addressed `skeletons` row, with `parent_id` chains recording
+derivation:
+
+1. **Structure** — bone hierarchy, joint types/limits, groups, pose-keypoint
+   marker slots. Common across persons; changes only with modeling work.
+2. **Person scale** — bone lengths from `scale` calibration. A durable
+   property of one person, reusable across sessions.
+3. **Marker attachment** — which physical markers, on which segment, at
+   what offset, with what noise. Valid for one session at best: markers are
+   re-taped every time, possibly in different places, and many sessions are
+   markerless.
+
+Baking (3) into the same object as (1)+(2) creates a real reuse problem: a
+scale improvement obtained during a marker session would live in a leaf
+skeleton that also carries dead session-specific marker data, and the
+durable part would not flow to the markerless skeleleton other sessions use
+without manual re-derivation.
+
+**Recommendation: keep (1)+(2) in the skeleton; move (3) into a separate
+per-session *marker attachment set* document.**
+
+- New document type (small YAML, content-addressed, stored like skeletons —
+  e.g. table `marker_attachment_sets`): a list of
+  `{name, parent joint, offset, noise_std, track/landmark}` entries that
+  reference the target skeleton's *joint names*, not a specific skeleton
+  hash.
+- At invocation, the loader **composes** skeleton + attachment set into the
+  effective tracker-facing skeleton (a pure merge into `markers:`). The C++
+  tracker still receives exactly one `Skeleton` — the single-interface
+  property of §4.2 is preserved — and the tracking run records both source
+  ids for provenance.
+- The offset-calibration pass (§6.3) writes an attachment set, **not** a
+  skeleton variant. If a marker session's data also improves bone lengths,
+  that goes through the existing scale calibration and produces a new
+  person-scale skeleton that is marker-free by construction — so the
+  improvement propagates to markerless sessions automatically, and the
+  attachment set applies on top of the new scale unchanged (joint-name
+  anchored; offsets survive a mild rescale, and a large rescale is itself a
+  reason to re-run the cheap offset calibration).
+- Props do **not** need this split: a prop's markers *are* its durable
+  geometry, so the single generated skeleton (§5.3) is already the right
+  granularity.
+
+*Alternative (status quo)*: keep everything in one skeleton object and rely
+on `parent_id` discipline. Workable for phases 1–2 (props only, which never
+hit the problem), and acceptable as long as no person marker data exists —
+so the attachment-set mechanism should land with phase 3, before real
+person-marker sessions are recorded.
+
+### 5.3 Prop skeletons are generated, not authored
 
 A prop is a degenerate skeleton: one free-flyer root, `FIXED` structure,
 markers only. A generator (CLI `posetrak marker-body to-skeleton` + called
@@ -377,7 +452,7 @@ stays dumb and literal; generation is an inspectable offline step.
 
 Option 1 first; revisit if the regularization proves fiddly.
 
-### 5.3 Tracker changes (C++)
+### 5.4 Tracker changes (C++)
 
 - **Rigid-body initialization**: for a root-only skeleton, triangulation +
   full IK is overkill and fragile. Add an analytic path: triangulate ≥3
@@ -428,9 +503,15 @@ extended from calibration-rig scope to general props.
      same bundle adjust recovers body-local positions. At least one coded
      marker or manual axis definition is needed to fix the body frame.
 2. **Import** into `marker_body_definitions` (idempotent).
-3. Optional: mark unobservable DOFs (symmetry) — stored in the definition,
-   consumed by the skeleton generator.
-   Harri: I did not fully understand what this is.
+3. Optional: mark a rotational symmetry axis. Concrete example: a jo is a
+   cylinder, and if its markers are bands (points on the long axis),
+   rotating the staff about that axis moves no marker at all — that roll
+   angle is both invisible to the cameras and physically meaningless for
+   the prop. Recording the axis in the definition lets the skeleton
+   generator lock the corresponding root DOF so the filter doesn't wander
+   in a direction the data can never correct (R1.4; mechanism in §5.3's
+   "Symmetric props"). Props with asymmetric marker layouts (a bokken with
+   tsuba-mounted markers) skip this — every DOF is observable.
 
 ### 6.2 Tracking a prop in a session (R1.2, R1.3)
 
@@ -444,9 +525,33 @@ extended from calibration-rig scope to general props.
    `python/app/ui/content_panels.py` — this is Main-window territory per
    CLAUDE.md's two-GUI note): crop grid with detected corners/dots
    overlaid, scrubber, and the existing keypoint-edit mode for fixing bad
-   frames. No stitching step — a prop's track assignment is trivial
-   (one object, ids are hard).
-   Harri: I hinted already earlier, but it is bit unclear to me how uncoded markers are handled, especially if there are multiple props/persons with marker dots in them.
+   frames. No stitching step — a *coded* prop's track assignment is
+   trivial (one object, ids are hard).
+
+**Uncoded markers, and multiple dotted subjects in one scene** (review
+question, Harri 2026-08-19): a dot detection carries no identity, so the
+steps above describe the coded phase-1 case, and dots gain identity at two
+levels (details in algorithms doc §3):
+
+- *Mixed bodies* (coded markers + dots on the same rigid body — the
+  calibration box pattern): the coded markers pose the body each frame, the
+  pose predicts every dot's position, and dots are labeled by that rigid
+  geometry alone. No association stack needed; this works in phase 1–2 and
+  is the recommended way to build props.
+- *Dot-only bodies and dotted persons* (phase 4): labeling runs through the
+  association stage, and its assignment is solved **globally across every
+  tracked subject in the run** — all persons' and props' predicted markers
+  compete in one mutual-exclusion assignment per frame. A dot that two
+  subjects could claim with comparable cost (a hand-on-prop moment, two
+  performers close together) is dropped for that frame, not guessed; the
+  subject's filter coasts. Identity re-attaches through tracklet
+  continuity, color class, or any coded marker on the same body once the
+  ambiguity passes.
+- Two dot-only bodies with near-identical, symmetric layouts are
+  inherently indistinguishable at bootstrap. The characterization tool
+  should warn when two bodies registered in the same capture have
+  near-identical inter-marker distance patterns; distinct constellations or
+  different color classes break the tie physically.
 4. **Finalise** to an object sequence (+ manifest), then run tracking —
    the object shows up in the run-tracker dialog as another subject; person
    + prop in one run uses `MultiPersonTracker`.
@@ -467,15 +572,18 @@ Following the "let the markerless tracker calibrate them" principle:
    tool proposes one from tracking stats); the system runs markerless
    tracking, triangulates labeled markers, attaches each to the nearest
    segment, averages the local offset, then refines by least squares over
-   the window (algorithms doc §5). Output: an updated *derived skeleton*
-   (child of the person's skeleton via `skeletons.parent_id`, exactly like
-   scale calibration) with the marker entries added, plus a proposed
-   `noise_std` per marker from residual spread — cloth-mounted markers
-   get honestly large noise automatically (R2.4).
-   The user can override segment attachment in a review dialog
+   the window (algorithms doc §5). Output: a **marker attachment set**
+   (§5.2) bound to the person's scaled skeleton by joint names, containing
+   the marker entries plus a proposed `noise_std` per marker from residual
+   spread — cloth-mounted markers get honestly large noise automatically
+   (R2.4). The user can override segment attachment in a review dialog
    (answering the brief's "does the user need to link markers to joints" —
    default automated, override available).
-   Harri: OK, this partly answered my earlier comment about life cycle of skeleton information. I still think we need to think how to propagate new scaling done in this child skeleton (with markers) to its parent (without markers)
+   Scale improvements discovered in a marker session do **not** live in
+   this output: bone-length refinement goes through the existing `scale`
+   calibration and updates the person-scale skeleton itself, which is
+   marker-free by construction — so it propagates to markerless sessions
+   with no extra step (see §5.2 for the layering rationale).
 5. Subsequent tracking runs bind the marker sequence and just work; if the
    markers are absent in some trial, nothing breaks (R2.1).
 
@@ -520,7 +628,7 @@ Phased shallow-to-deep:
 |---|---|---|---|
 | **1** | Rigid ArUco prop, standalone | UC1 core (R1.1–R1.4) | `detector_type`/`config_json`; ArUco detection runs writing `detection_keypoints`; `capture_objects`; skeleton generator; manifest table; multi-source `SessionReader` (single track case); rigid init; ObjectPanel review; finalise for objects |
 | **2** | Person + prop in one run | R1.5 | Track binding for multiple subjects incl. objects in `MultiPersonTracker`; grip anchor points; contact gating tuning for prop case |
-| **3** | Identified body markers | UC2 for coded/colored markers (no labeling problem) | Marker sequence per person; skeleton `track`/`landmark` markers; offset-calibration pass + derived skeleton; colored-band/glove detector |
+| **3** | Identified body markers | UC2 for coded/colored markers (no labeling problem) | Marker sequence per person; skeleton `track`/`landmark` markers; marker attachment sets (§5.2) + offset-calibration pass; colored-band/glove detector |
 | **4** | Anonymous dots | UC2 fully (R2.3) | Blob detector; per-camera tracklets; multi-view correspondence; `MarkerAssociator` gated assignment; labeled-sequence writer |
 | **5** | Moving camera | UC3 | Drift monitor + UI alert; single-camera re-solve action; `extrinsic_calibration_windows` |
 
@@ -546,7 +654,7 @@ urgent; its monitor half (6.4 step 1) is cheap enough to pull forward.
    detected-or-not; is a uniform 1.0 (with noise carried entirely in
    `noise_std_override`) right, or should blur/oblique-angle metrics
    modulate it? Start uniform; the format allows refinement.
-3. **Locked-DOF mechanism** (§5.2) — pseudo-observation regularization vs.
+3. **Locked-DOF mechanism** (§5.3) — pseudo-observation regularization vs.
    reduced-DOF root. Decide during phase 1 implementation against a real
    symmetric prop.
 4. **2-D-only marker observations** — is a marker seen in one camera
@@ -560,3 +668,11 @@ urgent; its monitor half (6.4 step 1) is cheap enough to pull forward.
    workflow.
 6. **Trial splitting UX for moved cameras** — automatic split proposal vs.
    manual; interacts with the trial data model. Decide in phase 5.
+7. **Marker attachment set details** (§5.2) — storage scope (session-only
+   vs. registry with copy-to-session like other documents), whether the
+   composition step materializes the composed skeleton as a `skeletons` row
+   (best provenance, more rows) or composes in the loader at run time
+   (fewer artifacts, provenance = pair of ids on the run), and whether an
+   attachment set should validate against a structure id or stay purely
+   joint-name anchored. Decide at phase 3 start; the recommendation in §5.2
+   only fixes the *split*, not these mechanics.

@@ -170,7 +170,15 @@ Assignment is gated global cost minimization:
   coded-marker decode on the same physical body when readable (hard
   override);
 - solve with Hungarian (mutual exclusion — the one genuinely new piece of
-  machinery vs. today's per-observation gating);
+  machinery vs. today's per-observation gating). The assignment is solved
+  **once per frame across all subjects in the run** — every person's and
+  prop's predicted markers form one joint problem, not one per subject.
+  This is what makes mutual exclusion meaningful in the scenes that
+  motivate this feature: a dot near two performers' wrists, or a hand
+  closing on a dotted prop, is *cross-subject* ambiguity, invisible to any
+  per-subject assignment. `MultiPersonTracker`'s frame loop already has all
+  subjects' predictions in hand at the right moment (same data the contact
+  gate uses);
 - **ambiguity policy — drop, don't guess**: if the best and second-best
   assignments for a detection are within a margin (both gates pass with
   comparable cost — wrist-grab territory), discard the detection for this
@@ -218,7 +226,7 @@ cannot fall into IK local minima:
    (same retry loop initialization already has).
 4. Collinear case: position + axis direction are determined; the rotation
    about the axis is set arbitrarily and the corresponding DOF must be
-   locked (design §5.2) — consistent, since that roll is exactly the
+   locked (design §5.3) — consistent, since that roll is exactly the
    unobservable DOF.
 5. Initial velocities zero; initial covariance from
    `init_position_std`/`init_orientation_std` as today.

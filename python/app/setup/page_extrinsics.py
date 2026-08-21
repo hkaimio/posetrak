@@ -50,7 +50,7 @@ _log = logging.getLogger(__name__)
 import cv2
 import numpy as np
 from PySide6.QtCore import QRect, QThread, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen
+from PySide6.QtGui import QColor, QDoubleValidator, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -59,6 +59,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -2060,7 +2061,7 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         Built once as a ``QStackedWidget`` with one page per row-type
         (``_refresh_detail_pane`` only ever calls ``setCurrentIndex`` and
         updates a page's own label/stored payload) rather than rebuilt on
-        every selection change -- keeps the World Position spinboxes'
+        every selection change -- keeps the World Position fields'
         identity, and the existing wiring into them, stable.
         """
         pane = QWidget()
@@ -2080,18 +2081,26 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         cp_layout = QVBoxLayout(cp_page)
         self._xyz_enabled = QCheckBox("Fix 3-D position in BA")
         self._xyz_enabled.stateChanged.connect(self._on_xyz_toggle)
-        self._xyz_x = QDoubleSpinBox()
-        self._xyz_y = QDoubleSpinBox()
-        self._xyz_z = QDoubleSpinBox()
-        for sb in (self._xyz_x, self._xyz_y, self._xyz_z):
-            sb.setRange(-1e6, 1e6)
-            sb.setDecimals(4)
-            sb.setSingleStep(0.1)
-            sb.setEnabled(False)
-        xyz_form = QHBoxLayout()
-        for lbl, sb in [("X", self._xyz_x), ("Y", self._xyz_y), ("Z", self._xyz_z)]:
-            xyz_form.addWidget(QLabel(lbl))
-            xyz_form.addWidget(sb)
+        # Plain numeric QLineEdits, not QDoubleSpinBox: the detail pane is
+        # only 220px wide, and a spinbox's up/down buttons ate so much of
+        # that width the number itself was invisible (caught in e2e
+        # testing, 2026-08-21). A QLineEdit + QDoubleValidator has no
+        # buttons to steal the space.
+        self._xyz_x = QLineEdit("0.0000")
+        self._xyz_y = QLineEdit("0.0000")
+        self._xyz_z = QLineEdit("0.0000")
+        for le in (self._xyz_x, self._xyz_y, self._xyz_z):
+            validator = QDoubleValidator(-1e6, 1e6, 4, le)
+            validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+            le.setValidator(validator)
+            le.setAlignment(Qt.AlignmentFlag.AlignRight)
+            le.setEnabled(False)
+        # One field per row (not three side by side) -- the detail pane is
+        # only 220px wide, and even without spin buttons three fields
+        # abreast left each too narrow to read a full coordinate.
+        xyz_form = QFormLayout()
+        for lbl, le in [("X", self._xyz_x), ("Y", self._xyz_y), ("Z", self._xyz_z)]:
+            xyz_form.addRow(lbl, le)
         self._xyz_apply_btn = QPushButton("Apply")
         self._xyz_apply_btn.setEnabled(False)
         self._xyz_apply_btn.clicked.connect(self._apply_xyz)
@@ -3024,6 +3033,16 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         if cp_idx is not None:
             self._rename_control_point(cp_idx)
 
+    @staticmethod
+    def _xyz_field_value(le: QLineEdit) -> float:
+        """Parse one World-position QLineEdit, tolerating an incomplete
+        in-progress edit (e.g. a bare "-") the QDoubleValidator still
+        accepts as intermediate input."""
+        try:
+            return float(le.text())
+        except ValueError:
+            return 0.0
+
     def _on_cp_selected(self, row: int) -> None:
         self._selected_cp_idx = row if row >= 0 else None
         has_cp = self._selected_cp_idx is not None
@@ -3032,24 +3051,24 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             cp = self._control_points[row]
             fixed = cp.world_xyz is not None
             self._xyz_enabled.setChecked(fixed)
-            for sb in (self._xyz_x, self._xyz_y, self._xyz_z):
-                sb.setEnabled(fixed)
+            for le in (self._xyz_x, self._xyz_y, self._xyz_z):
+                le.setEnabled(fixed)
             self._xyz_apply_btn.setEnabled(fixed)
             if fixed:
-                self._xyz_x.setValue(float(cp.world_xyz[0]))
-                self._xyz_y.setValue(float(cp.world_xyz[1]))
-                self._xyz_z.setValue(float(cp.world_xyz[2]))
+                self._xyz_x.setText(f"{cp.world_xyz[0]:.4f}")
+                self._xyz_y.setText(f"{cp.world_xyz[1]:.4f}")
+                self._xyz_z.setText(f"{cp.world_xyz[2]:.4f}")
         else:
             self._xyz_enabled.setChecked(False)
-            for sb in (self._xyz_x, self._xyz_y, self._xyz_z):
-                sb.setEnabled(False)
+            for le in (self._xyz_x, self._xyz_y, self._xyz_z):
+                le.setEnabled(False)
             self._xyz_apply_btn.setEnabled(False)
         self._refresh_markers()
 
     def _on_xyz_toggle(self, state: int) -> None:
         enabled = state == Qt.CheckState.Checked.value
-        for sb in (self._xyz_x, self._xyz_y, self._xyz_z):
-            sb.setEnabled(enabled)
+        for le in (self._xyz_x, self._xyz_y, self._xyz_z):
+            le.setEnabled(enabled)
         self._xyz_apply_btn.setEnabled(enabled)
         if not enabled and self._selected_cp_idx is not None:
             self._control_points[self._selected_cp_idx].world_xyz = None
@@ -3060,9 +3079,9 @@ class ExtrinsicsAutoCalibDialog(QDialog):
             return
         cp = self._control_points[self._selected_cp_idx]
         cp.world_xyz = np.array([
-            self._xyz_x.value(),
-            self._xyz_y.value(),
-            self._xyz_z.value(),
+            self._xyz_field_value(self._xyz_x),
+            self._xyz_field_value(self._xyz_y),
+            self._xyz_field_value(self._xyz_z),
         ])
         self._refresh_data_table()
 
@@ -5053,27 +5072,59 @@ class ExtrinsicsImportWidget(QWidget):
 
 
 class ExtrinsicsPage(QWizardPage):
-    """Wizard page 4 — import extrinsic calibration (optional step)."""
+    """Wizard page 4 — calibrate or import extrinsics (optional step).
+
+    Hosts the same "Calibrate…" entry point as ``ExtrinsicsStatusDialog``
+    (via the shared ``_open_auto_calibrate_dialog`` launcher) alongside
+    ``ExtrinsicsImportWidget`` for TOML import — before this, the wizard
+    page only wrapped ``ExtrinsicsImportWidget``, which dropped its own
+    "Auto-calibrate…" button when the GUI-native workflow moved behind
+    ``ExtrinsicsStatusDialog`` (UX Phase 3), leaving the wizard with no
+    way to launch calibration at all (caught in e2e testing, 2026-08-21).
+    """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setTitle("Extrinsic Calibration")
         self.setSubTitle(
-            "Import a Pose2Sim cameras.toml to add camera positions to the session. "
-            "This step is optional — you can import extrinsics later from the pose window."
+            "Calibrate camera positions from video, or import a Pose2Sim "
+            "cameras.toml. This step is optional — you can do it later from "
+            "the pose window."
         )
+        self._conn: sqlite3.Connection | None = None
+        self._session_id: str | None = None
+        self._shot_ids: list[str] = []
+
+        calibrate_btn = QPushButton("Calibrate…")
+        calibrate_btn.setToolTip(
+            "Run the GUI-native calibration workflow (scrub video, detect "
+            "markers/rig, solve)."
+        )
+        calibrate_btn.clicked.connect(self._on_calibrate)
+        calib_row = QHBoxLayout()
+        calib_row.addWidget(calibrate_btn)
+        calib_row.addStretch()
+
         self._widget = ExtrinsicsImportWidget()
         self._widget.imported.connect(self._on_imported)
         layout = QVBoxLayout(self)
+        layout.addLayout(calib_row)
         layout.addWidget(self._widget)
 
     def initializePage(self) -> None:  # noqa: N802
         wiz = self.wizard()
-        conn = getattr(wiz, "session_conn", None)
-        sid = getattr(wiz, "session_id", None)
-        shot_ids: list[str] = getattr(wiz, "new_shot_ids", [])
-        if conn is not None and sid is not None:
-            self._widget.set_session(conn, sid, shot_ids)
+        self._conn = getattr(wiz, "session_conn", None)
+        self._session_id = getattr(wiz, "session_id", None)
+        self._shot_ids = getattr(wiz, "new_shot_ids", [])
+        if self._conn is not None and self._session_id is not None:
+            self._widget.set_session(self._conn, self._session_id, self._shot_ids)
+
+    def _on_calibrate(self) -> None:
+        if self._conn is None or self._session_id is None:
+            return
+        _open_auto_calibrate_dialog(
+            self, self._conn, self._session_id, self._shot_ids, self._on_imported,
+        )
 
     def _on_imported(self, calib_id: str) -> None:
         wiz = self.wizard()

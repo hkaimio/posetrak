@@ -144,9 +144,9 @@ def test_cp_row_world_position_updates_on_apply_xyz(qapp, fake_conn) -> None:
     dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
     try:
         dlg._add_control_point()  # auto-selects -> arms xyz panel
-        dlg._xyz_x.setValue(1.0)
-        dlg._xyz_y.setValue(2.0)
-        dlg._xyz_z.setValue(3.0)
+        dlg._xyz_x.setText("1.0")
+        dlg._xyz_y.setText("2.0")
+        dlg._xyz_z.setText("3.0")
         dlg._apply_xyz()
 
         row = _rows_by_type(dlg, "CP")[0]

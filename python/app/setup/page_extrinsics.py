@@ -49,7 +49,7 @@ _log = logging.getLogger(__name__)
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QRect, QThread, Qt, Signal
+from PySide6.QtCore import QLocale, QRect, QThread, Qt, Signal
 from PySide6.QtGui import QColor, QDoubleValidator, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -2092,6 +2092,17 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         for le in (self._xyz_x, self._xyz_y, self._xyz_z):
             validator = QDoubleValidator(-1e6, 1e6, 4, le)
             validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+            # Pin to the "C" locale (decimal point ".") regardless of the
+            # system locale -- QDoubleValidator otherwise validates against
+            # the OS locale's decimal separator (e.g. "," on a Finnish
+            # Windows install), silently swallowing every "." keystroke,
+            # while _xyz_field_value() parses the result with Python's
+            # locale-independent float(), which only ever accepts ".".
+            # Reported as "keyboard does nothing" in e2e testing
+            # (2026-08-21) -- disabled fields (unchecked "Fix 3-D position
+            # in BA") look identical and also ignore all keys, but the
+            # dropped "." reproduced independently of that.
+            validator.setLocale(QLocale.c())
             le.setValidator(validator)
             le.setAlignment(Qt.AlignmentFlag.AlignRight)
             le.setEnabled(False)

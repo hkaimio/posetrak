@@ -155,6 +155,31 @@ def test_cp_row_world_position_updates_on_apply_xyz(qapp, fake_conn) -> None:
         dlg.done(0)
 
 
+def test_xyz_field_accepts_decimal_point_regardless_of_system_locale(qapp, fake_conn) -> None:
+    """QDoubleValidator validates the "." keystroke against the OS locale's
+    decimal separator by default (e.g. "," on a Finnish Windows install),
+    silently dropping every "." a user types -- while _xyz_field_value()
+    parses the result with Python's locale-independent float(), which only
+    ever accepts ".". Reported as "keyboard does nothing" in e2e testing
+    (2026-08-21) on a Finnish-locale machine; reproduced independent of the
+    "Fix 3-D position in BA" enable-gating (also caught in the same report)
+    by driving real key events through QTest rather than setText().
+    """
+    from PySide6.QtTest import QTest
+
+    dlg = ExtrinsicsAutoCalibDialog([_make_state("cam_A")], fake_conn, "sess1")
+    try:
+        dlg._add_control_point()  # auto-selects -> arms xyz panel
+        dlg._xyz_enabled.setChecked(True)
+        dlg._xyz_x.setFocus()
+        dlg._xyz_x.selectAll()
+        QTest.keyClicks(dlg._xyz_x, "12.5")
+        assert dlg._xyz_x.text() == "12.5"
+        assert dlg._xyz_field_value(dlg._xyz_x) == 12.5
+    finally:
+        dlg.done(0)
+
+
 def test_marker_row_appears_after_detection(qapp, fake_conn) -> None:
     states = [_make_state("cam_A", _render_marker_image(3))]
     dlg = ExtrinsicsAutoCalibDialog(states, fake_conn, "sess1")

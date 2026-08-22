@@ -15,6 +15,7 @@ from posetrak.db.manage_config import (
     create_config_from_toml,
     edit_config,
     list_configs,
+    refresh_baseline_tracker_config,
 )
 
 from posetrak.cli._output import print_table, print_record
@@ -241,3 +242,55 @@ def config_edit(
             session.close()
 
     click.echo(f"new tracker_config_id: {new_id}")
+
+
+# ---------------------------------------------------------------------------
+# config refresh-baseline
+# ---------------------------------------------------------------------------
+
+
+@config_group.command("refresh-baseline")
+@click.option("--global", "global_registry", is_flag=True, default=False,
+              help="Refresh the registry's baseline row instead of (or as "
+                   "well as) a session's.")
+@click.pass_obj
+def config_refresh_baseline(obj: dict, global_registry: bool) -> None:
+    """Backfill the checked-in baseline ("factory defaults") tracker config.
+
+    A session's registry rows (including the baseline config) are copied in
+    once, at creation time, and never re-synced -- so a session created
+    before BASELINE_CONFIG_VALUES existed (or before it was last changed)
+    keeps its old values, all-NULL or stale, forever. This updates that
+    session's (or the registry's) baseline row in place to the current
+    checked-in values.
+
+    Examples:
+
+        posetrak --session tutorial1.db config refresh-baseline
+        posetrak config refresh-baseline --global
+    """
+    session_path = obj.get("session")
+    if session_path is None and not global_registry:
+        raise click.UsageError("Specify --session, --global, or both.")
+
+    if session_path is not None:
+        session = _open_session(session_path)
+        try:
+            updated = refresh_baseline_tracker_config(session)
+        finally:
+            session.close()
+        click.echo(
+            f"session {session_path}: "
+            + ("baseline config refreshed." if updated else "no baseline config row found.")
+        )
+
+    if global_registry:
+        registry = _open_registry(obj)
+        try:
+            updated = refresh_baseline_tracker_config(registry)
+        finally:
+            registry.close()
+        click.echo(
+            "registry: "
+            + ("baseline config refreshed." if updated else "no baseline config row found.")
+        )

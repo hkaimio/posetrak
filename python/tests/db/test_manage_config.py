@@ -347,7 +347,7 @@ def test_refresh_baseline_tracker_config_backfills_existing_null_row(
     )
     registry_db.commit()
 
-    refresh_baseline_tracker_config(registry_db)
+    assert refresh_baseline_tracker_config(registry_db) is True
 
     row = registry_db.execute(
         "SELECT process_noise_std, tracker_fps FROM tracker_configs WHERE id = ?",
@@ -366,7 +366,7 @@ def test_refresh_baseline_tracker_config_noop_if_missing(
 
     registry_db.execute("DELETE FROM tracker_configs WHERE id = ?", (BASELINE_CONFIG_ID,))
     registry_db.commit()
-    refresh_baseline_tracker_config(registry_db)  # must not raise
+    assert refresh_baseline_tracker_config(registry_db) is False  # must not raise
     count = registry_db.execute(
         "SELECT COUNT(*) FROM tracker_configs WHERE id = ?", (BASELINE_CONFIG_ID,)
     ).fetchone()[0]

@@ -350,23 +350,31 @@ def seed_baseline_tracker_config(conn: sqlite3.Connection) -> str:
     return BASELINE_CONFIG_ID
 
 
-def refresh_baseline_tracker_config(conn: sqlite3.Connection) -> None:
+def refresh_baseline_tracker_config(conn: sqlite3.Connection) -> bool:
     """Update an already-seeded baseline row's tuning values in place.
 
     seed_baseline_tracker_config() is INSERT OR IGNORE, so an existing
     registry/session created before BASELINE_CONFIG_VALUES was populated
-    keeps its all-NULL row forever -- this backfills it. Only touches the
-    row matching BASELINE_CONFIG_ID; safe to call unconditionally (no-op if
-    the row doesn't exist yet, matching seed's own idempotency).
+    (or before it was last changed) keeps its old values -- all-NULL, or a
+    stale snapshot -- forever, since a session's own copy is made once at
+    creation time and never re-synced. This backfills it. Only touches the
+    row matching BASELINE_CONFIG_ID; safe to call unconditionally.
+
+    Returns
+    -------
+    bool
+        True if a row was found and updated, False if this conn has no
+        baseline row at all (nothing to refresh -- not an error).
     """
     columns = _tuning_columns(conn)
     values = [_encode(BASELINE_CONFIG_VALUES.get(col)) for col in columns]
     with conn:
-        conn.execute(
+        cur = conn.execute(
             "UPDATE tracker_configs SET " + ", ".join(f"{c} = ?" for c in columns)
             + " WHERE id = ?",
             (*values, BASELINE_CONFIG_ID),
         )
+    return cur.rowcount > 0
 
 
 def name_existing_config(conn: sqlite3.Connection, config_id: str, name: str) -> None:

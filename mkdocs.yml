@@ -35,6 +35,8 @@ exclude_docs: |
   !user-guide/
   !user-guide/*.md
   user-guide/ug-pages-needed.md
+  !user-guide/images/
+  !user-guide/images/**
   !architecture/
   !architecture/*.md
   !architecture/algorithms/

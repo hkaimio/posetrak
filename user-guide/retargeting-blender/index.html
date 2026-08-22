@@ -1,0 +1,1564 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Video-based multi-camera skeletal motion capture">
+      
+      
+      
+      
+        <link rel="prev" href="../tracking-troubleshooting/">
+      
+      
+        <link rel="next" href="../../architecture/overview/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Retargeting to Blender - Posetrak</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#retargeting-to-blender" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Posetrak" class="md-header__button md-logo" aria-label="Posetrak" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Posetrak
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Retargeting to Blender
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/hkaimio/posetrak" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    hkaimio/posetrak
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Posetrak" class="md-nav__button md-logo" aria-label="Posetrak" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Posetrak
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/hkaimio/posetrak" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    hkaimio/posetrak
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../first-capture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your first capture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../camera-intrinsics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Camera intrinsics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../extrinsics-calibration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extrinsics calibration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../synchronizing-videos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Synchronizing videos
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../analyzing-poses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Analyzing poses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracking-troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracking & troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Retargeting to Blender
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Retargeting to Blender
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#installing-bvh-retargeter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Installing BVH Retargeter
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#exporting-bvh-from-posetrak" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Exporting BVH from Posetrak
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#importing-into-blender" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Importing into Blender
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bvh-retargeter-one-time-setup-the-posetrak-rig-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        BVH Retargeter one-time setup: the Posetrak rig profile
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#retargeting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retargeting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#building-your-own-rig-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Building your own rig profile
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/cpp-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    C++ tracker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/python-apps/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python apps
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/data-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/algorithms/ukf/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UKF algorithm
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../skeleton-format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Skeleton format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../state-vector-format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    State vector format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../sync-metadata-format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sync metadata format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://github.com/hkaimio/posetrak/blob/main/CONTRIBUTING.md" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#installing-bvh-retargeter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Installing BVH Retargeter
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#exporting-bvh-from-posetrak" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Exporting BVH from Posetrak
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#importing-into-blender" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Importing into Blender
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bvh-retargeter-one-time-setup-the-posetrak-rig-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        BVH Retargeter one-time setup: the Posetrak rig profile
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#retargeting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retargeting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#building-your-own-rig-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Building your own rig profile
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/hkaimio/posetrak/edit/main/docs/user-guide/retargeting-blender.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="retargeting-to-blender">Retargeting to Blender<a class="headerlink" href="#retargeting-to-blender" title="Permanent link">&para;</a></h1>
+<p>Posetrak exports motion as <a href="https://en.wikipedia.org/wiki/Biovision_Hierarchy">BVH</a>,
+a generic mocap interchange format built around Posetrak's own tracking
+skeleton. Blender's built-in BVH importer will happily load that motion
+onto an armature shaped exactly like Posetrak's skeleton — but that's
+rarely the rig you actually want to animate. Getting the motion onto
+your own character (different bone names, different proportions,
+possibly a different bone count) is <strong>retargeting</strong>, and Blender has no
+retargeting built in — it needs a dedicated add-on.</p>
+<p>This page is a generic Posetrak → Blender retargeting workflow. It walks through
+<strong>BVH Retargeter</strong>, a free, actively maintained add-on that handles arbitrary
+source/target bone naming. If BVH Retargeter doesn't fit your pipeline there are
+other options, for example (ordered from lightweight to more capable
+but costly)</p>
+<ul>
+<li>Manual retargeting with <strong>Copy Rotation</strong> bone constraints — no
+  add-on at all, just build the bone-to-bone mapping yourself. Viable
+  for a one-off rig, painful to repeat.</li>
+<li><strong>Rokoko Studio Live for Blender</strong> is built around Rokoko's own mocap format,
+  but also accepts generic BVH. Retargeting functionality of the plugin is free
+  but requires creating and logging in to a Rokoko account.</li>
+<li><strong>Auto-Rig Pro</strong> (paid) — its Smart/Remap tools can retarget a BVH
+  import onto an Auto-Rig Pro rig, with more automated bone-length
+  matching than BVH Retargeter, at the cost of a purchase.</li>
+<li>Commercial animation software packages like
+  <a href="https://www.reallusion.com/iclone/default.html">iClone</a> or
+  <a href="https://cascadeur.com/">Cascadeur</a> have extensive tools for motion capture
+  retargeting and cleanup. Both of the aforementioned tools work with Posetrak;
+  stay tuned for dedicated tutorials for those.</li>
+</ul>
+<p>The rest of this page covers <strong>BVH Retargeter</strong>, since it's free,
+needs no account, and — with the one-time rig profile described below
+— needs no manual bone mapping for Posetrak's skeleton.</p>
+<h2 id="prerequisites">Prerequisites<a class="headerlink" href="#prerequisites" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Blender 4.2 or later (BVH Retargeter's minimum supported version).</li>
+<li>A rigged target character in your <code>.blend</code> file. This tutorial uses "Danny", a
+  free human model by Ethan Snell that has already been rigged with Blender's
+  Rigify tool. You can load the model from the <a href="https://pancake-manicure.gumroad.com/l/Danny">artist's web
+  site</a>.</li>
+<li>A BVH file exported from Posetrak.</li>
+</ul>
+<h2 id="installing-bvh-retargeter">Installing BVH Retargeter<a class="headerlink" href="#installing-bvh-retargeter" title="Permanent link">&para;</a></h2>
+<ol>
+<li>In Blender, open <strong>Edit → Preferences → Get Extensions</strong>, search for
+   "BVH", and install <strong>BVH and FBX Retargeter</strong> (by Thomas Larsson).</li>
+<li>Enable it if it isn't already (extensions installed this way are
+   enabled by default).</li>
+<li>A <strong>BVH Retargeter</strong> panel appears in the 3D viewport sidebar (<code>N</code>
+   panel) whenever an armature is selected.</li>
+</ol>
+<p>If your Blender build doesn't have the Extensions platform, or you want
+to track a specific release, the same add-on is published at the
+author's <a href="https://bitbucket.org/Diffeomorphic/retarget_bvh/wiki/Home/">project page</a> —
+install the zip via <strong>Edit → Preferences → Add-ons → Install…</strong>.</p>
+<h2 id="exporting-bvh-from-posetrak">Exporting BVH from Posetrak<a class="headerlink" href="#exporting-bvh-from-posetrak" title="Permanent link">&para;</a></h2>
+<p>In Posetrak, navigate to the trial's tracking results for the person. Click the
+"Export BVH..." button in the information pane on the right side of the window.</p>
+<h2 id="importing-into-blender">Importing into Blender<a class="headerlink" href="#importing-into-blender" title="Permanent link">&para;</a></h2>
+<p>Use Blender's built-in importer: <strong>File → Import → Motion Capture (.bvh)</strong>.</p>
+<ul>
+<li>Leave <strong>Forward</strong>/<strong>Up</strong> axes at their defaults (<code>-Z Forward</code>, <code>Y Up</code>) — that
+  already matches <code>--coord yup</code>.</li>
+<li>Select "Update scene FPS" and "Update scene duration" so that the scene's
+  timeline works as expected.</li>
+</ul>
+<p>This gives you a new armature shaped like Posetrak's tracking skeleton,
+animated, with frame 1 holding the T-pose. Nothing here uses BVH
+Retargeter yet.</p>
+<p><img alt="" src="../images/blender-armature-imported.jpg" /></p>
+<h2 id="bvh-retargeter-one-time-setup-the-posetrak-rig-profile">BVH Retargeter one-time setup: the Posetrak rig profile<a class="headerlink" href="#bvh-retargeter-one-time-setup-the-posetrak-rig-profile" title="Permanent link">&para;</a></h2>
+<p>There is no single "right" convention for representing a human skeleton; most 3D
+packages and individual artists have different preferences. Unfortunately BVH
+files include very little information about the convention used, which can
+make retargeting an animation in another application painful. BVH Retargeter
+tries to <em>guess</em> a source rig's bone roles and the joint angles that put the
+model to T-pose, but for Posetrak's skeleton both guesses need some help:</p>
+<ul>
+<li>Posetrak's neck has two bones (<code>neck1</code>, <code>neck2</code>) before the head, but
+  BVH Retargeter's automatic bone-role heuristic always assumes exactly
+  one neck bone — it mislabels <code>neck2</code> as the head and leaves the real
+  head bone unmapped, so head motion comes out visibly wrong.</li>
+<li>BVH Retargeter's automatic T-pose guess deliberately never touches
+  clavicle/shoulder or foot/ankle bones — it only forces arms, legs, and
+  fingers into shape, and leaves everything else at its raw imported
+  rest orientation. Posetrak's BVH rest-pose bone directions for those
+  two joints aren't anatomically correct on their own (the true T-pose
+  only appears once frame 1's rotation is applied on top), so left
+  alone, clavicles and feet come out of retargeting rotated roughly 90°
+  off.</li>
+</ul>
+<p>Both are fixed with two small JSON files that tell BVH Retargeter
+exactly how to read Posetrak's rig, instead of guessing:</p>
+<ol>
+<li>Get <code>known_rigs/posetrak.json</code> and <code>t_poses/posetrak.json</code> from
+   <a href="https://github.com/hkaimio/posetrak/tree/main/examples/retargeting/blender/bvh-retargeter"><code>examples/retargeting/blender/bvh-retargeter/</code></a>
+   in this repository.</li>
+<li>
+<p>Find your BVH Retargeter install folder:</p>
+<table>
+<thead>
+<tr>
+<th>OS</th>
+<th>Path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Windows</td>
+<td><code>%APPDATA%\Blender Foundation\Blender\&lt;version&gt;\extensions\user_default\retarget_bvh\</code></td>
+</tr>
+<tr>
+<td>macOS</td>
+<td><code>~/Library/Application Support/Blender/&lt;version&gt;/extensions/user_default/retarget_bvh/</code></td>
+</tr>
+<tr>
+<td>Linux</td>
+<td><code>~/.config/blender/&lt;version&gt;/extensions/user_default/retarget_bvh/</code></td>
+</tr>
+</tbody>
+</table>
+</li>
+<li>
+<p>Copy <code>known_rigs/posetrak.json</code> into that folder's <code>known_rigs/</code>
+   subfolder, and <code>t_poses/posetrak.json</code> into <code>t_poses/</code>.</p>
+</li>
+<li>In Blender, run <strong>BVH Retargeter → Init Known Rigs</strong> (or just
+   restart Blender) so it rescans both folders.</li>
+</ol>
+<p>You only need to do this once per Blender install.</p>
+<p>If you're tracking a custom skeleton with different joint names or a
+different bone count, these two files won't match yours as-is — see
+"Building your own rig profile," below.</p>
+<h2 id="retargeting">Retargeting<a class="headerlink" href="#retargeting" title="Permanent link">&para;</a></h2>
+<ol>
+<li>Have both armatures in the scene: your imported Posetrak BVH (the <strong>source</strong>)
+   and your character rig (the <strong>target</strong>), already positioned/scaled sensibly
+   relative to each other. If you have scaled the target rig, you <em>MUST</em> apply all
+   transforms before retargeting (Object -&gt; Apply -&gt; All Transforms).</li>
+<li>Click the source armature (the one you imported from Posetrak BVH file) to
+   select it, then <strong>shift-click the target armature last</strong> so both are selected
+   and the target is active. The source should show as orange and the target as
+   yellow.</li>
+<li>Click <strong>BVH Retargeter → Retarget Selected To Active</strong>.
+   <img alt="" src="../images/blender-bvh-retarget.jpg" /></li>
+<li>In the confirmation dialog:<ul>
+<li><strong>Source</strong> — with the Posetrak rig profile installed, <strong>Auto
+   Source</strong> should detect "Posetrak" automatically for both Source
+   Rig and Source T-Pose; check that the dropdowns show that before
+   confirming. If it didn't, uncheck <strong>Auto Source</strong> and
+   set <strong>Source Rig</strong> to <code>Automatic</code> and <strong>Source T-Pose</strong> to
+   <code>Posetrak</code> manually.</li>
+<li><strong>Target</strong> — if your target is a rig BVH Retargeter recognizes
+   out of the box (Rigify, Mixamo-compatible, etc.), Auto Target
+   should just work. If it's a custom rig and you see the same
+   clavicle/foot rotation problem on the <em>target</em> after retargeting,
+   it needs the same treatment — see below.</li>
+</ul>
+</li>
+<li>Confirm. Retargeting takes some time, depending on the length of your
+   capture, and Blender will be unresponsive while BVH retargeter works. When
+   ready, scrub the timeline to check the result.</li>
+</ol>
+<p><img alt="Target model animated by the Posetrak data" src="../images/bvh-retargeter-results-danny.gif" /></p>
+<p>Usually you need to do some adjustments to motion capture animations to get high
+quality results. The tracking data might have errors, and the target model's
+body dimensions are seldom exactly identical to those of the tracked person,
+which can cause e.g. feet sliding on the ground and hands penetrating other
+body parts. There are many tutorials on cleaning up motion capture data in
+Blender — Google is your friend here.</p>
+<div class="admonition warning">
+<p class="admonition-title">Auto Source / Auto Target silently override your dropdown choices</p>
+<p>Whichever of Auto Source / Auto Target is checked re-guesses the
+rig and T-pose from scratch every time you run an operator,
+overwriting whatever you'd manually selected — even if you picked
+the right T-pose moments earlier. If a manual T-pose selection ever
+seems to have "no effect," this is almost always why: check the
+checkbox, not just the dropdown.</p>
+</div>
+<h2 id="building-your-own-rig-profile">Building your own rig profile<a class="headerlink" href="#building-your-own-rig-profile" title="Permanent link">&para;</a></h2>
+<p>If your target character rig (or a custom Posetrak skeleton YAML) isn't
+recognized automatically and shows the same kind of misidentified or
+misrotated joints, the fix is the same two-file pattern used above for
+the source side:</p>
+<ol>
+<li><strong>Fix the T-pose.</strong> Pose the rig correctly — at frame 1 for a
+   Posetrak BVH, or by hand for a target character rig — select it, and
+   run <strong>BVH Retargeter → Save T-Pose</strong>, saving into that install's
+   <code>t_poses/</code> folder. This captures every bone's current rotation
+   exactly as posed.</li>
+<li><strong>Fix bone identification</strong>, only needed if the automatic
+   name/hierarchy guess gets something wrong (e.g. an unusual chain
+   length like Posetrak's two-bone neck): write a
+   <code>known_rigs/&lt;name&gt;.json</code> with a <code>"bones"</code> map from the rig's real
+   bone names to BVH Retargeter's canonical names (<code>hips</code>, <code>spine</code>,
+   <code>chest</code>, <code>neck</code>, <code>neck-1</code> for a second neck segment, <code>head</code>,
+   <code>shoulder.L</code>/<code>.R</code>, <code>upper_arm.L</code>/<code>.R</code>, …). Use
+   <code>known_rigs/posetrak.json</code> in this repository as a worked example, or
+   any of the simpler files bundled with the add-on itself (its
+   <code>known_rigs/mixamo.json</code> is a good starting point).</li>
+<li>Add <code>"t-pose-file": "&lt;name&gt;"</code> to the <code>known_rigs/&lt;name&gt;.json</code>
+   (matching the <code>"name"</code> field in your saved T-pose file), so <strong>Auto
+   Source</strong>/<strong>Auto Target</strong> picks up both automatically once it
+   recognizes the rig.</li>
+<li><strong>Init Known Rigs</strong>, then retarget as above.</li>
+</ol>
+<h2 id="troubleshooting">Troubleshooting<a class="headerlink" href="#troubleshooting" title="Permanent link">&para;</a></h2>
+<p><strong>Shoulders and/or ankles rotated ~90° after retargeting</strong>
+: The Posetrak T-pose file isn't being applied. Check: the two JSON
+  files are actually in the add-on's <code>known_rigs/</code>/<code>t_poses/</code> folders
+  (not a subfolder, not renamed); <strong>Init Known Rigs</strong> was run after
+  copying them; and — per the warning above — Auto Source is either
+  correctly detecting "Posetrak," or is unchecked with "Posetrak" picked
+  manually in both dropdowns.</p>
+<p><strong>Head motion looks offset, or barely moves</strong>
+: Almost certainly the two-bone-neck issue described above. Confirm
+  <code>known_rigs/posetrak.json</code> is installed and picked up — <strong>List Source
+  Rig</strong> should show <code>neck1 → neck</code>, <code>neck2 → neck-1</code>, <code>head → head</code>.</p>
+<p><strong>Retargeted motion just sits in the T-pose the whole time</strong>
+: Check that the frame range used by the retarget operator covers your
+  actual motion, and that frame 1 (the T-pose reference the operator
+  needs) is actually present — it isn't if you exported with
+  <code>--no-rest-frame</code>.</p>
+<h2 id="see-also">See also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="../first-capture/">Your first capture</a> — where this fits in the
+  overall workflow.</li>
+</ul>
+<hr />
+<p><em>Screenshots still needed: the BVH Retargeter sidebar panel, the
+install-folder location in Preferences, the Retarget confirmation
+dialog with Auto Source/Auto Target unchecked, and a before/after of
+the shoulder &amp; foot orientation fix.</em></p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

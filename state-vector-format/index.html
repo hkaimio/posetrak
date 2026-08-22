@@ -1,0 +1,2469 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Video-based multi-camera skeletal motion capture">
+      
+      
+      
+      
+        <link rel="prev" href="../skeleton-format/">
+      
+      
+        <link rel="next" href="../sync-metadata-format/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>State vector format - Posetrak</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#state-vector-format" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Posetrak" class="md-header__button md-logo" aria-label="Posetrak" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Posetrak
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              State vector format
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/hkaimio/posetrak" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    hkaimio/posetrak
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Posetrak" class="md-nav__button md-logo" aria-label="Posetrak" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Posetrak
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/hkaimio/posetrak" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    hkaimio/posetrak
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/first-capture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your first capture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/camera-intrinsics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Camera intrinsics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/extrinsics-calibration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extrinsics calibration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/synchronizing-videos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Synchronizing videos
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/analyzing-poses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Analyzing poses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/tracking-troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracking & troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../user-guide/retargeting-blender/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Retargeting to Blender
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/cpp-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    C++ tracker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/python-apps/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python apps
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/data-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/algorithms/ukf/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UKF algorithm
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skeleton-format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Skeleton format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    State vector format
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    State vector format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#file-format" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        File Format
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="File Format">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#csv-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CSV Structure
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#frame-identification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Frame Identification
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#state-components" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        State Components
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="State Components">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#root-transform-6-dof" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Root Transform (6 DOF)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Root Transform (6 DOF)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#position-3-dof" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Position (3 DOF)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#orientation-3-dof-4-parameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Orientation (3 DOF, 4 parameters)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#velocities-6-dof" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Velocities (6 DOF)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#joint-angles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Joint Angles
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Joint Angles">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#revolute-joints-1-dof" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Revolute Joints (1 DOF)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#spherical-joints-3-dof" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Spherical Joints (3 DOF)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fixed-joints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed Joints
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#column-naming-convention" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Column Naming Convention
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Column Naming Convention">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pattern" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pattern
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#special-characters-in-joint-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Special Characters in Joint Names
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#complete-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Complete Example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#forward-kinematics-algorithm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Forward Kinematics Algorithm
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#data-properties" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Data Properties
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Data Properties">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#frame-coverage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Frame Coverage
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#numeric-precision" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Numeric Precision
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#value-ranges" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Value Ranges
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#missing-data" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Missing Data
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#relationship-to-pinocchio-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Relationship to Pinocchio Configuration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Relationship to Pinocchio Configuration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#configuration-vector-q" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration Vector (q)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#velocity-vector-v" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Velocity Vector (v)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#implementation-references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Implementation References
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Implementation References">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#c-tracker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C++ (Tracker)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#python-visualization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Python (Visualization)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debugging-tips" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debugging Tips
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Debugging Tips">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#visualizing-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Visualizing State
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#common-issues" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Common Issues
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See Also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sync-metadata-format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sync metadata format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://github.com/hkaimio/posetrak/blob/main/CONTRIBUTING.md" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#file-format" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        File Format
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="File Format">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#csv-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CSV Structure
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#frame-identification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Frame Identification
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#state-components" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        State Components
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="State Components">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#root-transform-6-dof" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Root Transform (6 DOF)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Root Transform (6 DOF)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#position-3-dof" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Position (3 DOF)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#orientation-3-dof-4-parameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Orientation (3 DOF, 4 parameters)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#velocities-6-dof" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Velocities (6 DOF)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#joint-angles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Joint Angles
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Joint Angles">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#revolute-joints-1-dof" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Revolute Joints (1 DOF)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#spherical-joints-3-dof" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Spherical Joints (3 DOF)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fixed-joints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed Joints
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#column-naming-convention" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Column Naming Convention
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Column Naming Convention">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pattern" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pattern
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#special-characters-in-joint-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Special Characters in Joint Names
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#complete-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Complete Example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#forward-kinematics-algorithm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Forward Kinematics Algorithm
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#data-properties" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Data Properties
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Data Properties">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#frame-coverage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Frame Coverage
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#numeric-precision" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Numeric Precision
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#value-ranges" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Value Ranges
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#missing-data" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Missing Data
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#relationship-to-pinocchio-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Relationship to Pinocchio Configuration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Relationship to Pinocchio Configuration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#configuration-vector-q" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration Vector (q)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#velocity-vector-v" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Velocity Vector (v)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#implementation-references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Implementation References
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Implementation References">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#c-tracker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C++ (Tracker)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#python-visualization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Python (Visualization)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debugging-tips" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debugging Tips
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Debugging Tips">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#visualizing-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Visualizing State
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#common-issues" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Common Issues
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See Also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/hkaimio/posetrak/edit/main/docs/state-vector-format.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="state-vector-format">State Vector Format<a class="headerlink" href="#state-vector-format" title="Permanent link">&para;</a></h1>
+<h2 id="overview">Overview<a class="headerlink" href="#overview" title="Permanent link">&para;</a></h2>
+<p>The <code>state_vectors.csv</code> file contains the tracker's estimated pose state at each frame. It represents the full configuration of the skeleton including root position/orientation and all joint angles, plus their time derivatives (velocities).</p>
+<h2 id="file-format">File Format<a class="headerlink" href="#file-format" title="Permanent link">&para;</a></h2>
+<h3 id="csv-structure">CSV Structure<a class="headerlink" href="#csv-structure" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Header row</strong>: Column names defining each state component</li>
+<li><strong>Data rows</strong>: One row per frame, ordered by <code>tracker_frame_idx</code></li>
+<li><strong>Separator</strong>: Comma (<code>,</code>)</li>
+<li><strong>Numeric format</strong>: Floating point, typically scientific notation for small values</li>
+</ul>
+<h3 id="frame-identification">Frame Identification<a class="headerlink" href="#frame-identification" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tracker_frame_idx</code></td>
+<td>integer</td>
+<td>Frame index (0-based) in tracking sequence</td>
+</tr>
+<tr>
+<td><code>timestamp</code></td>
+<td>float</td>
+<td>Time in seconds (can be negative for pre-trigger data)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="state-components">State Components<a class="headerlink" href="#state-components" title="Permanent link">&para;</a></h2>
+<h3 id="root-transform-6-dof">Root Transform (6 DOF)<a class="headerlink" href="#root-transform-6-dof" title="Permanent link">&para;</a></h3>
+<p>The root joint represents the base of the skeleton with full 6-degree-of-freedom positioning.</p>
+<h4 id="position-3-dof">Position (3 DOF)<a class="headerlink" href="#position-3-dof" title="Permanent link">&para;</a></h4>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Units</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>root_position_x</code></td>
+<td>meters</td>
+<td>X-coordinate in world frame</td>
+</tr>
+<tr>
+<td><code>root_position_y</code></td>
+<td>meters</td>
+<td>Y-coordinate in world frame</td>
+</tr>
+<tr>
+<td><code>root_position_z</code></td>
+<td>meters</td>
+<td>Z-coordinate in world frame</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Coordinate system</strong>: Right-handed, typically Z-up or Y-up depending on skeleton convention.</p>
+<h4 id="orientation-3-dof-4-parameters">Orientation (3 DOF, 4 parameters)<a class="headerlink" href="#orientation-3-dof-4-parameters" title="Permanent link">&para;</a></h4>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Range</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>root_quaternion_w</code></td>
+<td>[-1, 1]</td>
+<td>Quaternion scalar (real) part</td>
+</tr>
+<tr>
+<td><code>root_quaternion_x</code></td>
+<td>[-1, 1]</td>
+<td>Quaternion X component (i)</td>
+</tr>
+<tr>
+<td><code>root_quaternion_y</code></td>
+<td>[-1, 1]</td>
+<td>Quaternion Y component (j)</td>
+</tr>
+<tr>
+<td><code>root_quaternion_z</code></td>
+<td>[-1, 1]</td>
+<td>Quaternion Z component (k)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Quaternion convention</strong>:
+- Format: <code>q = w + xi + yj + zk</code>
+- Normalized: <code>w² + x² + y² + z² = 1</code>
+- Represents rotation from world frame to root's local frame
+- Storage order: <code>[w, x, y, z]</code> (scalar-first)</p>
+<p><strong>Rotation application</strong>:
+<div class="highlight"><pre><span></span><code>R_world_root = quaternion_to_matrix([w, x, y, z])
+</code></pre></div></p>
+<h4 id="velocities-6-dof">Velocities (6 DOF)<a class="headerlink" href="#velocities-6-dof" title="Permanent link">&para;</a></h4>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Units</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>root_velocity_x</code></td>
+<td>m/s</td>
+<td>Linear velocity in X</td>
+</tr>
+<tr>
+<td><code>root_velocity_y</code></td>
+<td>m/s</td>
+<td>Linear velocity in Y</td>
+</tr>
+<tr>
+<td><code>root_velocity_z</code></td>
+<td>m/s</td>
+<td>Linear velocity in Z</td>
+</tr>
+<tr>
+<td><code>root_angular_velocity_x</code></td>
+<td>rad/s</td>
+<td>Angular velocity around X</td>
+</tr>
+<tr>
+<td><code>root_angular_velocity_y</code></td>
+<td>rad/s</td>
+<td>Angular velocity around Y</td>
+</tr>
+<tr>
+<td><code>root_angular_velocity_z</code></td>
+<td>rad/s</td>
+<td>Angular velocity around Z</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Note</strong>: Velocities are in the <strong>world frame</strong>, not body frame.</p>
+<h3 id="joint-angles">Joint Angles<a class="headerlink" href="#joint-angles" title="Permanent link">&para;</a></h3>
+<p>Joint angles represent <strong>deviations from the rest pose</strong> defined in the skeleton YAML. The final joint orientation is:</p>
+<div class="highlight"><pre><span></span><code>R_final = R_rest @ R_animation
+</code></pre></div>
+<p>Where:
+- <code>R_rest</code> = Rest orientation from skeleton YAML (<code>orientation</code> field, Euler angles)
+- <code>R_animation</code> = Rotation from state vector angles (see below)</p>
+<h4 id="revolute-joints-1-dof">Revolute Joints (1 DOF)<a class="headerlink" href="#revolute-joints-1-dof" title="Permanent link">&para;</a></h4>
+<p>Single-axis rotation around the joint's defined axis.</p>
+<p><strong>Columns</strong>: <code>joint_{name}_angle_0</code>, <code>joint_{name}_velocity_0</code></p>
+<table>
+<thead>
+<tr>
+<th>Column Pattern</th>
+<th>Units</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>joint_{name}_angle_0</code></td>
+<td>radians</td>
+<td>Rotation angle around joint axis</td>
+</tr>
+<tr>
+<td><code>joint_{name}_velocity_0</code></td>
+<td>rad/s</td>
+<td>Angular velocity</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Example</strong>:
+<div class="highlight"><pre><span></span><code>joint_elbow.L_angle_0, joint_elbow.L_velocity_0
+1.5708,                 0.0
+</code></pre></div>
+→ Left elbow bent 90° (π/2 radians), not moving</p>
+<p><strong>Rotation computation</strong>:
+<div class="highlight"><pre><span></span><code><span class="n">axis</span> <span class="o">=</span> <span class="n">joint</span><span class="o">.</span><span class="n">axis</span>  <span class="c1"># From skeleton YAML, e.g., [0, 1, 0]</span>
+<span class="n">angle</span> <span class="o">=</span> <span class="n">state_vector</span><span class="p">[</span><span class="s1">'joint_</span><span class="si">{name}</span><span class="s1">_angle_0'</span><span class="p">]</span>
+<span class="n">R_animation</span> <span class="o">=</span> <span class="n">axis_angle_to_matrix</span><span class="p">(</span><span class="n">axis</span> <span class="o">*</span> <span class="n">angle</span><span class="p">)</span>
+</code></pre></div></p>
+<h4 id="spherical-joints-3-dof">Spherical Joints (3 DOF)<a class="headerlink" href="#spherical-joints-3-dof" title="Permanent link">&para;</a></h4>
+<p>Full 3-axis rotation represented as <strong>axis-angle</strong> (also called rotation vector).</p>
+<p><strong>Columns</strong>: <code>joint_{name}_angle_{0,1,2}</code>, <code>joint_{name}_velocity_{0,1,2}</code></p>
+<table>
+<thead>
+<tr>
+<th>Column Pattern</th>
+<th>Units</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>joint_{name}_angle_0</code></td>
+<td>radians</td>
+<td>X-component of axis-angle</td>
+</tr>
+<tr>
+<td><code>joint_{name}_angle_1</code></td>
+<td>radians</td>
+<td>Y-component of axis-angle</td>
+</tr>
+<tr>
+<td><code>joint_{name}_angle_2</code></td>
+<td>radians</td>
+<td>Z-component of axis-angle</td>
+</tr>
+<tr>
+<td><code>joint_{name}_velocity_0</code></td>
+<td>rad/s</td>
+<td>Angular velocity X-component</td>
+</tr>
+<tr>
+<td><code>joint_{name}_velocity_1</code></td>
+<td>rad/s</td>
+<td>Angular velocity Y-component</td>
+</tr>
+<tr>
+<td><code>joint_{name}_velocity_2</code></td>
+<td>rad/s</td>
+<td>Angular velocity Z-component</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Example</strong>:
+<div class="highlight"><pre><span></span><code>joint_shoulder.L_angle_0, joint_shoulder.L_angle_1, joint_shoulder.L_angle_2
+0.5,                      0.3,                      -0.2
+</code></pre></div>
+→ Shoulder rotated by <code>√(0.5² + 0.3² + 0.2²) = 0.618</code> radians around axis <code>[0.809, 0.485, -0.324]</code></p>
+<p><strong>Axis-angle representation</strong>:
+- Vector <code>v = [angle_0, angle_1, angle_2]</code>
+- Rotation magnitude: <code>θ = ||v|| = √(angle_0² + angle_1² + angle_2²)</code>
+- Rotation axis: <code>n = v / θ</code> (unit vector)
+- Rotation: <code>θ</code> radians around axis <code>n</code></p>
+<p><strong>Special case (zero rotation)</strong>:
+- If <code>θ = 0</code> (all components zero), no rotation is applied
+- Rest pose orientation only</p>
+<p><strong>Rotation computation (Rodrigues' formula)</strong>:
+<div class="highlight"><pre><span></span><code><span class="n">axis_angle</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">angle_0</span><span class="p">,</span> <span class="n">angle_1</span><span class="p">,</span> <span class="n">angle_2</span><span class="p">])</span>
+<span class="n">theta</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">norm</span><span class="p">(</span><span class="n">axis_angle</span><span class="p">)</span>
+
+<span class="k">if</span> <span class="n">theta</span> <span class="o">&lt;</span> <span class="mf">1e-10</span><span class="p">:</span>
+    <span class="n">R_animation</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>  <span class="c1"># No rotation</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">axis</span> <span class="o">=</span> <span class="n">axis_angle</span> <span class="o">/</span> <span class="n">theta</span>  <span class="c1"># Normalize</span>
+    <span class="n">K</span> <span class="o">=</span> <span class="n">skew_symmetric</span><span class="p">(</span><span class="n">axis</span><span class="p">)</span>   <span class="c1"># Cross-product matrix</span>
+    <span class="n">R_animation</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span> <span class="o">+</span> <span class="n">np</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">theta</span><span class="p">)</span> <span class="o">*</span> <span class="n">K</span> <span class="o">+</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">np</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">theta</span><span class="p">))</span> <span class="o">*</span> <span class="n">K</span> <span class="o">@</span> <span class="n">K</span>
+</code></pre></div></p>
+<p>Where skew-symmetric matrix of <code>[a, b, c]</code>:
+<div class="highlight"><pre><span></span><code>K = [ 0  -c   b]
+    [ c   0  -a]
+    [-b   a   0]
+</code></pre></div></p>
+<h3 id="fixed-joints">Fixed Joints<a class="headerlink" href="#fixed-joints" title="Permanent link">&para;</a></h3>
+<p>Fixed joints have <strong>no state columns</strong> - they maintain constant transforms defined in the skeleton YAML.</p>
+<h2 id="column-naming-convention">Column Naming Convention<a class="headerlink" href="#column-naming-convention" title="Permanent link">&para;</a></h2>
+<h3 id="pattern">Pattern<a class="headerlink" href="#pattern" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code>{category}_{joint_name}_{component}_{index}
+</code></pre></div>
+<p>Components:
+- <strong>Position/Orientation</strong>: <code>position_{x,y,z}</code>, <code>quaternion_{w,x,y,z}</code>
+- <strong>Linear velocity</strong>: <code>velocity_{x,y,z}</code>
+- <strong>Angular velocity</strong>: <code>angular_velocity_{x,y,z}</code>
+- <strong>Joint angles</strong>: <code>angle_{0,1,2}</code> (0 for revolute, 0-2 for spherical)
+- <strong>Joint velocities</strong>: <code>velocity_{0,1,2}</code></p>
+<h3 id="special-characters-in-joint-names">Special Characters in Joint Names<a class="headerlink" href="#special-characters-in-joint-names" title="Permanent link">&para;</a></h3>
+<p>Joint names may contain dots (<code>.</code>) for left/right suffixes:
+- Example: <code>shoulder.L</code>, <code>f_index.01.R</code>
+- CSV column: <code>joint_shoulder.L_angle_0</code></p>
+<p>The dot is <strong>not</strong> a separator, it's part of the joint name.</p>
+<h2 id="complete-example">Complete Example<a class="headerlink" href="#complete-example" title="Permanent link">&para;</a></h2>
+<p>For a skeleton with:
+- Root (free-flyer)
+- <code>spine1</code> (spherical)
+- <code>elbow.L</code> (revolute, axis=[0,0,1])</p>
+<p>CSV header:
+<div class="highlight"><pre><span></span><code>tracker_frame_idx,timestamp,root_position_x,root_position_y,root_position_z,root_quaternion_w,root_quaternion_x,root_quaternion_y,root_quaternion_z,root_velocity_x,root_velocity_y,root_velocity_z,root_angular_velocity_x,root_angular_velocity_y,root_angular_velocity_z,joint_spine1_angle_0,joint_spine1_angle_1,joint_spine1_angle_2,joint_spine1_velocity_0,joint_spine1_velocity_1,joint_spine1_velocity_2,joint_elbow.L_angle_0,joint_elbow.L_velocity_0
+</code></pre></div></p>
+<p>Sample data row:
+<div class="highlight"><pre><span></span><code>100,1.667,5.21,4.02,0.82,0.43,0.90,0.02,0.06,0.25,0.009,0.12,-0.002,-0.040,0.027,0.449,0.262,-0.262,-0.007,0,0,1.571,0.002
+</code></pre></div></p>
+<p>Interpretation:
+- Frame 100 at 1.667 seconds
+- Root at (5.21, 4.02, 0.82) meters
+- Root quaternion [0.43, 0.90, 0.02, 0.06] (normalized)
+- Root moving at 0.25 m/s in X, 0.009 m/s in Y, 0.12 m/s in Z
+- Root rotating slowly (small angular velocities)
+- Spine1 axis-angle: [0.449, 0.262, -0.262] rad → 29° around [0.766, 0.447, -0.447]
+- Left elbow at 1.571 rad (90°), opening at 0.002 rad/s</p>
+<h2 id="forward-kinematics-algorithm">Forward Kinematics Algorithm<a class="headerlink" href="#forward-kinematics-algorithm" title="Permanent link">&para;</a></h2>
+<p>To reconstruct 3D marker positions from state vectors:</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">compute_forward_kinematics</span><span class="p">(</span><span class="n">skeleton</span><span class="p">,</span> <span class="n">state_vector</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Compute world positions of all joints and markers."""</span>
+    <span class="n">transforms</span> <span class="o">=</span> <span class="p">{}</span>  <span class="c1"># joint_name -&gt; 4x4 transform matrix</span>
+
+    <span class="k">for</span> <span class="n">joint</span> <span class="ow">in</span> <span class="n">skeleton</span><span class="o">.</span><span class="n">joints_in_hierarchy_order</span><span class="p">():</span>
+        <span class="c1"># Get parent transform (identity for root)</span>
+        <span class="k">if</span> <span class="n">joint</span><span class="o">.</span><span class="n">parent</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">T_parent</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="mi">4</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">T_parent</span> <span class="o">=</span> <span class="n">transforms</span><span class="p">[</span><span class="n">joint</span><span class="o">.</span><span class="n">parent</span><span class="p">]</span>
+
+        <span class="c1"># Build local transform</span>
+        <span class="n">T_local</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="mi">4</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">joint</span><span class="o">.</span><span class="n">is_root</span><span class="p">:</span>
+            <span class="c1"># Root: absolute position + quaternion</span>
+            <span class="n">T_local</span><span class="p">[:</span><span class="mi">3</span><span class="p">,</span> <span class="mi">3</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span>
+                <span class="n">state_vector</span><span class="p">[</span><span class="s1">'root_position_x'</span><span class="p">],</span>
+                <span class="n">state_vector</span><span class="p">[</span><span class="s1">'root_position_y'</span><span class="p">],</span>
+                <span class="n">state_vector</span><span class="p">[</span><span class="s1">'root_position_z'</span><span class="p">]</span>
+            <span class="p">]</span>
+            <span class="n">quat</span> <span class="o">=</span> <span class="p">[</span>
+                <span class="n">state_vector</span><span class="p">[</span><span class="s1">'root_quaternion_w'</span><span class="p">],</span>
+                <span class="n">state_vector</span><span class="p">[</span><span class="s1">'root_quaternion_x'</span><span class="p">],</span>
+                <span class="n">state_vector</span><span class="p">[</span><span class="s1">'root_quaternion_y'</span><span class="p">],</span>
+                <span class="n">state_vector</span><span class="p">[</span><span class="s1">'root_quaternion_z'</span><span class="p">]</span>
+            <span class="p">]</span>
+            <span class="n">R_quat</span> <span class="o">=</span> <span class="n">quaternion_to_matrix</span><span class="p">(</span><span class="n">quat</span><span class="p">)</span>
+            <span class="n">R_rest</span> <span class="o">=</span> <span class="n">euler_to_matrix</span><span class="p">(</span><span class="n">joint</span><span class="o">.</span><span class="n">rest_orientation</span><span class="p">)</span>
+            <span class="n">T_local</span><span class="p">[:</span><span class="mi">3</span><span class="p">,</span> <span class="p">:</span><span class="mi">3</span><span class="p">]</span> <span class="o">=</span> <span class="n">R_quat</span> <span class="o">@</span> <span class="n">R_rest</span>
+
+        <span class="k">else</span><span class="p">:</span>
+            <span class="c1"># Non-root: offset + rest + animation</span>
+            <span class="n">T_local</span><span class="p">[:</span><span class="mi">3</span><span class="p">,</span> <span class="mi">3</span><span class="p">]</span> <span class="o">=</span> <span class="n">joint</span><span class="o">.</span><span class="n">offset</span>
+            <span class="n">R_rest</span> <span class="o">=</span> <span class="n">euler_to_matrix</span><span class="p">(</span><span class="n">joint</span><span class="o">.</span><span class="n">rest_orientation</span><span class="p">)</span>
+            <span class="n">R_anim</span> <span class="o">=</span> <span class="n">get_animation_rotation</span><span class="p">(</span><span class="n">joint</span><span class="p">,</span> <span class="n">state_vector</span><span class="p">)</span>
+            <span class="n">T_local</span><span class="p">[:</span><span class="mi">3</span><span class="p">,</span> <span class="p">:</span><span class="mi">3</span><span class="p">]</span> <span class="o">=</span> <span class="n">R_rest</span> <span class="o">@</span> <span class="n">R_anim</span>
+
+        <span class="c1"># Compose with parent</span>
+        <span class="n">transforms</span><span class="p">[</span><span class="n">joint</span><span class="o">.</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">T_parent</span> <span class="o">@</span> <span class="n">T_local</span>
+
+    <span class="c1"># Marker positions</span>
+    <span class="n">marker_positions</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">marker</span> <span class="ow">in</span> <span class="n">skeleton</span><span class="o">.</span><span class="n">markers</span><span class="p">:</span>
+        <span class="n">T_joint</span> <span class="o">=</span> <span class="n">transforms</span><span class="p">[</span><span class="n">marker</span><span class="o">.</span><span class="n">parent_joint</span><span class="p">]</span>
+        <span class="n">pos_local</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="o">*</span><span class="n">marker</span><span class="o">.</span><span class="n">offset</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">])</span>
+        <span class="n">pos_world</span> <span class="o">=</span> <span class="n">T_joint</span> <span class="o">@</span> <span class="n">pos_local</span>
+        <span class="n">marker_positions</span><span class="p">[</span><span class="n">marker</span><span class="o">.</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">pos_world</span><span class="p">[:</span><span class="mi">3</span><span class="p">]</span>
+
+    <span class="k">return</span> <span class="n">marker_positions</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">get_animation_rotation</span><span class="p">(</span><span class="n">joint</span><span class="p">,</span> <span class="n">state_vector</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Extract animation rotation from state vector."""</span>
+    <span class="k">if</span> <span class="n">joint</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s1">'revolute'</span><span class="p">:</span>
+        <span class="n">angle</span> <span class="o">=</span> <span class="n">state_vector</span><span class="p">[</span><span class="sa">f</span><span class="s1">'joint_</span><span class="si">{</span><span class="n">joint</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s1">_angle_0'</span><span class="p">]</span>
+        <span class="k">return</span> <span class="n">axis_angle_to_matrix</span><span class="p">(</span><span class="n">joint</span><span class="o">.</span><span class="n">axis</span> <span class="o">*</span> <span class="n">angle</span><span class="p">)</span>
+
+    <span class="k">elif</span> <span class="n">joint</span><span class="o">.</span><span class="n">type</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">'ball'</span><span class="p">,</span> <span class="s1">'spherical'</span><span class="p">]:</span>
+        <span class="n">axis_angle</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span>
+            <span class="n">state_vector</span><span class="p">[</span><span class="sa">f</span><span class="s1">'joint_</span><span class="si">{</span><span class="n">joint</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s1">_angle_0'</span><span class="p">],</span>
+            <span class="n">state_vector</span><span class="p">[</span><span class="sa">f</span><span class="s1">'joint_</span><span class="si">{</span><span class="n">joint</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s1">_angle_1'</span><span class="p">],</span>
+            <span class="n">state_vector</span><span class="p">[</span><span class="sa">f</span><span class="s1">'joint_</span><span class="si">{</span><span class="n">joint</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s1">_angle_2'</span><span class="p">]</span>
+        <span class="p">])</span>
+        <span class="k">return</span> <span class="n">axis_angle_to_matrix</span><span class="p">(</span><span class="n">axis_angle</span><span class="p">)</span>
+
+    <span class="k">else</span><span class="p">:</span>  <span class="c1"># Fixed</span>
+        <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+</code></pre></div>
+<h2 id="data-properties">Data Properties<a class="headerlink" href="#data-properties" title="Permanent link">&para;</a></h2>
+<h3 id="frame-coverage">Frame Coverage<a class="headerlink" href="#frame-coverage" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Continuous frames</strong>: <code>tracker_frame_idx</code> typically increases by 1 each row</li>
+<li><strong>Gaps</strong>: Missing frames indicate tracking failure or dropped frames</li>
+<li><strong>Interpolation</strong>: Consumers may need to interpolate missing frames</li>
+</ul>
+<h3 id="numeric-precision">Numeric Precision<a class="headerlink" href="#numeric-precision" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Angles: Typically 6-8 decimal places (sub-millimeter precision in 3D)</li>
+<li>Positions: Meter-level with millimeter precision</li>
+<li>Very small values: Scientific notation (e.g., <code>1.234e-09</code>)</li>
+</ul>
+<h3 id="value-ranges">Value Ranges<a class="headerlink" href="#value-ranges" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Quaternions</strong>: Normalized, but may accumulate tiny errors (re-normalize if needed)</li>
+<li><strong>Joint angles</strong>: Within limits specified in skeleton YAML (may violate during tracking instability)</li>
+<li><strong>Velocities</strong>: Unbounded, but physically realistic values for human motion:</li>
+<li>Linear: &lt; 10 m/s</li>
+<li>Angular: &lt; 50 rad/s</li>
+</ul>
+<h3 id="missing-data">Missing Data<a class="headerlink" href="#missing-data" title="Permanent link">&para;</a></h3>
+<p>Some implementations use:
+- <code>NaN</code> for uninitialized/unavailable values
+- <code>0.0</code> for default/rest values</p>
+<p>Check specific tracker implementation for conventions.</p>
+<h2 id="relationship-to-pinocchio-configuration">Relationship to Pinocchio Configuration<a class="headerlink" href="#relationship-to-pinocchio-configuration" title="Permanent link">&para;</a></h2>
+<p>The tracker uses Pinocchio for kinematics. The state vector maps to Pinocchio's configuration vector <code>q</code>:</p>
+<h3 id="configuration-vector-q">Configuration Vector (<code>q</code>)<a class="headerlink" href="#configuration-vector-q" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Joint Type</th>
+<th>Pinocchio Representation</th>
+<th>Config Size</th>
+<th>State Vector Mapping</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Root (free-flyer)</td>
+<td>Position (3) + Quaternion [x,y,z,w]</td>
+<td>7</td>
+<td><code>root_position_{x,y,z}</code>, <code>root_quaternion_{w,x,y,z}</code> (reordered)</td>
+</tr>
+<tr>
+<td>Revolute</td>
+<td>Single angle</td>
+<td>1</td>
+<td><code>joint_{name}_angle_0</code></td>
+</tr>
+<tr>
+<td>Spherical</td>
+<td>Quaternion [x,y,z,w]</td>
+<td>4</td>
+<td>Convert axis-angle to quaternion</td>
+</tr>
+<tr>
+<td>Fixed</td>
+<td>—</td>
+<td>0</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Critical notes</strong>:
+- Pinocchio quaternion order: <code>[x, y, z, w]</code> (scalar-last)
+- State vector quaternion order: <code>[w, x, y, z]</code> (scalar-first)
+- Must reorder when passing to Pinocchio!
+- Spherical joints: State uses axis-angle, Pinocchio uses quaternion - conversion required</p>
+<h3 id="velocity-vector-v">Velocity Vector (<code>v</code>)<a class="headerlink" href="#velocity-vector-v" title="Permanent link">&para;</a></h3>
+<p>Similar structure but all components are velocities (6 for root, 3 for spherical, 1 for revolute).</p>
+<h2 id="implementation-references">Implementation References<a class="headerlink" href="#implementation-references" title="Permanent link">&para;</a></h2>
+<h3 id="c-tracker">C++ (Tracker)<a class="headerlink" href="#c-tracker" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>State storage</strong>: <code>cpp/src/core/state.cpp</code> and <code>cpp/include/posetrak/core/state.hpp</code></li>
+<li><strong>Pinocchio conversion</strong>: <code>cpp/src/kinematics/forward_kinematics.cpp</code> (<code>state_to_config()</code> function)</li>
+<li><strong>CSV export</strong>: Tracker outputs state vectors directly</li>
+</ul>
+<h3 id="python-visualization">Python (Visualization)<a class="headerlink" href="#python-visualization" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Loading</strong>: <code>pandas.read_csv()</code> with automatic column detection</li>
+<li><strong>FK computation</strong>: <code>scripts/visualize_tracking_results.py</code> (<code>compute_joint_transforms()</code>)</li>
+</ul>
+<h2 id="debugging-tips">Debugging Tips<a class="headerlink" href="#debugging-tips" title="Permanent link">&para;</a></h2>
+<h3 id="visualizing-state">Visualizing State<a class="headerlink" href="#visualizing-state" title="Permanent link">&para;</a></h3>
+<ol>
+<li><strong>Check quaternion normalization</strong>: <code>w² + x² + y² + z² ≈ 1</code></li>
+<li><strong>Plot joint angles over time</strong>: Should be smooth curves</li>
+<li><strong>Check velocity consistency</strong>: Numerical derivative of positions should match velocities</li>
+<li><strong>Validate against limits</strong>: Angles should stay within skeleton YAML limits</li>
+</ol>
+<h3 id="common-issues">Common Issues<a class="headerlink" href="#common-issues" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Likely Cause</th>
+<th>Solution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Skeleton in wrong position</td>
+<td>Incorrect root position/orientation</td>
+<td>Check coordinate system, quaternion order</td>
+</tr>
+<tr>
+<td>Limbs pointing wrong way</td>
+<td>Mismatched Euler angle convention</td>
+<td>Verify <code>orientation</code> computation (Rx<em>Ry</em>Rz)</td>
+</tr>
+<tr>
+<td>Discontinuous motion</td>
+<td>Dropped frames, tracking failure</td>
+<td>Interpolate missing frames</td>
+</tr>
+<tr>
+<td>Impossibly large angles</td>
+<td>Units mismatch (degrees vs radians)</td>
+<td>State vectors always use radians</td>
+</tr>
+<tr>
+<td>Jittery motion</td>
+<td>Noise in state estimates</td>
+<td>Apply smoothing filter</td>
+</tr>
+</tbody>
+</table>
+<h2 id="see-also">See Also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="../skeleton-format/">Skeleton YAML Format</a> - Defines joint hierarchy and rest poses</li>
+<li><code>cpp/src/kinematics/forward_kinematics.cpp</code> - Reference implementation</li>
+<li><code>scripts/visualize_tracking_results.py</code> - Python visualization example</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.tracking", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

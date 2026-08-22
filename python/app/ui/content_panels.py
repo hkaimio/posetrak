@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -438,7 +439,54 @@ def _fmt_time(s: float | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-class _CapturePersonsSection(QWidget):
+class _AddPersonDialog(QDialog):
+    """Name + optional default skeleton, in one step.
+
+    Previously "Add…" only asked for a name (QInputDialog.getText), so
+    setting a default skeleton needed choosing this new person's row
+    afterward and clicking "Default skeleton…" -- routine enough (every
+    person a tutorial adds needs one) that combining both into the add
+    step itself removes a whole extra round trip (2026-08-22 e2e testing).
+    """
+
+    def __init__(self, skeleton_names: dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Add person")
+
+        self._name_edit = QLineEdit()
+        self._skeleton_combo = QComboBox()
+        self._skeleton_combo.addItem("(none)", None)
+        for skeleton_id, name in skeleton_names.items():
+            self._skeleton_combo.addItem(name, skeleton_id)
+
+        form = QFormLayout()
+        form.addRow("Name:", self._name_edit)
+        form.addRow("Default skeleton:", self._skeleton_combo)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def _on_accept(self) -> None:
+        if not self._name_edit.text().strip():
+            QMessageBox.warning(self, "Name required", "Enter a name for this person.")
+            return
+        self.accept()
+
+    def name(self) -> str:
+        return self._name_edit.text().strip()
+
+    def default_skeleton_id(self) -> str | None:
+        return self._skeleton_combo.currentData()
+
+
+class CapturePersonsSection(QWidget):
     """"Persons" list for CapturePanel: this capture's named performers
     (config-improvements design doc, "Person model: promote identity to
     capture level"), with add/rename/set-default-skeleton/remove.
@@ -524,11 +572,13 @@ class _CapturePersonsSection(QWidget):
     def _on_add(self) -> None:
         from posetrak.db.manage_person import create_person
 
-        name, ok = QInputDialog.getText(self, "Add person", "Name:")
-        name = name.strip()
-        if not ok or not name:
+        dlg = _AddPersonDialog(self._skeleton_names, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        create_person(self._conn, self._capture_id, name)
+        create_person(
+            self._conn, self._capture_id, dlg.name(),
+            default_skeleton_id=dlg.default_skeleton_id(),
+        )
         self._refresh()
 
     def _on_rename(self) -> None:
@@ -686,7 +736,7 @@ class CapturePanel(QWidget):
         root.addWidget(build_default_config_row(self._conn, capture_id=self._capture_id, parent=self))
 
         # Persons (config-improvements design doc, phase 5)
-        root.addWidget(_CapturePersonsSection(self._conn, self._capture_id, parent=self))
+        root.addWidget(CapturePersonsSection(self._conn, self._capture_id, parent=self))
 
         # Bottom toolbar
         toolbar = QHBoxLayout()

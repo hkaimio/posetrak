@@ -17,9 +17,12 @@ last_updated = 2026-08-23
 
 See [packaging-design.md](packaging-design.md) for the full motivating
 problem, current-state trace, target vision, and recommended approach.
-See [code-signing-plan.md](code-signing-plan.md) for the Windows
-code-signing sub-plan (certificate options, CI wiring, a
-prototype-then-small-group-test phasing).
+See [installer-prototype-plan.md](installer-prototype-plan.md) for the
+near-term, Windows/CPU-only prototype-then-small-group-test plan this
+is actually starting with. See
+[code-signing-plan.md](code-signing-plan.md) for the Windows
+code-signing sub-plan — deliberately deferred until there's real
+evidence of interest in Posetrak beyond today's use.
 
 ## Current state
 

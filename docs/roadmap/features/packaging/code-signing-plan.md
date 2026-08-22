@@ -1,11 +1,15 @@
 # Windows code signing — implementation plan
 
-> **Status (2026-08-23)**: Proposal only, nothing implemented. Written up
-> after Harri asked what code signing would actually require (Windows
-> app deployment has changed significantly in the last few years — see
-> "What changed recently" below), and for a phased plan starting with a
-> prototype and a small test group rather than committing to a specific
-> certificate up front.
+> **Status (2026-08-23)**: Proposal only, nothing implemented, and
+> **deliberately deferred** — Harri: this is a hobby project with a
+> hobby budget, so paying for a certificate/signing service isn't
+> worth doing until there's real evidence of user interest in Posetrak
+> beyond its current use. The plan below is worth keeping ready for
+> that point rather than reconsidering from scratch, but isn't part of
+> the near-term installer prototype (see
+> [installer-prototype-plan.md](installer-prototype-plan.md)), which
+> ships unsigned and documents the resulting SmartScreen warning
+> instead.
 
 ## Why this matters at all
 

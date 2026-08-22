@@ -110,11 +110,18 @@ Design proposal: `docs/roadmap/features/packaging/packaging-design.md` — a
 thin bootstrapper (bundled `uv` binary + pre-built C++ tracker + a pinned
 lockfile snapshot) rather than a fully offline fat bundle, packaged as a
 Windows installer (Inno Setup) and a Linux AppImage, built via a new GitHub
-Actions release workflow. Proposal only as of 2026-08-23, nothing
-implemented. Independent, worth doing regardless: split the base
-`onnxruntime-gpu` dependency into a plain `onnxruntime` (CPU) base plus an
-opt-in GPU variant, matching the `segmentation` group's existing
-optional-heavy-dependency pattern.
+Actions release workflow. Near-term plan:
+`docs/roadmap/features/packaging/installer-prototype-plan.md` — a narrow
+Windows/CPU-only prototype, validated manually before any CI automation,
+then handed to a small group of real testers before deciding what's next.
+Ships unsigned; code signing
+(`docs/roadmap/features/packaging/code-signing-plan.md`) is deliberately
+deferred until there's real evidence of interest in Posetrak beyond
+today's use — a hobby project's budget doesn't justify it otherwise.
+Proposal only as of 2026-08-23, nothing implemented. Independent, worth
+doing regardless: split the base `onnxruntime-gpu` dependency into a plain
+`onnxruntime` (CPU) base plus an opt-in GPU variant, matching the
+`segmentation` group's existing optional-heavy-dependency pattern.
 
 ## 9. Ease AI-assistant (MCP) setup for end users
 

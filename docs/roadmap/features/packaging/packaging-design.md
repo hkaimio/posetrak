@@ -169,10 +169,14 @@ Not designed in detail — sizing the work for whoever picks it up:
 ## Open questions (not resolved here)
 
 1. **Code signing** for the Windows installer — an unsigned installer
-   triggers SmartScreen warnings. See
-   [code-signing-plan.md](code-signing-plan.md) for a concrete
-   implementation plan (certificate options, CI wiring, a
-   prototype-then-small-group-test phasing).
+   triggers SmartScreen warnings. Deliberately deferred (hobby project,
+   hobby budget) until there's real evidence of user interest beyond
+   today's use; the prototype installer (see
+   [installer-prototype-plan.md](installer-prototype-plan.md)) ships
+   unsigned and documents the resulting warning instead. See
+   [code-signing-plan.md](code-signing-plan.md) for the plan to pick
+   this up if/when it's worth doing (certificate options, CI wiring, a
+   prototype-then-small-group-test phasing of its own).
 2. **Auto-update** — out of scope for actually building in a first
    release, but the version-manifest shape above (paired
    `uv.lock` + tracker binary per release) is designed so it doesn't

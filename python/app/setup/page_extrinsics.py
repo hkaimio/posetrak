@@ -1936,6 +1936,15 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         # Data tab: the table plus a per-row-type detail pane beside it
         # (2026-08-14 follow-up) -- see _build_detail_pane/_refresh_detail_pane.
         data_tab = QWidget()
+        # A plain QWidget doesn't paint its own background by default,
+        # relying on whatever's already in the window's backing store
+        # underneath -- fine normally, but switching QTabWidget pages can
+        # occasionally leave the *previous* tab's pixels (the Cameras
+        # table) showing through until something else forces a repaint,
+        # reported as this pane looking transparent with the Cameras tab
+        # as its background (2026-08-22 e2e testing). Forcing an opaque
+        # paint here is the standard fix for that class of Qt glitch.
+        data_tab.setAutoFillBackground(True)
         data_tab_layout = QHBoxLayout(data_tab)
         data_tab_layout.setContentsMargins(0, 0, 0, 0)
         data_tab_layout.addWidget(self._data_table, 1)
@@ -2066,6 +2075,11 @@ class ExtrinsicsAutoCalibDialog(QDialog):
         """
         pane = QWidget()
         pane.setFixedWidth(220)
+        # See data_tab's own setAutoFillBackground(True) in _build_ui() for
+        # why: without it, this pane can show a stale, unrelated tab's
+        # pixels (the Cameras table) as its background until something
+        # else forces a repaint (2026-08-22 e2e testing).
+        pane.setAutoFillBackground(True)
         layout = QVBoxLayout(pane)
         layout.setContentsMargins(0, 0, 0, 0)
 

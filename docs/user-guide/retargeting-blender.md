@@ -9,24 +9,26 @@ your own character (different bone names, different proportions,
 possibly a different bone count) is **retargeting**, and Blender has no
 retargeting built in — it needs a dedicated add-on.
 
-This page is a generic Posetrak → Blender retargeting workflow. It
-walks through **BVH Retargeter**, a free, actively maintained add-on
-that handles arbitrary source/target bone naming — but it isn't the
-only option; see below.
+This page is a generic Posetrak → Blender retargeting workflow. It walks through
+**BVH Retargeter**, a free, actively maintained add-on that handles arbitrary
+source/target bone naming. If BVH Retargeter doesn't fit your pipeline there are
+other options, for example (ordered from lightweight to more capable
+but costly)
 
-## Other retargeting options
-
-If BVH Retargeter doesn't fit your pipeline:
-
-- **Auto-Rig Pro** (paid) — its Smart/Remap tools can retarget a BVH
-  import onto an Auto-Rig Pro rig, with more automated bone-length
-  matching than BVH Retargeter, at the cost of a purchase.
-- **Rokoko Studio Live for Blender** — built around Rokoko's own mocap
-  format, but also accepts generic BVH; a heavier install (the Rokoko
-  account/plugin ecosystem) for what is otherwise the same job.
 - Manual retargeting with **Copy Rotation** bone constraints — no
   add-on at all, just build the bone-to-bone mapping yourself. Viable
   for a one-off rig, painful to repeat.
+- **Rokoko Studio Live for Blender** is built around Rokoko's own mocap format,
+  but also accepts generic BVH. Retargeting functionality of the plugin is free
+  but requires creating and logging in to a Rokoko account.
+- **Auto-Rig Pro** (paid) — its Smart/Remap tools can retarget a BVH
+  import onto an Auto-Rig Pro rig, with more automated bone-length
+  matching than BVH Retargeter, at the cost of a purchase.
+- Commercial animation software packages like
+  [iClone](https://www.reallusion.com/iclone/default.html) or
+  [Cascadeur](https://cascadeur.com/) have extensive tools for motion capture
+  retargeting and cleanup. Both of the aforementioned tools work with Posetrak;
+  stay tuned for dedicated tutorials for those.
 
 The rest of this page covers **BVH Retargeter**, since it's free,
 needs no account, and — with the one-time rig profile described below
@@ -35,11 +37,11 @@ needs no account, and — with the one-time rig profile described below
 ## Prerequisites
 
 - Blender 4.2 or later (BVH Retargeter's minimum supported version).
-- A target character rig already in your `.blend` file — any bone
-  naming works, BVH Retargeter doesn't require it to match a "known"
-  rig, though results are best if it's already in a genuine T-pose at
-  rest.
-- A BVH file exported from Posetrak (below).
+- A rigged target character in your `.blend` file. This tutorial uses "Danny", a
+  free human model by Ethan Snell that has already been rigged with Blender's
+  Rigify tool. You can load the model from the [artist's web
+  site](https://pancake-manicure.gumroad.com/l/Danny).
+- A BVH file exported from Posetrak.
 
 ## Installing BVH Retargeter
 
@@ -57,35 +59,34 @@ install the zip via **Edit → Preferences → Add-ons → Install…**.
 
 ## Exporting BVH from Posetrak
 
-Navigate to trials tracking results of the person. CLick "Export BVH..." button in the information pane on right side of the window.
-
-See [Workflow: raw videos → BVH](../workflow-session-to-bvh.md) (Part
-10) for the full export pipeline if you're starting from a fresh
-capture rather than an existing tracking run.
+In Posetrak, navigate to the trial's tracking results for the person. Click the
+"Export BVH..." button in the information pane on the right side of the window.
 
 ## Importing into Blender
 
-Use Blender's built-in importer: **File → Import → Motion Capture
-(.bvh)**. Leave **Forward**/**Up** axes at their defaults (`-Z Forward`,
-`Y Up`) — that already matches `--coord yup`.
+Use Blender's built-in importer: **File → Import → Motion Capture (.bvh)**.
+
+- Leave **Forward**/**Up** axes at their defaults (`-Z Forward`, `Y Up`) — that
+  already matches `--coord yup`.
+- Select "Update scene FPS" and "Update scene duration" so that the scene's
+  timeline works as expected.
 
 This gives you a new armature shaped like Posetrak's tracking skeleton,
 animated, with frame 1 holding the T-pose. Nothing here uses BVH
-Retargeter yet — that starts next.
+Retargeter yet.
 
-!!! warning "Frame 1 must be the T-pose"
-    Everything below assumes frame 1 of the imported action is the
-    T-pose rest frame. If you exported with `--no-rest-frame`, or
-    trimmed the file before frame 1, re-export without that flag — the
-    T-pose frame is required, not optional, for a correct result.
+![](images/blender-armature-imported.jpg)
 
-## One-time setup: the Posetrak rig profile
+## BVH Retargeter one-time setup: the Posetrak rig profile
 
-BVH Retargeter can *guess* a source rig's bone roles from its names and
-hierarchy, and it can *guess* a T-pose by forcing arm and leg bones into
-a standard shape. For Posetrak's skeleton, both guesses need help:
+There is no single "right" convention for representing a human skeleton; most 3D
+packages and individual artists have different preferences. Unfortunately BVH
+files include very little information about the convention used, which can
+make retargeting an animation in another application painful. BVH Retargeter
+tries to *guess* a source rig's bone roles and the joint angles that put the
+model to T-pose, but for Posetrak's skeleton both guesses need some help:
 
-- Posetrak's neck is two bones (`neck1`, `neck2`) before the head, but
+- Posetrak's neck has two bones (`neck1`, `neck2`) before the head, but
   BVH Retargeter's automatic bone-role heuristic always assumes exactly
   one neck bone — it mislabels `neck2` as the head and leaves the real
   head bone unmapped, so head motion comes out visibly wrong.
@@ -125,21 +126,21 @@ different bone count, these two files won't match yours as-is — see
 
 ## Retargeting
 
-1. Have both armatures in the scene: your imported Posetrak BVH (the
-   **source**) and your character rig (the **target**), already
-   positioned/scaled sensibly relative to each other.
-2. Click the source armature to select it, then **shift-click the
-   target armature last** so both are selected and the target is
-   active.
-3. Run **BVH Retargeter → Retarget Selected To Active** (or **Load And
-   Retarget** if you haven't imported the BVH yet — it does the import
-   for you, and expects the target to already be the active object).
+1. Have both armatures in the scene: your imported Posetrak BVH (the **source**)
+   and your character rig (the **target**), already positioned/scaled sensibly
+   relative to each other. If you have scaled the target rig, you *MUST* apply all
+   transforms before retargeting (Object -> Apply -> All Transforms).
+2. Click the source armature (the one you imported from Posetrak BVH file) to
+   select it, then **shift-click the target armature last** so both are selected
+   and the target is active. The source should show as orange and the target as
+   yellow.
+3. Click **BVH Retargeter → Retarget Selected To Active**.
+   ![](images/blender-bvh-retarget.jpg)
 4. In the confirmation dialog:
      - **Source** — with the Posetrak rig profile installed, **Auto
        Source** should detect "Posetrak" automatically for both Source
-       Rig and Source T-Pose; check the dropdowns show that before
-       confirming. If it didn't (profile not installed, or your BVH is
-       missing a bone the profile expects), uncheck **Auto Source** and
+       Rig and Source T-Pose; check that the dropdowns show that before
+       confirming. If it didn't, uncheck **Auto Source** and
        set **Source Rig** to `Automatic` and **Source T-Pose** to
        `Posetrak` manually.
      - **Target** — if your target is a rig BVH Retargeter recognizes
@@ -147,7 +148,19 @@ different bone count, these two files won't match yours as-is — see
        should just work. If it's a custom rig and you see the same
        clavicle/foot rotation problem on the *target* after retargeting,
        it needs the same treatment — see below.
-5. Confirm, then scrub the timeline to check the result.
+5. Confirm. Retargeting takes some time, depending on the length of your
+   capture, and Blender will be unresponsive while BVH retargeter works. When
+   ready, scrub the timeline to check the result.
+
+![Target model animated by the Posetrak data](images/bvh-retargeter-results-danny.gif)
+
+Usually you need to do some adjustments to motion capture animations to get high
+quality results. The tracking data might have errors, and the target model's
+body dimensions are seldom exactly identical to those of the tracked person,
+which can cause e.g. feet sliding on the ground and hands penetrating other
+body parts. There are many tutorials on cleaning up motion capture data in
+Blender — Google is your friend here.
+
 
 !!! warning "Auto Source / Auto Target silently override your dropdown choices"
     Whichever of Auto Source / Auto Target is checked re-guesses the
@@ -201,7 +214,7 @@ the source side:
   Rig** should show `neck1 → neck`, `neck2 → neck-1`, `head → head`.
 
 **Retargeted motion just sits in the T-pose the whole time**
-: Check the frame range used by the retarget operator covers your
+: Check that the frame range used by the retarget operator covers your
   actual motion, and that frame 1 (the T-pose reference the operator
   needs) is actually present — it isn't if you exported with
   `--no-rest-frame`.
@@ -210,8 +223,6 @@ the source side:
 
 - [Your first capture](first-capture.md) — where this fits in the
   overall workflow.
-- [Workflow: raw videos → BVH](../workflow-session-to-bvh.md) — the
-  full capture-to-BVH pipeline.
 
 ---
 

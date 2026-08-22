@@ -273,17 +273,59 @@ def copy_config_to_session(
 BASELINE_CONFIG_ID = "factory-defaults"
 BASELINE_CONFIG_NAME = "(factory defaults)"
 
+#: Known-good tuning values the baseline config is seeded with, copied from
+#: config id 3d0dd7fc-195d-4997-8218-1d17b5179e5d ("ukemit - tommi et al" in
+#: a real, working 16-capture session recorded 2026-08) -- replaces an
+#: earlier all-NULL baseline, which showed a wall of empty/zero fields the
+#: first time a new user opened the tracker config editor rather than a
+#: usable starting point. Deliberately excludes that config's
+#: velocity_mode_camera_ids ([2]): it names a specific camera by index
+#: within one particular capture's camera set, which has no general meaning
+#: for a fresh install with a different (or no) camera layout. Columns not
+#: listed here stay NULL, same as before this fix: SessionReader's own
+#: hardcoded fallback constants apply (see load_tracker_config in
+#: cpp/src/db/session_reader.cpp).
+BASELINE_CONFIG_VALUES: dict[str, object] = {
+    "process_noise_std": 0.3,
+    "process_noise_vel_std": 1.0,
+    "velocity_half_life_s": 0.25,
+    "measurement_noise_std": 25.0,
+    "outlier_threshold": 6.0,
+    "tracker_fps": 120.0,
+    "pose_noise_std": 13.0,
+    "use_relative_observations": 1,
+    "relative_min_confidence": 0.5,
+    "process_noise_vel_gain_joint": 0.0,
+    "process_noise_vel_ref_joint": 2.0,
+    "process_noise_vel_gain_root": 0.0,
+    "process_noise_vel_ref_root": 1.0,
+    "pose_reg_joint_names": ["spine1", "spine2"],
+    "pose_reg_equal_split_noise_std": 0.03,
+    "pose_reg_rest_pose_noise_std": 0.15,
+    "nis_feedback_window": 8,
+    "nis_feedback_threshold": 1.5,
+    "nis_feedback_max_multiplier": 3.0,
+    "soft_limit_joint_names": ["upper_arm.L", "upper_arm.R"],
+    "soft_limit_margin_rad": 0.1222,
+    "soft_limit_noise_std": 0.03,
+    "edited_kp_noise_std": 28.178,
+    "cross_person_max_world_mm": 400.0,
+    "cross_person_min_confidence": 0.5,
+    "cross_person_max_n": 30,
+}
+
 
 def seed_baseline_tracker_config(conn: sqlite3.Connection) -> str:
     """Insert the checked-in baseline tracker_configs row if not already present.
 
     Idempotent (INSERT OR IGNORE keyed on the fixed BASELINE_CONFIG_ID), like
-    manage_skeleton.seed_default_skeletons() which this mirrors. Every tuning
-    column is left NULL, so SessionReader's existing hardcoded fallback
-    constants apply -- this row is not a *value* to reach for, it's just
-    something real for the default-config resolution chain (session ->
-    capture -> trial) to terminate in rather than an empty dialog. is_named=1
-    so it appears in the named-config picker.
+    manage_skeleton.seed_default_skeletons() which this mirrors. Tuning
+    columns are populated from BASELINE_CONFIG_VALUES; any column not listed
+    there is left NULL, so SessionReader's existing hardcoded fallback
+    constants apply to it -- this row's job is to give a new user a sane,
+    working starting point in the config editor, not to be the single
+    source of truth for every tuning constant. is_named=1 so it appears in
+    the named-config picker.
 
     Parameters
     ----------
@@ -296,13 +338,35 @@ def seed_baseline_tracker_config(conn: sqlite3.Connection) -> str:
         BASELINE_CONFIG_ID, whether the row was just created or already existed.
     """
     created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    columns = _tuning_columns(conn)
+    values = [_encode(BASELINE_CONFIG_VALUES.get(col)) for col in columns]
     with conn:
         conn.execute(
-            "INSERT OR IGNORE INTO tracker_configs (id, name, parent_id, created_at, is_named) "
-            "VALUES (?, ?, NULL, ?, 1)",
-            (BASELINE_CONFIG_ID, BASELINE_CONFIG_NAME, created_at),
+            "INSERT OR IGNORE INTO tracker_configs (id, name, parent_id, created_at, is_named, "
+            + ", ".join(columns) + ") VALUES ("
+            + ", ".join(["?"] * (5 + len(columns))) + ")",
+            (BASELINE_CONFIG_ID, BASELINE_CONFIG_NAME, None, created_at, 1, *values),
         )
     return BASELINE_CONFIG_ID
+
+
+def refresh_baseline_tracker_config(conn: sqlite3.Connection) -> None:
+    """Update an already-seeded baseline row's tuning values in place.
+
+    seed_baseline_tracker_config() is INSERT OR IGNORE, so an existing
+    registry/session created before BASELINE_CONFIG_VALUES was populated
+    keeps its all-NULL row forever -- this backfills it. Only touches the
+    row matching BASELINE_CONFIG_ID; safe to call unconditionally (no-op if
+    the row doesn't exist yet, matching seed's own idempotency).
+    """
+    columns = _tuning_columns(conn)
+    values = [_encode(BASELINE_CONFIG_VALUES.get(col)) for col in columns]
+    with conn:
+        conn.execute(
+            "UPDATE tracker_configs SET " + ", ".join(f"{c} = ?" for c in columns)
+            + " WHERE id = ?",
+            (*values, BASELINE_CONFIG_ID),
+        )
 
 
 def name_existing_config(conn: sqlite3.Connection, config_id: str, name: str) -> None:

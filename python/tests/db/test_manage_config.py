@@ -311,6 +311,68 @@ def test_seed_baseline_tracker_config_idempotent(registry_db: sqlite3.Connection
     assert count == 1
 
 
+def test_seed_baseline_tracker_config_has_real_values(
+    registry_db: sqlite3.Connection,
+) -> None:
+    """The baseline row should be a usable starting point, not a wall of
+    NULLs -- see BASELINE_CONFIG_VALUES for provenance."""
+    row = registry_db.execute(
+        "SELECT process_noise_std, measurement_noise_std, tracker_fps, "
+        "pose_noise_std, use_relative_observations, velocity_mode_camera_ids "
+        "FROM tracker_configs WHERE id = ?",
+        (BASELINE_CONFIG_ID,),
+    ).fetchone()
+    assert row["process_noise_std"] == pytest.approx(0.3)
+    assert row["measurement_noise_std"] == pytest.approx(25.0)
+    assert row["tracker_fps"] == pytest.approx(120.0)
+    assert row["pose_noise_std"] == pytest.approx(13.0)
+    assert row["use_relative_observations"] == 1
+    # Scene-specific (names a camera by index in one particular capture) --
+    # deliberately not carried into the baseline. See BASELINE_CONFIG_VALUES.
+    assert row["velocity_mode_camera_ids"] is None
+
+
+def test_refresh_baseline_tracker_config_backfills_existing_null_row(
+    registry_db: sqlite3.Connection,
+) -> None:
+    """A registry/session created before BASELINE_CONFIG_VALUES existed has
+    an all-NULL baseline row forever (seed is INSERT OR IGNORE) unless
+    explicitly refreshed."""
+    from posetrak.db.manage_config import refresh_baseline_tracker_config
+
+    registry_db.execute(
+        "UPDATE tracker_configs SET process_noise_std = NULL, tracker_fps = NULL "
+        "WHERE id = ?",
+        (BASELINE_CONFIG_ID,),
+    )
+    registry_db.commit()
+
+    refresh_baseline_tracker_config(registry_db)
+
+    row = registry_db.execute(
+        "SELECT process_noise_std, tracker_fps FROM tracker_configs WHERE id = ?",
+        (BASELINE_CONFIG_ID,),
+    ).fetchone()
+    assert row["process_noise_std"] == pytest.approx(0.3)
+    assert row["tracker_fps"] == pytest.approx(120.0)
+
+
+def test_refresh_baseline_tracker_config_noop_if_missing(
+    registry_db: sqlite3.Connection,
+) -> None:
+    """Safe to call even if the baseline row doesn't exist (matches seed's
+    own idempotency), rather than raising."""
+    from posetrak.db.manage_config import refresh_baseline_tracker_config
+
+    registry_db.execute("DELETE FROM tracker_configs WHERE id = ?", (BASELINE_CONFIG_ID,))
+    registry_db.commit()
+    refresh_baseline_tracker_config(registry_db)  # must not raise
+    count = registry_db.execute(
+        "SELECT COUNT(*) FROM tracker_configs WHERE id = ?", (BASELINE_CONFIG_ID,)
+    ).fetchone()[0]
+    assert count == 0
+
+
 # ---------------------------------------------------------------------------
 # name_existing_config
 # ---------------------------------------------------------------------------

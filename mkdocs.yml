@@ -51,6 +51,7 @@ nav:
       - Synchronizing videos: user-guide/synchronizing-videos.md
       - Analyzing poses: user-guide/analyzing-poses.md
       - Tracking & troubleshooting: user-guide/tracking-troubleshooting.md
+      - Retargeting to Blender: user-guide/retargeting-blender.md
   - Architecture:
       - Overview: architecture/overview.md
       - C++ tracker: architecture/cpp-tracker.md

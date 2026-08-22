@@ -201,11 +201,26 @@ def create_registry(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = _connect(path)
     _apply_schema(conn, _REGISTRY_SCHEMA_SQL, REGISTRY_SCHEMA_VERSION)
+    seed_bundled_defaults(conn)
+    return conn
+
+
+def seed_bundled_defaults(conn: sqlite3.Connection) -> None:
+    """Seed the bundled default skeletons and baseline tracker config.
+
+    create_registry() always calls this. create_session() deliberately
+    does *not* -- it's also used internally for exports/round-trips that
+    need a genuinely empty session (see e.g. trial_export.py), so callers
+    that create a session a person will actually start using (the setup
+    wizard, `session create`, `session add-camera`, ...) call this
+    themselves right after create_session() instead. Idempotent
+    (INSERT OR IGNORE, keyed by content hash / a fixed ID), so safe to
+    call on an already-seeded connection.
+    """
     from posetrak.db.manage_skeleton import seed_default_skeletons
     seed_default_skeletons(conn)
     from posetrak.db.manage_config import seed_baseline_tracker_config
     seed_baseline_tracker_config(conn)
-    return conn
 
 
 def open_registry(path: Path) -> sqlite3.Connection:

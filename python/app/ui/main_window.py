@@ -33,6 +33,7 @@ from posetrak.db.db import (
     create_session,
     open_registry,
     open_session,
+    seed_bundled_defaults,
 )
 from app.ui.session_tree import SessionTreeWidget
 
@@ -258,6 +259,7 @@ class MainWindow(QMainWindow):
         try:
             conn = create_session(p)
             create_mocap_session(conn)
+            seed_bundled_defaults(conn)
         except Exception as exc:
             QMessageBox.critical(self, "Cannot create session", str(exc))
             return

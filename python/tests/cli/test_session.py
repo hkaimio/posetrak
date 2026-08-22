@@ -61,6 +61,32 @@ class TestSessionCreate:
         assert "session_id:" in result.output
         assert session_db_path_new.exists()
 
+    def test_creates_session_in_new_db_seeds_bundled_defaults(
+        self,
+        cli_runner: CliRunner,
+        session_db_path_new: Path,
+    ) -> None:
+        """create_session() alone doesn't seed anything (also used for
+        exports/round-trips that need a genuinely empty session) -- the
+        CLI command, which represents a person actually starting a new
+        session, seeds bundled defaults itself so the skeleton picker and
+        baseline tracker config aren't empty (2026-08-23 e2e-testing
+        follow-up)."""
+        import sqlite3
+
+        result = cli_runner.invoke(
+            main,
+            ["--session", str(session_db_path_new), "session", "create"],
+        )
+        assert result.exit_code == 0, result.output
+
+        conn = sqlite3.connect(session_db_path_new)
+        assert conn.execute("SELECT COUNT(*) FROM skeletons").fetchone()[0] == 2
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tracker_configs WHERE id = 'factory-defaults'"
+        ).fetchone()[0] == 1
+        conn.close()
+
     def test_creates_session_in_existing_db(
         self,
         cli_runner: CliRunner,

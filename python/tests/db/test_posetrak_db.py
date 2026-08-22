@@ -32,6 +32,7 @@ from posetrak.db.db import (
     open_registry,
     open_session,
     resolve_path,
+    seed_bundled_defaults,
     set_project_root,
 )
 
@@ -1190,6 +1191,36 @@ def test_session_db_has_registry_tables(session_db: sqlite3.Connection) -> None:
     for table in ("camera_models", "camera_modes", "camera_instances",
                   "intrinsics_calibrations", "skeletons", "tracker_configs"):
         assert table in actual, f"Registry table missing from session DB: {table!r}"
+
+
+def test_create_session_does_not_seed_bundled_defaults(
+    session_db: sqlite3.Connection,
+) -> None:
+    """Unlike create_registry(), create_session() applies only the schema --
+    it's also used internally for exports/round-trips that need a
+    genuinely empty session (see trial_export.py). Callers representing a
+    person actually starting a new session call seed_bundled_defaults()
+    themselves right after (setup wizard, `session create`, `session
+    add-camera`, ...)."""
+    assert session_db.execute("SELECT COUNT(*) FROM skeletons").fetchone()[0] == 0
+    assert session_db.execute("SELECT COUNT(*) FROM tracker_configs").fetchone()[0] == 0
+
+
+def test_seed_bundled_defaults_seeds_session(session_db: sqlite3.Connection) -> None:
+    seed_bundled_defaults(session_db)
+    assert session_db.execute("SELECT COUNT(*) FROM skeletons").fetchone()[0] == 2
+    assert session_db.execute(
+        "SELECT COUNT(*) FROM tracker_configs WHERE id = 'factory-defaults'"
+    ).fetchone()[0] == 1
+
+
+def test_seed_bundled_defaults_idempotent(session_db: sqlite3.Connection) -> None:
+    seed_bundled_defaults(session_db)
+    seed_bundled_defaults(session_db)
+    assert session_db.execute("SELECT COUNT(*) FROM skeletons").fetchone()[0] == 2
+    assert session_db.execute(
+        "SELECT COUNT(*) FROM tracker_configs WHERE id = 'factory-defaults'"
+    ).fetchone()[0] == 1
 
 
 def test_add_session_camera_copies_camera_rows(

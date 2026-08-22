@@ -87,6 +87,7 @@ from posetrak.db.db import (
     create_mocap_session,
     create_session,
     create_shot,
+    seed_bundled_defaults,
 )
 from posetrak.db.import_calib_toml import import_calib_toml
 from posetrak.db.import_extrinsics import import_extrinsics
@@ -318,6 +319,7 @@ def main() -> int:
               "Delete it first or choose a different path.", file=sys.stderr)
         return 1
     print(f"\nCreated session DB: {db_path}")
+    seed_bundled_defaults(db)
 
     # The session DB includes all registry tables (camera_models, camera_modes,
     # camera_instances, intrinsics_calibrations, skeletons, tracker_configs).

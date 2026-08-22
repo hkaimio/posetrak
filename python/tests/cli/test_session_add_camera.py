@@ -164,6 +164,34 @@ class TestAddCameraAutoResolve:
         assert conn.execute("SELECT COUNT(*) FROM capture_videos").fetchone()[0] == 0
         conn.close()
 
+    def test_freshly_created_target_gets_bundled_defaults(
+        self, cli_runner: CliRunner, tmp_path: Path,
+        source_session_one_calibration: tuple[Path, str],
+    ) -> None:
+        """A brand-new target session (this command creates it if missing)
+        needs the bundled default skeletons and baseline tracker config to
+        be usable at all -- create_session() alone doesn't seed them
+        (2026-08-23 e2e-testing follow-up: a tutorial session built this
+        way had no skeleton choices anywhere and an all-NULL 'factory
+        defaults' tracker config)."""
+        src_path, label = source_session_one_calibration
+        target_path = tmp_path / "target.db"
+
+        result = cli_runner.invoke(main, [
+            "--session", str(target_path),
+            "session", "add-camera",
+            "--from", str(src_path),
+            "--camera", label,
+        ])
+        assert result.exit_code == 0, result.output
+
+        conn = sqlite3.connect(target_path)
+        assert conn.execute("SELECT COUNT(*) FROM skeletons").fetchone()[0] == 2
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tracker_configs WHERE id = 'factory-defaults'"
+        ).fetchone()[0] == 1
+        conn.close()
+
     def test_no_fk_violation_with_default_intrinsics_set(
         self, cli_runner: CliRunner, tmp_path: Path,
         source_session_one_calibration: tuple[Path, str],

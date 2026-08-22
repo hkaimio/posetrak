@@ -21,6 +21,7 @@ from posetrak.db.db import (
     open_registry,
     open_session,
     resolve_id_prefix,
+    seed_bundled_defaults,
     set_capture_extrinsics,
 )
 from posetrak.db.import_extrinsics import import_extrinsics
@@ -138,13 +139,19 @@ def session_create(obj: dict, date: str, location: str, notes: str) -> None:
             "A session DB path is required. Use --session PATH or set $POSETRAK_SESSION_DB."
         )
     sess_path = Path(path)
+    is_new = not sess_path.exists()
     try:
-        if sess_path.exists():
-            conn = open_session(sess_path)
-        else:
-            conn = create_session(sess_path)
+        conn = open_session(sess_path) if not is_new else create_session(sess_path)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(f"Error opening session db: {exc}") from exc
+
+    if is_new:
+        # create_session() only applies the schema; seed the same bundled
+        # defaults create_registry() seeds a fresh registry with, so a
+        # session created this way isn't stuck with an empty skeleton
+        # picker and an all-NULL baseline tracker config (2026-08-23
+        # e2e-testing follow-up).
+        seed_bundled_defaults(conn)
 
     try:
         session_id = create_mocap_session(
@@ -206,14 +213,18 @@ def session_import_yaml(
             "A session DB path is required. Use --session PATH or set $POSETRAK_SESSION_DB."
         )
     sess_path = Path(path)
+    is_new = not sess_path.exists()
     try:
-        if sess_path.exists():
-            session_conn = open_session(sess_path)
-        else:
-            session_conn = create_session(sess_path)
+        session_conn = open_session(sess_path) if not is_new else create_session(sess_path)
     except (FileNotFoundError, ValueError) as exc:
         registry.close()
         raise click.ClickException(f"Error opening session db: {exc}") from exc
+
+    if is_new:
+        # See session_create's identical seeding for why: create_session()
+        # doesn't seed bundled defaults on its own (2026-08-23 e2e-testing
+        # follow-up).
+        seed_bundled_defaults(session_conn)
 
     try:
         result = import_session_yaml(
@@ -369,10 +380,17 @@ def session_add_camera(
             "A session DB path is required. Use --session PATH or set $POSETRAK_SESSION_DB."
         )
     sess_path = Path(path)
+    is_new = not sess_path.exists()
     try:
-        session_conn = open_session(sess_path) if sess_path.exists() else create_session(sess_path)
+        session_conn = open_session(sess_path) if not is_new else create_session(sess_path)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(f"Error opening session db: {exc}") from exc
+
+    if is_new:
+        # See session_create's identical seeding for why: create_session()
+        # doesn't seed bundled defaults on its own (2026-08-23 e2e-testing
+        # follow-up).
+        seed_bundled_defaults(session_conn)
 
     try:
         source_conn = open_source_readonly(Path(from_path))

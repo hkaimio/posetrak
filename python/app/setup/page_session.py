@@ -50,6 +50,7 @@ from posetrak.db.db import (
     get_schema_version,
     open_registry,
     open_session,
+    seed_bundled_defaults,
 )
 
 
@@ -333,6 +334,7 @@ class SessionPage(QWizardPage):
                 "Choose a new path or use 'Open existing session'."
             )
         conn = create_session(path)
+        seed_bundled_defaults(conn)
         self._just_created_path = path
         session_id = generate_id()
         now = datetime.now(timezone.utc).isoformat()

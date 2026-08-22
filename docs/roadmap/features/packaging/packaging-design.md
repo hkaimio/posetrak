@@ -86,6 +86,23 @@ Two fundamentally different shapes were worth weighing:
    that release version. A launcher shortcut runs `uv sync` against
    that lockfile on first launch, then `uv run posetrak-ui`.
 
+**The C++ tracker binary could be a download too, not bundled** (Harri,
+2026-08-23) — shrinking the installer itself to just the `uv` binary and
+a launcher, with the tracker fetched at first-run alongside the Python
+deps. This is worth doing, and it's the key that unlocks a real
+"check for updates" story: the tracker binary and the Python side must
+always agree on their data/CLI contract (config TOML shape, CSV output
+columns, etc.), so an update needs to bump both together, never one
+without the other. Concretely, this means a **version manifest** (a
+small JSON file per release, fetched from a stable URL) that pairs one
+`uv.lock` snapshot with one tracker-binary download URL + checksum for
+each OS/variant — "update" then means: fetch the new manifest, `uv
+sync` against its lockfile, and replace the tracker binary from its
+paired URL, as one atomic operation. See the auto-update open question
+below and `code-signing-plan.md` (once auto-update needs the tracker
+binary re-downloaded post-install, its signature needs verifying the
+same way the installer's did at install time — the two are linked).
+
 **Recommendation: (2), the thin bootstrapper.** It means "install the
 release" and "set up a dev checkout" resolve dependencies through the
 exact same mechanism — one lockfile drives both, so there's no separate
@@ -152,12 +169,19 @@ Not designed in detail — sizing the work for whoever picks it up:
 ## Open questions (not resolved here)
 
 1. **Code signing** for the Windows installer — an unsigned installer
-   triggers SmartScreen warnings; whether that's acceptable for a first
-   release or needs a certificate (cost + process) isn't decided.
-2. **Auto-update** — out of scope for a first release, but worth naming
-   now so the launcher/bootstrap shape doesn't accidentally foreclose it
-   later (e.g. the launcher could someday check the lockfile's version
-   against the latest release before running `uv sync`).
+   triggers SmartScreen warnings. See
+   [code-signing-plan.md](code-signing-plan.md) for a concrete
+   implementation plan (certificate options, CI wiring, a
+   prototype-then-small-group-test phasing).
+2. **Auto-update** — out of scope for actually building in a first
+   release, but the version-manifest shape above (paired
+   `uv.lock` + tracker binary per release) is designed so it doesn't
+   foreclose adding a "check for updates" action later: fetch the
+   latest manifest, compare its version against what's installed, and
+   re-run the same fetch-and-replace steps the installer's first launch
+   already does. Re-downloading a tracker binary post-install needs the
+   same signature verification the installer itself needs at install
+   time — see code-signing-plan.md.
 3. **GPU vendor scope** — this doc only discusses NVIDIA/CUDA, matching
    `docs/setup.md`'s existing GPU-acceleration section. AMD/Intel GPU
    support isn't part of the current dependency story at all and isn't

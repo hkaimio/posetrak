@@ -17,13 +17,17 @@ last_updated = 2026-08-23
 
 See [packaging-design.md](packaging-design.md) for the full motivating
 problem, current-state trace, target vision, and recommended approach.
+See [code-signing-plan.md](code-signing-plan.md) for the Windows
+code-signing sub-plan (certificate options, CI wiring, a
+prototype-then-small-group-test phasing).
 
 ## Current state
 
 **2026-08-23: proposal only.** Nothing implemented — no installer
 scripts, no AppImage recipe, no release CI workflow, no `onnxruntime-gpu`
-split. Written up in response to Harri asking how to produce a real
-release artifact, ahead of the first Posetrak release.
+split, no certificate acquired. Written up in response to Harri asking
+how to produce a real release artifact, ahead of the first Posetrak
+release.
 
 ## Known issues / open questions
 

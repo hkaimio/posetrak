@@ -18,6 +18,7 @@ from pathlib import Path
 
 import click
 
+from posetrak.cli._camera import resolve_camera_instance
 from posetrak.cli._output import fail, print_table
 from posetrak.db.db import create_session, generate_id, open_session, resolve_id_prefix
 from posetrak.db.trial_export import (
@@ -27,6 +28,7 @@ from posetrak.db.trial_export import (
     import_trials,
     open_source_readonly,
 )
+from posetrak.db.video_export import VideoExportError, plan_clip, resolve_sync_config, run_ffmpeg_extract
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +244,7 @@ def cmd_show(ctx: click.Context, trial_id: str) -> None:
     click.echo(f"Capture:  {trial['capture_label']}")
     start = f"{trial['time_start_s']:.3f} s" if trial["time_start_s"] is not None else "—"
     end = f"{trial['time_end_s']:.3f} s" if trial["time_end_s"] is not None else "—"
-    click.echo(f"Range:    {start} → {end}")
+    click.echo(f"Range:    {start} -> {end}")
     click.echo()
 
     if detection_runs:
@@ -268,6 +270,153 @@ def cmd_show(ctx: click.Context, trial_id: str) -> None:
         click.echo("Tracking runs: none")
 
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# trial export-video
+# ---------------------------------------------------------------------------
+
+
+@trial_group.command("export-video")
+@click.option("--trial", "trial_id", default=None, metavar="ID",
+              help="Trial ID or prefix — uses its recorded time_start_s/time_end_s.")
+@click.option("--capture", "capture_id_opt", default=None, metavar="ID",
+              help="Capture ID or prefix. Required with --start/--end instead of --trial.")
+@click.option("--start", "start_s", type=float, default=None, metavar="S",
+              help="Master-timeline range start, in seconds. Used instead of --trial.")
+@click.option("--end", "end_s", type=float, default=None, metavar="S",
+              help="Master-timeline range end, in seconds. Used instead of --trial.")
+@click.option("--before", type=float, default=0.0, metavar="S",
+              help="Extra seconds of padding before the range start.")
+@click.option("--after", type=float, default=0.0, metavar="S",
+              help="Extra seconds of padding after the range end.")
+@click.option("--camera", "cameras", multiple=True, required=True, metavar="LABEL",
+              help="Camera to extract, by label or camera_instances.id prefix. Repeatable.")
+@click.option("--sync-config", "sync_config_id", default=None, metavar="ID",
+              help="Disambiguate which sync config to use, if the capture has more than one.")
+@click.option("--output-dir", "output_dir", required=True, metavar="DIR",
+              help="Directory to write <camera-label>.mp4 clips into.")
+@click.option("--overwrite", is_flag=True, default=False,
+              help="Overwrite existing output files (ffmpeg default: refuse).")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Print the computed per-camera plan without running ffmpeg.")
+@click.pass_context
+def cmd_export_video(
+    ctx: click.Context,
+    trial_id: str | None,
+    capture_id_opt: str | None,
+    start_s: float | None,
+    end_s: float | None,
+    before: float,
+    after: float,
+    cameras: tuple[str, ...],
+    sync_config_id: str | None,
+    output_dir: str,
+    overwrite: bool,
+    dry_run: bool,
+) -> None:
+    """Extract per-camera video clips for a time range, sync-mapped from
+    the capture's master timeline onto each camera's own footage.
+
+    Requires ffmpeg/ffprobe on PATH. Clips are stream-copied (no
+    re-encode): fast and lossless, but the actual start can land up to one
+    keyframe interval earlier than requested (never later, so the range
+    you asked for is never cut short).
+
+    Examples:
+
+        posetrak --session ukemi.db trial export-video \\
+            --trial c426e57d --before 2 --after 2 \\
+            --camera insta_ace2_pro --camera gopro-11_mini_02 --camera pixel9 \\
+            --output-dir D:/mocap/tutorial1-template
+
+        posetrak --session ukemi.db trial export-video \\
+            --capture 6ca933a5 --start 90 --end 100 \\
+            --camera pixel9 --output-dir clips/
+    """
+    session_path: str | None = ctx.obj.get("session")
+    if session_path is None:
+        fail("--session / POSETRAK_SESSION_DB is required for 'trial export-video'.")
+
+    try:
+        conn = open_source_readonly(Path(session_path))
+    except Exception as exc:  # noqa: BLE001
+        fail(f"Cannot open session: {exc}")
+
+    if trial_id is not None:
+        try:
+            resolved_trial = resolve_id_prefix(conn, "trials", trial_id)
+        except ValueError as exc:
+            fail(str(exc))
+        trial = conn.execute(
+            "SELECT capture_id, time_start_s, time_end_s FROM trials WHERE id = ?",
+            (resolved_trial,),
+        ).fetchone()
+        if trial["time_start_s"] is None or trial["time_end_s"] is None:
+            fail(f"Trial {trial_id!r} has no recorded time_start_s/time_end_s.")
+        capture_id = trial["capture_id"]
+        master_start = trial["time_start_s"] - before
+        master_end = trial["time_end_s"] + after
+    else:
+        if capture_id_opt is None or start_s is None or end_s is None:
+            fail("Either --trial, or --capture with --start/--end, is required.")
+        try:
+            capture_id = resolve_id_prefix(conn, "captures", capture_id_opt)
+        except ValueError as exc:
+            fail(str(exc))
+        master_start = start_s - before
+        master_end = end_s + after
+
+    try:
+        resolved_sync_config = resolve_sync_config(conn, capture_id, sync_config_id)
+    except VideoExportError as exc:
+        fail(str(exc))
+
+    plans = []
+    for label in cameras:
+        try:
+            camera_instance_id = resolve_camera_instance(conn, label)
+            plan = plan_clip(
+                conn,
+                capture_id=capture_id,
+                sync_config_id=resolved_sync_config,
+                camera_instance_id=camera_instance_id,
+                camera_label=label,
+                master_start_s=master_start,
+                master_end_s=master_end,
+            )
+        except (click.ClickException, VideoExportError) as exc:
+            conn.close()
+            fail(str(exc))
+        plans.append(plan)
+
+    conn.close()
+
+    click.echo(
+        f"Master range: [{master_start:.3f}, {master_end:.3f}]s "
+        f"({master_end - master_start:.3f}s)"
+    )
+    for plan in plans:
+        click.echo(
+            f"  {plan.camera_label:<20} container [{plan.container_start_s:.3f}s "
+            f".. +{plan.container_duration_s:.3f}s]  src={plan.source_path}"
+        )
+
+    if dry_run:
+        click.echo("Dry run — no files written.")
+        return
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for plan in plans:
+        out_path = out_dir / f"{plan.camera_label}.mp4"
+        click.echo(f"Extracting {plan.camera_label} -> {out_path} ...")
+        try:
+            run_ffmpeg_extract(plan, out_path, overwrite=overwrite)
+        except VideoExportError as exc:
+            fail(str(exc))
+    click.echo("Done.")
 
 
 # ---------------------------------------------------------------------------

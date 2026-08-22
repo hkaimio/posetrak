@@ -43,6 +43,22 @@ path = [
 SPDX-FileCopyrightText = "2026 Harri Kaimio"
 SPDX-License-Identifier = "Apache-2.0"
 
+# Bundled default skeletons: their skeletons.id is the SHA-256 of this exact
+# file's bytes (content-addressed, see manage_skeleton.py), and
+# capture_persons.default_skeleton_id rows elsewhere reference that id
+# directly. An inline SPDX header changes the hash -- it did, in commit
+# ad974b4, silently turning every fresh install's "Default male"/"Default
+# female" into a *different*, new skeleton (same content) from the one any
+# already-seeded registry/session has, an install-to-install drift bug only
+# caught via e2e testing on 2026-08-23. Keep these two files header-free.
+[[annotations]]
+path = [
+    "python/posetrak/data/skeletons/default_female.yaml",
+    "python/posetrak/data/skeletons/default_male.yaml",
+]
+SPDX-FileCopyrightText = "2026 Harri Kaimio"
+SPDX-License-Identifier = "Apache-2.0"
+
 # Misc. plain-text/config files with no established comment convention reuse
 # recognises, or where a header risks being read as actual content (a bare
 # version string, a glob-pattern list).

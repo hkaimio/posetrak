@@ -13,8 +13,14 @@ from pathlib import Path
 import pytest
 
 
-from posetrak.db.manage_skeleton import copy_skeleton, copy_skeleton_to_session, import_skeleton, list_skeletons
-from posetrak.db.db import create_session
+from posetrak.db.manage_skeleton import (
+    copy_skeleton,
+    copy_skeleton_to_session,
+    import_skeleton,
+    list_skeletons,
+    seed_default_skeletons,
+)
+from posetrak.db.db import create_registry, create_session
 
 
 # ---------------------------------------------------------------------------
@@ -262,3 +268,32 @@ def test_import_with_parent_in_session_only(tmp_path: Path) -> None:
     assert child_in_sess is not None, "child must exist in session"
     assert child_in_sess["parent_id"] == parent_id
     assert parent_in_reg is not None, "parent must exist in session"
+
+
+# ---------------------------------------------------------------------------
+# seed_default_skeletons -- bundled file hash stability
+# ---------------------------------------------------------------------------
+
+
+def test_seed_default_skeletons_ids_are_stable(tmp_path: Path) -> None:
+    """Regression test: skeletons.id is the SHA-256 of the bundled YAML
+    file's exact bytes, and capture_persons.default_skeleton_id rows
+    elsewhere reference that id directly. An inline SPDX header on either
+    bundled file changes its hash -- it did, in commit ad974b4, silently
+    turning every fresh install's "Default male"/"Default female" into a
+    *different*, new skeleton (identical content, different id) from the
+    one an already-seeded registry/session has, install-to-install drift
+    only caught via e2e testing on 2026-08-23 (see REUSE.toml's
+    header-exemption comment for these two files, which fixed it).
+
+    Pins the two IDs literally so a header (or any other incidental byte
+    change) creeping back in fails this test immediately, rather than
+    silently producing a second "Default male"/"Default female" pair the
+    next time someone seeds a fresh registry.
+    """
+    conn = create_registry(tmp_path / "registry.db")
+    ids = set(seed_default_skeletons(conn))
+    assert ids == {
+        "0d08a889b32acc13298ecba139ac585792f4221679b3238d0be40c356c945f04",  # Default female
+        "2ebe16046bf59a27482f253e40e9f21407bbbdb446f3db11e776c8fa97dc9c6a",  # Default male
+    }

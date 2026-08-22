@@ -22,7 +22,7 @@ Now change the target camera to "pixel9" and repeat the procedure - find the fir
 
 Now Posetrak knows a common "moment" at the start of the videos, but this is not enough as the cameras might have slightly different frame rates. Therefore we need to add another sync point at the end of the videos. Move the reference camera playhead to roughly frame 1470 and use `a`/`d` to locate the frame where the LED turns on (1477). Do the same for pixel9 in the right video panel (the right frame is 1479). Click "Mark sync pairs..." again.
 
-This time you will get a warning dialog from Posetrak that the frame rate ratio is inconsistent. Both videos were actually shot at 120 fps, but in Pixel9 this frame rate is intended for slow motion shots, so it sets the output video frame rate to 30 fps. In Posetrak we are just interested in the actual frame rate the video was shot at, so click the "pixel9 -> 119.962 fps" button. When you click it, you see that the timeline is adjusted: earlier the video file from Pixel 9 appeared to take almost 50 seconds; now that Posetrak knows it's actually a 120 fps video, it's corrected in the timeline too.
+This time you will get a warning dialog that the frame rate ratio is inconsistent — Pixel9's video declares a slower frame rate than it was actually shot at (see [Synchronizing videos](synchronizing-videos.md#troubleshooting) for why). Click the "pixel9 -> 119.962 fps" button to use the real capture rate; you'll see the timeline adjust to match.
 
 Finally, change the target camera to insta_ace2_pro, find the corresponding frame where the LED turns on (frame 1477) and click "Mark sync pairs..." once more. This time you do not get the frame rate warning message, as that video file has the correct frame rate.
 
@@ -30,13 +30,9 @@ The left pane should now show 4 sync anchors for the reference camera and 2 for 
 
 ## Extrinsics calibration
 
-Now that Posetrak knows how the videos relate to each other in time, we need to tell it how they relate in space: it needs to know where each camera was located and how it was oriented. This is called extrinsics calibration.
+Now that Posetrak knows how the videos relate to each other in time, we need to tell it how they relate in space: where each camera was located and how it was oriented. This is called extrinsics calibration — see the [Extrinsics calibration guide](extrinsics-calibration.md) for the concepts and the automated methods (markers, calibration rigs) this tutorial skips in favor of placing control points by hand, so you learn the UI they all build on.
 
-Extrinsics calibration requires that Posetrak knows exactly where some scene locations are shown in the cameras. When it has pixel coordinates of multiple scene locations in two cameras, it can calculate the relative positions of these cameras to each other. For pose tracking we also want to know the *actual* positions of the cameras in a metric coordinate system, so we need to tell it the coordinates of some scene points too.
-
-There are ways to automate this, but in this tutorial we are (mostly) placing the control points manually so that you learn the UI. This can be tedious and you should learn the automated methods, but manually placed control points are always the backup option if something goes wrong.
-
-In the "Extrinsics calibration" page, click "Calibrate…". You could also use some other tool (there are many camera calibration tools available) and import the results, but in this tutorial we use Posetrak's own tool.
+In the "Extrinsics calibration" page, click "Calibrate…".
 
 Open the "Data" tab at the bottom of the dialog. This shows the points already located - so far there are none.
 
@@ -46,13 +42,14 @@ The image below shows the correct location of the first control point in all cam
 
 After placing it, enable the "Fix 3D position" checkbox in the bottom right corner of the window. Check that the X, Y and Z coordinates are all zero and click "Apply".
 
-Our origin is now fixed, but we need more control points to set the axis directions and scale. Add another control point and place it at the corner of the red area near the benches and the green door. This edge of the red area will be our X axis. The red area is 4x4 m, so fix the 3D position for this control point as (x=4, y=0, z=0).
+Our origin is now fixed, but we need more control points to set the axis directions and scale (4 is the minimum — see the guide linked above for why). Add the following four the same way, fixing each one's 3D position as given:
 
-Add a third control point at the opposite corner of the red area from the origin and set its location as (x=4, y=4, z=0). You need to move the playhead of the `insta_ace2_pro` camera, as the performer is in front of this corner in the first frame. In `gopro-11_mini_01` this control point is not visible at all, so you cannot add it there.
-
-Add a fourth control point at the last remaining corner of the red area and set its location as (x=0, y=4, z=0); this edge is our Y axis (Posetrak assumes a right-handed, Z-up coordinate system). This control point is not visible in pixel9.
-
-In theory, 4 control points is the minimum needed for calculating extrinsics and anchoring the coordinate system, but since some of our points are not visible in all cameras we need to add a few more: let's add control point 5 in the corner of the red mats near the paper on the floor and control point 4. This location is (x=1, y=3, z=0). It is a bit difficult to locate in `insta_ace2_pro`.
+| # | Location | Coordinates | Notes |
+|---|---|---|---|
+| 2 | Corner of the red area near the benches and the green door (our X axis) | (4, 0, 0) | Red area is 4x4 m |
+| 3 | Opposite corner from the origin | (4, 4, 0) | Not visible in `gopro-11_mini_01`; move the `insta_ace2_pro` playhead, since the performer is in front of it in the first frame |
+| 4 | Last remaining corner of the red area (our Y axis; Posetrak uses a right-handed, Z-up coordinate system) | (0, 4, 0) | Not visible in `pixel9` |
+| 5 | Corner of the red mats near the paper on the floor and control point 4 | (1, 3, 0) | A bit difficult to locate in `insta_ace2_pro` |
 
 Now you can try solving extrinsics. Locate the "Solve" pane on the right side of the window, disable "SIFT" for now and click "Match and solve". Open the "Cameras" tab at the bottom of the window and check the solution quality. In my case it looks quite good already: all cameras show ~5 pixel max error.
 
@@ -78,9 +75,7 @@ Go to the detection page. You see a timeline of detected persons in each camera.
 
 Before continuing we need to tell Posetrak who the person in the detections is. In this capture there is only 1 person so this is easy, but if there are multiple persons being captured (or just visible to some cameras) there will be more detections. Right-click a row in the timeline and select the person in the pictures. Do this for all 3 cameras. When you are ready, click "Save assignments".
 
-Some of the videos have multiple detection rows even though there is only 1 person present. The detection algorithm used is not very smart: it first detects areas in the video frame where it thinks there might be a person, then crops the video to that area and tries to detect the person's pose. Posetrak adds some logic to this - if a person is detected at roughly the same area it assumes it is the same person as in the previous frame, but it cannot *recognize* whether this is the case. If it is unsure, it assumes it is a new detection.
-
-This gets problematic if there are multiple persons being captured at once, especially if they often cross each other. If this is the case, the recommended workflow is to do *segmentation* for the videos before pose estimation. For this simple case, that would be overkill.
+Some of the videos have multiple detection rows even though there is only 1 person present — see [Analyzing poses](analyzing-poses.md#direct-detection) for why, and when segmentation is worth the extra setup instead (not for this simple, single-person case).
 
 After saving the assignments, you'll see a new entry for the person under the detection in the navigation pane. Selecting that opens another page in the main window.
 

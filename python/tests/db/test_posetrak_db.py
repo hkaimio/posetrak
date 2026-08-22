@@ -1240,6 +1240,50 @@ def test_add_session_camera_copies_camera_rows(
     ).fetchone() is not None
 
 
+def test_add_session_camera_with_default_intrinsics_on_mode(
+    registry_db: sqlite3.Connection,
+    session_db: sqlite3.Connection,
+) -> None:
+    """camera_modes.default_intrinsics_calibration_id and
+    intrinsics_calibrations.camera_mode_id reference each other -- a real
+    circular FK, not just an insertion-order problem (see the comment in
+    add_session_camera). A camera_mode with its default set (true for any
+    camera that's actually been calibrated) used to raise
+    "FOREIGN KEY constraint failed" here regardless of copy order."""
+    import struct, datetime as _dt
+    model_id = create_camera_model(registry_db, manufacturer="Acme", model_name="C2")
+    mode_id = create_camera_mode(registry_db, model_id, width_px=1920, height_px=1080)
+    dist_blob = struct.pack("<4d", 0.0, 0.0, 0.0, 0.0)
+    inst_id = "inst-circular-fk-test"
+    registry_db.execute(
+        "INSERT INTO camera_instances (id, camera_model_id, serial_number, label) "
+        "VALUES (?, ?, '', 'c2')",
+        (inst_id, model_id),
+    )
+    intr_id = "intr-circular-fk-test"
+    registry_db.execute(
+        "INSERT INTO intrinsics_calibrations "
+        "(id, camera_mode_id, calibrated_at, distortion_model, fx, fy, cx, cy, dist_coeffs) "
+        "VALUES (?, ?, ?, 'radtan', 800.0, 800.0, 320.0, 240.0, ?)",
+        (intr_id, mode_id, _dt.date.today().isoformat(), dist_blob),
+    )
+    registry_db.execute(
+        "UPDATE camera_modes SET default_intrinsics_calibration_id = ? WHERE id = ?",
+        (intr_id, mode_id),
+    )
+    registry_db.commit()
+
+    session_id = create_mocap_session(session_db)
+    add_session_camera(  # must not raise sqlite3.IntegrityError
+        session_db, registry_db, session_id, inst_id, mode_id, intr_id, label="c2"
+    )
+
+    assert session_db.execute(
+        "SELECT default_intrinsics_calibration_id FROM camera_modes WHERE id = ?", (mode_id,)
+    ).fetchone()[0] == intr_id
+    assert session_db.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 def test_copy_rows_if_missing_idempotent(
     registry_db: sqlite3.Connection,
     session_db: sqlite3.Connection,

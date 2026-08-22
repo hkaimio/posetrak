@@ -1935,6 +1935,19 @@ def add_session_camera(
     camera_model_id = instance_row["camera_model_id"]
 
     with session:
+        # camera_modes.default_intrinsics_calibration_id references
+        # intrinsics_calibrations(id), which itself references back via
+        # intrinsics_calibrations.camera_mode_id -- a genuine circular FK
+        # between the two tables, not just an ordering problem. No
+        # sequence of plain INSERTs satisfies both directions at once, so
+        # defer FK enforcement to COMMIT (unlike "PRAGMA foreign_keys",
+        # "PRAGMA defer_foreign_keys" is specifically designed to be
+        # toggled mid-transaction -- see the comment near
+        # seg_quality_runs's migration for why the two pragmas differ).
+        # Real integrity violations still fail, just at COMMIT instead of
+        # at the offending INSERT; SQLite resets this pragma to off
+        # automatically once the transaction ends either way.
+        session.execute("PRAGMA defer_foreign_keys = ON")
         # Copy dependency chain: camera_models → camera_modes/instances → intrinsics
         _copy_rows_if_missing(registry, session, "camera_models", [camera_model_id])
         _copy_rows_if_missing(registry, session, "camera_modes", [camera_mode_id])

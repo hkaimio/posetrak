@@ -339,8 +339,8 @@ class MainWindow(QMainWindow):
         from app.setup.camera_registry import CameraRegistryWidget
         from app.setup.db_context import DBContext
         from app.setup.page_extrinsics import ExtrinsicsPage
+        from app.setup.page_persons import PersonsPage
         from app.setup.page_shots import ShotsPage
-        from app.setup.page_skeleton import SkeletonPage
         from app.setup.page_sync import SyncPage
 
         wizard = QWizard(self)
@@ -372,7 +372,7 @@ class MainWindow(QMainWindow):
         wizard.addPage(shots_page)
         wizard.addPage(SyncPage())
         wizard.addPage(ExtrinsicsPage())
-        wizard.addPage(SkeletonPage())
+        wizard.addPage(PersonsPage())
 
         if wizard.exec() == QWizard.DialogCode.Accepted:
             self._tree.reload()

@@ -12,7 +12,13 @@ SkeletonSetupWidget
     ``set_session(conn, session_id, registry_conn)`` before showing.
 
 SkeletonPage
-    QWizardPage (page 5) hosting SkeletonSetupWidget.  Always completable.
+    QWizardPage hosting SkeletonSetupWidget.  Always completable.  No
+    longer wired into either capture wizard (replaced by
+    app.setup.page_persons.PersonsPage as of the 2026-08-22 e2e-testing
+    follow-up -- a wizard's last page showing an empty session-skeleton
+    list had nothing to actually do at wizard time).  Kept as a reusable,
+    currently-unused page in case session-level skeleton setup earns a
+    wizard step again later.
 
 SkeletonSetupDialog
     Standalone QDialog for use from the pose extraction window's Session menu.

@@ -22,6 +22,26 @@ if sys.platform == "win32":
     except (ImportError, OSError, AttributeError):
         pass
 
+    # Also on Windows: Python's ssl module doesn't get the automatic AIA
+    # (Authority Information Access) chasing that browsers/WinINet-based
+    # apps get for free from the Windows certificate store, so a machine
+    # that's never made an HTTPS connection needing a given CA's
+    # intermediate certificate before -- a fresh install, or a Windows
+    # Sandbox test run, both confirmed by hand, 2026-08-23 -- can fail
+    # rtmlib's model-checkpoint download with "CERTIFICATE_VERIFY_FAILED:
+    # unable to get local issuer certificate" even though the same URL
+    # opens fine in any browser on that same machine. Point Python's
+    # default SSL context at certifi's independently-maintained root CA
+    # bundle instead of relying solely on Windows' local store, which
+    # ssl.create_default_context() (used internally by rtmlib's plain
+    # urllib download) still honours alongside the OS store. See
+    # backends_rtmdet.py.
+    try:
+        import certifi
+        os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+    except ImportError:
+        pass
+
 try:
     from rtmlib.tools.pose_estimation import RTMPose as _RTMPose
     from rtmlib.tools.pose_estimation.vitpose import ViTPose as _ViTPose

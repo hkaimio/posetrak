@@ -1,7 +1,7 @@
 ```toml
 name = "Release Packaging (Windows/Linux Installer)"
 status = "in_progress"
-progress_pct = 10
+progress_pct = 15
 description = """
 Produce an installable release artifact (Windows installer, Linux AppImage/tarball) that doesn't \
 require a compiler or manual `uv sync` -- a thin bootstrapper (uv binary + pre-built C++ tracker + \
@@ -26,9 +26,10 @@ evidence of interest in Posetrak beyond today's use.
 
 ## Current state
 
-**2026-08-23: installer-prototype-plan.md's Phase 0-1 (manual bootstrap
-folder) built and sanity-checked on the dev machine; not yet run through
-Windows Sandbox.**
+**2026-08-23: installer-prototype-plan.md's Phase 1 (manual bootstrap
+folder) built and iterating through Windows Sandbox test runs; three
+real bugs found and fixed so far, folder refreshed and ready for
+another retest.**
 
 - Built the optimized C++ tracker (`meson setup --reconfigure optbuild
   --buildtype=release`, `meson compile`) and assembled a bootstrap
@@ -90,9 +91,31 @@ Windows Sandbox.**
   sync`/`uv run` against the live bootstrap folder itself once it's
   meant for a Sandbox test -- test in a disposable copy instead, so the
   shared folder stays pristine.
+- **Third real finding, next run**: with the stale venv cleaned up, the
+  Sandbox got past `uv sync` and into `posetrak-ui` itself, then failed
+  with `FileNotFoundError` for
+  `...\posetrak-bootstrap-proto\app\db\registry_schema.sql`. Root
+  cause, independent of the prototype: `db.py`'s `_DB_DIR =
+  Path(__file__).parents[3] / "db"` was a hardcoded, fixed-depth walk
+  from `db.py`'s own file location, assuming a full git-checkout layout
+  (a `db/` directory at the repo root, sibling to `python/`). That
+  layout doesn't survive being packaged as just the `python/` tree —
+  which is exactly what the bootstrap folder's `git archive HEAD --
+  ... python` snapshot produces, and what a real wheel/pip install
+  would also produce. Fixed by moving `db/` into
+  `python/posetrak/db/sql/` (inside the package), adding an
+  `__init__.py`, and resolving it at runtime via
+  `importlib.resources.files("posetrak.db.sql")` — the same mechanism
+  already used for `posetrak.data.skeletons`'s bundled YAML files.
+  Declared the new package's data files in pyproject.toml's
+  `[tool.setuptools.package-data]`. Committed (`2fbfc4f`); verified
+  both via the full `python/tests/db`/`python/tests/cli` suite (no
+  regressions) and by re-running `uv sync` + a real `create_registry()`
+  / `create_session()` call against a disposable copy of the refreshed
+  bootstrap `app/` snapshot.
 - **Not yet done**: confirming the Sandbox run now succeeds end to end
-  with the cleaned folder; validating `uv`'s from-scratch Python
-  provisioning and a truly cache-free download; the rest of the
+  and actually opens the main window; validating `uv`'s from-scratch
+  Python provisioning and a truly cache-free download; the rest of the
   small-group test; CI automation; Linux.
 
 ## Known issues / open questions

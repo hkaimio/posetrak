@@ -880,7 +880,17 @@ class TrackerConfigWidget(QWidget):
         through as plain Python objects; edit_config()'s own _encode() JSON-
         encodes them.
         """
-        vel_ids = sorted(self._velocity_cam_indices) if self._velocity_cam_indices else None
+        # Always an explicit list, even when empty -- edit_config()'s
+        # documented contract treats None as "keep the source row's value",
+        # not "clear it". velocity_mode_camera_ids has no separate
+        # always-explicit enable flag (unlike e.g. use_relative_observations
+        # below), so collapsing an empty selection to None here silently
+        # discarded the user unchecking every camera: the previous
+        # (non-empty) value just kept getting inherited from whatever config
+        # this one was derived from. Confirmed live, 2026-08-23 -- Harri
+        # unchecked insta_ace2_pro's velocity-mode checkbox, re-ran tracking
+        # twice, and both runs still showed it enabled.
+        vel_ids = sorted(self._velocity_cam_indices)
         use_rel = 1 if self._use_relative.isChecked() else 0
         rel_min_conf = self._relative_min_conf.value() if use_rel else None
 
@@ -919,7 +929,12 @@ class TrackerConfigWidget(QWidget):
         soft_limit_noise_std = self._soft_limit_noise_std.value()
         soft_limit_enabled = soft_limit_noise_std > 0.0
 
-        nis_scopes = None
+        # Same None-means-inherit trap as velocity_mode_camera_ids above:
+        # nis_feedback_scopes has no separate always-explicit enable column
+        # either, so unchecking the box must send an explicit empty list,
+        # not None, or a previously-enabled parent config's scopes silently
+        # keep getting inherited.
+        nis_scopes: list = []
         if self._nis_feedback_enabled.isChecked():
             nis_scopes = [
                 {"name": "core", "joint_names": ADAPTIVE_NOISE_CORE_JOINTS},
@@ -947,7 +962,9 @@ class TrackerConfigWidget(QWidget):
             process_noise_vel_gain_root=self._vel_noise_gain_root.value(),
             process_noise_vel_ref_root=self._vel_noise_ref_root.value(),
             process_noise_vel_joint_names=joint_names,
-            process_noise_vel_scopes=vel_scopes or None,
+            # Same reasoning as vel_ids/nis_scopes above: always send the
+            # explicit (possibly empty) list rather than collapsing to None.
+            process_noise_vel_scopes=vel_scopes,
             pose_reg_joint_names=POSE_REG_SPINE_CHAIN if pose_reg_enabled else None,
             pose_reg_equal_split_noise_std=pose_reg_equal_split,
             pose_reg_rest_pose_noise_std=pose_reg_rest_pose,

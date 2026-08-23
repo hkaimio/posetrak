@@ -1,11 +1,33 @@
 # Posetrak — Setup Guide
 
-There's no packaged release yet. For now, using Posetrak means setting up a
-development environment and building/running from source: clone the repo,
-install [uv](https://docs.astral.sh/uv/), and either build the C++ tracker
-yourself or use a cross-compiled Windows exe (below). A simpler install path
-will follow once there's an actual release package. This is also the guide
-contributors use — there's no separate developer setup doc.
+## Windows: Installer
+
+The easiest way to try Posetrak on Windows — no compiler, no Python, no
+manual setup:
+
+1. Download **[posetrak-setup-0.1.0-proto1.exe](https://1drv.ms/u/c/5e84dad12af05ffc/IQAn0785a1wFTqraaclSGSMbAcNu8ZJUe636owFxRLTEYhM?e=jsrQwi)**.
+2. Run it. This is an early, unsigned prototype build, so Windows
+   SmartScreen will very likely show a "Windows protected your PC" warning
+   — click "More info", then "Run anyway". That's expected right now, not
+   a sign something is broken (there's no code-signing certificate yet;
+   see `docs/roadmap/features/packaging/code-signing-plan.md` if curious
+   why).
+3. Follow the installer. It installs per-user (no admin rights needed).
+   If you have an NVIDIA GPU and want Cutie-based segmentation, check
+   "Install GPU segmentation support" — it's a large extra download, so
+   it's unchecked by default and can be added later too (see
+   ["GPU acceleration"](#gpu-acceleration-for-pose-extraction) below).
+4. First launch needs internet access — it downloads Python and every
+   Python dependency (PySide6, OpenCV, etc.), which can take a few
+   minutes depending on your connection. Later launches are fast.
+
+Once it's running, continue to
+[Your first capture](user-guide/first-capture.md) or the hands-on
+[tutorial](user-guide/tutorial1.md).
+
+For development, contributing, Linux, or building from source instead of
+using the installer, see the rest of this guide — it's also the guide
+contributors use, there's no separate developer setup doc.
 
 ## Platform overview
 

@@ -2,7 +2,7 @@
 
 In this tutorial you will do a full motion capture from existing video files: set up a Posetrak project, detect persons and poses from the videos, and finally track a person's motion and export it as a BVH file that can be used in Blender and other 3D applications.
 
-Before starting, load the [tutorial materials](TODO-add-download-link) and unzip it to a directory in your computer. The zip file contains an (almost) empty Posetrak project file and 3 videos that are shot with different types of cameras at the same time, showing the captured motion from different angles.
+Before starting, this tutorial requires Posetrak to already be installed — see the [Setup guide](../setup.md) if you haven't done that yet. Then load the [tutorial materials](https://1drv.ms/u/c/5e84dad12af05ffc/IQAa_irEUQz6QoeMbzAWigbuAV8tjxp36djkLE02pJlKwFg?e=4n6WBb) and unzip it to a directory in your computer. The zip file contains an (almost) empty Posetrak project file and 3 videos that are shot with different types of cameras at the same time, showing the captured motion from different angles.
 
 
 ## 1. Setting up the project

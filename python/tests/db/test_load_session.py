@@ -465,6 +465,12 @@ class TestLoadCamerasFromSession:
         assert cam_a["K"][0, 2] == pytest.approx(320.0)
         assert cam_a["K"][1, 2] == pytest.approx(240.0)
 
+    def test_camera_instance_id_matches_source_row(self, session_db_with_cameras):
+        db_path, ids, cam_ids = session_db_with_cameras
+        cams = load_cameras_from_session(db_path, ids["ext_cal_id"], ids["session_id"])
+        cam_a = next(c for c in cams if c["label"] == "cam_a")
+        assert cam_a["camera_instance_id"] == cam_ids["inst1_id"]
+
     def test_R_shape(self, session_db_with_cameras):
         db_path, ids, _ = session_db_with_cameras
         cams = load_cameras_from_session(db_path, ids["ext_cal_id"], ids["session_id"])

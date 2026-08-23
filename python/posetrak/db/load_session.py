@@ -236,13 +236,15 @@ def load_cameras_from_session(
     Returns
     -------
     list of dicts sorted by label, each containing:
-      label      : str
-      camera_id  : int  (0-based index in alphabetical label order)
-      K          : np.ndarray (3, 3)
-      R          : np.ndarray (3, 3)
-      t          : np.ndarray (3,)
-      dist       : np.ndarray (4,)
-      P          : np.ndarray (3, 4)
+      label               : str
+      camera_id           : int  (0-based index in alphabetical label order)
+      camera_instance_id  : str  (camera_instances.id -- for joining back to
+                                  pose_observations.camera_instance_id)
+      K                   : np.ndarray (3, 3)
+      R                   : np.ndarray (3, 3)
+      t                   : np.ndarray (3,)
+      dist                : np.ndarray (4,)
+      P                   : np.ndarray (3, 4)
     """
     conn = _open_db(session_db)
     try:
@@ -313,6 +315,7 @@ def load_cameras_from_session(
             cams.append({
                 "label": label,
                 "instance_label": instance_label,
+                "camera_instance_id": row["camera_instance_id"],
                 "K": K,
                 "R": R,
                 "t": t,

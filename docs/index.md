@@ -2,31 +2,28 @@
 
 ![Posetrak](assets/banner.png){ align=right width=240 }
 
-Video-based skeletal motion capture using an Unscented Kalman Filter in joint
+Video-based markerless motion capture using an Unscented Kalman Filter in joint
 space. Supports an arbitrary number of synchronized cameras and configurable
 skeleton definitions, tracking results exported as BVH files.
 
-Multi-person, close-contact scenes — the kind that break most affordable
-motion capture — are the reason this project exists. See
-[Background](background.md) for why.
+Main motivation for Posetrak development were chalelnges in tracking
+multi-person, close-contact scenes. read here more about project's
+[background](background.md).
+
+## Getting started
+
+See the [setup guide](setup.md) for full platform-specific instructions, then
+[tutorial](user-guide/tutorial1.md) for a walkthrough of processing a simple
+motion capture sequence.
 
 ## Applications
 
 | Command | Description |
 |---|---|
 | `posetrak-ui` | Main GUI: sessions, capture setup, pose extraction, tracking, keypoint editing |
-| `posetrak track config.toml` | Run the UKF tracker on a capture session |
-| `posetrak scale config.toml` | Post-process a bone-length calibration run |
+| `posetrak` CLI | Command line client |
 | `posetrak-mcp` | Read-only MCP diagnostic server for tracking runs |
 
-`posetrak` also covers session/capture/detection management without the GUI
-(`posetrak session`, `posetrak detect`, `posetrak track`, etc.) — see
-[Architecture: Python apps](architecture/python-apps.md) for the full CLI.
-
-## Getting started
-
-See the [Setup guide](setup.md) for full platform-specific instructions, then
-[Your first capture](user-guide/first-capture.md) for an end-to-end walkthrough.
 
 ## Documentation
 

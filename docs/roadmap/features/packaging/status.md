@@ -1,7 +1,7 @@
 ```toml
 name = "Release Packaging (Windows/Linux Installer)"
 status = "in_progress"
-progress_pct = 50
+progress_pct = 55
 description = """
 Produce an installable release artifact (Windows installer, Linux AppImage/tarball) that doesn't \
 require a compiler or manual `uv sync` -- a thin bootstrapper (uv binary + pre-built C++ tracker + \
@@ -28,10 +28,12 @@ evidence of interest in Posetrak beyond today's use.
 
 **2026-08-23: installer-prototype-plan.md's Phase 1 confirmed working
 and called done (four real bugs found and fixed). Phase 2's installer
-built and run through its first real tutorial-walkthrough Sandbox test,
-which found and fixed two more real bugs (missing skeleton seed data in
-the test fixture; a Windows TLS cert-chasing gap breaking rtmlib model
-downloads). Installer rebuilt with both fixes, ready for round 2.**
+built and run through two rounds of tutorial-walkthrough Sandbox
+testing at the detection step, finding and fixing four more real bugs
+(missing skeleton seed data in the test fixture; a Windows TLS
+cert-chasing gap; false-positive CUDA detection; a permanently-stuck
+corrupt checkpoint cache). Installer rebuilt with all fixes, ready for
+round 3.**
 
 - Built the optimized C++ tracker (`meson setup --reconfigure optbuild
   --buildtype=release`, `meson compile`) and assembled a bootstrap
@@ -227,12 +229,49 @@ downloads). Installer rebuilt with both fixes, ready for round 2.**
     `backends_rtmpose.py`); added `certifi` as an explicit direct
     dependency (commit `efdf95e`). Installer rebuilt with the fix;
     bootstrap-proto's `app/` snapshot refreshed too.
-- **Not yet done**: re-running the installer Sandbox test with both
-  fixes in place (round 2); getting far enough into the tutorial to
-  exercise the C++ tracker itself and BVH export; measuring first-launch
-  `uv sync` timing; validating `uv`'s from-scratch Python provisioning
-  is truly cache-free; the rest of the small-group test; CI automation;
-  Linux.
+- **Installer Sandbox test, round 2** (resumed from the same detection
+  step, both round-1 fixes in place): the YOLOX detector's checkpoint
+  downloaded and loaded fine, but printed a scary-looking onnxruntime
+  stderr block ("FAIL ... cublasLt64_12.dll ... missing", "Failed to
+  create CUDAExecutionProvider") before falling back to CPU
+  internally -- non-fatal, but alarming. Shortly after, the ViTPose
+  checkpoint download stopped mid-transfer (20% of 1.15GB) and
+  onnxruntime then failed loading it with `InvalidProtobuf`. Two more
+  real, general bugs (neither Sandbox-specific), both fixed in commit
+  `00f8036`:
+  - **False-positive CUDA detection.** `_auto_device()`'s torch-absent
+    fallback trusted `onnxruntime.get_available_providers()`, which only
+    reflects what `onnxruntime-gpu` (a core dependency) was *compiled*
+    with, not whether CUDA is actually installed -- any CPU-only
+    machine without `torch` (the installer prototype's base install has
+    none; `torch` is only in the optional `segmentation` group) reports
+    "cuda" as available regardless and then fails loudly trying to use
+    it. Fixed by defaulting to CPU when torch is absent, since there's
+    no other reliable signal; `device="cuda"` is still available as an
+    explicit override.
+  - **Corrupt/truncated rtmlib checkpoint cache, permanently stuck.**
+    rtmlib's `download_checkpoint()` treats "a file already exists at
+    the cache path" as "already downloaded", and its download never
+    verifies the byte count against `Content-Length` before atomically
+    renaming into place -- a dropped connection (this specific
+    Sandbox's virtualized network, but not Sandbox-specific in general)
+    silently produces a truncated-but-"complete" cached file, and every
+    subsequent attempt then fails the exact same way forever with no
+    recovery path visible to the user. This is structurally the same
+    "leftover wreckage from a failed attempt masks the retry" pattern
+    as the registry-database bug from earlier in this same prototype
+    round. Fixed by adding a self-heal retry
+    (`construct_with_corrupt_checkpoint_retry()` in `backends.py`): on
+    any failure constructing a detector/estimator, delete the specific
+    cached file(s) for that checkpoint's URL and retry once.
+  Installer rebuilt with both fixes; bootstrap-proto's `app/` snapshot
+  refreshed too.
+- **Not yet done**: re-running the installer Sandbox test with all four
+  detection-step fixes in place (round 3); getting far enough into the
+  tutorial to exercise the C++ tracker itself and BVH export; measuring
+  first-launch `uv sync` timing; validating `uv`'s from-scratch Python
+  provisioning is truly cache-free; the rest of the small-group test;
+  CI automation; Linux.
 
 ## Known issues / open questions
 

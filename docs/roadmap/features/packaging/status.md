@@ -298,12 +298,51 @@ segmentation support.**
   slow but correct) → UKF tracking → BVH export. Also confirmed the new
   "Install GPU segmentation support" installer checkbox is visible and
   selectable.
-- **Not yet done**: measuring first-launch `uv sync` timing; validating
-  `uv`'s from-scratch Python provisioning is truly cache-free;
-  confirming (or ruling out) the WAL/Sandbox-shared-folder theory
-  above; verifying the CUDA-prerequisites TODO on real GPU hardware;
-  the in-app "install segmentation extras later" action; the small-group
-  test (Phase 3); CI automation; Linux.
+- **First-launch `uv sync` timing** (Harri's dev machine, fast
+  connection, not a formal measurement): "certainly... less than a
+  minute" -- much faster than packaging-design.md's "a few minutes"
+  guess. Still worth a real measurement from a slower/more typical
+  connection during Phase 3.
+- **Not yet done**: validating `uv`'s from-scratch Python provisioning
+  is truly cache-free; confirming (or ruling out) the
+  WAL/Sandbox-shared-folder theory above; verifying the
+  CUDA-prerequisites TODO on real GPU hardware; the in-app "install
+  segmentation extras later" action; CI automation; Linux.
+
+## Phase 3 -- small user-group test
+
+**Started 2026-08-23.** Distribution plan: Harri will upload the
+installer and a tutorial-materials zip (pinned project DB + 3 sample
+videos, from the pristine `D:\mocap\tutorial1-template` source, not
+either disposable Sandbox-test copy) to his own OneDrive and share
+links with testers -- reasonable for "a handful of testers" scale, no
+need for real hosting infrastructure yet.
+
+Progress so far:
+- Tagged and pushed `v0.1.0-proto1` at the commit the distributed
+  installer was built from (also pushed this session's other 27
+  backlogged commits to `origin/main` for the first time -- everything
+  up to that point had only ever been local).
+- Built a distribution folder (`D:\mocap\posetrak-phase3-distribution\`,
+  outside the repo): `posetrak-setup-0.1.0-proto1.exe` (18.3MB) +
+  `tutorial1-materials.zip` (394MB, from the pristine template). Harri
+  still needs to actually upload these to OneDrive and generate share
+  links -- not done yet.
+- `docs/user-guide/tutorial1.md` fixed up and added to the public docs
+  site's nav (commit `caf60b0`, **not yet pushed**): typos fixed, a
+  stale `TODO:` note removed, `mkdocs build --strict` passes. Its
+  tutorial-materials download link is still a `TODO-add-download-link`
+  placeholder pending the real OneDrive URL.
+- **Decided**: the tutorial-materials link can go on the public docs
+  site (harmless sample data), but the installer link itself should
+  NOT be published there yet -- `docs/setup.md` still correctly says
+  "no packaged release", and this is an unsigned Phase 3 prototype for
+  a small controlled test group, not a public release; publishing it
+  on the indexed public site would reach well beyond that. Harri agreed:
+  eventually make the installer link public too, but **holding for now**
+  -- he just received the actual Posetrak logo and wants it added to
+  both the installer (icon/wizard banner) and the docs site
+  (logo/favicon) before any of this goes live. Waiting on the logo file.
 
 ## Known issues / open questions
 

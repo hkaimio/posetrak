@@ -42,7 +42,7 @@ needs no account.
   site](https://pancake-manicure.gumroad.com/l/Danny).
 - A BVH file exported from Posetrak.
 
-## Installing BVH Retargeter
+### Installing BVH Retargeter
 
 1. In Blender, open **Edit → Preferences → Get Extensions**, search for
    "BVH", and install **BVH and FBX Retargeter** (by Thomas Larsson).
@@ -56,7 +56,7 @@ to track a specific release, the same add-on is published at the
 author's [project page](https://bitbucket.org/Diffeomorphic/retarget_bvh/wiki/Home/) —
 install the zip via **Edit → Preferences → Add-ons → Install…**.
 
-## BVH Retargeter one-time setup: the Posetrak rig profile
+### BVH Retargeter one-time setup: the Posetrak rig profile
 
 There is no single "right" convention for representing a human skeleton; most 3D
 packages and individual artists have different preferences. BVH Retargeter tries
@@ -87,22 +87,7 @@ If you're tracking a custom skeleton with different joint names or a
 different bone count, these two files won't match yours as-is — see
 "Building your own rig profile," below.
 
-## Exporting BVH from Posetrak
 
-In Posetrak, navigate to the trial's tracking results for the person. Click the
-"Export BVH..." button in the information pane on the right side of the window.
-
-## Importing into Blender
-
-Use Blender's built-in importer: **File → Import → Motion Capture (.bvh)**.
-
-
-
-This gives you a new armature shaped like Posetrak's tracking skeleton,
-animated, with frame 1 holding the T-pose. Nothing here uses BVH
-Retargeter yet.
-
-![](images/blender-armature-imported.jpg)
 
 
 ## Retargeting
@@ -114,9 +99,12 @@ Retargeter yet.
    scene duration" so that the scene's timeline works as expected.You should
    see a human skeleton appear in the scene.
 
+   ![](images/blender-armature-imported.jpg)
+
 3. Select File -> Append... and locate the `Danny_Rig_1.0.blend` file you
    donwloaded previously. After opening it,navigate to "Collections", then
    "LINK_Dancer" to append the model to your scene.
+
 
 4. Click the source armature (the one you imported from Posetrak BVH file) to
    select it, then **shift-click the target armature last** so both are selected
@@ -124,6 +112,7 @@ Retargeter yet.
    yellow.
 
 5. Click **BVH Retargeter → Retarget Selected To Active**.
+
    ![](images/blender-bvh-retarget.jpg)
 
 6. In the confirmation dialog:
@@ -213,5 +202,5 @@ the source side:
 
 ## See also
 
-- [Your first capture](first-capture.md) — where this fits in the
+- [Tutorial](tutorial1.md) — where this fits in the
   overall workflow.

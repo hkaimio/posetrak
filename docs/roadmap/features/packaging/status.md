@@ -282,3 +282,39 @@ lockfile snapshot for a given release should live. Plus, newly surfaced
 by the prototype: `uv.exe` itself is ~44MB, larger than
 packaging-design.md's "a few MB" estimate — still small next to the
 ~1.5GB dependency download, but worth correcting in that doc.
+
+**TODO: document end-user CUDA prerequisites.** Harri asked (2026-08-23)
+what a user needs installed for CUDA acceleration to work, specifically
+so this doesn't get forgotten before the small-group test (Phase 3) --
+testers will hit this. Best understanding so far, from reading the code
+and `uv.lock`'s platform markers (not yet verified on real GPU
+hardware):
+
+1. An NVIDIA GPU with a reasonably current driver (needs to support
+   CUDA 12.x).
+2. The optional `segmentation` dependency group installed (`uv sync
+   --group segmentation`) -- **not** part of the default install. This
+   pulls `torch` from the pinned `pytorch-cu126` index, and on Windows
+   torch's wheel bundles its own CUDA 12.6 + cuDNN runtime DLLs inside
+   `torch/lib/`.
+3. Nothing else, as far as the code implies: `backends_rtmdet.py`/
+   `backends_rtmpose.py` register torch's `lib/` directory onto the DLL
+   search path before onnxruntime-gpu is imported, specifically so
+   onnxruntime-gpu's CUDA execution provider finds `cublasLt64_12.dll`
+   etc. from torch's bundled copies -- no separate system-wide NVIDIA
+   CUDA Toolkit/cuDNN install appears to be required. (This is also why
+   `onnxruntime-gpu` is pinned `<1.26`: needs CUDA 12.x, and 1.26+ wants
+   CUDA 13, which wouldn't match torch's cu126 build.)
+4. A current Microsoft Visual C++ Redistributable (onnxruntime's own
+   stated requirement -- visible in the "Please install all
+   dependencies... latest MSVC runtime" text of the CUDA-unavailable
+   warning fixed in the entry above).
+
+Confirmed via `uv.lock`: the `nvidia-*-cu12` PyPI packages (cudnn,
+cublas, etc.) are manylinux-only wheels with no Windows build at all --
+on Windows, torch really is the sole source of these DLLs, there's no
+alternate system-package path to check. **Not yet confirmed**: whether
+`uv sync --group segmentation` alone is actually sufficient with no
+other install step, on a machine with a real GPU. Verify before writing
+this up in real user-facing docs (docs/setup.md and/or a dedicated GPU
+prerequisites section).

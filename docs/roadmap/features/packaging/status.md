@@ -342,7 +342,20 @@ Progress so far:
   eventually make the installer link public too, but **holding for now**
   -- he just received the actual Posetrak logo and wants it added to
   both the installer (icon/wizard banner) and the docs site
-  (logo/favicon) before any of this goes live. Waiting on the logo file.
+  (logo/favicon) before any of this goes live.
+- **Branding done** (commit `09184fe`): two master exports from Nelli
+  Kaimio (distinct copyright, see `branding/`'s REUSE.toml annotation)
+  -- an abstract mark for small/icon uses, an illustrated aikido figure
+  for banner uses. `branding/generate_assets.py` derives every
+  installer/docs asset from them (multi-res `.ico`, wizard BMPs
+  flattened onto white, docs PNGs). Wired into
+  `packaging/windows/posetrak.iss` (`SetupIconFile`,
+  `WizardImageFile`, `WizardSmallImageFile`, shortcut/uninstaller
+  icons) and `mkdocs.yml` (`theme.logo`/`favicon`) +
+  `docs/index.md` (home page banner). Installer rebuilt and the
+  compiled Setup.exe's embedded icon visually confirmed. Still
+  holding the public installer-download link per the earlier decision
+  -- that's independent of branding being done now.
 
 ## Known issues / open questions
 

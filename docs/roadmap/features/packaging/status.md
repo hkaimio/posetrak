@@ -1,7 +1,7 @@
 ```toml
 name = "Release Packaging (Windows/Linux Installer)"
 status = "in_progress"
-progress_pct = 40
+progress_pct = 50
 description = """
 Produce an installable release artifact (Windows installer, Linux AppImage/tarball) that doesn't \
 require a compiler or manual `uv sync` -- a thin bootstrapper (uv binary + pre-built C++ tracker + \
@@ -27,10 +27,11 @@ evidence of interest in Posetrak beyond today's use.
 ## Current state
 
 **2026-08-23: installer-prototype-plan.md's Phase 1 confirmed working
-(app installs, syncs dependencies, opens with a functional UI -- four
-real bugs found and fixed along the way) and called done. Phase 2
-started: Inno Setup script written and compiling cleanly into a ~19MB
-installer, not yet run through Windows Sandbox.**
+and called done (four real bugs found and fixed). Phase 2's installer
+built and run through its first real tutorial-walkthrough Sandbox test,
+which found and fixed two more real bugs (missing skeleton seed data in
+the test fixture; a Windows TLS cert-chasing gap breaking rtmlib model
+downloads). Installer rebuilt with both fixes, ready for round 2.**
 
 - Built the optimized C++ tracker (`meson setup --reconfigure optbuild
   --buildtype=release`, `meson compile`) and assembled a bootstrap
@@ -193,13 +194,45 @@ installer, not yet run through Windows Sandbox.**
     the installer writes to the Sandbox's own local disk, not back to
     the host, so this one avoids the live-mount contamination class of
     problem entirely) for testing the compiled installer itself.
-- **Not yet done**: actually running the compiled installer through
-  Windows Sandbox (install → Start Menu shortcut → first launch);
-  getting a sample video into the Sandbox to exercise the actual
-  detection/tracking pipeline (YOLO+RTMPose, the C++ tracker); measuring
-  first-launch `uv sync` timing; validating `uv`'s from-scratch Python
-  provisioning is truly cache-free; the rest of the small-group test;
-  CI automation; Linux.
+- **Installer Sandbox test, round 1**: installation itself worked
+  cleanly (SmartScreen notice, license page, Start Menu shortcut, first
+  launch). Harri then ran the actual tutorial materials
+  (`docs/user-guide/tutorial1.md`'s walkthrough, using a disposable copy
+  of his local `D:\mocap\tutorial1-template` test fixture mapped in
+  read-write alongside the read-only installer folder) through as far
+  as the detection step, surfacing two more real findings:
+  - **Default skeletons missing in the new-capture wizard's persons
+    page.** Root cause: data, not code -- `tutorial1-template.db` had 0
+    rows in `skeletons` (confirmed directly: `PRAGMA user_version` = 43,
+    correct, but the table was simply never seeded). The wizard's
+    "optional default skeleton, `(none)` is a valid choice" design
+    (`page_persons.py`) is working as intended; this template file
+    predates -- or was created via a path that skipped -- the
+    established `create_session()` + `seed_bundled_defaults()`
+    convention for sessions a person will actually use. Fixed directly:
+    seeded both the original template and its disposable Sandbox-test
+    copy with `seed_default_skeletons()` (idempotent, safe to re-run).
+  - **rtmlib's model-checkpoint download failed with
+    `CERTIFICATE_VERIFY_FAILED: unable to get local issuer
+    certificate`.** Root cause: Python's `ssl` module doesn't get the
+    automatic AIA (Authority Information Access) chasing that
+    browsers/WinINet-based Windows apps get for free from the native
+    certificate store, so a machine that's never made an HTTPS
+    connection needing a given CA's intermediate cert before -- a fresh
+    install or a Sandbox run, not Sandbox-specific -- can fail exactly
+    this way even though the same URL opens fine in a browser on the
+    same machine. Fixed by pointing Python's default SSL context at
+    certifi's root CA bundle via `SSL_CERT_FILE`, set at import time in
+    both rtmlib-backed detection backend modules (`backends_rtmdet.py`,
+    `backends_rtmpose.py`); added `certifi` as an explicit direct
+    dependency (commit `efdf95e`). Installer rebuilt with the fix;
+    bootstrap-proto's `app/` snapshot refreshed too.
+- **Not yet done**: re-running the installer Sandbox test with both
+  fixes in place (round 2); getting far enough into the tutorial to
+  exercise the C++ tracker itself and BVH export; measuring first-launch
+  `uv sync` timing; validating `uv`'s from-scratch Python provisioning
+  is truly cache-free; the rest of the small-group test; CI automation;
+  Linux.
 
 ## Known issues / open questions
 

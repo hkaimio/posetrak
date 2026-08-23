@@ -1,7 +1,7 @@
 ```toml
 name = "Release Packaging (Windows/Linux Installer)"
 status = "in_progress"
-progress_pct = 18
+progress_pct = 30
 description = """
 Produce an installable release artifact (Windows installer, Linux AppImage/tarball) that doesn't \
 require a compiler or manual `uv sync` -- a thin bootstrapper (uv binary + pre-built C++ tracker + \
@@ -26,11 +26,11 @@ evidence of interest in Posetrak beyond today's use.
 
 ## Current state
 
-**2026-08-23: installer-prototype-plan.md's Phase 1 (manual bootstrap
-folder) built and iterating through Windows Sandbox test runs; four
-real bugs found and fixed so far, folder refreshed and ready for
-another retest (Sandbox VM should be restarted or its stale
-`~/.posetrak/registry.db` deleted first -- see below).**
+**2026-08-23: installer-prototype-plan.md's Phase 1 core mechanism
+confirmed working end to end on Windows Sandbox -- app installs, syncs
+dependencies, and opens with a functional UI. Four real bugs found and
+fixed along the way. Detection/tracking pipeline itself still untested
+(no sample video in the Sandbox).**
 
 - Built the optimized C++ tracker (`meson setup --reconfigure optbuild
   --buildtype=release`, `meson compile`) and assembled a bootstrap
@@ -144,9 +144,28 @@ another retest (Sandbox VM should be restarted or its stale
   -- delete `%USERPROFILE%\.posetrak\registry.db` (and any
   `-wal`/`-shm` siblings) inside the Sandbox, or just restart the
   Sandbox VM, before the next retest.
-- **Not yet done**: confirming the Sandbox run now succeeds end to end
-  and actually opens the main window; validating `uv`'s from-scratch
-  Python provisioning and a truly cache-free download; the rest of the
+- **First fully successful run**: after the registry cleanup, the app
+  opened. Harri confirmed the basic UI works from the bootstrap folder:
+  created a new session DB, opened Manage Cameras (correctly empty) and
+  Manage Skeletons (correctly shows the bundled default male/female
+  skeletons), and opened the new-capture wizard. This validates Phase
+  1's core assumption end to end -- the thin-bootstrap shape genuinely
+  works on a clean machine with no Python/compiler/uv preinstalled.
+  Not tested yet: the detection/tracking pipeline itself (no sample
+  video was available inside the Sandbox to drive the capture wizard
+  further).
+- **Known open risk, not yet hit**: `pyproject.toml` pins
+  `onnxruntime-gpu` unconditionally -- there's no CPU-only dependency
+  variant yet, even though this prototype's own scope (above) says
+  "CPU-only first". Untested whether `onnxruntime-gpu` degrades cleanly
+  to its CPU execution provider on a GPU-less Sandbox, or errors/warns
+  in a way that looks broken to a tester, once video is actually fed
+  through detection. Worth watching for specifically once a sample clip
+  is available to test the pipeline end to end.
+- **Not yet done**: getting a sample video into the Sandbox to exercise
+  the actual detection/tracking pipeline (YOLO+RTMPose, the C++
+  tracker); measuring first-launch `uv sync` timing; validating `uv`'s
+  from-scratch Python provisioning is truly cache-free; the rest of the
   small-group test; CI automation; Linux.
 
 ## Known issues / open questions

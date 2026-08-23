@@ -6,7 +6,7 @@ Video-based markerless motion capture using an Unscented Kalman Filter in joint
 space. Supports an arbitrary number of synchronized cameras and configurable
 skeleton definitions, tracking results exported as BVH files.
 
-Main motivation for Posetrak development were chalelnges in tracking
+Main motivation for Posetrak development were challenges in tracking
 multi-person, close-contact scenes. read here more about project's
 [background](background.md).
 

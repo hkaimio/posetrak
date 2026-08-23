@@ -28,6 +28,7 @@ motion capture sequence.
 ## Documentation
 
 - **[Setup](setup.md)** — prerequisites, build instructions, both platforms
+- **[Tutorial](user-guide/tutorial1.md)** — quick walkthrough of main Posetrak features using a concrete example
 - **[User Guide](user-guide/first-capture.md)** — capturing, calibrating, tracking, troubleshooting
 - **[Architecture](architecture/overview.md)** — system design, data model, the UKF solver
 - **[Reference](skeleton-format.md)** — file formats (skeleton YAML, state vector, sync metadata)

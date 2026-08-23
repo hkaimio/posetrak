@@ -23,9 +23,14 @@ def _tracker_binary_name(platform: str = sys.platform) -> str:
     return "posetrak-tracker.exe" if platform == "win32" else "posetrak-tracker"
 
 
-# Development build fallback: optbuild relative to repo root.
+# Development build fallback: optbuild relative to repo root. cpp/cli, not
+# cli -- stale since the C++ source tree moved under cpp/ (2026-08-18); never
+# caught because every test mocks default_binary_path() out entirely rather
+# than exercising this fallback path's actual value (2026-08-23 packaging
+# prototype work, building a bootstrap folder against ~/.posetrak/ surfaced
+# it by comparison).
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_DEVBUILD_BINARY = _REPO_ROOT / "optbuild" / "cli" / _tracker_binary_name()
+_DEVBUILD_BINARY = _REPO_ROOT / "optbuild" / "cpp" / "cli" / _tracker_binary_name()
 
 
 @dataclass

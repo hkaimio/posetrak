@@ -44,6 +44,15 @@ IK solver against Blender armatures and [export the
 results](https://github.com/hkaimio/mocap-helpers/tree/main/opensim-to-bvh) as
 BVH files for other animation tools.
 
+<figure class="video-embed-figure">
+  <div class="video-embed">
+    <iframe src="https://player.vimeo.com/video/1220607472"
+            allow="autoplay; fullscreen; picture-in-picture"
+            allowfullscreen></iframe>
+  </div>
+  <figcaption>One of the first successful tests integrating data cleanup with my tools, Pose2sim, OpenSim inverse kinematics & Blender. Note jumps in arms & hip orientation, mostly due to changes in set of cameras classified as inliers. October 2025</figcaption>
+</figure>
+
 These got the motion data where I wanted it, but the outliers and noise were
 still a problem. Movements turned very jerky whenever a camera lost visibility
 of a key body part. That sent me looking for ways to improve temporal stability
@@ -56,6 +65,16 @@ the filter operated directly on the skeleton's joint angles instead of on
 individual 3D points, outlier rejection and temporal smoothing could be solved
 against the skeleton itself — triangulation and IK were actually just getting in
 the way.
+
+<figure class="video-embed-figure">
+  <div class="video-embed">
+    <iframe src="https://player.vimeo.com/video/1220607473"
+            allow="autoplay; fullscreen; picture-in-picture"
+            allowfullscreen></iframe>
+  </div>
+  <figcaption>Red: Pose2sim triangulation + OpenSim IK solver<br/>Blue: My first full skeleton UKF solver prototype. December 2025</figcaption>
+</figure>
+
 
 That's the key idea behind Posetrak's solver: every frame it directly updates
 the skeleton pose from the 2D keypoint detections using a massive unscented

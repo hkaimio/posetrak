@@ -86,8 +86,19 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\launch.bat"; WorkingDir: "{
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+; Quick starting point per Harri, 2026-08-23: an install-time way to pull
+; in the segmentation extras (torch/Cutie) is being added now; a more
+; discoverable in-app "install additional components later" action is
+; still wanted too (see docs/roadmap/features/packaging/status.md's
+; TODO) but is real design work, not a five-minute addition.
+Name: "cutie"; Description: "Install GPU segmentation support (PyTorch/Cutie) -- several GB extra download, requires an NVIDIA GPU"; GroupDescription: "Optional components:"; Flags: unchecked
 
 [Run]
+; Runs uv's own console output visibly (no runhidden) -- this can be a
+; multi-GB download, and a silently "stuck" wizard page would look
+; broken. Placed before the launch entry so first launch doesn't race a
+; second, redundant sync.
+Filename: "{app}\uv.exe"; Parameters: "sync --group segmentation --project ""{app}\app"""; WorkingDir: "{app}"; StatusMsg: "Installing GPU segmentation support (this can take several minutes and needs internet access)..."; Tasks: cutie; Flags: waituntilterminated
 Filename: "{app}\launch.bat"; Description: "Launch {#MyAppName} now"; Flags: postinstall nowait skipifsilent
 
 [UninstallDelete]

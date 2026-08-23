@@ -188,6 +188,31 @@ def _check_schema_version(
 # ---------------------------------------------------------------------------
 
 
+def _discard_partial_db(conn: sqlite3.Connection, path: Path) -> None:
+    """Close *conn* and delete *path* plus any WAL/SHM sidecar files.
+
+    ``sqlite3.connect()`` creates the file at *path* immediately, before a
+    single statement has run against it. If schema application or seeding
+    then fails partway through, the caller (create_registry()/
+    create_session()) would otherwise leave that empty, schema-version-0
+    file behind. A later open_or_create_registry() -- or a plain retry --
+    sees the leftover file and treats it as an existing (but broken)
+    database instead of creating a fresh one, surfacing a confusing
+    "expected N, got 0" schema-mismatch error that has nothing to do with
+    the actual failure.
+
+    Found via the installer prototype's Windows Sandbox testing
+    (2026-08-23): a since-fixed bug in schema-file resolution made
+    create_registry() fail this way, and every subsequent launch then hit
+    the schema-mismatch error above instead of the original one, because
+    the wrecked ~/.posetrak/registry.db from the first failed attempt was
+    still sitting there.
+    """
+    conn.close()
+    for suffix in ("", "-wal", "-shm"):
+        path.with_name(path.name + suffix).unlink(missing_ok=True)
+
+
 def create_registry(path: Path) -> sqlite3.Connection:
     """Create a new registry database at *path* and return an open connection.
 
@@ -211,8 +236,12 @@ def create_registry(path: Path) -> sqlite3.Connection:
         raise FileExistsError(f"Registry database already exists: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = _connect(path)
-    _apply_schema(conn, _REGISTRY_SCHEMA_SQL, REGISTRY_SCHEMA_VERSION)
-    seed_bundled_defaults(conn)
+    try:
+        _apply_schema(conn, _REGISTRY_SCHEMA_SQL, REGISTRY_SCHEMA_VERSION)
+        seed_bundled_defaults(conn)
+    except Exception:
+        _discard_partial_db(conn, path)
+        raise
     return conn
 
 
@@ -316,11 +345,15 @@ def create_session(path: Path) -> sqlite3.Connection:
         raise FileExistsError(f"Session database already exists: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = _connect(path)
-    registry_sql = _REGISTRY_SCHEMA_SQL.read_text(encoding="utf-8")
-    session_sql = _SESSION_SCHEMA_SQL.read_text(encoding="utf-8")
-    conn.executescript(registry_sql + "\n" + session_sql)
-    _set_schema_version(conn, SESSION_SCHEMA_VERSION)
-    conn.commit()
+    try:
+        registry_sql = _REGISTRY_SCHEMA_SQL.read_text(encoding="utf-8")
+        session_sql = _SESSION_SCHEMA_SQL.read_text(encoding="utf-8")
+        conn.executescript(registry_sql + "\n" + session_sql)
+        _set_schema_version(conn, SESSION_SCHEMA_VERSION)
+        conn.commit()
+    except Exception:
+        _discard_partial_db(conn, path)
+        raise
     return conn
 
 

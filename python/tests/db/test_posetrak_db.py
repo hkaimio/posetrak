@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-
+import posetrak.db.db as db_module
 from posetrak.db.db import (
     DEFAULT_REGISTRY_PATH,
     REGISTRY_SCHEMA_VERSION,
@@ -91,6 +91,26 @@ def test_create_registry_fails_if_exists(tmp_path: Path) -> None:
     conn.close()
     with pytest.raises(FileExistsError):
         create_registry(db_path)
+
+
+def test_create_registry_removes_partial_file_on_schema_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A schema-application failure must not leave a broken file behind.
+
+    sqlite3.connect() creates the file at *path* immediately, before a
+    single statement runs. Without cleanup, a failure partway through
+    create_registry() leaves an empty, schema-version-0 file there --
+    which a later open_or_create_registry() (or a plain retry) would then
+    treat as an existing but broken registry instead of creating a fresh
+    one, surfacing a confusing "expected N, got 0" mismatch instead of
+    the real error.
+    """
+    db_path = tmp_path / "reg.db"
+    monkeypatch.setattr(db_module, "_REGISTRY_SCHEMA_SQL", Path("does-not-exist.sql"))
+    with pytest.raises(FileNotFoundError):
+        create_registry(db_path)
+    assert not db_path.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +260,21 @@ def test_create_session_creates_file(tmp_path: Path) -> None:
     conn = create_session(db_path)
     conn.close()
     assert db_path.exists()
+
+
+def test_create_session_removes_partial_file_on_schema_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A schema-application failure must not leave a broken file behind.
+
+    See test_create_registry_removes_partial_file_on_schema_failure --
+    same failure mode, same fix (_discard_partial_db).
+    """
+    db_path = tmp_path / "session.db"
+    monkeypatch.setattr(db_module, "_REGISTRY_SCHEMA_SQL", Path("does-not-exist.sql"))
+    with pytest.raises(FileNotFoundError):
+        create_session(db_path)
+    assert not db_path.exists()
 
 
 def test_create_session_sets_schema_version(tmp_path: Path) -> None:

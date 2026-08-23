@@ -72,3 +72,21 @@ path = [
 ]
 SPDX-FileCopyrightText = "2026 Harri Kaimio"
 SPDX-License-Identifier = "Apache-2.0"
+
+# The Posetrak logo (two master exports plus everything derived from them --
+# installer icon/wizard images, docs site logo/favicon) is Nelli Kaimio's
+# artwork, not Harri's -- distinct copyright holder from the rest of the
+# project, though still released under the same license.
+[[annotations]]
+path = [
+    "branding/posetrak-logo-abstract.png",
+    "branding/posetrak-logo-aikido.png",
+    "packaging/windows/assets/posetrak-icon.ico",
+    "packaging/windows/assets/wizard-small.bmp",
+    "packaging/windows/assets/wizard-banner.bmp",
+    "docs/assets/logo.png",
+    "docs/assets/favicon.png",
+    "docs/assets/banner.png",
+]
+SPDX-FileCopyrightText = "2026 Nelli Kaimio"
+SPDX-License-Identifier = "Apache-2.0"

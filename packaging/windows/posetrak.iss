@@ -26,6 +26,12 @@
 ; to a sibling "dist" directory if not given explicitly -- a future CI
 ; release workflow would assemble that directory itself and pass its
 ; own path the same way.
+;
+; Branding assets (assets\*.ico/*.bmp) are generated from the master
+; artwork in branding\ (posetrak-logo-abstract.png for the icon/small
+; wizard image, posetrak-logo-aikido.png for the wizard banner) --
+; regenerate them from those masters rather than hand-editing the
+; derived files if the logo ever changes.
 
 #ifndef SourceDir
   #define SourceDir "dist"
@@ -60,13 +66,18 @@ SolidCompression=yes
 WizardStyle=modern
 OutputDir=output
 OutputBaseFilename=posetrak-setup-{#MyAppVersion}
-UninstallDisplayIcon={app}\tracker\posetrak-tracker.exe
+; Branding (logo by Nelli Kaimio -- see branding/ and REUSE.toml).
+SetupIconFile=assets\posetrak-icon.ico
+WizardImageFile=assets\wizard-banner.bmp
+WizardSmallImageFile=assets\wizard-small.bmp
+UninstallDisplayIcon={app}\posetrak-icon.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "{#SourceDir}\uv.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "assets\posetrak-icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\launch.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\launch.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\README.txt"; DestDir: "{app}"; Flags: ignoreversion
@@ -80,9 +91,9 @@ Source: "{#SourceDir}\tracker\*"; DestDir: "{app}\tracker"; Flags: ignoreversion
 Source: "{#SourceDir}\app\*"; DestDir: "{app}\app"; Excludes: ".venv,__pycache__,*.egg-info,logs,*.pyc"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\launch.bat"; WorkingDir: "{app}"; IconFilename: "{app}\tracker\posetrak-tracker.exe"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\launch.bat"; WorkingDir: "{app}"; IconFilename: "{app}\posetrak-icon.ico"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\launch.bat"; WorkingDir: "{app}"; IconFilename: "{app}\tracker\posetrak-tracker.exe"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\launch.bat"; WorkingDir: "{app}"; IconFilename: "{app}\posetrak-icon.ico"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked

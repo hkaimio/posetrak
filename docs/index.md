@@ -1,5 +1,7 @@
 # Posetrak
 
+![Posetrak](assets/banner.png){ align=right width=240 }
+
 Video-based skeletal motion capture using an Unscented Kalman Filter in joint
 space. Supports an arbitrary number of synchronized cameras and configurable
 skeleton definitions, tracking results exported as BVH files.

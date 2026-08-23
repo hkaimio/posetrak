@@ -1,5 +1,10 @@
 # Your first capture
 
+!!! warning "Work in progress"
+    This checklist overlaps with the [tutorial](tutorial1.md), which is
+    the more complete, hands-on walkthrough for now. This page will be
+    trimmed down to a quick-reference checklist alongside it later.
+
 Main steps in creating a motion capture with Posetrak. This is meant as
 an overview/checklist — the linked pages cover each step's details.
 

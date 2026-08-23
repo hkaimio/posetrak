@@ -21,8 +21,7 @@ manual setup:
    Python dependency (PySide6, OpenCV, etc.), which can take a few
    minutes depending on your connection. Later launches are fast.
 
-Once it's running, continue to
-[Your first capture](user-guide/first-capture.md) or the hands-on
+Once it's running, continue to the hands-on
 [tutorial](user-guide/tutorial1.md).
 
 For development, contributing, Linux, or building from source instead of

@@ -68,6 +68,9 @@ nav:
   - Roadmap: roadmap.md
   - Contributing: https://github.com/hkaimio/posetrak/blob/main/CONTRIBUTING.md
 
+extra_css:
+  - assets/video-embed.css
+
 theme:
   name: material
   logo: assets/logo.png

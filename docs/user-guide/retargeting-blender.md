@@ -128,8 +128,14 @@ different bone count, these two files won't match yours as-is — see
 
 1. Have both armatures in the scene: your imported Posetrak BVH (the **source**)
    and your character rig (the **target**), already positioned/scaled sensibly
-   relative to each other. If you have scaled the target rig, you *MUST* apply all
-   transforms before retargeting (Object -> Apply -> All Transforms).
+   relative to each other.
+   - Open a new Blender scene & delete the default cube
+   - Open the BVH file you previously expoterd from Posetrak in Blender (File ->
+     import -> Motion Capture (.bvh)). You should see a human skeleton appear in
+     the scene.
+   - Select File -> Append... and locate the `Danny_Rig_1.0.blend` file you
+     donwloaded previously. After opening it,navigate to "Collections", then
+     "LINK_Dancer" to append the model to your scene.
 2. Click the source armature (the one you imported from Posetrak BVH file) to
    select it, then **shift-click the target armature last** so both are selected
    and the target is active. The source should show as orange and the target as

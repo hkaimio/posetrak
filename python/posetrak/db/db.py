@@ -13,6 +13,7 @@ This module handles:
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 import sqlite3
 import uuid
@@ -30,12 +31,22 @@ SESSION_SCHEMA_VERSION: Final[int] = 43
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
 
 # ---------------------------------------------------------------------------
-# SQL file paths (resolved relative to this source file)
+# SQL file paths
 # ---------------------------------------------------------------------------
 
-_DB_DIR: Final[Path] = Path(__file__).parents[3] / "db"
-_REGISTRY_SCHEMA_SQL: Final[Path] = _DB_DIR / "registry_schema.sql"
-_SESSION_SCHEMA_SQL: Final[Path] = _DB_DIR / "session_schema.sql"
+# Package data (posetrak/db/sql/, declared in pyproject.toml's
+# [tool.setuptools.package-data]), not a path resolved relative to this
+# source file's location on disk -- the previous Path(__file__).parents[3]
+# / "db" walk assumed a full git checkout with a repo-root db/ directory
+# sibling to python/, which isn't true once posetrak is installed by any
+# means that doesn't preserve that exact layout (found via the packaging
+# prototype's bootstrap folder, 2026-08-23: a snapshot of just the python/
+# tree has no such sibling, so every schema/migration load failed with
+# FileNotFoundError). importlib.resources.files() is the same mechanism
+# manage_skeleton.py already uses for its own bundled YAML data.
+_DB_DIR: Final = importlib.resources.files("posetrak.db.sql")
+_REGISTRY_SCHEMA_SQL: Final = _DB_DIR / "registry_schema.sql"
+_SESSION_SCHEMA_SQL: Final = _DB_DIR / "session_schema.sql"
 
 
 # ---------------------------------------------------------------------------

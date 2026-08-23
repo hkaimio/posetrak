@@ -1,7 +1,7 @@
 ```toml
 name = "Release Packaging (Windows/Linux Installer)"
 status = "in_progress"
-progress_pct = 60
+progress_pct = 75
 description = """
 Produce an installable release artifact (Windows installer, Linux AppImage/tarball) that doesn't \
 require a compiler or manual `uv sync` -- a thin bootstrapper (uv binary + pre-built C++ tracker + \
@@ -26,14 +26,16 @@ evidence of interest in Posetrak beyond today's use.
 
 ## Current state
 
-**2026-08-23: installer-prototype-plan.md's Phase 1 confirmed working
-and called done (four real bugs found and fixed). Phase 2's installer
-built and run through two rounds of tutorial-walkthrough Sandbox
-testing at the detection step, finding and fixing four more real bugs
-(missing skeleton seed data in the test fixture; a Windows TLS
-cert-chasing gap; false-positive CUDA detection; a permanently-stuck
-corrupt checkpoint cache). Installer rebuilt with all fixes, ready for
-round 3.**
+**2026-08-23: the full Phase 1+2 core loop is validated end to end --
+install → first launch → session setup → calibration → detection →
+tracking → BVH export, all via the unsigned installer on a clean
+Windows Sandbox. Six real bugs found and fixed along the way (missing
+skeleton seed data; a Windows TLS cert-chasing gap; false-positive CUDA
+detection; a permanently-stuck corrupt checkpoint cache; plus a
+still-unconfirmed skeleton-data-reversion possibly related to WAL mode
+over Sandbox's shared folder). Also added: a CPU-fallback warning in
+the detection UI, and an installer checkbox for optional GPU
+segmentation support.**
 
 - Built the optimized C++ tracker (`meson setup --reconfigure optbuild
   --buildtype=release`, `meson compile`) and assembled a bootstrap
@@ -273,11 +275,35 @@ round 3.**
   virtualized cores, not a bug (real CPU-only users on real hardware
   will be faster than this, but still slower than GPU -- the CUDA
   prerequisites TODO above covers what's needed for GPU acceleration).
-- **Not yet done**: getting far enough into the tutorial to exercise
-  the C++ tracker itself and BVH export; measuring first-launch `uv
-  sync` timing; validating `uv`'s from-scratch Python provisioning is
-  truly cache-free; verifying the CUDA-prerequisites TODO above on real
-  GPU hardware; the rest of the small-group test; CI automation; Linux.
+- **One more finding, same session**: at the "run tracker" step, the
+  default skeletons were "missing" again -- the `skeletons` table in
+  `posetrak-tutorial-test\tutorial1-template.db` had reverted to 0 rows
+  despite being seeded earlier in this same testing round. Root cause
+  not confirmed; no code path in the app deletes skeleton rows in bulk
+  (checked), so the leading theory is that Windows Sandbox's shared
+  folder is effectively a network filesystem, and SQLite's WAL mode
+  (used unconditionally by this app's `_connect()`) is
+  [explicitly documented as unreliable over network filesystems](https://www.sqlite.org/wal.html)
+  -- if so this is specific to testing via a live-mapped Sandbox
+  folder, not something a real user (session DB on local disk) would
+  hit. Reseeded the test file directly (verified via a fresh reopen)
+  to unblock; flagged to Harri to watch for recurrence as a signal
+  either way. Not yet actually reproduced/confirmed.
+- **Installer Sandbox test, round 4 -- full tutorial walkthrough
+  succeeds end to end.** With skeletons reseeded, Harri ran the tracker
+  and exported BVH successfully. This is the full Phase 1+2 core loop
+  validated: install (unsigned, SmartScreen-warned) → first launch (`uv
+  sync` provisions Python + deps from scratch) → session/capture setup
+  → extrinsics calibration → detection (YOLOX + RTMPose, CPU fallback,
+  slow but correct) → UKF tracking → BVH export. Also confirmed the new
+  "Install GPU segmentation support" installer checkbox is visible and
+  selectable.
+- **Not yet done**: measuring first-launch `uv sync` timing; validating
+  `uv`'s from-scratch Python provisioning is truly cache-free;
+  confirming (or ruling out) the WAL/Sandbox-shared-folder theory
+  above; verifying the CUDA-prerequisites TODO on real GPU hardware;
+  the in-app "install segmentation extras later" action; the small-group
+  test (Phase 3); CI automation; Linux.
 
 ## Known issues / open questions
 

@@ -1,7 +1,7 @@
 ```toml
 name = "Release Packaging (Windows/Linux Installer)"
 status = "in_progress"
-progress_pct = 75
+progress_pct = 85
 description = """
 Produce an installable release artifact (Windows installer, Linux AppImage/tarball) that doesn't \
 require a compiler or manual `uv sync` -- a thin bootstrapper (uv binary + pre-built C++ tracker + \
@@ -353,9 +353,19 @@ Progress so far:
   `WizardImageFile`, `WizardSmallImageFile`, shortcut/uninstaller
   icons) and `mkdocs.yml` (`theme.logo`/`favicon`) +
   `docs/index.md` (home page banner). Installer rebuilt and the
-  compiled Setup.exe's embedded icon visually confirmed. Still
-  holding the public installer-download link per the earlier decision
-  -- that's independent of branding being done now.
+  compiled Setup.exe's embedded icon visually confirmed.
+- **Both download links are now live** (commit `c99f80e`): Harri
+  uploaded the branded installer and the tutorial-materials zip to his
+  own OneDrive and shared the links. `docs/user-guide/tutorial1.md`'s
+  placeholder is now the real tutorial-materials link, and
+  `docs/setup.md` gained a new "Windows: Installer" section up front
+  with the installer link, SmartScreen-warning expectations, and
+  first-launch timing -- the old "There's no packaged release yet"
+  framing is gone. Both links resolve correctly (redirect to
+  `onedrive.live.com` with the right file IDs) but a plain HTTP check
+  can't confirm they're downloadable without a Microsoft sign-in
+  (OneDrive returns 403 to non-browser requests regardless) --
+  Harri to confirm in an incognito window.
 
 ## Known issues / open questions
 

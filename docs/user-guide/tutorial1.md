@@ -1,14 +1,27 @@
 # Tutorial 1 - Tracking motion with Posetrak
 
-In this tutorial you will set up a Posetrak project using existing video files, detect persons and poses from those, and finally track a person's motion and export it as a BVH file.
+In this tutorial you will do a full motion capture from existing video files: set up a Posetrak project, detect persons and poses from the videos, and finally track a person's motion and export it as a BVH file that can be used in Blender and other 3D applications.
+
+Before starting, load the [tutorial materials](TODO-add-download-link) and unzip it to a directory in your computer. The zip file contains an (almost) empty Posetrak project file and 3 videos that are shot with different types of cameras at the same time, showing the captured motion from different angles.
+
+
+## 1. Setting up the project
 
 1. Open Posetrak application, choose File -> Open session... and open the tutorial1.db file
+2. Select Session -> New capture...
+3. In the dialog, name your capture "Tutorial 1" , click "Add videos..." and select all the 3 video files that you downloaded
+3. For each video file, select the correct camera (video file names mention the camera used, and the tutorial project file has required configuration data for these)
+   ![](images/tutorial1/add-videos.jpg)
 
-## Synchronizing videos
+Click "Next" to move forward.
+
+## 2. Synchronizing videos
+
+Posetrak uses multiple camera views to reconstruct the exact pose of performers. For this, the videos must be in sync - Posetrak needs to know which frames are captured at the same time. It is usually enough that you show it the frames for two moments, one near the start of the videos and one near their end. To help with this, I have added a blinking LED on the floor: you can first search for roughly the same moment in the videos, then look for the exact moments where the LED lights up or turns off.
 
 The "Camera Synchronization" window shows videos from 2 cameras side by side. The left one is the **reference camera**, the right is the camera you are synchronizing with the reference. I recommend using one camera as reference and synchronizing all others to it, but this is not the only way: for example, you can synchronize camera2 to camera1 and camera3 to camera2.
 
-In any case, for each camera you need to anchor at least two frames in the capture to the capture's timeline.
+![](images/tutorial1/sync-page.jpg)
 
 You can move the video playheads in several ways:
 
@@ -28,9 +41,11 @@ Finally, change the target camera to insta_ace2_pro, find the corresponding fram
 
 The left pane should now show 4 sync anchors for the reference camera and 2 for the others. We are done with syncing the captured material. Click "Solve & apply sync", then "Next".
 
-## Extrinsics calibration
+## 3. Extrinsics calibration
 
 Now that Posetrak knows how the videos relate to each other in time, we need to tell it how they relate in space: where each camera was located and how it was oriented. This is called extrinsics calibration — see the [Extrinsics calibration guide](extrinsics-calibration.md) for the concepts and the automated methods (markers, calibration rigs) this tutorial skips in favor of placing control points by hand, so you learn the UI they all build on.
+
+![](images/tutorial1/extrinsics-page.jpg)
 
 In the "Extrinsics calibration" page, click "Calibrate…".
 
@@ -38,7 +53,7 @@ Open the "Data" tab at the bottom of the dialog. This shows the points already l
 
 We will place the origin of our coordinate system at the corner of the red tatami area nearest to the blinking LED we used for synchronization. In the right side pane, locate "Control points" and click "Add...". Then click that corner in all 3 camera images. When you press the mouse button on top of a camera image, it zooms into the area around the mouse cursor. You can then move the control point by dragging the mouse with the left button held down. When you release the button, the control point is placed at that location. (You can also redo this later if the point is in the wrong place.)
 
-The image below shows the correct location of the first control point in all cameras.
+See the images below for correct location of the control points.
 
 After placing it, enable the "Fix 3D position" checkbox in the bottom right corner of the window. Check that the X, Y and Z coordinates are all zero and click "Apply".
 
@@ -51,37 +66,68 @@ Our origin is now fixed, but we need more control points to set the axis directi
 | 4 | Last remaining corner of the red area (our Y axis; Posetrak uses a right-handed, Z-up coordinate system) | (0, 4, 0) | Not visible in `pixel9` |
 | 5 | Corner of the red mats near the paper on the floor and control point 4 | (1, 3, 0) | A bit difficult to locate in `insta_ace2_pro` |
 
+These images show correct locations of all 5 control points:
+
+**GoPro-11_mini_02** (CP 3 is not visible to this camera)
+
+![](images/tutorial1/cps-gopro.jpg)
+
+**Insta-ace2_pro**
+
+![](images/tutorial1/cps-insta.jpg)
+
+**Pixel 9** (control point 4 is not visible to this camera)
+
+![](images/tutorial1/cps-pixel9.jpg)
+
+
 Now you can try solving extrinsics. Locate the "Solve" pane on the right side of the window, disable "SIFT" for now and click "Match and solve". Open the "Cameras" tab at the bottom of the window and check the solution quality. In my case it looks quite good already: all cameras show ~5 pixel max error.
 
 Let's use automatic marker detection to add additional points to get a more accurate solution. There are a few ArUco markers attached to the room's walls and floor, and Posetrak can detect these automatically. From the sidebar's "Markers" section, click "Detect markers...". In the dialog that opens, select the correct marker dictionary, in this case DICT_5X5_50, and press OK. You should see yellow dots at each marker corner. Click "Match and solve..." again to use the newly detected markers as additional control points.
 
 The extrinsics calibration is now done. Click "Accept".
 
-## Define persons in the capture
+## 4. Define persons in the capture
 
 This is the last step of setting up the capture. Click "Add...", give the tracked person a name (anything is fine - this capture has only one person, but if there are more it is nice to call them by names you recognize). Select "Default male" as skeleton.
 
-## Capturing motion from a trial
+![](images/tutorial1/add-persons.jpg)
+
+## 5. Define trial & detect motion from the videos
 
 Now the capture material is ready - we can try to capture people's motions from it. Posetrak separates a *capture* (the whole set of videos you have recorded) from a *trial* (the time range of the captured video you actually want to use). Often you might leave the cameras on for a longer period and most of that time nothing interesting happens (just turning on 6 or 8 cameras takes some time).
 
-Select your capture from the list on the left side of the main window (there should be only one now). Use the time slider below the videos to select the start time for your trial (in this case around 2s) and click "Mark Start". Move the time slider to the end time of your trial (in this case around 12s) and click "Mark End". Click "New trial..." and give your trial a name in the dialog. You should see the trial appear in the side pane under your capture. Select it.
+Select your capture from the list on the left side of the main window (there should be only one now). Use the time slider below the videos to select the start time for your trial (in this case around 2s) and click "Mark Start". Move the time slider to the end time of your trial (in this case around 12s) and click "Mark End". Click "New trial..." and give your trial a name in the dialog.
+
+![](images/tutorial1/capture-page-new-trial.jpg)
+
+You should see the trial appear in the side pane under your capture. Select it.
 
 Next, we need to detect the persons and their poses in the videos. Click "Run detection...". Select "vitpose-l-133kp" as pose model, leave the other settings at their default values, and click "Run Detection".
 
 Running the detection takes some time. The first time, Posetrak loads the AI models needed for this from the internet before starting. After it finishes, you will see a detection under the trial (yes, you can run multiple detections for the same trial, for example if you want to use different detection algorithms for people, animals, etc.).
 
+## 6. Match the detected motions to persons
+
 Go to the detection page. You see a timeline of detected persons in each camera. When you hover on top of it, you see the detected person and pose keypoints on the right. Green dots are keypoints the detector is confident with; yellow and red points are uncertain detections.
 
 Before continuing we need to tell Posetrak who the person in the detections is. In this capture there is only 1 person so this is easy, but if there are multiple persons being captured (or just visible to some cameras) there will be more detections. Right-click a row in the timeline and select the person in the pictures. Do this for all 3 cameras. When you are ready, click "Save assignments".
 
-Some of the videos have multiple detection rows even though there is only 1 person present — see [Analyzing poses](analyzing-poses.md#direct-detection) for why, and when segmentation is worth the extra setup instead (not for this simple, single-person case).
+![](images/tutorial1/tutorial-stitching.gif)
+
+Some of the videos have multiple detection rows even though there is only 1 person present. This can happen if the person tracking algorithm "loses" the person, even for a brief moment. It then plays safe, starts a new detection and lets you decide if it is still the same person. See [Analyzing poses](analyzing-poses.md#direct-detection) for more details on this, and when a separate segmentation stage is worth the extra setup (not for this simple, single-person case).
 
 After saving the assignments, you'll see a new entry for the person under the detection in the navigation pane. Selecting that opens another page in the main window.
 
-## Capturing 3D movement
+## 7. Capturing 3D movement
 
-Finally, it's time. In the person page under detection, find the "Run tracker..." button and click it. The tracker options dialog opens - the defaults are fine for this tutorial, so just click "Run Tracker" again at the bottom of the dialog. You can follow the tracker's progress; it will likely take a minute or two.
+Finally, we are ready for running the actual motion capture! In the person page under detection, find the "Run tracker..." button and click it.
+
+![](images/tutorial1/person-page-run-tracker.jpg)
+
+The tracker options dialog opens - the defaults are fine for this tutorial, so just click "Run Tracker" again at the bottom of the dialog. You can follow the tracker's progress; it will likely take a minute or two.
+
+![](images/tutorial1/tracker-run-dlg.jpg)
 
 Congratulations - you are done! When the tracker finishes, there is a new entry in the navigation pane under the person. That page looks almost the same as the person page, but also shows the tracking results: you should see yellow dots on top of the videos in addition to green dots. The yellow dots are the tracked 3D joint positions as seen from that camera's point of view, while green dots are the joint keypoints originally detected from the video. Ideally, they should be at the same locations.
 

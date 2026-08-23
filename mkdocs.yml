@@ -48,6 +48,7 @@ nav:
   - Setup: setup.md
   - User Guide:
       - Your first capture: user-guide/first-capture.md
+      - "Tutorial: tracking a capture": user-guide/tutorial1.md
       - Camera intrinsics: user-guide/camera-intrinsics.md
       - Extrinsics calibration: user-guide/extrinsics-calibration.md
       - Synchronizing videos: user-guide/synchronizing-videos.md

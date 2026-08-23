@@ -46,7 +46,7 @@ BVH files for other animation tools.
 
 <figure class="video-embed-figure">
   <div class="video-embed">
-    <iframe src="https://player.vimeo.com/video/1220607472"
+    <iframe src="https://player.vimeo.com/video/1220607472?muted=1&loop=1"
             allow="autoplay; fullscreen; picture-in-picture"
             allowfullscreen></iframe>
   </div>
@@ -68,7 +68,7 @@ the way.
 
 <figure class="video-embed-figure">
   <div class="video-embed">
-    <iframe src="https://player.vimeo.com/video/1220607473"
+    <iframe src="https://player.vimeo.com/video/1220607473?muted=1&loop=1"
             allow="autoplay; fullscreen; picture-in-picture"
             allowfullscreen></iframe>
   </div>

@@ -71,6 +71,10 @@ nav:
 extra_css:
   - assets/video-embed.css
 
+extra_javascript:
+  - https://player.vimeo.com/api/player.js
+  - assets/video-embed.js
+
 theme:
   name: material
   logo: assets/logo.png

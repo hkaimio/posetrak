@@ -27,6 +27,7 @@ path = [
     "**/*.npz",
     "**/*.wrap",
     "**/*.example",
+    "**/*.txt",
     "uv.lock",
 ]
 SPDX-FileCopyrightText = "2026 Harri Kaimio"

@@ -94,3 +94,7 @@ ik_root_updates.csv
 tracker_markers.csv
 __marimo__/
 *.rrd
+
+# Compiled Inno Setup installers (built artifacts, not checked in --
+# see packaging/windows/posetrak.iss)
+packaging/windows/output/

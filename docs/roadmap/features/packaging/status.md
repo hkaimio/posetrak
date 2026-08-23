@@ -1,7 +1,7 @@
 ```toml
 name = "Release Packaging (Windows/Linux Installer)"
 status = "in_progress"
-progress_pct = 15
+progress_pct = 18
 description = """
 Produce an installable release artifact (Windows installer, Linux AppImage/tarball) that doesn't \
 require a compiler or manual `uv sync` -- a thin bootstrapper (uv binary + pre-built C++ tracker + \
@@ -27,9 +27,10 @@ evidence of interest in Posetrak beyond today's use.
 ## Current state
 
 **2026-08-23: installer-prototype-plan.md's Phase 1 (manual bootstrap
-folder) built and iterating through Windows Sandbox test runs; three
+folder) built and iterating through Windows Sandbox test runs; four
 real bugs found and fixed so far, folder refreshed and ready for
-another retest.**
+another retest (Sandbox VM should be restarted or its stale
+`~/.posetrak/registry.db` deleted first -- see below).**
 
 - Built the optimized C++ tracker (`meson setup --reconfigure optbuild
   --buildtype=release`, `meson compile`) and assembled a bootstrap
@@ -113,6 +114,36 @@ another retest.**
   regressions) and by re-running `uv sync` + a real `create_registry()`
   / `create_session()` call against a disposable copy of the refreshed
   bootstrap `app/` snapshot.
+- **Fourth real finding, next run**: with the db-packaging bug fixed,
+  the same still-running Sandbox session got past `uv sync` into
+  `posetrak-ui` itself, then failed with `ValueError: registry database
+  schema version mismatch: expected 8, got 0`. Root cause: the *first*
+  (pre-fix) launch attempt in that session had already called
+  `create_registry()` against `~/.posetrak/registry.db`; `sqlite3.
+  connect()` creates the file on disk immediately, so when schema
+  application then failed (the bug above), it left an empty,
+  schema-version-0 file behind at that path. `open_or_create_registry()`
+  only checks `path.exists()`, so the retry (with the fix in place)
+  found that leftover file and tried to *open* it as an existing
+  registry instead of creating a fresh one -- surfacing a confusing
+  version-mismatch error unrelated to the actual, already-fixed bug.
+  This is a real defect independent of the prototype: any interrupted
+  first-run (disk full, permission error, power loss) partway through
+  registry/session creation would leave the same wreckage behind in a
+  real install. Fixed by making `create_registry()`/`create_session()`
+  roll back (delete the partial file + WAL/SHM sidecars) on any failure
+  during schema application or seeding, so a retry creates cleanly
+  instead of tripping over a broken leftover (commit `990cc19`).
+  Verified via regression tests plus an end-to-end repro against a
+  disposable copy of the refreshed bootstrap snapshot: a simulated
+  schema-application failure now leaves no file behind, and the retry
+  succeeds with the correct schema version.
+- **Note for the current Sandbox session specifically**: this fix
+  doesn't retroactively un-corrupt a `registry.db` already wrecked by
+  an earlier attempt *within the same still-running Sandbox instance*
+  -- delete `%USERPROFILE%\.posetrak\registry.db` (and any
+  `-wal`/`-shm` siblings) inside the Sandbox, or just restart the
+  Sandbox VM, before the next retest.
 - **Not yet done**: confirming the Sandbox run now succeeds end to end
   and actually opens the main window; validating `uv`'s from-scratch
   Python provisioning and a truly cache-free download; the rest of the

@@ -62,10 +62,24 @@ Windows Sandbox.**
   C++ source tree moved under `cpp/` (commit `dd6afae`); every existing
   test mocks `default_binary_path()` out entirely so nothing caught it.
   Fixed and regression-tested (commit `7ee7a65`).
-- **Not yet done**: the actual Windows Sandbox run (this machine's `uv
-  sync` reused an already-installed system Python 3.13, so it hasn't
-  validated `uv`'s from-scratch Python provisioning or a truly
-  cache-free download); the small-group test; CI automation; Linux.
+- **First real Sandbox finding, before the small-group phase even
+  started**: Harri opened the Sandbox and it "does not recognize how to
+  run .ps1" — a stock Windows install associates `.ps1` with Notepad on
+  double-click rather than running it, and even "Run with PowerShell"
+  hits the default execution policy (`Restricted`), which refuses to
+  run *any* unsigned script with no override. Added `launch.bat`
+  (double-click-safe, calls `powershell.exe -ExecutionPolicy Bypass
+  -File launch.ps1` — bypasses only for that one invocation, not a
+  system-wide change) as the actual entry point; `launch.ps1` is now an
+  implementation detail. `README.txt` updated to match. This is exactly
+  the class of thing the plan's Phase 3 (small-group test) exists to
+  catch — caught even earlier, during the very first run. Not yet
+  re-verified inside the Sandbox itself.
+- **Not yet done**: confirming `launch.bat` actually resolves the .ps1
+  problem inside the Sandbox; validating `uv`'s from-scratch Python
+  provisioning and a truly cache-free download (this machine's own
+  sanity check reused an already-installed system Python); the rest of
+  the small-group test; CI automation; Linux.
 
 ## Known issues / open questions
 

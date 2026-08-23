@@ -1,7 +1,7 @@
 ```toml
 name = "Release Packaging (Windows/Linux Installer)"
 status = "in_progress"
-progress_pct = 30
+progress_pct = 40
 description = """
 Produce an installable release artifact (Windows installer, Linux AppImage/tarball) that doesn't \
 require a compiler or manual `uv sync` -- a thin bootstrapper (uv binary + pre-built C++ tracker + \
@@ -26,11 +26,11 @@ evidence of interest in Posetrak beyond today's use.
 
 ## Current state
 
-**2026-08-23: installer-prototype-plan.md's Phase 1 core mechanism
-confirmed working end to end on Windows Sandbox -- app installs, syncs
-dependencies, and opens with a functional UI. Four real bugs found and
-fixed along the way. Detection/tracking pipeline itself still untested
-(no sample video in the Sandbox).**
+**2026-08-23: installer-prototype-plan.md's Phase 1 confirmed working
+(app installs, syncs dependencies, opens with a functional UI -- four
+real bugs found and fixed along the way) and called done. Phase 2
+started: Inno Setup script written and compiling cleanly into a ~19MB
+installer, not yet run through Windows Sandbox.**
 
 - Built the optimized C++ tracker (`meson setup --reconfigure optbuild
   --buildtype=release`, `meson compile`) and assembled a bootstrap
@@ -162,11 +162,44 @@ fixed along the way. Detection/tracking pipeline itself still untested
   in a way that looks broken to a tester, once video is actually fed
   through detection. Worth watching for specifically once a sample clip
   is available to test the pipeline end to end.
-- **Not yet done**: getting a sample video into the Sandbox to exercise
-  the actual detection/tracking pipeline (YOLO+RTMPose, the C++
-  tracker); measuring first-launch `uv sync` timing; validating `uv`'s
-  from-scratch Python provisioning is truly cache-free; the rest of the
-  small-group test; CI automation; Linux.
+- **Phase 1 called done; moved to Phase 2** (Harri's call, 2026-08-23):
+  UI-level validation is sufficient for now rather than chasing the
+  detection/tracking pipeline through the Sandbox next.
+- **Phase 2 started**: wrote `packaging/windows/posetrak.iss` (Inno
+  Setup script, checked into the repo -- unlike the disposable bootstrap
+  folder, this is real release infrastructure). Per-user install
+  (`PrivilegesRequired=lowest`, `%LOCALAPPDATA%\Programs\Posetrak`, no
+  admin/UAC prompt), Start Menu shortcut + optional desktop icon +
+  uninstaller, and an `InfoBeforeFile` page
+  (`packaging/windows/smartscreen-notice.txt`) covering Phase 2's
+  "documenting the warning" requirement. `SourceDir` is passed via
+  `/DSourceDir=...` at build time so a future CI workflow can point it
+  at whatever it assembles.
+  - Installed Inno Setup 6 via `winget` (wasn't on the dev machine).
+  - **Found while compiling**: the live-mapped bootstrap-proto folder
+    had picked up `app/.venv`, `__pycache__`, and a `posetrak-ui.log`
+    written back by the Sandbox's own successful run -- the same
+    live-mount problem as the earlier host-side contamination, just
+    from the other direction. Fixed by having the `.iss`'s `[Files]`
+    entry `Excludes` those defensively, so the installer can't bundle
+    them regardless of what's sitting in the staging folder at build
+    time.
+  - First compile also failed outright ("process cannot access the
+    file") because the Windows Sandbox VM was still running and holding
+    a lock on the shared folder; resolved once Harri closed it.
+  - Compiled cleanly: `posetrak-setup-0.1.0-proto1.exe`, ~19MB.
+  - Set up a second, separate disposable Sandbox config
+    (`D:\mocap\posetrak-installer-test\`, read-only mapped folder --
+    the installer writes to the Sandbox's own local disk, not back to
+    the host, so this one avoids the live-mount contamination class of
+    problem entirely) for testing the compiled installer itself.
+- **Not yet done**: actually running the compiled installer through
+  Windows Sandbox (install → Start Menu shortcut → first launch);
+  getting a sample video into the Sandbox to exercise the actual
+  detection/tracking pipeline (YOLO+RTMPose, the C++ tracker); measuring
+  first-launch `uv sync` timing; validating `uv`'s from-scratch Python
+  provisioning is truly cache-free; the rest of the small-group test;
+  CI automation; Linux.
 
 ## Known issues / open questions
 

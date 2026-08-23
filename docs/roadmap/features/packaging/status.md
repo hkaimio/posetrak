@@ -1,7 +1,7 @@
 ```toml
 name = "Release Packaging (Windows/Linux Installer)"
 status = "in_progress"
-progress_pct = 55
+progress_pct = 60
 description = """
 Produce an installable release artifact (Windows installer, Linux AppImage/tarball) that doesn't \
 require a compiler or manual `uv sync` -- a thin bootstrapper (uv binary + pre-built C++ tracker + \
@@ -266,12 +266,18 @@ round 3.**
     cached file(s) for that checkpoint's URL and retry once.
   Installer rebuilt with both fixes; bootstrap-proto's `app/` snapshot
   refreshed too.
-- **Not yet done**: re-running the installer Sandbox test with all four
-  detection-step fixes in place (round 3); getting far enough into the
-  tutorial to exercise the C++ tracker itself and BVH export; measuring
-  first-launch `uv sync` timing; validating `uv`'s from-scratch Python
-  provisioning is truly cache-free; the rest of the small-group test;
-  CI automation; Linux.
+- **Installer Sandbox test, round 3**: both models now load cleanly
+  with all four detection-step fixes in place -- no crash, no scary
+  onnxruntime stderr. Detection itself is slow, as expected: the
+  Sandbox has no GPU passthrough, so this is CPU inference on shared
+  virtualized cores, not a bug (real CPU-only users on real hardware
+  will be faster than this, but still slower than GPU -- the CUDA
+  prerequisites TODO above covers what's needed for GPU acceleration).
+- **Not yet done**: getting far enough into the tutorial to exercise
+  the C++ tracker itself and BVH export; measuring first-launch `uv
+  sync` timing; validating `uv`'s from-scratch Python provisioning is
+  truly cache-free; verifying the CUDA-prerequisites TODO above on real
+  GPU hardware; the rest of the small-group test; CI automation; Linux.
 
 ## Known issues / open questions
 

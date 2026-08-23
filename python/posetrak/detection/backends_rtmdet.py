@@ -83,23 +83,31 @@ except ImportError:
     _RTMLIB_AVAILABLE = False
     _RTMLIB_VERSION = ""
 
-from posetrak.detection.backends import PersonDetection, register_detector
+from posetrak.detection.backends import (
+    PersonDetection,
+    construct_with_corrupt_checkpoint_retry,
+    register_detector,
+)
 
 
 def _auto_device() -> str:
     try:
         import torch
-        if torch.cuda.is_available():
-            return "cuda"
+        return "cuda" if torch.cuda.is_available() else "cpu"
     except ImportError:
         pass
-    # Torch absent or CPU-only: check onnxruntime directly.
-    try:
-        import onnxruntime as ort
-        if "CUDAExecutionProvider" in ort.get_available_providers():
-            return "cuda"
-    except Exception:
-        pass
+    # Torch absent: onnxruntime.get_available_providers() only reflects
+    # what onnxruntime-gpu was *compiled* with, not whether the CUDA
+    # runtime is actually installed and loadable -- a machine with
+    # onnxruntime-gpu (a core dependency here) but no NVIDIA GPU at all
+    # (confirmed on Windows Sandbox, 2026-08-23 -- the installer
+    # prototype's base install has no torch) reports "CUDAExecutionProvider"
+    # as available regardless, and then fails loudly trying to actually use
+    # it (onnxruntime still recovers by falling back to CPU internally, but
+    # not before printing a scary "DLL missing"/"FAIL" stderr block that
+    # looks like a crash). Without torch there's no reliable way to confirm
+    # CUDA is actually usable, so default to CPU; callers who know better
+    # can still pass device="cuda" explicitly.
     return "cpu"
 
 
@@ -162,13 +170,16 @@ class YOLOXDetector:
         self.version = _RTMLIB_VERSION
         self._conf = conf
         self._iou_thr = iou_thr
-        self._model = _YOLOX(
-            url,
-            model_input_size=input_size,
-            mode="human",
-            score_thr=conf,
-            backend="onnxruntime",
-            device=device or _auto_device(),
+        self._model = construct_with_corrupt_checkpoint_retry(
+            lambda: _YOLOX(
+                url,
+                model_input_size=input_size,
+                mode="human",
+                score_thr=conf,
+                backend="onnxruntime",
+                device=device or _auto_device(),
+            ),
+            checkpoint_url=url,
         )
         self._next_id = 0
         self._prev_boxes: list[np.ndarray] = []

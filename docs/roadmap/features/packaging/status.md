@@ -324,3 +324,24 @@ alternate system-package path to check. **Not yet confirmed**: whether
 other install step, on a machine with a real GPU. Verify before writing
 this up in real user-facing docs (docs/setup.md and/or a dedicated GPU
 prerequisites section).
+
+**TODO: a way to install `segmentation` extras (torch/Cutie) after the
+thin-bootstrap install.** Harri asked (2026-08-23): the installed app
+has no `torch`, so segmentation-based detection just doesn't work, and
+there's currently no discoverable way for a user to add it -- only a
+manual `uv sync --group segmentation` from a command line against the
+installed `app\` folder. Two ideas, not mutually exclusive:
+1. An installer-time checkbox ("Install GPU segmentation support")
+   that runs `uv sync --group segmentation` as a post-install step --
+   simple, but forces the decision upfront before the user knows if
+   they'll need it, and adds a large download to every install that
+   checks it.
+2. An in-app "install additional components" action (Settings/Tools
+   menu) that shells out to `uv sync --group segmentation --project
+   <install dir>\app` in the background, reusing the existing
+   `job_runner.py` pattern already used for other long-running
+   operations. More discoverable, works anytime post-install. Probably
+   the better primary mechanism, with (1) as an optional convenience
+   later. Needs real design before implementing: where the menu item
+   lives, how failure/retry is surfaced, resolving `uv.exe`'s path from
+   an installed layout vs. a dev checkout.

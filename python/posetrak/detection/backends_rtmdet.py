@@ -170,6 +170,7 @@ class YOLOXDetector:
         self.version = _RTMLIB_VERSION
         self._conf = conf
         self._iou_thr = iou_thr
+        self.device = device or _auto_device()
         self._model = construct_with_corrupt_checkpoint_retry(
             lambda: _YOLOX(
                 url,
@@ -177,7 +178,7 @@ class YOLOXDetector:
                 mode="human",
                 score_thr=conf,
                 backend="onnxruntime",
-                device=device or _auto_device(),
+                device=self.device,
             ),
             checkpoint_url=url,
         )

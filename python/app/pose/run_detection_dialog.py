@@ -180,6 +180,15 @@ class RunDetectionDialog(QDialog):
 
         layout.addLayout(form)
 
+        # Set once by DetectionJob.device_notice if the run falls back to
+        # CPU (no GPU / no torch); stays visible for the whole run, unlike
+        # _frame_label which gets overwritten by the next progress update.
+        self._device_warning_label = QLabel("")
+        self._device_warning_label.setStyleSheet("color: #b36b00; font-weight: bold;")
+        self._device_warning_label.setWordWrap(True)
+        self._device_warning_label.hide()
+        layout.addWidget(self._device_warning_label)
+
         # Progress
         self._frame_bar = QProgressBar()
         self._frame_bar.setRange(0, 100)
@@ -260,6 +269,8 @@ class RunDetectionDialog(QDialog):
         self._frame_bar.setValue(0)
         self._cam_bar.setValue(0)
         self._cam_label.setText("Starting…")
+        self._device_warning_label.hide()
+        self._device_warning_label.setText("")
 
         seg_run_id = self._bbox_source_combo.currentData() if self._bbox_source_combo else None
         if seg_run_id is not None:
@@ -280,6 +291,7 @@ class RunDetectionDialog(QDialog):
         )
         self._job.progress.connect(self._on_progress)
         self._job.camera_progress.connect(self._on_camera_progress)
+        self._job.device_notice.connect(self._on_device_notice)
         self._job.finished.connect(self._on_finished)
         self._job.error.connect(self._on_error)
         self._job.start()
@@ -423,6 +435,10 @@ class RunDetectionDialog(QDialog):
     def _on_progress(self, pct: int, msg: str) -> None:
         self._frame_bar.setValue(pct)
         self._frame_label.setText(msg)
+
+    def _on_device_notice(self, msg: str) -> None:
+        self._device_warning_label.setText(f"⚠ {msg}")
+        self._device_warning_label.show()
 
     def _on_camera_progress(self, done: int, total: int) -> None:
         self._cam_bar.setValue(int(done / max(total, 1) * 100))

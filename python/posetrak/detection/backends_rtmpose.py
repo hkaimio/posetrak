@@ -132,13 +132,14 @@ class RTMPoseEstimator:
         self.version = _RTMLIB_VERSION
         self.input_size = input_size_hw        # (height, width)
         cls = _ViTPose if backend_cls == "vitpose" else _RTMPose
+        self.device = device or _auto_device()
         self._model = construct_with_corrupt_checkpoint_retry(
             lambda: cls(
                 url,
                 model_input_size=(input_size_hw[0], input_size_hw[1]),
                 to_openpose=False,
                 backend=backend,
-                device=device or _auto_device(),
+                device=self.device,
             ),
             checkpoint_url=url,
         )

@@ -109,6 +109,37 @@ def test_no_bbox_source_combo_when_no_segmentation_exists(qapp, tmp_path):
     assert dlg._bbox_source_combo is None
 
 
+def test_device_warning_hidden_initially(qapp, tmp_path):
+    from posetrak.db.db import create_session
+    from app.pose.run_detection_dialog import RunDetectionDialog
+
+    conn = create_session(tmp_path / "empty.db")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')")
+    conn.execute("INSERT INTO captures (id, session_id, capture_number) VALUES ('cap1', 'sess1', 1)")
+    conn.commit()
+
+    dlg = RunDetectionDialog(conn=conn, session_path=tmp_path / "empty.db", capture_id="cap1")
+    assert dlg._device_warning_label.isHidden()
+    assert dlg._device_warning_label.text() == ""
+
+
+def test_device_notice_shows_warning_label(qapp, tmp_path):
+    from posetrak.db.db import create_session
+    from app.pose.run_detection_dialog import RunDetectionDialog
+
+    conn = create_session(tmp_path / "empty.db")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')")
+    conn.execute("INSERT INTO captures (id, session_id, capture_number) VALUES ('cap1', 'sess1', 1)")
+    conn.commit()
+
+    dlg = RunDetectionDialog(conn=conn, session_path=tmp_path / "empty.db", capture_id="cap1")
+    dlg._on_device_notice("No GPU detected -- detection will run on CPU and will be slow.")
+    assert not dlg._device_warning_label.isHidden()
+    assert "No GPU detected" in dlg._device_warning_label.text()
+
+
 def test_bbox_source_combo_lists_yolo_and_segmentation(qapp, capture_db, tmp_path):
     dlg = _make_dialog(qapp, capture_db, tmp_path)
     assert dlg._bbox_source_combo is not None

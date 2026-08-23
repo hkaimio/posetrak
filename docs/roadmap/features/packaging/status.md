@@ -73,13 +73,27 @@ Windows Sandbox.**
   system-wide change) as the actual entry point; `launch.ps1` is now an
   implementation detail. `README.txt` updated to match. This is exactly
   the class of thing the plan's Phase 3 (small-group test) exists to
-  catch — caught even earlier, during the very first run. Not yet
-  re-verified inside the Sandbox itself.
-- **Not yet done**: confirming `launch.bat` actually resolves the .ps1
-  problem inside the Sandbox; validating `uv`'s from-scratch Python
-  provisioning and a truly cache-free download (this machine's own
-  sanity check reused an already-installed system Python); the rest of
-  the small-group test; CI automation; Linux.
+  catch — caught even earlier, during the very first run.
+- **Second real finding, same run**: with `launch.bat` in place, `uv
+  sync` then failed inside the Sandbox with "did not find executable at
+  ...WindowsApps\...python.exe" — `HarriKaimio`'s own path, on a
+  Sandbox user account (`WDAGUtilityAccount`) that doesn't have that
+  interpreter at all. Cause: Windows Sandbox mounts a mapped folder
+  *live* (not a copy), and the dev-machine sanity check above had left
+  its own `app\.venv` sitting in the shared bootstrap folder --
+  `uv`-created venvs aren't portable between machines (they point back
+  at the interpreter that created them via `pyvenv.cfg`), so the
+  Sandbox inherited a broken one instead of creating its own fresh
+  venv. Removed `app\.venv` (plus `__pycache__`/`posetrak.egg-info`
+  cruft from the same sanity check) from the shared folder.
+  **Methodology fix for future iterations**: never re-run `uv
+  sync`/`uv run` against the live bootstrap folder itself once it's
+  meant for a Sandbox test -- test in a disposable copy instead, so the
+  shared folder stays pristine.
+- **Not yet done**: confirming the Sandbox run now succeeds end to end
+  with the cleaned folder; validating `uv`'s from-scratch Python
+  provisioning and a truly cache-free download; the rest of the
+  small-group test; CI automation; Linux.
 
 ## Known issues / open questions
 

@@ -11,17 +11,17 @@ cameras for more than 30 years; aikido has been my primary hobby for most of
 that time. In summer 2025 I started looking for ways to capture aikido
 techniques, for both visualization and analysis.
 
-I tried the obvious options first — open source projects like FreeMoCap and
+I tried the obvious options first: open source projects like FreeMoCap and
 Pose2Sim, and some of the AI-based commercial services that were emerging at the
 time (I left the high-end commercial systems like OptiTrack and Rokoko out of
-consideration; this was, and is, a hobby project with a hobby budget).
+consideration. This was, and is, a hobby project with a hobby budget).
 
-None of them held up - aikido seemed to break their assumption at every level.
+None of them held up — aikido seemed to break their assumption at every level.
 
 Aikido is a martial art practiced with one or multiple partners: tori (the
 person applying a technique) guides uke (the person receiving it) into a
 circular movement around herself, often at very close distance. There's usually
-no camera angle from which the two don't occlude each other — and usually both
+no camera angle from which the two don't occlude each other, and usually both
 occlude different parts of each other at the same time, and the occlusions
 change multiple times per second.
 
@@ -65,16 +65,17 @@ converges quickly without it).
 
 This has real benefits: the probabilistic
 framework makes outlier detection robust, temporal smoothness vs. reaction speed
-to quick movements becomes something you can tune, and the filter can use a
+to quick movements becomes something you can tune, and the solver can use a
 detection even when a keypoint is visible in only a single camera at a given
 frame. It can even mix material from cameras running at different frame rates.
 
-The downside is that the filter is computationally heavy. I wrote the first
+The downside is that the solver is computationally heavy. I wrote the first
 version in Python, like the rest of my tooling, but switched to C++ soon after.
-It's still far from real-time but usually fast enough for batch processing.
+Current version is optimized for AVX vector isntructions; it's still far from
+real-time but usually fast enough for batch processing.
 
-Eventually the project diverged too far from its origins to keep bolting onto
-Pose2Sim-compatible plain-text files, so I migrated everything into a relational
+Eventually the project diverged too far from its origins to justify bolting onto
+Pose2Sim-compatible plain-text files, so I migrated alld ata into a relational
 database and built proper GUI and command-line tools around it.
 
 ## Posetrak now
@@ -89,26 +90,27 @@ The Posetrak project has 3 parts:
 
 - the actual unscented Kalman filter based solver written in C++
 
-- the backplane that stores data needed for the pipeline in an SQLite database
+- the backplane that stores all data needed for the pipeline in an SQLite
+  database and makes it available for individual tools
 
-- and tools for executing other parts of the capture pipeline (some of which are
-  written by me; others utilize existing open source projects).
-
+- tools for executing other parts of the capture pipeline (some of these are
+  written by me; most utilize existing open source projects)
 
 These are largely separate. The backplane, for example, could be useful with
 other solvers too. This is one of the reasons I decided to release Posetrak as
 an open source project. Currently the parts are not as nicely decoupled as I
-would like them to be, so this is one potentially interesting area of work.
+would like them to be, so this is one potentially interesting area for future
+work.
 
 Looking ahead, I want to keep improving the solver and usability. An immediate
 need is to add marker-based capture. My main use case for that is better
 tracking of props like weapons.
 
-Single-camera and face mocap are both low on my list: for aikido specifically,
-I don't think single-camera capture is feasible until AI models have enough
-training material on close-contact multi-person scenes like this — which is,
-after all, the whole reason Posetrak exists. For now the focus stays on
-multi-camera.
+Single-camera and face mocap are both low on my list: lots of excellent tools
+heave recently emerged for both. But for aikido specifically, I don't think
+single-camera capture is feasible until AI models have enough training material
+on close-contact multi-person scenes like this — which is, after all, the whole
+reason Posetrak exists. For now the focus stays on multi-camera.
 
 One more thing I'd like to try, eventually: my wife works as a professional
 animal trainer in the film industry, and I'd love to do some mocap work with her

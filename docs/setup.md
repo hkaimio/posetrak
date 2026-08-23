@@ -2,7 +2,7 @@
 
 ## Windows
 
-USe the pre-packaged installer for Windows: **[posetrak-setup-0.1.0-proto1.exe](https://1drv.ms/u/c/5e84dad12af05ffc/IQAn0785a1wFTqraaclSGSMbAcNu8ZJUe636owFxRLTEYhM?e=jsrQwi)**.
+Use the pre-packaged installer for Windows: **[posetrak-setup-0.1.0-proto1.exe](https://1drv.ms/u/c/5e84dad12af05ffc/IQAn0785a1wFTqraaclSGSMbAcNu8ZJUe636owFxRLTEYhM?e=jsrQwi)**.
 
 This is an early, unsigned prototype build, so Windows SmartScreen will very
 likely show a "Windows protected your PC" warning. If you see this message,

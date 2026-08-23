@@ -81,7 +81,8 @@ Two fundamentally different shapes were worth weighing:
    per-package hooks for anything with native extensions — PySide6,
    OpenCV, onnxruntime, torch all qualify).
 2. **Thin bootstrapper** — the installer/zip contains only: the `uv`
-   binary (a few MB, no install step of its own), the pre-built C++
+   binary (~44MB, confirmed by the installer prototype below; no install
+   step of its own), the pre-built C++
    tracker binary, and a pinned `pyproject.toml`/`uv.lock` snapshot for
    that release version. A launcher shortcut runs `uv sync` against
    that lockfile on first launch, then `uv run posetrak-ui`.

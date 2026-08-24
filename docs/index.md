@@ -3,12 +3,21 @@
 ![Posetrak](assets/banner.png){ align=right width=240 }
 
 Video-based markerless motion capture using an Unscented Kalman Filter in joint
-space. Supports an arbitrary number of synchronized cameras and configurable
-skeleton definitions, tracking results exported as BVH files.
+space. Supports an arbitrary number of heterogenous cameras and tracking
+multiple performers simultaneously. Tracking results exported as BVH files
+usable in Blender and other 3D animation applications.
 
 Main motivation for Posetrak development were challenges in tracking
-multi-person, close-contact scenes. read here more about project's
-[background](background.md).
+multi-person, close-contact scenes like martial arts. Read here more about
+project's [background](background.md).
+
+
+<div class="video-embed">
+<iframe src="https://player.vimeo.com/video/1220935922?muted=1&loop=1"
+        allow="autoplay; fullscreen; picture-in-picture"
+        allowfullscreen></iframe>
+</div>
+
 
 ## Getting started
 

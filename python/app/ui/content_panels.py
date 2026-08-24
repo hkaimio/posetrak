@@ -552,10 +552,14 @@ class CapturePersonsSection(QWidget):
 
     def _refresh(self) -> None:
         from posetrak.db.manage_person import list_persons
+        from posetrak.db.manage_skeleton import skeleton_picker_labels
 
-        self._skeleton_names = {
-            r["id"]: r["name"] for r in self._conn.execute("SELECT id, name FROM skeletons")
-        }
+        # parent_id/created_at feed skeleton_picker_labels()'s disambiguation
+        # and "newer version exists" flag -- see its docstring.
+        skel_rows = self._conn.execute(
+            "SELECT id, name, parent_id, created_at FROM skeletons"
+        ).fetchall()
+        self._skeleton_names = skeleton_picker_labels(skel_rows)
         selected_id = self._selected_person_id()
         self._list.clear()
         for person in list_persons(self._conn, self._capture_id):

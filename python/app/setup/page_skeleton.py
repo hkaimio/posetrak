@@ -57,6 +57,7 @@ from posetrak.db.manage_skeleton import (
     copy_skeleton_to_session,
     import_skeleton_str,
     list_skeletons,
+    skeletons_with_newer_version,
 )
 from posetrak.db.scale_skeleton import scale_skeleton_yaml, template_measurements
 
@@ -114,8 +115,17 @@ class _RegistryPickerDialog(QDialog):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
 
         self._rows = rows
+        # Created is already its own column here, so unlike the flat combo
+        # pickers elsewhere this dialog doesn't need date-based disambiguation
+        # -- but it can still miss that a same-named, newer version of a
+        # skeleton exists (the real bug that motivated this whole feature),
+        # so flag that explicitly on the older row's Name cell.
+        newer_exists = skeletons_with_newer_version(rows)
         for i, r in enumerate(rows):
-            self._table.setItem(i, 0, QTableWidgetItem(r["name"] or ""))
+            name = r["name"] or ""
+            if r["id"] in newer_exists:
+                name += "  (newer version exists)"
+            self._table.setItem(i, 0, QTableWidgetItem(name))
             self._table.setItem(i, 1, QTableWidgetItem(r["person_label"] or ""))
             self._table.setItem(i, 2, QTableWidgetItem(str(_joint_count(r["yaml_content"]))))
             self._table.setItem(i, 3, QTableWidgetItem((r["created_at"] or "")[:10]))

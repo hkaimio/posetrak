@@ -1520,13 +1520,21 @@ class RunTrackerWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _refresh_skeletons(self) -> None:
+        from posetrak.db.manage_skeleton import skeleton_picker_labels
+
         self._all_skeletons = []
         if self._conn is None:
             return
+        # Need parent_id/created_at too -- skeleton_picker_labels() uses them
+        # to flag a skeleton that has a same-named, newer descendant (see
+        # that function's docstring for the real bug this avoids).
         rows = self._conn.execute(
-            "SELECT id, name FROM skeletons ORDER BY name"
+            "SELECT id, name, parent_id, created_at FROM skeletons"
         ).fetchall()
-        self._all_skeletons = [(r["id"], r["name"] or r["id"][:12]) for r in rows]
+        labels = skeleton_picker_labels(rows)
+        self._all_skeletons = sorted(
+            ((r["id"], labels[r["id"]]) for r in rows), key=lambda pair: pair[1]
+        )
 
     def _skeleton_name(self, skel_id: str | None) -> str | None:
         for sid, name in self._all_skeletons:

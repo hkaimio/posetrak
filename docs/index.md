@@ -24,17 +24,17 @@ project's [background](background.md).
   camera rigs, even cameras capturing at different frame rate
 
 - Tools for full motion capture pipeline:
-  - camera intrinsics & extrinsics calibration
-  - multi-video synchronization
-  - people tracking usign memory-based video segmentation
-  - Hierarchical 2D pose estimation
-  - UKF based hierarchical skeleton solver
-  - Export to BVH & other formats
+    - Camera intrinsics & extrinsics calibration
+    - Multi-video synchronization
+    - People tracking usign memory-based video segmentation
+    - Hierarchical 2D pose estimation
+    - UKF based hierarchical skeleton solver
+    - Export to BVH & other formats
 
 - Editing (manual and/or AI assisted) of data in most pipeline stages:
-  - people detection
-  - source video segmentation
-  - 2D keypoint cleanup
+    - People detection
+    - Source video segmentation
+    - 2D keypoint cleanup
 
 - Most functionality available via graphical UI, command line client and MCP
   server for AI agents.

@@ -20,7 +20,7 @@ project's [background](background.md).
 
 ## Features
 
-- Motion capture from multiple consumer level cameras. Supports hereogenous
+- Motion capture from multiple consumer level cameras. Supports heterogenous
   camera rigs, even cameras capturing at different frame rate
 
 - Tools for full motion capture pipeline:

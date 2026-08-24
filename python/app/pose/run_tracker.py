@@ -1446,12 +1446,23 @@ class RunTrackerWidget(QWidget):
         self._update_run_btn()
 
     def preselect_sequence(self, seq_id: str) -> None:
-        """Pre-select and lock the primary person's Trial/Person/Detection run
-        to whichever of those *seq_id* resolves to.
+        """Pre-select and lock the Trial/Person/Detection run that *seq_id*
+        resolves to, so the person whose panel this dialog was opened from
+        stays included in the run.
 
-        Call after set_session(). Those three combos are disabled so the user
-        cannot change them when this widget is embedded in a PersonPanel;
-        Skeleton stays editable.
+        Call after set_session(). Trial and the matched person's row are
+        locked so the user cannot change them away when this widget is
+        embedded in a PersonPanel; Skeleton stays editable.
+
+        In capture_persons mode (a checkbox per defined person -- see
+        _insert_capture_person_rows()) every *other* row is left in place
+        and toggleable, so cross-person tracking started from one person's
+        panel can still add the rest of the roster. Regression, fixed
+        2026-08-24: this used to unconditionally drop every row but the
+        matched one, a behavior that predates the checkbox roster and
+        silently collapsed every capture_persons-mode run down to one
+        person, with "Add person..." hidden in that mode leaving no way
+        back.
         """
         row = self._conn.execute(
             "SELECT dr.trial_id, dr.id AS detection_run_id, sp.person_name"
@@ -1491,18 +1502,22 @@ class RunTrackerWidget(QWidget):
                 break
 
         if target_row is not None:
-            # This view locks onto a single sequence's person -- drop every
-            # other row so only the matched one remains, then lock it.
-            while self._people_table.rowCount() > 1:
-                if target_row == 0:
-                    self._people_table.removeRow(1)
-                else:
-                    self._people_table.removeRow(0)
-                    target_row -= 1
-
             person_widget = self._people_table.cellWidget(target_row, 0)
             if isinstance(person_widget, QCheckBox):
+                # capture_persons mode: the roster is fixed and every other
+                # person's row must stay selectable for cross-person
+                # tracking -- only lock the one row this sequence resolves
+                # to, instead of discarding the rest of the roster.
                 person_widget.setChecked(True)
+            else:
+                # Legacy free-text mode has no fixed roster to preserve --
+                # collapse down to the single matched row, as before.
+                while self._people_table.rowCount() > 1:
+                    if target_row == 0:
+                        self._people_table.removeRow(1)
+                    else:
+                        self._people_table.removeRow(0)
+                        target_row -= 1
             person_widget.setEnabled(False)
 
             dr_combo = self._people_table.cellWidget(target_row, 1)

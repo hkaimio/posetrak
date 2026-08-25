@@ -4,6 +4,7 @@
 
 site_name: Posetrak
 site_description: Video-based multi-camera skeletal motion capture
+site_url: https://hkaimio.github.io/posetrak/
 repo_url: https://github.com/hkaimio/posetrak
 repo_name: hkaimio/posetrak
 edit_uri: edit/main/docs/
@@ -77,6 +78,7 @@ extra_javascript:
 
 theme:
   name: material
+  custom_dir: overrides
   logo: assets/logo.png
   favicon: assets/favicon.png
   palette:

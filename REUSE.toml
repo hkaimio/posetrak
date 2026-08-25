@@ -87,6 +87,7 @@ path = [
     "docs/assets/logo.png",
     "docs/assets/favicon.png",
     "docs/assets/banner.png",
+    "docs/assets/some-banner.png",
 ]
 SPDX-FileCopyrightText = "2026 Nelli Kaimio"
 SPDX-License-Identifier = "Apache-2.0"

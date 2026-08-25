@@ -418,6 +418,12 @@ end-to-end (`uv sync` + imports) on the dev machine; it doesn't
 re-validate the full install → first-launch → tutorial-walkthrough loop
 on a clean machine the way proto1's Phase 3 did.
 
+Harri has uploaded `posetrak-setup-0.1.0-proto2.exe` to his own OneDrive
+and shared the link, but is running the Windows Sandbox clean-machine
+test himself before it goes live anywhere -- `docs/setup.md`'s
+Installer link **intentionally still points at proto1** until that
+test passes; do not update it to proto2 without an explicit go-ahead.
+
 ## Known issues / open questions
 
 See packaging-design.md's "Open questions" section: code signing

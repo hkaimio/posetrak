@@ -2,7 +2,7 @@
 
 ## Windows
 
-Use the pre-packaged installer for Windows: **[posetrak-setup-0.1.0-proto1.exe](https://1drv.ms/u/c/5e84dad12af05ffc/IQAn0785a1wFTqraaclSGSMbAcNu8ZJUe636owFxRLTEYhM?e=jsrQwi)**.
+Use the pre-packaged installer for Windows: **[posetrak-setup-0.1.0-proto2.exe](https://1drv.ms/u/c/5e84dad12af05ffc/IQCx4WYnIjQ3QoYt3fyI_VxBAYp12ATvJAyTQB5NiOL-sRQ?e=DmpFQA)**.
 
 This is an early, unsigned prototype build, so Windows SmartScreen will very
 likely show a "Windows protected your PC" warning. If you see this message,
@@ -24,7 +24,7 @@ Once it's running, continue to the hands-on
 
 ## Linux, Mac
 
-Currently there is no installer for other platorms than Windows so you need to
+Currently there is no installer for other platforms than Windows so you need to
 build Posetrak yourself. Linux is fully supported; other platforms have not yet
 been tested.
 

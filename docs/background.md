@@ -3,7 +3,7 @@
 ## Why another motion tracking project?
 
 Aikido might sound like a surprising starting point for a motion capture
-project, but it turned out to be much better — and harder — match than I
+project, but it turned out to be a much better — and harder — match than I
 could have imagined.
 
 Professionally I've worked as a software engineer with images, graphics, and
@@ -26,7 +26,7 @@ occlude different parts of each other at the same time, and the occlusions
 change multiple times per second.
 
 Many of the techniques are wrist locks, where one person grabs the other's hand,
-so hand tracking obviously in crucial, but pose detectors have a hard time
+so hand tracking is obviously crucial, but pose detectors have a hard time
 telling which hand belongs to whom once they're locked together. And a lock
 rarely stays at the wrist: it forces the whole joint chain from wrist through
 elbow and shoulder up to the spine into an extreme pose, which means that
@@ -34,8 +34,8 @@ without careful parameterization, an IK solver spends most of its time hovering
 right next to its singularities.
 
 Quite often the existing tools failed to detect some of the practitioners at
-all, or mixed their body parts into weird constellations. Most tools did
-something as I expected but failed in other areas.
+all, or mixed their body parts into weird constellations. Most tools did some
+things as I expected but failed in others.
 
 So I started writing small tools to fill the gaps & glue tools together: a
 Blender plugin to [edit the raw pose detection
@@ -50,7 +50,7 @@ BVH files for other animation tools.
             allow="autoplay; fullscreen; picture-in-picture"
             allowfullscreen></iframe>
   </div>
-  <figcaption>One of the first successful tests integrating data cleanup with my tools, Pose2sim, OpenSim inverse kinematics & Blender. Note jumps in arms & hip orientation, mostly due to changes in set of cameras classified as inliers. October 2025</figcaption>
+  <figcaption>One of the first successful tests integrating data cleanup with my tools, Pose2sim, OpenSim inverse kinematics & Blender. Note jumps in arms & hip orientation, mostly due to changes in the set of cameras classified as inliers. October 2025</figcaption>
 </figure>
 
 These got the motion data where I wanted it, but the outliers and noise were
@@ -90,16 +90,17 @@ frame. It can even mix material from cameras running at different frame rates.
 
 The downside is that the solver is computationally heavy. I wrote the first
 version in Python, like the rest of my tooling, but switched to C++ soon after.
-Current version is optimized for AVX vector isntructions; it's still far from
-real-time but usually fast enough for batch processing.
+Current version is optimized for modern multi-core CPUs with SIMD vector
+instructions; it's still far from real-time but usually fast enough for batch
+processing.
 
 Eventually the project diverged too far from its origins to justify bolting onto
-Pose2Sim-compatible plain-text files, so I migrated alld ata into a relational
+Pose2Sim-compatible plain-text files, so I migrated all data into a relational
 database and built proper GUI and command-line tools around it.
 
 ## Posetrak now
 
-Posetrak now largely achieves the goals I started with: I can capture pair and
+Posetrak largely achieves the goals I started with: I can capture pair and
 multi-person aikido practice with equipment that's affordable for a serious
 hobbyist, and I've used it successfully for plenty of activities beyond aikido
 too. It's still very much a tool built for my own needs, though. Polishing it
@@ -126,10 +127,11 @@ need is to add marker-based capture. My main use case for that is better
 tracking of props like weapons.
 
 Single-camera and face mocap are both low on my list: lots of excellent tools
-heave recently emerged for both. But for aikido specifically, I don't think
+have recently emerged for both. But for aikido specifically, I don't think
 single-camera capture is feasible until AI models have enough training material
-on close-contact multi-person scenes like this — which is, after all, the whole
-reason Posetrak exists. For now the focus stays on multi-camera.
+on close-contact multi-person scenes and specifically from the particular
+martial art — which is, after all, the whole reason Posetrak exists. For now the
+focus stays on multi-camera.
 
 One more thing I'd like to try, eventually: my wife works as a professional
 animal trainer in the film industry, and I'd love to do some mocap work with her

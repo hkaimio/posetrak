@@ -38,7 +38,7 @@
 #endif
 
 #define MyAppName "Posetrak"
-#define MyAppVersion "0.1.0-proto1"
+#define MyAppVersion "0.1.0-proto2"
 #define MyAppPublisher "Harri Kaimio"
 #define MyAppURL "https://github.com/hkaimio/posetrak"
 

@@ -367,6 +367,57 @@ Progress so far:
   (OneDrive returns 403 to non-browser requests regardless) --
   Harri to confirm in an incognito window.
 
+## proto2 — bug-fix refresh
+
+**2026-08-25.** A number of real bugs were found and fixed on `main`
+after `v0.1.0-proto1`'s tutorial walkthrough (skeleton-scaling
+triangulation reading garbage from `tracking_obs_results` instead of
+raw pose observations; the velocity-mode/NIS-feedback camera checkboxes
+not actually disabling once enabled; a hierarchical-solver run silently
+using a skeleton whose HandL/HandR groups were never upgraded because
+an upgraded sibling shared its exact display name with no way to tell
+them apart in any picker; Run Tracker dropping every other person from
+the people table when opened from a specific person's panel, breaking
+cross-person tracking runs started that way) — enough to warrant a
+second prototype build rather than waiting for a fuller release.
+
+No C++ source changed since proto1 (confirmed via `git diff --stat
+v0.1.0-proto1..HEAD -- cpp/`), so this is a straight repackage:
+- Rebuilt `optbuild` (`meson compile -C optbuild`) — a no-op except for
+  the embedded build-version string, confirming the tracker binary is
+  unchanged.
+- Refreshed the `app/` snapshot in the same disposable
+  `D:\mocap\posetrak-bootstrap-proto\` folder from Phase 1/2 (`git
+  archive HEAD -- pyproject.toml uv.lock README.md .python-version
+  python`, replacing the folder wholesale rather than overlaying it, to
+  avoid stale files left over from proto1).
+- Sanity-checked the refreshed snapshot in a disposable copy (per the
+  proto1 methodology fix: never `uv sync` against the live bootstrap
+  folder itself) — `uv sync --project .` resolved and installed cleanly
+  (144 packages resolved, 39 installed, no `.venv` from a different
+  project bleeding in), and both GUI entry-point modules
+  (`app.ui.main_window`, `app.pose.main`) imported without error from
+  the synced environment.
+- Bumped `packaging/windows/posetrak.iss`'s `MyAppVersion` to
+  `0.1.0-proto2` (commit `b48ad90`) and recompiled with `ISCC.exe`
+  (via PowerShell — Git Bash's `//D` escaping for Inno Setup's `/D`
+  preprocessor-define flag didn't pass the path through correctly to
+  `ISCC.exe`, since Git Bash was in this session, but PowerShell was
+  not, so this is Git Bash-specific rather than an ISCC restriction):
+  `posetrak-setup-0.1.0-proto2.exe`, 19.2MB (vs proto1's 19.2MB —
+  expectedly close, no new dependencies added).
+- Tagged and pushed `v0.1.0-proto2` at the commit the installer was
+  built from (`b48ad90`), mirroring proto1's Phase 0 convention.
+
+**Not done as part of this refresh** (deliberately, matching how
+proto1's own distribution was handled): no fresh Windows Sandbox
+clean-machine test, and no upload/distribution of the new installer —
+both are Harri's own follow-up, same as proto1's Phase 3. This refresh
+only proves the bootstrap/packaging mechanism itself still works
+end-to-end (`uv sync` + imports) on the dev machine; it doesn't
+re-validate the full install → first-launch → tutorial-walkthrough loop
+on a clean machine the way proto1's Phase 3 did.
+
 ## Known issues / open questions
 
 See packaging-design.md's "Open questions" section: code signing

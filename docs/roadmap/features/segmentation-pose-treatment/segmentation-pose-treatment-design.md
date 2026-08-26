@@ -251,6 +251,17 @@ correction workflow in practice, not on anything in this codebase.
    correction-attempt counts per hard range, not something measurable
    from the codebase alone.
 
+## Future work (after Phase 1)
+
+Harri (2026-08-26): once Phase 1 ships, revisit the original hand-painted
+(brush) mask-correction idea from the study that led to this doc — the
+existing interactive workflow only supports SAM2-point-click correction
+today (`cutie_click_controller.py`), and a true freehand paint tool was
+the first idea raised, before the study pivoted to the masking-treatment
+question this doc is actually about. Bundle in whatever other
+segmentation-UI improvements fall out of using Phase 1 in practice — not
+scoped further than that yet.
+
 ## References
 
 - `python/tools/segmentation_mask_steering_experiment.py` — the study's

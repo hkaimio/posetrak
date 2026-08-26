@@ -5,6 +5,16 @@
 > not yet part of any pipeline) validated the core idea against real grab
 > footage from two captures. This doc is the resulting design; see
 > "The study" below for what was actually measured.
+>
+> **Decided (2026-08-26): two-phase plan.** Phase 1 (below, "Where this
+> actually plugs in") is the near-term target — apply the treatment inside
+> the existing offline `PoseWorker` path, no new architecture needed.
+> "Fuse pose estimation into the interactive tracking loop itself" (a
+> materially different architecture, see its own section below) is a
+> deliberately deferred Phase 2 candidate: real GPU-memory and timing
+> numbers were measured for it, but building it now isn't justified until
+> Phase 1 ships and real usage shows segmentation-quality feedback is
+> still a pain point worth the added interactive latency.
 
 ## Motivation
 
@@ -135,6 +145,75 @@ about. Plain CPU/OpenCV treatment code, close to what the study script
 already does, is likely adequate; this should be measured against a real
 job before optimizing anything.
 
+## Phase 2 candidate (deferred): fuse pose estimation into interactive tracking
+
+A different idea surfaced while discussing this doc: instead of a
+separate "Queue Pose" step after segmentation is finalized, have each
+interactive tracking job (`CutieWorker`'s forward/backward jobs,
+`cutie_init_panel.py`) *also* run pose estimation per frame as it goes,
+using the mask it just produced, and write/overwrite
+`detection_keypoints` directly. The appeal: immediate visual feedback on
+whether a segmentation attempt is actually "good enough" to produce
+correct pose, rather than only eyeballing the mask and finding out later
+whether it worked.
+
+**What first looked like blockers turned out not to be, once thought
+through against the actual code**:
+
+- *Segmentation's fragmented run identity* — each interactive session
+  creates its own new `seg_quality_run` row, with older sessions kept as
+  fallback coverage (`_load_stored_mask`'s multi-run lookup,
+  `cutie_init_panel.py`). This only matters for a *later* consumer doing
+  its own lookup by `seg_quality_run_id`, like `PoseWorker._load_mask`
+  does today. Fused, pose estimation runs inline against the mask that
+  was just computed in memory — there's nothing to look up.
+- *Append-only detection runs* — resolved by assigning one
+  `detection_run_id` up front for the whole segmentation effort and
+  finalizing once, at the end. This isn't even a new exception: this
+  codebase already treats a detection run as freely mutable until
+  finalized (`finalise_to_db` refuses a second call once `tracking_runs`/
+  `pose_observation_edits` reference it — see CLAUDE.md's data-model
+  invariants), so repeated overwrites during interactive refinement are
+  already the sanctioned pattern, just applied earlier in the pipeline
+  than usual.
+- *Track/person assignment* — a non-issue here specifically:
+  segmentation-driven pose already has identity for free from
+  `persons_ordered`, unlike the YOLO+tracker path where a generic
+  track ID genuinely needs a separate person-assignment step.
+
+**What actually matters is performance, and it was measured directly**
+(real footage, real models, RTX 4080 Super, 2026-08-26):
+
+| | GPU memory (resident) | added time/frame |
+|---|---|---|
+| Cutie alone (today) | ~500 MB model, ~1.24 GB during a step | 69.3 ms |
+| + RTMPose | +483 MB | +55.2 ms → **124.5 ms total** |
+| + ViTPose + hand refinement too | +2.16 GB more | +134.2 ms → **203.5 ms total** |
+
+Memory is comfortable under any combination (~4 GB beyond Cutie's own
+footprint, against ~9.7 GB free on this machine). Time is the real
+trade-off: **Harri's call (2026-08-26): production needs hand refinement
+too, and ~200ms/frame is too much for something meant to feel
+interactive.** Fusing only the wholebody model (RTMPose, ~125ms/frame,
+~1.8× slower than Cutie alone) is the more plausible version of this
+idea; hand refinement would stay a separate, later pass — matching how
+`_run_hand_refinement` already runs as a distinct step after body pose in
+today's `PoseWorker`, just not pulled into the per-frame interactive
+loop at all.
+
+Decoding the frame only once (already resident for Cutie) instead of
+once for segmentation and again for a later separate pose pass is a real
+saving, but small relative to the added inference cost — not the
+deciding factor.
+
+**The actual deciding factor isn't a number this session could measure**:
+today, pose is paid once, over whatever range is finally accepted. Fused,
+it's paid on every forward/backward attempt, including discarded ones.
+If a hard range typically takes 1-2 correction attempts, fusion is close
+to a wash on total work (plus the feedback benefit); if it typically
+takes many more, the repeated cost is real. That depends on Harri's own
+correction workflow in practice, not on anything in this codebase.
+
 ## Open questions
 
 1. **Confidence-weighted treatment as a `feather2` alternative.** Cutie's
@@ -152,15 +231,25 @@ job before optimizing anything.
 2. **Should the treatment be user-toggleable per pose-extraction job**,
    similar to the install-time GPU segmentation checkbox elsewhere in
    this codebase, or always-on once validated?
-3. **Which treatment, finally** — `feather2`'s parameters (10px band,
-   0.4 contrast factor) came from one round of tuning after `feather`
-   underperformed; not exhaustively swept. Worth another study round
-   specifically comparing `feather2` against the confidence-weighted
-   variant from (1) before committing either to real code.
+3. **Which treatment, finally** — **decided for Phase 1: ship `feather2`
+   as-is.** Its parameters (10px band, 0.4 contrast factor) came from one
+   round of tuning after `feather` underperformed, not an exhaustive
+   sweep, and confidence-weighting from (1) is a plausible improvement —
+   but the mask feeding Phase 1 is already human-curated, which is
+   exactly the case where confidence-weighting matters least (it's most
+   valuable when the mask itself might be unreliable, i.e. Phase 2's
+   automatic-during-tracking case). Revisit only if `feather2` proves
+   inadequate in real use.
 4. Should `python/tools/run_cutie_pose.py` (the older, related
    Cutie+RTMPose tool with its own tight/padded bbox derivation) gain
    the same treatment for consistency, or stay a separate experimental
    path?
+5. **When to revisit Phase 2** — once Phase 1 has real usage, does
+   segmentation-quality feedback (only discoverable today by running a
+   separate later pose pass) remain a genuine pain point worth ~1.8×
+   slower interactive tracking? Needs Harri's own sense of typical
+   correction-attempt counts per hard range, not something measurable
+   from the codebase alone.
 
 ## References
 

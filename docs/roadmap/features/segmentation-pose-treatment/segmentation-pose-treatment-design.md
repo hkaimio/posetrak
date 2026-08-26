@@ -126,24 +126,25 @@ treated-crop input should feed `_run_hand_refinement`'s
 `detect_hand_in_crop` call too, given the hand-refinement model showed
 the *larger* relative benefit in the study.
 
-## The real implementation wrinkle
+## The real implementation wrinkle — resolved, it isn't one
 
 `RTMPoseEstimator.estimate()` (`posetrak/detection/backends_rtmpose.py`)
-takes one frame and a list of bboxes, batching every person in the frame
-through rtmlib in a single call. Per-person treatment breaks that: each
+takes one frame and a list of bboxes; per-person treatment means each
 person needs their *own* treated frame (their own crop with *everyone
-else* suppressed), so the pose call has to become one call per person per
-frame instead of one call per frame. Whether rtmlib's own internal
-batching makes this a real throughput cost, or whether it already loops
-per-bbox under the hood, needs checking before assuming a regression.
+else* suppressed), so the call has to become one call per person instead
+of one call per frame. Checked directly against rtmlib's own source
+(`rtmlib/tools/pose_estimation/rtmpose.py` and `vitpose.py`,
+`__call__`): there is no batching to lose — both already `for bbox in
+bboxes: preprocess → inference → postprocess`, one ONNX session run per
+bbox, regardless of how many bboxes arrive in one call. Per-person calls
+are exactly what already happens today; this is not a throughput
+regression at all.
 
-That said, this is a secondary concern here specifically because
-`PoseWorker` is a queued, offline, already non-realtime job over an
-already-bounded, human-corrected range — not the live per-frame pipeline
-a GPU-fusion discussion earlier in this same investigation was worried
-about. Plain CPU/OpenCV treatment code, close to what the study script
-already does, is likely adequate; this should be measured against a real
-job before optimizing anything.
+Plain CPU/OpenCV treatment code, close to what the study script already
+does, is adequate here regardless — `PoseWorker` is a queued, offline,
+already non-realtime job over an already-bounded, human-corrected range,
+not the live per-frame pipeline the GPU-fusion discussion earlier in
+this investigation was worried about.
 
 ## Phase 2 candidate (deferred): fuse pose estimation into interactive tracking
 

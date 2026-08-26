@@ -41,6 +41,14 @@ class PoseExtractionJob:
     pose_model: str = "rtmpose-l-133kp"
     overwrite_range: bool = True    # delete existing keypoints in range first
     refine_hands: bool = True       # run HandRefinementPipeline after estimation
+    apply_mask_treatment: bool = True  # suppress other people in each person's own
+                                        # crop before estimation -- see mask_treatment.py
+                                        # and docs/roadmap/features/segmentation-pose-treatment/.
+                                        # Defaults on: validated by the study that motivated
+                                        # it, and this path only ever runs against a
+                                        # human-curated mask in the first place. Left as a
+                                        # real field (not hardcoded) since whether to expose
+                                        # a UI toggle is still an open question in that doc.
     status: str = "pending"
     keypoints_written: int = 0
     error: str = ""
@@ -197,7 +205,9 @@ class PoseWorker(QThread):
 
                     detections = _bboxes_from_mask(mask, job.persons_ordered)
                     if detections:
-                        results = estimator.estimate(frame_bgr, detections)
+                        results = _estimate_per_person(
+                            estimator, frame_bgr, mask, detections, job.apply_mask_treatment,
+                        )
                         writer.add_frame(frame_idx, detections, results,
                                         job.pose_model, img=frame_bgr)
                         self._keypoints_written += len(results)
@@ -286,6 +296,37 @@ def _bboxes_from_mask(
             confidence=1.0,
         ))
     return detections
+
+
+def _estimate_per_person(
+    estimator,
+    frame_bgr: np.ndarray,
+    mask: np.ndarray,
+    detections: list,
+    apply_mask_treatment: bool,
+) -> list:
+    """Run pose estimation once per detection instead of once per frame.
+
+    Segmentation-driven estimation historically batched every person in a
+    frame through one estimator.estimate(frame, detections) call. Applying
+    a per-person mask treatment (suppress everyone but the target person,
+    mask_treatment.py) means each person needs their own treated frame, so
+    this can no longer be a single call across all detections -- checked
+    against rtmlib's own source (RTMPose/ViTPose.__call__) before making
+    this change: it already loops one ONNX inference per bbox internally
+    regardless of how many bboxes arrive in one call, so this is not a
+    throughput regression, just a restructuring of the same work.
+    """
+    if not apply_mask_treatment:
+        return estimator.estimate(frame_bgr, detections)
+
+    from posetrak.detection.mask_treatment import suppress_others
+
+    results = []
+    for det in detections:
+        treated = suppress_others(frame_bgr, mask, det.track_id)
+        results.extend(estimator.estimate(treated, [det]))
+    return results
 
 
 def _delete_range(conn: sqlite3.Connection, job: PoseExtractionJob) -> None:

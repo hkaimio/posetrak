@@ -15,6 +15,16 @@
 > numbers were measured for it, but building it now isn't justified until
 > Phase 1 ships and real usage shows segmentation-quality feedback is
 > still a pain point worth the added interactive latency.
+>
+> **Phase 1: implemented** (commit `1b47033`, this branch). `PoseWorker`
+> applies `suppress_others()` (`posetrak/detection/mask_treatment.py`) per
+> person before estimation; `PoseExtractionJob.apply_mask_treatment`
+> (default on) keeps it toggleable. Hand refinement is **not yet** wired
+> to treated crops — `HandRefinementPipeline` is a shared,
+> bbox-source-agnostic component with no mask awareness today; that's a
+> separate follow-up, not folded into this change. Not yet validated
+> against a real video/session (same caveat `PoseWorker` itself already
+> carried before this change, per the segmentation-reuse status doc).
 
 ## Motivation
 

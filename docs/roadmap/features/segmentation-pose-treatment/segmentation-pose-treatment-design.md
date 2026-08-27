@@ -53,11 +53,73 @@
 > keypoint fraction) but never measured downstream *temporal* smoothness
 > through the actual UKF tracker — a real gap, only caught because this
 > was run for real rather than judged from the study script's own debug
-> videos. **Whether Phase 1 should ship as-is, gain a temporal-smoothing
-> mitigation, or be reconsidered isn't decided** — Harri is also now
-> weighing whether image-treatment tricks are the right approach at all
-> versus fine-tuning Cutie and/or the pose estimators for this use case;
-> see "Open questions" below.
+> videos.
+>
+> **Confound found and isolated (2026-08-27):** the baseline (`75e00861`)
+> and feathered (`d1fd9d62`) runs Harri compared didn't actually share a
+> tracker config — `d1fd9d62` had `nis_feedback_scopes` populated
+> (`["core","limbs"]`), `75e00861` had it empty. Re-tracked the same
+> feathered pose data under the baseline's own config (`64989446-...`) to
+> isolate this. Result: some of the original 1.4–2.5× jerk elevation *was*
+> the confound (arm/forearm/shoulder joints mostly normalize once configs
+> match — e.g. `forearm.R` full-window ratio drops from 1.39× to 1.00×),
+> but a real, config-independent effect remains **concentrated in the
+> hands and fingers**: `hand.L`/`hand.R` still ~1.25–1.32× baseline
+> full-window, and individual finger joints (`thumb.02.R/L`, `f_index.02.R`,
+> etc.) 1.4–2.4×. So the finding narrows from "general arm jerkiness" to
+> "hand-and-finger-specific jerkiness," but doesn't go away.
+>
+> **Temporal-mask-smoothing mitigation tried and did not resolve it
+> (2026-08-27).** Implemented `suppress_others_temporal()`
+> (`posetrak/detection/mask_treatment.py`) — derives the treatment
+> boundary from a 5-frame window (majority vote per pixel, with an
+> occlusion guard excluding frames whose target-pixel count differs
+> drastically from the center frame's) instead of a single frame's mask,
+> per the working hypothesis that single-frame boundary jitter was
+> feeding the pose model a different "context edit" every frame. Wired
+> into `PoseWorker` behind `PoseExtractionJob.temporal_mask_smoothing`
+> (default off), full end-to-end rerun of the same trial/segmentation/
+> pose-model/tracker-config as `64989446` (new tracking run
+> `662cac6f-...`). RMS-jerk comparison, same methodology, against the
+> *config-isolated* feathered run (`64989446`) rather than the confounded
+> one:
+>
+> | joint | baseline | isolated feathered | temporal-smoothed |
+> |---|---|---|---|
+> | hand.L (full range) | 720.7 | 898.4 (1.25×) | 912.5 (1.27×) |
+> | hand.R (full range) | 662.7 | 874.9 (1.32×) | 864.2 (1.30×) |
+> | hand.L (grab window 40.5–43.5s) | 1152.1 | 1282.1 (1.11×) | 1463.0 (1.27×) |
+> | hand.R (grab window 40.5–43.5s) | 622.3 | 832.1 (1.34×) | 794.8 (1.28×) |
+>
+> Essentially no improvement — hand.R is flat within noise, hand.L is
+> unchanged over the full trial and actually *worse* than the isolated
+> feathered run specifically in the grab window that matters most.
+> Finger-joint ratios (thumb/index/etc.) are similarly unmoved, a few
+> individually worse. **This is evidence against the working hypothesis**:
+> mask-boundary jitter smoothed over a small window was not the dominant
+> mechanism, or at least not one this mitigation reaches — plausible
+> reasons include (a) genuine boundary motion during a grab (a hand
+> actually moving) isn't jitter and survives the majority vote/occlusion
+> guard unchanged, which is exactly when the effect matters most, or (b)
+> the jerkiness is inherent to the treatment itself (blur + contrast
+> reduction genuinely removes fine hand detail every frame, regardless of
+> how stable the boundary deriving it is) rather than to boundary
+> *instability* specifically. Not root-caused further than this.
+> Temporal smoothing also cost real throughput — full 6-camera extraction
+> took ~4.6 hours for one 28.6s trial (~44–47 min/4K camera, ~19 min/FHD
+> camera — resolution-dominated: `suppress_others()`/`_temporal()` run
+> their blur + `distanceTransform` at full video-frame resolution, twice
+> per frame for two people, and the temporal variant repeats mask
+> decode/compare work across a 5-frame window on top of that), well above
+> a plain feathered pass, for no measured benefit.
+>
+> **Given this, option (c) from "Open questions" below is now the
+> stronger read**: the balance has shifted toward image-treatment tricks
+> being the wrong layer for this problem, and fine-tuning Cutie and/or the
+> pose estimators (see "Future work") the more promising direction —
+> though this is one negative mitigation result, not proof the whole
+> treatment approach is unfixable. See "Open questions" for what's still
+> undecided.
 
 ## Motivation
 
@@ -260,15 +322,23 @@ correction workflow in practice, not on anything in this codebase.
 
 ## Open questions
 
-0. **The jerkiness finding above, unresolved.** Options not yet weighed
-   against each other: (a) temporally smooth the mask itself before
-   deriving the treatment each frame, so boundary jitter doesn't reach
-   the pose model frame-independently; (b) accept the trade-off for the
+0. **The jerkiness finding above — mitigation (a) tried, didn't work.**
+   Temporal mask smoothing (see status callout above) measurably failed
+   to close the hand/finger jerkiness gap against the config-isolated
+   feathered run, including a regression in the specific grab window that
+   motivated it. Remaining options: (b) accept the trade-off for the
    disambiguation benefit in contact frames specifically, if a way is
    found to apply the treatment *only* during genuine grabs rather than
-   always-on; (c) treat this as evidence that post-hoc image treatment is
-   the wrong layer entirely, and prioritize the fine-tuning direction
-   below instead.
+   always-on (untried — would need a cheap per-frame "are these two
+   people's bboxes close enough to matter" gate); (c) treat this as
+   evidence that post-hoc image treatment is the wrong layer entirely,
+   and prioritize the fine-tuning direction below instead. Given (a)'s
+   result, (c) is the current lean, but Phase 1 hasn't been formally
+   un-shipped or reverted — `apply_mask_treatment` still defaults on,
+   `temporal_mask_smoothing` still defaults off (proven not to help, no
+   reason to flip it), and no decision has been made to disable the
+   treatment by default pending Harri's call on whether to pursue (b),
+   (c), or both in parallel.
 1. **Confidence-weighted treatment as a `feather2` alternative.** Cutie's
    `InferenceCore.step()` (`cutie/inference/inference_core.py:139-170`,
    confirmed by reading it directly) returns a genuine per-pixel
@@ -327,6 +397,46 @@ frame). Not scoped or investigated at all yet: data volume needed, which
 model(s) to target first, training infrastructure, whether curated
 `seg_masks`/hand-corrected keypoints from this project's own sessions are
 enough labeled data to fine-tune from directly.
+
+**Data-quality audit for fine-tuning (2026-08-27), started.** A real
+count against the session DB: ~97k Cutie-corrected mask rows and 18,289
+`pose_observation_edits` rows (485,383 individual keypoint corrections,
+57% on hands). Harri's caution: a lot of the hand-corrected data is
+"hand-guided but the final correction is by the model" — `HandRedetectWorker`
+(`python/app/ui/hand_redetect_worker.py`) auto-redetects and writes a
+refined hand pose after any nearby manual edit
+(`db_cache.write_hand_refinement()`, `source='hand_l.refined'` /
+`'hand_r.refined'` in `pose_observations`, a layer distinct from and
+lower-priority than `pose_observation_edits`) — so a meaningful fraction
+of what looks like "corrected" hand data was never directly eyeballed at
+the final keypoint level, just at the crop/gate level, and likely
+contains real errors.
+
+Proposed (not yet built) as a mitigation: cross-validate a keypoint edit
+in one camera via DLT triangulation against other cameras' contemporaneous
+observations, flagging high-reprojection-residual edits as suspect —
+reusing patterns already in `skeleton_scaling_panel.py`. Harri confirmed
+the approach is sound ("should detect wrong estimates quite reliably")
+but flagged a real coverage gap: edits are made camera-sequentially in
+practice (usually only 1–2 cameras per session, since the tracker's own
+predicted-state-driven correction plus the outlier gate usually carries
+difficult frames through without full manual coverage), not
+simultaneously across cameras — so triangulation validation has sparse
+overlap today. For genuinely hard cases (grabs specifically), Harri's
+plan is to label additional cameras specifically to make triangulation
+validation usable there. Building the triangulation-audit tool itself is
+a real next step but hasn't been started.
+
+**"World models" for evaluating/preparing training data — considered,
+not pursued.** Harri asked whether recent world models (improved physics
+and image understanding) could help evaluate or prepare this training
+data. Caution given: a world model would very plausibly inherit the same
+blind spot this whole problem is about — disambiguating which of two
+overlapping bodies a limb belongs to during a grab is precisely the kind
+of close-contact, mutual-occlusion case general-purpose world models are
+not specifically trained to resolve either, so it's unclear this would
+add reliable signal beyond what triangulation-consistency (above) already
+offers more cheaply and more verifiably. Not explored further.
 
 ## References
 

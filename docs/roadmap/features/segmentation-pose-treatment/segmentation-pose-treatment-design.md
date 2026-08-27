@@ -25,6 +25,39 @@
 > separate follow-up, not folded into this change. Not yet validated
 > against a real video/session (same caveat `PoseWorker` itself already
 > carried before this change, per the segmentation-reuse status doc).
+>
+> **Real-tracking-run finding (2026-08-27), gates Phase 1 as shipped
+> here.** Harri retracked trial `d70d5b60` end to end with the treatment
+> on (run `d1fd9d62-...`) against the original baseline (`75e00861-...`)
+> and visually spotted extra jerkiness in the arms during throws. Measured
+> directly from `tracking_results` (RMS jerk of raw joint angle, both
+> smoothed runs, `posetrak.db.load_session.load_tracking_run_data`):
+> arm-joint jerk is elevated 1.4-2.5× for the treated run, and **not
+> confined to contact moments** — it's present across nearly the entire
+> trial, worse during throws but rarely near parity even in calm stretches.
+> One severe, localized spike found directly (`hand.L` around t=44.2s,
+> ratio 19.6× in that one-second bin): a genuine transient divergence the
+> UKF's own outlier gate didn't fully catch, not just diffuse roughness.
+>
+> **Working hypothesis**: the treatment is computed independently per
+> frame from that frame's own mask. Normal mask-boundary jitter is
+> harmless to the untreated path (the model always sees the same true
+> pixels regardless of mask stability), but feeding that jitter through
+> `suppress_others()` gives the model a slightly different "context edit"
+> every frame — an added source of input variability the baseline path
+> structurally cannot have. Not yet tested against this hypothesis
+> directly (e.g. by checking whether mask-boundary movement at t≈44.2s
+> in the source footage actually correlates with the spike).
+>
+> The original study measured per-frame pose *correctness* (in-mask
+> keypoint fraction) but never measured downstream *temporal* smoothness
+> through the actual UKF tracker — a real gap, only caught because this
+> was run for real rather than judged from the study script's own debug
+> videos. **Whether Phase 1 should ship as-is, gain a temporal-smoothing
+> mitigation, or be reconsidered isn't decided** — Harri is also now
+> weighing whether image-treatment tricks are the right approach at all
+> versus fine-tuning Cutie and/or the pose estimators for this use case;
+> see "Open questions" below.
 
 ## Motivation
 
@@ -227,6 +260,15 @@ correction workflow in practice, not on anything in this codebase.
 
 ## Open questions
 
+0. **The jerkiness finding above, unresolved.** Options not yet weighed
+   against each other: (a) temporally smooth the mask itself before
+   deriving the treatment each frame, so boundary jitter doesn't reach
+   the pose model frame-independently; (b) accept the trade-off for the
+   disambiguation benefit in contact frames specifically, if a way is
+   found to apply the treatment *only* during genuine grabs rather than
+   always-on; (c) treat this as evidence that post-hoc image treatment is
+   the wrong layer entirely, and prioritize the fine-tuning direction
+   below instead.
 1. **Confidence-weighted treatment as a `feather2` alternative.** Cutie's
    `InferenceCore.step()` (`cutie/inference/inference_core.py:139-170`,
    confirmed by reading it directly) returns a genuine per-pixel
@@ -272,6 +314,19 @@ the first idea raised, before the study pivoted to the masking-treatment
 question this doc is actually about. Bundle in whatever other
 segmentation-UI improvements fall out of using Phase 1 in practice — not
 scoped further than that yet.
+
+**Harri (2026-08-27), raised alongside the jerkiness finding above**:
+whether post-hoc image treatment (this whole doc's approach) is even the
+right layer, versus fine-tuning Cutie and/or the pose estimators (RTMPose/
+ViTPose) directly on this project's own close-contact footage. A
+fine-tuned model wouldn't need any per-frame image manipulation at all —
+it would just be inherently better at grabs — which would also sidestep
+the jerkiness mechanism entirely (no mask-jitter-driven input variability
+to introduce, since nothing about the input image changes frame to
+frame). Not scoped or investigated at all yet: data volume needed, which
+model(s) to target first, training infrastructure, whether curated
+`seg_masks`/hand-corrected keypoints from this project's own sessions are
+enough labeled data to fine-tune from directly.
 
 ## References
 

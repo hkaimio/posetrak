@@ -71,3 +71,69 @@ def suppress_others(frame: np.ndarray, mask: np.ndarray, target_label: int) -> n
     low_contrast = blurred.astype(np.float32) * CONTRAST_FACTOR + FILL_GRAY * (1 - CONTRAST_FACTOR)
 
     return (frame.astype(np.float32) * (1 - alpha) + low_contrast * alpha).astype(np.uint8)
+
+
+#: Half-width (frames) of the temporal smoothing window -- 2 either side of
+#: the current frame, symmetric since this is offline batch processing with
+#: no live/causal constraint (a small lookahead costs nothing here).
+TEMPORAL_WINDOW_RADIUS = 2
+
+#: A window frame is excluded from the stability average if its own
+#: target-pixel count differs from the center frame's by more than this
+#: fraction -- a guard against smoothing across a genuine occlusion/
+#: tracking-gap event rather than ordinary boundary jitter.
+OCCLUSION_GUARD_FRAC = 0.5
+
+
+def suppress_others_temporal(
+    frame: np.ndarray, masks_window: list[np.ndarray], center_idx: int, target_label: int
+) -> np.ndarray:
+    """Like suppress_others(), but derives the treatment boundary from a
+    small temporal window of masks instead of a single frame.
+
+    2026-08-27: a real tracking run showed the single-frame version
+    (suppress_others()) measurably increases jerkiness in the target's own
+    hand-joint angles during grabs -- not in the other arm joints, just the
+    hands -- even with the tracker config held identical to baseline. The
+    working hypothesis: normal frame-to-frame mask-boundary jitter is
+    harmless to the untreated pipeline (which always sees the same true
+    pixels regardless of mask stability) but gives the pose model a
+    slightly different "context edit" every frame once it drives a
+    treatment, an input-variability source the untreated path can't have.
+    This smooths the boundary itself over a small window before deriving
+    alpha from it, so single-frame jitter doesn't reach the model.
+
+    Parameters
+    ----------
+    frame:
+        (H, W, 3) BGR image for the *center* frame only -- only the
+        boundary/alpha is temporally smoothed, not the image content
+        itself (real motion should never be smoothed away).
+    masks_window:
+        Consecutive (H, W) uint8 labeled masks, e.g. [t-2, t-1, t, t+1, t+2].
+        Must all be the same shape as *frame*.
+    center_idx:
+        Index into masks_window corresponding to *frame* itself.
+    target_label:
+        Which label to preserve.
+    """
+    center_mask = masks_window[center_idx]
+    center_count = int(np.count_nonzero(center_mask == target_label))
+
+    kept = []
+    for m in masks_window:
+        count = int(np.count_nonzero(m == target_label))
+        if center_count > 0 and abs(count - center_count) / center_count > OCCLUSION_GUARD_FRAC:
+            continue  # likely occlusion/tracking-gap event, not ordinary jitter
+        kept.append(m == target_label)
+
+    stability = np.mean(np.stack(kept), axis=0)  # fraction of kept frames where this pixel is target
+    smoothed_target = (stability >= 0.5).astype(np.uint8)
+
+    dist = cv2.distanceTransform(1 - smoothed_target, cv2.DIST_L2, 3)
+    alpha = np.clip(dist / FEATHER_PX, 0.0, 1.0)[..., None]
+
+    blurred = cv2.GaussianBlur(frame, (BLUR_KSIZE, BLUR_KSIZE), 0)
+    low_contrast = blurred.astype(np.float32) * CONTRAST_FACTOR + FILL_GRAY * (1 - CONTRAST_FACTOR)
+
+    return (frame.astype(np.float32) * (1 - alpha) + low_contrast * alpha).astype(np.uint8)

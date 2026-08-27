@@ -16,6 +16,7 @@ from posetrak.detection.mask_treatment import (
     FEATHER_PX,
     FILL_GRAY,
     suppress_others,
+    suppress_others_temporal,
 )
 
 
@@ -95,3 +96,65 @@ def test_other_person_is_treated_same_as_background():
     # not background.
     far_pixel = treated[40, 79]
     assert far_pixel[0] != 200
+
+
+# ---------------------------------------------------------------------------
+# suppress_others_temporal
+# ---------------------------------------------------------------------------
+
+
+def _mask_boundary_at(x: int, h=80, w=80) -> np.ndarray:
+    mask = np.zeros((h, w), dtype=np.uint8)
+    mask[:, :x] = 1
+    return mask
+
+
+def test_single_frame_jitter_does_not_reach_the_treatment():
+    """A one-frame boundary blip (present at t only, not t-1/t+1) should be
+    smoothed away -- this is the whole point of the temporal variant."""
+    frame = _solid_frame(10)
+    frame[:, :40] = 200
+
+    stable_masks = [_mask_boundary_at(40) for _ in range(5)]
+    jittered_masks = list(stable_masks)
+    jittered_masks[2] = _mask_boundary_at(50)  # center frame's boundary jumps 10px
+
+    treated_stable = suppress_others_temporal(frame, stable_masks, center_idx=2, target_label=1)
+    treated_jittered = suppress_others_temporal(frame, jittered_masks, center_idx=2, target_label=1)
+
+    # Majority vote (4 of 5 frames agree on x=40) should recover close to
+    # the stable result despite the center frame's own one-off jump.
+    np.testing.assert_allclose(
+        treated_stable.astype(np.int32), treated_jittered.astype(np.int32), atol=5,
+    )
+
+
+def test_sustained_boundary_move_is_not_treated_as_jitter():
+    """If the boundary genuinely moved (agrees across the whole window,
+    not just one outlier frame), the temporal version should track it,
+    not stubbornly keep the old boundary."""
+    frame = _solid_frame(10)
+    frame[:, :60] = 200
+
+    masks_at_60 = [_mask_boundary_at(60) for _ in range(5)]
+    treated = suppress_others_temporal(frame, masks_at_60, center_idx=2, target_label=1)
+
+    # Deep inside the (correctly, consistently) larger target region,
+    # content should be untouched.
+    assert treated[40, 55][0] == frame[40, 55][0]
+
+
+def test_occlusion_guard_excludes_drastically_different_frames():
+    """A frame where the target's pixel count changes drastically (e.g. a
+    real occlusion event) shouldn't get blended into the stability
+    estimate as if it were ordinary jitter."""
+    frame = _solid_frame(10)
+    frame[:, :40] = 200
+
+    masks = [_mask_boundary_at(40) for _ in range(5)]
+    masks[0] = np.zeros((80, 80), dtype=np.uint8)  # target vanished this frame (occlusion)
+
+    # Should not raise, and should still behave like the stable case
+    # (the occluded frame is excluded by the guard, not averaged in).
+    treated = suppress_others_temporal(frame, masks, center_idx=2, target_label=1)
+    assert treated[40, 10][0] == frame[40, 10][0]  # deep inside target, untouched

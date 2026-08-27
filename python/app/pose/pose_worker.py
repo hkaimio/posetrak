@@ -18,11 +18,14 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from collections import deque
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
 from PySide6.QtCore import QThread, Signal
+
+from posetrak.detection.mask_treatment import TEMPORAL_WINDOW_RADIUS
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +52,20 @@ class PoseExtractionJob:
                                         # human-curated mask in the first place. Left as a
                                         # real field (not hardcoded) since whether to expose
                                         # a UI toggle is still an open question in that doc.
+    temporal_mask_smoothing: bool = False  # smooth the treatment boundary over a small
+                                        # frame window instead of deriving it from a single
+                                        # frame's mask -- mask_treatment.suppress_others_temporal().
+                                        # 2026-08-27: a real tracking run showed
+                                        # apply_mask_treatment measurably increases jerkiness
+                                        # in the target's own hand-joint angles during grabs
+                                        # (not other arm joints -- isolated by re-tracking the
+                                        # same pose data under the baseline's own tracker
+                                        # config, ruling out a config confound). Working
+                                        # hypothesis: single-frame mask-boundary jitter feeds
+                                        # a different "context edit" to the pose model every
+                                        # frame; this is the mitigation being validated.
+                                        # Defaults off pending that validation -- see the
+                                        # design doc's open question 0.
     status: str = "pending"
     keypoints_written: int = 0
     error: str = ""
@@ -179,45 +196,126 @@ class PoseWorker(QThread):
             cap = cv2.VideoCapture(job.video_path)
             cap.set(cv2.CAP_PROP_POS_FRAMES, job.first_frame)
 
+            def _load_and_scale_mask(frame_idx: int, fh: int, fw: int) -> np.ndarray | None:
+                # Stored at max_dim=1920p by CutieWorker; scale UP to native
+                # video resolution so bboxes/keypoints come out at native
+                # resolution, matching the camera calibration matrices the
+                # C++ tracker uses (same as the YOLO pipeline).
+                mask = _load_mask(conn, job.seg_quality_run_id, job.shot_video_id, frame_idx)
+                if mask is not None and mask.shape != (fh, fw):
+                    mask = cv2.resize(mask, (fw, fh), interpolation=cv2.INTER_NEAREST)
+                return mask
+
+            def _handle_frame(
+                frame_idx: int, frame_bgr: np.ndarray, treatment_mask: np.ndarray,
+            ) -> None:
+                nonlocal frames_with_kp
+                detections = _bboxes_from_mask(treatment_mask, job.persons_ordered)
+                if detections:
+                    results = _estimate_per_person(
+                        estimator, frame_bgr, treatment_mask, detections, job.apply_mask_treatment,
+                    )
+                    writer.add_frame(frame_idx, detections, results,
+                                    job.pose_model, img=frame_bgr)
+                    self._keypoints_written += len(results)
+                    frames_with_kp += 1
+
             try:
-                for frame_idx in range(job.first_frame, job.last_frame + 1):
-                    if self._stop_requested:
-                        break
-                    ret, frame_bgr = cap.read()
-                    if not ret:
-                        log.warning("PoseWorker: video read failed at frame %d", frame_idx)
-                        break
+                if not job.temporal_mask_smoothing:
+                    for frame_idx in range(job.first_frame, job.last_frame + 1):
+                        if self._stop_requested:
+                            break
+                        ret, frame_bgr = cap.read()
+                        if not ret:
+                            log.warning("PoseWorker: video read failed at frame %d", frame_idx)
+                            break
 
-                    # Read the mask (stored at max_dim=1920p by CutieWorker).
-                    mask = _load_mask(conn, job.seg_quality_run_id,
-                                     job.shot_video_id, frame_idx)
-                    if mask is None:
+                        fh, fw = frame_bgr.shape[:2]
+                        mask = _load_and_scale_mask(frame_idx, fh, fw)
+                        if mask is None:
+                            done += 1
+                            continue
+
+                        _handle_frame(frame_idx, frame_bgr, mask)
+
                         done += 1
-                        continue
+                        if done % 50 == 0:
+                            self.progress.emit(done, total)
+                else:
+                    # Temporal smoothing needs a small lookahead (offline
+                    # batch job, no live/causal constraint) -- buffer
+                    # TEMPORAL_WINDOW_RADIUS frames of context on each side
+                    # before processing the center frame. A deque holding
+                    # exactly window_size (frame_idx, frame, mask) entries:
+                    # each time it's freshly full, index RADIUS is exactly
+                    # the frame with a complete window on both sides, so
+                    # sliding the window one frame at a time visits every
+                    # frame's "complete-context" moment exactly once. The
+                    # first/last RADIUS frames of the whole range never get
+                    # a turn at that position before the loop ends, so the
+                    # tail flush below processes them explicitly with
+                    # whatever (necessarily smaller) window is available --
+                    # suppress_others_temporal() already shrinks gracefully
+                    # when handed a short window.
+                    from posetrak.detection.mask_treatment import suppress_others_temporal
 
-                    # Scale mask UP to match the native video resolution so bboxes
-                    # are in full-resolution coordinates.  Keypoints must be stored
-                    # at native resolution to match the camera calibration matrices
-                    # used by the C++ tracker (same as the YOLO pipeline).
-                    fh, fw = frame_bgr.shape[:2]
-                    if mask.shape != (fh, fw):
-                        mask = cv2.resize(mask, (fw, fh), interpolation=cv2.INTER_NEAREST)
+                    window_size = 2 * TEMPORAL_WINDOW_RADIUS + 1
+                    pending: deque[tuple[int, np.ndarray, np.ndarray | None]] = deque()
 
-                    detections = _bboxes_from_mask(mask, job.persons_ordered)
-                    if detections:
-                        results = _estimate_per_person(
-                            estimator, frame_bgr, mask, detections, job.apply_mask_treatment,
-                        )
-                        writer.add_frame(frame_idx, detections, results,
-                                        job.pose_model, img=frame_bgr)
-                        self._keypoints_written += len(results)
-                        frames_with_kp += 1
+                    def _process_pending_index(i: int) -> None:
+                        nonlocal done, frames_with_kp
+                        frame_idx, frame_bgr, mask = pending[i]
+                        if mask is not None:
+                            lo = max(0, i - TEMPORAL_WINDOW_RADIUS)
+                            hi = min(len(pending), i + TEMPORAL_WINDOW_RADIUS + 1)
+                            masks_window = []
+                            center_in_window = None
+                            for j in range(lo, hi):
+                                m = pending[j][2]
+                                if m is None:
+                                    continue
+                                if j == i:
+                                    center_in_window = len(masks_window)
+                                masks_window.append(m)
 
-                    done += 1
-                    if done % 50 == 0:
-                        self.progress.emit(done, total)
-                        log.debug("PoseWorker: %d/%d frames  kp_frames=%d  t=%.3f",
-                                  done, total, frames_with_kp, time.monotonic() - t0)
+                            detections = _bboxes_from_mask(mask, job.persons_ordered)
+                            if detections:
+                                results = []
+                                for det in detections:
+                                    treated = suppress_others_temporal(
+                                        frame_bgr, masks_window, center_in_window, det.track_id,
+                                    )
+                                    results.extend(estimator.estimate(treated, [det]))
+                                writer.add_frame(frame_idx, detections, results,
+                                                job.pose_model, img=frame_bgr)
+                                self._keypoints_written += len(results)
+                                frames_with_kp += 1
+                        done += 1
+                        if done % 50 == 0:
+                            self.progress.emit(done, total)
+
+                    for frame_idx in range(job.first_frame, job.last_frame + 1):
+                        if self._stop_requested:
+                            break
+                        ret, frame_bgr = cap.read()
+                        if not ret:
+                            log.warning("PoseWorker: video read failed at frame %d", frame_idx)
+                            break
+                        fh, fw = frame_bgr.shape[:2]
+                        mask = _load_and_scale_mask(frame_idx, fh, fw)
+                        pending.append((frame_idx, frame_bgr, mask))
+                        if len(pending) > window_size:
+                            pending.popleft()
+                        if len(pending) == window_size:
+                            _process_pending_index(TEMPORAL_WINDOW_RADIUS)
+
+                    # Tail flush: if the whole range never filled the
+                    # window (a very short clip), every frame is still
+                    # unprocessed -- otherwise only the last RADIUS frames
+                    # (indices RADIUS+1..end of the final buffer state) are.
+                    tail_start = 0 if len(pending) < window_size else TEMPORAL_WINDOW_RADIUS + 1
+                    for i in range(tail_start, len(pending)):
+                        _process_pending_index(i)
             finally:
                 cap.release()
 

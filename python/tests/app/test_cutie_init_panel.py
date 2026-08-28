@@ -139,6 +139,35 @@ def test_loads_existing_seg_run_by_capture(qapp, capture_db):
         panel.shutdown()
 
 
+def test_seg_init_run_id_continues_existing_run_instead_of_creating_new(qapp, capture_db):
+    """Issue 2 (segmentation-ui-improvements design doc): passing an
+    existing seg_quality_runs id in should make new edits extend that
+    run, not fragment into a fresh one -- the gap behind the multi-run
+    confusion this session hit while doing unrelated work."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+    from posetrak.db.db import generate_id
+
+    seg_id = generate_id()
+    capture_db.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES (?, 'cap1', 0.0, 1e9, '2026-01-01T00:00:00Z')",
+        (seg_id,),
+    )
+    capture_db.commit()
+
+    panel = CutieInitPanel(capture_db, "cap1", seg_init_run_id=seg_id)
+    try:
+        assert panel._seg_init_run_id == seg_id
+        # _ensure_seg_run() must be a no-op -- no second row created.
+        panel._ensure_seg_run()
+        n = capture_db.execute(
+            "SELECT COUNT(*) FROM seg_quality_runs WHERE shot_id='cap1'"
+        ).fetchone()[0]
+        assert n == 1
+    finally:
+        panel.shutdown()
+
+
 def test_resolve_or_create_detection_run_needs_sync_config(qapp, capture_db):
     """No sync config for the capture yet -- can't create a detection run
     to write pose results into, so this returns None with a status message
@@ -447,5 +476,76 @@ def test_queue_tracking_range_reflects_direction(qapp, synced_capture_db):
         assert bwd_job.init_frame == 150
         assert bwd_job.first_frame == 60
         assert bwd_job.last_frame == 150
+    finally:
+        panel.shutdown()
+
+
+def test_on_track_range_queues_both_directions_from_middle_seed(qapp, synced_capture_db):
+    """Issue 3 (segmentation-ui-improvements design doc): a middle seed
+    frame should queue both a backward job (mark start -> seed) and a
+    forward job (seed -> mark end) from one action, matching exactly what
+    pressing both individual buttons would have produced."""
+    import cv2
+    import numpy as np
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    synced_capture_db.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('seg1', 'cap1', 0.0, 1e9, '2026-01-01T00:00:00Z')"
+    )
+    ok, buf = cv2.imencode(".png", np.ones((4, 4), dtype=np.uint8))
+    assert ok
+    synced_capture_db.execute(
+        "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
+        "VALUES ('seg1', 'sv1', 150, ?)",
+        (buf.tobytes(),),
+    )
+    synced_capture_db.commit()
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        panel._scrubber.setValue(panel._to_units(5.0))  # sv1 local frame 150
+        panel._on_track_range()
+
+        assert len(panel._runner.jobs) == 2
+        bwd_job, fwd_job = panel._runner.jobs
+        assert bwd_job.direction == "backward"
+        assert bwd_job.first_frame == 60
+        assert bwd_job.last_frame == 150
+        assert fwd_job.direction == "forward"
+        assert fwd_job.first_frame == 150
+        assert fwd_job.last_frame == 240
+    finally:
+        panel.shutdown()
+
+
+def test_on_track_range_skips_degenerate_direction_at_edge(qapp, synced_capture_db):
+    """Seeding exactly at Mark Start should only queue the forward job --
+    a backward job from mark_start to mark_start would be zero-length and
+    pointless (the seed frame's own mask is already written directly)."""
+    import cv2
+    import numpy as np
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    synced_capture_db.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('seg1', 'cap1', 0.0, 1e9, '2026-01-01T00:00:00Z')"
+    )
+    ok, buf = cv2.imencode(".png", np.ones((4, 4), dtype=np.uint8))
+    assert ok
+    synced_capture_db.execute(
+        "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
+        "VALUES ('seg1', 'sv1', 60, ?)",
+        (buf.tobytes(),),
+    )
+    synced_capture_db.commit()
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        panel._scrubber.setValue(panel._to_units(2.0))  # sv1 local frame 60 == mark start
+        panel._on_track_range()
+
+        assert len(panel._runner.jobs) == 1
+        assert panel._runner.jobs[0].direction == "forward"
     finally:
         panel.shutdown()

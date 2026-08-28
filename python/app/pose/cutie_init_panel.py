@@ -208,6 +208,7 @@ class CutieInitPanel(QWidget):
         shot_id: str,
         parent: QWidget | None = None,
         trial_id: str | None = None,
+        seg_init_run_id: str | None = None,
     ) -> None:
         """*shot_id* is the capture this segmentation belongs to (see
         docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md's
@@ -218,7 +219,15 @@ class CutieInitPanel(QWidget):
         when pose extraction is actually queued (``_resolve_or_create_detection_run``).
         *trial_id* is optional provenance (which trial this panel happened
         to be opened from) threaded onto any detection run created here;
-        not required for anything to function."""
+        not required for anything to function.
+
+        *seg_init_run_id*, when given, is an existing ``seg_quality_runs``
+        row (from the session tree's "Open/Continue" action) to extend
+        instead of creating a new one on first edit -- closes the gap
+        where every panel reopen silently fragmented one capture's
+        segmentation work across several rows (segmentation-ui-
+        improvements design doc, Issue 2). Omit to start a fresh
+        segmentation, same as before this parameter existed."""
         super().__init__(parent)
         self._conn = conn
         self._shot_id = shot_id
@@ -283,7 +292,10 @@ class CutieInitPanel(QWidget):
         self._runner.job_failed.connect(self._on_job_failed)
         self._runner.queue_done.connect(self._on_queue_done)
 
-        self._seg_init_run_id: str | None = None   # seg_quality_run created for this session
+        # seg_quality_run new masks are written to -- either a fresh run
+        # created lazily by _ensure_seg_run() on first edit, or (when the
+        # caller passed seg_init_run_id) an existing run being continued.
+        self._seg_init_run_id: str | None = seg_init_run_id
         self._db_flush_buffer: list[tuple] = []    # buffered (svid, frame_idx, blob) rows
         self._DB_FLUSH_EVERY = 50           # flush to DB every N frames
         self._batch_recv_count: int = 0     # batches received for current job (for logging)
@@ -382,17 +394,33 @@ class CutieInitPanel(QWidget):
         track_vbox.addLayout(track_layout)
         track_layout.setContentsMargins(0, 0, 0, 0)
 
-        self._track_bwd_btn = QPushButton("◀ Queue Backward")
+        self._track_range_btn = QPushButton("⏩ Segment Range from Seed")
+        self._track_range_btn.setToolTip(
+            "Seed at the current frame, propagate to both Mark Start and Mark "
+            "End (queues one or two jobs as needed) -- the recommended way to "
+            "cover a range from a middle seed frame"
+        )
+        self._track_range_btn.clicked.connect(self._on_track_range)
+        self._track_range_btn.setEnabled(False)
+        track_layout.addWidget(self._track_range_btn)
+
+        track_layout.addSpacing(8)
+
+        self._track_bwd_btn = QPushButton("◀ Backward only")
         self._track_bwd_btn.setToolTip(
-            "Add a backward tracking job to the queue (current frame → mark start)"
+            "Add a backward tracking job to the queue (current frame → mark "
+            "start) without also queuing forward -- for resuming just one "
+            "direction, e.g. after a failed or cancelled job"
         )
         self._track_bwd_btn.clicked.connect(self._on_track_backward)
         self._track_bwd_btn.setEnabled(False)
         track_layout.addWidget(self._track_bwd_btn)
 
-        self._track_fwd_btn = QPushButton("▶ Queue Forward")
+        self._track_fwd_btn = QPushButton("▶ Forward only")
         self._track_fwd_btn.setToolTip(
-            "Add a forward tracking job to the queue (current frame → mark end)"
+            "Add a forward tracking job to the queue (current frame → mark "
+            "end) without also queuing backward -- for resuming just one "
+            "direction, e.g. after a failed or cancelled job"
         )
         self._track_fwd_btn.clicked.connect(self._on_track_forward)
         self._track_fwd_btn.setEnabled(False)
@@ -869,6 +897,7 @@ class CutieInitPanel(QWidget):
 
         # Enable track / pose buttons if there are persons to track
         can_track = bool(self._persons)
+        self._track_range_btn.setEnabled(can_track)
         self._track_fwd_btn.setEnabled(can_track)
         self._track_bwd_btn.setEnabled(can_track)
         self._queue_pose_btn.setEnabled(can_track)
@@ -1260,6 +1289,37 @@ class CutieInitPanel(QWidget):
 
     def _on_track_backward(self) -> None:
         self._queue_tracking("backward")
+
+    def _on_track_range(self) -> None:
+        """Seed at the current frame, queue whichever of backward/forward
+        actually covers new ground toward Mark Start/Mark End.
+
+        Replaces having to remember to press both "Forward" and "Backward"
+        separately for a middle seed frame (segmentation-ui-improvements
+        design doc, Issue 3) -- same two _queue_tracking() calls the
+        existing per-direction buttons already make, just wrapped behind
+        one action with the degenerate (seed already at an edge) case
+        skipped rather than queuing a zero-length job.
+        """
+        cam = self._cam_combo.currentData()
+        if cam is None:
+            return
+        seed = self._local_frame_for(cam)
+        mark_start_frame = self._local_frame_for(cam, self._mark_start)
+        mark_end_frame = self._local_frame_for(cam, self._mark_end)
+
+        queued_any = False
+        if seed > mark_start_frame:
+            self._queue_tracking("backward")
+            queued_any = True
+        if seed < mark_end_frame:
+            self._queue_tracking("forward")
+            queued_any = True
+
+        if not queued_any:
+            self._set_status(
+                "Seed frame is the only frame in the marked range — nothing to propagate."
+            )
 
     def _queue_tracking(self, direction: str) -> None:
         """Create a TrackingJob from the current UI state and enqueue it."""

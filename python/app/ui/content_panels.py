@@ -1374,6 +1374,81 @@ class StandaloneRunPanel(QWidget):
         vbox.addWidget(panel, 1)
 
 
+class SegmentationRunPanel(QWidget):
+    """Summary view for a single seg_quality_runs row, reached by clicking
+    a segmentation node in the session tree (segmentation-ui-improvements
+    design doc, Issue 1). Deliberately lightweight -- the actual editing
+    surface is CutieInitPanel in its own window, opened via the "Open /
+    Continue" button (Issue 2: continues this run instead of starting a
+    fresh one)."""
+
+    data_changed = Signal()
+    open_requested = Signal(str)  # seg_quality_run_id
+
+    def __init__(
+        self, conn: sqlite3.Connection, seg_run_id: str, session_path=None, parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._conn = conn
+        self._seg_run_id = seg_run_id
+        self._session_path = session_path
+        self._build()
+
+    def _build(self) -> None:
+        row = self._conn.execute(
+            "SELECT sq.id, sq.name, sq.time_start_s, sq.time_end_s, sq.created_at, "
+            "       sq.quality_source, sq.notes, c.label AS capture_label, "
+            "       (SELECT COUNT(*) FROM seg_masks m WHERE m.seg_quality_run_id = sq.id) "
+            "           AS n_masks, "
+            "       (SELECT COUNT(DISTINCT shot_video_id) FROM seg_masks m "
+            "           WHERE m.seg_quality_run_id = sq.id) AS n_cameras "
+            "FROM seg_quality_runs sq "
+            "LEFT JOIN captures c ON c.id = sq.shot_id "
+            "WHERE sq.id = ?",
+            (self._seg_run_id,),
+        ).fetchone()
+
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(4, 4, 4, 4)
+        vbox.setSpacing(6)
+
+        if row is None:
+            vbox.addWidget(QLabel("Segmentation not found."))
+            return
+
+        bc = QLabel(
+            f"{row['capture_label'] or '?'}  /  "
+            f"{row['name'] or 'Segmentation'}  {_fmt_ts(row['created_at'])}"
+        )
+        bc.setStyleSheet("color: gray; font-size: 11px;")
+        vbox.addWidget(bc)
+
+        info_lines = [f"Quality source: {row['quality_source']}"]
+        if row["time_start_s"] is not None and row["time_end_s"] is not None:
+            info_lines.append(
+                f"Initially marked range: {row['time_start_s']:.1f}s – "
+                f"{row['time_end_s']:.1f}s (editing may have extended this "
+                "since -- see mask count below for the real extent)"
+            )
+        info_lines.append(f"Masks stored: {row['n_masks']}  across {row['n_cameras']} camera(s)")
+        if row["notes"]:
+            info_lines.append(f"Notes: {row['notes']}")
+        for line in info_lines:
+            lbl = QLabel(line)
+            lbl.setWordWrap(True)
+            vbox.addWidget(lbl)
+
+        open_btn = QPushButton("Open / Continue…")
+        open_btn.setToolTip(
+            "Open the segmentation editor, continuing this run instead of "
+            "starting a new one"
+        )
+        open_btn.clicked.connect(lambda: self.open_requested.emit(self._seg_run_id))
+        vbox.addWidget(open_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        vbox.addStretch()
+
+
 # ---------------------------------------------------------------------------
 # CropBackfillWorker — background thread to generate missing person-crop JPEGs
 # ---------------------------------------------------------------------------

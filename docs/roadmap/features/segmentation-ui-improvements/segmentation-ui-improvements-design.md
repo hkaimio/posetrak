@@ -10,6 +10,11 @@
 > cheap orchestration fixes on top of machinery that already exists;
 > others are genuinely new capability. A suggested build order is at the
 > end.
+>
+> **Three UX questions resolved (2026-08-28)**: where segmentations sit
+> in the tree relative to trials, how to keep that understandable, and
+> how split points (Issue 4) interact with Mark Start/End — see the
+> updated Issue 1 and Issue 4 sections below.
 
 ## Issue 1 — segmentations aren't visible in the UI, can't rename/delete
 
@@ -52,6 +57,32 @@ Delete. Two real gaps to close to make that menu work:
   from it (`PoseExtractionJob.seg_quality_run_id`, not currently a
   queryable FK but derivable) and refuse/warn rather than silently
   orphaning that downstream data.
+
+**Tree placement — capture-level, not trial-level (resolved 2026-08-28)**.
+`seg_quality_runs` has a nullable `trial_id`, the same shape
+`detection_runs` has, and `session_tree.py` already nests a detection run
+under its trial when that's set, under the capture directly when it
+isn't (`_add_capture_children`). That conditional rule isn't right for
+segmentation, though: a detection run's *normal* case is being scoped to
+one trial; a segmentation's normal case is closer to the opposite — it's
+routinely created before trial boundaries exist and legitimately spans
+several trials at once (`CutieInitPanel`'s own docstring: "segmentation
+is capture-scoped and independent of any specific detection run"). Using
+the same conditional-nesting rule would make a `seg_quality_runs` row
+jump between "under Trial A" and "at the capture level" as the user
+extends its range — confusing in a different way than the problem being
+solved here. **List segmentations at the capture level, always** — never
+conditionally nested under a trial.
+
+To keep that understandable without structural nesting: (1) show the
+segmentation's own covered time range in its label, the same way trial
+items already do (`name += f"  ({start:.1f}s – {end:.1f}s)"`), and (2)
+compute (don't store) which trial(s) it overlaps and surface that as a
+tooltip or trailing annotation, e.g. `"covers: Heitot, Cooldown
+(partial)"`. Distinguishing a segmentation item from a detection-run item
+at the same capture level is then just the existing label-prefix
+convention (`"Segmentation  6.5s–67.7s  …"` vs. `"Detection [model]  …"`)
+— nothing else in this tree uses icons, no reason to start here.
 
 ## Issue 2 — every panel open starts a brand-new segmentation from zero
 
@@ -124,18 +155,45 @@ accidentally queueing a job that crosses a planned split.
 
 **Proposal**: a lightweight "split points" list, editable on the
 `RangeBar` timeline before any SAM2 clicking starts — mark one or more
-candidate hard-transition frames, rendered as vertical markers. Clicking
-a marker jumps the scrubber there and auto-sets mark-start/mark-end to
-the enclosing sub-segment, so a queued job can't silently span a
-planned split. Persist the split-point list somewhere that survives a
-panel reopen (worth just extending the same continuation mechanism from
-Issue 2, e.g. a JSON list alongside `seg_quality_runs.persons_json`,
-rather than inventing a separate persistence path) — otherwise this is
-pure planning scaffolding, not a new backend capability, but it's a real
-UI feature to build (RangeBar already supports markers via
-`set_covered_frames`-style rendering, per the class's existing pattern in
-`cutie_init_panel.py:50`, though a new "split point" visual distinct from
-"covered frames" is still new code) — medium effort, not trivial.
+candidate hard-transition frames.
+
+**Visual treatment (resolved 2026-08-28)**: `RangeBar` already stacks
+four layers (teal mask-coverage band, steel-blue selection fill, amber
+trial-range band, bright-blue Mark Start/End ticks, white position tick
+— see the class docstring, `cutie_init_panel.py:50`). Split points need
+a fifth, visually distinct layer — thin full-height ticks in a color
+nothing else uses (red/orange, since blue is already the mark-boundary
+color), so a split point never reads as a current-selection edge.
+
+**Interaction with Mark Start/End (resolved 2026-08-28) — snap, don't
+hard-lock**: clicking a split-point marker snaps Mark Start/Mark End to
+it (the low-friction path for respecting the plan). Manually setting a
+range that spans a split point is still *allowed* — don't hard-block,
+since sometimes a planned split turns out to be unnecessary — but the
+crossed marker renders in a warning state and the queue action confirms
+before proceeding, so crossing one is never silent. This also connects
+to Issue 3: once split points exist, picking a seed frame should
+auto-populate Mark Start/Mark End from the *enclosing* split-point pair
+rather than requiring them to be set by hand each time — the marks
+become "the current planned sub-segment's bounds, pre-filled, still
+freely overridable."
+
+**Persistence (revised 2026-08-28)**: originally proposed storing split
+points alongside `seg_quality_runs.persons_json`. On reflection that's
+the wrong owner — "two people cross paths here" is a property of the
+*footage*, not of one particular attempt at segmenting it, and tying it
+to a `seg_quality_runs` row means it vanishes whenever that row is
+deleted or superseded (exactly the run-churn Issues 1–2 are trying to
+reduce). Use a small **capture-scoped** table instead, e.g.
+`capture_segmentation_hints(id, capture_id, time_s, note, created_at)`,
+storing `time_s` as global time the same way trial ranges already are —
+split points must be global-time, not per-camera frame numbers, since
+"the moment two people cross" is one synchronized real-world event that
+has to mean the same thing on all cameras of the capture. This survives
+across "New segmentation" resets and isn't tied to any one run's
+lifecycle. Still pure planning scaffolding otherwise — no change to
+`TrackingJob`/`CutieWorker` needed, just a new small table plus the
+RangeBar/interaction UI above — medium effort, not trivial.
 
 ## Issue 5 — manual mask editing (brush) when SAM2 gets it wrong
 

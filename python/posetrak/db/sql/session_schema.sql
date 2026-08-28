@@ -504,7 +504,8 @@ CREATE TABLE IF NOT EXISTS seg_quality_runs (
     erosion_px     INTEGER NOT NULL DEFAULT 5,
     mask_dir       TEXT,
     notes          TEXT,
-    persons_json   TEXT
+    persons_json   TEXT,
+    name           TEXT
 );
 
 -- Per-keypoint segmentation quality scores, aligned with detection_keypoints.

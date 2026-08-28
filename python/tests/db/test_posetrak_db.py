@@ -984,6 +984,26 @@ def test_migrate_session_v42_to_v43_adds_persons_json(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_migrate_session_v43_to_v44_adds_name(tmp_path: Path) -> None:
+    """v43->v44 adds seg_quality_runs.name (nullable) -- a user-settable
+    display name distinct from the existing free-text notes column, so
+    segmentations can be listed/renamed in the session tree the same way
+    detection_runs/tracking_runs already are (see docs/roadmap/features/
+    segmentation-ui-improvements/segmentation-ui-improvements-design.md,
+    Issue 1)."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("PRAGMA user_version = 43")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(seg_quality_runs)")}
+    assert "name" in cols
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------

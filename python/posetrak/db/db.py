@@ -25,7 +25,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 8
-SESSION_SCHEMA_VERSION: Final[int] = 43
+SESSION_SCHEMA_VERSION: Final[int] = 44
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1446,6 +1446,25 @@ def _migrate_session_v42_to_v43(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v43_to_v44(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 43 to 44.
+
+    v44 adds seg_quality_runs.name -- a user-settable display name,
+    distinct from the existing free-text notes column. Needed so
+    segmentations can be listed and renamed in the session tree the same
+    way detection_runs/tracking_runs already are. See
+    docs/roadmap/features/segmentation-ui-improvements/
+    segmentation-ui-improvements-design.md, Issue 1. NULL for existing
+    rows and any row the user hasn't renamed -- callers fall back to a
+    generated label (covered time range + created_at) when NULL.
+    """
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(seg_quality_runs)")}
+    if "name" not in existing_cols:
+        conn.execute("ALTER TABLE seg_quality_runs ADD COLUMN name TEXT")
+    _set_schema_version(conn, 44)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1595,6 +1614,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 42
     if actual == 42:
         _migrate_session_v42_to_v43(conn)
+        actual = 43
+    if actual == 43:
+        _migrate_session_v43_to_v44(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

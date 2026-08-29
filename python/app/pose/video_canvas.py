@@ -12,14 +12,35 @@ Coordinate convention:
   - Canvas coords: pixels in the QLabel widget (origin top-left).
   - Image coords:  pixels in the original (possibly scaled) frame.
   - The display scales the frame uniformly to fit, with black bars if the
-    aspect ratio doesn't match.
+    aspect ratio doesn't match -- unless zoomed in (see zoom_in_at()), in
+    which case the visible region is a crop of the frame instead, still
+    letterboxed on whichever axis (if any) the crop doesn't fill.
+
+Zoom/pan (segmentation-ui-improvements design doc, Issue 5): zoom_in_at()/
+zoom_out_at() recentre on an image point and scale by ZOOM_STEP, clamped to
+[ZOOM_MIN, ZOOM_MAX]. The expensive part of a redraw (video decode already
+done by the caller, but the cv2 resize/mask-blend/BGR->RGB conversion here)
+is cached as self._base_pixmap and only recomputed when the frame/mask/
+zoom actually changes -- mouse-move (tracking the cursor for the brush
+tool's preview circle) instead just copies that cached pixmap and draws
+the circle on top, cheap enough for interactive drag rates.
+
+The skeleton overlay is only painted at zoom 1.0 -- its own coordinate
+math assumes the full frame maps linearly into the display rect, which
+stops being true once the display is a crop rather than the whole frame;
+deliberately skipped instead of drawing it in the wrong place.
 """
 from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal, QPoint
-from PySide6.QtGui import QImage, QPixmap, QPainter, QColor
+from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen
 from PySide6.QtWidgets import QLabel, QSizePolicy
+
+#: Multiplicative zoom step per zoom_in_at()/zoom_out_at() call.
+ZOOM_STEP = 1.6
+ZOOM_MIN = 1.0
+ZOOM_MAX = 8.0
 
 
 # DAVIS colour palette: first 16 entries (label 0 = background, 1..N = persons).
@@ -94,10 +115,15 @@ class VideoCanvas(QLabel):
         Left mouse press in image coordinates.
     right_clicked(x, y):
         Right mouse press in image coordinates.
+    left_dragged(x, y):
+        Mouse moved with the left button held, in image coordinates --
+        for a continuous paint/erase brush stroke, not emitted for the
+        select/zoom tools (see set_tool()).
     """
 
     left_clicked = Signal(int, int)
     right_clicked = Signal(int, int)
+    left_dragged = Signal(int, int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -105,6 +131,7 @@ class VideoCanvas(QLabel):
         self.setMinimumSize(320, 240)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setStyleSheet("background-color: black;")
+        self.setMouseTracking(True)  # mouseMoveEvent fires without a button held too
 
         self._frame: np.ndarray | None = None
         self._mask: np.ndarray | None = None
@@ -118,10 +145,27 @@ class VideoCanvas(QLabel):
         self._kp_frame_w: int = 0
         self._kp_frame_h: int = 0
 
-        # Transform state: image_coord = (canvas_coord - offset) / scale
+        # Transform state: image_coord = (src_x0 + (canvas_coord - offset) / scale)
         self._scale: float = 1.0
         self._offset_x: int = 0
         self._offset_y: int = 0
+        self._src_x0: float = 0.0
+        self._src_y0: float = 0.0
+
+        # Zoom/pan -- pan_c{x,y} is None until the first zoom_in_at(), meaning
+        # "centered on the frame" (the pre-zoom default).
+        self._zoom: float = 1.0
+        self._pan_cx: float | None = None
+        self._pan_cy: float | None = None
+
+        # Brush tool state -- see set_tool()/set_brush_radius(). The cached
+        # expensive render, so mouse-move (tracking the cursor for the brush
+        # preview circle) can cheaply redraw just the circle on top instead
+        # of redoing the cv2 decode/resize/blend pipeline.
+        self._active_tool: str = "select"
+        self._brush_radius: int = 10
+        self._cursor_img: tuple[int, int] | None = None
+        self._base_pixmap: QPixmap | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -169,6 +213,7 @@ class VideoCanvas(QLabel):
         self._frame = None
         self._mask = None
         self._message = None
+        self._base_pixmap = None
         self.setPixmap(QPixmap())
 
     def canvas_to_image(self, cx: int, cy: int) -> tuple[int, int] | None:
@@ -176,14 +221,53 @@ class VideoCanvas(QLabel):
 
         Returns None if the point is outside the displayed image area.
         """
-        ix = (cx - self._offset_x) / self._scale
-        iy = (cy - self._offset_y) / self._scale
+        ix = self._src_x0 + (cx - self._offset_x) / self._scale
+        iy = self._src_y0 + (cy - self._offset_y) / self._scale
         if self._frame is None:
             return None
         h, w = self._frame.shape[:2]
         if not (0 <= ix < w and 0 <= iy < h):
             return None
         return int(ix), int(iy)
+
+    # ------------------------------------------------------------------
+    # Tools (segmentation-ui-improvements design doc, Issue 5)
+    # ------------------------------------------------------------------
+
+    def set_tool(self, tool: str) -> None:
+        """Set the active tool -- "select" (SAM2 clicks, unchanged), "paint",
+        "erase", or "zoom". Only affects the brush-preview circle and
+        left_dragged emission here; the actual paint/erase/zoom behavior
+        lives in the caller (CutieInitPanel), which decides what left_clicked/
+        right_clicked/left_dragged mean based on the same tool."""
+        self._active_tool = tool
+        self._update_cursor_overlay()
+
+    def set_brush_radius(self, radius: int) -> None:
+        """Brush radius in *image* pixels (not screen pixels), so painting
+        stays consistent across zoom levels -- only the on-screen preview
+        circle's radius scales with the current zoom."""
+        self._brush_radius = max(1, radius)
+        self._update_cursor_overlay()
+
+    def zoom_in_at(self, ix: int, iy: int) -> None:
+        """Zoom in by ZOOM_STEP, recentring on image point (ix, iy)."""
+        self._zoom = min(ZOOM_MAX, self._zoom * ZOOM_STEP)
+        self._pan_cx, self._pan_cy = float(ix), float(iy)
+        self._render()
+
+    def zoom_out_at(self, ix: int, iy: int) -> None:
+        """Zoom out by ZOOM_STEP, recentring on image point (ix, iy)."""
+        self._zoom = max(ZOOM_MIN, self._zoom / ZOOM_STEP)
+        self._pan_cx, self._pan_cy = float(ix), float(iy)
+        self._render()
+
+    def reset_zoom(self) -> None:
+        """Back to fit-to-widget, centred on the whole frame."""
+        self._zoom = 1.0
+        self._pan_cx = None
+        self._pan_cy = None
+        self._render()
 
     # ------------------------------------------------------------------
     # Qt overrides
@@ -205,11 +289,29 @@ class VideoCanvas(QLabel):
         elif event.button() == Qt.MouseButton.RightButton:
             self.right_clicked.emit(ix, iy)
 
+    def mouseMoveEvent(self, event) -> None:
+        pos = event.position()
+        cx, cy = int(pos.x()), int(pos.y())
+        img_coords = self.canvas_to_image(cx, cy)
+        self._cursor_img = img_coords
+        self._update_cursor_overlay()
+        if img_coords is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+            self.left_dragged.emit(*img_coords)
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self._cursor_img = None
+        self._update_cursor_overlay()
+
     # ------------------------------------------------------------------
     # Internal rendering
     # ------------------------------------------------------------------
 
     def _render(self) -> None:
+        """Recompute self._base_pixmap (the expensive path: cv2 crop/
+        resize/mask-blend/BGR->RGB) and display it. Called whenever the
+        frame, mask, zoom, or widget size actually changes -- NOT on
+        every mouse move, see _update_cursor_overlay()."""
         ww, wh = self.width(), self.height()
         if ww == 0 or wh == 0:
             return
@@ -223,6 +325,7 @@ class VideoCanvas(QLabel):
                 painter.setPen(QColor(160, 160, 160))
                 painter.drawText(canvas.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
                 painter.end()
+            self._base_pixmap = canvas
             self.setPixmap(canvas)
             return
 
@@ -237,19 +340,52 @@ class VideoCanvas(QLabel):
                 )
             frame = blend_mask(frame, mask)
 
-        # Scale to fit the widget while preserving aspect ratio.
         fh, fw = frame.shape[:2]
         if fw == 0 or fh == 0:
             return
 
-        scale = min(ww / fw, wh / fh)
-        dw = int(fw * scale)
-        dh = int(fh * scale)
+        fit_scale = min(ww / fw, wh / fh)
+        scale = fit_scale * self._zoom
         self._scale = scale
-        self._offset_x = (ww - dw) // 2
-        self._offset_y = (wh - dh) // 2
 
-        display = cv2.resize(frame, (dw, dh), interpolation=cv2.INTER_LINEAR)
+        pan_cx = self._pan_cx if self._pan_cx is not None else fw / 2.0
+        pan_cy = self._pan_cy if self._pan_cy is not None else fh / 2.0
+
+        # Visible image-space viewport, per axis independently: letterbox
+        # (centered offset, no crop) if the whole frame fits that axis at
+        # this scale, otherwise crop to a pan-clamped window of that size.
+        view_w = ww / scale
+        view_h = wh / scale
+
+        if view_w >= fw:
+            src_x0, src_w = 0.0, float(fw)
+            dst_x0 = int(round((ww - fw * scale) / 2))
+        else:
+            src_x0 = max(0.0, min(pan_cx - view_w / 2, fw - view_w))
+            src_w = view_w
+            dst_x0 = 0
+
+        if view_h >= fh:
+            src_y0, src_h = 0.0, float(fh)
+            dst_y0 = int(round((wh - fh * scale) / 2))
+        else:
+            src_y0 = max(0.0, min(pan_cy - view_h / 2, fh - view_h))
+            src_h = view_h
+            dst_y0 = 0
+
+        self._offset_x = dst_x0
+        self._offset_y = dst_y0
+        self._src_x0 = src_x0
+        self._src_y0 = src_y0
+
+        sx0, sy0 = int(round(src_x0)), int(round(src_y0))
+        sx1 = min(fw, sx0 + max(1, int(round(src_w))))
+        sy1 = min(fh, sy0 + max(1, int(round(src_h))))
+        crop = frame[sy0:sy1, sx0:sx1]
+        dw = max(1, int(round((sx1 - sx0) * scale)))
+        dh = max(1, int(round((sy1 - sy0) * scale)))
+
+        display = cv2.resize(crop, (dw, dh), interpolation=cv2.INTER_LINEAR)
 
         # Convert BGR → RGB for QImage.  Use bytes() to ensure QImage owns
         # the buffer — rgb.data is a memoryview that may be freed before
@@ -261,9 +397,11 @@ class VideoCanvas(QLabel):
 
         painter = QPainter(canvas)
         painter.drawPixmap(self._offset_x, self._offset_y, pixmap)
-        if self._skeleton_overlay is not None:
-            # Use the native video resolution if set (keypoints stored at 4K);
-            # fall back to the display frame dimensions if not yet probed.
+        # Skeleton overlay only at zoom 1.0 -- its own coordinate math
+        # assumes the whole frame maps linearly into the display rect,
+        # which stops being true once the display is a crop (see module
+        # docstring) rather than drawing it in the wrong place.
+        if self._skeleton_overlay is not None and self._zoom == 1.0:
             kp_w = self._kp_frame_w if self._kp_frame_w > 0 else fw
             kp_h = self._kp_frame_h if self._kp_frame_h > 0 else fh
             painter.save()
@@ -271,4 +409,35 @@ class VideoCanvas(QLabel):
             self._skeleton_overlay.paint(painter, kp_w, kp_h, dw, dh)
             painter.restore()
         painter.end()
+        self._base_pixmap = canvas
         self.setPixmap(canvas)
+        self._update_cursor_overlay()
+
+    def _update_cursor_overlay(self) -> None:
+        """Cheap redraw: copy the cached base pixmap and draw the brush
+        preview circle on top, without touching frame/mask data at all.
+        Safe to call on every mouse-move."""
+        if self._base_pixmap is None:
+            return
+        show_circle = (
+            self._active_tool in ("paint", "erase")
+            and self._cursor_img is not None
+        )
+        if not show_circle:
+            self.setPixmap(self._base_pixmap)
+            return
+
+        pixmap = self._base_pixmap.copy()
+        ix, iy = self._cursor_img
+        cx = self._offset_x + (ix - self._src_x0) * self._scale
+        cy = self._offset_y + (iy - self._src_y0) * self._scale
+        r = self._brush_radius * self._scale
+
+        painter = QPainter(pixmap)
+        color = QColor(240, 60, 60) if self._active_tool == "erase" else QColor(240, 240, 240)
+        pen = QPen(color)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawEllipse(QPoint(int(cx), int(cy)), int(r), int(r))
+        painter.end()
+        self.setPixmap(pixmap)

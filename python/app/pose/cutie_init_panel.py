@@ -48,20 +48,24 @@ from posetrak.db.db import generate_id
 
 
 class RangeBar(QWidget):
-    """Horizontal timeline bar combining five layers of information:
+    """Horizontal timeline bar combining six layers of information:
 
-    1. Mask coverage (lower 5 px) — teal segments where frames have stored masks.
-    2. Selected tracking range (full height) — steel-blue fill between Mark Start/End.
-    3. Trial range (top 3 px) — amber band showing the trial this panel was opened
+    1. Queued-job ranges (lower 5 px, drawn first) — gold segments where a
+       pending/running tracking job covers frames not yet actually masked.
+       See set_queued_ranges().
+    2. Mask coverage (lower 5 px, drawn over queued) — teal segments where
+       frames have stored masks.
+    3. Selected tracking range (full height) — steel-blue fill between Mark Start/End.
+    4. Trial range (top 3 px) — amber band showing the trial this panel was opened
        from, if any -- purely informational, independent of the Mark Start/End
        selection (see docs/roadmap/features/segmentation-reuse/status.md's
        2026-08-16 note: segmentation is capture-scoped, so the selected range is
        deliberately free to differ from the trial's own bounds -- redo just part
        of a trial, or run wider than one trial on purpose).
-    4. Split points — magenta ticks (brighter red when the current selection
+    5. Split points — magenta ticks (brighter red when the current selection
        spans one), see set_split_points().
-    5. Mark boundary ticks — bright blue.
-    6. Current frame position — white tick.
+    6. Mark boundary ticks — bright blue.
+    7. Current frame position — white tick.
 
     The bar's own coordinate space is whatever unit the caller uses when
     calling set_range/set_selection/set_position/set_trial_range -- global-
@@ -85,6 +89,7 @@ class RangeBar(QWidget):
         # List of (first_frame, last_frame) contiguous covered runs.
         self._coverage_runs: list[tuple[int, int]] = []
         self._split_points: list[int] = []
+        self._queued_ranges: list[tuple[int, int]] = []
 
     def set_range(self, first: int, last: int) -> None:
         self._first = first
@@ -113,6 +118,10 @@ class RangeBar(QWidget):
 
     def set_split_points(self, points: list[int]) -> None:
         self._split_points = sorted(points)
+        self.update()
+
+    def set_queued_ranges(self, ranges: list[tuple[int, int]]) -> None:
+        self._queued_ranges = ranges
         self.update()
 
     def set_covered_frames(self, frame_indices: list[int], gap_threshold: int = 1) -> None:
@@ -152,6 +161,16 @@ class RangeBar(QWidget):
 
         # Background — full track range
         p.fillRect(0, 0, w, h, QColor(55, 55, 55))
+
+        # Queued-job ranges — gold band in lower cov_h px, drawn *before*
+        # mask coverage so already-completed frames (teal) paint over the
+        # gold as a job actually runs, reading as a fill-in-progress
+        # effect rather than the two bands needing separate space.
+        queued_color = QColor(200, 160, 40)
+        for run_first, run_last in self._queued_ranges:
+            x1 = self._to_x(run_first)
+            x2 = self._to_x(run_last) + 1
+            p.fillRect(x1, h - cov_h, max(1, x2 - x1), cov_h, queued_color)
 
         # Mask coverage — teal band in lower cov_h px
         cov_color = QColor(56, 168, 120)
@@ -283,9 +302,11 @@ class CutieInitPanel(QWidget):
         self._mark_start: int = 0
         self._mark_end: int   = 0
 
-        # Split points (scrubber units; see _load_split_points) -- only
-        # meaningful with a sync table, since a split point is one
-        # synchronized real-world moment shared across every camera.
+        # Split points for the currently-selected camera (scrubber units;
+        # see _load_split_points) -- camera-specific (a hard-transition
+        # moment, e.g. two people crossing, is usually camera-angle-
+        # dependent), but still needs a sync table for a shared scrubber
+        # coordinate space to place it in.
         self._split_points: list[int] = []
 
         # DB path for PoseWorker (needs its own connection for thread-safe writes)
@@ -576,19 +597,23 @@ class CutieInitPanel(QWidget):
         vbox.addLayout(mark_row)
 
         # Split points -- planning hard-transition boundaries (e.g. two
-        # people crossing paths) so segmentation gets seeded independently
-        # on each side instead of one continuous pass diverging there.
-        # Magenta ticks on the RangeBar above; only meaningful with a sync
-        # table (see _load_split_points), so this whole row stays disabled
-        # without one.
+        # people crossing paths, usually camera-angle-dependent -- a
+        # crossing that occludes in one camera's view may be clearly
+        # separated in another's) so segmentation gets seeded
+        # independently on each side instead of one continuous pass
+        # diverging there. Magenta ticks on the RangeBar above,
+        # per-camera (see _load_split_points); only meaningful with a
+        # sync table, in which case the buttons just no-op with a status
+        # message rather than being disabled outright.
         split_row = QHBoxLayout()
         split_row.setSpacing(4)
 
         self._mark_split_btn = QPushButton("✂ Mark Split")
         self._mark_split_btn.setToolTip(
-            "Mark the current position as a split point -- a place where "
-            "segmentation should be seeded independently on each side "
-            "rather than propagated through in one pass"
+            "Mark the current position, for the current camera only, as a "
+            "split point -- a place where segmentation should be seeded "
+            "independently on each side rather than propagated through in "
+            "one pass"
         )
         self._mark_split_btn.clicked.connect(self._on_mark_split_point)
         split_row.addWidget(self._mark_split_btn)
@@ -765,8 +790,7 @@ class CutieInitPanel(QWidget):
                 )
 
         self._setup_scrubber_range()
-        self._load_split_points()
-        self._rebuild_camera_combo()
+        self._rebuild_camera_combo()  # triggers _on_camera_changed(0), loading split points
         self._rebuild_person_selector()
         self._init_controller()
 
@@ -1097,6 +1121,8 @@ class CutieInitPanel(QWidget):
             self._range_bar.set_range(cam["track_first"], cam["track_last"])
             self._update_mark_labels(cam)
             self._refresh_coverage_bar(cam)
+            self._refresh_queued_bar(cam)
+            self._load_split_points()
             self._show_frame(cam["track_first"])
             return
 
@@ -1106,6 +1132,8 @@ class CutieInitPanel(QWidget):
         # position maps to, not the position/marks themselves.
         self._update_mark_labels(cam)
         self._refresh_coverage_bar(cam)
+        self._refresh_queued_bar(cam)
+        self._load_split_points()  # split points are camera-specific
         self._show_frame(self._local_frame_for(cam))
 
     def _on_frame_changed(self, frame_idx: int) -> None:
@@ -1149,6 +1177,32 @@ class CutieInitPanel(QWidget):
                 global_frames.append(self._to_units(t))
         self._range_bar.set_covered_frames(global_frames, gap_threshold=self._TIME_SCALE // 5)
 
+    def _refresh_queued_bar(self, cam: dict) -> None:
+        """Show this camera's pending/running Cutie tracking jobs on the
+        range bar, distinct from already-written masks (teal) -- lets a
+        queued-but-not-yet-run segment be seen at a glance instead of
+        only showing up once the job actually starts producing masks.
+        Only TrackingJob (Cutie mask propagation), not PoseExtractionJob
+        (pose estimation, a separate later stage) -- this band pairs with
+        the mask-coverage band above it, not pose extraction's own
+        progress.
+        """
+        from app.pose.job_queue_runner import TrackingJob as _TrackingJob
+        ranges: list[tuple[int, int]] = []
+        for job in self._runner.jobs:
+            if not isinstance(job, _TrackingJob):
+                continue
+            if job.shot_video_id != cam["id"] or job.status not in ("pending", "running"):
+                continue
+            if self._sync_table is None:
+                ranges.append((job.first_frame, job.last_frame))
+                continue
+            t0 = self._sync_table.frame_to_global_time(job.first_frame, cam["id"])
+            t1 = self._sync_table.frame_to_global_time(job.last_frame, cam["id"])
+            if t0 is not None and t1 is not None:
+                ranges.append((self._to_units(t0), self._to_units(t1)))
+        self._range_bar.set_queued_ranges(ranges)
+
     def _on_mark_start(self) -> None:
         cam = self._cam_combo.currentData()
         if cam is None:
@@ -1177,25 +1231,33 @@ class CutieInitPanel(QWidget):
         """Load this capture's split points and push them to the RangeBar.
 
         Only meaningful with a sync table -- a split point is one
-        synchronized real-world moment, and without global time there's
-        no shared coordinate space to place it in across cameras.
+        specific camera's own hard-transition moment (2026-08-29: originally
+        modeled as capture-wide/shared-across-cameras, corrected once real
+        use showed the whole point of a split is usually camera-angle-
+        dependent -- e.g. two people occlude each other from one camera's
+        viewpoint at a moment they're clearly separated in another's
+        parallax), so still needs global time to place on the shared
+        scrubber, but is loaded per the *currently displayed* camera, not
+        the capture as a whole.
         """
         self._split_points = []
         self._split_point_ids = []
-        if self._sync_table is None:
+        cam = self._cam_combo.currentData()
+        if self._sync_table is None or cam is None:
             self._range_bar.set_split_points([])
             return
         rows = self._conn.execute(
             "SELECT id, time_s FROM capture_segmentation_hints "
-            "WHERE capture_id = ? ORDER BY time_s",
-            (self._shot_id,),
+            "WHERE shot_video_id = ? ORDER BY time_s",
+            (cam["id"],),
         ).fetchall()
         self._split_points = [self._to_units(r["time_s"]) for r in rows]
         self._split_point_ids = [r["id"] for r in rows]
         self._range_bar.set_split_points(self._split_points)
 
     def _on_mark_split_point(self) -> None:
-        if self._sync_table is None:
+        cam = self._cam_combo.currentData()
+        if self._sync_table is None or cam is None:
             self._set_status(
                 "Split points need solved sync (one global time shared across "
                 "cameras) -- not available for this capture yet."
@@ -1203,16 +1265,16 @@ class CutieInitPanel(QWidget):
             return
         time_s = self._to_seconds(self._scrubber.value())
         self._conn.execute(
-            "INSERT INTO capture_segmentation_hints (id, capture_id, time_s, created_at) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO capture_segmentation_hints "
+            "(id, capture_id, shot_video_id, time_s, created_at) VALUES (?, ?, ?, ?, ?)",
             (
-                generate_id(), self._shot_id, time_s,
+                generate_id(), self._shot_id, cam["id"], time_s,
                 datetime.datetime.now(datetime.timezone.utc).isoformat(),
             ),
         )
         self._conn.commit()
         self._load_split_points()
-        self._set_status(f"Split point marked at {self._fmt_mmss(time_s)}.")
+        self._set_status(f"Split point marked at {self._fmt_mmss(time_s)} for {cam['label']}.")
 
     def _on_remove_nearest_split_point(self) -> None:
         if not self._split_points:
@@ -1229,17 +1291,25 @@ class CutieInitPanel(QWidget):
 
     def _on_snap_marks_to_segment(self) -> None:
         """Set Mark Start/Mark End to the split points enclosing the
-        current scrubber position (falling back to the full scrubber
-        range on whichever side has none) -- "pre-fill the marks from the
-        plan, still freely overridable" from the design doc."""
+        current scrubber position, falling back to the trial's own range
+        on whichever side has no split point (matching what marks default
+        to on load) rather than the full capture range -- "pre-fill the
+        marks from the plan, still freely overridable" from the design
+        doc."""
         cam = self._cam_combo.currentData()
         if cam is None:
             return
+        if self._trial_range_s is not None:
+            default_start = max(self._scrubber.minimum(), self._to_units(self._trial_range_s[0]))
+            default_end = min(self._scrubber.maximum(), self._to_units(self._trial_range_s[1]))
+        else:
+            default_start = self._scrubber.minimum()
+            default_end = self._scrubber.maximum()
         pos = self._scrubber.value()
         before = [sp for sp in self._split_points if sp <= pos]
         after = [sp for sp in self._split_points if sp > pos]
-        self._mark_start = max(before) if before else self._scrubber.minimum()
-        self._mark_end = min(after) if after else self._scrubber.maximum()
+        self._mark_start = max(before) if before else default_start
+        self._mark_end = min(after) if after else default_end
         self._range_bar.set_selection(self._mark_start, self._mark_end)
         self._update_mark_labels(cam)
 
@@ -1965,6 +2035,13 @@ class CutieInitPanel(QWidget):
         # Run Queue enabled only when there are pending jobs and queue is idle.
         has_pending = pending > 0
         self._run_queue_btn.setEnabled(has_pending and not self._runner.is_running)
+
+        # Job membership/status changed -- refresh the range bar's queued
+        # band too. Covers every call site (enqueue, start, finish, fail,
+        # cancel, remove, run queue) since they all already call this.
+        cam = self._cam_combo.currentData()
+        if cam is not None:
+            self._refresh_queued_bar(cam)
 
     # ------------------------------------------------------------------
     # DB helpers

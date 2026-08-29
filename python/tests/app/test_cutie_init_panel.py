@@ -561,15 +561,54 @@ def test_load_split_points_converts_time_s_to_scrubber_units(qapp, synced_captur
     from posetrak.db.db import generate_id
 
     synced_capture_db.execute(
-        "INSERT INTO capture_segmentation_hints (id, capture_id, time_s, created_at) "
-        "VALUES (?, 'cap1', 5.0, '2026-01-01T00:00:00Z')",
+        "INSERT INTO capture_segmentation_hints "
+        "(id, capture_id, shot_video_id, time_s, created_at) "
+        "VALUES (?, 'cap1', 'sv1', 5.0, '2026-01-01T00:00:00Z')",
         (generate_id(),),
     )
     synced_capture_db.commit()
 
     panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
     try:
+        assert panel._cam_combo.currentData()["id"] == "sv1"
         assert panel._split_points == [panel._to_units(5.0)]
+    finally:
+        panel.shutdown()
+
+
+def test_split_points_are_per_camera(qapp, synced_capture_db):
+    """Split points are camera-specific -- a hard transition is usually
+    camera-angle-dependent (e.g. an occlusion in one view isn't one in
+    another's parallax), so a point marked on sv1 shouldn't show up when
+    sv2 is the selected camera, and vice versa."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+    from posetrak.db.db import generate_id
+
+    synced_capture_db.execute(
+        "INSERT INTO capture_segmentation_hints "
+        "(id, capture_id, shot_video_id, time_s, created_at) "
+        "VALUES (?, 'cap1', 'sv1', 5.0, '2026-01-01T00:00:00Z')",
+        (generate_id(),),
+    )
+    synced_capture_db.execute(
+        "INSERT INTO capture_segmentation_hints "
+        "(id, capture_id, shot_video_id, time_s, created_at) "
+        "VALUES (?, 'cap1', 'sv2', 6.0, '2026-01-01T00:00:00Z')",
+        (generate_id(),),
+    )
+    synced_capture_db.commit()
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        assert panel._cam_combo.currentData()["id"] == "sv1"
+        assert panel._split_points == [panel._to_units(5.0)]
+
+        idx_sv2 = next(
+            i for i in range(panel._cam_combo.count())
+            if panel._cam_combo.itemData(i)["id"] == "sv2"
+        )
+        panel._cam_combo.setCurrentIndex(idx_sv2)
+        assert panel._split_points == [panel._to_units(6.0)]
     finally:
         panel.shutdown()
 
@@ -646,9 +685,10 @@ def test_on_snap_marks_to_segment_uses_enclosing_split_points(qapp, synced_captu
         panel.shutdown()
 
 
-def test_on_snap_marks_to_segment_falls_back_to_full_range_at_edges(qapp, synced_capture_db):
+def test_on_snap_marks_to_segment_falls_back_to_trial_bounds_at_edges(qapp, synced_capture_db):
     """Before the first split point (or after the last), snap to the
-    scrubber's own bounds on that side instead of leaving marks empty."""
+    trial's own bounds on that side -- matching what marks default to on
+    load -- rather than the full capture range."""
     from app.pose.cutie_init_panel import CutieInitPanel
 
     panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
@@ -657,6 +697,25 @@ def test_on_snap_marks_to_segment_falls_back_to_full_range_at_edges(qapp, synced
         panel._on_mark_split_point()
 
         panel._scrubber.setValue(panel._to_units(2.5))  # before the only split point
+        panel._on_snap_marks_to_segment()
+
+        assert panel._to_seconds(panel._mark_start) == pytest.approx(2.0)  # trial1 starts at 2.0
+        assert panel._to_seconds(panel._mark_end) == pytest.approx(4.0)
+    finally:
+        panel.shutdown()
+
+
+def test_on_snap_marks_to_segment_falls_back_to_full_range_without_trial(qapp, synced_capture_db):
+    """Same edge case, but opened without a trial_id -- falls back to the
+    full scrubber range since there's no trial to fall back to."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(synced_capture_db, "cap1")
+    try:
+        panel._scrubber.setValue(panel._to_units(4.0))
+        panel._on_mark_split_point()
+
+        panel._scrubber.setValue(panel._to_units(2.5))
         panel._on_snap_marks_to_segment()
 
         assert panel._mark_start == panel._scrubber.minimum()
@@ -735,5 +794,106 @@ def test_queue_tracking_no_prompt_when_no_split_point_crossed(qapp, synced_captu
         monkeypatch.setattr(QMessageBox, "question", staticmethod(_fail_if_called))
         panel._queue_tracking("forward")
         assert len(panel._runner.jobs) == 1
+    finally:
+        panel.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Queued-segment range bar (shows pending/running jobs, not just completed masks)
+# ---------------------------------------------------------------------------
+
+
+def test_queued_range_appears_on_range_bar_after_enqueue(qapp, synced_capture_db):
+    import cv2
+    import numpy as np
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    synced_capture_db.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('seg1', 'cap1', 0.0, 1e9, '2026-01-01T00:00:00Z')"
+    )
+    ok, buf = cv2.imencode(".png", np.ones((4, 4), dtype=np.uint8))
+    assert ok
+    synced_capture_db.execute(
+        "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
+        "VALUES ('seg1', 'sv1', 150, ?)",
+        (buf.tobytes(),),
+    )
+    synced_capture_db.commit()
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        panel._scrubber.setValue(panel._to_units(5.0))  # sv1 local frame 150
+        panel._queue_tracking("forward")  # -> mark_end, trial1's own end (8.0s)
+
+        assert panel._range_bar._queued_ranges == [
+            (panel._to_units(5.0), panel._to_units(8.0))
+        ]
+    finally:
+        panel.shutdown()
+
+
+def test_queued_range_cleared_when_job_removed(qapp, synced_capture_db):
+    import cv2
+    import numpy as np
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    synced_capture_db.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('seg1', 'cap1', 0.0, 1e9, '2026-01-01T00:00:00Z')"
+    )
+    ok, buf = cv2.imencode(".png", np.ones((4, 4), dtype=np.uint8))
+    assert ok
+    synced_capture_db.execute(
+        "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
+        "VALUES ('seg1', 'sv1', 150, ?)",
+        (buf.tobytes(),),
+    )
+    synced_capture_db.commit()
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        panel._scrubber.setValue(panel._to_units(5.0))
+        panel._queue_tracking("forward")
+        assert panel._range_bar._queued_ranges
+
+        panel._job_list.setCurrentRow(0)
+        panel._on_remove_job()
+
+        assert panel._range_bar._queued_ranges == []
+    finally:
+        panel.shutdown()
+
+
+def test_queued_range_only_shown_for_the_selected_camera(qapp, synced_capture_db):
+    import cv2
+    import numpy as np
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    synced_capture_db.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('seg1', 'cap1', 0.0, 1e9, '2026-01-01T00:00:00Z')"
+    )
+    ok, buf = cv2.imencode(".png", np.ones((4, 4), dtype=np.uint8))
+    assert ok
+    synced_capture_db.execute(
+        "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
+        "VALUES ('seg1', 'sv1', 150, ?)",
+        (buf.tobytes(),),
+    )
+    synced_capture_db.commit()
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        panel._scrubber.setValue(panel._to_units(5.0))
+        panel._queue_tracking("forward")  # queued for sv1
+        assert panel._range_bar._queued_ranges  # non-empty while sv1 selected
+
+        idx_sv2 = next(
+            i for i in range(panel._cam_combo.count())
+            if panel._cam_combo.itemData(i)["id"] == "sv2"
+        )
+        panel._cam_combo.setCurrentIndex(idx_sv2)
+        assert panel._range_bar._queued_ranges == []  # sv1's job doesn't show for sv2
     finally:
         panel.shutdown()

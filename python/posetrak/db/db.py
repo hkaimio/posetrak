@@ -25,7 +25,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 8
-SESSION_SCHEMA_VERSION: Final[int] = 45
+SESSION_SCHEMA_VERSION: Final[int] = 46
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1493,6 +1493,29 @@ def _migrate_session_v44_to_v45(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v45_to_v46(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 45 to 46.
+
+    v46 adds capture_segmentation_hints.shot_video_id: split points were
+    originally modeled capture-wide (one moment shared across every
+    camera), but real use immediately showed the whole point of a split
+    is usually camera-angle-dependent -- two people can occlude each
+    other from one camera's viewpoint at a moment they're clearly
+    separated in another's parallax. Nullable rather than NOT NULL: any
+    row from the brief window v45 was live has no camera to attribute it
+    to and is left as an orphan (harmless -- every real query filters by
+    shot_video_id, so a NULL row just never matches and needs
+    recreating) rather than guessing or deleting outright.
+    """
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(capture_segmentation_hints)")}
+    if "shot_video_id" not in existing_cols:
+        conn.execute(
+            "ALTER TABLE capture_segmentation_hints ADD COLUMN shot_video_id TEXT"
+        )
+    _set_schema_version(conn, 46)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1648,6 +1671,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 44
     if actual == 44:
         _migrate_session_v44_to_v45(conn)
+        actual = 45
+    if actual == 45:
+        _migrate_session_v45_to_v46(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

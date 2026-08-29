@@ -1026,6 +1026,26 @@ def test_migrate_session_v44_to_v45_adds_capture_segmentation_hints(tmp_path: Pa
     conn.close()
 
 
+def test_migrate_session_v45_to_v46_adds_shot_video_id(tmp_path: Path) -> None:
+    """v45->v46 adds capture_segmentation_hints.shot_video_id -- split
+    points turned out to be camera-specific in practice (a hard
+    transition is usually camera-angle-dependent), not shared across a
+    capture's cameras as v45 originally modeled (see docs/roadmap/
+    features/segmentation-ui-improvements/
+    segmentation-ui-improvements-design.md, Issue 4)."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("PRAGMA user_version = 45")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(capture_segmentation_hints)")}
+    assert "shot_video_id" in cols
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------

@@ -240,6 +240,57 @@ work (brush cursor, undo, label-aware painting, acceptable performance
 on full-resolution frames) — bigger in scope than Issues 1–4 combined.
 Sequence it after the others (see "Suggested build order").
 
+**Design finalized (2026-08-29)**, after reading `ClickController` and
+`VideoCanvas` in full rather than guessing at the architecture:
+
+- **Four mutually-exclusive tools** (`QButtonGroup` of checkable
+  buttons, same pattern the person selector already uses): Select
+  (today's SAM2 point-click, unchanged, default), Paint (stamps the
+  currently-selected person's label within a brush radius), Erase
+  (stamps background/0 — see below), Zoom (click zooms in centered on
+  the clicked pixel, Alt-click zooms out, right-click resets to fit).
+  Icons: no icon font ships with PySide6 and none of Qt's built-in
+  `QStyle.standardIcon` set fits (no paintbrush/magic-wand/zoom
+  glyphs); continuing this file's existing plain-Unicode-emoji-as-
+  button-text convention (🎯 ✂ ⇤ ▶ ◀ ✓ already in use) rather than
+  adding an icon-font dependency for this.
+- **Erase = stamp background (0), not "revert to the layer below."**
+  Simpler (paint and erase become symmetric — both just stamp a value),
+  and directly serves the motivating use case: cleaning up stray
+  leftover pixels Cutie/SAM2 mislabeled when two people cross paths,
+  which "revert" wouldn't reach if there's no clean layer underneath to
+  revert to.
+- **The real architecture problem**: `ClickController._run_predictions()`
+  is a pure function of `(base_mask, live_clicks)`, re-run and fully
+  rebuilt on *every* click — a naive paint/erase writing straight into
+  `self._mask` would be silently discarded by the next SAM2 click
+  anywhere. Fix: a third compositing layer, applied last, always wins —
+  `self._paint_overlay` (H×W, sentinel 255 = untouched), applied after
+  `_run_predictions()`'s existing base+SAM2 compositing. A "Clear Manual
+  Edits" action (mirroring the existing Clear Person/Clear All) resets
+  it. Consequence worth knowing: once a person's pixels are hand-edited,
+  a *later* SAM2 click for that same person won't override them (the
+  overlay always wins) until manually cleared.
+- **Re-seed use case validated for free**: Harri's motivating scenario —
+  erase/relabel Cutie's leftover pixels from an occlusion, then use the
+  corrected frame as the seed for re-running the affected range — needs
+  no new plumbing beyond the overlay itself, since `_queue_tracking()`
+  already seeds from `self._controller.get_mask()` when it's non-empty,
+  and the overlay is folded into exactly that return value.
+- **`VideoCanvas` needs real additions**, not just wiring: it has no
+  mouse-move tracking and no zoom/pan state today (always fits the
+  whole frame to the widget). Brush cursor: track mouse-move, but repaint
+  cheaply by copying the last fully-rendered `QPixmap` and drawing the
+  cursor circle on top, rather than redoing the cv2 decode/resize/blend
+  pipeline at mouse-move rates. Zoom: a zoom factor + pan center on top
+  of today's fit-to-widget scale; brush radius is stored in image
+  pixels (not screen pixels) so painting stays consistent across zoom
+  levels, only the on-screen cursor circle's radius scales with zoom.
+- **Known v1 gap, accepted rather than solved now**: click-only zoom
+  means panning without changing zoom level is indirect (zoom out, then
+  zoom in elsewhere). Ship it as asked; revisit with drag-to-pan or
+  scroll-wheel-zoom only if that proves annoying in practice.
+
 ## Issue 6 — cross-camera seeding / triangulation error-detection (future)
 
 Flagged explicitly as far-fetched/future — scoped only briefly here.

@@ -117,3 +117,44 @@ def test_set_image_resets_paint_overlay_for_the_new_frame():
     frame2 = np.zeros((80, 80, 3), dtype=np.uint8)
     ctrl.set_image(frame2)
     assert ctrl.get_mask()[20, 20] == 0  # fresh frame, no leftover paint
+
+
+# ---------------------------------------------------------------------------
+# Hydra config clobbering (real bug: SAM2 fails to load on the *second*
+# ClickController built in a process, after a Cutie tracking job has run
+# in between)
+# ---------------------------------------------------------------------------
+
+
+def test_reinit_sam2_hydra_config_recovers_from_a_clobbered_global_hydra():
+    """sam2/__init__.py registers SAM2's own Hydra config search path
+    exactly once, guarded by `if not GlobalHydra.instance().is_initialized()`.
+    CutieWorker._load_cutie() later calls GlobalHydra.instance().clear()
+    and re-initialises Hydra pointed at Cutie's own config dir -- once
+    that's happened, sam2's one-time guard never fires again (it's
+    top-level module code that already ran at first import), so a later
+    ClickController()'s SAM2 build fails with "Cannot find primary
+    config 'configs/sam2.1/...yaml'". Confirmed against a real user
+    report with this exact error message.
+
+    Reproduces the clobbering directly (not via a real Cutie model load,
+    which would need real weights/config on disk) and confirms
+    _reinit_sam2_hydra_config() recovers regardless of what Hydra's
+    global state held before it ran.
+    """
+    from hydra import compose, initialize_config_module
+    from hydra.core.global_hydra import GlobalHydra
+
+    from app.pose.cutie_click_controller import _reinit_sam2_hydra_config
+
+    # Simulate Cutie having left Hydra initialized with an unrelated
+    # config search path (standing in for Cutie's own config dir).
+    GlobalHydra.instance().clear()
+    initialize_config_module("hydra.conf", version_base="1.2")
+
+    # Without the fix, this is exactly the reported failure:
+    # MissingConfigException: Cannot find primary config
+    # 'configs/sam2.1/sam2.1_hiera_b+.yaml'.
+    _reinit_sam2_hydra_config()
+    cfg = compose(config_name="configs/sam2.1/sam2.1_hiera_b+.yaml")
+    assert cfg.model._target_ == "sam2.modeling.sam2_base.SAM2Base"

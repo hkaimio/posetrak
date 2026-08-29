@@ -45,6 +45,36 @@ def _auto_device() -> str:
         return "cpu"
 
 
+def _reinit_sam2_hydra_config() -> None:
+    """Re-register SAM2's own Hydra config search path right before
+    building a SAM2 model.
+
+    sam2/__init__.py only registers its config path once, guarded by
+    ``if not GlobalHydra.instance().is_initialized()`` -- fine for a
+    process that only ever loads SAM2, but this app also loads Cutie's
+    own model (CutieWorker._load_cutie()), which calls
+    ``GlobalHydra.instance().clear()`` and re-initialises Hydra pointed
+    at Cutie's config directory. Once any Cutie tracking job has run,
+    that leaves Hydra "initialized" with the wrong (Cutie's) search
+    path -- sam2's own one-time guard never fires again, since it's
+    top-level module code that already ran at first import, so a later
+    ClickController() fails with "Cannot find primary config
+    'configs/sam2.1/....yaml'" (confirmed from a real repro: SAM2 loads
+    fine on the first segmentation panel opened in a session, then fails
+    on a second one opened after a Cutie tracking job has run in
+    between). Fix: unconditionally clear + re-register SAM2's own config
+    path immediately before each SAM2 model build, mirroring the same
+    discipline CutieWorker already applies for its own model -- each
+    Hydra user becomes responsible for leaving Hydra in *its own* state
+    right before it needs it, rather than assuming whatever's already
+    there is usable.
+    """
+    from hydra import initialize_config_module
+    from hydra.core.global_hydra import GlobalHydra
+    GlobalHydra.instance().clear()
+    initialize_config_module("sam2", version_base="1.2")
+
+
 #: Sentinel value for "this pixel has not been manually painted/erased" in
 #: the paint overlay -- distinct from every real label (0 = background,
 #: 1..N = person), so an untouched pixel falls through to whatever
@@ -98,6 +128,7 @@ class ClickController:
 
         if _AVAILABLE:
             try:
+                _reinit_sam2_hydra_config()
                 sam_model = _build_sam2_hf(model_name, device=_auto_device())
                 self._predictor = _SAM2ImagePredictor(sam_model)
             except Exception as e:

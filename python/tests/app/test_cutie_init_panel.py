@@ -549,3 +549,191 @@ def test_on_track_range_skips_degenerate_direction_at_edge(qapp, synced_capture_
         assert panel._runner.jobs[0].direction == "forward"
     finally:
         panel.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Split points (segmentation-ui-improvements design doc, Issue 4)
+# ---------------------------------------------------------------------------
+
+
+def test_load_split_points_converts_time_s_to_scrubber_units(qapp, synced_capture_db):
+    from app.pose.cutie_init_panel import CutieInitPanel
+    from posetrak.db.db import generate_id
+
+    synced_capture_db.execute(
+        "INSERT INTO capture_segmentation_hints (id, capture_id, time_s, created_at) "
+        "VALUES (?, 'cap1', 5.0, '2026-01-01T00:00:00Z')",
+        (generate_id(),),
+    )
+    synced_capture_db.commit()
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        assert panel._split_points == [panel._to_units(5.0)]
+    finally:
+        panel.shutdown()
+
+
+def test_split_points_empty_without_sync_table(qapp, capture_db):
+    """No sync table -- split points have no shared coordinate space
+    across cameras, so the whole feature stays inert (same convention as
+    the rest of the global-time machinery)."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(capture_db, "cap1")
+    try:
+        assert panel._split_points == []
+        panel._on_mark_split_point()  # must not crash or insert a row
+        n = capture_db.execute(
+            "SELECT COUNT(*) FROM capture_segmentation_hints"
+        ).fetchone()[0]
+        assert n == 0
+    finally:
+        panel.shutdown()
+
+
+def test_on_mark_split_point_inserts_row_at_current_position(qapp, synced_capture_db):
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        panel._scrubber.setValue(panel._to_units(4.0))
+        panel._on_mark_split_point()
+
+        row = synced_capture_db.execute(
+            "SELECT time_s FROM capture_segmentation_hints WHERE capture_id='cap1'"
+        ).fetchone()
+        assert row["time_s"] == pytest.approx(4.0)
+        assert panel._split_points == [panel._to_units(4.0)]
+    finally:
+        panel.shutdown()
+
+
+def test_on_remove_nearest_split_point_removes_closest(qapp, synced_capture_db):
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        panel._scrubber.setValue(panel._to_units(3.0))
+        panel._on_mark_split_point()
+        panel._scrubber.setValue(panel._to_units(6.0))
+        panel._on_mark_split_point()
+        assert len(panel._split_points) == 2
+
+        panel._scrubber.setValue(panel._to_units(3.2))  # nearer to the 3.0s point
+        panel._on_remove_nearest_split_point()
+
+        assert panel._split_points == [panel._to_units(6.0)]
+    finally:
+        panel.shutdown()
+
+
+def test_on_snap_marks_to_segment_uses_enclosing_split_points(qapp, synced_capture_db):
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        for t in (3.0, 6.0):
+            panel._scrubber.setValue(panel._to_units(t))
+            panel._on_mark_split_point()
+
+        panel._scrubber.setValue(panel._to_units(4.5))
+        panel._on_snap_marks_to_segment()
+
+        assert panel._to_seconds(panel._mark_start) == pytest.approx(3.0)
+        assert panel._to_seconds(panel._mark_end) == pytest.approx(6.0)
+    finally:
+        panel.shutdown()
+
+
+def test_on_snap_marks_to_segment_falls_back_to_full_range_at_edges(qapp, synced_capture_db):
+    """Before the first split point (or after the last), snap to the
+    scrubber's own bounds on that side instead of leaving marks empty."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        panel._scrubber.setValue(panel._to_units(4.0))
+        panel._on_mark_split_point()
+
+        panel._scrubber.setValue(panel._to_units(2.5))  # before the only split point
+        panel._on_snap_marks_to_segment()
+
+        assert panel._mark_start == panel._scrubber.minimum()
+        assert panel._to_seconds(panel._mark_end) == pytest.approx(4.0)
+    finally:
+        panel.shutdown()
+
+
+def test_queue_tracking_warns_before_crossing_a_split_point(qapp, synced_capture_db, monkeypatch):
+    import cv2
+    import numpy as np
+    from PySide6.QtWidgets import QMessageBox
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    synced_capture_db.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('seg1', 'cap1', 0.0, 1e9, '2026-01-01T00:00:00Z')"
+    )
+    ok, buf = cv2.imencode(".png", np.ones((4, 4), dtype=np.uint8))
+    assert ok
+    synced_capture_db.execute(
+        "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
+        "VALUES ('seg1', 'sv1', 150, ?)",
+        (buf.tobytes(),),
+    )
+    synced_capture_db.commit()
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        panel._scrubber.setValue(panel._to_units(6.0))  # split point between seed (5.0) and mark end (8.0)
+        panel._on_mark_split_point()
+        panel._scrubber.setValue(panel._to_units(5.0))  # sv1 local frame 150
+
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.No),
+        )
+        panel._queue_tracking("forward")
+        assert len(panel._runner.jobs) == 0  # declined -- not queued
+
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+        )
+        panel._queue_tracking("forward")
+        assert len(panel._runner.jobs) == 1  # confirmed -- queued
+    finally:
+        panel.shutdown()
+
+
+def test_queue_tracking_no_prompt_when_no_split_point_crossed(qapp, synced_capture_db, monkeypatch):
+    import cv2
+    import numpy as np
+    from PySide6.QtWidgets import QMessageBox
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    synced_capture_db.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('seg1', 'cap1', 0.0, 1e9, '2026-01-01T00:00:00Z')"
+    )
+    ok, buf = cv2.imencode(".png", np.ones((4, 4), dtype=np.uint8))
+    assert ok
+    synced_capture_db.execute(
+        "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
+        "VALUES ('seg1', 'sv1', 150, ?)",
+        (buf.tobytes(),),
+    )
+    synced_capture_db.commit()
+
+    def _fail_if_called(*a, **k):
+        raise AssertionError("QMessageBox.question should not be called")
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        panel._scrubber.setValue(panel._to_units(5.0))  # sv1 local frame 150, no split points at all
+        monkeypatch.setattr(QMessageBox, "question", staticmethod(_fail_if_called))
+        panel._queue_tracking("forward")
+        assert len(panel._runner.jobs) == 1
+    finally:
+        panel.shutdown()

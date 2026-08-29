@@ -48,7 +48,7 @@ from posetrak.db.db import generate_id
 
 
 class RangeBar(QWidget):
-    """Horizontal timeline bar combining four layers of information:
+    """Horizontal timeline bar combining five layers of information:
 
     1. Mask coverage (lower 5 px) — teal segments where frames have stored masks.
     2. Selected tracking range (full height) — steel-blue fill between Mark Start/End.
@@ -58,8 +58,10 @@ class RangeBar(QWidget):
        2026-08-16 note: segmentation is capture-scoped, so the selected range is
        deliberately free to differ from the trial's own bounds -- redo just part
        of a trial, or run wider than one trial on purpose).
-    4. Mark boundary ticks — bright blue.
-    5. Current frame position — white tick.
+    4. Split points — magenta ticks (brighter red when the current selection
+       spans one), see set_split_points().
+    5. Mark boundary ticks — bright blue.
+    6. Current frame position — white tick.
 
     The bar's own coordinate space is whatever unit the caller uses when
     calling set_range/set_selection/set_position/set_trial_range -- global-
@@ -82,6 +84,7 @@ class RangeBar(QWidget):
         self._trial_end: int | None = None
         # List of (first_frame, last_frame) contiguous covered runs.
         self._coverage_runs: list[tuple[int, int]] = []
+        self._split_points: list[int] = []
 
     def set_range(self, first: int, last: int) -> None:
         self._first = first
@@ -106,6 +109,10 @@ class RangeBar(QWidget):
 
     def set_position(self, frame: int) -> None:
         self._pos = frame
+        self.update()
+
+    def set_split_points(self, points: list[int]) -> None:
+        self._split_points = sorted(points)
         self.update()
 
     def set_covered_frames(self, frame_indices: list[int], gap_threshold: int = 1) -> None:
@@ -170,6 +177,16 @@ class RangeBar(QWidget):
             tx2 = self._to_x(self._trial_end)
             if tx2 > tx1:
                 p.fillRect(tx1, 0, tx2 - tx1, trial_h, QColor(230, 160, 40))
+
+        # Split points — magenta, full height; brighter red where the
+        # current selection spans one (a planned boundary the queued job
+        # would silently cross), distinct from both the trial band's
+        # amber and the mark ticks' blue so it never reads as either.
+        for sp in self._split_points:
+            crossed = self._sel_start < sp < self._sel_end
+            color = QColor(255, 60, 60) if crossed else QColor(200, 60, 200)
+            xs = self._to_x(sp)
+            p.fillRect(max(0, xs - 1), 0, 2, h, color)
 
         # Start / end tick marks — brighter blue, full height
         for xm in (x1, x2):
@@ -265,6 +282,11 @@ class CutieInitPanel(QWidget):
         # Tracking range (frame indices; set via Mark Start / Mark End buttons)
         self._mark_start: int = 0
         self._mark_end: int   = 0
+
+        # Split points (scrubber units; see _load_split_points) -- only
+        # meaningful with a sync table, since a split point is one
+        # synchronized real-world moment shared across every camera.
+        self._split_points: list[int] = []
 
         # DB path for PoseWorker (needs its own connection for thread-safe writes)
         _db_path = ""
@@ -553,6 +575,43 @@ class CutieInitPanel(QWidget):
         mark_row.addWidget(self._mark_end_btn)
         vbox.addLayout(mark_row)
 
+        # Split points -- planning hard-transition boundaries (e.g. two
+        # people crossing paths) so segmentation gets seeded independently
+        # on each side instead of one continuous pass diverging there.
+        # Magenta ticks on the RangeBar above; only meaningful with a sync
+        # table (see _load_split_points), so this whole row stays disabled
+        # without one.
+        split_row = QHBoxLayout()
+        split_row.setSpacing(4)
+
+        self._mark_split_btn = QPushButton("✂ Mark Split")
+        self._mark_split_btn.setToolTip(
+            "Mark the current position as a split point -- a place where "
+            "segmentation should be seeded independently on each side "
+            "rather than propagated through in one pass"
+        )
+        self._mark_split_btn.clicked.connect(self._on_mark_split_point)
+        split_row.addWidget(self._mark_split_btn)
+
+        self._remove_split_btn = QPushButton("Remove Nearest")
+        self._remove_split_btn.setToolTip(
+            "Remove the split point nearest the current position"
+        )
+        self._remove_split_btn.clicked.connect(self._on_remove_nearest_split_point)
+        split_row.addWidget(self._remove_split_btn)
+
+        self._snap_marks_btn = QPushButton("⇤ Snap Marks to Segment")
+        self._snap_marks_btn.setToolTip(
+            "Set Mark Start/Mark End to the split points enclosing the "
+            "current position -- pre-fills the range from the plan, still "
+            "freely adjustable afterwards"
+        )
+        self._snap_marks_btn.clicked.connect(self._on_snap_marks_to_segment)
+        split_row.addWidget(self._snap_marks_btn)
+
+        split_row.addStretch()
+        vbox.addLayout(split_row)
+
         return vbox
 
     def _build_queue_panel(self) -> QWidget:
@@ -706,6 +765,7 @@ class CutieInitPanel(QWidget):
                 )
 
         self._setup_scrubber_range()
+        self._load_split_points()
         self._rebuild_camera_combo()
         self._rebuild_person_selector()
         self._init_controller()
@@ -1109,6 +1169,89 @@ class CutieInitPanel(QWidget):
         self._range_bar.set_selection(self._mark_start, self._mark_end)
         self._update_mark_labels(cam)
 
+    # ------------------------------------------------------------------
+    # Split points (segmentation-ui-improvements design doc, Issue 4)
+    # ------------------------------------------------------------------
+
+    def _load_split_points(self) -> None:
+        """Load this capture's split points and push them to the RangeBar.
+
+        Only meaningful with a sync table -- a split point is one
+        synchronized real-world moment, and without global time there's
+        no shared coordinate space to place it in across cameras.
+        """
+        self._split_points = []
+        self._split_point_ids = []
+        if self._sync_table is None:
+            self._range_bar.set_split_points([])
+            return
+        rows = self._conn.execute(
+            "SELECT id, time_s FROM capture_segmentation_hints "
+            "WHERE capture_id = ? ORDER BY time_s",
+            (self._shot_id,),
+        ).fetchall()
+        self._split_points = [self._to_units(r["time_s"]) for r in rows]
+        self._split_point_ids = [r["id"] for r in rows]
+        self._range_bar.set_split_points(self._split_points)
+
+    def _on_mark_split_point(self) -> None:
+        if self._sync_table is None:
+            self._set_status(
+                "Split points need solved sync (one global time shared across "
+                "cameras) -- not available for this capture yet."
+            )
+            return
+        time_s = self._to_seconds(self._scrubber.value())
+        self._conn.execute(
+            "INSERT INTO capture_segmentation_hints (id, capture_id, time_s, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                generate_id(), self._shot_id, time_s,
+                datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            ),
+        )
+        self._conn.commit()
+        self._load_split_points()
+        self._set_status(f"Split point marked at {self._fmt_mmss(time_s)}.")
+
+    def _on_remove_nearest_split_point(self) -> None:
+        if not self._split_points:
+            self._set_status("No split points to remove.")
+            return
+        pos = self._scrubber.value()
+        idx = min(range(len(self._split_points)), key=lambda i: abs(self._split_points[i] - pos))
+        sp_id = self._split_point_ids[idx]
+        time_s = self._to_seconds(self._split_points[idx])
+        self._conn.execute("DELETE FROM capture_segmentation_hints WHERE id = ?", (sp_id,))
+        self._conn.commit()
+        self._load_split_points()
+        self._set_status(f"Removed split point at {self._fmt_mmss(time_s)}.")
+
+    def _on_snap_marks_to_segment(self) -> None:
+        """Set Mark Start/Mark End to the split points enclosing the
+        current scrubber position (falling back to the full scrubber
+        range on whichever side has none) -- "pre-fill the marks from the
+        plan, still freely overridable" from the design doc."""
+        cam = self._cam_combo.currentData()
+        if cam is None:
+            return
+        pos = self._scrubber.value()
+        before = [sp for sp in self._split_points if sp <= pos]
+        after = [sp for sp in self._split_points if sp > pos]
+        self._mark_start = max(before) if before else self._scrubber.minimum()
+        self._mark_end = min(after) if after else self._scrubber.maximum()
+        self._range_bar.set_selection(self._mark_start, self._mark_end)
+        self._update_mark_labels(cam)
+
+    def _confirm_crossing_split_points(self, crossed: list[int]) -> bool:
+        times = ", ".join(self._fmt_mmss(self._to_seconds(sp)) for sp in crossed)
+        return QMessageBox.question(
+            self, "Crosses a planned split point",
+            f"This job crosses {len(crossed)} planned split point(s) at {times} -- "
+            "propagation may diverge there. Queue anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes
+
     def _update_mark_labels(self, cam: dict) -> None:
         if self._sync_table is not None:
             self._mark_start_label.setText(
@@ -1329,6 +1472,33 @@ class CutieInitPanel(QWidget):
 
         local_frame = self._local_frame_for(cam)
 
+        # first_frame/last_frame bound the job's own propagation range for
+        # its direction -- CutieWorker._run_forward only ever reads
+        # last_frame (init_frame -> last_frame) and _run_backward only
+        # ever reads first_frame (first_frame -> init_frame), so the bound
+        # the *other* direction would have used is irrelevant to actual
+        # propagation. Setting it to the current frame here (rather than
+        # always passing the full mark_start/mark_end range regardless of
+        # direction) makes TrackingJob.summary's "first-last" display
+        # correctly show which range *this* job actually covers instead of
+        # showing the same range for both a forward and a backward job
+        # queued from the same position.
+        if direction == "forward":
+            first_frame, last_frame = local_frame, self._local_frame_for(cam, self._mark_end)
+            range_start, range_end = self._scrubber.value(), self._mark_end
+        else:
+            first_frame, last_frame = self._local_frame_for(cam, self._mark_start), local_frame
+            range_start, range_end = self._mark_start, self._scrubber.value()
+
+        # Warn-but-allow on crossing a planned split point (segmentation-
+        # ui-improvements design doc, Issue 4) -- not a hard block, since a
+        # planned split can turn out to be unnecessary on reflection, but
+        # never silent either.
+        crossed = [sp for sp in self._split_points if range_start < sp < range_end]
+        if crossed and not self._confirm_crossing_split_points(crossed):
+            self._set_status("Cancelled — job would have crossed a planned split point.")
+            return
+
         # Seed mask: live SAM2 result or stored DB mask.
         seed_mask = None
         if self._controller and np.any(self._controller.get_mask()):
@@ -1347,22 +1517,6 @@ class CutieInitPanel(QWidget):
         if not ok:
             self._set_status("Failed to encode seed mask.")
             return
-
-        # first_frame/last_frame bound the job's own propagation range for
-        # its direction -- CutieWorker._run_forward only ever reads
-        # last_frame (init_frame -> last_frame) and _run_backward only
-        # ever reads first_frame (first_frame -> init_frame), so the bound
-        # the *other* direction would have used is irrelevant to actual
-        # propagation. Setting it to the current frame here (rather than
-        # always passing the full mark_start/mark_end range regardless of
-        # direction) makes TrackingJob.summary's "first-last" display
-        # correctly show which range *this* job actually covers instead of
-        # showing the same range for both a forward and a backward job
-        # queued from the same position.
-        if direction == "forward":
-            first_frame, last_frame = local_frame, self._local_frame_for(cam, self._mark_end)
-        else:
-            first_frame, last_frame = self._local_frame_for(cam, self._mark_start), local_frame
 
         from app.pose.job_queue_runner import TrackingJob
         import uuid

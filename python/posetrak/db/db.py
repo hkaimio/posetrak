@@ -25,7 +25,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 8
-SESSION_SCHEMA_VERSION: Final[int] = 43
+SESSION_SCHEMA_VERSION: Final[int] = 46
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1446,6 +1446,76 @@ def _migrate_session_v42_to_v43(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v43_to_v44(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 43 to 44.
+
+    v44 adds seg_quality_runs.name -- a user-settable display name,
+    distinct from the existing free-text notes column. Needed so
+    segmentations can be listed and renamed in the session tree the same
+    way detection_runs/tracking_runs already are. See
+    docs/roadmap/features/segmentation-ui-improvements/
+    segmentation-ui-improvements-design.md, Issue 1. NULL for existing
+    rows and any row the user hasn't renamed -- callers fall back to a
+    generated label (covered time range + created_at) when NULL.
+    """
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(seg_quality_runs)")}
+    if "name" not in existing_cols:
+        conn.execute("ALTER TABLE seg_quality_runs ADD COLUMN name TEXT")
+    _set_schema_version(conn, 44)
+    conn.commit()
+
+
+def _migrate_session_v44_to_v45(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 44 to 45.
+
+    v45 adds capture_segmentation_hints -- user-marked "split points":
+    frames where propagating a single Cutie tracking pass through would
+    likely diverge (e.g. two people crossing paths), so segmentation
+    should instead be seeded independently on each side. Deliberately a
+    capture-scoped table, not a column on seg_quality_runs: a hard moment
+    is a property of the footage itself, not of any one attempt at
+    segmenting it, so it must survive a segmentation being deleted or
+    superseded (segmentation-ui-improvements design doc, Issue 4).
+    time_s is global time (consistent with trials/seg_quality_runs'
+    own ranges) -- "two people cross paths here" is one synchronized
+    real-world event and has to mean the same instant on every camera.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS capture_segmentation_hints ("
+        "    id         TEXT PRIMARY KEY,"
+        "    capture_id TEXT NOT NULL REFERENCES captures(id),"
+        "    time_s     REAL NOT NULL,"
+        "    note       TEXT,"
+        "    created_at TEXT NOT NULL"
+        ")"
+    )
+    _set_schema_version(conn, 45)
+    conn.commit()
+
+
+def _migrate_session_v45_to_v46(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 45 to 46.
+
+    v46 adds capture_segmentation_hints.shot_video_id: split points were
+    originally modeled capture-wide (one moment shared across every
+    camera), but real use immediately showed the whole point of a split
+    is usually camera-angle-dependent -- two people can occlude each
+    other from one camera's viewpoint at a moment they're clearly
+    separated in another's parallax. Nullable rather than NOT NULL: any
+    row from the brief window v45 was live has no camera to attribute it
+    to and is left as an orphan (harmless -- every real query filters by
+    shot_video_id, so a NULL row just never matches and needs
+    recreating) rather than guessing or deleting outright.
+    """
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(capture_segmentation_hints)")}
+    if "shot_video_id" not in existing_cols:
+        conn.execute(
+            "ALTER TABLE capture_segmentation_hints ADD COLUMN shot_video_id TEXT"
+        )
+    _set_schema_version(conn, 46)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1595,6 +1665,15 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 42
     if actual == 42:
         _migrate_session_v42_to_v43(conn)
+        actual = 43
+    if actual == 43:
+        _migrate_session_v43_to_v44(conn)
+        actual = 44
+    if actual == 44:
+        _migrate_session_v44_to_v45(conn)
+        actual = 45
+    if actual == 45:
+        _migrate_session_v45_to_v46(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

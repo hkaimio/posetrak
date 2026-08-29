@@ -1030,8 +1030,9 @@ class TrialPanel(QWidget):
     """Overview panel for a trial: info, segmentation, detection runs, tracking runs."""
 
     data_changed = Signal()
-    navigate_detection = Signal(str)   # detection run_id — open assignment editor
-    navigate_tracking = Signal(str)    # tracking run_id — open tracking run panel
+    navigate_detection = Signal(str)     # detection run_id — open assignment editor
+    navigate_tracking = Signal(str)      # tracking run_id — open tracking run panel
+    navigate_segmentation = Signal(str)  # seg_quality_run_id — open segmentation summary
 
     def __init__(
         self,
@@ -1109,6 +1110,46 @@ class TrialPanel(QWidget):
 
         # Segmentation section
         seg_box = _section("Segmentation")
+
+        # Segmentations whose recorded range fully covers this trial --
+        # listed above the Create button so an existing one can be reused
+        # instead of starting from scratch. Uses seg_quality_runs' own
+        # recorded time_start_s/time_end_s, which can under-report a
+        # segmentation's real coverage if it was extended in a later
+        # editing session (see segmentation-ui-improvements design doc) --
+        # a segmentation that actually covers this trial but whose
+        # recorded range doesn't reflect that won't show up here.
+        covering_segs = []
+        if start_s is not None and end_s is not None:
+            covering_segs = self._conn.execute(
+                "SELECT sq.id, sq.name, sq.time_start_s, sq.time_end_s, sq.quality_source, "
+                "       (SELECT COUNT(*) FROM seg_masks m WHERE m.seg_quality_run_id = sq.id) "
+                "           AS n_masks "
+                "FROM seg_quality_runs sq "
+                "WHERE sq.shot_id = ? AND sq.time_start_s <= ? AND sq.time_end_s >= ? "
+                "ORDER BY sq.created_at",
+                (self._capture_id, start_s, end_s),
+            ).fetchall()
+        if covering_segs:
+            seg_list = QListWidget()
+            seg_list.setMaximumHeight(100)
+            seg_list.setAlternatingRowColors(True)
+            for sq in covering_segs:
+                label = (
+                    f"{sq['name'] or sq['quality_source']}  "
+                    f"({sq['time_start_s']:.1f}s – {sq['time_end_s']:.1f}s)  "
+                    f"{sq['n_masks']} masks"
+                )
+                item = QListWidgetItem(label)
+                item.setData(Qt.ItemDataRole.UserRole, sq["id"])
+                seg_list.addItem(item)
+            seg_list.itemDoubleClicked.connect(
+                lambda it: self.navigate_segmentation.emit(it.data(Qt.ItemDataRole.UserRole))
+            )
+            seg_box.inner_layout().addWidget(seg_list)
+        else:
+            seg_box.inner_layout().addWidget(QLabel("No applicable segmentation found."))
+
         self._seg_btn = QPushButton(
             "Create segmentation" if persons else "Define persons for this capture first"
         )
@@ -1372,6 +1413,81 @@ class StandaloneRunPanel(QWidget):
         panel.applied.connect(self.data_changed)
         self._stitcher_panel = panel
         vbox.addWidget(panel, 1)
+
+
+class SegmentationRunPanel(QWidget):
+    """Summary view for a single seg_quality_runs row, reached by clicking
+    a segmentation node in the session tree (segmentation-ui-improvements
+    design doc, Issue 1). Deliberately lightweight -- the actual editing
+    surface is CutieInitPanel in its own window, opened via the "Open /
+    Continue" button (Issue 2: continues this run instead of starting a
+    fresh one)."""
+
+    data_changed = Signal()
+    open_requested = Signal(str)  # seg_quality_run_id
+
+    def __init__(
+        self, conn: sqlite3.Connection, seg_run_id: str, session_path=None, parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._conn = conn
+        self._seg_run_id = seg_run_id
+        self._session_path = session_path
+        self._build()
+
+    def _build(self) -> None:
+        row = self._conn.execute(
+            "SELECT sq.id, sq.name, sq.time_start_s, sq.time_end_s, sq.created_at, "
+            "       sq.quality_source, sq.notes, c.label AS capture_label, "
+            "       (SELECT COUNT(*) FROM seg_masks m WHERE m.seg_quality_run_id = sq.id) "
+            "           AS n_masks, "
+            "       (SELECT COUNT(DISTINCT shot_video_id) FROM seg_masks m "
+            "           WHERE m.seg_quality_run_id = sq.id) AS n_cameras "
+            "FROM seg_quality_runs sq "
+            "LEFT JOIN captures c ON c.id = sq.shot_id "
+            "WHERE sq.id = ?",
+            (self._seg_run_id,),
+        ).fetchone()
+
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(4, 4, 4, 4)
+        vbox.setSpacing(6)
+
+        if row is None:
+            vbox.addWidget(QLabel("Segmentation not found."))
+            return
+
+        bc = QLabel(
+            f"{row['capture_label'] or '?'}  /  "
+            f"{row['name'] or 'Segmentation'}  {_fmt_ts(row['created_at'])}"
+        )
+        bc.setStyleSheet("color: gray; font-size: 11px;")
+        vbox.addWidget(bc)
+
+        info_lines = [f"Quality source: {row['quality_source']}"]
+        if row["time_start_s"] is not None and row["time_end_s"] is not None:
+            info_lines.append(
+                f"Initially marked range: {row['time_start_s']:.1f}s – "
+                f"{row['time_end_s']:.1f}s (editing may have extended this "
+                "since -- see mask count below for the real extent)"
+            )
+        info_lines.append(f"Masks stored: {row['n_masks']}  across {row['n_cameras']} camera(s)")
+        if row["notes"]:
+            info_lines.append(f"Notes: {row['notes']}")
+        for line in info_lines:
+            lbl = QLabel(line)
+            lbl.setWordWrap(True)
+            vbox.addWidget(lbl)
+
+        open_btn = QPushButton("Open / Continue…")
+        open_btn.setToolTip(
+            "Open the segmentation editor, continuing this run instead of "
+            "starting a new one"
+        )
+        open_btn.clicked.connect(lambda: self.open_requested.emit(self._seg_run_id))
+        vbox.addWidget(open_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        vbox.addStretch()
 
 
 # ---------------------------------------------------------------------------

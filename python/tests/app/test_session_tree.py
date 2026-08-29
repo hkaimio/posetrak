@@ -48,10 +48,22 @@ def _tree_for(conn):
     return tree
 
 
-def test_segmentation_run_lists_at_capture_level_not_under_a_trial(qapp, session_db):
+def _find_segmentation_run_item(cap_item):
+    """The one "Segmentation" group under *cap_item*, then its one run item."""
+    from app.ui import session_tree as st_mod
+    from app.ui.session_tree import ItemKind
+
+    group = next(
+        cap_item.child(i) for i in range(cap_item.childCount())
+        if cap_item.child(i).data(0, st_mod._KIND) == ItemKind.SEGMENTATION_GROUP
+    )
+    return group.child(0)
+
+
+def test_segmentation_run_lists_under_capture_level_group_not_a_trial(qapp, session_db):
     """A segmentation whose recorded range spans both trials must appear
-    as a direct child of the capture item, never nested under either
-    trial -- the core Issue-1 tree-placement decision."""
+    under the capture-level "Segmentation" group, never nested under
+    either trial -- the core Issue-1 tree-placement decision."""
     from app.ui.session_tree import ItemKind
 
     session_db.execute(
@@ -63,26 +75,42 @@ def test_segmentation_run_lists_at_capture_level_not_under_a_trial(qapp, session
     tree = _tree_for(session_db)
     cap_item = tree.topLevelItem(0)
     from app.ui import session_tree as st_mod
-    direct_seg_children = [
-        cap_item.child(i) for i in range(cap_item.childCount())
-        if cap_item.child(i).data(0, st_mod._KIND) == ItemKind.SEGMENTATION_RUN
-    ]
-    assert len(direct_seg_children) == 1
-    assert direct_seg_children[0].data(0, st_mod._ID) == "seg1"
 
-    # And not nested under either trial item.
+    group_items = [
+        cap_item.child(i) for i in range(cap_item.childCount())
+        if cap_item.child(i).data(0, st_mod._KIND) == ItemKind.SEGMENTATION_GROUP
+    ]
+    assert len(group_items) == 1
+    group_item = group_items[0]
+    assert group_item.text(0) == "Segmentation"
+    assert group_item.childCount() == 1
+    assert group_item.child(0).data(0, st_mod._KIND) == ItemKind.SEGMENTATION_RUN
+    assert group_item.child(0).data(0, st_mod._ID) == "seg1"
+
+    # And not nested under either trial item, nor a direct capture child.
     for i in range(cap_item.childCount()):
         child = cap_item.child(i)
+        assert child.data(0, st_mod._KIND) != ItemKind.SEGMENTATION_RUN
         if child.data(0, st_mod._KIND) == ItemKind.TRIAL:
             for j in range(child.childCount()):
                 assert child.child(j).data(0, st_mod._KIND) != ItemKind.SEGMENTATION_RUN
 
 
+def test_no_segmentation_group_when_capture_has_no_segmentations(qapp, session_db):
+    from app.ui import session_tree as st_mod
+    from app.ui.session_tree import ItemKind
+
+    tree = _tree_for(session_db)
+    cap_item = tree.topLevelItem(0)
+    assert not any(
+        cap_item.child(i).data(0, st_mod._KIND) == ItemKind.SEGMENTATION_GROUP
+        for i in range(cap_item.childCount())
+    )
+
+
 def test_segmentation_run_label_includes_name_range_and_mask_count(qapp, session_db):
     import cv2
     import numpy as np
-    from app.ui import session_tree as st_mod
-    from app.ui.session_tree import ItemKind
 
     session_db.execute(
         "INSERT INTO seg_quality_runs (id, shot_id, name, time_start_s, time_end_s, created_at) "
@@ -111,10 +139,7 @@ def test_segmentation_run_label_includes_name_range_and_mask_count(qapp, session
 
     tree = _tree_for(session_db)
     cap_item = tree.topLevelItem(0)
-    seg_item = next(
-        cap_item.child(i) for i in range(cap_item.childCount())
-        if cap_item.child(i).data(0, st_mod._KIND) == ItemKind.SEGMENTATION_RUN
-    )
+    seg_item = _find_segmentation_run_item(cap_item)
     label = seg_item.text(0)
     assert "Main pass" in label
     assert "6.5s" in label and "13.9s" in label
@@ -122,9 +147,6 @@ def test_segmentation_run_label_includes_name_range_and_mask_count(qapp, session
 
 
 def test_segmentation_run_falls_back_to_generated_label_without_name(qapp, session_db):
-    from app.ui import session_tree as st_mod
-    from app.ui.session_tree import ItemKind
-
     session_db.execute(
         "INSERT INTO seg_quality_runs "
         "(id, shot_id, quality_source, time_start_s, time_end_s, created_at) "
@@ -134,10 +156,7 @@ def test_segmentation_run_falls_back_to_generated_label_without_name(qapp, sessi
 
     tree = _tree_for(session_db)
     cap_item = tree.topLevelItem(0)
-    seg_item = next(
-        cap_item.child(i) for i in range(cap_item.childCount())
-        if cap_item.child(i).data(0, st_mod._KIND) == ItemKind.SEGMENTATION_RUN
-    )
+    seg_item = _find_segmentation_run_item(cap_item)
     assert "Segmentation" in seg_item.text(0)
     assert "cutie-interactive" in seg_item.text(0)
 

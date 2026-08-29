@@ -393,6 +393,7 @@ class MainWindow(QMainWindow):
         panel.data_changed.connect(self.reload_tree)
         panel.navigate_detection.connect(self._show_detection_run)
         panel.navigate_tracking.connect(self._show_tracking_run)
+        panel.navigate_segmentation.connect(self._show_segmentation_run)
         self._swap_content(panel)
 
     def _show_detection_run(self, run_id: str) -> None:

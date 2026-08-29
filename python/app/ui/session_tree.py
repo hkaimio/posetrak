@@ -24,12 +24,13 @@ _ID   = Qt.ItemDataRole.UserRole + 1
 
 
 class ItemKind(str, Enum):
-    CAPTURE          = "capture"
-    TRIAL            = "trial"
-    SEGMENTATION_RUN = "segmentation_run"
-    DETECTION_RUN    = "detection_run"
-    PERSON_TRACK     = "person_track"
-    TRACKING_RUN     = "tracking_run"
+    CAPTURE            = "capture"
+    TRIAL              = "trial"
+    SEGMENTATION_GROUP = "segmentation_group"
+    SEGMENTATION_RUN   = "segmentation_run"
+    DETECTION_RUN      = "detection_run"
+    PERSON_TRACK       = "person_track"
+    TRACKING_RUN       = "tracking_run"
 
 
 class SessionTreeWidget(QTreeWidget):
@@ -128,15 +129,23 @@ class SessionTreeWidget(QTreeWidget):
                 tr_item.addChild(self._make_detection_run_item(dr))
             parent.addChild(tr_item)
 
-        # Segmentations — always capture-level, never nested under a trial
-        # even when trial_id is set (see segmentation-ui-improvements
-        # design doc, Issue 1): a segmentation routinely spans several
-        # trials or predates trial boundaries entirely, unlike a
-        # detection run's normal one-trial-scoped case, so the
-        # conditional trial/capture nesting used for detection runs above
-        # would make the same row jump parents as its range is extended.
-        for sq in self._load_segmentation_runs(capture_id):
-            parent.addChild(self._make_segmentation_run_item(sq, trials))
+        # Segmentations — grouped under a single "Segmentation" folder that
+        # is itself a capture-level child, never nested under a trial even
+        # when trial_id is set (see segmentation-ui-improvements design
+        # doc, Issue 1): a segmentation routinely spans several trials or
+        # predates trial boundaries entirely, unlike a detection run's
+        # normal one-trial-scoped case, so the conditional trial/capture
+        # nesting used for detection runs above would make the same row
+        # jump parents as its range is extended. The group folder itself
+        # isn't a real row -- id is just the capture_id, unused beyond
+        # menu/selection dispatch.
+        seg_runs = self._load_segmentation_runs(capture_id)
+        if seg_runs:
+            group_item = _make_item(ItemKind.SEGMENTATION_GROUP, capture_id, "Segmentation")
+            group_item.setExpanded(True)
+            for sq in seg_runs:
+                group_item.addChild(self._make_segmentation_run_item(sq, trials))
+            parent.addChild(group_item)
 
         # Detection runs not in any trial
         for dr in self._load_detection_runs(capture_id, trial_id=None):
@@ -287,12 +296,13 @@ class SessionTreeWidget(QTreeWidget):
         item_id: str = item.data(0, _ID)
         menu = QMenu(self)
         {
-            ItemKind.CAPTURE:          self._capture_menu,
-            ItemKind.TRIAL:            self._trial_menu,
-            ItemKind.SEGMENTATION_RUN: self._segmentation_run_menu,
-            ItemKind.DETECTION_RUN:    self._detection_run_menu,
-            ItemKind.PERSON_TRACK:     self._person_track_menu,
-            ItemKind.TRACKING_RUN:     self._tracking_run_menu,
+            ItemKind.CAPTURE:            self._capture_menu,
+            ItemKind.TRIAL:              self._trial_menu,
+            ItemKind.SEGMENTATION_GROUP: self._segmentation_group_menu,
+            ItemKind.SEGMENTATION_RUN:   self._segmentation_run_menu,
+            ItemKind.DETECTION_RUN:      self._detection_run_menu,
+            ItemKind.PERSON_TRACK:       self._person_track_menu,
+            ItemKind.TRACKING_RUN:       self._tracking_run_menu,
         }[kind](menu, item_id)
         menu.exec(self.viewport().mapToGlobal(pos))
 
@@ -314,6 +324,9 @@ class SessionTreeWidget(QTreeWidget):
         menu.addAction("Delete trial").triggered.connect(
             lambda: self._confirm_delete("trials", trial_id)
         )
+
+    def _segmentation_group_menu(self, menu: QMenu, capture_id: str) -> None:
+        menu.addAction("New segmentation…").setEnabled(False)
 
     def _segmentation_run_menu(self, menu: QMenu, seg_run_id: str) -> None:
         menu.addAction("Open / Continue…").triggered.connect(

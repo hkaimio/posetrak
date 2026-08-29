@@ -1004,6 +1004,28 @@ def test_migrate_session_v43_to_v44_adds_name(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_migrate_session_v44_to_v45_adds_capture_segmentation_hints(tmp_path: Path) -> None:
+    """v44->v45 adds capture_segmentation_hints -- user-marked split
+    points, capture-scoped rather than tied to one seg_quality_runs row
+    (see docs/roadmap/features/segmentation-ui-improvements/
+    segmentation-ui-improvements-design.md, Issue 4)."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("PRAGMA user_version = 44")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+    tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    assert "capture_segmentation_hints" in tables
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------

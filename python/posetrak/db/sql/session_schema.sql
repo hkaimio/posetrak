@@ -508,6 +508,20 @@ CREATE TABLE IF NOT EXISTS seg_quality_runs (
     name           TEXT
 );
 
+-- User-marked "split points": frames where a single Cutie tracking pass
+-- would likely diverge (e.g. two people crossing paths), so segmentation
+-- should be seeded independently on each side instead. Capture-scoped,
+-- not tied to any one seg_quality_runs row's lifecycle -- a hard moment
+-- is a property of the footage, not of one attempt at segmenting it.
+-- time_s is global time, same convention as trials/seg_quality_runs.
+CREATE TABLE IF NOT EXISTS capture_segmentation_hints (
+    id         TEXT PRIMARY KEY,
+    capture_id TEXT NOT NULL REFERENCES captures(id),
+    time_s     REAL NOT NULL,
+    note       TEXT,
+    created_at TEXT NOT NULL
+);
+
 -- Per-keypoint segmentation quality scores, aligned with detection_keypoints.
 -- quality_blob: little-endian float32 array of length N_KEYPOINTS (133).
 -- Values: 1.0=inside, 0.5=boundary, 0.0=outside, -1.0=unavailable.

@@ -25,7 +25,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 8
-SESSION_SCHEMA_VERSION: Final[int] = 44
+SESSION_SCHEMA_VERSION: Final[int] = 45
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1465,6 +1465,34 @@ def _migrate_session_v43_to_v44(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v44_to_v45(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 44 to 45.
+
+    v45 adds capture_segmentation_hints -- user-marked "split points":
+    frames where propagating a single Cutie tracking pass through would
+    likely diverge (e.g. two people crossing paths), so segmentation
+    should instead be seeded independently on each side. Deliberately a
+    capture-scoped table, not a column on seg_quality_runs: a hard moment
+    is a property of the footage itself, not of any one attempt at
+    segmenting it, so it must survive a segmentation being deleted or
+    superseded (segmentation-ui-improvements design doc, Issue 4).
+    time_s is global time (consistent with trials/seg_quality_runs'
+    own ranges) -- "two people cross paths here" is one synchronized
+    real-world event and has to mean the same instant on every camera.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS capture_segmentation_hints ("
+        "    id         TEXT PRIMARY KEY,"
+        "    capture_id TEXT NOT NULL REFERENCES captures(id),"
+        "    time_s     REAL NOT NULL,"
+        "    note       TEXT,"
+        "    created_at TEXT NOT NULL"
+        ")"
+    )
+    _set_schema_version(conn, 45)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1617,6 +1645,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 43
     if actual == 43:
         _migrate_session_v43_to_v44(conn)
+        actual = 44
+    if actual == 44:
+        _migrate_session_v44_to_v45(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

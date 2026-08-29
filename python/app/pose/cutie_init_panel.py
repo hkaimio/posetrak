@@ -289,6 +289,9 @@ class CutieInitPanel(QWidget):
         # Click interaction state
         self._controller = None             # ClickController; created lazily
         self._selected_label: int = 0       # 0 = no person selected
+        # Active tool: "select" (SAM2 clicks, default), "paint", "erase",
+        # "zoom" -- segmentation-ui-improvements design doc, Issue 5.
+        self._active_tool: str = "select"
         self._encoded_frame_idx: int = -1   # frame that _controller has encoded
         self._encoded_svid: str = ""        # camera id for encoded frame
 
@@ -390,6 +393,7 @@ class CutieInitPanel(QWidget):
         self._canvas = VideoCanvas()
         self._canvas.left_clicked.connect(self._on_left_click)
         self._canvas.right_clicked.connect(self._on_right_click)
+        self._canvas.left_dragged.connect(self._on_left_dragged)
         root.addWidget(self._canvas, stretch=1)
 
         # --- Scrubber ---
@@ -408,19 +412,99 @@ class CutieInitPanel(QWidget):
         self._person_btn_group.setExclusive(False)
         root.addWidget(self._person_group)
 
+        # --- Edit tool selector (segmentation-ui-improvements design doc,
+        # Issue 5) -- Select is today's SAM2 point-click behavior,
+        # unchanged; Paint/Erase/Zoom are new. No icon font ships with
+        # PySide6 and none of Qt's built-in standard icons fit these
+        # concepts, so continuing this file's existing plain-Unicode-
+        # emoji-as-button-text convention rather than adding a
+        # dependency.
+        tool_row = QHBoxLayout()
+        tool_row.addWidget(QLabel("Tool:"))
+        self._tool_btn_group = QButtonGroup(self)
+        self._tool_btn_group.setExclusive(True)
+
+        self._tool_select_btn = QPushButton("🪄 Select")
+        self._tool_select_btn.setCheckable(True)
+        self._tool_select_btn.setChecked(True)
+        self._tool_select_btn.setToolTip(
+            "SAM2 point-click segmentation -- left-click = positive, "
+            "right-click = negative (unchanged default behavior)"
+        )
+        self._tool_btn_group.addButton(self._tool_select_btn)
+        tool_row.addWidget(self._tool_select_btn)
+
+        self._tool_paint_btn = QPushButton("🖌 Paint")
+        self._tool_paint_btn.setCheckable(True)
+        self._tool_paint_btn.setToolTip(
+            "Manually stamp the selected person's label within the brush "
+            "radius -- drag to paint a stroke. Always wins over SAM2/base "
+            "for touched pixels until cleared."
+        )
+        self._tool_btn_group.addButton(self._tool_paint_btn)
+        tool_row.addWidget(self._tool_paint_btn)
+
+        self._tool_erase_btn = QPushButton("Erase")
+        self._tool_erase_btn.setCheckable(True)
+        self._tool_erase_btn.setToolTip(
+            "Manually stamp background within the brush radius -- reaches "
+            "stray base/SAM2 pixels with no live clicks too, e.g. Cutie "
+            "leftovers from an occlusion"
+        )
+        self._tool_btn_group.addButton(self._tool_erase_btn)
+        tool_row.addWidget(self._tool_erase_btn)
+
+        self._tool_zoom_btn = QPushButton("🔍 Zoom")
+        self._tool_zoom_btn.setCheckable(True)
+        self._tool_zoom_btn.setToolTip(
+            "Click to zoom in, Alt+click to zoom out, right-click to reset "
+            "-- all centred on the clicked pixel"
+        )
+        self._tool_btn_group.addButton(self._tool_zoom_btn)
+        tool_row.addWidget(self._tool_zoom_btn)
+
+        self._tool_btn_group.buttonClicked.connect(self._on_tool_changed)
+
+        tool_row.addSpacing(12)
+        tool_row.addWidget(QLabel("Brush size:"))
+        self._brush_slider = QSlider(Qt.Orientation.Horizontal)
+        self._brush_slider.setMinimum(1)
+        self._brush_slider.setMaximum(60)
+        self._brush_slider.setValue(10)
+        self._brush_slider.setMaximumWidth(120)
+        self._brush_slider.valueChanged.connect(self._on_brush_size_changed)
+        tool_row.addWidget(self._brush_slider)
+        self._brush_size_label = QLabel("10px")
+        tool_row.addWidget(self._brush_size_label)
+        tool_row.addStretch()
+        root.addLayout(tool_row)
+
         # --- Edit action buttons ---
         edit_row = QHBoxLayout()
         self._clear_person_btn = QPushButton("Clear person")
-        self._clear_person_btn.setToolTip("Remove all clicks for the selected person")
+        self._clear_person_btn.setToolTip(
+            "Remove all clicks AND manual paint/erase edits for the "
+            "selected person -- start this person over completely"
+        )
         self._clear_person_btn.clicked.connect(self._on_clear_person)
         self._clear_person_btn.setEnabled(False)
         edit_row.addWidget(self._clear_person_btn)
 
         self._clear_all_btn = QPushButton("Clear all")
-        self._clear_all_btn.setToolTip("Remove all clicks for all persons")
+        self._clear_all_btn.setToolTip("Remove all clicks and manual edits for all persons")
         self._clear_all_btn.clicked.connect(self._on_clear_all)
         self._clear_all_btn.setEnabled(False)
         edit_row.addWidget(self._clear_all_btn)
+
+        self._clear_paint_btn = QPushButton("Clear Manual Edits")
+        self._clear_paint_btn.setToolTip(
+            "Discard manual paint/erase edits on this frame only, "
+            "reverting to whatever SAM2/the stored base mask alone would "
+            "show -- clicks are untouched"
+        )
+        self._clear_paint_btn.clicked.connect(self._on_clear_paint_overlay)
+        self._clear_paint_btn.setEnabled(False)
+        edit_row.addWidget(self._clear_paint_btn)
         edit_row.addStretch()
 
         self._sam_status_label = QLabel("")
@@ -1018,16 +1102,86 @@ class CutieInitPanel(QWidget):
         has_selection = self._selected_label > 0
         self._clear_person_btn.setEnabled(has_controller and has_selection)
         self._clear_all_btn.setEnabled(has_controller)
+        self._clear_paint_btn.setEnabled(has_controller)
 
     # ------------------------------------------------------------------
     # Interaction — canvas clicks
     # ------------------------------------------------------------------
 
     def _on_left_click(self, x: int, y: int) -> None:
-        self._handle_click(x, y, positive=True)
+        if self._active_tool == "select":
+            self._handle_click(x, y, positive=True)
+        elif self._active_tool in ("paint", "erase"):
+            self._handle_paint_or_erase(x, y)
+        elif self._active_tool == "zoom":
+            self._handle_zoom_click(x, y)
 
     def _on_right_click(self, x: int, y: int) -> None:
-        self._handle_click(x, y, positive=False)
+        if self._active_tool == "select":
+            self._handle_click(x, y, positive=False)
+        elif self._active_tool == "zoom":
+            self._canvas.reset_zoom()
+            self._set_status("Zoom reset to fit.")
+        # paint/erase: right-click is a no-op (left-drag is the whole tool)
+
+    def _on_left_dragged(self, x: int, y: int) -> None:
+        if self._active_tool in ("paint", "erase"):
+            self._handle_paint_or_erase(x, y)
+
+    def _handle_zoom_click(self, x: int, y: int) -> None:
+        from PySide6.QtWidgets import QApplication
+        alt = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+        if alt:
+            self._canvas.zoom_out_at(x, y)
+            self._set_status("Zoomed out.")
+        else:
+            self._canvas.zoom_in_at(x, y)
+            self._set_status("Zoomed in.")
+
+    def _handle_paint_or_erase(self, x: int, y: int) -> None:
+        if self._selected_label == 0:
+            self._set_status("Select a person button first, then paint/erase on the frame.")
+            return
+        if self._controller is None:
+            return
+        cam = self._cam_combo.currentData()
+        if cam is None:
+            return
+        frame_idx = self._local_frame_for(cam)
+
+        # Registers frame + base mask if not already done -- works without
+        # SAM2 being available, paint/erase don't need it (see _ensure_encoded).
+        self._ensure_encoded(cam, frame_idx)
+
+        radius = self._brush_slider.value()
+        if self._active_tool == "paint":
+            mask = self._controller.paint_circle(self._selected_label, x, y, radius)
+            self._set_status(f"Painting person {self._selected_label}…")
+        else:
+            mask = self._controller.erase_circle(x, y, radius)
+            self._set_status("Erasing…")
+        self._refresh_overlay(cam, frame_idx, mask)
+
+    def _on_tool_changed(self, btn) -> None:
+        tool = {
+            self._tool_select_btn: "select",
+            self._tool_paint_btn: "paint",
+            self._tool_erase_btn: "erase",
+            self._tool_zoom_btn: "zoom",
+        }[btn]
+        self._active_tool = tool
+        self._canvas.set_tool(tool)
+        messages = {
+            "select": "Select tool: left-click = positive, right-click = negative (SAM2).",
+            "paint": "Paint tool: drag on the frame to stamp the selected person's label.",
+            "erase": "Erase tool: drag on the frame to clear to background.",
+            "zoom": "Zoom tool: click to zoom in, Alt+click to zoom out, right-click to reset.",
+        }
+        self._set_status(messages[tool])
+
+    def _on_brush_size_changed(self, value: int) -> None:
+        self._brush_size_label.setText(f"{value}px")
+        self._canvas.set_brush_radius(value)
 
     def _handle_click(self, x: int, y: int, positive: bool) -> None:
         if self._selected_label == 0:
@@ -1076,6 +1230,17 @@ class CutieInitPanel(QWidget):
             return
         self._controller.clear_all()
         self._set_status("Cleared all live clicks")
+        cam = self._cam_combo.currentData()
+        if cam is not None:
+            self._show_frame(self._local_frame_for(cam))
+
+    def _on_clear_paint_overlay(self) -> None:
+        """Discard manual paint/erase edits on this frame only -- clicks
+        and the stored base mask are untouched."""
+        if self._controller is None:
+            return
+        self._controller.clear_paint_overlay()
+        self._set_status("Cleared manual paint/erase edits for this frame")
         cam = self._cam_combo.currentData()
         if cam is not None:
             self._show_frame(self._local_frame_for(cam))
@@ -1349,10 +1514,16 @@ class CutieInitPanel(QWidget):
             self._ensure_encoded(cam, self._local_frame_for(cam))
 
     def _ensure_encoded(self, cam: dict, frame_idx: int) -> None:
-        """Encode the frame for SAM2 if not already done for this frame."""
+        """Register the frame + stored base mask with the controller.
+
+        Not gated on SAM2 being available: set_image()/set_base_mask()
+        are plain numpy bookkeeping the paint/erase tools need too (they
+        don't touch SAM2 at all), and are safe to call either way --
+        _run_predictions() internally already no-ops the SAM2 half when
+        self._controller.available is False.
+        """
         if (
             self._controller is None
-            or not self._controller.available
             or (self._encoded_frame_idx == frame_idx and self._encoded_svid == cam["id"])
         ):
             return
@@ -1361,7 +1532,7 @@ class CutieInitPanel(QWidget):
         if frame is None:
             return
 
-        self._set_status("Encoding frame for SAM2…")
+        self._set_status("Encoding frame…")
         self._controller.set_image(frame)
         # Load stored mask as base so other persons are preserved during editing.
         self._controller.set_base_mask(self._load_stored_mask(cam["id"], frame_idx))

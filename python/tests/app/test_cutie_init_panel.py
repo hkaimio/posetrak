@@ -897,3 +897,174 @@ def test_queued_range_only_shown_for_the_selected_camera(qapp, synced_capture_db
         assert panel._range_bar._queued_ranges == []  # sv1's job doesn't show for sv2
     finally:
         panel.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Edit tools: Select/Paint/Erase/Zoom (segmentation-ui-improvements design
+# doc, Issue 5)
+# ---------------------------------------------------------------------------
+
+
+def _fake_frame(video_path, frame_idx, shape=(80, 80, 3)):
+    import numpy as np
+    return np.zeros(shape, dtype=np.uint8)
+
+
+def test_tool_buttons_update_active_tool_and_canvas(qapp, capture_db):
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(capture_db, "cap1")
+    try:
+        assert panel._active_tool == "select"  # default, unchanged behavior
+        panel._tool_paint_btn.click()
+        assert panel._active_tool == "paint"
+        assert panel._canvas._active_tool == "paint"
+
+        panel._tool_zoom_btn.click()
+        assert panel._active_tool == "zoom"
+    finally:
+        panel.shutdown()
+
+
+def test_brush_slider_updates_canvas_radius_and_label(qapp, capture_db):
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(capture_db, "cap1")
+    try:
+        panel._brush_slider.setValue(25)
+        assert panel._canvas._brush_radius == 25
+        assert panel._brush_size_label.text() == "25px"
+    finally:
+        panel.shutdown()
+
+
+def test_left_click_dispatches_to_paint_when_paint_tool_active(qapp, capture_db, monkeypatch):
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(capture_db, "cap1")
+    try:
+        monkeypatch.setattr(panel._frame_cache, "get_frame", _fake_frame)
+        panel._selected_label = 1
+        panel._tool_paint_btn.click()
+        panel._brush_slider.setValue(8)
+
+        panel._on_left_click(40, 40)
+
+        mask = panel._controller.get_mask()
+        assert mask[40, 40] == 1
+    finally:
+        panel.shutdown()
+
+
+def test_left_dragged_continues_a_paint_stroke(qapp, capture_db, monkeypatch):
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(capture_db, "cap1")
+    try:
+        monkeypatch.setattr(panel._frame_cache, "get_frame", _fake_frame)
+        panel._selected_label = 1
+        panel._tool_paint_btn.click()
+        panel._brush_slider.setValue(5)
+
+        panel._on_left_click(20, 20)
+        panel._on_left_dragged(30, 20)
+        panel._on_left_dragged(40, 20)
+
+        mask = panel._controller.get_mask()  # mask is [row, col] = [y, x]
+        assert mask[20, 20] == 1
+        assert mask[20, 30] == 1
+        assert mask[20, 40] == 1
+    finally:
+        panel.shutdown()
+
+
+def test_erase_tool_reaches_stored_base_mask_pixels(qapp, capture_db, monkeypatch):
+    """The motivating use case: erasing a stray Cutie/SAM2 leftover pixel
+    that has no live click on it at all."""
+    import cv2
+    import numpy as np
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    stored = np.zeros((80, 80), dtype=np.uint8)
+    stored[40, 40] = 1
+    ok, buf = cv2.imencode(".png", stored)
+    assert ok
+    capture_db.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('seg1', 'cap1', 0.0, 1e9, '2026-01-01T00:00:00Z')"
+    )
+    capture_db.execute(
+        "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
+        "VALUES ('seg1', 'sv1', 0, ?)",
+        (buf.tobytes(),),
+    )
+    capture_db.commit()
+
+    panel = CutieInitPanel(capture_db, "cap1")
+    try:
+        monkeypatch.setattr(panel._frame_cache, "get_frame", _fake_frame)
+        panel._selected_label = 1
+        panel._tool_erase_btn.click()
+        panel._brush_slider.setValue(3)
+
+        panel._ensure_encoded(panel._cam_combo.currentData(), 0)
+        assert panel._controller.get_mask()[40, 40] == 1  # base mask loaded
+
+        panel._on_left_click(40, 40)
+        assert panel._controller.get_mask()[40, 40] == 0  # erased
+    finally:
+        panel.shutdown()
+
+
+def test_zoom_tool_left_click_zooms_in(qapp, capture_db):
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(capture_db, "cap1")
+    try:
+        panel._tool_zoom_btn.click()
+        panel._on_left_click(40, 40)
+        assert panel._canvas._zoom > 1.0
+    finally:
+        panel.shutdown()
+
+
+def test_zoom_tool_right_click_resets(qapp, capture_db):
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(capture_db, "cap1")
+    try:
+        panel._tool_zoom_btn.click()
+        panel._on_left_click(40, 40)
+        assert panel._canvas._zoom > 1.0
+        panel._on_right_click(40, 40)
+        assert panel._canvas._zoom == 1.0
+    finally:
+        panel.shutdown()
+
+
+def test_painted_mask_becomes_the_seed_for_queue_tracking(qapp, synced_capture_db, monkeypatch):
+    """Harri's motivating use case end to end: erase/relabel stray pixels,
+    then re-seed the affected range from the corrected frame -- needs no
+    new plumbing, _queue_tracking() already seeds from get_mask()."""
+    import numpy as np
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        monkeypatch.setattr(panel._frame_cache, "get_frame", _fake_frame)
+        panel._scrubber.setValue(panel._to_units(5.0))  # sv1 local frame 150
+        panel._selected_label = 1
+        panel._tool_paint_btn.click()
+        panel._brush_slider.setValue(10)
+        panel._on_left_click(40, 40)
+
+        panel._queue_tracking("forward")
+        job = panel._runner.jobs[-1]
+
+        import cv2
+        seed = cv2.imdecode(
+            np.frombuffer(job.init_mask_png, dtype=np.uint8), cv2.IMREAD_UNCHANGED
+        )
+        assert seed[40, 40] == 1
+    finally:
+        panel.shutdown()

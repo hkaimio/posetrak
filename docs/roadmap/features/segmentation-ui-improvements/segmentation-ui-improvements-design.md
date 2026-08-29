@@ -291,6 +291,14 @@ Sequence it after the others (see "Suggested build order").
   zoom in elsewhere). Ship it as asked; revisit with drag-to-pan or
   scroll-wheel-zoom only if that proves annoying in practice.
 
+**Implemented (2026-08-29)** exactly as designed above, across
+`ClickController` (paint overlay), `VideoCanvas` (zoom/pan, brush
+cursor), and `CutieInitPanel` (the four tool buttons, brush slider,
+Clear Manual Edits). The motivating use case was verified end to end in
+tests: erasing/relabeling a stray Cutie/SAM2 leftover pixel and re-
+seeding the affected range from the corrected frame needed no new
+plumbing beyond the overlay itself.
+
 ## Issue 6 — cross-camera seeding / triangulation error-detection (future)
 
 Flagged explicitly as far-fetched/future — scoped only briefly here.

@@ -195,6 +195,22 @@ lifecycle. Still pure planning scaffolding otherwise — no change to
 `TrackingJob`/`CutieWorker` needed, just a new small table plus the
 RangeBar/interaction UI above — medium effort, not trivial.
 
+**Built (2026-08-29), then corrected from real use**: shipped as
+described above, plus a fifth RangeBar layer for split points and a
+sixth showing queued (not-yet-run) job ranges in the same coverage band.
+One assumption above turned out wrong the moment it was actually used:
+"the moment two people cross is one synchronized real-world event that
+has to mean the same thing on all cameras" is true as a *physical*
+statement but not the useful one — whether that crossing is actually
+*hard to segment* is camera-angle-dependent (an occlusion in one
+camera's 2D projection can be a clean parallax separation in another's).
+`capture_segmentation_hints` gained a `shot_video_id` column (migration
+v45→v46) and split points are now loaded/created/removed per the
+currently-selected camera, not shared capture-wide. Also fixed: "Snap
+Marks to Segment" was falling back to the full capture range instead of
+the trial's own bounds (matching what marks already default to on load)
+when there was no split point on one side.
+
 ## Issue 5 — manual mask editing (brush) when SAM2 gets it wrong
 
 **Confirmed**: `ClickController` (`cutie_click_controller.py`) is

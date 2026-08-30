@@ -53,6 +53,7 @@ nav:
       - Camera intrinsics: user-guide/camera-intrinsics.md
       - Extrinsics calibration: user-guide/extrinsics-calibration.md
       - Synchronizing videos: user-guide/synchronizing-videos.md
+      - Segmenting multi-person scenes: user-guide/segmentation.md
       - Analyzing poses: user-guide/analyzing-poses.md
       - Tracking & troubleshooting: user-guide/tracking-troubleshooting.md
       - Retargeting to Blender: user-guide/retargeting-blender.md

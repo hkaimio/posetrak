@@ -435,7 +435,9 @@ CREATE TABLE IF NOT EXISTS detection_runs (
     pose_input_height   INTEGER,
     status              TEXT NOT NULL DEFAULT 'running',
     created_at          TEXT NOT NULL,
-    completed_at        TEXT
+    completed_at        TEXT,
+    detector_type       TEXT NOT NULL DEFAULT 'pose',  -- 'pose', 'aruco', 'blob', ...
+    config_json         TEXT  -- detector-specific config; see marker-mocap-design.md §4.1
 );
 
 -- Raw keypoints produced by pose estimation, keyed by detection run.

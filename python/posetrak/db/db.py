@@ -25,7 +25,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 8
-SESSION_SCHEMA_VERSION: Final[int] = 46
+SESSION_SCHEMA_VERSION: Final[int] = 47
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1516,6 +1516,33 @@ def _migrate_session_v45_to_v46(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v46_to_v47(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 46 to 47.
+
+    v47 adds detection_runs.detector_type and .config_json, the first
+    piece of marker-based-mocap phase 1a (design §4.1): a marker detection
+    run (initially ArUco) is a `detection_runs` row like any pose-detection
+    run, distinguished by `detector_type` rather than a parallel table, so
+    every existing run/status/provenance query keeps working unchanged.
+    `detector_type` defaults to 'pose' so every pre-existing row is
+    correctly classified with no backfill. `config_json` carries detector
+    parameters plus, for coded markers, the `marker_ids` list that fixes
+    the corner-blob decode order in detection_keypoints (one physical
+    prop's corner slots are ordered list-position-major by this list, per
+    marker-mocap-design.md §4.1) -- NULL for existing (pose) runs, which
+    have no such config today.
+    """
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(detection_runs)")}
+    if "detector_type" not in existing_cols:
+        conn.execute(
+            "ALTER TABLE detection_runs ADD COLUMN detector_type TEXT NOT NULL DEFAULT 'pose'"
+        )
+    if "config_json" not in existing_cols:
+        conn.execute("ALTER TABLE detection_runs ADD COLUMN config_json TEXT")
+    _set_schema_version(conn, 47)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1674,6 +1701,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 45
     if actual == 45:
         _migrate_session_v45_to_v46(conn)
+        actual = 46
+    if actual == 46:
+        _migrate_session_v46_to_v47(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

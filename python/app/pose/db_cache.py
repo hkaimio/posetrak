@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
@@ -60,6 +61,8 @@ def create_detection_run(
     pose_conf_threshold: float = 0.3,
     pose_input_width: int = 0,
     pose_input_height: int = 0,
+    detector_type: str = "pose",
+    config_json: str | None = None,
 ) -> str:
     run_id = generate_id()
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -68,15 +71,59 @@ def create_detection_run(
         "(id, shot_id, sync_config_id, trial_id, time_start_s, time_end_s, "
         " detector_model, pose_model, detector_version, pose_version, "
         " detector_conf, pose_conf_threshold, "
-        " pose_input_width, pose_input_height, status, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'running',?)",
+        " pose_input_width, pose_input_height, status, created_at, "
+        " detector_type, config_json) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'running',?,?,?)",
         (run_id, shot_id, sync_config_id, trial_id, time_start_s, time_end_s,
          detector_model, pose_model, detector_version, pose_version,
          detector_conf, pose_conf_threshold,
-         pose_input_width, pose_input_height, now),
+         pose_input_width, pose_input_height, now,
+         detector_type, config_json),
     )
     session.commit()
     return run_id
+
+
+def create_marker_detection_run(
+    session: sqlite3.Connection,
+    shot_id: str,
+    sync_config_id: str,
+    time_start_s: float,
+    time_end_s: float,
+    dictionary: str,
+    marker_ids: list[str],
+    min_marker_perimeter_rate: float | None = None,
+    frame_step: int = 1,
+    trial_id: str | None = None,
+) -> str:
+    """Create a detection_runs row for an ArUco marker detection pass.
+
+    Design phase 1a (marker-mocap-design.md §7.1) -- deliberately takes
+    detector configuration directly rather than resolving it from a
+    `marker_body_definitions`/`capture_objects` row; that lookup is phase
+    1c's job. `config_json`'s `marker_ids` is the corner-blob decode key
+    for `detection_keypoints` (§4.1): a run's coded-marker corner slots are
+    ordered list-position-major by this list, so re-deriving the blob
+    layout later only ever needs this one field, not a second lookup.
+    """
+    config = {
+        "dictionary": dictionary,
+        "marker_ids": list(marker_ids),
+        "min_marker_perimeter_rate": min_marker_perimeter_rate,
+        "frame_step": frame_step,
+    }
+    return create_detection_run(
+        session,
+        shot_id=shot_id,
+        sync_config_id=sync_config_id,
+        time_start_s=time_start_s,
+        time_end_s=time_end_s,
+        detector_model=f"aruco:{dictionary}",
+        pose_model="",  # no pose model for a marker run; NOT NULL, so "" not NULL
+        trial_id=trial_id,
+        detector_type="aruco",
+        config_json=json.dumps(config),
+    )
 
 
 def mark_run_complete(session: sqlite3.Connection, run_id: str, status: str = "complete") -> None:
@@ -247,6 +294,100 @@ class DetectionBatchWriter:
                 rows,
             )
             self._session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Coded-marker (ArUco) keypoint writer -- design phase 1a
+# ---------------------------------------------------------------------------
+
+_MARKER_TRACK_ID = 0       # one prop = one track (aruco-prop-tracking-design.md)
+_MARKER_REGION_TYPE = "markers"
+
+
+class MarkerKeypointWriter:
+    """Accumulates coded-marker corner rows and flushes to DB in batches.
+
+    Fixed-slot layout per marker-mocap-design.md §4.1: one row per (frame,
+    camera), track_id=0, region_type='markers'. The blob is
+    float32[4 * len(marker_ids), 3] (x, y, confidence), ordered
+    list-position-major by *marker_ids* with corners 0-3 within each
+    marker (real ``cv2.aruco`` corner order -- see
+    ``fiducial_markers.ArucoDetector``'s own docstring). A marker not seen
+    in a given frame keeps NaN x/y and confidence 0 at its slot -- exactly
+    an occluded keypoint, so the same NaN-handling code paths used for pose
+    keypoints apply unchanged.
+    """
+
+    def __init__(
+        self,
+        session: sqlite3.Connection,
+        detection_run_id: str,
+        shot_video_id: str,
+        marker_ids: list[str],
+    ) -> None:
+        self._session = session
+        self._run_id = detection_run_id
+        self._svid = shot_video_id
+        self._marker_ids = list(marker_ids)
+        self._slot_of = {mid: i for i, mid in enumerate(self._marker_ids)}
+        self._rows: list[tuple] = []
+
+    def add_frame(self, video_frame: int, detections: list) -> None:
+        """*detections* is the ``ArucoDetector.detect()`` result for this frame."""
+        n = len(self._marker_ids)
+        kp = np.full((4 * n, 3), np.nan, dtype=np.float32)
+        kp[:, 2] = 0.0  # confidence -- overwritten to 1.0 per corner actually seen
+        for det in detections:
+            slot = self._slot_of.get(det.marker_id)
+            if slot is None:
+                continue  # a marker outside this prop's configured id list -- ignore
+            for corner in det.corners:
+                idx = slot * 4 + corner.corner_index
+                kp[idx, 0] = corner.px
+                kp[idx, 1] = corner.py
+                kp[idx, 2] = 1.0
+        self._rows.append((
+            self._run_id, self._svid, video_frame, _MARKER_TRACK_ID, _MARKER_REGION_TYPE,
+            kp.tobytes(), None,
+        ))
+        if len(self._rows) >= _BATCH_SIZE:
+            self._flush()
+
+    def _flush(self) -> None:
+        if self._rows:
+            self._session.executemany(
+                "INSERT OR REPLACE INTO detection_keypoints "
+                "(detection_run_id, shot_video_id, video_frame, track_id, region_type, "
+                " keypoints, noise_scale) "
+                "VALUES (?,?,?,?,?,?,?)",
+                self._rows,
+            )
+            self._rows.clear()
+            self._session.commit()
+
+    def finalise(self) -> None:
+        """Flush remaining rows."""
+        self._flush()
+
+
+def read_marker_keypoints_for_run(
+    session: sqlite3.Connection,
+    detection_run_id: str,
+    shot_video_id: str,
+) -> dict[int, np.ndarray]:
+    """Return {video_frame: float32[4*n_markers, 3]} for a coded-marker run."""
+    rows = session.execute(
+        "SELECT video_frame, keypoints FROM detection_keypoints "
+        "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? AND region_type=? "
+        "ORDER BY video_frame",
+        (detection_run_id, shot_video_id, _MARKER_TRACK_ID, _MARKER_REGION_TYPE),
+    ).fetchall()
+    result = {}
+    for row in rows:
+        kp_bytes = bytes(row["keypoints"])
+        n = len(kp_bytes) // (3 * 4)
+        result[row["video_frame"]] = np.frombuffer(kp_bytes, dtype=np.float32).reshape(n, 3)
+    return result
 
 
 def read_detections_for_run(

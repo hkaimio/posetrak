@@ -1,5 +1,22 @@
 # Marker-based mocap — status
 
+- **2026-08-30** — Second review round: UC1 phasing restructured so
+  anonymous/reflective dots on props are pulled into the first iteration
+  alongside ArUco, instead of waiting for UC2 (Harri: real props already
+  combine ArUco + reflective dots, and a dots-only prop is also a valid
+  configuration). Design §7 now runs seven phases — ArUco prop (1),
+  dot-only prop (2), person + prop together (3), multiple mixed props +
+  person — UC1 complete (4) — before UC2's identified (5) and anonymous
+  (6) person markers, then moving camera (7). Split driven by labeling
+  difficulty, not marker type: rigid-prop dot labeling is a single-body
+  problem (algorithms §3.4 tier 1), so it doesn't need the cross-subject
+  `MarkerAssociator` machinery UC2 requires until multiple marked bodies
+  can compete in phase 4/6. Added the previously-missing cold-start
+  procedure for a body with no coded anchor: unlabeled rigid-template
+  registration by pairwise-distance RANSAC (algorithms §4.1). UC2 (person
+  markers) is confirmed as the next project after UC1, not interleaved
+  with it.
+
 - **2026-08-19** — First review round: Harri's inline comments on the
   design addressed. Main outcome: new design §5.2 splits session-scoped
   marker attachments out of the skeleton into a composed *marker

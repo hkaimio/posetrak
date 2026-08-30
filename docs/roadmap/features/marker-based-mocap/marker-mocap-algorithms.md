@@ -170,15 +170,16 @@ Assignment is gated global cost minimization:
   coded-marker decode on the same physical body when readable (hard
   override);
 - solve with Hungarian (mutual exclusion — the one genuinely new piece of
-  machinery vs. today's per-observation gating). The assignment is solved
-  **once per frame across all subjects in the run** — every person's and
-  prop's predicted markers form one joint problem, not one per subject.
-  This is what makes mutual exclusion meaningful in the scenes that
-  motivate this feature: a dot near two performers' wrists, or a hand
-  closing on a dotted prop, is *cross-subject* ambiguity, invisible to any
-  per-subject assignment. `MultiPersonTracker`'s frame loop already has all
-  subjects' predictions in hand at the right moment (same data the contact
-  gate uses);
+  machinery vs. today's per-observation gating). The candidate/marker pool
+  the solver runs over is a scope parameter (§3.4): at its widest, the
+  assignment is solved **once per frame across all subjects in the run** —
+  every person's and prop's predicted markers form one joint problem, not
+  one per subject. This is what makes mutual exclusion meaningful in the
+  scenes that motivate this feature: a dot near two performers' wrists, or
+  a hand closing on a dotted prop, is *cross-subject* ambiguity, invisible
+  to any per-subject assignment. `MultiPersonTracker`'s frame loop already
+  has all subjects' predictions in hand at the right moment (same data the
+  contact gate uses);
 - **ambiguity policy — drop, don't guess**: if the best and second-best
   assignments for a detection are within a margin (both gates pass with
   comparable cost — wrist-grab territory), discard the detection for this
@@ -193,10 +194,43 @@ for this frame's update; the labels also write the finalized sequence
 
 **Bootstrapping**: no chicken-and-egg — the markerless pipeline initializes
 and tracks on its own; markers join opportunistically once assignments are
-confident. For props (phase 1–2), this whole section is bypassed: coded ids
-label detections at the detector, and dot-only props get their dots
-labeled by the body's own rigid geometry once the coded anchors have posed
-the body (single-body Procrustes gate, a two-line special case of 3.3).
+confident. For a body carrying coded markers (design phase 1), this whole
+section is bypassed at the detector: ids label detections directly, and
+any dots sharing that body get their labels from the body's own rigid
+geometry once the coded anchors have posed it — no assignment machinery at
+all (§3.4 tier 1). For a *dot-only* body, steady-state relabeling still
+needs no more than that same rigid-geometry lookup, but there is no coded
+anchor to pose the body first — cold start is a genuine unlabeled
+point-set registration problem, covered in §4.
+
+### 3.4 Scope: single-body vs. cross-subject
+
+`MarkerAssociator` is written once with a **scope parameter**, not rebuilt
+when person markers arrive later. The cost function, gating, and Hungarian
+solver above are identical at both scopes — only what competes in one
+assignment problem changes:
+
+- **Single-body scope** (design phase 2: a standalone dot-only prop): the
+  candidate pool and the marker pool are both just that one body's own
+  points. There is exactly one subject, so mutual exclusion is present in
+  the machinery but never actually contested — no cross-subject evidence
+  terms are needed, and the K-frame confirmation window mostly guards
+  against a mis-registered restart after occlusion, not cross-subject
+  mix-ups. This tier is also what a mixed coded+dot body uses at
+  steady state (previous paragraph) even though it needs no cold start.
+- **Cross-subject scope** (design phase 4 once multiple dot-only/mixed
+  props share a scene; design phase 6 once persons carry dots too): the
+  assignment is solved once per frame **across every tracked subject in
+  the run** — every person's and prop's predicted markers form one joint
+  problem, per the Hungarian bullet above. This is what makes mutual
+  exclusion meaningful in the scenes that motivate this feature: a dot near
+  two performers' wrists, or a hand closing on a dotted prop, is
+  *cross-subject* ambiguity, invisible to any single-body assignment.
+
+Implement single-body scope first (phase 2) as the general solver
+restricted to a candidate/marker pool of size one body; widening the pool
+to "all subjects `MultiPersonTracker` is stepping this frame" for phase 4/6
+should be a call-site change, not a rewrite of the assignment logic itself.
 
 **Placement**: `MarkerAssociator` is a C++ component owned by the per-frame
 loop (`step_person_context()` level), holding tracklet state per camera. It
@@ -212,10 +246,54 @@ UKF's predict/update entry point.
 
 Person initialization is triangulation + damped-least-squares IK. For a
 root-only prop skeleton the analytic solution is better conditioned and
-cannot fall into IK local minima:
+cannot fall into IK local minima. The fit itself (§4.2) needs, per marker,
+one triangulated world point with a known correspondence to a body-local
+template point; §4.1 covers how that correspondence is obtained, which
+differs for coded and dot-only bodies.
+
+### 4.1 Establishing correspondence
+
+- **Coded or mixed bodies** (design phase 1, and steady state for any body
+  with a coded anchor): decoded marker ids give per-marker-id triangulated
+  points directly — proceed to §4.2.
+- **Dot-only bodies, cold start** (design phase 2): the multi-view
+  correspondence step (§3.2) yields only *unlabeled* 3-D candidates, so the
+  body-local template point each one corresponds to is unknown. This is a
+  rigid point-set registration problem without correspondence, solved by
+  pairwise-distance consistency — the same technique commercial optical
+  mocap uses to identify a rigid body from a fresh marker cloud:
+  1. From the body's marker template, precompute all pairwise inter-marker
+     distances.
+  2. Pick a candidate triple from the frame's unlabeled 3-D points whose
+     three pairwise distances match a template triple within tolerance
+     (calibration + triangulation error); this fixes a candidate
+     correspondence for those three points and, via Kabsch on the triple, a
+     candidate rigid transform.
+  3. Verify by transforming the remaining template points into world space
+     under that transform and counting how many unlabeled candidates lie
+     within tolerance of one (inlier count) — RANSAC over triple choices,
+     keep the transform with the most inliers.
+  4. A template with internal symmetry can yield multiple equally-good
+     correspondences at this step; if so, treat it exactly like the
+     collinear case below — the ambiguous relabeling maps to an
+     unobservable DOF (or a discrete finite set of them) that must be
+     locked or accepted as ambiguous, not resolved by guessing. Distinct,
+     asymmetric marker constellations avoid this entirely and are the
+     recommended way to build dot-only props (mirrors the "two symmetric
+     bodies in one capture" warning in design §6.2).
+  5. Once inliers are identified, they *are* the per-marker-id
+     triangulated points §4.2 expects; run the fit below. Re-run this
+     registration (not just re-triangulation) after any tracking loss,
+     since a fresh cloud again has no correspondence.
+
+  A short window of frames (rather than a single frame) improves inlier
+  robustness against noise and partial occlusion at essentially no extra
+  cost, since this only runs at init/re-acquisition, not every frame.
+
+### 4.2 Closed-form fit
 
 1. Triangulate all markers with ≥ `min_cameras_for_init` views (existing
-   `Triangulator`).
+   `Triangulator`), using the correspondence from §4.1.
 2. Require ≥ 3 triangulated points, non-collinear (smallest singular value
    of the centered point matrix above a threshold; for deliberately
    collinear layouts — a two-band staff — fall to the reduced solution
@@ -234,7 +312,7 @@ cannot fall into IK local minima:
 Implementation: `Tracker::initialize()` branches to this path when the
 skeleton has no non-root active joints; no new public API needed.
 Re-initialization after loss constructs a new Tracker (existing
-constraint).
+constraint) and, for dot-only bodies, re-runs §4.1's registration first.
 
 ---
 
@@ -342,10 +420,16 @@ moved, not the camera.
 
 - **Synthetic first, per phase**: the existing synthetic-sequence test
   pattern extends naturally — generate a rigid-body trajectory, project
-  marker corners with noise/dropout, assert pose RMSE (phase 1);
-  synthetic anonymous dots with occlusion/swap scenarios asserting zero
-  mislabels and bounded drop rate (phase 4); synthetic camera bump
-  asserting detection latency and re-solve accuracy (phase 5).
+  marker corners with noise/dropout, assert pose RMSE (phase 1); synthetic
+  dot-only prop with an unlabeled marker cloud, asserting correct §4.1
+  registration at cold start and correct relabeling through a simulated
+  occlusion (phase 2); synthetic scene with **two** independent dot-only
+  (or mixed) props whose point clouds overlap in the shared volume,
+  asserting zero cross-prop mislabels — the case that motivates promoting
+  §3.4's assignment to cross-subject scope (phase 4); synthetic anonymous
+  dots on an articulated person with occlusion/swap scenarios asserting
+  zero mislabels and bounded drop rate (phase 6); synthetic camera bump
+  asserting detection latency and re-solve accuracy (phase 7).
 - **Ground-truth props**: the calibration box itself is the first test prop
   — its geometry is exactly known, and `scene_marker_bodies` gives a
   static-pose ground truth (track the box while stationary → pose error is

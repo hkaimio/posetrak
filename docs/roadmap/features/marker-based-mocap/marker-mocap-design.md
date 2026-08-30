@@ -19,7 +19,19 @@ they conflict, supersedes:
   §3/§9/§10 — the fiducial detection framework, marker body YAML format, and
   `marker_body_definitions`/`scene_marker_bodies` storage. This design is the
   "future moving-marker feature" those sections repeatedly deferred to; it
-  consumes that infrastructure as-is rather than reworking it.
+  consumes that infrastructure as-is rather than reworking it, **except**
+  one runtime assumption in §10's "Reflective dots" note, which this design
+  supersedes: that doc reasons dots can only be tracked "once *some* marker
+  on the same body ... has already solved a pose for it" (i.e. a coded
+  anchor is always present). That held for the calibration box that
+  motivated it, but not for a *dot-only* prop (phase 2, §7) — the
+  definition-format-level requirement to fix the body-local frame at
+  *characterization* time (§6.1 item 1: at least one coded marker or a
+  manual axis definition) is unaffected and still applies once, offline,
+  but per-frame *runtime* correspondence for an all-dot body has no coded
+  anchor to lean on and needs the unlabeled rigid-template registration in
+  [marker-mocap-algorithms.md](marker-mocap-algorithms.md#41-establishing-correspondence)
+  §4.1 instead.
 
 Algorithm-level detail (detection, association, initialization, calibration,
 drift detection) lives in [marker-mocap-algorithms.md](marker-mocap-algorithms.md).
@@ -47,7 +59,7 @@ Requirements:
   like person tracking output.
 - **R1.4** Physically unobservable DOFs (roll of a rotationally symmetric
   staff) must not be chased by the filter.
-- **R1.5** (Phase 2+) A prop held by a tracked person can be coupled to the
+- **R1.5** (Phase 3+) A prop held by a tracked person can be coupled to the
   person's solution so the prop's precise markers also improve hand/arm pose
   ("use its relative keypoint locations to also optimize hand pose").
 
@@ -172,8 +184,10 @@ filter:
                        └──────────────┬───────────────────────────────┘
                                       ▼
         ┌──────────────────────── per frame ─────────────────────────┐
-        │ [anonymous markers only] MarkerAssociator (NEW, phase 4):  │
-        │   tracklets + multi-view + prediction-gated assignment     │
+        │ [anonymous markers only] MarkerAssociator (NEW, phase 2,   │
+        │   single-body scope; generalised to full cross-subject     │
+        │   scope in phase 4): tracklets + multi-view + prediction-  │
+        │   gated assignment                                         │
         │                                                            │
         │ UKF predict → update            (existing, unchanged)      │
         │ MultiPersonTracker contact anchors: person ↔ prop (reused) │
@@ -417,9 +431,9 @@ per-session *marker attachment set* document.**
   granularity.
 
 *Alternative (status quo)*: keep everything in one skeleton object and rely
-on `parent_id` discipline. Workable for phases 1–2 (props only, which never
+on `parent_id` discipline. Workable for phases 1–4 (props only, which never
 hit the problem), and acceptable as long as no person marker data exists —
-so the attachment-set mechanism should land with phase 3, before real
+so the attachment-set mechanism should land with phase 5, before real
 person-marker sessions are recorded.
 
 ### 5.3 Prop skeletons are generated, not authored
@@ -459,15 +473,18 @@ Option 1 first; revisit if the regularization proves fiddly.
   non-collinear markers, then closed-form rigid fit (Kabsch/Umeyama, scale
   fixed) of body-local → world; fall back to IK path otherwise. See
   algorithms doc §4.
-- **Association hook (phase 4 only)**: anonymous-dot labeling needs the
-  predicted state each frame. New component `MarkerAssociator` sits in the
-  per-frame loop between observation fetch and `track_frame()`; it consumes
-  the tracker's predicted marker projections and the frame's anonymous
-  candidates, and emits labeled `Observation`s (or drops them). It reuses
-  `Tracker::marker_projection_std()` for gating covariance. The UKF itself
-  is untouched. See algorithms doc §3 for the three-layer design and why
-  assignment stays *outside* the UKF update (the brief's "per-marker
-  prediction vs. combine into update" question).
+- **Association hook (phase 2+, anonymous markers only)**: anonymous-dot
+  labeling needs the predicted state each frame. New component
+  `MarkerAssociator` sits in the per-frame loop between observation fetch
+  and `track_frame()`; it consumes the tracker's predicted marker
+  projections and the frame's anonymous candidates, and emits labeled
+  `Observation`s (or drops them). It reuses `Tracker::marker_projection_std()`
+  for gating covariance. The UKF itself is untouched. Phase 2 needs only its
+  single-body scope (one marked rigid body, no cross-subject term); phase 4
+  generalises it to the full joint-Hungarian-across-all-subjects form. See
+  algorithms doc §3 for the three-layer design and why assignment stays
+  *outside* the UKF update (the brief's "per-marker prediction vs. combine
+  into update" question).
 - **Person↔prop coupling (R1.5)**: a prop is another subject in
   `MultiPersonTracker`. The existing Stage-2 machinery — contact gating +
   cross-subject PAIR_DIFF anchors with `anchor_position`, rotation of
@@ -475,10 +492,11 @@ Option 1 first; revisit if the regularization proves fiddly.
   verbatim to "person hand marker ↔ prop grip marker". Grip markers (e.g. a
   point on the tsuka) are declared in the prop's marker body definition as
   dots even if nothing physical is there; they exist to give the gate an
-  anchor point. Later (phase 5+ of this feature), a spliced single skeleton
-  (`prop_root` with `parent: right_hand`, per the ArUco analysis phase 3)
-  becomes possible for rigidly-attached props, but the anchor mechanism is
-  the right default for hand-held props whose grip changes.
+  anchor point. Later (beyond the phasing in §7 of this feature), a spliced
+  single skeleton (`prop_root` with `parent: right_hand`, per the ArUco
+  analysis phase 3) becomes possible for rigidly-attached props, but the
+  anchor mechanism is the right default for hand-held props whose grip
+  changes.
 
 ---
 
@@ -530,23 +548,36 @@ extended from calibration-rig scope to general props.
 
 **Uncoded markers, and multiple dotted subjects in one scene** (review
 question, Harri 2026-08-19): a dot detection carries no identity, so the
-steps above describe the coded phase-1 case, and dots gain identity at two
-levels (details in algorithms doc §3):
+steps above describe the coded phase-1 case, and dots gain identity at
+three levels of the same mechanism, in increasing order of what they need
+(details in algorithms doc §3):
 
 - *Mixed bodies* (coded markers + dots on the same rigid body — the
-  calibration box pattern): the coded markers pose the body each frame, the
-  pose predicts every dot's position, and dots are labeled by that rigid
-  geometry alone. No association stack needed; this works in phase 1–2 and
-  is the recommended way to build props.
-- *Dot-only bodies and dotted persons* (phase 4): labeling runs through the
-  association stage, and its assignment is solved **globally across every
-  tracked subject in the run** — all persons' and props' predicted markers
-  compete in one mutual-exclusion assignment per frame. A dot that two
-  subjects could claim with comparable cost (a hand-on-prop moment, two
-  performers close together) is dropped for that frame, not guessed; the
-  subject's filter coasts. Identity re-attaches through tracklet
-  continuity, color class, or any coded marker on the same body once the
-  ambiguity passes.
+  calibration box pattern, and Harri's actual existing props): the coded
+  markers pose the body each frame, the pose predicts every dot's position,
+  and dots are labeled by that rigid geometry alone. No association stack
+  needed at all — this works throughout phases 1–4 regardless of how many
+  other subjects are in the scene, since each such body's dots are labeled
+  purely from its own already-posed geometry, never in competition with
+  anyone else's. This is the recommended way to build props whenever a
+  coded anchor is acceptable.
+- *Dot-only bodies, standalone* (phase 2): with no coded anchor to pose the
+  body first, bootstrap is a genuine unlabeled point-set registration
+  problem — match the unordered triangulated 3-D points against the known
+  rigid template by pairwise-distance consistency (algorithms doc §4).
+  Once posed, steady-state relabeling is nearest-predicted-position per
+  marker, same as the mixed-body case above — still no cross-subject
+  mutual exclusion needed with only one marked body in frame.
+- *Multiple dot-only bodies, or dotted persons, competing in one scene*
+  (phase 4 for props; phase 6 once persons carry dots too): labeling runs
+  through the full association stage, and its assignment is solved
+  **globally across every tracked subject in the run** — all persons' and
+  props' predicted markers compete in one mutual-exclusion assignment per
+  frame. A dot that two subjects could claim with comparable cost (a
+  hand-on-prop moment, two performers close together) is dropped for that
+  frame, not guessed; the subject's filter coasts. Identity re-attaches
+  through tracklet continuity, color class, or any coded marker on the same
+  body once the ambiguity passes.
 - Two dot-only bodies with near-identical, symmetric layouts are
   inherently indistinguishable at bootstrap. The characterization tool
   should warn when two bodies registered in the same capture have
@@ -624,29 +655,54 @@ Phased shallow-to-deep:
 
 ## 7. Phasing
 
+UC1 (props) and UC2 (person markers) are staged as two successive
+first-iteration targets rather than interleaved phase-by-phase: **UC1 is the
+first iteration in full** — real captures already combine ArUco anchors with
+reflective dots on the same prop, and a dots-only prop is an equally valid
+configuration, so both marker types belong in UC1 rather than treating dots
+as a UC2-only concern. UC2 (markers *on people*) is explicitly the next
+project after UC1 is working end to end, not a phase inside it.
+
+The phase split within UC1 is driven by labeling difficulty, not by marker
+type: a rigid prop's anonymous dots keep constant pairwise distances, so
+identifying and tracking them is a *single-body* problem (cold-start
+template registration + prediction-gated relabeling scoped to that one
+body's own markers, per [marker-mocap-algorithms.md](marker-mocap-algorithms.md#3-anonymous-marker-association-labeling)
+§3) — no cross-subject mutual exclusion is needed until *two or more*
+marked bodies (props and/or people) can plausibly be confused for each
+other in the same volume. That only happens once multiple props are tracked
+together, which is deliberately the last UC1 phase rather than the first.
+
 | Phase | Scope | Delivers | Main new pieces |
 |---|---|---|---|
-| **1** | Rigid ArUco prop, standalone | UC1 core (R1.1–R1.4) | `detector_type`/`config_json`; ArUco detection runs writing `detection_keypoints`; `capture_objects`; skeleton generator; manifest table; multi-source `SessionReader` (single track case); rigid init; ObjectPanel review; finalise for objects |
-| **2** | Person + prop in one run | R1.5 | Track binding for multiple subjects incl. objects in `MultiPersonTracker`; grip anchor points; contact gating tuning for prop case |
-| **3** | Identified body markers | UC2 for coded/colored markers (no labeling problem) | Marker sequence per person; skeleton `track`/`landmark` markers; marker attachment sets (§5.2) + offset-calibration pass; colored-band/glove detector |
-| **4** | Anonymous dots | UC2 fully (R2.3) | Blob detector; per-camera tracklets; multi-view correspondence; `MarkerAssociator` gated assignment; labeled-sequence writer |
-| **5** | Moving camera | UC3 | Drift monitor + UI alert; single-camera re-solve action; `extrinsic_calibration_windows` |
+| **1** | Rigid ArUco prop, standalone | UC1 core (R1.1–R1.4), coded markers | `detector_type`/`config_json`; ArUco detection runs writing `detection_keypoints`; `capture_objects`; skeleton generator; manifest table; multi-source `SessionReader` (single track case); rigid init; ObjectPanel review; finalise for objects. Zero labeling ambiguity — validates the object/track plumbing before any unlabeled-detection problem is layered on it. |
+| **2** | Rigid dot-only (or ArUco+dot) prop, standalone | UC1 core, anonymous markers | Dot detector (algorithms §1.2); multi-view correspondence (algorithms §3.2); single-body cold-start rigid-template registration (new — algorithms §4); scoped single-body prediction-gated relabeling per frame (algorithms §3.3, restricted to one body, no cross-subject term). Proves the anonymous-marker pipeline end to end in the easiest labeling context: exactly one marked rigid body in frame. |
+| **3** | Markerless person + one prop (ArUco or dot) together | R1.5 | Track binding for multiple subjects incl. objects in `MultiPersonTracker`; grip anchor points; contact gating tuning for the prop case. The person contributes no marker detections, so prop-dot labeling stays single-body-scoped even with a person present — the only new cross-subject question is the contact/grip anchor coupling, reusing the existing Stage-2 mechanism. |
+| **4** | Multiple props (mixed ArUco/dot-only) + person interacting — **UC1 complete** | Full R1.1–R1.5 | Generalise the single-body assignment from phase 2 to the full joint-Hungarian-across-all-subjects form (algorithms §3.3) — this is the first point where two dotted props' point clouds can actually cross-contaminate, so it is the first phase that needs mutual exclusion at all. |
+| **5** | Identified body markers | UC2 for coded/colored markers (no labeling problem) | Marker sequence per person; skeleton `track`/`landmark` markers; marker attachment sets (§5.2) + offset-calibration pass; colored-band/glove detector |
+| **6** | Anonymous dots on people | UC2 fully (R2.3) | Full cross-subject `MarkerAssociator` scope extended to articulated bodies: per-person *and* cross-person mutual exclusion, occlusion/reacquisition on a moving skeleton, tentative-confirmation window under real pose ambiguity (wrist grabs, limb crossings) — the genuinely hard labeling case, now isolated from the much simpler rigid-prop case solved in phases 2 and 4 |
+| **7** | Moving camera | UC3 | Drift monitor + UI alert; single-camera re-solve action; `extrinsic_calibration_windows` |
 
 Phase ordering rationale: props first is unanimous across the brief and both
 prior analyses — self-contained, no labeling problem, exercises the
 multi-source loading and the extra-subject orchestrator path that every
-later phase needs. Phase 3 before 4 because coded/colored markers deliver
-UC2 value without the association stack, and the offset-calibration
-machinery it builds is required by phase 4 anyway. Phase 5 is independent
-of 2–4 and can be reordered if a real moved-camera incident makes it
-urgent; its monitor half (6.4 step 1) is cheap enough to pull forward.
+later phase needs. Phase 1 before phase 2 so the object/track/finalise
+plumbing is validated against the zero-ambiguity coded case before an
+unlabeled-detection problem is layered on it; phase 2's mechanisms
+(detector, triangulated correspondence, prediction-gated assignment) are
+then reused, not rebuilt, when phase 6 extends them to people. Phase 5
+before 6 because coded/colored markers deliver UC2 value without the
+association stack, and the offset-calibration machinery it builds is
+required by phase 6 anyway. Phase 7 is independent of 3–6 and can be
+reordered if a real moved-camera incident makes it urgent; its monitor half
+(6.4 step 1) is cheap enough to pull forward.
 
 ---
 
 ## 8. Open questions
 
 1. **Reflective vs. colored dots** — hardware shoot-out (ring lights,
-   locked WB, marker sizes vs. FOV mode) remains empirical; phase 4 should
+   locked WB, marker sizes vs. FOV mode) remains empirical; phase 2 should
    start with whichever wins a bench test. Tracked in
    marker-detection-analysis.md's open questions; nothing in this design
    depends on the outcome (both are anonymous point detections).
@@ -658,7 +714,7 @@ urgent; its monitor half (6.4 step 1) is cheap enough to pull forward.
    reduced-DOF root. Decide during phase 1 implementation against a real
    symmetric prop.
 4. **2-D-only marker observations** — is a marker seen in one camera
-   (labeled via tracklet continuity) worth using in v1 of phase 4, or does
+   (labeled via tracklet continuity) worth using in v1 of phase 2/4, or does
    requiring multi-view labeling keep assignment materially simpler?
    Default: require multi-view for *labeling*, allow single-view for
    *continued* observation of an already-labeled tracklet.
@@ -667,12 +723,12 @@ urgent; its monitor half (6.4 step 1) is cheap enough to pull forward.
    combined hierarchy). Defer to phase 1 export work; ask the consuming
    workflow.
 6. **Trial splitting UX for moved cameras** — automatic split proposal vs.
-   manual; interacts with the trial data model. Decide in phase 5.
+   manual; interacts with the trial data model. Decide in phase 7.
 7. **Marker attachment set details** (§5.2) — storage scope (session-only
    vs. registry with copy-to-session like other documents), whether the
    composition step materializes the composed skeleton as a `skeletons` row
    (best provenance, more rows) or composes in the loader at run time
    (fewer artifacts, provenance = pair of ids on the run), and whether an
    attachment set should validate against a structure id or stay purely
-   joint-name anchored. Decide at phase 3 start; the recommendation in §5.2
+   joint-name anchored. Decide at phase 5 start; the recommendation in §5.2
    only fixes the *split*, not these mechanics.

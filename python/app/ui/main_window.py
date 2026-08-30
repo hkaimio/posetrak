@@ -125,6 +125,7 @@ class MainWindow(QMainWindow):
         self._tree.segmentation_run_open_requested.connect(self._open_segmentation_run)
         self._tree.detection_run_selected.connect(self._show_detection_run)
         self._tree.person_track_selected.connect(self._show_person_track)
+        self._tree.object_track_selected.connect(self._show_object_track)
         self._tree.tracking_run_selected.connect(self._show_tracking_run)
         self._tree.selection_changed.connect(self._save_tree_selection)
         splitter.addWidget(self._tree)
@@ -440,6 +441,11 @@ class MainWindow(QMainWindow):
     def _show_person_track(self, sequence_id: str) -> None:
         from app.ui.content_panels import PersonPanel
         panel = PersonPanel(self._session_conn, sequence_id, self._session_path)
+        self._swap_content(panel)
+
+    def _show_object_track(self, sequence_id: str) -> None:
+        from app.ui.content_panels import ObjectPanel
+        panel = ObjectPanel(self._session_conn, sequence_id, self._session_path)
         self._swap_content(panel)
 
     def _show_tracking_run(self, run_id: str) -> None:

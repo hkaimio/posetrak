@@ -318,6 +318,19 @@ CREATE TABLE IF NOT EXISTS pose_observation_edits (
 CREATE UNIQUE INDEX IF NOT EXISTS pose_observation_edits_unique
     ON pose_observation_edits (sequence_id, camera_instance_id, video_frame);
 
+-- Keypoint-slot manifest (marker-based-mocap design doc §4.3; the
+-- extensibility seam sketched in docs/data-model-and-storage.md §3). A
+-- sequence with no rows here keeps today's implied-by-pose_model layout;
+-- a sequence with rows (marker-based-mocap object sequences, starting
+-- phase 1d) declares its own per-slot name/source, e.g. "hilt:c0" / "aruco".
+CREATE TABLE IF NOT EXISTS pose_sequence_keypoints (
+    sequence_id   TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+    keypoint_idx  INTEGER NOT NULL,
+    name          TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    PRIMARY KEY (sequence_id, keypoint_idx)
+);
+
 -- A single tracker execution record
 -- tracker_config_id  -- references registry: tracker_configs(id)
 -- skeleton_id        -- references registry: skeletons(id)

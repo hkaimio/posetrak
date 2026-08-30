@@ -6582,6 +6582,249 @@ class _RunInfoPane(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# ObjectPanel / ObjectCropGridWidget — marker-based-mocap design doc §7.1
+# sub-phase 1e (ObjectPanel review). Object analog of PersonPanel/
+# PersonCropGridWidget below, deliberately far simpler: no stitching, no
+# hand regions, no segmentation overlay, no crop caching (marker detection
+# never writes frame_cache_entries) -- full frames are decoded on demand
+# via FrameReader and shown through the *same* _CropCell/_ImageCanvas
+# primitives, so the keypoint-edit mode (drag a corner, write via
+# pose_observation_edits) is the same mechanism, not a second
+# implementation of it (see status.md's 2026-08-30 1d/1e ordering note).
+# ---------------------------------------------------------------------------
+
+
+class ObjectCropGridWidget(QWidget):
+    """Per-camera marker-corner review + correction for one finalised
+    object sequence."""
+
+    def __init__(self, conn: sqlite3.Connection, sequence_id: str, parent=None) -> None:
+        super().__init__(parent)
+        self._conn = conn
+        self._sequence_id = sequence_id
+        self._cells: list[_CropCell] = []
+        self._readers: list = []
+        self._cameras: list[dict] = []
+        self._obs_kp: dict[str, dict[int, "object"]] = {}
+        self._current_frame_by_cam: dict[str, int | None] = {}
+        self._sync_table: SyncTable | None = None
+        self._time_start_s = 0.0
+        self._time_end_s = 0.0
+        self._build()
+
+    def _build(self) -> None:
+        from app.setup.db_context import SyncPoint, SyncTable
+
+        seq = self._conn.execute(
+            "SELECT shot_id, sync_config_id, time_start_s, time_end_s "
+            "FROM pose_observation_sequences WHERE id = ?",
+            (self._sequence_id,),
+        ).fetchone()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        if seq is None:
+            root.addWidget(QLabel("Sequence not found."))
+            return
+        self._shot_id = seq["shot_id"]
+        self._time_start_s = seq["time_start_s"]
+        self._time_end_s = seq["time_end_s"]
+
+        sp_rows = self._conn.execute(
+            "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, sv.actual_fps "
+            "FROM sync_points sp JOIN capture_videos sv ON sv.id = sp.shot_video_id "
+            "WHERE sp.sync_config_id = ?",
+            (seq["sync_config_id"],),
+        ).fetchall()
+        points = [
+            SyncPoint(camera_instance_id="", shot_video_id=r["shot_video_id"],
+                      video_frame=r["video_frame"], timestamp_s=r["timestamp_s"])
+            for r in sp_rows
+        ]
+        fps_by_video = {r["shot_video_id"]: float(r["actual_fps"] or 30.0) for r in sp_rows}
+        self._sync_table = SyncTable(points, fps_by_video)
+
+        cam_rows = self._conn.execute(
+            "SELECT DISTINCT po.camera_instance_id, cv.id AS shot_video_id, cv.file_path, "
+            "       COALESCE(ci.label, cv.camera_instance_id) AS label "
+            "FROM pose_observations po "
+            "JOIN capture_videos cv ON cv.camera_instance_id = po.camera_instance_id "
+            "    AND cv.shot_id = ? "
+            "LEFT JOIN camera_instances ci ON ci.id = po.camera_instance_id "
+            "WHERE po.sequence_id = ?",
+            (self._shot_id, self._sequence_id),
+        ).fetchall()
+        self._cameras = [dict(r) for r in cam_rows]
+
+        if not self._cameras:
+            root.addWidget(QLabel("No camera observations for this sequence."))
+            return
+
+        from app.setup.video_reader import FrameReader
+
+        toolbar = QHBoxLayout()
+        self._edit_check = QCheckBox("Edit mode")
+        self._edit_check.setToolTip(
+            "Drag a corner to correct it -- writes a pose_observation_edits "
+            "row, same mechanism PersonPanel's crop grid already uses."
+        )
+        self._edit_check.toggled.connect(self._on_edit_toggled)
+        toolbar.addWidget(self._edit_check)
+        toolbar.addStretch()
+        root.addLayout(toolbar)
+
+        grid = QHBoxLayout()
+        for cam in self._cameras:
+            cell = _CropCell(cam["label"])
+            cell._canvas.keypoint_moved.connect(
+                lambda idx, x, y, cid=cam["camera_instance_id"]: self._on_kp_moved(cid, idx, x, y)
+            )
+            self._cells.append(cell)
+            grid.addWidget(cell, stretch=1)
+
+            reader = FrameReader(cam["file_path"], self)
+            reader.frame_ready.connect(
+                lambda idx, frame, cid=cam["camera_instance_id"]: self._on_frame_ready(cid, idx, frame)
+            )
+            reader.start()
+            self._readers.append(reader)
+        root.addLayout(grid, stretch=1)
+
+        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setRange(0, 1000)
+        self._slider.valueChanged.connect(self._on_slider_changed)
+        root.addWidget(self._slider)
+
+        self._time_label = QLabel("")
+        root.addWidget(self._time_label)
+
+        self._load_observations()
+        self._on_slider_changed(0)
+
+    def _load_observations(self) -> None:
+        from app.pose.db_cache import read_observations_with_edits
+        for cam in self._cameras:
+            cid = cam["camera_instance_id"]
+            self._obs_kp[cid] = read_observations_with_edits(
+                self._conn, self._sequence_id, cid, primary_source="markers"
+            )
+
+    def _current_time(self) -> float:
+        frac = self._slider.value() / max(self._slider.maximum(), 1)
+        return self._time_start_s + frac * (self._time_end_s - self._time_start_s)
+
+    def _cell_index(self, cam_id: str) -> int:
+        return next(i for i, c in enumerate(self._cameras) if c["camera_instance_id"] == cam_id)
+
+    def _on_slider_changed(self, _value: int) -> None:
+        t = self._current_time()
+        self._time_label.setText(f"{t:.2f}s")
+        for cam, cell, reader in zip(self._cameras, self._cells, self._readers):
+            cid = cam["camera_instance_id"]
+            frame_idx = self._sync_table.lookup(t, cam["shot_video_id"])
+            self._current_frame_by_cam[cid] = frame_idx
+            if frame_idx is None:
+                cell.show_empty()
+                continue
+            reader.request(frame_idx)
+            kp = self._obs_kp.get(cid, {}).get(frame_idx)
+            cell.set_overlay(kp, None, [], None, True, False)
+
+    def _on_frame_ready(self, cam_id: str, frame_idx: int, frame) -> None:
+        import cv2
+        # Coalesced background reads can arrive after the slider moved on.
+        if self._current_frame_by_cam.get(cam_id) != frame_idx:
+            return
+        cell = self._cells[self._cell_index(cam_id)]
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w = rgb.shape[:2]
+        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+        cell.show_image(QPixmap.fromImage(qimg), 0.0, 0.0, 1.0)
+
+    def _on_edit_toggled(self, enabled: bool) -> None:
+        for cell in self._cells:
+            cell.set_edit_mode(enabled)
+
+    def _on_kp_moved(self, cam_id: str, kp_idx: int, new_x: float, new_y: float) -> None:
+        from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit
+        frame_idx = self._current_frame_by_cam.get(cam_id)
+        if frame_idx is None:
+            return
+        update_single_keypoint_edit(
+            self._conn, self._sequence_id, cam_id, frame_idx, kp_idx, new_x, new_y,
+            source="markers",  # object sequences have no 'body' source to infer width from
+        )
+        self._obs_kp[cam_id] = read_observations_with_edits(
+            self._conn, self._sequence_id, cam_id, primary_source="markers"
+        )
+        self._cells[self._cell_index(cam_id)].set_overlay(
+            self._obs_kp[cam_id].get(frame_idx), None, [], None, True, False
+        )
+
+    def shutdown(self) -> None:
+        for reader in self._readers:
+            reader.shutdown()
+
+
+class ObjectPanel(QWidget):
+    """Object panel: info + marker-corner review/correction crop grid."""
+
+    def __init__(self, conn: sqlite3.Connection, sequence_id: str,
+                 session_path: Path, parent=None) -> None:
+        super().__init__(parent)
+        self._conn = conn
+        self._sequence_id = sequence_id
+        self._session_path = session_path
+        self._crop_grid: ObjectCropGridWidget | None = None
+        self._build()
+
+    def _build(self) -> None:
+        seq = self._conn.execute(
+            "SELECT id, time_start_s, time_end_s, detection_run_id "
+            "FROM pose_observation_sequences WHERE id = ?",
+            (self._sequence_id,),
+        ).fetchone()
+        if seq is None:
+            return
+
+        run = self._conn.execute(
+            "SELECT co.name AS object_name, co.marker_body_definition_id, mbd.name AS body_name "
+            "FROM detection_runs dr "
+            "JOIN capture_objects co ON co.id = dr.capture_object_id "
+            "LEFT JOIN marker_body_definitions mbd ON mbd.id = co.marker_body_definition_id "
+            "WHERE dr.id = ?",
+            (seq["detection_run_id"],),
+        ).fetchone()
+        object_name = (run["object_name"] if run else None) or "Object"
+        body_name = (run["body_name"] if run else None) or "—"
+
+        n_manifest = self._conn.execute(
+            "SELECT COUNT(*) FROM pose_sequence_keypoints WHERE sequence_id = ?",
+            (self._sequence_id,),
+        ).fetchone()[0]
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.addWidget(QLabel(f"<h2>{object_name}</h2>"))
+
+        form_box = _section("Object info")
+        form = QFormLayout()
+        form.addRow("Marker body:", QLabel(body_name))
+        form.addRow("Time range:", QLabel(
+            f"{_fmt_time(seq['time_start_s'])}  →  {_fmt_time(seq['time_end_s'])}"
+        ))
+        form.addRow("Markers:", QLabel(str(n_manifest // 4) if n_manifest else "0"))
+        form_box.inner_layout().addLayout(form)
+        layout.addWidget(form_box)
+
+        self._crop_grid = ObjectCropGridWidget(self._conn, self._sequence_id)
+        layout.addWidget(self._crop_grid, stretch=1)
+
+    def shutdown(self) -> None:
+        if self._crop_grid is not None:
+            self._crop_grid.shutdown()
+
+
+# ---------------------------------------------------------------------------
 # PersonPanel
 # ---------------------------------------------------------------------------
 

@@ -1,5 +1,20 @@
 # Marker-based mocap — status
 
+- **2026-08-30** — 1d (finalisation) and 1e (ObjectPanel review) built and
+  merged. Building 1e surfaced a real bug in shared code, not specific to
+  markers: `merge_observation_sources`/`infer_body_width`/
+  `update_single_keypoint_edit` hardcoded `source='body'` throughout. For
+  any sequence whose real source is never 'body' (an object's 'markers'
+  source), the moment even one edit existed anywhere in the camera,
+  `merge_observation_sources`'s "ghost frame → synthesize zero body"
+  fallback fired regardless, silently discarding every real, untouched
+  keypoint slot's data. Fixed by generalising all three functions to a
+  `primary_source`/`source` parameter (default unchanged, so every
+  existing person-panel call site is unaffected) rather than working
+  around it in ObjectPanel — the whole point of finalising before
+  reviewing (previous entry) was reusing this machinery genuinely, not
+  papering over its person-only assumption.
+
 - **2026-08-30** — Implementation progress: 1a (ArUco detection layer),
   1b (skeleton generator), and 1c (capture-object plumbing + GUI
   marker-detection run mode) built, tested against synthetic fixtures and

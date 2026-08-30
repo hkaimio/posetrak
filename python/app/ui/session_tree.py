@@ -30,6 +30,7 @@ class ItemKind(str, Enum):
     SEGMENTATION_RUN   = "segmentation_run"
     DETECTION_RUN      = "detection_run"
     PERSON_TRACK       = "person_track"
+    OBJECT_TRACK       = "object_track"  # marker-based-mocap design doc §7.1 sub-phase 1e
     TRACKING_RUN       = "tracking_run"
 
 
@@ -46,6 +47,7 @@ class SessionTreeWidget(QTreeWidget):
     segmentation_run_open_requested = Signal(str)  # seg_quality_run_id ("Open / Continue…")
     detection_run_selected         = Signal(str)  # run_id
     person_track_selected          = Signal(str)  # sequence_id
+    object_track_selected          = Signal(str)  # sequence_id (marker-based-mocap, phase 1e)
     tracking_run_selected          = Signal(str)  # tracking_run_id
     selection_changed              = Signal(str, str)  # kind.value, item_id
 
@@ -206,15 +208,23 @@ class SessionTreeWidget(QTreeWidget):
             _grey(item)
         item.setExpanded(True)
         self._add_person_tracks(item, dr["id"])
+        self._add_object_tracks(item, dr["id"])
         return item
 
     def _add_person_tracks(self, parent: QTreeWidgetItem, detection_run_id: str) -> None:
+        # Excludes object sequences (marker-based-mocap design doc §7.1) --
+        # those have no sequence_persons row and get their own branch via
+        # _add_object_tracks, keyed by detection_runs.capture_object_id
+        # rather than by "has no person name" (an ordinary person sequence
+        # can also briefly have no sequence_persons row right after
+        # finalising, so absence alone isn't a safe object signal).
         rows = self._conn.execute(
             "SELECT pos.id, pos.name, "
             "    GROUP_CONCAT(sp.person_name, ', ') AS person_names "
             "FROM pose_observation_sequences pos "
             "LEFT JOIN sequence_persons sp ON sp.sequence_id = pos.id "
-            "WHERE pos.detection_run_id = ? "
+            "JOIN detection_runs dr ON dr.id = pos.detection_run_id "
+            "WHERE pos.detection_run_id = ? AND dr.capture_object_id IS NULL "
             "GROUP BY pos.id "
             "ORDER BY pos.time_start_s",
             (detection_run_id,),
@@ -222,6 +232,25 @@ class SessionTreeWidget(QTreeWidget):
         for row in rows:
             label = row["person_names"] or row["name"] or "Person"
             seq_item = _make_item(ItemKind.PERSON_TRACK, row["id"], label)
+            seq_item.setExpanded(True)
+            self._add_tracking_runs(seq_item, row["id"])
+            parent.addChild(seq_item)
+
+    def _add_object_tracks(self, parent: QTreeWidgetItem, detection_run_id: str) -> None:
+        """Object analog of _add_person_tracks (marker-based-mocap design
+        doc §7.1 sub-phase 1e) -- a finalised object sequence, labeled by
+        its capture_objects row's own name rather than a person name."""
+        rows = self._conn.execute(
+            "SELECT pos.id, co.name AS object_name "
+            "FROM pose_observation_sequences pos "
+            "JOIN detection_runs dr ON dr.id = pos.detection_run_id "
+            "JOIN capture_objects co ON co.id = dr.capture_object_id "
+            "WHERE pos.detection_run_id = ? "
+            "ORDER BY pos.time_start_s",
+            (detection_run_id,),
+        ).fetchall()
+        for row in rows:
+            seq_item = _make_item(ItemKind.OBJECT_TRACK, row["id"], row["object_name"] or "Object")
             seq_item.setExpanded(True)
             self._add_tracking_runs(seq_item, row["id"])
             parent.addChild(seq_item)
@@ -263,6 +292,8 @@ class SessionTreeWidget(QTreeWidget):
             self.detection_run_selected.emit(item_id)
         elif kind == ItemKind.PERSON_TRACK:
             self.person_track_selected.emit(item_id)
+        elif kind == ItemKind.OBJECT_TRACK:
+            self.object_track_selected.emit(item_id)
         elif kind == ItemKind.TRACKING_RUN:
             self.tracking_run_selected.emit(item_id)
         self.selection_changed.emit(kind.value, item_id)
@@ -302,6 +333,7 @@ class SessionTreeWidget(QTreeWidget):
             ItemKind.SEGMENTATION_RUN:   self._segmentation_run_menu,
             ItemKind.DETECTION_RUN:      self._detection_run_menu,
             ItemKind.PERSON_TRACK:       self._person_track_menu,
+            ItemKind.OBJECT_TRACK:       self._object_track_menu,
             ItemKind.TRACKING_RUN:       self._tracking_run_menu,
         }[kind](menu, item_id)
         menu.exec(self.viewport().mapToGlobal(pos))
@@ -354,6 +386,16 @@ class SessionTreeWidget(QTreeWidget):
         )
         menu.addSeparator()
         menu.addAction("Delete person").triggered.connect(
+            lambda: self._confirm_delete("pose_observation_sequences", seq_id)
+        )
+
+    def _object_track_menu(self, menu: QMenu, seq_id: str) -> None:
+        # No rename here -- an object sequence's display name comes from
+        # its capture_objects row (renamed via CaptureObjectsSection), not
+        # the sequence itself.
+        menu.addAction("Run tracker…").setEnabled(False)
+        menu.addSeparator()
+        menu.addAction("Delete object sequence").triggered.connect(
             lambda: self._confirm_delete("pose_observation_sequences", seq_id)
         )
 

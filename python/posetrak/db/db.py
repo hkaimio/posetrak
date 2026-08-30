@@ -25,7 +25,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 8
-SESSION_SCHEMA_VERSION: Final[int] = 48
+SESSION_SCHEMA_VERSION: Final[int] = 49
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1590,6 +1590,33 @@ def _migrate_session_v47_to_v48(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v48_to_v49(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 48 to 49.
+
+    v49 adds `pose_sequence_keypoints` (design §4.3), the keypoint-manifest
+    table sketched as `docs/data-model-and-storage.md` §3's extensibility
+    seam: a sequence *without* manifest rows keeps today's implied-by-
+    `pose_model` layout (fully backward compatible -- every existing
+    person sequence needs no backfill), while a sequence *with* manifest
+    rows (starting with marker-based-mocap phase 1d's object sequences)
+    declares its own per-slot name and source, e.g. `hilt:c0`..`c3` /
+    'aruco'. Landmark names derive from the marker body definition, so the
+    same physical prop always yields the same names regardless of which
+    ArUco ids it happens to carry.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS pose_sequence_keypoints ("
+        "    sequence_id   TEXT NOT NULL REFERENCES pose_observation_sequences(id),"
+        "    keypoint_idx  INTEGER NOT NULL,"
+        "    name          TEXT NOT NULL,"
+        "    source        TEXT NOT NULL,"
+        "    PRIMARY KEY (sequence_id, keypoint_idx)"
+        ")"
+    )
+    _set_schema_version(conn, 49)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1754,6 +1781,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 47
     if actual == 47:
         _migrate_session_v47_to_v48(conn)
+        actual = 48
+    if actual == 48:
+        _migrate_session_v48_to_v49(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

@@ -9,6 +9,8 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 
+import json
+
 import numpy as np
 
 from posetrak.db.db import generate_id
@@ -312,3 +314,203 @@ def auto_assign_and_finalise(
         notes=notes,
         confidence_scale=confidence_scale,
     )
+
+
+def finalise_object_to_db(
+    session: sqlite3.Connection,
+    detection_run_id: str,
+    notes: str = "",
+) -> str:
+    """Finalise a marker detection run into one `pose_observation_sequence`
+    for its tracked object (marker-based-mocap design doc §4.3, §7.1
+    sub-phase 1d).
+
+    Unlike `finalise_to_db`, there is no stitching/track-assignment step:
+    a marker detection run already has exactly one implicit subject
+    (`track_id=0` throughout, "one prop = one track" — design §4.1), so
+    this reads every camera's `detection_keypoints` directly and writes
+    one sequence, automatically — the finalisation call itself *is* the
+    only decision (design §7.1's 1d/1e ordering note: an object has no
+    pre-finalisation review step to make first, unlike a person's
+    track-to-person stitching).
+
+    Also writes the `pose_sequence_keypoints` manifest (design §4.3): each
+    landmark's name and source, resolved from the run's own `config_json`
+    (`marker_ids`, and the marker body definition's own marker names when
+    known) — so the sequence is self-describing without needing to
+    re-resolve the marker body definition later.
+
+    Raises
+    ------
+    ValueError
+        If *detection_run_id* is not a marker (`detector_type='aruco'`)
+        run, or has no `capture_object_id` (only an object-bound run can
+        be finalised this way — a standalone/scripted phase-1a run with
+        no known object has nothing to attach the resulting sequence's
+        identity to).
+    RuntimeError
+        If a sequence for this run already has tracking results and/or
+        manual keypoint edits (same immutability guard as `finalise_to_db`).
+    """
+    from app.pose.db_cache import MARKER_REGION_TYPE, MARKER_TRACK_ID
+    from app.setup.fiducial_markers import load_marker_body_yaml
+
+    run = session.execute(
+        "SELECT shot_id, sync_config_id, time_start_s, time_end_s, detector_type, "
+        "       detector_model, config_json, capture_object_id "
+        "FROM detection_runs WHERE id = ?",
+        (detection_run_id,),
+    ).fetchone()
+    if run is None:
+        raise ValueError(f"detection_runs row not found: {detection_run_id!r}")
+    if run["detector_type"] != "aruco":
+        raise ValueError(
+            f"detection run {detection_run_id!r} is a {run['detector_type']!r} run, "
+            "not a marker run -- use finalise_to_db for pose detection runs"
+        )
+    if run["capture_object_id"] is None:
+        raise ValueError(
+            f"detection run {detection_run_id!r} has no capture_object_id -- only "
+            "an object-bound run (design phase 1c) can be finalised into an object "
+            "sequence; a standalone/scripted run has no object to attach one to"
+        )
+
+    shot_id = run["shot_id"]
+    sync_config_id = run["sync_config_id"]
+    time_start_s = float(run["time_start_s"])
+    time_end_s = float(run["time_end_s"])
+    config = json.loads(run["config_json"] or "{}")
+    marker_ids: list[str] = config.get("marker_ids") or []
+    marker_body_definition_id = config.get("marker_body_definition_id")
+
+    # Landmark names: prefer the marker body definition's own names
+    # (survives even if a future run re-decodes the same physical markers
+    # under different dictionary ids); fall back to the bare marker id
+    # for a standalone run with no known body.
+    marker_names: dict[str, str] = {}
+    if marker_body_definition_id is not None:
+        body_row = session.execute(
+            "SELECT yaml_content FROM marker_body_definitions WHERE id = ?",
+            (marker_body_definition_id,),
+        ).fetchone()
+        if body_row is not None and body_row["yaml_content"] is not None:
+            marker_names = load_marker_body_yaml(body_row["yaml_content"]).marker_names
+
+    landmark_names: list[str] = []
+    for marker_id in marker_ids:
+        name = marker_names.get(marker_id, marker_id)
+        landmark_names.extend(f"{name}:c{i}" for i in range(4))
+
+    # Same immutability guard as finalise_to_db -- refuse to blow away
+    # real work rather than the FK violation an uncontrolled cascade used
+    # to hit (see that function's own comment).
+    existing_ids = [
+        r[0] for r in session.execute(
+            "SELECT id FROM pose_observation_sequences WHERE detection_run_id = ?",
+            (detection_run_id,),
+        )
+    ]
+    for sid in existing_ids:
+        has_tracking = session.execute(
+            "SELECT 1 FROM tracking_runs WHERE observation_sequence_id = ? LIMIT 1", (sid,)
+        ).fetchone()
+        has_edits = session.execute(
+            "SELECT 1 FROM pose_observation_edits WHERE sequence_id = ? LIMIT 1", (sid,)
+        ).fetchone()
+        if has_tracking or has_edits:
+            raise RuntimeError(
+                f"Cannot re-finalise detection run {detection_run_id}: sequence {sid} "
+                "already has tracking results and/or manual keypoint edits. Detection "
+                "runs are immutable once tracked or edited -- create a new detection "
+                "run instead of re-finalising this one."
+            )
+    for sid in existing_ids:
+        session.execute(
+            "DELETE FROM tracking_results WHERE run_id IN "
+            "(SELECT id FROM tracking_runs WHERE observation_sequence_id = ?)", (sid,)
+        )
+        session.execute(
+            "DELETE FROM tracking_obs_results WHERE run_id IN "
+            "(SELECT id FROM tracking_runs WHERE observation_sequence_id = ?)", (sid,)
+        )
+        session.execute(
+            "DELETE FROM tracking_runs WHERE observation_sequence_id = ?", (sid,)
+        )
+        session.execute("DELETE FROM pose_sequence_keypoints WHERE sequence_id = ?", (sid,))
+        session.execute("DELETE FROM pose_observations WHERE sequence_id = ?", (sid,))
+    session.execute(
+        "DELETE FROM pose_observation_sequences WHERE detection_run_id = ?",
+        (detection_run_id,),
+    )
+
+    seq_id = generate_id()
+    session.execute(
+        "INSERT INTO pose_observation_sequences "
+        "(id, shot_id, sync_config_id, time_start_s, time_end_s, pose_model, notes, "
+        " pixels_are_undistorted, detection_run_id) "
+        "VALUES (?,?,?,?,?,?,?,0,?)",
+        (seq_id, shot_id, sync_config_id, time_start_s, time_end_s,
+         run["detector_model"], notes, detection_run_id),
+    )
+    if landmark_names:
+        session.executemany(
+            "INSERT INTO pose_sequence_keypoints (sequence_id, keypoint_idx, name, source) "
+            "VALUES (?, ?, ?, ?)",
+            [(seq_id, i, name, "aruco") for i, name in enumerate(landmark_names)],
+        )
+
+    # Build SyncTable + camera_instance_id lookup, same as finalise_to_db.
+    rows = session.execute(
+        "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, sv.actual_fps "
+        "FROM sync_points sp "
+        "JOIN capture_videos sv ON sv.id = sp.shot_video_id "
+        "WHERE sp.sync_config_id = ?",
+        (sync_config_id,),
+    ).fetchall()
+    points = [
+        SyncPoint(
+            camera_instance_id="", shot_video_id=r["shot_video_id"],
+            video_frame=r["video_frame"], timestamp_s=r["timestamp_s"],
+        )
+        for r in rows
+    ]
+    fps_by_video = {r["shot_video_id"]: float(r["actual_fps"]) for r in rows}
+    sync_table = SyncTable(points, fps_by_video)
+
+    sv_rows = session.execute(
+        "SELECT id, camera_instance_id FROM capture_videos WHERE shot_id = ?", (shot_id,)
+    ).fetchall()
+    camera_by_svid = {r["id"]: r["camera_instance_id"] for r in sv_rows}
+
+    kp_rows = session.execute(
+        "SELECT shot_video_id, video_frame, keypoints, noise_scale FROM detection_keypoints "
+        "WHERE detection_run_id = ? AND track_id = ? AND region_type = ? "
+        "ORDER BY shot_video_id, video_frame",
+        (detection_run_id, MARKER_TRACK_ID, MARKER_REGION_TYPE),
+    ).fetchall()
+
+    obs_rows = []
+    for kp_row in kp_rows:
+        camera_instance_id = camera_by_svid.get(kp_row["shot_video_id"])
+        if camera_instance_id is None:
+            continue
+        frame_idx = int(kp_row["video_frame"])
+        timestamp_s = sync_table.frame_to_global_time(frame_idx, kp_row["shot_video_id"])
+        if timestamp_s is None:
+            continue
+        obs_rows.append((
+            seq_id, camera_instance_id, frame_idx, timestamp_s,
+            0,  # person_id column, repurposed as "the object" -- always 0, one subject per sequence
+            "markers", detection_run_id, bytes(kp_row["keypoints"]), kp_row["noise_scale"],
+        ))
+    if obs_rows:
+        session.executemany(
+            "INSERT INTO pose_observations "
+            "(sequence_id, camera_instance_id, video_frame, timestamp_s, "
+            " person_id, source, detection_run_id, kp_blob, noise_scale) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            obs_rows,
+        )
+
+    session.commit()
+    return seq_id

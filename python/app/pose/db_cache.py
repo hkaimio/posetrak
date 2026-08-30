@@ -328,8 +328,8 @@ class DetectionBatchWriter:
 # Coded-marker (ArUco) keypoint writer -- design phase 1a
 # ---------------------------------------------------------------------------
 
-_MARKER_TRACK_ID = 0       # one prop = one track (aruco-prop-tracking-design.md)
-_MARKER_REGION_TYPE = "markers"
+MARKER_TRACK_ID = 0       # one prop = one track (aruco-prop-tracking-design.md)
+MARKER_REGION_TYPE = "markers"
 
 
 class MarkerKeypointWriter:
@@ -375,7 +375,7 @@ class MarkerKeypointWriter:
                 kp[idx, 1] = corner.py
                 kp[idx, 2] = 1.0
         self._rows.append((
-            self._run_id, self._svid, video_frame, _MARKER_TRACK_ID, _MARKER_REGION_TYPE,
+            self._run_id, self._svid, video_frame, MARKER_TRACK_ID, MARKER_REGION_TYPE,
             kp.tobytes(), None,
         ))
         if len(self._rows) >= _BATCH_SIZE:
@@ -408,7 +408,7 @@ def read_marker_keypoints_for_run(
         "SELECT video_frame, keypoints FROM detection_keypoints "
         "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? AND region_type=? "
         "ORDER BY video_frame",
-        (detection_run_id, shot_video_id, _MARKER_TRACK_ID, _MARKER_REGION_TYPE),
+        (detection_run_id, shot_video_id, MARKER_TRACK_ID, MARKER_REGION_TYPE),
     ).fetchall()
     result = {}
     for row in rows:

@@ -1,5 +1,19 @@
 # Marker-based mocap — status
 
+- **2026-08-30** — Implementation progress: 1a (ArUco detection layer),
+  1b (skeleton generator), and 1c (capture-object plumbing + GUI
+  marker-detection run mode) built, tested against synthetic fixtures and
+  real capture data (calibration box, `ukemi-tommi-20260509.db`), and
+  merged. While starting 1d, found that review-before-finalisation (the
+  original 1d→1e order) doesn't fit the codebase: pre-finalisation review
+  for a person is track-to-person *stitching*, a real decision with no
+  per-frame correction path anywhere in the project; per-frame correction
+  only exists post-finalisation, via `pose_observation_edits`. Since an
+  object's own phasing already established "no stitching step," swapped
+  the order (§7.1 now runs 1d finalisation, then 1e review) so ObjectPanel
+  reuses that existing mechanism directly instead of building a parallel
+  one for raw `detection_keypoints`. Confirmed with Harri before proceeding.
+
 - **2026-08-30** — Phase 1 broken into six independently-buildable
   sub-phases (design §7.1), each with its own validation check: detection
   layer (1a), skeleton generator (1b, parallel to 1a), capture-object

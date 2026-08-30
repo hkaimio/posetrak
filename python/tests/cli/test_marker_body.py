@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
 from posetrak.cli.main import main
@@ -29,11 +30,40 @@ markers:
     up: [0.0, 1.0, 0.0]
 """
 
+TWO_MARKER_BODY_YAML = """\
+name: test-bokken
+units: meters
+markers:
+  - name: hilt
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "3"
+    size: 0.05
+    center: [0.0, 0.0, 0.0]
+    normal: [0.0, 0.0, 1.0]
+    up: [0.0, 1.0, 0.0]
+  - name: tip
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "7"
+    size: 0.03
+    center: [0.0, 0.9, 0.0]
+    normal: [0.0, 0.0, 1.0]
+    up: [0.0, 1.0, 0.0]
+"""
+
 
 @pytest.fixture()
 def marker_body_yaml(tmp_path: Path) -> Path:
     path = tmp_path / "test_rig.yaml"
     path.write_text(MINIMAL_MARKER_BODY_YAML, encoding="utf-8")
+    return path
+
+
+@pytest.fixture()
+def two_marker_body_yaml(tmp_path: Path) -> Path:
+    path = tmp_path / "test_bokken.yaml"
+    path.write_text(TWO_MARKER_BODY_YAML, encoding="utf-8")
     return path
 
 
@@ -226,3 +256,108 @@ class TestMarkerBodyExport:
         )
         assert result.exit_code == 0, result.output
         assert out_path.read_text(encoding="utf-8") == MINIMAL_MARKER_BODY_YAML
+
+
+class TestMarkerBodyToSkeleton:
+    def _import(self, cli_runner, registry_db_path, yaml_path, name="") -> str:
+        args = [
+            "--registry", str(registry_db_path),
+            "marker-body", "import",
+            "--file", str(yaml_path),
+            "--global",
+        ]
+        if name:
+            args += ["--name", name]
+        result = cli_runner.invoke(main, args)
+        assert result.exit_code == 0, result.output
+        return result.output.split("marker_body_id:")[-1].strip()
+
+    def test_creates_skeleton_and_records_provenance(
+        self, cli_runner: CliRunner, registry_db_path: Path, two_marker_body_yaml: Path,
+    ) -> None:
+        body_id = self._import(cli_runner, registry_db_path, two_marker_body_yaml)
+
+        result = cli_runner.invoke(
+            main, ["--registry", str(registry_db_path), "marker-body", "to-skeleton", body_id],
+        )
+        assert result.exit_code == 0, result.output
+        assert "skeleton_id:" in result.output
+        skeleton_id = result.output.split("skeleton_id:")[-1].strip()
+
+        export_result = cli_runner.invoke(
+            main, ["--registry", str(registry_db_path), "skeleton", "export", skeleton_id],
+        )
+        assert export_result.exit_code == 0, export_result.output
+        parsed = yaml.safe_load(export_result.output)
+        assert parsed["name"] == "test-bokken"
+        assert parsed["generated_from_marker_body"] == body_id
+        assert len(parsed["markers"]) == 8  # 2 markers * 4 corners
+        assert parsed["joints"][0]["name"] == "prop_root"
+
+    def test_idempotent(
+        self, cli_runner: CliRunner, registry_db_path: Path, two_marker_body_yaml: Path,
+    ) -> None:
+        body_id = self._import(cli_runner, registry_db_path, two_marker_body_yaml)
+        args = ["--registry", str(registry_db_path), "marker-body", "to-skeleton", body_id]
+        r1 = cli_runner.invoke(main, args)
+        r2 = cli_runner.invoke(main, args)
+        assert r1.exit_code == 0 and r2.exit_code == 0
+        id1 = r1.output.split("skeleton_id:")[-1].strip()
+        id2 = r2.output.split("skeleton_id:")[-1].strip()
+        assert id1 == id2
+
+    def test_name_override(
+        self, cli_runner: CliRunner, registry_db_path: Path, two_marker_body_yaml: Path,
+    ) -> None:
+        body_id = self._import(cli_runner, registry_db_path, two_marker_body_yaml)
+        result = cli_runner.invoke(
+            main,
+            [
+                "--registry", str(registry_db_path),
+                "marker-body", "to-skeleton", body_id, "--name", "my-prop-skeleton",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        skeleton_id = result.output.split("skeleton_id:")[-1].strip()
+
+        export_result = cli_runner.invoke(
+            main, ["--registry", str(registry_db_path), "skeleton", "export", skeleton_id],
+        )
+        assert yaml.safe_load(export_result.output)["name"] == "my-prop-skeleton"
+
+    def test_output_file(
+        self, cli_runner: CliRunner, registry_db_path: Path, two_marker_body_yaml: Path,
+        tmp_path: Path,
+    ) -> None:
+        body_id = self._import(cli_runner, registry_db_path, two_marker_body_yaml)
+        out_path = tmp_path / "generated_skeleton.yaml"
+        result = cli_runner.invoke(
+            main,
+            [
+                "--registry", str(registry_db_path),
+                "marker-body", "to-skeleton", body_id, "--output", str(out_path),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        parsed = yaml.safe_load(out_path.read_text(encoding="utf-8"))
+        assert parsed["name"] == "test-bokken"
+
+    def test_not_found(self, cli_runner: CliRunner, registry_db_path: Path) -> None:
+        result = cli_runner.invoke(
+            main,
+            ["--registry", str(registry_db_path), "marker-body", "to-skeleton", "deadbeef"],
+        )
+        assert result.exit_code != 0
+
+    def test_empty_marker_body_errors(
+        self, cli_runner: CliRunner, registry_db_path: Path, tmp_path: Path,
+    ) -> None:
+        empty_path = tmp_path / "empty.yaml"
+        empty_path.write_text("name: empty-body\nunits: meters\nmarkers: []\n", encoding="utf-8")
+        body_id = self._import(cli_runner, registry_db_path, empty_path)
+
+        result = cli_runner.invoke(
+            main, ["--registry", str(registry_db_path), "marker-body", "to-skeleton", body_id],
+        )
+        assert result.exit_code != 0
+        assert "no markers" in result.output

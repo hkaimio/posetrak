@@ -518,11 +518,32 @@ class MarkerRigConfig:
     the design doc's "Reflective dots" subsection and its Open Questions
     entry). Kept here so a marker body's dots survive the load/save
     round-trip for whenever that future feature is built.
+
+    ``marker_names``: marker_id -> its own ``name`` field. ``marker_corners``/
+    ``marker_dictionaries`` are keyed by id (the literal value a real
+    detection is matched against, per the design doc's "name vs id" note),
+    but a *skeleton generator* consuming this config (marker-based-mocap
+    design doc §5.3) needs the human-authored ``name`` for marker naming
+    (``<name>:c0``..``c3``) -- kept as a side table rather than switching
+    the other two dicts' keys, which would break every existing consumer
+    that looks a marker up by id.
+
+    ``symmetry_axis``: this body's rotational-symmetry axis in body-local
+    coordinates, if the marker body definition declares one (marker-based-
+    mocap design doc §6.1 item 3 -- e.g. a jo's long axis, where roll is
+    both invisible to every camera and physically meaningless). ``None``
+    when absent (the common case). Not yet surfaced by any authoring UI;
+    for now this is set only by hand-written YAML or a characterization
+    script, and consumed only by the skeleton generator to emit a
+    locked-DOF annotation (design §5.3) -- unrelated to detection/anchoring,
+    so nothing else in this module reads it.
     """
     rig_id: str
     marker_corners: dict[str, np.ndarray] = field(default_factory=dict)
     marker_dictionaries: dict[str, str] = field(default_factory=dict)
     reflective_dots: dict[str, np.ndarray] = field(default_factory=dict)
+    marker_names: dict[str, str] = field(default_factory=dict)
+    symmetry_axis: np.ndarray | None = None
 
 
 def load_rig_config(path: str) -> MarkerRigConfig:
@@ -597,6 +618,11 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
     entries are parsed into ``MarkerRigConfig.reflective_dots`` but never
     fed into ``marker_corners`` -- see that field's docstring for why.
 
+    A top-level ``symmetry_axis: [x, y, z]`` (marker-based-mocap design doc
+    §6.1 item 3), if present, is parsed into ``MarkerRigConfig.symmetry_axis``
+    unchanged -- optional, and ignored by every consumer except the
+    skeleton generator.
+
     Parameters
     ----------
     yaml_content:
@@ -622,12 +648,17 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
     """
     payload = yaml.safe_load(yaml_content) or {}
     resolved_rig_id = rig_id or payload.get("name", "marker_body")
+    symmetry_axis_raw = payload.get("symmetry_axis")
+    symmetry_axis = (
+        np.array(symmetry_axis_raw, dtype=np.float64) if symmetry_axis_raw is not None else None
+    )
 
     seen_names: set[str] = set()
     seen_ids: set[str] = set()
     marker_corners: dict[str, np.ndarray] = {}
     marker_dictionaries: dict[str, str] = {}
     reflective_dots: dict[str, np.ndarray] = {}
+    marker_names: dict[str, str] = {}
 
     for entry in payload.get("markers") or []:
         name = entry.get("name")
@@ -682,6 +713,7 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
                 "a composite-key lookup this loader doesn't implement yet."
             )
         seen_ids.add(marker_id)
+        marker_names[marker_id] = name
 
         if "corners" in entry:
             corners = np.array(entry["corners"], dtype=np.float64)
@@ -712,6 +744,8 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
         marker_corners=marker_corners,
         marker_dictionaries=marker_dictionaries,
         reflective_dots=reflective_dots,
+        marker_names=marker_names,
+        symmetry_axis=symmetry_axis,
     )
 
 

@@ -19,8 +19,11 @@ from pathlib import Path
 
 import click
 
+from app.setup.fiducial_markers import load_marker_body_yaml
 from posetrak.db.db import open_registry, open_session, resolve_id_prefix
 from posetrak.db.manage_marker_body import import_marker_body, list_marker_bodies
+from posetrak.db.manage_skeleton import import_skeleton_str
+from posetrak.skeleton.marker_body_to_skeleton import generate_prop_skeleton_yaml
 
 from posetrak.cli._output import print_table, print_record
 
@@ -215,3 +218,54 @@ def marker_body_export(obj: dict, marker_body_id: str, output: str) -> None:
         click.echo(f"Exported marker body to {output}")
     else:
         sys.stdout.write(yaml_content)
+
+
+@marker_body_group.command("to-skeleton")
+@click.argument("marker_body_id", metavar="ID_OR_PREFIX")
+@click.option("--name", default="", metavar="S",
+              help="Generated skeleton's name (default: the marker body's own name)")
+@click.option("--output", default="", metavar="PATH",
+              help="Also write the generated skeleton YAML to a file (- for stdout)")
+@click.pass_obj
+def marker_body_to_skeleton(obj: dict, marker_body_id: str, name: str, output: str) -> None:
+    """Generate a prop tracking skeleton from a marker body definition and
+    import it (marker-based-mocap design doc §5.3, §7.1 sub-phase 1b).
+
+    One free-flyer root, markers only -- no articulated joints. Import is
+    content-addressed and idempotent, same as `skeleton import`: running
+    this again for the same marker body (and the same --name) returns the
+    existing skeleton id rather than creating a duplicate row.
+    """
+    conn, _ = _open_conn(obj)
+    try:
+        resolved = _resolve_prefix(conn, "marker_body_definitions", marker_body_id)
+        row = conn.execute(
+            "SELECT yaml_content FROM marker_body_definitions WHERE id = ?", (resolved,)
+        ).fetchone()
+        if row is None or row[0] is None:
+            raise click.ClickException(f"Marker body '{marker_body_id}' has no YAML content")
+
+        config = load_marker_body_yaml(row[0])
+        try:
+            skeleton_yaml = generate_prop_skeleton_yaml(
+                config, name=name or None, marker_body_definition_id=resolved,
+            )
+        except ValueError as exc:
+            raise click.ClickException(f"Error generating skeleton: {exc}") from exc
+
+        skeleton_id = import_skeleton_str(
+            conn, skeleton_yaml,
+            name=name or config.rig_id,
+            source=f"marker_body:{resolved}",
+        )
+    finally:
+        conn.close()
+
+    if output:
+        if output == "-":
+            sys.stdout.write(skeleton_yaml)
+        else:
+            Path(output).write_text(skeleton_yaml, encoding="utf-8")
+            click.echo(f"Wrote generated skeleton YAML to {output}")
+
+    click.echo(f"skeleton_id: {skeleton_id}")

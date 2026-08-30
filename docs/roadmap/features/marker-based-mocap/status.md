@@ -1,5 +1,14 @@
 # Marker-based mocap — status
 
+- **2026-08-30** — Phase 1 broken into six independently-buildable
+  sub-phases (design §7.1), each with its own validation check: detection
+  layer (1a), skeleton generator (1b, parallel to 1a), capture-object
+  plumbing (1c), ObjectPanel review (1d), finalisation + manifest (1e),
+  tracker multi-source load + rigid init (1f, phase 1's actual finish
+  line). Requested because phase 1 as originally scoped bundled DB schema,
+  Python detection, Python finalisation, C++ tracker, and two GUIs into one
+  slab with a single end-to-end validation criterion.
+
 - **2026-08-30** — Second review round: UC1 phasing restructured so
   anonymous/reflective dots on props are pulled into the first iteration
   alongside ArUco, instead of waiting for UC2 (Harri: real props already

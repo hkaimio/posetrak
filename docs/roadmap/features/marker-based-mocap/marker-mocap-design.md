@@ -697,6 +697,24 @@ required by phase 6 anyway. Phase 7 is independent of 3–6 and can be
 reordered if a real moved-camera incident makes it urgent; its monitor half
 (6.4 step 1) is cheap enough to pull forward.
 
+### 7.1 Phase 1 breakdown
+
+Phase 1 alone touches four separate subsystems (DB schema, Python
+detection, Python finalisation, C++ tracker, two different GUIs) that are
+each independently buildable and checkable — there is no reason to land
+it as one slab. Six sub-phases, each with its own pass/fail check, in
+dependency order (1a and 1b have no dependency on each other and can run
+in parallel; everything else is sequential):
+
+| Sub-phase | Delivers | Validation |
+|---|---|---|
+| **1a** — Detection layer | `detector_type`/`config_json` on `detection_runs` (§4.1); ArUco detector run (reusing `FiducialDetector`/`ArucoDetector`) writing the coded-marker `detection_keypoints` blob layout. No UI, no `capture_objects`, no skeleton — a standalone batch job invocable from a script/CLI against an existing capture's video. | Run detection against a real recorded clip with a known ArUco prop (or a synthetic rendered sequence with known corner positions). Query `detection_keypoints` directly: correct corner count per detected marker, ids match `config_json.marker_ids`, confidence 1.0 when seen, NaN+conf 0 for frames where the marker is genuinely occluded. No tracker or finalisation involved yet. |
+| **1b** — Skeleton generator | `posetrak marker-body to-skeleton` CLI (§5.3): converts a `marker_body_definitions` row into skeleton YAML (`input_tracks`, `markers`, locked-DOF annotation for symmetric props — resolves open question 3). Pure offline transform, no capture/detection/tracker-run involvement. | Generate YAML for an existing definition (the calibration box is the natural first target — it already has both ArUco and dot markers per §10) and diff against a hand-verified expected structure; load the generated YAML through the existing `SkeletonLoader`/`SkeletonLayout` unit-test harness and confirm it parses as a valid root-only, `FIXED`-structure skeleton with the right marker count and (for a symmetric test prop) the locked-DOF annotation present. |
+| **1c** — Capture-object plumbing | `capture_objects` table + `tracking_run_persons.capture_object_id` (§4.2); "add object to capture" UI in the session tree (picker over `marker_body_definitions`); the 1a detector wired in as a selectable type in the existing run-detection dialog. | In the GUI, add a real object to a real capture, launch a marker-detection run against a trial, confirm the object appears in the session tree and the run's `detection_keypoints` rows are correctly scoped to it. A DB-level test covers the new table/column and the run-launch code path (same style as existing `test_posetrak_db.py`/session-tree tests). |
+| **1d** — ObjectPanel review | New `ObjectPanel` (sibling of `PersonPanel`, §6.2 step 3): crop grid with detected corners overlaid, scrubber, keypoint-edit mode reused for fixing bad frames. | Open a real 1c detection run in the panel; corners visibly overlay correctly across cameras and frames; deliberately corrupt one frame's corner via the edit UI, confirm the correction persists across a panel reload before finalisation touches it. |
+| **1e** — Finalisation + manifest | `pose_sequence_keypoints` manifest table (§4.3); finalise pipeline extended to emit one object `pose_observation_sequence` (+ manifest rows) per trial from the (possibly edited) 1d detection run. | Finalise a reviewed object run; inspect the resulting sequence's manifest names (`<marker>:c0`..`c3` per §4.3) against the marker body definition, and confirm blob shapes/landmark count match; run the existing finalisation consistency checks (whatever already validates person sequences) against the new object sequence. |
+| **1f** — Tracker: multi-source load + rigid init | C++ `input_tracks` binding, `(track, landmark)` → marker-index resolution via the manifest, `PersonSpec`'s track map, multi-source `SessionReader::load_observations()` (single-track case); rigid Kabsch/Umeyama initialization path in `Tracker::initialize()` (algorithms §4.2). | Run `posetrak-tracker track` against the 1e sequence with the 1b-generated skeleton on a real prop-only trial (or a synthetic rigid-trajectory sequence per the algorithms-doc §7 test pattern); assert successful init (residual RMS within the existing retry threshold) and a plausible 6-DOF trajectory written to `tracking_results`/`root_pose.csv`. This is phase 1's actual finish line — first end-to-end tracked prop. |
+
 ---
 
 ## 8. Open questions

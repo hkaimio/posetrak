@@ -252,6 +252,11 @@ You can now export the captured motion as a BVH file by clicking the "Export
 BVH..." button. Then open Blender, select File -> Import -> Motion Capture
 (.bvh) and load the file in Blender.
 
-This is where Posetrak's job ends — if you want to use the captured motion on a
-real Blender character, continue to the [retargeting
-tutorial](retargeting-blender.md).
+You have now completed your first motion capture in Posetrak! Next:
+
+- If you want to use the captured motion on a real Blender character, continue
+  to the [retargeting tutorial](retargeting-blender.md).
+
+- If you need to track multiple persons at same time, read
+  [segmentation](segmentation.md) tutorial to learn about Posetrak's advanced
+  tools that help in this task.

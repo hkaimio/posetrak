@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: test-rigid-prop
+units: meters
+
+joints:
+  - name: prop_root
+    type: root
+    parent: null
+    offset: [0.0, 0.0, 0.0]
+
+input_tracks:
+  - id: prop_markers
+    type: labeled_points
+
+markers:
+  - name: m0
+    parent: prop_root
+    offset: [0.10, 0.00, 0.00]
+    track: prop_markers
+    landmark: m0
+  - name: m1
+    parent: prop_root
+    offset: [-0.10, 0.05, 0.00]
+    track: prop_markers
+    landmark: m1
+  - name: m2
+    parent: prop_root
+    offset: [0.00, -0.10, 0.05]
+    track: prop_markers
+    landmark: m2
+  - name: m3
+    parent: prop_root
+    offset: [0.00, 0.05, 0.15]
+    track: prop_markers
+    landmark: m3
+  - name: m4
+    parent: prop_root
+    offset: [0.05, -0.05, -0.10]
+    track: prop_markers
+    landmark: m4

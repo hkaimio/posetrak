@@ -1,5 +1,55 @@
 # Marker-based mocap — status
 
+- **2026-08-30** — 1f (tracker: multi-source load + rigid init) built and
+  validated end-to-end on real data — **phase 1's finish line reached**.
+  `Skeleton` gained `input_tracks_` (`InputTrack{id, type}`) and `Marker`
+  gained `track`/`landmark` fields (design §5.1), parsed from `input_tracks:`/
+  `track:`/`landmark:` in skeleton YAML. `SessionReader::load_observations()`
+  now resolves keypoint-blob slots via a `pose_sequence_keypoints` manifest
+  (landmark name → marker index) before falling back to the legacy COCO-id
+  map, so an object skeleton with no `coco_id` at all still loads. Doing
+  this surfaced the same bug class as the Python-side fix above, in C++:
+  the group's base/primary row was picked by literal `source == "body"`,
+  so a `'markers'`-source object sequence's own row was never recognised
+  as primary and every keypoint was silently dropped. Fixed the same way —
+  generalised to "whichever row isn't a recognized overlay" via the
+  existing `hand_base_idx`/`split_source` helpers, rather than adding a
+  second hardcoded literal; behaviour for existing person data (source
+  always `'body'`) is unchanged. Kept as one commit with the manifest-load
+  feature rather than split out like the Python fix: unlike that case, this
+  bug has no test or manifestation independent of the new manifest-resolution
+  path (object skeletons carry no `coco_id`, so there was no data shape that
+  could exercise `load_observations`'s base-row selection over a non-'body'
+  source before this feature existed).
+
+  Added `Tracker::initialize_rigid_body()` (algorithms §4.2): for a
+  root-only skeleton (no active joint below the root), computes rest-pose
+  FK marker positions, matches them against the frame's triangulated world
+  positions, rejects a collinear marker layout (SVD second singular value
+  ≤ 1e-4 m — matches the design doc's own deferral of that case), fits a
+  closed-form Kabsch/Umeyama rigid transform (`Eigen::umeyama`,
+  `with_scaling=false`), and rejects if RMS residual exceeds the new
+  `rigid_init_max_residual_m` config field (default 0.02 m). `initialize()`
+  routes to it automatically when the skeleton has no non-root active DOF.
+
+  Validated against real capture data (`ukemi-tommi-20260509.db`, capture
+  `ecf8c983-2e0a-4906-96ca-73207a71ad7c`, the ArUco-marked calibration box):
+  real per-camera marker detections are sparse and independently timed, so
+  the CLI's default init search (a narrow ~1-tracker-frame window at
+  `start_time`) rarely lands on an instant with ≥3 markers seen by ≥2
+  cameras — needed a `--start-time` scan to find one (`t=21.1s` worked: 4
+  markers, RMS residual 0.0086 m). Once initialized, a full tracking run
+  (`--start-time 21.1 --end-time 28.3`) tracked 344/863 steps with 0 lost,
+  writing a smooth, bounded 6-DOF trajectory to `root_pose.csv` (no
+  NaN/Inf, quaternions normalized, ~0.4 m of real object motion over the
+  window, covariance condition number 9–409). Mean reprojection error
+  (~29 px) is higher than ideal and worth a closer look before relying on
+  this for accuracy-sensitive work, but is not a phase-1 blocker — the
+  validation criterion here is a plausible tracked trajectory, not
+  calibration/detection accuracy. The narrow-init-window characteristic is
+  a real UX gap for sparse marker data (worth a follow-up to widen or
+  auto-scan the CLI's init search) but is out of scope for this phase.
+
 - **2026-08-30** — 1d (finalisation) and 1e (ObjectPanel review) built and
   merged. Building 1e surfaced a real bug in shared code, not specific to
   markers: `merge_observation_sources`/`infer_body_width`/

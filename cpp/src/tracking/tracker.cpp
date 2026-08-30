@@ -10,6 +10,7 @@
 #include "posetrak/tracking/tracker.hpp"
 
 #include <Eigen/Dense>
+#include <Eigen/Geometry>
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
 
@@ -112,6 +113,22 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
         return false;
     }
     init_marker_positions_ = marker_positions;
+
+    // A root-only skeleton (no non-root active joints -- a prop skeleton
+    // generated from a marker body definition, design §5.3) has no pose to
+    // solve for beyond its 6-DOF root: triangulation + full IK is overkill
+    // and can fall into a local minimum for this degenerate case. Closed-form
+    // rigid-body fit instead (algorithms doc §4.2).
+    bool has_non_root_active_joint = false;
+    for (auto const& j : skeleton_->joints()) {
+        if (j.parent_index.has_value() && j.type != JointType::FIXED && j.active_dof() > 0) {
+            has_non_root_active_joint = true;
+            break;
+        }
+    }
+    if (!has_non_root_active_joint) {
+        return initialize_rigid_body(marker_positions, timestamp);
+    }
 
     // Step 2: Analytically estimate root position + orientation from observed markers.
     // This gives us a good global pose even before IK runs.
@@ -365,6 +382,99 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
     }
 
     // Step 5: Initialize UKF
+    initialize_ukf(init_state, timestamp);
+    initialized_ = true;
+    last_timestamp_ = timestamp;
+    return true;
+}
+
+bool Tracker::initialize_rigid_body(std::map<std::string, Eigen::Vector3d> const& marker_positions,
+                                    double timestamp) {
+    // Body-local marker positions come from rest-pose FK (root at identity):
+    // for a root-only skeleton every marker's local_pos is already expressed
+    // directly in the root joint's frame, so this is exactly the body-local
+    // geometry the design doc's Kabsch/Umeyama fit needs.
+    Eigen::VectorXd q_rest = Eigen::VectorXd::Zero(model_->nq);
+    if (model_->nq >= 7) {
+        q_rest[6] = 1.0;  // identity quaternion w component (Pinocchio free-flyer q = [xyz, xyzw])
+    }
+    auto rest_markers = fk_->compute(q_rest);
+
+    std::vector<Eigen::Vector3d> body_local;
+    std::vector<Eigen::Vector3d> world_pts;
+    for (auto const& [name, world_pos] : marker_positions) {
+        auto it = rest_markers.find(name);
+        if (it == rest_markers.end())
+            continue;
+        body_local.push_back(it->second);
+        world_pts.push_back(world_pos);
+    }
+    if (body_local.size() < 3) {
+        fmt::print("  Rigid-body init: fewer than 3 markers with a body-local match ({})\n",
+                   body_local.size());
+        return false;
+    }
+
+    // Non-collinear check (algorithms doc §4 step 2): smallest singular value
+    // of the centered body-local point matrix. A collinear layout (e.g. a
+    // two-band staff) needs the reduced position+axis solution instead --
+    // not yet implemented (design doc open question 3: "decide during phase
+    // 1 implementation against a real symmetric prop"); no such prop exists
+    // yet, so this rejects rather than silently mis-fitting.
+    Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+    for (auto const& p : body_local) {
+        centroid += p;
+    }
+    centroid /= static_cast<double>(body_local.size());
+
+    Eigen::MatrixXd centered(3, static_cast<Eigen::Index>(body_local.size()));
+    for (size_t i = 0; i < body_local.size(); ++i) {
+        centered.col(static_cast<Eigen::Index>(i)) = body_local[i] - centroid;
+    }
+    Eigen::JacobiSVD<Eigen::MatrixXd> collinearity_check(centered);
+    constexpr double kCollinearSingularValueThreshold = 1e-4;  // metres
+    if (collinearity_check.singularValues().size() < 2 ||
+        collinearity_check.singularValues()(1) < kCollinearSingularValueThreshold) {
+        fmt::print(
+            "  Rigid-body init: marker layout is collinear -- reduced position+axis "
+            "solution is not yet implemented (design doc open question 3)\n");
+        return false;
+    }
+
+    // Closed-form rigid (no scaling -- prop geometry is metric by
+    // construction) fit: body_local -> world.
+    Eigen::MatrixXd src(3, static_cast<Eigen::Index>(body_local.size()));
+    Eigen::MatrixXd dst(3, static_cast<Eigen::Index>(body_local.size()));
+    for (size_t i = 0; i < body_local.size(); ++i) {
+        src.col(static_cast<Eigen::Index>(i)) = body_local[i];
+        dst.col(static_cast<Eigen::Index>(i)) = world_pts[i];
+    }
+    Eigen::Matrix4d transform = Eigen::umeyama(src, dst, /*with_scaling=*/false);
+    Eigen::Matrix3d rotation = transform.block<3, 3>(0, 0);
+    Eigen::Vector3d root_position = transform.block<3, 1>(0, 3);
+    Eigen::Quaterniond root_orientation(rotation);
+    root_orientation.normalize();
+
+    double squared_error_sum = 0.0;
+    for (size_t i = 0; i < body_local.size(); ++i) {
+        Eigen::Vector3d predicted = rotation * body_local[i] + root_position;
+        squared_error_sum += (predicted - world_pts[i]).squaredNorm();
+    }
+    double residual_rms = std::sqrt(squared_error_sum / static_cast<double>(body_local.size()));
+    fmt::print("  Rigid-body init: Kabsch/Umeyama fit over {} markers, RMS residual = {:.4f} m\n",
+               body_local.size(), residual_rms);
+
+    if (residual_rms > config_.rigid_init_max_residual_m) {
+        fmt::print("  Rigid-body init: residual {:.4f} m > {:.4f} m limit -- rejecting frame\n",
+                   residual_rms, config_.rigid_init_max_residual_m);
+        return false;
+    }
+
+    int num_dof = skeleton_->total_dof_count();  // 0 for a pure root-only skeleton
+    State init_state(root_position, root_orientation, Eigen::VectorXd::Zero(num_dof),
+                     Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                     Eigen::VectorXd::Zero(num_dof));
+
     initialize_ukf(init_state, timestamp);
     initialized_ = true;
     last_timestamp_ = timestamp;

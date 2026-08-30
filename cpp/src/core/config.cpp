@@ -176,6 +176,7 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
             result.init_joint_std = init["init_joint_std"].value_or(0.1);
             result.init_velocity_std = init["init_velocity_std"].value_or(0.1);
             result.min_cameras_for_init = init["min_cameras_for_init"].value_or(2);
+            result.rigid_init_max_residual_m = init["rigid_init_max_residual_m"].value_or(0.02);
         }
 
         // UKF sub-section
@@ -294,6 +295,11 @@ void TrackerAppConfig::validate() const {
         throw std::runtime_error(
             fmt::format("Invalid min_cameras_for_init: {} (must be >= 2 for triangulation)",
                         min_cameras_for_init));
+    }
+
+    if (rigid_init_max_residual_m <= 0.0) {
+        throw std::runtime_error(fmt::format("Invalid rigid_init_max_residual_m: {} (must be > 0)",
+                                             rigid_init_max_residual_m));
     }
 
     if (start_time < 0.0) {

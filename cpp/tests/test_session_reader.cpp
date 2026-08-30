@@ -317,6 +317,18 @@ static void create_fixture_db() {
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         );
     )");
+    // Keypoint-slot manifest (marker-mocap design doc §4.3) -- a sequence
+    // with no rows here (every fixture row inserted before this table
+    // existed) keeps the legacy COCO-id-implied layout.
+    exec_sql(db, R"(
+        CREATE TABLE pose_sequence_keypoints (
+            sequence_id TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+            keypoint_idx INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            PRIMARY KEY (sequence_id, keypoint_idx)
+        );
+    )");
 
     // ---------- Test data ----------
 
@@ -528,6 +540,59 @@ static void create_fixture_db() {
                       edit_blob, mask);
     }
 
+    // ---------- Marker-based-mocap object sequence (design doc §7.1 sub-phase
+    // 1f) -- source='markers', no 'body' row ever, resolved via
+    // pose_sequence_keypoints instead of a COCO id. Regression fixture for the
+    // "primary-source row is whichever row isn't a recognized overlay, not
+    // hardcoded to the literal name 'body'" fix (status.md, 2026-08-30). ----------
+    exec_sql(db,
+             "INSERT INTO pose_observation_sequences "
+             "(id,shot_id,sync_config_id,time_start_s,time_end_s) "
+             "VALUES ('seq_markers','shot1','sc1',0.0,1.0);");
+    exec_sql(db,
+             "INSERT INTO pose_sequence_keypoints (sequence_id, keypoint_idx, name, source) VALUES "
+             "('seq_markers', 0, 'hilt:c0', 'aruco'),"
+             "('seq_markers', 1, 'hilt:c1', 'aruco'),"
+             "('seq_markers', 2, 'hilt:c2', 'aruco'),"
+             "('seq_markers', 3, 'hilt:c3', 'aruco');");
+    {
+        auto make_marker_blob = [](std::vector<std::array<float, 3>> const& corners) {
+            std::vector<float> kps;
+            for (auto const& c : corners) {
+                kps.push_back(c[0]);
+                kps.push_back(c[1]);
+                kps.push_back(c[2]);
+            }
+            return encode_float32_blob(kps);
+        };
+        auto insert_markers_row = [&](int frame, std::vector<std::array<float, 3>> const& corners) {
+            std::string sql =
+                "INSERT INTO pose_observations "
+                "(sequence_id, camera_instance_id, video_frame, timestamp_s, person_id, source,"
+                " kp_blob, noise_scale) "
+                "VALUES ('seq_markers', 'inst1', " +
+                std::to_string(frame) + ", " + std::to_string(frame * (1.0 / 120.0)) +
+                ", 0, 'markers', ?, 1.0)";
+            sqlite3_stmt* stmt = nullptr;
+            sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+            auto blob = make_marker_blob(corners);
+            sqlite3_bind_blob(stmt, 1, blob.data(), static_cast<int>(blob.size()), SQLITE_STATIC);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        };
+        // Frame 0: all 4 corners seen.
+        insert_markers_row(0, {{{100.f, 200.f, 1.f}},
+                               {{110.f, 200.f, 1.f}},
+                               {{110.f, 210.f, 1.f}},
+                               {{100.f, 210.f, 1.f}}});
+        // Frame 1: corner 2 not seen (NaN-equivalent: confidence 0) -- must be
+        // filtered by min_confidence, not crash or misalign the other three.
+        insert_markers_row(1, {{{101.f, 201.f, 1.f}},
+                               {{111.f, 201.f, 1.f}},
+                               {{0.f, 0.f, 0.f}},
+                               {{101.f, 211.f, 1.f}}});
+    }
+
     sqlite3_close(db);
 }
 
@@ -566,6 +631,26 @@ static Skeleton make_test_skeleton_with_hands() {
     s.add_marker("body5", 0, Eigen::Vector3d(0.02, 0, 0), 5);
     s.add_marker("hand_l4", 0, Eigen::Vector3d(0.03, 0, 0), 95);
     s.add_marker("hand_r4", 0, Eigen::Vector3d(0.04, 0, 0), 116);
+    return s;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: root-only "prop" skeleton with track/landmark-bound markers (no
+// coco_id at all) -- design doc §5.1/§5.3, resolved via pose_sequence_keypoints
+// rather than a COCO id.
+// ---------------------------------------------------------------------------
+static Skeleton make_test_object_skeleton() {
+    Skeleton s;
+    s.add_joint("prop_root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    s.add_input_track("prop_markers", "labeled_points");
+    s.add_marker("hilt:c0", 0, Eigen::Vector3d(0.0, 0.0, 0.0), std::nullopt, "prop_markers",
+                 "hilt:c0");
+    s.add_marker("hilt:c1", 0, Eigen::Vector3d(0.05, 0.0, 0.0), std::nullopt, "prop_markers",
+                 "hilt:c1");
+    s.add_marker("hilt:c2", 0, Eigen::Vector3d(0.05, 0.05, 0.0), std::nullopt, "prop_markers",
+                 "hilt:c2");
+    s.add_marker("hilt:c3", 0, Eigen::Vector3d(0.0, 0.05, 0.0), std::nullopt, "prop_markers",
+                 "hilt:c3");
     return s;
 }
 
@@ -855,4 +940,55 @@ TEST_CASE("SessionReader load_observations lets hand_l.refined override hand_l",
     // 'hand_r' row still applies untouched.
     REQUIRE(frame3[3].position_distorted.x() == Catch::Approx(173.0));
     REQUIRE(frame3[3].crop_scale == Catch::Approx(0.43));
+}
+
+// ---------------------------------------------------------------------------
+// Marker-based-mocap object sequences (design doc §7.1 sub-phase 1f):
+// source='markers' rows, resolved via pose_sequence_keypoints instead of a
+// COCO id. Regression test for the exact bug this fix addresses: the
+// primary/base-layer row used to be found by literal name =='body', so an
+// object sequence's 'markers' row was never recognised as the base layer and
+// every one of its keypoints was silently discarded (mirrors the Python-side
+// observation_merge.py bug, status.md 2026-08-30).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SessionReader load_observations resolves a manifest-bound (markers-source) sequence",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    auto cameras = reader.load_cameras_for_sequence("seq_markers");
+    auto skeleton = make_test_object_skeleton();
+
+    auto obs_set = reader.load_observations("seq_markers", cameras, skeleton, 0.1, 0);
+    auto const& seq = obs_set.sequences().begin()->second;
+
+    // Frame 0: all 4 corners above the confidence threshold.
+    std::vector<Observation> frame0;
+    for (auto const& o : seq.observations)
+        if (o.frame_idx == 0)
+            frame0.push_back(o);
+    REQUIRE(frame0.size() == 4);
+    // Observations come out in ascending manifest-index order (0..3), i.e.
+    // marker_id order hilt:c0, c1, c2, c3 -- confirming resolve_marker_idx
+    // correctly mapped each manifest slot to its skeleton marker, not just
+    // "found something".
+    REQUIRE(frame0[0].position_distorted.x() == Catch::Approx(100.0));
+    REQUIRE(frame0[0].position_distorted.y() == Catch::Approx(200.0));
+    REQUIRE(frame0[1].position_distorted.x() == Catch::Approx(110.0));
+    REQUIRE(frame0[2].position_distorted.x() == Catch::Approx(110.0));
+    REQUIRE(frame0[2].position_distorted.y() == Catch::Approx(210.0));
+    REQUIRE(frame0[3].position_distorted.x() == Catch::Approx(100.0));
+
+    // Frame 1: corner index 2 has confidence 0 -- filtered by min_confidence,
+    // the other three still come through unaffected.
+    std::vector<Observation> frame1;
+    for (auto const& o : seq.observations)
+        if (o.frame_idx == 1)
+            frame1.push_back(o);
+    REQUIRE(frame1.size() == 3);
+    REQUIRE(frame1[0].position_distorted.x() == Catch::Approx(101.0));
+    REQUIRE(frame1[1].position_distorted.x() == Catch::Approx(111.0));
+    REQUIRE(frame1[2].position_distorted.x() == Catch::Approx(101.0));
+    REQUIRE(frame1[2].position_distorted.y() == Catch::Approx(211.0));
 }

@@ -749,6 +749,53 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
         }
     }
 
+    // Step 2.1: Build manifest keypoint-slot → skeleton marker index map
+    // (marker-mocap design §4.3/§5.1, §7.1 sub-phase 1f). A sequence with no
+    // pose_sequence_keypoints rows (every existing person sequence) leaves
+    // this empty -- "behaves exactly as today" (design §5.1). landmark_to_marker_idx
+    // keys off Marker::landmark (the name a manifest row is matched against),
+    // not Marker::name, since a marker bound to a track may in principle have
+    // a display name distinct from its landmark -- though today's generator
+    // (posetrak.skeleton.marker_body_to_skeleton) always sets them equal.
+    std::unordered_map<int, int> manifest_idx_to_marker_idx;
+    {
+        std::unordered_map<std::string, int> landmark_to_marker_idx;
+        for (size_t i = 0; i < markers.size(); ++i) {
+            if (!markers[i].landmark.empty()) {
+                landmark_to_marker_idx[markers[i].landmark] = static_cast<int>(i);
+            }
+        }
+        if (!landmark_to_marker_idx.empty()) {
+            Stmt manifest_stmt(db_,
+                               "SELECT keypoint_idx, name FROM pose_sequence_keypoints"
+                               " WHERE sequence_id = ?");
+            sqlite3_bind_text(manifest_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+            while (manifest_stmt.step()) {
+                int keypoint_idx = sqlite3_column_int(manifest_stmt.ptr, 0);
+                std::string landmark_name =
+                    reinterpret_cast<char const*>(sqlite3_column_text(manifest_stmt.ptr, 1));
+                auto it = landmark_to_marker_idx.find(landmark_name);
+                if (it != landmark_to_marker_idx.end()) {
+                    manifest_idx_to_marker_idx[keypoint_idx] = it->second;
+                }
+            }
+        }
+    }
+
+    // Resolves a keypoint blob slot to a skeleton marker index, trying the
+    // manifest (track/landmark-bound markers) before the legacy COCO map --
+    // the two never overlap in practice (a sequence is either a person's
+    // coco133-implied layout or an object's manifest-declared one, never
+    // both), so lookup order is not load-bearing, only completeness is.
+    auto resolve_marker_idx = [&](int blob_idx) -> std::optional<int> {
+        if (auto it = manifest_idx_to_marker_idx.find(blob_idx);
+            it != manifest_idx_to_marker_idx.end())
+            return it->second;
+        if (auto it = coco_to_marker_idx.find(blob_idx); it != coco_to_marker_idx.end())
+            return it->second;
+        return std::nullopt;
+    };
+
     // Step 2.6: Build marker parent map (hierarchical RELATIVE pairs, Phase 3) and
     // all-pairs distance matrix (spatial cross-pairs, Phase 4).
     // For each marker, find the nearest ancestor joint that also has a marker attached.
@@ -943,14 +990,26 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
         }
         Camera const* camera = cam_it->second;
 
+        // The group's base/primary row is whichever row's source is *not* a
+        // recognized overlay (hand_l/hand_r or their .refined variants) --
+        // rather than hardcoding the literal name 'body'. A person group's
+        // base row is always named 'body'; a marker-based-mocap object
+        // sequence's is always 'markers' (design doc §7.1 sub-phase 1f) and
+        // never carries hand overlays at all -- in both cases there is at
+        // most one non-overlay row per group, so this is unambiguous and,
+        // for today's person-only data, behaves identically to the literal
+        // 'body' check it replaces. See status.md's 2026-08-30 note on the
+        // Python-side mirror of this same bug (observation_merge.py).
         SourceRow const* body_row = nullptr;
         for (auto const& r : group_rows) {
-            if (r.source == "body") {
+            auto [row_base_source, row_is_refined] = split_source(r.source);
+            (void)row_is_refined;
+            if (hand_base_idx(row_base_source) < 0) {
                 body_row = &r;
                 break;
             }
         }
-        // No 'body' row for this group: happens whenever body detection
+        // No base/primary row for this group: happens whenever body detection
         // drops a frame (person lost/occluded) that a refined pass still
         // covers (e.g. a hand track surviving on its own persisted crop).
         // Build a full-width, all-absent (confidence 0) placeholder rather
@@ -1018,15 +1077,15 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                 ++rows_skipped_confidence;
                 continue;
             }
-            auto it = coco_to_marker_idx.find(i);
-            if (it == coco_to_marker_idx.end()) {
+            auto marker_idx_opt = resolve_marker_idx(i);
+            if (!marker_idx_opt.has_value()) {
                 ++rows_skipped_coco;
                 continue;
             }
 
             Observation obs;
             obs.camera_id = camera->id();
-            obs.marker_id = it->second;
+            obs.marker_id = *marker_idx_opt;
             obs.frame_idx = group_frame;
             obs.timestamp = base_timestamp_s;
             obs.position_distorted =
@@ -1192,9 +1251,10 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
             std::to_string(rows_skipped_camera) +
             " rows with unknown camera)\n"
             "  COCO markers in skeleton: " +
-            std::to_string(coco_to_marker_idx.size()) + " (skipped " +
-            std::to_string(rows_skipped_coco) +
-            " keypoints with unknown COCO id)\n"
+            std::to_string(coco_to_marker_idx.size()) +
+            ", manifest-bound markers: " + std::to_string(manifest_idx_to_marker_idx.size()) +
+            " (skipped " + std::to_string(rows_skipped_coco) +
+            " keypoints matching neither)\n"
             "  skipped " +
             std::to_string(rows_skipped_confidence) + " keypoints below confidence threshold " +
             std::to_string(min_confidence));

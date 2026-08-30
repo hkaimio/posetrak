@@ -70,6 +70,16 @@ static Skeleton parse_skeleton_node(YAML::Node const& root) {
     // Create skeleton
     Skeleton skeleton;
 
+    // Parse input_tracks: (design §5.1) -- a skeleton with none behaves
+    // exactly as today (openpose_keypoint/coco_id-only markers).
+    if (root["input_tracks"]) {
+        for (auto const& track_node : root["input_tracks"]) {
+            std::string track_id = track_node["id"].as<std::string>();
+            std::string track_type = track_node["type"].as<std::string>("");
+            skeleton.add_input_track(track_id, track_type);
+        }
+    }
+
     // Parse groups section first to build joint-to-group and marker-to-group mappings
     std::unordered_map<std::string, std::string> joint_to_group_map;
     std::unordered_map<std::string, std::string> marker_to_group_map;
@@ -320,7 +330,18 @@ static Skeleton parse_skeleton_node(YAML::Node const& root) {
                 coco_id = static_cast<int>(marker_node["openpose_keypoint"].as<size_t>());
             }
 
-            uint32_t marker_idx = skeleton.add_marker(marker_name, it->second, offset, coco_id);
+            // track/landmark (design §5.1): a marker bound to a dynamic
+            // observation source instead of (or in addition to) coco_id.
+            std::string track = marker_node["track"].as<std::string>("");
+            std::string landmark = marker_node["landmark"].as<std::string>("");
+            if (!track.empty() && skeleton.get_input_track(track) == nullptr) {
+                throw std::runtime_error("Marker '" + marker_name +
+                                         "' references undeclared track '" + track +
+                                         "' (add it to input_tracks:)");
+            }
+
+            uint32_t marker_idx =
+                skeleton.add_marker(marker_name, it->second, offset, coco_id, track, landmark);
 
             // Assign group from groups section if defined
             if (marker_to_group_map.count(marker_name) > 0) {

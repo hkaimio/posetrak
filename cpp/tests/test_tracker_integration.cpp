@@ -713,3 +713,152 @@ TEST_CASE(
         CHECK(angle_error < 15.0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Rigid-body initialization (marker-mocap algorithms doc §4.2, design §7.1
+// sub-phase 1f): a root-only skeleton (a prop generated from a marker body
+// definition, design §5.3) uses a closed-form Kabsch/Umeyama fit instead of
+// triangulation + IK.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Rigid-body initialization: root-only skeleton uses Kabsch/Umeyama fit",
+          "[tracker][rigid_init]") {
+    TrackerIntegrationFixture fixture;
+    fixture.setup_cameras(3, 4.0, 1.5);
+
+    Skeleton skeleton = load_skeleton_from_yaml("cpp/tests/data/rigid_prop.yaml");
+    REQUIRE(skeleton.input_tracks().size() == 1);
+    REQUIRE(skeleton.input_tracks()[0].id == "prop_markers");
+    REQUIRE(skeleton.get_marker("m0")->track == "prop_markers");
+
+    auto skeleton_ptr = std::make_shared<Skeleton const>(skeleton);
+
+    pinocchio::Model model;
+    pinocchio::Data data;
+    PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
+    auto marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton_ptr);
+    ForwardKinematics fk(model, data, marker_map, layout);
+
+    // Ground-truth pose: a non-trivial position and rotation, not the identity
+    // pose the T-pose/rest-FK warm start would trivially match by luck.
+    Eigen::Vector3d const gt_position(1.2, -0.5, 0.8);
+    Eigen::Quaterniond gt_orientation(
+        Eigen::AngleAxisd(0.7, Eigen::Vector3d(0.3, 0.6, 0.74).normalized()));
+    gt_orientation.normalize();
+    State const gt_state(gt_position, gt_orientation, Eigen::VectorXd(0), Eigen::Vector3d::Zero(),
+                         Eigen::Vector3d::Zero(), Eigen::VectorXd(0));
+
+    // Project every marker into every camera that can see it -- no noise, so
+    // the recovered pose should match ground truth almost exactly.
+    std::unordered_map<std::string, int> marker_name_to_id;
+    auto const& markers = skeleton.markers();
+    for (size_t i = 0; i < markers.size(); ++i) {
+        marker_name_to_id[markers[i].name] = static_cast<int>(i);
+    }
+    auto marker_positions_world = fk.compute(gt_state);
+
+    std::vector<Observation> observations;
+    for (auto const& [name, pos3d] : marker_positions_world) {
+        int const marker_id = marker_name_to_id.at(name);
+        for (auto const& camera : fixture.cameras()) {
+            auto pos2d_opt = camera.project_undistorted(pos3d);
+            if (!pos2d_opt.has_value() || !camera.is_in_bounds(*pos2d_opt))
+                continue;
+            Observation obs;
+            obs.camera_id = camera.id();
+            obs.marker_id = marker_id;
+            obs.frame_idx = 0;
+            obs.timestamp = 0.0;
+            obs.position = *pos2d_opt;
+            obs.position_distorted = *pos2d_opt;
+            obs.confidence = 0.9;
+            observations.push_back(obs);
+        }
+    }
+    REQUIRE(observations.size() >=
+            3 * skeleton.markers().size());  // all 3 cameras see every marker
+
+    TrackerConfig config;
+    config.min_cameras_for_init = 2;
+    config.rigid_init_max_residual_m = 0.02;
+
+    std::unordered_map<int, Camera> camera_map;
+    for (auto const& cam : fixture.cameras()) {
+        camera_map.emplace(cam.id(), cam);
+    }
+
+    Tracker tracker(skeleton_ptr, camera_map, config);
+
+    SECTION("initialize() succeeds and recovers the ground-truth pose") {
+        bool const ok = tracker.initialize(observations, 0.0);
+        REQUIRE(ok);
+
+        CHECK_THAT((tracker.state().root_position() - gt_position).norm(), WithinAbs(0.0, 1e-6));
+        CHECK_THAT(tracker.state().root_orientation().angularDistance(gt_orientation),
+                   WithinAbs(0.0, 1e-6));
+        // Root-only skeleton: no joint-angle DOFs at all.
+        CHECK(tracker.state().joint_angles().size() == 0);
+    }
+
+    SECTION("initialize() rejects a residual above rigid_init_max_residual_m") {
+        // Corrupt one marker's observations enough to blow the fit residual
+        // past the configured threshold without breaking triangulation itself
+        // (still >= min_cameras_for_init views for that marker).
+        for (auto& obs : observations) {
+            if (obs.marker_id == marker_name_to_id.at("m0")) {
+                obs.position += Eigen::Vector2d(50.0, 50.0);
+            }
+        }
+        TrackerConfig strict_config = config;
+        strict_config.rigid_init_max_residual_m = 0.001;  // 1 mm -- unrealistically tight
+        Tracker strict_tracker(skeleton_ptr, camera_map, strict_config);
+        bool const ok = strict_tracker.initialize(observations, 0.0);
+        CHECK_FALSE(ok);
+    }
+
+    SECTION("initialize() rejects a collinear marker layout") {
+        // A synthetic skeleton whose markers all lie on one line -- no
+        // unique rotation, so the fit must reject rather than guess.
+        Skeleton collinear_skeleton = load_skeleton_from_yaml("cpp/tests/data/rigid_prop.yaml");
+        for (size_t i = 0; i < collinear_skeleton.markers().size(); ++i) {
+            collinear_skeleton.markers()[i].local_pos = Eigen::Vector3d(0.0, 0.1 * i, 0.0);
+        }
+        auto collinear_ptr = std::make_shared<Skeleton const>(collinear_skeleton);
+
+        pinocchio::Model collinear_model;
+        pinocchio::Data collinear_data;
+        PinocchioModelBuilder::build_model_and_data(collinear_skeleton, collinear_model,
+                                                    collinear_data);
+        auto collinear_marker_map =
+            PinocchioModelBuilder::build_marker_frame_map(collinear_model, collinear_skeleton);
+        auto collinear_layout = SkeletonLayout::from_full_skeleton(collinear_ptr);
+        ForwardKinematics collinear_fk(collinear_model, collinear_data, collinear_marker_map,
+                                       collinear_layout);
+
+        auto collinear_world = collinear_fk.compute(gt_state);
+        std::vector<Observation> collinear_observations;
+        for (auto const& [name, pos3d] : collinear_world) {
+            int const marker_id = marker_name_to_id.at(name);
+            for (auto const& camera : fixture.cameras()) {
+                auto pos2d_opt = camera.project_undistorted(pos3d);
+                if (!pos2d_opt.has_value() || !camera.is_in_bounds(*pos2d_opt))
+                    continue;
+                Observation obs;
+                obs.camera_id = camera.id();
+                obs.marker_id = marker_id;
+                obs.frame_idx = 0;
+                obs.timestamp = 0.0;
+                obs.position = *pos2d_opt;
+                obs.position_distorted = *pos2d_opt;
+                obs.confidence = 0.9;
+                collinear_observations.push_back(obs);
+            }
+        }
+        REQUIRE(collinear_observations.size() >= 3 * collinear_skeleton.markers().size());
+
+        Tracker collinear_tracker(collinear_ptr, camera_map, config);
+        bool const ok = collinear_tracker.initialize(collinear_observations, 0.0);
+        CHECK_FALSE(ok);
+    }
+}

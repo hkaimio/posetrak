@@ -345,6 +345,29 @@ class Tracker {
     triangulate_markers(std::vector<Observation> const& observations) const;
 
     /**
+     * @brief Analytic rigid-body initialization for a root-only skeleton (marker-mocap
+     * algorithms doc §4.2) -- a prop skeleton generated from a marker body definition
+     * (design §5.3) has one free-flyer root and no other active joints, so a closed-form
+     * Kabsch/Umeyama fit of body-local marker positions (rest-pose FK) to their
+     * triangulated world positions is better-conditioned than IK and cannot fall into a
+     * local minimum the way IK can for this degenerate case.
+     *
+     * Called from initialize() when the skeleton has no non-root active joints, in place
+     * of the human-skeleton analytic-estimate + limb-warm-start + IK path.
+     *
+     * @param marker_positions Triangulated world positions, keyed by marker name (from
+     *        triangulate_markers()); must have >= 3 entries (checked by the caller).
+     * @param timestamp Frame timestamp, passed through to initialize_ukf().
+     * @return false if fewer than 3 triangulated markers have a body-local counterpart,
+     *         the layout is collinear (not yet supported -- see algorithms doc §4 step 4
+     *         and design doc open question 3), or the fit residual exceeds
+     *         config_.rigid_init_max_residual_m (caller's existing retry-on-a-later-frame
+     *         loop applies, same as a failed human-skeleton IK).
+     */
+    bool initialize_rigid_body(std::map<std::string, Eigen::Vector3d> const& marker_positions,
+                               double timestamp);
+
+    /**
      * @brief Run the parent (full-body) predict+update step.
      *
      * Calls ukf_->predict(), ukf_->update(), writes debug output, then

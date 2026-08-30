@@ -130,6 +130,12 @@ struct TrackerConfig {
     double ik_tolerance = 0.01;    ///< IK convergence tolerance (meters)
     int min_cameras_for_init = 2;  ///< Minimum cameras required for triangulation
 
+    /// @brief Max Kabsch/Umeyama fit RMS residual (meters) for a root-only (rigid-body)
+    /// skeleton's analytic initialization (marker-mocap algorithms doc §4) to be accepted.
+    /// Above this, initialize() rejects the frame and the existing retry-on-a-later-frame
+    /// loop tries again, same as the human-skeleton IK-residual check.
+    double rigid_init_max_residual_m = 0.02;
+
     // Layout selection
     std::vector<std::string> active_joint_groups;  ///< Joint groups to track (empty = all)
 
@@ -262,6 +268,7 @@ struct TrackerAppConfig {
     double init_joint_std = 0.1;
     double init_velocity_std = 0.1;
     int min_cameras_for_init = 2;
+    double rigid_init_max_residual_m = 0.02;
 
     // === UKF parameters ===
     double ukf_alpha = 0.5;
@@ -368,6 +375,7 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.ik_max_iterations = ik_max_iterations;
     tc.ik_tolerance = ik_tolerance;
     tc.min_cameras_for_init = min_cameras_for_init;
+    tc.rigid_init_max_residual_m = rigid_init_max_residual_m;
     tc.active_joint_groups = active_joint_groups;
     tc.velocity_mode_camera_ids = velocity_mode_camera_ids;
     tc.velocity_measurement_noise_std = velocity_measurement_noise_std;

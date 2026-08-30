@@ -84,6 +84,29 @@ struct Marker {
     Eigen::Vector3d local_pos;   ///< Position in joint's local frame
     std::optional<int> coco_id;  ///< Optional COCO keypoint ID for compatibility
     std::string group;           ///< Marker group for filtering (e.g., "main", "HandL")
+
+    /// @brief Named observation source this marker is bound to (skeleton YAML's
+    /// input_tracks:, marker-based-mocap design doc §5.1) -- e.g. "prop_markers"
+    /// for a generated prop skeleton. Empty for a marker with no track: field
+    /// (the "exactly as today" case: coco_id-only, or a marker not bound to
+    /// any dynamic observation source at all).
+    std::string track;
+
+    /// @brief Landmark name within `track`, resolved against the bound
+    /// sequence's keypoint manifest at load time (design §5.1/§4.3) -- e.g.
+    /// "hilt:c0" for a coded-marker corner, or a dot's own name. Meaningless
+    /// when `track` is empty.
+    std::string landmark;
+};
+
+/// @brief One skeleton input_tracks: entry (design doc §5.1) -- a named
+/// observation source a marker can bind to via Marker::track, with a layout
+/// implied by `type` ("coco133" et al. use the legacy openpose_keypoint
+/// mapping; "labeled_points" resolves landmark names via the bound
+/// sequence's own pose_sequence_keypoints manifest at load time).
+struct InputTrack {
+    std::string id;
+    std::string type;
 };
 
 /// @brief Metadata for a named joint/marker group beyond membership (which
@@ -143,11 +166,27 @@ class Skeleton {
     /// @param joint_index Attached joint index
     /// @param local_pos Position in joint's local frame
     /// @param coco_id Optional COCO keypoint ID
+    /// @param track Optional input_tracks: id this marker is bound to (design §5.1);
+    ///        empty means "not bound to a dynamic observation source"
+    /// @param landmark Optional landmark name within `track`; meaningless if track is empty
     /// @return Index of the added marker
     /// @throws std::invalid_argument if marker name already exists or joint index invalid
     uint32_t add_marker(std::string const& name, uint32_t joint_index,
-                        Eigen::Vector3d const& local_pos,
-                        std::optional<int> coco_id = std::nullopt);
+                        Eigen::Vector3d const& local_pos, std::optional<int> coco_id = std::nullopt,
+                        std::string const& track = "", std::string const& landmark = "");
+
+    /// @brief Register an input_tracks: entry (design §5.1).
+    /// @param id Track id, referenced by Marker::track
+    /// @param type Layout type ("coco133", "labeled_points", ...)
+    void add_input_track(std::string const& id, std::string const& type);
+
+    /// @brief All declared input_tracks:, in YAML order. Empty for a skeleton
+    /// with no input_tracks: section -- "behaves exactly as today" (design §5.1).
+    std::vector<InputTrack> const& input_tracks() const { return input_tracks_; }
+
+    /// @brief Look up one input_tracks: entry by id.
+    /// @return Pointer to the entry, or nullptr if no such track is declared.
+    InputTrack const* get_input_track(std::string const& id) const;
 
     /// @brief Set joint limits
     /// @param joint_index Index of the joint
@@ -283,9 +322,10 @@ class Skeleton {
     /// @return True if cycle detected
     bool detect_cycle(uint32_t joint_index, std::unordered_set<uint32_t>& visited) const;
 
-    std::vector<Joint> joints_;          ///< Joint definitions (in state vector order)
-    std::vector<Marker> markers_;        ///< Marker definitions (in state vector order)
-    std::vector<SkeletonGroup> groups_;  ///< Group metadata, in groups: YAML order
+    std::vector<Joint> joints_;             ///< Joint definitions (in state vector order)
+    std::vector<Marker> markers_;           ///< Marker definitions (in state vector order)
+    std::vector<SkeletonGroup> groups_;     ///< Group metadata, in groups: YAML order
+    std::vector<InputTrack> input_tracks_;  ///< input_tracks: entries, in YAML order
 };
 
 }  // namespace posetrak

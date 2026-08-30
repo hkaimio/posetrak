@@ -95,16 +95,33 @@ def create_marker_detection_run(
     min_marker_perimeter_rate: float | None = None,
     frame_step: int = 1,
     trial_id: str | None = None,
+    capture_object_id: str | None = None,
+    marker_body_definition_id: str | None = None,
 ) -> str:
     """Create a detection_runs row for an ArUco marker detection pass.
 
-    Design phase 1a (marker-mocap-design.md §7.1) -- deliberately takes
-    detector configuration directly rather than resolving it from a
-    `marker_body_definitions`/`capture_objects` row; that lookup is phase
-    1c's job. `config_json`'s `marker_ids` is the corner-blob decode key
-    for `detection_keypoints` (§4.1): a run's coded-marker corner slots are
-    ordered list-position-major by this list, so re-deriving the blob
-    layout later only ever needs this one field, not a second lookup.
+    Design phase 1a (marker-mocap-design.md §7.1) covers the standalone
+    case: *dictionary*/*marker_ids* given directly, no
+    `marker_body_definitions`/`capture_objects` row involved.
+    Phase 1c's `MarkerDetectionPipeline`/`load_pipeline_for_capture_object`
+    additionally passes *capture_object_id* and *marker_body_definition_id*
+    once a real object/registered body drives the run. `config_json`'s
+    `marker_ids` is the corner-blob decode key for `detection_keypoints`
+    (§4.1) in both cases: a run's coded-marker corner slots are ordered
+    list-position-major by this list, so re-deriving the blob layout later
+    only ever needs this one field, not a second lookup -- even for a
+    marker-body-driven run, where *dictionary* itself is only a best-effort
+    single value (a body spanning more than one ArUco dictionary has no one
+    right answer for it; the per-marker dictionaries live in the marker
+    body definition itself, reachable via `marker_body_definition_id`).
+
+    `capture_object_id` also becomes `detection_runs.capture_object_id`
+    (not just a `config_json` field) so a run's object is directly
+    queryable -- `config_json.marker_ids` alone can't disambiguate two
+    `capture_objects` rows that reference the *same* marker body
+    definition (e.g. two physically-identical props in one capture),
+    mirroring why `tracking_run_persons.capture_object_id` (design §4.2)
+    is an explicit column rather than left as convention.
     """
     config = {
         "dictionary": dictionary,
@@ -112,7 +129,11 @@ def create_marker_detection_run(
         "min_marker_perimeter_rate": min_marker_perimeter_rate,
         "frame_step": frame_step,
     }
-    return create_detection_run(
+    if marker_body_definition_id is not None:
+        config["marker_body_definition_id"] = marker_body_definition_id
+    if capture_object_id is not None:
+        config["capture_object_id"] = capture_object_id
+    run_id = create_detection_run(
         session,
         shot_id=shot_id,
         sync_config_id=sync_config_id,
@@ -124,6 +145,13 @@ def create_marker_detection_run(
         detector_type="aruco",
         config_json=json.dumps(config),
     )
+    if capture_object_id is not None:
+        session.execute(
+            "UPDATE detection_runs SET capture_object_id = ? WHERE id = ?",
+            (capture_object_id, run_id),
+        )
+        session.commit()
+    return run_id
 
 
 def mark_run_complete(session: sqlite3.Connection, run_id: str, status: str = "complete") -> None:

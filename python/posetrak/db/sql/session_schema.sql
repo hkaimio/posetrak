@@ -168,6 +168,21 @@ CREATE TABLE IF NOT EXISTS capture_persons (
     created_at          TEXT NOT NULL
 );
 
+-- The object analog of capture_persons (marker-based-mocap design doc
+-- §4.2): a physical prop instance participating in a capture. Carries no
+-- geometry itself -- that lives in marker_body_definition_id's row; a
+-- tracking skeleton is generated from it (posetrak.skeleton.
+-- marker_body_to_skeleton, phase 1b), not authored here.
+-- marker_body_definition_id -- references marker_body_definitions(id) (this table).
+CREATE TABLE IF NOT EXISTS capture_objects (
+    id                         TEXT PRIMARY KEY,
+    capture_id                 TEXT NOT NULL REFERENCES captures(id),
+    name                       TEXT NOT NULL,
+    marker_body_definition_id  TEXT NOT NULL REFERENCES marker_body_definitions(id),
+    notes                      TEXT,
+    created_at                 TEXT NOT NULL
+);
+
 -- Video files associated with a capture, one per camera.
 -- camera_instance_id     -- references registry: camera_instances(id)
 -- camera_mode_id         -- references registry: camera_modes(id); nullable until wizard sets it
@@ -325,10 +340,15 @@ CREATE TABLE IF NOT EXISTS tracking_runs (
 
 -- Per-person skeleton override within a run (supports multi-person tracking)
 -- skeleton_id -- references registry: skeletons(id)
+-- capture_object_id -- NULL for an actual person; set for a tracked object
+--   (marker-based-mocap design doc §4.2). Not consumed by the tracker until
+--   phase 1f binds multi-source loading; added now alongside capture_objects
+--   so phase 1's data-model work lands in one place.
 CREATE TABLE IF NOT EXISTS tracking_run_persons (
     run_id     TEXT    NOT NULL REFERENCES tracking_runs(id),
     person_id  INTEGER NOT NULL,
     skeleton_id TEXT   NOT NULL, -- references registry: skeletons(id)
+    capture_object_id TEXT REFERENCES capture_objects(id),
     PRIMARY KEY (run_id, person_id)
 );
 
@@ -437,7 +457,8 @@ CREATE TABLE IF NOT EXISTS detection_runs (
     created_at          TEXT NOT NULL,
     completed_at        TEXT,
     detector_type       TEXT NOT NULL DEFAULT 'pose',  -- 'pose', 'aruco', 'blob', ...
-    config_json         TEXT  -- detector-specific config; see marker-mocap-design.md §4.1
+    config_json         TEXT,  -- detector-specific config; see marker-mocap-design.md §4.1
+    capture_object_id   TEXT REFERENCES capture_objects(id)  -- NULL for person (pose) runs
 );
 
 -- Raw keypoints produced by pose estimation, keyed by detection run.

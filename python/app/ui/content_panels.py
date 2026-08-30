@@ -636,6 +636,174 @@ class CapturePersonsSection(QWidget):
         self._refresh()
 
 
+class _AddObjectDialog(QDialog):
+    """Name + marker body definition picker (marker-based-mocap design doc
+    §6.2 step 1, §7.1 sub-phase 1c). Mirrors _AddPersonDialog's shape --
+    an object's marker body is required, not optional like a person's
+    default skeleton, since an object with no marker body can never be
+    detected or tracked."""
+
+    def __init__(self, marker_body_names: dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Add object")
+
+        self._name_edit = QLineEdit()
+        self._body_combo = QComboBox()
+        for body_id, name in marker_body_names.items():
+            self._body_combo.addItem(name, body_id)
+
+        form = QFormLayout()
+        form.addRow("Name:", self._name_edit)
+        form.addRow("Marker body:", self._body_combo)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        if not marker_body_names:
+            layout.addWidget(QLabel(
+                "No marker body definitions in this session yet -- import one "
+                "first (marker-body CLI, or \"Manage rigs…\" in the setup app)."
+            ))
+            self._body_combo.setEnabled(False)
+            buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def _on_accept(self) -> None:
+        if not self._name_edit.text().strip():
+            QMessageBox.warning(self, "Name required", "Enter a name for this object.")
+            return
+        self.accept()
+
+    def name(self) -> str:
+        return self._name_edit.text().strip()
+
+    def marker_body_definition_id(self) -> str | None:
+        return self._body_combo.currentData()
+
+
+class CaptureObjectsSection(QWidget):
+    """"Objects" list for CapturePanel: this capture's tracked props
+    (marker-based-mocap design doc §6.2 step 1), with add/rename/remove.
+    The object analog of CapturePersonsSection above -- same flat-list
+    shape, since there is exactly as little to show per row (name + which
+    marker body, folded into one label).
+    """
+
+    def __init__(self, conn: sqlite3.Connection, capture_id: str, parent=None) -> None:
+        super().__init__(parent)
+        self._conn = conn
+        self._capture_id = capture_id
+        self._body_names: dict[str, str] = {}
+        self._build()
+        self._refresh()
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        box = QGroupBox("Objects")
+        box_layout = QVBoxLayout(box)
+
+        self._list = QListWidget()
+        self._list.setToolTip(
+            "Tracked props defined for this capture (marker-based-mocap) --\n"
+            "each carries a marker body definition describing its physical\n"
+            "marker layout. Detected the same way as a person, via a marker\n"
+            "detection run in Run Detection."
+        )
+        self._list.itemSelectionChanged.connect(self._update_button_states)
+        box_layout.addWidget(self._list)
+
+        btn_row = QHBoxLayout()
+        self._add_btn = QPushButton("Add…")
+        self._add_btn.clicked.connect(self._on_add)
+        self._rename_btn = QPushButton("Rename…")
+        self._rename_btn.clicked.connect(self._on_rename)
+        self._remove_btn = QPushButton("Remove")
+        self._remove_btn.clicked.connect(self._on_remove)
+        btn_row.addWidget(self._add_btn)
+        btn_row.addWidget(self._rename_btn)
+        btn_row.addWidget(self._remove_btn)
+        box_layout.addLayout(btn_row)
+
+        root.addWidget(box)
+        self._update_button_states()
+
+    def _update_button_states(self) -> None:
+        has_selection = self._list.currentItem() is not None
+        self._rename_btn.setEnabled(has_selection)
+        self._remove_btn.setEnabled(has_selection)
+
+    def _selected_object_id(self) -> str | None:
+        item = self._list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def _refresh(self) -> None:
+        from posetrak.db.manage_capture_object import list_capture_objects
+
+        body_rows = self._conn.execute(
+            "SELECT id, name FROM marker_body_definitions ORDER BY name"
+        ).fetchall()
+        self._body_names = {r["id"]: r["name"] for r in body_rows}
+        selected_id = self._selected_object_id()
+        self._list.clear()
+        for obj in list_capture_objects(self._conn, self._capture_id):
+            body_name = self._body_names.get(obj["marker_body_definition_id"], "(unknown body)")
+            item = QListWidgetItem(f"{obj['name']}  —  {body_name}")
+            item.setData(Qt.ItemDataRole.UserRole, obj["id"])
+            self._list.addItem(item)
+            if obj["id"] == selected_id:
+                self._list.setCurrentItem(item)
+        self._update_button_states()
+
+    def _on_add(self) -> None:
+        from posetrak.db.manage_capture_object import create_capture_object
+
+        dlg = _AddObjectDialog(self._body_names, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        create_capture_object(
+            self._conn, self._capture_id, dlg.name(), dlg.marker_body_definition_id(),
+        )
+        self._refresh()
+
+    def _on_rename(self) -> None:
+        from posetrak.db.manage_capture_object import rename_capture_object
+
+        object_id = self._selected_object_id()
+        if object_id is None:
+            return
+        current = self._list.currentItem().text().split("  —  ")[0]
+        name, ok = QInputDialog.getText(self, "Rename object", "Name:", text=current)
+        name = name.strip()
+        if not ok or not name:
+            return
+        rename_capture_object(self._conn, object_id, name)
+        self._refresh()
+
+    def _on_remove(self) -> None:
+        from posetrak.db.manage_capture_object import delete_capture_object
+
+        object_id = self._selected_object_id()
+        if object_id is None:
+            return
+        if QMessageBox.question(
+            self, "Remove object", "Remove this object?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            delete_capture_object(self._conn, object_id)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Cannot remove object", str(exc))
+            return
+        self._refresh()
+
+
 # ---------------------------------------------------------------------------
 # CapturePanel
 # ---------------------------------------------------------------------------
@@ -741,6 +909,9 @@ class CapturePanel(QWidget):
 
         # Persons (config-improvements design doc, phase 5)
         root.addWidget(CapturePersonsSection(self._conn, self._capture_id, parent=self))
+
+        # Objects (marker-based-mocap design doc §7.1 sub-phase 1c)
+        root.addWidget(CaptureObjectsSection(self._conn, self._capture_id, parent=self))
 
         # Bottom toolbar
         toolbar = QHBoxLayout()

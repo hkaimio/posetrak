@@ -25,9 +25,17 @@ from app.pose.db_cache import (
     create_marker_detection_run,
     read_marker_keypoints_for_run,
 )
-from app.setup.fiducial_markers import ARUCO_DICTIONARIES, ArucoDetector, MarkerCornerObs, FiducialDetection
+from app.setup.fiducial_markers import (
+    ARUCO_DICTIONARIES,
+    ArucoDetector,
+    MarkerCornerObs,
+    FiducialDetection,
+    load_marker_body_yaml,
+)
 from posetrak.db.db import create_session
-from posetrak.detection.marker_pipeline import MarkerDetectionPipeline
+from posetrak.db.manage_capture_object import create_capture_object
+from posetrak.db.manage_marker_body import import_marker_body_str
+from posetrak.detection.marker_pipeline import MarkerDetectionPipeline, load_pipeline_for_capture_object
 
 _SHOT_ID = "test-shot-id"
 _SYNC_ID = "test-sync-id"
@@ -294,3 +302,109 @@ def test_real_detector_output_writes_through_correctly(session):
     assert kp.shape == (4, 3)
     assert np.all(kp[:, 2] == 1.0)  # all 4 corners detected
     assert np.all(np.isfinite(kp[:, :2]))
+
+
+# ---------------------------------------------------------------------------
+# Marker-body-driven mode (design phase 1c) -- rig_config constructor path
+# and the load_pipeline_for_capture_object factory.
+# ---------------------------------------------------------------------------
+
+_ONE_MARKER_BODY_YAML = """\
+name: test-bokken
+units: meters
+markers:
+  - name: hilt
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "3"
+    size: 0.05
+    center: [0.0, 0.0, 0.0]
+    normal: [0.0, 0.0, 1.0]
+    up: [0.0, 1.0, 0.0]
+"""
+
+_DOT_ONLY_BODY_YAML = "name: dot-prop\nunits: meters\nmarkers:\n  - name: a\n    type: reflective_dot\n    center: [0,0,0]\n"
+
+
+def test_rig_config_constructor_derives_marker_ids_from_config():
+    config = load_marker_body_yaml(_ONE_MARKER_BODY_YAML)
+    # marker_corners keys are the coded markers' dictionary ids ("3" here);
+    # constructing with rig_config= should derive marker_ids from that,
+    # not require it separately.
+    assert list(config.marker_corners.keys()) == ["3"]
+
+
+def test_rig_config_pipeline_rejects_dot_only_body(session):
+    ids = _TEST_IDS
+    config = load_marker_body_yaml(_DOT_ONLY_BODY_YAML)
+    with pytest.raises(ValueError, match="no coded markers"):
+        MarkerDetectionPipeline(
+            session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+            time_start_s=0.0, time_end_s=10.0, rig_config=config,
+        )
+
+
+def test_rig_config_pipeline_end_to_end(session):
+    ids = _TEST_IDS
+    body_id = import_marker_body_str(session, _ONE_MARKER_BODY_YAML, name="Test Bokken")
+    object_id = create_capture_object(session, ids["shot_id"], "bokken-A", body_id)
+    config = load_marker_body_yaml(_ONE_MARKER_BODY_YAML)
+    with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_frames):
+        pipeline = MarkerDetectionPipeline(
+            session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+            time_start_s=0.0, time_end_s=1.0, rig_config=config,
+            capture_object_id=object_id, marker_body_definition_id=body_id,
+        )
+        result = pipeline.run()
+
+    row = session.execute(
+        "SELECT capture_object_id, config_json FROM detection_runs WHERE id=?",
+        (result.detection_run_id,),
+    ).fetchone()
+    assert row["capture_object_id"] == object_id
+    config_json = json.loads(row["config_json"])
+    assert config_json["marker_body_definition_id"] == body_id
+    assert config_json["capture_object_id"] == object_id
+    assert config_json["marker_ids"] == ["3"]
+
+    kp_by_frame = read_marker_keypoints_for_run(session, result.detection_run_id, ids["svid"])
+    assert np.all(kp_by_frame[0][:, 2] == 1.0)  # marker "3" seen on even frames
+
+
+def test_load_pipeline_for_capture_object(session):
+    ids = _TEST_IDS
+    body_id = import_marker_body_str(session, _ONE_MARKER_BODY_YAML, name="Test Bokken")
+    object_id = create_capture_object(session, ids["shot_id"], "bokken-A", body_id)
+
+    with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_frames):
+        pipeline = load_pipeline_for_capture_object(
+            session, capture_object_id=object_id, sync_config_id=ids["sync_id"],
+            time_start_s=0.0, time_end_s=1.0,
+        )
+        result = pipeline.run()
+
+    row = session.execute(
+        "SELECT capture_object_id FROM detection_runs WHERE id=?", (result.detection_run_id,)
+    ).fetchone()
+    assert row["capture_object_id"] == object_id
+
+    kp_by_frame = read_marker_keypoints_for_run(session, result.detection_run_id, ids["svid"])
+    assert np.all(kp_by_frame[0][:, 2] == 1.0)
+
+
+def test_load_pipeline_for_capture_object_missing_object(session):
+    with pytest.raises(ValueError, match="capture_objects"):
+        load_pipeline_for_capture_object(
+            session, capture_object_id="does-not-exist", sync_config_id=_TEST_IDS["sync_id"],
+            time_start_s=0.0, time_end_s=1.0,
+        )
+
+
+def test_load_pipeline_for_capture_object_dot_only_body_raises(session):
+    body_id = import_marker_body_str(session, _DOT_ONLY_BODY_YAML, name="Dot Prop")
+    object_id = create_capture_object(session, _TEST_IDS["shot_id"], "dot-prop-A", body_id)
+    with pytest.raises(ValueError, match="no coded markers"):
+        load_pipeline_for_capture_object(
+            session, capture_object_id=object_id, sync_config_id=_TEST_IDS["sync_id"],
+            time_start_s=0.0, time_end_s=1.0,
+        )

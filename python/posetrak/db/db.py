@@ -25,7 +25,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 8
-SESSION_SCHEMA_VERSION: Final[int] = 47
+SESSION_SCHEMA_VERSION: Final[int] = 48
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1543,6 +1543,53 @@ def _migrate_session_v46_to_v47(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v47_to_v48(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 47 to 48.
+
+    v48 adds marker-based-mocap phase 1c's data model (design §4.2):
+
+    - `capture_objects`: the object analog of `capture_persons` -- a
+      physical prop instance participating in a capture, linking to its
+      registry `marker_body_definitions` row. Carries no geometry itself
+      (that lives in the definition); adding one to a capture is the same
+      kind of action as adding a named performer.
+    - `tracking_run_persons.capture_object_id`: makes a tracking run's
+      object subjects explicit rather than a convention (design §4.2) --
+      unused until sub-phase 1f wires up tracking runs, added now so the
+      schema work for phase 1's data model lands in one place.
+    - `detection_runs.capture_object_id`: the same "make it explicit"
+      reasoning applied to the detection layer, which the design doc
+      doesn't spell out directly -- needed because a marker detection
+      run's `config_json.marker_ids` alone can't disambiguate two
+      `capture_objects` rows that reference the *same* marker body
+      definition (e.g. two physically-identical props in one capture).
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS capture_objects ("
+        "    id                         TEXT PRIMARY KEY,"
+        "    capture_id                 TEXT NOT NULL REFERENCES captures(id),"
+        "    name                       TEXT NOT NULL,"
+        "    marker_body_definition_id  TEXT NOT NULL REFERENCES marker_body_definitions(id),"
+        "    notes                      TEXT,"
+        "    created_at                 TEXT NOT NULL"
+        ")"
+    )
+    tr_persons_cols = {row[1] for row in conn.execute("PRAGMA table_info(tracking_run_persons)")}
+    if "capture_object_id" not in tr_persons_cols:
+        conn.execute(
+            "ALTER TABLE tracking_run_persons ADD COLUMN capture_object_id "
+            "TEXT REFERENCES capture_objects(id)"
+        )
+    detection_runs_cols = {row[1] for row in conn.execute("PRAGMA table_info(detection_runs)")}
+    if "capture_object_id" not in detection_runs_cols:
+        conn.execute(
+            "ALTER TABLE detection_runs ADD COLUMN capture_object_id "
+            "TEXT REFERENCES capture_objects(id)"
+        )
+    _set_schema_version(conn, 48)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1704,6 +1751,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 46
     if actual == 46:
         _migrate_session_v46_to_v47(conn)
+        actual = 47
+    if actual == 47:
+        _migrate_session_v47_to_v48(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

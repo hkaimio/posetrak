@@ -198,6 +198,68 @@ class DetectionJob(BackgroundJob):
         self.finished.emit(result.detection_run_id)
 
 
+class MarkerDetectionJob(BackgroundJob):
+    """Background job wrapping MarkerDetectionPipeline for one capture
+    object (marker-based-mocap design doc §7.1 sub-phase 1c) -- the
+    marker-run counterpart to DetectionJob above. Same signal shapes
+    (progress/camera_progress/finished/error), so RunDetectionDialog wires
+    it to its existing handlers unchanged; camera_progress's phase label
+    is always "Marker detection" (there is no second pass like hand
+    refinement here).
+    """
+
+    camera_progress = Signal(int, int, str)
+
+    def __init__(
+        self,
+        session_path: str,
+        capture_object_id: str,
+        sync_config_id: str,
+        time_start_s: float,
+        time_end_s: float,
+        min_marker_perimeter_rate: float | None = None,
+        frame_step: int = 1,
+    ):
+        super().__init__()
+        self._session_path = session_path
+        self._capture_object_id = capture_object_id
+        self._sync_config_id = sync_config_id
+        self._time_start_s = time_start_s
+        self._time_end_s = time_end_s
+        self._min_marker_perimeter_rate = min_marker_perimeter_rate
+        self._frame_step = frame_step
+
+    def run(self):
+        from posetrak.db.db import open_session
+        from posetrak.detection.marker_pipeline import load_pipeline_for_capture_object
+
+        session = open_session(Path(self._session_path))
+        try:
+            pipeline = load_pipeline_for_capture_object(
+                session,
+                capture_object_id=self._capture_object_id,
+                sync_config_id=self._sync_config_id,
+                time_start_s=self._time_start_s,
+                time_end_s=self._time_end_s,
+                min_marker_perimeter_rate=self._min_marker_perimeter_rate,
+                frame_step=self._frame_step,
+            )
+
+            def on_progress(done: int, total: int, cam_id: str) -> None:
+                pct = int(done / max(total, 1) * 100)
+                self.progress.emit(pct, f"{cam_id}  {done}/{total} frames")
+
+            result = pipeline.run(on_progress=on_progress)
+            for i, cam in enumerate(pipeline.cameras, start=1):
+                self.camera_progress.emit(i, len(pipeline.cameras), "Marker detection")
+        finally:
+            # Same close-before-finished ordering as DetectionJob, and for
+            # the same reason -- see its own finally block's comment.
+            session.close()
+
+        self.finished.emit(result.detection_run_id)
+
+
 # ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------

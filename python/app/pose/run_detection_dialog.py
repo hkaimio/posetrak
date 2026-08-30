@@ -17,7 +17,7 @@ from pathlib import Path
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QVBoxLayout,
+    QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QSpinBox, QVBoxLayout,
 )
 
 from posetrak.db.db import generate_id
@@ -121,6 +121,63 @@ class RunDetectionDialog(QDialog):
         time_row.addWidget(self._end_spin)
         time_widget = self._make_row_widget(time_row)
         form.addRow("Time range:", time_widget)
+
+        # Run for: a person (pose detection, the default) or one of this
+        # capture's tracked objects (marker detection instead -- design
+        # doc §7.1 sub-phase 1c). Both the combo and its accompanying
+        # marker-only fields are only built when the capture actually has
+        # at least one object, same "don't show it if it can't apply" rule
+        # the bbox-source combo below already follows -- object mode is
+        # simply impossible otherwise, so there is nothing to disable-not-
+        # hide here (unlike detector/pose-model, which the bbox combo can
+        # toggle away from without objects being involved at all).
+        from posetrak.db.manage_capture_object import list_capture_objects
+
+        objects = list_capture_objects(self._conn, self._capture_id)
+        self._object_combo: QComboBox | None = None
+        self._marker_perimeter_spin: QDoubleSpinBox | None = None
+        self._marker_frame_step_spin: QSpinBox | None = None
+        if objects:
+            self._object_combo = QComboBox()
+            self._object_combo.addItem("Person (pose)", None)
+            for obj in objects:
+                self._object_combo.addItem(obj["name"], obj["id"])
+            self._object_combo.setToolTip(
+                "Choose one of this capture's tracked objects to run marker "
+                "detection instead of pose detection -- the fields below "
+                "switch to match."
+            )
+            self._object_combo.currentIndexChanged.connect(self._on_object_source_changed)
+            form.addRow("Run for:", self._object_combo)
+
+            # Marker-detection-only fields -- dictionary/marker ids come
+            # from the chosen object's own marker body definition, so
+            # there is nothing to pick here beyond the detector's own
+            # tuning. Disabled (not hidden) until an object is chosen,
+            # matching the bbox-source combo's own convention below.
+            self._marker_perimeter_spin = QDoubleSpinBox()
+            self._marker_perimeter_spin.setRange(0.001, 1.0)
+            self._marker_perimeter_spin.setDecimals(3)
+            self._marker_perimeter_spin.setSingleStep(0.005)
+            self._marker_perimeter_spin.setValue(0.01)
+            self._marker_perimeter_spin.setToolTip(
+                "cv2.aruco's minMarkerPerimeterRate -- lower catches smaller/"
+                "farther markers but risks false positives. The cv2 default "
+                "(0.03) misses room-distance markers in 4K frames; 0.01 is a "
+                "better starting point for this project's typical setups."
+            )
+            self._marker_frame_step_spin = QSpinBox()
+            self._marker_frame_step_spin.setRange(1, 100)
+            self._marker_frame_step_spin.setValue(1)
+            self._marker_frame_step_spin.setSuffix(" frame(s)")
+            marker_row = QHBoxLayout()
+            marker_row.addWidget(QLabel("Perimeter rate:"))
+            marker_row.addWidget(self._marker_perimeter_spin)
+            marker_row.addWidget(QLabel("Frame step:"))
+            marker_row.addWidget(self._marker_frame_step_spin)
+            form.addRow("Marker detector:", self._make_row_widget(marker_row))
+            self._marker_perimeter_spin.setEnabled(False)
+            self._marker_frame_step_spin.setEnabled(False)
 
         # Bbox source: YOLO (default, always available) or an existing
         # segmentation covering this capture, if any -- gap 2 of
@@ -270,6 +327,30 @@ class RunDetectionDialog(QDialog):
         self._detector_combo.setEnabled(is_yolo)
         self._conf_spin.setEnabled(is_yolo)
 
+    def _on_object_source_changed(self, _index: int) -> None:
+        """Choosing an object switches the dialog to marker-detection mode
+        (design §7.1 sub-phase 1c): every person-only field (bbox source,
+        detector, pose model, confidence, refine hands) is disabled and
+        the marker-only fields are enabled, and vice versa -- same
+        disable-not-hide convention as _on_bbox_source_changed above."""
+        is_object_mode = self._object_combo.currentData() is not None
+        self._marker_perimeter_spin.setEnabled(is_object_mode)
+        self._marker_frame_step_spin.setEnabled(is_object_mode)
+        self._pose_combo.setEnabled(not is_object_mode)
+        self._refine_hands_check.setEnabled(not is_object_mode)
+        if self._bbox_source_combo is not None:
+            self._bbox_source_combo.setEnabled(not is_object_mode)
+            # Reconciles detector/confidence with YOLO-vs-segmentation when
+            # returning to person mode; harmlessly overridden again just
+            # below when entering object mode.
+            self._on_bbox_source_changed(self._bbox_source_combo.currentIndex())
+        else:
+            self._detector_combo.setEnabled(not is_object_mode)
+            self._conf_spin.setEnabled(not is_object_mode)
+        if is_object_mode:
+            self._detector_combo.setEnabled(False)
+            self._conf_spin.setEnabled(False)
+
     def _controls_enabled(self, enabled: bool) -> None:
         for w in [
             self._sync_combo,
@@ -284,6 +365,10 @@ class RunDetectionDialog(QDialog):
             self._bbox_source_combo.setEnabled(enabled)
             if enabled:
                 self._on_bbox_source_changed(self._bbox_source_combo.currentIndex())
+        if self._object_combo is not None:
+            self._object_combo.setEnabled(enabled)
+            if enabled:
+                self._on_object_source_changed(self._object_combo.currentIndex())
 
     def _on_run(self) -> None:
         sync_id = self._sync_combo.currentData()
@@ -296,12 +381,18 @@ class RunDetectionDialog(QDialog):
             QMessageBox.warning(self, "Invalid range", "End time must be after start time.")
             return
 
+        object_id = self._object_combo.currentData() if self._object_combo else None
+
         self._controls_enabled(False)
         self._frame_bar.setValue(0)
         self._cam_bar.setValue(0)
         self._cam_label.setText("Starting…")
         self._device_warning_label.hide()
         self._device_warning_label.setText("")
+
+        if object_id is not None:
+            self._run_marker_detection(object_id, sync_id, start_s, end_s)
+            return
 
         seg_run_id = self._bbox_source_combo.currentData() if self._bbox_source_combo else None
         if seg_run_id is not None:
@@ -323,6 +414,29 @@ class RunDetectionDialog(QDialog):
         self._job.progress.connect(self._on_progress)
         self._job.camera_progress.connect(self._on_camera_progress)
         self._job.device_notice.connect(self._on_device_notice)
+        self._job.finished.connect(self._on_finished)
+        self._job.error.connect(self._on_error)
+        self._job.start()
+
+    # ------------------------------------------------------------------
+    # Marker detection for a tracked object (design §7.1 sub-phase 1c)
+    # ------------------------------------------------------------------
+
+    def _run_marker_detection(
+        self, object_id: str, sync_id: str, start_s: float, end_s: float,
+    ) -> None:
+        from app.pose.main import MarkerDetectionJob
+        self._job = MarkerDetectionJob(
+            session_path=str(self._session_path),
+            capture_object_id=object_id,
+            sync_config_id=sync_id,
+            time_start_s=start_s,
+            time_end_s=end_s,
+            min_marker_perimeter_rate=self._marker_perimeter_spin.value(),
+            frame_step=self._marker_frame_step_spin.value(),
+        )
+        self._job.progress.connect(self._on_progress)
+        self._job.camera_progress.connect(self._on_camera_progress)
         self._job.finished.connect(self._on_finished)
         self._job.error.connect(self._on_error)
         self._job.start()

@@ -2,22 +2,28 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""marker_pipeline.py — ArUco marker detection pipeline (design phase 1a).
+"""marker_pipeline.py — ArUco marker detection pipeline (design phases 1a/1c).
 
-See docs/roadmap/features/marker-based-mocap/marker-mocap-design.md §7.1
-sub-phase 1a. Structurally parallel to ``pipeline.py``'s person
-``DetectionPipeline``, but for coded (ArUco) markers on a rigid prop:
+See docs/roadmap/features/marker-based-mocap/marker-mocap-design.md §7.1.
+Structurally parallel to ``pipeline.py``'s person ``DetectionPipeline``,
+but for coded (ArUco) markers on a rigid prop.
 
-- reuses ``app.setup.fiducial_markers.ArucoDetector`` (built stateless and
-  per-frame for exactly this kind of consumer);
-- writes the fixed-slot corner blob described in the design doc's §4.1
-  directly to ``detection_keypoints`` via ``db_cache.MarkerKeypointWriter``.
+Two ways to drive ``MarkerDetectionPipeline``, both writing the fixed-slot
+corner blob described in the design doc's §4.1 to ``detection_keypoints``
+via ``db_cache.MarkerKeypointWriter`` (detector-agnostic -- it only
+consumes ``FiducialDetection`` objects, so it works unchanged either way):
 
-Deliberately decoupled from ``capture_objects``/``marker_body_definitions``
-(that wiring is sub-phase 1c): the caller passes detector configuration
-directly (dictionary, the prop's marker ids, perimeter rate), the same way
-this module can be driven from a script or test without any GUI or
-capture-object plumbing existing yet.
+- **Standalone** (sub-phase 1a): pass ``marker_ids`` + a single
+  ``dictionary`` directly, no ``capture_objects``/``marker_body_definitions``
+  involved -- a plain ``ArucoDetector`` does the detecting. This is what a
+  script or test drives without any GUI or registered marker body existing.
+- **Marker-body-driven** (sub-phase 1c, the real GUI path): pass a
+  ``rig_config`` (an ``app.setup.fiducial_markers.MarkerRigConfig``, e.g.
+  from ``load_pipeline_for_capture_object`` below) -- a ``MarkerRigDetector``
+  does the detecting instead, which additionally handles a body spanning
+  more than one ArUco dictionary and filters out any marker not actually
+  part of this body (the "purple marker mixup" lesson, algorithms doc
+  §1.1). ``marker_ids`` is derived from the config, not given directly.
 
 Camera/sync-table loading below duplicates ``pipeline.py``'s
 ``_load_cameras``/``_frame_range`` rather than sharing them, to keep this
@@ -34,8 +40,9 @@ from typing import Callable
 
 from app.pose.db_cache import MarkerKeypointWriter, create_marker_detection_run, mark_run_complete
 from app.setup.db_context import SyncPoint, SyncTable
-from app.setup.fiducial_markers import ArucoDetector
+from app.setup.fiducial_markers import ArucoDetector, MarkerRigConfig, MarkerRigDetector, load_marker_body_yaml
 from posetrak.detection.frame_source import iter_frames
+from posetrak.db.manage_capture_object import get_capture_object
 
 _log = logging.getLogger(__name__)
 
@@ -76,17 +83,28 @@ class MarkerDetectionPipeline:
         sync_config_id: str,
         time_start_s: float,
         time_end_s: float,
-        marker_ids: list[str],
+        marker_ids: list[str] | None = None,
         dictionary: str = "DICT_4X4_50",
+        rig_config: MarkerRigConfig | None = None,
         min_marker_perimeter_rate: float | None = None,
         frame_step: int = 1,
         trial_id: str | None = None,
+        capture_object_id: str | None = None,
+        marker_body_definition_id: str | None = None,
         stop_event: threading.Event | None = None,
     ) -> None:
-        if not marker_ids:
+        if rig_config is not None:
+            if not rig_config.marker_corners:
+                raise ValueError(
+                    f"marker body {rig_config.rig_id!r} has no coded markers to detect "
+                    "-- a dot-only body needs sub-phase 2's detector, not this one"
+                )
+            marker_ids = list(rig_config.marker_corners.keys())
+        elif not marker_ids:
             raise ValueError(
                 "marker_ids must list every coded marker id the prop carries -- "
-                "it fixes the detection_keypoints corner-slot ordering (design §4.1)"
+                "it fixes the detection_keypoints corner-slot ordering (design §4.1), "
+                "or pass rig_config instead to derive it from a marker body definition"
             )
         if frame_step < 1:
             raise ValueError("frame_step must be >= 1")
@@ -100,11 +118,18 @@ class MarkerDetectionPipeline:
         self._marker_ids = list(marker_ids)
         self._min_marker_perimeter_rate = min_marker_perimeter_rate
         self._frame_step = frame_step
+        self._capture_object_id = capture_object_id
+        self._marker_body_definition_id = marker_body_definition_id
         self._stop_event = stop_event or threading.Event()
-        self._detector = ArucoDetector(
-            dictionary=dictionary,
-            min_marker_perimeter_rate=min_marker_perimeter_rate,
-        )
+        if rig_config is not None:
+            self._detector = MarkerRigDetector(
+                rig_config, dictionary=dictionary, min_marker_perimeter_rate=min_marker_perimeter_rate,
+            )
+        else:
+            self._detector = ArucoDetector(
+                dictionary=dictionary,
+                min_marker_perimeter_rate=min_marker_perimeter_rate,
+            )
         self._cameras, self._sync_table = self._load_cameras()
 
     # ------------------------------------------------------------------
@@ -115,7 +140,11 @@ class MarkerDetectionPipeline:
     def cameras(self) -> list[MarkerCameraInfo]:
         return self._cameras
 
-    def run(self, on_progress: ProgressCallback | None = None) -> MarkerPipelineResult:
+    def run(
+        self,
+        on_progress: ProgressCallback | None = None,
+        on_camera_done: Callable[[int, int], None] | None = None,
+    ) -> MarkerPipelineResult:
         run_id = create_marker_detection_run(
             self._session,
             shot_id=self._shot_id,
@@ -127,6 +156,8 @@ class MarkerDetectionPipeline:
             min_marker_perimeter_rate=self._min_marker_perimeter_rate,
             frame_step=self._frame_step,
             trial_id=self._trial_id,
+            capture_object_id=self._capture_object_id,
+            marker_body_definition_id=self._marker_body_definition_id,
         )
 
         result = MarkerPipelineResult(detection_run_id=run_id)
@@ -138,6 +169,8 @@ class MarkerDetectionPipeline:
                 n = self._process_camera(run_id, cam, on_progress)
                 result.cameras_processed.append(cam.camera_instance_id)
                 result.frames_processed += n
+                if on_camera_done:
+                    on_camera_done(len(result.cameras_processed), len(self._cameras))
 
             result.status = "failed" if self._stop_event.is_set() else "complete"
             mark_run_complete(self._session, run_id, result.status)
@@ -280,3 +313,56 @@ class MarkerDetectionPipeline:
             cam.label or cam.camera_instance_id, frames_done,
         )
         return frames_done
+
+
+def load_pipeline_for_capture_object(
+    session,
+    capture_object_id: str,
+    sync_config_id: str,
+    time_start_s: float,
+    time_end_s: float,
+    min_marker_perimeter_rate: float | None = None,
+    frame_step: int = 1,
+    trial_id: str | None = None,
+    stop_event: threading.Event | None = None,
+) -> MarkerDetectionPipeline:
+    """Build a ``MarkerDetectionPipeline`` for an existing ``capture_objects``
+    row (design phase 1c) -- resolves its marker body definition, loads the
+    resolved rig geometry, and constructs the pipeline in marker-body-driven
+    mode. This is the path the GUI's run-detection dialog uses; sub-phase
+    1a's plain constructor stays available for the standalone/scripted case.
+
+    Raises
+    ------
+    ValueError
+        If *capture_object_id* or its marker body definition does not
+        exist, or the marker body has no coded markers to detect (a
+        dot-only body needs sub-phase 2's detector, not this one).
+    """
+    obj_row = get_capture_object(session, capture_object_id)
+    if obj_row is None:
+        raise ValueError(f"capture_objects row not found: {capture_object_id!r}")
+
+    body_id = obj_row["marker_body_definition_id"]
+    body_row = session.execute(
+        "SELECT yaml_content FROM marker_body_definitions WHERE id = ?", (body_id,)
+    ).fetchone()
+    if body_row is None or body_row["yaml_content"] is None:
+        raise ValueError(f"marker_body_definitions row not found or empty: {body_id!r}")
+
+    rig_config = load_marker_body_yaml(body_row["yaml_content"], rig_id=body_id)
+
+    return MarkerDetectionPipeline(
+        session,
+        shot_id=obj_row["capture_id"],
+        sync_config_id=sync_config_id,
+        time_start_s=time_start_s,
+        time_end_s=time_end_s,
+        rig_config=rig_config,
+        min_marker_perimeter_rate=min_marker_perimeter_rate,
+        frame_step=frame_step,
+        trial_id=trial_id,
+        capture_object_id=capture_object_id,
+        marker_body_definition_id=body_id,
+        stop_event=stop_event,
+    )

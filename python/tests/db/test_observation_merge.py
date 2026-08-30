@@ -171,3 +171,51 @@ def test_infer_body_width_finds_body_row_in_any_frame():
 def test_infer_body_width_returns_none_when_no_frame_has_a_body_row():
     hand = _kp(9.0, n=21)
     assert infer_body_width([[("hand_l", hand)]]) is None
+
+
+# ---------------------------------------------------------------------------
+# primary_source (marker-based-mocap design doc §7.1 sub-phase 1e): a
+# sequence whose real source is never 'body' (e.g. 'markers' for an object)
+# must have its own row treated as the base layer, not silently replaced by
+# a synthesized zero body the moment default_width happens to be known from
+# something unrelated (an edit's own shape, in the real bug this was found
+# from -- read_observations_with_edits, status.md's 2026-08-30 note).
+# ---------------------------------------------------------------------------
+
+
+def test_primary_source_row_is_used_as_base_layer():
+    markers = _kp(5.0, n=8)
+    merged = merge_observation_sources([("markers", markers)], primary_source="markers")
+    np.testing.assert_array_equal(merged, markers)
+    assert merged is not markers
+
+
+def test_non_matching_source_ignored_even_with_default_width():
+    """The exact regression this generalisation fixes: a 'markers' row must
+    not be discarded in favour of a synthesized zero body just because
+    default_width is given and the source isn't the *default* primary_source
+    ('body') -- it must be compared against the *given* primary_source."""
+    markers = _kp(5.0, n=8)
+    merged = merge_observation_sources(
+        [("markers", markers)], default_width=8, primary_source="markers",
+    )
+    np.testing.assert_array_equal(merged, markers)
+
+
+def test_wrong_primary_source_still_falls_back_to_zero_body():
+    """Sanity check the other direction: if the caller asks for a primary
+    source that genuinely isn't present, the zero-body fallback still
+    applies -- this isn't a case where every row is now unconditionally
+    trusted, only that the *comparison* is against the given primary_source."""
+    markers = _kp(5.0, n=8)
+    merged = merge_observation_sources(
+        [("markers", markers)], default_width=8, primary_source="body",
+    )
+    np.testing.assert_array_equal(merged, np.zeros((8, 3), dtype=np.float32))
+
+
+def test_infer_body_width_with_custom_primary_source():
+    markers = _kp(5.0, n=8)
+    rows_by_frame = [[("markers", markers)]]
+    assert infer_body_width(rows_by_frame, primary_source="markers") == 8
+    assert infer_body_width(rows_by_frame, primary_source="body") is None

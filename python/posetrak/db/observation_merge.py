@@ -57,40 +57,50 @@ def _split_source(source: str) -> tuple[str, bool]:
 def merge_observation_sources(
     rows: list[tuple[str, np.ndarray]],
     default_width: int | None = None,
+    primary_source: str = BODY_SOURCE,
 ) -> np.ndarray | None:
     """Merge (source, kp[n,3]) rows sharing one (camera, frame) into one array.
 
-    'body' is the base layer — its own row establishes the merged array's
-    width. Every other recognised source (`_SOURCE_PLACEMENT`) overlays its
-    own index range on top, the same precedence Phase 1 already validated by
-    patching hand keypoints directly into the whole-body blob.
+    *primary_source* (default `BODY_SOURCE`, i.e. 'body' — every existing
+    person-panel call site) is the base layer — its own row establishes
+    the merged array's width. Every other recognised source
+    (`_SOURCE_PLACEMENT`) overlays its own index range on top, the same
+    precedence Phase 1 already validated by patching hand keypoints
+    directly into the whole-body blob. A sequence with no 'body' source at
+    all (marker-based-mocap object sequences, source='markers' — design
+    doc §7.1 sub-phase 1e) passes its own *primary_source* instead, so its
+    single real row is treated as the base layer rather than silently
+    discarded in favour of a synthesized zero body the instant
+    *default_width* happens to be known from something unrelated (e.g. an
+    edit's own shape) — see status.md's 2026-08-30 note on this exact bug.
 
     A source '<base>.refined' overrides its plain '<base>' counterpart for
     the same slots — applied as two explicit passes (plain sources, then
     '.refined' sources) rather than relying on *rows*' order, since nothing
     upstream guarantees '.refined' rows arrive after their base row (the DB
     query has no ORDER BY on source). Rows for an unrecognised base source
-    are ignored.
+    (i.e. anything that is neither *primary_source* nor a key of
+    `_SOURCE_PLACEMENT`) are ignored.
 
     *default_width* covers a frame that has an overlay row (e.g.
-    'hand_l.refined') but no 'body' row of its own -- this happens when
-    auto-redetection (Idea 3) fires from a wrist/elbow placed on an
-    otherwise-undetected "ghost" frame (no original pose_observations row,
-    only a pose_observation_edits row). Without a 'body' row to overlay
-    onto, there is nothing to establish the merged array's width, so the
-    caller passes the camera's known keypoint count and this synthesizes a
-    zero-confidence body of that width to overlay onto -- consistent with
-    how a ghost frame is treated everywhere else (zero confidence except
-    for what's explicitly known).
+    'hand_l.refined') but no *primary_source* row of its own -- this
+    happens when auto-redetection (Idea 3) fires from a wrist/elbow placed
+    on an otherwise-undetected "ghost" frame (no original
+    pose_observations row, only a pose_observation_edits row). Without a
+    primary-source row to overlay onto, there is nothing to establish the
+    merged array's width, so the caller passes the camera's known
+    keypoint count and this synthesizes a zero-confidence body of that
+    width to overlay onto -- consistent with how a ghost frame is treated
+    everywhere else (zero confidence except for what's explicitly known).
 
-    Returns None if no 'body' row is present and no *default_width* was
-    given (nothing to merge onto).
+    Returns None if no *primary_source* row is present and no
+    *default_width* was given (nothing to merge onto).
     """
     body: np.ndarray | None = None
     overlay_rows: list[tuple[str, bool, np.ndarray]] = []  # (base, is_refined, kp)
     for source, kp in rows:
         base, is_refined = _split_source(source)
-        if base == BODY_SOURCE and not is_refined:
+        if base == primary_source and not is_refined:
             body = kp
         elif base in _SOURCE_PLACEMENT:
             overlay_rows.append((base, is_refined, kp))
@@ -114,19 +124,24 @@ def merge_observation_sources(
     return merged
 
 
-def infer_body_width(rows_by_frame: Iterable[list[tuple[str, np.ndarray]]]) -> int | None:
-    """Return the width of any 'body'-sourced row found across *rows_by_frame*.
+def infer_body_width(
+    rows_by_frame: Iterable[list[tuple[str, np.ndarray]]],
+    primary_source: str = BODY_SOURCE,
+) -> int | None:
+    """Return the width of any *primary_source*-sourced row found across
+    *rows_by_frame* (default 'body', matching `merge_observation_sources`'s
+    own default).
 
     Meant as the `default_width` for `merge_observation_sources` on a camera
     with multiple frames: as long as one frame in the camera has a normal
-    'body' detection, every other frame's overlay-only rows (a ghost frame's
-    auto-redetected hand, say) can synthesize a same-width zero body instead
-    of falling back to a mismatched, overlay-width array.
+    primary-source detection, every other frame's overlay-only rows (a
+    ghost frame's auto-redetected hand, say) can synthesize a same-width
+    zero body instead of falling back to a mismatched, overlay-width array.
     """
     for rows in rows_by_frame:
         for source, kp in rows:
             base, is_refined = _split_source(source)
-            if base == BODY_SOURCE and not is_refined:
+            if base == primary_source and not is_refined:
                 return kp.shape[0]
     return None
 

@@ -459,6 +459,7 @@ def read_observations_with_edits(
     session: sqlite3.Connection,
     sequence_id: str,
     camera_instance_id: str,
+    primary_source: str = BODY_SOURCE,
 ) -> dict[int, np.ndarray]:
     """Return {video_frame: float32[N,3]} for one camera, with pose_observation_edits applied.
 
@@ -469,6 +470,15 @@ def read_observations_with_edits(
     slots (bit set in kp_mask) have their x/y replaced by the edit values;
     if the edit marks a keypoint as outlier (is_outlier != 0) its confidence
     is zeroed.
+
+    *primary_source* (default `BODY_SOURCE`) names the source this
+    sequence's single "real" row uses as its base layer -- pass a
+    sequence's own source (e.g. 'markers' for a marker-based-mocap object
+    sequence, design doc §7.1 sub-phase 1e) when it isn't 'body', so that
+    sequence's row is correctly treated as the base layer instead of a
+    same-width zero body silently overwriting it once any edit exists (see
+    `merge_observation_sources`'s own docstring and status.md's 2026-08-30
+    note for why this matters).
     """
     obs_rows = session.execute(
         "SELECT video_frame, source, kp_blob FROM pose_observations"
@@ -498,7 +508,7 @@ def read_observations_with_edits(
         for r in edit_rows
     }
 
-    default_width = infer_body_width(by_frame.values())
+    default_width = infer_body_width(by_frame.values(), primary_source=primary_source)
     if default_width is None and edits:
         default_width = next(iter(edits.values()))[0].shape[0]
 
@@ -517,11 +527,12 @@ def read_observations_with_edits(
 
     result: dict[int, np.ndarray] = {}
     for frame, rows in by_frame.items():
-        kp = merge_observation_sources(rows, default_width=default_width)
+        kp = merge_observation_sources(rows, default_width=default_width, primary_source=primary_source)
         if kp is None:
-            # No 'body' row for this frame and no other frame in this camera
-            # had one either (default_width also came up empty) -- nothing
-            # establishes the true width, so fall back to whichever row is
+            # No primary-source row for this frame and no other frame in
+            # this camera had one either (default_width also came up
+            # empty) -- nothing establishes the true width, so fall back
+            # to whichever row is
             # present rather than dropping the frame.
             kp = rows[0][1]
         if frame in edits:
@@ -580,6 +591,7 @@ def update_single_keypoint_edit(
     new_x: float,
     new_y: float,
     is_outlier: bool = False,
+    source: str = BODY_SOURCE,
 ) -> None:
     """Update one keypoint slot in pose_observation_edits, preserving other slots.
 
@@ -590,25 +602,29 @@ def update_single_keypoint_edit(
     Works on ghost frames (no pose_observations row) by inferring the keypoint
     count from any other observation in the same camera.
 
-    The keypoint count is always inferred from a 'body' row: a frame may also
-    have 'hand_l'/'hand_r' rows (narrower, 21-point arrays) that must not be
-    mistaken for the frame's full keypoint width.
+    The keypoint count is inferred from a *source*-tagged row (default
+    `BODY_SOURCE`, i.e. 'body' — every existing person-panel call site):
+    a frame may also have 'hand_l'/'hand_r' rows (narrower, 21-point
+    arrays) that must not be mistaken for the frame's full keypoint width.
+    A sequence with no 'body' source at all (marker-based-mocap object
+    sequences, source='markers' — design doc §7.1 sub-phase 1e) passes
+    its own *source* here instead, since 'body' will never exist for it.
     """
     obs_row = session.execute(
         "SELECT kp_blob FROM pose_observations"
         " WHERE sequence_id = ? AND camera_instance_id = ? AND video_frame = ?"
         " AND source = ?",
-        (sequence_id, camera_instance_id, video_frame, BODY_SOURCE),
+        (sequence_id, camera_instance_id, video_frame, source),
     ).fetchone()
 
     if obs_row is not None:
         n_kp = len(bytes(obs_row["kp_blob"])) // (3 * 4)
     else:
-        # Ghost frame: infer n_kp from any other 'body' observation in this camera.
+        # Ghost frame: infer n_kp from any other same-source observation in this camera.
         any_obs = session.execute(
             "SELECT kp_blob FROM pose_observations"
             " WHERE sequence_id = ? AND camera_instance_id = ? AND source = ? LIMIT 1",
-            (sequence_id, camera_instance_id, BODY_SOURCE),
+            (sequence_id, camera_instance_id, source),
         ).fetchone()
         if any_obs is None:
             return  # no observations at all — cannot determine keypoint count

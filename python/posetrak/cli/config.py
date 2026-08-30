@@ -15,6 +15,7 @@ from posetrak.db.manage_config import (
     create_config_from_toml,
     edit_config,
     list_configs,
+    refresh_baseline_tracker_config,
 )
 
 from posetrak.cli._output import print_table, print_record
@@ -241,3 +242,82 @@ def config_edit(
             session.close()
 
     click.echo(f"new tracker_config_id: {new_id}")
+
+
+# ---------------------------------------------------------------------------
+# config refresh-baseline
+# ---------------------------------------------------------------------------
+
+
+def _refresh_defaults(conn) -> tuple[bool, int]:
+    """Refresh the baseline tracker config and add any bundled default
+    skeletons this connection is missing. Returns (config_updated,
+    n_skeletons_added)."""
+    from posetrak.db.manage_skeleton import seed_default_skeletons
+
+    updated = refresh_baseline_tracker_config(conn)
+
+    # seed_default_skeletons() is INSERT OR IGNORE keyed by content hash, so
+    # it only ever adds a skeleton this connection doesn't already have --
+    # an older bundled default (a different hash, from before the YAML was
+    # last changed) is left in place rather than replaced: skeletons are
+    # content-addressed, and a capture_persons row may already point at that
+    # exact ID, so nothing here deletes or overwrites an existing skeleton.
+    before = conn.total_changes
+    seed_default_skeletons(conn)
+    n_added = conn.total_changes - before
+
+    return updated, n_added
+
+
+@config_group.command("refresh-baseline")
+@click.option("--global", "global_registry", is_flag=True, default=False,
+              help="Refresh the registry's baseline row instead of (or as "
+                   "well as) a session's.")
+@click.pass_obj
+def config_refresh_baseline(obj: dict, global_registry: bool) -> None:
+    """Backfill the checked-in baseline tracker config and default skeletons.
+
+    A session's registry rows (baseline tracker config, default skeletons)
+    are copied in once, at creation time, and never re-synced -- so a
+    session created before either was last changed keeps its old values
+    forever: an all-NULL/stale "factory defaults" tracker config, and
+    missing whichever bundled default skeletons (Default male/female) were
+    added or updated since. This updates the baseline config row in place
+    and adds any bundled default skeleton the session doesn't already have
+    -- an older skeleton already present (a different content hash) is left
+    alone rather than replaced, since a person may already be pointing at
+    its exact ID.
+
+    Examples:
+
+        posetrak --session tutorial1.db config refresh-baseline
+        posetrak config refresh-baseline --global
+    """
+    session_path = obj.get("session")
+    if session_path is None and not global_registry:
+        raise click.UsageError("Specify --session, --global, or both.")
+
+    if session_path is not None:
+        session = _open_session(session_path)
+        try:
+            updated, n_added = _refresh_defaults(session)
+        finally:
+            session.close()
+        click.echo(
+            f"session {session_path}: "
+            + ("baseline config refreshed, " if updated else "no baseline config row found, ")
+            + (f"{n_added} default skeleton(s) added." if n_added else "skeletons already up to date.")
+        )
+
+    if global_registry:
+        registry = _open_registry(obj)
+        try:
+            updated, n_added = _refresh_defaults(registry)
+        finally:
+            registry.close()
+        click.echo(
+            "registry: "
+            + ("baseline config refreshed, " if updated else "no baseline config row found, ")
+            + (f"{n_added} default skeleton(s) added." if n_added else "skeletons already up to date.")
+        )

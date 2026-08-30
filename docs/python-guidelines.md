@@ -112,7 +112,8 @@ print(row["label"])   # not row[1]
 
 ### Migrations
 
-Each migration is a standalone `.sql` file in `db/migrations/`.  The calling
+Each migration is a standalone `.sql` file in `python/posetrak/db/sql/migrations/`
+(package data, loaded via `importlib.resources` — see `_DB_DIR` in `db.py`).  The calling
 Python function in `db.py` sets `PRAGMA user_version` after running the SQL —
 never put `PRAGMA user_version` inside the SQL file so the same file can be
 reused for multiple DB types.

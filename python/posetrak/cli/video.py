@@ -273,4 +273,4 @@ def cmd_relocate(
     click.echo(f"Updated {len(records)} video path(s).")
     for r in records:
         click.echo(f"  {r['id'][:8]}…  {r['old_path']}")
-        click.echo(f"           → {r['new_path']}")
+        click.echo(f"           -> {r['new_path']}")

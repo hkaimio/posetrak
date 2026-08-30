@@ -7,7 +7,12 @@
 Workflow
 --------
 1.  Dialog opens from TrackingRunPanel → loads skeleton template measurements.
-2.  Background worker: load inlier obs from DB → DLT triangulate → per-step
+2.  Background worker: tracking_obs_results says which (camera, marker,
+    step) observations the tracker accepted as inliers; the actual 2D point
+    triangulated for each is read straight from the original pose_observations
+    detection (undistorted the same way the tracker itself would), not from
+    tracking_obs_results' own "actual pixel" fields -- see _MeasWorker's
+    docstring for why that distinction matters. DLT triangulate → per-step
     distances between marker pairs (femur, shin, upper_arm, …).
 3.  Six measurement cards each show a time series.  The user drags a
     SpanSelector band on each graph independently to pick a "good pose" range.
@@ -94,7 +99,28 @@ _MEAS_PAIRS: dict[str, list[tuple[str, str]]] = {
 
 
 class _MeasWorker(QThread):
-    """Load inlier obs → DLT triangulate → per-step measurement DataFrame."""
+    """tracking_obs_results tells us which (camera, marker, step) observations
+    the tracker accepted as inliers; the actual 2D point triangulated for each
+    one is then read straight from the original pose detection, not from
+    tracking_obs_results itself.
+
+    This split matters: tracking_obs_results.obs_blob's "actual" pixel fields
+    are whatever the tracker's own measurement model happened to compare
+    against its prediction, and that is *not* always an absolute undistorted
+    pixel position -- per posetrak/core/observation.hpp, it can also be a
+    frame-to-frame pixel delta (VELOCITY mode,
+    tracker_configs.velocity_mode_camera_ids) or a child-minus-parent offset
+    (PAIR_DIFF/relative mode, tracker_configs.use_relative_observations) --
+    and nothing in the stored data says which one applies to a given slot.
+    Confirmed against a real capture, 2026-08-23: triangulating those values
+    directly as if they were always positions produced measurements in the
+    thousands of centimetres. The original pose_observations detection,
+    undistorted the same way the tracker itself would, is unambiguously
+    always a real pixel position regardless of which measurement mode the
+    tracker used it in -- so that's the source of truth this re-triangulates
+    from. See also
+    docs/roadmap/features/observation-results-semantics.md.
+    """
 
     finished = Signal(object, str)  # (pd.DataFrame | None, error_msg)
 
@@ -121,7 +147,7 @@ class _MeasWorker(QThread):
             conn = sqlite3.connect(self._db_path)
             conn.row_factory = sqlite3.Row
             run = conn.execute(
-                "SELECT extrinsic_calibration_id, observation_sequence_id "
+                "SELECT extrinsic_calibration_id, observation_sequence_id, skeleton_id "
                 "FROM tracking_runs WHERE id=?",
                 (self._run_id,),
             ).fetchone()
@@ -129,34 +155,52 @@ class _MeasWorker(QThread):
                 "SELECT session_id FROM extrinsic_calibrations WHERE id=?",
                 (run["extrinsic_calibration_id"],),
             ).fetchone()
-            conn.close()
+            skel_row = conn.execute(
+                "SELECT yaml_content FROM skeletons WHERE id=?", (run["skeleton_id"],)
+            ).fetchone()
 
             cam_list = load_cameras_from_session(
                 self._db_path,
                 run["extrinsic_calibration_id"],
                 session_row["session_id"],
             )
-            P_by_label = {
-                c.get("instance_label") or c["label"]: c["P"] for c in cam_list
-            }
+            cam_by_label = {c.get("instance_label") or c["label"]: c for c in cam_list}
+
+            keypoint_idx_by_marker = _marker_openpose_indices(skel_row["yaml_content"])
+            raw_by_instance = _load_raw_observations_by_camera(
+                conn, run["observation_sequence_id"]
+            )
+            conn.close()
 
             tri: dict[tuple, np.ndarray] = {}
             step_ts: dict[int, float] = {}
             for (step, mname), grp in obs_df.groupby(["tracker_step", "marker_name"]):
+                kp_idx = keypoint_idx_by_marker.get(mname)
+                if kp_idx is None:
+                    continue
+                timestamp_s = float(grp["timestamp_s"].iloc[0])
                 pts, Ps = [], []
                 for row in grp.itertuples(index=False):
-                    P = P_by_label.get(row.camera_label)
-                    if P is None:
+                    cam = cam_by_label.get(row.camera_label)
+                    if cam is None:
                         continue
-                    pts.append((row.pixel_x, row.pixel_y))
-                    Ps.append(P)
+                    raw = raw_by_instance.get(cam["camera_instance_id"])
+                    if raw is None:
+                        continue
+                    point = _nearest_raw_keypoint(raw, timestamp_s, kp_idx)
+                    if point is None:
+                        continue
+                    px, py = _undistort_point(point[0], point[1], cam["K"], cam["dist"])
+                    pts.append((px, py))
+                    Ps.append(cam["P"])
                 if len(pts) < 2:
                     continue
-                pos, cond = _dlt(pts, Ps)
-                if cond > 200 or not np.all(np.isfinite(pos)):
+                result = _robust_triangulate(pts, Ps)
+                if result is None:
                     continue
+                pos, _cond = result
                 tri[(step, mname)] = pos
-                step_ts[step] = float(grp["timestamp_s"].iloc[0])
+                step_ts[step] = timestamp_s
 
             if not tri:
                 self.finished.emit(None, "DLT triangulation yielded no valid results.")
@@ -197,6 +241,98 @@ class _MeasWorker(QThread):
             self.finished.emit(None, traceback.format_exc())
 
 
+def _marker_openpose_indices(yaml_content: str) -> dict[str, int]:
+    """Map marker name -> its openpose_keypoint index (the index into
+    pose_observations.kp_blob's COCO-133 layout), per the skeleton YAML's own
+    markers list. Markers with no openpose_keypoint (rare) are omitted."""
+    skel = yaml.safe_load(yaml_content)
+    result = {}
+    for m in skel.get("markers", []):
+        idx = m.get("openpose_keypoint")
+        if idx is not None:
+            result[m["name"]] = int(idx)
+    return result
+
+
+def _load_raw_observations_by_camera(
+    conn: sqlite3.Connection, sequence_id: str
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Load every 'body'-source pose_observations row for *sequence_id*,
+    grouped by camera_instance_id.
+
+    Returns {camera_instance_id: (timestamps sorted ascending, kp array
+    [n_frames, n_keypoints, 3] aligned with timestamps)}. A whole trial's
+    worth of raw detections (a few hundred to low thousands of frames per
+    camera) comfortably fits in memory decoded up front, which is much
+    simpler than re-querying per (step, marker, camera).
+    """
+    rows = conn.execute(
+        "SELECT camera_instance_id, timestamp_s, kp_blob FROM pose_observations "
+        "WHERE sequence_id = ? AND source = 'body' ORDER BY camera_instance_id, timestamp_s",
+        (sequence_id,),
+    ).fetchall()
+
+    by_instance: dict[str, list] = {}
+    for row in rows:
+        by_instance.setdefault(row["camera_instance_id"], []).append(row)
+
+    result: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for instance_id, instance_rows in by_instance.items():
+        timestamps = np.array([r["timestamp_s"] for r in instance_rows], dtype=float)
+        kps = np.stack([
+            np.frombuffer(bytes(r["kp_blob"]), dtype="<f4").reshape(-1, 3)
+            for r in instance_rows
+        ])
+        result[instance_id] = (timestamps, kps)
+    return result
+
+
+def _nearest_raw_keypoint(
+    raw: tuple[np.ndarray, np.ndarray], timestamp_s: float, keypoint_idx: int
+) -> tuple[float, float] | None:
+    """Return (px, py) for *keypoint_idx* at the raw detection frame nearest
+    *timestamp_s*, or None if that keypoint has zero confidence there (not
+    actually detected) or the index is out of range for this camera's layout."""
+    timestamps, kps = raw
+    i = int(np.searchsorted(timestamps, timestamp_s))
+    if i > 0 and (
+        i == len(timestamps) or abs(timestamps[i - 1] - timestamp_s) <= abs(timestamps[i] - timestamp_s)
+    ):
+        i -= 1
+    if keypoint_idx >= kps.shape[1]:
+        return None
+    x, y, conf = kps[i, keypoint_idx]
+    return (float(x), float(y)) if conf > 0.0 else None
+
+
+def _undistort_point(
+    px: float, py: float, K: np.ndarray, dist: np.ndarray
+) -> tuple[float, float]:
+    """Remove lens distortion from a raw detected pixel, mirroring
+    Camera::undistort()'s iterative Gauss-Newton method (cpp/src/core/camera.cpp)
+    closely enough for this measurement tool's purposes -- this uses K for
+    both normalisation and reprojection rather than separate K_original/K_new
+    matrices, an approximation that's exact when they're equal and negligible
+    otherwise (a calibration refinement pass typically shifts fx/fy/cx/cy by
+    well under 1%)."""
+    k1, k2, p1, p2 = dist[0], dist[1], dist[2], dist[3]
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    if abs(k1) < 1e-9 and abs(k2) < 1e-9 and abs(p1) < 1e-9 and abs(p2) < 1e-9:
+        return px, py
+    xn = (px - cx) / fx
+    yn = (py - cy) / fy
+    x0, y0 = xn, yn
+    for _ in range(5):
+        r2 = xn * xn + yn * yn
+        radial = 1.0 + k1 * r2 + k2 * r2 * r2
+        dx = 2.0 * p1 * xn * yn + p2 * (r2 + 2.0 * xn * xn)
+        dy = p1 * (r2 + 2.0 * yn * yn) + 2.0 * p2 * xn * yn
+        xn = (x0 - dx) / radial
+        yn = (y0 - dy) / radial
+    return xn * fx + cx, yn * fy + cy
+
+
 def _dlt(
     observations: list[tuple[float, float]],
     Ps: list[np.ndarray],
@@ -211,6 +347,67 @@ def _dlt(
     pos = X[:3] / X[3]
     cond = float(s[0] / s[-2]) if s[-2] > 1e-12 else float("inf")
     return pos, cond
+
+
+def _reprojection_error_px(pos: np.ndarray, pt: tuple[float, float], P: np.ndarray) -> float:
+    u, v, w = P @ np.append(pos, 1.0)
+    return float(np.hypot(u / w - pt[0], v / w - pt[1]))
+
+
+# A camera whose recorded "inlier" observation is nonetheless wrong (bad
+# detection during fast/blurred motion, a mismatched measurement mode -- see
+# the velocity_mode_camera_ids handling in _MeasWorker.run() -- or any other
+# per-frame glitch that the tracker's own outlier check didn't happen to
+# catch) still passes _dlt()'s cond<200 check as long as the *other* cameras
+# agree with each other; the linear system stays well-conditioned even though
+# the answer is nonsense. 50px is a coarse but effective backstop: normal
+# detection jitter reprojects within a few pixels, while the kind of failure
+# that produces a wildly wrong 3D point (e.g. a multi-thousand-cm "femur")
+# reprojects hundreds to tens of thousands of pixels off.
+_MAX_REPROJECTION_ERROR_PX: float = 50.0
+
+
+def _robust_triangulate(
+    pts: list[tuple[float, float]], Ps: list[np.ndarray]
+) -> tuple[np.ndarray, float] | None:
+    """DLT-triangulate, iteratively dropping the worst-fitting camera as long
+    as the current result reprojects badly in some view and enough cameras
+    remain for another attempt.
+
+    More than one camera can have a bad-but-flagged-as-inlier observation in
+    the same frame -- e.g. confirmed against a real capture, 2026-08-23: the
+    very first tracked frame of a trial had two independently bad detections
+    (both low-confidence enough that the tracker's own Mahalanobis outlier
+    gate didn't catch either one, since low confidence inflates the assumed
+    measurement noise). Dropping only a single camera isn't always enough to
+    recover a good answer, so this keeps dropping the current worst offender
+    one at a time.
+
+    Returns None if no acceptable (conditioned, finite) solution is found,
+    even after dropping cameras down to the minimum of 2.
+
+    Tracks the best (lowest max-reprojection-error) attempt seen rather than
+    just the last one: dropping a camera is a heuristic guess at which one
+    is bad, and an unlucky guess (e.g. dropping a good camera while a second
+    bad one remains) could make a later attempt worse, not better -- that
+    shouldn't discard an earlier, better-fitting result.
+    """
+    best: tuple[np.ndarray, float] | None = None
+    best_max_error = float("inf")
+    while len(pts) >= 2:
+        pos, cond = _dlt(pts, Ps)
+        if cond > 200 or not np.all(np.isfinite(pos)):
+            break
+        errors = [_reprojection_error_px(pos, pt, P) for pt, P in zip(pts, Ps)]
+        max_error = max(errors)
+        if max_error < best_max_error:
+            best, best_max_error = (pos, cond), max_error
+        if max_error <= _MAX_REPROJECTION_ERROR_PX or len(pts) <= 2:
+            break
+        worst = int(np.argmax(errors))
+        pts = [p for i, p in enumerate(pts) if i != worst]
+        Ps = [P for i, P in enumerate(Ps) if i != worst]
+    return best
 
 
 # ---------------------------------------------------------------------------

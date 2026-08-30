@@ -128,8 +128,8 @@ class RunDetectionDialog(QDialog):
         # Only shown when at least one segmentation exists, so the common
         # case (no segmentation, YOLO-only) looks exactly as before.
         seg_runs = self._conn.execute(
-            "SELECT id, created_at, persons_json FROM seg_quality_runs "
-            "WHERE shot_id = ? ORDER BY created_at DESC",
+            "SELECT id, created_at, persons_json, time_start_s, time_end_s "
+            "FROM seg_quality_runs WHERE shot_id = ? ORDER BY created_at DESC",
             (self._capture_id,),
         ).fetchall()
         self._bbox_source_combo: QComboBox | None = None
@@ -137,6 +137,18 @@ class RunDetectionDialog(QDialog):
             import json as _json
             self._bbox_source_combo = QComboBox()
             self._bbox_source_combo.addItem("YOLO detection", None)
+            # Default to the most recent segmentation that fully covers the
+            # range being detected here, rather than always defaulting to
+            # YOLO: a masks-based segmentation gives tighter crops and needs
+            # no manual track-to-person stitching afterward, so there's no
+            # reason to prefer YOLO when a segmentation already has us
+            # covered. A segmentation that only covers *part* of this range
+            # is left unselected (picking it silently would leave the
+            # uncovered frames without any bboxes at all); with no known
+            # range (time_start_s/time_end_s not given -- e.g. a brand new
+            # trial before Mark Start/End) there's nothing to check against,
+            # so it's left on YOLO too.
+            default_index = 0
             for r in seg_runs:
                 persons = _json.loads(r["persons_json"]) if r["persons_json"] else []
                 who = ", ".join(persons) if persons else "unlabeled"
@@ -144,12 +156,22 @@ class RunDetectionDialog(QDialog):
                 self._bbox_source_combo.addItem(
                     f"Segmentation ({who}) — {created}", r["id"]
                 )
+                if (
+                    default_index == 0
+                    and time_start_s is not None
+                    and time_end_s is not None
+                    and r["time_start_s"] <= time_start_s
+                    and r["time_end_s"] >= time_end_s
+                ):
+                    default_index = self._bbox_source_combo.count() - 1
+            self._bbox_source_combo.setCurrentIndex(default_index)
             self._bbox_source_combo.setToolTip(
                 "Source bboxes from an existing Cutie segmentation instead of "
                 "running YOLO -- masks give tighter, more accurate crops, and "
                 "results are finalised automatically (no manual track-to-person "
                 "stitching needed, since a segmentation's labels are already "
-                "stable per-person identities)."
+                "stable per-person identities). Defaults to the most recent "
+                "segmentation that fully covers this time range, if any."
             )
             self._bbox_source_combo.currentIndexChanged.connect(self._on_bbox_source_changed)
             form.addRow("Bbox source:", self._bbox_source_combo)
@@ -178,7 +200,25 @@ class RunDetectionDialog(QDialog):
         )
         form.addRow("", self._refine_hands_check)
 
+        if self._bbox_source_combo is not None:
+            # setCurrentIndex() above (when defaulting to a segmentation)
+            # doesn't fire currentIndexChanged (not connected yet at that
+            # point), so sync the detector/confidence fields' enabled state
+            # by hand now that they exist -- without this, defaulting to a
+            # segmentation would leave the YOLO-only fields incorrectly
+            # enabled until the user touched the combo themselves.
+            self._on_bbox_source_changed(self._bbox_source_combo.currentIndex())
+
         layout.addLayout(form)
+
+        # Set once by DetectionJob.device_notice if the run falls back to
+        # CPU (no GPU / no torch); stays visible for the whole run, unlike
+        # _frame_label which gets overwritten by the next progress update.
+        self._device_warning_label = QLabel("")
+        self._device_warning_label.setStyleSheet("color: #b36b00; font-weight: bold;")
+        self._device_warning_label.setWordWrap(True)
+        self._device_warning_label.hide()
+        layout.addWidget(self._device_warning_label)
 
         # Progress
         self._frame_bar = QProgressBar()
@@ -260,6 +300,8 @@ class RunDetectionDialog(QDialog):
         self._frame_bar.setValue(0)
         self._cam_bar.setValue(0)
         self._cam_label.setText("Starting…")
+        self._device_warning_label.hide()
+        self._device_warning_label.setText("")
 
         seg_run_id = self._bbox_source_combo.currentData() if self._bbox_source_combo else None
         if seg_run_id is not None:
@@ -280,6 +322,7 @@ class RunDetectionDialog(QDialog):
         )
         self._job.progress.connect(self._on_progress)
         self._job.camera_progress.connect(self._on_camera_progress)
+        self._job.device_notice.connect(self._on_device_notice)
         self._job.finished.connect(self._on_finished)
         self._job.error.connect(self._on_error)
         self._job.start()
@@ -423,6 +466,10 @@ class RunDetectionDialog(QDialog):
     def _on_progress(self, pct: int, msg: str) -> None:
         self._frame_bar.setValue(pct)
         self._frame_label.setText(msg)
+
+    def _on_device_notice(self, msg: str) -> None:
+        self._device_warning_label.setText(f"⚠ {msg}")
+        self._device_warning_label.show()
 
     def _on_camera_progress(self, done: int, total: int) -> None:
         self._cam_bar.setValue(int(done / max(total, 1) * 100))

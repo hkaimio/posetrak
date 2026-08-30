@@ -1,34 +1,63 @@
 # Posetrak
 
-Video-based skeletal motion capture using an Unscented Kalman Filter in joint
-space. Supports an arbitrary number of synchronized cameras and configurable
-skeleton definitions, tracking results exported as BVH files.
+![Posetrak](assets/banner.png){ align=right width=240 }
 
-Multi-person, close-contact scenes — the kind that break most affordable
-motion capture — are the reason this project exists. See
-[Background](background.md) for why.
+Video-based markerless motion capture using an Unscented Kalman Filter in joint
+space. Supports an arbitrary number of heterogenous cameras and tracking
+multiple performers simultaneously. Tracking results exported as BVH files
+usable in Blender and other 3D animation applications.
+
+Main motivation for Posetrak development were challenges in tracking
+multi-person, close-contact scenes like martial arts. Read here more about
+project's [background](background.md).
+
+
+<div class="video-embed">
+<iframe src="https://player.vimeo.com/video/1220935922?muted=1&loop=1"
+        allow="autoplay; fullscreen; picture-in-picture"
+        allowfullscreen></iframe>
+</div>
+
+## Features
+
+- Motion capture from multiple consumer level cameras. Supports heterogenous
+  camera rigs, even cameras capturing at different frame rate
+
+- Tools for full motion capture pipeline:
+    - Camera intrinsics & extrinsics calibration
+    - Multi-video synchronization
+    - People tracking usign memory-based video segmentation
+    - Hierarchical 2D pose estimation
+    - UKF based hierarchical skeleton solver
+    - Export to BVH & other formats
+
+- Editing (manual and/or AI assisted) of data in most pipeline stages:
+    - People detection
+    - Source video segmentation
+    - 2D keypoint cleanup
+
+- Most functionality available via graphical UI, command line client and MCP
+  server for AI agents.
+
+## Getting started
+
+See the [setup guide](setup.md) for full platform-specific instructions, then
+[tutorial](user-guide/tutorial1.md) for a walkthrough of processing a simple
+motion capture sequence.
 
 ## Applications
 
 | Command | Description |
 |---|---|
 | `posetrak-ui` | Main GUI: sessions, capture setup, pose extraction, tracking, keypoint editing |
-| `posetrak track config.toml` | Run the UKF tracker on a capture session |
-| `posetrak scale config.toml` | Post-process a bone-length calibration run |
+| `posetrak` CLI | Command line client |
 | `posetrak-mcp` | Read-only MCP diagnostic server for tracking runs |
 
-`posetrak` also covers session/capture/detection management without the GUI
-(`posetrak session`, `posetrak detect`, `posetrak track`, etc.) — see
-[Architecture: Python apps](architecture/python-apps.md) for the full CLI.
-
-## Getting started
-
-See the [Setup guide](setup.md) for full platform-specific instructions, then
-[Your first capture](user-guide/first-capture.md) for an end-to-end walkthrough.
 
 ## Documentation
 
 - **[Setup](setup.md)** — prerequisites, build instructions, both platforms
+- **[Tutorial](user-guide/tutorial1.md)** — quick walkthrough of main Posetrak features using a concrete example
 - **[User Guide](user-guide/first-capture.md)** — capturing, calibrating, tracking, troubleshooting
 - **[Architecture](architecture/overview.md)** — system design, data model, the UKF solver
 - **[Reference](skeleton-format.md)** — file formats (skeleton YAML, state vector, sync metadata)

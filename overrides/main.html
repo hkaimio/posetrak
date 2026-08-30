@@ -1,0 +1,21 @@
+<!--
+SPDX-FileCopyrightText: 2026 Harri Kaimio
+
+SPDX-License-Identifier: Apache-2.0
+-->
+{% extends "base.html" %}
+
+{% block extrahead %}
+  {% set og_description = page.meta.description if page and page.meta and page.meta.description else config.site_description %}
+  {% set og_title = (page.title | striptags) ~ " - " ~ config.site_name if page and page.title and not page.is_homepage else config.site_name %}
+  {% set og_image = config.site_url ~ "assets/some-banner.png" %}
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="{{ og_title }}">
+  <meta property="og:description" content="{{ og_description }}">
+  <meta property="og:image" content="{{ og_image }}">
+  <meta property="og:url" content="{{ page.canonical_url or config.site_url }}">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ og_title }}">
+  <meta name="twitter:description" content="{{ og_description }}">
+  <meta name="twitter:image" content="{{ og_image }}">
+{% endblock %}

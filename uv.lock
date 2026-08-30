@@ -1742,6 +1742,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "av" },
+    { name = "certifi" },
     { name = "click" },
     { name = "h5py" },
     { name = "lap" },
@@ -1791,6 +1792,7 @@ usd = [
 [package.metadata]
 requires-dist = [
     { name = "av", specifier = ">=12.0" },
+    { name = "certifi", specifier = ">=2024.0" },
     { name = "click", specifier = ">=8.0" },
     { name = "h5py", specifier = ">=3.10" },
     { name = "lap", specifier = ">=0.5.12" },

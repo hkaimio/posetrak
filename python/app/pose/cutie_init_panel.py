@@ -48,18 +48,24 @@ from posetrak.db.db import generate_id
 
 
 class RangeBar(QWidget):
-    """Horizontal timeline bar combining four layers of information:
+    """Horizontal timeline bar combining six layers of information:
 
-    1. Mask coverage (lower 5 px) — teal segments where frames have stored masks.
-    2. Selected tracking range (full height) — steel-blue fill between Mark Start/End.
-    3. Trial range (top 3 px) — amber band showing the trial this panel was opened
+    1. Queued-job ranges (lower 5 px, drawn first) — gold segments where a
+       pending/running tracking job covers frames not yet actually masked.
+       See set_queued_ranges().
+    2. Mask coverage (lower 5 px, drawn over queued) — teal segments where
+       frames have stored masks.
+    3. Selected tracking range (full height) — steel-blue fill between Mark Start/End.
+    4. Trial range (top 3 px) — amber band showing the trial this panel was opened
        from, if any -- purely informational, independent of the Mark Start/End
        selection (see docs/roadmap/features/segmentation-reuse/status.md's
        2026-08-16 note: segmentation is capture-scoped, so the selected range is
        deliberately free to differ from the trial's own bounds -- redo just part
        of a trial, or run wider than one trial on purpose).
-    4. Mark boundary ticks — bright blue.
-    5. Current frame position — white tick.
+    5. Split points — magenta ticks (brighter red when the current selection
+       spans one), see set_split_points().
+    6. Mark boundary ticks — bright blue.
+    7. Current frame position — white tick.
 
     The bar's own coordinate space is whatever unit the caller uses when
     calling set_range/set_selection/set_position/set_trial_range -- global-
@@ -82,6 +88,8 @@ class RangeBar(QWidget):
         self._trial_end: int | None = None
         # List of (first_frame, last_frame) contiguous covered runs.
         self._coverage_runs: list[tuple[int, int]] = []
+        self._split_points: list[int] = []
+        self._queued_ranges: list[tuple[int, int]] = []
 
     def set_range(self, first: int, last: int) -> None:
         self._first = first
@@ -106,6 +114,14 @@ class RangeBar(QWidget):
 
     def set_position(self, frame: int) -> None:
         self._pos = frame
+        self.update()
+
+    def set_split_points(self, points: list[int]) -> None:
+        self._split_points = sorted(points)
+        self.update()
+
+    def set_queued_ranges(self, ranges: list[tuple[int, int]]) -> None:
+        self._queued_ranges = ranges
         self.update()
 
     def set_covered_frames(self, frame_indices: list[int], gap_threshold: int = 1) -> None:
@@ -146,6 +162,16 @@ class RangeBar(QWidget):
         # Background — full track range
         p.fillRect(0, 0, w, h, QColor(55, 55, 55))
 
+        # Queued-job ranges — gold band in lower cov_h px, drawn *before*
+        # mask coverage so already-completed frames (teal) paint over the
+        # gold as a job actually runs, reading as a fill-in-progress
+        # effect rather than the two bands needing separate space.
+        queued_color = QColor(200, 160, 40)
+        for run_first, run_last in self._queued_ranges:
+            x1 = self._to_x(run_first)
+            x2 = self._to_x(run_last) + 1
+            p.fillRect(x1, h - cov_h, max(1, x2 - x1), cov_h, queued_color)
+
         # Mask coverage — teal band in lower cov_h px
         cov_color = QColor(56, 168, 120)
         for run_first, run_last in self._coverage_runs:
@@ -170,6 +196,16 @@ class RangeBar(QWidget):
             tx2 = self._to_x(self._trial_end)
             if tx2 > tx1:
                 p.fillRect(tx1, 0, tx2 - tx1, trial_h, QColor(230, 160, 40))
+
+        # Split points — magenta, full height; brighter red where the
+        # current selection spans one (a planned boundary the queued job
+        # would silently cross), distinct from both the trial band's
+        # amber and the mark ticks' blue so it never reads as either.
+        for sp in self._split_points:
+            crossed = self._sel_start < sp < self._sel_end
+            color = QColor(255, 60, 60) if crossed else QColor(200, 60, 200)
+            xs = self._to_x(sp)
+            p.fillRect(max(0, xs - 1), 0, 2, h, color)
 
         # Start / end tick marks — brighter blue, full height
         for xm in (x1, x2):
@@ -208,6 +244,7 @@ class CutieInitPanel(QWidget):
         shot_id: str,
         parent: QWidget | None = None,
         trial_id: str | None = None,
+        seg_init_run_id: str | None = None,
     ) -> None:
         """*shot_id* is the capture this segmentation belongs to (see
         docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md's
@@ -218,7 +255,15 @@ class CutieInitPanel(QWidget):
         when pose extraction is actually queued (``_resolve_or_create_detection_run``).
         *trial_id* is optional provenance (which trial this panel happened
         to be opened from) threaded onto any detection run created here;
-        not required for anything to function."""
+        not required for anything to function.
+
+        *seg_init_run_id*, when given, is an existing ``seg_quality_runs``
+        row (from the session tree's "Open/Continue" action) to extend
+        instead of creating a new one on first edit -- closes the gap
+        where every panel reopen silently fragmented one capture's
+        segmentation work across several rows (segmentation-ui-
+        improvements design doc, Issue 2). Omit to start a fresh
+        segmentation, same as before this parameter existed."""
         super().__init__(parent)
         self._conn = conn
         self._shot_id = shot_id
@@ -244,6 +289,9 @@ class CutieInitPanel(QWidget):
         # Click interaction state
         self._controller = None             # ClickController; created lazily
         self._selected_label: int = 0       # 0 = no person selected
+        # Active tool: "select" (SAM2 clicks, default), "paint", "erase",
+        # "zoom" -- segmentation-ui-improvements design doc, Issue 5.
+        self._active_tool: str = "select"
         self._encoded_frame_idx: int = -1   # frame that _controller has encoded
         self._encoded_svid: str = ""        # camera id for encoded frame
 
@@ -256,6 +304,13 @@ class CutieInitPanel(QWidget):
         # Tracking range (frame indices; set via Mark Start / Mark End buttons)
         self._mark_start: int = 0
         self._mark_end: int   = 0
+
+        # Split points for the currently-selected camera (scrubber units;
+        # see _load_split_points) -- camera-specific (a hard-transition
+        # moment, e.g. two people crossing, is usually camera-angle-
+        # dependent), but still needs a sync table for a shared scrubber
+        # coordinate space to place it in.
+        self._split_points: list[int] = []
 
         # DB path for PoseWorker (needs its own connection for thread-safe writes)
         _db_path = ""
@@ -283,7 +338,10 @@ class CutieInitPanel(QWidget):
         self._runner.job_failed.connect(self._on_job_failed)
         self._runner.queue_done.connect(self._on_queue_done)
 
-        self._seg_init_run_id: str | None = None   # seg_quality_run created for this session
+        # seg_quality_run new masks are written to -- either a fresh run
+        # created lazily by _ensure_seg_run() on first edit, or (when the
+        # caller passed seg_init_run_id) an existing run being continued.
+        self._seg_init_run_id: str | None = seg_init_run_id
         self._db_flush_buffer: list[tuple] = []    # buffered (svid, frame_idx, blob) rows
         self._DB_FLUSH_EVERY = 50           # flush to DB every N frames
         self._batch_recv_count: int = 0     # batches received for current job (for logging)
@@ -335,6 +393,7 @@ class CutieInitPanel(QWidget):
         self._canvas = VideoCanvas()
         self._canvas.left_clicked.connect(self._on_left_click)
         self._canvas.right_clicked.connect(self._on_right_click)
+        self._canvas.left_dragged.connect(self._on_left_dragged)
         root.addWidget(self._canvas, stretch=1)
 
         # --- Scrubber ---
@@ -353,19 +412,99 @@ class CutieInitPanel(QWidget):
         self._person_btn_group.setExclusive(False)
         root.addWidget(self._person_group)
 
+        # --- Edit tool selector (segmentation-ui-improvements design doc,
+        # Issue 5) -- Select is today's SAM2 point-click behavior,
+        # unchanged; Paint/Erase/Zoom are new. No icon font ships with
+        # PySide6 and none of Qt's built-in standard icons fit these
+        # concepts, so continuing this file's existing plain-Unicode-
+        # emoji-as-button-text convention rather than adding a
+        # dependency.
+        tool_row = QHBoxLayout()
+        tool_row.addWidget(QLabel("Tool:"))
+        self._tool_btn_group = QButtonGroup(self)
+        self._tool_btn_group.setExclusive(True)
+
+        self._tool_select_btn = QPushButton("🪄 Select")
+        self._tool_select_btn.setCheckable(True)
+        self._tool_select_btn.setChecked(True)
+        self._tool_select_btn.setToolTip(
+            "SAM2 point-click segmentation -- left-click = positive, "
+            "right-click = negative (unchanged default behavior)"
+        )
+        self._tool_btn_group.addButton(self._tool_select_btn)
+        tool_row.addWidget(self._tool_select_btn)
+
+        self._tool_paint_btn = QPushButton("🖌 Paint")
+        self._tool_paint_btn.setCheckable(True)
+        self._tool_paint_btn.setToolTip(
+            "Manually stamp the selected person's label within the brush "
+            "radius -- drag to paint a stroke. Always wins over SAM2/base "
+            "for touched pixels until cleared."
+        )
+        self._tool_btn_group.addButton(self._tool_paint_btn)
+        tool_row.addWidget(self._tool_paint_btn)
+
+        self._tool_erase_btn = QPushButton("Erase")
+        self._tool_erase_btn.setCheckable(True)
+        self._tool_erase_btn.setToolTip(
+            "Manually stamp background within the brush radius -- reaches "
+            "stray base/SAM2 pixels with no live clicks too, e.g. Cutie "
+            "leftovers from an occlusion"
+        )
+        self._tool_btn_group.addButton(self._tool_erase_btn)
+        tool_row.addWidget(self._tool_erase_btn)
+
+        self._tool_zoom_btn = QPushButton("🔍 Zoom")
+        self._tool_zoom_btn.setCheckable(True)
+        self._tool_zoom_btn.setToolTip(
+            "Click to zoom in, Alt+click to zoom out, right-click to reset "
+            "-- all centred on the clicked pixel"
+        )
+        self._tool_btn_group.addButton(self._tool_zoom_btn)
+        tool_row.addWidget(self._tool_zoom_btn)
+
+        self._tool_btn_group.buttonClicked.connect(self._on_tool_changed)
+
+        tool_row.addSpacing(12)
+        tool_row.addWidget(QLabel("Brush size:"))
+        self._brush_slider = QSlider(Qt.Orientation.Horizontal)
+        self._brush_slider.setMinimum(1)
+        self._brush_slider.setMaximum(60)
+        self._brush_slider.setValue(10)
+        self._brush_slider.setMaximumWidth(120)
+        self._brush_slider.valueChanged.connect(self._on_brush_size_changed)
+        tool_row.addWidget(self._brush_slider)
+        self._brush_size_label = QLabel("10px")
+        tool_row.addWidget(self._brush_size_label)
+        tool_row.addStretch()
+        root.addLayout(tool_row)
+
         # --- Edit action buttons ---
         edit_row = QHBoxLayout()
         self._clear_person_btn = QPushButton("Clear person")
-        self._clear_person_btn.setToolTip("Remove all clicks for the selected person")
+        self._clear_person_btn.setToolTip(
+            "Remove all clicks AND manual paint/erase edits for the "
+            "selected person -- start this person over completely"
+        )
         self._clear_person_btn.clicked.connect(self._on_clear_person)
         self._clear_person_btn.setEnabled(False)
         edit_row.addWidget(self._clear_person_btn)
 
         self._clear_all_btn = QPushButton("Clear all")
-        self._clear_all_btn.setToolTip("Remove all clicks for all persons")
+        self._clear_all_btn.setToolTip("Remove all clicks and manual edits for all persons")
         self._clear_all_btn.clicked.connect(self._on_clear_all)
         self._clear_all_btn.setEnabled(False)
         edit_row.addWidget(self._clear_all_btn)
+
+        self._clear_paint_btn = QPushButton("Clear Manual Edits")
+        self._clear_paint_btn.setToolTip(
+            "Discard manual paint/erase edits on this frame only, "
+            "reverting to whatever SAM2/the stored base mask alone would "
+            "show -- clicks are untouched"
+        )
+        self._clear_paint_btn.clicked.connect(self._on_clear_paint_overlay)
+        self._clear_paint_btn.setEnabled(False)
+        edit_row.addWidget(self._clear_paint_btn)
         edit_row.addStretch()
 
         self._sam_status_label = QLabel("")
@@ -382,17 +521,33 @@ class CutieInitPanel(QWidget):
         track_vbox.addLayout(track_layout)
         track_layout.setContentsMargins(0, 0, 0, 0)
 
-        self._track_bwd_btn = QPushButton("◀ Queue Backward")
+        self._track_range_btn = QPushButton("⏩ Segment Range from Seed")
+        self._track_range_btn.setToolTip(
+            "Seed at the current frame, propagate to both Mark Start and Mark "
+            "End (queues one or two jobs as needed) -- the recommended way to "
+            "cover a range from a middle seed frame"
+        )
+        self._track_range_btn.clicked.connect(self._on_track_range)
+        self._track_range_btn.setEnabled(False)
+        track_layout.addWidget(self._track_range_btn)
+
+        track_layout.addSpacing(8)
+
+        self._track_bwd_btn = QPushButton("◀ Backward only")
         self._track_bwd_btn.setToolTip(
-            "Add a backward tracking job to the queue (current frame → mark start)"
+            "Add a backward tracking job to the queue (current frame → mark "
+            "start) without also queuing forward -- for resuming just one "
+            "direction, e.g. after a failed or cancelled job"
         )
         self._track_bwd_btn.clicked.connect(self._on_track_backward)
         self._track_bwd_btn.setEnabled(False)
         track_layout.addWidget(self._track_bwd_btn)
 
-        self._track_fwd_btn = QPushButton("▶ Queue Forward")
+        self._track_fwd_btn = QPushButton("▶ Forward only")
         self._track_fwd_btn.setToolTip(
-            "Add a forward tracking job to the queue (current frame → mark end)"
+            "Add a forward tracking job to the queue (current frame → mark "
+            "end) without also queuing backward -- for resuming just one "
+            "direction, e.g. after a failed or cancelled job"
         )
         self._track_fwd_btn.clicked.connect(self._on_track_forward)
         self._track_fwd_btn.setEnabled(False)
@@ -524,6 +679,47 @@ class CutieInitPanel(QWidget):
         mark_row.addWidget(self._mark_end_label)
         mark_row.addWidget(self._mark_end_btn)
         vbox.addLayout(mark_row)
+
+        # Split points -- planning hard-transition boundaries (e.g. two
+        # people crossing paths, usually camera-angle-dependent -- a
+        # crossing that occludes in one camera's view may be clearly
+        # separated in another's) so segmentation gets seeded
+        # independently on each side instead of one continuous pass
+        # diverging there. Magenta ticks on the RangeBar above,
+        # per-camera (see _load_split_points); only meaningful with a
+        # sync table, in which case the buttons just no-op with a status
+        # message rather than being disabled outright.
+        split_row = QHBoxLayout()
+        split_row.setSpacing(4)
+
+        self._mark_split_btn = QPushButton("✂ Mark Split")
+        self._mark_split_btn.setToolTip(
+            "Mark the current position, for the current camera only, as a "
+            "split point -- a place where segmentation should be seeded "
+            "independently on each side rather than propagated through in "
+            "one pass"
+        )
+        self._mark_split_btn.clicked.connect(self._on_mark_split_point)
+        split_row.addWidget(self._mark_split_btn)
+
+        self._remove_split_btn = QPushButton("Remove Nearest")
+        self._remove_split_btn.setToolTip(
+            "Remove the split point nearest the current position"
+        )
+        self._remove_split_btn.clicked.connect(self._on_remove_nearest_split_point)
+        split_row.addWidget(self._remove_split_btn)
+
+        self._snap_marks_btn = QPushButton("⇤ Snap Marks to Segment")
+        self._snap_marks_btn.setToolTip(
+            "Set Mark Start/Mark End to the split points enclosing the "
+            "current position -- pre-fills the range from the plan, still "
+            "freely adjustable afterwards"
+        )
+        self._snap_marks_btn.clicked.connect(self._on_snap_marks_to_segment)
+        split_row.addWidget(self._snap_marks_btn)
+
+        split_row.addStretch()
+        vbox.addLayout(split_row)
 
         return vbox
 
@@ -678,7 +874,7 @@ class CutieInitPanel(QWidget):
                 )
 
         self._setup_scrubber_range()
-        self._rebuild_camera_combo()
+        self._rebuild_camera_combo()  # triggers _on_camera_changed(0), loading split points
         self._rebuild_person_selector()
         self._init_controller()
 
@@ -869,6 +1065,7 @@ class CutieInitPanel(QWidget):
 
         # Enable track / pose buttons if there are persons to track
         can_track = bool(self._persons)
+        self._track_range_btn.setEnabled(can_track)
         self._track_fwd_btn.setEnabled(can_track)
         self._track_bwd_btn.setEnabled(can_track)
         self._queue_pose_btn.setEnabled(can_track)
@@ -905,16 +1102,86 @@ class CutieInitPanel(QWidget):
         has_selection = self._selected_label > 0
         self._clear_person_btn.setEnabled(has_controller and has_selection)
         self._clear_all_btn.setEnabled(has_controller)
+        self._clear_paint_btn.setEnabled(has_controller)
 
     # ------------------------------------------------------------------
     # Interaction — canvas clicks
     # ------------------------------------------------------------------
 
     def _on_left_click(self, x: int, y: int) -> None:
-        self._handle_click(x, y, positive=True)
+        if self._active_tool == "select":
+            self._handle_click(x, y, positive=True)
+        elif self._active_tool in ("paint", "erase"):
+            self._handle_paint_or_erase(x, y)
+        elif self._active_tool == "zoom":
+            self._handle_zoom_click(x, y)
 
     def _on_right_click(self, x: int, y: int) -> None:
-        self._handle_click(x, y, positive=False)
+        if self._active_tool == "select":
+            self._handle_click(x, y, positive=False)
+        elif self._active_tool == "zoom":
+            self._canvas.reset_zoom()
+            self._set_status("Zoom reset to fit.")
+        # paint/erase: right-click is a no-op (left-drag is the whole tool)
+
+    def _on_left_dragged(self, x: int, y: int) -> None:
+        if self._active_tool in ("paint", "erase"):
+            self._handle_paint_or_erase(x, y)
+
+    def _handle_zoom_click(self, x: int, y: int) -> None:
+        from PySide6.QtWidgets import QApplication
+        alt = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+        if alt:
+            self._canvas.zoom_out_at(x, y)
+            self._set_status("Zoomed out.")
+        else:
+            self._canvas.zoom_in_at(x, y)
+            self._set_status("Zoomed in.")
+
+    def _handle_paint_or_erase(self, x: int, y: int) -> None:
+        if self._selected_label == 0:
+            self._set_status("Select a person button first, then paint/erase on the frame.")
+            return
+        if self._controller is None:
+            return
+        cam = self._cam_combo.currentData()
+        if cam is None:
+            return
+        frame_idx = self._local_frame_for(cam)
+
+        # Registers frame + base mask if not already done -- works without
+        # SAM2 being available, paint/erase don't need it (see _ensure_encoded).
+        self._ensure_encoded(cam, frame_idx)
+
+        radius = self._brush_slider.value()
+        if self._active_tool == "paint":
+            mask = self._controller.paint_circle(self._selected_label, x, y, radius)
+            self._set_status(f"Painting person {self._selected_label}…")
+        else:
+            mask = self._controller.erase_circle(x, y, radius)
+            self._set_status("Erasing…")
+        self._refresh_overlay(cam, frame_idx, mask)
+
+    def _on_tool_changed(self, btn) -> None:
+        tool = {
+            self._tool_select_btn: "select",
+            self._tool_paint_btn: "paint",
+            self._tool_erase_btn: "erase",
+            self._tool_zoom_btn: "zoom",
+        }[btn]
+        self._active_tool = tool
+        self._canvas.set_tool(tool)
+        messages = {
+            "select": "Select tool: left-click = positive, right-click = negative (SAM2).",
+            "paint": "Paint tool: drag on the frame to stamp the selected person's label.",
+            "erase": "Erase tool: drag on the frame to clear to background.",
+            "zoom": "Zoom tool: click to zoom in, Alt+click to zoom out, right-click to reset.",
+        }
+        self._set_status(messages[tool])
+
+    def _on_brush_size_changed(self, value: int) -> None:
+        self._brush_size_label.setText(f"{value}px")
+        self._canvas.set_brush_radius(value)
 
     def _handle_click(self, x: int, y: int, positive: bool) -> None:
         if self._selected_label == 0:
@@ -967,6 +1234,17 @@ class CutieInitPanel(QWidget):
         if cam is not None:
             self._show_frame(self._local_frame_for(cam))
 
+    def _on_clear_paint_overlay(self) -> None:
+        """Discard manual paint/erase edits on this frame only -- clicks
+        and the stored base mask are untouched."""
+        if self._controller is None:
+            return
+        self._controller.clear_paint_overlay()
+        self._set_status("Cleared manual paint/erase edits for this frame")
+        cam = self._cam_combo.currentData()
+        if cam is not None:
+            self._show_frame(self._local_frame_for(cam))
+
     # ------------------------------------------------------------------
     # Interaction — scrubbing
     # ------------------------------------------------------------------
@@ -1008,6 +1286,8 @@ class CutieInitPanel(QWidget):
             self._range_bar.set_range(cam["track_first"], cam["track_last"])
             self._update_mark_labels(cam)
             self._refresh_coverage_bar(cam)
+            self._refresh_queued_bar(cam)
+            self._load_split_points()
             self._show_frame(cam["track_first"])
             return
 
@@ -1017,6 +1297,8 @@ class CutieInitPanel(QWidget):
         # position maps to, not the position/marks themselves.
         self._update_mark_labels(cam)
         self._refresh_coverage_bar(cam)
+        self._refresh_queued_bar(cam)
+        self._load_split_points()  # split points are camera-specific
         self._show_frame(self._local_frame_for(cam))
 
     def _on_frame_changed(self, frame_idx: int) -> None:
@@ -1060,6 +1342,32 @@ class CutieInitPanel(QWidget):
                 global_frames.append(self._to_units(t))
         self._range_bar.set_covered_frames(global_frames, gap_threshold=self._TIME_SCALE // 5)
 
+    def _refresh_queued_bar(self, cam: dict) -> None:
+        """Show this camera's pending/running Cutie tracking jobs on the
+        range bar, distinct from already-written masks (teal) -- lets a
+        queued-but-not-yet-run segment be seen at a glance instead of
+        only showing up once the job actually starts producing masks.
+        Only TrackingJob (Cutie mask propagation), not PoseExtractionJob
+        (pose estimation, a separate later stage) -- this band pairs with
+        the mask-coverage band above it, not pose extraction's own
+        progress.
+        """
+        from app.pose.job_queue_runner import TrackingJob as _TrackingJob
+        ranges: list[tuple[int, int]] = []
+        for job in self._runner.jobs:
+            if not isinstance(job, _TrackingJob):
+                continue
+            if job.shot_video_id != cam["id"] or job.status not in ("pending", "running"):
+                continue
+            if self._sync_table is None:
+                ranges.append((job.first_frame, job.last_frame))
+                continue
+            t0 = self._sync_table.frame_to_global_time(job.first_frame, cam["id"])
+            t1 = self._sync_table.frame_to_global_time(job.last_frame, cam["id"])
+            if t0 is not None and t1 is not None:
+                ranges.append((self._to_units(t0), self._to_units(t1)))
+        self._range_bar.set_queued_ranges(ranges)
+
     def _on_mark_start(self) -> None:
         cam = self._cam_combo.currentData()
         if cam is None:
@@ -1079,6 +1387,105 @@ class CutieInitPanel(QWidget):
             self._mark_start = self._mark_end
         self._range_bar.set_selection(self._mark_start, self._mark_end)
         self._update_mark_labels(cam)
+
+    # ------------------------------------------------------------------
+    # Split points (segmentation-ui-improvements design doc, Issue 4)
+    # ------------------------------------------------------------------
+
+    def _load_split_points(self) -> None:
+        """Load this capture's split points and push them to the RangeBar.
+
+        Only meaningful with a sync table -- a split point is one
+        specific camera's own hard-transition moment (2026-08-29: originally
+        modeled as capture-wide/shared-across-cameras, corrected once real
+        use showed the whole point of a split is usually camera-angle-
+        dependent -- e.g. two people occlude each other from one camera's
+        viewpoint at a moment they're clearly separated in another's
+        parallax), so still needs global time to place on the shared
+        scrubber, but is loaded per the *currently displayed* camera, not
+        the capture as a whole.
+        """
+        self._split_points = []
+        self._split_point_ids = []
+        cam = self._cam_combo.currentData()
+        if self._sync_table is None or cam is None:
+            self._range_bar.set_split_points([])
+            return
+        rows = self._conn.execute(
+            "SELECT id, time_s FROM capture_segmentation_hints "
+            "WHERE shot_video_id = ? ORDER BY time_s",
+            (cam["id"],),
+        ).fetchall()
+        self._split_points = [self._to_units(r["time_s"]) for r in rows]
+        self._split_point_ids = [r["id"] for r in rows]
+        self._range_bar.set_split_points(self._split_points)
+
+    def _on_mark_split_point(self) -> None:
+        cam = self._cam_combo.currentData()
+        if self._sync_table is None or cam is None:
+            self._set_status(
+                "Split points need solved sync (one global time shared across "
+                "cameras) -- not available for this capture yet."
+            )
+            return
+        time_s = self._to_seconds(self._scrubber.value())
+        self._conn.execute(
+            "INSERT INTO capture_segmentation_hints "
+            "(id, capture_id, shot_video_id, time_s, created_at) VALUES (?, ?, ?, ?, ?)",
+            (
+                generate_id(), self._shot_id, cam["id"], time_s,
+                datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            ),
+        )
+        self._conn.commit()
+        self._load_split_points()
+        self._set_status(f"Split point marked at {self._fmt_mmss(time_s)} for {cam['label']}.")
+
+    def _on_remove_nearest_split_point(self) -> None:
+        if not self._split_points:
+            self._set_status("No split points to remove.")
+            return
+        pos = self._scrubber.value()
+        idx = min(range(len(self._split_points)), key=lambda i: abs(self._split_points[i] - pos))
+        sp_id = self._split_point_ids[idx]
+        time_s = self._to_seconds(self._split_points[idx])
+        self._conn.execute("DELETE FROM capture_segmentation_hints WHERE id = ?", (sp_id,))
+        self._conn.commit()
+        self._load_split_points()
+        self._set_status(f"Removed split point at {self._fmt_mmss(time_s)}.")
+
+    def _on_snap_marks_to_segment(self) -> None:
+        """Set Mark Start/Mark End to the split points enclosing the
+        current scrubber position, falling back to the trial's own range
+        on whichever side has no split point (matching what marks default
+        to on load) rather than the full capture range -- "pre-fill the
+        marks from the plan, still freely overridable" from the design
+        doc."""
+        cam = self._cam_combo.currentData()
+        if cam is None:
+            return
+        if self._trial_range_s is not None:
+            default_start = max(self._scrubber.minimum(), self._to_units(self._trial_range_s[0]))
+            default_end = min(self._scrubber.maximum(), self._to_units(self._trial_range_s[1]))
+        else:
+            default_start = self._scrubber.minimum()
+            default_end = self._scrubber.maximum()
+        pos = self._scrubber.value()
+        before = [sp for sp in self._split_points if sp <= pos]
+        after = [sp for sp in self._split_points if sp > pos]
+        self._mark_start = max(before) if before else default_start
+        self._mark_end = min(after) if after else default_end
+        self._range_bar.set_selection(self._mark_start, self._mark_end)
+        self._update_mark_labels(cam)
+
+    def _confirm_crossing_split_points(self, crossed: list[int]) -> bool:
+        times = ", ".join(self._fmt_mmss(self._to_seconds(sp)) for sp in crossed)
+        return QMessageBox.question(
+            self, "Crosses a planned split point",
+            f"This job crosses {len(crossed)} planned split point(s) at {times} -- "
+            "propagation may diverge there. Queue anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes
 
     def _update_mark_labels(self, cam: dict) -> None:
         if self._sync_table is not None:
@@ -1107,10 +1514,16 @@ class CutieInitPanel(QWidget):
             self._ensure_encoded(cam, self._local_frame_for(cam))
 
     def _ensure_encoded(self, cam: dict, frame_idx: int) -> None:
-        """Encode the frame for SAM2 if not already done for this frame."""
+        """Register the frame + stored base mask with the controller.
+
+        Not gated on SAM2 being available: set_image()/set_base_mask()
+        are plain numpy bookkeeping the paint/erase tools need too (they
+        don't touch SAM2 at all), and are safe to call either way --
+        _run_predictions() internally already no-ops the SAM2 half when
+        self._controller.available is False.
+        """
         if (
             self._controller is None
-            or not self._controller.available
             or (self._encoded_frame_idx == frame_idx and self._encoded_svid == cam["id"])
         ):
             return
@@ -1119,7 +1532,7 @@ class CutieInitPanel(QWidget):
         if frame is None:
             return
 
-        self._set_status("Encoding frame for SAM2…")
+        self._set_status("Encoding frame…")
         self._controller.set_image(frame)
         # Load stored mask as base so other persons are preserved during editing.
         self._controller.set_base_mask(self._load_stored_mask(cam["id"], frame_idx))
@@ -1261,6 +1674,37 @@ class CutieInitPanel(QWidget):
     def _on_track_backward(self) -> None:
         self._queue_tracking("backward")
 
+    def _on_track_range(self) -> None:
+        """Seed at the current frame, queue whichever of backward/forward
+        actually covers new ground toward Mark Start/Mark End.
+
+        Replaces having to remember to press both "Forward" and "Backward"
+        separately for a middle seed frame (segmentation-ui-improvements
+        design doc, Issue 3) -- same two _queue_tracking() calls the
+        existing per-direction buttons already make, just wrapped behind
+        one action with the degenerate (seed already at an edge) case
+        skipped rather than queuing a zero-length job.
+        """
+        cam = self._cam_combo.currentData()
+        if cam is None:
+            return
+        seed = self._local_frame_for(cam)
+        mark_start_frame = self._local_frame_for(cam, self._mark_start)
+        mark_end_frame = self._local_frame_for(cam, self._mark_end)
+
+        queued_any = False
+        if seed > mark_start_frame:
+            self._queue_tracking("backward")
+            queued_any = True
+        if seed < mark_end_frame:
+            self._queue_tracking("forward")
+            queued_any = True
+
+        if not queued_any:
+            self._set_status(
+                "Seed frame is the only frame in the marked range — nothing to propagate."
+            )
+
     def _queue_tracking(self, direction: str) -> None:
         """Create a TrackingJob from the current UI state and enqueue it."""
         cam = self._cam_combo.currentData()
@@ -1268,6 +1712,33 @@ class CutieInitPanel(QWidget):
             return
 
         local_frame = self._local_frame_for(cam)
+
+        # first_frame/last_frame bound the job's own propagation range for
+        # its direction -- CutieWorker._run_forward only ever reads
+        # last_frame (init_frame -> last_frame) and _run_backward only
+        # ever reads first_frame (first_frame -> init_frame), so the bound
+        # the *other* direction would have used is irrelevant to actual
+        # propagation. Setting it to the current frame here (rather than
+        # always passing the full mark_start/mark_end range regardless of
+        # direction) makes TrackingJob.summary's "first-last" display
+        # correctly show which range *this* job actually covers instead of
+        # showing the same range for both a forward and a backward job
+        # queued from the same position.
+        if direction == "forward":
+            first_frame, last_frame = local_frame, self._local_frame_for(cam, self._mark_end)
+            range_start, range_end = self._scrubber.value(), self._mark_end
+        else:
+            first_frame, last_frame = self._local_frame_for(cam, self._mark_start), local_frame
+            range_start, range_end = self._mark_start, self._scrubber.value()
+
+        # Warn-but-allow on crossing a planned split point (segmentation-
+        # ui-improvements design doc, Issue 4) -- not a hard block, since a
+        # planned split can turn out to be unnecessary on reflection, but
+        # never silent either.
+        crossed = [sp for sp in self._split_points if range_start < sp < range_end]
+        if crossed and not self._confirm_crossing_split_points(crossed):
+            self._set_status("Cancelled — job would have crossed a planned split point.")
+            return
 
         # Seed mask: live SAM2 result or stored DB mask.
         seed_mask = None
@@ -1287,22 +1758,6 @@ class CutieInitPanel(QWidget):
         if not ok:
             self._set_status("Failed to encode seed mask.")
             return
-
-        # first_frame/last_frame bound the job's own propagation range for
-        # its direction -- CutieWorker._run_forward only ever reads
-        # last_frame (init_frame -> last_frame) and _run_backward only
-        # ever reads first_frame (first_frame -> init_frame), so the bound
-        # the *other* direction would have used is irrelevant to actual
-        # propagation. Setting it to the current frame here (rather than
-        # always passing the full mark_start/mark_end range regardless of
-        # direction) makes TrackingJob.summary's "first-last" display
-        # correctly show which range *this* job actually covers instead of
-        # showing the same range for both a forward and a backward job
-        # queued from the same position.
-        if direction == "forward":
-            first_frame, last_frame = local_frame, self._local_frame_for(cam, self._mark_end)
-        else:
-            first_frame, last_frame = self._local_frame_for(cam, self._mark_start), local_frame
 
         from app.pose.job_queue_runner import TrackingJob
         import uuid
@@ -1751,6 +2206,13 @@ class CutieInitPanel(QWidget):
         # Run Queue enabled only when there are pending jobs and queue is idle.
         has_pending = pending > 0
         self._run_queue_btn.setEnabled(has_pending and not self._runner.is_running)
+
+        # Job membership/status changed -- refresh the range bar's queued
+        # band too. Covers every call site (enqueue, start, finish, fail,
+        # cancel, remove, run queue) since they all already call this.
+        cam = self._cam_combo.currentData()
+        if cam is not None:
+            self._refresh_queued_bar(cam)
 
     # ------------------------------------------------------------------
     # DB helpers

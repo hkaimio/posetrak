@@ -21,9 +21,13 @@ path = [
     "**/*.json",
     "**/*.csv",
     "**/*.png",
+    "**/*.jpg",
+    "**/*.jpeg",
+    "**/*.gif",
     "**/*.npz",
     "**/*.wrap",
     "**/*.example",
+    "**/*.txt",
     "uv.lock",
 ]
 SPDX-FileCopyrightText = "2026 Harri Kaimio"
@@ -40,6 +44,22 @@ path = [
 SPDX-FileCopyrightText = "2026 Harri Kaimio"
 SPDX-License-Identifier = "Apache-2.0"
 
+# Bundled default skeletons: their skeletons.id is the SHA-256 of this exact
+# file's bytes (content-addressed, see manage_skeleton.py), and
+# capture_persons.default_skeleton_id rows elsewhere reference that id
+# directly. An inline SPDX header changes the hash -- it did, in commit
+# ad974b4, silently turning every fresh install's "Default male"/"Default
+# female" into a *different*, new skeleton (same content) from the one any
+# already-seeded registry/session has, an install-to-install drift bug only
+# caught via e2e testing on 2026-08-23. Keep these two files header-free.
+[[annotations]]
+path = [
+    "python/posetrak/data/skeletons/default_female.yaml",
+    "python/posetrak/data/skeletons/default_male.yaml",
+]
+SPDX-FileCopyrightText = "2026 Harri Kaimio"
+SPDX-License-Identifier = "Apache-2.0"
+
 # Misc. plain-text/config files with no established comment convention reuse
 # recognises, or where a header risks being read as actual content (a bare
 # version string, a glob-pattern list).
@@ -51,4 +71,23 @@ path = [
     "docs/roadmap/features/hand-detection-refinement/hand-detect-test-frames.txt",
 ]
 SPDX-FileCopyrightText = "2026 Harri Kaimio"
+SPDX-License-Identifier = "Apache-2.0"
+
+# The Posetrak logo (two master exports plus everything derived from them --
+# installer icon/wizard images, docs site logo/favicon) is Nelli Kaimio's
+# artwork, not Harri's -- distinct copyright holder from the rest of the
+# project, though still released under the same license.
+[[annotations]]
+path = [
+    "branding/posetrak-logo-abstract.png",
+    "branding/posetrak-logo-aikido.png",
+    "packaging/windows/assets/posetrak-icon.ico",
+    "packaging/windows/assets/wizard-small.bmp",
+    "packaging/windows/assets/wizard-banner.bmp",
+    "docs/assets/logo.png",
+    "docs/assets/favicon.png",
+    "docs/assets/banner.png",
+    "docs/assets/some-banner.png",
+]
+SPDX-FileCopyrightText = "2026 Nelli Kaimio"
 SPDX-License-Identifier = "Apache-2.0"

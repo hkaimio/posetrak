@@ -193,6 +193,92 @@ def test_capture_person_with_no_observations_in_trial_is_skipped(qapp, session_d
     assert w._people_table.rowCount() == 0
 
 
+# ---------------------------------------------------------------------------
+# preselect_sequence()
+#
+# Regression coverage for the real bug found 2026-08-24: opening "Run
+# Tracker" from a specific person's panel used to unconditionally drop
+# every other row from the people table, a behavior left over from before
+# capture_persons mode's checkbox roster existed. In that mode it silently
+# collapsed every run down to a single person -- with "Add person..."
+# hidden in that mode, there was no way to bring the rest of the roster
+# back, defeating cross-person tracking.
+# ---------------------------------------------------------------------------
+
+
+def test_preselect_sequence_keeps_capture_persons_roster(qapp, session_db) -> None:
+    from app.pose.run_tracker import RunTrackerWidget
+
+    _make_trial(session_db)
+    alice_id = create_person(session_db, "cap1", "Alice")
+    bob_id = create_person(session_db, "cap1", "Bob")
+    _make_detection_run_with_sequence(
+        session_db, detection_run_id="dr1", seq_id="seq1", capture_id="cap1",
+        trial_id="trial1", person_name="Alice", capture_person_id=alice_id,
+    )
+    _make_detection_run_with_sequence(
+        session_db, detection_run_id="dr2", seq_id="seq2", capture_id="cap1",
+        trial_id="trial1", person_name="Bob", capture_person_id=bob_id,
+    )
+
+    w = RunTrackerWidget()
+    w.set_session(session_db, str(session_db.execute("PRAGMA database_list").fetchone()[2]))
+    _select_trial(w)
+    assert w._people_table.rowCount() == 2  # both rows present before preselecting
+
+    w.preselect_sequence("seq1")  # opened from Alice's PersonPanel
+
+    # Both people must still be listed -- cross-person tracking needs Bob's
+    # row to still be there and toggleable, not silently discarded.
+    assert w._people_table.rowCount() == 2
+    names = {w._people_table.cellWidget(r, 0).text() for r in range(2)}
+    assert names == {"Alice", "Bob"}
+
+    alice_row = next(
+        r for r in range(2) if w._people_table.cellWidget(r, 0).text() == "Alice"
+    )
+    bob_row = 1 - alice_row
+    alice_chk = w._people_table.cellWidget(alice_row, 0)
+    bob_chk = w._people_table.cellWidget(bob_row, 0)
+
+    # Alice's row is locked onto the sequence this dialog was opened for.
+    assert alice_chk.isChecked() is True
+    assert alice_chk.isEnabled() is False
+    assert w._people_table.cellWidget(alice_row, 1).isEnabled() is False
+
+    # Bob's row is untouched -- still checked by default and fully
+    # toggleable, so he can be added to (or dropped from) this run.
+    assert bob_chk.isChecked() is True
+    assert bob_chk.isEnabled() is True
+
+    assert w._add_person_btn.isHidden() is True
+
+
+def test_preselect_sequence_collapses_legacy_free_text_mode(qapp, session_db) -> None:
+    """Legacy free-text mode has no fixed roster to preserve -- collapsing
+    to the single matched row (as before) is still correct there, since
+    "Add person..." stays visible to bring others back in that mode."""
+    from app.pose.run_tracker import RunTrackerWidget
+
+    _make_trial(session_db)
+    _make_detection_run_with_sequence(
+        session_db, detection_run_id="dr1", seq_id="seq1", capture_id="cap1",
+        trial_id="trial1", person_name="Alice", capture_person_id=None,
+    )
+
+    w = RunTrackerWidget()
+    w.set_session(session_db, str(session_db.execute("PRAGMA database_list").fetchone()[2]))
+    _select_trial(w)
+
+    w.preselect_sequence("seq1")
+
+    assert w._people_table.rowCount() == 1
+    widget = w._people_table.cellWidget(0, 0)
+    assert isinstance(widget, QComboBox)
+    assert widget.isEnabled() is False
+    assert w._add_person_btn.isHidden() is False
+
+
 def test_unchecked_row_excluded_from_skeleton_ids_and_run(qapp, session_db) -> None:
     from app.pose.run_tracker import RunTrackerWidget
 

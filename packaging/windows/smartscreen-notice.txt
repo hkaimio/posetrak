@@ -1,0 +1,28 @@
+Before you continue
+====================
+
+This build of Posetrak is not code-signed. Windows SmartScreen will
+most likely show a blue "Windows protected your PC" warning when you
+run the installer, and may show a similar warning the first time you
+run the app itself.
+
+This is expected right now, not a sign that something is wrong.
+Posetrak is a hobby project without a code-signing certificate yet
+(certificates cost money per year, and signing isn't worth it until
+there's real demand for the app beyond its current small user base --
+see docs/roadmap/features/packaging/code-signing-plan.md in the source
+repository if you're curious about the plan for that).
+
+If you see the SmartScreen warning:
+  1. Click "More info".
+  2. Click "Run anyway".
+
+If your antivirus software flags the installer, the tracker executable
+(posetrak-tracker.exe), or uv.exe as suspicious, that's also a known
+possibility for unsigned executables -- please report it (see the
+project's issue tracker) so we know which vendors are affected.
+
+What happens after install:
+  The first launch needs internet access and can take a few minutes --
+  it downloads Python and every Python dependency Posetrak needs
+  (PySide6, OpenCV, etc.) via `uv`. Later launches are fast.

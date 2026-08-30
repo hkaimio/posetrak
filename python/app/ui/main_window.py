@@ -33,6 +33,7 @@ from posetrak.db.db import (
     create_session,
     open_registry,
     open_session,
+    seed_bundled_defaults,
 )
 from app.ui.session_tree import SessionTreeWidget
 
@@ -120,6 +121,8 @@ class MainWindow(QMainWindow):
         self._tree = SessionTreeWidget()
         self._tree.capture_selected.connect(self._show_capture)
         self._tree.trial_selected.connect(self._show_trial)
+        self._tree.segmentation_run_selected.connect(self._show_segmentation_run)
+        self._tree.segmentation_run_open_requested.connect(self._open_segmentation_run)
         self._tree.detection_run_selected.connect(self._show_detection_run)
         self._tree.person_track_selected.connect(self._show_person_track)
         self._tree.tracking_run_selected.connect(self._show_tracking_run)
@@ -258,6 +261,7 @@ class MainWindow(QMainWindow):
         try:
             conn = create_session(p)
             create_mocap_session(conn)
+            seed_bundled_defaults(conn)
         except Exception as exc:
             QMessageBox.critical(self, "Cannot create session", str(exc))
             return
@@ -339,8 +343,8 @@ class MainWindow(QMainWindow):
         from app.setup.camera_registry import CameraRegistryWidget
         from app.setup.db_context import DBContext
         from app.setup.page_extrinsics import ExtrinsicsPage
+        from app.setup.page_persons import PersonsPage
         from app.setup.page_shots import ShotsPage
-        from app.setup.page_skeleton import SkeletonPage
         from app.setup.page_sync import SyncPage
 
         wizard = QWizard(self)
@@ -372,7 +376,7 @@ class MainWindow(QMainWindow):
         wizard.addPage(shots_page)
         wizard.addPage(SyncPage())
         wizard.addPage(ExtrinsicsPage())
-        wizard.addPage(SkeletonPage())
+        wizard.addPage(PersonsPage())
 
         if wizard.exec() == QWizard.DialogCode.Accepted:
             self._tree.reload()
@@ -389,6 +393,7 @@ class MainWindow(QMainWindow):
         panel.data_changed.connect(self.reload_tree)
         panel.navigate_detection.connect(self._show_detection_run)
         panel.navigate_tracking.connect(self._show_tracking_run)
+        panel.navigate_segmentation.connect(self._show_segmentation_run)
         self._swap_content(panel)
 
     def _show_detection_run(self, run_id: str) -> None:
@@ -396,6 +401,41 @@ class MainWindow(QMainWindow):
         panel = StandaloneRunPanel(self._session_conn, run_id)
         panel.data_changed.connect(self.reload_tree)
         self._swap_content(panel)
+
+    def _show_segmentation_run(self, seg_run_id: str) -> None:
+        from app.ui.content_panels import SegmentationRunPanel
+        panel = SegmentationRunPanel(self._session_conn, seg_run_id, self._session_path)
+        panel.data_changed.connect(self.reload_tree)
+        panel.open_requested.connect(self._open_segmentation_run)
+        self._swap_content(panel)
+
+    def _open_segmentation_run(self, seg_run_id: str) -> None:
+        """Open CutieInitPanel continuing an existing segmentation (Issue 2:
+        every prior panel open started a brand-new seg_quality_runs row
+        instead of extending the one selected here)."""
+        from app.pose.cutie_init_panel import CutieInitPanel
+        from PySide6.QtCore import Qt as _Qt
+        from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+        row = self._session_conn.execute(
+            "SELECT shot_id, trial_id FROM seg_quality_runs WHERE id = ?", (seg_run_id,)
+        ).fetchone()
+        if row is None:
+            return
+        win = QWidget(self, _Qt.WindowType.Window)
+        win.setWindowTitle("Cutie Segmentation Init")
+        win.resize(1200, 750)
+        layout = QVBoxLayout(win)
+        layout.setContentsMargins(0, 0, 0, 0)
+        panel = CutieInitPanel(
+            self._session_conn, row["shot_id"], parent=win,
+            trial_id=row["trial_id"], seg_init_run_id=seg_run_id,
+        )
+        layout.addWidget(panel)
+        win.setAttribute(_Qt.WidgetAttribute.WA_DeleteOnClose)
+        win.destroyed.connect(panel.shutdown)
+        win.destroyed.connect(self.reload_tree)
+        win.show()
 
     def _show_person_track(self, sequence_id: str) -> None:
         from app.ui.content_panels import PersonPanel

@@ -12,7 +12,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from posetrak.tracker.runner import PersonRunSpec, _build_multi_person_args, _tracker_binary_name
+from posetrak.tracker.runner import (
+    PersonRunSpec,
+    _build_multi_person_args,
+    _DEVBUILD_BINARY,
+    _REPO_ROOT,
+    _tracker_binary_name,
+)
 
 
 def test_build_multi_person_args_repeats_person_flag_with_four_values_each():
@@ -65,3 +71,14 @@ def test_tracker_binary_name_adds_exe_suffix_on_windows():
 def test_tracker_binary_name_no_suffix_elsewhere():
     assert _tracker_binary_name("linux") == "posetrak-tracker"
     assert _tracker_binary_name("darwin") == "posetrak-tracker"
+
+
+def test_devbuild_binary_path_matches_cpp_reorg_layout():
+    """Regression test: this fallback path went stale (still 'optbuild/cli'
+    instead of 'optbuild/cpp/cli') after the C++ source tree moved under
+    cpp/ -- every caller mocks default_binary_path() out entirely, so
+    nothing exercised this path's actual value and it went unnoticed until
+    building a packaging prototype surfaced it by comparison against the
+    real build output location."""
+    assert _DEVBUILD_BINARY == _REPO_ROOT / "optbuild" / "cpp" / "cli" / _tracker_binary_name()
+    assert _REPO_ROOT.name == "posetrak"

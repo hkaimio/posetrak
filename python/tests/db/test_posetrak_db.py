@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-
+import posetrak.db.db as db_module
 from posetrak.db.db import (
     DEFAULT_REGISTRY_PATH,
     REGISTRY_SCHEMA_VERSION,
@@ -32,6 +32,7 @@ from posetrak.db.db import (
     open_registry,
     open_session,
     resolve_path,
+    seed_bundled_defaults,
     set_project_root,
 )
 
@@ -90,6 +91,26 @@ def test_create_registry_fails_if_exists(tmp_path: Path) -> None:
     conn.close()
     with pytest.raises(FileExistsError):
         create_registry(db_path)
+
+
+def test_create_registry_removes_partial_file_on_schema_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A schema-application failure must not leave a broken file behind.
+
+    sqlite3.connect() creates the file at *path* immediately, before a
+    single statement runs. Without cleanup, a failure partway through
+    create_registry() leaves an empty, schema-version-0 file there --
+    which a later open_or_create_registry() (or a plain retry) would then
+    treat as an existing but broken registry instead of creating a fresh
+    one, surfacing a confusing "expected N, got 0" mismatch instead of
+    the real error.
+    """
+    db_path = tmp_path / "reg.db"
+    monkeypatch.setattr(db_module, "_REGISTRY_SCHEMA_SQL", Path("does-not-exist.sql"))
+    with pytest.raises(FileNotFoundError):
+        create_registry(db_path)
+    assert not db_path.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +260,21 @@ def test_create_session_creates_file(tmp_path: Path) -> None:
     conn = create_session(db_path)
     conn.close()
     assert db_path.exists()
+
+
+def test_create_session_removes_partial_file_on_schema_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A schema-application failure must not leave a broken file behind.
+
+    See test_create_registry_removes_partial_file_on_schema_failure --
+    same failure mode, same fix (_discard_partial_db).
+    """
+    db_path = tmp_path / "session.db"
+    monkeypatch.setattr(db_module, "_REGISTRY_SCHEMA_SQL", Path("does-not-exist.sql"))
+    with pytest.raises(FileNotFoundError):
+        create_session(db_path)
+    assert not db_path.exists()
 
 
 def test_create_session_sets_schema_version(tmp_path: Path) -> None:
@@ -948,6 +984,68 @@ def test_migrate_session_v42_to_v43_adds_persons_json(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_migrate_session_v43_to_v44_adds_name(tmp_path: Path) -> None:
+    """v43->v44 adds seg_quality_runs.name (nullable) -- a user-settable
+    display name distinct from the existing free-text notes column, so
+    segmentations can be listed/renamed in the session tree the same way
+    detection_runs/tracking_runs already are (see docs/roadmap/features/
+    segmentation-ui-improvements/segmentation-ui-improvements-design.md,
+    Issue 1)."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("PRAGMA user_version = 43")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(seg_quality_runs)")}
+    assert "name" in cols
+    conn.close()
+
+
+def test_migrate_session_v44_to_v45_adds_capture_segmentation_hints(tmp_path: Path) -> None:
+    """v44->v45 adds capture_segmentation_hints -- user-marked split
+    points, capture-scoped rather than tied to one seg_quality_runs row
+    (see docs/roadmap/features/segmentation-ui-improvements/
+    segmentation-ui-improvements-design.md, Issue 4)."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("PRAGMA user_version = 44")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+    tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    assert "capture_segmentation_hints" in tables
+    conn.close()
+
+
+def test_migrate_session_v45_to_v46_adds_shot_video_id(tmp_path: Path) -> None:
+    """v45->v46 adds capture_segmentation_hints.shot_video_id -- split
+    points turned out to be camera-specific in practice (a hard
+    transition is usually camera-angle-dependent), not shared across a
+    capture's cameras as v45 originally modeled (see docs/roadmap/
+    features/segmentation-ui-improvements/
+    segmentation-ui-improvements-design.md, Issue 4)."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("PRAGMA user_version = 45")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(capture_segmentation_hints)")}
+    assert "shot_video_id" in cols
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------
@@ -1192,6 +1290,36 @@ def test_session_db_has_registry_tables(session_db: sqlite3.Connection) -> None:
         assert table in actual, f"Registry table missing from session DB: {table!r}"
 
 
+def test_create_session_does_not_seed_bundled_defaults(
+    session_db: sqlite3.Connection,
+) -> None:
+    """Unlike create_registry(), create_session() applies only the schema --
+    it's also used internally for exports/round-trips that need a
+    genuinely empty session (see trial_export.py). Callers representing a
+    person actually starting a new session call seed_bundled_defaults()
+    themselves right after (setup wizard, `session create`, `session
+    add-camera`, ...)."""
+    assert session_db.execute("SELECT COUNT(*) FROM skeletons").fetchone()[0] == 0
+    assert session_db.execute("SELECT COUNT(*) FROM tracker_configs").fetchone()[0] == 0
+
+
+def test_seed_bundled_defaults_seeds_session(session_db: sqlite3.Connection) -> None:
+    seed_bundled_defaults(session_db)
+    assert session_db.execute("SELECT COUNT(*) FROM skeletons").fetchone()[0] == 2
+    assert session_db.execute(
+        "SELECT COUNT(*) FROM tracker_configs WHERE id = 'factory-defaults'"
+    ).fetchone()[0] == 1
+
+
+def test_seed_bundled_defaults_idempotent(session_db: sqlite3.Connection) -> None:
+    seed_bundled_defaults(session_db)
+    seed_bundled_defaults(session_db)
+    assert session_db.execute("SELECT COUNT(*) FROM skeletons").fetchone()[0] == 2
+    assert session_db.execute(
+        "SELECT COUNT(*) FROM tracker_configs WHERE id = 'factory-defaults'"
+    ).fetchone()[0] == 1
+
+
 def test_add_session_camera_copies_camera_rows(
     tmp_path: Path,
     registry_db: sqlite3.Connection,
@@ -1238,6 +1366,50 @@ def test_add_session_camera_copies_camera_rows(
     assert session_db.execute(
         "SELECT id FROM intrinsics_calibrations WHERE id = ?", (intr_id,)
     ).fetchone() is not None
+
+
+def test_add_session_camera_with_default_intrinsics_on_mode(
+    registry_db: sqlite3.Connection,
+    session_db: sqlite3.Connection,
+) -> None:
+    """camera_modes.default_intrinsics_calibration_id and
+    intrinsics_calibrations.camera_mode_id reference each other -- a real
+    circular FK, not just an insertion-order problem (see the comment in
+    add_session_camera). A camera_mode with its default set (true for any
+    camera that's actually been calibrated) used to raise
+    "FOREIGN KEY constraint failed" here regardless of copy order."""
+    import struct, datetime as _dt
+    model_id = create_camera_model(registry_db, manufacturer="Acme", model_name="C2")
+    mode_id = create_camera_mode(registry_db, model_id, width_px=1920, height_px=1080)
+    dist_blob = struct.pack("<4d", 0.0, 0.0, 0.0, 0.0)
+    inst_id = "inst-circular-fk-test"
+    registry_db.execute(
+        "INSERT INTO camera_instances (id, camera_model_id, serial_number, label) "
+        "VALUES (?, ?, '', 'c2')",
+        (inst_id, model_id),
+    )
+    intr_id = "intr-circular-fk-test"
+    registry_db.execute(
+        "INSERT INTO intrinsics_calibrations "
+        "(id, camera_mode_id, calibrated_at, distortion_model, fx, fy, cx, cy, dist_coeffs) "
+        "VALUES (?, ?, ?, 'radtan', 800.0, 800.0, 320.0, 240.0, ?)",
+        (intr_id, mode_id, _dt.date.today().isoformat(), dist_blob),
+    )
+    registry_db.execute(
+        "UPDATE camera_modes SET default_intrinsics_calibration_id = ? WHERE id = ?",
+        (intr_id, mode_id),
+    )
+    registry_db.commit()
+
+    session_id = create_mocap_session(session_db)
+    add_session_camera(  # must not raise sqlite3.IntegrityError
+        session_db, registry_db, session_id, inst_id, mode_id, intr_id, label="c2"
+    )
+
+    assert session_db.execute(
+        "SELECT default_intrinsics_calibration_id FROM camera_modes WHERE id = ?", (mode_id,)
+    ).fetchone()[0] == intr_id
+    assert session_db.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 def test_copy_rows_if_missing_idempotent(

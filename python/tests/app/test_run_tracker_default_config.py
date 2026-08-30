@@ -14,6 +14,7 @@ separate, out of scope for source-only work.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -97,6 +98,78 @@ def test_tracker_config_widget_collect_apply_round_trip(qapp, session_db) -> Non
     assert w2._use_relative.isChecked() is True
     assert w2.loaded_config_id == new_id
     assert w2.loaded_config_name == "rt-test"
+
+
+def test_collect_overrides_velocity_cameras_explicitly_cleared(qapp, session_db) -> None:
+    """Unchecking every velocity-mode camera must produce an explicit empty
+    list override, not None -- edit_config() treats None as 'keep the source
+    row's value', so a bare None here would silently keep inheriting whatever
+    velocity_mode_camera_ids the *previous* config already had instead of
+    clearing it. Confirmed live, 2026-08-23: Harri unchecked a camera's
+    velocity-mode checkbox, re-ran tracking twice, and both runs still showed
+    it enabled."""
+    from app.pose.run_tracker import TrackerConfigWidget
+    from posetrak.db.manage_config import edit_config, seed_baseline_tracker_config
+
+    seed_baseline_tracker_config(session_db)
+
+    # A parent config with velocity mode already on for camera index 2.
+    parent_id = edit_config(
+        session_db, BASELINE_CONFIG_ID, is_named=True, name="parent-with-velocity",
+        velocity_mode_camera_ids=[2],
+    )
+    parent_row = session_db.execute(
+        "SELECT * FROM tracker_configs WHERE id = ?", (parent_id,)
+    ).fetchone()
+
+    w = TrackerConfigWidget()
+    w.set_connection(session_db)
+    w.load_config_row(parent_id, "parent-with-velocity", parent_row)
+    assert w._velocity_cam_indices == {2}
+
+    # Simulate the user opening "Velocity mode cameras" and unchecking the
+    # only selected one.
+    w._velocity_cam_indices = set()
+
+    new_id = edit_config(session_db, parent_id, **w.collect_overrides())
+    row = session_db.execute(
+        "SELECT velocity_mode_camera_ids FROM tracker_configs WHERE id = ?", (new_id,)
+    ).fetchone()
+    assert json.loads(row["velocity_mode_camera_ids"]) == []
+
+
+def test_collect_overrides_nis_feedback_explicitly_disabled(qapp, session_db) -> None:
+    """Same None-means-inherit trap as velocity cameras, for the other
+    checkbox-gated list field with no separate always-explicit enable
+    column."""
+    from app.pose.run_tracker import TrackerConfigWidget
+    from posetrak.db.manage_config import edit_config, seed_baseline_tracker_config
+
+    seed_baseline_tracker_config(session_db)
+
+    w = TrackerConfigWidget()
+    w.set_connection(session_db)
+    w._nis_feedback_enabled.setChecked(True)
+    parent_id = edit_config(
+        session_db, BASELINE_CONFIG_ID, is_named=True, name="parent-with-nis",
+        **w.collect_overrides(),
+    )
+    parent_row = session_db.execute(
+        "SELECT * FROM tracker_configs WHERE id = ?", (parent_id,)
+    ).fetchone()
+    assert json.loads(parent_row["nis_feedback_scopes"])  # non-empty
+
+    w2 = TrackerConfigWidget()
+    w2.set_connection(session_db)
+    w2.load_config_row(parent_id, "parent-with-nis", parent_row)
+    assert w2._nis_feedback_enabled.isChecked() is True
+    w2._nis_feedback_enabled.setChecked(False)
+
+    new_id = edit_config(session_db, parent_id, **w2.collect_overrides())
+    row = session_db.execute(
+        "SELECT nis_feedback_scopes FROM tracker_configs WHERE id = ?", (new_id,)
+    ).fetchone()
+    assert json.loads(row["nis_feedback_scopes"]) == []
 
 
 # ---------------------------------------------------------------------------

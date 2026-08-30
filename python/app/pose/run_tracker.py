@@ -880,7 +880,17 @@ class TrackerConfigWidget(QWidget):
         through as plain Python objects; edit_config()'s own _encode() JSON-
         encodes them.
         """
-        vel_ids = sorted(self._velocity_cam_indices) if self._velocity_cam_indices else None
+        # Always an explicit list, even when empty -- edit_config()'s
+        # documented contract treats None as "keep the source row's value",
+        # not "clear it". velocity_mode_camera_ids has no separate
+        # always-explicit enable flag (unlike e.g. use_relative_observations
+        # below), so collapsing an empty selection to None here silently
+        # discarded the user unchecking every camera: the previous
+        # (non-empty) value just kept getting inherited from whatever config
+        # this one was derived from. Confirmed live, 2026-08-23 -- Harri
+        # unchecked insta_ace2_pro's velocity-mode checkbox, re-ran tracking
+        # twice, and both runs still showed it enabled.
+        vel_ids = sorted(self._velocity_cam_indices)
         use_rel = 1 if self._use_relative.isChecked() else 0
         rel_min_conf = self._relative_min_conf.value() if use_rel else None
 
@@ -919,7 +929,12 @@ class TrackerConfigWidget(QWidget):
         soft_limit_noise_std = self._soft_limit_noise_std.value()
         soft_limit_enabled = soft_limit_noise_std > 0.0
 
-        nis_scopes = None
+        # Same None-means-inherit trap as velocity_mode_camera_ids above:
+        # nis_feedback_scopes has no separate always-explicit enable column
+        # either, so unchecking the box must send an explicit empty list,
+        # not None, or a previously-enabled parent config's scopes silently
+        # keep getting inherited.
+        nis_scopes: list = []
         if self._nis_feedback_enabled.isChecked():
             nis_scopes = [
                 {"name": "core", "joint_names": ADAPTIVE_NOISE_CORE_JOINTS},
@@ -947,7 +962,9 @@ class TrackerConfigWidget(QWidget):
             process_noise_vel_gain_root=self._vel_noise_gain_root.value(),
             process_noise_vel_ref_root=self._vel_noise_ref_root.value(),
             process_noise_vel_joint_names=joint_names,
-            process_noise_vel_scopes=vel_scopes or None,
+            # Same reasoning as vel_ids/nis_scopes above: always send the
+            # explicit (possibly empty) list rather than collapsing to None.
+            process_noise_vel_scopes=vel_scopes,
             pose_reg_joint_names=POSE_REG_SPINE_CHAIN if pose_reg_enabled else None,
             pose_reg_equal_split_noise_std=pose_reg_equal_split,
             pose_reg_rest_pose_noise_std=pose_reg_rest_pose,
@@ -1429,12 +1446,23 @@ class RunTrackerWidget(QWidget):
         self._update_run_btn()
 
     def preselect_sequence(self, seq_id: str) -> None:
-        """Pre-select and lock the primary person's Trial/Person/Detection run
-        to whichever of those *seq_id* resolves to.
+        """Pre-select and lock the Trial/Person/Detection run that *seq_id*
+        resolves to, so the person whose panel this dialog was opened from
+        stays included in the run.
 
-        Call after set_session(). Those three combos are disabled so the user
-        cannot change them when this widget is embedded in a PersonPanel;
-        Skeleton stays editable.
+        Call after set_session(). Trial and the matched person's row are
+        locked so the user cannot change them away when this widget is
+        embedded in a PersonPanel; Skeleton stays editable.
+
+        In capture_persons mode (a checkbox per defined person -- see
+        _insert_capture_person_rows()) every *other* row is left in place
+        and toggleable, so cross-person tracking started from one person's
+        panel can still add the rest of the roster. Regression, fixed
+        2026-08-24: this used to unconditionally drop every row but the
+        matched one, a behavior that predates the checkbox roster and
+        silently collapsed every capture_persons-mode run down to one
+        person, with "Add person..." hidden in that mode leaving no way
+        back.
         """
         row = self._conn.execute(
             "SELECT dr.trial_id, dr.id AS detection_run_id, sp.person_name"
@@ -1474,18 +1502,22 @@ class RunTrackerWidget(QWidget):
                 break
 
         if target_row is not None:
-            # This view locks onto a single sequence's person -- drop every
-            # other row so only the matched one remains, then lock it.
-            while self._people_table.rowCount() > 1:
-                if target_row == 0:
-                    self._people_table.removeRow(1)
-                else:
-                    self._people_table.removeRow(0)
-                    target_row -= 1
-
             person_widget = self._people_table.cellWidget(target_row, 0)
             if isinstance(person_widget, QCheckBox):
+                # capture_persons mode: the roster is fixed and every other
+                # person's row must stay selectable for cross-person
+                # tracking -- only lock the one row this sequence resolves
+                # to, instead of discarding the rest of the roster.
                 person_widget.setChecked(True)
+            else:
+                # Legacy free-text mode has no fixed roster to preserve --
+                # collapse down to the single matched row, as before.
+                while self._people_table.rowCount() > 1:
+                    if target_row == 0:
+                        self._people_table.removeRow(1)
+                    else:
+                        self._people_table.removeRow(0)
+                        target_row -= 1
             person_widget.setEnabled(False)
 
             dr_combo = self._people_table.cellWidget(target_row, 1)
@@ -1503,13 +1535,21 @@ class RunTrackerWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _refresh_skeletons(self) -> None:
+        from posetrak.db.manage_skeleton import skeleton_picker_labels
+
         self._all_skeletons = []
         if self._conn is None:
             return
+        # Need parent_id/created_at too -- skeleton_picker_labels() uses them
+        # to flag a skeleton that has a same-named, newer descendant (see
+        # that function's docstring for the real bug this avoids).
         rows = self._conn.execute(
-            "SELECT id, name FROM skeletons ORDER BY name"
+            "SELECT id, name, parent_id, created_at FROM skeletons"
         ).fetchall()
-        self._all_skeletons = [(r["id"], r["name"] or r["id"][:12]) for r in rows]
+        labels = skeleton_picker_labels(rows)
+        self._all_skeletons = sorted(
+            ((r["id"], labels[r["id"]]) for r in rows), key=lambda pair: pair[1]
+        )
 
     def _skeleton_name(self, skel_id: str | None) -> str | None:
         for sid, name in self._all_skeletons:

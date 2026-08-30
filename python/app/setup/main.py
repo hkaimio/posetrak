@@ -38,9 +38,9 @@ def main() -> int:
 
     from app.setup.camera_registry import CameraRegistryWidget
     from app.setup.page_extrinsics import ExtrinsicsPage
+    from app.setup.page_persons import PersonsPage
     from app.setup.page_session import SessionPage
     from app.setup.page_shots import ShotsPage
-    from app.setup.page_skeleton import SkeletonPage
     from app.setup.page_sync import SyncPage
 
     app = QApplication(sys.argv)
@@ -84,7 +84,7 @@ def main() -> int:
     wizard.addPage(shots_page)
     wizard.addPage(SyncPage())
     wizard.addPage(ExtrinsicsPage())
-    wizard.addPage(SkeletonPage())
+    wizard.addPage(PersonsPage())
 
     wizard.show()
     return app.exec()

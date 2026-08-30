@@ -231,3 +231,91 @@ def list_skeletons(registry: sqlite3.Connection) -> list[sqlite3.Row]:
     return registry.execute(
         "SELECT * FROM skeletons ORDER BY created_at"
     ).fetchall()
+
+
+def skeletons_with_newer_version(rows) -> set[str]:
+    """Return the ids of skeletons that have a descendant (any number of
+    parent_id hops, not just a direct child) sharing their own name.
+
+    Found via a real bug, 2026-08-24: a hierarchical-tracking run silently
+    used a skeleton whose HandL/HandR groups lacked the
+    freeflyer_joint/ref_marker metadata upgrade_skeleton_hand_groups.py adds
+    -- because a *corrected* version of that exact skeleton already existed
+    (same name, `parent_id` pointing at the original), and every picker
+    listed both under the identical name with no way to tell them apart.
+    This flags the older, easy-to-mistake-for-current row.
+
+    Parameters
+    ----------
+    rows:
+        Skeleton rows as returned by list_skeletons() (or any iterable of
+        rows/mappings with id, name, parent_id columns).
+    """
+    by_id = {r["id"]: r for r in rows}
+    children_by_parent: dict[str, list[str]] = {}
+    for r in rows:
+        if r["parent_id"]:
+            children_by_parent.setdefault(r["parent_id"], []).append(r["id"])
+
+    def has_same_name_descendant(skel_id: str, name: str) -> bool:
+        for child_id in children_by_parent.get(skel_id, []):
+            child = by_id.get(child_id)
+            if child is None:
+                continue
+            if child["name"] == name or has_same_name_descendant(child_id, name):
+                return True
+        return False
+
+    return {r["id"] for r in rows if has_same_name_descendant(r["id"], r["name"])}
+
+
+def skeleton_picker_labels(rows) -> dict[str, str]:
+    """Build a {skeleton_id: display_label} map for pickers, disambiguating
+    skeletons that share a name and flagging one that has a same-named,
+    newer descendant. See skeletons_with_newer_version() for the bug this
+    guards against.
+
+    Parameters
+    ----------
+    rows:
+        Skeleton rows as returned by list_skeletons() (or any iterable of
+        rows/mappings with id, name, parent_id, created_at columns).
+
+    Returns
+    -------
+    dict[str, str]
+        - A name that's unique among *rows* passes through unchanged.
+        - A duplicated name gets its creation date appended, e.g.
+          "Harri fingers fixed (2026-07-21)" -- and, in the (expected to be
+          rare) case where the date alone still doesn't disambiguate, an id
+          prefix too.
+        - A skeleton flagged by skeletons_with_newer_version() gets
+          " -- newer version exists" appended, so the older, easy-to-mistake
+          duplicate is the one visibly flagged rather than the one to use.
+    """
+    names = [r["name"] for r in rows]
+    name_counts = {n: names.count(n) for n in set(names)}
+    newer_exists = skeletons_with_newer_version(rows)
+
+    # For duplicated names, precompute date-based labels and detect any
+    # residual collision (same name AND same date) needing an id suffix too.
+    date_label_counts: dict[tuple[str, str], int] = {}
+    for r in rows:
+        if name_counts[r["name"]] > 1:
+            date = (r["created_at"] or "")[:10]
+            key = (r["name"], date)
+            date_label_counts[key] = date_label_counts.get(key, 0) + 1
+
+    labels: dict[str, str] = {}
+    for r in rows:
+        name = r["name"]
+        label = name
+        if name_counts[name] > 1:
+            date = (r["created_at"] or "")[:10]
+            label = f"{name} ({date})" if date else name
+            if date_label_counts.get((name, date), 0) > 1:
+                label += f" [{r['id'][:8]}]"
+        if r["id"] in newer_exists:
+            label += " -- newer version exists"
+        labels[r["id"]] = label
+    return labels

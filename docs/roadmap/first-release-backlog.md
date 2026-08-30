@@ -1,9 +1,10 @@
 # First-release backlog
 
-Captured 2026-07-15 (Harri), item 7 added 2026-08-03. One item expected to
-meaningfully improve tracking quality, the rest tech debt / UX. Not sequenced
-here beyond the note on each; see individual design docs (linked below) for
-anything already scoped in more detail.
+Captured 2026-07-15 (Harri), item 7 added 2026-08-03, items 8-9 added
+2026-08-23. One item expected to meaningfully improve tracking quality, the
+rest tech debt / UX. Not sequenced here beyond the note on each; see
+individual design docs (linked below) for anything already scoped in more
+detail.
 
 ## 1. Cross-person relative observations
 
@@ -100,3 +101,39 @@ originally-planned items from that effort are still outstanding:
 repo" item was superseded by the current approach — fetching full Pinocchio +
 Boost via a dedicated conda environment — which turned out simpler to keep in
 sync with the Linux/WSL Pinocchio version than a hand-curated subset.)
+
+## 8. Package a real release artifact
+
+No release workflow exists today — installing Posetrak means the full
+developer setup (`docs/setup.md`): a C++ toolchain, `uv`, manual `uv sync`.
+Design proposal: `docs/roadmap/features/packaging/packaging-design.md` — a
+thin bootstrapper (bundled `uv` binary + pre-built C++ tracker + a pinned
+lockfile snapshot) rather than a fully offline fat bundle, packaged as a
+Windows installer (Inno Setup) and a Linux AppImage, built via a new GitHub
+Actions release workflow. Near-term plan:
+`docs/roadmap/features/packaging/installer-prototype-plan.md` — a narrow
+Windows/CPU-only prototype, validated manually before any CI automation,
+then handed to a small group of real testers before deciding what's next.
+Ships unsigned; code signing
+(`docs/roadmap/features/packaging/code-signing-plan.md`) is deliberately
+deferred until there's real evidence of interest in Posetrak beyond
+today's use — a hobby project's budget doesn't justify it otherwise.
+Proposal only as of 2026-08-23, nothing implemented. Independent, worth
+doing regardless: split the base `onnxruntime-gpu` dependency into a plain
+`onnxruntime` (CPU) base plus an opt-in GPU variant, matching the
+`segmentation` group's existing optional-heavy-dependency pattern.
+
+## 9. Ease AI-assistant (MCP) setup for end users
+
+The MCP diagnostic server (`python/app/mcp/`, see item 4 above for its own
+feature-compatibility gaps) is aimed at exactly the kind of problem a
+packaged release's users will hit — "why does this tracking run look
+wrong" — but connecting to it today means hand-editing `.mcp.json` with an
+absolute database path, and switching which session/capture you're asking
+about means restarting the server (`--db-path` is a required, startup-only
+argument). Design proposal:
+`docs/roadmap/features/mcp-onboarding/mcp-onboarding-design.md` — a
+"Connect AI assistant…" action in `posetrak-ui` that generates the client
+config automatically, and letting the server follow whichever session is
+currently open instead of needing a restart per switch. Proposal only as
+of 2026-08-23, nothing implemented.

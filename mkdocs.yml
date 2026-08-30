@@ -4,6 +4,7 @@
 
 site_name: Posetrak
 site_description: Video-based multi-camera skeletal motion capture
+site_url: https://hkaimio.github.io/posetrak/
 repo_url: https://github.com/hkaimio/posetrak
 repo_name: hkaimio/posetrak
 edit_uri: edit/main/docs/
@@ -35,6 +36,8 @@ exclude_docs: |
   !user-guide/
   !user-guide/*.md
   user-guide/ug-pages-needed.md
+  !user-guide/images/
+  !user-guide/images/**
   !architecture/
   !architecture/*.md
   !architecture/algorithms/
@@ -45,12 +48,15 @@ nav:
   - Background: background.md
   - Setup: setup.md
   - User Guide:
+      - "Tutorial: tracking a capture": user-guide/tutorial1.md
       - Your first capture: user-guide/first-capture.md
       - Camera intrinsics: user-guide/camera-intrinsics.md
       - Extrinsics calibration: user-guide/extrinsics-calibration.md
       - Synchronizing videos: user-guide/synchronizing-videos.md
+      - Segmenting multi-person scenes: user-guide/segmentation.md
       - Analyzing poses: user-guide/analyzing-poses.md
       - Tracking & troubleshooting: user-guide/tracking-troubleshooting.md
+      - Retargeting to Blender: user-guide/retargeting-blender.md
   - Architecture:
       - Overview: architecture/overview.md
       - C++ tracker: architecture/cpp-tracker.md
@@ -64,8 +70,18 @@ nav:
   - Roadmap: roadmap.md
   - Contributing: https://github.com/hkaimio/posetrak/blob/main/CONTRIBUTING.md
 
+extra_css:
+  - assets/video-embed.css
+
+extra_javascript:
+  - https://player.vimeo.com/api/player.js
+  - assets/video-embed.js
+
 theme:
   name: material
+  custom_dir: overrides
+  logo: assets/logo.png
+  favicon: assets/favicon.png
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -86,6 +102,7 @@ theme:
 
 markdown_extensions:
   - admonition
+  - attr_list
   - tables
   - toc:
       permalink: true

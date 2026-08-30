@@ -12,9 +12,18 @@ than almost any other single decision in the pipeline.
 - Runs YOLO (person detection) + RTMPose (keypoint estimation) directly
   on the video, then you assign the detected tracks to persons.
 - Simple, fast, no extra setup step.
-- Works well when performers don't cross paths in frame — the underlying
-  person-tracker can lose or swap identities across an occlusion or a
-  crossing, which direct detection has no way to correct after the fact.
+- The underlying tracker isn't identity-aware: per frame, it finds
+  candidate person regions and only carries a track forward if the next
+  frame's region roughly overlaps the last one — it never actually
+  *recognizes* a person the way a human would. This is why even a
+  simple, single-performer capture can show more than one detection row
+  for that one person (a brief occlusion or a fast pose change is
+  enough to start a new track) — assign every row for the same person
+  to them during "Save assignments."
+- Works well when performers don't cross paths in frame — the same
+  overlap-based tracking can lose or swap identities across an
+  occlusion or a crossing, which direct detection has no way to correct
+  after the fact.
 
 ## Segmentation-assisted detection
 

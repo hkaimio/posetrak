@@ -78,7 +78,8 @@ Key command groups:
 
 | Command | Purpose |
 |---|---|
-| `posetrak trial` | Create, list, show, export, import trials |
+| `posetrak session` | Create sessions, import a project YAML, clone camera intrinsics from another session/registry (`add-camera`) |
+| `posetrak trial` | Create, list, show trials; extract per-camera video clips for a time range (`export-video`) |
 | `posetrak capture` | List and show captures |
 | `posetrak video` | List, locate, and relocate video files |
 | `posetrak export` | Export a trial to a portable archive |

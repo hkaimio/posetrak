@@ -21,11 +21,15 @@ from posetrak.db.db import (
     open_registry,
     open_session,
     resolve_id_prefix,
+    seed_bundled_defaults,
     set_capture_extrinsics,
 )
 from posetrak.db.import_extrinsics import import_extrinsics
 from posetrak.db.import_session_yaml import import_session_yaml
 from posetrak.db.import_sync_json import import_sync_json
+from posetrak.db.trial_export import open_source_readonly
+
+from posetrak.cli._camera import resolve_camera_instance
 
 from posetrak.cli._output import print_table, print_record
 
@@ -135,13 +139,19 @@ def session_create(obj: dict, date: str, location: str, notes: str) -> None:
             "A session DB path is required. Use --session PATH or set $POSETRAK_SESSION_DB."
         )
     sess_path = Path(path)
+    is_new = not sess_path.exists()
     try:
-        if sess_path.exists():
-            conn = open_session(sess_path)
-        else:
-            conn = create_session(sess_path)
+        conn = open_session(sess_path) if not is_new else create_session(sess_path)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(f"Error opening session db: {exc}") from exc
+
+    if is_new:
+        # create_session() only applies the schema; seed the same bundled
+        # defaults create_registry() seeds a fresh registry with, so a
+        # session created this way isn't stuck with an empty skeleton
+        # picker and an all-NULL baseline tracker config (2026-08-23
+        # e2e-testing follow-up).
+        seed_bundled_defaults(conn)
 
     try:
         session_id = create_mocap_session(
@@ -203,14 +213,18 @@ def session_import_yaml(
             "A session DB path is required. Use --session PATH or set $POSETRAK_SESSION_DB."
         )
     sess_path = Path(path)
+    is_new = not sess_path.exists()
     try:
-        if sess_path.exists():
-            session_conn = open_session(sess_path)
-        else:
-            session_conn = create_session(sess_path)
+        session_conn = open_session(sess_path) if not is_new else create_session(sess_path)
     except (FileNotFoundError, ValueError) as exc:
         registry.close()
         raise click.ClickException(f"Error opening session db: {exc}") from exc
+
+    if is_new:
+        # See session_create's identical seeding for why: create_session()
+        # doesn't seed bundled defaults on its own (2026-08-23 e2e-testing
+        # follow-up).
+        seed_bundled_defaults(session_conn)
 
     try:
         result = import_session_yaml(
@@ -237,6 +251,192 @@ def session_import_yaml(
     for label, shot_id in result.shot_ids.items():
         sync_id = result.sync_config_ids.get(label, "")
         click.echo(f"  shot {label!r}: id={shot_id}  sync_config={sync_id}")
+
+
+# ---------------------------------------------------------------------------
+# session add-camera
+# ---------------------------------------------------------------------------
+
+
+def _resolve_mode_and_intrinsics(
+    conn: sqlite3.Connection,
+    camera_instance_id: str,
+    camera_label: str,
+    capture_id: str | None,
+) -> tuple[str, str]:
+    """Return (camera_mode_id, intrinsics_calibration_id) for *camera_instance_id*.
+
+    *conn* may be a full session DB (with capture history) or a bare
+    registry (camera_models/modes/instances/intrinsics only, no captures
+    table at all). Resolution order:
+
+    1. If *capture_id* is given, use exactly that capture's capture_videos
+       row for this camera.
+    2. Otherwise, if this camera has capture_videos history, look for a
+       single distinct (mode, intrinsics) pair across every capture that
+       used it — cameras are session-wide, but their calibration can change
+       between captures (a lens getting bumped, refocused, recalibrated),
+       so this only auto-resolves when there's genuinely one answer.
+    3. Otherwise (a bare registry, or a camera never used in a capture),
+       fall back to its camera_modes.default_intrinsics_calibration_id.
+    """
+    if capture_id is not None:
+        resolved_capture = _resolve(conn, "captures", capture_id)
+        row = conn.execute(
+            "SELECT camera_mode_id, intrinsics_calibration_id FROM capture_videos "
+            "WHERE shot_id = ? AND camera_instance_id = ?",
+            (resolved_capture, camera_instance_id),
+        ).fetchone()
+        if row is None:
+            raise click.ClickException(
+                f"Camera {camera_label!r} was not used in capture {capture_id!r}."
+            )
+        if row["intrinsics_calibration_id"] is None:
+            raise click.ClickException(
+                f"Camera {camera_label!r} in capture {capture_id!r} has no "
+                "intrinsics calibration recorded."
+            )
+        return row["camera_mode_id"], row["intrinsics_calibration_id"]
+
+    try:
+        pairs = conn.execute(
+            "SELECT DISTINCT camera_mode_id, intrinsics_calibration_id, shot_id "
+            "FROM capture_videos "
+            "WHERE camera_instance_id = ? AND intrinsics_calibration_id IS NOT NULL",
+            (camera_instance_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        pairs = []  # bare registry: no capture_videos table at all
+
+    distinct = {(r["camera_mode_id"], r["intrinsics_calibration_id"]) for r in pairs}
+    if len(distinct) == 1:
+        return next(iter(distinct))
+    if len(distinct) > 1:
+        by_capture = ", ".join(f"{r['shot_id']}→{r['intrinsics_calibration_id']}" for r in pairs)
+        raise click.ClickException(
+            f"Camera {camera_label!r} has {len(distinct)} different intrinsics "
+            f"calibrations across captures in the source ({by_capture}). "
+            "Pass --capture to pick which one."
+        )
+
+    # No capture_videos history at all (bare registry, or camera never used
+    # in a capture yet) — fall back to the mode's own recorded default.
+    row = conn.execute(
+        "SELECT cmo.id AS mode_id, cmo.default_intrinsics_calibration_id AS intr_id "
+        "FROM camera_modes cmo "
+        "JOIN camera_instances ci ON ci.camera_model_id = cmo.camera_model_id "
+        "WHERE ci.id = ? AND cmo.default_intrinsics_calibration_id IS NOT NULL",
+        (camera_instance_id,),
+    ).fetchall()
+    if len(row) == 1:
+        return row[0]["mode_id"], row[0]["intr_id"]
+    raise click.ClickException(
+        f"Could not determine a camera mode/intrinsics calibration for "
+        f"{camera_label!r} automatically. Pass --capture to pick one "
+        "explicitly, or the source has no calibration for this camera at all."
+    )
+
+
+@session_group.command("add-camera")
+@click.option("--from", "from_path", required=True, metavar="PATH",
+              help="Source database (a session DB or a registry) to copy the "
+                   "camera's registry rows from.")
+@click.option("--camera", "cameras", multiple=True, required=True, metavar="LABEL",
+              help="Camera to clone, by label or camera_instances.id prefix. Repeatable.")
+@click.option("--capture", "capture_id", default=None, metavar="ID",
+              help="Disambiguate which capture's mode/intrinsics to use, if a "
+                   "camera was recalibrated between captures in the source.")
+@click.option("--session", "mocap_session_id", default=None, metavar="UUID",
+              help="mocap_sessions.id to add the camera(s) to. Only needed if "
+                   "the target session DB already has more than one — a fresh "
+                   "DB's sole session, or a newly created one, is used "
+                   "automatically.")
+@click.pass_obj
+def session_add_camera(
+    obj: dict,
+    from_path: str,
+    cameras: tuple[str, ...],
+    capture_id: str | None,
+    mocap_session_id: str | None,
+) -> None:
+    """Clone one or more cameras' registry rows into a session.
+
+    Copies camera_models/camera_modes/camera_instances/intrinsics_calibrations
+    for each --camera from the source DB (any session or registry) into the
+    target session (--session, created if it doesn't exist yet), and links
+    each one via session_cameras. Does not touch captures, videos, trials,
+    or tracking data — this is camera setup only, e.g. to start a new
+    session pre-configured with an existing session's camera intrinsics.
+
+    Examples:
+
+        posetrak --session tutorial1.db session add-camera \\
+            --from ukemi-tommi-20260509.db --capture 6ca933a5 \\
+            --camera insta_ace2_pro --camera gopro-11_mini_02 --camera pixel9
+    """
+    path = obj.get("session")
+    if not path:
+        raise click.UsageError(
+            "A session DB path is required. Use --session PATH or set $POSETRAK_SESSION_DB."
+        )
+    sess_path = Path(path)
+    is_new = not sess_path.exists()
+    try:
+        session_conn = open_session(sess_path) if not is_new else create_session(sess_path)
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(f"Error opening session db: {exc}") from exc
+
+    if is_new:
+        # See session_create's identical seeding for why: create_session()
+        # doesn't seed bundled defaults on its own (2026-08-23 e2e-testing
+        # follow-up).
+        seed_bundled_defaults(session_conn)
+
+    try:
+        source_conn = open_source_readonly(Path(from_path))
+    except Exception as exc:  # noqa: BLE001
+        session_conn.close()
+        raise click.ClickException(f"Error opening source {from_path!r}: {exc}") from exc
+
+    try:
+        if mocap_session_id is not None:
+            session_id = _resolve(session_conn, "mocap_sessions", mocap_session_id)
+        else:
+            existing = session_conn.execute("SELECT id FROM mocap_sessions").fetchall()
+            if len(existing) == 0:
+                session_id = create_mocap_session(session_conn)
+            elif len(existing) == 1:
+                session_id = existing[0][0]
+            else:
+                raise click.ClickException(
+                    f"{len(existing)} mocap_sessions rows exist in {sess_path} — "
+                    "pass --session UUID to pick one."
+                )
+
+        for label_or_id in cameras:
+            camera_instance_id = resolve_camera_instance(source_conn, label_or_id)
+            camera_label = source_conn.execute(
+                "SELECT label FROM camera_instances WHERE id = ?", (camera_instance_id,)
+            ).fetchone()[0]
+            camera_mode_id, intrinsics_id = _resolve_mode_and_intrinsics(
+                source_conn, camera_instance_id, camera_label, capture_id
+            )
+            try:
+                add_session_camera(
+                    session_conn, source_conn, session_id,
+                    camera_instance_id, camera_mode_id, intrinsics_id,
+                    label=camera_label,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise click.ClickException(
+                    f"Camera {camera_label!r} could not be added: {exc}"
+                ) from exc
+            click.echo(f"Added camera {camera_label!r} (instance={camera_instance_id})")
+    finally:
+        source_conn.close()
+        session_conn.close()
+
+    click.echo(f"session_id: {session_id}")
 
 
 # ---------------------------------------------------------------------------

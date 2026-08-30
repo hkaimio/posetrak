@@ -94,6 +94,15 @@ class DetectionJob(BackgroundJob):
     # no per-camera-completion signal of its own at all).
     camera_progress = Signal(int, int, str)
 
+    # Emitted once, right after the detector/estimator are constructed, if
+    # either fell back to CPU -- _auto_device() has no reliable way to tell
+    # "CPU because that's genuinely all this machine has" apart from "CPU
+    # because torch isn't installed" (see backends_rtmdet.py/
+    # backends_rtmpose.py), and CPU inference is dramatically slower than
+    # GPU, so the dialog surfaces this rather than leaving a user to wonder
+    # why detection is crawling with no explanation.
+    device_notice = Signal(str)
+
     def __init__(
         self,
         session_path: str,
@@ -130,6 +139,11 @@ class DetectionJob(BackgroundJob):
                 conf=self._detector_conf,
             )
             est = RTMPoseEstimator(model_name=self._pose_model_name)
+            if det.device == "cpu" or est.device == "cpu":
+                self.device_notice.emit(
+                    "No GPU detected -- detection will run on CPU and will be "
+                    "significantly slower than with a GPU."
+                )
 
             def on_progress(done: int, total: int, cam_id: str) -> None:
                 pct = int(done / max(total, 1) * 100)

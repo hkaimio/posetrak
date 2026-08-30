@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "av>=12.0",
+    "certifi>=2024.0",
     "click>=8.0",
     "h5py>=3.10",
     "matplotlib>=3.8",
@@ -44,6 +45,7 @@ where = ["python"]
 
 [tool.setuptools.package-data]
 "posetrak.data.skeletons" = ["*.yaml"]
+"posetrak.db.sql" = ["*.sql", "migrations/*.sql"]
 
 [dependency-groups]
 dev = [

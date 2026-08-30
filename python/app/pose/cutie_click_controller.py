@@ -45,8 +45,53 @@ def _auto_device() -> str:
         return "cpu"
 
 
+def _reinit_sam2_hydra_config() -> None:
+    """Re-register SAM2's own Hydra config search path right before
+    building a SAM2 model.
+
+    sam2/__init__.py only registers its config path once, guarded by
+    ``if not GlobalHydra.instance().is_initialized()`` -- fine for a
+    process that only ever loads SAM2, but this app also loads Cutie's
+    own model (CutieWorker._load_cutie()), which calls
+    ``GlobalHydra.instance().clear()`` and re-initialises Hydra pointed
+    at Cutie's config directory. Once any Cutie tracking job has run,
+    that leaves Hydra "initialized" with the wrong (Cutie's) search
+    path -- sam2's own one-time guard never fires again, since it's
+    top-level module code that already ran at first import, so a later
+    ClickController() fails with "Cannot find primary config
+    'configs/sam2.1/....yaml'" (confirmed from a real repro: SAM2 loads
+    fine on the first segmentation panel opened in a session, then fails
+    on a second one opened after a Cutie tracking job has run in
+    between). Fix: unconditionally clear + re-register SAM2's own config
+    path immediately before each SAM2 model build, mirroring the same
+    discipline CutieWorker already applies for its own model -- each
+    Hydra user becomes responsible for leaving Hydra in *its own* state
+    right before it needs it, rather than assuming whatever's already
+    there is usable.
+    """
+    from hydra import initialize_config_module
+    from hydra.core.global_hydra import GlobalHydra
+    GlobalHydra.instance().clear()
+    initialize_config_module("sam2", version_base="1.2")
+
+
+#: Sentinel value for "this pixel has not been manually painted/erased" in
+#: the paint overlay -- distinct from every real label (0 = background,
+#: 1..N = person), so an untouched pixel falls through to whatever
+#: base_mask/SAM2 already produced for it.
+PAINT_UNTOUCHED = 255
+
+
 class ClickController:
     """Stateful SAM2 click segmentation for one video frame at a time.
+
+    Compositing order (segmentation-ui-improvements design doc, Issue 5):
+    base_mask -> SAM2 result (only for labels with live clicks) -> manual
+    paint/erase overlay, always applied last. The overlay is a separate
+    layer, not a direct edit to self._mask, because _run_predictions() is
+    a pure function of (base_mask, clicks) rebuilt from scratch on every
+    click -- writing straight into self._mask would get silently
+    discarded by the next click anywhere.
 
     Usage
     -----
@@ -56,6 +101,8 @@ class ClickController:
     mask = ctrl.push_point(1, x2, y2, positive=False)  # negative click
     mask = ctrl.clear_person(2)
     ctrl.clear_all()
+    mask = ctrl.paint_circle(1, x, y, radius=12)     # manual brush, person 1
+    mask = ctrl.erase_circle(x, y, radius=12)        # manual eraser -> background
     """
 
     def __init__(self, model_name: str = "facebook/sam2.1-hiera-base-plus") -> None:
@@ -70,12 +117,18 @@ class ClickController:
         # live clicks show their base pixels; persons with live clicks have their
         # SAM2 result painted over their base region.
         self._base_mask: np.ndarray | None = None
+        # Manual paint/erase overlay, applied after base+SAM2 compositing --
+        # PAINT_UNTOUCHED (255) where nothing has been manually edited, else
+        # the label to force there (0 = erased to background). See the class
+        # docstring for why this can't just be an edit to self._mask.
+        self._paint_overlay: np.ndarray | None = None
         # True once set_image() has actually run the (expensive) encoder for
         # the current self._image_bgr -- avoids re-encoding on every click.
         self._image_encoded = False
 
         if _AVAILABLE:
             try:
+                _reinit_sam2_hydra_config()
                 sam_model = _build_sam2_hf(model_name, device=_auto_device())
                 self._predictor = _SAM2ImagePredictor(sam_model)
             except Exception as e:
@@ -95,6 +148,7 @@ class ClickController:
         self._h, self._w = frame_bgr.shape[:2]
         self._clicks.clear()
         self._base_mask = None
+        self._paint_overlay = None
         self._mask = np.zeros((self._h, self._w), dtype=np.uint8)
         self._image_encoded = False
 
@@ -131,15 +185,41 @@ class ClickController:
         return self._run_predictions()
 
     def clear_person(self, label: int) -> np.ndarray:
-        """Remove all clicks for person *label*.  Returns updated labeled mask."""
+        """Remove all clicks *and* manual paint/erase edits for person
+        *label* -- "start this person over completely." Returns updated
+        labeled mask."""
         self._clicks.pop(label, None)
+        if self._paint_overlay is not None:
+            self._paint_overlay[self._paint_overlay == label] = PAINT_UNTOUCHED
         return self._run_predictions()
 
     def clear_all(self) -> None:
-        """Remove all live clicks and the base mask; reset to blank."""
+        """Remove all live clicks, the base mask, and manual edits; reset to blank."""
         self._clicks.clear()
         self._base_mask = None
+        self._paint_overlay = None
         self._mask = np.zeros((self._h, self._w), dtype=np.uint8)
+
+    def clear_paint_overlay(self) -> np.ndarray:
+        """Discard all manual paint/erase edits on the current frame,
+        reverting to whatever base_mask/SAM2 alone would show. Returns
+        the updated labeled mask."""
+        self._paint_overlay = None
+        return self._run_predictions()
+
+    def paint_circle(self, label: int, x: int, y: int, radius: int) -> np.ndarray:
+        """Manually stamp *label* into a filled circle of *radius* image
+        pixels centred at (x, y) -- the brush tool. Persists across
+        subsequent clicks (see class docstring); returns the updated mask."""
+        return self._stamp_circle(label, x, y, radius)
+
+    def erase_circle(self, x, y, radius: int) -> np.ndarray:
+        """Manually stamp background (0) into a filled circle of *radius*
+        image pixels centred at (x, y) -- the eraser tool. Forces pixels
+        to background rather than reverting to whatever's underneath, so
+        it also reaches stray base_mask/SAM2 pixels with no live clicks
+        to override them (e.g. Cutie leftovers from an occlusion)."""
+        return self._stamp_circle(0, x, y, radius)
 
     def get_mask(self) -> np.ndarray:
         return self._mask
@@ -184,8 +264,8 @@ class ClickController:
             combined = np.zeros((self._h, self._w), dtype=np.uint8)
 
         if self._image_bgr is None:
-            self._mask = combined
-            return combined
+            self._mask = self._apply_paint_overlay(combined)
+            return self._mask
 
         for label, clicks in self._clicks.items():
             if not clicks:
@@ -206,8 +286,29 @@ class ClickController:
                     ).astype(bool)
                 combined[m] = label
 
-        self._mask = combined
+        self._mask = self._apply_paint_overlay(combined)
+        return self._mask
+
+    def _apply_paint_overlay(self, combined: np.ndarray) -> np.ndarray:
+        """Apply manual paint/erase edits on top of *combined* -- always
+        wins over base_mask/SAM2, the last layer in the compositing order
+        (see class docstring)."""
+        if self._paint_overlay is None or self._paint_overlay.shape != combined.shape:
+            return combined
+        touched = self._paint_overlay != PAINT_UNTOUCHED
+        combined[touched] = self._paint_overlay[touched]
         return combined
+
+    def _stamp_circle(self, value: int, x: int, y: int, radius: int) -> np.ndarray:
+        """Set a filled circle of *radius* image pixels centred at (x, y)
+        to *value* in the paint overlay, then recomposite."""
+        import cv2
+        if self._h == 0 or self._w == 0:
+            return self._mask
+        if self._paint_overlay is None:
+            self._paint_overlay = np.full((self._h, self._w), PAINT_UNTOUCHED, dtype=np.uint8)
+        cv2.circle(self._paint_overlay, (int(x), int(y)), max(1, int(radius)), int(value), -1)
+        return self._run_predictions()
 
     def _predict(
         self, points: list[list[int]], labels: list[int]

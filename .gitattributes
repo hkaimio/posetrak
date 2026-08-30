@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# skeletons.id is the SHA-256 of these files' exact bytes (content-addressed,
+# see manage_skeleton.py); capture_persons.default_skeleton_id rows
+# elsewhere reference that id directly. Without this, a checkout with
+# core.autocrlf=true (common on Windows) silently rewrites LF to CRLF,
+# changing the hash and turning "Default male"/"Default female" into a
+# *different* skeleton (identical content, new id) purely from checking the
+# repo out -- confirmed reproducing exactly this way on 2026-08-23. -text
+# disables line-ending conversion in both directions.
+python/posetrak/data/skeletons/default_female.yaml -text
+python/posetrak/data/skeletons/default_male.yaml -text

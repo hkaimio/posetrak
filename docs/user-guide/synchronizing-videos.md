@@ -28,9 +28,17 @@ the same instant.
 
 ## Troubleshooting
 
-- *(TBD: what it looks like when sync is off — warnings at trial
-  creation? bad triangulation later on? how to tell sync is the actual
-  cause rather than, say, extrinsics.)*
+- **Frame rate ratio warning when marking a sync pair** — some phones'
+  slow-motion recording modes capture at a much higher rate (e.g. 120
+  fps) than the frame rate the video file itself declares (e.g. 30 fps,
+  intended for slow-motion playback). Posetrak computes each camera's
+  actual frame rate from your sync points and warns when it doesn't
+  match what the file claims. Click the suggested corrected fps in the
+  warning dialog — the timeline recalculates using the real capture
+  rate, which is what lets that camera line up with the others.
+- *(TBD: what it looks like when sync is off in other ways — warnings at
+  trial creation? bad triangulation later on? how to tell sync is the
+  actual cause rather than, say, extrinsics.)*
 
 ## See also
 

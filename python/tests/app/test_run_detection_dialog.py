@@ -109,6 +109,37 @@ def test_no_bbox_source_combo_when_no_segmentation_exists(qapp, tmp_path):
     assert dlg._bbox_source_combo is None
 
 
+def test_device_warning_hidden_initially(qapp, tmp_path):
+    from posetrak.db.db import create_session
+    from app.pose.run_detection_dialog import RunDetectionDialog
+
+    conn = create_session(tmp_path / "empty.db")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')")
+    conn.execute("INSERT INTO captures (id, session_id, capture_number) VALUES ('cap1', 'sess1', 1)")
+    conn.commit()
+
+    dlg = RunDetectionDialog(conn=conn, session_path=tmp_path / "empty.db", capture_id="cap1")
+    assert dlg._device_warning_label.isHidden()
+    assert dlg._device_warning_label.text() == ""
+
+
+def test_device_notice_shows_warning_label(qapp, tmp_path):
+    from posetrak.db.db import create_session
+    from app.pose.run_detection_dialog import RunDetectionDialog
+
+    conn = create_session(tmp_path / "empty.db")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')")
+    conn.execute("INSERT INTO captures (id, session_id, capture_number) VALUES ('cap1', 'sess1', 1)")
+    conn.commit()
+
+    dlg = RunDetectionDialog(conn=conn, session_path=tmp_path / "empty.db", capture_id="cap1")
+    dlg._on_device_notice("No GPU detected -- detection will run on CPU and will be slow.")
+    assert not dlg._device_warning_label.isHidden()
+    assert "No GPU detected" in dlg._device_warning_label.text()
+
+
 def test_bbox_source_combo_lists_yolo_and_segmentation(qapp, capture_db, tmp_path):
     dlg = _make_dialog(qapp, capture_db, tmp_path)
     assert dlg._bbox_source_combo is not None
@@ -119,17 +150,75 @@ def test_bbox_source_combo_lists_yolo_and_segmentation(qapp, capture_db, tmp_pat
 
 
 def test_choosing_segmentation_disables_yolo_only_fields(qapp, capture_db, tmp_path):
+    # capture_db's segmentation covers the whole capture (time_end_s=1e9),
+    # so it's the default bbox source here -- the YOLO-only fields start
+    # disabled, not enabled.
     dlg = _make_dialog(qapp, capture_db, tmp_path)
-    assert dlg._detector_combo.isEnabled()
-    assert dlg._conf_spin.isEnabled()
-
-    dlg._bbox_source_combo.setCurrentIndex(1)  # the segmentation entry
+    assert dlg._bbox_source_combo.currentIndex() == 1
     assert not dlg._detector_combo.isEnabled()
     assert not dlg._conf_spin.isEnabled()
 
-    dlg._bbox_source_combo.setCurrentIndex(0)  # back to YOLO
+    dlg._bbox_source_combo.setCurrentIndex(0)  # switch to YOLO
     assert dlg._detector_combo.isEnabled()
     assert dlg._conf_spin.isEnabled()
+
+    dlg._bbox_source_combo.setCurrentIndex(1)  # back to the segmentation
+    assert not dlg._detector_combo.isEnabled()
+    assert not dlg._conf_spin.isEnabled()
+
+
+def _make_dialog_with_seg_range(
+    qapp, tmp_path, seg_start_s, seg_end_s, time_start_s=2.0, time_end_s=8.0
+):
+    """Minimal session with one segmentation run covering [seg_start_s,
+    seg_end_s), then a RunDetectionDialog asking to detect [time_start_s,
+    time_end_s)."""
+    from posetrak.db.db import create_session, generate_id
+    from app.pose.run_detection_dialog import RunDetectionDialog
+
+    conn = create_session(tmp_path / "seg_range_test.db")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01')")
+    conn.execute("INSERT INTO captures (id, session_id, capture_number) VALUES ('cap1', 'sess1', 1)")
+    conn.execute(
+        "INSERT INTO seg_quality_runs "
+        "(id, shot_id, time_start_s, time_end_s, created_at, persons_json) "
+        "VALUES (?, 'cap1', ?, ?, '2026-01-01T00:00:00Z', '[\"Alice\"]')",
+        (generate_id(), seg_start_s, seg_end_s),
+    )
+    conn.commit()
+
+    return RunDetectionDialog(
+        conn=conn,
+        session_path=tmp_path / "seg_range_test.db",
+        capture_id="cap1",
+        time_start_s=time_start_s,
+        time_end_s=time_end_s,
+    )
+
+
+def test_defaults_to_segmentation_covering_the_full_requested_range(qapp, tmp_path):
+    dlg = _make_dialog_with_seg_range(qapp, tmp_path, seg_start_s=0.0, seg_end_s=1e9)
+    assert dlg._bbox_source_combo.currentIndex() == 1
+    assert dlg._bbox_source_combo.currentData() is not None
+
+
+def test_stays_on_yolo_when_segmentation_only_covers_part_of_the_range(qapp, tmp_path):
+    # Segmentation covers [0, 5) but detection is being run over [2, 8) --
+    # frames 5-8 would have no bboxes at all if this were picked silently.
+    dlg = _make_dialog_with_seg_range(qapp, tmp_path, seg_start_s=0.0, seg_end_s=5.0)
+    assert dlg._bbox_source_combo.currentIndex() == 0
+    assert dlg._bbox_source_combo.currentData() is None
+
+
+def test_stays_on_yolo_when_requested_time_range_is_unknown(qapp, tmp_path):
+    # No time_start_s/time_end_s given at all (e.g. a brand new trial
+    # before Mark Start/End) -- nothing to check containment against.
+    dlg = _make_dialog_with_seg_range(
+        qapp, tmp_path, seg_start_s=0.0, seg_end_s=1e9, time_start_s=None, time_end_s=None
+    )
+    assert dlg._bbox_source_combo.currentIndex() == 0
+    assert dlg._bbox_source_combo.currentData() is None
 
 
 def test_run_from_segmentation_builds_one_job_per_camera(qapp, capture_db, tmp_path, monkeypatch):

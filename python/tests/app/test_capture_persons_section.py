@@ -2,16 +2,20 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for _CapturePersonsSection (config-improvements design doc, phase 5,
+"""Tests for CapturePersonsSection (config-improvements design doc, phase 5,
 D3): CapturePanel's "Persons" list -- add/rename/set-default-skeleton/remove
 against a real session DB.
 
-Qt dialogs (QInputDialog/QMessageBox) can't be driven headlessly, so these
-tests call the private _on_*() handlers directly rather than going through
-button clicks + modal dialogs -- the same approach test_run_tracker*.py uses
-for anything behind a QInputDialog. That covers the actual DB-mutating logic;
-the "click Add… and see the text prompt" wiring itself is a one-line
-`.clicked.connect(self._on_add)` not worth a headless test.
+Qt's own static dialogs (QInputDialog/QMessageBox) can't be driven
+headlessly, so tests for the handlers behind those (_on_rename,
+_on_set_default_skeleton, _on_remove) call the private _on_*() methods
+directly rather than going through button clicks + modal dialogs -- the
+same approach test_run_tracker*.py uses. _on_add uses a real custom QDialog
+(_AddPersonDialog) instead, which *can* be driven headlessly (construct it,
+set its widgets, read back .name()/.default_skeleton_id()) -- see
+TestAddPersonDialog below -- so its own tests monkeypatch just
+_AddPersonDialog.exec to skip the modal event loop while still exercising
+the real widget-to-value wiring, rather than bypassing the dialog entirely.
 """
 
 from __future__ import annotations
@@ -54,23 +58,23 @@ def _make_skeleton(conn: sqlite3.Connection, skel_id: str, name: str) -> None:
 
 
 def test_empty_capture_shows_no_rows(qapp, session_db) -> None:
-    from app.ui.content_panels import _CapturePersonsSection
+    from app.ui.content_panels import CapturePersonsSection
 
     capture_id = _make_capture(session_db)
-    section = _CapturePersonsSection(session_db, capture_id)
+    section = CapturePersonsSection(session_db, capture_id)
     assert section._list.count() == 0
     assert section._rename_btn.isEnabled() is False
     assert section._remove_btn.isEnabled() is False
 
 
 def test_refresh_lists_existing_persons_sorted_by_name(qapp, session_db) -> None:
-    from app.ui.content_panels import _CapturePersonsSection
+    from app.ui.content_panels import CapturePersonsSection
 
     capture_id = _make_capture(session_db)
     create_person(session_db, capture_id, "Zoe")
     create_person(session_db, capture_id, "Alice")
 
-    section = _CapturePersonsSection(session_db, capture_id)
+    section = CapturePersonsSection(session_db, capture_id)
     labels = [section._list.item(i).text() for i in range(section._list.count())]
     assert labels[0].startswith("Alice")
     assert labels[1].startswith("Zoe")
@@ -78,24 +82,28 @@ def test_refresh_lists_existing_persons_sorted_by_name(qapp, session_db) -> None
 
 
 def test_refresh_shows_default_skeleton_name(qapp, session_db) -> None:
-    from app.ui.content_panels import _CapturePersonsSection
+    from app.ui.content_panels import CapturePersonsSection
 
     capture_id = _make_capture(session_db)
     _make_skeleton(session_db, "skel-a", "Skeleton A")
     create_person(session_db, capture_id, "Alice", default_skeleton_id="skel-a")
 
-    section = _CapturePersonsSection(session_db, capture_id)
+    section = CapturePersonsSection(session_db, capture_id)
     assert section._list.item(0).text() == "Alice  —  Skeleton A"
 
 
 def test_on_add_creates_person(qapp, session_db, monkeypatch) -> None:
-    from app.ui.content_panels import _CapturePersonsSection
-    from PySide6.QtWidgets import QInputDialog
+    from app.ui.content_panels import _AddPersonDialog, CapturePersonsSection
+    from PySide6.QtWidgets import QDialog
 
     capture_id = _make_capture(session_db)
-    section = _CapturePersonsSection(session_db, capture_id)
+    section = CapturePersonsSection(session_db, capture_id)
 
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Bob", True)))
+    def fake_exec(self) -> int:
+        self._name_edit.setText("Bob")
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(_AddPersonDialog, "exec", fake_exec)
     section._on_add()
 
     names = [r["name"] for r in list_persons(session_db, capture_id)]
@@ -103,13 +111,52 @@ def test_on_add_creates_person(qapp, session_db, monkeypatch) -> None:
     assert section._list.count() == 1
 
 
+def test_on_add_cancelled_creates_nothing(qapp, session_db, monkeypatch) -> None:
+    from app.ui.content_panels import _AddPersonDialog, CapturePersonsSection
+    from PySide6.QtWidgets import QDialog
+
+    capture_id = _make_capture(session_db)
+    section = CapturePersonsSection(session_db, capture_id)
+
+    monkeypatch.setattr(
+        _AddPersonDialog, "exec", lambda self: QDialog.DialogCode.Rejected
+    )
+    section._on_add()
+
+    assert list_persons(session_db, capture_id) == []
+
+
+def test_on_add_sets_default_skeleton_chosen_in_dialog(qapp, session_db, monkeypatch) -> None:
+    """The Add… dialog lets the skeleton be picked in the same step as the
+    name, instead of requiring a separate "Default skeleton…" click
+    afterward (2026-08-22 e2e testing)."""
+    from app.ui.content_panels import _AddPersonDialog, CapturePersonsSection
+    from PySide6.QtWidgets import QDialog
+
+    capture_id = _make_capture(session_db)
+    _make_skeleton(session_db, "skel-a", "Skeleton A")
+    section = CapturePersonsSection(session_db, capture_id)
+
+    def fake_exec(self) -> int:
+        self._name_edit.setText("Bob")
+        idx = self._skeleton_combo.findData("skel-a")
+        self._skeleton_combo.setCurrentIndex(idx)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(_AddPersonDialog, "exec", fake_exec)
+    section._on_add()
+
+    persons = list_persons(session_db, capture_id)
+    assert persons[0]["default_skeleton_id"] == "skel-a"
+
+
 def test_on_rename_updates_person(qapp, session_db, monkeypatch) -> None:
-    from app.ui.content_panels import _CapturePersonsSection
+    from app.ui.content_panels import CapturePersonsSection
     from PySide6.QtWidgets import QInputDialog
 
     capture_id = _make_capture(session_db)
     person_id = create_person(session_db, capture_id, "Alice")
-    section = _CapturePersonsSection(session_db, capture_id)
+    section = CapturePersonsSection(session_db, capture_id)
     section._list.setCurrentRow(0)
 
     monkeypatch.setattr(
@@ -122,13 +169,13 @@ def test_on_rename_updates_person(qapp, session_db, monkeypatch) -> None:
 
 
 def test_on_set_default_skeleton_updates_person(qapp, session_db, monkeypatch) -> None:
-    from app.ui.content_panels import _CapturePersonsSection
+    from app.ui.content_panels import CapturePersonsSection
     from PySide6.QtWidgets import QInputDialog
 
     capture_id = _make_capture(session_db)
     _make_skeleton(session_db, "skel-a", "Skeleton A")
     person_id = create_person(session_db, capture_id, "Alice")
-    section = _CapturePersonsSection(session_db, capture_id)
+    section = CapturePersonsSection(session_db, capture_id)
     section._list.setCurrentRow(0)
 
     monkeypatch.setattr(
@@ -140,12 +187,12 @@ def test_on_set_default_skeleton_updates_person(qapp, session_db, monkeypatch) -
 
 
 def test_on_remove_deletes_unreferenced_person(qapp, session_db, monkeypatch) -> None:
-    from app.ui.content_panels import _CapturePersonsSection
+    from app.ui.content_panels import CapturePersonsSection
     from PySide6.QtWidgets import QMessageBox
 
     capture_id = _make_capture(session_db)
     person_id = create_person(session_db, capture_id, "Alice")
-    section = _CapturePersonsSection(session_db, capture_id)
+    section = CapturePersonsSection(session_db, capture_id)
     section._list.setCurrentRow(0)
 
     monkeypatch.setattr(
@@ -161,7 +208,7 @@ def test_on_remove_deletes_unreferenced_person(qapp, session_db, monkeypatch) ->
 def test_on_remove_shows_error_and_keeps_person_when_referenced(
     qapp, session_db, monkeypatch
 ) -> None:
-    from app.ui.content_panels import _CapturePersonsSection
+    from app.ui.content_panels import CapturePersonsSection
     from PySide6.QtWidgets import QMessageBox
 
     capture_id = _make_capture(session_db)
@@ -182,7 +229,7 @@ def test_on_remove_shows_error_and_keeps_person_when_referenced(
     )
     session_db.commit()
 
-    section = _CapturePersonsSection(session_db, capture_id)
+    section = CapturePersonsSection(session_db, capture_id)
     section._list.setCurrentRow(0)
 
     monkeypatch.setattr(
@@ -199,3 +246,42 @@ def test_on_remove_shows_error_and_keeps_person_when_referenced(
     assert len(critical_calls) == 1
     assert get_person(session_db, person_id) is not None
     assert section._list.count() == 1
+
+
+class TestAddPersonDialog:
+    def test_skeleton_combo_lists_none_plus_every_skeleton(self, qapp) -> None:
+        from app.ui.content_panels import _AddPersonDialog
+
+        dlg = _AddPersonDialog({"skel-a": "Skeleton A", "skel-b": "Skeleton B"})
+        labels = [dlg._skeleton_combo.itemText(i) for i in range(dlg._skeleton_combo.count())]
+        assert labels == ["(none)", "Skeleton A", "Skeleton B"]
+        assert dlg._skeleton_combo.currentData() is None  # "(none)" selected by default
+
+    def test_name_and_skeleton_readable_after_selection(self, qapp) -> None:
+        from app.ui.content_panels import _AddPersonDialog
+
+        dlg = _AddPersonDialog({"skel-a": "Skeleton A"})
+        dlg._name_edit.setText("  Bob  ")
+        dlg._skeleton_combo.setCurrentIndex(dlg._skeleton_combo.findData("skel-a"))
+        assert dlg.name() == "Bob"  # stripped
+        assert dlg.default_skeleton_id() == "skel-a"
+
+    def test_no_skeleton_selected_reads_as_none(self, qapp) -> None:
+        from app.ui.content_panels import _AddPersonDialog
+
+        dlg = _AddPersonDialog({"skel-a": "Skeleton A"})
+        dlg._name_edit.setText("Bob")
+        assert dlg.default_skeleton_id() is None
+
+    def test_empty_name_rejected_without_accepting(self, qapp, monkeypatch) -> None:
+        from app.ui.content_panels import _AddPersonDialog
+        from PySide6.QtWidgets import QMessageBox
+
+        monkeypatch.setattr(
+            QMessageBox, "warning",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok),
+        )
+        dlg = _AddPersonDialog({})
+        dlg._name_edit.setText("   ")
+        dlg._on_accept()
+        assert dlg.result() != dlg.DialogCode.Accepted

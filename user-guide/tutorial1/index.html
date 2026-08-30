@@ -1,0 +1,1607 @@
+<!--
+SPDX-FileCopyrightText: 2026 Harri Kaimio
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Video-based multi-camera skeletal motion capture">
+      
+      
+      
+        <link rel="canonical" href="https://hkaimio.github.io/posetrak/user-guide/tutorial1/">
+      
+      
+        <link rel="prev" href="../../setup/">
+      
+      
+        <link rel="next" href="../first-capture/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Tutorial: tracking a capture - Posetrak</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/video-embed.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  
+  
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Tutorial: tracking a capture - Posetrak">
+  <meta property="og:description" content="Video-based multi-camera skeletal motion capture">
+  <meta property="og:image" content="https://hkaimio.github.io/posetrak/assets/some-banner.png">
+  <meta property="og:url" content="https://hkaimio.github.io/posetrak/user-guide/tutorial1/">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Tutorial: tracking a capture - Posetrak">
+  <meta name="twitter:description" content="Video-based multi-camera skeletal motion capture">
+  <meta name="twitter:image" content="https://hkaimio.github.io/posetrak/assets/some-banner.png">
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#tutorial-1-tracking-motion-with-posetrak" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Posetrak" class="md-header__button md-logo" aria-label="Posetrak" data-md-component="logo">
+      
+  <img src="../../assets/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Posetrak
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Tutorial: tracking a capture
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/hkaimio/posetrak" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    hkaimio/posetrak
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Posetrak" class="md-nav__button md-logo" aria-label="Posetrak" data-md-component="logo">
+      
+  <img src="../../assets/logo.png" alt="logo">
+
+    </a>
+    Posetrak
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/hkaimio/posetrak" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    hkaimio/posetrak
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorial: tracking a capture
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorial: tracking a capture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-setting-up-the-project" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Setting up the project
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-synchronizing-videos" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Synchronizing videos
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-extrinsics-calibration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Extrinsics calibration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-define-persons-in-the-capture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Define persons in the capture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-define-trial-detect-motion-from-the-videos" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Define trial &amp; detect motion from the videos
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-match-the-detected-motions-to-persons" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Match the detected motions to persons
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-capturing-3d-movement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Capturing 3D movement
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../first-capture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your first capture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../camera-intrinsics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Camera intrinsics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../extrinsics-calibration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extrinsics calibration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../synchronizing-videos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Synchronizing videos
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../segmentation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Segmenting multi-person scenes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../analyzing-poses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Analyzing poses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracking-troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracking & troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../retargeting-blender/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Retargeting to Blender
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/cpp-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    C++ tracker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/python-apps/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python apps
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/data-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/algorithms/ukf/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UKF algorithm
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../skeleton-format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Skeleton format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../state-vector-format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    State vector format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../sync-metadata-format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sync metadata format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://github.com/hkaimio/posetrak/blob/main/CONTRIBUTING.md" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-setting-up-the-project" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Setting up the project
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-synchronizing-videos" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Synchronizing videos
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-extrinsics-calibration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Extrinsics calibration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-define-persons-in-the-capture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Define persons in the capture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-define-trial-detect-motion-from-the-videos" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Define trial &amp; detect motion from the videos
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-match-the-detected-motions-to-persons" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Match the detected motions to persons
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-capturing-3d-movement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Capturing 3D movement
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/hkaimio/posetrak/edit/main/docs/user-guide/tutorial1.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="tutorial-1-tracking-motion-with-posetrak">Tutorial 1 - Tracking motion with Posetrak<a class="headerlink" href="#tutorial-1-tracking-motion-with-posetrak" title="Permanent link">&para;</a></h1>
+<p>In this tutorial you will do a full motion capture from existing video files:
+set up a Posetrak project, detect persons and poses from the videos, and finally
+track a person's motion and export it as a BVH file that can be used in Blender
+and other 3D applications.</p>
+<p>Before starting, install the Posetrak application. See
+the <a href="../../setup/">setup guide</a> if you haven't done that yet. Then load the
+<a href="https://1drv.ms/u/c/5e84dad12af05ffc/IQAa_irEUQz6QoeMbzAWigbuAV8tjxp36djkLE02pJlKwFg?e=4n6WBb">tutorial
+materials</a>
+and unzip it to a directory in your computer. The zip file contains an (almost)
+empty Posetrak project file and 3 videos that are shot with different types of
+cameras at the same time, showing the captured motion from different angles.</p>
+<h2 id="1-setting-up-the-project">1. Setting up the project<a class="headerlink" href="#1-setting-up-the-project" title="Permanent link">&para;</a></h2>
+<ol>
+<li>Open Posetrak application, choose File -&gt; Open session... and open the
+   tutorial1.db file</li>
+<li>Select Session -&gt; New capture...</li>
+<li>In the dialog, name your capture "Tutorial 1" , click "Add videos..." and
+   select all the 3 video files that you downloaded</li>
+<li>For each video file, select the correct camera (video file names mention the
+   camera used, and the tutorial project file has required configuration data
+   for these) <img alt="" src="../images/tutorial1/add-videos.jpg" /></li>
+</ol>
+<p>Click "Next" to move forward.</p>
+<h2 id="2-synchronizing-videos">2. Synchronizing videos<a class="headerlink" href="#2-synchronizing-videos" title="Permanent link">&para;</a></h2>
+<p>Posetrak uses multiple camera views to reconstruct the exact pose of performers.
+For this, the videos must be in sync: Posetrak needs to know which frames are
+captured at the same time. It is usually enough that you show it the frames for
+two moments, one near the start of the videos and one near their end. To help
+with this, I have added a blinking LED on the floor: you can first search for
+roughly the same moment in the videos, then look for the exact moments where the
+LED lights up or turns off.</p>
+<p>The "Camera Synchronization" window shows videos from 2 cameras side by side.
+The left one is the <strong>reference camera</strong>, the right is the camera you are
+synchronizing with the reference. I recommend using one camera as reference and
+synchronizing all others to it, but this is not the only way: for example, you
+can synchronize camera2 to camera1 and camera3 to camera2.</p>
+<p><img alt="" src="../images/tutorial1/sync-page.jpg" /></p>
+<p>You can move the video playheads in several ways:</p>
+<ul>
+<li>
+<p>Use the slider below the videos to quickly find the place you are looking for.</p>
+</li>
+<li>
+<p>For exact frame selection use keyboard shortcuts: in the reference video (the
+  left one) <code>d</code> moves one frame forward and <code>a</code> one frame backwards. For the
+  target video (right) the corresponding keys are <code>l</code> and <code>j</code>. Holding shift
+  while pressing these keys moves the video 10 frames back/forward.</p>
+</li>
+<li>
+<p>You can also go to a specific frame by clicking the "Go to..." button on the
+  right side of the slider.</p>
+</li>
+</ul>
+<p>Check that you have "gopro-11_mini_02" selected as reference and
+"insta_ace2_pro" as target camera. Move the reference camera playhead using the
+<code>a</code> and <code>d</code> keys to the first frame where the small LED on the floor goes off
+(that is frame 16). Then find the same moment in the target camera using <code>j</code> and
+<code>l</code> keys (it is frame 17). Verify that you have these frames in the two video
+windows and click "Mark sync pair at these frames". You should see new entries
+for the two cameras in the "Sync anchors" list on the left side of the window.</p>
+<p>Next, change the target camera to "pixel9" and repeat the procedure - find the
+first frame where pixel9 shows the LED off (it is also frame 17). Click "Mark
+sync pair at these frames" again.</p>
+<p>Now Posetrak knows a common "moment" at the start of the videos, but this is not
+enough as the cameras might have slightly different frame rates. Therefore we
+need to add another sync point at the end of the videos. Move the reference
+camera playhead to roughly frame 1470 and use <code>a</code>/<code>d</code> to locate the frame where
+the LED turns on (1477). Do the same for pixel9 in the right video panel (the
+right frame is 1479). Click "Mark sync pairs..." again.</p>
+<p>This time you will get a warning dialog that the frame rate ratio is
+inconsistent. Pixel9's video declares a slower frame rate than it was actually
+shot at (see <a href="../synchronizing-videos/#troubleshooting">Synchronizing videos</a> for
+why). Click the "pixel9 -&gt; 119.962 fps" button to use the real capture rate;
+you'll see the timeline adjust to match.</p>
+<p>Finally, change the target camera to insta_ace2_pro, find the corresponding
+frame where the LED turns on (frame 1477) and click "Mark sync pairs..." once
+more. This time you do not get the frame rate warning message, as that video
+file has the correct frame rate.</p>
+<p>The left pane should now show 4 sync anchors for the reference camera and 2 for
+the others. We are done with syncing the captured material. Click "Solve &amp; apply
+sync", then "Next".</p>
+<h2 id="3-extrinsics-calibration">3. Extrinsics calibration<a class="headerlink" href="#3-extrinsics-calibration" title="Permanent link">&para;</a></h2>
+<p>Next, we need to tell it how they relate in space: where each camera was located
+and how it was oriented. This is called extrinsics calibration. <a href="../extrinsics-calibration/">Extrinsics
+calibration guide</a> has more information about the
+concepts and the automated methods available (markers, calibration rigs). This
+tutorial skips those in favor of placing control points manually, so you learn
+the UI they all build on.</p>
+<p><img alt="" src="../images/tutorial1/extrinsics-page.jpg" /></p>
+<p>In the "Extrinsics calibration" page, click "Calibrate…".</p>
+<p>Open the "Data" tab at the bottom of the dialog. This shows the points
+already located - so far there are none.</p>
+<p>We will place the origin of our coordinate system at the corner of the red
+tatami area nearest to the blinking LED we used for synchronization. See the
+iamges below for corrrect location of this and other control points.</p>
+<p>In the qright side pane, locate "Control points" and click "Add...". Then click
+that corner in all 3 camera images. When you press the mouse button on top of a
+camera image, it zooms into the area around the mouse cursor. You can then move
+the control point by dragging the mouse with the left button held down. When you
+release the button, the control point is placed at that location. (You can also
+redo this later if the point is in the wrong place.)</p>
+<p>After placing the control point, enable the "Fix 3D position" checkbox in the
+bottom right corner of the window. Check that the X, Y and Z coordinates are all
+zero and click "Apply".</p>
+<p>Our origin is now fixed, but we need more control points to set the axis
+directions and scale. Add the following four the same way, fixing each one's 3D
+position as given:</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Location</th>
+<th>Coordinates</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2</td>
+<td>Corner of the red area near the benches and the green door</td>
+<td>(4, 0, 0)</td>
+<td>Red area is 4x4 m</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Opposite corner from the origin</td>
+<td>(4, 4, 0)</td>
+<td>Not visible in <code>gopro-11_mini_01</code>; move the <code>insta_ace2_pro</code> playhead, since the performer is in front of it in the first frame</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Last remaining corner of the red area</td>
+<td>(0, 4, 0)</td>
+<td>Not visible in <code>pixel9</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td>Corner of the red mats near the paper on the floor and control point 4</td>
+<td>(1, 3, 0)</td>
+<td>A bit difficult to locate in <code>insta_ace2_pro</code></td>
+</tr>
+</tbody>
+</table>
+<p>These images show correct locations of all 5 control points:</p>
+<p><strong>GoPro-11_mini_02</strong> (CP 3 is not visible to this camera)</p>
+<p><img alt="" src="../images/tutorial1/cps-gopro.jpg" /></p>
+<p><strong>Insta-ace2_pro</strong></p>
+<p><img alt="" src="../images/tutorial1/cps-insta.jpg" /></p>
+<p><strong>Pixel 9</strong> (control point 4 is not visible to this camera)</p>
+<p><img alt="" src="../images/tutorial1/cps-pixel9.jpg" /></p>
+<p>Now you can try solving extrinsics. Locate the "Solve" pane on the right side of
+the window, disable "SIFT" for now and click "Match and solve". Open the
+"Cameras" tab at the bottom of the window and check the solution quality. In my
+case it looks quite good already: all cameras show ~5 pixel max error.</p>
+<p>We can use automatic marker detection to add additional points to get a more
+accurate solution. There are a few ArUco markers attached to the room's walls
+and floor, and Posetrak can detect these automatically. From the sidebar's
+"Markers" section, click "Detect markers...". In the dialog that opens, select
+the correct marker dictionary, in this case DICT_5X5_50, and press OK. You
+should see yellow dots at each marker corner. Click "Match and solve..." again
+to use the newly detected markers as additional control points.</p>
+<p>The extrinsics calibration is now done. Click "Accept".</p>
+<h2 id="4-define-persons-in-the-capture">4. Define persons in the capture<a class="headerlink" href="#4-define-persons-in-the-capture" title="Permanent link">&para;</a></h2>
+<p>This is the last step of setting up the capture. Click "Add...", give the
+tracked person a name (anything is fine). Select "Default male" as skeleton.</p>
+<p><img alt="" src="../images/tutorial1/add-persons.jpg" /></p>
+<h2 id="5-define-trial-detect-motion-from-the-videos">5. Define trial &amp; detect motion from the videos<a class="headerlink" href="#5-define-trial-detect-motion-from-the-videos" title="Permanent link">&para;</a></h2>
+<p>Now the capture material is ready and we can try to capture people's motions
+from it. The time range of capture that Posetrak actually analyzes is called a
+<em>trial</em>. Often you might leave the cameras on for a longer period and most of
+that time nothing interesting happens (just turning on 6 or 8 cameras takes long
+time).</p>
+<p>Select your capture from the list in the navigation page (left side of the main
+window). Use the time slider below the videos to select the start time for your
+trial (in this case around 2s) and click "Mark Start". Move the time slider to
+the end time of your trial (in this case around 12s) and click "Mark End".</p>
+<p>Click "New trial..." and give your trial a name.</p>
+<p><img alt="" src="../images/tutorial1/capture-page-new-trial.jpg" /></p>
+<p>You should see the trial appear in the side pane under your capture. Select it.</p>
+<p>Next, we need to detect the persons and their poses in the videos. Click "Run
+detection...". Select "vitpose-l-133kp" as pose model, leave the other settings
+at their default values, and click "Run Detection".</p>
+<p>Running the detection takes some time. The first time, Posetrak loads the AI
+models needed for this from the internet before starting. After it finishes, you
+will see a detection under the trial (yes, you can run multiple detections for
+the same trial, for example if you want to use different detection algorithms
+for people, animals, etc.).</p>
+<h2 id="6-match-the-detected-motions-to-persons">6. Match the detected motions to persons<a class="headerlink" href="#6-match-the-detected-motions-to-persons" title="Permanent link">&para;</a></h2>
+<p>Go to the detection page. You see a timeline of detected persons in each camera.
+When you hover on top of it, you see the detected person and pose keypoints on
+the right. Green dots are keypoints the detector is confident with; yellow and
+red points are uncertain detections.</p>
+<p>Before continuing we need to tell Posetrak who the person in each detections is.
+In this capture there is only 1 person so this is easy, but yuo track multiple
+persons (or others are just visible to some cameras) there will be more
+detections. Right-click a row in the timeline and select the person in the
+pictures. Do this for all 3 cameras. When you are ready, click "Save
+assignments".</p>
+<p><img alt="" src="../images/tutorial1/tutorial-stitching.gif" /></p>
+<p>Some of the videos have multiple detection rows even though there is only 1
+person present. This happens if the person tracking algorithm "loses" the
+person, even for a brief moment. It plays safe, starts a new detection and lets
+you decide if it is still the same person. See <a href="../analyzing-poses/#direct-detection">analyzing
+poses</a> for more details on this, and when a
+separate segmentation stage is worth the extra setup (not for this simple,
+single-person case).</p>
+<p>After saving the assignments, you'll see a new entry for the person under the
+detection in the navigation pane. Selecting that opens another page in the main
+window.</p>
+<h2 id="7-capturing-3d-movement">7. Capturing 3D movement<a class="headerlink" href="#7-capturing-3d-movement" title="Permanent link">&para;</a></h2>
+<p>Finally, we are ready for running the actual motion capture! In the person page
+under detection, find the "Run tracker..." button and click it.</p>
+<p><img alt="" src="../images/tutorial1/person-page-run-tracker.jpg" /></p>
+<p>The tracker options dialog opens. The defaults are fine for this tutorial, so
+just click "Run Tracker" again at the bottom of the dialog. You can follow the
+tracker's progress; in my computer it takes bit less than 2 minutes.</p>
+<p><img alt="" src="../images/tutorial1/tracker-run-dlg.jpg" /></p>
+<p>Congratulations - you are done! When the tracker finishes, there is a new entry
+in the navigation pane under the person. That page looks almost the same as the
+person page, but also shows the tracking results: you should see yellow dots on
+top of the videos in addition to green dots. The yellow dots are the tracked 3D
+joint positions as seen from that camera's point of view, while green dots are
+the joint keypoints originally detected from the video. Ideally, they should be
+at the same locations.</p>
+<p>You can now export the captured motion as a BVH file by clicking the "Export
+BVH..." button. Then open Blender, select File -&gt; Import -&gt; Motion Capture
+(.bvh) and load the file in Blender.</p>
+<p>You have now completed your first motion capture in Posetrak! Next:</p>
+<ul>
+<li>
+<p>If you want to use the captured motion on a real Blender character, continue
+  to the <a href="../retargeting-blender/">retargeting tutorial</a>.</p>
+</li>
+<li>
+<p>If you need to track multiple persons at same time, read
+  <a href="../segmentation/">segmentation</a> tutorial to learn about Posetrak's advanced
+  tools that help in this task.</p>
+</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="https://player.vimeo.com/api/player.js"></script>
+      
+        <script src="../../assets/video-embed.js"></script>
+      
+    
+  </body>
+</html>

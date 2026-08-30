@@ -1,0 +1,1810 @@
+<!--
+SPDX-FileCopyrightText: 2026 Harri Kaimio
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Video-based multi-camera skeletal motion capture">
+      
+      
+      
+        <link rel="canonical" href="https://hkaimio.github.io/posetrak/architecture/algorithms/ukf/">
+      
+      
+        <link rel="prev" href="../../data-model/">
+      
+      
+        <link rel="next" href="../../../skeleton-format/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../../assets/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>UKF algorithm - Posetrak</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../../assets/video-embed.css">
+    
+    <script>__md_scope=new URL("../../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  
+  
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="UKF algorithm - Posetrak">
+  <meta property="og:description" content="Video-based multi-camera skeletal motion capture">
+  <meta property="og:image" content="https://hkaimio.github.io/posetrak/assets/some-banner.png">
+  <meta property="og:url" content="https://hkaimio.github.io/posetrak/architecture/algorithms/ukf/">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="UKF algorithm - Posetrak">
+  <meta name="twitter:description" content="Video-based multi-camera skeletal motion capture">
+  <meta name="twitter:image" content="https://hkaimio.github.io/posetrak/assets/some-banner.png">
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#ukf-algorithm" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../../.." title="Posetrak" class="md-header__button md-logo" aria-label="Posetrak" data-md-component="logo">
+      
+  <img src="../../../assets/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Posetrak
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              UKF algorithm
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/hkaimio/posetrak" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    hkaimio/posetrak
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../../.." title="Posetrak" class="md-nav__button md-logo" aria-label="Posetrak" data-md-component="logo">
+      
+  <img src="../../../assets/logo.png" alt="logo">
+
+    </a>
+    Posetrak
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/hkaimio/posetrak" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    hkaimio/posetrak
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../user-guide/tutorial1/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorial: tracking a capture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../user-guide/first-capture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your first capture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../user-guide/camera-intrinsics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Camera intrinsics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../user-guide/extrinsics-calibration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extrinsics calibration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../user-guide/synchronizing-videos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Synchronizing videos
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../user-guide/segmentation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Segmenting multi-person scenes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../user-guide/analyzing-poses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Analyzing poses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../user-guide/tracking-troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracking & troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../user-guide/retargeting-blender/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Retargeting to Blender
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cpp-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    C++ tracker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../python-apps/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python apps
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../data-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UKF algorithm
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UKF algorithm
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#why-a-kalman-filter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why a Kalman filter?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#why-ukf-rather-than-ekf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why UKF rather than EKF?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-the-filter-estimates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the filter estimates
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#predict-step-process-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Predict step (process model)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#update-step-measurement-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Update step (measurement model)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#error-state-formulation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Error-state formulation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#joint-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Joint limits
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Joint limits">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-limits-are-applied" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How limits are applied
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-limits-matter-for-tracking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why limits matter for tracking
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#common-failure-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Common failure mode
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#why-sigma-points" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why sigma points?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ukf-hyperparameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UKF hyperparameters
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#noise-parameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Noise parameters
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Noise parameters">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#tuning-guidance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tuning guidance
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#covariance-update" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Covariance update
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#initialisation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Initialisation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#optional-rts-smoothing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optional RTS smoothing
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../skeleton-format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Skeleton format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../state-vector-format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    State vector format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../sync-metadata-format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sync metadata format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://github.com/hkaimio/posetrak/blob/main/CONTRIBUTING.md" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#why-a-kalman-filter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why a Kalman filter?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#why-ukf-rather-than-ekf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why UKF rather than EKF?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-the-filter-estimates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the filter estimates
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#predict-step-process-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Predict step (process model)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#update-step-measurement-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Update step (measurement model)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#error-state-formulation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Error-state formulation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#joint-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Joint limits
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Joint limits">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-limits-are-applied" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How limits are applied
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-limits-matter-for-tracking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why limits matter for tracking
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#common-failure-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Common failure mode
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#why-sigma-points" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why sigma points?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ukf-hyperparameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UKF hyperparameters
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#noise-parameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Noise parameters
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Noise parameters">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#tuning-guidance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tuning guidance
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#covariance-update" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Covariance update
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#initialisation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Initialisation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#optional-rts-smoothing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optional RTS smoothing
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/hkaimio/posetrak/edit/main/docs/architecture/algorithms/ukf.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="ukf-algorithm">UKF algorithm<a class="headerlink" href="#ukf-algorithm" title="Permanent link">&para;</a></h1>
+<p>Posetrak estimates skeletal pose using an <strong>error-state Unscented Kalman Filter (UKF)</strong> in joint space.  This page explains what that means and how to interpret the tuning parameters.</p>
+<hr />
+<h2 id="why-a-kalman-filter">Why a Kalman filter?<a class="headerlink" href="#why-a-kalman-filter" title="Permanent link">&para;</a></h2>
+<p>The straightforward approach to multi-camera pose estimation is to triangulate each body landmark into 3-D and then solve inverse kinematics each frame independently.  In practice this breaks down quickly:</p>
+<ul>
+<li><strong>Noise and flickering</strong> — pose detectors fire keypoints at slightly wrong positions every frame.  Frame-independent IK turns that noise directly into visible jitter in the animation.</li>
+<li><strong>Missing detections</strong> — when a limb is occluded or the detector fails, there is no observation to triangulate.  IK has no way to estimate where the limb went.</li>
+<li><strong>Temporal inconsistency</strong> — two consecutive frames that look visually identical can produce very different IK solutions when the problem is underconstrained (e.g. multiple plausible elbow positions for a given wrist position).</li>
+</ul>
+<p>A Kalman filter solves all three by maintaining a <strong>probability distribution</strong> over the full body state and propagating it forward in time.  The current estimate is not just a point — it is a mean and a covariance that encode uncertainty.  Each frame, the filter predicts where the body should be given its recent motion, then corrects that prediction using the new camera observations.  Missing observations leave the prediction unchanged but increase uncertainty; noisy observations are weighted against the prediction by how surprised the filter is.</p>
+<h2 id="why-ukf-rather-than-ekf">Why UKF rather than EKF?<a class="headerlink" href="#why-ukf-rather-than-ekf" title="Permanent link">&para;</a></h2>
+<p>The measurement model — the function from joint angles to 2-D pixel observations — is nonlinear: joint angles → forward kinematics → 3-D marker positions → camera projection → pixels.</p>
+<p>An Extended Kalman Filter would linearise this chain by computing its Jacobian analytically.  This is possible but brittle: the Jacobian is non-trivial to implement correctly, and the linear approximation degrades for larger rotations.</p>
+<p>The <strong>Unscented Kalman Filter</strong> sidesteps linearisation entirely.  Instead of a Jacobian, it uses <strong>sigma points</strong>: a small set of carefully chosen sample states that together represent the mean and covariance of the distribution.  Each sigma point is passed through the full nonlinear chain — FK, then projection — and the results are recombined.  No approximation is required; only forward evaluations of functions that already exist.</p>
+<hr />
+<h2 id="what-the-filter-estimates">What the filter estimates<a class="headerlink" href="#what-the-filter-estimates" title="Permanent link">&para;</a></h2>
+<p>The filter maintains a probability distribution over the full body state:</p>
+<ul>
+<li><strong>Root position</strong> — 3 numbers (x, y, z in world space, metres)</li>
+<li><strong>Root orientation</strong> — represented as a quaternion, with 3 effective DOFs in the error-state (see below)</li>
+<li><strong>Joint angles</strong> — one number per revolute DOF, three per spherical DOF (radians)</li>
+<li><strong>All of the above, differentiated</strong> — the corresponding velocity for each</li>
+</ul>
+<p>For a full-body skeleton with hands, the error-state dimension is approximately 230 (108 joint DOFs × 2 for position and velocity, plus 12 for root), yielding around 460 sigma points per frame.  A simpler skeleton without hands is roughly 60–70 DOF and ~130 sigma points.  The exact number depends on the skeleton definition.</p>
+<p>The filter expresses uncertainty as a covariance matrix of that dimension.</p>
+<hr />
+<h2 id="predict-step-process-model">Predict step (process model)<a class="headerlink" href="#predict-step-process-model" title="Permanent link">&para;</a></h2>
+<p>Each frame, the filter <strong>predicts</strong> how the state will change before it has seen new measurements.</p>
+<p>The process model is <strong>constant velocity</strong>: each position/angle advances by <code>velocity × dt</code>.  Velocities decay exponentially toward zero with a half-life controlled by <code>velocity_half_life_s</code> — this encodes the expectation that a person will slow down and stop rather than continue indefinitely.</p>
+<p>Process noise (controlled by <code>process_noise_std</code> and <code>process_noise_vel_std</code>) adds uncertainty to the prediction at each step, reflecting the fact that joint accelerations are unknown.  Too small → the filter becomes overconfident and rejects valid measurements as outliers.  Too large → the filter becomes sluggish and the covariance grows unboundedly.</p>
+<hr />
+<h2 id="update-step-measurement-model">Update step (measurement model)<a class="headerlink" href="#update-step-measurement-model" title="Permanent link">&para;</a></h2>
+<p>After predicting, the filter <strong>updates</strong> its state using the 2-D keypoint observations from the cameras.</p>
+<p>The measurement model is:</p>
+<ol>
+<li>Take the predicted state.</li>
+<li>Run <strong>forward kinematics</strong> (Pinocchio): state → 3-D marker positions in world space.</li>
+<li><strong>Project</strong> each marker through each camera's intrinsics to get expected pixel positions.</li>
+<li>Compare expected pixel positions to observed keypoint positions.</li>
+<li>Correct the state toward the observations; reduce covariance.</li>
+</ol>
+<p><strong>Outlier rejection</strong> — Before applying an observation, the filter computes its <strong>Mahalanobis distance</strong>: how far the observation is from the prediction in units of standard deviations.  Observations beyond the <code>outlier_threshold</code> (in σ units) are discarded.  This is what allows the filter to tolerate occasional bad detections without being corrupted by them.</p>
+<hr />
+<h2 id="error-state-formulation">Error-state formulation<a class="headerlink" href="#error-state-formulation" title="Permanent link">&para;</a></h2>
+<p>Orientations — for the root joint and for spherical joints — cannot be treated as ordinary Euclidean numbers.  The fundamental issue is that rotation is a curved space (a manifold): if you add two rotation vectors together you do not generally get a valid rotation, and the shortest path between two rotations wraps around rather than going in a straight line.  Standard Kalman filter arithmetic assumes flat Euclidean space, so it cannot be applied directly to quaternions or rotation matrices.</p>
+<p>Posetrak uses an <strong>error-state formulation</strong> to work around this:</p>
+<ul>
+<li>The filter stores the current best estimate of each orientation as a <strong>full quaternion</strong> (the <em>nominal state</em>).  This quaternion always represents a valid rotation.</li>
+<li>The <strong>covariance matrix</strong> is maintained over a small 3-D <strong>axis-angle perturbation</strong> (the <em>error state</em>) around that quaternion.  The error state lives in the tangent space of the rotation manifold at the current quaternion — a flat Euclidean space where ordinary Kalman arithmetic works.</li>
+<li>When sigma points are generated, each one is obtained by applying a small axis-angle perturbation to the current quaternion.  When the update step computes a correction, that correction is also expressed as an axis-angle, then composed onto the nominal quaternion via the exponential map.</li>
+</ul>
+<p>The effect is that all the Kalman filter mathematics operates in flat space on small perturbations, while the stored state always stays on the rotation manifold.  <code>State::apply_error_update()</code> performs the retraction step at the end of each predict/update cycle.</p>
+<hr />
+<h2 id="joint-limits">Joint limits<a class="headerlink" href="#joint-limits" title="Permanent link">&para;</a></h2>
+<p>Joint limits define the allowable range of motion for each joint axis.  They appear in the skeleton YAML as <code>limits: {x: [min, max], y: [...], z: [...]}</code> (radians).</p>
+<h3 id="how-limits-are-applied">How limits are applied<a class="headerlink" href="#how-limits-are-applied" title="Permanent link">&para;</a></h3>
+<p>After sigma point propagation, the filter computes the <strong>predicted mean state</strong> from the weighted average of propagated sigma points.  Joint limits are applied to that mean state immediately, before the covariance is recomputed.  The implementation is in <code>ConstantVelocityModel::enforce_joint_limits()</code> (<code>cpp/src/filters/process_model.cpp</code>):</p>
+<ul>
+<li><strong>Revolute joints</strong> (1 DOF): the single angle is clamped with <code>std::clamp(angle, min, max)</code>.</li>
+<li><strong>Spherical joints</strong> (3 DOF): each axis is clamped independently.  Axes where <code>min == max</code> are treated as <strong>locked DOFs</strong> and are set to exactly the limit value at every step.  Active axes (where <code>min &lt; max</code>) are clamped to their range.</li>
+</ul>
+<p>Limits are <strong>not</strong> applied to individual sigma points — only to the mean after propagation.  This means the covariance can still represent uncertainty beyond the limits for a single predict step; the clamp takes effect before the update and before the next predict.</p>
+<h3 id="why-limits-matter-for-tracking">Why limits matter for tracking<a class="headerlink" href="#why-limits-matter-for-tracking" title="Permanent link">&para;</a></h3>
+<p>Joint limits serve two purposes:
+- <strong>Physical plausibility</strong> — prevents the filter from finding unrealistic poses (elbow bending backwards, etc.)
+- <strong>Disambiguation</strong> — for joints with symmetric measurement models, limits prevent the filter from converging to the anatomically wrong solution</p>
+<h3 id="common-failure-mode">Common failure mode<a class="headerlink" href="#common-failure-mode" title="Permanent link">&para;</a></h3>
+<p>If a technique involves a large range of motion and the skeleton limits do not allow it, the predicted markers freeze at the boundary while the actual person keeps moving.  This widens the gap between prediction and observation, raising Mahalanobis distances and triggering outlier rejection of the (correct) observations — which in turn prevents any correction, making the divergence worse.</p>
+<p>If tracking degrades at specific joints, check whether the limits in the skeleton YAML are wide enough for the activity being captured.  The joint_angles CSV output shows which DOFs are hitting their limits.</p>
+<hr />
+<h2 id="why-sigma-points">Why sigma points?<a class="headerlink" href="#why-sigma-points" title="Permanent link">&para;</a></h2>
+<p>For a 230-dimensional state the UKF generates $2 \times 230 + 1 = 461$ sigma points.  Each requires a full forward kinematics pass, which is the dominant per-frame cost.  This is the main reason an optimised build (<code>optbuild/</code>) matters for real tracking runs — the debug build is too slow.</p>
+<hr />
+<h2 id="ukf-hyperparameters">UKF hyperparameters<a class="headerlink" href="#ukf-hyperparameters" title="Permanent link">&para;</a></h2>
+<p>The three spread parameters <code>alpha</code>, <code>beta</code>, <code>kappa</code> control sigma point placement:</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Typical value</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>alpha</code></td>
+<td>0.5</td>
+<td>Spread of sigma points around the mean.  <strong>Must be ≥ 0.5 for typical state dimensions (~60–230 DOF)</strong> — smaller values cause negative weights on the central sigma point, which breaks the covariance update.</td>
+</tr>
+<tr>
+<td><code>beta</code></td>
+<td>2.0</td>
+<td>Encodes prior knowledge about the distribution (Gaussian → β = 2 is optimal).</td>
+</tr>
+<tr>
+<td><code>kappa</code></td>
+<td>0.0</td>
+<td>Secondary scaling; usually left at 0.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="noise-parameters">Noise parameters<a class="headerlink" href="#noise-parameters" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Unit</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>process_noise_std</code></td>
+<td>rad/s² (joint), m/s² (root)</td>
+<td>Expected standard deviation of joint/position acceleration per second.  Controls how quickly the filter trusts new measurements over its own prediction.</td>
+</tr>
+<tr>
+<td><code>process_noise_vel_std</code></td>
+<td>rad/s²</td>
+<td>Same, applied to velocity DOFs.</td>
+</tr>
+<tr>
+<td><code>velocity_half_life_s</code></td>
+<td>seconds</td>
+<td>Exponential damping on velocities.  Shorter → velocities decay faster; keeps covariance bounded during static poses.</td>
+</tr>
+<tr>
+<td><code>measurement_noise_std</code></td>
+<td>pixels</td>
+<td>Expected standard deviation of a single keypoint detection in pixel space.  Larger → filter trusts detections less and relies more on prediction.</td>
+</tr>
+<tr>
+<td><code>outlier_threshold</code></td>
+<td>σ</td>
+<td>Mahalanobis distance threshold for accepting an observation.  Observations beyond this are discarded.  Typical value: 4.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="tuning-guidance">Tuning guidance<a class="headerlink" href="#tuning-guidance" title="Permanent link">&para;</a></h3>
+<p><strong>NIS / dof</strong> (Normalised Innovation Squared divided by degrees of freedom) is the primary consistency check for the filter.  A well-tuned filter has $\text{NIS}/\text{dof} \approx 1$.</p>
+<ul>
+<li>$\text{NIS}/\text{dof} &gt; 1$ → filter is <strong>overconfident</strong> — measurements consistently surprise it.  Increase <code>measurement_noise_std</code> or <code>process_noise_std</code>.</li>
+<li>$\text{NIS}/\text{dof} &lt; 1$ → filter is <strong>underconfident</strong> — covariance is too large.  Decrease noise parameters.</li>
+<li>High <code>cov_condition_number</code> ($&gt; 10^6$) → covariance is becoming ill-conditioned.  Try reducing <code>velocity_half_life_s</code> (shorter damping keeps condition numbers lower).</li>
+</ul>
+<p>The parameter sweep tool (<code>python/tools/param_sweep.py</code>) automates a grid search over these parameters and ranks configurations by a score that combines NIS consistency, tracking-lost rate, and covariance condition number.  See the tool's docstring for usage.</p>
+<hr />
+<h2 id="covariance-update">Covariance update<a class="headerlink" href="#covariance-update" title="Permanent link">&para;</a></h2>
+<p>The filter uses the <strong>Joseph form</strong> of the covariance update:</p>
+<p>$$P_{k+1|k+1} = (I - K H)\, P_{k+1|k}\, (I - K H)^T + K R K^T$$</p>
+<p>where:</p>
+<table>
+<thead>
+<tr>
+<th>Symbol</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>$P_{k+1|k+1}$</td>
+<td>Updated (posterior) covariance — uncertainty after incorporating the new observations</td>
+</tr>
+<tr>
+<td>$P_{k+1|k}$</td>
+<td>Predicted (prior) covariance — uncertainty before the update, propagated from the previous step</td>
+</tr>
+<tr>
+<td>$K$</td>
+<td>Kalman gain — $n_\text{state} \times n_\text{obs}$ matrix that weights how much to trust each observation vs. the prediction</td>
+</tr>
+<tr>
+<td>$H$</td>
+<td>Linearised measurement matrix — maps state perturbations to expected measurement changes (approximated from sigma points in the UKF)</td>
+</tr>
+<tr>
+<td>$R$</td>
+<td>Measurement noise covariance — diagonal matrix with $\sigma_\text{measurement}^2$ on each observed pixel coordinate</td>
+</tr>
+<tr>
+<td>$I$</td>
+<td>Identity matrix</td>
+</tr>
+</tbody>
+</table>
+<p>The standard form is $P = (I - KH)P_\text{prior}$, which is equivalent algebraically.  The Joseph form adds the $KRK^T$ term and the symmetric product structure, making it self-evidently symmetric and positive-semidefinite even when the Kalman gain is computed with floating-point rounding errors.  For a 230-dimensional state this numerical stability matters.</p>
+<hr />
+<h2 id="initialisation">Initialisation<a class="headerlink" href="#initialisation" title="Permanent link">&para;</a></h2>
+<p>The filter is initialised from the first frame where enough cameras have detections:</p>
+<ol>
+<li><strong>DLT triangulation</strong> — each detected marker is triangulated across cameras using the Direct Linear Transform to get a 3-D world position.</li>
+<li><strong>Inverse kinematics</strong> — damped least-squares IK maps the triangulated marker positions to joint angles, giving the initial state.</li>
+<li><strong>Initial covariance</strong> — set from <code>init_position_std</code>, <code>init_orientation_std</code>, <code>init_joint_std</code>, <code>init_velocity_std</code> config parameters.</li>
+</ol>
+<hr />
+<h2 id="optional-rts-smoothing">Optional RTS smoothing<a class="headerlink" href="#optional-rts-smoothing" title="Permanent link">&para;</a></h2>
+<p>After a tracking pass, <strong>Rauch-Tung-Striebel (RTS) smoothing</strong> can be applied to refine the estimates using future observations.  Enable in the config before running; call the <code>smooth()</code> pass after the forward tracking loop completes.  Smoothed results are stored alongside unsmoothed results (distinguished by <code>is_smoothed</code> in <code>tracking_results</code>).</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["navigation.instant", "navigation.tracking", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="https://player.vimeo.com/api/player.js"></script>
+      
+        <script src="../../../assets/video-embed.js"></script>
+      
+    
+  </body>
+</html>

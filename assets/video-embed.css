@@ -1,0 +1,74 @@
+/* SPDX-FileCopyrightText: 2026 Harri Kaimio
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Responsive 16:9 wrapper for third-party video embeds (Vimeo, YouTube,
+ * etc.) -- the iframe's own width/height attributes don't scale on narrow
+ * viewports, so this classic "padding-bottom hack" reserves a 16:9 box via
+ * percentage padding and stretches the iframe to fill it absolutely.
+ * Usage in a .md file:
+ *
+ *   <div class="video-embed">
+ *     <iframe src="https://player.vimeo.com/video/VIDEO_ID"
+ *             allow="autoplay; fullscreen; picture-in-picture"
+ *             allowfullscreen></iframe>
+ *   </div>
+ */
+.video-embed {
+  position: relative;
+  padding-bottom: 56.25%; /* 16:9 */
+  height: 0;
+  overflow: hidden;
+  margin: 1.5em 0;
+}
+
+.video-embed iframe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+/* Optional <figure class="video-embed-figure"> wrapper for a caption:
+ *
+ *   <figure class="video-embed-figure">
+ *     <div class="video-embed">
+ *       <iframe src="..." allow="..." allowfullscreen></iframe>
+ *     </div>
+ *     <figcaption>Caption text here</figcaption>
+ *   </figure>
+ */
+/* .md-typeset-prefixed selectors throughout below: Material's own rules
+   (e.g. ".md-typeset figure") are class+element, specificity (0,1,1) --
+   a bare ".video-embed-figure" class selector (0,1,0) loses to them
+   regardless of source order, so every rule here needs to at least match
+   that specificity to reliably win. Confirmed live, 2026-08-23: without
+   this prefix, ".video-embed-figure { width: 100% }" was silently losing
+   to Material's "width: fit-content" despite loading later. */
+.md-typeset .video-embed-figure {
+  margin: 1.5em 0;
+  /* Material's own figure styling shrink-wraps <figure> to its content's
+     intrinsic width (for the usual case of an <img> caption) -- the video
+     div contributes no intrinsic width of its own (its iframe is
+     position:absolute, so it doesn't count), so without this the whole
+     figure -- video included -- shrinks to match whatever the figcaption's
+     own longest line happens to be. A two-line caption with a manual
+     <br/> rendered a visibly narrower video than a one-paragraph caption
+     of the same figure, purely because its wrapped lines were each
+     shorter. Force full width instead. */
+  width: 100%;
+}
+
+.md-typeset .video-embed-figure .video-embed {
+  margin: 0; /* the figure itself provides the outer margin */
+}
+
+.md-typeset .video-embed-figure figcaption {
+  margin-top: 0.5em;
+  text-align: center;
+  font-size: 0.8em;
+  color: var(--md-default-fg-color--light);
+}

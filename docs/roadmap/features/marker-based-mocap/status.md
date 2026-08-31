@@ -1,5 +1,38 @@
 # Marker-based mocap — status
 
+- **2026-08-31** — First real end-to-end GUI pass feedback (Harri), logged
+  for design rather than acted on now -- all genuinely need more thought
+  than a quick patch, and naturally land around phase 2 (dot markers, so
+  multiple detector types) / phase 4 (multiple mixed props + person, UC1
+  complete):
+  - **Marker detection is single-threaded and sequential across cameras**
+    (~13-20% CPU observed). `MarkerDetectionPipeline.run()` processes
+    cameras one at a time; `iter_frames()`'s per-video decode is
+    *deliberately* pinned to `thread_type="NONE"` (a documented past
+    FFmpeg hang with threaded decode + this code's early-close pattern),
+    so the fix isn't intra-video frame parallelism -- it's running
+    independent cameras in separate processes (multiprocessing, not
+    threads, since decode is CPU-bound and the GIL blocks real threaded
+    speedup).
+  - **No preview crops during/after marker detection** -- `ObjectPanel`'s
+    crop grid falls back to on-demand `FrameReader` decoding (a deliberate
+    1e choice: "no crop-caching infrastructure needed for objects, unlike
+    persons"), which is slow in practice. Persons get crops for free as a
+    byproduct of the same decode pass detection already does
+    (`_encode_crop()`, into an already-generic crop table); replicating
+    that for markers (union bbox of a frame's detected corners) looks
+    straightforward on its own. The part that needs real design, per
+    Harri: (1) today's one-full-decode-per-registered-subject architecture
+    means a scene with several props + performers re-decodes the same
+    footage once per subject -- a per-run crop fix doesn't worsen that,
+    but doesn't fix it either, and a shared single-pass scene-wide
+    detection (matching UC1 phase 4 / UC2's later multi-subject phasing)
+    is the real fix; (2) preview *bounding boxes* need the same
+    overlap-merging logic multi-person preview already uses -- a person
+    holding a tracked prop (e.g. a sword) must not naively get two
+    separate, nonsensical previews (one for the person's bbox, one for the
+    sword's) when they're the same physical region.
+
 - **2026-08-31** — First real GUI-launched tracking run for an object threw
   `apply_keypoint_edits: edit blob has 20 keypoints, expected 133`. Root
   cause turned out to be an installed binary, not a live code bug: the

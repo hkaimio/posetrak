@@ -1,5 +1,26 @@
 # Marker-based mocap — status
 
+- **2026-08-31** — Scoped (not built) a new capability triggered by a real
+  capture that the existing turn-around-video calibration method can't
+  handle: "Weapon test 2026-08-20"'s sword prop has ArUco markers on both
+  flat faces with no marker ever visible from both, which a single-camera
+  turn-around can't link (no shared correspondence across the transition).
+  See
+  [rigid-marker-body-calibration-design.md](rigid-marker-body-calibration-design.md):
+  a calibrated multi-camera rig sidesteps this because the two faces' anti-
+  parallel normals mean opposite-side cameras typically see both faces in
+  the same synchronized frame, and each ArUco marker is a self-contained
+  pose reference (known planar corners), so no cross-face co-occurrence is
+  even required -- just some frame where each marker co-occurs with *any*
+  decodable ArUco. Large fraction of the numerics already exist and are
+  production-used by the (structurally identical) extrinsics-calibration
+  path (`solve_marker_pose()` et al. in `app/setup/extrinsics_solver.py`);
+  genuinely new pieces are a reflective-dot blob detector (phase 2 scope,
+  not yet built at all), offset extraction/aggregation, an optional joint
+  least-squares refine, and the orchestrating CLI. Phased A (ArUco-only,
+  de-risks the core co-occurrence assumption first) / B (joint refine) / C
+  (reflective dots).
+
 - **2026-08-31** — An external code review (`gpt-sol-review-20260831.md`,
   no code changes) found two real issues worth acting on immediately, both
   confirmed against the actual code and fixed (Harri agreed on these two;

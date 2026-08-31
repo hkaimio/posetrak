@@ -119,14 +119,7 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
     // solve for beyond its 6-DOF root: triangulation + full IK is overkill
     // and can fall into a local minimum for this degenerate case. Closed-form
     // rigid-body fit instead (algorithms doc §4.2).
-    bool has_non_root_active_joint = false;
-    for (auto const& j : skeleton_->joints()) {
-        if (j.parent_index.has_value() && j.type != JointType::FIXED && j.active_dof() > 0) {
-            has_non_root_active_joint = true;
-            break;
-        }
-    }
-    if (!has_non_root_active_joint) {
+    if (skeleton_->is_rigid_body()) {
         return initialize_rigid_body(marker_positions, timestamp);
     }
 

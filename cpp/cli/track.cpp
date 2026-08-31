@@ -473,8 +473,11 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
         // Initialization priority:
         //  1. Explicit python_state_path in config → load that state directly (useful for
         //  debugging)
-        //  2. Otherwise → run IK on first frame's triangulated observations (the normal path)
-        //  3. If IK initialization fails → fall back to rest pose with a warning
+        //  2. Otherwise → search forward from start_time for a window with enough observation
+        //  coverage, running IK/rigid-fit at each candidate (the normal path)
+        //  3. If no window in the search range initializes → a free-floating rigid prop has no
+        //  meaningful fallback, so fail loudly; an articulated skeleton falls back to rest pose
+        //  with a warning, same as always
         bool initialized = false;
 
         if (config.python_state_path.has_value()) {
@@ -502,13 +505,57 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
             if (!quiet) {
                 fmt::print("  Initializing from first-frame observations via IK...\n");
             }
-            initialized = tracker.initialize(first_frame_obs, config.start_time);
+            // Real multi-camera captures have sparse, independently-timed per-camera
+            // detections (a marker-based-mocap object especially -- see
+            // marker-mocap-design.md status.md's 2026-08-30 entry), so the exact window
+            // at start_time commonly has no valid init coverage even though a window a
+            // second or two later does. Search forward rather than trying start_time once.
+            double const search_end =
+                std::min(end_time, config.start_time + config.init_search_window_s);
+            double init_timestamp = config.start_time;
+            for (double t = config.start_time; t < search_end; t += dt) {
+                auto obs = observations_set.get_all_in_range(t, t + dt);
+                if (tracker.initialize(obs, t)) {
+                    initialized = true;
+                    init_timestamp = t;
+                    break;
+                }
+            }
+
             if (initialized) {
-                if (!quiet) {
+                if (init_timestamp > config.start_time) {
+                    fmt::print(
+                        "  IK initialization successful at t={:.3f}s (searched forward {:.3f}s "
+                        "from the requested start time {:.3f}s -- no valid init window there)\n",
+                        init_timestamp, init_timestamp - config.start_time, config.start_time);
+                    config.start_time = init_timestamp;
+                    t_first_window = config.start_time + dt;
+                    first_frame_obs =
+                        observations_set.get_all_in_range(config.start_time, t_first_window);
+                    num_steps = static_cast<int>((end_time - config.start_time) / dt);
+                    if (num_steps <= 0) {
+                        throw std::runtime_error(
+                            "No time steps left to process after the initialization search "
+                            "shifted start_time forward -- check end_time");
+                    }
+                } else if (!quiet) {
                     fmt::print("  IK initialization successful\n");
                 }
+            } else if (skeleton.is_rigid_body()) {
+                throw std::runtime_error(fmt::format(
+                    "Rigid-body initialization failed across the entire search window "
+                    "[{:.3f}, {:.3f}) -- no window there had enough camera coverage "
+                    "(>= 3 triangulated markers, >= {} cameras, and a non-collinear layout) "
+                    "for a valid Kabsch/Umeyama fit. A rest-pose fallback is meaningless "
+                    "for a free-floating prop (unlike an articulated skeleton), so refusing "
+                    "to proceed rather than track from a silently wrong pose. Try a later "
+                    "--start-time, or widen [tracking.initialization] init_search_window_s.",
+                    config.start_time, search_end, tracker_config.min_cameras_for_init));
             } else {
-                fmt::print("  WARNING: IK initialization failed, falling back to rest pose\n");
+                fmt::print(
+                    "  WARNING: IK initialization failed across the search window "
+                    "[{:.3f}, {:.3f}), falling back to rest pose\n",
+                    config.start_time, search_end);
                 tracker.initialize_from_rest_pose(config.start_time);
                 initialized = true;
             }

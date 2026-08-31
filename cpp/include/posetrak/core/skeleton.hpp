@@ -188,6 +188,22 @@ class Skeleton {
     /// @return Pointer to the entry, or nullptr if no such track is declared.
     InputTrack const* get_input_track(std::string const& id) const;
 
+    /// @brief True if this skeleton has no active DOF below the root -- a
+    /// free-flyer root plus markers only, generated from a marker body
+    /// definition (design §5.3) rather than an articulated body. Single
+    /// source of truth for the "use closed-form rigid-body init instead of
+    /// triangulation+IK" decision (Tracker::initialize()) and for callers
+    /// that need to know a rest-pose fallback would be meaningless (a
+    /// free-floating prop has no anchor to fall back to, unlike a person).
+    bool is_rigid_body() const {
+        for (auto const& j : joints_) {
+            if (j.parent_index.has_value() && j.type != JointType::FIXED && j.active_dof() > 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /// @brief Set joint limits
     /// @param joint_index Index of the joint
     /// @param limits Array of limit pairs [min, max] for each DOF

@@ -270,6 +270,20 @@ struct TrackerAppConfig {
     int min_cameras_for_init = 2;
     double rigid_init_max_residual_m = 0.02;
 
+    /// @brief How far past start_time to search for a window with enough
+    /// observation coverage to initialize, when the window at start_time
+    /// itself doesn't have it. Real multi-camera captures with sparse,
+    /// independently-timed per-camera detections (marker-based-mocap
+    /// objects especially -- see marker-mocap-design.md status.md) commonly
+    /// have no valid init window at exactly start_time; without a search,
+    /// initialize() fails there and the CLI either falls back to a rest
+    /// pose (meaningless for a free-floating rigid prop -- see
+    /// Skeleton::is_rigid_body()) or, for an articulated skeleton, still
+    /// starts from a worse guess than a few frames later would have given.
+    /// 0.0 disables the search (only start_time itself is tried, the
+    /// original behaviour).
+    double init_search_window_s = 2.0;
+
     // === UKF parameters ===
     double ukf_alpha = 0.5;
     double ukf_beta = 2.0;

@@ -384,16 +384,61 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
         }
     }
 
-    // Initialize from first-frame observations
-    double t_first_window = start_time + dt;
-    auto first_frame_obs = ctx->observations.get_all_in_range(start_time, t_first_window);
-    bool initialized = ctx->tracker->initialize(first_frame_obs, start_time);
+    // Initialize from first-frame observations. The auto-detect above (waiting for
+    // min_cameras_for_init cameras to have *ever* seen anything) is a coarse heuristic --
+    // it doesn't guarantee that exact window has enough *simultaneous* multi-camera
+    // coverage for triangulation to actually succeed, and an explicit --start-time
+    // override skips it entirely. Real multi-camera captures have sparse,
+    // independently-timed per-camera detections (a marker-based-mocap object
+    // especially -- see marker-mocap-design.md status.md's 2026-08-30 entry), so
+    // search forward across a window rather than trying start_time once.
+    constexpr double kInitSearchWindowS = 2.0;  // TODO: promote to a TrackerConfig field
+    // if per-capture tuning turns out to matter (mirrors TrackerAppConfig's TOML-path
+    // init_search_window_s, config.hpp).
+    double const search_end = std::min(end_time, start_time + kInitSearchWindowS);
+    double init_timestamp = start_time;
+    bool initialized = false;
+    for (double t = start_time; t < search_end; t += dt) {
+        auto obs = ctx->observations.get_all_in_range(t, t + dt);
+        if (ctx->tracker->initialize(obs, t)) {
+            initialized = true;
+            init_timestamp = t;
+            break;
+        }
+    }
+
     if (initialized) {
-        if (!quiet) {
+        if (init_timestamp > start_time) {
+            fmt::print(
+                "  IK initialization successful at t={:.3f}s (searched forward {:.3f}s from "
+                "the requested start time {:.3f}s -- no valid init window there)\n",
+                init_timestamp, init_timestamp - start_time, start_time);
+            start_time = init_timestamp;
+            num_steps = static_cast<int>((end_time - start_time) / dt);
+            if (num_steps <= 0) {
+                throw std::runtime_error(
+                    "No time steps left to process after the initialization search shifted "
+                    "start_time forward -- check end_time");
+            }
+            ctx->start_time = start_time;
+            ctx->num_steps = num_steps;
+        } else if (!quiet) {
             fmt::print("  IK initialization successful\n");
         }
+    } else if (ctx->skeleton.is_rigid_body()) {
+        throw std::runtime_error(fmt::format(
+            "Rigid-body initialization failed across the entire search window [{:.3f}, "
+            "{:.3f}) -- no window there had enough camera coverage (>= 3 triangulated "
+            "markers, >= {} cameras, and a non-collinear layout) for a valid Kabsch/Umeyama "
+            "fit. A rest-pose fallback is meaningless for a free-floating prop (unlike an "
+            "articulated skeleton), so refusing to proceed rather than track from a "
+            "silently wrong pose. Try a later --start-time.",
+            start_time, search_end, ctx->tracker_config.min_cameras_for_init));
     } else {
-        fmt::print("  WARNING: IK initialization failed, falling back to rest pose\n");
+        fmt::print(
+            "  WARNING: IK initialization failed across the search window [{:.3f}, {:.3f}), "
+            "falling back to rest pose\n",
+            start_time, search_end);
         ctx->tracker->initialize_from_rest_pose(start_time);
     }
 

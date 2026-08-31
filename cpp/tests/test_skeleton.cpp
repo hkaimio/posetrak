@@ -196,3 +196,25 @@ TEST_CASE("Skeleton joint queries", "[skeleton]") {
         REQUIRE(j == nullptr);
     }
 }
+
+TEST_CASE("Skeleton::is_rigid_body", "[skeleton]") {
+    SECTION("Root-only skeleton (marker-mocap prop) is rigid") {
+        Skeleton skel;
+        skel.add_joint("prop_root", std::nullopt, JointType::FIXED);
+        REQUIRE(skel.is_rigid_body());
+    }
+
+    SECTION("Root plus a FIXED child (marker-only, no active DOF) is still rigid") {
+        Skeleton skel;
+        uint32_t root = skel.add_joint("prop_root", std::nullopt, JointType::FIXED);
+        skel.add_joint("marker_point", root, JointType::FIXED);
+        REQUIRE(skel.is_rigid_body());
+    }
+
+    SECTION("Any non-root active joint makes it not rigid") {
+        Skeleton skel;
+        uint32_t pelvis = skel.add_joint("pelvis", std::nullopt, JointType::SPHERICAL);
+        skel.add_joint("spine", pelvis, JointType::REVOLUTE);
+        REQUIRE_FALSE(skel.is_rigid_body());
+    }
+}

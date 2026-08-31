@@ -180,6 +180,33 @@ def test_marker_keypoint_writer_layout_and_missing_marker(session):
     assert np.all(kp[4:8, 2] == 1.0)
 
 
+def test_marker_keypoint_writer_uses_near_zero_noise_scale(session):
+    """noise_scale (-> Observation::crop_scale) must be ~0 for markers, not
+    the person pipeline's 1.0 default (code review finding #4, status.md
+    2026-08-31 entry): a coded ArUco corner is found by direct sub-pixel
+    corner refinement on the full-resolution frame, with no fixed-input-
+    resolution network stage for crop_scale to describe -- letting it stay
+    1.0 gave marker observations the same detection-algorithm-error
+    contribution as an interpolated pose keypoint, silently under-trusting
+    the corners' real precision relative to camera/calibration error."""
+    ids = _TEST_IDS
+    run_id = create_marker_detection_run(
+        session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+        time_start_s=0.0, time_end_s=10.0, dictionary="DICT_4X4_50",
+        marker_ids=["3"],
+    )
+    writer = MarkerKeypointWriter(session, run_id, ids["svid"], marker_ids=["3"])
+    writer.add_frame(0, [_fake_detection("3", (10.0, 20.0))])
+    writer.finalise()
+
+    noise_scale = session.execute(
+        "SELECT noise_scale FROM detection_keypoints "
+        "WHERE detection_run_id=? AND shot_video_id=? AND video_frame=0",
+        (run_id, ids["svid"]),
+    ).fetchone()[0]
+    assert noise_scale == 0.0
+
+
 def test_marker_keypoint_writer_ignores_unconfigured_marker_id(session):
     """A detected marker id outside the prop's configured list is dropped,
     not appended -- the blob width is fixed by marker_ids at run creation."""

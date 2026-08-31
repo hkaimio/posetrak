@@ -331,6 +331,25 @@ class DetectionBatchWriter:
 MARKER_TRACK_ID = 0       # one prop = one track (aruco-prop-tracking-design.md)
 MARKER_REGION_TYPE = "markers"
 
+# The tracker's measurement noise splits into two independent pieces
+# (Observation::measurement_noise_std(ep, ec) = ep*crop_scale + ec):
+# ep ("pose_noise_std") is the detection algorithm's own localization error,
+# scaled by crop_scale -- how much the algorithm's fixed input resolution
+# was stretched to cover the real-world crop, so a farther/bigger bbox
+# means more real pixels of error per network-input pixel. ec
+# ("calib_noise_std") is camera-specific error (extrinsics inaccuracy,
+# autofocus drift affecting intrinsics, ...) that applies regardless of
+# detection method. A coded ArUco corner is found by direct sub-pixel
+# corner refinement on the full-resolution frame -- there is no
+# fixed-input-resolution network stage for crop_scale to describe, and the
+# corner-finding error itself is negligible next to ec -- so crop_scale
+# should be ~0 for markers (letting ec alone dominate), not the person
+# pipeline's 1.0 default. See status.md's 2026-08-31 entry (code review
+# finding #4): before this, marker observations silently reused the full
+# ep contribution meant for a markerless pose network, under-trusting
+# sub-pixel-precise corners relative to a ~5-25px interpolated keypoint.
+_MARKER_CROP_SCALE = 0.0
+
 
 class MarkerKeypointWriter:
     """Accumulates coded-marker corner rows and flushes to DB in batches.
@@ -376,7 +395,7 @@ class MarkerKeypointWriter:
                 kp[idx, 2] = 1.0
         self._rows.append((
             self._run_id, self._svid, video_frame, MARKER_TRACK_ID, MARKER_REGION_TYPE,
-            kp.tobytes(), None,
+            kp.tobytes(), _MARKER_CROP_SCALE,
         ))
         if len(self._rows) >= _BATCH_SIZE:
             self._flush()

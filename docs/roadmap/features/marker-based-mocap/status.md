@@ -1,5 +1,78 @@
 # Marker-based mocap — status
 
+- **2026-08-31** — An external code review (`gpt-sol-review-20260831.md`,
+  no code changes) found two real issues worth acting on immediately, both
+  confirmed against the actual code and fixed (Harri agreed on these two;
+  the rest of the review's findings are either already-known/tracked
+  (the outlier-edit bug, #8) or correctly scoped to later phases already
+  named in the design doc (symmetric/locked-root DOFs, multi-track loading,
+  dot/mixed finalisation) rather than phase-1 defects):
+
+  - **Finding #1 (High) — failed rigid init silently fell back to a
+    meaningless rest pose.** The CLI tried exactly one window at
+    `start_time`, and on failure printed a warning and called
+    `initialize_from_rest_pose()` -- fine for an articulated person (still
+    anchored, if imprecise), meaningless for a free-floating rigid prop at
+    the world origin. This is exactly the failure this phase's own 1f
+    validation hit and worked around by hand (brute-force `--start-time`
+    scanning) rather than fixing. Also found while reading the code: a
+    comment in both `config.hpp` and `tracker.hpp` already described "the
+    existing retry-on-a-later-frame loop" as if it existed -- it never did,
+    for persons or objects, in either of the CLI's two separate init call
+    sites (`track.cpp`'s TOML-config-file path, `run_track()`; and the
+    DB-driven path every GUI-launched run actually uses,
+    `multi_person_tracker.cpp`'s `build_person_context()` -- initially
+    fixed only the former and real-data-validated against the latter by
+    accident of it still printing the *old* message verbatim, catching the
+    miss before calling it done). Fixed in both: search forward from
+    `start_time` (a new `init_search_window_s`, 2.0s default -- a
+    `[tracking.initialization]` TOML field in `run_track()`, a local
+    constant in `build_person_context()` pending a real need to tune it
+    per-capture), trying `tracker.initialize()` at each candidate window
+    and shifting `start_time` (and `num_steps`) to the first one that
+    succeeds. If the whole window fails, a rigid-body skeleton (new
+    `Skeleton::is_rigid_body()`, replacing a duplicated local check in
+    `Tracker::initialize()`) now throws with a clear message instead of
+    silently proceeding; an articulated skeleton keeps the original
+    rest-pose-fallback-with-warning behaviour unchanged, since that wasn't
+    reported broken and rest pose is at least a defensible guess there.
+    Real-data validated on `ukemi-tommi-20260509.db`'s calibration box:
+    from `--start-time 14.93` (the object's sequence start, sparse
+    1-camera-only coverage per Harri's own account of the capture) the
+    2s window isn't enough and it now fails loudly with a clear message
+    instead of silently tracking from the origin; from `--start-time 19.5`
+    it searches forward 0.942s, finds a valid window, and tracks
+    547/547 steps (100%) -- no more manual `--start-time` scanning needed
+    for a reasonably-close guess. Not yet covered by an automated test
+    (review's own finding #9 flags this gap correctly): the fixture needed
+    -- a rigid skeleton with real per-camera timing gaps large enough to
+    exercise both the search-succeeds and search-exhausted paths -- is
+    substantially bigger than a quick addition; deferred rather than
+    rushed, real-data validation stands in for now.
+
+  - **Finding #4 (High) — marker corners weren't getting credit for their
+    own precision.** The tracker's measurement noise splits into two
+    pieces (`Observation::measurement_noise_std(ep, ec) = ep*crop_scale +
+    ec`): `ep` (`pose_noise_std`) is the detection algorithm's own
+    localization error, scaled by `crop_scale` (how much the algorithm's
+    fixed input resolution was stretched to cover the real-world crop);
+    `ec` (`calib_noise_std`) is camera-specific error (extrinsics
+    inaccuracy, autofocus drift affecting intrinsics) that applies
+    regardless of detection method (Harri's framing, confirmed against the
+    C++ formula). `MarkerKeypointWriter` wrote `noise_scale=NULL`, which
+    `SessionReader` defaults to the person pipeline's `crop_scale=1.0` --
+    giving marker corners the *full* `ep` contribution meant for a
+    markerless pose network's fixed-input-resolution error, when an ArUco
+    corner is found by direct sub-pixel refinement on the full-resolution
+    frame with no such resolution-scaling error to describe. Likely a real
+    contributor to the ~29px mean reprojection error 1f's real-data
+    validation flagged as "worth a closer look." Fixed: `MarkerKeypointWriter`
+    now writes `noise_scale=0.0` instead of `NULL`, letting `ec` alone
+    dominate for markers -- no schema change, no C++ change, since the
+    existing formula already does the right thing once `crop_scale` is
+    correct. Old runs (`noise_scale=NULL`) are unaffected (`COALESCE`
+    still gives them 1.0); only new marker runs get the fix.
+
 - **2026-08-31** — First real end-to-end GUI pass feedback (Harri), logged
   for design rather than acted on now -- all genuinely need more thought
   than a quick patch, and naturally land around phase 2 (dot markers, so

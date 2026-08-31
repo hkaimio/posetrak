@@ -1525,14 +1525,25 @@ class DetectionRunPanel(QWidget):
 
 
 class StandaloneRunPanel(QWidget):
-    """Assignment editor (StitcherPanel) for a single detection run.
+    """Assignment editor (StitcherPanel) for a person detection run, or a
+    lightweight finalise/review summary for a marker (object) detection run
+    (marker-based-mocap design doc §7.1) -- the two run kinds have nothing in
+    common past this point. A person run needs track-to-person stitching
+    before it can be finalised; an object run has no stitching decision to
+    make (§7.1's 1d/1e ordering note) and is normally auto-finalised the
+    moment its detection job completes (RunDetectionDialog._on_finished).
+    This panel's object branch covers what that automation doesn't: a run
+    finalised before it existed, or one whose auto-finalise attempt failed
+    and needs a retry -- previously this fell through to StitcherPanel, which
+    has no person tracks to show for an object run and no way to proceed.
 
     Reached by clicking a detection run row in TrialPanel or a detection run
     node in the session tree.  Shows a compact breadcrumb header above the
-    full-width StitcherPanel.
+    full-width StitcherPanel (person runs) or the object summary (object runs).
     """
 
     data_changed = Signal()
+    navigate_object_track = Signal(str)  # sequence_id (marker-based-mocap, phase 1e)
 
     def __init__(self, conn: sqlite3.Connection, run_id: str, parent=None) -> None:
         super().__init__(parent)
@@ -1550,11 +1561,10 @@ class StandaloneRunPanel(QWidget):
         return True
 
     def _build(self) -> None:
-        from app.pose.stitcher_panel import StitcherPanel
-
         run = self._conn.execute(
-            "SELECT dr.id, dr.detector_model, dr.pose_model, dr.created_at, "
-            "       dr.trial_id, t.name AS trial_name, c.label AS capture_label "
+            "SELECT dr.id, dr.detector_type, dr.detector_model, dr.pose_model, dr.created_at, "
+            "       dr.trial_id, dr.capture_object_id, t.name AS trial_name, "
+            "       c.label AS capture_label "
             "FROM detection_runs dr "
             "LEFT JOIN trials t ON t.id = dr.trial_id "
             "LEFT JOIN captures c ON c.id = t.capture_id "
@@ -1580,10 +1590,58 @@ class StandaloneRunPanel(QWidget):
             bc.setStyleSheet("color: gray; font-size: 11px;")
             vbox.addWidget(bc)
 
+        if run is not None and run["detector_type"] == "aruco":
+            self._build_object_summary(vbox, run)
+            return
+
+        from app.pose.stitcher_panel import StitcherPanel
+
         panel = StitcherPanel(self._conn, self._run_id, parent=self)
         panel.applied.connect(self.data_changed)
         self._stitcher_panel = panel
         vbox.addWidget(panel, 1)
+
+    def _build_object_summary(self, vbox: QVBoxLayout, run: sqlite3.Row) -> None:
+        object_row = self._conn.execute(
+            "SELECT name FROM capture_objects WHERE id = ?", (run["capture_object_id"],)
+        ).fetchone()
+        object_name = object_row["name"] if object_row else "(unknown object)"
+        vbox.addWidget(QLabel(f"<b>Object:</b> {object_name}"))
+
+        seq_row = self._conn.execute(
+            "SELECT id FROM pose_observation_sequences WHERE detection_run_id = ?",
+            (self._run_id,),
+        ).fetchone()
+
+        if seq_row is None:
+            vbox.addWidget(QLabel(
+                "Not finalised yet. An object has no per-frame review step "
+                "before finalising (one prop = one track, no stitching "
+                "decision to make) -- finalising is the only remaining step."
+            ))
+            finalise_btn = QPushButton("Finalise")
+            finalise_btn.clicked.connect(self._on_finalise_object)
+            vbox.addWidget(finalise_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        else:
+            vbox.addWidget(QLabel("Finalised."))
+            review_btn = QPushButton("Review corners…")
+            review_btn.clicked.connect(
+                lambda: self.navigate_object_track.emit(seq_row["id"])
+            )
+            vbox.addWidget(review_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        vbox.addStretch()
+
+    def _on_finalise_object(self) -> None:
+        from app.pose.finalise import finalise_object_to_db
+
+        try:
+            seq_id = finalise_object_to_db(self._conn, self._run_id)
+        except (ValueError, RuntimeError) as exc:
+            QMessageBox.critical(self, "Finalise failed", str(exc))
+            return
+        self.data_changed.emit()
+        self.navigate_object_track.emit(seq_id)
 
 
 class SegmentationRunPanel(QWidget):

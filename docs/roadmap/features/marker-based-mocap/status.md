@@ -1,5 +1,36 @@
 # Marker-based mocap — status
 
+- **2026-08-31** — Fixed a gap Harri hit doing his own manual pass over 1c:
+  running marker detection for an object left it stuck. `finalise_object_to_db`
+  (1d) existed but nothing ever called it -- `RunDetectionDialog._on_finished`
+  linked the run to a trial and stopped there for both person and object runs,
+  and the session tree's detection-run node (`StandaloneRunPanel`) always
+  built a `StitcherPanel`, the person track-to-person assignment UI, which has
+  no person tracks to show for an object run and no way to proceed. Fixed
+  two ways: (1) `RunDetectionDialog._on_finished` now auto-finalises a marker
+  run the moment its job completes -- consistent with §7.1's 1d/1e ordering
+  note that an object has no stitching decision to make, so finalising is the
+  only remaining step; (2) `StandaloneRunPanel` now branches on
+  `detector_type`, showing a small object summary (a "Finalise" button if a
+  run somehow reaches it unfinalised -- an older run, or a failed
+  auto-finalise -- otherwise "Review corners…" straight into `ObjectPanel`)
+  instead of falling through to `StitcherPanel`. New tests in
+  `test_run_detection_dialog.py` and `test_standalone_run_panel.py` (new).
+
+  While verifying this, found `python/tests/db/test_observation_edits.py::
+  test_edit_marks_outlier_zeroes_confidence` fails on its own, independent of
+  this fix (confirmed against the pre-fix commit too): `db_cache.py`'s
+  `_apply_edit` unconditionally overwrites a slot's x/y from the edit blob
+  even when the edit only marks the slot an outlier, instead of leaving the
+  original position untouched as the test (and `read_observations_with_edits`'s
+  own docstring) expect. That overwrite logic dates to the June "Phase 7 —
+  ghost-frame keypoint placement" commit, well before marker-based-mocap;
+  the regression test exposing it was added in this feature's own 1d work
+  but evidently never actually verified failing at the time. Not fixed here
+  -- unrelated to this fix and to marker-based-mocap generally (it would
+  affect person keypoint editing the same way) -- flagged to Harri to
+  prioritise separately.
+
 - **2026-08-30** — 1f (tracker: multi-source load + rigid init) built and
   validated end-to-end on real data — **phase 1's finish line reached**.
   `Skeleton` gained `input_tracks_` (`InputTrack{id, type}`) and `Marker`

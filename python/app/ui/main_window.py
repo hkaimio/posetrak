@@ -401,6 +401,7 @@ class MainWindow(QMainWindow):
         from app.ui.content_panels import StandaloneRunPanel
         panel = StandaloneRunPanel(self._session_conn, run_id)
         panel.data_changed.connect(self.reload_tree)
+        panel.navigate_object_track.connect(self._show_object_track)
         self._swap_content(panel)
 
     def _show_segmentation_run(self, seg_run_id: str) -> None:

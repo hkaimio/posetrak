@@ -50,6 +50,7 @@ class RunDetectionDialog(QDialog):
         self._session_path = session_path
         self._trial_id = trial_id
         self._job = None
+        self._is_marker_run = False
         self._seg_runner = None
         self._seg_detection_run_id: str | None = None
         self._seg_persons_ordered: list[str] = []
@@ -382,6 +383,7 @@ class RunDetectionDialog(QDialog):
             return
 
         object_id = self._object_combo.currentData() if self._object_combo else None
+        self._is_marker_run = False
 
         self._controls_enabled(False)
         self._frame_bar.setValue(0)
@@ -426,6 +428,7 @@ class RunDetectionDialog(QDialog):
         self, object_id: str, sync_id: str, start_s: float, end_s: float,
     ) -> None:
         from app.pose.main import MarkerDetectionJob
+        self._is_marker_run = True
         self._job = MarkerDetectionJob(
             session_path=str(self._session_path),
             capture_object_id=object_id,
@@ -613,6 +616,23 @@ class RunDetectionDialog(QDialog):
             (trial_id, run_id),
         )
         self._conn.commit()
+
+        if self._is_marker_run:
+            # An object has no track-to-person stitching decision to make
+            # first (design doc §7.1 1d/1e ordering note) -- finalisation
+            # is the only step, so it happens automatically right here
+            # rather than waiting on a manual "Finalise" action that,
+            # unlike the person workflow, has nothing left to decide.
+            from app.pose.finalise import finalise_object_to_db
+            try:
+                finalise_object_to_db(self._conn, run_id)
+            except (ValueError, RuntimeError) as exc:
+                QMessageBox.critical(
+                    self, "Finalise failed",
+                    f"Marker detection finished, but finalising it into an object "
+                    f"sequence failed:\n\n{exc}\n\nThe raw detection run is still "
+                    "available; open it again to retry.",
+                )
 
         self.detection_finished.emit(trial_id, run_id)
 

@@ -296,3 +296,104 @@ def test_on_seg_queue_done_finalises_without_manual_stitching(qapp, capture_db, 
         "SELECT trial_id FROM detection_runs WHERE id = ?", (run_id,)
     ).fetchone()
     assert trial_row["trial_id"] == finished[0][0]
+
+
+# ---------------------------------------------------------------------------
+# Marker (object) detection run auto-finalisation (marker-based-mocap design
+# doc §7.1 1d/1e ordering note). Regression coverage for the bug where a
+# completed marker run left the object stuck: no pose_observation_sequence
+# was ever created, and the only UI reachable from the run was the person
+# stitching tab, which has nothing to show for an object and no way to
+# proceed. finalise_object_to_db existed but nothing ever called it.
+# ---------------------------------------------------------------------------
+
+
+def _write_marker_run(capture_db, object_id, marker_body_id, marker_ids) -> str:
+    import numpy as np
+
+    from app.pose.db_cache import MarkerKeypointWriter, create_marker_detection_run
+
+    run_id = create_marker_detection_run(
+        capture_db, shot_id="cap1", sync_config_id="sync1",
+        time_start_s=0.0, time_end_s=1.0, dictionary="DICT_4X4_50",
+        marker_ids=marker_ids, capture_object_id=object_id,
+        marker_body_definition_id=marker_body_id,
+    )
+    writer = MarkerKeypointWriter(capture_db, run_id, "sv1", marker_ids=marker_ids)
+    writer.add_frame(0, [])  # buffered only -- writes NaN placeholders
+    writer.finalise()  # flush the buffer to detection_keypoints before overwriting
+
+    kp = np.zeros((4 * len(marker_ids), 3), dtype=np.float32)
+    kp[:, 2] = 1.0
+    capture_db.execute(
+        "UPDATE detection_keypoints SET keypoints=? "
+        "WHERE detection_run_id=? AND shot_video_id=? AND video_frame=0",
+        (kp.tobytes(), run_id, "sv1"),
+    )
+    capture_db.commit()
+    return run_id
+
+
+def test_marker_run_auto_finalises_on_finish(qapp, capture_db, tmp_path):
+    """Once a marker detection job completes, _on_finished must finalise it
+    into an object pose_observation_sequence right away -- an object has no
+    track-to-person stitching decision to make first, so there is nothing
+    else to wait on."""
+    from posetrak.db.manage_capture_object import create_capture_object
+    from posetrak.db.manage_marker_body import import_marker_body_str
+
+    body_id = import_marker_body_str(
+        capture_db,
+        "name: test-prop\nunits: meters\nmarkers:\n"
+        "  - name: hilt\n    type: aruco\n    dictionary: DICT_4X4_50\n"
+        "    id: \"3\"\n    size: 0.05\n    center: [0.0, 0.0, 0.0]\n"
+        "    normal: [0.0, 0.0, 1.0]\n    up: [0.0, 1.0, 0.0]\n",
+        name="Test Prop",
+    )
+    object_id = create_capture_object(capture_db, "cap1", "prop-A", body_id)
+    run_id = _write_marker_run(capture_db, object_id, body_id, ["3"])
+
+    dlg = _make_dialog(qapp, capture_db, tmp_path)
+    dlg._is_marker_run = True
+
+    finished = []
+    dlg.detection_finished.connect(lambda trial_id, rid: finished.append((trial_id, rid)))
+    dlg._on_finished(run_id)
+
+    seqs = capture_db.execute(
+        "SELECT id FROM pose_observation_sequences WHERE detection_run_id = ?", (run_id,)
+    ).fetchall()
+    assert len(seqs) == 1
+    assert len(finished) == 1
+    assert finished[0][1] == run_id
+
+
+def test_marker_run_finalise_failure_shows_error_but_still_reports_finished(
+    qapp, capture_db, tmp_path, monkeypatch,
+):
+    """A finalise failure (e.g. a real ValueError/RuntimeError from
+    finalise_object_to_db) must not crash the dialog -- it should surface
+    the error and still let the caller know the raw run exists, so the user
+    can retry from the run's own detail panel instead of losing track of it."""
+    from app.pose import finalise as finalise_mod
+    from PySide6.QtWidgets import QMessageBox
+
+    def _boom(session, run_id):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(finalise_mod, "finalise_object_to_db", _boom)
+    critical_calls = []
+    monkeypatch.setattr(
+        QMessageBox, "critical",
+        lambda *a, **k: critical_calls.append(a) or QMessageBox.StandardButton.Ok,
+    )
+
+    dlg = _make_dialog(qapp, capture_db, tmp_path)
+    dlg._is_marker_run = True
+
+    finished = []
+    dlg.detection_finished.connect(lambda trial_id, rid: finished.append((trial_id, rid)))
+    dlg._on_finished("nonexistent-run-id")
+
+    assert len(critical_calls) == 1
+    assert len(finished) == 1

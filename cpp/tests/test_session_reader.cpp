@@ -591,6 +591,37 @@ static void create_fixture_db() {
                                {{111.f, 201.f, 1.f}},
                                {{0.f, 0.f, 0.f}},
                                {{101.f, 211.f, 1.f}}});
+
+        // Frame 2: no 'markers' row at all -- the group's only row is a
+        // synthetic 'hand_l'-sourced one, forcing the null-body_row ("no
+        // base/primary row for this group") branch even though a real
+        // object sequence never actually produces a hand_l overlay row.
+        // Regression fixture for the fix generalizing that branch's
+        // full-width placeholder from the literal kFullBodyNKp=133 (a
+        // COCO-133 person assumption) to this sequence's own manifest
+        // width (4, from the pose_sequence_keypoints rows above) --
+        // without it, applying the frame-2 edit below (sized to the real
+        // 4-keypoint manifest width) against a synthesized 133-wide
+        // placeholder throws "edit blob has 4 keypoints, expected 133".
+        insert_markers_row(2, {{{1.f, 2.f, 1.f}}});  // 1 corner only; source overridden below
+        exec_sql(db,
+                 "UPDATE pose_observations SET source='hand_l' "
+                 "WHERE sequence_id='seq_markers' AND video_frame=2");
+
+        std::vector<float> edit_kps(4 * 3, 0.f);
+        edit_kps[0 * 3 + 0] = 300.f;
+        edit_kps[0 * 3 + 1] = 301.f;
+        edit_kps[0 * 3 + 2] = 0.f;  // is_outlier=0 -> apply x/y, confidence=1
+        auto edit_blob = encode_float32_blob(edit_kps);
+
+        std::vector<uint8_t> mask(1, 0);  // ceil(4/8) = 1 byte
+        mask[0] |= 1u;                    // slot 0 only
+
+        bind_and_step(db,
+                      "INSERT INTO pose_observation_edits "
+                      "(id, sequence_id, camera_instance_id, video_frame, kp_blob, kp_mask) "
+                      "VALUES ('edit_markers_ghost', 'seq_markers', 'inst1', 2, ?, ?)",
+                      edit_blob, mask);
     }
 
     sqlite3_close(db);
@@ -991,4 +1022,34 @@ TEST_CASE("SessionReader load_observations resolves a manifest-bound (markers-so
     REQUIRE(frame1[1].position_distorted.x() == Catch::Approx(111.0));
     REQUIRE(frame1[2].position_distorted.x() == Catch::Approx(101.0));
     REQUIRE(frame1[2].position_distorted.y() == Catch::Approx(211.0));
+}
+
+TEST_CASE(
+    "SessionReader load_observations uses manifest width, not COCO-133, "
+    "for an object sequence's null-body_row placeholder",
+    "[session_reader]") {
+    // Frame 2 of seq_markers has no real 'markers' row -- its only row is a
+    // synthetic 'hand_l'-sourced one, forcing the "no base/primary row for
+    // this group" branch. Before this fix, that branch always synthesized a
+    // 133-wide (kFullBodyNKp) placeholder, so applying frame 2's 4-wide edit
+    // (matching this sequence's real pose_sequence_keypoints manifest width)
+    // threw "edit blob has 4 keypoints, expected 133" instead of applying.
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    auto cameras = reader.load_cameras_for_sequence("seq_markers");
+    auto skeleton = make_test_object_skeleton();
+
+    auto obs_set = reader.load_observations("seq_markers", cameras, skeleton, 0.1, 0);
+    auto const& seq = obs_set.sequences().begin()->second;
+
+    std::vector<Observation> frame2;
+    for (auto const& o : seq.observations)
+        if (o.frame_idx == 2)
+            frame2.push_back(o);
+    // Only the edited slot (0) clears min_confidence -- the other 3 slots
+    // of the synthesized placeholder stay confidence 0 and get filtered.
+    REQUIRE(frame2.size() == 1);
+    REQUIRE(frame2[0].position_distorted.x() == Catch::Approx(300.0));
+    REQUIRE(frame2[0].position_distorted.y() == Catch::Approx(301.0));
 }

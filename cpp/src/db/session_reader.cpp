@@ -758,6 +758,13 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
     // a display name distinct from its landmark -- though today's generator
     // (posetrak.skeleton.marker_body_to_skeleton) always sets them equal.
     std::unordered_map<int, int> manifest_idx_to_marker_idx;
+    // Per-frame kp_blob width for a manifest-bound (object) sequence -- the
+    // count of pose_sequence_keypoints rows, i.e. max(keypoint_idx)+1, not
+    // manifest_idx_to_marker_idx.size() (which only counts slots that
+    // happened to match a skeleton marker's landmark; a partial-subset
+    // skeleton would otherwise understate the real blob width). 0 for a
+    // sequence with no manifest at all (every existing person sequence).
+    int manifest_width = 0;
     {
         std::unordered_map<std::string, int> landmark_to_marker_idx;
         for (size_t i = 0; i < markers.size(); ++i) {
@@ -772,6 +779,7 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
             sqlite3_bind_text(manifest_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
             while (manifest_stmt.step()) {
                 int keypoint_idx = sqlite3_column_int(manifest_stmt.ptr, 0);
+                manifest_width = std::max(manifest_width, keypoint_idx + 1);
                 std::string landmark_name =
                     reinterpret_cast<char const*>(sqlite3_column_text(manifest_stmt.ptr, 1));
                 auto it = landmark_to_marker_idx.find(landmark_name);
@@ -1009,15 +1017,23 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                 break;
             }
         }
-        // No base/primary row for this group: happens whenever body detection
-        // drops a frame (person lost/occluded) that a refined pass still
-        // covers (e.g. a hand track surviving on its own persisted crop).
-        // Build a full-width, all-absent (confidence 0) placeholder rather
-        // than copying whichever refined row happens to be present -- that
-        // row is only kHandNKp long and would otherwise silently truncate
-        // 'merged' to its width, corrupting both the hand-overlay indices
-        // below (which assume the full COCO-133 layout) and any edit lookup
-        // (whose blob width always matches the full layout).
+        // No base/primary row for this group: happens whenever body/marker
+        // detection drops a frame that either a refined pass still covers
+        // (a person's hand track surviving on its own persisted crop) or a
+        // manual edit still covers (an object's ObjectCropGridWidget can
+        // place/correct a corner on a frame_step-skipped frame the marker
+        // detector never wrote a row for at all -- update_single_keypoint_edit
+        // explicitly supports this "ghost frame" case). Build a full-width,
+        // all-absent (confidence 0) placeholder rather than copying whichever
+        // row happens to be present -- that row would otherwise silently
+        // truncate 'merged' to its own (narrower) width, corrupting both the
+        // hand-overlay indices below (which assume the full COCO-133 layout)
+        // and the edit-blob width check in apply_keypoint_edits (whose blob
+        // width always matches the *sequence's* full layout, COCO-133 for a
+        // person or the manifest width for an object -- never a single row's
+        // width). manifest_width (0 for every existing person sequence) is
+        // exactly that per-sequence full layout width when this is an object
+        // sequence; kFullBodyNKp remains the fallback for a person sequence.
         std::vector<db::Keypoint> merged;
         double base_crop_scale;
         double base_timestamp_s;
@@ -1026,7 +1042,7 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
             base_crop_scale = body_row->crop_scale;
             base_timestamp_s = body_row->timestamp_s;
         } else {
-            merged.assign(kFullBodyNKp, db::Keypoint{});
+            merged.assign(manifest_width > 0 ? manifest_width : kFullBodyNKp, db::Keypoint{});
             base_crop_scale = group_rows.front().crop_scale;
             base_timestamp_s = group_rows.front().timestamp_s;
         }

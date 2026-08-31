@@ -1,5 +1,44 @@
 # Marker-based mocap — status
 
+- **2026-08-31** — First real GUI-launched tracking run for an object threw
+  `apply_keypoint_edits: edit blob has 20 keypoints, expected 133`. Root
+  cause turned out to be an installed binary, not a live code bug: the
+  tracker binary `run_tracker()` actually invokes (`~/.posetrak/
+  posetrak-tracker.exe`, preferred over `optbuild/` per
+  `default_binary_path()`) was dated 2026-08-23 -- a week before *any* of
+  this feature's C++ work landed, so it still had the pre-fix
+  `SessionReader::load_observations()` that matched a group's base row by
+  literal `source == "body"`. Since an object's real source is `'markers'`,
+  every single frame's base row failed that check, so every frame fell
+  into the "no base row for this group" placeholder branch -- silently
+  producing an all-zero-confidence, 133-wide (`kFullBodyNKp`, a COCO-133
+  literal) array for every frame; the one frame with a real keypoint edit
+  (correctly sized to this object's own 20-keypoint width) then failed the
+  width check against that wrong placeholder. Rebuilt `optbuild` and copied
+  the fresh binary over the stale installed one to fix Harri's immediate
+  block.
+
+  While diagnosing, generalized that placeholder branch anyway (defensive,
+  not the actual trigger here since the *current* code's body-row match
+  already works correctly for a real 'markers' row): it still hardcoded
+  `kFullBodyNKp` regardless of sequence, so a genuine object ghost-frame
+  (edit-only, e.g. a hand-overlay-shaped row from some future feature)
+  would hit the same wrong-width bug the stale binary did, just via a
+  different path to the same "no base row" branch. Now uses the sequence's
+  own manifest width (`pose_sequence_keypoints` row count) when it has one,
+  falling back to `kFullBodyNKp` only for a person sequence (no manifest at
+  all) -- exactly the same "generalize the assumption, don't add a second
+  hardcoded case" pattern as every other 'body'-literal fix in this
+  feature. New regression test in `test_session_reader.cpp` forces the
+  null-base-row branch for an object sequence (synthetic `hand_l`-sourced
+  row) and confirms the manifest width applies instead of 133.
+
+  **Lesson for later real-data testing**: `~/.posetrak/posetrak-tracker.exe`
+  is a separate, manually-installed copy that silently wins over both
+  `optbuild/` and `builddir/` (see `default_binary_path()`) and has no
+  install script to keep it current -- worth checking (or just re-copying)
+  after any C++ tracker change, not just rebuilding `optbuild`.
+
 - **2026-08-31** — Added the GUI entry point 1f's own validation left
   missing: `ObjectPanel` now has a "Tracking runs" list and a "Run
   tracker…" button, opening new `ObjectRunTrackerDialog`

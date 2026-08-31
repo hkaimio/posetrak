@@ -6824,7 +6824,8 @@ class ObjectCropGridWidget(QWidget):
 
 
 class ObjectPanel(QWidget):
-    """Object panel: info + marker-corner review/correction crop grid."""
+    """Object panel: info, marker-corner review/correction crop grid, and
+    tracker launcher (marker-based-mocap design doc §7.1 sub-phase 1f)."""
 
     def __init__(self, conn: sqlite3.Connection, sequence_id: str,
                  session_path: Path, parent=None) -> None:
@@ -6833,6 +6834,8 @@ class ObjectPanel(QWidget):
         self._sequence_id = sequence_id
         self._session_path = session_path
         self._crop_grid: ObjectCropGridWidget | None = None
+        self._run_box: QGroupBox | None = None
+        self._run_list: QListWidget | None = None
         self._build()
 
     def _build(self) -> None:
@@ -6876,6 +6879,56 @@ class ObjectPanel(QWidget):
 
         self._crop_grid = ObjectCropGridWidget(self._conn, self._sequence_id)
         layout.addWidget(self._crop_grid, stretch=1)
+
+        # --- Tracking runs section (§7.1 sub-phase 1f) ---
+        self._run_box = _section("Tracking runs (0)")
+        self._run_list = QListWidget()
+        self._run_list.setMaximumHeight(110)
+        self._run_box.inner_layout().addWidget(self._run_list)
+        run_btn = _action_btn("Run tracker…")
+        run_btn.clicked.connect(self._open_run_tracker)
+        self._run_box.inner_layout().addWidget(run_btn)
+        layout.addWidget(self._run_box)
+        self._refresh_runs()
+
+    def _refresh_runs(self) -> None:
+        if self._run_list is None or self._run_box is None:
+            return
+        self._run_list.clear()
+        runs = self._conn.execute(
+            "SELECT tr.id, tr.ran_at, s.name AS skel_name "
+            "FROM tracking_runs tr "
+            "LEFT JOIN skeletons s ON s.id = tr.skeleton_id "
+            "WHERE tr.observation_sequence_id = ? ORDER BY tr.ran_at DESC",
+            (self._sequence_id,),
+        ).fetchall()
+        self._run_box.setTitle(f"Tracking runs ({len(runs)})")
+        if not runs:
+            self._run_list.addItem("No tracking runs yet.")
+            return
+        for r in runs:
+            stats = self._conn.execute(
+                "SELECT COUNT(*) AS total, "
+                "       SUM(CASE WHEN tracking_lost=0 THEN 1 ELSE 0 END) AS tracked "
+                "FROM tracking_results WHERE run_id=? AND person_id=0 AND is_smoothed=0",
+                (r["id"],),
+            ).fetchone()
+            label = f"[{r['skel_name'] or '?'}]  {_fmt_ts(r['ran_at'])}"
+            if stats and stats["total"]:
+                pct = 100.0 * (stats["tracked"] or 0) / stats["total"]
+                label += f"  —  {stats['tracked']}/{stats['total']} frames ({pct:.0f}%)"
+            self._run_list.addItem(label)
+
+    def _open_run_tracker(self) -> None:
+        from app.pose.run_tracker import ObjectRunTrackerDialog
+        dlg = ObjectRunTrackerDialog(
+            conn=self._conn,
+            session_path=str(self._session_path),
+            sequence_id=self._sequence_id,
+            parent=self,
+        )
+        dlg.exec()
+        self._refresh_runs()
 
     def shutdown(self) -> None:
         if self._crop_grid is not None:

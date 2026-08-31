@@ -110,6 +110,46 @@ def test_object_panel_shows_object_and_body_name(qapp, session_with_object_seque
     panel.shutdown()
 
 
+def test_object_panel_shows_no_tracking_runs_initially(qapp, session_with_object_sequence, tmp_path):
+    from app.ui.content_panels import ObjectPanel
+
+    conn, seq_id, _object_id = session_with_object_sequence
+    panel = ObjectPanel(conn, seq_id, tmp_path / "test.db")
+    assert panel._run_box._btn.text() == "Tracking runs (0)"
+    assert panel._run_list.count() == 1
+    assert panel._run_list.item(0).text() == "No tracking runs yet."
+    panel.shutdown()
+
+
+def test_object_panel_lists_existing_tracking_run(qapp, session_with_object_sequence, tmp_path):
+    from app.ui.content_panels import ObjectPanel
+    from posetrak.db.manage_skeleton import import_skeleton_str
+
+    conn, seq_id, _object_id = session_with_object_sequence
+    skel_id = import_skeleton_str(
+        conn,
+        "name: test-prop\nunits: meters\njoints:\n"
+        "  - name: prop_root\n    type: root\n    parent: null\n"
+        "    offset: [0.0, 0.0, 0.0]\n",
+        name="test-prop",
+    )
+    conn.execute(
+        "INSERT INTO tracking_runs "
+        "(id, observation_sequence_id, tracker_config_id, skeleton_id, "
+        " extrinsic_calibration_id, sync_config_id, ran_at, posetrak_version, "
+        " active_camera_ids, marker_names) "
+        "VALUES ('run1', ?, 'cfg1', ?, 'calib1', 'sync1', '2026-01-01T00:00:00Z', "
+        "        'test', '[]', '[]')",
+        (seq_id, skel_id),
+    )
+    conn.commit()
+
+    panel = ObjectPanel(conn, seq_id, tmp_path / "test.db")
+    assert panel._run_box._btn.text() == "Tracking runs (1)"
+    assert "test-prop" in panel._run_list.item(0).text()
+    panel.shutdown()
+
+
 def test_object_crop_grid_creates_one_cell_per_camera(qapp, session_with_object_sequence, tmp_path):
     from app.ui.content_panels import ObjectCropGridWidget
 

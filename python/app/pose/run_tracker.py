@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -2260,6 +2261,268 @@ class RunTrackerDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(self._widget, 1)
         layout.addWidget(buttons)
+
+
+class ObjectRunTrackerDialog(QDialog):
+    """Run the tracker against a single marker-based-mocap object sequence
+    (marker-based-mocap design doc §7.1 sub-phase 1f -- this is the GUI
+    entry point that phase's own CLI-only validation left missing).
+
+    Deliberately not RunTrackerWidget: that widget is built entirely around
+    multi-person tracking (a trial → people table, cross-person coupling,
+    hierarchical child stages), none of which applies to a rigid prop --
+    one object is always exactly one sequence, one skeleton, one track
+    (person_id=0), tracked alone. This dialog is the same idea stripped to
+    what an object actually needs: pick a skeleton, adjust the tracker
+    config (TrackerConfigWidget is generic, not person-specific -- its
+    cross-person/hierarchical tabs are simply unused here), pick a time
+    range, run. Reuses the exact same execution path
+    (run_tracker()/_TrackerThread) PersonPanel's single-person case uses,
+    so nothing here is throwaway if a future trial-level launcher (Harri's
+    "run tracker across several detection runs" idea) ends up calling into
+    this same machinery from a different entry point.
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        session_path: str,
+        sequence_id: str,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Run Tracker")
+        self.setMinimumWidth(820)
+        self.setMinimumHeight(650)
+        self.resize(880, 760)
+
+        self._conn = conn
+        self._session_path = session_path
+        self._sequence_id = sequence_id
+        self._thread: _TrackerThread | None = None
+        self._run_id: str | None = None
+
+        seq = conn.execute(
+            "SELECT time_start_s, time_end_s FROM pose_observation_sequences WHERE id = ?",
+            (sequence_id,),
+        ).fetchone()
+        time_start_s = seq["time_start_s"] if seq else 0.0
+        time_end_s = seq["time_end_s"] if seq else 0.0
+
+        from posetrak.db.manage_skeleton import skeleton_picker_labels
+
+        rows = conn.execute("SELECT id, name, parent_id, created_at FROM skeletons").fetchall()
+        labels = skeleton_picker_labels(rows)
+        self._skeletons = sorted(
+            ((r["id"], labels[r["id"]]) for r in rows), key=lambda pair: pair[1]
+        )
+
+        self._config_widget = TrackerConfigWidget()
+        self._config_widget.set_connection(conn)
+
+        self._skeleton_combo = QComboBox()
+        for skel_id, name in self._skeletons:
+            self._skeleton_combo.addItem(name, skel_id)
+        self._skeleton_combo.currentIndexChanged.connect(self._on_skeleton_changed)
+
+        self._start_spin = QDoubleSpinBox()
+        self._start_spin.setRange(0.0, 100_000.0)
+        self._start_spin.setDecimals(2)
+        self._start_spin.setSuffix(" s")
+        self._start_spin.setValue(time_start_s)
+        self._end_spin = QDoubleSpinBox()
+        self._end_spin.setRange(0.0, 100_000.0)
+        self._end_spin.setDecimals(2)
+        self._end_spin.setSuffix(" s")
+        self._end_spin.setValue(time_end_s)
+        time_row = QHBoxLayout()
+        time_row.addWidget(self._start_spin)
+        time_row.addWidget(QLabel("to"))
+        time_row.addWidget(self._end_spin)
+        time_widget = QWidget()
+        time_widget.setLayout(time_row)
+
+        self._out_dir_edit = QLineEdit()
+        self._out_dir_edit.setPlaceholderText(
+            "Leave empty for <session-dir>/posetrak_results/<shot>/<skeleton>/tracking"
+        )
+        out_browse_btn = QPushButton("Browse…")
+        out_browse_btn.clicked.connect(self._browse_out_dir)
+        out_row = QHBoxLayout()
+        out_row.addWidget(self._out_dir_edit, 1)
+        out_row.addWidget(out_browse_btn)
+
+        self._binary_edit = QLineEdit(str(_DEFAULT_BINARY))
+        bin_browse_btn = QPushButton("Browse…")
+        bin_browse_btn.clicked.connect(self._browse_binary)
+        bin_row = QHBoxLayout()
+        bin_row.addWidget(self._binary_edit, 1)
+        bin_row.addWidget(bin_browse_btn)
+
+        form = QFormLayout()
+        form.addRow("Skeleton:", self._skeleton_combo)
+        form.addRow("Time range:", time_widget)
+        form.addRow("Output directory:", out_row)
+        form.addRow("Tracker binary:", bin_row)
+        top_box = QGroupBox("Run")
+        top_box.setLayout(form)
+
+        self._run_btn = QPushButton("Run Tracker")
+        self._run_btn.setEnabled(bool(self._skeletons))
+        if not self._skeletons:
+            self._run_btn.setToolTip(
+                "No skeletons in this session yet -- import the generated prop "
+                "skeleton via Session > Manage skeletons…"
+            )
+        self._run_btn.clicked.connect(self._start_tracking)
+
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._status_label = QLabel("")
+        self._log = QPlainTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setMaximumBlockCount(2000)
+        mono = QFont("Monospace")
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        mono.setPointSize(9)
+        self._log.setFont(mono)
+        prog_layout = QVBoxLayout()
+        prog_layout.addWidget(self._progress_bar)
+        prog_layout.addWidget(self._status_label)
+        prog_layout.addWidget(self._log, 1)
+        self._prog_box = QGroupBox("Progress")
+        self._prog_box.setLayout(prog_layout)
+        self._prog_box.setVisible(False)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+
+        root = QVBoxLayout(self)
+        root.addWidget(top_box)
+        root.addWidget(self._config_widget, 1)
+        root.addWidget(self._run_btn)
+        root.addWidget(self._prog_box)
+        root.addWidget(buttons)
+
+        if self._skeletons:
+            self._on_skeleton_changed(0)
+
+    def _on_skeleton_changed(self, index: int) -> None:
+        skel_id = self._skeleton_combo.itemData(index)
+        if skel_id:
+            self._config_widget.set_skeleton_ids([skel_id])
+
+    def _browse_out_dir(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Select output directory")
+        if path:
+            self._out_dir_edit.setText(path)
+
+    def _browse_binary(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Select posetrak binary", "", "All files (*)")
+        if path:
+            self._binary_edit.setText(path)
+
+    def _resolve_out_dir(self, skel_id: str) -> Path:
+        explicit = self._out_dir_edit.text().strip()
+        if explicit:
+            return Path(explicit)
+        db_dir = Path(self._session_path).parent
+        seq_row = self._conn.execute(
+            "SELECT sh.label, sh.capture_number"
+            " FROM pose_observation_sequences pos"
+            " JOIN captures sh ON sh.id = pos.shot_id"
+            " WHERE pos.id = ?",
+            (self._sequence_id,),
+        ).fetchone()
+        shot = (
+            seq_row["label"] if seq_row and seq_row["label"]
+            else f"capture{seq_row['capture_number']:03d}" if seq_row
+            else "capture"
+        )
+        skel_name = dict(self._skeletons).get(skel_id, "skeleton").replace(" ", "_")
+        return db_dir / "posetrak_results" / shot / skel_name / "tracking"
+
+    def _start_tracking(self) -> None:
+        skel_id = self._skeleton_combo.currentData()
+        if not skel_id:
+            QMessageBox.critical(self, "Cannot run tracker", "Choose a skeleton first.")
+            return
+
+        binary = Path(self._binary_edit.text())
+        if not binary.exists():
+            QMessageBox.critical(
+                self,
+                "Binary not found",
+                f"Cannot find tracker binary:\n{binary}\n\n"
+                "Build the optimised release first:\n"
+                "  meson setup optbuild --buildtype=release\n"
+                "  meson compile -C optbuild",
+            )
+            return
+
+        stage_err = self._config_widget.validate_stage_overrides()
+        if stage_err:
+            QMessageBox.critical(self, "Cannot run tracker", stage_err)
+            return
+
+        out_dir = self._resolve_out_dir(skel_id)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        base = self._config_widget.loaded_config_id or BASELINE_CONFIG_ID
+        config_id = edit_config(
+            self._conn, base, is_named=False, **self._config_widget.collect_overrides()
+        )
+        self._config_widget.sync_stage_overrides(config_id)
+
+        self._run_id = None
+        self._progress_bar.setValue(0)
+        self._status_label.setText("Starting…")
+        self._log.clear()
+        self._prog_box.setVisible(True)
+        self._run_btn.setEnabled(False)
+
+        thread = _TrackerThread(
+            session_path=self._session_path,
+            sequence_id=self._sequence_id,
+            skeleton_id=skel_id,
+            config_id=config_id,
+            output_dir=out_dir,
+            binary_path=binary,
+            person_id=0,
+            start_time=self._start_spin.value(),
+            end_time=self._end_spin.value(),
+            smooth=True,
+        )
+        thread.line_output.connect(self._on_output)
+        thread.tracking_finished.connect(self._on_finished)
+        thread.start()
+        self._thread = thread
+
+    def _on_output(self, line: str) -> None:
+        m = re.match(r"\s*Progress:\s*(\d+)/(\d+)\s*\(([0-9.]+)%\)", line)
+        if m:
+            self._progress_bar.setValue(int(float(m.group(3))))
+            self._status_label.setText(line)
+        else:
+            self._log.appendPlainText(line)
+
+    def _on_finished(self, exit_code: int, run_id: str) -> None:
+        self._run_id = run_id or None
+        self._thread = None
+        self._run_btn.setEnabled(True)
+
+        if exit_code != 0:
+            self._progress_bar.setValue(0)
+            self._status_label.setText(f"Tracker exited with code {exit_code}.")
+            detail = _describe_windows_exit_code(exit_code)
+            if detail:
+                QMessageBox.critical(self, "Tracker failed to start", detail)
+            return
+
+        self._progress_bar.setValue(100)
+        self._status_label.setText(
+            f"Tracking complete. Run id: {self._run_id}" if self._run_id else "Tracking complete."
+        )
 
 
 class DefaultConfigDialog(QDialog):

@@ -1,5 +1,37 @@
 # Marker-based mocap — status
 
+- **2026-08-31** — Added the GUI entry point 1f's own validation left
+  missing: `ObjectPanel` now has a "Tracking runs" list and a "Run
+  tracker…" button, opening new `ObjectRunTrackerDialog`
+  (`app/pose/run_tracker.py`). Deliberately not `RunTrackerWidget`/
+  `RunTrackerDialog` extended to cover objects too: that widget is built
+  entirely around multi-person tracking (a trial → people table,
+  cross-person coupling, hierarchical child stages), none of which applies
+  to a rigid prop -- one object is always exactly one sequence, one
+  skeleton, one track (`person_id=0`). The new dialog is the same idea
+  stripped to what an object needs: skeleton picker, the existing generic
+  `TrackerConfigWidget`, time range, Run -- reusing the exact same
+  execution path (`run_tracker()`/`_TrackerThread`) the person single-
+  sequence case already uses, so no backend or CLI changes were needed.
+  Results are ordinary `tracking_runs` rows, so the session tree's existing
+  generic `TRACKING_RUN` nodes (already wired under `_add_object_tracks`)
+  and `TrackingRunPanel` (already generic, keyed only by `run_id`) picked
+  them up with no changes there either. New tests in
+  `test_object_run_tracker_dialog.py` (new) and `test_object_panel.py`.
+
+  Harri also asked whether a per-detection-run "Finalise" step should be
+  needed at all, and floated a bigger direction: a "Run tracker" button on
+  the Trial page eventually becoming the standard place to launch tracking
+  across a chosen set of detection runs (mixed person/object), rather than
+  per-sequence panels. Both are answered/noted, not built: finalisation for
+  new marker runs is already automatic (previous entry); the trial-level
+  launcher is a real, separate design question (which detection runs to
+  include, how mixed person+object runs interleave) worth its own pass
+  once more than one or two object types exist in practice. The
+  `ObjectRunTrackerDialog` execution plumbing added here is not throwaway
+  either way -- a future trial-level launcher would call into the same
+  `run_tracker()` path per selected sequence.
+
 - **2026-08-31** — Fixed a gap Harri hit doing his own manual pass over 1c:
   running marker detection for an object left it stuck. `finalise_object_to_db`
   (1d) existed but nothing ever called it -- `RunDetectionDialog._on_finished`

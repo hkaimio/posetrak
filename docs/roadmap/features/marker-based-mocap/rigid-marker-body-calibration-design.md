@@ -149,15 +149,29 @@ Genuinely new:
 
 ## 6. Validation before building anything
 
-The cheapest possible next step is a data check, not code: confirm the
-"Weapon test 2026-08-20" / "Harri bokken" capture actually has frames where
-a face-A marker and a face-B marker (dot or ArUco, doesn't matter) are both
-visible in the same synchronized frame across the 6 cameras — that
-co-occurrence is what stitches the two faces into one body frame. §2's
-opposite-normals argument makes this likely, but it's an assumption worth
-confirming against the real capture (requires a first ArUco detection pass
-over the trial if one doesn't already exist) before committing to the
-build.
+**Confirmed 2026-09-01, against the real capture.** Ran a plain
+`ArucoDetector` (no rig config, no filtering — just whatever DICT_4X4_50
+IDs are actually there) across all 6 cameras over the full trial
+(34.4–100.6s, ~20 fps effective sampling; read-only, no DB writes). Two
+IDs dominate and match Harri's description exactly (one per face): `2` and
+`3`, both seen on nearly every camera. They co-occur constantly, not as an
+edge case — 227 distinct 0.05s time-buckets (out of ~1,320 sampled) had
+both visible simultaneously from different cameras, starting immediately
+at t=35.5s and repeating on almost every sample for several seconds
+straight (e.g. `t=36.05s`: camera `50819e8c` sees `2`, camera `a7f65681`
+sees `3`, same synchronized instant). This is exactly §2's argument playing
+out on real data: whenever the sword is being handled normally, opposite-
+side cameras catch both faces together. The core assumption this whole
+approach rests on is no longer speculative — Phase A has real data to work
+with.
+
+Two other IDs turned up rarely (`10` once on one camera, `17` a few times
+on two cameras) — plausible false-positive decodes or something briefly in
+frame, not a plausible third marker on the sword given how confined and
+rare they are next to `2`/`3`'s near-ubiquity. Worth a quick visual check
+on those specific frames before the calibration tool starts trusting
+whatever IDs a detection pass reports, so it doesn't quietly try to place
+a phantom third marker.
 
 ## 7. Open questions
 
@@ -172,6 +186,7 @@ build.
   over directly once Phase B exists — worth generating for the new body
   definition's `noise_std` fields (design doc §5.1) rather than leaving
   them at a uniform default.
-- **Multiple aruco markers per face**: does this sword have more than one
-  ArUco per face, or one plus the dots? Changes how much redundancy Phase
-  A's seed step has to lean on before Phase B's refine is available.
+- **Multiple aruco markers per face**: answered by Harri — one per face
+  (IDs `2` and `3`, confirmed above). No other markers from DICT_4X4_50
+  are expected in the scene; the `10`/`17` stragglers found during
+  validation are almost certainly noise, not a design consideration.

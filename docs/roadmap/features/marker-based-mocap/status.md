@@ -1,5 +1,17 @@
 # Marker-based mocap — status
 
+- **2026-09-01** — Validated the co-occurrence assumption
+  [rigid-marker-body-calibration-design.md](rigid-marker-body-calibration-design.md)'s
+  §2 rests on, against the real "Weapon test 2026-08-20"/"Harri bokken"
+  capture (read-only ArUco scan across all 6 cameras, no DB writes):
+  confirmed, and abundantly so, not marginally -- the sword's two ArUco IDs
+  (`2`, `3`, one per face) co-occur from different cameras in 227 distinct
+  0.05s time-buckets across the trial, starting immediately and repeating
+  on nearly every sample for stretches at a time. Phase A of that design
+  has real data to build against. Full numbers and a couple of stray IDs
+  worth a quick sanity check (likely noise, not a third marker) are in the
+  design doc's §6.
+
 - **2026-08-31** — Scoped (not built) a new capability triggered by a real
   capture that the existing turn-around-video calibration method can't
   handle: "Weapon test 2026-08-20"'s sword prop has ArUco markers on both

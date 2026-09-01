@@ -1,5 +1,32 @@
 # Marker-based mocap — status
 
+- **2026-09-01** — Scoped (not built)
+  [reflective-dot-detection-design.md](reflective-dot-detection-design.md),
+  the follow-up Harri asked for after reading the sword baseline below:
+  fast motion frequently leaves ArUco undetectable (blur kills the bit-
+  pattern decode well before the marker looks unrecognizable), so the
+  tracker coasts on its constant-velocity model through the gap and
+  visibly snaps once a fresh, distant observation arrives -- his own
+  diagnosis, matching the run's actual numbers (19% outlier rate, only 5.5
+  mean inliers). A dot's blob detection should be far more blur-tolerant,
+  a specific and testable hypothesis (compare gap duration during fast
+  segments, not just aggregate tracked-step-fraction, once dots exist).
+  Detection method itself was already resolved generically in
+  `pose-detect-improvements/marker-detection-analysis.md` (threshold +
+  connected components + centroid); calibration-time dot geometry is a
+  straightforward Phase A/B extension (no cold-start needed, restrict to
+  ArUco-anchored frames). The real open piece is live per-frame labeling
+  of anonymous dots during an actual tracking run, where a genuine
+  architecture fork exists between prediction-gated assignment inside the
+  C++ tracker (matches what marker-detection-analysis.md already designed
+  generically for anonymous person markers, reusable there later, real new
+  tracker-side work) vs. resolving to fixed slots in the Python detection
+  pipeline before the C++ side ever sees them (no tracker changes, but
+  still needs the already-designed pairwise-distance RANSAC cold-start
+  registration for frames with no ArUco anchor -- exactly the fast-motion
+  case this exists to fix, so it doesn't avoid the hard part either).
+  Neither decided yet; see the design doc's §3.2 and §6.
+
 - **2026-09-01** — First end-to-end real tracking run of a prop calibrated
   entirely by Phase A (previous entries), no manual measurement anywhere in
   the chain. Full pipeline against the real "Weapon test 2026-08-20"/"Harri

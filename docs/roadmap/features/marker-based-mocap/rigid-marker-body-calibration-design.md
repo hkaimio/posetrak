@@ -143,9 +143,14 @@ Genuinely new:
   validated end-to-end on real data. Likely worth folding into Phase A
   rather than deferring — the math isn't large, and validating the seed
   step alone doesn't tell you whether the refine is needed.
-- **Phase C — reflective dots.** Build the blob detector (§4.1), extend
-  offset extraction/aggregation to dot markers (mostly the same machinery,
-  simpler per-marker unknowns: 3 DOF, not 6).
+- **Phase C — reflective dots.** Scoped in full in
+  [reflective-dot-detection-design.md](reflective-dot-detection-design.md)
+  (2026-09-01, prompted by Harri's own read of the ArUco-only baseline's
+  tracking quality) — turned out to split into an easy half (calibration-
+  time geometry, a direct extension of this doc's Phase A/B) and a real
+  new-work half (live per-frame labeling of anonymous dots during an
+  actual tracking run), with a genuine architecture choice on the latter
+  not yet decided.
 
 ## 6. Validation before building anything
 

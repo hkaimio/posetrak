@@ -231,11 +231,23 @@ cut at what it needs to cover, not the round itself.
   different, and possibly quite different, real detection precision;
   worth measuring once C1 has real residuals rather than assuming.
 
-## 7. Design round scope for C2 (Option A) -- first cut, not the round itself
+## 7. Design round scope for C2 (Option A)
 
-What Harri's question flagged needs deciding before Hungarian-assignment
-code gets written. Listed so the design round has a concrete starting
-agenda, not to pre-answer it here:
+**Done 2026-09-01** — full design round in
+[dot-assignment-architecture-design.md](dot-assignment-architecture-design.md):
+DB schema (new variable-row-count `detection_dot_candidates`/
+`pose_observation_dot_candidates` tables, no manifest entries for dot
+landmarks), skeleton representation (no format change -- a new
+`unlabeled_points` `input_tracks:` type, already accepted by the loader
+today since `type` is parsed as an opaque unvalidated string),
+`SessionReader`/`ObservationSet` additions (a new `UnlabeledCandidate`
+type alongside `Observation`), the exact `Tracker::run_parent_step()`
+integration point (between `predict()` and `update()`, reusing
+`prior_state`/`prior_cov` it already computes), a closed-form (not
+sigma-point) Mahalanobis cost function specific to rigid-body skeletons,
+and a hand-written Hungarian solver (no existing dependency covers this,
+problem sizes are small). Below is the original first-cut agenda that
+round worked from, kept for context:
 
 - **Skeleton/DB representation of a variable-size dot set.** Today's
   `Marker`/manifest model assumes a fixed, known-at-load-time slot per

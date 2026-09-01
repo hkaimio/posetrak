@@ -1,5 +1,28 @@
 # Marker-based mocap — status
 
+- **2026-09-01** — Full design round for dot assignment (Option A),
+  requested straight after the detection prototype confirmed the approach
+  was worth designing properly. See
+  [dot-assignment-architecture-design.md](dot-assignment-architecture-design.md).
+  Highlights: no skeleton format change needed (a new `unlabeled_points`
+  `input_tracks:` type slots in for free -- the loader already parses
+  `type` as an opaque, unvalidated string); `UKF::update()` needs zero
+  changes, since assignment resolves candidates to ordinary `Observation`s
+  *before* it's ever called; the exact integration point is
+  `Tracker::run_parent_step()` between `predict()` and `update()`, reusing
+  `prior_state`/`prior_cov` it already computes rather than any new
+  work; and the Mahalanobis cost function has an exact closed form for a
+  rigid-body skeleton (no sigma points, no Pinocchio call -- a 3x6
+  Jacobian from the state's own error-state convention, verified against
+  `State::apply_error_update()`), which is both cheap and exact rather
+  than an approximation-on-an-approximation. New DB tables needed
+  (`detection_dot_candidates`/`pose_observation_dot_candidates`, variable
+  row count per frame -- fixed-width blobs don't fit an anonymous
+  candidate set) and a small hand-written Hungarian solver (no existing
+  dependency covers this; problem sizes are small enough not to need one).
+  RANSAC cold-start and the non-rigid (person-marker) case are explicitly
+  out of scope for this round. Not built yet.
+
 - **2026-09-01** — Prototyped reflective-dot detection against real
   footage before committing to the bigger architecture (Harri's call:
   de-risk the detector's real unknowns first, given a schema/skeleton/

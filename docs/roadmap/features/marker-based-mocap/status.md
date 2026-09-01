@@ -1,5 +1,46 @@
 # Marker-based mocap — status
 
+- **2026-09-01** — First end-to-end real tracking run of a prop calibrated
+  entirely by Phase A (previous entries), no manual measurement anywhere in
+  the chain. Full pipeline against the real "Weapon test 2026-08-20"/"Harri
+  bokken" capture: `calibrate_rigid_marker_body.py` (54 co-occurrence
+  samples, marker size 9.5cm measured by Harri) → `marker-body import` →
+  new `capture_objects` row → `to-skeleton` → `MarkerDetectionPipeline` over
+  the full 66s trial, 6 cameras, `frame_step=1` (47,688 observations) →
+  `finalise_object_to_db` → `posetrak-tracker track`.
+
+  Result: **0 steps lost** across the whole trial, 3458/6618 steps tracked
+  (52.3%), mean reprojection error **8.4px** -- notably better than the
+  calibration box's ~29px, the first real confirmation the marker-noise fix
+  (`crop_scale=0` for markers, giving ArUco corners credit for their own
+  sub-pixel precision, 2026-08-31 entry below) actually helps as predicted.
+  The rigid init-search fix (also 2026-08-31) worked exactly as designed on
+  this brand-new sequence too: no valid window at the exact requested
+  start, found one 0.06s later, 4.6mm RMS Kabsch/Umeyama fit.
+
+  Honest caveat, not a blocker: frame-to-frame position deltas show real
+  jitter at several points -- implied instantaneous speeds up to ~160 m/s
+  between consecutive 10ms steps, physically impossible for a hand-held
+  sword. Lines up with `mean_num_inliers` of only 5.5 (out of 8 possible
+  marker-corners across 6 cameras) and a 19% outlier rate: with only 2
+  markers (no dots yet), fast motion during the more energetic parts of the
+  kata leaves many steps weakly constrained by a single marker, and motion
+  blur degrades detection further right when it matters most. Never full
+  track loss, but real per-step noise -- exactly the gap Phase C
+  (reflective dots) should measurably close. This run is deliberately kept
+  as the "before" baseline (Harri's own plan) to compare against once dots
+  are added: same trial, same skeleton family, re-run and compare tracked-
+  step fraction / reprojection error / jitter directly.
+
+  Real DB rows created (`E:\mocap\vanhaa\ukemi-tommi-20260509.db`, all
+  additive, nothing mutated): marker body definition
+  `c5a55f312cb9c972d935332820c38260d7d7b5c18a9e7cafbcd9d96a7ee51121`,
+  capture object `b0ac2784-53c8-4ad0-88d8-9fe94a0fd020`, skeleton
+  `2c93603ced9b3facce19c3376b5ead2dc2953f5969799cc866caf6e14e80c862`,
+  detection run `3f35c79e-6289-4556-81af-563b65d4c654`, sequence
+  `98ec877c-3740-497e-9a98-f69bbca04a62`, tracking run
+  `319ebb30-49a9-4ee1-b2ad-2874b1495a2f`.
+
 - **2026-09-01** — Visually confirmed (annotated frame dumps) the two
   stray marker IDs found while validating co-occurrence (previous entry)
   are both harmless: `17` is a genuine false-positive decode (drawn quad

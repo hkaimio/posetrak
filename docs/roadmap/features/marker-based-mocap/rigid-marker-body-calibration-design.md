@@ -166,12 +166,15 @@ approach rests on is no longer speculative — Phase A has real data to work
 with.
 
 Two other IDs turned up rarely (`10` once on one camera, `17` a few times
-on two cameras) — plausible false-positive decodes or something briefly in
-frame, not a plausible third marker on the sword given how confined and
-rare they are next to `2`/`3`'s near-ubiquity. Worth a quick visual check
-on those specific frames before the calibration tool starts trusting
-whatever IDs a detection pass reports, so it doesn't quietly try to place
-a phantom third marker.
+on two cameras). **Visually checked 2026-09-01** (annotated frame dumps,
+detected quad drawn on the actual decoded image): `17` is a genuine false
+positive — the drawn quad sits on bare rock wall texture at the frame
+edge, no marker of any kind there. `10` is a real marker, but it's one of
+the room's own fixed floor-mounted calibration markers (visible throughout
+the space in every frame, unrelated to the sword), not a third marker on
+the prop. Neither affects the calibration tool, which only ever considers
+the explicit `--marker-ids` it's given — confirms `2`/`3` are the sword's
+only two markers with no further caveats.
 
 ## 7. Open questions
 
@@ -190,3 +193,35 @@ a phantom third marker.
   (IDs `2` and `3`, confirmed above). No other markers from DICT_4X4_50
   are expected in the scene; the `10`/`17` stragglers found during
   validation are almost certainly noise, not a design consideration.
+
+## 8. Phase A implementation
+
+`python/tools/calibrate_rigid_marker_body.py` (2026-09-01). A standalone
+script, not yet a `posetrak marker-body` CLI subcommand — intentionally,
+pending validation against real data (same "prototype first" precedent as
+elsewhere in this project). Read-only against the session DB; writes only
+the output YAML.
+
+For each sampled frame across a given time range: detects ArUco markers
+per camera (undistorted corners), solves each visible marker's own rigid
+world pose via `solve_marker_pose()` (§3/§4 — direct reuse, unmodified,
+of the extrinsics-calibration path's own numerics), and whenever the
+configured `--reference-id` is also solved that frame, expresses every
+other visible marker's corners in the reference's local frame and
+accumulates the sample. Robust (trimmed-mean) averages each marker's
+samples across the whole capture and writes a `marker_body_definitions`
+YAML using the `corners:` form — the format's provenance-preserving
+representation for solved (not designed) geometry, so no rotation
+extraction/back-conversion from the solved transform is needed at all.
+
+Camera loading is a small local function (`load_camera_states()`), not a
+reuse of `page_extrinsics._load_states_from_capture()` — that helper keys
+`CamCalibState` by camera *label*, but this script needs to join against
+`sync_points`/`extrinsic_entries`, which key on `camera_instance_id`;
+using one key throughout avoids a label round-trip. `_resolve_intrinsics()`
+is copied locally rather than imported from `page_extrinsics.py`, so this
+headless batch tool doesn't pull in that module's PySide6 dependency.
+
+Not yet run against real data — needs the sword's physical marker size
+(meters) as `--marker-size`, which isn't recorded anywhere in the DB yet
+(no prior `marker_body_definitions` row for this prop).

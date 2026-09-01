@@ -1,5 +1,21 @@
 # Marker-based mocap — status
 
+- **2026-09-01** — Visually confirmed (annotated frame dumps) the two
+  stray marker IDs found while validating co-occurrence (previous entry)
+  are both harmless: `17` is a genuine false-positive decode (drawn quad
+  on bare rock wall, no real marker there); `10` is real but is one of the
+  room's own fixed floor-mounted calibration markers, seen repeatedly at
+  its one stationary location, unrelated to the sword. Neither affects the
+  calibration tool, which only ever considers the explicit marker IDs it's
+  given. Built (not yet run against real data) Phase A of
+  [rigid-marker-body-calibration-design.md](rigid-marker-body-calibration-design.md):
+  `python/tools/calibrate_rigid_marker_body.py`, a standalone script
+  (design doc §8) that solves each visible ArUco's own rigid pose per
+  frame (reusing `extrinsics_solver.solve_marker_pose()` unmodified) and
+  robust-averages every other marker's corners in the reference marker's
+  frame across the whole capture. Needs the sword's physical marker size
+  to actually run -- not yet recorded anywhere in the DB.
+
 - **2026-09-01** — Validated the co-occurrence assumption
   [rigid-marker-body-calibration-design.md](rigid-marker-body-calibration-design.md)'s
   §2 rests on, against the real "Weapon test 2026-08-20"/"Harri bokken"

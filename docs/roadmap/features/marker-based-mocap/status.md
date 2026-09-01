@@ -1,5 +1,45 @@
 # Marker-based mocap — status
 
+- **2026-09-01** — Prototyped reflective-dot detection against real
+  footage before committing to the bigger architecture (Harri's call:
+  de-risk the detector's real unknowns first, given a schema/skeleton/
+  tracker design round is real work not worth doing on assumptions).
+  Visually confirmed the dots are retroreflective (bright blown-out white
+  points, ring-lit) rather than colored; per Harri, `pixel7` has no ring
+  light and other Android phones' tone-mapping may complicate detection,
+  so started with the two GoPro cameras. `python/tools/
+  prototype_dot_blob_detector.py` (threshold + connected components +
+  compactness filter, throwaway spike) ran against the baseline
+  tracking run's single biggest observation gap (53.6-55.1s, where the
+  ArUco-only pipeline produced zero observations for the whole 6-camera
+  tracker): median 4 candidates/frame, only 14% of frames empty, and a
+  clean 3-way area separation (real dots 30-70px vs. a tiny recurring
+  floor-glint false positive vs. large stationary LED-ring-light blobs
+  from other tripods) that a simple area+compactness filter already
+  handles. Individual zero-candidate frames checked by eye were genuine
+  benign per-camera misses (dot face turned away from that one camera),
+  exactly what the multi-camera rig exists to cover.
+
+  Also visually re-examined why ArUco actually misses observations: not
+  purely motion blur as first framed -- one checked instant showed the
+  marker plate genuinely edge-on to the camera (viewing-angle failure, not
+  blur), another showed a clean sharp marker that still produced no
+  tracked observation (likely a decode-margin cutoff invisible by eye).
+  Broadens the case for dots (robust to viewing angle and decode margins,
+  not just blur) without changing the conclusion.
+
+  Decided: dot labeling during live tracking goes with Option A
+  (Hungarian algorithm over a Mahalanobis-distance cost matrix, inside the
+  C++ tracker using its own live pose prediction) -- Harri's call,
+  explicitly for production quality over a quick demo, and explicitly not
+  assuming a fixed dot count (rules out any count-specific shortcut).
+  This is a real design round (schema, skeleton representation,
+  `SessionReader`/`ObservationSet` changes, where in the pipeline
+  assignment happens) that hasn't been done yet -- a first-cut agenda for
+  it is in
+  [reflective-dot-detection-design.md](reflective-dot-detection-design.md)
+  §7, not the round itself.
+
 - **2026-09-01** — Scoped (not built)
   [reflective-dot-detection-design.md](reflective-dot-detection-design.md),
   the follow-up Harri asked for after reading the sword baseline below:

@@ -2,25 +2,18 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""prototype_dot_blob_detector.py — spike for reflective-dot detection
-(marker-mocap design doc's Phase C, see
+"""prototype_dot_blob_detector.py — manual detector-tuning tool for
+reflective-dot detection (see
 docs/roadmap/features/marker-based-mocap/reflective-dot-detection-design.md).
 
-Not integrated with anything -- a throwaway script to characterize real
-detector behavior (candidate counts, false-positive sources, achievable
-centroid precision) on real GoPro footage before committing to the
-Hungarian/Mahalanobis assignment architecture. Read-only against the
-session DB; writes only annotated PNGs + a CSV to the scratchpad/output dir
-given on the command line.
-
-Detection method matches marker-detection-analysis.md's Question A
-(threshold + connected components + centroid) -- confirmed empirically
-2026-09-01 against real capture frames: the sword's dots are retroreflective
-(blown-out white, high contrast against the dark wood/case), but other
-bright/reflective scene elements (a shiny case edge threw a comparable
-glare in one frame) can trigger the same threshold, so a shape filter
-(compactness/aspect ratio, not just brightness+area) is included from the
-start rather than added after the fact.
+Not part of the production write path (that's
+posetrak.detection.dot_blob_detector, which this script now calls into --
+see that module for the detection method itself). This script stays useful
+as a way to eyeball detector behavior (candidate counts, false-positive
+sources, achievable centroid precision) against a real capture and dump
+annotated frames, without running a full detection pipeline. Read-only
+against the session DB; writes only annotated PNGs + a CSV to the
+scratchpad/output dir given on the command line.
 
 Usage:
     python tools/prototype_dot_blob_detector.py \\
@@ -35,7 +28,6 @@ import argparse
 import csv
 import sqlite3
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -44,49 +36,8 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
 from app.setup.db_context import SyncPoint, SyncTable  # noqa: E402
+from posetrak.detection.dot_blob_detector import detect_blobs  # noqa: E402
 from posetrak.detection.frame_source import iter_frames  # noqa: E402
-
-
-@dataclass
-class BlobCandidate:
-    cx: float
-    cy: float
-    area: float
-    compactness: float  # 4*pi*area / perimeter^2 -- 1.0 for a perfect circle
-    bbox: tuple[int, int, int, int]
-
-
-def detect_blobs(
-    gray: np.ndarray,
-    *,
-    threshold: int = 235,
-    min_area: float = 4.0,
-    max_area: float = 400.0,
-    min_compactness: float = 0.5,
-) -> list[BlobCandidate]:
-    """Threshold + connected components + centroid, with a compactness
-    filter to reject elongated glare streaks (light fixtures, shiny edges)
-    that pass a brightness+area filter alone but aren't a round dot."""
-    _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    out = []
-    for c in contours:
-        area = cv2.contourArea(c)
-        if area < min_area or area > max_area:
-            continue
-        perimeter = cv2.arcLength(c, True)
-        if perimeter <= 0:
-            continue
-        compactness = 4 * np.pi * area / (perimeter * perimeter)
-        if compactness < min_compactness:
-            continue
-        m = cv2.moments(c)
-        if m["m00"] == 0:
-            continue
-        cx, cy = m["m10"] / m["m00"], m["m01"] / m["m00"]
-        x, y, w, h = cv2.boundingRect(c)
-        out.append(BlobCandidate(cx, cy, area, compactness, (x, y, w, h)))
-    return out
 
 
 def main() -> None:

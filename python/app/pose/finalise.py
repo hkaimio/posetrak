@@ -352,7 +352,12 @@ def finalise_object_to_db(
         If a sequence for this run already has tracking results and/or
         manual keypoint edits (same immutability guard as `finalise_to_db`).
     """
-    from app.pose.db_cache import MARKER_REGION_TYPE, MARKER_TRACK_ID
+    from app.pose.db_cache import (
+        DOT_REGION_TYPE,
+        DOT_TRACK_ID,
+        MARKER_REGION_TYPE,
+        MARKER_TRACK_ID,
+    )
     from app.setup.fiducial_markers import load_marker_body_yaml
 
     run = session.execute(
@@ -482,35 +487,50 @@ def finalise_object_to_db(
     ).fetchall()
     camera_by_svid = {r["id"]: r["camera_instance_id"] for r in sv_rows}
 
-    kp_rows = session.execute(
-        "SELECT shot_video_id, video_frame, keypoints, noise_scale FROM detection_keypoints "
-        "WHERE detection_run_id = ? AND track_id = ? AND region_type = ? "
-        "ORDER BY shot_video_id, video_frame",
-        (detection_run_id, MARKER_TRACK_ID, MARKER_REGION_TYPE),
-    ).fetchall()
+    def _copy_region(track_id: int, region_type: str, source: str) -> None:
+        """Copy every detection_keypoints row for one (track_id, region_type)
+        into pose_observations under the given source -- same call shape
+        for 'markers' and 'dots' (dot-assignment-architecture-design.md §3:
+        the finalisation copy loop needs no dots-specific code path, just
+        another region_type/source value)."""
+        kp_rows = session.execute(
+            "SELECT shot_video_id, video_frame, keypoints, noise_scale FROM detection_keypoints "
+            "WHERE detection_run_id = ? AND track_id = ? AND region_type = ? "
+            "ORDER BY shot_video_id, video_frame",
+            (detection_run_id, track_id, region_type),
+        ).fetchall()
 
-    obs_rows = []
-    for kp_row in kp_rows:
-        camera_instance_id = camera_by_svid.get(kp_row["shot_video_id"])
-        if camera_instance_id is None:
-            continue
-        frame_idx = int(kp_row["video_frame"])
-        timestamp_s = sync_table.frame_to_global_time(frame_idx, kp_row["shot_video_id"])
-        if timestamp_s is None:
-            continue
-        obs_rows.append((
-            seq_id, camera_instance_id, frame_idx, timestamp_s,
-            0,  # person_id column, repurposed as "the object" -- always 0, one subject per sequence
-            "markers", detection_run_id, bytes(kp_row["keypoints"]), kp_row["noise_scale"],
-        ))
-    if obs_rows:
-        session.executemany(
-            "INSERT INTO pose_observations "
-            "(sequence_id, camera_instance_id, video_frame, timestamp_s, "
-            " person_id, source, detection_run_id, kp_blob, noise_scale) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            obs_rows,
-        )
+        obs_rows = []
+        for kp_row in kp_rows:
+            camera_instance_id = camera_by_svid.get(kp_row["shot_video_id"])
+            if camera_instance_id is None:
+                continue
+            frame_idx = int(kp_row["video_frame"])
+            timestamp_s = sync_table.frame_to_global_time(frame_idx, kp_row["shot_video_id"])
+            if timestamp_s is None:
+                continue
+            obs_rows.append((
+                seq_id, camera_instance_id, frame_idx, timestamp_s,
+                0,  # person_id column, repurposed as "the object" -- always 0, one
+                    # subject per sequence (or, for dots, the scene-wide placeholder
+                    # SessionReader::load_unlabeled_candidates() ignores anyway)
+                source, detection_run_id, bytes(kp_row["keypoints"]), kp_row["noise_scale"],
+            ))
+        if obs_rows:
+            session.executemany(
+                "INSERT INTO pose_observations "
+                "(sequence_id, camera_instance_id, video_frame, timestamp_s, "
+                " person_id, source, detection_run_id, kp_blob, noise_scale) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                obs_rows,
+            )
+
+    _copy_region(MARKER_TRACK_ID, MARKER_REGION_TYPE, "markers")
+    # Anonymous reflective-dot candidates (dot-assignment-architecture-design.md):
+    # present only for a run that had detect_dots_for_cameras enabled for at
+    # least one camera (MarkerDetectionPipeline) -- a no-op copy otherwise, since
+    # _copy_region's own query simply finds no rows.
+    _copy_region(DOT_TRACK_ID, DOT_REGION_TYPE, "dots")
 
     session.commit()
     return seq_id

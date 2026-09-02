@@ -25,6 +25,12 @@ consumes ``FiducialDetection`` objects, so it works unchanged either way):
   part of this body (the "purple marker mixup" lesson, algorithms doc
   §1.1). ``marker_ids`` is derived from the config, not given directly.
 
+Either mode can additionally run anonymous reflective-dot blob detection
+per camera (see ``__init__``'s ``detect_dots_for_cameras``) -- an
+orthogonal, opt-in add-on to whichever coded-marker detector is already
+running, not a third mode: same frame, same loop, a second writer
+(``db_cache.DotCandidateWriter``) alongside the first.
+
 Camera/sync-table loading below duplicates ``pipeline.py``'s
 ``_load_cameras``/``_frame_range`` rather than sharing them, to keep this
 phase's slice self-contained; a shared helper is a reasonable extraction
@@ -38,9 +44,17 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable
 
-from app.pose.db_cache import MarkerKeypointWriter, create_marker_detection_run, mark_run_complete
+import cv2
+
+from app.pose.db_cache import (
+    DotCandidateWriter,
+    MarkerKeypointWriter,
+    create_marker_detection_run,
+    mark_run_complete,
+)
 from app.setup.db_context import SyncPoint, SyncTable
 from app.setup.fiducial_markers import ArucoDetector, MarkerRigConfig, MarkerRigDetector, load_marker_body_yaml
+from posetrak.detection.dot_blob_detector import detect_blobs
 from posetrak.detection.frame_source import iter_frames
 from posetrak.db.manage_capture_object import get_capture_object
 
@@ -92,7 +106,21 @@ class MarkerDetectionPipeline:
         capture_object_id: str | None = None,
         marker_body_definition_id: str | None = None,
         stop_event: threading.Event | None = None,
+        detect_dots_for_cameras: set[str] | None = None,
     ) -> None:
+        """See the class docstring for the two ways to drive this pipeline.
+
+        detect_dots_for_cameras: camera_instance_ids to additionally run
+            anonymous reflective-dot blob detection on, alongside the coded-
+            marker detection every camera already gets (dot-assignment-
+            architecture-design.md §7's write path). None/empty disables it
+            for every camera -- the default, so every existing caller is
+            unaffected. Per-camera rather than a single on/off switch because
+            dot visibility depends on the physical rig (a ring light on the
+            GoPros used to validate this detector, not necessarily on every
+            camera in the same capture) -- the caller decides which cameras
+            actually have one, this pipeline doesn't guess from a label.
+        """
         if rig_config is not None:
             if not rig_config.marker_corners:
                 raise ValueError(
@@ -121,6 +149,7 @@ class MarkerDetectionPipeline:
         self._capture_object_id = capture_object_id
         self._marker_body_definition_id = marker_body_definition_id
         self._stop_event = stop_event or threading.Event()
+        self._detect_dots_for_cameras = detect_dots_for_cameras or set()
         if rig_config is not None:
             self._detector = MarkerRigDetector(
                 rig_config, dictionary=dictionary, min_marker_perimeter_rate=min_marker_perimeter_rate,
@@ -288,6 +317,11 @@ class MarkerDetectionPipeline:
             shot_video_id=cam.shot_video_id,
             marker_ids=self._marker_ids,
         )
+        dot_writer = None
+        if cam.camera_instance_id in self._detect_dots_for_cameras:
+            dot_writer = DotCandidateWriter(
+                self._session, detection_run_id=run_id, shot_video_id=cam.shot_video_id,
+            )
 
         frames_done = 0
         try:
@@ -301,12 +335,19 @@ class MarkerDetectionPipeline:
                     img, video_id=cam.camera_instance_id, frame_idx=video_frame
                 )
                 writer.add_frame(video_frame, detections)
+
+                if dot_writer is not None:
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    dot_writer.add_frame(video_frame, detect_blobs(gray))
+
                 frames_done += 1
 
                 if on_progress:
                     on_progress(frames_done, total, cam.label or cam.camera_instance_id)
         finally:
             writer.finalise()
+            if dot_writer is not None:
+                dot_writer.finalise()
 
         _log.info(
             "_process_camera: %s done -- %d frames",
@@ -325,12 +366,18 @@ def load_pipeline_for_capture_object(
     frame_step: int = 1,
     trial_id: str | None = None,
     stop_event: threading.Event | None = None,
+    detect_dots_for_cameras: set[str] | None = None,
 ) -> MarkerDetectionPipeline:
     """Build a ``MarkerDetectionPipeline`` for an existing ``capture_objects``
     row (design phase 1c) -- resolves its marker body definition, loads the
     resolved rig geometry, and constructs the pipeline in marker-body-driven
     mode. This is the path the GUI's run-detection dialog uses; sub-phase
     1a's plain constructor stays available for the standalone/scripted case.
+
+    detect_dots_for_cameras: forwarded to ``MarkerDetectionPipeline``
+        unchanged -- see its own docstring. The GUI's run-detection dialog
+        does not yet expose a way to set this (no UI wiring exists for it
+        yet); a caller building the pipeline directly can already use it.
 
     Raises
     ------
@@ -365,4 +412,5 @@ def load_pipeline_for_capture_object(
         capture_object_id=capture_object_id,
         marker_body_definition_id=body_id,
         stop_event=stop_event,
+        detect_dots_for_cameras=detect_dots_for_cameras,
     )

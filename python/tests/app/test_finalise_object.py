@@ -18,10 +18,16 @@ import numpy as np
 import pytest
 
 from posetrak.db.db import create_session, generate_id
-from app.pose.db_cache import create_detection_run, create_marker_detection_run, MarkerKeypointWriter
+from app.pose.db_cache import (
+    DotCandidateWriter,
+    MarkerKeypointWriter,
+    create_detection_run,
+    create_marker_detection_run,
+)
 from app.pose.finalise import finalise_object_to_db
 from posetrak.db.manage_capture_object import create_capture_object
 from posetrak.db.manage_marker_body import import_marker_body_str
+from posetrak.detection.dot_blob_detector import BlobCandidate
 
 _SHOT_ID = "test-shot-id"
 _SYNC_ID = "test-sync-id"
@@ -100,6 +106,10 @@ def _write_marker_run(session, marker_ids, **kwargs) -> str:
     return run_id
 
 
+def _fake_blob(cx: float, cy: float) -> BlobCandidate:
+    return BlobCandidate(cx=cx, cy=cy, area=10.0, compactness=0.9, bbox=(0, 0, 1, 1))
+
+
 def test_finalise_object_creates_sequence_and_manifest_with_marker_body(session):
     body_id = import_marker_body_str(session, _MARKER_BODY_YAML, name="Test Bokken")
     object_id = create_capture_object(session, _SHOT_ID, "bokken-A", body_id)
@@ -173,6 +183,71 @@ def test_finalise_object_writes_observations_per_frame(session):
     assert kp0.shape == (8, 3)
     assert np.allclose(kp0[:, 0], 100.0)
     assert np.allclose(kp0[:, 2], 1.0)
+
+
+def test_finalise_object_copies_dot_candidates_alongside_markers(session):
+    """A run with anonymous reflective-dot candidates (MarkerDetectionPipeline's
+    detect_dots_for_cameras) gets a second, independent set of pose_observations
+    rows -- source='dots' -- copied by the identical call shape as the
+    'markers' rows, no dots-specific code path."""
+    body_id = import_marker_body_str(session, _MARKER_BODY_YAML, name="Test Bokken")
+    object_id = create_capture_object(session, _SHOT_ID, "bokken-A", body_id)
+    run_id = _write_marker_run(
+        session, ["3", "7"], marker_body_definition_id=body_id, capture_object_id=object_id,
+    )
+
+    dot_writer = DotCandidateWriter(session, run_id, _SVID)
+    dot_writer.add_frame(0, [_fake_blob(10.0, 20.0), _fake_blob(30.0, 40.0)])
+    dot_writer.add_frame(1, [])
+    dot_writer.finalise()
+
+    seq_id = finalise_object_to_db(session, run_id)
+
+    marker_obs = session.execute(
+        "SELECT video_frame FROM pose_observations WHERE sequence_id=? AND source='markers' "
+        "ORDER BY video_frame", (seq_id,),
+    ).fetchall()
+    assert [r["video_frame"] for r in marker_obs] == [0, 1]
+
+    dot_obs = session.execute(
+        "SELECT video_frame, person_id, kp_blob FROM pose_observations "
+        "WHERE sequence_id=? AND source='dots' ORDER BY video_frame", (seq_id,),
+    ).fetchall()
+    assert [r["video_frame"] for r in dot_obs] == [0, 1]
+    assert all(r["person_id"] == 0 for r in dot_obs)
+
+    blob0 = np.frombuffer(bytes(dot_obs[0]["kp_blob"]), dtype=np.float32).reshape(-1, 4)
+    assert blob0.shape == (2, 4)
+    assert np.allclose(blob0[:, :2], [[10.0, 20.0], [30.0, 40.0]])
+
+    blob1 = np.frombuffer(bytes(dot_obs[1]["kp_blob"]), dtype=np.float32).reshape(-1, 4)
+    assert blob1.shape == (0, 4)
+
+    # No pose_sequence_keypoints entries for dots -- they're anonymous, not
+    # named landmarks; the manifest stays exactly the coded-marker one.
+    manifest_sources = {
+        r[0] for r in session.execute(
+            "SELECT DISTINCT source FROM pose_sequence_keypoints WHERE sequence_id=?", (seq_id,),
+        )
+    }
+    assert manifest_sources == {"aruco"}
+
+
+def test_finalise_object_without_dot_candidates_writes_none(session):
+    """A run that never had detect_dots_for_cameras enabled produces no
+    source='dots' rows at all -- the copy is a no-op, not an error."""
+    body_id = import_marker_body_str(session, _MARKER_BODY_YAML, name="Test Bokken")
+    object_id = create_capture_object(session, _SHOT_ID, "bokken-A", body_id)
+    run_id = _write_marker_run(
+        session, ["3", "7"], marker_body_definition_id=body_id, capture_object_id=object_id,
+    )
+
+    seq_id = finalise_object_to_db(session, run_id)
+
+    count = session.execute(
+        "SELECT COUNT(*) FROM pose_observations WHERE sequence_id=? AND source='dots'", (seq_id,),
+    ).fetchone()[0]
+    assert count == 0
 
 
 def test_finalise_object_rejects_non_marker_run(session):

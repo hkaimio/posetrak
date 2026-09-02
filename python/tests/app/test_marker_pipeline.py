@@ -21,8 +21,10 @@ import numpy as np
 import pytest
 
 from app.pose.db_cache import (
+    DotCandidateWriter,
     MarkerKeypointWriter,
     create_marker_detection_run,
+    read_dot_candidates_for_run,
     read_marker_keypoints_for_run,
 )
 from app.setup.fiducial_markers import (
@@ -35,6 +37,7 @@ from app.setup.fiducial_markers import (
 from posetrak.db.db import create_session
 from posetrak.db.manage_capture_object import create_capture_object
 from posetrak.db.manage_marker_body import import_marker_body_str
+from posetrak.detection.dot_blob_detector import BlobCandidate
 from posetrak.detection.marker_pipeline import MarkerDetectionPipeline, load_pipeline_for_capture_object
 
 _SHOT_ID = "test-shot-id"
@@ -149,6 +152,10 @@ def _fake_detection(marker_id: str, base_xy: tuple[float, float]) -> FiducialDet
     return FiducialDetection(marker_type="aruco", marker_id=marker_id, corners=corners)
 
 
+def _fake_blob(cx: float, cy: float, *, area: float, compactness: float) -> BlobCandidate:
+    return BlobCandidate(cx=cx, cy=cy, area=area, compactness=compactness, bbox=(0, 0, 1, 1))
+
+
 def test_marker_keypoint_writer_layout_and_missing_marker(session):
     """Blob is 4*n_markers rows, list-position-major by marker_ids; a
     marker absent from the frame keeps NaN x/y and confidence 0 at its
@@ -227,6 +234,61 @@ def test_marker_keypoint_writer_ignores_unconfigured_marker_id(session):
 
 
 # ---------------------------------------------------------------------------
+# DotCandidateWriter: anonymous reflective-dot candidates, variable-N per
+# frame (see dot-assignment-architecture-design.md).
+# ---------------------------------------------------------------------------
+
+
+def test_dot_candidate_writer_round_trips_variable_candidate_counts(session):
+    ids = _TEST_IDS
+    run_id = create_marker_detection_run(
+        session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+        time_start_s=0.0, time_end_s=10.0, dictionary="DICT_4X4_50",
+        marker_ids=["3"],
+    )
+    writer = DotCandidateWriter(session, run_id, ids["svid"])
+
+    writer.add_frame(0, [
+        _fake_blob(10.0, 20.0, area=12.5, compactness=0.9),
+        _fake_blob(30.0, 40.0, area=8.0, compactness=0.85),
+    ])
+    writer.add_frame(1, [])  # processed, nothing seen -- still writes a row
+    writer.finalise()
+
+    candidates = read_dot_candidates_for_run(session, run_id, ids["svid"])
+    assert set(candidates.keys()) == {0, 1}
+
+    assert candidates[0].shape == (2, 4)
+    assert np.allclose(candidates[0][0], [10.0, 20.0, 12.5, 0.9])
+    assert np.allclose(candidates[0][1], [30.0, 40.0, 8.0, 0.85])
+
+    assert candidates[1].shape == (0, 4)
+
+
+def test_dot_candidate_writer_uses_near_zero_noise_scale(session):
+    """Same reasoning as the ArUco corner writer's own test above: a dot
+    centroid comes from thresholding the full-resolution frame directly, not
+    a fixed-input-resolution network, so noise_scale (-> crop_scale) must be
+    ~0, not the person pipeline's 1.0 default."""
+    ids = _TEST_IDS
+    run_id = create_marker_detection_run(
+        session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+        time_start_s=0.0, time_end_s=10.0, dictionary="DICT_4X4_50",
+        marker_ids=["3"],
+    )
+    writer = DotCandidateWriter(session, run_id, ids["svid"])
+    writer.add_frame(0, [_fake_blob(10.0, 20.0, area=12.5, compactness=0.9)])
+    writer.finalise()
+
+    noise_scale = session.execute(
+        "SELECT noise_scale FROM detection_keypoints "
+        "WHERE detection_run_id=? AND shot_video_id=? AND video_frame=0 AND region_type='dots'",
+        (run_id, ids["svid"]),
+    ).fetchone()[0]
+    assert noise_scale == 0.0
+
+
+# ---------------------------------------------------------------------------
 # Pipeline: real ArucoDetector against rendered marker images, frame_step,
 # and run-status bookkeeping. iter_frames is patched to synthesize frames
 # without a real video file, matching how CLI tests mock the pipeline
@@ -289,6 +351,61 @@ def test_pipeline_frame_step_skips_frames(session):
 
     kp_by_frame = read_marker_keypoints_for_run(session, result.detection_run_id, ids["svid"])
     assert set(kp_by_frame.keys()) == set(range(0, 300, 3))
+
+
+def _synthetic_dot_frames(path, first_frame, last_frame):
+    """Yields a dark frame with one bright dot at (50, 60) on even frames,
+    a plain dark frame on odd frames -- unlike _synthetic_frames' all-white
+    background, dark enough that only the drawn dot exceeds the detector's
+    default threshold."""
+    for i in range(first_frame, last_frame):
+        frame = np.full((300, 300, 3), 20, dtype=np.uint8)
+        if i % 2 == 0:
+            cv2.circle(frame, (50, 60), 6, (250, 250, 250), thickness=-1)
+        yield i, frame
+
+
+def test_pipeline_writes_dot_candidates_for_an_enabled_camera(session):
+    ids = _TEST_IDS
+    with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_dot_frames):
+        pipeline = MarkerDetectionPipeline(
+            session,
+            shot_id=ids["shot_id"],
+            sync_config_id=ids["sync_id"],
+            time_start_s=0.0,
+            time_end_s=10.0,
+            marker_ids=["3"],
+            detect_dots_for_cameras={ids["cam_id"]},
+        )
+        result = pipeline.run()
+
+    assert result.status == "complete"
+    candidates = read_dot_candidates_for_run(session, result.detection_run_id, ids["svid"])
+    # Even frame: the drawn dot is detected. Odd frame: none seen, but the
+    # frame was still processed -- an empty row, not a missing one.
+    assert candidates[0].shape == (1, 4)
+    assert np.allclose(candidates[0][0, :2], [50.0, 60.0], atol=1.0)
+    assert candidates[1].shape == (0, 4)
+
+
+def test_pipeline_writes_no_dot_candidates_when_camera_not_enabled(session):
+    """detect_dots_for_cameras defaults to disabled for every camera -- no
+    detection_keypoints rows with region_type='dots' at all, not even empty
+    ones, when a camera isn't in the set."""
+    ids = _TEST_IDS
+    with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_dot_frames):
+        pipeline = MarkerDetectionPipeline(
+            session,
+            shot_id=ids["shot_id"],
+            sync_config_id=ids["sync_id"],
+            time_start_s=0.0,
+            time_end_s=10.0,
+            marker_ids=["3"],
+        )
+        result = pipeline.run()
+
+    candidates = read_dot_candidates_for_run(session, result.detection_run_id, ids["svid"])
+    assert candidates == {}
 
 
 def test_pipeline_rejects_empty_marker_ids(session):

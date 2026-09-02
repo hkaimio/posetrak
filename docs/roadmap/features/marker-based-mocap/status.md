@@ -1,5 +1,67 @@
 # Marker-based mocap — status
 
+- **2026-09-02** — Built the detection-time write path for anonymous
+  reflective-dot candidates, and finalisation support for them, closing the
+  loop with the read side added earlier the same day (this file's next
+  entry): a marker detection run can now produce dot candidates a session DB
+  round-trips end to end, from detection through `pose_observations`.
+
+  Promoted `detect_blobs()`/`BlobCandidate` out of the throwaway
+  `tools/prototype_dot_blob_detector.py` script into a real module,
+  `posetrak/detection/dot_blob_detector.py` -- the script itself now imports
+  from it rather than duplicating the detection logic, keeping its role to
+  what it's actually for (eyeballing detector behavior against a real
+  capture, dumping annotated frames), not holding the production copy.
+
+  New `DotCandidateWriter` (`db_cache.py`), mirroring the existing coded-
+  marker corner writer's shape but for a variable candidate count per frame
+  (`float32[N,4]`: px, py, area, compactness) rather than a fixed slot
+  layout -- always writes a row even when a frame has zero candidates, so
+  "processed, saw nothing" stays distinguishable from "never processed".
+  Reuses the same near-zero `noise_scale` reasoning the marker writer
+  established: a dot centroid comes from thresholding the full-resolution
+  frame directly, not a fixed-input-resolution network, so there's no
+  crop_scale-scaled detection error to describe.
+
+  Wired into `MarkerDetectionPipeline` as an opt-in add-on
+  (`detect_dots_for_cameras`, a set of camera instance ids) alongside
+  whichever coded-marker detector is already running -- same frame, same
+  loop, a second writer. Per-camera rather than a single on/off switch
+  because dot visibility depends on the physical rig (a ring light on the
+  GoPros used to validate this detector, not necessarily on every camera in
+  the same capture); the caller decides, the pipeline doesn't guess from a
+  camera label. Defaults to disabled everywhere, so every existing caller
+  is unaffected. The GUI's run-detection dialog doesn't expose this yet --
+  deliberately deferred; a caller building the pipeline directly can
+  already use it.
+
+  Extended `finalise_object_to_db()`'s existing marker-corner copy into a
+  small shared helper parameterized by (track id, region type, source), and
+  called it a second time for dots -- the exact "one more parameter value,
+  no dots-specific code path" the design called for. Dots get no
+  `pose_sequence_keypoints` manifest entries (they're anonymous, not named
+  landmarks); everything else about the copy is identical to markers.
+
+  Full targeted test coverage green: new `test_dot_blob_detector.py` (the
+  detector itself against synthetic frames), `DotCandidateWriter` round-trip
+  and noise-scale tests plus a pipeline end-to-end test gated on
+  `detect_dots_for_cameras` (`test_marker_pipeline.py`), and finalisation
+  copying dots alongside markers, and correctly writing nothing when a run
+  never had dot detection enabled (`test_finalise_object.py`). Also ran the
+  full non-GUI Python test suite (`tests/db`, `tests/detection`,
+  `tests/cli`, `tests/tracker`, `tests/skeleton`, `tests/tools`,
+  `tests/test_segmentation.py`) plus every touched `tests/app` file: 671
+  passed, 2 failed -- both pre-existing and unrelated to this work
+  (a Windows-path-absoluteness assumption in `test_posetrak_db.py`, and an
+  observation-edit outlier test in `test_observation_edits.py`). The full
+  suite including every GUI test could not be run to completion in this
+  environment -- an unrelated pre-existing crash partway through the Qt
+  widget tests (confirmed reproducible in isolation, e.g.
+  `test_page_sync_led.py`'s `_build_combined_observations` being passed the
+  wrong result type) kills the whole test process before it reaches a
+  summary; flagged, not investigated further here since it long predates
+  and is unrelated to this feature.
+
 - **2026-09-02** — Added `SessionReader::load_unlabeled_candidates()`: reads
   anonymous reflective-dot candidate detections back out of the DB for a
   sequence, decoding each `pose_observations` row with `source='dots'`

@@ -417,6 +417,103 @@ class MarkerKeypointWriter:
         self._flush()
 
 
+# ---------------------------------------------------------------------------
+# Anonymous reflective-dot candidate writer -- see
+# docs/roadmap/features/marker-based-mocap/dot-assignment-architecture-design.md
+# ---------------------------------------------------------------------------
+
+DOT_TRACK_ID = 0       # dots are scene-wide, not tied to any one tracked
+                       # subject -- reuses the "one implicit subject" slot
+                       # MARKER_TRACK_ID already established for this table.
+DOT_REGION_TYPE = "dots"
+
+# Same reasoning as _MARKER_CROP_SCALE above: a dot's centroid comes from
+# thresholding + connected components directly on the full-resolution frame,
+# not a fixed-input-resolution network's output, so there is no crop_scale
+# to describe -- letting Observation::measurement_noise_std()'s calibration
+# term (ec) alone dominate, rather than double-counting a pose-network-style
+# detection error that doesn't apply here.
+_DOT_CROP_SCALE = 0.0
+
+
+class DotCandidateWriter:
+    """Accumulates anonymous reflective-dot candidate rows and flushes to DB
+    in batches.
+
+    Unlike MarkerKeypointWriter's fixed-slot layout, a frame's candidate
+    count is whatever the detector actually found -- the blob is
+    float32[N, 4] (px, py, area, compactness), N varying frame to frame
+    (dot-assignment-architecture-design.md §3). Always writes a row even
+    when N=0, so "this frame was processed and saw nothing" stays
+    distinguishable from "this frame was never processed" -- the same
+    reasoning MarkerKeypointWriter's always-write-a-row behavior follows.
+    """
+
+    def __init__(
+        self,
+        session: sqlite3.Connection,
+        detection_run_id: str,
+        shot_video_id: str,
+    ) -> None:
+        self._session = session
+        self._run_id = detection_run_id
+        self._svid = shot_video_id
+        self._rows: list[tuple] = []
+
+    def add_frame(self, video_frame: int, candidates: list) -> None:
+        """*candidates* is the ``dot_blob_detector.detect_blobs()`` result
+        for this frame (a list of ``BlobCandidate``)."""
+        blob = np.array(
+            [(c.cx, c.cy, c.area, c.compactness) for c in candidates],
+            dtype=np.float32,
+        ).reshape(len(candidates), 4)
+        self._rows.append((
+            self._run_id, self._svid, video_frame, DOT_TRACK_ID, DOT_REGION_TYPE,
+            blob.tobytes(), _DOT_CROP_SCALE,
+        ))
+        if len(self._rows) >= _BATCH_SIZE:
+            self._flush()
+
+    def _flush(self) -> None:
+        if self._rows:
+            self._session.executemany(
+                "INSERT OR REPLACE INTO detection_keypoints "
+                "(detection_run_id, shot_video_id, video_frame, track_id, region_type, "
+                " keypoints, noise_scale) "
+                "VALUES (?,?,?,?,?,?,?)",
+                self._rows,
+            )
+            self._rows.clear()
+            self._session.commit()
+
+    def finalise(self) -> None:
+        """Flush remaining rows."""
+        self._flush()
+
+
+def read_dot_candidates_for_run(
+    session: sqlite3.Connection,
+    detection_run_id: str,
+    shot_video_id: str,
+) -> dict[int, np.ndarray]:
+    """Return {video_frame: float32[N, 4]} for a dot-candidate detection run.
+
+    N varies per frame -- reshape(-1, 4) recovers it from the blob's own
+    byte length, the same trick decode_dot_candidates() uses on the C++ side.
+    """
+    rows = session.execute(
+        "SELECT video_frame, keypoints FROM detection_keypoints "
+        "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? AND region_type=? "
+        "ORDER BY video_frame",
+        (detection_run_id, shot_video_id, DOT_TRACK_ID, DOT_REGION_TYPE),
+    ).fetchall()
+    result = {}
+    for row in rows:
+        kp_bytes = bytes(row["keypoints"])
+        result[row["video_frame"]] = np.frombuffer(kp_bytes, dtype=np.float32).reshape(-1, 4)
+    return result
+
+
 def read_marker_keypoints_for_run(
     session: sqlite3.Connection,
     detection_run_id: str,

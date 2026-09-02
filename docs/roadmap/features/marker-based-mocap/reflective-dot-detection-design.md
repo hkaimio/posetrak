@@ -202,6 +202,29 @@ cut at what it needs to cover, not the round itself.
 - **C1 -- calibration-time dot geometry** (§3.1). Extends
   `calibrate_rigid_marker_body.py` directly; no cold-start needed, low
   risk, mostly reuses Phase A/B's own machinery.
+  **Revised 2026-09-02 after real-data testing**: the automatic
+  (`--detect-dots`) path this originally described -- restrict to
+  instants where >=2 cameras each see exactly one candidate, avoiding
+  general multi-view correspondence -- turned out not strict enough: two
+  cameras each having exactly one candidate does not mean those
+  candidates are the same physical point, and real footage produced a
+  triangulated "dot" over 3 meters from the sword before a reprojection
+  check was added, and still an implausible one after. Confirms
+  `marker-detection-analysis.md`'s original recommendation (verify
+  against a third view, not just two) was the right call to have
+  followed the first time. Real reference+dot co-occurrence in the
+  "Weapon test 2026-08-20" capture is also sparse enough (41 of 680
+  buckets across the full ~66s range) that a properly-strict 3-view
+  requirement would likely yield too few samples from this specific
+  footage regardless. **Decided (Harri): manual annotation for the sword
+  now** -- `tools/annotate_dots_manually.py`, human-confirmed
+  correspondence via clicking a handful of known-good instants, reusing
+  the same reprojection-checked triangulation. Automatic calibration
+  (3-view verification, or single-camera multi-frame resection against a
+  continuous tracked trajectory instead of requiring simultaneous
+  multi-camera co-occurrence at all) remains a real goal for general use,
+  not built this round -- see status.md's 2026-09-02 entry for the full
+  account.
 - **C2 -- live per-frame labeling, Option A** (§3.2). The real new
   capability: Hungarian/Mahalanobis assignment inside the C++ tracker,
   plus the schema/skeleton/`ObservationSet` design round this needs first

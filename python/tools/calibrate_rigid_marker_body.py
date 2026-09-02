@@ -2,8 +2,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""calibrate_rigid_marker_body.py — Phase A: ArUco-only rigid marker-body
-calibration from ordinary multi-camera performance footage.
+"""calibrate_rigid_marker_body.py — Phase A/C1: rigid marker-body
+calibration (ArUco corners, and optionally reflective-dot centroids) from
+ordinary multi-camera performance footage.
 
 See docs/roadmap/features/marker-based-mocap/rigid-marker-body-calibration-design.md
 for the full design and real-data validation of the core assumption this
@@ -26,13 +27,36 @@ whole capture and writes a marker_body_definitions YAML using the
 solved, not designed, geometry -- see app/setup/fiducial_markers.py's
 load_marker_body_yaml docstring).
 
+**Reflective-dot calibration** (Phase C1, `--detect-dots`; see
+docs/roadmap/features/marker-based-mocap/reflective-dot-detection-design.md
+§3.1): same co-occurrence-with-the-reference-marker mechanism, just
+accumulating dot centroids (3 DOF: a point) instead of ArUco corners (6
+DOF: a rigid transform). Multi-view correspondence (which blob in camera A
+is the same physical dot as which blob in camera B) is the one genuinely
+new sub-problem this needs that ArUco calibration doesn't -- an ArUco
+corner's identity comes from the marker's own decoded ID, but a dot
+candidate carries no identity at all. Resolved here by restricting to
+buckets where at least two cameras *each saw exactly one candidate* that
+instant: real GoPro footage from the sword's own validated capture
+(reflective-dot-detection-design.md §2.1) has ~39% of frames with exactly
+one candidate per camera against ~11% with more than one, so this
+restriction still leaves plenty of usable samples per dot without needing
+genuine epipolar-consistency correspondence matching (marker-detection-
+analysis.md's Question B, layer 2) -- a real trade of some statistical
+efficiency for a lot less complexity, not a correctness shortcut: every
+sample this *does* use is an unambiguous, correctly-triangulated point.
+Since dot identity isn't known ahead of time (unlike an ArUco's decoded
+ID), triangulated samples across the whole capture are greedily clustered
+by proximity in the reference marker's local frame (see
+cluster_dot_samples()) into per-physical-dot groups before averaging.
+
 This is a standalone script, not yet a `posetrak marker-body` CLI
 subcommand -- intentionally, until validated against real data (marker-
 mocap-design.md's own "Option 1 first, revisit if it proves fiddly"
 precedent). Read-only against the session DB; writes only the output YAML.
 
-Phase B (joint least-squares refine) and Phase C (reflective dots) are not
-implemented here -- see the design doc's phasing.
+Phase B (joint least-squares refine) is not implemented here -- see the
+design doc's phasing.
 
 Usage:
     python tools/calibrate_rigid_marker_body.py \\
@@ -43,6 +67,7 @@ Usage:
         --marker-size 0.05 \\
         --marker-ids 2 3 \\
         --reference-id 2 \\
+        --detect-dots \\
         --output sword_body.yaml
 """
 from __future__ import annotations
@@ -61,11 +86,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.setup.db_context import SyncPoint, SyncTable  # noqa: E402
 from app.setup.extrinsics_solver import (  # noqa: E402
     CamCalibState,
+    _proj_matrix,
     _undistort_pts,
     marker_local_corners,
     solve_marker_pose,
 )
 from app.setup.fiducial_markers import ArucoDetector  # noqa: E402
+from posetrak.detection.dot_blob_detector import detect_blobs  # noqa: E402
 from posetrak.detection.frame_source import iter_frames  # noqa: E402
 
 
@@ -204,6 +231,105 @@ def robust_mean(samples: np.ndarray, trim_frac: float = 0.1) -> np.ndarray:
     return out
 
 
+def triangulate_point_multi_view(
+    observations: dict[str, tuple[float, float]], states: dict[str, CamCalibState],
+    max_reprojection_px: float = 5.0,
+) -> np.ndarray | None:
+    """Linear (DLT) triangulation of one unlabeled 3D point from >=2
+    single-camera undistorted pixel observations -- the standard
+    homogeneous linear-least-squares formulation (stack two equations per
+    view, solve via SVD), not app.setup.extrinsics_solver's own
+    triangulate_pair()/triangulate_all_pairs(): those batch-triangulate
+    many *already-matched* point pairs at once (PairMatch), which doesn't
+    fit calibration's one-point-per-bucket, N-view (not just 2) shape any
+    more simply than writing this directly.
+
+    Every view's own reprojection error is checked against
+    *max_reprojection_px* before accepting the result (same filter
+    triangulate_pair() applies, same default order of magnitude) --
+    *required*, not a nice-to-have: "each camera saw exactly one
+    candidate" (the caller's own ambiguity filter) does not imply those
+    candidates are the *same physical point* two different stray bright
+    spots can each be "the only candidate" in their own camera while being
+    completely unrelated. Confirmed necessary against real footage
+    (Weapon test 2026-08-20): without this check, one two-camera
+    coincidence triangulated to a point over 3 meters from the reference
+    marker -- nowhere near the sword.
+
+    Returns None if fewer than 2 usable views, the linear system is
+    degenerate (near-parallel rays, camera behind the point, etc.), or the
+    reprojection check fails in any contributing view -- the caller drops
+    the bucket rather than accepting a garbage point.
+    """
+    proj_matrices: dict[str, np.ndarray] = {}
+    rows = []
+    for cam_id, (u, v) in observations.items():
+        state = states.get(cam_id)
+        if state is None or state.R is None:
+            continue
+        P = _proj_matrix(state)
+        proj_matrices[cam_id] = P
+        rows.append(u * P[2] - P[0])
+        rows.append(v * P[2] - P[1])
+    if len(rows) < 4:  # fewer than 2 real views
+        return None
+    A = np.stack(rows)
+    _, _, vt = np.linalg.svd(A)
+    x = vt[-1]
+    if abs(x[3]) < 1e-8:
+        return None
+    point = x[:3] / x[3]
+
+    point_h = np.append(point, 1.0)
+    for cam_id, P in proj_matrices.items():
+        proj = P @ point_h
+        if abs(proj[2]) < 1e-8:
+            return None
+        reproj_px = proj[:2] / proj[2]
+        u, v = observations[cam_id]
+        if np.linalg.norm(reproj_px - np.array([u, v])) > max_reprojection_px:
+            return None
+    return point
+
+
+def cluster_dot_samples(samples: list[np.ndarray], tolerance_m: float = 0.02) -> list[list[np.ndarray]]:
+    """Greedy incremental clustering of local-frame 3D dot samples into
+    distinct physical dots.
+
+    Unlike an ArUco corner (identity comes from the marker's own decoded
+    ID), a triangulated dot sample carries no identity at all -- samples
+    across the whole capture need grouping into "these N samples are all
+    the same physical dot" before they can be averaged. Each sample joins
+    the nearest existing cluster's running centroid if within
+    *tolerance_m*, else starts a new cluster.
+
+    Order-dependent by construction (greedy, not a global optimum) -- fine
+    here because real dot separations are centimeters to tens of
+    centimeters apart on a rigid prop, while per-sample triangulation
+    noise from real footage is sub-centimeter (marker-mocap-algorithms.md
+    §5.1's own robust-average precedent assumes the same kind of
+    separation), so this is not a close call needing a globally-optimal
+    clustering method.
+    """
+    clusters: list[list[np.ndarray]] = []
+    centroids: list[np.ndarray] = []
+    for sample in samples:
+        best_idx = None
+        best_dist = tolerance_m
+        for i, centroid in enumerate(centroids):
+            dist = float(np.linalg.norm(sample - centroid))
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+        if best_idx is None:
+            clusters.append([sample])
+            centroids.append(sample)
+        else:
+            clusters[best_idx].append(sample)
+            centroids[best_idx] = np.mean(clusters[best_idx], axis=0)
+    return clusters
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--session", required=True, help="Path to the session .db file")
@@ -218,6 +344,22 @@ def main() -> None:
     ap.add_argument("--min-cameras", type=int, default=2)
     ap.add_argument("--output", required=True, help="Output marker_body_definitions YAML path")
     ap.add_argument("--name", default="calibrated-rigid-body")
+    ap.add_argument("--detect-dots", action="store_true",
+                    help="Also calibrate reflective-dot centroids (Phase C1) alongside the "
+                         "ArUco markers, from the same footage pass")
+    ap.add_argument("--dot-threshold", type=int, default=235,
+                    help="detect_blobs() threshold override -- see dot_blob_detector.py's own "
+                         "module docstring for why the default isn't a starting point to retune")
+    ap.add_argument("--dot-min-area", type=float, default=4.0)
+    ap.add_argument("--dot-max-area", type=float, default=400.0)
+    ap.add_argument("--dot-min-compactness", type=float, default=0.5)
+    ap.add_argument("--dot-cluster-tolerance-m", type=float, default=0.02,
+                    help="Max distance (meters) for a triangulated dot sample to join an "
+                         "existing cluster rather than start a new physical dot")
+    ap.add_argument("--dot-max-reprojection-px", type=float, default=5.0,
+                    help="Reject a triangulated dot sample if any contributing view's own "
+                         "reprojection error exceeds this -- rejects cross-camera "
+                         "coincidences (see triangulate_point_multi_view()'s doc comment)")
     args = ap.parse_args()
 
     conn = sqlite3.connect(f"file:{args.session}?mode=ro", uri=True)
@@ -240,6 +382,12 @@ def main() -> None:
     frame_obs: dict[float, dict[str, dict[str, np.ndarray]]] = defaultdict(
         lambda: defaultdict(dict)
     )
+    # bucket -> camera_instance_id -> list of undistorted (u, v) dot candidates
+    # this camera saw that instant -- kept as a list (not just the count) so
+    # the aggregation pass below can still print/inspect ambiguous buckets;
+    # only len()==1 buckets ever become a calibration sample (see module
+    # docstring's "restrict to unambiguous frames" rationale).
+    dot_obs: dict[float, dict[str, list[np.ndarray]]] = defaultdict(lambda: defaultdict(list))
 
     for cam_id, state in states.items():
         svid = svid_by_cam.get(cam_id)
@@ -257,8 +405,6 @@ def main() -> None:
             if (video_frame - first) % args.stride != 0:
                 continue
             dets = detector.detect(img, video_id=cam_id, frame_idx=video_frame)
-            if not dets:
-                continue
             gt = sync_table.frame_to_global_time(video_frame, svid)
             if gt is None:
                 continue
@@ -269,6 +415,17 @@ def main() -> None:
                 pts = np.array([(c.px, c.py) for c in d.corners], dtype=np.float64)
                 pts_undist = _undistort_pts(pts, state)
                 frame_obs[bucket][d.marker_id][cam_id] = pts_undist
+
+            if args.detect_dots:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                blobs = detect_blobs(
+                    gray, threshold=args.dot_threshold, min_area=args.dot_min_area,
+                    max_area=args.dot_max_area, min_compactness=args.dot_min_compactness,
+                )
+                if blobs:
+                    pts = np.array([(b.cx, b.cy) for b in blobs], dtype=np.float64)
+                    pts_undist = _undistort_pts(pts, state)
+                    dot_obs[bucket][cam_id].extend(pts_undist)
         print(f"  {n_decoded} frames decoded")
 
     print(f"\n{len(frame_obs)} time buckets with >=1 marker detection")
@@ -277,8 +434,14 @@ def main() -> None:
     # marker's own frame, one sample per bucket where both the reference
     # and this marker had a solvable (>=2 camera) pose.
     samples_by_marker: dict[str, list[np.ndarray]] = defaultdict(list)
+    # Unlabeled local-frame 3D dot samples, not yet grouped by physical dot
+    # (cluster_dot_samples() does that after this loop) -- one sample per
+    # bucket where the reference solved AND >=2 cameras each saw exactly
+    # one dot candidate that instant.
+    dot_samples: list[np.ndarray] = []
     ref_template = marker_local_corners(args.marker_size)
     n_ref_solved = 0
+    n_dot_buckets_ambiguous = 0
 
     for bucket, by_marker in sorted(frame_obs.items()):
         ref_obs = by_marker.get(ref_id)
@@ -303,9 +466,34 @@ def main() -> None:
             local_corners = (R_ref.T @ (world_corners - tvec_ref).T).T
             samples_by_marker[mid].append(local_corners)
 
+        if args.detect_dots:
+            cam_dots = dot_obs.get(bucket, {})
+            unambiguous = {
+                cam_id: tuple(pts[0]) for cam_id, pts in cam_dots.items() if len(pts) == 1
+            }
+            if len(cam_dots) > 0 and any(len(pts) > 1 for pts in cam_dots.values()):
+                n_dot_buckets_ambiguous += 1
+            if len(unambiguous) >= args.min_cameras:
+                world_pt = triangulate_point_multi_view(
+                    unambiguous, states, max_reprojection_px=args.dot_max_reprojection_px
+                )
+                if world_pt is not None:
+                    dot_samples.append(R_ref.T @ (world_pt - tvec_ref.flatten()))
+
     print(f"Reference marker '{ref_id}' solved in {n_ref_solved} buckets")
     for mid, samples in samples_by_marker.items():
         print(f"  marker '{mid}': {len(samples)} co-occurrence samples with reference")
+
+    dot_clusters: list[list[np.ndarray]] = []
+    if args.detect_dots:
+        print(f"\nDot candidates: {len(dot_samples)} unambiguous triangulated samples "
+              f"({n_dot_buckets_ambiguous} buckets dropped for having >1 candidate in some "
+              "camera -- see module docstring)")
+        dot_clusters = cluster_dot_samples(dot_samples, args.dot_cluster_tolerance_m)
+        print(f"  clustered into {len(dot_clusters)} physical dots")
+        for i, cluster in enumerate(dot_clusters):
+            spread = np.stack(cluster).std(axis=0)
+            print(f"  dot{i}: {len(cluster)} samples, per-axis std (m) {spread}")
 
     # ---- Aggregate + write output YAML ----
     lines = [f"name: {args.name}", "units: meters", "markers:"]
@@ -339,6 +527,12 @@ def main() -> None:
         spread = np.stack([stacked[:, i, :].std(axis=0) for i in range(4)])
         print(f"  marker '{mid}' corner std across samples (m): "
               f"{spread.mean(axis=0)}")
+
+    for i, cluster in enumerate(dot_clusters):
+        center = robust_mean(np.stack(cluster))
+        lines.append(f"  - name: dot{i}")
+        lines.append("    type: reflective_dot")
+        lines.append(f"    center: {_fmt(center)}")
 
     out_path = Path(args.output)
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

@@ -1,5 +1,77 @@
 # Marker-based mocap — status
 
+- **2026-09-02** — Started calibration-time dot geometry (see
+  [reflective-dot-detection-design.md](reflective-dot-detection-design.md)
+  §3.1), then pivoted from automatic to manual annotation after real-data
+  testing surfaced a real correctness gap the automatic approach couldn't
+  cheaply clear. Also fixed a real, separate bug found along the way: the
+  skeleton generator was routing reflective dots onto the *same* input
+  track as coded-marker corners.
+
+  **Bug found and fixed**: `posetrak.skeleton.marker_body_to_skeleton
+  .generate_prop_skeleton()` bound `reflective_dot` entries to the same
+  `labeled_points`-type track as ArUco corners (`prop_markers`) --
+  predating the dot-assignment design, never updated once that design
+  settled on a separate `unlabeled_points` track type. A skeleton
+  generated from *any* existing dot-bearing marker body would never
+  actually have engaged the shared dot-assignment machinery built earlier
+  today, since nothing checks for an `unlabeled_points` track on
+  `prop_markers`. Fixed: dots now get their own `prop_dots`
+  (`unlabeled_points`) track, only emitted when the body actually has
+  dots (same for `prop_markers` and coded markers). Updated the one
+  existing test that had encoded the old (wrong) behavior as expected,
+  and added a mixed-body test covering both tracks at once.
+
+  **Automatic calibration attempt**: extended
+  `tools/calibrate_rigid_marker_body.py` with `--detect-dots`, reusing
+  the same reference-marker co-occurrence mechanism Phase A/B already
+  validated for ArUco corners, restricted to instants where >=2 cameras
+  each saw exactly one dot candidate (avoiding the harder general
+  multi-view correspondence problem -- real GoPro footage has ~39% of
+  frames with exactly one candidate per camera vs. ~11% with more than
+  one, so this restriction still looked viable on paper). Running it
+  against the real "Weapon test 2026-08-20" capture (full ~66s range, all
+  6 cameras, 20 minutes of real decode) caught a real bug before it could
+  reach production: "each camera saw exactly one candidate" does not mean
+  those candidates are the *same physical point* -- two unrelated bright
+  spots can each be their own camera's only candidate. The first real run
+  triangulated a "dot" over 3 meters from the sword. Added a reprojection-
+  error check (reject a triangulation that doesn't reproject correctly
+  into every contributing view) and re-ran; the result was still
+  implausible, confirming `marker-detection-analysis.md`'s own original
+  recommendation (verify against a third view, not just two) was right
+  and the two-view-plus-reprojection shortcut this round tried isn't
+  strong enough. On top of that, genuine reference+dot co-occurrence in
+  this specific capture is already sparse (41 of 680 buckets across the
+  full real range), so a properly-strict (3-view) requirement would
+  likely yield close to zero usable samples here regardless.
+
+  **Decided (Harri): manual annotation for this prop now, automatic
+  calibration remains a real longer-term goal.** New
+  `tools/annotate_dots_manually.py`: for a handful of human-picked
+  timestamps where a dot is known to be visible in >=2 cameras, solves
+  the reference marker's pose from that instant's own ArUco detections
+  (same mechanism as the automatic path), shows each camera's frame via
+  OpenCV for the user to click the dot (or skip), and triangulates with
+  the identical reprojection-checked `triangulate_point_multi_view()` the
+  automatic path uses -- human-confirmed correspondence sidesteps the
+  correctness problem entirely, so only a handful of good instants are
+  needed per dot rather than the many samples an automatic approach needs
+  to average out false positives. Reads an existing (ArUco-calibrated)
+  marker body YAML and writes a new one with the manually-triangulated
+  dots appended, same output format either way.
+
+  Test coverage: `triangulate_point_multi_view()` (recovers a known point
+  from synthetic multi-view observations, rejects a simulated
+  cross-camera false match, needs >=2 views, ignores unknown camera ids)
+  and `cluster_dot_samples()` (separates distinct dots, merges within
+  tolerance, empty/single-sample edge cases) in
+  `test_calibrate_rigid_marker_body.py`; `write_marker_body_yaml()`'s
+  round-trip in `test_annotate_dots_manually.py`. The interactive
+  click-and-triangulate workflow itself needs a real person clicking a
+  real window -- not something this session's own tools can drive, so
+  that part is unvalidated pending Harri actually running it.
+
 - **2026-09-02** — Closed the loop on the central claim the whole
   dot-assignment design rests on (see
   [dot-assignment-architecture-design.md](dot-assignment-architecture-design.md)

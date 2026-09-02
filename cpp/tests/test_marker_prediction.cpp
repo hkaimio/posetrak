@@ -3,12 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Unit tests for predict_rigid_marker() (marker-based-mocap design doc's
- * dot-assignment-architecture-design.md, sub-phase C2.2). Hand-computed
- * expected position/covariance for a simple camera rig, per that design
- * doc's own §10 test spec -- catches a Jacobian sign error (the
- * right-vs-left perturbation convention is exactly the kind of thing
- * that's easy to get backwards) before it reaches integration testing.
+ * Unit tests for predict_rigid_marker() -- the closed-form predicted
+ * pixel position and covariance for one marker on a rigid-body skeleton
+ * (see docs/roadmap/features/marker-based-mocap/dot-assignment-architecture-design.md).
+ * Hand-computed expected position/covariance for a simple camera rig --
+ * catches a Jacobian sign error (the right-vs-left perturbation
+ * convention is exactly the kind of thing that's easy to get backwards)
+ * before it reaches integration testing.
  */
 #include <posetrak/tracking/marker_prediction.hpp>
 

@@ -1,85 +1,103 @@
 # Marker-based mocap — status
 
-- **2026-09-02** — Built C2.4 (`Tracker` predict/update split) and C2.5
-  (`predict_dot_slot_predictions()`), the two sub-tasks the rest of §12's
-  chain depends on. Full C++ suite green afterward (posetrak_tests: all
-  passing, 3986 assertions in 325 test cases).
+- **2026-09-02** — Split `Tracker`'s per-frame predict/update cycle into
+  two public methods, and added a query for where each unlabeled ("dot")
+  marker on a rigid-body skeleton is expected to project this frame. This
+  is the foundation the shared dot-assignment phase (see
+  [dot-assignment-architecture-design.md](dot-assignment-architecture-design.md))
+  is built on top of: an orchestrator resolving competing dot candidates
+  across several tracked subjects needs every subject's live prediction
+  for the *same* instant, which requires calling predict() on all of them
+  before any one commits its update.
 
-  - **C2.4**: `Tracker::run_parent_step()` removed; its predict half is now
-    public `predict_step(dt)`, its update half public
-    `update_step(observations, timestamp)` (also absorbing `track_frame()`'s
-    own post-step bookkeeping — `last_timestamp_`/`frame_count_`/
-    `prev_observations_`/`frame_callback_` — since `update_step()` is now
-    the terminal call for a frame either way). `track_frame()` itself is a
-    two-line wrapper. The design doc's original sketch assumed only
-    `prior_state`/`prior_cov` needed to survive the split; tracing
-    `run_parent_step()`'s actual body first found that the RTS smoother
-    needs the *resolved* `PredictResult::cross_cov_future` too — an async
-    computation deliberately resolved late (in `update_step()`) so its work
-    overlaps `ukf_->update()`'s — so the whole `PredictResult` is stashed as
-    a `Tracker` member across the split, guarded by a `predict_pending_`
-    bool that makes calling `update_step()` without a preceding
-    `predict_step()` throw rather than read stale/absent state.
-  - **C2.5**: `predict_dot_slot_predictions(camera_id)` — one camera at a
-    time (matches `marker_projection_std(camera_id, ...)`'s own existing
-    per-camera signature convention), returns every `unlabeled_points`-track
-    marker's `MarkerPrediction` for that camera. Rejects a non-rigid-body
-    skeleton (the general/articulated case is still deferred, §6) and an
-    unknown camera id. Body-local marker geometry is recomputed fresh from
-    rest-pose FK on every call rather than cached at init time — cheap for a
-    rigid body (no articulation to run FK over), and avoids the fragility of
-    tying correctness to which of `Tracker`'s several init paths happened to
-    run (`initialize_rigid_body()` is only one of them;
-    `initialize_from_state()` and `initialize_with_fixed_root()` also
-    produce an initialized `Tracker` but were never going to populate a
-    rigid-body-specific cache).
+  `Tracker::run_parent_step()` removed; its predict half is now public
+  `predict_step(dt)`, its update half public
+  `update_step(observations, timestamp)` (also absorbing `track_frame()`'s
+  own post-step bookkeeping — `last_timestamp_`/`frame_count_`/
+  `prev_observations_`/`frame_callback_` — since `update_step()` is now
+  the terminal call for a frame either way). `track_frame()` itself is a
+  two-line wrapper. The original design sketch assumed only
+  `prior_state`/`prior_cov` needed to survive the split; tracing
+  `run_parent_step()`'s actual body first found that the RTS smoother
+  needs the *resolved* `PredictResult::cross_cov_future` too — an async
+  computation deliberately resolved late (in `update_step()`) so its work
+  overlaps `ukf_->update()`'s — so the whole `PredictResult` is stashed as
+  a `Tracker` member across the split, guarded by a `predict_pending_`
+  bool that makes calling `update_step()` without a preceding
+  `predict_step()` throw rather than read stale/absent state.
+
+  New `predict_dot_slot_predictions(camera_id)` — one camera at a time
+  (matches `marker_projection_std(camera_id, ...)`'s own existing
+  per-camera signature convention), returns every unlabeled marker's
+  predicted pixel position and covariance for that camera. Rejects a
+  non-rigid-body skeleton (the general/articulated case is still deferred)
+  and an unknown camera id. Body-local marker geometry is recomputed fresh
+  from rest-pose FK on every call rather than cached at init time — cheap
+  for a rigid body (no articulation to run FK over), and avoids the
+  fragility of tying correctness to which of `Tracker`'s several init
+  paths happened to run (`initialize_rigid_body()` is only one of them;
+  `initialize_from_state()` and `initialize_with_fixed_root()` also
+  produce an initialized `Tracker` but were never going to populate a
+  rigid-body-specific cache).
 
   Test coverage (`test_tracker_predict_update_split.cpp`, new): a
   frame-by-frame regression against the same articulated fixture
   `test_marker_projection_std.cpp` uses, confirming `predict_step()` +
   `update_step()` reproduce `track_frame()`'s `TrackingResult` field-for-
-  field (state, covariance, per-observation diagnostics) to within floating-
-  point tolerance every frame, not just at the end — this is the "single-
-  subject case is provably unaffected by the split existing at all" test
-  §12 calls for. Plus the throw-without-predict, unknown-camera, non-rigid-
-  skeleton, and a hand-computed-position rigid-body prediction case.
+  field (state, covariance, per-observation diagnostics) to within
+  floating-point tolerance every frame, not just at the end — proving the
+  single-subject case is unaffected by the split existing at all. Plus the
+  throw-without-predict, unknown-camera, non-rigid-skeleton, and a
+  hand-computed-position rigid-body prediction case. Full C++ suite green
+  afterward (posetrak_tests: all passing, 3986 assertions in 325 test
+  cases).
 
-- **2026-09-02** — Built the first, fully independent batch of Phase C2
-  sub-tasks (§12's own "parallelizable" group): C2.1 (Hungarian solver),
-  C2.2 (rigid closed-form `MarkerPrediction`), C2.3 (DB schema
-  convention/blob codec), C2.9 (config surface). All four unit-tested in
-  isolation; full C++ suite green afterward (319 test cases, 3272+
-  assertions).
+- **2026-09-02** — Built the four dot-assignment pieces with no
+  dependencies on anything else (see
+  [dot-assignment-architecture-design.md](dot-assignment-architecture-design.md)):
+  the Hungarian assignment solver, the rigid-body closed-form marker-
+  position/covariance prediction, the DB blob-decoding convention for
+  anonymous dot candidates, and the tracker's dot-assignment gating-
+  threshold config field. All four unit-tested in isolation; full C++
+  suite green afterward (319 test cases, 3272+ assertions).
 
-  - **C2.1**: `cpp/include/posetrak/tracking/assignment.hpp`, header-only
-    (matches `blob_codec.hpp`'s own convention). Classic O(n³) Jonker-
-    Volgenant-potentials Hungarian, gated per-pair (a pairing above the
-    gate is dropped, not forced) rather than all-or-nothing. Tested
-    against a genuinely adversarial case (globally-optimal vs. greedy-
-    first-match disagree) and at 40×40 scale, comfortably past the
+  - **Hungarian assignment solver**
+    (`cpp/include/posetrak/tracking/assignment.hpp`, header-only, matches
+    `blob_codec.hpp`'s own convention): classic O(n³)
+    Jonker-Volgenant-potentials Hungarian, gated per-pair (a pairing above
+    the gate is dropped, not forced) rather than all-or-nothing. Tested
+    against a genuinely adversarial case (globally-optimal vs.
+    greedy-first-match disagree) and at 40×40 scale, comfortably past the
     "several tens per scene" target.
-  - **C2.2**: new `cpp/{include,src}/posetrak/tracking/marker_prediction.{hpp,cpp}`.
-    Implements exactly the §6.1 math (no FK, no Pinocchio). Cross-checked
-    the Jacobian two ways before trusting it: algebraically against
+  - **Rigid closed-form marker prediction** (new
+    `cpp/{include,src}/posetrak/tracking/marker_prediction.{hpp,cpp}`):
+    predicts a marker's pixel position and covariance directly from the
+    root pose and its covariance, with no FK/Pinocchio call, for a
+    rigid-body (prop) skeleton. Cross-checked the Jacobian two ways before
+    trusting it: algebraically against
     `Tracker::marker_projection_std()`'s independently-derived (general,
     FK-based) version of the same quantity — both reduce to the same
     formula via a standard rotation-of-skew identity — and empirically via
     a hand-computed lever-arm test that a sign error couldn't have passed
     by accident (nonzero u-variance, exactly-zero v-variance from a
     rotation that only moves the marker in depth).
-  - **C2.3**: `decode_dot_candidates()` added to `blob_codec.hpp` as a
+  - **DB blob-decoding convention for dot candidates**:
+    `decode_dot_candidates()` added to `blob_codec.hpp` as a
     `decode_keypoints()` sibling (float32[N,4]: px, py, area,
-    compactness) — confirms §3's "no new tables" call holds in practice,
-    not just on paper.
-  - **C2.9**: found and fixed a real inaccuracy in the design doc itself
-    before implementing -- §8 had cited `rigid_init_max_residual_m` as a
-    "DB column + `load_tracker_config()` wiring" precedent, but checking
-    the actual code (`session_reader.cpp`'s real column list, `config.cpp`)
-    showed it's TOML-only, no DB column at all -- exactly the
+    compactness) — confirms the design's "no new tables needed" call holds
+    in practice, not just on paper: the existing
+    `detection_keypoints`/`pose_observations` tables already fit a
+    variable-N blob directly.
+  - **Config surface**: found and fixed a real inaccuracy in the design
+    doc itself before implementing — it had cited
+    `rigid_init_max_residual_m` as a "DB column +
+    `load_tracker_config()` wiring" precedent, but checking the actual
+    code (`session_reader.cpp`'s real column list, `config.cpp`) showed
+    it's TOML-only, no DB column at all — exactly the
     `init_search_window_s` (2026-08-31) pattern instead. Corrected the
-    doc, then implemented against the corrected, verified precedent:
-    `dot_assignment_gate_mahalanobis` is TOML-parsed/validated on
-    `TrackerAppConfig` only.
+    doc, then implemented against the corrected, verified precedent: the
+    new `dot_assignment_gate_mahalanobis` field is TOML-parsed/validated
+    on `TrackerAppConfig` only.
 
   Also fixed, unrelated to the new code's correctness: the full test
   suite's own wall-clock time (mostly binary-load/process-startup
@@ -90,19 +108,19 @@
   `tests/meson.build`'s timeout to 120s rather than leave the suite
   looking flaky as more tests get added.
 
-- **2026-09-02** — Broken Phase C2 (live dot labeling, the design in
-  [dot-assignment-architecture-design.md](dot-assignment-architecture-design.md))
-  into 12 independently buildable/testable sub-tasks (new doc §12), same
-  discipline as phase 1's own 1a–1f breakdown. Four have no dependencies
-  and can start immediately/in parallel: the Hungarian solver (C2.1), the
-  rigid closed-form `MarkerPrediction` math (C2.2), the DB schema/blob
-  codec convention (C2.3), and the config surface (C2.9). The rest chain
-  through the `Tracker` predict/update split (C2.4/C2.5) and the shared
-  orchestrator (C2.10, tested synthetically against the actual
-  double-claim scenario the whole redesign exists to fix) before wiring
-  into both call paths (C2.11) and finally real-data validation (C2.12) —
-  which is explicitly gated on Phase C1 (calibration-time dot geometry,
-  a separate phase) existing too, not just C2's own pieces. The
+- **2026-09-02** — Broke the live dot-labeling design
+  ([dot-assignment-architecture-design.md](dot-assignment-architecture-design.md))
+  into 12 independently buildable/testable pieces of work (the doc's own
+  implementation-phasing section), same discipline as phase 1's own
+  six-sub-phase breakdown. Four have no dependencies and can start
+  immediately/in parallel: the Hungarian solver, the rigid closed-form
+  marker-prediction math, the DB schema/blob-codec convention, and the
+  config surface. The rest chain through the `Tracker` predict/update
+  split and the shared dot-assignment orchestrator (tested synthetically
+  against the actual double-claim scenario the whole redesign exists to
+  fix) before wiring into both tracking call paths and finally real-data
+  validation — which is explicitly gated on the separate calibration-time
+  dot-geometry phase existing too, not just this phase's own pieces. The
   scene-wide-detection/de-dup bridge a real second dot-bearing subject
   would need stays explicitly out of this phasing, unchanged from the
   prior entry.

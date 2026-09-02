@@ -5,8 +5,9 @@
 /**
  * @file assignment.hpp
  * @brief Gated rectangular assignment (Hungarian algorithm) for anonymous
- * reflective-dot candidate resolution -- marker-based-mocap design doc's
- * dot-assignment-architecture-design.md, sub-phase C2.1.
+ * reflective-dot candidate resolution -- see
+ * docs/roadmap/features/marker-based-mocap/dot-assignment-architecture-design.md
+ * for the design this implements.
  *
  * Header-only, matching posetrak/db/blob_codec.hpp's own convention for a
  * small, self-contained, independently-testable piece of math with no

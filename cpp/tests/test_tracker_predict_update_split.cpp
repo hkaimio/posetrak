@@ -4,11 +4,13 @@
 
 /**
  * Tests for the Tracker::predict_step()/update_step() split and
- * Tracker::predict_dot_slot_predictions() (marker-based-mocap design doc's
- * dot-assignment-architecture-design.md, sub-phases C2.4/C2.5).
+ * Tracker::predict_dot_slot_predictions() -- see
+ * docs/roadmap/features/marker-based-mocap/dot-assignment-architecture-design.md
+ * for why the shared dot-assignment phase needs every tracked subject's
+ * predict() to run before any of them commits an update.
  *
- * The core regression this file exists to catch (design doc §10): calling
- * predict_step() then update_step() must be observably identical to calling
+ * The core regression this file exists to catch: calling predict_step()
+ * then update_step() must be observably identical to calling
  * track_frame() -- an external orchestrator inserting a dot-assignment
  * resolution step between them must not change what a subject with nothing
  * to resolve experiences.

@@ -134,8 +134,9 @@ TEST_CASE("apply_keypoint_edits: size mismatch throws", "[blob_codec]") {
 }
 
 // ---------------------------------------------------------------------------
-// decode_dot_candidates (marker-based-mocap design doc's
-// dot-assignment-architecture-design.md, sub-phase C2.3)
+// decode_dot_candidates -- variable-N reflective-dot candidate blob decode,
+// the decode_keypoints() sibling for anonymous dot detections (see
+// docs/roadmap/features/marker-based-mocap/dot-assignment-architecture-design.md)
 // ---------------------------------------------------------------------------
 
 static std::vector<uint8_t> encode_dot_candidates(std::vector<std::array<float, 4>> const& vals) {

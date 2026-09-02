@@ -68,9 +68,10 @@ TEST_CASE("TrackerAppConfig load minimal config applies defaults", "[config]") {
     REQUIRE(cfg.process_noise_std == Approx(0.5));
     REQUIRE(cfg.calib_noise_std == Approx(2.0));
     REQUIRE(cfg.outlier_threshold == Approx(4.0));
-    // Marker-based-mocap dot assignment (dot-assignment-architecture-design.md
-    // sec 8, sub-phase C2.9) -- TOML-only, same as rigid_init_max_residual_m's
-    // own real shape, no tracker_configs DB column.
+    // Dot-assignment gating threshold (see
+    // docs/roadmap/features/marker-based-mocap/dot-assignment-architecture-design.md)
+    // -- TOML-only, same as rigid_init_max_residual_m's own real shape, no
+    // tracker_configs DB column.
     REQUIRE(cfg.dot_assignment_gate_mahalanobis == Approx(9.21));
 
     // UKF defaults
@@ -80,7 +81,8 @@ TEST_CASE("TrackerAppConfig load minimal config applies defaults", "[config]") {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: dot_assignment_gate_mahalanobis (design doc sub-phase C2.9)
+// Tests: dot_assignment_gate_mahalanobis (the Hungarian assignment solver's
+// gating threshold for reflective-dot candidate resolution)
 // ---------------------------------------------------------------------------
 
 TEST_CASE("TrackerAppConfig to_tracker_config threads dot_assignment_gate_mahalanobis through",

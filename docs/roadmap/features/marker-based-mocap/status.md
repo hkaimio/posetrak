@@ -1,5 +1,35 @@
 # Marker-based mocap — status
 
+- **2026-09-02** — Revised `dot-assignment-architecture-design.md`
+  against Harri's inline review comments -- both landed on real gaps in
+  the first draft, not just clarifications:
+  - **Storage**: dropped both proposed new tables entirely.
+    `detection_keypoints`/`pose_observations` were already
+    one-row-per-(frame,camera,source) with an arbitrary-length blob --
+    ArUco's fixed corner count was a property of what ArUco stores, not a
+    schema constraint. Dots reuse the same tables with a new
+    `region_type`/`source='dots'` value and a variable-N blob layout, and
+    finalisation reuses the *existing* generic copy loop unmodified (just
+    one more parameter value) rather than new machinery -- directly fixes
+    the row-count-at-scale concern too (blob size grows with candidate
+    count, row count doesn't).
+  - **Generalizes beyond one rigid prop**: named the actual seam
+    (`MarkerPrediction`: predicted position + pixel covariance for one
+    marker slot) that assignment consumes, and confirmed the rigid
+    closed-form math is only one implementation of it -- the general/
+    articulated implementation isn't hypothetical, it's a documented reuse
+    of `UKF::predict_measurements()`'s existing sigma-point machinery
+    (already marker_id/FK-generic, verified against the code), deferred
+    only because no articulated dot-augmented capture exists yet to build
+    or test against. Corrected the assignment solver's expected scale
+    (Harri: "several tens per scene", not "a dozen") with real numbers
+    (O(n^3) at n=50 is sub-millisecond, nowhere near the bottleneck).
+  - **New, explicitly acknowledged gap**: multi-subject candidate-pool
+    arbitration (two dot-bearing subjects drawing from the same shared
+    detection pass) isn't designed -- flagged as a real hole (§9.1) tied
+    to the already-logged shared-scene-detection item (2026-08-31 entry
+    below), not silently assumed away.
+
 - **2026-09-01** — Full design round for dot assignment (Option A),
   requested straight after the detection prototype confirmed the approach
   was worth designing properly. See

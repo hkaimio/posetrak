@@ -1,5 +1,22 @@
 # Marker-based mocap — status
 
+- **2026-09-02** — Broken Phase C2 (live dot labeling, the design in
+  [dot-assignment-architecture-design.md](dot-assignment-architecture-design.md))
+  into 12 independently buildable/testable sub-tasks (new doc §12), same
+  discipline as phase 1's own 1a–1f breakdown. Four have no dependencies
+  and can start immediately/in parallel: the Hungarian solver (C2.1), the
+  rigid closed-form `MarkerPrediction` math (C2.2), the DB schema/blob
+  codec convention (C2.3), and the config surface (C2.9). The rest chain
+  through the `Tracker` predict/update split (C2.4/C2.5) and the shared
+  orchestrator (C2.10, tested synthetically against the actual
+  double-claim scenario the whole redesign exists to fix) before wiring
+  into both call paths (C2.11) and finally real-data validation (C2.12) —
+  which is explicitly gated on Phase C1 (calibration-time dot geometry,
+  a separate phase) existing too, not just C2's own pieces. The
+  scene-wide-detection/de-dup bridge a real second dot-bearing subject
+  would need stays explicitly out of this phasing, unchanged from the
+  prior entry.
+
 - **2026-09-02** — Answered a direct question (Harri: "the tracked
   subjects already influence each other via the cross-subject relative
   observation mechanism -- why does dot assignment need a new layer?") by

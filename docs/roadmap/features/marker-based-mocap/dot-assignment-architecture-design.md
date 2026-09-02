@@ -711,3 +711,40 @@ DB column + `SessionReader::load_tracker_config()` wiring):
 - **When to build the general `MarkerPrediction` implementation** (§6) —
   gated on a real articulated-body dot-augmentation use case existing,
   not decided here.
+
+## 12. Implementation phasing
+
+Scope for Phase C2 only (live per-frame labeling) — not C1 (calibration-
+time dot geometry, `reflective-dot-detection-design.md` §5) or C3
+(re-run and compare), each its own phase with its own scope. C2.11's own
+real-data validation is gated on C1 existing (a skeleton with calibrated
+`unlabeled_points` markers to track against) even though nothing else
+below needs it. Each sub-task independently buildable/testable, same
+discipline as phase 1's own 1a–1f breakdown
+(`marker-mocap-design.md` §7.1).
+
+| Sub-task | Delivers | Depends on | Validation |
+|---|---|---|---|
+| **C2.1** — Hungarian solver | `cpp/include/posetrak/tracking/assignment.hpp`: hand-written O(n³) Hungarian over an arbitrary rectangular cost matrix, with gating (§7). | None. | Pure unit tests, synthetic cost matrices (§10): correct recovery on square and non-square matrices, gating rejects above-threshold pairs without forcing a match, a tie-breaking case. No tracker/skeleton/camera involved. |
+| **C2.2** — Rigid closed-form `MarkerPrediction` | The §6.1 math: `Cov_pixel`/predicted-position computation for one marker on a rigid-body skeleton, from `prior_state`/`prior_cov`. | None. | Unit test against a synthetic rigid skeleton (reuse `tests/data/rigid_prop.yaml`) with a known `prior_state`/`prior_cov` and a hand-computed expected `Cov_pixel` for at least one marker/camera pair — catches a Jacobian sign error before integration. |
+| **C2.3** — DB schema + blob codec | `region_type`/`source='dots'` convention on the existing `detection_keypoints`/`pose_observations` tables (§3); `decode_dot_candidates()` sibling to `decode_keypoints()` in `blob_codec.hpp`. | None. | Unit test: round-trips a variable-N blob correctly, including N=0 and N in the "several tens" range (§7.1). |
+| **C2.4** — `Tracker` predict/update split | New public `Tracker::predict_step(dt)` / `update_step(observations, timestamp)`, replacing the private atomic `run_parent_step()` (§5.1); `track_frame()` becomes a thin wrapper over both. | None (can stub `predict_dot_slot_predictions()` until C2.2 lands). | Direct unit test: calling `predict_step()` then `update_step()` in sequence produces byte-identical `TrackingResult`s to calling `track_frame()` — the single-subject case must be provably unaffected by the split existing at all. |
+| **C2.5** — `predict_dot_slot_predictions()` | `Tracker` method exposing every `unlabeled_points`-track marker's `MarkerPrediction` after a `predict_step()` call (§5.1, §6). | C2.2, C2.4. | Unit test against the same rigid fixture as C2.2, called through the real `Tracker` (not the standalone math) — confirms the wiring, not just the formula. |
+| **C2.6** — `SessionReader`/`ObservationSet` loading | New `UnlabeledCandidate` struct; `load_observations()` gains the per-camera/frame candidate output, decoded via C2.3 (§4). | C2.3. | Extend `test_session_reader.cpp`'s existing manifest-bound-sequence fixture (1f) with a `source='dots'` row; confirm decoded candidates match expected positions/counts. |
+| **C2.7** — Detection-time write path | Promote `prototype_dot_blob_detector.py`'s `detect_blobs()` out of throwaway-script status into a real `DotCandidateWriter` (mirrors `MarkerKeypointWriter`), wired into the marker detection pipeline for GoPro cameras first (§2.1's validated regime). | C2.3. | Unit test on synthetic frames (known blob positions) — same style as existing `MarkerKeypointWriter` tests. Real-footage validation reuses §2.1's already-confirmed area/compactness parameters, not new detector tuning. |
+| **C2.8** — Finalisation | Extend `finalise_object_to_db`'s existing generic copy loop to also handle `region_type='dots'` → `pose_observations`/`source='dots'` (§3) — the identical call shape as markers, one more parameter value. | C2.7. | `finalise_object_to_db` test with a `region_type='dots'` detection run confirms correct `pose_observations` rows with no dots-specific code path (already specified in §10). |
+| **C2.9** — Config surface | `dot_assignment_gate_mahalanobis` `TrackerConfig` field: struct field, TOML parsing, validation, DB column, `load_tracker_config()` wiring (§8) — same pattern as `rigid_init_max_residual_m` (phase 1f). | None. | Mirrors phase 1f's own config-field test coverage (parse + validate + round-trip through the DB). |
+| **C2.10** — `resolve_shared_dot_assignment()` | The orchestrator-level free function (§5.2): builds one combined cost matrix per camera across every participating subject's dot slots (§7.1), solves via C2.1, splits results back out per subject. | C2.1, C2.5, C2.9. | Synthetic multi-subject test (§10, already specified): two skeletons whose slots predict near a shared ambiguous candidate — verify it resolves to exactly one subject, never both, and the loser gets no `Observation` rather than a forced pairing. This is the test that actually exercises the double-claim problem the whole shared-phase redesign exists to fix. |
+| **C2.11** — Wiring into both call paths | Thread the predict-all/resolve/update-all shape (§5.2) through `run_track_from_db()`'s raw loop and `MultiPersonTracker::run()`, likely via new `step_person_context_predict()`/`step_person_context_update()` siblings to the existing `step_person_context()` (§5.2) — both call paths already share that free-function layer, so this is one piece of new plumbing, not two. Every dot-free subject's call path (every existing person, the sword's own ArUco corners) is untouched. | C2.6, C2.10. | Regression: every existing test involving `step_person_context()`/`track_frame()` for a dot-free subject must be unaffected. New: a single-subject (N=1) synthetic case confirms the three-pass shape degenerates correctly to "just track normally" when there's nothing to arbitrate. |
+| **C2.12** — Real end-to-end validation | Re-run against real footage once a dot-calibrated skeleton exists. | C2.7, C2.8, C2.11, **and Phase C1** (external to this phasing). | Phase C3's own stated purpose (§5 of the scoping doc): re-run the exact "Harri bokken" baseline (status.md, 2026-09-01) with dots included; compare tracked-step fraction, reprojection error, and specifically gap duration during fast segments against the ArUco-only numbers already recorded. Single-subject only — no real multi-subject-with-dots capture exists yet to validate C2.10's actual arbitration behavior against real data, only synthetically (C2.10's own test). |
+
+**Parallelizable**: C2.1, C2.2, C2.3, C2.9 have no dependencies on each
+other or on anything else in this list — natural first batch. C2.7 (once
+C2.3 lands) and C2.4 can also proceed independently of each other.
+
+**Explicitly not in this phasing** (§9, §5.4): the scene-wide-detection/
+de-dup bridge that a *second* real dot-bearing subject would need for
+`resolve_shared_dot_assignment()`'s joint arbitration to be correct
+against real (not synthetic) data — the sword alone never exercises it,
+and no real multi-subject-with-dots capture exists yet to design or
+validate it against.

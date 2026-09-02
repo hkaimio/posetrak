@@ -1,5 +1,32 @@
 # Marker-based mocap — status
 
+- **2026-09-02** — Answered a direct question (Harri: "the tracked
+  subjects already influence each other via the cross-subject relative
+  observation mechanism -- why does dot assignment need a new layer?") by
+  tracing the existing cross-person coupling mechanism precisely and
+  confirming why it can't be reused. It never splits predict from update
+  because it doesn't need to: `build_anchor_observations()` (verified,
+  `multi_person_tracker.cpp`) borrows another subject's *own*
+  already-computed posterior state (this frame's if they already stepped,
+  else last frame's extrapolated) as a soft reference value for an
+  already-known marker correspondence -- correspondence is never in
+  question, and one frame of staleness is an accepted, designed-for
+  approximation. Dot assignment has neither property: it must resolve a
+  genuine identity ambiguity across subjects sharing one candidate pool,
+  and needs every competitor's prediction for the identical instant, not
+  a stale one, to actually prevent double-claiming. Confirmed
+  `UnscentedKalmanFilter::predict()` mutates state in place (not a
+  peekable dry-run), which is what makes `Tracker`'s predict/update split
+  unavoidable rather than a design preference. Also surfaced and resolved
+  a second, more discretionary choice bundled into the design: joint
+  (one combined cost matrix across subjects, globally optimal) vs.
+  sequential greedy against a shrinking pool (closer to the existing
+  anchor mechanism's own shape, less new machinery, but order-dependent).
+  Harri confirmed joint, consistent with this design's other
+  production-quality-over-cheaper-path calls. Written up in
+  [dot-assignment-architecture-design.md](dot-assignment-architecture-design.md)
+  §5.3 (new).
+
 - **2026-09-02** — Made dot assignment a shared phase across every
   tracked subject, not a per-subject step -- Harri's explicit call, not
   needed for the sword alone but wanted "very soon." Substantially

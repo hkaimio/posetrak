@@ -276,7 +276,7 @@ Per frame, for dot-bearing subjects only:
 for (auto* s : dot_bearing_subjects) s->tracker->predict_step(dt);   // 1. everyone predicts first
 
 auto assignment = resolve_shared_dot_assignment(dot_bearing_subjects,   // 2. ONE combined
-                                                candidates_this_frame,  //    resolution, §5.3
+                                                candidates_this_frame,  //    resolution, §7.1
                                                 config, step, timestamp);
 
 for (auto* s : dot_bearing_subjects) {                                // 3. then everyone updates
@@ -303,7 +303,99 @@ use today) is real, mechanical work — probably a new sibling pair to
 `step_person_context_frame0()`/`step_person_context()` split-by-purpose
 pattern already in this file), not something to improvise per call site.
 
-### 5.3 The real prerequisite this exposes: candidates must be a single shared pool, not N redundant per-subject lists
+### 5.3 Why this can't reuse the existing cross-person coupling mechanism, and joint vs. sequential resolution
+
+**Added 2026-09-02** in response to a direct question (Harri: *"the
+tracked subjects already influence each other via the cross-subject
+relative observation mechanism... How is that feature implemented now,
+and what new requirements does dot assignment bring?"*). Worth writing
+down precisely, since the answer explains why §5.1's `Tracker` split is
+genuinely unavoidable rather than a design preference.
+
+**Cross-person coupling (`error-improvements/phase5-cross-person-plan.md`,
+implemented) never splits predict from update.** Traced directly in
+`multi_person_tracker.cpp`: `MultiPersonTracker::run()` still calls each
+subject's plain, atomic `Tracker::track_frame()`. Before subject A's
+turn, `build_anchor_observations()` constructs a `PAIR_DIFF` anchor
+`Observation` using subject B's **own already-computed state**
+(`other_ctx.tracker->state()`) — B's current-frame posterior if B already
+took its turn this frame (processing order rotates every frame), or a
+one-frame constant-velocity extrapolation of B's *last* frame's posterior
+if B hasn't gone yet (`build_anchor_observations()`'s own "anchor
+freshness" comment, verbatim: *"current-frame posterior if already
+stepped this frame, else a one-frame constant-velocity extrapolation of
+their frame-(t-1) posterior"*). That anchor is appended to A's own
+observation list; A's single unsplit `track_frame()` call runs unchanged.
+
+This works without ever needing a live, same-instant peek at another
+subject's mid-step prediction, because of two properties specific to what
+it does that dot assignment doesn't share:
+
+- **Correspondence is already known.** Contact-gating decides *which*
+  marker on A pairs with *which* marker on B (a 3D proximity computation
+  between two already-named, already-labeled points) — there is no
+  identity ambiguity to resolve, only a reference *value* to borrow.
+- **Staleness is tolerable.** A one-frame-old extrapolated reference is
+  an accepted design point, not a shortcut — it's a soft `PAIR_DIFF`
+  residual carrying its own noise term, and the extrapolation exists
+  specifically to absorb that lag.
+
+Dot assignment has neither property: it has to resolve *which
+candidate is which named marker* — a genuine combinatorial identity
+problem the anchor mechanism was never built to solve — and it needs
+every competing subject's prediction for the *identical instant*, not a
+stale one, because the correctness property actually wanted (never let
+two subjects claim the same candidate) is a hard constraint on a discrete
+decision. A subject deciding from its own last-frame extrapolation, while
+another decides from its own, doesn't prevent both concluding "candidate
+#7 is mine" in the same frame — staleness doesn't fix a double-claim, it
+only hides it.
+
+That forces the one piece of new capability the anchor mechanism never
+needed: a way to get a subject's genuinely-current prediction to an
+outside caller before that subject's own update commits. Checked whether
+this could be avoided by "peeking" without a real split —
+`UnscentedKalmanFilter::predict()` (`ukf.cpp:620`) writes `state_`/
+`covariance_` in place (confirmed by reading through to its final
+assignment, `state_ = compute_state_mean(...)`); it is a real state
+transition, not a pure/dry-run computation callable speculatively and
+discarded. So §5.1's split (or some equivalent) is not a stylistic
+choice — it's what "get a live prediction without committing to it
+first" actually requires, given predict() is exactly as stateful as it
+looks.
+
+**Joint vs. sequential resolution — a separate, more discretionary
+choice bundled into the design above.** Given the split is required
+either way, two shapes both fully prevent double-claiming:
+
+- **Joint (what §5.2 designs, confirmed 2026-09-02)**: `predict_step()`
+  on every dot-bearing subject first, then one combined cost matrix
+  across all of them, solved together — globally optimal, immune to
+  processing-order artifacts. A candidate always goes to whichever
+  subject it genuinely fits best, never to whoever happened to ask first.
+- **Sequential greedy (considered, not chosen)**: process subjects one
+  at a time in the same rotated order the anchor mechanism already uses;
+  each subject's own local Hungarian solve runs against whatever
+  candidates earlier subjects this frame haven't already claimed,
+  removing them from the pool as it goes. Needs the identical
+  per-subject `predict_step()`/`update_step()` split (predict() is
+  exactly as stateful here as in the joint case), but never constructs a
+  cross-subject cost matrix and doesn't need a full predict-everyone pass
+  before any subject updates — closer to the existing anchor mechanism's
+  own shape. Trade-off: order-dependent — a candidate can go to a
+  merely-adequate match for whoever processes first, when a later subject
+  in the same frame would have been the better fit, and that failure mode
+  gets more likely as candidate density grows (exactly the "several tens
+  per scene" / person-picks-up-a-marked-prop case this is being designed
+  for).
+
+Decided: **joint**, for the same reason the earlier per-count and
+per-scale decisions in this doc went the more rigorous way — production
+quality over the cheaper path, and the actual cost difference is small
+(§7.1's combined-matrix complexity is still comfortably sub-millisecond
+at the scales discussed).
+
+### 5.4 The real prerequisite this exposes: candidates must be a single shared pool, not N redundant per-subject lists
 
 A genuinely joint resolution requires that the *candidates themselves* —
 not just the resolution step — be a single authoritative list per
@@ -487,7 +579,7 @@ subjects from both claiming the same candidate, since neither subject's
 solve knows the other's even ran. The fix isn't a different algorithm,
 it's a differently-shaped input: **one Hungarian solve per (camera,
 frame), with columns = the union of every participating subject's dot
-slots that frame, rows = that camera's (de-duplicated, §5.3) candidate
+slots that frame, rows = that camera's (de-duplicated, §5.4) candidate
 list.** Gating, the dummy-row/column padding, and the "unmatched costs
 nothing" philosophy above are unchanged — they already operate on an
 arbitrary rectangular cost matrix, which a multi-subject matrix still is,
@@ -525,7 +617,7 @@ DB column + `SessionReader::load_tracker_config()` wiring):
 - **The general/articulated `MarkerPrediction` implementation** (§6) —
   seam is designed, implementation deferred; no articulated
   dot-augmented capture exists yet to build or validate it against.
-- **Scene-wide shared detection, and its interim de-dup bridge** (§5.3)
+- **Scene-wide shared detection, and its interim de-dup bridge** (§5.4)
   — the shared assignment *phase* (§5) is now designed and targeted for
   the near future per Harri's direction, but it's only *correct* once
   candidates are a single de-duplicated pool per (camera, frame) rather
@@ -609,7 +701,7 @@ DB column + `SessionReader::load_tracker_config()` wiring):
   or whether marginal candidates would benefit from a soft cost penalty
   instead of a hard reject.
 - **When to build scene-wide shared detection (or its de-dup bridge)**
-  (§5.3/§9) — a real, currently-unresolved dependency of *correct* shared
+  (§5.4/§9) — a real, currently-unresolved dependency of *correct* shared
   assignment with more than one subject's own detection run in play; not
   designed here.
 - **`resolve_shared_dot_assignment()`'s exact call-site wiring** (§5.2) —

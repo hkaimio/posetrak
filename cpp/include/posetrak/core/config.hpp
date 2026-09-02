@@ -47,6 +47,18 @@ struct TrackerConfig {
     double calib_noise_std = 5.0;      ///< Calibration error (pixels in original video)
     double outlier_threshold = 5.991;  ///< Chi-squared threshold (95% for 2-DOF)
 
+    /// @brief Max squared-Mahalanobis cost for a candidate-to-slot pairing to be
+    /// accepted by the shared dot-assignment phase (marker-based-mocap design
+    /// doc's dot-assignment-architecture-design.md §7/§8). Separate from
+    /// outlier_threshold, which gates an already-labeled Observation after the
+    /// fact -- this gates candidate-to-slot *assignment* before an Observation
+    /// even exists, so it typically wants its own, looser value: an
+    /// unresolved slot costs nothing downstream, but an artificially tight
+    /// gate here would discard real candidates the outlier-rejection stage
+    /// could otherwise have used. Same chi-squared-threshold units and
+    /// 2-DOF convention as outlier_threshold's own default.
+    double dot_assignment_gate_mahalanobis = 9.21;  ///< Chi-squared threshold (99% for 2-DOF)
+
     // === Adaptive process noise (Phase 1 — velocity-driven per-DOF scaling) ===
     // See docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
     // 0.0 gain = disabled (exact pre-Phase-1 static process noise).
@@ -224,6 +236,7 @@ struct TrackerAppConfig {
     double pose_noise_std = 0.0;   ///< Pose estimation error (pixels in model input image)
     double calib_noise_std = 2.0;  ///< Calibration error (pixels in original video)
     double outlier_threshold = 4.0;
+    double dot_assignment_gate_mahalanobis = 9.21;  ///< See TrackerConfig's own field doc comment.
 
     // === Adaptive process noise (Phase 1 — velocity-driven per-DOF scaling) ===
     // 0.0 gain = disabled (exact pre-Phase-1 static process noise).
@@ -358,6 +371,7 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.pose_noise_std = pose_noise_std;
     tc.calib_noise_std = calib_noise_std;
     tc.outlier_threshold = outlier_threshold;
+    tc.dot_assignment_gate_mahalanobis = dot_assignment_gate_mahalanobis;
     tc.process_noise_vel_gain_joint = process_noise_vel_gain_joint;
     tc.process_noise_vel_ref_joint = process_noise_vel_ref_joint;
     tc.process_noise_vel_gain_root = process_noise_vel_gain_root;

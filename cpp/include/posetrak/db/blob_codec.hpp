@@ -78,6 +78,47 @@ inline std::vector<Keypoint> decode_keypoints(void const* data, int byte_count) 
     return result;
 }
 
+/// @brief One anonymous reflective-dot candidate as stored in a
+/// `region_type`/`source='dots'` blob (marker-based-mocap design doc's
+/// dot-assignment-architecture-design.md §3) -- distorted pixel position
+/// plus the two detector-side diagnostics
+/// (`prototype_dot_blob_detector.py`'s `BlobCandidate`) currently used
+/// only for logging/detector tuning, not by the Hungarian solver itself.
+struct DotCandidate {
+    float px{};
+    float py{};
+    float area{};
+    float compactness{};
+};
+
+/// @brief Decode float32[n, 4] LE blob to vector<DotCandidate> -- the
+/// variable-length sibling to decode_keypoints() for the "several tens of
+/// anonymous candidates per frame" case (design doc §3/§7.1): unlike
+/// ArUco's fixed manifest-width layout, N here is however many candidates
+/// this (camera, frame) actually had, recovered from blob byte length
+/// exactly the way decode_keypoints() recovers its own N. Reuses the
+/// existing detection_keypoints/pose_observations tables with a new
+/// region_type/source value and this blob layout, rather than a new
+/// table -- see the design doc's §3 for why (blob size grows with
+/// candidate count, row count doesn't, at any scale).
+inline std::vector<DotCandidate> decode_dot_candidates(void const* data, int byte_count) {
+    constexpr int candidate_bytes = 4 * sizeof(float);
+    if (byte_count % candidate_bytes != 0) {
+        throw std::runtime_error("decode_dot_candidates: byte_count " + std::to_string(byte_count) +
+                                 " is not a multiple of 16 (4 floats per candidate)");
+    }
+    int n = byte_count / candidate_bytes;
+    std::vector<DotCandidate> result(static_cast<size_t>(n));
+    auto const* src = static_cast<float const*>(data);
+    for (int i = 0; i < n; ++i) {
+        result[static_cast<size_t>(i)].px = src[i * 4 + 0];
+        result[static_cast<size_t>(i)].py = src[i * 4 + 1];
+        result[static_cast<size_t>(i)].area = src[i * 4 + 2];
+        result[static_cast<size_t>(i)].compactness = src[i * 4 + 3];
+    }
+    return result;
+}
+
 /// @brief Test whether slot i is overridden by a pose_observation_edits kp_mask.
 ///
 /// Same bit convention as apply_keypoint_edits() below (uint8[ceil(N/8)], bit i LSB-first).

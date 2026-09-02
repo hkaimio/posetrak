@@ -132,3 +132,63 @@ TEST_CASE("apply_keypoint_edits: size mismatch throws", "[blob_codec]") {
                                            mask.data(), static_cast<int>(mask.size())),
                       std::runtime_error);
 }
+
+// ---------------------------------------------------------------------------
+// decode_dot_candidates (marker-based-mocap design doc's
+// dot-assignment-architecture-design.md, sub-phase C2.3)
+// ---------------------------------------------------------------------------
+
+static std::vector<uint8_t> encode_dot_candidates(std::vector<std::array<float, 4>> const& vals) {
+    std::vector<uint8_t> out(vals.size() * 4 * sizeof(float));
+    for (size_t i = 0; i < vals.size(); ++i) {
+        std::memcpy(out.data() + i * 16, vals[i].data(), 16);
+    }
+    return out;
+}
+
+TEST_CASE("decode_dot_candidates: round-trips N=0 (empty blob)", "[blob_codec]") {
+    auto blob = encode_dot_candidates({});
+    auto result = decode_dot_candidates(blob.data(), static_cast<int>(blob.size()));
+    REQUIRE(result.empty());
+}
+
+TEST_CASE("decode_dot_candidates: round-trips a handful of candidates", "[blob_codec]") {
+    auto blob = encode_dot_candidates({
+        {10.5f, 20.5f, 32.0f, 0.87f},
+        {100.0f, 200.0f, 45.5f, 0.91f},
+        {5.25f, 6.75f, 8.0f, 0.62f},
+    });
+    auto result = decode_dot_candidates(blob.data(), static_cast<int>(blob.size()));
+    REQUIRE(result.size() == 3);
+    REQUIRE(result[0].px == Catch::Approx(10.5f));
+    REQUIRE(result[0].py == Catch::Approx(20.5f));
+    REQUIRE(result[0].area == Catch::Approx(32.0f));
+    REQUIRE(result[0].compactness == Catch::Approx(0.87f));
+    REQUIRE(result[2].px == Catch::Approx(5.25f));
+    REQUIRE(result[2].compactness == Catch::Approx(0.62f));
+}
+
+TEST_CASE("decode_dot_candidates: round-trips several-tens scale", "[blob_codec]") {
+    // The design doc's own scaling target (sec 7): "several tens per
+    // scene", not the single-digit-to-a-dozen count the first draft
+    // assumed.
+    constexpr int n = 47;
+    std::vector<std::array<float, 4>> vals(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        vals[static_cast<size_t>(i)] = {static_cast<float>(i), static_cast<float>(i) * 2.0f, 30.0f,
+                                        0.8f};
+    }
+    auto blob = encode_dot_candidates(vals);
+    auto result = decode_dot_candidates(blob.data(), static_cast<int>(blob.size()));
+    REQUIRE(result.size() == static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        REQUIRE(result[static_cast<size_t>(i)].px == Catch::Approx(static_cast<float>(i)));
+        REQUIRE(result[static_cast<size_t>(i)].py == Catch::Approx(static_cast<float>(i) * 2.0f));
+    }
+}
+
+TEST_CASE("decode_dot_candidates: byte count not a multiple of 16 throws", "[blob_codec]") {
+    std::vector<uint8_t> bad_blob(17, 0);  // 17 is not a multiple of 16
+    REQUIRE_THROWS_AS(decode_dot_candidates(bad_blob.data(), static_cast<int>(bad_blob.size())),
+                      std::runtime_error);
+}

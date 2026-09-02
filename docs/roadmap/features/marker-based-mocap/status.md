@@ -1,5 +1,51 @@
 # Marker-based mocap — status
 
+- **2026-09-02** — Built the first, fully independent batch of Phase C2
+  sub-tasks (§12's own "parallelizable" group): C2.1 (Hungarian solver),
+  C2.2 (rigid closed-form `MarkerPrediction`), C2.3 (DB schema
+  convention/blob codec), C2.9 (config surface). All four unit-tested in
+  isolation; full C++ suite green afterward (319 test cases, 3272+
+  assertions).
+
+  - **C2.1**: `cpp/include/posetrak/tracking/assignment.hpp`, header-only
+    (matches `blob_codec.hpp`'s own convention). Classic O(n³) Jonker-
+    Volgenant-potentials Hungarian, gated per-pair (a pairing above the
+    gate is dropped, not forced) rather than all-or-nothing. Tested
+    against a genuinely adversarial case (globally-optimal vs. greedy-
+    first-match disagree) and at 40×40 scale, comfortably past the
+    "several tens per scene" target.
+  - **C2.2**: new `cpp/{include,src}/posetrak/tracking/marker_prediction.{hpp,cpp}`.
+    Implements exactly the §6.1 math (no FK, no Pinocchio). Cross-checked
+    the Jacobian two ways before trusting it: algebraically against
+    `Tracker::marker_projection_std()`'s independently-derived (general,
+    FK-based) version of the same quantity — both reduce to the same
+    formula via a standard rotation-of-skew identity — and empirically via
+    a hand-computed lever-arm test that a sign error couldn't have passed
+    by accident (nonzero u-variance, exactly-zero v-variance from a
+    rotation that only moves the marker in depth).
+  - **C2.3**: `decode_dot_candidates()` added to `blob_codec.hpp` as a
+    `decode_keypoints()` sibling (float32[N,4]: px, py, area,
+    compactness) — confirms §3's "no new tables" call holds in practice,
+    not just on paper.
+  - **C2.9**: found and fixed a real inaccuracy in the design doc itself
+    before implementing -- §8 had cited `rigid_init_max_residual_m` as a
+    "DB column + `load_tracker_config()` wiring" precedent, but checking
+    the actual code (`session_reader.cpp`'s real column list, `config.cpp`)
+    showed it's TOML-only, no DB column at all -- exactly the
+    `init_search_window_s` (2026-08-31) pattern instead. Corrected the
+    doc, then implemented against the corrected, verified precedent:
+    `dot_assignment_gate_mahalanobis` is TOML-parsed/validated on
+    `TrackerAppConfig` only.
+
+  Also fixed, unrelated to the new code's correctness: the full test
+  suite's own wall-clock time (mostly binary-load/process-startup
+  overhead, not CPU -- observed ~25s real vs. ~0.03s user) had crept
+  close enough to meson's 30s default test timeout that adding these four
+  small files pushed it over, causing an intermittent spurious timeout
+  with all 3272 assertions actually passing when run directly. Widened
+  `tests/meson.build`'s timeout to 120s rather than leave the suite
+  looking flaky as more tests get added.
+
 - **2026-09-02** — Broken Phase C2 (live dot labeling, the design in
   [dot-assignment-architecture-design.md](dot-assignment-architecture-design.md))
   into 12 independently buildable/testable sub-tasks (new doc §12), same

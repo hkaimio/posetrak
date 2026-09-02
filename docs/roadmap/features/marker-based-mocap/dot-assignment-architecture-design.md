@@ -589,10 +589,26 @@ afterward.
 
 ## 8. Config surface
 
-New `TrackerConfig` fields (mirroring `rigid_init_max_residual_m`'s own
-addition pattern from phase 1f — struct field, TOML parsing, validation,
-DB column + `SessionReader::load_tracker_config()` wiring):
+**Corrected 2026-09-02**: checked `rigid_init_max_residual_m`'s actual
+wiring before reusing it as precedent, and it is *not* DB-wired —
+verified against both `SessionReader::load_tracker_config()`'s real
+column list (`session_reader.cpp:157`, no such column selected) and
+`config.cpp` (parsed from TOML only). It's exactly the same situation
+`init_search_window_s` (2026-08-31) already named explicitly: a
+TOML-config-file field for the `run_track()` CLI path, and a plain
+`TrackerConfig` struct default for the DB-driven path every real capture
+(the sword included) actually uses, "pending a real need to tune it
+per-capture." `dot_assignment_gate_mahalanobis` follows that same,
+correctly-verified pattern, not the DB-column one this section
+originally (incorrectly) cited:
 
+- New `TrackerConfig`/`TrackerAppConfig` struct field, `TrackerAppConfig`
+  TOML parsing + validation (`config.cpp`, matching
+  `rigid_init_max_residual_m`'s real shape) — usable from `run_track()`'s
+  CLI config-file path. No `tracker_configs` DB column, no
+  `SessionReader::load_tracker_config()` change, no Python/GUI wiring —
+  add these only if real per-capture tuning need shows up, same
+  threshold `init_search_window_s` was held to.
 - `dot_assignment_gate_mahalanobis` (double) — separate from
   `outlier_threshold` (which gates already-labeled observations after the
   fact); this gates candidate-to-slot *assignment* before an Observation
@@ -733,7 +749,7 @@ discipline as phase 1's own 1a–1f breakdown
 | **C2.6** — `SessionReader`/`ObservationSet` loading | New `UnlabeledCandidate` struct; `load_observations()` gains the per-camera/frame candidate output, decoded via C2.3 (§4). | C2.3. | Extend `test_session_reader.cpp`'s existing manifest-bound-sequence fixture (1f) with a `source='dots'` row; confirm decoded candidates match expected positions/counts. |
 | **C2.7** — Detection-time write path | Promote `prototype_dot_blob_detector.py`'s `detect_blobs()` out of throwaway-script status into a real `DotCandidateWriter` (mirrors `MarkerKeypointWriter`), wired into the marker detection pipeline for GoPro cameras first (§2.1's validated regime). | C2.3. | Unit test on synthetic frames (known blob positions) — same style as existing `MarkerKeypointWriter` tests. Real-footage validation reuses §2.1's already-confirmed area/compactness parameters, not new detector tuning. |
 | **C2.8** — Finalisation | Extend `finalise_object_to_db`'s existing generic copy loop to also handle `region_type='dots'` → `pose_observations`/`source='dots'` (§3) — the identical call shape as markers, one more parameter value. | C2.7. | `finalise_object_to_db` test with a `region_type='dots'` detection run confirms correct `pose_observations` rows with no dots-specific code path (already specified in §10). |
-| **C2.9** — Config surface | `dot_assignment_gate_mahalanobis` `TrackerConfig` field: struct field, TOML parsing, validation, DB column, `load_tracker_config()` wiring (§8) — same pattern as `rigid_init_max_residual_m` (phase 1f). | None. | Mirrors phase 1f's own config-field test coverage (parse + validate + round-trip through the DB). |
+| **C2.9** — Config surface | `dot_assignment_gate_mahalanobis`: `TrackerConfig`/`TrackerAppConfig` struct field, TOML parsing, validation (§8) — verified as `rigid_init_max_residual_m`'s *actual* shape (TOML-only, no DB column), not the DB-wired version originally assumed. | None. | Mirrors phase 1f's own config-field test coverage (parse + validate), no DB round-trip needed. |
 | **C2.10** — `resolve_shared_dot_assignment()` | The orchestrator-level free function (§5.2): builds one combined cost matrix per camera across every participating subject's dot slots (§7.1), solves via C2.1, splits results back out per subject. | C2.1, C2.5, C2.9. | Synthetic multi-subject test (§10, already specified): two skeletons whose slots predict near a shared ambiguous candidate — verify it resolves to exactly one subject, never both, and the loser gets no `Observation` rather than a forced pairing. This is the test that actually exercises the double-claim problem the whole shared-phase redesign exists to fix. |
 | **C2.11** — Wiring into both call paths | Thread the predict-all/resolve/update-all shape (§5.2) through `run_track_from_db()`'s raw loop and `MultiPersonTracker::run()`, likely via new `step_person_context_predict()`/`step_person_context_update()` siblings to the existing `step_person_context()` (§5.2) — both call paths already share that free-function layer, so this is one piece of new plumbing, not two. Every dot-free subject's call path (every existing person, the sword's own ArUco corners) is untouched. | C2.6, C2.10. | Regression: every existing test involving `step_person_context()`/`track_frame()` for a dot-free subject must be unaffected. New: a single-subject (N=1) synthetic case confirms the three-pass shape degenerates correctly to "just track normally" when there's nothing to arbitrate. |
 | **C2.12** — Real end-to-end validation | Re-run against real footage once a dot-calibrated skeleton exists. | C2.7, C2.8, C2.11, **and Phase C1** (external to this phasing). | Phase C3's own stated purpose (§5 of the scoping doc): re-run the exact "Harri bokken" baseline (status.md, 2026-09-01) with dots included; compare tracked-step fraction, reprojection error, and specifically gap duration during fast segments against the ArUco-only numbers already recorded. Single-subject only — no real multi-subject-with-dots capture exists yet to validate C2.10's actual arbitration behavior against real data, only synthetically (C2.10's own test). |

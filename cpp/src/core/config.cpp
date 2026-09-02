@@ -73,6 +73,8 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
         result.calib_noise_std = tracking["calib_noise_std"].value_or(legacy_noise);
         result.pose_noise_std = tracking["pose_noise_std"].value_or(0.0);
         result.outlier_threshold = tracking["outlier_threshold"].value_or(4.0);
+        result.dot_assignment_gate_mahalanobis =
+            tracking["dot_assignment_gate_mahalanobis"].value_or(9.21);
         if (auto vel_cams = tracking["velocity_mode_camera_ids"].as_array()) {
             for (auto&& elem : *vel_cams) {
                 if (auto v = elem.value<int64_t>())
@@ -275,6 +277,12 @@ void TrackerAppConfig::validate() const {
     if (outlier_threshold <= 0.0) {
         throw std::runtime_error(
             fmt::format("Invalid outlier_threshold: {} (must be > 0)", outlier_threshold));
+    }
+
+    if (dot_assignment_gate_mahalanobis <= 0.0) {
+        throw std::runtime_error(
+            fmt::format("Invalid dot_assignment_gate_mahalanobis: {} (must be > 0)",
+                        dot_assignment_gate_mahalanobis));
     }
 
     if (ik_max_iterations <= 0) {

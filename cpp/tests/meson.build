@@ -64,6 +64,10 @@ test_sources = files(
 
   # DB result writer (hierarchical solver read-modify-write patching)
   'test_result_writer.cpp',
+
+  # Marker-based mocap: dot assignment (design doc's Phase C2)
+  'test_assignment.cpp',
+  'test_marker_prediction.cpp',
 )
 
 test_exe = executable('test_posetrak',
@@ -74,4 +78,10 @@ test_exe = executable('test_posetrak',
 
 test('posetrak_tests', test_exe,
   workdir: meson.project_source_root(),
+  # Meson's 30s default has become too tight for this binary's own
+  # process/DLL-load overhead on this platform (observed ~25s wall time
+  # with ~0.03s of that actually CPU-bound, i.e. not the tests running
+  # slowly -- just process startup), not any single slow test. Widened
+  # rather than left to intermittently time out as more tests get added.
+  timeout: 120,
 )

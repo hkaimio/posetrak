@@ -68,9 +68,42 @@ TEST_CASE("TrackerAppConfig load minimal config applies defaults", "[config]") {
     REQUIRE(cfg.process_noise_std == Approx(0.5));
     REQUIRE(cfg.calib_noise_std == Approx(2.0));
     REQUIRE(cfg.outlier_threshold == Approx(4.0));
+    // Marker-based-mocap dot assignment (dot-assignment-architecture-design.md
+    // sec 8, sub-phase C2.9) -- TOML-only, same as rigid_init_max_residual_m's
+    // own real shape, no tracker_configs DB column.
+    REQUIRE(cfg.dot_assignment_gate_mahalanobis == Approx(9.21));
 
     // UKF defaults
     REQUIRE(cfg.ukf_alpha == Approx(0.5));
     REQUIRE(cfg.ukf_beta == Approx(2.0));
     REQUIRE(cfg.ukf_kappa == Approx(0.0));
+}
+
+// ---------------------------------------------------------------------------
+// Tests: dot_assignment_gate_mahalanobis (design doc sub-phase C2.9)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("TrackerAppConfig to_tracker_config threads dot_assignment_gate_mahalanobis through",
+          "[config]") {
+    auto cfg = make_valid_base_config();
+    cfg.dot_assignment_gate_mahalanobis = 12.5;
+    TrackerConfig tc = cfg.to_tracker_config();
+    REQUIRE(tc.dot_assignment_gate_mahalanobis == Approx(12.5));
+}
+
+TEST_CASE("TrackerAppConfig validate rejects non-positive dot_assignment_gate_mahalanobis",
+          "[config]") {
+    auto cfg = make_valid_base_config();
+    cfg.dot_assignment_gate_mahalanobis = 0.0;
+    REQUIRE_THROWS_AS(cfg.validate(), std::runtime_error);
+
+    cfg.dot_assignment_gate_mahalanobis = -1.0;
+    REQUIRE_THROWS_AS(cfg.validate(), std::runtime_error);
+}
+
+TEST_CASE("TrackerAppConfig validate accepts a positive dot_assignment_gate_mahalanobis",
+          "[config]") {
+    auto cfg = make_valid_base_config();
+    cfg.dot_assignment_gate_mahalanobis = 9.21;
+    REQUIRE_NOTHROW(cfg.validate());
 }

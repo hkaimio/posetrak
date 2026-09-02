@@ -1,5 +1,43 @@
 # Marker-based mocap — status
 
+- **2026-09-02** — Added `SessionReader::load_unlabeled_candidates()`: reads
+  anonymous reflective-dot candidate detections back out of the DB for a
+  sequence, decoding each `pose_observations` row with `source='dots'`
+  through the existing variable-length blob decoder and undistorting
+  positions the same way labeled keypoints already are. New
+  `UnlabeledCandidate` struct (camera, frame, timestamp, undistorted +
+  distorted position, area, compactness) -- deliberately not an
+  `Observation`, since there is no marker identity yet; resolving that
+  identity is exactly what the shared dot-assignment phase does later (see
+  [dot-assignment-architecture-design.md](dot-assignment-architecture-design.md)).
+
+  Chose a new sibling method over changing `load_observations()`'s own
+  signature -- `SessionReader` already has many single-purpose `load_*`
+  methods (config, cameras, sequence info, ...), and dot candidates aren't
+  filtered by `person_id` at all (they're scene-wide, not tied to any one
+  tracked subject), so folding them into the person-scoped observation
+  loader would have been the more awkward shape, not the simpler one.
+  Factored the small "resolve camera_instance_id → Camera" and "read the
+  pixels_are_undistorted flag" lookups `load_observations()` already did
+  inline into two private helpers shared by both methods, rather than
+  duplicating them.
+
+  Found and fixed a real bug while adding the test fixture, not just a test
+  artifact: `load_observations()`'s own query had no filter excluding
+  `source='dots'` rows, so a dots row sharing an existing row's
+  `person_id` would get pulled into that row's group and fail decoding as
+  a labeled keypoint blob (wrong element count). Added an explicit
+  `source != 'dots'` exclusion -- dots candidates are scene-wide and have
+  no natural `person_id` of their own, so nothing guarantees a future
+  write path picks one that never collides.
+
+  Test coverage extends the existing manifest-bound object-sequence
+  fixture (`test_session_reader.cpp`) with two `source='dots'` frames of
+  different candidate counts (3, then 1), confirming per-frame decoding,
+  camera resolution, and the confirmed-empty case for a sequence with no
+  dots rows at all (every sequence before the dot-detection write path
+  exists). Full C++ suite green afterward.
+
 - **2026-09-02** — Split `Tracker`'s per-frame predict/update cycle into
   two public methods, and added a query for where each unlabeled ("dot")
   marker on a rigid-body skeleton is expected to project this frame. This

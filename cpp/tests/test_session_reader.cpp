@@ -622,6 +622,39 @@ static void create_fixture_db() {
                       "(id, sequence_id, camera_instance_id, video_frame, kp_blob, kp_mask) "
                       "VALUES ('edit_markers_ghost', 'seq_markers', 'inst1', 2, ?, ?)",
                       edit_blob, mask);
+
+        // ---------- Anonymous reflective-dot candidates on the same sequence
+        // (source='dots'): person_id=0 as a placeholder -- dot candidates are
+        // scene-wide, not tied to a tracked subject, but pose_observations'
+        // primary key still requires one. A different candidate count per
+        // frame (3, then 1) exercises the variable-N blob width. ----------
+        auto make_dots_blob = [](std::vector<std::array<float, 4>> const& candidates) {
+            std::vector<float> vals;
+            for (auto const& c : candidates) {
+                vals.insert(vals.end(), c.begin(), c.end());
+            }
+            return encode_float32_blob(vals);
+        };
+        auto insert_dots_row = [&](int frame, std::vector<std::array<float, 4>> const& candidates) {
+            std::string sql =
+                "INSERT INTO pose_observations "
+                "(sequence_id, camera_instance_id, video_frame, timestamp_s, person_id, source,"
+                " kp_blob, noise_scale) "
+                "VALUES ('seq_markers', 'inst1', " +
+                std::to_string(frame) + ", " + std::to_string(frame * (1.0 / 120.0)) +
+                ", 0, 'dots', ?, NULL)";
+            sqlite3_stmt* stmt = nullptr;
+            sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+            auto blob = make_dots_blob(candidates);
+            sqlite3_bind_blob(stmt, 1, blob.data(), static_cast<int>(blob.size()), SQLITE_STATIC);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        };
+        // px, py, area, compactness
+        insert_dots_row(0, {{{400.f, 500.f, 12.5f, 0.90f}},
+                            {{410.f, 505.f, 10.0f, 0.85f}},
+                            {{420.f, 510.f, 15.0f, 0.92f}}});
+        insert_dots_row(1, {{{450.f, 460.f, 8.0f, 0.80f}}});
     }
 
     sqlite3_close(db);
@@ -1052,4 +1085,60 @@ TEST_CASE(
     REQUIRE(frame2.size() == 1);
     REQUIRE(frame2[0].position_distorted.x() == Catch::Approx(300.0));
     REQUIRE(frame2[0].position_distorted.y() == Catch::Approx(301.0));
+}
+
+TEST_CASE("SessionReader load_unlabeled_candidates decodes a variable-N dot blob per frame",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    auto cameras = reader.load_cameras_for_sequence("seq_markers");
+    auto candidates = reader.load_unlabeled_candidates("seq_markers", cameras);
+
+    // pixels_are_undistorted defaults to 1 for this sequence, so position ==
+    // position_distorted -- both checked to confirm the field is actually
+    // populated, not left default-constructed.
+    std::vector<UnlabeledCandidate> frame0;
+    std::vector<UnlabeledCandidate> frame1;
+    for (auto const& c : candidates) {
+        REQUIRE(c.camera_id == cameras.at("cam1").id());
+        REQUIRE(c.position.isApprox(c.position_distorted));
+        if (c.frame_idx == 0)
+            frame0.push_back(c);
+        else if (c.frame_idx == 1)
+            frame1.push_back(c);
+    }
+
+    REQUIRE(frame0.size() == 3);
+    REQUIRE(frame0[0].position.x() == Catch::Approx(400.0));
+    REQUIRE(frame0[0].position.y() == Catch::Approx(500.0));
+    REQUIRE(frame0[0].area == Catch::Approx(12.5));
+    REQUIRE(frame0[0].compactness == Catch::Approx(0.90));
+    REQUIRE(frame0[1].position.x() == Catch::Approx(410.0));
+    REQUIRE(frame0[2].position.x() == Catch::Approx(420.0));
+    // No per-candidate detector confidence exists in the blob -- always 1.0.
+    REQUIRE(frame0[0].confidence == Catch::Approx(1.0));
+
+    REQUIRE(frame1.size() == 1);
+    REQUIRE(frame1[0].position.x() == Catch::Approx(450.0));
+    REQUIRE(frame1[0].position.y() == Catch::Approx(460.0));
+    REQUIRE(frame1[0].area == Catch::Approx(8.0));
+    REQUIRE(frame1[0].compactness == Catch::Approx(0.80));
+
+    // seq_markers' own labeled 'markers'/'hand_l' rows must not leak in --
+    // load_unlabeled_candidates() is source='dots' only.
+    REQUIRE(candidates.size() == 4);
+}
+
+TEST_CASE("SessionReader load_unlabeled_candidates returns empty for a sequence with no dots rows",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    // seq1 (the plain person sequence used by the basic load_observations
+    // test below) has no source='dots' rows at all -- every sequence before
+    // the dot-detection write path exists looks like this.
+    auto cameras = reader.load_cameras_for_sequence("seq1");
+    auto candidates = reader.load_unlabeled_candidates("seq1", cameras);
+    REQUIRE(candidates.empty());
 }

@@ -14,6 +14,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace posetrak {
@@ -56,6 +57,25 @@ struct SequenceMetadata {
     std::string session_id;
     std::string extrinsic_calibration_id;
     std::string sync_config_id;
+};
+
+/// @brief One anonymous reflective-dot candidate detection, undistorted and
+/// resolved to a Camera, but not yet resolved to a marker identity -- that
+/// resolution is what the shared dot-assignment phase does at tracking time
+/// (see docs/roadmap/features/marker-based-mocap/dot-assignment-architecture-design.md).
+/// Deliberately not an Observation: there is no marker_id yet.
+struct UnlabeledCandidate {
+    int camera_id;
+    int frame_idx;
+    double timestamp;
+    Eigen::Vector2d position;            ///< Undistorted pixels, matches Observation::position
+    Eigen::Vector2d position_distorted;  ///< Original distorted pixels, for diagnostics
+    /// No per-candidate detector confidence exists in the underlying blob (unlike a
+    /// pose keypoint) -- always 1.0. Kept as a field for shape-parity with Observation
+    /// rather than dropped, in case a future detector version adds a real one.
+    double confidence;
+    double area;         ///< Blob area in pixels, from the detector (diagnostics/tuning only)
+    double compactness;  ///< Blob compactness, from the detector (diagnostics/tuning only)
 };
 
 /// @brief Reads tracking data from a per-session SQLite database
@@ -160,7 +180,43 @@ class SessionReader {
                                      double cross_pair_max_px = 0.0, int cross_pair_max_n = 10,
                                      double edited_kp_noise_std = 0.0);
 
+    /// @brief Load anonymous reflective-dot candidates for a sequence.
+    ///
+    /// Reads every `pose_observations` row with `source='dots'` (the
+    /// finalized-data counterpart of a `detection_keypoints` row with
+    /// `region_type='dots'`), decodes each row's variable-length
+    /// `float32[N,4]` blob via `db::decode_dot_candidates()`, and undistorts
+    /// positions the same way `load_observations()` does for labeled
+    /// keypoints.
+    ///
+    /// Not filtered by `person_id`: dot candidates are scene-wide detections,
+    /// not yet tied to any one tracked subject -- that is exactly the
+    /// ambiguity the shared dot-assignment phase resolves at tracking time.
+    ///
+    /// @param sequence_id pose_observation_sequences primary key
+    /// @param cameras Camera map (label → Camera) as returned by load_cameras()
+    /// @return Every candidate across every camera/frame with a `source='dots'`
+    ///         row, ordered by camera then frame. Empty if the sequence has no
+    ///         such rows (every sequence before the dot-detection write path
+    ///         exists).
+    std::vector<UnlabeledCandidate>
+    load_unlabeled_candidates(std::string const& sequence_id,
+                              std::map<std::string, Camera> const& cameras);
+
    private:
+    /// @brief Read pose_observation_sequences.pixels_are_undistorted for sequence_id.
+    /// @return true (safe default for pre-flag data) if NULL or the row is absent.
+    bool load_pixels_are_undistorted(std::string const& sequence_id);
+
+    /// @brief Build camera_instance_id -> Camera const* for every camera actually
+    /// used by this sequence's captured videos, resolved against `cameras`.
+    /// Shared by load_observations() and load_unlabeled_candidates() -- both need
+    /// the identical instance-id-to-Camera resolution.
+    /// @note The returned pointers alias `cameras`; callers must not outlive it.
+    std::unordered_map<std::string, Camera const*>
+    load_instance_camera_map(std::string const& sequence_id,
+                             std::map<std::string, Camera> const& cameras);
+
     sqlite3* db_{};
 
     /// @brief RAII wrapper around a prepared SQLite statement

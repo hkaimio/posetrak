@@ -705,40 +705,11 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
                                                 double cross_pair_max_px, int cross_pair_max_n,
                                                 double edited_kp_noise_std) {
     // Step 0: Read pixels_are_undistorted flag for this sequence
-    bool pixels_are_undistorted = true;  // default: assume undistorted (safe for existing data)
-    {
-        Stmt flag_stmt(db_,
-                       "SELECT pixels_are_undistorted"
-                       " FROM pose_observation_sequences WHERE id = ?");
-        sqlite3_bind_text(flag_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
-        if (flag_stmt.step()) {
-            if (sqlite3_column_type(flag_stmt.ptr, 0) != SQLITE_NULL) {
-                pixels_are_undistorted = (sqlite3_column_int(flag_stmt.ptr, 0) != 0);
-            }
-        }
-    }
+    bool pixels_are_undistorted = load_pixels_are_undistorted(sequence_id);
 
     // Step 1: Build instance_id → Camera const* map.
-    // Enumerate cameras from capture_videos for the capture this sequence belongs to.
-    Stmt inst_stmt(db_,
-                   "SELECT ci.id, ci.label"
-                   " FROM pose_observation_sequences pos"
-                   " JOIN captures s ON s.id = pos.shot_id"
-                   " JOIN capture_videos sv ON sv.shot_id = s.id"
-                   " JOIN camera_instances ci ON ci.id = sv.camera_instance_id"
-                   " WHERE pos.id = ?");
-    sqlite3_bind_text(inst_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
-
-    std::unordered_map<std::string, Camera const*> inst_to_cam;
-    while (inst_stmt.step()) {
-        std::string inst_id = reinterpret_cast<char const*>(sqlite3_column_text(inst_stmt.ptr, 0));
-        std::string label = reinterpret_cast<char const*>(sqlite3_column_text(inst_stmt.ptr, 1));
-
-        auto it = cameras.find(label);
-        if (it != cameras.end()) {
-            inst_to_cam[inst_id] = &it->second;
-        }
-    }
+    std::unordered_map<std::string, Camera const*> inst_to_cam =
+        load_instance_camera_map(sequence_id, cameras);
 
     // Step 2: Build COCO keypoint ID → skeleton marker index map
     std::unordered_map<int, int> coco_to_marker_idx;
@@ -912,11 +883,18 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
     // (camera, frame, source) -- Phase 2 of hand-detection refinement lets a
     // (camera, frame) pair have multiple source rows ('body' plus refined
     // 'hand_l'/'hand_r' passes) instead of one shared row.
+    //
+    // Excludes source='dots' explicitly rather than relying on those rows
+    // using a person_id that never matches: dots rows are anonymous,
+    // scene-wide detections (load_unlabeled_candidates() is the reader for
+    // them), not a labeled marker/keypoint layout decode_keypoints() can
+    // parse -- a dots row sharing this query's person_id would otherwise get
+    // pulled into a group here and fail to decode as float32[N,3].
     Stmt obs_stmt(db_,
                   "SELECT po.camera_instance_id, po.video_frame, po.source, po.timestamp_s,"
                   " po.kp_blob, COALESCE(po.noise_scale, 1.0) AS crop_scale"
                   " FROM pose_observations po"
-                  " WHERE po.sequence_id = ? AND po.person_id = ?"
+                  " WHERE po.sequence_id = ? AND po.person_id = ? AND po.source != 'dots'"
                   " ORDER BY po.camera_instance_id, po.video_frame");
     sqlite3_bind_text(obs_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(obs_stmt.ptr, 2, person_id);
@@ -1286,6 +1264,90 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
         obs_set.add_sequence(seq);
     }
     return obs_set;
+}
+
+bool SessionReader::load_pixels_are_undistorted(std::string const& sequence_id) {
+    bool pixels_are_undistorted = true;  // default: assume undistorted (safe for existing data)
+    Stmt flag_stmt(db_,
+                   "SELECT pixels_are_undistorted"
+                   " FROM pose_observation_sequences WHERE id = ?");
+    sqlite3_bind_text(flag_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+    if (flag_stmt.step()) {
+        if (sqlite3_column_type(flag_stmt.ptr, 0) != SQLITE_NULL) {
+            pixels_are_undistorted = (sqlite3_column_int(flag_stmt.ptr, 0) != 0);
+        }
+    }
+    return pixels_are_undistorted;
+}
+
+std::unordered_map<std::string, Camera const*>
+SessionReader::load_instance_camera_map(std::string const& sequence_id,
+                                        std::map<std::string, Camera> const& cameras) {
+    // Enumerate cameras from capture_videos for the capture this sequence belongs to.
+    Stmt inst_stmt(db_,
+                   "SELECT ci.id, ci.label"
+                   " FROM pose_observation_sequences pos"
+                   " JOIN captures s ON s.id = pos.shot_id"
+                   " JOIN capture_videos sv ON sv.shot_id = s.id"
+                   " JOIN camera_instances ci ON ci.id = sv.camera_instance_id"
+                   " WHERE pos.id = ?");
+    sqlite3_bind_text(inst_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+
+    std::unordered_map<std::string, Camera const*> inst_to_cam;
+    while (inst_stmt.step()) {
+        std::string inst_id = reinterpret_cast<char const*>(sqlite3_column_text(inst_stmt.ptr, 0));
+        std::string label = reinterpret_cast<char const*>(sqlite3_column_text(inst_stmt.ptr, 1));
+
+        auto it = cameras.find(label);
+        if (it != cameras.end()) {
+            inst_to_cam[inst_id] = &it->second;
+        }
+    }
+    return inst_to_cam;
+}
+
+std::vector<UnlabeledCandidate>
+SessionReader::load_unlabeled_candidates(std::string const& sequence_id,
+                                         std::map<std::string, Camera> const& cameras) {
+    bool const pixels_are_undistorted = load_pixels_are_undistorted(sequence_id);
+    std::unordered_map<std::string, Camera const*> inst_to_cam =
+        load_instance_camera_map(sequence_id, cameras);
+
+    Stmt stmt(db_,
+              "SELECT po.camera_instance_id, po.video_frame, po.timestamp_s, po.kp_blob"
+              " FROM pose_observations po"
+              " WHERE po.sequence_id = ? AND po.source = 'dots'"
+              " ORDER BY po.camera_instance_id, po.video_frame");
+    sqlite3_bind_text(stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+
+    std::vector<UnlabeledCandidate> result;
+    while (stmt.step()) {
+        std::string inst_id = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 0));
+        int video_frame = sqlite3_column_int(stmt.ptr, 1);
+        double timestamp_s = sqlite3_column_double(stmt.ptr, 2);
+        void const* blob_data = sqlite3_column_blob(stmt.ptr, 3);
+        int blob_bytes = sqlite3_column_bytes(stmt.ptr, 3);
+
+        auto cam_it = inst_to_cam.find(inst_id);
+        if (cam_it == inst_to_cam.end())
+            continue;  // camera not in the requested map -- same skip as load_observations()
+        Camera const* camera = cam_it->second;
+
+        for (auto const& c : db::decode_dot_candidates(blob_data, blob_bytes)) {
+            UnlabeledCandidate cand;
+            cand.camera_id = camera->id();
+            cand.frame_idx = video_frame;
+            cand.timestamp = timestamp_s;
+            cand.position_distorted = Eigen::Vector2d(c.px, c.py);
+            cand.position = pixels_are_undistorted ? cand.position_distorted
+                                                   : camera->undistort(cand.position_distorted);
+            cand.confidence = 1.0;
+            cand.area = c.area;
+            cand.compactness = c.compactness;
+            result.push_back(cand);
+        }
+    }
+    return result;
 }
 
 }  // namespace posetrak

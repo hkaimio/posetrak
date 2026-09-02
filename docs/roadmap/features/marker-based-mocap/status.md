@@ -1,5 +1,59 @@
 # Marker-based mocap — status
 
+- **2026-09-02** — Built the shared dot-assignment phase itself: one
+  combined Hungarian solve per camera across every participating tracked
+  subject's candidate reflective-dot predictions, so a candidate can only
+  ever be claimed by one subject -- the actual double-claim problem the
+  whole shared-phase redesign (see
+  [dot-assignment-architecture-design.md](dot-assignment-architecture-design.md))
+  exists to fix. Not yet wired into either real per-frame loop
+  (`run_track_from_db()`'s raw loop, `MultiPersonTracker::run()`) -- that's
+  separate, later work; this is the resolution logic itself, callable and
+  fully tested on its own.
+
+  New `cpp/{include,src}/posetrak/tracking/dot_assignment.{hpp,cpp}`, split
+  into two layers mirroring this codebase's existing
+  `update_contact_pairs()`/`build_cross_person_anchors()` vs.
+  `MultiPersonTracker::update_contact_gate()`/`build_anchor_observations()`
+  split for the structurally analogous cross-person case:
+
+  - `resolve_dot_assignment()` -- the pure resolution core. No
+    Tracker/skeleton/camera access at all: takes each subject's
+    already-computed `MarkerPrediction`s (camera → marker → prediction) and
+    the frame's candidate pool (camera → candidates), builds one cost
+    matrix per camera (rows = that camera's candidates, columns = the union
+    of every subject's dot-slot predictions for that camera), solves via
+    the existing Hungarian solver with the configured Mahalanobis gate, and
+    returns each subject's own resolved `Observation`s. Being Tracker-free
+    is what makes it directly testable against fabricated predictions and
+    candidates, the same reason the cross-person functions above are pure.
+  - `resolve_shared_dot_assignment()` -- a thin wrapper that calls
+    `Tracker::predict_dot_slot_predictions()` per subject per camera and
+    delegates to the pure core. This is the shape a future orchestrator
+    actually calls; deviated from the design doc's original suggestion to
+    put it in `multi_person_tracker.hpp`/`.cpp` -- neither function needs
+    `PersonContext`/`MultiPersonTracker` machinery, and a dedicated file
+    matches this codebase's existing one-concept-per-file pattern for the
+    assignment/prediction seams (`assignment.hpp`, `marker_prediction.hpp`)
+    this builds directly on top of.
+
+  Resolved `Observation`s reuse the same near-zero `crop_scale` convention
+  already established for ArUco corners and dot candidates at write
+  time -- a candidate's centroid comes from thresholding the full-resolution
+  frame directly, not a fixed-input-resolution network, so calibration
+  error alone should dominate the noise model.
+
+  Test coverage (`test_dot_assignment.cpp`, new, 10 cases): straightforward
+  single-subject matches and gate rejection first, then the two cases that
+  actually matter -- a clearly-closer-fit scenario confirming the losing
+  subject gets nothing (not a forced worse pairing), and a genuinely
+  equidistant/ambiguous candidate confirming exactly one subject wins, via
+  logical XOR, never both and never neither. Plus multi-marker and
+  multi-camera independence checks, and one test wiring
+  `resolve_shared_dot_assignment()` against two real rigid-body `Tracker`s
+  end to end (not fabricated data) to confirm the Tracker-calling glue
+  itself, not just the math. Full C++ suite green afterward.
+
 - **2026-09-02** — Built the detection-time write path for anonymous
   reflective-dot candidates, and finalisation support for them, closing the
   loop with the read side added earlier the same day (this file's next

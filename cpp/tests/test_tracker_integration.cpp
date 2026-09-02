@@ -3,9 +3,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <posetrak/core/observation.hpp>
+#include <posetrak/db/session_reader.hpp>
 #include <posetrak/io/skeleton_loader.hpp>
 #include <posetrak/kinematics/forward_kinematics.hpp>
 #include <posetrak/kinematics/pinocchio_model_builder.hpp>
+#include <posetrak/tracking/dot_assignment.hpp>
 #include <posetrak/tracking/relative_observations.hpp>
 #include <posetrak/tracking/tracker.hpp>
 
@@ -861,4 +863,169 @@ TEST_CASE("Rigid-body initialization: root-only skeleton uses Kabsch/Umeyama fit
         bool const ok = collinear_tracker.initialize(collinear_observations, 0.0);
         CHECK_FALSE(ok);
     }
+}
+
+TEST_CASE(
+    "Rigid-body tracking: resolving a dot candidate through the shared assignment phase "
+    "produces the identical posterior to feeding it in as a pre-labeled Observation",
+    "[tracker][rigid_init][dot_assignment]") {
+    // Closes the loop on design doc section 1's central claim
+    // (dot-assignment-architecture-design.md): UnscentedKalmanFilter::update()
+    // only ever consumes already-labeled Observations, so it cannot matter
+    // *how* a dot candidate got resolved to a marker_id -- only that it did.
+    // This drives one real Tracker through predict_step() ->
+    // resolve_shared_dot_assignment() -> update_step() for a frame carrying
+    // both a labeled (ArUco-style) observation set and one anonymous dot
+    // candidate, and checks the resulting posterior against a second Tracker
+    // fed the identical data as a single pre-labeled Observation list via
+    // the ordinary track_frame().
+    TrackerIntegrationFixture fixture;
+    fixture.setup_cameras(3, 4.0, 1.5);
+
+    // rigid_prop.yaml's own 5 labeled markers, plus one unlabeled_points dot
+    // this test adds directly to the loaded Skeleton (no fixture-file change
+    // needed -- Marker::track is an opaque, unvalidated string at load time,
+    // design doc section 1).
+    Skeleton skeleton = load_skeleton_from_yaml("cpp/tests/data/rigid_prop.yaml");
+    skeleton.add_input_track("dots", "unlabeled_points");
+    skeleton.add_marker("dot0", /*joint_index=*/0, Eigen::Vector3d(0.03, 0.03, 0.08), std::nullopt,
+                        "dots", "dot0");
+    auto skeleton_ptr = std::make_shared<Skeleton const>(skeleton);
+
+    pinocchio::Model model;
+    pinocchio::Data data;
+    PinocchioModelBuilder::build_model_and_data(skeleton, model, data);
+    auto marker_map = PinocchioModelBuilder::build_marker_frame_map(model, skeleton);
+    auto layout = SkeletonLayout::from_full_skeleton(skeleton_ptr);
+    ForwardKinematics fk(model, data, marker_map, layout);
+
+    Eigen::Vector3d const gt_position(1.2, -0.5, 0.8);
+    Eigen::Quaterniond gt_orientation(
+        Eigen::AngleAxisd(0.7, Eigen::Vector3d(0.3, 0.6, 0.74).normalized()));
+    gt_orientation.normalize();
+    State const gt_state(gt_position, gt_orientation, Eigen::VectorXd(0), Eigen::Vector3d::Zero(),
+                         Eigen::Vector3d::Zero(), Eigen::VectorXd(0));
+
+    std::unordered_map<std::string, int> marker_name_to_id;
+    auto const& markers = skeleton.markers();
+    for (size_t i = 0; i < markers.size(); ++i) {
+        marker_name_to_id[markers[i].name] = static_cast<int>(i);
+    }
+    int const dot0_id = marker_name_to_id.at("dot0");
+    auto marker_positions_world = fk.compute(gt_state);
+
+    // Labeled observations (m0..m4) -- identical for both trackers, exactly
+    // as any ordinary Observation the tracker already handles today.
+    std::vector<Observation> labeled_observations;
+    // dot0's projection, kept in two forms: an UnlabeledCandidate per camera
+    // (what the shared assignment phase actually resolves) and a hand-built
+    // Observation using the identical field values (what a labeled ArUco
+    // corner at the same pixel would look like) -- the whole point is that
+    // these two must produce the same posterior.
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> dot_candidates_by_camera;
+    std::vector<Observation> dot0_as_labeled_observations;
+
+    for (auto const& [name, pos3d] : marker_positions_world) {
+        int const marker_id = marker_name_to_id.at(name);
+        for (auto const& camera : fixture.cameras()) {
+            auto pos2d_opt = camera.project_undistorted(pos3d);
+            if (!pos2d_opt.has_value() || !camera.is_in_bounds(*pos2d_opt))
+                continue;
+
+            if (marker_id == dot0_id) {
+                UnlabeledCandidate cand;
+                cand.camera_id = camera.id();
+                cand.frame_idx = 1;
+                cand.timestamp = 1.0 / 30.0;
+                cand.position = *pos2d_opt;
+                cand.position_distorted = *pos2d_opt;
+                cand.confidence = 1.0;
+                cand.area = 10.0;
+                cand.compactness = 0.9;
+                dot_candidates_by_camera[camera.id()].push_back(cand);
+
+                Observation labeled_dot;
+                labeled_dot.camera_id = camera.id();
+                labeled_dot.marker_id = marker_id;
+                labeled_dot.frame_idx = 1;
+                labeled_dot.timestamp = 1.0 / 30.0;
+                labeled_dot.position = *pos2d_opt;
+                labeled_dot.position_distorted = *pos2d_opt;
+                labeled_dot.confidence = 1.0;
+                labeled_dot.crop_scale = 0.0;  // matches resolve_dot_assignment()'s own convention
+                dot0_as_labeled_observations.push_back(labeled_dot);
+            } else {
+                Observation obs;
+                obs.camera_id = camera.id();
+                obs.marker_id = marker_id;
+                obs.frame_idx = 1;
+                obs.timestamp = 1.0 / 30.0;
+                obs.position = *pos2d_opt;
+                obs.position_distorted = *pos2d_opt;
+                obs.confidence = 0.9;
+                labeled_observations.push_back(obs);
+            }
+        }
+    }
+    REQUIRE(labeled_observations.size() >= 3 * (skeleton.markers().size() - 1));
+    REQUIRE(!dot_candidates_by_camera.empty());
+
+    TrackerConfig config;
+    config.min_cameras_for_init = 2;
+    config.rigid_init_max_residual_m = 0.02;
+    config.dot_assignment_gate_mahalanobis = 9.21;
+
+    std::unordered_map<int, Camera> camera_map;
+    for (auto const& cam : fixture.cameras()) {
+        camera_map.emplace(cam.id(), cam);
+    }
+
+    // Both trackers start from the identical initialized state -- init itself
+    // isn't what this test is about, so a slightly-off (not exactly gt)
+    // starting state exercises a real predict+update, not a no-op refinement.
+    State const init_state(gt_position + Eigen::Vector3d(0.02, -0.01, 0.015), gt_orientation,
+                           Eigen::VectorXd(0), Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                           Eigen::VectorXd(0));
+
+    Tracker tracker_direct(skeleton_ptr, camera_map, config);
+    Tracker tracker_via_dots(skeleton_ptr, camera_map, config);
+    tracker_direct.initialize_from_state(init_state, 0.0);
+    tracker_via_dots.initialize_from_state(init_state, 0.0);
+
+    double const dt = 1.0 / 30.0;
+
+    // "Direct" path: dot0's projection fed straight in as a pre-labeled
+    // Observation, alongside the ordinary labeled markers -- one ordinary
+    // track_frame() call, exactly as today.
+    std::vector<Observation> direct_observations = labeled_observations;
+    direct_observations.insert(direct_observations.end(), dot0_as_labeled_observations.begin(),
+                               dot0_as_labeled_observations.end());
+    TrackingResult const direct_result = tracker_direct.track_frame(direct_observations, dt);
+
+    // "Via dots" path: the shared assignment phase resolves dot0's candidate
+    // to marker_id before update_step() ever sees it.
+    tracker_via_dots.predict_step(dt);
+    std::vector<DotAssignmentSubject> subjects = {DotAssignmentSubject{0, &tracker_via_dots}};
+    auto assignment =
+        resolve_shared_dot_assignment(subjects, dot_candidates_by_camera, config, 1, dt);
+    size_t total_dot_candidates = 0;
+    for (auto const& [cam_id, cands] : dot_candidates_by_camera)
+        total_dot_candidates += cands.size();
+    REQUIRE(assignment.count(0) == 1);
+    // One dot0 candidate per camera, well within the gate, no competing
+    // subject -- every one of them should resolve.
+    REQUIRE(assignment.at(0).resolved.size() == total_dot_candidates);
+
+    std::vector<Observation> via_dots_observations = labeled_observations;
+    via_dots_observations.insert(via_dots_observations.end(), assignment.at(0).resolved.begin(),
+                                 assignment.at(0).resolved.end());
+    TrackingResult const via_dots_result = tracker_via_dots.update_step(via_dots_observations, dt);
+
+    REQUIRE_FALSE(direct_result.tracking_lost);
+    REQUIRE_FALSE(via_dots_result.tracking_lost);
+    double const tol = 1e-9;
+    CHECK(direct_result.state.root_position().isApprox(via_dots_result.state.root_position(), tol));
+    CHECK(direct_result.state.root_orientation().coeffs().isApprox(
+        via_dots_result.state.root_orientation().coeffs(), tol));
+    CHECK(direct_result.covariance.isApprox(via_dots_result.covariance, tol));
 }

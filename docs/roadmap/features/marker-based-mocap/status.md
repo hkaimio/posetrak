@@ -1,5 +1,32 @@
 # Marker-based mocap — status
 
+- **2026-09-02** — Closed the loop on the central claim the whole
+  dot-assignment design rests on (see
+  [dot-assignment-architecture-design.md](dot-assignment-architecture-design.md)
+  §1: `UnscentedKalmanFilter::update()` never changes, because it only ever
+  consumes already-labeled `Observation`s regardless of how they got
+  labeled). New integration test in `test_tracker_integration.cpp`, built on
+  the existing rigid-prop fixture: adds one `unlabeled_points` marker
+  directly to the loaded skeleton (no fixture-file change needed --
+  `Marker::track` was already an opaque, unvalidated string at load time),
+  drives one real `Tracker` through `predict_step()` ->
+  `resolve_shared_dot_assignment()` -> `update_step()` for a frame with both
+  ordinary labeled markers and one anonymous dot candidate, and checks the
+  resulting posterior state and covariance against a second `Tracker` fed
+  the identical data as a single pre-labeled `Observation` list through the
+  ordinary `track_frame()`. Bit-identical (1e-9 tolerance) on both.
+
+  This is deliberately scoped narrower than "wire the shared phase into the
+  real per-frame loops" (`run_track_from_db()`'s raw loop,
+  `MultiPersonTracker::run()`) -- that's substantial, separate plumbing work
+  the design doc itself calls out as such (§5.2/§9/§11), and it can only be
+  exercised synthetically right now anyway: no real dot-bearing capture
+  exists yet (gated on the separate calibration-time phase, C1, which
+  hasn't been built). This test confirms the piece that actually matters
+  today -- the resolution math and the Tracker seam it plugs into behave
+  correctly together -- without touching the orchestration loops every
+  current real tracking run (dot-free) already depends on.
+
 - **2026-09-02** — Built the shared dot-assignment phase itself: one
   combined Hungarian solve per camera across every participating tracked
   subject's candidate reflective-dot predictions, so a candidate can only

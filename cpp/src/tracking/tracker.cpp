@@ -846,30 +846,14 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
                               "Negative dt: timestamps out of order"};
     }
 
-    std::vector<Observation> const annotated = build_annotated_observations(observations);
-    auto result = run_parent_step(annotated, dt, timestamp);
-
-    if (!result.tracking_lost) {
-        last_timestamp_ = timestamp;
-        ++frame_count_;
-        // Store raw pixel positions for next frame's velocity-mode annotation
-        for (Observation const& obs : observations) {
-            prev_observations_[obs.camera_id][obs.marker_id] = obs.position;
-        }
-        if (frame_callback_) {
-            frame_callback_(result);
-        }
-    }
-
-    return result;
+    predict_step(dt);
+    return update_step(observations, timestamp);
 }
 
-TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observations, double dt,
-                                        double timestamp) {
+void Tracker::predict_step(double dt) {
     using Clock = std::chrono::steady_clock;
     using Ms = std::chrono::duration<double, std::milli>;
 
-    // Step 1: Predict
     auto t0 = Clock::now();
     auto predict_result = ukf_->predict(dt);
     double const predict_ms = Ms(Clock::now() - t0).count();
@@ -881,15 +865,101 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
         print_init_debug(prior_state, "PRIOR ");
     }
 
+    pending_predict_ms_ = predict_ms;
+    pending_prior_state_ = prior_state;
+    pending_prior_cov_ = prior_cov;
+    pending_predict_result_ = std::move(predict_result);
+    predict_pending_ = true;
+}
+
+std::unordered_map<int, MarkerPrediction>
+Tracker::predict_dot_slot_predictions(int camera_id) const {
+    if (!skeleton_->is_rigid_body()) {
+        throw std::runtime_error(
+            "Tracker::predict_dot_slot_predictions: general/articulated MarkerPrediction is "
+            "not yet implemented (dot-assignment-architecture-design.md §6 -- deferred pending "
+            "a real articulated dot-augmented capture)");
+    }
+    auto cam_it = cameras_.find(camera_id);
+    if (cam_it == cameras_.end()) {
+        throw std::runtime_error("Tracker::predict_dot_slot_predictions: unknown camera_id " +
+                                 std::to_string(camera_id));
+    }
+    if (!predict_pending_) {
+        throw std::runtime_error(
+            "Tracker::predict_dot_slot_predictions: called without a preceding predict_step() "
+            "this frame");
+    }
+
+    // Body-local marker positions from rest-pose FK (root at identity) -- same trick
+    // initialize_rigid_body() uses for its own Kabsch/Umeyama fit (see that function's
+    // doc comment): for a root-only skeleton this is exactly the geometry
+    // predict_rigid_marker()'s local_pos parameter wants. Recomputed fresh each call
+    // rather than cached -- cheap (no articulation to run FK over) and avoids tying
+    // this method's correctness to which of Tracker's several init paths happened to
+    // run (initialize_rigid_body() is only one of them; initialize_from_state() and
+    // initialize_with_fixed_root() also produce an initialized Tracker but never touch
+    // a rigid-body-specific cache).
+    Eigen::VectorXd q_rest = Eigen::VectorXd::Zero(model_->nq);
+    if (model_->nq >= 7) {
+        q_rest[6] = 1.0;  // identity quaternion w component (Pinocchio free-flyer q = [xyz, xyzw])
+    }
+    auto rest_markers = fk_->compute(q_rest);
+
+    std::unordered_map<int, MarkerPrediction> result;
+    Eigen::Matrix<double, 6, 6> const pose_cov = pending_prior_cov_.topLeftCorner<6, 6>();
+    Eigen::Vector3d const root_position = pending_prior_state_->root_position();
+    Eigen::Quaterniond const root_orientation = pending_prior_state_->root_orientation();
+
+    auto const& markers = skeleton_->markers();
+    for (size_t i = 0; i < markers.size(); ++i) {
+        Marker const& marker = markers[i];
+        if (marker.track.empty())
+            continue;
+        InputTrack const* track = skeleton_->get_input_track(marker.track);
+        if (track == nullptr || track->type != "unlabeled_points")
+            continue;
+        auto local_it = rest_markers.find(marker.name);
+        if (local_it == rest_markers.end())
+            continue;
+
+        auto prediction = predict_rigid_marker(local_it->second, root_position, root_orientation,
+                                               pose_cov, cam_it->second);
+        if (prediction.has_value()) {
+            result.emplace(static_cast<int>(i), *prediction);
+        }
+    }
+    return result;
+}
+
+TrackingResult Tracker::update_step(std::vector<Observation> const& observations,
+                                    double timestamp) {
+    using Clock = std::chrono::steady_clock;
+    using Ms = std::chrono::duration<double, std::milli>;
+
+    if (!predict_pending_) {
+        throw std::runtime_error(
+            "Tracker::update_step: called without a preceding predict_step() this frame");
+    }
+    predict_pending_ = false;
+    PredictResult predict_result = std::move(*pending_predict_result_);
+    State const prior_state = *pending_prior_state_;
+    Eigen::MatrixXd const prior_cov = std::move(pending_prior_cov_);
+    double const predict_ms = pending_predict_ms_;
+    pending_predict_result_.reset();
+    pending_prior_state_.reset();
+
+    std::vector<Observation> const annotated = build_annotated_observations(observations);
+
     // Step 2: Check if we have observations
-    if (!has_sufficient_observations(observations)) {
+    if (!has_sufficient_observations(annotated)) {
         return TrackingResult{timestamp, ukf_->state(), ukf_->covariance(),         {},
                               0,         true,          "Insufficient observations"};
     }
 
     // Step 3: Update
     auto t1 = Clock::now();
-    auto update_info = ukf_->update(observations, cameras_, *fk_, config_.pose_noise_std,
+    auto update_info = ukf_->update(annotated, cameras_, *fk_, config_.pose_noise_std,
                                     config_.calib_noise_std, config_.outlier_threshold);
     double const update_ms = Ms(Clock::now() - t1).count();
 
@@ -968,7 +1038,7 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
         predict_result.cross_cov_future.get();
     }
 
-    return TrackingResult{
+    TrackingResult result{
         timestamp,
         ukf_->state(),
         ukf_->covariance(),
@@ -990,6 +1060,22 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
         update_info.kalman_ms,
         update_info.cov_update_ms,
     };
+
+    // track_frame()'s own post-run_parent_step() bookkeeping (design doc §5.1) -- folded in
+    // here since update_step() is now the terminal call for the frame either way.
+    if (!result.tracking_lost) {
+        last_timestamp_ = timestamp;
+        ++frame_count_;
+        // Store raw pixel positions for next frame's velocity-mode annotation
+        for (Observation const& obs : observations) {
+            prev_observations_[obs.camera_id][obs.marker_id] = obs.position;
+        }
+        if (frame_callback_) {
+            frame_callback_(result);
+        }
+    }
+
+    return result;
 }
 
 bool Tracker::has_sufficient_observations(std::vector<Observation> const& observations) const {

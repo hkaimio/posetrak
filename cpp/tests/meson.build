@@ -68,6 +68,7 @@ test_sources = files(
   # Marker-based mocap: dot assignment (design doc's Phase C2)
   'test_assignment.cpp',
   'test_marker_prediction.cpp',
+  'test_tracker_predict_update_split.cpp',
 )
 
 test_exe = executable('test_posetrak',

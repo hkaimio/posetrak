@@ -25,6 +25,7 @@
 #include "posetrak/kinematics/forward_kinematics.hpp"
 #include "posetrak/kinematics/inverse_kinematics.hpp"
 #include "posetrak/kinematics/triangulation.hpp"
+#include "posetrak/tracking/marker_prediction.hpp"
 #include <deque>
 #include <functional>
 #include <map>
@@ -212,6 +213,80 @@ class Tracker {
     TrackingResult track_frame(std::vector<Observation> const& observations, double timestamp);
 
     /**
+     * @brief Predict-only half of the track_frame() cycle (marker-mocap design doc
+     * dot-assignment-architecture-design.md §5.1): advances the UKF by dt with no
+     * observations yet, and stashes everything update_step() needs to finish the
+     * frame later.
+     *
+     * Exists so an external orchestrator can call predict_step() on every
+     * dot-bearing subject in a scene *before* any of them commits an update --
+     * the shared dot-assignment phase (design doc §5.2) needs every subject's
+     * live prediction for the same instant, and
+     * UnscentedKalmanFilter::predict() mutates state in place (not a peekable
+     * dry run), so there is no other way to get that live prediction without
+     * holding the result open across the resolution step. track_frame() itself
+     * is just predict_step() immediately followed by update_step() -- a
+     * subject with no dots to resolve sees no behavioural change.
+     *
+     * @param dt Time elapsed since last frame. Not validated here (unlike
+     *        track_frame()'s own negative-dt guard) -- the caller (track_frame()
+     *        itself, or an orchestrator's driving loop) owns that decision.
+     * @note Requires is_initialized() == true.
+     * @note Must be followed by exactly one update_step() call before this
+     *       Tracker's state reflects "this frame" -- calling update_step()
+     *       without a preceding predict_step() throws, and calling
+     *       predict_step() again without an intervening update_step() discards
+     *       the pending predict and starts over (not a supported usage, but not
+     *       one worth guarding against either).
+     */
+    void predict_step(double dt);
+
+    /**
+     * @brief Every unlabeled_points-track marker's MarkerPrediction (design doc
+     * §6), evaluated at the state predict_step() just computed, for one camera.
+     *
+     * This is the query surface a shared dot-assignment orchestrator (design
+     * doc §5.2) actually calls -- it never touches Skeleton/State/covariance
+     * directly, so which MarkerPrediction implementation runs (closed-form
+     * rigid, §6.1, or the deferred general/articulated case) is entirely this
+     * Tracker's own decision, invisible to the caller.
+     *
+     * @param camera_id Camera to project into.
+     * @return skeleton().markers() index -> MarkerPrediction, for every
+     *         unlabeled_points marker that projects in front of this camera.
+     *         Empty if this skeleton declares no unlabeled_points input track.
+     * @note Requires a predict_step() call this frame (i.e. call between
+     *       predict_step() and update_step(), not before or after).
+     * @throws std::runtime_error if skeleton_->is_rigid_body() is false --
+     *         the general/articulated implementation is deferred (design doc
+     *         §6) pending a real articulated dot-augmented capture to design
+     *         it against -- or if camera_id is unknown.
+     */
+    std::unordered_map<int, MarkerPrediction> predict_dot_slot_predictions(int camera_id) const;
+
+    /**
+     * @brief Update-only half of the track_frame() cycle -- consumes the
+     * prediction stashed by the most recent predict_step() call and finishes
+     * the frame: observation annotation, sufficiency check, UKF update, NIS
+     * feedback, RTS smoother bookkeeping, FK refresh on the posterior state,
+     * and the same last_timestamp_/frame_count_/prev_observations_/
+     * frame_callback_ bookkeeping track_frame() itself does after a
+     * successful frame.
+     *
+     * @param observations Frame observations -- raw, not yet velocity-mode
+     *        annotated (this method annotates them itself, exactly as
+     *        track_frame() already does).
+     * @param timestamp Frame timestamp (the same value used to compute the dt
+     *        passed to the preceding predict_step() call).
+     * @return TrackingResult for this frame -- identical to what
+     *         track_frame() would have returned for the same
+     *         (observations, timestamp) pair.
+     * @throws std::runtime_error if called without a preceding predict_step()
+     *         this frame.
+     */
+    TrackingResult update_step(std::vector<Observation> const& observations, double timestamp);
+
+    /**
      * @brief Check if tracker is initialized and ready
      */
     bool is_initialized() const { return initialized_; }
@@ -368,20 +443,6 @@ class Tracker {
                                double timestamp);
 
     /**
-     * @brief Run the parent (full-body) predict+update step.
-     *
-     * Calls ukf_->predict(), ukf_->update(), writes debug output, then
-     * refreshes fk_ so children can query world_transform() immediately after.
-     *
-     * @param obs  Observations for this frame
-     * @param dt   Time elapsed since last frame
-     * @param timestamp  Frame timestamp (used only to populate the result)
-     * @return TrackingResult for the parent filter
-     */
-    TrackingResult run_parent_step(std::vector<Observation> const& obs, double dt,
-                                   double timestamp);
-
-    /**
      * @brief Check if we have sufficient observations for tracking
      */
     bool has_sufficient_observations(std::vector<Observation> const& observations) const;
@@ -452,6 +513,19 @@ class Tracker {
 
     // Triangulated 3-D positions from the initialization frame, used by debug output.
     std::map<std::string, Eigen::Vector3d> init_marker_positions_;
+
+    // predict_step()/update_step() split (design doc §5.1): everything run_parent_step()
+    // used to compute in its own predict half and consume immediately in its update
+    // half now has to survive the gap where an orchestrator resolves dot assignment.
+    // pending_predict_result_ in particular holds PredictResult::cross_cov_future --
+    // launched async inside ukf_->predict(), deliberately resolved late (in
+    // update_step()) so its work overlaps ukf_->update()'s -- so the whole struct, not
+    // just the prior state/cov, must live here across the boundary.
+    bool predict_pending_ = false;
+    std::optional<PredictResult> pending_predict_result_;
+    std::optional<State> pending_prior_state_;  // State has no default ctor
+    Eigen::MatrixXd pending_prior_cov_;
+    double pending_predict_ms_ = 0.0;
 
     // Previous-frame undistorted pixels per camera and marker, for velocity-mode cameras.
     // Populated at the end of each successful track_frame() call.

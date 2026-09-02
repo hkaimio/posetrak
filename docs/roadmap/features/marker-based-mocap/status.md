@@ -1,5 +1,49 @@
 # Marker-based mocap — status
 
+- **2026-09-02** — Built C2.4 (`Tracker` predict/update split) and C2.5
+  (`predict_dot_slot_predictions()`), the two sub-tasks the rest of §12's
+  chain depends on. Full C++ suite green afterward (posetrak_tests: all
+  passing, 3986 assertions in 325 test cases).
+
+  - **C2.4**: `Tracker::run_parent_step()` removed; its predict half is now
+    public `predict_step(dt)`, its update half public
+    `update_step(observations, timestamp)` (also absorbing `track_frame()`'s
+    own post-step bookkeeping — `last_timestamp_`/`frame_count_`/
+    `prev_observations_`/`frame_callback_` — since `update_step()` is now
+    the terminal call for a frame either way). `track_frame()` itself is a
+    two-line wrapper. The design doc's original sketch assumed only
+    `prior_state`/`prior_cov` needed to survive the split; tracing
+    `run_parent_step()`'s actual body first found that the RTS smoother
+    needs the *resolved* `PredictResult::cross_cov_future` too — an async
+    computation deliberately resolved late (in `update_step()`) so its work
+    overlaps `ukf_->update()`'s — so the whole `PredictResult` is stashed as
+    a `Tracker` member across the split, guarded by a `predict_pending_`
+    bool that makes calling `update_step()` without a preceding
+    `predict_step()` throw rather than read stale/absent state.
+  - **C2.5**: `predict_dot_slot_predictions(camera_id)` — one camera at a
+    time (matches `marker_projection_std(camera_id, ...)`'s own existing
+    per-camera signature convention), returns every `unlabeled_points`-track
+    marker's `MarkerPrediction` for that camera. Rejects a non-rigid-body
+    skeleton (the general/articulated case is still deferred, §6) and an
+    unknown camera id. Body-local marker geometry is recomputed fresh from
+    rest-pose FK on every call rather than cached at init time — cheap for a
+    rigid body (no articulation to run FK over), and avoids the fragility of
+    tying correctness to which of `Tracker`'s several init paths happened to
+    run (`initialize_rigid_body()` is only one of them;
+    `initialize_from_state()` and `initialize_with_fixed_root()` also
+    produce an initialized `Tracker` but were never going to populate a
+    rigid-body-specific cache).
+
+  Test coverage (`test_tracker_predict_update_split.cpp`, new): a
+  frame-by-frame regression against the same articulated fixture
+  `test_marker_projection_std.cpp` uses, confirming `predict_step()` +
+  `update_step()` reproduce `track_frame()`'s `TrackingResult` field-for-
+  field (state, covariance, per-observation diagnostics) to within floating-
+  point tolerance every frame, not just at the end — this is the "single-
+  subject case is provably unaffected by the split existing at all" test
+  §12 calls for. Plus the throw-without-predict, unknown-camera, non-rigid-
+  skeleton, and a hand-computed-position rigid-body prediction case.
+
 - **2026-09-02** — Built the first, fully independent batch of Phase C2
   sub-tasks (§12's own "parallelizable" group): C2.1 (Hungarian solver),
   C2.2 (rigid closed-form `MarkerPrediction`), C2.3 (DB schema

@@ -1,5 +1,37 @@
 # Marker-based mocap — status
 
+- **2026-09-02** — Made dot assignment a shared phase across every
+  tracked subject, not a per-subject step -- Harri's explicit call, not
+  needed for the sword alone but wanted "very soon." Substantially
+  revised `dot-assignment-architecture-design.md`'s §5 (previously "put
+  assignment inside `Tracker::run_parent_step()`," which structurally
+  cannot prevent two subjects from claiming the same candidate, since
+  each `Tracker` only ever sees its own prediction). New design: split
+  `Tracker::run_parent_step()` (verified private/atomic today) into
+  public `predict_step()`/`update_step()`, so an orchestrator can call
+  `predict_step()` on every dot-bearing subject first, run **one**
+  Hungarian solve per camera across the *union* of every participating
+  subject's dot slots (not one solve per subject), then call each
+  subject's own `update_step()` with its resolved share -- a sibling
+  phase to `MultiPersonTracker`'s existing `update_contact_gate()`
+  cross-person orchestration, not a new kind of thing that orchestrator
+  hasn't done before. `Tracker::track_frame()` itself is unchanged for
+  every dot-free subject (every existing person, and the sword's own
+  ArUco corners).
+
+  Working through this surfaced a real, previously-unstated dependency:
+  joint arbitration only works if the *candidates* are a single
+  de-duplicated pool per (camera, frame) -- today's per-capture_object
+  detection runs (§3) would each independently detect the same physical
+  dot as a separate row, so a combined cost matrix wouldn't actually
+  arbitrate anything between two subjects' own redundant detections.
+  This confirms the already-logged shared-scene-detection item
+  (2026-08-31 entry below) is a hard *correctness* dependency now, not
+  merely a performance one -- flagged as the real remaining gap (§5.3/§9),
+  not designed or built this round; no real multi-subject-with-dots
+  capture exists yet to design or validate either the full fix or an
+  interim de-dup bridge against.
+
 - **2026-09-02** — Revised `dot-assignment-architecture-design.md`
   against Harri's inline review comments -- both landed on real gaps in
   the first draft, not just clarifications:

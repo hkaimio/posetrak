@@ -3,9 +3,21 @@
 Design round for
 [reflective-dot-detection-design.md](reflective-dot-detection-design.md)
 §3.2/§7: tracker-side Hungarian/Mahalanobis assignment of anonymous
-reflective-dot candidates to named, calibrated dot slots, for a rigid
-prop. Grounded directly in the current codebase at each step below, not
-sketched in the abstract. Not built yet — design only.
+reflective-dot candidates to named, calibrated dot slots. Grounded
+directly in the current codebase at each step below, not sketched in the
+abstract. Not built yet — design only.
+
+**Target architecture, decided 2026-09-02**: assignment is **one shared
+phase across every tracked subject in the scene**, not a per-subject
+step — Harri's explicit call, because the alternative (each subject
+independently resolving its own candidates) cannot prevent two subjects'
+skeletons from both claiming the same physical candidate, and that
+conflict is exactly the kind of thing this project designs against up
+front rather than working around later. Not needed for the very first
+real use (the sword, alone in its own trial) — a single subject is the
+N=1 degenerate case of the shared design, not a separate implementation
+that needs replacing once a second subject shows up. §5 below designs the
+shared phase directly; nothing here builds a single-subject shortcut.
 
 ## 1. What doesn't need to change
 
@@ -52,12 +64,15 @@ blob detector    ──write──▶ detection_keypoints                  ─�
                          "unlabeled_points" input tracks)
                                     │
                                     ▼
-                    Tracker::run_parent_step(), between
-                    predict() and update() -- §5: get each dot
-                    slot's MarkerPrediction (§6 -- closed form
-                    today) from prior_state_/prior_cov_ (already
-                    computed by predict()), solve Hungarian (§7),
-                    gate, emit Observations
+              ── per frame, orchestrator level (§5) ──
+              1. predict_step() on every dot-bearing subject
+                 (Tracker split: predict, not yet update)
+              2. every subject's MarkerPrediction (§6) for its
+                 own dot slots, gathered into ONE cost matrix
+                 per camera across ALL participating subjects
+              3. one Hungarian solve (§7) per camera, gated,
+                 resolved candidates split back out per subject
+              4. update_step(own_obs + resolved_dots) per subject
                                     │
                                     ▼
                          ukf_->update(observations, ...)  <- UNCHANGED
@@ -166,39 +181,156 @@ whoever builds this, not architecturally significant either way — the
 load-time work (query, decode, undistort, bucket by frame) is the same
 shape as what already happens for labeled observations.
 
-## 5. Where assignment happens — exact integration point
+## 5. Where assignment happens — a shared phase, requires splitting `Tracker`'s predict from its update
 
-`Tracker::run_parent_step()` (`tracker.cpp:867`), verified against the
-current code:
+**Revised 2026-09-02** (Harri: *"dot assignment must be a common phase
+for all tracked subjects... not needed for this first demo but very
+soon"*). The original draft put assignment *inside* `Tracker::
+run_parent_step()`, between its own already-called `predict()` and
+`update()` — correct for exactly one subject, but structurally unable to
+arbitrate a candidate two different subjects' skeletons could both claim,
+since each `Tracker` only ever sees its own predicted positions. A shared
+phase needs every participating subject's *prediction* available before
+*any* subject's *update* runs — which today's `Tracker` can't expose,
+because `run_parent_step()` (verified: `tracker.cpp:867`, `private`) does
+both atomically, and `track_frame()` (the only `public` per-frame entry
+point today) calls it as one unit.
+
+### 5.1 Split `Tracker`'s predict from its update
+
+`run_parent_step()`'s own body already divides cleanly at exactly this
+boundary — verified line by line, not assumed:
 
 ```cpp
-auto predict_result = ukf_->predict(dt);          // Step 1 (unchanged)
-State const prior_state = ukf_->state();           // ALREADY computed
-Eigen::MatrixXd const prior_cov = ukf_->covariance(); // ALREADY computed
-// ... debug print (unchanged) ...
+// Everything through here only needs dt -- no observations yet:
+auto predict_result = ukf_->predict(dt);
+State const prior_state = ukf_->state();
+Eigen::MatrixXd const prior_cov = ukf_->covariance();
+if (frame_count_ < config_.debug_init_frames) { print_init_debug(prior_state, "PRIOR "); }
 
-// NEW Step 2: dot assignment, only if this skeleton has an
-// unlabeled_points input track AND this frame has candidates for it.
-// Uses prior_state/prior_cov directly -- no extra predict() or FK call
-// beyond what already runs today.
-std::vector<Observation> augmented = observations;  // was: used directly
-assign_dot_observations(augmented, unlabeled_candidates_this_frame,
-                        prior_state, prior_cov, *skeleton_, cameras_, config_);
-
-if (!has_sufficient_observations(augmented)) { ... }   // Step 2 (was: observations)
-auto update_info = ukf_->update(augmented, cameras_, *fk_, ...);  // Step 3 (was: observations)
+// Everything from here on is the update half:
+if (!has_sufficient_observations(observations)) { return {...lost...}; }
+auto update_info = ukf_->update(observations, cameras_, *fk_, ...);
+// ... NIS feedback, debug print, TrackingResult construction ...
 ```
 
-`track_frame()` needs to thread the frame's `unlabeled_candidates`
-through from its own caller (ultimately `step_person_context()` in
-`multi_person_tracker.cpp`, which already looks up `frame_obs` from
-`ObservationSet` the same way) down to `run_parent_step()` — mechanical,
-not architecturally interesting.
+Two new **public** methods replace the current private/atomic split:
 
-This lands assignment exactly where the scoping doc's §3.2 asked for it:
-downstream of `update()`'s own math needing zero awareness that
-assignment happened, and upstream reusing state that's already being
-computed regardless.
+- **`Tracker::predict_step(double dt)`** — runs the predict half above,
+  stores `prior_state_`/`prior_cov_` as new private members (today they're
+  locals). Callable independently of any observations.
+- **`Tracker::update_step(std::vector<Observation> const& observations, double timestamp) -> TrackingResult`**
+  — runs the update half, using the `prior_state_`/`prior_cov_` stored by
+  the most recent `predict_step()` call, plus the existing bookkeeping
+  `track_frame()` currently does after `run_parent_step()` returns
+  (`last_timestamp_`, `frame_count_`, `prev_observations_`,
+  `frame_callback_`).
+- **`Tracker::predict_dot_slot_predictions() -> std::vector<std::pair<int, MarkerPrediction>>`**
+  (marker_id → `MarkerPrediction`, §6) — callable only after
+  `predict_step()`, for every marker belonging to this skeleton's
+  `unlabeled_points` input track (§1). This is the query surface the
+  orchestrator (§5.2) actually uses; it's what makes §6's rigid-vs-general
+  implementation choice a `Tracker`-internal decision the orchestrator
+  never needs to know about.
+- **`Tracker::track_frame()` is unchanged in behavior and signature** —
+  becomes `{ predict_step(dt); return update_step(annotated, timestamp); }`
+  internally, still the right call for every subject that has no
+  `unlabeled_points` track (every existing person and the sword's own
+  ArUco corners) or no candidates this particular frame. The split only
+  matters to a subject actually participating in shared dot assignment
+  this frame.
+
+### 5.2 Orchestrator-level shared resolution
+
+The split needs a caller above `Tracker` that can see every participating
+subject at once. Neither of today's two call paths is that caller today,
+but both already reuse the same free-function layer for the ordinary
+per-frame step (`step_person_context()`, `multi_person_tracker.hpp`) —
+the single-subject CLI path (`run_track_from_db()`, a raw loop calling
+`step_person_context()` directly) and the actual multi-subject path
+(`MultiPersonTracker::run()`, `multi_person_tracker.cpp:1111`, already
+literally shaped "for frame: for subject: step subject", already
+running one shared per-frame phase — `update_contact_gate()` — before
+each subject's own step, for the structurally analogous cross-person
+contact-anchor case). A new shared-dot-assignment phase is a sibling to
+`update_contact_gate()`/`build_anchor_observations()`, not a new kind of
+thing this orchestrator hasn't done before:
+
+```cpp
+// New free function, multi_person_tracker.hpp/.cpp -- one call per frame,
+// given every subject (PersonContext or object-equivalent) with an
+// unlabeled_points track and candidates this frame.
+struct SubjectDotAssignment {
+    std::vector<Observation> resolved;  // this subject's newly-labeled dot Observations
+};
+std::unordered_map<int, SubjectDotAssignment>
+resolve_shared_dot_assignment(
+    std::vector<DotAssignmentSubject> const& subjects,  // tracker*, skeleton, cameras -- enough to call predict_dot_slot_predictions()
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
+    TrackerConfig const& config, int frame_idx, double timestamp);
+```
+
+Per frame, for dot-bearing subjects only:
+
+```cpp
+for (auto* s : dot_bearing_subjects) s->tracker->predict_step(dt);   // 1. everyone predicts first
+
+auto assignment = resolve_shared_dot_assignment(dot_bearing_subjects,   // 2. ONE combined
+                                                candidates_this_frame,  //    resolution, §5.3
+                                                config, step, timestamp);
+
+for (auto* s : dot_bearing_subjects) {                                // 3. then everyone updates
+    auto obs = s->own_labeled_observations_this_frame;                //    with their own share
+    auto const& resolved = assignment[s->idx].resolved;
+    obs.insert(obs.end(), resolved.begin(), resolved.end());
+    s->tracker->update_step(obs, timestamp);
+}
+// every other subject (no unlabeled_points track) keeps calling
+// track_frame() exactly as today, untouched by any of the above.
+```
+
+`run_track_from_db()`'s raw loop and `MultiPersonTracker::run()`'s
+`for step: for person` loop both need this three-pass shape *only* when
+at least one participating subject has dots; the ordinary
+`step_person_context()` call stays exactly as-is for everyone else,
+including the sword's own ArUco corners (which have no
+`unlabeled_points` track and never enter this path at all). Threading
+this through both call paths cleanly (vs. only wiring it into
+`MultiPersonTracker`, which the sword's single-subject CLI path doesn't
+use today) is real, mechanical work — probably a new sibling pair to
+`step_person_context()` itself (e.g. `step_person_context_predict()`/
+`step_person_context_update()`, mirroring the existing
+`step_person_context_frame0()`/`step_person_context()` split-by-purpose
+pattern already in this file), not something to improvise per call site.
+
+### 5.3 The real prerequisite this exposes: candidates must be a single shared pool, not N redundant per-subject lists
+
+A genuinely joint resolution requires that the *candidates themselves* —
+not just the resolution step — be a single authoritative list per
+(camera, frame), not one independently-detected list per subject's own
+detection run. Today's detection model (§3, unchanged from ArUco's own
+convention) runs one detection pass **per capture_object**, each
+re-decoding the same footage independently. If two subjects' own
+passes each happen to detect the *same* physical dot, that's two
+separate, pixel-coincident-but-distinct candidate rows (one per
+detection run) — feeding both into one cost matrix doesn't arbitrate
+anything, since a Hungarian solver sees two different candidates, not
+one contested one, and could still assign both to different subjects.
+
+This is a real, currently-unresolved prerequisite the shared-phase design
+surfaces, not a detail: **either detection itself needs to become a
+single shared scene-wide pass** (already logged as a separate, bigger,
+deferred item — status.md, 2026-08-31, "a scene with several props +
+performers re-decodes the same footage once per subject... a shared
+single-pass scene-wide detection... is the real fix" — and now confirmed
+to be a hard *dependency* of correct shared assignment, not merely a
+performance nicety), **or** the orchestrator needs an interim
+de-duplication step: cluster candidates from different subjects'
+detection runs that are within some small pixel tolerance at the same
+(camera, frame) into one physical candidate before building the cost
+matrix. The de-dup bridge is the pragmatic near-term option (scene-wide
+detection is bigger, later work), but isn't designed or built here — see
+§9.1.
 
 ## 6. Cost function — a predicted-position-and-covariance seam, closed form for rigid bodies now
 
@@ -218,6 +350,13 @@ seam is narrow, and worth naming explicitly rather than leaving implicit:
 > `predict()`-step state.** Assignment (§7) only ever consumes this —
 > it has no idea whether the number behind it came from a closed form or
 > from sigma points.
+
+Exposed via `Tracker::predict_dot_slot_predictions()` (§5.1) — the
+orchestrator (§5.2) calls this on every dot-bearing subject after their
+shared `predict_step()` pass, gathers the results per camera, and never
+touches `Skeleton`/`State`/FK itself. Which implementation runs is
+entirely a per-`Tracker` decision driven by its own `Skeleton::
+is_rigid_body()`, invisible to the orchestrator either way.
 
 Two implementations of that seam:
 
@@ -311,19 +450,21 @@ subproject/wrap needed. New small header, e.g.
 unit-testable against synthetic cost matrices with no
 tracker/skeleton/camera involved at all.
 
-**Revised 2026-09-01**: the first draft under-scoped the expected
-candidate count ("single digits to a dozen") against Harri's own expected
-scale ("several tens per scene"). The solver itself doesn't need to
-change for that: O(n³) at n=50 is 125,000 operations, sub-millisecond —
-several orders of magnitude below the tracker's existing per-step budget
-(~2ms at the ~500 steps/s the 1f baseline already measures). The real
-scaling questions this raises are elsewhere, already addressed above: row
-volume is §3's blob-vs-row fix (flat regardless of N), and the
-predicted-position cost per slot is §6's `MarkerPrediction` seam (closed
-form is O(1) per slot for a rigid body; the deferred articulated
-implementation is the one that actually costs more at higher N, via its
-extra sigma-point FK pass — a real cost, but the solver isn't where it
-lands).
+**Revised 2026-09-01 (scale) and 2026-09-02 (shared pool)**: the first
+draft under-scoped the expected candidate count ("single digits to a
+dozen") against Harri's own expected scale ("several tens per scene").
+The solver itself doesn't need to change for that: O(n³) at n=50 is
+125,000 operations, sub-millisecond — several orders of magnitude below
+the tracker's existing per-step budget (~2ms at the ~500 steps/s the 1f
+baseline already measures), and this holds even summed across several
+subjects' slots at once (§7.1) — still comfortably two-digit-microsecond
+territory at n in the low hundreds. The real scaling questions this
+raises are elsewhere, already addressed above: row volume is §3's
+blob-vs-row fix (flat regardless of N), and the predicted-position cost
+per slot is §6's `MarkerPrediction` seam (closed form is O(1) per slot for
+a rigid body; the deferred articulated implementation is the one that
+actually costs more at higher N, via its extra sigma-point FK pass — a
+real cost, but the solver isn't where it lands).
 
 **Gating** (`marker-detection-analysis.md`'s "ambiguity policy — drop,
 don't guess", carried over unchanged): entries above the configured
@@ -337,12 +478,22 @@ that camera this step — the same "missing observation costs a little
 covariance growth, a wrong one injects a confident lie" philosophy this
 codebase already applies everywhere else.
 
-Assignment runs **per camera, per tracked subject (skeleton), independently**
-(candidates are inherently per-camera 2D detections, exactly like every
-other marker observation already works — the same physical dot seen by
-two cameras already produces two independent `Observation`s with the same
-`marker_id` today). "Per subject" is doing real work in that sentence —
-see §9's new subsection on what this assumes and doesn't yet handle.
+### 7.1 One combined cost matrix per camera, across every participating subject
+
+**Revised 2026-09-02** (Harri: *"dot assignment must be a common phase
+for all tracked subjects"*): the first draft ran one independent Hungarian
+solve per (camera, subject) — exactly the shape that can't prevent two
+subjects from both claiming the same candidate, since neither subject's
+solve knows the other's even ran. The fix isn't a different algorithm,
+it's a differently-shaped input: **one Hungarian solve per (camera,
+frame), with columns = the union of every participating subject's dot
+slots that frame, rows = that camera's (de-duplicated, §5.3) candidate
+list.** Gating, the dummy-row/column padding, and the "unmatched costs
+nothing" philosophy above are unchanged — they already operate on an
+arbitrary rectangular cost matrix, which a multi-subject matrix still is,
+just wider. This is the shape `resolve_shared_dot_assignment()` (§5.2)
+actually builds and solves, splitting the result back out per subject
+afterward.
 
 ## 8. Config surface
 
@@ -374,37 +525,25 @@ DB column + `SessionReader::load_tracker_config()` wiring):
 - **The general/articulated `MarkerPrediction` implementation** (§6) —
   seam is designed, implementation deferred; no articulated
   dot-augmented capture exists yet to build or validate it against.
-
-### 9.1 Scene-wide / multi-subject candidate pools — a real gap, not decided here
-
-§7's "per subject, independently" is only correct when each tracked
-subject's candidates are already known to be its own — true for the
-sword today (one object, its own detection run, its own candidate rows).
-It stops being true the moment two or more dot-bearing subjects (a prop
-*and* a performer wearing augmentation markers, or two props) are tracked
-from the *same* shared candidate pool in the same scene: nothing in this
-design arbitrates a candidate that gates acceptably against slots on two
-different skeletons' independent `MultiPersonTracker`-owned `Tracker`
-instances, so both could independently "claim" it in the same step.
-
-Not designed here, deliberately: no real multi-subject-with-dots capture
-exists yet to design or validate against — the same discipline this
-whole feature has followed throughout (prototype/validate against real
-data before committing architecture, most recently for the rigid
-closed-form math itself, §2.1's blob detector, and Phase A's
-co-occurrence check). This also directly connects to the still-open
-scene-wide-detection item already logged (status.md, 2026-08-31: "a scene
-with several props + performers re-decodes the same footage once per
-subject... a shared single-pass scene-wide detection... is the real fix")
-— multi-subject candidate arbitration and shared-pass detection are
-naturally the same future piece of work, not two separate ones. When it's
-tackled, the likely shape is orchestration one level up
-(`MultiPersonTracker`, which already runs its owned `Tracker` instances in
-a defined order per step and already has precedent for cross-instance
-coordination via cross-person `PAIR_DIFF` anchor observations) rather
-than anything inside a single `Tracker`'s own assignment call — flagged
-so the eventual design starts from the right layer, not decided further
-than that here.
+- **Scene-wide shared detection, and its interim de-dup bridge** (§5.3)
+  — the shared assignment *phase* (§5) is now designed and targeted for
+  the near future per Harri's direction, but it's only *correct* once
+  candidates are a single de-duplicated pool per (camera, frame) rather
+  than one independently-detected list per subject's own detection run.
+  Neither the full fix (a real shared-pass detector) nor the interim
+  bridge (clustering near-coincident candidates across subjects' existing
+  per-object detection runs) is designed or built in this round — no real
+  multi-subject-with-dots capture exists yet to design or validate either
+  against, the same discipline this whole feature has followed throughout
+  (prototype/validate against real data before committing architecture,
+  most recently for the rigid closed-form math itself, §2.1's blob
+  detector, and Phase A's co-occurrence check).
+- **`resolve_shared_dot_assignment()`'s exact signature, and threading
+  the predict/update split through both call paths** (§5.2) — the shape
+  is designed; wiring it into `run_track_from_db()`'s raw loop and
+  `MultiPersonTracker::run()` without disturbing every dot-free subject's
+  existing behavior is real implementation work, not sketched to the
+  line-of-code level here.
 
 ## 10. Testing strategy
 
@@ -427,9 +566,24 @@ than that here.
   pre-labeled `Observation`s directly would produce — confirms `update()`
   really is unaffected by how observations got resolved, closing the loop
   on §1's central claim.
+- **`predict_step()`/`update_step()` split** (§5.1): a direct unit test
+  that calling them in sequence produces byte-identical `TrackingResult`s
+  to calling `track_frame()` — the single-subject case must be exactly
+  unaffected by the split existing at all.
+- **`resolve_shared_dot_assignment()` — the actual multi-subject
+  arbitration** (§5.2/§7.1): synthetic two-subject test with two
+  skeletons whose dot slots predict to nearby-but-distinct pixel
+  positions and a candidate pool containing one ambiguous point gating
+  against both — verify it resolves to exactly one subject (not both,
+  not neither when the gate should admit one), and a second case with the
+  candidate genuinely equidistant/ambiguous verifying the loser gets no
+  `Observation` rather than a forced wrong pairing. This is the test that
+  actually exercises the problem Harri's review comment identified;
+  everything else here can pass while that bug still exists.
 - **Real data**: re-run the "Harri bokken" baseline (status.md,
   2026-09-01) once C1 (calibration) and this design are both built —
-  Phase C3's own stated purpose, already planned.
+  Phase C3's own stated purpose, already planned. Single-subject only
+  until a second dot-bearing subject exists in a real capture.
 - **Blob codec + finalisation reuse** (§3): unit test
   `decode_dot_candidates()` round-trips a variable-N blob correctly
   (including N=0 and a large N in the "several tens" range, §7); a
@@ -454,9 +608,14 @@ than that here.
   hard area/compactness filter at detection time is sufficient on its own
   or whether marginal candidates would benefit from a soft cost penalty
   instead of a hard reject.
-- **Multi-subject candidate arbitration** (§9.1) — real gap, explicitly
-  not designed this round; needs a real multi-subject-with-dots capture
-  to design against.
+- **When to build scene-wide shared detection (or its de-dup bridge)**
+  (§5.3/§9) — a real, currently-unresolved dependency of *correct* shared
+  assignment with more than one subject's own detection run in play; not
+  designed here.
+- **`resolve_shared_dot_assignment()`'s exact call-site wiring** (§5.2) —
+  the free-function shape is designed; how it plugs into
+  `run_track_from_db()`'s raw loop vs. `MultiPersonTracker::run()`
+  without disturbing dot-free subjects is real implementation work.
 - **When to build the general `MarkerPrediction` implementation** (§6) —
   gated on a real articulated-body dot-augmentation use case existing,
   not decided here.

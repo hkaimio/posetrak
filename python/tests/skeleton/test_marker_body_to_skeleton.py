@@ -127,11 +127,19 @@ def test_dot_only_body_produces_one_marker_per_dot():
     config = load_marker_body_yaml(_DOT_ONLY_BODY_YAML)
     doc = generate_prop_skeleton(config)
 
+    # A dot-only body has no coded markers at all -- no prop_markers track
+    # emitted for something nothing references.
+    assert doc["input_tracks"] == [{"id": "prop_dots", "type": "unlabeled_points"}]
+
     names = {m["name"] for m in doc["markers"]}
     assert names == {"end_a", "end_b"}
     for m in doc["markers"]:
         assert m["landmark"] == m["name"]
-        assert m["track"] == "prop_markers"
+        # Dots get their own unlabeled_points track, never prop_markers
+        # (dot-assignment-architecture-design.md §1) -- a dot has no
+        # manifest slot to resolve against the way a coded marker's corner
+        # does, so it cannot share that track.
+        assert m["track"] == "prop_dots"
     end_b = next(m for m in doc["markers"] if m["name"] == "end_b")
     assert np.allclose(end_b["offset"], [0.0, 1.2, 0.0])
 
@@ -145,6 +153,20 @@ def test_mixed_body_with_symmetry_axis_locks_root_dof():
 
     names = {m["name"] for m in doc["markers"]}
     assert names == {"band_top:c0", "band_top:c1", "band_top:c2", "band_top:c3", "mid_dot"}
+
+
+def test_mixed_body_routes_coded_and_dot_markers_to_separate_tracks():
+    config = load_marker_body_yaml(_MIXED_BODY_WITH_SYMMETRY_YAML)
+    doc = generate_prop_skeleton(config)
+
+    assert doc["input_tracks"] == [
+        {"id": "prop_markers", "type": "labeled_points"},
+        {"id": "prop_dots", "type": "unlabeled_points"},
+    ]
+    by_name = {m["name"]: m for m in doc["markers"]}
+    for corner in ("band_top:c0", "band_top:c1", "band_top:c2", "band_top:c3"):
+        assert by_name[corner]["track"] == "prop_markers"
+    assert by_name["mid_dot"]["track"] == "prop_dots"
 
 
 def test_empty_body_raises():

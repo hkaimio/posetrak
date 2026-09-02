@@ -16,14 +16,15 @@ geometry, from ``app.setup.fiducial_markers.load_marker_body_yaml``) in,
 skeleton YAML text out -- with no capture/detection/tracker-run
 involvement, matching this sub-phase's deliberately narrow scope.
 
-Deliberately not yet consumed by the C++ loader: ``input_tracks`` and a
-marker's ``track``/``landmark`` fields are new syntax this design
-introduces (design §5.1); wiring the C++ side to actually bind them is
-sub-phase 1f. Until then, a skeleton this module generates is loadable by
-every *existing* consumer (the C++ ``SkeletonLoader``, the Python
-``SkeletonLayout``) exactly like a hand-authored one -- both simply do not
-look at the extra keys, matching how a skeleton with no ``input_tracks``
-already behaves "exactly as today" per §5.1.
+``input_tracks`` and a marker's ``track``/``landmark`` fields are consumed
+by the C++ side as of sub-phase 1f (Tracker::initialize()'s rigid-body
+path); coded-marker corners and reflective dots get two *separate* input
+tracks -- ``prop_markers`` (``type: labeled_points``, resolved via the
+manifest, phase 1) and ``prop_dots`` (``type: unlabeled_points``, resolved
+at tracking time by the shared dot-assignment phase, see
+docs/roadmap/features/marker-based-mocap/dot-assignment-architecture-design.md
+§1) -- never the same track: a dot has no manifest slot to resolve
+against, that's the whole reason it needs its own track type.
 """
 from __future__ import annotations
 
@@ -35,7 +36,8 @@ import yaml
 from app.setup.fiducial_markers import MarkerRigConfig
 
 _ROOT_JOINT_NAME = "prop_root"
-_INPUT_TRACK_ID = "prop_markers"
+_MARKER_INPUT_TRACK_ID = "prop_markers"
+_DOT_INPUT_TRACK_ID = "prop_dots"
 
 
 def _corner_landmark_name(marker_name: str, corner_index: int) -> str:
@@ -104,7 +106,7 @@ def generate_prop_skeleton(
                 "name": landmark,
                 "parent": _ROOT_JOINT_NAME,
                 "offset": [float(v) for v in corners[corner_index]],
-                "track": _INPUT_TRACK_ID,
+                "track": _MARKER_INPUT_TRACK_ID,
                 "landmark": landmark,
             })
 
@@ -113,7 +115,7 @@ def generate_prop_skeleton(
             "name": dot_name,
             "parent": _ROOT_JOINT_NAME,
             "offset": [float(v) for v in np.asarray(center, dtype=np.float64)],
-            "track": _INPUT_TRACK_ID,
+            "track": _DOT_INPUT_TRACK_ID,
             "landmark": dot_name,
         })
 
@@ -121,7 +123,12 @@ def generate_prop_skeleton(
     if marker_body_definition_id is not None:
         doc["generated_from_marker_body"] = marker_body_definition_id
     doc["joints"] = [root_joint]
-    doc["input_tracks"] = [{"id": _INPUT_TRACK_ID, "type": "labeled_points"}]
+    input_tracks: list[dict[str, str]] = []
+    if config.marker_corners:
+        input_tracks.append({"id": _MARKER_INPUT_TRACK_ID, "type": "labeled_points"})
+    if config.reflective_dots:
+        input_tracks.append({"id": _DOT_INPUT_TRACK_ID, "type": "unlabeled_points"})
+    doc["input_tracks"] = input_tracks
     doc["markers"] = markers
     return doc
 

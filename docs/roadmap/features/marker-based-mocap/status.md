@@ -1,5 +1,61 @@
 # Marker-based mocap — status
 
+- **2026-09-04** — Opening a marker-based-mocap object's tracking run in
+  the GUI turned out to have real, pre-existing gaps once the two dots-
+  enabled runs above were actually opened: the crop-preview pipeline
+  (`frame_cache_entries`, the wide-crop cache, `CropBackfillWorker`'s
+  bbox-aware fast path) is entirely keyed off `person_name` +
+  `detection_track_assignments` -- concepts `finalise_object_to_db()`
+  never populates (an object has no track-to-person stitching step, see
+  the 2026-08-30 entry below) -- so every frame fell through to a
+  full-resolution, no-bbox decode every time. Not fixed yet (real feature
+  work: needs an object-appropriate crop-window source); documented so
+  the next person touching ObjectPanel doesn't have to re-discover it.
+
+  Built `python/tools/render_tracking_debug_frames.py` instead, an
+  offline diagnostic (still PNGs or a slow-motion MP4 over a time range)
+  overlaying real video frames with actual ArUco/dot detections, the raw
+  (including unresolved) dot candidates, and the tracker's own current
+  pose estimate -- re-projected via forward kinematics from
+  `tracking_results.state` and the real camera calibration, not read from
+  `tracking_obs_results.obs_blob` (which only ever carries a slot for a
+  marker that had an actual observation that step -- an undetected
+  marker's predicted position was invisible until this tool computed it
+  independently). Iterated on real user feedback against real footage:
+  fixed a genuine coordinate-space bug in the first version (obs_blob's
+  actual_x/y are in the tracker's *undistorted* pixel space --
+  `Camera::project_undistorted()`, "for UKF" -- while the raw video frame
+  is distorted; drawing one directly onto the other put every obs_blob-
+  sourced overlay a few pixels off, worse near the frame edges where
+  distortion is larger -- confirmed by redistorting a real point and
+  getting a bit-identical raw candidate pixel back), switched from a
+  hollow ring to a filled center dot + thin ring (a hollow ring's true
+  center is hard to judge once the ring's own radius is a real fraction
+  of the zoomed view), and switched unassigned raw candidates back to a
+  ring (a filled gray dot disappears against a similarly gray/textured
+  background).
+
+  This tool is what surfaced the actual calibration problem behind the
+  "tracking is badly off" report: `aruco_2`'s own four corners don't fit
+  one consistent rigid pose equally well even in an easy frame (two
+  corners within ~5px, two off by ~30px); computed directly from the
+  calibrated skeleton geometry, `aruco_2` and `aruco_3`'s tag centers are
+  5.6cm apart in-plane (only ~2cm through the blade's thickness) when the
+  physical tags sit opposite each other at nearly the same point along
+  the blade -- confirming Harri's own visual read of the same offset; and
+  the debug videos show several markers' predicted positions landing
+  tens-to-100+px from the real, visible sword in the middle of the known
+  ArUco gap while others (right on a tag) fit fine -- consistent with a
+  real dot-to-wrong-slot mismatch (e.g. dot0/dot1, physically on the
+  sword's far face and out of view for this camera, resolving instead to
+  real dot4/dot5 detections because the miscalibrated body's predicted
+  dot0/dot1 positions land closer to them than to nothing). Conclusion,
+  stated plainly rather than hedged: this capture's marker-body
+  calibration needs to be redone (starting with the `aruco_2`/`aruco_3`
+  relative pose, since everything else -- dots calibrated relative to
+  whichever tag was visible -- likely inherits its error) before its
+  tracking results can be trusted; not yet done.
+
 - **2026-09-04** — Real end-to-end validation: dot-assisted tracking closes
   the fast-motion gap that motivated this whole feature. Ran the tracker
   against the real sword capture three ways, all on

@@ -1,5 +1,38 @@
 # Marker-based mocap — status
 
+- **2026-09-04** — Real end-to-end validation: dot-assisted tracking closes
+  the fast-motion gap that motivated this whole feature. Ran the tracker
+  against the real sword capture three ways, all on
+  `ukemi-tommi-20260509.db`:
+
+  1. Original ArUco-only baseline (older detection run,
+     `tracking_runs.id` `319ebb30...`): 52.3% tracked.
+  2. A fresh detection run with dot detection enabled on the two ring-lit
+     cameras, tracked with the new ArUco+dots skeleton (`ef3d451b...`,
+     `tracking_runs.id` `88b86bc0...`): **73.3% tracked** (4849/6618
+     steps), 1466 explicitly lost.
+  3. Control: the *same* fresh detection run's sequence, tracked with the
+     old dots-free skeleton (`2c93603c...`, `tracking_runs.id`
+     `c8da1eac...`) to rule out the improvement being an artifact of
+     re-running detection rather than of the dots themselves: 52.3%
+     tracked (3458/6618) -- matches the original baseline almost exactly,
+     confirming runs 1 and 3 are a clean apples-to-apples pair and the
+     ~21-point gain in run 2 is attributable to the dots.
+
+  Checked the specific 53.6-55.1s window previously found to be a
+  complete tracker freeze (zero `tracking_results` rows, not
+  constant-velocity coasting as the design docs had assumed): the control
+  run confirms that finding again (only 6 of ~150 possible steps in that
+  window have any row at all). The dots-enabled run has a row for every
+  one of the ~150 steps in that same window -- 108 with real inlier
+  observations (avg. ~2 per step, consistent with only a couple of dots
+  being visible at a time during a fast swing) and 40 honestly reported
+  as lost rather than silently skipped. This is the direct answer to the
+  question that started this phase: dots keep the tracker alive and
+  producing real updates specifically during the gap ArUco alone
+  couldn't cover, not just improving some aggregate statistic elsewhere
+  in the capture.
+
 - **2026-09-03/04** — Wired the shared dot-assignment phase into both real
   per-frame tracking loops (`run_track_from_db()`'s raw loop,
   `MultiPersonTracker::run()`) -- the one piece that was still missing

@@ -26,14 +26,18 @@ the only new piece here is getting the per-camera pixel click instead of
 an automatic blob detection.
 
 Workflow: for each timestamp you name (a moment you already know shows
-the dot clearly in 2+ cameras), the reference marker is solved from that
-same instant's ArUco detections, then each camera's frame at that instant
-is shown one at a time -- click the dot's pixel, or press 's' to skip
-this camera for this dot. Samples across every timestamp for one dot are
-averaged into its final local-frame position. Reads an existing
-marker_body_definitions YAML (already calibrated for its coded markers,
-e.g. calibrate_rigid_marker_body.py's own output) and writes a new one
-with the manually-triangulated dots appended.
+at least one dot clearly in 2+ cameras), the reference marker is solved
+from that same instant's ArUco detections, then each camera's frame at
+that instant is shown *once* -- label every one of --dot-names that's
+visible in that single frame (click a point, press the digit key for
+which dot it is, repeat for every dot visible in this camera), then
+confirm the whole frame and move to the next camera. Not every dot needs
+to be visible in every camera, or at every timestamp -- whatever gets
+labeled for a given dot, across however many cameras/timestamps, gets
+triangulated and averaged into that dot's final local-frame position.
+Reads an existing marker_body_definitions YAML (already calibrated for
+its coded markers, e.g. calibrate_rigid_marker_body.py's own output) and
+writes a new one with the manually-triangulated dots appended.
 
 Usage:
     python tools/annotate_dots_manually.py \\
@@ -41,14 +45,17 @@ Usage:
         --shot-id <capture_id> \\
         --dictionary DICT_4X4_50 --marker-size 0.095 \\
         --marker-ids 2 3 --reference-id 2 \\
-        --dot-names dot0 dot1 \\
+        --dot-names dot0 dot1 dot2 \\
         --timestamps 40.2 55.7 61.0 \\
         --input sword_body.yaml \\
         --output sword_body_with_dots.yaml
 
-Controls while a frame window is shown: left-click to mark the dot (click
-again to move the mark before confirming), Enter/Space to confirm and
-move on, 's' to skip this camera for this dot, 'q' to abort.
+Controls while a frame window is shown: left-click a point, then press
+its digit key (0 for the first --dot-names entry, 1 for the second, ...)
+to label it -- repeat for every dot visible in this frame. 'u' undoes the
+last labeled point. Enter/Space confirms the whole frame (including zero
+labels, if nothing here is visible) and moves to the next camera. 'q'
+aborts entirely. At most 10 dot names per run (digit keys 0-9).
 """
 from __future__ import annotations
 
@@ -80,50 +87,81 @@ def _grab_frame(file_path: str, video_frame: int) -> np.ndarray | None:
     return None
 
 
-def _click_pixel(window_name: str, img: np.ndarray) -> tuple[float, float] | None:
-    """Show *img*, let the user click a point, confirm/skip/abort.
+def _click_multiple_pixels(
+    window_name: str, img: np.ndarray, dot_names: list[str]
+) -> dict[str, tuple[float, float]]:
+    """Show *img*; click a point then press its digit key (0 for
+    dot_names[0], 1 for dot_names[1], ...) to label it, repeating for
+    every dot visible in this one frame, Enter/Space to confirm the whole
+    set and move on.
 
-    Returns the clicked (u, v) in the image's own pixel space, or None if
-    skipped. Raises SystemExit if the user aborts ('q').
+    Returns {dot_name: (u, v)} in the image's own pixel space, for
+    however many of *dot_names* got labeled here (0 or more -- not every
+    dot needs to be visible in every camera). Raises SystemExit if the
+    user aborts ('q').
     """
-    marked: list[tuple[int, int]] = []
+    if len(dot_names) > 10:
+        raise ValueError("at most 10 dot names supported per run (digit keys 0-9)")
+
+    labeled: dict[str, tuple[int, int]] = {}
+    order: list[str] = []  # labeling order, so 'u' undoes the most recent one
+    pending: list[tuple[int, int]] = []  # clicked but not yet assigned a digit
 
     def on_mouse(event, x, y, flags, userdata):
         if event == cv2.EVENT_LBUTTONDOWN:
-            marked[:] = [(x, y)]
+            pending[:] = [(x, y)]
 
-    display = img.copy()
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(window_name, on_mouse)
 
+    legend = "  ".join(f"{i}:{n}" for i, n in enumerate(dot_names))
     while True:
-        frame = display.copy()
-        if marked:
-            cv2.drawMarker(frame, marked[0], (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
-        cv2.putText(frame, "click dot, Enter=confirm, s=skip, q=quit", (20, 40),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        frame = img.copy()
+        for name, (x, y) in labeled.items():
+            cv2.drawMarker(frame, (x, y), (0, 255, 0), cv2.MARKER_CROSS, 20, 2)
+            cv2.putText(frame, name, (x + 14, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                       (0, 255, 0), 2)
+        if pending:
+            cv2.drawMarker(frame, pending[0], (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
+        cv2.putText(frame, f"click + digit to label: {legend}", (20, 40),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        cv2.putText(frame, "Enter=confirm frame, u=undo, q=quit", (20, 75),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         cv2.imshow(window_name, frame)
         key = cv2.waitKey(30) & 0xFF
-        if key in (13, 32) and marked:  # Enter or Space
-            return float(marked[0][0]), float(marked[0][1])
-        if key == ord("s"):
-            return None
-        if key == ord("q"):
+        if key in (13, 32):  # Enter or Space
+            return {name: (float(x), float(y)) for name, (x, y) in labeled.items()}
+        if key == ord("u"):
+            if order:
+                del labeled[order.pop()]
+        elif key == ord("q"):
             cv2.destroyAllWindows()
             raise SystemExit("Aborted by user")
+        elif pending and ord("0") <= key <= ord("9"):
+            idx = key - ord("0")
+            if idx < len(dot_names):
+                name = dot_names[idx]
+                if name in labeled:
+                    order.remove(name)
+                labeled[name] = pending[0]
+                order.append(name)
+                pending.clear()
 
 
 def annotate_one_instant(
-    dot_name: str, timestamp: float, states: dict, sync_table, svid_by_cam: dict,
+    dot_names: list[str], timestamp: float, states: dict, sync_table, svid_by_cam: dict,
     detector: ArucoDetector, ref_id: str, marker_size: float, min_cameras: int,
     max_reprojection_px: float,
-) -> np.ndarray | None:
-    """Solve the reference marker's pose at *timestamp* and let the user
-    click *dot_name* in every camera with a frame at that instant.
+) -> dict[str, np.ndarray]:
+    """Solve the reference marker's pose at *timestamp*, show each camera's
+    frame once, and let the user label as many of *dot_names* as are
+    visible per camera in a single pass.
 
-    Returns the dot's local-frame (reference marker's frame) 3D position
-    for this instant, or None if the reference couldn't be solved or fewer
-    than *min_cameras* usable clicks were made.
+    Returns {dot_name: local-frame 3D position} for every dot with enough
+    usable labels this instant (>=min_cameras cameras, passing the
+    reprojection check) -- a dot with too few labels, or none at all,
+    simply isn't a key in the result. Empty if the reference marker
+    itself couldn't be solved from >=min_cameras cameras.
     """
     frames: dict[str, tuple[np.ndarray, int]] = {}
     for cam_id, svid in svid_by_cam.items():
@@ -147,32 +185,39 @@ def annotate_one_instant(
     if len(ref_obs) < min_cameras:
         print(f"  t={timestamp}: reference marker '{ref_id}' seen in only "
               f"{len(ref_obs)} camera(s) -- skipping this instant")
-        return None
+        return {}
     try:
         rvec_ref, tvec_ref, _rms = solve_marker_pose(ref_obs, states, marker_size)
     except (ValueError, RuntimeError) as e:
         print(f"  t={timestamp}: reference marker pose solve failed ({e}) -- skipping")
-        return None
+        return {}
     R_ref, _ = cv2.Rodrigues(rvec_ref)
 
     print(f"  t={timestamp}: reference solved from {len(ref_obs)} camera(s) -- "
-          f"click '{dot_name}' in each frame")
-    clicked: dict[str, tuple[float, float]] = {}
+          f"label any of {dot_names} visible in each frame")
+    clicked_by_dot: dict[str, dict[str, tuple[float, float]]] = {name: {} for name in dot_names}
     for cam_id, (img, _video_frame) in frames.items():
-        pixel = _click_pixel(f"{dot_name} @ t={timestamp} -- {cam_id[:8]}", img)
+        points = _click_multiple_pixels(f"t={timestamp} -- {cam_id[:8]}", img, dot_names)
         cv2.destroyAllWindows()
-        if pixel is not None:
+        for dot_name, pixel in points.items():
             undist = _undistort_pts(np.array([pixel], dtype=np.float64), states[cam_id])
-            clicked[cam_id] = (float(undist[0, 0]), float(undist[0, 1]))
+            clicked_by_dot[dot_name][cam_id] = (float(undist[0, 0]), float(undist[0, 1]))
 
-    if len(clicked) < min_cameras:
-        print(f"  t={timestamp}: only {len(clicked)} camera(s) clicked -- skipping")
-        return None
-    world_pt = triangulate_point_multi_view(clicked, states, max_reprojection_px=max_reprojection_px)
-    if world_pt is None:
-        print(f"  t={timestamp}: triangulation/reprojection check failed -- skipping")
-        return None
-    return R_ref.T @ (world_pt - tvec_ref.flatten())
+    results: dict[str, np.ndarray] = {}
+    for dot_name, clicked in clicked_by_dot.items():
+        if not clicked:
+            continue  # not visible anywhere this instant -- not an error
+        if len(clicked) < min_cameras:
+            print(f"  t={timestamp}: '{dot_name}' labeled in only {len(clicked)} camera(s) "
+                  "-- skipping")
+            continue
+        world_pt = triangulate_point_multi_view(clicked, states, max_reprojection_px=max_reprojection_px)
+        if world_pt is None:
+            print(f"  t={timestamp}: '{dot_name}' triangulation/reprojection check failed "
+                  "-- skipping")
+            continue
+        results[dot_name] = R_ref.T @ (world_pt - tvec_ref.flatten())
+    return results
 
 
 def _fmt(v: np.ndarray) -> str:
@@ -240,28 +285,34 @@ def main() -> None:
     existing = yaml.safe_load(Path(args.input).read_text(encoding="utf-8"))
     markers: list[dict] = list(existing.get("markers", []))
     existing_dot_names = {m["name"] for m in markers if m.get("type") == "reflective_dot"}
+    for name in args.dot_names:
+        if name in existing_dot_names:
+            print(f"'{name}' already exists in {args.input} -- re-annotating will replace it")
 
-    for dot_name in args.dot_names:
-        if dot_name in existing_dot_names:
-            print(f"'{dot_name}' already exists in {args.input} -- re-annotating will replace it")
-        print(f"\n=== Annotating '{dot_name}' ===")
-        samples = []
-        for t in args.timestamps:
-            sample = annotate_one_instant(
-                dot_name, t, states, sync_table, svid_by_cam, detector, ref_id,
-                args.marker_size, args.min_cameras, args.max_reprojection_px,
-            )
-            if sample is not None:
-                samples.append(sample)
+    # One pass per timestamp (not per dot): each camera's frame at that instant
+    # is shown once, and however many of --dot-names are visible get labeled
+    # together -- see the module docstring for why (avoids revisiting the same
+    # image once per dot when several are visible in one view, which real
+    # footage of this sword clearly shows).
+    samples_by_dot: dict[str, list[np.ndarray]] = {name: [] for name in args.dot_names}
+    for t in args.timestamps:
+        results = annotate_one_instant(
+            args.dot_names, t, states, sync_table, svid_by_cam, detector, ref_id,
+            args.marker_size, args.min_cameras, args.max_reprojection_px,
+        )
+        for name, sample in results.items():
+            samples_by_dot[name].append(sample)
+
+    for name, samples in samples_by_dot.items():
         if not samples:
-            print(f"  '{dot_name}': no usable samples across any timestamp -- not written")
+            print(f"\n'{name}': no usable samples across any timestamp -- not written")
             continue
         center = robust_mean(np.stack(samples), trim_frac=0.0) if len(samples) > 1 else samples[0]
         if len(samples) > 1:
             spread = np.stack(samples).std(axis=0)
-            print(f"  '{dot_name}': {len(samples)} samples, per-axis std (m) {spread}")
-        markers = [m for m in markers if m.get("name") != dot_name]
-        markers.append({"name": dot_name, "type": "reflective_dot", "center": center})
+            print(f"\n'{name}': {len(samples)} samples, per-axis std (m) {spread}")
+        markers = [m for m in markers if m.get("name") != name]
+        markers.append({"name": name, "type": "reflective_dot", "center": center})
 
     write_marker_body_yaml(existing.get("name", "calibrated-rigid-body"), markers, Path(args.output))
     print(f"\nWrote {args.output}")

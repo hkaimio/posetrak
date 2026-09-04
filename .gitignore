@@ -98,3 +98,7 @@ __marimo__/
 # Compiled Inno Setup installers (built artifacts, not checked in --
 # see packaging/windows/posetrak.iss)
 packaging/windows/output/
+
+# Scratch output (annotated frames, CSVs, etc.) from ad-hoc analysis scripts --
+# not project source, not meant to be committed.
+scratch/

@@ -595,12 +595,19 @@ def read_observations_with_edits(
     same-width zero body silently overwriting it once any edit exists (see
     `merge_observation_sources`'s own docstring and status.md's 2026-08-30
     note for why this matters).
+
+    Rows with source `DOT_REGION_TYPE` ('dots') are excluded: they hold
+    anonymous reflective-dot candidates in a different blob layout
+    (float32[N,4]: px, py, area, compactness -- see `DotCandidateWriter`),
+    not the float32[N,3] named-keypoint layout every other source uses.
+    They aren't part of the per-subject keypoint display/edit this
+    function serves.
     """
     obs_rows = session.execute(
         "SELECT video_frame, source, kp_blob FROM pose_observations"
-        " WHERE sequence_id = ? AND camera_instance_id = ?"
+        " WHERE sequence_id = ? AND camera_instance_id = ? AND source != ?"
         " ORDER BY video_frame",
-        (sequence_id, camera_instance_id),
+        (sequence_id, camera_instance_id, DOT_REGION_TYPE),
     ).fetchall()
     if not obs_rows:
         return {}

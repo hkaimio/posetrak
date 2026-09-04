@@ -233,6 +233,36 @@ def test_finalise_object_copies_dot_candidates_alongside_markers(session):
     assert manifest_sources == {"aruco"}
 
 
+def test_read_observations_with_edits_ignores_dot_candidates(session):
+    """A sequence with both 'markers' and 'dots' pose_observations rows for
+    the same camera must not crash the generic keypoint reader: 'dots' rows
+    are float32[N,4] (px, py, area, compactness), not the float32[N,3]
+    named-keypoint layout every other source uses, and read_observations_with_edits
+    isn't meant to display them (they're anonymous, scene-wide candidates,
+    not part of any per-subject keypoint editor). Regression test for a real
+    GUI crash: opening a marker-based-mocap object's TrackingRunPanel/
+    PersonCropGridWidget threw `ValueError: cannot reshape array of size 4
+    into shape (3)` the moment a sequence had any dot candidates at all."""
+    body_id = import_marker_body_str(session, _MARKER_BODY_YAML, name="Test Bokken")
+    object_id = create_capture_object(session, _SHOT_ID, "bokken-A", body_id)
+    run_id = _write_marker_run(
+        session, ["3", "7"], marker_body_definition_id=body_id, capture_object_id=object_id,
+    )
+
+    dot_writer = DotCandidateWriter(session, run_id, _SVID)
+    dot_writer.add_frame(0, [_fake_blob(10.0, 20.0)])
+    dot_writer.finalise()
+
+    seq_id = finalise_object_to_db(session, run_id)
+
+    from app.pose.db_cache import read_observations_with_edits
+
+    obs = read_observations_with_edits(session, seq_id, _CAM_ID, primary_source="markers")
+    assert set(obs.keys()) == {0, 1}
+    for kp in obs.values():
+        assert kp.shape[1] == 3
+
+
 def test_finalise_object_without_dot_candidates_writes_none(session):
     """A run that never had detect_dots_for_cameras enabled produces no
     source='dots' rows at all -- the copy is a no-op, not an error."""

@@ -1344,6 +1344,8 @@ SessionReader::load_unlabeled_candidates(std::string const& sequence_id,
             cand.confidence = 1.0;
             cand.area = c.area;
             cand.compactness = c.compactness;
+            cand.major_axis = c.major_axis;
+            cand.minor_axis = c.minor_axis;
             result.push_back(cand);
         }
     }

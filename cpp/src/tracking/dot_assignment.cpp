@@ -5,13 +5,14 @@
 #include "posetrak/tracking/dot_assignment.hpp"
 
 #include "posetrak/tracking/assignment.hpp"
+#include <cmath>
 
 namespace posetrak {
 
 std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
     std::vector<SubjectDotPredictions> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
-    double gate_mahalanobis, int frame_idx, double timestamp) {
+    double gate_mahalanobis, int frame_idx, double timestamp, double calib_noise_std) {
     std::unordered_map<int, SubjectDotAssignment> result;
 
     // One column per (subject, marker) slot with a prediction for this camera.
@@ -72,6 +73,24 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
             // alone should dominate Observation::measurement_noise_std().
             obs.crop_scale = 0.0;
 
+            // Motion-blur streak (dot_blob_detector.py's elongated-blob
+            // acceptance path): its centroid is genuinely less precise than
+            // a round dot's, roughly in proportion to how far the dot moved
+            // during the exposure. A first cut, not yet modeling *direction*
+            // -- the real uncertainty is larger along the blur than across
+            // it, but Observation::measurement_noise_std() is a single
+            // scalar; logged as a design gap in status.md's 2026-09-04
+            // entry alongside the future velocity-from-streak and
+            // blinking-LED sub-frame-timing ideas it also records. Treats
+            // the elongation beyond the round-dot footprint as spread
+            // uniformly over the exposure window (stddev = width/sqrt(12)).
+            // Left at 0.0 (the default -- normal formula applies) for a
+            // round dot, where major_axis == minor_axis.
+            double const elongation = cand.major_axis - cand.minor_axis;
+            if (elongation > 1.0) {
+                obs.noise_std_override = calib_noise_std + elongation / std::sqrt(12.0);
+            }
+
             result[col.subject_id].resolved.push_back(obs);
         }
     }
@@ -98,7 +117,8 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     }
 
     return resolve_dot_assignment(predictions, candidates_by_camera,
-                                  config.dot_assignment_gate_mahalanobis, frame_idx, timestamp);
+                                  config.dot_assignment_gate_mahalanobis, frame_idx, timestamp,
+                                  config.calib_noise_std);
 }
 
 }  // namespace posetrak

@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime
 import json
 import sqlite3
+import struct
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -435,18 +436,67 @@ DOT_REGION_TYPE = "dots"
 # detection error that doesn't apply here.
 _DOT_CROP_SCALE = 0.0
 
+# px, py, area, compactness, major_axis_px, minor_axis_px -- see
+# encode_dot_candidates() for the blob layout these are packed into.
+_DOT_CANDIDATE_FLOATS = 6
+
+
+def encode_dot_candidates(candidates: list) -> bytes:
+    """Encode one frame's dot_blob_detector.BlobCandidate list into the
+    'dots' blob format: a little-endian int32 candidate count, followed by
+    float32[count, 6] (px, py, area, compactness, major_axis_px,
+    minor_axis_px) -- the major/minor axis pair `resolve_dot_assignment()`
+    (dot_assignment.cpp) uses to inflate a motion-blur streak's measurement
+    noise (dot_blob_detector.py's own docstring; status.md's 2026-09-04
+    entry).
+
+    Explicitly versioned via a leading count field, rather than inferring
+    N from raw byte length the way the original float32[N,4] format did
+    (still what decode_dot_candidates() below decoded before 2026-09-04):
+    byte-length inference is genuinely ambiguous once the per-candidate
+    width changes -- some real candidate counts make an old N*16-byte
+    blob's length also land on an exact multiple of the new 24-byte
+    stride, decoding as a different (wrong) N silently rather than
+    failing loudly. A count prefix removes the ambiguity outright, at the
+    cost of the old format no longer being decodable -- acceptable here
+    since the only real capture using it (this feature's own first
+    dots-enabled detection run) was already going to need re-running once
+    the marker-body calibration bug found the same day is fixed.
+    """
+    arr = np.array(
+        [(c.cx, c.cy, c.area, c.compactness, c.major_axis_px, c.minor_axis_px)
+         for c in candidates],
+        dtype=np.float32,
+    ).reshape(len(candidates), _DOT_CANDIDATE_FLOATS)
+    return struct.pack("<i", len(candidates)) + arr.tobytes()
+
+
+def decode_dot_candidates(blob: bytes) -> np.ndarray:
+    """Decode a 'dots' blob (see encode_dot_candidates()) -> float32[N, 6]."""
+    if len(blob) < 4:
+        raise ValueError(f"dot candidate blob too short: {len(blob)} bytes")
+    (n,) = struct.unpack_from("<i", blob, 0)
+    expected_bytes = 4 + n * _DOT_CANDIDATE_FLOATS * 4
+    if n < 0 or len(blob) != expected_bytes:
+        raise ValueError(
+            f"dot candidate blob malformed, or written in the pre-2026-09-04 "
+            f"float32[N,4] format: header says {n} candidates ({expected_bytes} "
+            f"bytes expected), got {len(blob)} bytes -- re-run detection"
+        )
+    return np.frombuffer(blob, dtype=np.float32, offset=4).reshape(n, _DOT_CANDIDATE_FLOATS)
+
 
 class DotCandidateWriter:
     """Accumulates anonymous reflective-dot candidate rows and flushes to DB
     in batches.
 
     Unlike MarkerKeypointWriter's fixed-slot layout, a frame's candidate
-    count is whatever the detector actually found -- the blob is
-    float32[N, 4] (px, py, area, compactness), N varying frame to frame
-    (dot-assignment-architecture-design.md §3). Always writes a row even
-    when N=0, so "this frame was processed and saw nothing" stays
-    distinguishable from "this frame was never processed" -- the same
-    reasoning MarkerKeypointWriter's always-write-a-row behavior follows.
+    count is whatever the detector actually found (dot-assignment-
+    architecture-design.md §3) -- see encode_dot_candidates() for the blob
+    layout. Always writes a row even when N=0, so "this frame was
+    processed and saw nothing" stays distinguishable from "this frame was
+    never processed" -- the same reasoning MarkerKeypointWriter's
+    always-write-a-row behavior follows.
     """
 
     def __init__(
@@ -463,13 +513,9 @@ class DotCandidateWriter:
     def add_frame(self, video_frame: int, candidates: list) -> None:
         """*candidates* is the ``dot_blob_detector.detect_blobs()`` result
         for this frame (a list of ``BlobCandidate``)."""
-        blob = np.array(
-            [(c.cx, c.cy, c.area, c.compactness) for c in candidates],
-            dtype=np.float32,
-        ).reshape(len(candidates), 4)
         self._rows.append((
             self._run_id, self._svid, video_frame, DOT_TRACK_ID, DOT_REGION_TYPE,
-            blob.tobytes(), _DOT_CROP_SCALE,
+            encode_dot_candidates(candidates), _DOT_CROP_SCALE,
         ))
         if len(self._rows) >= _BATCH_SIZE:
             self._flush()
@@ -496,10 +542,9 @@ def read_dot_candidates_for_run(
     detection_run_id: str,
     shot_video_id: str,
 ) -> dict[int, np.ndarray]:
-    """Return {video_frame: float32[N, 4]} for a dot-candidate detection run.
+    """Return {video_frame: float32[N, 6]} for a dot-candidate detection run.
 
-    N varies per frame -- reshape(-1, 4) recovers it from the blob's own
-    byte length, the same trick decode_dot_candidates() uses on the C++ side.
+    See decode_dot_candidates() for the blob layout.
     """
     rows = session.execute(
         "SELECT video_frame, keypoints FROM detection_keypoints "
@@ -507,11 +552,7 @@ def read_dot_candidates_for_run(
         "ORDER BY video_frame",
         (detection_run_id, shot_video_id, DOT_TRACK_ID, DOT_REGION_TYPE),
     ).fetchall()
-    result = {}
-    for row in rows:
-        kp_bytes = bytes(row["keypoints"])
-        result[row["video_frame"]] = np.frombuffer(kp_bytes, dtype=np.float32).reshape(-1, 4)
-    return result
+    return {row["video_frame"]: decode_dot_candidates(bytes(row["keypoints"])) for row in rows}
 
 
 def read_marker_keypoints_for_run(

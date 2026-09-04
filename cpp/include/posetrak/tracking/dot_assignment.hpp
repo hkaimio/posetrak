@@ -87,6 +87,13 @@ struct SubjectDotPredictions {
 ///        (TrackerConfig::dot_assignment_gate_mahalanobis).
 /// @param frame_idx Frame index to stamp onto every resolved Observation.
 /// @param timestamp Timestamp to stamp onto every resolved Observation.
+/// @param calib_noise_std Base calibration noise (TrackerConfig::calib_noise_std)
+///        a resolved Observation's noise_std_override is inflated from when its
+///        candidate is a motion-blur streak (major_axis notably exceeds
+///        minor_axis -- see dot_blob_detector.py's elongated-blob acceptance
+///        path) rather than a round dot. Defaulted so existing callers/tests
+///        constructing candidates with major_axis == minor_axis (a round dot)
+///        are unaffected either way.
 /// @return subject_id -> SubjectDotAssignment, for every subject that had at
 ///         least one resolved Observation. A subject with nothing resolved
 ///         this frame (no predictions, or every candidate gated out) is
@@ -94,7 +101,7 @@ struct SubjectDotPredictions {
 std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
     std::vector<SubjectDotPredictions> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
-    double gate_mahalanobis, int frame_idx, double timestamp);
+    double gate_mahalanobis, int frame_idx, double timestamp, double calib_noise_std = 5.0);
 
 /// @brief One dot-bearing subject as resolve_shared_dot_assignment() needs
 /// it: an id to key the result map by, plus the Tracker to query

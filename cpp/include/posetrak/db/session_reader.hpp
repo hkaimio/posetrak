@@ -76,6 +76,18 @@ struct UnlabeledCandidate {
     double confidence;
     double area;         ///< Blob area in pixels, from the detector (diagnostics/tuning only)
     double compactness;  ///< Blob compactness, from the detector (diagnostics/tuning only)
+    /// Minimum-area-rect axes from the detector (db::DotCandidate::major_axis/minor_axis) --
+    /// equal for a round dot; major_axis is a streak's real length and minor_axis its width
+    /// (~the dot's true diameter) for a motion-blur streak accepted via dot_blob_detector.py's
+    /// elongated-blob path. Unlike area/compactness above, these ARE used, not diagnostics-only:
+    /// resolve_dot_assignment() inflates a streaked candidate's Observation::noise_std_override
+    /// from them (dot_assignment.cpp).
+    /// Defaulted (unlike area/compactness above) so an existing fixture or
+    /// call site built before these fields existed still gets major==minor
+    /// (a round dot -- no noise_std_override) rather than reading
+    /// uninitialized memory.
+    double major_axis = 0.0;
+    double minor_axis = 0.0;
 };
 
 /// @brief Reads tracking data from a per-session SQLite database
@@ -185,8 +197,8 @@ class SessionReader {
     /// Reads every `pose_observations` row with `source='dots'` (the
     /// finalized-data counterpart of a `detection_keypoints` row with
     /// `region_type='dots'`), decodes each row's variable-length
-    /// `float32[N,4]` blob via `db::decode_dot_candidates()`, and undistorts
-    /// positions the same way `load_observations()` does for labeled
+    /// count-prefixed `float32[N,6]` blob via `db::decode_dot_candidates()`,
+    /// and undistorts positions the same way `load_observations()` does for labeled
     /// keypoints.
     ///
     /// Not filtered by `person_id`: dot candidates are scene-wide detections,

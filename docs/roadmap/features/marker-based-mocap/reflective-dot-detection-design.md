@@ -253,6 +253,33 @@ cut at what it needs to cover, not the round itself.
   Phase A/B already flagged -- dots and ArUco corners will have
   different, and possibly quite different, real detection precision;
   worth measuring once C1 has real residuals rather than assuming.
+- **Motion-blur streak handling** (2026-09-04): `detect_blobs()`'s
+  compactness filter, needed to reject glare streaks, was also rejecting
+  a genuinely blurred dot during fast swings -- exactly the moments this
+  feature exists to help with most. Fixed by accepting an elongated blob
+  whose *width* still matches a round dot's diameter range even when its
+  *length* doesn't (a real streak's width doesn't change under blur, only
+  its length), capped by `max_streak_length_px` (a first cut, not yet
+  checked against a real blurred-dot example the way the other defaults
+  were), and inflating the resolved Observation's noise
+  (`resolve_dot_assignment()`, dot_assignment.cpp) from the streak's
+  length. That noise inflation is a single scalar, not yet modeling that
+  the real uncertainty is larger *along* the blur direction than across
+  it -- Harri raised two future uses for the streak's actual direction/
+  length once that's worth doing properly:
+  - **Velocity estimate from the streak**: a streak's own vector (start
+    to end within one exposure) is a real, currently-unused velocity
+    observation for the fast-motion moments where the constant-velocity
+    process model is under the most strain.
+  - **Sub-frame timing via a blinking-LED reference**: an array of LEDs
+    blinking at staggered, precisely-known offsets (~1ms apart) visible
+    in-frame would let the exposure window's exact start/end be read
+    directly off which LEDs are lit, rather than assumed from the
+    camera's nominal shutter setting -- combined with the streak's own
+    start/end pixel coordinates, this would let a dot's position be
+    estimated at the *exact* tracker timestep rather than smeared
+    uniformly across the whole exposure, the fundamental limit a plain
+    centroid-plus-inflated-noise treatment can't get past.
 
 ## 7. Design round scope for C2 (Option A)
 

@@ -82,3 +82,41 @@ def test_detect_blobs_thresholds_and_area_are_overridable() -> None:
 
     assert detect_blobs(frame, threshold=100) != []
     assert detect_blobs(frame, threshold=100, min_area=10000.0) == []
+
+
+def test_detect_blobs_reports_axes_close_to_diameter_for_a_round_dot() -> None:
+    frame = _blank_frame()
+    _draw_dot(frame, 100, 80, radius=6)  # diameter ~12
+
+    blobs = detect_blobs(frame)
+
+    assert len(blobs) == 1
+    assert blobs[0].major_axis_px == pytest.approx(12.0, abs=2.0)
+    assert blobs[0].minor_axis_px == pytest.approx(12.0, abs=2.0)
+
+
+def test_detect_blobs_accepts_a_short_motion_blur_streak_with_dot_like_width() -> None:
+    """A real dot's width doesn't change under motion blur, only its length
+    grows -- a short streak (dot-width, well under max_streak_length_px)
+    should be accepted and reported with its real length/width, not
+    rejected the way an arbitrarily long glare streak is (see the test
+    below, unchanged)."""
+    frame = _blank_frame()
+    cv2.rectangle(frame, (60, 97), (85, 103), 250, thickness=-1)  # 25x6 streak, compactness ~0.49
+
+    blobs = detect_blobs(frame)
+
+    assert len(blobs) == 1
+    assert blobs[0].major_axis_px == pytest.approx(25.0, abs=2.0)
+    assert blobs[0].minor_axis_px == pytest.approx(6.0, abs=2.0)
+
+
+def test_detect_blobs_rejects_a_streak_too_long_to_be_realistic_blur() -> None:
+    """A streak whose width falls in the round-dot diameter range must
+    still be rejected once it's longer than any realistic motion blur --
+    the original glare-streak test above (80x4) already covers this at a
+    narrower width; this checks it holds at a dot-like width too."""
+    frame = _blank_frame()
+    cv2.rectangle(frame, (20, 96), (180, 104), 250, thickness=-1)  # 160x8, dot-width but too long
+
+    assert detect_blobs(frame) == []

@@ -38,6 +38,8 @@ UnlabeledCandidate make_candidate(int camera_id, double px, double py) {
     c.confidence = 1.0;
     c.area = 10.0;
     c.compactness = 0.9;
+    c.major_axis = 3.6;  // a round dot (major == minor) -- no noise-std-override kicks in
+    c.minor_axis = 3.6;
     return c;
 }
 

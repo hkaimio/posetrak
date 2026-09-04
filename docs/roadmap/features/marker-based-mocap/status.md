@@ -56,6 +56,29 @@
   whichever tag was visible -- likely inherits its error) before its
   tracking results can be trusted; not yet done.
 
+- **2026-09-04** — Separately, fixed `detect_blobs()`'s
+  (dot_blob_detector.py) real structural weakness: its compactness
+  filter, needed to reject glare
+  streaks, was also rejecting a genuinely blurred dot during fast
+  swings -- exactly the moments this feature exists to help with most.
+  Now accepts an elongated blob whose *width* still matches a round dot's
+  diameter range even when its *length* doesn't, capped by
+  `max_streak_length_px` (a first cut, not yet checked against a real
+  blurred-dot example). Feeds the streak's length into the resolved
+  Observation's noise (`resolve_dot_assignment()`) rather than trusting a
+  streaked centroid as tightly as a round dot's -- required a versioned
+  wire-format change (`pose_observations`/`detection_keypoints`'s 'dots'
+  blob: int32 candidate count + float32[N,6], not the inferred-from-byte-
+  length float32[N,4] the format had been since first written) to carry
+  the streak's axes through to the C++ side at all; see
+  [reflective-dot-detection-design.md](reflective-dot-detection-design.md)'s
+  "Open questions" section for the full rationale, the two future ideas
+  (velocity-from-streak, blinking-LED sub-frame timing) this also logs,
+  and why old 'dots' data (the one real detection run recorded under the
+  old format) needs re-running rather than migrating -- moot anyway,
+  since that run's tracking needs redoing once the calibration above is
+  fixed.
+
 - **2026-09-04** — Real end-to-end validation: dot-assisted tracking closes
   the fast-motion gap that motivated this whole feature. Ran the tracker
   against the real sword capture three ways, all on

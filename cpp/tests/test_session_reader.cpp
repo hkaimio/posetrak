@@ -10,6 +10,7 @@
 #include <sqlite3.h>
 
 #include <array>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>
@@ -628,14 +629,23 @@ static void create_fixture_db() {
         // scene-wide, not tied to a tracked subject, but pose_observations'
         // primary key still requires one. A different candidate count per
         // frame (3, then 1) exercises the variable-N blob width. ----------
-        auto make_dots_blob = [](std::vector<std::array<float, 4>> const& candidates) {
+        // Count-prefixed format (2026-09-04): int32 candidate count, then
+        // float32[count, 6] (px, py, area, compactness, major_axis,
+        // minor_axis) -- see db_cache.py's encode_dot_candidates().
+        auto make_dots_blob = [](std::vector<std::array<float, 6>> const& candidates) {
+            std::vector<uint8_t> out;
+            auto const n = static_cast<int32_t>(candidates.size());
+            out.resize(sizeof(int32_t));
+            std::memcpy(out.data(), &n, sizeof(int32_t));
             std::vector<float> vals;
             for (auto const& c : candidates) {
                 vals.insert(vals.end(), c.begin(), c.end());
             }
-            return encode_float32_blob(vals);
+            auto payload = encode_float32_blob(vals);
+            out.insert(out.end(), payload.begin(), payload.end());
+            return out;
         };
-        auto insert_dots_row = [&](int frame, std::vector<std::array<float, 4>> const& candidates) {
+        auto insert_dots_row = [&](int frame, std::vector<std::array<float, 6>> const& candidates) {
             std::string sql =
                 "INSERT INTO pose_observations "
                 "(sequence_id, camera_instance_id, video_frame, timestamp_s, person_id, source,"
@@ -650,11 +660,11 @@ static void create_fixture_db() {
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
         };
-        // px, py, area, compactness
-        insert_dots_row(0, {{{400.f, 500.f, 12.5f, 0.90f}},
-                            {{410.f, 505.f, 10.0f, 0.85f}},
-                            {{420.f, 510.f, 15.0f, 0.92f}}});
-        insert_dots_row(1, {{{450.f, 460.f, 8.0f, 0.80f}}});
+        // px, py, area, compactness, major_axis, minor_axis
+        insert_dots_row(0, {{{400.f, 500.f, 12.5f, 0.90f, 4.0f, 4.0f}},
+                            {{410.f, 505.f, 10.0f, 0.85f, 3.6f, 3.6f}},
+                            {{420.f, 510.f, 15.0f, 0.92f, 4.4f, 4.4f}}});
+        insert_dots_row(1, {{{450.f, 460.f, 8.0f, 0.80f, 3.2f, 3.2f}}});
     }
 
     sqlite3_close(db);
@@ -1114,6 +1124,8 @@ TEST_CASE("SessionReader load_unlabeled_candidates decodes a variable-N dot blob
     REQUIRE(frame0[0].position.y() == Catch::Approx(500.0));
     REQUIRE(frame0[0].area == Catch::Approx(12.5));
     REQUIRE(frame0[0].compactness == Catch::Approx(0.90));
+    REQUIRE(frame0[0].major_axis == Catch::Approx(4.0));
+    REQUIRE(frame0[0].minor_axis == Catch::Approx(4.0));
     REQUIRE(frame0[1].position.x() == Catch::Approx(410.0));
     REQUIRE(frame0[2].position.x() == Catch::Approx(420.0));
     // No per-candidate detector confidence exists in the blob -- always 1.0.

@@ -6,6 +6,7 @@
 
 #include <Eigen/Core>
 
+#include <cstdint>
 #include <cstring>
 #include <stdexcept>
 #include <vector>
@@ -80,41 +81,68 @@ inline std::vector<Keypoint> decode_keypoints(void const* data, int byte_count) 
 
 /// @brief One anonymous reflective-dot candidate as stored in a
 /// `region_type`/`source='dots'` blob (marker-based-mocap design doc's
-/// dot-assignment-architecture-design.md §3) -- distorted pixel position
-/// plus the two detector-side diagnostics
-/// (`prototype_dot_blob_detector.py`'s `BlobCandidate`) currently used
-/// only for logging/detector tuning, not by the Hungarian solver itself.
+/// dot-assignment-architecture-design.md §3) -- distorted pixel position,
+/// the two original detector-side diagnostics, and the minimum-area-rect
+/// axes (`dot_blob_detector.py`'s `BlobCandidate.major_axis_px`/
+/// `minor_axis_px`) `resolve_dot_assignment()` uses to inflate a
+/// motion-blur streak's measurement noise (dot_assignment.cpp).
 struct DotCandidate {
     float px{};
     float py{};
     float area{};
     float compactness{};
+    float major_axis{};  ///< Equivalent circular diameter for a round dot;
+                         ///< a streak's real length for an elongated one.
+    float minor_axis{};  ///< Equal to major_axis for a round dot; a
+                         ///< streak's width (~the dot's true diameter).
 };
 
-/// @brief Decode float32[n, 4] LE blob to vector<DotCandidate> -- the
-/// variable-length sibling to decode_keypoints() for the "several tens of
-/// anonymous candidates per frame" case (design doc §3/§7.1): unlike
+/// @brief Decode a 'dots' blob (see db_cache.py's encode_dot_candidates()
+/// for the Python-side writer and its full rationale) -> vector<DotCandidate>.
+///
+/// Layout: a little-endian int32 candidate count, followed by
+/// float32[count, 6] (px, py, area, compactness, major_axis, minor_axis).
+/// The variable-length sibling to decode_keypoints() for the "several tens
+/// of anonymous candidates per frame" case (design doc §3/§7.1): unlike
 /// ArUco's fixed manifest-width layout, N here is however many candidates
-/// this (camera, frame) actually had, recovered from blob byte length
-/// exactly the way decode_keypoints() recovers its own N. Reuses the
-/// existing detection_keypoints/pose_observations tables with a new
-/// region_type/source value and this blob layout, rather than a new
+/// this (camera, frame) actually had. Explicitly versioned via the count
+/// prefix rather than inferred from blob byte length alone -- inference
+/// is genuinely ambiguous once the per-candidate float count can differ
+/// between format versions (see encode_dot_candidates()'s docstring); a
+/// count prefix makes decoding a byte count that doesn't match the
+/// declared count fail loudly instead of silently reading the wrong N.
+/// Reuses the existing detection_keypoints/pose_observations tables with
+/// a region_type/source value and this blob layout, rather than a new
 /// table -- see the design doc's §3 for why (blob size grows with
 /// candidate count, row count doesn't, at any scale).
 inline std::vector<DotCandidate> decode_dot_candidates(void const* data, int byte_count) {
-    constexpr int candidate_bytes = 4 * sizeof(float);
-    if (byte_count % candidate_bytes != 0) {
+    constexpr int floats_per_candidate = 6;
+    constexpr int candidate_bytes = floats_per_candidate * sizeof(float);
+    if (byte_count < static_cast<int>(sizeof(int32_t))) {
         throw std::runtime_error("decode_dot_candidates: byte_count " + std::to_string(byte_count) +
-                                 " is not a multiple of 16 (4 floats per candidate)");
+                                 " too short for the count prefix");
     }
-    int n = byte_count / candidate_bytes;
+    int32_t n = 0;
+    std::memcpy(&n, data, sizeof(int32_t));
+    int64_t const expected_bytes =
+        static_cast<int64_t>(sizeof(int32_t)) + static_cast<int64_t>(n) * candidate_bytes;
+    if (n < 0 || expected_bytes != byte_count) {
+        throw std::runtime_error(
+            "decode_dot_candidates: malformed blob, or written in the pre-2026-09-04 "
+            "float32[N,4] format (header says " +
+            std::to_string(n) + " candidates, " + std::to_string(expected_bytes) +
+            " bytes expected, got " + std::to_string(byte_count) + ") -- re-run detection");
+    }
     std::vector<DotCandidate> result(static_cast<size_t>(n));
-    auto const* src = static_cast<float const*>(data);
+    auto const* src =
+        reinterpret_cast<float const*>(static_cast<uint8_t const*>(data) + sizeof(int32_t));
     for (int i = 0; i < n; ++i) {
-        result[static_cast<size_t>(i)].px = src[i * 4 + 0];
-        result[static_cast<size_t>(i)].py = src[i * 4 + 1];
-        result[static_cast<size_t>(i)].area = src[i * 4 + 2];
-        result[static_cast<size_t>(i)].compactness = src[i * 4 + 3];
+        result[static_cast<size_t>(i)].px = src[i * floats_per_candidate + 0];
+        result[static_cast<size_t>(i)].py = src[i * floats_per_candidate + 1];
+        result[static_cast<size_t>(i)].area = src[i * floats_per_candidate + 2];
+        result[static_cast<size_t>(i)].compactness = src[i * floats_per_candidate + 3];
+        result[static_cast<size_t>(i)].major_axis = src[i * floats_per_candidate + 4];
+        result[static_cast<size_t>(i)].minor_axis = src[i * floats_per_candidate + 5];
     }
     return result;
 }

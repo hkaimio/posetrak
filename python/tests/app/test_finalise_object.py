@@ -23,6 +23,7 @@ from app.pose.db_cache import (
     MarkerKeypointWriter,
     create_detection_run,
     create_marker_detection_run,
+    decode_dot_candidates,
 )
 from app.pose.finalise import finalise_object_to_db
 from posetrak.db.manage_capture_object import create_capture_object
@@ -107,7 +108,8 @@ def _write_marker_run(session, marker_ids, **kwargs) -> str:
 
 
 def _fake_blob(cx: float, cy: float) -> BlobCandidate:
-    return BlobCandidate(cx=cx, cy=cy, area=10.0, compactness=0.9, bbox=(0, 0, 1, 1))
+    return BlobCandidate(cx=cx, cy=cy, area=10.0, compactness=0.9, bbox=(0, 0, 1, 1),
+                          major_axis_px=3.6, minor_axis_px=3.6)
 
 
 def test_finalise_object_creates_sequence_and_manifest_with_marker_body(session):
@@ -216,12 +218,12 @@ def test_finalise_object_copies_dot_candidates_alongside_markers(session):
     assert [r["video_frame"] for r in dot_obs] == [0, 1]
     assert all(r["person_id"] == 0 for r in dot_obs)
 
-    blob0 = np.frombuffer(bytes(dot_obs[0]["kp_blob"]), dtype=np.float32).reshape(-1, 4)
-    assert blob0.shape == (2, 4)
+    blob0 = decode_dot_candidates(bytes(dot_obs[0]["kp_blob"]))
+    assert blob0.shape == (2, 6)
     assert np.allclose(blob0[:, :2], [[10.0, 20.0], [30.0, 40.0]])
 
-    blob1 = np.frombuffer(bytes(dot_obs[1]["kp_blob"]), dtype=np.float32).reshape(-1, 4)
-    assert blob1.shape == (0, 4)
+    blob1 = decode_dot_candidates(bytes(dot_obs[1]["kp_blob"]))
+    assert blob1.shape == (0, 6)
 
     # No pose_sequence_keypoints entries for dots -- they're anonymous, not
     # named landmarks; the manifest stays exactly the coded-marker one.

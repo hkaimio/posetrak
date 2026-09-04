@@ -543,6 +543,66 @@ bool states_bitwise_equal(State const& a, State const& b) {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// Shared dot-assignment phase support: the two pure helpers
+// person_context_step_window()/bucket_candidates_by_camera() the
+// step_person_context_predict()/_update() wiring depends on. The wiring
+// itself (MultiPersonTracker::run(), run_track_from_db()) is exercised
+// indirectly by every other test in this file continuing to pass unchanged
+// (none of the existing fixtures have an unlabeled_points track, so
+// has_dot_track stays false and the ordinary step_person_context() path is
+// all that runs) -- see status.md for the real end-to-end validation this
+// wiring was built for.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("person_context_step_window computes the same window step_person_context() uses",
+          "[multi_person_tracker][dot_assignment]") {
+    auto ctx = std::make_unique<PersonContext>();
+    ctx->start_time = 10.0;
+    ctx->dt = 0.1;
+
+    auto [t_start, t_end] = person_context_step_window(*ctx, 5);
+    // step_person_context()'s own formula: start_time + step*dt - dt/2
+    REQUIRE(t_start == Catch::Approx(10.45));
+    REQUIRE(t_end == Catch::Approx(10.55));
+}
+
+TEST_CASE("bucket_candidates_by_camera groups by camera within the time window",
+          "[multi_person_tracker][dot_assignment]") {
+    auto make_candidate = [](int cam_id, double t) {
+        UnlabeledCandidate c;
+        c.camera_id = cam_id;
+        c.frame_idx = 0;
+        c.timestamp = t;
+        c.position = Eigen::Vector2d(1.0, 2.0);
+        c.position_distorted = c.position;
+        c.confidence = 1.0;
+        c.area = 10.0;
+        c.compactness = 0.9;
+        return c;
+    };
+    std::vector<UnlabeledCandidate> candidates = {
+        make_candidate(0, 10.42),  // inside [10.4, 10.5)
+        make_candidate(0, 10.48),  // inside
+        make_candidate(1, 10.44),  // inside, different camera
+        make_candidate(0, 10.51),  // outside -- >= t_end
+        make_candidate(0, 10.39),  // outside -- < t_start
+    };
+
+    auto result = bucket_candidates_by_camera(candidates, 10.4, 10.5);
+
+    REQUIRE(result.size() == 2);
+    REQUIRE(result.at(0).size() == 2);
+    REQUIRE(result.at(1).size() == 1);
+}
+
+TEST_CASE("bucket_candidates_by_camera returns empty for no candidates in range",
+          "[multi_person_tracker][dot_assignment]") {
+    std::vector<UnlabeledCandidate> candidates;
+    auto result = bucket_candidates_by_camera(candidates, 0.0, 1.0);
+    REQUIRE(result.empty());
+}
+
 TEST_CASE("MultiPersonTracker Stage 1: output matches single-person path bitwise",
           "[multi_person_tracker][tracker]") {
     fs::path db_path = fs::temp_directory_path() / "posetrak_test_multi_person_tracker.db";

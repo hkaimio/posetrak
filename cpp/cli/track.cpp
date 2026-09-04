@@ -983,6 +983,30 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
 
         step_person_context_frame0(*ctx);
         for (int step = 1; step < ctx->num_steps; ++step) {
+            // Shared dot-assignment three-pass shape (design doc §5.2), only when
+            // this subject actually has unlabeled_points candidates queued this
+            // step -- every other step (including every step of a dot-free
+            // sequence, e.g. the sword's own ArUco corners) keeps calling the
+            // untouched step_person_context() below.
+            if (ctx->has_dot_track) {
+                auto [t_start, t_end] = person_context_step_window(*ctx, step);
+                auto candidates_by_camera =
+                    bucket_candidates_by_camera(ctx->unlabeled_candidates, t_start, t_end);
+                if (!candidates_by_camera.empty()) {
+                    step_person_context_predict(*ctx, step);
+                    std::vector<DotAssignmentSubject> subjects = {
+                        DotAssignmentSubject{0, ctx->tracker.get()}};
+                    double const t_effective = t_start + ctx->dt / 2.0;
+                    auto assignment = resolve_shared_dot_assignment(
+                        subjects, candidates_by_camera, ctx->tracker_config, step, t_effective);
+                    std::vector<Observation> resolved;
+                    if (auto it = assignment.find(0); it != assignment.end()) {
+                        resolved = it->second.resolved;
+                    }
+                    step_person_context_update(*ctx, step, verbose, quiet, resolved);
+                    continue;
+                }
+            }
             step_person_context(*ctx, step, verbose, quiet);
         }
 

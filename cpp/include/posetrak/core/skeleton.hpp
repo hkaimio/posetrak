@@ -204,6 +204,27 @@ class Skeleton {
         return true;
     }
 
+    /// @brief True if at least one marker's `track` resolves to an
+    /// `input_tracks:` entry of type `unlabeled_points` -- this skeleton
+    /// participates in the shared dot-assignment phase (dot-assignment-
+    /// architecture-design.md). Single source of truth for "does this
+    /// subject need the predict-all/resolve/update-all three-pass shape",
+    /// mirroring the same per-marker check
+    /// `Tracker::predict_dot_slot_predictions()` already does internally --
+    /// this is the caller-facing yes/no a subject-building step needs
+    /// before ever constructing a `Tracker`.
+    bool has_unlabeled_points_track() const {
+        for (auto const& m : markers_) {
+            if (m.track.empty())
+                continue;
+            InputTrack const* track = get_input_track(m.track);
+            if (track != nullptr && track->type == "unlabeled_points") {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// @brief Set joint limits
     /// @param joint_index Index of the joint
     /// @param limits Array of limit pairs [min, max] for each DOF

@@ -30,9 +30,11 @@
 #include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/core/state.hpp"
 #include "posetrak/db/result_writer.hpp"
+#include "posetrak/db/session_reader.hpp"
 #include "posetrak/io/statistics_tracker.hpp"
 #include "posetrak/io/tracking_export.hpp"
 #include "posetrak/kinematics/forward_kinematics.hpp"
+#include "posetrak/tracking/dot_assignment.hpp"
 #include "posetrak/tracking/tracker.hpp"
 #include <chrono>
 #include <filesystem>
@@ -125,6 +127,21 @@ struct PersonContext {
     std::string extrinsic_calibration_id;
     std::string sync_config_id;
 
+    /// True iff *skeleton* declares at least one unlabeled_points-track marker
+    /// (Skeleton::has_unlabeled_points_track()) -- this person/object
+    /// participates in the shared dot-assignment phase (dot-assignment-
+    /// architecture-design.md) on whichever steps it actually has candidates
+    /// queued. False for every existing person and the sword's own ArUco-only
+    /// skeleton -- those keep calling step_person_context() exactly as today.
+    bool has_dot_track = false;
+
+    /// Anonymous reflective-dot candidates for this person's whole sequence,
+    /// loaded once (like *observations*) when has_dot_track is true; empty
+    /// otherwise. A per-step subset is bucketed by camera on demand (see
+    /// bucket_candidates_by_camera()) rather than sliced up front, mirroring
+    /// how *observations* itself is queried per step via get_all_in_range().
+    std::vector<UnlabeledCandidate> unlabeled_candidates;
+
     std::shared_ptr<const SkeletonLayout> layout;
 
     /// Full-skeleton-width layout, built only when this person's tracker_config
@@ -203,6 +220,61 @@ void step_person_context(PersonContext& ctx, int step, bool verbose, bool quiet,
 /// @brief Close exporters, run RTS smoothing if *smooth_output*, flush the result
 /// writer, and write final statistics/summary files.
 void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet, bool verbose);
+
+// ---------------------------------------------------------------------------
+// Shared dot-assignment phase support (dot-assignment-architecture-design.md
+// §5.2): step_person_context() itself stays untouched and is still the right
+// call for every subject with nothing to resolve this step. The pair below
+// exists only for a subject that *does* have dot candidates queued this step,
+// so an orchestrator can predict every such subject before resolving jointly,
+// then update each with its own resolved share -- see MultiPersonTracker::run()
+// and run_track_from_db() for the two real call sites.
+// ---------------------------------------------------------------------------
+
+/// @brief The [t_start, t_end) window step_person_context() itself uses for
+/// step *step* -- factored out so callers needing to know it ahead of time
+/// (to bucket candidates, decide whether this step needs the three-pass
+/// shape at all) don't duplicate the formula.
+std::pair<double, double> person_context_step_window(PersonContext const& ctx, int step);
+
+/// @brief Buckets *candidates* whose timestamp falls in [t_start, t_end) by
+/// camera_id -- the shape resolve_shared_dot_assignment() needs as input.
+std::unordered_map<int, std::vector<UnlabeledCandidate>>
+bucket_candidates_by_camera(std::vector<UnlabeledCandidate> const& candidates, double t_start,
+                            double t_end);
+
+/// @brief Predict-only half of a per-person step, for a subject participating
+/// in the shared dot-assignment phase this step: sets the UKF frame number
+/// (the same side effect step_person_context()'s own track_frame() call
+/// triggers internally) and calls Tracker::predict_step(ctx.dt).
+///
+/// Unlike step_person_context() itself, this always predicts -- there is no
+/// early return for "no observations this step", because whether there is
+/// anything to update with can only be known *after* the shared resolve
+/// phase runs, which itself needs every participating subject's prediction
+/// already computed (design doc §5.2). Only call this for a subject that
+/// actually has dot candidates queued this step; every other subject keeps
+/// calling the ordinary step_person_context(), which predicts lazily inside
+/// its own early-return-if-empty check exactly as it does today.
+void step_person_context_predict(PersonContext& ctx, int step);
+
+/// @brief Update-only half of a per-person step -- must be preceded by
+/// step_person_context_predict() this same step. Gathers this step's own
+/// labeled observations, appends *extra_observations* (anchors and/or
+/// resolved dot Observations, the caller's choice), and calls
+/// Tracker::update_step(). Also performs the same post-step bookkeeping
+/// step_person_context() does (CSV export, DB write, stats, frames_tracked/
+/// frames_lost) -- this is the terminal call for the frame either way.
+///
+/// Unlike step_person_context(), this never skips silently on an empty
+/// frame: Tracker::update_step() itself already handles "predict already
+/// ran, but there's nothing to update with" safely (see its own doc
+/// comment), so this always writes a row (a tracking_lost one, if truly
+/// nothing came through) rather than a frame simply going missing from
+/// the output -- a deliberate, narrow difference from step_person_context(),
+/// only reachable via step_person_context_predict() having already run.
+void step_person_context_update(PersonContext& ctx, int step, bool verbose, bool quiet,
+                                std::vector<Observation> const& extra_observations = {});
 
 // ---------------------------------------------------------------------------
 // Stage 2: contact gating + cross-person anchor construction

@@ -230,6 +230,7 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     }
     std::string yaml_content = reader.load_skeleton_yaml(full_skeleton_id);
     ctx->skeleton = load_skeleton_from_yaml_string(yaml_content);
+    ctx->has_dot_track = ctx->skeleton.has_unlabeled_points_track();
     if (!quiet) {
         fmt::print("  Loaded {} joints\n", ctx->skeleton.joints().size());
     }
@@ -285,6 +286,17 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     if (!quiet) {
         fmt::print("  Loaded {} observations across {} cameras\n",
                    ctx->observations.total_observations(), ctx->observations.camera_count());
+    }
+
+    // Anonymous reflective-dot candidates (dot-assignment-architecture-design.md) --
+    // only worth querying for a skeleton that actually declares a dot track; every
+    // existing person/object sequence has has_dot_track == false and pays nothing here.
+    if (ctx->has_dot_track) {
+        ctx->unlabeled_candidates =
+            reader.load_unlabeled_candidates(full_sequence_id, ctx->cameras_by_name);
+        if (!quiet) {
+            fmt::print("  Loaded {} unlabeled dot candidates\n", ctx->unlabeled_candidates.size());
+        }
     }
 
     // Determine effective end time
@@ -588,6 +600,123 @@ void step_person_context(PersonContext& ctx, int step, bool verbose, bool quiet,
     // variance (matching state's rest-pose-default convention) until a child
     // stage's own merge (run_hierarchical_child_stages()) overwrites them with
     // real values -- see the design doc's cov_diag semantics note.
+    Eigen::VectorXd const state_vec =
+        ctx.full_layout ? expand_state_to_full_layout(result.state, *ctx.layout, *ctx.full_layout)
+                              .to_error_vector()
+                        : result.state.to_error_vector();
+    Eigen::MatrixXd const cov_for_write =
+        ctx.full_layout && result.covariance.size() > 0
+            ? diag_to_covariance_matrix(expand_cov_diag_to_full_layout(
+                  result.covariance.diagonal(), *ctx.layout, *ctx.full_layout,
+                  ctx.tracker_config.init_joint_std * ctx.tracker_config.init_joint_std,
+                  ctx.tracker_config.init_velocity_std * ctx.tracker_config.init_velocity_std))
+            : result.covariance;
+    ctx.result_writer->write_frame(step, t_effective, state_vec, cov_for_write,
+                                   result.tracking_lost, result.update_info.num_inliers, cov_cond,
+                                   result.update_info.nis, result.update_info.nis_dof);
+    if (!result.update_info.observations.empty())
+        ctx.result_writer->write_obs_results(step, result.update_info.observations);
+
+    ctx.stats_tracker->add_frame_stats(
+        step, t_effective, result.update_info, result.covariance, result.tracking_lost,
+        result.predict_ms, result.update_ms, result.p_sigma_gen_ms, result.p_propagate_ms,
+        result.p_mean_cov_ms, result.p_rts_ms, result.u_fk1_ms, result.u_s_ms, result.u_outlier_ms,
+        result.u_fk2_ms, result.u_inlier_ms, result.u_kalman_ms, result.u_cov_update_ms);
+
+    if (!quiet && !verbose && step % 10 == 0) {
+        double percent = 100.0 * step / ctx.num_steps;
+        auto elapsed = std::chrono::steady_clock::now() - ctx.track_start_time;
+        double elapsed_sec =
+            std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() / 1000.0;
+        double steps_per_sec = step / elapsed_sec;
+        int eta_sec = static_cast<int>((ctx.num_steps - step) / steps_per_sec);
+        fmt::print("  Progress: {}/{} ({:.1f}%) | {:.1f} steps/s | ETA: {}s\r", step, ctx.num_steps,
+                   percent, steps_per_sec, eta_sec);
+        std::cout.flush();
+    }
+}
+
+std::pair<double, double> person_context_step_window(PersonContext const& ctx, int step) {
+    double t_start = ctx.start_time + step * ctx.dt - ctx.dt / 2.0;
+    return {t_start, t_start + ctx.dt};
+}
+
+std::unordered_map<int, std::vector<UnlabeledCandidate>>
+bucket_candidates_by_camera(std::vector<UnlabeledCandidate> const& candidates, double t_start,
+                            double t_end) {
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> result;
+    for (auto const& c : candidates) {
+        if (c.timestamp >= t_start && c.timestamp < t_end) {
+            result[c.camera_id].push_back(c);
+        }
+    }
+    return result;
+}
+
+void step_person_context_predict(PersonContext& ctx, int step) {
+    if (auto* ukf = ctx.tracker->get_ukf()) {
+        ukf->set_frame_number(step);
+    }
+    ctx.tracker->predict_step(ctx.dt);
+}
+
+void step_person_context_update(PersonContext& ctx, int step, bool verbose, bool quiet,
+                                std::vector<Observation> const& extra_observations) {
+    auto [t_start, t_end] = person_context_step_window(ctx, step);
+
+    // Unlike step_person_context(), no early return when this is empty --
+    // Tracker::update_step() itself already handles "predict already ran,
+    // but nothing to update with" safely (see its own doc comment), and
+    // predict_step() (already called by our caller) has no equivalent
+    // "undo" -- see step_person_context_predict()'s doc comment for why.
+    auto frame_obs = ctx.observations.get_all_in_range(t_start, t_end);
+    frame_obs.insert(frame_obs.end(), extra_observations.begin(), extra_observations.end());
+
+    double t_effective = t_start + ctx.dt / 2.0;
+
+    if (ctx.pred_obs_file.is_open()) {
+        export_predicted_observations(ctx.pred_obs_file, step + 1, t_effective, frame_obs,
+                                      ctx.tracker->state(), ctx.fk, ctx.cameras_by_id,
+                                      ctx.skeleton);
+    }
+
+    auto result = ctx.tracker->update_step(frame_obs, t_effective);
+
+    if (result.tracking_lost) {
+        ctx.frames_lost++;
+        if (verbose) {
+            fmt::print("  Step {}: t=[{:.3f}, {:.3f}): Tracking LOST\n", step, t_start, t_end);
+        }
+    } else {
+        ctx.frames_tracked++;
+        if (verbose) {
+            fmt::print("  Step {}: t=[{:.3f}, {:.3f}): {} inliers, {} outliers\n", step, t_start,
+                       t_end, result.update_info.num_inliers, result.update_info.num_outliers);
+        }
+    }
+
+    if (ctx.state_vec_file.is_open()) {
+        export_state_vector(ctx.state_vec_file, step, t_effective, result.state, *ctx.layout);
+    }
+
+    {
+        auto marker_positions_3d_map = ctx.fk->compute(result.state);
+        std::map<std::string, Eigen::Vector3d> marker_positions_3d(marker_positions_3d_map.begin(),
+                                                                   marker_positions_3d_map.end());
+        ctx.exporter->write_frame(step, t_effective, result.state, marker_positions_3d, frame_obs,
+                                  result.update_info);
+    }
+
+    double cov_cond = 0.0;
+    if (result.covariance.size() > 0) {
+        Eigen::VectorXd diag = result.covariance.diagonal();
+        double dmax = diag.maxCoeff();
+        double dmin = diag.minCoeff();
+        if (dmin > 0.0)
+            cov_cond = dmax / dmin;
+    }
+    // Same hierarchical-mode expansion as step_person_context() -- see that
+    // function's own comment on full_layout/cov_diag semantics.
     Eigen::VectorXd const state_vec =
         ctx.full_layout ? expand_state_to_full_layout(result.state, *ctx.layout, *ctx.full_layout)
                               .to_error_vector()
@@ -1130,6 +1259,66 @@ void MultiPersonTracker::run() {
         if (!order.empty())
             std::rotate(order.begin(), order.begin() + 1, order.end());
 
+        // Shared dot-assignment phase (design doc §5.2): find which
+        // still-running persons actually have unlabeled_points candidates
+        // queued this step, predict all of them first, resolve jointly
+        // across all of them, then let each consume its own share via
+        // update_step() below (alongside its own anchors). A person with no
+        // candidates this step -- including every person with no
+        // unlabeled_points track at all -- is entirely unaffected and keeps
+        // calling the ordinary step_person_context() unchanged.
+        std::unordered_map<int, std::unordered_map<int, std::vector<UnlabeledCandidate>>>
+            candidates_by_idx;
+        for (int idx : order) {
+            auto& ctx = *persons_[static_cast<size_t>(idx)];
+            if (step >= ctx.num_steps || !ctx.has_dot_track)
+                continue;
+            auto [t_start, t_end] = person_context_step_window(ctx, step);
+            auto candidates = bucket_candidates_by_camera(ctx.unlabeled_candidates, t_start, t_end);
+            if (!candidates.empty()) {
+                candidates_by_idx[idx] = std::move(candidates);
+            }
+        }
+
+        std::unordered_map<int, SubjectDotAssignment> dot_assignment;
+        if (!candidates_by_idx.empty()) {
+            for (auto const& [idx, per_cam] : candidates_by_idx) {
+                (void)per_cam;
+                step_person_context_predict(*persons_[static_cast<size_t>(idx)], step);
+            }
+
+            // One combined candidate pool per camera across every participating
+            // subject -- see dot-assignment-architecture-design.md §5.4 on why
+            // this naive concatenation (not a real de-duplication) is a known,
+            // explicitly-deferred limitation for the case of two subjects' own
+            // detection runs both finding the same physical dot. No real
+            // multi-subject-with-dots capture exists yet to need that fix.
+            std::vector<DotAssignmentSubject> subjects;
+            std::unordered_map<int, std::vector<UnlabeledCandidate>> combined_candidates;
+            for (int idx : order) {
+                auto it = candidates_by_idx.find(idx);
+                if (it == candidates_by_idx.end())
+                    continue;
+                subjects.push_back(
+                    DotAssignmentSubject{idx, persons_[static_cast<size_t>(idx)]->tracker.get()});
+                for (auto const& [cam_id, cands] : it->second) {
+                    auto& dest = combined_candidates[cam_id];
+                    dest.insert(dest.end(), cands.begin(), cands.end());
+                }
+            }
+            // Gate config is whichever participating subject comes first in
+            // *order* -- a real per-subject-config reconciliation isn't
+            // designed here (§5.2 sketches one shared config for the whole
+            // resolve call); in practice every subject shares the same
+            // dot_assignment_gate_mahalanobis value today.
+            int const config_idx = subjects.front().subject_id;
+            auto& config_ctx = *persons_[static_cast<size_t>(config_idx)];
+            auto [t_start, t_end] = person_context_step_window(config_ctx, step);
+            double const dot_timestamp = t_start + config_ctx.dt / 2.0;
+            dot_assignment = resolve_shared_dot_assignment(
+                subjects, combined_candidates, config_ctx.tracker_config, step, dot_timestamp);
+        }
+
         std::vector<char> processed_this_frame(persons_.size(), 0);
         for (int idx : order) {
             auto& ctx = *persons_[static_cast<size_t>(idx)];
@@ -1138,7 +1327,15 @@ void MultiPersonTracker::run() {
                 continue;
             }
             auto anchors = build_anchor_observations(idx, step, processed_this_frame);
-            step_person_context(ctx, step, verbose_, opts_.quiet, anchors);
+            if (candidates_by_idx.count(idx) > 0) {
+                if (auto dot_it = dot_assignment.find(idx); dot_it != dot_assignment.end()) {
+                    anchors.insert(anchors.end(), dot_it->second.resolved.begin(),
+                                   dot_it->second.resolved.end());
+                }
+                step_person_context_update(ctx, step, verbose_, opts_.quiet, anchors);
+            } else {
+                step_person_context(ctx, step, verbose_, opts_.quiet, anchors);
+            }
             processed_this_frame[static_cast<size_t>(idx)] = 1;
         }
 

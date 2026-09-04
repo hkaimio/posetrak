@@ -1,5 +1,75 @@
 # Marker-based mocap — status
 
+- **2026-09-03/04** — Wired the shared dot-assignment phase into both real
+  per-frame tracking loops (`run_track_from_db()`'s raw loop,
+  `MultiPersonTracker::run()`) -- the one piece that was still missing
+  between "the resolution math works" and "the tracker can actually use
+  dots at all" (see
+  [dot-assignment-architecture-design.md](dot-assignment-architecture-design.md)
+  §5.2). Preceded and motivated by a real manual dot-geometry calibration
+  session for the sword (7 dots, all real, cross-checked -- see the
+  session log for the full back-and-forth) and registering it properly:
+  new `marker_body_definitions` row (id `a1e503f0...`, ArUco + all 7 dots),
+  sword-bokken's `capture_objects` row repointed at it, and a real
+  generated skeleton (id `ef3d451b...`) confirmed to route dots onto their
+  own `unlabeled_points` track correctly (the fix from the entry below).
+
+  New `Skeleton::has_unlabeled_points_track()` -- the caller-facing
+  yes/no a subject-building step needs before ever constructing a
+  `Tracker`, mirroring the per-marker check
+  `Tracker::predict_dot_slot_predictions()` already did internally.
+
+  `PersonContext` gained `has_dot_track` and `unlabeled_candidates`
+  (loaded once via `SessionReader::load_unlabeled_candidates()`, only
+  when `has_dot_track` is true -- every existing person/object sequence
+  pays nothing here). Two new pure helpers,
+  `person_context_step_window()` and `bucket_candidates_by_camera()`,
+  factor out the per-step time window and per-camera bucketing so neither
+  call site duplicates them.
+
+  New `step_person_context_predict()`/`step_person_context_update()`
+  sibling pair to `step_person_context()` itself -- **not** a refactor of
+  it into a predict+update wrapper, deliberately: `step_person_context()`
+  still checks "any observations this step?" *before* deciding whether to
+  predict at all (skip entirely, no write, exactly as today), which a
+  dot-bearing step can't do -- predicting is required just to *find out*
+  whether a dot will resolve. So `step_person_context_update()` always
+  calls `Tracker::update_step()` and lets its own "insufficient
+  observations" handling cover the empty case safely, rather than trying
+  to replicate the early-return optimization on top of an already-run
+  predict. This is a deliberate, narrow, documented difference scoped to
+  only the steps that actually go through it -- every dot-free step, and
+  every dot-bearing subject's step with nothing queued that particular
+  frame, keeps calling the untouched `step_person_context()` exactly as
+  before.
+
+  Both real call sites now do the three-pass shape (predict every
+  dot-bearing-this-step subject, resolve jointly across all of them via
+  `resolve_shared_dot_assignment()`, then update each with its own
+  resolved share appended to its existing observations/anchors) *only*
+  when at least one participating subject actually has candidates queued
+  that step; every other subject and every other step is untouched.
+  `MultiPersonTracker::run()`'s version merges every participating
+  subject's own candidate list into one combined pool per camera before
+  resolving -- the known, explicitly-deferred limitation from §5.4 (no
+  real de-duplication across subjects' own detection runs) still applies,
+  unchanged, since no real multi-subject-with-dots capture exists yet to
+  need it.
+
+  Test coverage: the full existing C++ suite (including
+  `test_multi_person_tracker.cpp`'s bitwise-identical-to-single-person
+  regression tests) passed **unchanged** after this wiring -- real
+  confirmation that no dot-free call path was disturbed. Added direct
+  unit tests for the two new pure helpers. Did not build a new synthetic
+  multi-person-with-dots DB fixture for the three-pass shape itself
+  (the design doc's own suggested next test) -- the underlying resolution
+  math and the Tracker-level integration are already covered elsewhere
+  (`test_dot_assignment.cpp`, the `test_tracker_integration.cpp`
+  posterior-equivalence test), and a real end-to-end validation against
+  the actual sword capture was imminent and clearly more valuable than a
+  synthetic fixture built just for this; revisit if real testing surfaces
+  something that needs isolating.
+
 - **2026-09-02** — Started calibration-time dot geometry (see
   [reflective-dot-detection-design.md](reflective-dot-detection-design.md)
   §3.1), then pivoted from automatic to manual annotation after real-data

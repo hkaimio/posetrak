@@ -111,6 +111,46 @@ def test_detect_blobs_accepts_a_short_motion_blur_streak_with_dot_like_width() -
     assert blobs[0].minor_axis_px == pytest.approx(6.0, abs=2.0)
 
 
+def test_detect_blobs_reports_no_direction_for_a_round_dot() -> None:
+    frame = _blank_frame()
+    _draw_dot(frame, 100, 80, radius=6)
+
+    blobs = detect_blobs(frame)
+
+    assert len(blobs) == 1
+    assert blobs[0].dir_x == 0.0
+    assert blobs[0].dir_y == 0.0
+
+
+def test_detect_blobs_reports_a_streaks_own_axis_direction() -> None:
+    """A horizontal streak's direction should come back as (approximately)
+    a horizontal unit vector, canonicalized to the dy>=0 half-plane (here
+    dy==0, so dx>=0) -- see dot_blob_detector.py's own "Streak direction"
+    docstring section for why the sign can't be resolved from the blob
+    alone."""
+    frame = _blank_frame()
+    cv2.rectangle(frame, (60, 97), (85, 103), 250, thickness=-1)  # horizontal streak
+
+    blobs = detect_blobs(frame)
+
+    assert len(blobs) == 1
+    assert blobs[0].dir_x == pytest.approx(1.0, abs=0.05)
+    assert blobs[0].dir_y == pytest.approx(0.0, abs=0.05)
+
+
+def test_detect_blobs_canonicalizes_a_vertical_streaks_direction_sign() -> None:
+    """A vertical streak's direction should land in the canonical dy>=0
+    half-plane regardless of which way the rectangle happens to be drawn."""
+    frame = _blank_frame()
+    cv2.rectangle(frame, (97, 60), (103, 85), 250, thickness=-1)  # vertical streak
+
+    blobs = detect_blobs(frame)
+
+    assert len(blobs) == 1
+    assert blobs[0].dir_x == pytest.approx(0.0, abs=0.05)
+    assert blobs[0].dir_y == pytest.approx(1.0, abs=0.05)
+
+
 def test_detect_blobs_rejects_a_streak_too_long_to_be_realistic_blur() -> None:
     """A streak whose width falls in the round-dot diameter range must
     still be rejected once it's longer than any realistic motion blur --

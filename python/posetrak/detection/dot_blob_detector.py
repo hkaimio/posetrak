@@ -30,6 +30,20 @@ long. `max_streak_length_px`'s default is a first cut (not yet confirmed
 against a real blurred-dot example the way the other defaults were) --
 narrow or widen it once real fast-swing footage is available to check
 against.
+
+Streak direction (2026-09-05): a motion-blur streak's own axis is a real,
+otherwise-unused velocity signal (reflective-dot-detection-design.md's
+"Open questions" -- the streak-to-speed design this feeds is in
+docs/roadmap/features/marker-based-mocap/streak-velocity-design.md).
+Reported as a unit vector (`dir_x`, `dir_y`) derived from the minimum-area
+rectangle's own long edge rather than trusted from cv2.minAreaRect's angle
+output directly (its convention/range has changed across OpenCV versions).
+A blur streak is a *line*, not an arrow -- there is no way to tell which
+end of it the dot started from -- so the vector is canonicalized to a
+fixed half-plane (dy >= 0, or dx >= 0 when dy == 0) rather than left
+arbitrary; resolving the resulting 180-degree sign ambiguity against a
+predicted velocity is left to the consumer. (0.0, 0.0) for a round dot,
+where no streak axis exists.
 """
 from __future__ import annotations
 
@@ -57,6 +71,11 @@ class BlobCandidate:
     # entry for that and the blinking-LED sub-frame-timing idea).
     major_axis_px: float
     minor_axis_px: float
+    # Unit vector along a motion-blur streak's own axis (module docstring) --
+    # (0.0, 0.0) for a round dot, where major_axis_px == minor_axis_px and no
+    # streak axis exists to report.
+    dir_x: float = 0.0
+    dir_y: float = 0.0
 
 
 def detect_blobs(
@@ -97,8 +116,10 @@ def detect_blobs(
         compactness = 4 * np.pi * area / (perimeter * perimeter)
         equiv_diameter = 2.0 * np.sqrt(area / np.pi)
         major_axis_px = minor_axis_px = equiv_diameter
+        dir_x = dir_y = 0.0
         if compactness < min_compactness:
-            (_, (rw, rh), _) = cv2.minAreaRect(c)
+            rect = cv2.minAreaRect(c)
+            (rw, rh) = rect[1]
             major_axis_px, minor_axis_px = max(rw, rh), min(rw, rh)
             is_streak = (
                 min_diameter <= minor_axis_px <= max_diameter
@@ -106,11 +127,36 @@ def detect_blobs(
             )
             if not is_streak:
                 continue
+            dir_x, dir_y = _streak_direction(rect)
         m = cv2.moments(c)
         if m["m00"] == 0:
             continue
         cx, cy = m["m10"] / m["m00"], m["m01"] / m["m00"]
         x, y, w, h = cv2.boundingRect(c)
         out.append(BlobCandidate(cx, cy, area, compactness, (x, y, w, h),
-                                  major_axis_px, minor_axis_px))
+                                  major_axis_px, minor_axis_px, dir_x, dir_y))
     return out
+
+
+def _streak_direction(rect: tuple) -> tuple[float, float]:
+    """Unit vector along *rect*'s (a cv2.minAreaRect result) long edge,
+    canonicalized to a fixed half-plane -- see the module docstring's
+    "Streak direction" section for why this doesn't (and can't) recover a
+    forward/backward sense, only the axis.
+
+    Computed from cv2.boxPoints() rather than rect's own angle field
+    directly: which side of the rectangle the angle describes, and its
+    range, is an OpenCV-version-dependent convention that boxPoints already
+    resolves into concrete corner coordinates.
+    """
+    box = cv2.boxPoints(rect)
+    edge_a = box[1] - box[0]
+    edge_b = box[2] - box[1]
+    long_edge = edge_a if np.dot(edge_a, edge_a) >= np.dot(edge_b, edge_b) else edge_b
+    norm = float(np.linalg.norm(long_edge))
+    if norm < 1e-9:
+        return 0.0, 0.0
+    dx, dy = float(long_edge[0] / norm), float(long_edge[1] / norm)
+    if dy < 0.0 or (dy == 0.0 and dx < 0.0):
+        dx, dy = -dx, -dy
+    return dx, dy

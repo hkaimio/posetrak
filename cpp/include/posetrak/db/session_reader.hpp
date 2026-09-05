@@ -88,6 +88,13 @@ struct UnlabeledCandidate {
     /// uninitialized memory.
     double major_axis = 0.0;
     double minor_axis = 0.0;
+    /// Unit vector along a motion-blur streak's own axis (db::DotCandidate::dir_x/dir_y,
+    /// dot_blob_detector.py's canonicalized, direction-ambiguous streak axis) -- (0, 0) for a
+    /// round dot. Feeds the streak-velocity design
+    /// (docs/roadmap/features/marker-based-mocap/streak-velocity-design.md); defaulted for the
+    /// same reason major_axis/minor_axis are.
+    double dir_x = 0.0;
+    double dir_y = 0.0;
 };
 
 /// @brief Reads tracking data from a per-session SQLite database
@@ -197,7 +204,7 @@ class SessionReader {
     /// Reads every `pose_observations` row with `source='dots'` (the
     /// finalized-data counterpart of a `detection_keypoints` row with
     /// `region_type='dots'`), decodes each row's variable-length
-    /// count-prefixed `float32[N,6]` blob via `db::decode_dot_candidates()`,
+    /// count-prefixed `float32[N,8]` blob via `db::decode_dot_candidates()`,
     /// and undistorts positions the same way `load_observations()` does for labeled
     /// keypoints.
     ///

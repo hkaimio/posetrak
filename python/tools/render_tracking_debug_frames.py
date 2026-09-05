@@ -278,25 +278,25 @@ def _nearest_tracker_step(
 def _raw_dot_candidates(
     conn: sqlite3.Connection, sequence_id: str, camera_instance_id: str, video_frame: int
 ) -> np.ndarray:
-    """Return float32[N,6] (px, py, area, compactness, major_axis_px,
-    minor_axis_px) -- see db_cache.decode_dot_candidates() -- for this
-    camera's own frame, or an empty array if this run has no dot source at
-    all."""
+    """Return float32[N,8] (px, py, area, compactness, major_axis_px,
+    minor_axis_px, dir_x, dir_y) -- see db_cache.decode_dot_candidates() --
+    for this camera's own frame, or an empty array if this run has no dot
+    source at all."""
     row = conn.execute(
         "SELECT kp_blob FROM pose_observations WHERE sequence_id = ? "
         "AND camera_instance_id = ? AND source = 'dots' AND video_frame = ?",
         (sequence_id, camera_instance_id, video_frame),
     ).fetchone()
     if row is None:
-        return np.zeros((0, 6), dtype=np.float32)
+        return np.zeros((0, 8), dtype=np.float32)
     try:
         return decode_dot_candidates(bytes(row["kp_blob"]))
     except ValueError:
-        # Pre-2026-09-04 float32[N,4] data (see db_cache.decode_dot_candidates'
-        # own docstring) -- degrade to "no raw candidates shown" rather than
+        # Older-format data (see db_cache.decode_dot_candidates' own
+        # docstring) -- degrade to "no raw candidates shown" rather than
         # crash; everything else (actual/predicted marker overlays) is
         # unaffected since it doesn't touch this blob at all.
-        return np.zeros((0, 6), dtype=np.float32)
+        return np.zeros((0, 8), dtype=np.float32)
 
 
 class _FrameData:
@@ -305,7 +305,7 @@ class _FrameData:
     def __init__(self) -> None:
         self.actual: dict[str, tuple[float, float, bool]] = {}   # name -> (x, y, is_outlier)
         self.predicted: dict[str, tuple[float, float]] = {}       # name -> (x, y), FK-projected
-        self.raw_dots: np.ndarray = np.zeros((0, 6), dtype=np.float32)
+        self.raw_dots: np.ndarray = np.zeros((0, 8), dtype=np.float32)
         self.status: str = ""
 
 
@@ -366,17 +366,21 @@ def _dot(img: np.ndarray, x: float, y: float, color, r: int) -> None:
 def _draw_overlay(img: np.ndarray, marker_names: list[str], fd: _FrameData) -> np.ndarray:
     out = img.copy()
 
-    for cx, cy, area, _compact, _major, _minor in fd.raw_dots:
-        # Plain ring sized to the candidate's equivalent circular diameter
-        # (not major/minor axis directly -- those aren't oriented, since
-        # the stored pair is just magnitudes, no rotation angle, and an
-        # unrotated ellipse would risk implying a false orientation for a
-        # diagonal streak). No filled center: a solid gray dot disappears
-        # against a similarly gray/textured background (concrete wall,
-        # mat); a ring stays visible while still reading as "detected, not
-        # yet assigned".
+    for cx, cy, area, _compact, major, _minor, dir_x, dir_y in fd.raw_dots:
+        # Plain ring sized to the candidate's equivalent circular diameter.
+        # No filled center: a solid gray dot disappears against a similarly
+        # gray/textured background (concrete wall, mat); a ring stays
+        # visible while still reading as "detected, not yet assigned".
         r = max(3, int(np.sqrt(max(area, 1.0) / np.pi)))
         cv2.circle(out, (int(round(cx)), int(round(cy))), r, (160, 160, 160), 2)
+        if dir_x != 0.0 or dir_y != 0.0:
+            # Streak axis (dot_blob_detector.py's canonicalized, direction-
+            # ambiguous dir_x/dir_y) drawn both ways from center -- it's an
+            # axis, not an arrow, so there's no real "forward" end to show.
+            half = major / 2.0
+            p0 = (int(round(cx - dir_x * half)), int(round(cy - dir_y * half)))
+            p1 = (int(round(cx + dir_x * half)), int(round(cy + dir_y * half)))
+            cv2.line(out, p0, p1, (0, 200, 255), 1, cv2.LINE_AA)
 
     for name in marker_names:
         is_dot = name.startswith("dot")

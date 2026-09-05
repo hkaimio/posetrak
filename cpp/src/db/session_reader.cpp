@@ -1346,6 +1346,12 @@ SessionReader::load_unlabeled_candidates(std::string const& sequence_id,
             cand.compactness = c.compactness;
             cand.major_axis = c.major_axis;
             cand.minor_axis = c.minor_axis;
+            // Left in distorted-pixel space, unlike position above: undistort() is nonlinear, so
+            // correctly transforming a direction at a point needs its local Jacobian, not just
+            // re-running undistort() on a second point -- not done here (a first cut; lens
+            // distortion should be mild across a dot's own small streak extent regardless).
+            cand.dir_x = c.dir_x;
+            cand.dir_y = c.dir_y;
             result.push_back(cand);
         }
     }

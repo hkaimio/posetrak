@@ -1,5 +1,30 @@
 # Marker-based mocap — status
 
+- **2026-09-05** — Streak-velocity design (still-visible constant-velocity
+  lag during the fastest sword cuts, see the entry below): phases 1-2 done
+  and validated against real data, phase 3 (tracker integration) not
+  started -- see
+  [streak-velocity-design.md](streak-velocity-design.md) for the full
+  mechanism. `dot_blob_detector.py` now reports a canonicalized streak
+  axis (`dir_x`/`dir_y`) alongside its existing length; the 'dots' wire
+  format bumped again to carry it (`float32[N,6]` -> `float32[N,8]`, same
+  versioned-count-prefix scheme as the previous bump). A new standalone
+  script, `estimate_streak_exposure_ratio.py`, estimates `k =
+  exposure_time/frame_time` per camera as a ratio of sums over real,
+  resolved frame-to-frame displacements (not a mean of per-sample ratios,
+  which is unstable near zero displacement) -- `k` is provably
+  speed-independent (the object's own velocity cancels out of the ratio),
+  so a real per-camera constant is exactly what a stable estimate across
+  different motion speeds should look like. Re-ran detection + tracking
+  on the real sword capture to get real streak data (same 80.5% tracked
+  result as before, confirming the format bump changed nothing else):
+  `gopro-11_mini_02` gave 195 samples, `k=0.65` (stable across a
+  first/second-half split), direction cosine 0.99 against real
+  displacement -- a real, positive validation that both streak length and
+  direction track real motion well enough to be worth building the
+  tracker-integrated version. Full IDs and numbers in
+  `LOCAL-TEST-DATA-NOTES.md`'s 2026-09-05 entry.
+
 - **2026-09-05** — Real visual review of the corrected-calibration
   tracking video (previous entry) surfaced two further, distinct
   problems, both now fixed and validated together:

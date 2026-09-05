@@ -262,11 +262,11 @@ def test_dot_candidate_writer_round_trips_variable_candidate_counts(session):
 
     d0 = 2.0 * (12.5 / np.pi) ** 0.5
     d1 = 2.0 * (8.0 / np.pi) ** 0.5
-    assert candidates[0].shape == (2, 6)
-    assert np.allclose(candidates[0][0], [10.0, 20.0, 12.5, 0.9, d0, d0])
-    assert np.allclose(candidates[0][1], [30.0, 40.0, 8.0, 0.85, d1, d1])
+    assert candidates[0].shape == (2, 8)
+    assert np.allclose(candidates[0][0], [10.0, 20.0, 12.5, 0.9, d0, d0, 0.0, 0.0])
+    assert np.allclose(candidates[0][1], [30.0, 40.0, 8.0, 0.85, d1, d1, 0.0, 0.0])
 
-    assert candidates[1].shape == (0, 6)
+    assert candidates[1].shape == (0, 8)
 
 
 def test_dot_candidate_writer_uses_near_zero_noise_scale(session):
@@ -387,9 +387,9 @@ def test_pipeline_writes_dot_candidates_for_an_enabled_camera(session):
     candidates = read_dot_candidates_for_run(session, result.detection_run_id, ids["svid"])
     # Even frame: the drawn dot is detected. Odd frame: none seen, but the
     # frame was still processed -- an empty row, not a missing one.
-    assert candidates[0].shape == (1, 6)
+    assert candidates[0].shape == (1, 8)
     assert np.allclose(candidates[0][0, :2], [50.0, 60.0], atol=1.0)
-    assert candidates[1].shape == (0, 6)
+    assert candidates[1].shape == (0, 8)
 
 
 def test_pipeline_writes_no_dot_candidates_when_camera_not_enabled(session):

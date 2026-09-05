@@ -1,5 +1,56 @@
 # Marker-based mocap — status
 
+- **2026-09-05** — Fixed the marker-body calibration bug the previous
+  entry found (`aruco_2`/`aruco_3` 5.6cm in-plane bias), confirmed both
+  numerically and visually. The original multi-camera rig that shot the
+  sword performance is gone (two of its six cameras have since broken),
+  but the two ArUco tags' shared rigid harness survived, separated from
+  the sword -- along with 4 of the sword's 7 reflective dots (the other 3
+  were mounted elsewhere on the sword itself). Recalibrated it from a
+  single camera slowly orbiting the stationary harness, anchored by two
+  extra static ArUco markers placed in view (`calibrate_harness_from_orbit.py`,
+  new): every frame gets its own camera-pose solve from whichever anchor
+  is visible, turning each into an independent viewpoint onto the harness
+  -- no two harness markers need to be seen in the same instant, unlike
+  the original method, and a single ~74s orbit produced thousands of
+  samples per marker instead of a few dozen.
+
+  Result: `aruco_2`/`aruco_3` in-plane offset 5.64cm -> 0.10cm (through-
+  thickness 1.98cm -> 2.93cm) -- matching "opposite faces, same point
+  along the blade" exactly, as Harri had described from direct physical
+  inspection. The 4 harness dots shifted only 0.2-0.8cm from their old,
+  manually-annotated positions (those were computed differently -- a
+  fresh reference-pose solve per instant, not an average across many --
+  and so were already largely unaffected by the ArUco bug); the 3 dots
+  not on the harness were confirmed safe to carry through unchanged
+  (every manual annotation session used `--reference-id 2`, so they were
+  never exposed to the `aruco_2`/`aruco_3` relative-pose bug in the first
+  place -- worth checking explicitly rather than assuming, since the
+  wrong assumption either way would have silently introduced or missed a
+  real few-cm error).
+
+  Re-ran detection fresh (the prior run's 'dots' data predates the same
+  day's later blob-format change) and tracking with the corrected body:
+  74.9% tracked (4957/6618), close to the previous (miscalibrated) run's
+  73.3-74.8% -- the headline number barely moved, but visual inspection
+  via `render_tracking_debug_frames.py` against real frames shows what
+  actually changed: the "predicted markers scattered tens-to-100+px into
+  empty space" incoherence the miscalibrated run showed is gone, in both
+  a normal segment and inside the known 53.6-55.1s ArUco gap. The
+  aggregate tracked-fraction alone couldn't distinguish "fitting a
+  plausible pose" from "fitting an implausible one" -- this is the
+  distinction that matters, and it's now the right one.
+
+  One honest, unresolved caveat: `aruco_2`'s own corner reprojection error
+  in the final run (median ~8.5-11.5px) is still somewhat higher than
+  `aruco_3`'s (~5.4-7px) in the same run or the original ArUco-only
+  baseline's (~5-6px). Not the bug just fixed (numerically and visually
+  confirmed separately) and not investigated further -- plausibly
+  `aruco_2`'s hard-coded perfect-square template (it defines the body's
+  own local origin/orientation by construction, unlike every other
+  marker's empirically-fitted geometry) not perfectly matching some real
+  imperfection in the physical tag or its mount.
+
 - **2026-09-04** — Opening a marker-based-mocap object's tracking run in
   the GUI turned out to have real, pre-existing gaps once the two dots-
   enabled runs above were actually opened: the crop-preview pipeline

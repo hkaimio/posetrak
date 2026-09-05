@@ -289,7 +289,14 @@ def _raw_dot_candidates(
     ).fetchone()
     if row is None:
         return np.zeros((0, 6), dtype=np.float32)
-    return decode_dot_candidates(bytes(row["kp_blob"]))
+    try:
+        return decode_dot_candidates(bytes(row["kp_blob"]))
+    except ValueError:
+        # Pre-2026-09-04 float32[N,4] data (see db_cache.decode_dot_candidates'
+        # own docstring) -- degrade to "no raw candidates shown" rather than
+        # crash; everything else (actual/predicted marker overlays) is
+        # unaffected since it doesn't touch this blob at all.
+        return np.zeros((0, 6), dtype=np.float32)
 
 
 class _FrameData:

@@ -1,5 +1,67 @@
 # Marker-based mocap — status
 
+- **2026-09-05** — Real visual review of the corrected-calibration
+  tracking video (previous entry) surfaced two further, distinct
+  problems, both now fixed and validated together:
+
+  **Cross-face dot confusion.** The video showed a real dot mislabeled
+  as a different, wrong-face dot for a stretch (~60-80px error
+  'converging' onto a self-consistent but wrong fit) -- a flat prop with
+  markers on both faces means a candidate near a *near-face* marker's
+  prediction can be mistakenly assigned to a *far-face* marker's slot
+  instead, since nothing before now excluded a physically-impossible
+  (facing away from the camera) marker from the assignment pool at all.
+  Fixed with a new `Marker::normal` (`cpp/include/posetrak/core/
+  skeleton.hpp`): `predict_rigid_marker()` now excludes a marker from a
+  camera's prediction entirely when its current world-frame normal (the
+  object's own orientation applied fresh every call) faces away from
+  that camera -- same `std::nullopt` convention already used for
+  "behind the camera". An ArUco tag's normal comes free from its own
+  corner geometry; a dot has no inherent orientation, so it's either
+  inferred (nearest face-plane by signed distance) or, better, declared
+  explicitly via a new `same_face_as: <marker name>` marker body YAML
+  field. The explicit path turned out necessary, not optional, on the
+  real sword body: geometric inference put two real dots on the
+  geometrically "nearest" plane, which turned out to be the *wrong*
+  face once Harri checked the real footage directly -- not a
+  calibration error, just confirmation that a real prop isn't the flat
+  two-plane shape inference assumes closely enough to rely on for this.
+  Worth remembering for next time: Harri's *first* verbal description of
+  which dots share which face was also wrong (corrected once actually
+  checking the video) -- this is exactly the kind of fact that needs
+  direct physical/video confirmation before use, not memory alone, no
+  matter how confident it sounds either time.
+
+  **Constant-velocity lag during fast cuts.** Separately, the tracker
+  visibly failed to react fast enough at the start of a fast sword cut,
+  losing several real, correctly-identified dots as outliers because
+  the constant-velocity process model's predicted uncertainty didn't
+  grow fast enough to keep pace with the real acceleration. The fix
+  already existed and was already validated on human motion, just
+  switched off by default: `TrackerConfig::process_noise_vel_gain_root`/
+  `_ref_root` (`adaptive-process-noise-design.md`'s Mechanism A, done
+  2026-07-06/07) scales root process noise with the root's own current
+  velocity estimate. A first tuning attempt (gain=2, ref=3), tested
+  *before* the face-culling fix above, made a known failure window
+  *worse* -- confirmed why: widening the prediction's search gate
+  before fixing correspondence just gives wrong-face candidates more
+  room to be mistakenly matched, trading one failure mode for another.
+  Retested after the face-culling fix with a more aggressive tuning
+  (gain=4, ref=2): a clean, substantial win, this time with nothing left
+  to interact with it badly.
+
+  **Combined, final result**: 80.5% tracked (5325/6618) on the real
+  sword capture, and the known 53.6-55.1s ArUco gap window down to only
+  17/300 lost steps -- fewer than even the *original, mislabeling-prone*
+  run's 53/300, while now actually being correct (reprojection error
+  stayed in the same healthy 5.8-10.9px median range throughout, so this
+  isn't just looser gating accepting sloppier matches). Visually
+  reconfirmed at the exact previously-worst instant: dots cluster
+  tightly and correctly on the real, visible object, no scattering.
+  Full IDs, config values, and every intermediate (including the
+  since-superseded first noise tuning) in `LOCAL-TEST-DATA-NOTES.md`'s
+  2026-09-05 entries.
+
 - **2026-09-05** — Fixed the marker-body calibration bug the previous
   entry found (`aruco_2`/`aruco_3` 5.6cm in-plane bias), confirmed both
   numerically and visually. The original multi-camera rig that shot the

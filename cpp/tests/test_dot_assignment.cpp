@@ -592,3 +592,79 @@ TEST_CASE(
     REQUIRE(result.at(0).resolved.size() == 2);  // POSITION + the new VELOCITY observation
     REQUIRE(tracker.streak_k_accumulators()[0].sample_count() == 1);
 }
+
+// ---------------------------------------------------------------------------
+// A streaked dot's POSITION and VELOCITY Observations share one (camera,
+// marker, frame) triple -- the exact case that broke UnscentedKalmanFilter::
+// update()'s internal bookkeeping (observation-results-semantics.md's
+// 2026-09-05 entry) because it previously matched observations by that triple
+// alone, which no longer uniquely identifies one.
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "Tracker::update_step: a marker's POSITION and VELOCITY Observations "
+    "keep independent, uncorrupted diagnostics",
+    "[dot_assignment][streak_velocity][observation_results]") {
+    auto skeleton = make_rigid_dot_skeleton();
+    std::unordered_map<int, Camera> cameras;
+    cameras.emplace(0, make_test_camera(0, 0.0));
+
+    TrackerConfig config;
+    Tracker tracker(skeleton, cameras, config);
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), Eigen::VectorXd(0),
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), Eigen::VectorXd(0));
+    tracker.initialize_from_state(state, 0.0);
+
+    tracker.predict_step(1.0 / 30.0);
+    auto pred = tracker.predict_dot_slot_predictions(0);
+    REQUIRE(pred.size() == 1);
+    int const marker_id = pred.begin()->first;
+    Eigen::Vector2d const predicted_pos = pred.begin()->second.position;
+
+    // Deliberately large noise overrides on both -- this test is about whether the
+    // two observations' own diagnostics stay correctly paired with their own
+    // observation, not about outlier gating, so both are made trivially inliers
+    // regardless of the tracker's exact internal prior/velocity-reference value.
+    Observation obs_position;
+    obs_position.camera_id = 0;
+    obs_position.marker_id = marker_id;
+    obs_position.frame_idx = 0;
+    obs_position.timestamp = 1.0 / 30.0;
+    obs_position.position = predicted_pos + Eigen::Vector2d(15.0, -8.0);
+    obs_position.position_distorted = obs_position.position;
+    obs_position.confidence = 1.0;
+    obs_position.crop_scale = 0.0;
+    obs_position.noise_std_override = 1000.0;
+
+    Observation obs_velocity = obs_position;
+    obs_velocity.mode = MeasurementMode::VELOCITY;
+    obs_velocity.position = predicted_pos;
+    obs_velocity.prev_position = predicted_pos - Eigen::Vector2d(40.0, 25.0);
+    obs_velocity.noise_std_override = 1000.0;
+
+    auto result = tracker.update_step({obs_position, obs_velocity}, 1.0 / 30.0);
+
+    ObservationResult const* pos_result = nullptr;
+    ObservationResult const* vel_result = nullptr;
+    for (auto const& r : result.update_info.observations) {
+        if (r.mode == MeasurementMode::POSITION)
+            pos_result = &r;
+        if (r.mode == MeasurementMode::VELOCITY)
+            vel_result = &r;
+    }
+    REQUIRE(pos_result != nullptr);
+    REQUIRE(vel_result != nullptr);
+    REQUIRE_FALSE(pos_result->is_outlier);
+    REQUIRE_FALSE(vel_result->is_outlier);
+
+    // Before the fix, the post-outlier-rejection innovation-recompute pass matched
+    // "this observation" by (marker_id, camera_id, frame_idx) alone -- identical for
+    // both here -- so one's recomputed predicted/innovation could land on the
+    // *other*'s ObservationResult. Each must reflect its own measured value.
+    Eigen::Vector2d const expected_velocity_measurement =
+        obs_velocity.position - obs_velocity.prev_position;
+    REQUIRE(pos_result->actual.isApprox(obs_position.position, 1e-6));
+    REQUIRE(vel_result->actual.isApprox(expected_velocity_measurement, 1e-6));
+    REQUIRE((pos_result->actual - pos_result->predicted).isApprox(pos_result->innovation, 1e-6));
+    REQUIRE((vel_result->actual - vel_result->predicted).isApprox(vel_result->innovation, 1e-6));
+}

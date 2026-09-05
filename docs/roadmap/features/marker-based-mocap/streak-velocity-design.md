@@ -157,35 +157,58 @@ delta). The known 53.6–55.1s ArUco gap window itself was unaffected either
 way (0/150 lost in both runs — already perfect at this baseline, so not
 where the difference shows up).
 
-**Most likely cause, not yet fixed**: `Tracker::prev_observations_` records
-*every* observation's position unconditionally at the end of a successful
-step (`tracker.cpp`'s `if (!result.tracking_lost) { for (obs : observations)
-prev_observations_[...] = obs.position; }`), regardless of whether the
-UKF's own outlier rejection marked that exact observation an outlier that
-same step. The offline validation script (§3) explicitly filtered to
-`used=1, is_outlier=0` samples before using a position as "previous" for
-anything — the online integration has no such filter, because
-`prev_observations_` is a pre-existing, shared piece of Tracker state (also
-used by the ordinary camera-level `VELOCITY` mode) that was never filtered
-this way for anything else. A single bad match (a real risk exactly during
-the fast, ambiguous motion this feature targets) can therefore contaminate
-the *next* frame's streak-velocity displacement and sign resolution with a
-wrong reference position, injecting a wrongly-scaled or wrongly-signed
-`VELOCITY` observation right when the filter is least able to absorb one
-gracefully — a plausible, mechanistic explanation for "recovers some,
-breaks others," not yet confirmed by isolating it directly (e.g. logging
-which streak-velocity observations coincide with a previous-step outlier,
-or the per-camera `k` trajectory itself, would confirm it). The fix would
-need the streak extension's own last-known-*inlier* position, not just
-last-observed, threaded from `update_step()`'s outlier verdicts back into
-the next frame's dot-assignment call — real plumbing, not done.
+**First cause theory (`prev_observations_` contamination) — retracted.**
+Originally hypothesized `Tracker::prev_observations_` records every
+observation's position unconditionally regardless of the UKF's own outlier
+verdict, contaminating the next frame's streak-velocity reference. Real
+attempted evidence for this (rendering debug videos of the regression
+window and reading `tracking_obs_results.obs_blob` to look for bad
+matches) turned out to be looking at a **separate, confirmed bug** instead
+(caught by Harri reviewing the videos directly — predicted markers tracked
+the real sword correctly while "actual" markers were rendered floating
+over blank wall, nowhere near any possible detection, which is the tell
+that it's a data bug rather than a real-but-wrong correspondence): this
+feature is the first thing to ever give one (camera, marker) two
+Observations in the same step, and that broke three places in the
+codebase that assumed at most one, including one able to affect the real
+outlier-rejection decision. Full account and fix in
+`docs/roadmap/features/observation-results-semantics.md`'s 2026-09-05
+entry. The original `prev_observations_` theory is neither confirmed nor
+ruled out yet — it needs re-investigating with the now-fixed diagnostics,
+since every video and query used to support it was reading corrupted data.
+
+**Re-checked after the fix (2026-09-05, re-tracked runs `b4328ce1-...`
+baseline / `17456a44-...` streak, same 80.5%/79.1% numbers as before —
+confirming the obs_blob fix didn't change either run's real outcome):
+scanning every dot observation's nearest real raw candidate distance,
+filtered to `mode==POSITION` only, in both windows for both runs --
+
+| window | baseline max | streak max |
+|---|---|---|
+| gap (53.6–55.1s) | 61px | 61px (was 1135px pre-fix — artifact, gone) |
+| regression (63.6–64.3s) | **934px** | 22px (was 1139px pre-fix — artifact, gone) |
+
+The streak run's own "hundreds of pixels" is now fully explained as the
+obs_blob bug — nothing left to investigate there. But **baseline's own
+934px anomaly in the regression window is real and unrelated to streak
+velocity or this bug** (every entry checked was genuinely `mode==POSITION`
+already) — a real bad match, most likely the originally-suspected
+Mahalanobis-gate-too-loose mechanism: the aggressive adaptive-root-noise
+tuning (gain=4) inflates covariance enough during extreme uncertainty that
+the same fixed chi-squared gate becomes very permissive in raw pixels,
+letting a statistically-plausible-but-visually-wrong match through. This
+is a pre-existing characteristic of the already-validated baseline
+tuning, exposed by looking here, not something streak velocity caused —
+worth its own look someday, but out of this feature's scope.**
 
 ## 5. Open questions
 
-- **(top priority)** §4's outlier-contamination hypothesis for the net
-  regression -- confirm it (or rule it out) before any further tuning of
-  this mechanism, since a tuning change can't fix a wrong-reference-position
-  bug and would just be guessing against noise.
+- **(top priority)** Re-diagnose the net regression (77 recovered / 168
+  newly lost) with the now-fixed diagnostics -- the obs_blob bug is fully
+  accounted for and no longer a candidate explanation (streak's own
+  regression-window match quality is fine, 22px). The
+  `prev_observations_` contamination theory (§4) remains open and
+  unconfirmed; needs a fresh look now that the diagnostics can be trusted.
 - Movement-gate threshold (`--min-displacement-px`) and minimum sample
   count before trusting `k` are both first cuts, not yet tuned against how
   quickly `k` actually converges/stays stable on real footage.

@@ -157,7 +157,7 @@ uv run posetrak-mcp --db-path /path/to/session.db
 **Key schema notes for server development:**
 
 - `tracking_runs.active_camera_ids` — JSON array of camera **labels** (e.g. `"gopro-11_mini_01"`), not UUIDs. `get_run_cameras()` in `db.py` resolves these to `camera_instances.id` UUIDs so they match `extrinsic_entries` and `pose_observation_edits`.
-- `tracking_obs_results.obs_blob` — `float32[n_cam, n_mrk, 8]`: fields are `[actual_x, actual_y, pred_x, pred_y, mahal_dist, used (1=inlier), is_outlier, pad]`. NaN actual_x means no observation for that camera/marker slot.
+- `tracking_obs_results.obs_blob` — `float32[n_cam, n_mrk, 8]`: fields are `[actual_x, actual_y, pred_x, pred_y, mahal_dist, used (1=inlier), is_outlier, mode]`. NaN actual_x means no observation for that camera/marker slot. `mode` (0=POSITION, 1=VELOCITY, 2=PAIR_DIFF, matching `MeasurementMode`) says what `actual_x/y` and `pred_x/y` actually are: only `mode==0` (POSITION) means they're absolute undistorted pixels — VELOCITY means a frame-to-frame pixel delta, PAIR_DIFF a child-minus-parent offset. Always check `mode` before treating `actual_x/y` as a position; see `docs/roadmap/features/observation-results-semantics.md` for the real bugs this ambiguity has caused twice.
 - Always open session DBs read-only: `sqlite3.connect(f"file:{path}?mode=ro", uri=True)`.
 
 ### Python Package

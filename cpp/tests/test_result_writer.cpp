@@ -280,7 +280,8 @@ std::vector<float> read_obs_blob(fs::path const& path, std::string const& run_id
 
 ObservationResult make_result(std::string const& marker_name, int camera_id,
                               Eigen::Vector2d const& actual, Eigen::Vector2d const& predicted,
-                              double mahal = 1.0, bool is_outlier = false) {
+                              double mahal = 1.0, bool is_outlier = false,
+                              MeasurementMode mode = MeasurementMode::POSITION) {
     ObservationResult r;
     r.marker_name = marker_name;
     r.camera_id = camera_id;
@@ -290,10 +291,93 @@ ObservationResult make_result(std::string const& marker_name, int camera_id,
     r.innovation = actual - predicted;
     r.predicted = predicted;
     r.actual = actual;
+    r.mode = mode;
     return r;
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// write_obs_results() -- streak-velocity-design.md §4's dual-Observation-
+// per-slot fix (observation-results-semantics.md's 2026-09-05 entry).
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "ResultWriter::write_obs_results: a single POSITION observation writes "
+    "mode=0 into the pad field",
+    "[result_writer][write_obs_results]") {
+    fs::path path = fs::temp_directory_path() / "test_result_writer_write_obs_position.db";
+    std::string run_id = "run1";
+    make_obs_fixture_db(path, run_id, 0, 4, R"(["cam0"])", R"(["dot4"])", make_nan_obs_blob(1, 1));
+
+    {
+        ResultWriter writer(path.string(), run_id, 0);
+        writer.write_obs_results(4, {make_result("dot4", 0, {110.0, 215.0}, {109.0, 213.0}, 2.2,
+                                                 false, MeasurementMode::POSITION)});
+    }
+
+    auto blob = read_obs_blob(path, run_id, 0, 4);
+    CHECK_THAT(blob[0], WithinAbs(110.0, 1e-4));
+    CHECK_THAT(blob[1], WithinAbs(215.0, 1e-4));
+    CHECK(blob[7] == 0.0f);  // MeasurementMode::POSITION
+}
+
+TEST_CASE(
+    "ResultWriter::write_obs_results: a VELOCITY-only slot writes mode=1, "
+    "not mistaken for a position",
+    "[result_writer][write_obs_results]") {
+    fs::path path = fs::temp_directory_path() / "test_result_writer_write_obs_velocity_only.db";
+    std::string run_id = "run1";
+    make_obs_fixture_db(path, run_id, 0, 4, R"(["cam0"])", R"(["dot4"])", make_nan_obs_blob(1, 1));
+
+    {
+        ResultWriter writer(path.string(), run_id, 0);
+        writer.write_obs_results(4, {make_result("dot4", 0, {12.0, -3.0}, {0.0, 0.0}, 0.5, false,
+                                                 MeasurementMode::VELOCITY)});
+    }
+
+    auto blob = read_obs_blob(path, run_id, 0, 4);
+    CHECK_THAT(blob[0], WithinAbs(12.0, 1e-4));  // a real pixel delta, not a position --
+    CHECK_THAT(blob[1], WithinAbs(-3.0, 1e-4));  // callers must check mode before trusting this
+    CHECK(blob[7] == 1.0f);                      // MeasurementMode::VELOCITY
+}
+
+TEST_CASE(
+    "ResultWriter::write_obs_results: POSITION wins the slot over a VELOCITY "
+    "sibling for the same (camera, marker), regardless of vector order",
+    "[result_writer][write_obs_results]") {
+    // This is the exact bug streak velocity introduced (observation-results-
+    // semantics.md's 2026-09-05 entry): a streaked dot's POSITION and VELOCITY
+    // Observations share one (camera, marker) diagnostic slot; before this fix,
+    // whichever was last in the vector silently won, so a VELOCITY observation's
+    // own pixel *delta* (a small number, e.g. dx=12) could overwrite a real
+    // absolute pixel position (e.g. (1325, 956)) -- a real detection's own
+    // position rendered as if the delta were a position lands nowhere near any
+    // actual image feature, exactly what was visually reported.
+    fs::path path = fs::temp_directory_path() / "test_result_writer_write_obs_precedence.db";
+    std::string run_id = "run1";
+    make_obs_fixture_db(path, run_id, 0, 1, R"(["cam0"])", R"(["dot4"])", make_nan_obs_blob(1, 1));
+
+    ObservationResult position = make_result("dot4", 0, {1325.3, 955.7}, {1324.3, 969.6}, 3.1,
+                                             false, MeasurementMode::POSITION);
+    ObservationResult velocity =
+        make_result("dot4", 0, {12.0, -3.0}, {0.0, 0.0}, 0.5, false, MeasurementMode::VELOCITY);
+
+    SECTION("POSITION before VELOCITY in the vector") {
+        ResultWriter writer(path.string(), run_id, 0);
+        writer.write_obs_results(0, {position, velocity});
+    }
+    SECTION("VELOCITY before POSITION in the vector") {
+        ResultWriter writer(path.string(), run_id, 0);
+        writer.write_obs_results(0, {velocity, position});
+    }
+
+    auto blob = read_obs_blob(path, run_id, 0, 0);
+    CHECK_THAT(blob[0], WithinAbs(1325.3, 1e-3));  // the real pixel position, either order
+    CHECK_THAT(blob[1], WithinAbs(955.7, 1e-3));
+    CHECK_THAT(blob[4], WithinAbs(3.1, 1e-6));  // POSITION's own mahalanobis distance
+    CHECK(blob[7] == 0.0f);                     // tagged POSITION, not VELOCITY
+}
 
 TEST_CASE("ResultWriter::patch_obs_results writes into a marker's own slots",
           "[result_writer][patch_obs_results]") {

@@ -1,5 +1,25 @@
 # Marker-based mocap — status
 
+- **2026-09-05** (later still) — A real bug in the streak-velocity
+  regression videos, caught by Harri's own review ("actual" dot markers
+  floating over blank wall, nowhere near any possible detection): fixed a
+  `tracking_obs_results` diagnostic-write collision that streak velocity's
+  dual-Observation-per-marker design exposed, plus two related `ukf.cpp`
+  bugs the same root assumption ("at most one Observation per (camera,
+  marker) per step") had caused, one of which could affect real outlier
+  decisions, not just diagnostics. Full account:
+  [observation-results-semantics.md](../observation-results-semantics.md).
+  Re-tracked both configs fresh -- identical numeric results to before
+  the fix -- and re-scanned both runs' videos with corrected diagnostics:
+  streak velocity's own "hundreds of pixels" is now fully explained and
+  gone; a *separate*, real ~934px bad match remains in the baseline run's
+  regression window, unrelated to streak velocity, most likely the
+  adaptive-root-noise tuning's gate becoming too permissive during high
+  uncertainty (not investigated further). See
+  [streak-velocity-design.md](streak-velocity-design.md) §4 and
+  `LOCAL-TEST-DATA-NOTES.md`'s 2026-09-05 entries for real IDs and
+  numbers.
+
 - **2026-09-05** (later same day) — Streak-velocity phase 3 (tracker
   integration) built and wired into the real per-frame loop -- see
   [streak-velocity-design.md](streak-velocity-design.md) §4 for the full

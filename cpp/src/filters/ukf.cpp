@@ -26,6 +26,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
 namespace posetrak {
 
@@ -1648,10 +1649,16 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
             // Find this observation in the inlier list to get its index in measurement_mean
             int inlier_idx = -1;
             for (size_t j = 0; j < inlier_observations.size(); ++j) {
-                // Match by marker_id, camera_id, and frame_idx (uniquely identifies obs)
+                // Match by marker_id, camera_id, frame_idx, AND mode -- (marker_id, camera_id,
+                // frame_idx) alone no longer uniquely identifies an observation now that a
+                // streaked dot can carry both a POSITION and a VELOCITY Observation for the same
+                // (camera, marker) this step (streak-velocity-design.md §4); without the mode
+                // check here, this loop could silently attach one observation's post-outlier-
+                // rejection predicted/innovation to the *other*'s ObservationResult.
                 if (inlier_observations[j].marker_id == observations[i].marker_id &&
                     inlier_observations[j].camera_id == observations[i].camera_id &&
-                    inlier_observations[j].frame_idx == observations[i].frame_idx) {
+                    inlier_observations[j].frame_idx == observations[i].frame_idx &&
+                    inlier_observations[j].mode == observations[i].mode) {
                     inlier_idx = static_cast<int>(j);
                     break;
                 }
@@ -2020,15 +2027,30 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
     }
 
     // Second pass: cross-camera outlier detection
-    // Group valid observations by marker_id. force_inlier observations are excluded here too,
-    // not just from the rejection decision in the third pass below -- a trusted edit that's
-    // currently inconsistent with the filter's state (exactly when force_inlier matters) would
-    // otherwise skew the per-marker median and change whether *other* cameras' genuinely bad
-    // observations of the same marker pass the cross-camera check.
-    std::map<int, std::vector<size_t>> marker_to_obs_indices;
+    // Group valid observations by (marker_id, mode, ref_marker_id). force_inlier observations
+    // are excluded here too, not just from the rejection decision in the third pass below -- a
+    // trusted edit that's currently inconsistent with the filter's state (exactly when
+    // force_inlier matters) would otherwise skew the per-marker median and change whether
+    // *other* cameras' genuinely bad observations of the same marker pass the cross-camera
+    // check.
+    //
+    // Grouping by marker_id alone (as this used to) silently pools together measurements of
+    // fundamentally different physical quantities whenever a marker carries more than one
+    // Observation this step: a POSITION-mode Mahalanobis distance (an absolute-pixel residual)
+    // is not comparable to a VELOCITY-mode one (a frame-to-frame pixel-delta residual) -- pooling
+    // them into one median is statistically meaningless and can reject a perfectly good
+    // observation of one kind because the other kind's distances dominate the median, or the
+    // reverse. Same reasoning extends PAIR_DIFF's ref_marker_id into the key: two different
+    // parent markers produce differently-distributed child-minus-parent residuals for the same
+    // child, so they shouldn't be pooled together either -- relevant once cross-marker relative
+    // observations (e.g. a prop marker's PAIR_DIFF against a person's fingertip) exist alongside
+    // this dot-track's own PAIR_DIFF usage.
+    std::map<std::tuple<int, int, int>, std::vector<size_t>> marker_to_obs_indices;
     for (size_t i = 0; i < observations.size(); ++i) {
         if (obs_data[i].is_valid && !observations[i].force_inlier) {
-            marker_to_obs_indices[observations[i].marker_id].push_back(i);
+            Observation const& o = observations[i];
+            marker_to_obs_indices[{o.marker_id, static_cast<int>(o.mode), o.ref_marker_id}]
+                .push_back(i);
         }
     }
 
@@ -2037,7 +2059,7 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
     double const cross_camera_multiplier = 3.0;  // Tunable: reject if distance > k * median
     double const min_median_threshold = 0.5;     // Skip cross-camera check if median is too small
 
-    for (auto const& [marker_id, obs_indices] : marker_to_obs_indices) {
+    for (auto const& [group_key, obs_indices] : marker_to_obs_indices) {
         if (obs_indices.size() < 2) {
             continue;  // Need at least 2 cameras to compare
         }
@@ -2082,6 +2104,7 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
         obs_result.marker_name = layout_->skeleton()->markers()[obs.marker_id].name;
         obs_result.camera_id = obs.camera_id;
         obs_result.camera_frame_idx = obs.frame_idx;
+        obs_result.mode = obs.mode;
         obs_result.predicted = data.predicted;
         obs_result.actual = data.actual;
         obs_result.innovation = data.innovation;
@@ -2196,6 +2219,7 @@ std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagno
             obs_result.marker_name = layout_->skeleton()->markers()[obs.marker_id].name;
             obs_result.camera_id = obs.camera_id;
             obs_result.camera_frame_idx = obs.frame_idx;
+            obs_result.mode = obs.mode;
             obs_result.is_outlier = true;  // Mark as outlier for diagnostics
             obs_result.mahalanobis_distance = 0.0;
             obs_result.innovation = Eigen::Vector2d::Zero();
@@ -2219,6 +2243,7 @@ std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagno
         obs_result.marker_name = layout_->skeleton()->markers()[obs.marker_id].name;
         obs_result.camera_id = obs.camera_id;
         obs_result.camera_frame_idx = obs.frame_idx;
+        obs_result.mode = obs.mode;
         obs_result.is_outlier = false;
         obs_result.mahalanobis_distance = mahal_dist;
         obs_result.innovation = innovation;

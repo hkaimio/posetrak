@@ -11,6 +11,7 @@
 
 #include <Eigen/Core>
 
+#include "posetrak/core/observation.hpp"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -29,6 +30,14 @@ struct ObservationResult {
     Eigen::Vector2d innovation;   ///< Innovation vector [u_err, v_err] in pixels
     Eigen::Vector2d predicted;    ///< Predicted measurement [u_pred, v_pred]
     Eigen::Vector2d actual;       ///< Actual measurement [u_actual, v_actual]
+    /// Which measurement model produced predicted/actual above -- POSITION means both are
+    /// absolute undistorted pixels; VELOCITY means a frame-to-frame pixel delta; PAIR_DIFF means
+    /// a child-minus-parent pixel offset (see Observation::mode's own doc comment). Needed
+    /// because more than one ObservationResult can now share a (camera_id, marker_name) pair in
+    /// a single step (docs/roadmap/features/observation-results-semantics.md) -- ResultWriter::
+    /// write_obs_results() uses this to decide which one gets tracking_obs_results' one
+    /// diagnostic slot per (camera, marker), and to record which it picked.
+    MeasurementMode mode = MeasurementMode::POSITION;
 };
 
 /**

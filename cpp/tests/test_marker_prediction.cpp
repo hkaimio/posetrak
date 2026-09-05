@@ -16,6 +16,8 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <numbers>
+
 using namespace posetrak;
 using Catch::Approx;
 
@@ -136,4 +138,107 @@ TEST_CASE("predict_rigid_marker: behind the camera returns nullopt", "[marker_pr
 
     auto result = predict_rigid_marker(local_pos, root_position, root_orientation, cov, camera);
     REQUIRE_FALSE(result.has_value());
+}
+
+// ---------------------------------------------------------------------------
+// Self-occlusion culling (local_normal parameter) -- marker-based-mocap
+// design: a marker on a flat prop's far side from a given camera should
+// never predict a pixel location for that camera at all, not just predict
+// one that then loses a nearby real (near-face) candidate to it in
+// assignment.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("predict_rigid_marker: normal facing away from the camera returns nullopt",
+          "[marker_prediction]") {
+    // Camera at world origin looking down +Z; marker 2m along +Z from it
+    // (i.e. camera is in the marker's -Z direction). A normal of +Z points
+    // further away from the camera, not toward it -- this face can't
+    // actually be seen from here.
+    Camera camera = make_camera(Eigen::Vector3d(0.0, 0.0, 0.0));
+    Eigen::Vector3d local_pos = Eigen::Vector3d::Zero();
+    Eigen::Vector3d root_position(0.0, 0.0, 2.0);
+    Eigen::Quaterniond root_orientation = Eigen::Quaterniond::Identity();
+    Eigen::Matrix<double, 6, 6> cov = Eigen::Matrix<double, 6, 6>::Zero();
+    Eigen::Vector3d local_normal(0.0, 0.0, 1.0);
+
+    auto result =
+        predict_rigid_marker(local_pos, root_position, root_orientation, cov, camera, local_normal);
+    REQUIRE_FALSE(result.has_value());
+}
+
+TEST_CASE("predict_rigid_marker: normal facing toward the camera predicts normally",
+          "[marker_prediction]") {
+    // Same geometry as the previous test, but the normal points -Z
+    // (toward the camera) -- this face genuinely is the one facing the
+    // lens, so the prediction should come through exactly as it would
+    // with no normal at all.
+    Camera camera = make_camera(Eigen::Vector3d(0.0, 0.0, 0.0));
+    Eigen::Vector3d local_pos = Eigen::Vector3d::Zero();
+    Eigen::Vector3d root_position(0.0, 0.0, 2.0);
+    Eigen::Quaterniond root_orientation = Eigen::Quaterniond::Identity();
+    Eigen::Matrix<double, 6, 6> cov = Eigen::Matrix<double, 6, 6>::Zero();
+    Eigen::Vector3d local_normal(0.0, 0.0, -1.0);
+
+    auto result =
+        predict_rigid_marker(local_pos, root_position, root_orientation, cov, camera, local_normal);
+    REQUIRE(result.has_value());
+    REQUIRE(result->position.x() == Approx(640.0));
+    REQUIRE(result->position.y() == Approx(360.0));
+}
+
+TEST_CASE("predict_rigid_marker: no normal given never culls, regardless of orientation",
+          "[marker_prediction]") {
+    // Same geometry as the "facing away" test above (a normal of +Z there
+    // gets culled) -- omitting local_normal entirely must predict exactly
+    // as the pre-existing (no-culling) behavior always did, since every
+    // skeleton/marker without a known normal (e.g. any person keypoint)
+    // must be completely unaffected by this feature.
+    Camera camera = make_camera(Eigen::Vector3d(0.0, 0.0, 0.0));
+    Eigen::Vector3d local_pos = Eigen::Vector3d::Zero();
+    Eigen::Vector3d root_position(0.0, 0.0, 2.0);
+    Eigen::Quaterniond root_orientation = Eigen::Quaterniond::Identity();
+    Eigen::Matrix<double, 6, 6> cov = Eigen::Matrix<double, 6, 6>::Zero();
+
+    auto result = predict_rigid_marker(local_pos, root_position, root_orientation, cov, camera);
+    REQUIRE(result.has_value());
+}
+
+TEST_CASE("predict_rigid_marker: normal exactly edge-on to the camera is culled",
+          "[marker_prediction]") {
+    // Boundary convention check: a normal exactly perpendicular to the
+    // view direction (dot product == 0, precisely edge-on) is treated as
+    // not visible ("<= 0", not "< 0") -- see the function's own doc
+    // comment for why a stricter positive margin isn't used instead (the
+    // two real ArUco tags this exists for aren't perfectly antiparallel).
+    Camera camera = make_camera(Eigen::Vector3d(0.0, 0.0, 0.0));
+    Eigen::Vector3d local_pos = Eigen::Vector3d::Zero();
+    Eigen::Vector3d root_position(0.0, 0.0, 2.0);
+    Eigen::Quaterniond root_orientation = Eigen::Quaterniond::Identity();
+    Eigen::Matrix<double, 6, 6> cov = Eigen::Matrix<double, 6, 6>::Zero();
+    Eigen::Vector3d local_normal(1.0, 0.0, 0.0);  // perpendicular to the (0,0,-1) view direction
+
+    auto result =
+        predict_rigid_marker(local_pos, root_position, root_orientation, cov, camera, local_normal);
+    REQUIRE_FALSE(result.has_value());
+}
+
+TEST_CASE("predict_rigid_marker: normal is transformed by the current root orientation",
+          "[marker_prediction]") {
+    // A locally-away-facing normal ((0,0,1), which the first culling test
+    // above confirms gets culled at identity orientation) becomes
+    // camera-facing once the root has rotated 180 degrees about Y --
+    // confirms the normal is re-projected through root_orientation every
+    // call rather than treated as a fixed world-frame direction, which
+    // matters because a rigid prop actually spins during real tracking.
+    Camera camera = make_camera(Eigen::Vector3d(0.0, 0.0, 0.0));
+    Eigen::Vector3d local_pos = Eigen::Vector3d::Zero();
+    Eigen::Vector3d root_position(0.0, 0.0, 2.0);
+    Eigen::Quaterniond root_orientation(
+        Eigen::AngleAxisd(std::numbers::pi, Eigen::Vector3d::UnitY()));
+    Eigen::Matrix<double, 6, 6> cov = Eigen::Matrix<double, 6, 6>::Zero();
+    Eigen::Vector3d local_normal(0.0, 0.0, 1.0);
+
+    auto result =
+        predict_rigid_marker(local_pos, root_position, root_orientation, cov, camera, local_normal);
+    REQUIRE(result.has_value());
 }

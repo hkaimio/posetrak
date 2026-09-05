@@ -169,6 +169,124 @@ def test_mixed_body_routes_coded_and_dot_markers_to_separate_tracks():
     assert by_name["mid_dot"]["track"] == "prop_dots"
 
 
+def test_aruco_marker_gets_its_own_computed_normal():
+    config = load_marker_body_yaml(_TWO_MARKER_BODY_YAML)
+    doc = generate_prop_skeleton(config)
+
+    # Both tags were authored with normal: [0, 0, 1] in the source marker
+    # body YAML (a different, pre-existing concept: that field parametrically
+    # defines the tag's own corner positions when the source uses
+    # center/normal/up rather than already-resolved corners:). This checks
+    # the generated skeleton's own (independently *computed*, from the
+    # resolved corners _plane_normal() itself derives) normal comes back
+    # the same, and that every one of a tag's 4 corner markers agrees.
+    for corner in ("hilt:c0", "hilt:c1", "hilt:c2", "hilt:c3"):
+        m = next(x for x in doc["markers"] if x["name"] == corner)
+        assert np.allclose(m["normal"], [0.0, 0.0, 1.0], atol=1e-9)
+
+
+def test_dot_inherits_the_nearest_tags_normal():
+    config = load_marker_body_yaml(_MIXED_BODY_WITH_SYMMETRY_YAML)
+    doc = generate_prop_skeleton(config)
+
+    mid_dot = next(m for m in doc["markers"] if m["name"] == "mid_dot")
+    assert np.allclose(mid_dot["normal"], [0.0, 0.0, 1.0], atol=1e-9)
+
+
+def test_dot_only_body_has_no_normal_at_all():
+    # No ArUco tag anywhere on the body -- nothing to infer a dot's normal
+    # from, so the field is simply absent (not a wrong guess) rather than
+    # defaulting to something arbitrary.
+    config = load_marker_body_yaml(_DOT_ONLY_BODY_YAML)
+    doc = generate_prop_skeleton(config)
+    for m in doc["markers"]:
+        assert "normal" not in m
+
+
+def test_dot_picks_the_correct_face_even_when_closer_to_the_other_tags_center():
+    # A dot far out along a long, thin two-tag prop must be assigned
+    # whichever tag's *face plane* it actually sits on, even when the
+    # *other* tag's center happens to be nearer in raw 3D distance --
+    # exactly the sword's real dot2/dot6 situation (near the tip, both
+    # tags clustered close together near the handle, tens of cm away) that
+    # motivated using signed plane-distance instead of nearest-center.
+    # Geometry here is deliberately picked so the two heuristics disagree:
+    # tip_dot is 0.9004m from "near"'s center but 0.9101m from "far"'s
+    # (raw distance favors "near"), while its distance along "far"'s own
+    # plane normal is 0.002m against "near"'s 0.028m (plane distance
+    # favors "far", correctly, since a dot at z=-0.028 physically belongs
+    # on the z=-0.03 face, not the z=0 one).
+    yaml_body = """\
+name: test-long-prop
+units: meters
+markers:
+  - name: near
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "1"
+    size: 0.05
+    center: [0.0, 0.0, 0.0]
+    normal: [0.0, 0.0, 1.0]
+    up: [0.0, 1.0, 0.0]
+  - name: far
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "2"
+    size: 0.05
+    center: [0.01, -0.01, -0.03]
+    normal: [0.0, 0.0, -1.0]
+    up: [0.0, 1.0, 0.0]
+  - name: tip_dot
+    type: reflective_dot
+    center: [0.0, 0.9, -0.028]
+"""
+    config = load_marker_body_yaml(yaml_body)
+    doc = generate_prop_skeleton(config)
+
+    tip_dot = next(m for m in doc["markers"] if m["name"] == "tip_dot")
+    assert np.allclose(tip_dot["normal"], [0.0, 0.0, -1.0], atol=1e-6)
+
+
+def test_explicit_same_face_as_overrides_geometric_inference():
+    # A dot whose calibrated position doesn't actually sit near the tag
+    # it's really mounted on (a real, confirmed situation on the sword
+    # body -- geometric inference alone gets it wrong) must still get the
+    # *named* tag's normal when same_face_as: says so, not whatever
+    # inference would have picked.
+    yaml_body = """\
+name: test-override-prop
+units: meters
+markers:
+  - name: near
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "1"
+    size: 0.05
+    center: [0.0, 0.0, 0.0]
+    normal: [0.0, 0.0, 1.0]
+    up: [0.0, 1.0, 0.0]
+  - name: far
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "2"
+    size: 0.05
+    center: [0.0, 0.0, -0.03]
+    normal: [0.0, 0.0, -1.0]
+    up: [0.0, 1.0, 0.0]
+  - name: misleading_dot
+    type: reflective_dot
+    center: [0.0, 0.0, 0.001]
+    same_face_as: far
+"""
+    config = load_marker_body_yaml(yaml_body)
+    doc = generate_prop_skeleton(config)
+
+    # Without the override, inference would pick "near" (z=0.001 is
+    # essentially on "near"'s own plane) -- same_face_as: far must win.
+    dot = next(m for m in doc["markers"] if m["name"] == "misleading_dot")
+    assert np.allclose(dot["normal"], [0.0, 0.0, -1.0], atol=1e-6)
+
+
 def test_empty_body_raises():
     config = load_marker_body_yaml(_EMPTY_BODY_YAML)
     with pytest.raises(ValueError, match="no markers"):

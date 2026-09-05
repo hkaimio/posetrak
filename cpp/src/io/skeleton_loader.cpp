@@ -347,6 +347,13 @@ static Skeleton parse_skeleton_node(YAML::Node const& root) {
             if (marker_to_group_map.count(marker_name) > 0) {
                 skeleton.markers()[marker_idx].group = marker_to_group_map[marker_name];
             }
+
+            // Outward-facing normal (marker-based-mocap self-occlusion-culling
+            // design) -- optional, see Marker::normal's own doc comment.
+            if (marker_node["normal"]) {
+                skeleton.markers()[marker_idx].normal =
+                    parse_vec3(marker_node["normal"]).normalized();
+            }
         }
     }
 

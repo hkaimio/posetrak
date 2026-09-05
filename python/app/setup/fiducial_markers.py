@@ -537,6 +537,21 @@ class MarkerRigConfig:
     script, and consumed only by the skeleton generator to emit a
     locked-DOF annotation (design §5.3) -- unrelated to detection/anchoring,
     so nothing else in this module reads it.
+
+    ``reflective_dot_faces``: dot name -> the coded marker *id* (not name)
+    it's mounted on the same physical face as, for a ``reflective_dot``
+    entry that declared an explicit ``same_face_as: <marker name>``
+    (marker-based-mocap self-occlusion-culling design). The skeleton
+    generator uses this to assign the dot the *named* tag's own outward
+    normal directly, in preference to inferring one geometrically (nearest
+    face-plane by signed distance) -- confirmed necessary on the real
+    sword body: two real dots' calibrated positions sit almost exactly on
+    the "wrong" tag's own plane (2026-09-05), most likely because the
+    object isn't the simple flat two-plane shape that inference assumes,
+    not from a calibration error -- only direct physical inspection
+    (which face is this dot actually mounted on) resolves that reliably.
+    Absent (empty) for a dot with no ``same_face_as:`` given, in which
+    case the generator falls back to geometric inference as before.
     """
     rig_id: str
     marker_corners: dict[str, np.ndarray] = field(default_factory=dict)
@@ -544,6 +559,7 @@ class MarkerRigConfig:
     reflective_dots: dict[str, np.ndarray] = field(default_factory=dict)
     marker_names: dict[str, str] = field(default_factory=dict)
     symmetry_axis: np.ndarray | None = None
+    reflective_dot_faces: dict[str, str] = field(default_factory=dict)
 
 
 def load_rig_config(path: str) -> MarkerRigConfig:
@@ -659,6 +675,7 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
     marker_dictionaries: dict[str, str] = {}
     reflective_dots: dict[str, np.ndarray] = {}
     marker_names: dict[str, str] = {}
+    reflective_dot_faces_by_name: dict[str, str] = {}  # dot name -> referenced marker NAME (unresolved)
 
     for entry in payload.get("markers") or []:
         name = entry.get("name")
@@ -682,6 +699,9 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
                     f"marker body {resolved_rig_id!r}: reflective_dot {name!r} needs 'center'"
                 )
             reflective_dots[name] = np.array(center, dtype=np.float64)
+            same_face_as = entry.get("same_face_as")
+            if same_face_as:
+                reflective_dot_faces_by_name[name] = same_face_as
             continue
 
         # Coded marker types (aruco, apriltag, ...): need dictionary + id + geometry.
@@ -739,6 +759,16 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
         marker_corners[marker_id] = corners
         marker_dictionaries[marker_id] = dictionary
 
+    name_to_id = {v: k for k, v in marker_names.items()}
+    reflective_dot_faces: dict[str, str] = {}
+    for dot_name, ref_name in reflective_dot_faces_by_name.items():
+        if ref_name not in name_to_id:
+            raise ValueError(
+                f"marker body {resolved_rig_id!r}: reflective_dot {dot_name!r}'s "
+                f"same_face_as: {ref_name!r} does not match any coded marker's name in this body"
+            )
+        reflective_dot_faces[dot_name] = name_to_id[ref_name]
+
     return MarkerRigConfig(
         rig_id=resolved_rig_id,
         marker_corners=marker_corners,
@@ -746,6 +776,7 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
         reflective_dots=reflective_dots,
         marker_names=marker_names,
         symmetry_axis=symmetry_axis,
+        reflective_dot_faces=reflective_dot_faces,
     )
 
 

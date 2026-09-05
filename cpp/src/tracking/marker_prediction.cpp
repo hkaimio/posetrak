@@ -9,9 +9,32 @@ namespace posetrak {
 std::optional<MarkerPrediction>
 predict_rigid_marker(Eigen::Vector3d const& local_pos, Eigen::Vector3d const& root_position,
                      Eigen::Quaterniond const& root_orientation,
-                     Eigen::Matrix<double, 6, 6> const& pose_cov_6x6, Camera const& camera) {
+                     Eigen::Matrix<double, 6, 6> const& pose_cov_6x6, Camera const& camera,
+                     std::optional<Eigen::Vector3d> const& local_normal) {
     Eigen::Matrix3d const R = root_orientation.toRotationMatrix();
     Eigen::Vector3d const p_world = R * local_pos + root_position;
+
+    // --- Self-occlusion culling (marker-based-mocap design) ---
+    // Checked before the projection math below, not after: cheaper, and a
+    // marker on the object's far side from this camera has no real pixel
+    // location to predict at all -- the flat-object case this exists for
+    // (two ArUco tags + several dots on opposite faces of the same thin
+    // prop) means a candidate anywhere near this marker's naive projection
+    // is far more likely to actually be the marker on the *near* face,
+    // which real production data confirms happens: dot assignment
+    // repeatedly matched a real near-face dot's detection to a far-face
+    // slot's prediction (status.md's 2026-09-05 entry). >= 0 (not a
+    // stricter margin) since the two tags' calibrated normals aren't
+    // perfectly antiparallel in practice -- see that same entry for the
+    // real numbers -- and a small margin would risk culling a marker
+    // that's genuinely still visible near-edge-on.
+    if (local_normal.has_value()) {
+        Eigen::Vector3d const world_normal = R * (*local_normal);
+        Eigen::Vector3d const view_dir = (camera.position() - p_world).normalized();
+        if (world_normal.dot(view_dir) <= 0.0) {
+            return std::nullopt;  // this face is turned away from the camera this frame
+        }
+    }
 
     // --- Predicted pixel position ---
     // clip_to_bounds=false: a marker predicted just outside the frame is

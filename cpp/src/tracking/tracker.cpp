@@ -924,7 +924,7 @@ Tracker::predict_dot_slot_predictions(int camera_id) const {
             continue;
 
         auto prediction = predict_rigid_marker(local_it->second, root_position, root_orientation,
-                                               pose_cov, cam_it->second);
+                                               pose_cov, cam_it->second, marker.normal);
         if (prediction.has_value()) {
             result.emplace(static_cast<int>(i), *prediction);
         }

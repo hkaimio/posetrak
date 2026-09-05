@@ -152,6 +152,60 @@ markers:
     assert set(config.reflective_dots) == {"dot_a"}
 
 
+def test_reflective_dot_same_face_as_resolves_to_referenced_markers_id():
+    yaml_content = """
+name: test-body
+markers:
+  - name: front
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "7"
+    size: 0.1
+    center: [0.0, 0.0, 0.0]
+    normal: [0.0, 0.0, 1.0]
+    up: [0.0, 1.0, 0.0]
+  - name: dot_a
+    type: reflective_dot
+    center: [0.02, 0.02, 0.0]
+    same_face_as: front
+"""
+    config = load_marker_body_yaml(yaml_content)
+    assert config.reflective_dot_faces == {"dot_a": "7"}
+
+
+def test_reflective_dot_same_face_as_unknown_name_raises():
+    yaml_content = """
+name: test-body
+markers:
+  - name: front
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "7"
+    size: 0.1
+    center: [0.0, 0.0, 0.0]
+    normal: [0.0, 0.0, 1.0]
+    up: [0.0, 1.0, 0.0]
+  - name: dot_a
+    type: reflective_dot
+    center: [0.02, 0.02, 0.0]
+    same_face_as: back
+"""
+    with pytest.raises(ValueError, match="same_face_as"):
+        load_marker_body_yaml(yaml_content)
+
+
+def test_reflective_dot_without_same_face_as_leaves_faces_dict_empty():
+    yaml_content = """
+name: test-body
+markers:
+  - name: dot_a
+    type: reflective_dot
+    center: [0.02, 0.02, 0.0]
+"""
+    config = load_marker_body_yaml(yaml_content)
+    assert config.reflective_dot_faces == {}
+
+
 # ---------------------------------------------------------------------------
 # multi-dictionary bodies
 # ---------------------------------------------------------------------------

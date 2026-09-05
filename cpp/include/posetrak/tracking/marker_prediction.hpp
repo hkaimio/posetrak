@@ -69,14 +69,29 @@ struct MarkerPrediction {
 ///                           rigid body, which has no joint-angle DOFs to
 ///                           occupy the columns/rows in between).
 /// @param camera             Camera to project into.
+/// @param local_normal       Marker::normal (self-occlusion-culling design)
+///                           -- when given, the marker is treated as not
+///                           seen by *camera* this frame (std::nullopt,
+///                           same as "behind the camera") if its current
+///                           world-frame normal faces away from the
+///                           camera. Recomputed from local_normal +
+///                           root_orientation every call rather than once
+///                           per track, since the object's orientation
+///                           (and therefore which face points where)
+///                           changes every frame. std::nullopt (the
+///                           default) disables the check entirely --
+///                           existing callers/skeletons with no known
+///                           normal are unaffected.
 /// @return MarkerPrediction if the marker projects in front of the
-///         camera, std::nullopt otherwise (mirrors
-///         Camera::project_undistorted()'s own "behind camera"
+///         camera *and* (when local_normal is given) its own face is
+///         turned toward the camera this frame, std::nullopt otherwise
+///         (mirrors Camera::project_undistorted()'s own "behind camera"
 ///         convention -- the caller should treat this camera as simply
 ///         not seeing this marker slot this frame, not as an error).
 std::optional<MarkerPrediction>
 predict_rigid_marker(Eigen::Vector3d const& local_pos, Eigen::Vector3d const& root_position,
                      Eigen::Quaterniond const& root_orientation,
-                     Eigen::Matrix<double, 6, 6> const& pose_cov_6x6, Camera const& camera);
+                     Eigen::Matrix<double, 6, 6> const& pose_cov_6x6, Camera const& camera,
+                     std::optional<Eigen::Vector3d> const& local_normal = std::nullopt);
 
 }  // namespace posetrak

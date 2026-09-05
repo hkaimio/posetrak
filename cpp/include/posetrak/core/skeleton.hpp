@@ -97,6 +97,22 @@ struct Marker {
     /// "hilt:c0" for a coded-marker corner, or a dot's own name. Meaningless
     /// when `track` is empty.
     std::string landmark;
+
+    /// @brief Outward-facing surface normal, in the marker's own parent
+    /// joint's local frame (unit length). Optional -- absent means "no
+    /// known normal, always potentially visible from any angle" (e.g. any
+    /// person-skeleton keypoint, or a prop with dots but no ArUco tag to
+    /// derive a normal from). Set for a rigid-prop marker on a body with
+    /// at least one coded (ArUco) tag (marker-based-mocap
+    /// self-occlusion-culling design): an ArUco tag's normal comes
+    /// directly from its own corner geometry, and a dot inherits whichever
+    /// tag's face-plane it sits closest to. `predict_rigid_marker()`
+    /// (marker_prediction.hpp) uses this to exclude a marker from a
+    /// camera's dot-assignment candidate pool when it's on the object's
+    /// far side from that camera this frame -- see that function's own
+    /// doc comment for why this needs to live in the marker's *local*
+    /// frame rather than precomputed per-camera (the object rotates).
+    std::optional<Eigen::Vector3d> normal;
 };
 
 /// @brief One skeleton input_tracks: entry (design doc §5.1) -- a named

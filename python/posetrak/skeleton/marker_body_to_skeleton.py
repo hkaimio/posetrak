@@ -44,6 +44,35 @@ def _corner_landmark_name(marker_name: str, corner_index: int) -> str:
     return f"{marker_name}:c{corner_index}"
 
 
+def _plane_normal(corners: np.ndarray) -> np.ndarray:
+    """Outward-facing unit normal for a planar 4-corner marker, in whatever
+    frame *corners* (4,3), ordered top-left/top-right/bottom-right/bottom-
+    left as ``MarkerRigConfig.marker_corners`` docstring itself specifies)
+    are expressed in.
+
+    ``normalize(cross(bottom_left - top_left, top_right - top_left))`` --
+    verified against ``extrinsics_solver.marker_local_corners()``'s own
+    flat template (top-left=(-h,h,0), top-right=(h,h,0),
+    bottom-left=(-h,-h,0), Z=0 plane) giving exactly +Z, the convention
+    every other calibration tool in this project already treats as "the
+    marker's own front face" (e.g. the sword's `aruco_2` -- the marker
+    body's reference/origin tag -- sits at Z=0 with this same template).
+    Cross-checked against the real, orbit-recalibrated `aruco_3` corners
+    (2026-09-05): comes out as (0.007, 0.158, -0.987), i.e. essentially
+    -Z, matching the physical fact that the two tags sit on opposite
+    faces of the same thin harness.
+
+    Raises ValueError for a degenerate (near-zero-area, e.g. all 4 corners
+    collinear) marker -- there's no meaningful normal to compute.
+    """
+    top_left, top_right, _bottom_right, bottom_left = corners
+    n = np.cross(bottom_left - top_left, top_right - top_left)
+    norm = np.linalg.norm(n)
+    if norm < 1e-12:
+        raise ValueError("degenerate (near-zero-area) marker corners -- cannot compute a normal")
+    return n / norm
+
+
 def generate_prop_skeleton(
     config: MarkerRigConfig,
     *,
@@ -97,9 +126,24 @@ def generate_prop_skeleton(
         # silently dropped in the meantime.
         root_joint["locked_dofs"] = {"axis": [float(v) for v in config.symmetry_axis]}
 
+    # Outward normal per ArUco tag (self-occlusion-culling design,
+    # cpp/include/posetrak/core/skeleton.hpp's Marker::normal) -- an ArUco
+    # tag's own corner geometry already fully determines it, no new
+    # calibration data needed. Also the source a dot's own normal gets
+    # inferred from below: a point has no inherent orientation, so it
+    # inherits whichever tag's face-plane it sits closest to.
+    tag_planes: list[tuple[np.ndarray, np.ndarray]] = []  # (center, normal) per ArUco tag
+    tag_normals: dict[str, np.ndarray] = {}
+    for marker_id, corners in config.marker_corners.items():
+        corners_arr = np.asarray(corners, dtype=np.float64)
+        normal = _plane_normal(corners_arr)
+        tag_normals[marker_id] = normal
+        tag_planes.append((corners_arr.mean(axis=0), normal))
+
     markers: list[dict[str, Any]] = []
     for marker_id, corners in config.marker_corners.items():
         marker_name = config.marker_names.get(marker_id, marker_id)
+        normal = tag_normals[marker_id]
         for corner_index in range(4):
             landmark = _corner_landmark_name(marker_name, corner_index)
             markers.append({
@@ -108,16 +152,42 @@ def generate_prop_skeleton(
                 "offset": [float(v) for v in corners[corner_index]],
                 "track": _MARKER_INPUT_TRACK_ID,
                 "landmark": landmark,
+                "normal": [float(v) for v in normal],
             })
 
     for dot_name, center in config.reflective_dots.items():
-        markers.append({
+        center_arr = np.asarray(center, dtype=np.float64)
+        entry: dict[str, Any] = {
             "name": dot_name,
             "parent": _ROOT_JOINT_NAME,
-            "offset": [float(v) for v in np.asarray(center, dtype=np.float64)],
+            "offset": [float(v) for v in center_arr],
             "track": _DOT_INPUT_TRACK_ID,
             "landmark": dot_name,
-        })
+        }
+        explicit_ref_id = config.reflective_dot_faces.get(dot_name)
+        if explicit_ref_id is not None:
+            # An author-supplied same_face_as: (fiducial_markers.py's own
+            # MarkerRigConfig.reflective_dot_faces docstring) always wins
+            # over inference -- confirmed necessary on the real sword body,
+            # where two dots' calibrated positions sit almost exactly on
+            # the geometrically "wrong" tag's own plane, most likely
+            # because a real prop isn't the flat two-plane shape inference
+            # assumes, not from a calibration error.
+            entry["normal"] = [float(v) for v in tag_normals[explicit_ref_id]]
+        elif tag_planes:
+            # Nearest tag *plane* (signed distance along that plane's own
+            # normal), not nearest tag *center* -- a dot far out along a
+            # long, thin prop (e.g. one near the tip, tens of cm from
+            # either tag) can be nearly equidistant from both tags by raw
+            # 3D distance while still being unambiguously on one face: its
+            # position projected onto the thickness axis is what actually
+            # says which face it's on, regardless of how far along the
+            # prop's length it sits.
+            plane_center, plane_normal = min(
+                tag_planes, key=lambda cn: abs(np.dot(center_arr - cn[0], cn[1]))
+            )
+            entry["normal"] = [float(v) for v in plane_normal]
+        markers.append(entry)
 
     doc: dict[str, Any] = {"name": name or config.rig_id, "units": "meters"}
     if marker_body_definition_id is not None:

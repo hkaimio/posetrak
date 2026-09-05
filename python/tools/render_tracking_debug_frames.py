@@ -94,6 +94,15 @@ subject can move within frame without the view jumping around):
         --start-time 53.0 --end-time 56.0 --slow-factor 4 \\
         --video-out scratch/tracking_debug/gap.mp4
 
+Usage (every active camera side by side in a grid, each with its own crop --
+lets a single-camera-specific issue be told apart from a genuinely shared
+one; omit --camera-label to use every camera active in the run):
+    python tools/render_tracking_debug_frames.py \\
+        --session /path/to/session.db \\
+        --run-id 88b86bc0-7267-4852-8007-8705c1da2945 \\
+        --grid --start-time 53.0 --end-time 56.0 --slow-factor 4 \\
+        --video-out scratch/tracking_debug/gap_grid.mp4
+
 Legend drawn on each frame (filled dot at the exact point + thin ring):
     green   = actual ArUco corner, used as inlier
     orange  = actual ArUco corner, rejected as outlier
@@ -108,6 +117,7 @@ Legend drawn on each frame (filled dot at the exact point + thin ring):
 from __future__ import annotations
 
 import argparse
+import math
 import sqlite3
 import sys
 from pathlib import Path
@@ -135,6 +145,7 @@ class _RunContext:
     ) -> None:
         self.conn = conn
         self.run_id = run_id
+        self.camera_label = camera_label
         # Smoothed (RTS) is the actual delivered output -- what a client application
         # sees -- so it's the right default for "does this look correct" review.
         # Raw is an explicit opt-in (--raw) for the different question "what did the
@@ -499,18 +510,21 @@ def render_pngs(ctx: _RunContext, timestamps: list[float], output_dir: Path, cam
         print(f"  -> {out_path}")
 
 
-def render_video(
-    ctx: _RunContext, start_time: float, end_time: float, slow_factor: float, output_path: Path,
-) -> None:
+def _compute_crop_window(
+    ctx: _RunContext, start_time: float, end_time: float
+) -> tuple[int, int, int, int] | None:
+    """One fixed crop window for a whole clip: the union of every frame's
+    actual/predicted/raw-dot points over [start_time, end_time], generously
+    padded. A per-frame crop would jump around and make drift/bias
+    impossible to judge by eye, which is the whole point of this tool.
+    Returns None if this camera has no sync data or no observations at all
+    in the range (e.g. it doesn't cover this part of the capture).
+    """
     frame_lo = ctx.sync_table.lookup(start_time, ctx.svid)
     frame_hi = ctx.sync_table.lookup(end_time, ctx.svid)
     if frame_lo is None or frame_hi is None:
-        raise SystemExit("no sync data for this camera in the requested time range")
+        return None
 
-    # Pass 1: one fixed crop window for the whole clip (union of every
-    # frame's actual/predicted/raw-dot points, generously padded) -- a
-    # per-frame crop would jump around and make drift/bias impossible to
-    # judge by eye, which is the whole point of this tool.
     all_pts: list[tuple[float, float]] = []
     for frame_idx in range(frame_lo, frame_hi + 1):
         t = ctx.sync_table.frame_to_global_time(frame_idx, ctx.svid)
@@ -519,12 +533,25 @@ def render_video(
         fd = _frame_data_for_time(ctx, t, frame_idx)
         all_pts.extend(_collect_points(fd))
     if not all_pts:
-        raise SystemExit("no observations of any kind in this time range -- nothing to crop to")
+        return None
     xs = [p[0] for p in all_pts]
     ys = [p[1] for p in all_pts]
     pad = _PAD_PX * 2
-    crop = (max(0, int(min(xs) - pad)), max(0, int(min(ys) - pad)),
+    return (max(0, int(min(xs) - pad)), max(0, int(min(ys) - pad)),
             int(max(xs) + pad), int(max(ys) + pad))
+
+
+def render_video(
+    ctx: _RunContext, start_time: float, end_time: float, slow_factor: float, output_path: Path,
+) -> None:
+    frame_lo = ctx.sync_table.lookup(start_time, ctx.svid)
+    frame_hi = ctx.sync_table.lookup(end_time, ctx.svid)
+    if frame_lo is None or frame_hi is None:
+        raise SystemExit("no sync data for this camera in the requested time range")
+
+    crop = _compute_crop_window(ctx, start_time, end_time)
+    if crop is None:
+        raise SystemExit("no observations of any kind in this time range -- nothing to crop to")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     writer = None
@@ -552,11 +579,128 @@ def render_video(
           f"at {out_fps:.1f}fps ({slow_factor}x slow-motion) -> {output_path}")
 
 
+def _render_camera_cell(
+    ctx: _RunContext, timestamp_s: float, window: tuple[int, int, int, int] | None,
+    cell_w: int, cell_h: int,
+) -> np.ndarray:
+    """One camera's own rendered, cropped, letterboxed-to-(cell_w, cell_h)
+    frame at *timestamp_s* -- a black cell with a status label if this
+    camera has no sync data, no frame, or no crop window (doesn't cover
+    this part of the capture) at this instant, so a grid always has the
+    same shape regardless of which cameras have data when.
+    """
+    cell = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
+
+    def _label(text: str) -> None:
+        cv2.putText(cell, f"{ctx.camera_label}: {text}", (10, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+
+    if window is None:
+        _label("no data in range")
+        return cell
+    frame_idx = ctx.sync_table.lookup(timestamp_s, ctx.svid)
+    if frame_idx is None:
+        _label("no sync at this time")
+        return cell
+    img = _grab_frame(ctx.file_path, frame_idx)
+    if img is None:
+        _label("frame decode failed")
+        return cell
+
+    fd = _frame_data_for_time(ctx, timestamp_s, frame_idx)
+    rendered = _draw_overlay(img, ctx.marker_names, fd)
+    x0, y0, x1, y1 = window
+    rendered = rendered[y0:min(y1, rendered.shape[0]), x0:min(x1, rendered.shape[1])]
+    if rendered.shape[0] == 0 or rendered.shape[1] == 0:
+        _label("empty crop")
+        return cell
+
+    h, w = rendered.shape[:2]
+    scale = min(cell_w / w, cell_h / h)
+    new_w, new_h = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+    resized = cv2.resize(rendered, (new_w, new_h))
+    ox, oy = (cell_w - new_w) // 2, (cell_h - new_h) // 2
+    cell[oy:oy + new_h, ox:ox + new_w] = resized
+    cv2.putText(cell, f"{ctx.camera_label}  {fd.status}", (10, cell_h - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    return cell
+
+
+def render_grid_video(
+    contexts: list[_RunContext], start_time: float, end_time: float, slow_factor: float,
+    output_path: Path, cell_w: int = 900, cell_h: int = 600,
+) -> None:
+    """Render every camera in *contexts* (same run, one _RunContext each)
+    side by side in a grid over [start_time, end_time], each cropped to its
+    own union-of-observed/predicted-points window (same idea as
+    render_video(), just computed per camera rather than once) -- lets a
+    single-camera-specific issue (occlusion, glare, a bad calibration) be
+    told apart from a genuinely shared one by seeing every camera's own view
+    of the same real moments at once, instead of guessing from one.
+
+    The first context in *contexts* drives the output frame cadence (its own
+    sync table's frame indices over the range); every other camera's own
+    frame at each resulting timestamp is looked up independently via its own
+    sync table, since different cameras don't share frame numbering.
+    """
+    if not contexts:
+        raise SystemExit("render_grid_video: no cameras given")
+
+    windows = []
+    for ctx in contexts:
+        w = _compute_crop_window(ctx, start_time, end_time)
+        if w is None:
+            print(f"{ctx.camera_label}: no observations in this range -- shown blank in the grid")
+        windows.append(w)
+    if all(w is None for w in windows):
+        raise SystemExit("no camera has any observations in this time range -- nothing to render")
+
+    ref = contexts[0]
+    frame_lo = ref.sync_table.lookup(start_time, ref.svid)
+    frame_hi = ref.sync_table.lookup(end_time, ref.svid)
+    if frame_lo is None or frame_hi is None:
+        raise SystemExit(f"no sync data for reference camera {ref.camera_label} in this range")
+
+    n = len(contexts)
+    cols = math.ceil(math.sqrt(n))
+    rows = math.ceil(n / cols)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = None
+    out_fps = ref.native_fps / slow_factor
+    n_written = 0
+
+    for frame_idx in range(frame_lo, frame_hi + 1):
+        t = ref.sync_table.frame_to_global_time(frame_idx, ref.svid)
+        if t is None:
+            continue
+        canvas = np.zeros((rows * cell_h, cols * cell_w, 3), dtype=np.uint8)
+        for i, (ctx, window) in enumerate(zip(contexts, windows)):
+            cell = _render_camera_cell(ctx, t, window, cell_w, cell_h)
+            r, c = divmod(i, cols)
+            canvas[r * cell_h:(r + 1) * cell_h, c * cell_w:(c + 1) * cell_w] = cell
+        cv2.putText(canvas, f"t={t:.3f}s", (10, canvas.shape[0] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+
+        if writer is None:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(str(output_path), fourcc, out_fps, (cols * cell_w, rows * cell_h))
+        writer.write(canvas)
+        n_written += 1
+
+    if writer is not None:
+        writer.release()
+    print(f"wrote {n_written} frames ({n_written / ref.native_fps:.2f}s of real time) "
+          f"at {out_fps:.1f}fps ({slow_factor}x slow-motion), {cols}x{rows} grid -> {output_path}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--session", required=True)
     ap.add_argument("--run-id", required=True)
-    ap.add_argument("--camera-label", required=True)
+    ap.add_argument("--camera-label", nargs="*", default=None,
+                     help="One camera label for --timestamps/--video-out. For --grid, zero or "
+                          "more (default: every camera active in this run).")
     ap.add_argument("--timestamps", nargs="+", type=float, default=None,
                      help="Still-frame mode: render one PNG per timestamp, each cropped to its own content.")
     ap.add_argument("--output-dir", default=None, help="Required with --timestamps.")
@@ -565,6 +709,13 @@ def main() -> None:
     ap.add_argument("--slow-factor", type=float, default=4.0,
                      help="Video mode: output fps = native fps / this factor (default 4x slow-motion).")
     ap.add_argument("--video-out", default=None, help="Video mode: output .mp4 path.")
+    ap.add_argument("--grid", action="store_true",
+                     help="With --video-out: render every --camera-label (default: all active "
+                          "cameras in this run) side by side in a grid, each cropped to its own "
+                          "content, instead of a single camera's own video -- lets a single-"
+                          "camera-specific issue be told apart from a genuinely shared one.")
+    ap.add_argument("--cell-width", type=int, default=900, help="--grid only: per-camera cell width.")
+    ap.add_argument("--cell-height", type=int, default=600, help="--grid only: per-camera cell height.")
     ap.add_argument("--raw", action="store_true",
                      help="Show the raw (is_smoothed=0), live/causal tracker state instead of "
                           "the default RTS-smoothed one. Smoothed is the actual delivered "
@@ -579,12 +730,28 @@ def main() -> None:
 
     conn = sqlite3.connect(f"file:{args.session}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
-    ctx = _RunContext(conn, args.run_id, args.camera_label, use_smoothed=not args.raw)
+
+    if args.grid:
+        if args.video_out is None or args.start_time is None or args.end_time is None:
+            raise SystemExit("--grid requires --video-out, --start-time, and --end-time")
+        labels = args.camera_label
+        if not labels:
+            _camera_ids, names = get_run_cameras(conn, args.run_id)
+            labels = list(names.values())
+            print(f"--grid with no --camera-label: using every active camera in this run: {labels}")
+        contexts = [_RunContext(conn, args.run_id, label, use_smoothed=not args.raw) for label in labels]
+        render_grid_video(contexts, args.start_time, args.end_time, args.slow_factor,
+                          Path(args.video_out), args.cell_width, args.cell_height)
+        return
+
+    if not args.camera_label or len(args.camera_label) != 1:
+        raise SystemExit("exactly one --camera-label is required outside --grid mode")
+    ctx = _RunContext(conn, args.run_id, args.camera_label[0], use_smoothed=not args.raw)
 
     if args.timestamps is not None:
         if args.output_dir is None:
             raise SystemExit("--output-dir is required with --timestamps")
-        render_pngs(ctx, args.timestamps, Path(args.output_dir), args.camera_label)
+        render_pngs(ctx, args.timestamps, Path(args.output_dir), args.camera_label[0])
     elif args.video_out is not None:
         if args.start_time is None or args.end_time is None:
             raise SystemExit("--start-time and --end-time are required with --video-out")

@@ -47,6 +47,7 @@ posetrak_sources = files(
   'tracking/hierarchical_solver.cpp',
   'tracking/marker_prediction.cpp',
   'tracking/dot_assignment.cpp',
+  'tracking/streak_k_accumulator.cpp',
 
   # Build metadata
   'version.cpp',

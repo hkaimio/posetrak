@@ -198,7 +198,13 @@ static void create_fixture_db() {
             edited_kp_noise_std REAL,
             cross_person_max_world_mm REAL,
             cross_person_min_confidence REAL,
-            cross_person_max_n INTEGER
+            cross_person_max_n INTEGER,
+            dot_streak_velocity_enabled INTEGER,
+            dot_streak_k_window INTEGER,
+            dot_streak_k_min_samples INTEGER,
+            dot_streak_min_displacement_px REAL,
+            dot_streak_min_elongation_px REAL,
+            dot_streak_velocity_noise_std REAL
         );
     )");
 
@@ -759,6 +765,15 @@ TEST_CASE("SessionReader load_tracker_config", "[session_reader]") {
     REQUIRE(cfg.tracker.cross_person_min_confidence ==
             Catch::Approx(TrackerConfig{}.cross_person_min_confidence));
     REQUIRE(cfg.tracker.cross_person_max_n == TrackerConfig{}.cross_person_max_n);
+    REQUIRE(cfg.tracker.dot_streak_velocity_enabled == TrackerConfig{}.dot_streak_velocity_enabled);
+    REQUIRE(cfg.tracker.dot_streak_k_window == TrackerConfig{}.dot_streak_k_window);
+    REQUIRE(cfg.tracker.dot_streak_k_min_samples == TrackerConfig{}.dot_streak_k_min_samples);
+    REQUIRE(cfg.tracker.dot_streak_min_displacement_px ==
+            Catch::Approx(TrackerConfig{}.dot_streak_min_displacement_px));
+    REQUIRE(cfg.tracker.dot_streak_min_elongation_px ==
+            Catch::Approx(TrackerConfig{}.dot_streak_min_elongation_px));
+    REQUIRE(cfg.tracker.dot_streak_velocity_noise_std ==
+            Catch::Approx(TrackerConfig{}.dot_streak_velocity_noise_std));
 }
 
 TEST_CASE("SessionReader load_sequence_info", "[session_reader]") {

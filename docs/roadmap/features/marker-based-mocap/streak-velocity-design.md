@@ -6,8 +6,9 @@ Scope note (2026-09-05): follow-up to
 vector as an unused velocity signal, and to status.md's 2026-09-05 entry
 (adaptive process noise closed most, not all, of the fast-swing lag gap).
 Phase 1 (wire format) and phase 2 (standalone calibration/validation
-script) done, validated against real data; phase 3 (tracker integration)
-not started.
+script) done, validated against real data. Phase 3 (tracker integration)
+built and wired into the real per-frame loop, but its first real-data
+validation was net negative (§4) -- a real, diagnosed bug, not yet fixed.
 
 ## 1. Why a streak is a velocity measurement
 
@@ -107,30 +108,84 @@ saw so much less matchable fast motion than the other pointed at the same
 scene; worth another look before trusting a per-camera `k` for it
 specifically.
 
-## 4. Tracker integration (not started)
+## 4. Tracker integration (built, wired in, net negative on first real run)
 
-No new UKF residual math is needed: `MeasurementMode::VELOCITY` already
+No new UKF residual math was needed: `MeasurementMode::VELOCITY` already
 computes `h(x_t) = project(x_t) - project(x_{t-1})` from the saved
 posterior state alone (`ukf.cpp`'s `prev_projections` — confirmed it does
 *not* require an actual t-1 *observation*, just a projectable posterior),
-exactly the shape a streak-derived measurement needs. The plan:
+exactly the shape a streak-derived measurement needs. Built as:
 
-- A per-camera windowed accumulator on `Tracker`, alongside
-  `prev_observations_`/`nis_feedback_windows_`, holding the running
-  `Σ streak_length`/`Σ frame_displacement` sums (§3), gated on a minimum
-  sample count before `k` is trusted for that camera.
-- When `resolve_dot_assignment()` resolves a streaked candidate with a
-  trusted `k`, additionally construct a `VELOCITY`-mode `Observation` with
-  measured value `streak_vector_px / k` (rescaling the sub-exposure
-  displacement up to a full-frame-equivalent one), alongside (not instead
-  of) the existing `POSITION` observation with its elongation-inflated
-  noise.
-- Sign ambiguity resolved by projecting the candidate's own predicted
-  velocity onto the streak's canonicalized axis and taking whichever of the
-  two directions agrees.
+- `StreakKAccumulator` (`streak_k_accumulator.hpp`/`.cpp`): the same
+  ratio-of-sums windowed estimator as §3's standalone script, as plain,
+  Tracker-agnostic data (mirroring `resolve_dot_assignment()`'s own "pure
+  core, directly testable" split). `Tracker` owns one map of these, keyed
+  by camera_id, alongside `prev_observations_` (`streak_k_accumulators()`,
+  mutable accessor).
+- `resolve_dot_assignment()` takes an optional `StreakVelocityConfig` (a
+  `TrackerConfig::dot_streak_*` bundle — disabled by default) plus a
+  `PrevDotPositions` (each subject's own `Tracker::prev_observations()`,
+  gathered by `resolve_shared_dot_assignment()`). For a resolved streaked
+  candidate with a real previous position for that exact (subject, camera,
+  marker) slot: computes the real frame-to-frame displacement, admits
+  `(elongation, disp_px)` into that camera's `StreakKAccumulator` once past
+  the movement gate, and — once `k` is trusted — emits a second,
+  `VELOCITY`-mode `Observation` alongside (not instead of) the usual
+  `POSITION` one, with measured value `streak_length / k` along the
+  streak's own axis.
+- Sign ambiguity resolved against the real measured displacement just
+  computed (`streak_dir` flipped if it points the wrong way), not a
+  predicted velocity — simpler than the original plan sketch, and
+  consistent with what the offline validation actually checked (§3's
+  direction-cosine numbers are against real displacement too, not a
+  prediction).
+- `TrackerConfig`/`TrackerAppConfig` gained six `dot_streak_*` fields;
+  `tracker_configs` (session schema v50 / registry schema v9) gained the
+  matching columns, same `ALTER TABLE`-per-migration pattern as every
+  earlier tunable (e.g. `process_noise_vel_gain_root`).
+
+**Real validation (2026-09-05, tracking_run_id `a5ce3a4c-...`, config
+`sword-streak-velocity-v1` — gain=4/ref=2 adaptive root noise + face
+culling, same as the validated `86c35ea2-...` baseline, plus
+`dot_streak_velocity_enabled=1` with every other `dot_streak_*` field at
+its default): 79.1% tracked (5234/6618) vs. baseline's 80.5% (5325/6618) —
+**a net regression**, not the hoped-for improvement, despite the
+mechanism's own real signal being genuine: comparing the two runs
+step-by-step, streak velocity newly recovered 77 previously-lost steps
+*and* newly lost 168 previously-good ones (net -91, matching the aggregate
+delta). The known 53.6–55.1s ArUco gap window itself was unaffected either
+way (0/150 lost in both runs — already perfect at this baseline, so not
+where the difference shows up).
+
+**Most likely cause, not yet fixed**: `Tracker::prev_observations_` records
+*every* observation's position unconditionally at the end of a successful
+step (`tracker.cpp`'s `if (!result.tracking_lost) { for (obs : observations)
+prev_observations_[...] = obs.position; }`), regardless of whether the
+UKF's own outlier rejection marked that exact observation an outlier that
+same step. The offline validation script (§3) explicitly filtered to
+`used=1, is_outlier=0` samples before using a position as "previous" for
+anything — the online integration has no such filter, because
+`prev_observations_` is a pre-existing, shared piece of Tracker state (also
+used by the ordinary camera-level `VELOCITY` mode) that was never filtered
+this way for anything else. A single bad match (a real risk exactly during
+the fast, ambiguous motion this feature targets) can therefore contaminate
+the *next* frame's streak-velocity displacement and sign resolution with a
+wrong reference position, injecting a wrongly-scaled or wrongly-signed
+`VELOCITY` observation right when the filter is least able to absorb one
+gracefully — a plausible, mechanistic explanation for "recovers some,
+breaks others," not yet confirmed by isolating it directly (e.g. logging
+which streak-velocity observations coincide with a previous-step outlier,
+or the per-camera `k` trajectory itself, would confirm it). The fix would
+need the streak extension's own last-known-*inlier* position, not just
+last-observed, threaded from `update_step()`'s outlier verdicts back into
+the next frame's dot-assignment call — real plumbing, not done.
 
 ## 5. Open questions
 
+- **(top priority)** §4's outlier-contamination hypothesis for the net
+  regression -- confirm it (or rule it out) before any further tuning of
+  this mechanism, since a tuning change can't fix a wrong-reference-position
+  bug and would just be guessing against noise.
 - Movement-gate threshold (`--min-displacement-px`) and minimum sample
   count before trusting `k` are both first cuts, not yet tuned against how
   quickly `k` actually converges/stays stable on real footage.

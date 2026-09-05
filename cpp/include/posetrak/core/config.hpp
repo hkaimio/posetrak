@@ -59,6 +59,35 @@ struct TrackerConfig {
     /// 2-DOF convention as outlier_threshold's own default.
     double dot_assignment_gate_mahalanobis = 9.21;  ///< Chi-squared threshold (99% for 2-DOF)
 
+    // === Streak-derived dot velocity ===
+    // See docs/roadmap/features/marker-based-mocap/streak-velocity-design.md §3/§4.
+    // A motion-blur streak's own length/axis is a real, otherwise-unused frame-internal
+    // velocity signal for exactly the fast-motion moments the constant-velocity process
+    // model struggles with most. Disabled by default (unvalidated in live tracking as
+    // of introduction -- see the design doc's real, positive offline validation, which
+    // this enables acting on).
+    bool dot_streak_velocity_enabled = false;
+    /// Rolling sample window (per camera) for the k=exposure_time/frame_time estimate.
+    int dot_streak_k_window = 200;
+    /// Minimum samples in the window before k is trusted enough to emit a
+    /// streak-derived VELOCITY observation for that camera.
+    int dot_streak_k_min_samples = 20;
+    /// "Only dots with actual movement" gate: a resolved candidate's frame-to-frame
+    /// displacement must be at least this many pixels to be admitted into the k
+    /// estimate at all (a near-zero displacement makes k's denominator noise-dominated
+    /// -- see the design doc's ratio-of-sums rationale for why this matters less than
+    /// it would for a naive mean-of-ratios estimate, but it still isn't zero).
+    double dot_streak_min_displacement_px = 3.0;
+    /// Minimum major_axis-minor_axis elongation for a candidate to count as a real
+    /// streak at all -- matches resolve_dot_assignment()'s own streak-noise-inflation
+    /// gate, so a marginal blob isn't treated as a streak by one mechanism and a round
+    /// dot by the other.
+    double dot_streak_min_elongation_px = 1.0;
+    /// noise_std_override for the emitted streak-derived VELOCITY observation. An open
+    /// empirical question (design doc §5) -- no principled default yet, same honest
+    /// caveat as edited_kp_noise_std below.
+    double dot_streak_velocity_noise_std = 10.0;
+
     // === Adaptive process noise (Phase 1 — velocity-driven per-DOF scaling) ===
     // See docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
     // 0.0 gain = disabled (exact pre-Phase-1 static process noise).
@@ -238,6 +267,14 @@ struct TrackerAppConfig {
     double outlier_threshold = 4.0;
     double dot_assignment_gate_mahalanobis = 9.21;  ///< See TrackerConfig's own field doc comment.
 
+    // === Streak-derived dot velocity === (see TrackerConfig's own field doc comments)
+    bool dot_streak_velocity_enabled = false;
+    int dot_streak_k_window = 200;
+    int dot_streak_k_min_samples = 20;
+    double dot_streak_min_displacement_px = 3.0;
+    double dot_streak_min_elongation_px = 1.0;
+    double dot_streak_velocity_noise_std = 10.0;
+
     // === Adaptive process noise (Phase 1 — velocity-driven per-DOF scaling) ===
     // 0.0 gain = disabled (exact pre-Phase-1 static process noise).
     double process_noise_vel_gain_joint = 0.0;
@@ -372,6 +409,12 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.calib_noise_std = calib_noise_std;
     tc.outlier_threshold = outlier_threshold;
     tc.dot_assignment_gate_mahalanobis = dot_assignment_gate_mahalanobis;
+    tc.dot_streak_velocity_enabled = dot_streak_velocity_enabled;
+    tc.dot_streak_k_window = dot_streak_k_window;
+    tc.dot_streak_k_min_samples = dot_streak_k_min_samples;
+    tc.dot_streak_min_displacement_px = dot_streak_min_displacement_px;
+    tc.dot_streak_min_elongation_px = dot_streak_min_elongation_px;
+    tc.dot_streak_velocity_noise_std = dot_streak_velocity_noise_std;
     tc.process_noise_vel_gain_joint = process_noise_vel_gain_joint;
     tc.process_noise_vel_ref_joint = process_noise_vel_ref_joint;
     tc.process_noise_vel_gain_root = process_noise_vel_gain_root;

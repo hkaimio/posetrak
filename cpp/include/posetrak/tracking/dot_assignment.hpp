@@ -24,11 +24,10 @@
  * split for the structurally analogous cross-person case
  * (multi_person_tracker.hpp).
  *
- * Not yet wired into either real per-frame loop (run_track_from_db()'s raw
- * loop, MultiPersonTracker::run()) -- that's separate, later work (design
- * doc §9/§11): both callers need a predict-all/resolve/update-all three-pass
- * shape instead of their current one-call-per-subject step, which is real
- * plumbing, not something this file's own scope covers.
+ * Wired into run_track_from_db()'s single-subject loop (cpp/cli/track.cpp);
+ * MultiPersonTracker::run() still needs the same predict-all/resolve/
+ * update-all three-pass wiring (design doc §9/§11) -- real plumbing, not
+ * something this file's own scope covers.
  */
 #pragma once
 
@@ -36,11 +35,35 @@
 #include "posetrak/core/observation.hpp"
 #include "posetrak/db/session_reader.hpp"
 #include "posetrak/tracking/marker_prediction.hpp"
+#include "posetrak/tracking/streak_k_accumulator.hpp"
 #include "posetrak/tracking/tracker.hpp"
 #include <unordered_map>
 #include <vector>
 
 namespace posetrak {
+
+/// @brief Everything resolve_dot_assignment() needs to also emit a streak-derived
+/// VELOCITY observation for a streaked candidate (streak-velocity-design.md §4) --
+/// bundled since it's an optional, orthogonal extra step on top of the core
+/// assignment. A default-constructed value (enabled=false) skips it entirely, so
+/// every existing caller/test is unaffected.
+struct StreakVelocityConfig {
+    bool enabled = false;
+    int k_window = 200;                ///< Rolling sample window per camera.
+    int k_min_samples = 20;            ///< Minimum samples before k is trusted.
+    double min_displacement_px = 3.0;  ///< "Only dots with actual movement" gate.
+    double min_elongation_px = 1.0;    ///< Matches the streak-noise-inflation gate below.
+    double velocity_noise_std = 10.0;  ///< noise_std_override for the emitted observation.
+};
+
+/// @brief This frame's previous-frame resolved dot positions, keyed
+/// subject_id -> camera_id -> marker_id -> undistorted pixel position -- one
+/// subject's own Tracker::prev_observations() gathered per subject (subject-scoped
+/// rather than a flat camera/marker map) so two subjects' unrelated marker_id
+/// numbering can never collide. Only used by the streak-velocity extension (empty
+/// is the correct default when it's disabled).
+using PrevDotPositions =
+    std::unordered_map<int, std::unordered_map<int, std::unordered_map<int, Eigen::Vector2d>>>;
 
 /// @brief One subject's resolved dot observations for this frame -- the
 /// per-subject share of resolve_dot_assignment()'s / resolve_shared_dot_assignment()'s
@@ -94,6 +117,35 @@ struct SubjectDotPredictions {
 ///        path) rather than a round dot. Defaulted so existing callers/tests
 ///        constructing candidates with major_axis == minor_axis (a round dot)
 ///        are unaffected either way.
+/// @param streak_config Streak-derived velocity extension (streak-velocity-design.md
+///        §4) -- default-constructed (enabled=false) skips it entirely, so an
+///        existing caller/test passing nothing for the remaining parameters is
+///        unaffected. When enabled, a resolved streaked candidate ALSO (not
+///        instead of the usual POSITION Observation above) gets a second,
+///        VELOCITY-mode Observation for the same (camera, marker) slot, built
+///        from the streak's own length and canonicalized axis rescaled by the
+///        camera's running k = exposure_time/frame_time estimate -- but only
+///        once *prev_positions* has a real previous-frame position for this
+///        exact (subject, camera, marker) slot: that's both what admits this
+///        sample into the k estimate (§3: k is speed-independent only when
+///        both streak_length and frame_displacement are real) and what
+///        resolves the streak axis's inherent 180-degree sign ambiguity
+///        against a real measured direction. A dot reacquired after being lost
+///        entirely therefore can't get a streak-velocity boost on the exact
+///        frame it reappears -- a known, documented scope limit (design doc
+///        §4), not an oversight: the harder "never-tracked-before" case would
+///        need a different reference direction (e.g. the model's own
+///        predicted displacement) that isn't wired up here.
+/// @param prev_positions This frame's previous-frame resolved dot positions,
+///        gathered by the caller (see resolve_shared_dot_assignment()). Empty
+///        (the default) is correct whenever streak_config.enabled is false.
+/// @param streak_k_state Mutable per-camera k accumulator, updated in place as
+///        real samples are admitted. Optional (nullptr uses a throwaway,
+///        call-local accumulator instead) purely so a caller that only wants
+///        this call's own streak-velocity Observations, without persisting k
+///        across calls, doesn't have to keep one around -- resolve_shared_dot_
+///        assignment() always passes a Tracker-owned one so it actually
+///        accumulates across frames the way the design intends.
 /// @return subject_id -> SubjectDotAssignment, for every subject that had at
 ///         least one resolved Observation. A subject with nothing resolved
 ///         this frame (no predictions, or every candidate gated out) is
@@ -101,7 +153,9 @@ struct SubjectDotPredictions {
 std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
     std::vector<SubjectDotPredictions> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
-    double gate_mahalanobis, int frame_idx, double timestamp, double calib_noise_std = 5.0);
+    double gate_mahalanobis, int frame_idx, double timestamp, double calib_noise_std = 5.0,
+    StreakVelocityConfig const& streak_config = {}, PrevDotPositions const& prev_positions = {},
+    std::unordered_map<int, StreakKAccumulator>* streak_k_state = nullptr);
 
 /// @brief One dot-bearing subject as resolve_shared_dot_assignment() needs
 /// it: an id to key the result map by, plus the Tracker to query
@@ -122,6 +176,17 @@ struct DotAssignmentSubject {
 /// SubjectDotPredictions, and delegates. See resolve_dot_assignment() for
 /// the actual resolution logic and its own doc comment for every parameter
 /// this forwards unchanged.
+///
+/// Also builds resolve_dot_assignment()'s streak-velocity inputs from
+/// *config*'s dot_streak_* fields: gathers each subject's own
+/// Tracker::prev_observations() into a PrevDotPositions, and forwards the
+/// first subject's Tracker::streak_k_accumulators() as the mutable k state --
+/// k is a property of the camera (exposure/frame-rate), not of any one
+/// subject, so it should in principle be shared across every subject using
+/// that camera; simplified to the first subject's own accumulator map since
+/// no real capture this round has more than one dot-bearing subject sharing a
+/// camera (same simplification precedent as this function's own multi-
+/// subject/camera-coverage note below, for a different concern).
 ///
 /// @param subjects Every dot-bearing subject participating this frame.
 /// @note Every camera_id key in *candidates_by_camera* is assumed valid for

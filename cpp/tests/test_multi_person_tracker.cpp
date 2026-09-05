@@ -222,7 +222,10 @@ void create_fixture_db(fs::path const& path, int num_frames, double dt) {
             near_limit_spread_sigma REAL, near_limit_damping_factor REAL,
             edited_kp_noise_std REAL,
             cross_person_max_world_mm REAL, cross_person_min_confidence REAL,
-            cross_person_max_n INTEGER
+            cross_person_max_n INTEGER,
+            dot_streak_velocity_enabled INTEGER, dot_streak_k_window INTEGER,
+            dot_streak_k_min_samples INTEGER, dot_streak_min_displacement_px REAL,
+            dot_streak_min_elongation_px REAL, dot_streak_velocity_noise_std REAL
         );
     )");
     exec_sql(db, R"(

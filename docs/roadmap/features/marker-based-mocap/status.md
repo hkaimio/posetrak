@@ -1,5 +1,19 @@
 # Marker-based mocap — status
 
+- **2026-09-05** (later same day) — Streak-velocity phase 3 (tracker
+  integration) built and wired into the real per-frame loop -- see
+  [streak-velocity-design.md](streak-velocity-design.md) §4 for the full
+  account. First real-data validation was a genuine, diagnosed **net
+  regression**: 79.1% tracked vs. the 80.5% baseline, despite the mechanism
+  recovering 77 previously-lost steps (it also newly lost 168 others). Most
+  likely cause: `Tracker::prev_observations_` isn't filtered by the UKF's
+  own outlier verdict, unlike the offline validation script that first
+  confirmed the mechanism's real signal -- a bad match during fast,
+  ambiguous motion can contaminate the next frame's streak-velocity
+  reference position. Not yet fixed; not yet confirmed as *the* cause
+  either, just the most likely one given the code. `dot_streak_velocity_enabled`
+  defaults to false, so this doesn't affect any existing run.
+
 - **2026-09-05** — Streak-velocity design (still-visible constant-velocity
   lag during the fastest sword cuts, see the entry below): phases 1-2 done
   and validated against real data, phase 3 (tracker integration) not

@@ -181,7 +181,16 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     -- auto-generated label from coincidentally matching a real name, or a
     -- user from picking a short, timestamp-shaped name on purpose. See
     -- docs/roadmap/features/configuration-improvements/config-improvements-design.md.
-    is_named                          INTEGER NOT NULL DEFAULT 0
+    is_named                          INTEGER NOT NULL DEFAULT 0,
+    -- Added in schema migration v50 (session)/v9 (registry): streak-derived dot
+    -- velocity -- see
+    -- docs/roadmap/features/marker-based-mocap/streak-velocity-design.md §3/§4.
+    dot_streak_velocity_enabled       INTEGER,  -- 0/1 flag; NULL/0 = disabled
+    dot_streak_k_window               INTEGER,  -- Rolling sample window per camera
+    dot_streak_k_min_samples          INTEGER,  -- Min samples before k is trusted
+    dot_streak_min_displacement_px    REAL,     -- "Only dots with actual movement" gate
+    dot_streak_min_elongation_px      REAL,     -- Matches the streak-noise-inflation gate
+    dot_streak_velocity_noise_std     REAL      -- noise_std_override for the emitted observation
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

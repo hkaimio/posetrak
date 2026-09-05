@@ -43,6 +43,18 @@ UnlabeledCandidate make_candidate(int camera_id, double px, double py) {
     return c;
 }
 
+/// A streak candidate: major_axis - minor_axis = elongation, with a
+/// (possibly not yet sign-resolved) axis direction.
+UnlabeledCandidate make_streak_candidate(int camera_id, double px, double py, double elongation,
+                                         double dir_x, double dir_y) {
+    UnlabeledCandidate c = make_candidate(camera_id, px, py);
+    c.minor_axis = 3.6;
+    c.major_axis = c.minor_axis + elongation;
+    c.dir_x = dir_x;
+    c.dir_y = dir_y;
+    return c;
+}
+
 /// Isotropic covariance MarkerPrediction -- diag(std^2, std^2) -- enough for
 /// every test here, which only cares about which candidate a prediction is
 /// closest to, not a real projected-uncertainty shape.
@@ -236,6 +248,203 @@ TEST_CASE("resolve_dot_assignment: no subjects resolves to an empty map", "[dot_
 }
 
 // ---------------------------------------------------------------------------
+// Streak-derived velocity extension (streak-velocity-design.md §3/§4) --
+// resolve_dot_assignment()'s optional extra VELOCITY Observation for a
+// streaked, already-continuous candidate.
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "resolve_dot_assignment: streak velocity disabled by default -- one "
+    "Observation, not two",
+    "[dot_assignment][streak_velocity]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(110.0, 100.0, /*std=*/20.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {make_streak_candidate(0, 110.0, 100.0, /*elongation=*/6.0, 1.0, 0.0)};
+
+    // Default StreakVelocityConfig{} (enabled=false) and empty prev_positions --
+    // exactly what an existing caller/test not passing these arguments gets.
+    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0);
+
+    REQUIRE(result.at(0).resolved.size() == 1);
+    REQUIRE(result.at(0).resolved[0].mode == MeasurementMode::POSITION);
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: streak velocity needs a real previous position -- "
+    "none available, still just one Observation",
+    "[dot_assignment][streak_velocity]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(110.0, 100.0, /*std=*/20.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {make_streak_candidate(0, 110.0, 100.0, 6.0, 1.0, 0.0)};
+
+    StreakVelocityConfig streak_cfg;
+    streak_cfg.enabled = true;
+    streak_cfg.k_min_samples = 1;
+    PrevDotPositions prev_positions;  // empty -- this exact slot was never resolved before
+
+    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, streak_cfg,
+                                         prev_positions);
+
+    REQUIRE(result.at(0).resolved.size() == 1);
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: streak velocity needs real elongation -- a round "
+    "dot never emits one even with real movement",
+    "[dot_assignment][streak_velocity]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(110.0, 100.0, /*std=*/20.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {make_candidate(0, 110.0, 100.0)};  // major==minor, no streak axis
+
+    StreakVelocityConfig streak_cfg;
+    streak_cfg.enabled = true;
+    streak_cfg.k_min_samples = 1;
+    PrevDotPositions prev_positions;
+    prev_positions[0][0][7] = Eigen::Vector2d(100.0, 100.0);  // real, well-above-gate movement
+
+    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, streak_cfg,
+                                         prev_positions);
+
+    REQUIRE(result.at(0).resolved.size() == 1);
+}
+
+TEST_CASE("resolve_dot_assignment: streak velocity respects the movement gate",
+          "[dot_assignment][streak_velocity]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.2, 100.0, /*std=*/20.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {make_streak_candidate(0, 100.2, 100.0, 6.0, 1.0, 0.0)};
+
+    StreakVelocityConfig streak_cfg;
+    streak_cfg.enabled = true;
+    streak_cfg.k_min_samples = 1;
+    streak_cfg.min_displacement_px = 3.0;
+    PrevDotPositions prev_positions;
+    prev_positions[0][0][7] = Eigen::Vector2d(100.0, 100.0);  // 0.2px -- below the 3.0px gate
+
+    std::unordered_map<int, StreakKAccumulator> streak_k;
+    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, streak_cfg,
+                                         prev_positions, &streak_k);
+
+    REQUIRE(result.at(0).resolved.size() == 1);  // no VELOCITY observation
+    REQUIRE(streak_k[0].sample_count() == 0);    // and the sample was never admitted either
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: streak velocity withholds the Observation until k "
+    "has enough samples, but still accumulates them",
+    "[dot_assignment][streak_velocity]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(110.0, 100.0, /*std=*/20.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {make_streak_candidate(0, 110.0, 100.0, 6.0, 1.0, 0.0)};
+
+    StreakVelocityConfig streak_cfg;
+    streak_cfg.enabled = true;
+    streak_cfg.k_min_samples = 5;  // this call's own sample is only the 1st
+    PrevDotPositions prev_positions;
+    prev_positions[0][0][7] = Eigen::Vector2d(100.0, 100.0);
+
+    std::unordered_map<int, StreakKAccumulator> streak_k;
+    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, streak_cfg,
+                                         prev_positions, &streak_k);
+
+    REQUIRE(result.at(0).resolved.size() == 1);  // not trusted yet -- no VELOCITY observation
+    REQUIRE(streak_k[0].sample_count() == 1);    // but the sample was admitted
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: a trusted k emits a correctly-scaled VELOCITY "
+    "observation alongside the POSITION one",
+    "[dot_assignment][streak_velocity]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(110.0, 100.0, /*std=*/20.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    double const elongation = 6.0;
+    candidates[0] = {make_streak_candidate(0, 110.0, 100.0, elongation, 1.0, 0.0)};
+
+    StreakVelocityConfig streak_cfg;
+    streak_cfg.enabled = true;
+    streak_cfg.k_min_samples = 2;  // trusted once THIS frame's sample makes it the 2nd
+    PrevDotPositions prev_positions;
+    prev_positions[0][0][7] = Eigen::Vector2d(100.0, 100.0);  // disp = (10, 0), disp_px = 10
+
+    std::unordered_map<int, StreakKAccumulator> streak_k;
+    streak_k[0].add(/*streak_px=*/3.0, /*disp_px=*/10.0, /*window=*/200);  // pre-existing sample
+
+    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, streak_cfg,
+                                         prev_positions, &streak_k);
+
+    REQUIRE(result.at(0).resolved.size() == 2);
+    Observation const* vel = nullptr;
+    for (auto const& obs : result.at(0).resolved) {
+        if (obs.mode == MeasurementMode::VELOCITY)
+            vel = &obs;
+    }
+    REQUIRE(vel != nullptr);
+    REQUIRE(vel->camera_id == 0);
+    REQUIRE(vel->marker_id == 7);
+    REQUIRE(vel->noise_std_override == Catch::Approx(streak_cfg.velocity_noise_std));
+
+    // k = (3.0 + elongation) / (10.0 + 10.0) -- this frame's own sample is admitted
+    // before k is read, same as resolve_dot_assignment()'s own doc comment says.
+    double const expected_k = (3.0 + elongation) / (10.0 + 10.0);
+    Eigen::Vector2d const expected_disp(elongation / expected_k,
+                                        0.0);  // along +x, matching real disp
+    Eigen::Vector2d const measured = vel->position - vel->prev_position;
+    REQUIRE(measured.x() == Catch::Approx(expected_disp.x()));
+    REQUIRE(measured.y() == Catch::Approx(0.0).margin(1e-9));
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: the streak axis's sign ambiguity is resolved "
+    "against the real measured displacement, not left as detected",
+    "[dot_assignment][streak_velocity]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(110.0, 100.0, /*std=*/20.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    // Streak axis stored pointing -x (dot_blob_detector.py's canonicalization has no
+    // way to know the true forward direction), but the real displacement is +x.
+    candidates[0] = {make_streak_candidate(0, 110.0, 100.0, 6.0, -1.0, 0.0)};
+
+    StreakVelocityConfig streak_cfg;
+    streak_cfg.enabled = true;
+    streak_cfg.k_min_samples = 1;
+    PrevDotPositions prev_positions;
+    prev_positions[0][0][7] = Eigen::Vector2d(100.0, 100.0);  // disp = (+10, 0)
+
+    std::unordered_map<int, StreakKAccumulator> streak_k;
+    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, streak_cfg,
+                                         prev_positions, &streak_k);
+
+    Observation const* vel = nullptr;
+    for (auto const& obs : result.at(0).resolved) {
+        if (obs.mode == MeasurementMode::VELOCITY)
+            vel = &obs;
+    }
+    REQUIRE(vel != nullptr);
+    Eigen::Vector2d const measured = vel->position - vel->prev_position;
+    REQUIRE(measured.x() > 0.0);  // resolved to +x (real motion), not -x (raw streak encoding)
+}
+
+// ---------------------------------------------------------------------------
 // resolve_shared_dot_assignment(): the Tracker-calling wrapper, against a
 // real rigid-body Tracker fixture (same shape as
 // test_tracker_predict_update_split.cpp's dot-slot-prediction tests).
@@ -324,4 +533,62 @@ TEST_CASE("resolve_shared_dot_assignment: wires Tracker predictions into the pur
     REQUIRE(result.count(1) == 1);
     REQUIRE(result.at(0).resolved.size() == 1);
     REQUIRE(result.at(1).resolved.size() == 1);
+}
+
+TEST_CASE(
+    "resolve_shared_dot_assignment: gathers a real Tracker's own "
+    "prev_observations() into the streak-velocity extension",
+    "[dot_assignment][streak_velocity]") {
+    auto skeleton = make_rigid_dot_skeleton();
+    std::unordered_map<int, Camera> cameras;
+    cameras.emplace(0, make_test_camera(0, 0.0));
+
+    TrackerConfig config;
+    // Wide open -- this test is about the prev_observations()/streak_k_accumulators()
+    // plumbing, not the assignment gate itself (already covered elsewhere).
+    config.dot_assignment_gate_mahalanobis = 1e6;
+    config.dot_streak_velocity_enabled = true;
+    config.dot_streak_k_min_samples = 1;
+    config.dot_streak_min_displacement_px = 1.0;
+
+    Tracker tracker(skeleton, cameras, config);
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), Eigen::VectorXd(0),
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), Eigen::VectorXd(0));
+    tracker.initialize_from_state(state, 0.0);
+
+    // Frame 0: a real, successful track_frame() call is what populates
+    // prev_observations() -- resolve_dot_assignment()'s own POSITION-mode
+    // Observations from the previous frame aren't special-cased for this, they go
+    // through the exact same bookkeeping every other Observation does.
+    tracker.predict_step(1.0 / 30.0);
+    auto pred0 = tracker.predict_dot_slot_predictions(0);
+    REQUIRE(pred0.size() == 1);
+    int const marker_id = pred0.begin()->first;
+    Eigen::Vector2d const pos0 = pred0.begin()->second.position;
+
+    Observation obs0;
+    obs0.camera_id = 0;
+    obs0.marker_id = marker_id;
+    obs0.frame_idx = 0;
+    obs0.timestamp = 1.0 / 30.0;
+    obs0.position = pos0;
+    obs0.position_distorted = pos0;
+    obs0.confidence = 1.0;
+    obs0.crop_scale = 0.0;
+    auto frame0_result = tracker.update_step({obs0}, 1.0 / 30.0);
+    REQUIRE_FALSE(frame0_result.tracking_lost);
+    REQUIRE(tracker.prev_observations().at(0).count(marker_id) == 1);
+
+    // Frame 1: a streaked candidate offset from frame 0's own resolved position --
+    // real "movement" for the streak-velocity extension to work with.
+    tracker.predict_step(1.0 / 30.0);
+    std::vector<DotAssignmentSubject> subjects = {DotAssignmentSubject{0, &tracker}};
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {make_streak_candidate(0, pos0.x() + 10.0, pos0.y(), 6.0, 1.0, 0.0)};
+
+    auto result = resolve_shared_dot_assignment(subjects, candidates, config, 1, 2.0 / 30.0);
+
+    REQUIRE(result.count(0) == 1);
+    REQUIRE(result.at(0).resolved.size() == 2);  // POSITION + the new VELOCITY observation
+    REQUIRE(tracker.streak_k_accumulators()[0].sample_count() == 1);
 }

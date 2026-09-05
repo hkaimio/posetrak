@@ -26,6 +26,7 @@
 #include "posetrak/kinematics/inverse_kinematics.hpp"
 #include "posetrak/kinematics/triangulation.hpp"
 #include "posetrak/tracking/marker_prediction.hpp"
+#include "posetrak/tracking/streak_k_accumulator.hpp"
 #include <deque>
 #include <functional>
 #include <map>
@@ -263,6 +264,33 @@ class Tracker {
      *         it against -- or if camera_id is unknown.
      */
     std::unordered_map<int, MarkerPrediction> predict_dot_slot_predictions(int camera_id) const;
+
+    /**
+     * @brief Previous-frame undistorted pixel per (camera, marker), as populated by
+     * the most recent successful update_step()/track_frame() call.
+     *
+     * Exposed (read-only) for the shared dot-assignment orchestrator's streak-
+     * velocity estimation (streak-velocity-design.md §4, resolve_shared_dot_
+     * assignment() in dot_assignment.cpp), which needs this Tracker's own
+     * continuity to compute a real frame-to-frame displacement without
+     * duplicating this bookkeeping itself.
+     */
+    std::unordered_map<int, std::unordered_map<int, Eigen::Vector2d>> const&
+    prev_observations() const {
+        return prev_observations_;
+    }
+
+    /**
+     * @brief Mutable per-camera k=exposure_time/frame_time running estimate
+     * (streak-velocity-design.md §3/§4) -- owned here, alongside
+     * prev_observations_, so it persists across frames the same way. Updated and
+     * read by resolve_dot_assignment() via resolve_shared_dot_assignment()'s thin
+     * wrapper; empty/untouched when TrackerConfig::dot_streak_velocity_enabled is
+     * false.
+     */
+    std::unordered_map<int, StreakKAccumulator>& streak_k_accumulators() {
+        return streak_k_accumulators_;
+    }
 
     /**
      * @brief Update-only half of the track_frame() cycle -- consumes the
@@ -530,6 +558,11 @@ class Tracker {
     // Previous-frame undistorted pixels per camera and marker, for velocity-mode cameras.
     // Populated at the end of each successful track_frame() call.
     std::unordered_map<int, std::unordered_map<int, Eigen::Vector2d>> prev_observations_;
+
+    // Per-camera running k=exposure_time/frame_time estimate for the streak-derived
+    // dot velocity mechanism (streak-velocity-design.md §3/§4) -- see
+    // streak_k_accumulators() above.
+    std::unordered_map<int, StreakKAccumulator> streak_k_accumulators_;
 
     // RTS smoother
     bool smoothing_enabled_ = false;

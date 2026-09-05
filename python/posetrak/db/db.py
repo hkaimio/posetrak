@@ -24,8 +24,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 8
-SESSION_SCHEMA_VERSION: Final[int] = 49
+REGISTRY_SCHEMA_VERSION: Final[int] = 9
+SESSION_SCHEMA_VERSION: Final[int] = 50
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -307,6 +307,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 7
     if actual == 7:
         _migrate_registry_v7_to_v8(conn)
+        actual = 8
+    if actual == 8:
+        _migrate_registry_v8_to_v9(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -611,6 +614,31 @@ def _migrate_registry_v7_to_v8(conn: sqlite3.Connection) -> None:
         ")"
     )
     _set_schema_version(conn, 8)
+    conn.commit()
+
+
+def _migrate_registry_v8_to_v9(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 8 to 9.
+
+    v9 adds streak-derived dot velocity's tuning columns to tracker_configs --
+    see docs/roadmap/features/marker-based-mocap/streak-velocity-design.md
+    §3/§4. NULL/0 on every column means disabled, matching every other
+    adaptive-tracking mechanism's own backward-compatible default.
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_streak_velocity_enabled" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_velocity_enabled INTEGER")
+    if "dot_streak_k_window" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_k_window INTEGER")
+    if "dot_streak_k_min_samples" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_k_min_samples INTEGER")
+    if "dot_streak_min_displacement_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_min_displacement_px REAL")
+    if "dot_streak_min_elongation_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_min_elongation_px REAL")
+    if "dot_streak_velocity_noise_std" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_velocity_noise_std REAL")
+    _set_schema_version(conn, 9)
     conn.commit()
 
 
@@ -1617,6 +1645,30 @@ def _migrate_session_v48_to_v49(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v49_to_v50(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 49 to 50.
+
+    v50 adds streak-derived dot velocity's tuning columns to tracker_configs,
+    mirroring the registry schema v8->v9 change -- see
+    docs/roadmap/features/marker-based-mocap/streak-velocity-design.md §3/§4.
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_streak_velocity_enabled" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_velocity_enabled INTEGER")
+    if "dot_streak_k_window" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_k_window INTEGER")
+    if "dot_streak_k_min_samples" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_k_min_samples INTEGER")
+    if "dot_streak_min_displacement_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_min_displacement_px REAL")
+    if "dot_streak_min_elongation_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_min_elongation_px REAL")
+    if "dot_streak_velocity_noise_std" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_velocity_noise_std REAL")
+    _set_schema_version(conn, 50)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1784,6 +1836,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 48
     if actual == 48:
         _migrate_session_v48_to_v49(conn)
+        actual = 49
+    if actual == 49:
+        _migrate_session_v49_to_v50(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

@@ -1090,6 +1090,7 @@ void Tracker::reset() {
     ukf_.reset();
     smoother_cache_.clear();
     prev_observations_.clear();
+    streak_k_accumulators_.clear();
 }
 
 // ─── RTS smoothing ────────────────────────────────────────────────────────────

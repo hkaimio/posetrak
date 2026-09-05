@@ -190,7 +190,13 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "       COALESCE(edited_kp_noise_std, 0.0) AS edited_kp_noise_std,"
         "       COALESCE(cross_person_max_world_mm, 0.0) AS cross_person_max_world_mm,"
         "       COALESCE(cross_person_min_confidence, 0.5) AS cross_person_min_confidence,"
-        "       COALESCE(cross_person_max_n, 10) AS cross_person_max_n"
+        "       COALESCE(cross_person_max_n, 10) AS cross_person_max_n,"
+        "       COALESCE(dot_streak_velocity_enabled, 0) AS dot_streak_velocity_enabled,"
+        "       COALESCE(dot_streak_k_window, 200) AS dot_streak_k_window,"
+        "       COALESCE(dot_streak_k_min_samples, 20) AS dot_streak_k_min_samples,"
+        "       COALESCE(dot_streak_min_displacement_px, 3.0) AS dot_streak_min_displacement_px,"
+        "       COALESCE(dot_streak_min_elongation_px, 1.0) AS dot_streak_min_elongation_px,"
+        "       COALESCE(dot_streak_velocity_noise_std, 10.0) AS dot_streak_velocity_noise_std"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -218,7 +224,10 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         39=near_limit_damping_joint_names, 40=near_limit_margin_rad,
     //         41=near_limit_spread_sigma, 42=near_limit_damping_factor,
     //         43=edited_kp_noise_std, 44=cross_person_max_world_mm,
-    //         45=cross_person_min_confidence, 46=cross_person_max_n
+    //         45=cross_person_min_confidence, 46=cross_person_max_n,
+    //         47=dot_streak_velocity_enabled, 48=dot_streak_k_window,
+    //         49=dot_streak_k_min_samples, 50=dot_streak_min_displacement_px,
+    //         51=dot_streak_min_elongation_px, 52=dot_streak_velocity_noise_std
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -400,6 +409,14 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(44, out.tracker.cross_person_max_world_mm);
     apply_real(45, out.tracker.cross_person_min_confidence);
     apply_int(46, out.tracker.cross_person_max_n);
+    // col 47: dot_streak_velocity_enabled (INTEGER 0/1)
+    if (sqlite3_column_type(stmt.ptr, 47) != SQLITE_NULL)
+        out.tracker.dot_streak_velocity_enabled = (sqlite3_column_int(stmt.ptr, 47) != 0);
+    apply_int(48, out.tracker.dot_streak_k_window);
+    apply_int(49, out.tracker.dot_streak_k_min_samples);
+    apply_real(50, out.tracker.dot_streak_min_displacement_px);
+    apply_real(51, out.tracker.dot_streak_min_elongation_px);
+    apply_real(52, out.tracker.dot_streak_velocity_noise_std);
 
     return out;
 }

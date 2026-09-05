@@ -41,6 +41,8 @@ sys.modules[_spec.name] = render_tracking_debug_frames
 _spec.loader.exec_module(render_tracking_debug_frames)
 
 _nearest_state_row = render_tracking_debug_frames._nearest_state_row
+_robust_bounds = render_tracking_debug_frames._robust_bounds
+_sequential_frame_lookup = render_tracking_debug_frames._sequential_frame_lookup
 
 
 def _make_conn() -> sqlite3.Connection:
@@ -98,3 +100,96 @@ def test_nearest_state_row_returns_none_with_no_matching_run():
     conn = _make_conn()
     assert _nearest_state_row(conn, "no-such-run", 1.0, is_smoothed=False) is None
     assert _nearest_state_row(conn, "no-such-run", 1.0, is_smoothed=True) is None
+
+
+# ---------------------------------------------------------------------------
+# _robust_bounds() -- the crop-window fix (2026-09-05): a strict min/max over
+# a whole clip's points let a single wild outlier (a false-positive raw-dot
+# candidate anywhere in frame, or a predicted marker reprojected far from the
+# subject during high state uncertainty) blow up the crop for the entire
+# clip, exactly the moments this tool exists to zoom in on.
+# ---------------------------------------------------------------------------
+
+def test_robust_bounds_ignores_a_single_wild_outlier_with_enough_points():
+    # A realistic point count for a real clip (hundreds of frames x several
+    # markers) -- tightly clustered, plus one wild point (e.g. a false-
+    # positive raw-dot candidate near a door, far from the real subject).
+    values = [100.0 + i * 0.01 for i in range(200)]  # tightly clustered 100.0-101.99
+    values.append(5000.0)
+
+    lo, hi = _robust_bounds(values)
+
+    assert 99.0 <= lo <= 101.0  # near the tight cluster, not pulled down by anything
+    assert 100.0 <= hi <= 200.0  # nowhere near the 5000.0 outlier
+
+
+def test_robust_bounds_falls_back_to_min_max_with_too_few_points():
+    values = [10.0, 5000.0, 12.0]  # too few for percentiles to mean anything
+    assert _robust_bounds(values) == (10.0, 5000.0)
+
+
+# ---------------------------------------------------------------------------
+# _sequential_frame_lookup() -- the grid-render performance fix (2026-09-05):
+# _grab_frame() reopens and reseeks the whole video container on every call,
+# which made a 6-camera grid render extremely slow (I/O-bound repeated
+# seeking through external-drive 4K footage) despite near-zero CPU use.
+# _sequential_frame_lookup() should decode each camera's needed range with
+# exactly one pass, not one open-and-seek per requested timestamp.
+# ---------------------------------------------------------------------------
+
+class _FakeSyncTable:
+    def __init__(self, mapping: dict[float, int | None]) -> None:
+        self._mapping = mapping
+
+    def lookup(self, t: float, svid: str) -> int | None:
+        return self._mapping.get(t)
+
+
+class _FakeCtx:
+    def __init__(self, mapping: dict[float, int | None]) -> None:
+        self.sync_table = _FakeSyncTable(mapping)
+        self.svid = "svid"
+        self.file_path = "unused.mp4"
+
+
+def test_sequential_frame_lookup_decodes_the_needed_range_exactly_once(monkeypatch):
+    available = [(10, "img10"), (11, "img11"), (12, "img12"), (13, "img13"), (14, "img14")]
+    calls: list[tuple[int, int]] = []
+
+    def fake_iter_frames(path, first, last):
+        calls.append((first, last))
+        for fi, img in available:
+            if first <= fi < last:
+                yield fi, img
+
+    monkeypatch.setattr(render_tracking_debug_frames, "iter_frames", fake_iter_frames)
+
+    ctx = _FakeCtx({1.0: 10, 2.0: 12, 3.0: 14})
+    results = list(_sequential_frame_lookup(ctx, [1.0, 2.0, 3.0]))
+
+    assert results == [(10, "img10"), (12, "img12"), (14, "img14")]
+    assert calls == [(10, 15)]  # exactly one decode pass over [min, max], not one per frame
+
+
+def test_sequential_frame_lookup_returns_none_for_a_timestamp_with_no_sync_data(monkeypatch):
+    available = [(10, "img10"), (11, "img11")]
+    monkeypatch.setattr(
+        render_tracking_debug_frames, "iter_frames",
+        lambda path, first, last: (f for f in available if first <= f[0] < last),
+    )
+
+    ctx = _FakeCtx({1.0: 10, 2.0: None, 3.0: 11})
+    results = list(_sequential_frame_lookup(ctx, [1.0, 2.0, 3.0]))
+
+    assert results == [(10, "img10"), (None, None), (11, "img11")]
+
+
+def test_sequential_frame_lookup_never_opens_the_video_when_nothing_has_sync_data(monkeypatch):
+    def fail_iter_frames(path, first, last):
+        raise AssertionError("iter_frames should not be called with no valid timestamps")
+
+    monkeypatch.setattr(render_tracking_debug_frames, "iter_frames", fail_iter_frames)
+
+    ctx = _FakeCtx({1.0: None, 2.0: None})
+    results = list(_sequential_frame_lookup(ctx, [1.0, 2.0]))
+    assert results == [(None, None), (None, None)]

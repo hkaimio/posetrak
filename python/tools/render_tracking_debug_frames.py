@@ -510,15 +510,41 @@ def render_pngs(ctx: _RunContext, timestamps: list[float], output_dir: Path, cam
         print(f"  -> {out_path}")
 
 
+_CROP_TRIM_FRAC = 0.12  # percentile trim per side -- see _compute_crop_window's own doc comment.
+# 12%, not a token 3%: confirmed on a real, genuinely unstable window (2026-09-05, Harri's own
+# multi-camera review) that it's not just a rare single outlier point dragging the crop wide --
+# a real fraction of frames can have a wrong prediction/false-positive candidate while the
+# tracker is struggling, which is exactly the case this tool exists to zoom in on despite.
+
+
+def _robust_bounds(values: list[float], trim_frac: float = _CROP_TRIM_FRAC) -> tuple[float, float]:
+    """(trim_frac, 1-trim_frac)-percentile bounds rather than strict min/max.
+
+    A single wild point -- a false-positive raw-dot candidate anywhere in
+    frame (the detector has no notion of "near the subject"), or a predicted
+    marker reprojected far away during genuinely high state uncertainty
+    (exactly what this tool exists to surface) -- would otherwise blow up
+    the crop for the *whole* clip on its own, even though it's one instant
+    out of hundreds. Falls back to plain min/max when there are too few
+    points for percentiles to mean much (avoids a degenerate, empty range).
+    """
+    if len(values) < 10:
+        return min(values), max(values)
+    arr = np.asarray(values, dtype=np.float64)
+    return float(np.percentile(arr, trim_frac * 100)), float(np.percentile(arr, (1 - trim_frac) * 100))
+
+
 def _compute_crop_window(
     ctx: _RunContext, start_time: float, end_time: float
 ) -> tuple[int, int, int, int] | None:
-    """One fixed crop window for a whole clip: the union of every frame's
-    actual/predicted/raw-dot points over [start_time, end_time], generously
-    padded. A per-frame crop would jump around and make drift/bias
-    impossible to judge by eye, which is the whole point of this tool.
-    Returns None if this camera has no sync data or no observations at all
-    in the range (e.g. it doesn't cover this part of the capture).
+    """One fixed crop window for a whole clip: a robust (trimmed) bound over
+    the union of every frame's actual/predicted/raw-dot points over
+    [start_time, end_time], generously padded. A per-frame crop would jump
+    around and make drift/bias impossible to judge by eye, which is the
+    whole point of this tool -- see _robust_bounds() for why min/max isn't
+    used directly. Returns None if this camera has no sync data or no
+    observations at all in the range (e.g. it doesn't cover this part of
+    the capture).
     """
     frame_lo = ctx.sync_table.lookup(start_time, ctx.svid)
     frame_hi = ctx.sync_table.lookup(end_time, ctx.svid)
@@ -536,9 +562,11 @@ def _compute_crop_window(
         return None
     xs = [p[0] for p in all_pts]
     ys = [p[1] for p in all_pts]
+    x_lo, x_hi = _robust_bounds(xs)
+    y_lo, y_hi = _robust_bounds(ys)
     pad = _PAD_PX * 2
-    return (max(0, int(min(xs) - pad)), max(0, int(min(ys) - pad)),
-            int(max(xs) + pad), int(max(ys) + pad))
+    return (max(0, int(x_lo - pad)), max(0, int(y_lo - pad)),
+            int(x_hi + pad), int(y_hi + pad))
 
 
 def render_video(
@@ -579,15 +607,61 @@ def render_video(
           f"at {out_fps:.1f}fps ({slow_factor}x slow-motion) -> {output_path}")
 
 
+def _sequential_frame_lookup(ctx: _RunContext, target_times: list[float]):
+    """Yield this camera's own (frame_idx, img) for each of *target_times*
+    (assumed non-decreasing), decoding its video file with *one* sequential
+    pass over the needed range rather than a fresh open-and-seek per frame.
+
+    Calling _grab_frame() once per (camera, output frame) -- 1080 times for
+    a 6-camera, 180-frame grid -- reopens and reseeks the video container on
+    every single call (_iter_frames_av opens a fresh av.open() each time).
+    Confirmed live: this made a grid render take far longer than 6 single-
+    camera renders combined, with the Python process sitting near 0% CPU --
+    the classic signature of an I/O-bound repeated-seek bottleneck, not
+    actual decode work, especially reading 4K footage off an external drive.
+    Sequentially decoding [min(needed), max(needed)] once and picking off
+    the frames actually wanted, as render_video() already does for a single
+    camera, avoids the reseeking entirely.
+
+    Yields (None, None) for a target time this camera has no sync data for,
+    and (frame_idx, None) if decoding reached that frame_idx but produced no
+    image (a real decode failure, not just "camera doesn't cover this
+    moment").
+    """
+    needed = [ctx.sync_table.lookup(t, ctx.svid) for t in target_times]
+    valid = [f for f in needed if f is not None]
+    if not valid:
+        for _ in target_times:
+            yield None, None
+        return
+
+    frame_iter = iter_frames(ctx.file_path, min(valid), max(valid) + 1)
+    current_idx: int | None = None
+    current_img: np.ndarray | None = None
+    exhausted = False
+    for want in needed:
+        if want is None:
+            yield None, None
+            continue
+        while not exhausted and (current_idx is None or current_idx < want):
+            try:
+                current_idx, current_img = next(frame_iter)
+            except StopIteration:
+                exhausted = True
+        yield want, (current_img if current_idx == want else None)
+
+
 def _render_camera_cell(
-    ctx: _RunContext, timestamp_s: float, window: tuple[int, int, int, int] | None,
-    cell_w: int, cell_h: int,
+    ctx: _RunContext, timestamp_s: float, frame_idx: int | None, img: np.ndarray | None,
+    window: tuple[int, int, int, int] | None, cell_w: int, cell_h: int,
 ) -> np.ndarray:
     """One camera's own rendered, cropped, letterboxed-to-(cell_w, cell_h)
-    frame at *timestamp_s* -- a black cell with a status label if this
-    camera has no sync data, no frame, or no crop window (doesn't cover
-    this part of the capture) at this instant, so a grid always has the
-    same shape regardless of which cameras have data when.
+    frame at *timestamp_s*, given its already-decoded *frame_idx*/*img*
+    (see _sequential_frame_lookup() -- decoding happens once per camera for
+    a whole grid render, not per cell) -- a black cell with a status label
+    if this camera has no sync data, no frame, or no crop window (doesn't
+    cover this part of the capture) at this instant, so a grid always has
+    the same shape regardless of which cameras have data when.
     """
     cell = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
 
@@ -598,11 +672,9 @@ def _render_camera_cell(
     if window is None:
         _label("no data in range")
         return cell
-    frame_idx = ctx.sync_table.lookup(timestamp_s, ctx.svid)
     if frame_idx is None:
         _label("no sync at this time")
         return cell
-    img = _grab_frame(ctx.file_path, frame_idx)
     if img is None:
         _label("frame decode failed")
         return cell
@@ -665,18 +737,29 @@ def render_grid_video(
     cols = math.ceil(math.sqrt(n))
     rows = math.ceil(n / cols)
 
+    # One target timestamp per output frame, computed once from the reference
+    # camera -- every camera's own decoder (below) consumes this same list in
+    # order, so every cell in a given output frame shows the same real instant.
+    target_times = []
+    for frame_idx in range(frame_lo, frame_hi + 1):
+        t = ref.sync_table.frame_to_global_time(frame_idx, ref.svid)
+        if t is not None:
+            target_times.append(t)
+
+    # One sequential decode pass per camera over the whole range (see
+    # _sequential_frame_lookup()'s own doc comment for why this matters).
+    streams = [_sequential_frame_lookup(ctx, target_times) for ctx in contexts]
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     writer = None
     out_fps = ref.native_fps / slow_factor
     n_written = 0
 
-    for frame_idx in range(frame_lo, frame_hi + 1):
-        t = ref.sync_table.frame_to_global_time(frame_idx, ref.svid)
-        if t is None:
-            continue
+    for t in target_times:
         canvas = np.zeros((rows * cell_h, cols * cell_w, 3), dtype=np.uint8)
-        for i, (ctx, window) in enumerate(zip(contexts, windows)):
-            cell = _render_camera_cell(ctx, t, window, cell_w, cell_h)
+        for i, (ctx, window, stream) in enumerate(zip(contexts, windows, streams)):
+            frame_idx, img = next(stream)
+            cell = _render_camera_cell(ctx, t, frame_idx, img, window, cell_w, cell_h)
             r, c = divmod(i, cols)
             canvas[r * cell_h:(r + 1) * cell_h, c * cell_w:(c + 1) * cell_w] = cell
         cv2.putText(canvas, f"t={t:.3f}s", (10, canvas.shape[0] - 10),

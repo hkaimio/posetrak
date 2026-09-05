@@ -203,12 +203,20 @@ worth its own look someday, but out of this feature's scope.**
 
 ## 5. Open questions
 
-- **(top priority)** Re-diagnose the net regression (77 recovered / 168
-  newly lost) with the now-fixed diagnostics -- the obs_blob bug is fully
-  accounted for and no longer a candidate explanation (streak's own
-  regression-window match quality is fine, 22px). The
+- **(top priority, partially resolved 2026-09-06)** Re-diagnose the net
+  regression (77 recovered / 168 newly lost). A real chunk of it turned out
+  to be a confound unrelated to streak velocity itself: `outlier_threshold`
+  left at its default (5.991) was rejecting large-but-genuine innovations
+  during fast swings as outliers, faster than the filter could otherwise
+  recover (see status.md's 2026-09-06 entry for the full account). Raising
+  it to 20 shrinks the baseline/streak-velocity gap from -91 steps to -48
+  (80.5%->84.2% baseline, 79.1%->83.5% streak-velocity) -- real, validated
+  on the same sequence, but streak velocity still trails baseline by 48
+  steps even with this fixed, so it isn't the whole story. The
   `prev_observations_` contamination theory (§4) remains open and
-  unconfirmed; needs a fresh look now that the diagnostics can be trusted.
+  unconfirmed for whatever gap remains; needs a fresh look, ideally
+  re-run with `outlier_threshold=20` on both configs from the start so the
+  now-known confound isn't mixed into the remaining diagnosis.
 - Movement-gate threshold (`--min-displacement-px`) and minimum sample
   count before trusting `k` are both first cuts, not yet tuned against how
   quickly `k` actually converges/stays stable on real footage.

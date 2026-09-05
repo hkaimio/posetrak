@@ -1,5 +1,125 @@
 # Marker-based mocap — status
 
+- **2026-09-05** (even later still) — Multi-camera grid-video review of the
+  sword capture (see the 2026-09-05 "later still" entry below for the
+  render tool itself) surfaced two real findings, both from Harri's own
+  frame-by-frame viewing, not a metric:
+
+  **Capture design limit, not a tracking bug.** In the known gap window,
+  the predicted pose drifts specifically in the direction roughly
+  orthogonal to `gopro-11_mini_02` -- and that's also the direction none
+  of this capture's markers are visible from any camera at all (every
+  marker sits on one face of the blade). No amount of filter tuning
+  recovers information no camera captured. Practical conclusion for
+  future captures: a marker body needs markers/tags visible from more
+  than one side (e.g. the sword's front face too), not just opposite
+  edges of the same face.
+
+  **Real detections lost at the dot-assignment gate during fast swings,
+  not at the UKF's outlier check.** Checked directly: of 14,212 dot
+  observations that made it into `tracking_obs_results` for the
+  streak-velocity run, zero were ever flagged outlier by
+  `UnscentedKalmanFilter::reject_outliers()`. The loss Harri saw (real,
+  visibly-streaked dots in gopro-11_mini_02/insta_ace2_pro/oneplus9pro-01/
+  pixel9 producing zero accepted detections during the 70-71s cut) happens
+  one stage earlier, in `resolve_dot_assignment()`'s Hungarian-solver gate,
+  which only pairs a candidate with a predicted marker if their squared
+  Mahalanobis distance (using the *predicted* marker covariance) is within
+  `dot_assignment_gate_mahalanobis` (9.21). That covariance is supposed to
+  grow with the root's own current velocity (adaptive process noise,
+  Mechanism A -- already active here at gain_root=4/ref_root=2), but the
+  variance-domain multiplier was hard-capped at a fixed
+  `kMaxVelocityNoiseMultiplier = 10.0` UKF constant. At this tuning, any
+  root DOF's velocity above ~1.08 rad/s already saturates that cap.
+  Checked against real state data: the known 63.6-64.3s regression window
+  sits at a mean 1.77 rad/s and is **100% saturated** for its entire
+  duration, while the (already near-perfect) 53.6-55.1s ArUco gap window
+  never saturates at all (max 1.06 rad/s) -- strong correlation between
+  "known-bad window" and "noise-scaling pinned at its ceiling."
+
+  Deliberately did *not* reach for widening `dot_assignment_gate_mahalanobis`
+  itself -- this project already has a direct precedent for that making
+  things worse (see the "Constant-velocity lag during fast cuts" entry
+  below: widening the search gate before fixing correspondence let
+  wrong-face candidates get matched more easily), and baseline already has
+  one confirmed bad ~934px match in this exact regression window
+  attributed to the existing adaptive-noise permissiveness already being
+  too loose at times. Instead, exposed the previously-hardcoded cap as a
+  new tunable, `process_noise_vel_max_multiplier` (config field + new
+  `UnscentedKalmanFilter::set_velocity_noise_max_multiplier()`, default
+  10.0 so every existing config is unaffected; session schema v51/registry
+  v10).
+
+  **That first experiment (raised cap) didn't work -- and the per-step data
+  shows exactly why.** Raising the cap to 50 barely moved the aggregate
+  number (80.1% vs baseline 80.5%) and, checked frame-by-frame against
+  Harri's own named 70-71s window, changed *nothing* about the actual
+  symptom: in both the old and raised-cap runs, root angular velocity
+  freezes at a constant value the instant dot resolution hits zero, and
+  stays frozen (identical value, to 2 decimals) for the next 700+ ms while
+  zero dots resolve in either run. The velocity-scaling formula depends on
+  the *current velocity estimate* -- but once no observation is being
+  accepted, there's nothing left to correct that estimate, so it stops
+  evolving entirely regardless of how high the cap goes. Raising the
+  ceiling on a covariance that's supposed to widen around a moving mean
+  does nothing once the mean itself has stopped moving.
+
+  Checking *why* even ArUco corners (deterministic per-tag correspondence,
+  not Hungarian-matched like dots, so none of the wrong-face risk applies)
+  were producing zero accepted detections in this same window found the
+  real mechanism: real, correctly-detected corners *were* present every
+  step, sitting at real, correct pixel positions, but rejected by
+  `UnscentedKalmanFilter::reject_outliers()` at Mahalanobis-squared values
+  of 10-19 against the effective `outlier_threshold` of 5.991 (this
+  config's `tracker_configs` row left it NULL, so it fell through to
+  `TrackerConfig`'s own struct default rather than the separate
+  `TrackerAppConfig` default of 4.0 used by the TOML/CLI path -- worth
+  remembering that these two structs' defaults for the same-named field
+  differ). Reprojection error at those same instants was 400-1100+ px --
+  the *predicted mean* had diverged hugely (the frozen-velocity coast
+  above), not the detection. No amount of covariance widening fixes a
+  wrong mean; it only widens the ellipse drawn around it.
+
+  Raising `outlier_threshold` to 20 (a real config field already wired
+  through `session_reader.cpp`, no code change needed) let those large-but-
+  genuine innovations back in as inliers, snapping the mean back instead of
+  waiting for it to organically re-align. Validated on the same
+  sequence/skeleton: baseline 80.5% -> **84.2%** tracked (5325 -> 5574/6618),
+  streak-velocity 79.1% -> **83.5%** (5234 -> 5526/6618) -- the
+  streak-velocity/baseline gap (the still-unexplained net regression from
+  the 2026-09-05 entries above) shrinks from -91 steps to -48, so a real
+  chunk of that regression turns out to be this same outlier-rejection
+  deadlock, not something specific to streak velocity. Sanity-checked
+  before trusting it: whole-run median/p90 reprojection error barely moved
+  (7.70px -> 8.14px median, 18.28 -> 19.85 p90), and a scan for sustained
+  (>=5 consecutive steps, >30px) bad dot matches anywhere in the run found
+  none of concern -- this isn't "the gate stopped filtering," it's
+  specifically recovering genuine detections that a too-tight post-hoc
+  check was discarding during real, temporary divergence. A small sweep
+  (15/20/30, and 30+the raised cap combined) found 20 already captures
+  essentially all of the gain (20 and 30 are statistically indistinguishable
+  here) with a smaller cut into the outlier-rejection safety margin, and
+  combining with the raised cap added nothing (if anything, very slightly
+  worse: 83.4% vs 84.2%) -- so the cap change, while real and now available,
+  isn't the fix for *this* failure mode. Re-rendered the regression and
+  70-71s grid videos against the fixed streak-velocity run
+  (`751aa5e3-2bb7-4cce-af93-5783cc2030db`) alongside the original
+  (pre-fix) ones already sent, plus the remaining 73.8-100.5s of the
+  full-sequence request on the same improved run. See
+  `LOCAL-TEST-DATA-NOTES.md` for every ID and file name.
+
+  Open risk, not yet investigated: `outlier_threshold=20` is a single
+  global scalar applied identically to ArUco corners (safe to trust even
+  at huge Mahalanobis distance, since their correspondence is tag-ID-based,
+  not nearest-neighbor) and dots (Hungarian-matched, so a wrong-but-nearest
+  assignment *can* now survive this check almost unchallenged -- only 43
+  outliers survived out of ~38,000 dot+ArUco observations at threshold 30,
+  down from 3,982 at the default). The whole-run sanity checks above found
+  no evidence of this happening on this particular capture, but a
+  marker-type-specific threshold (looser for ArUco, tighter for dots)
+  would close this gap properly rather than relying on this capture
+  happening not to trigger it.
+
 - **2026-09-05** (later still) — A real bug in the streak-velocity
   regression videos, caught by Harri's own review ("actual" dot markers
   floating over blank wall, nowhere near any possible detection): fixed a

@@ -266,9 +266,26 @@ def _grab_frame(file_path: str, video_frame: int) -> np.ndarray | None:
 def _nearest_tracker_step(
     conn: sqlite3.Connection, run_id: str, timestamp_s: float
 ) -> tuple[int, float, bytes] | None:
+    """Find the raw (is_smoothed=0) tracking_results row nearest *timestamp_s*.
+
+    Must stay is_smoothed=0: RTS-smoothed rows use a *different* tracker_step
+    numbering than raw ones (smoothing only ever covers steps that were
+    actually tracked, so a gap-heavy run's smoothed index runs ahead of the
+    raw one by however many steps were lost before it -- confirmed on a real
+    run where raw tracker_step 1933 and smoothed tracker_step 1603 both carry
+    timestamp_s=53.766, a >3s gap between what step "1603" means in each).
+    tracking_obs_results is only ever written from the raw forward pass
+    (ResultWriter::write_obs_results(), called from Tracker::update_step()),
+    so it's raw-indexed only -- looking this dot/state up via a smoothed row's
+    tracker_step silently fetches another instant's real, valid-looking
+    observation data and overlays it on the wrong video frame. This is
+    exactly what looked like a real-but-wrong dot match in early videos
+    (dots confidently, low-Mahalanobis "matched" nowhere near the sword) --
+    a render-tool bug, not a tracking bug.
+    """
     row = conn.execute(
         "SELECT tracker_step, timestamp_s, state FROM tracking_results "
-        "WHERE run_id = ? AND person_id = 0 "
+        "WHERE run_id = ? AND person_id = 0 AND is_smoothed = 0 "
         "ORDER BY ABS(timestamp_s - ?) LIMIT 1",
         (run_id, timestamp_s),
     ).fetchone()

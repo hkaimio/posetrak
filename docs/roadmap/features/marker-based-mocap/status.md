@@ -20,6 +20,20 @@
   `LOCAL-TEST-DATA-NOTES.md`'s 2026-09-05 entries for real IDs and
   numbers.
 
+  Harri then correctly refused to accept that fix on the numbers alone --
+  the re-rendered videos still showed the identical symptom. Right call:
+  a *second, separate, pre-existing* bug in `render_tracking_debug_frames.py`
+  itself (not the mode-mixing one), only found by actually extracting and
+  viewing PNG frames rather than trusting a DB query: RTS-smoothed
+  `tracking_results` rows use a different `tracker_step` numbering than
+  raw ones, and the tool's nearest-timestamp lookup didn't filter
+  `is_smoothed`, so it could return a smoothed row's step number and reuse
+  it to key into `tracking_obs_results` (raw-indexed only) -- silently
+  fetching a real, valid, *different* instant's data onto the wrong video
+  frame. One-line fix (`AND is_smoothed = 0`); added the module's first
+  test coverage. Re-rendered all four videos a third time, this time
+  visually confirmed correct.
+
 - **2026-09-05** (later same day) — Streak-velocity phase 3 (tracker
   integration) built and wired into the real per-frame loop -- see
   [streak-velocity-design.md](streak-velocity-design.md) §4 for the full

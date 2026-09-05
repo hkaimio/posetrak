@@ -53,11 +53,25 @@ Reads:
   space pose_observations/tracking_obs_results already use
   (pixels_are_undistorted=0). This is the tracker's own current best
   estimate for a marker whether or not it was actually observed that step.
-- tracking_obs_results.obs_blob for the tracker step nearest that
-  timestamp -- actual_x/y for every marker that WAS fed into that step's
+  RTS-smoothed (is_smoothed=1) by default -- the actual delivered output, what a
+  client application sees -- with --raw for the live/causal (is_smoothed=0)
+  estimate instead, a different, narrower question (e.g. to match the
+  tracked/lost percentages, always computed from raw tracking_results rows).
+  Raw and smoothed rows use *different* tracker_step numbering for the same real
+  time (smoothing only covers steps actually tracked, so a gap-heavy run's
+  smoothed index runs ahead of the raw one) -- fixed 2026-09-05 after this tool
+  briefly used the wrong one's step number to look up tracking_obs_results,
+  silently showing a different, real instant's dot positions on the wrong frame
+  (see _nearest_state_row()'s own doc comment for the confirmed example).
+- tracking_obs_results.obs_blob for the RAW tracker step nearest that
+  timestamp, regardless of the --raw flag above (this table is only ever
+  written from the raw forward pass, so there is no smoothed version of it
+  to read) -- actual_x/y for every marker that WAS fed into that step's
   update (ArUco corners and, for a dots-enabled run, dot0..dot6), decoded
   via app.mcp.db's existing helpers so the camera/marker index ordering is
-  guaranteed to match what the C++ tracker actually wrote.
+  guaranteed to match what the C++ tracker actually wrote. Only slots tagged
+  mode==POSITION are shown as a position -- see observation-results-
+  semantics.md for why actual_x/y isn't always one.
 - pose_observations (source='dots') for that camera's own video frame --
   every raw candidate the detector saw that frame, whether or not it got
   resolved to a marker slot that step. This is the one piece obs_blob
@@ -116,9 +130,17 @@ _PAD_PX = 220  # crop padding around the region of interest, in source pixels
 class _RunContext:
     """Everything needed to render frames for one (tracking run, camera) pair."""
 
-    def __init__(self, conn: sqlite3.Connection, run_id: str, camera_label: str) -> None:
+    def __init__(
+        self, conn: sqlite3.Connection, run_id: str, camera_label: str, use_smoothed: bool = True
+    ) -> None:
         self.conn = conn
         self.run_id = run_id
+        # Smoothed (RTS) is the actual delivered output -- what a client application
+        # sees -- so it's the right default for "does this look correct" review.
+        # Raw is an explicit opt-in (--raw) for the different question "what did the
+        # live, causal tracker see frame by frame" (e.g. matching the tracked/lost
+        # percentages, which are always computed from raw tracking_results rows).
+        self.use_smoothed = use_smoothed
 
         run = conn.execute(
             "SELECT observation_sequence_id, skeleton_id FROM tracking_runs WHERE id = ?", (run_id,)
@@ -263,31 +285,30 @@ def _grab_frame(file_path: str, video_frame: int) -> np.ndarray | None:
     return None
 
 
-def _nearest_tracker_step(
-    conn: sqlite3.Connection, run_id: str, timestamp_s: float
+def _nearest_state_row(
+    conn: sqlite3.Connection, run_id: str, timestamp_s: float, is_smoothed: bool
 ) -> tuple[int, float, bytes] | None:
-    """Find the raw (is_smoothed=0) tracking_results row nearest *timestamp_s*.
+    """Find the tracking_results row of one flavor (raw or RTS-smoothed) nearest
+    *timestamp_s*.
 
-    Must stay is_smoothed=0: RTS-smoothed rows use a *different* tracker_step
-    numbering than raw ones (smoothing only ever covers steps that were
-    actually tracked, so a gap-heavy run's smoothed index runs ahead of the
-    raw one by however many steps were lost before it -- confirmed on a real
-    run where raw tracker_step 1933 and smoothed tracker_step 1603 both carry
+    Always pass the flavor you actually want, never reuse one flavor's
+    tracker_step to key into something that assumes the other: raw and
+    smoothed rows use *different* tracker_step numbering for the same real
+    time (smoothing only ever covers steps that were actually tracked, so a
+    gap-heavy run's smoothed index runs ahead of the raw one by however many
+    steps were lost before it -- confirmed on a real run where raw
+    tracker_step 1933 and smoothed tracker_step 1603 both carry
     timestamp_s=53.766, a >3s gap between what step "1603" means in each).
     tracking_obs_results is only ever written from the raw forward pass
     (ResultWriter::write_obs_results(), called from Tracker::update_step()),
-    so it's raw-indexed only -- looking this dot/state up via a smoothed row's
-    tracker_step silently fetches another instant's real, valid-looking
-    observation data and overlays it on the wrong video frame. This is
-    exactly what looked like a real-but-wrong dot match in early videos
-    (dots confidently, low-Mahalanobis "matched" nowhere near the sword) --
-    a render-tool bug, not a tracking bug.
+    so it's raw-indexed only regardless of which flavor's state is being
+    displayed -- see _frame_data_for_time()'s own two separate lookups.
     """
     row = conn.execute(
         "SELECT tracker_step, timestamp_s, state FROM tracking_results "
-        "WHERE run_id = ? AND person_id = 0 AND is_smoothed = 0 "
+        "WHERE run_id = ? AND person_id = 0 AND is_smoothed = ? "
         "ORDER BY ABS(timestamp_s - ?) LIMIT 1",
-        (run_id, timestamp_s),
+        (run_id, 1 if is_smoothed else 0, timestamp_s),
     ).fetchone()
     return (row["tracker_step"], row["timestamp_s"], row["state"]) if row else None
 
@@ -330,20 +351,36 @@ def _frame_data_for_time(ctx: _RunContext, timestamp_s: float, video_frame: int)
     fd = _FrameData()
     fd.raw_dots = _raw_dot_candidates(ctx.conn, ctx.sequence_id, ctx.camera_instance_id, video_frame)
 
-    step_info = _nearest_tracker_step(ctx.conn, ctx.run_id, timestamp_s)
-    if step_info is None:
+    # The displayed pose (predicted-marker overlay) follows ctx.use_smoothed -- smoothed
+    # is the actual delivered output (the default), raw is the live tracker's own causal
+    # estimate (--raw), a different, narrower question.
+    state_row = _nearest_state_row(ctx.conn, ctx.run_id, timestamp_s, ctx.use_smoothed)
+    if state_row is None:
         fd.status = "no tracking_results near this time"
         return fd
-    step, step_t, state_blob = step_info
-    fd.status = f"step {step} @ {step_t:.3f}s"
+    step, step_t, state_blob = state_row
+    flavor = "smoothed" if ctx.use_smoothed else "raw"
+    fd.status = f"step {step} @ {step_t:.3f}s ({flavor})"
 
     if state_blob is not None:
         pos, rot = _decode_pose(state_blob)
         fd.predicted = _fk_predict_all(ctx, pos, rot)
 
+    # tracking_obs_results is only ever written from the raw forward pass
+    # (ResultWriter::write_obs_results(), called from Tracker::update_step()) --
+    # always look it up via the RAW step nearest this timestamp, regardless of which
+    # flavor's state/predicted overlay is shown above. Reusing `step` here when
+    # ctx.use_smoothed is true would be exactly the raw/smoothed step-numbering
+    # collision fixed 2026-09-05 (see _nearest_state_row()'s own doc comment).
+    raw_step_row = _nearest_state_row(ctx.conn, ctx.run_id, timestamp_s, is_smoothed=False)
+    if raw_step_row is None:
+        fd.status += "  (no raw step for obs lookup)"
+        return fd
+    raw_step, _raw_step_t, _raw_state = raw_step_row
+
     obs_row = ctx.conn.execute(
         "SELECT obs_blob FROM tracking_obs_results WHERE run_id = ? AND person_id = 0 AND tracker_step = ?",
-        (ctx.run_id, step),
+        (ctx.run_id, raw_step),
     ).fetchone()
     if obs_row is None:
         fd.status += "  (tracking_lost, no obs_results)"
@@ -352,8 +389,13 @@ def _frame_data_for_time(ctx: _RunContext, timestamp_s: float, video_frame: int)
     cam_slice = blob[ctx.cam_idx]
     names, undist_pts, outliers = [], [], []
     for i, name in enumerate(ctx.marker_names):
-        ax, ay, _px, _py, _mahal, _used, is_outlier, _pad = cam_slice[i]
-        if not np.isnan(ax):
+        ax, ay, _px, _py, _mahal, _used, is_outlier, mode = cam_slice[i]
+        # mode==0 is MeasurementMode::POSITION -- the only mode where actual_x/y is an
+        # absolute pixel position (observation-results-semantics.md). A POSITION
+        # observation always wins its (camera, marker) slot when more than one
+        # Observation exists for it, so this should be rare in practice, but skip
+        # rather than misinterpret a VELOCITY/PAIR_DIFF-only slot's non-positional value.
+        if not np.isnan(ax) and mode == 0.0:
             names.append(name)
             undist_pts.append((ax, ay))
             outliers.append(is_outlier > 0.5)
@@ -523,11 +565,21 @@ def main() -> None:
     ap.add_argument("--slow-factor", type=float, default=4.0,
                      help="Video mode: output fps = native fps / this factor (default 4x slow-motion).")
     ap.add_argument("--video-out", default=None, help="Video mode: output .mp4 path.")
+    ap.add_argument("--raw", action="store_true",
+                     help="Show the raw (is_smoothed=0), live/causal tracker state instead of "
+                          "the default RTS-smoothed one. Smoothed is the actual delivered "
+                          "output (what a client application sees); raw is the narrower "
+                          "question of what the tracker's own per-frame decisions looked like "
+                          "(e.g. to match the tracked/lost percentages, always computed from "
+                          "raw tracking_results rows). tracking_obs_results-derived overlays "
+                          "(raw dot candidates, actual/predicted marker positions) are always "
+                          "looked up via the raw step regardless of this flag -- that table is "
+                          "only ever written from the raw forward pass.")
     args = ap.parse_args()
 
     conn = sqlite3.connect(f"file:{args.session}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
-    ctx = _RunContext(conn, args.run_id, args.camera_label)
+    ctx = _RunContext(conn, args.run_id, args.camera_label, use_smoothed=not args.raw)
 
     if args.timestamps is not None:
         if args.output_dir is None:

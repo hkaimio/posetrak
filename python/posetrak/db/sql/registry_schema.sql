@@ -190,7 +190,11 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     dot_streak_k_min_samples          INTEGER,  -- Min samples before k is trusted
     dot_streak_min_displacement_px    REAL,     -- "Only dots with actual movement" gate
     dot_streak_min_elongation_px      REAL,     -- Matches the streak-noise-inflation gate
-    dot_streak_velocity_noise_std     REAL      -- noise_std_override for the emitted observation
+    dot_streak_velocity_noise_std     REAL,     -- noise_std_override for the emitted observation
+    -- Added in schema migration v51 (session)/v10 (registry): cap on the adaptive
+    -- process noise (Mechanism A) variance-domain multiplier, previously a hardcoded
+    -- UKF constant -- see UnscentedKalmanFilter::set_velocity_noise_max_multiplier().
+    process_noise_vel_max_multiplier REAL      -- Variance-domain cap; NULL/10.0 = prior hardcoded default
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

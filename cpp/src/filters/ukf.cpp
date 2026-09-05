@@ -149,6 +149,10 @@ void UnscentedKalmanFilter::set_velocity_noise_gain(double gain_joint, double ve
         std::unordered_set<std::string>(joint_names.begin(), joint_names.end());
 }
 
+void UnscentedKalmanFilter::set_velocity_noise_max_multiplier(double max_multiplier) {
+    vel_noise_max_multiplier_ = max_multiplier;
+}
+
 void UnscentedKalmanFilter::set_velocity_noise_gain_scopes(
     std::vector<VelocityNoiseScope> const& scopes) {
     vel_noise_extra_scopes_.clear();
@@ -366,7 +370,7 @@ Eigen::MatrixXd UnscentedKalmanFilter::apply_velocity_scaling(State const& veloc
         if (gain <= 0.0)
             return;
         double const std_mult = std::min(1.0 + gain * std::abs(velocity) / vel_ref,
-                                         std::sqrt(kMaxVelocityNoiseMultiplier));
+                                         std::sqrt(vel_noise_max_multiplier_));
         double const var_mult = std_mult * std_mult;
         int const vel_idx = active_dof + pos_idx;
         scaled(pos_idx, pos_idx) *= var_mult;

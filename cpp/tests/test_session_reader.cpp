@@ -204,7 +204,8 @@ static void create_fixture_db() {
             dot_streak_k_min_samples INTEGER,
             dot_streak_min_displacement_px REAL,
             dot_streak_min_elongation_px REAL,
-            dot_streak_velocity_noise_std REAL
+            dot_streak_velocity_noise_std REAL,
+            process_noise_vel_max_multiplier REAL
         );
     )");
 
@@ -774,6 +775,8 @@ TEST_CASE("SessionReader load_tracker_config", "[session_reader]") {
             Catch::Approx(TrackerConfig{}.dot_streak_min_elongation_px));
     REQUIRE(cfg.tracker.dot_streak_velocity_noise_std ==
             Catch::Approx(TrackerConfig{}.dot_streak_velocity_noise_std));
+    REQUIRE(cfg.tracker.process_noise_vel_max_multiplier ==
+            Catch::Approx(TrackerConfig{}.process_noise_vel_max_multiplier));
 }
 
 TEST_CASE("SessionReader load_sequence_info", "[session_reader]") {

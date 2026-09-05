@@ -92,6 +92,8 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
         result.process_noise_vel_ref_joint = tracking["process_noise_vel_ref_joint"].value_or(1.0);
         result.process_noise_vel_gain_root = tracking["process_noise_vel_gain_root"].value_or(0.0);
         result.process_noise_vel_ref_root = tracking["process_noise_vel_ref_root"].value_or(1.0);
+        result.process_noise_vel_max_multiplier =
+            tracking["process_noise_vel_max_multiplier"].value_or(10.0);
         if (auto names = tracking["process_noise_vel_joint_names"].as_array()) {
             for (auto&& elem : *names) {
                 if (auto str = elem.value<std::string>())

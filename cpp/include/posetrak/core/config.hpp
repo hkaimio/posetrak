@@ -95,6 +95,17 @@ struct TrackerConfig {
     double process_noise_vel_ref_joint = 1.0;   ///< Reference velocity for joint DOFs (rad/s)
     double process_noise_vel_gain_root = 0.0;   ///< Velocity gain for root DOFs
     double process_noise_vel_ref_root = 1.0;    ///< Reference velocity for root DOFs (m/s, rad/s)
+    /// Cap on the per-DOF variance-domain multiplier `(1 + gain*|v|/ref)^2` applied by
+    /// both the joint and root velocity gains above. Was a hardcoded UKF constant
+    /// (kMaxVelocityNoiseMultiplier = 10.0) until a real capture showed it binding: a
+    /// sword-swing capture's root angular velocity exceeded the gain=4/ref_root=2
+    /// saturation point (~1.08 rad/s) for a third of the whole run, including 100% of
+    /// a known bad-tracking window -- the mechanism meant to widen the dot-assignment
+    /// gate during fast motion couldn't widen any further right when it mattered most.
+    /// Exposed as a config field (rather than just editing the constant) so this can be
+    /// tuned/swept per capture instead of requiring a rebuild each time. 10.0 keeps
+    /// every existing config's behavior unchanged.
+    double process_noise_vel_max_multiplier = 10.0;
     /// Literal joint names (e.g. "spine1", "thigh.L") the joint gain applies to.
     /// Empty (default) = all joints. Added after finding a body-wide gain
     /// over-loosens fast-but-normal limb motion (arms) while barely engaging for
@@ -281,6 +292,7 @@ struct TrackerAppConfig {
     double process_noise_vel_ref_joint = 1.0;
     double process_noise_vel_gain_root = 0.0;
     double process_noise_vel_ref_root = 1.0;
+    double process_noise_vel_max_multiplier = 10.0;  ///< See TrackerConfig's own field doc comment.
     std::vector<std::string> process_noise_vel_joint_names;
     std::vector<VelocityNoiseScope> process_noise_vel_scopes;
 
@@ -419,6 +431,7 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.process_noise_vel_ref_joint = process_noise_vel_ref_joint;
     tc.process_noise_vel_gain_root = process_noise_vel_gain_root;
     tc.process_noise_vel_ref_root = process_noise_vel_ref_root;
+    tc.process_noise_vel_max_multiplier = process_noise_vel_max_multiplier;
     tc.process_noise_vel_joint_names = process_noise_vel_joint_names;
     tc.process_noise_vel_scopes = process_noise_vel_scopes;
     tc.pose_reg_joint_names = pose_reg_joint_names;

@@ -589,6 +589,7 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
         config_.process_noise_vel_gain_joint, config_.process_noise_vel_ref_joint,
         config_.process_noise_vel_gain_root, config_.process_noise_vel_ref_root,
         config_.process_noise_vel_joint_names);
+    ukf_->set_velocity_noise_max_multiplier(config_.process_noise_vel_max_multiplier);
     {
         std::vector<UnscentedKalmanFilter::VelocityNoiseScope> scopes;
         for (VelocityNoiseScope const& scope : config_.process_noise_vel_scopes) {

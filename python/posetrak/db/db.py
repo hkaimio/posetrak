@@ -24,8 +24,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 9
-SESSION_SCHEMA_VERSION: Final[int] = 50
+REGISTRY_SCHEMA_VERSION: Final[int] = 10
+SESSION_SCHEMA_VERSION: Final[int] = 51
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -310,6 +310,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 8
     if actual == 8:
         _migrate_registry_v8_to_v9(conn)
+        actual = 9
+    if actual == 9:
+        _migrate_registry_v9_to_v10(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -639,6 +642,28 @@ def _migrate_registry_v8_to_v9(conn: sqlite3.Connection) -> None:
     if "dot_streak_velocity_noise_std" not in existing:
         conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_velocity_noise_std REAL")
     _set_schema_version(conn, 9)
+    conn.commit()
+
+
+def _migrate_registry_v9_to_v10(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 9 to 10.
+
+    v10 adds process_noise_vel_max_multiplier to tracker_configs: the cap on the
+    adaptive process noise (Mechanism A) variance-domain multiplier, previously a
+    hardcoded UKF constant (kMaxVelocityNoiseMultiplier = 10.0) -- found to bind
+    for real on a fast-swing capture (a third of the run's steps, including 100% of
+    a known bad-tracking window, already saturated the default gain=4/ref_root=2
+    tuning's multiplier at just ~1.08 rad/s of root angular velocity). NULL means
+    the same 10.0 default every existing config already got from the hardcoded
+    constant -- backward-compatible. See
+    docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
+    """
+    existing = _tracker_config_columns(conn)
+    if "process_noise_vel_max_multiplier" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_max_multiplier REAL"
+        )
+    _set_schema_version(conn, 10)
     conn.commit()
 
 
@@ -1669,6 +1694,22 @@ def _migrate_session_v49_to_v50(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v50_to_v51(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 50 to 51.
+
+    v51 adds process_noise_vel_max_multiplier to tracker_configs, mirroring the
+    registry schema v9->v10 change -- see
+    docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
+    """
+    existing = _tracker_config_columns(conn)
+    if "process_noise_vel_max_multiplier" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_max_multiplier REAL"
+        )
+    _set_schema_version(conn, 51)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1839,6 +1880,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 49
     if actual == 49:
         _migrate_session_v49_to_v50(conn)
+        actual = 50
+    if actual == 50:
+        _migrate_session_v50_to_v51(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

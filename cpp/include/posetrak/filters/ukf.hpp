@@ -237,6 +237,22 @@ class UnscentedKalmanFilter {
                                  std::vector<std::string> const& joint_names = {});
 
     /**
+     * @brief Override the cap on the per-DOF variance-domain multiplier applied by
+     * set_velocity_noise_gain() (and set_velocity_noise_gain_scopes()) -- was a fixed
+     * `kMaxVelocityNoiseMultiplier = 10.0` constant until a real capture showed it
+     * binding: a fast enough sword swing saturates the default gain=4/ref=2 tuning's
+     * multiplier at just ~1.08 rad/s of root angular velocity, well below real swing
+     * speeds, so the mechanism meant to widen the dot-assignment gate during fast
+     * motion can't widen any further exactly when it's needed most.
+     *
+     * @param max_multiplier Cap on `(1 + gain*|v|/vel_ref)^2`, in variance-domain
+     *        units (i.e. 10.0 means up to 10x the static variance, ~3.16x the std
+     *        dev). Must be >= 1.0; the default (10.0, applied unless this is called)
+     *        reproduces every existing config's prior behavior unchanged.
+     */
+    void set_velocity_noise_max_multiplier(double max_multiplier);
+
+    /**
      * @brief One additional, independent velocity-driven gain scope for
      * set_velocity_noise_gain_scopes() -- own gain/reference velocity, own
      * disjoint joint list.
@@ -680,7 +696,11 @@ class UnscentedKalmanFilter {
         std::unordered_set<std::string> joint_names;
     };
     std::vector<ResolvedVelocityNoiseScope> vel_noise_extra_scopes_;
-    static constexpr double kMaxVelocityNoiseMultiplier = 10.0;
+    /// Default cap, kept as the fallback if set_velocity_noise_max_multiplier() is
+    /// never called (every pre-existing config/call site). See that setter's own doc
+    /// comment for why this became configurable instead of staying a fixed constant.
+    static constexpr double kDefaultMaxVelocityNoiseMultiplier = 10.0;
+    double vel_noise_max_multiplier_ = kDefaultMaxVelocityNoiseMultiplier;
     /// Returns a copy of the static process_noise_ baseline (as built by
     /// rebuild_process_noise()) with each active DOF's diagonal entries scaled by
     /// its own velocity-driven multiplier; returns process_noise_ unchanged if both

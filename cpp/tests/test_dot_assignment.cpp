@@ -105,6 +105,97 @@ TEST_CASE("resolve_dot_assignment: candidate beyond the gate resolves to nothing
     REQUIRE(result.count(0) == 0);
 }
 
+// ---------------------------------------------------------------------------
+// Tracklet gate relaxation (2026-09-06) -- see dot_assignment.hpp's own doc
+// comment on resolve_dot_assignment()'s dot_tracklet_gate_multiplier/
+// prev_tracklet_ids parameters, and status.md's 2026-09-06 Phase B entry for
+// the real-data finding that motivated it (only ~4-6% of raw candidates
+// survive this gate during a fast swing, unmodified).
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "resolve_dot_assignment: a same-tracklet candidate beyond the plain gate is still accepted",
+    "[dot_assignment]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0, /*std=*/1.0);
+
+    // diff=(0,3.5), mahal_sq = 3.5^2 / 1.0^2 = 12.25 -- beyond kGate=9.21 unmodified.
+    UnlabeledCandidate cand = make_candidate(0, 100.0, 203.5);
+    cand.tracklet_id = 42;
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {cand};
+
+    PrevDotTrackletIds prev_tracklet_ids;
+    prev_tracklet_ids[0][0][7] = 42;  // same tracklet resolved into this slot last frame
+
+    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, {}, {}, nullptr,
+                                         /*dot_tracklet_gate_multiplier=*/2.0, prev_tracklet_ids);
+
+    REQUIRE(result.count(0) == 1);
+    REQUIRE(result.at(0).resolved.size() == 1);
+    REQUIRE(result.at(0).resolved[0].tracklet_id == 42);
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: a different-tracklet candidate beyond the plain gate is still "
+    "rejected",
+    "[dot_assignment]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0, /*std=*/1.0);
+
+    UnlabeledCandidate cand = make_candidate(0, 100.0, 203.5);  // same mahal_sq=12.25 as above
+    cand.tracklet_id = 99;  // does NOT match what resolved into this slot last frame
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {cand};
+
+    PrevDotTrackletIds prev_tracklet_ids;
+    prev_tracklet_ids[0][0][7] = 42;
+
+    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, {}, {}, nullptr,
+                                         /*dot_tracklet_gate_multiplier=*/2.0, prev_tracklet_ids);
+
+    REQUIRE(result.count(0) == 0);
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: tracklet relaxation is a no-op when the multiplier is left at 1.0",
+    "[dot_assignment]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0, /*std=*/1.0);
+
+    UnlabeledCandidate cand = make_candidate(0, 100.0, 203.5);
+    cand.tracklet_id = 42;
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {cand};
+
+    PrevDotTrackletIds prev_tracklet_ids;
+    prev_tracklet_ids[0][0][7] = 42;  // a real match, but the multiplier default (1.0) should
+                                      // still leave this pairing beyond the gate
+
+    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0);
+
+    REQUIRE(result.count(0) == 0);
+}
+
+TEST_CASE("resolve_dot_assignment: a resolved Observation carries its candidate's tracklet_id",
+          "[dot_assignment]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0);
+
+    UnlabeledCandidate cand = make_candidate(0, 100.5, 200.5);
+    cand.tracklet_id = 7;
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {cand};
+
+    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0);
+
+    REQUIRE(result.at(0).resolved[0].tracklet_id == 7);
+}
+
 TEST_CASE("resolve_dot_assignment: a clearly-closer subject wins, the other gets nothing",
           "[dot_assignment]") {
     // Two subjects' dot slots predict to distinct positions; one candidate

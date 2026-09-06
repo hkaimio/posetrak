@@ -59,6 +59,14 @@ struct Observation {
     /// threshold and cross-camera consistency), regardless of its computed mahalanobis_distance
     /// -- mahalanobis_distance is still computed and recorded for diagnostics either way.
     bool force_inlier = false;
+    /// Per-camera frame-to-frame identity from an anonymous dot candidate's own
+    /// tracklet_id (dot_tracklet.DotTrackletLinker, resolve_dot_assignment() in
+    /// dot_assignment.cpp) -- -1 (default) for any Observation not built from an
+    /// anonymous dot candidate. Stashed here so Tracker::update_step() can record
+    /// it into prev_dot_tracklet_ids_ the same way it already records
+    /// obs.position into prev_observations_, for the *next* frame's gate
+    /// relaxation to compare against.
+    int tracklet_id = -1;
 
     /// @brief Compute measurement noise std from split pose + calibration error model.
     /// @param ep Pose estimation error (pixels in model input image)

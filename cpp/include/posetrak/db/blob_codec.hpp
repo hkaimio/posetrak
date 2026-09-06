@@ -93,23 +93,31 @@ struct DotCandidate {
     float py{};
     float area{};
     float compactness{};
-    float major_axis{};  ///< Equivalent circular diameter for a round dot;
-                         ///< a streak's real length for an elongated one.
-    float minor_axis{};  ///< Equal to major_axis for a round dot; a
-                         ///< streak's width (~the dot's true diameter).
-    float dir_x{};       ///< Unit vector along a streak's axis, canonicalized to
-    float dir_y{};       ///< a fixed half-plane (dot_blob_detector.py's
-                         ///< `_streak_direction()`) since a blur streak has no
-                         ///< forward/backward sense -- (0, 0) for a round dot.
+    float major_axis{};        ///< Equivalent circular diameter for a round dot;
+                               ///< a streak's real length for an elongated one.
+    float minor_axis{};        ///< Equal to major_axis for a round dot; a
+                               ///< streak's width (~the dot's true diameter).
+    float dir_x{};             ///< Unit vector along a streak's axis, canonicalized to
+    float dir_y{};             ///< a fixed half-plane (dot_blob_detector.py's
+                               ///< `_streak_direction()`) since a blur streak has no
+                               ///< forward/backward sense -- (0, 0) for a round dot.
+    float tracklet_id{-1.0F};  ///< Per-camera frame-to-frame identity from
+                               ///< dot_tracklet.DotTrackletLinker (2026-09-06)
+                               ///< -- resolve_dot_assignment() uses this to
+                               ///< relax its own gate for a candidate
+                               ///< continuing an already-established track.
+                               ///< Stored as a float (exact for any
+                               ///< realistic per-capture tracklet count)
+                               ///< rather than mixing types in this blob.
 };
 
 /// @brief Decode a 'dots' blob (see db_cache.py's encode_dot_candidates()
 /// for the Python-side writer and its full rationale) -> vector<DotCandidate>.
 ///
 /// Layout: a little-endian int32 candidate count, followed by
-/// float32[count, 8] (px, py, area, compactness, major_axis, minor_axis,
-/// dir_x, dir_y). The variable-length sibling to decode_keypoints() for the
-/// "several tens of anonymous candidates per frame" case (design doc
+/// float32[count, 9] (px, py, area, compactness, major_axis, minor_axis,
+/// dir_x, dir_y, tracklet_id). The variable-length sibling to decode_keypoints()
+/// for the "several tens of anonymous candidates per frame" case (design doc
 /// §3/§7.1): unlike ArUco's fixed manifest-width layout, N here is however
 /// many candidates this (camera, frame) actually had. Explicitly versioned
 /// via the count prefix rather than inferred from blob byte length alone --
@@ -122,7 +130,7 @@ struct DotCandidate {
 /// than a new table -- see the design doc's §3 for why (blob size grows
 /// with candidate count, row count doesn't, at any scale).
 inline std::vector<DotCandidate> decode_dot_candidates(void const* data, int byte_count) {
-    constexpr int floats_per_candidate = 8;
+    constexpr int floats_per_candidate = 9;
     constexpr int candidate_bytes = floats_per_candidate * sizeof(float);
     if (byte_count < static_cast<int>(sizeof(int32_t))) {
         throw std::runtime_error("decode_dot_candidates: byte_count " + std::to_string(byte_count) +
@@ -135,7 +143,7 @@ inline std::vector<DotCandidate> decode_dot_candidates(void const* data, int byt
     if (n < 0 || expected_bytes != byte_count) {
         throw std::runtime_error(
             "decode_dot_candidates: malformed blob, or written in an older "
-            "(pre-2026-09-05) format (header says " +
+            "(pre-2026-09-06) format (header says " +
             std::to_string(n) + " candidates, " + std::to_string(expected_bytes) +
             " bytes expected, got " + std::to_string(byte_count) + ") -- re-run detection");
     }
@@ -151,6 +159,7 @@ inline std::vector<DotCandidate> decode_dot_candidates(void const* data, int byt
         result[static_cast<size_t>(i)].minor_axis = src[i * floats_per_candidate + 5];
         result[static_cast<size_t>(i)].dir_x = src[i * floats_per_candidate + 6];
         result[static_cast<size_t>(i)].dir_y = src[i * floats_per_candidate + 7];
+        result[static_cast<size_t>(i)].tracklet_id = src[i * floats_per_candidate + 8];
     }
     return result;
 }

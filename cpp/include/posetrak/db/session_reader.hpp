@@ -95,6 +95,14 @@ struct UnlabeledCandidate {
     /// same reason major_axis/minor_axis are.
     double dir_x = 0.0;
     double dir_y = 0.0;
+    /// Per-camera frame-to-frame identity from dot_tracklet.DotTrackletLinker
+    /// (db::DotCandidate::tracklet_id, 2026-09-06) -- resolve_dot_assignment()
+    /// relaxes its own gate for a candidate whose tracklet_id matches what
+    /// resolved into the same (subject, camera, marker) slot last frame.
+    /// Defaulted to -1 (never matches a real tracklet) for the same reason
+    /// major_axis/minor_axis are -- an existing fixture/call site built
+    /// before this field existed should not silently start matching.
+    int tracklet_id = -1;
 };
 
 /// @brief Reads tracking data from a per-session SQLite database

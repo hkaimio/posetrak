@@ -1067,9 +1067,12 @@ TrackingResult Tracker::update_step(std::vector<Observation> const& observations
     if (!result.tracking_lost) {
         last_timestamp_ = timestamp;
         ++frame_count_;
-        // Store raw pixel positions for next frame's velocity-mode annotation
+        // Store raw pixel positions for next frame's velocity-mode annotation, and (2026-09-06)
+        // each observation's own tracklet_id (-1, a no-op, for anything not built from an
+        // anonymous dot candidate) for the next frame's tracklet gate-relaxation lookup.
         for (Observation const& obs : observations) {
             prev_observations_[obs.camera_id][obs.marker_id] = obs.position;
+            prev_dot_tracklet_ids_[obs.camera_id][obs.marker_id] = obs.tracklet_id;
         }
         if (frame_callback_) {
             frame_callback_(result);
@@ -1091,6 +1094,7 @@ void Tracker::reset() {
     ukf_.reset();
     smoother_cache_.clear();
     prev_observations_.clear();
+    prev_dot_tracklet_ids_.clear();
     streak_k_accumulators_.clear();
 }
 

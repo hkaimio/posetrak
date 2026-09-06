@@ -14,7 +14,8 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
     double gate_mahalanobis, int frame_idx, double timestamp, double calib_noise_std,
     StreakVelocityConfig const& streak_config, PrevDotPositions const& prev_positions,
-    std::unordered_map<int, StreakKAccumulator>* streak_k_state) {
+    std::unordered_map<int, StreakKAccumulator>* streak_k_state,
+    double dot_tracklet_gate_multiplier, PrevDotTrackletIds const& prev_tracklet_ids) {
     std::unordered_map<int, SubjectDotAssignment> result;
 
     // Only touched when streak_config.enabled -- see the streak_k parameter doc
@@ -51,11 +52,33 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
         int const n_cols = static_cast<int>(columns.size());
         std::vector<double> cost(static_cast<size_t>(n_rows) * static_cast<size_t>(n_cols));
         for (int r = 0; r < n_rows; ++r) {
-            Eigen::Vector2d const cand_pos = candidates[static_cast<size_t>(r)].position;
+            UnlabeledCandidate const& row_cand = candidates[static_cast<size_t>(r)];
+            Eigen::Vector2d const cand_pos = row_cand.position;
             for (int c = 0; c < n_cols; ++c) {
-                MarkerPrediction const& pred = *columns[static_cast<size_t>(c)].prediction;
+                Column const& col = columns[static_cast<size_t>(c)];
+                MarkerPrediction const& pred = *col.prediction;
                 Eigen::Vector2d const diff = cand_pos - pred.position;
-                double const mahal_sq = diff.transpose() * pred.covariance.inverse() * diff;
+                double mahal_sq = diff.transpose() * pred.covariance.inverse() * diff;
+
+                // Tracklet gate relaxation (2026-09-06, see dot_assignment.hpp's own doc
+                // comment on this parameter): a candidate continuing the same tracklet that
+                // resolved into this exact (subject, camera, marker) slot last frame gets
+                // this one pairing's own cost divided down, rather than touching the shared
+                // gate_mahalanobis threshold every other pairing is still judged against.
+                if (dot_tracklet_gate_multiplier > 1.0 && row_cand.tracklet_id >= 0) {
+                    auto subj_it = prev_tracklet_ids.find(col.subject_id);
+                    if (subj_it != prev_tracklet_ids.end()) {
+                        auto cam_it2 = subj_it->second.find(camera_id);
+                        if (cam_it2 != subj_it->second.end()) {
+                            auto marker_it = cam_it2->second.find(col.marker_id);
+                            if (marker_it != cam_it2->second.end() &&
+                                marker_it->second == row_cand.tracklet_id) {
+                                mahal_sq /= dot_tracklet_gate_multiplier;
+                            }
+                        }
+                    }
+                }
+
                 cost[static_cast<size_t>(r) * static_cast<size_t>(n_cols) +
                      static_cast<size_t>(c)] = mahal_sq;
             }
@@ -74,6 +97,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
             obs.position = cand.position;
             obs.position_distorted = cand.position_distorted;
             obs.confidence = cand.confidence;
+            obs.tracklet_id = cand.tracklet_id;
             // Same reasoning as the ArUco corner and dot-detector write paths'
             // own noise_scale=0.0 convention: a dot candidate's centroid comes
             // from thresholding the full-resolution frame directly, not a
@@ -172,6 +196,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     std::vector<SubjectDotPredictions> predictions;
     predictions.reserve(subjects.size());
     PrevDotPositions prev_positions;
+    PrevDotTrackletIds prev_tracklet_ids;
     for (auto const& subject : subjects) {
         SubjectDotPredictions sp;
         sp.subject_id = subject.subject_id;
@@ -183,6 +208,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
         }
         predictions.push_back(std::move(sp));
         prev_positions[subject.subject_id] = subject.tracker->prev_observations();
+        prev_tracklet_ids[subject.subject_id] = subject.tracker->prev_dot_tracklet_ids();
     }
 
     StreakVelocityConfig streak_config;
@@ -200,7 +226,8 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
 
     return resolve_dot_assignment(
         predictions, candidates_by_camera, config.dot_assignment_gate_mahalanobis, frame_idx,
-        timestamp, config.calib_noise_std, streak_config, prev_positions, streak_k_state);
+        timestamp, config.calib_noise_std, streak_config, prev_positions, streak_k_state,
+        config.dot_tracklet_gate_multiplier, prev_tracklet_ids);
 }
 
 }  // namespace posetrak

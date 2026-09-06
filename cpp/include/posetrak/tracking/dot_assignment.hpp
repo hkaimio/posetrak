@@ -65,6 +65,20 @@ struct StreakVelocityConfig {
 using PrevDotPositions =
     std::unordered_map<int, std::unordered_map<int, std::unordered_map<int, Eigen::Vector2d>>>;
 
+/// @brief This frame's previous-frame resolved dot tracklet ids, keyed
+/// subject_id -> camera_id -> marker_id -> tracklet_id (db::DotCandidate::
+/// tracklet_id, dot_tracklet.DotTrackletLinker) -- same shape and same
+/// stale-until-overwritten lifetime as PrevDotPositions above (gathered
+/// from one subject's own Tracker::prev_dot_tracklet_ids() per subject_id).
+/// Used by the gate-relaxation mechanism below: a candidate whose own
+/// tracklet_id matches the id that resolved into a given (subject, camera,
+/// marker) slot *last* frame is treated as continuing an already-
+/// established track, not judged from a cold start every frame. Empty (the
+/// default) disables relaxation entirely -- every existing caller/test is
+/// unaffected.
+using PrevDotTrackletIds =
+    std::unordered_map<int, std::unordered_map<int, std::unordered_map<int, int>>>;
+
 /// @brief One subject's resolved dot observations for this frame -- the
 /// per-subject share of resolve_dot_assignment()'s / resolve_shared_dot_assignment()'s
 /// combined result.
@@ -146,6 +160,24 @@ struct SubjectDotPredictions {
 ///        across calls, doesn't have to keep one around -- resolve_shared_dot_
 ///        assignment() always passes a Tracker-owned one so it actually
 ///        accumulates across frames the way the design intends.
+/// @param dot_tracklet_gate_multiplier Cost-matrix gate relaxation
+///        (TrackerConfig::dot_tracklet_gate_multiplier, 2026-09-06): when a
+///        candidate's own tracklet_id matches *prev_tracklet_ids*'s entry for
+///        the (subject, camera, marker) slot being costed, that pair's squared
+///        Mahalanobis cost is divided by this before the gate check -- the
+///        gate itself (gate_mahalanobis) stays a single, unmodified scalar
+///        passed into solve_assignment(); this instead makes one specific
+///        pairing's own cost cheaper, which is functionally the same as
+///        loosening the gate but only for a pairing with independent identity
+///        evidence behind it, not universally (status.md's 2026-09-06 Phase B
+///        entry: real data showed only ~4-6% of raw candidates during a fast
+///        swing survive the plain gate, with zero rejected at the later UKF
+///        outlier check -- the attrition is entirely here). 1.0 (default) is
+///        a no-op divide, so every existing caller/test is unaffected.
+/// @param prev_tracklet_ids This frame's previous-frame resolved tracklet ids,
+///        gathered by the caller (see resolve_shared_dot_assignment()). Empty
+///        (the default) is correct whenever dot_tracklet_gate_multiplier is
+///        1.0 (relaxation can never trigger with no map to look up against).
 /// @return subject_id -> SubjectDotAssignment, for every subject that had at
 ///         least one resolved Observation. A subject with nothing resolved
 ///         this frame (no predictions, or every candidate gated out) is
@@ -155,7 +187,8 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
     double gate_mahalanobis, int frame_idx, double timestamp, double calib_noise_std = 5.0,
     StreakVelocityConfig const& streak_config = {}, PrevDotPositions const& prev_positions = {},
-    std::unordered_map<int, StreakKAccumulator>* streak_k_state = nullptr);
+    std::unordered_map<int, StreakKAccumulator>* streak_k_state = nullptr,
+    double dot_tracklet_gate_multiplier = 1.0, PrevDotTrackletIds const& prev_tracklet_ids = {});
 
 /// @brief One dot-bearing subject as resolve_shared_dot_assignment() needs
 /// it: an id to key the result map by, plus the Tracker to query
@@ -187,6 +220,11 @@ struct DotAssignmentSubject {
 /// no real capture this round has more than one dot-bearing subject sharing a
 /// camera (same simplification precedent as this function's own multi-
 /// subject/camera-coverage note below, for a different concern).
+///
+/// Also gathers each subject's own Tracker::prev_dot_tracklet_ids() into a
+/// PrevDotTrackletIds and forwards *config*.dot_tracklet_gate_multiplier --
+/// the tracklet gate-relaxation mechanism (see resolve_dot_assignment()'s own
+/// doc comment).
 ///
 /// @param subjects Every dot-bearing subject participating this frame.
 /// @note Every camera_id key in *candidates_by_camera* is assumed valid for

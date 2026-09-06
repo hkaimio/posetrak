@@ -205,7 +205,9 @@ static void create_fixture_db() {
             dot_streak_min_displacement_px REAL,
             dot_streak_min_elongation_px REAL,
             dot_streak_velocity_noise_std REAL,
-            process_noise_vel_max_multiplier REAL
+            process_noise_vel_max_multiplier REAL,
+            dot_assignment_gate_mahalanobis REAL,
+            dot_tracklet_gate_multiplier REAL
         );
     )");
 
@@ -636,10 +638,11 @@ static void create_fixture_db() {
         // scene-wide, not tied to a tracked subject, but pose_observations'
         // primary key still requires one. A different candidate count per
         // frame (3, then 1) exercises the variable-N blob width. ----------
-        // Count-prefixed format (2026-09-05): int32 candidate count, then
-        // float32[count, 8] (px, py, area, compactness, major_axis,
-        // minor_axis, dir_x, dir_y) -- see db_cache.py's encode_dot_candidates().
-        auto make_dots_blob = [](std::vector<std::array<float, 8>> const& candidates) {
+        // Count-prefixed format (2026-09-06): int32 candidate count, then
+        // float32[count, 9] (px, py, area, compactness, major_axis,
+        // minor_axis, dir_x, dir_y, tracklet_id) -- see db_cache.py's
+        // encode_dot_candidates().
+        auto make_dots_blob = [](std::vector<std::array<float, 9>> const& candidates) {
             std::vector<uint8_t> out;
             auto const n = static_cast<int32_t>(candidates.size());
             out.resize(sizeof(int32_t));
@@ -652,7 +655,7 @@ static void create_fixture_db() {
             out.insert(out.end(), payload.begin(), payload.end());
             return out;
         };
-        auto insert_dots_row = [&](int frame, std::vector<std::array<float, 8>> const& candidates) {
+        auto insert_dots_row = [&](int frame, std::vector<std::array<float, 9>> const& candidates) {
             std::string sql =
                 "INSERT INTO pose_observations "
                 "(sequence_id, camera_instance_id, video_frame, timestamp_s, person_id, source,"
@@ -667,11 +670,11 @@ static void create_fixture_db() {
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
         };
-        // px, py, area, compactness, major_axis, minor_axis, dir_x, dir_y
-        insert_dots_row(0, {{{400.f, 500.f, 12.5f, 0.90f, 4.0f, 4.0f, 0.0f, 0.0f}},
-                            {{410.f, 505.f, 10.0f, 0.85f, 3.6f, 3.6f, 0.0f, 0.0f}},
-                            {{420.f, 510.f, 15.0f, 0.92f, 4.4f, 4.4f, 0.0f, 0.0f}}});
-        insert_dots_row(1, {{{450.f, 460.f, 8.0f, 0.80f, 3.2f, 3.2f, 0.6f, 0.8f}}});
+        // px, py, area, compactness, major_axis, minor_axis, dir_x, dir_y, tracklet_id
+        insert_dots_row(0, {{{400.f, 500.f, 12.5f, 0.90f, 4.0f, 4.0f, 0.0f, 0.0f, 7.0f}},
+                            {{410.f, 505.f, 10.0f, 0.85f, 3.6f, 3.6f, 0.0f, 0.0f, -1.0f}},
+                            {{420.f, 510.f, 15.0f, 0.92f, 4.4f, 4.4f, 0.0f, 0.0f, -1.0f}}});
+        insert_dots_row(1, {{{450.f, 460.f, 8.0f, 0.80f, 3.2f, 3.2f, 0.6f, 0.8f, 7.0f}}});
     }
 
     sqlite3_close(db);
@@ -777,6 +780,10 @@ TEST_CASE("SessionReader load_tracker_config", "[session_reader]") {
             Catch::Approx(TrackerConfig{}.dot_streak_velocity_noise_std));
     REQUIRE(cfg.tracker.process_noise_vel_max_multiplier ==
             Catch::Approx(TrackerConfig{}.process_noise_vel_max_multiplier));
+    REQUIRE(cfg.tracker.dot_assignment_gate_mahalanobis ==
+            Catch::Approx(TrackerConfig{}.dot_assignment_gate_mahalanobis));
+    REQUIRE(cfg.tracker.dot_tracklet_gate_multiplier ==
+            Catch::Approx(TrackerConfig{}.dot_tracklet_gate_multiplier));
 }
 
 TEST_CASE("SessionReader load_sequence_info", "[session_reader]") {
@@ -1146,7 +1153,9 @@ TEST_CASE("SessionReader load_unlabeled_candidates decodes a variable-N dot blob
     REQUIRE(frame0[0].minor_axis == Catch::Approx(4.0));
     REQUIRE(frame0[0].dir_x == Catch::Approx(0.0));
     REQUIRE(frame0[0].dir_y == Catch::Approx(0.0));
+    REQUIRE(frame0[0].tracklet_id == 7);
     REQUIRE(frame0[1].position.x() == Catch::Approx(410.0));
+    REQUIRE(frame0[1].tracklet_id == -1);
     REQUIRE(frame0[2].position.x() == Catch::Approx(420.0));
     // No per-candidate detector confidence exists in the blob -- always 1.0.
     REQUIRE(frame0[0].confidence == Catch::Approx(1.0));
@@ -1158,6 +1167,7 @@ TEST_CASE("SessionReader load_unlabeled_candidates decodes a variable-N dot blob
     REQUIRE(frame1[0].compactness == Catch::Approx(0.80));
     REQUIRE(frame1[0].dir_x == Catch::Approx(0.6));
     REQUIRE(frame1[0].dir_y == Catch::Approx(0.8));
+    REQUIRE(frame1[0].tracklet_id == 7);
 
     // seq_markers' own labeled 'markers'/'hand_l' rows must not leak in --
     // load_unlabeled_candidates() is source='dots' only.

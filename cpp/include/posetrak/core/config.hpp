@@ -59,6 +59,22 @@ struct TrackerConfig {
     /// 2-DOF convention as outlier_threshold's own default.
     double dot_assignment_gate_mahalanobis = 9.21;  ///< Chi-squared threshold (99% for 2-DOF)
 
+    /// @brief Divides a candidate-to-slot pairing's squared-Mahalanobis cost when the
+    /// candidate's own tracklet_id (dot_tracklet.DotTrackletLinker) matches the
+    /// tracklet that resolved into that exact (subject, camera, marker) slot *last*
+    /// frame -- see dot_assignment.hpp's own doc comment on resolve_dot_assignment()'s
+    /// matching parameter for the full mechanism. Real data from a fast-swing capture
+    /// (status.md's 2026-09-06 Phase B entry) found only ~4-6% of raw candidates
+    /// survive dot_assignment_gate_mahalanobis unmodified during fast motion, with
+    /// zero rejected at the later outlier_threshold check -- the attrition is
+    /// entirely here, which is what this exists to relax, but only for a pairing with
+    /// independent tracklet-continuity evidence behind it, not universally the way
+    /// raising dot_assignment_gate_mahalanobis itself would (a documented anti-pattern
+    /// in this project: widening a gate before fixing correspondence made a known
+    /// failure window worse once before). 1.0 (default) is a no-op divide -- every
+    /// existing config is unaffected until this is deliberately raised.
+    double dot_tracklet_gate_multiplier = 1.0;
+
     // === Streak-derived dot velocity ===
     // See docs/roadmap/features/marker-based-mocap/streak-velocity-design.md §3/§4.
     // A motion-blur streak's own length/axis is a real, otherwise-unused frame-internal
@@ -277,6 +293,7 @@ struct TrackerAppConfig {
     double calib_noise_std = 2.0;  ///< Calibration error (pixels in original video)
     double outlier_threshold = 4.0;
     double dot_assignment_gate_mahalanobis = 9.21;  ///< See TrackerConfig's own field doc comment.
+    double dot_tracklet_gate_multiplier = 1.0;      ///< See TrackerConfig's own field doc comment.
 
     // === Streak-derived dot velocity === (see TrackerConfig's own field doc comments)
     bool dot_streak_velocity_enabled = false;
@@ -421,6 +438,7 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.calib_noise_std = calib_noise_std;
     tc.outlier_threshold = outlier_threshold;
     tc.dot_assignment_gate_mahalanobis = dot_assignment_gate_mahalanobis;
+    tc.dot_tracklet_gate_multiplier = dot_tracklet_gate_multiplier;
     tc.dot_streak_velocity_enabled = dot_streak_velocity_enabled;
     tc.dot_streak_k_window = dot_streak_k_window;
     tc.dot_streak_k_min_samples = dot_streak_k_min_samples;

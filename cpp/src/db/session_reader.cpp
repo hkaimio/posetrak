@@ -198,7 +198,9 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "       COALESCE(dot_streak_min_elongation_px, 1.0) AS dot_streak_min_elongation_px,"
         "       COALESCE(dot_streak_velocity_noise_std, 10.0) AS dot_streak_velocity_noise_std,"
         "       COALESCE(process_noise_vel_max_multiplier, 10.0) AS "
-        "process_noise_vel_max_multiplier"
+        "process_noise_vel_max_multiplier,"
+        "       COALESCE(dot_assignment_gate_mahalanobis, 9.21) AS dot_assignment_gate_mahalanobis,"
+        "       COALESCE(dot_tracklet_gate_multiplier, 1.0) AS dot_tracklet_gate_multiplier"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -230,7 +232,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         47=dot_streak_velocity_enabled, 48=dot_streak_k_window,
     //         49=dot_streak_k_min_samples, 50=dot_streak_min_displacement_px,
     //         51=dot_streak_min_elongation_px, 52=dot_streak_velocity_noise_std,
-    //         53=process_noise_vel_max_multiplier
+    //         53=process_noise_vel_max_multiplier, 54=dot_assignment_gate_mahalanobis,
+    //         55=dot_tracklet_gate_multiplier
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -421,6 +424,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(51, out.tracker.dot_streak_min_elongation_px);
     apply_real(52, out.tracker.dot_streak_velocity_noise_std);
     apply_real(53, out.tracker.process_noise_vel_max_multiplier);
+    apply_real(54, out.tracker.dot_assignment_gate_mahalanobis);
+    apply_real(55, out.tracker.dot_tracklet_gate_multiplier);
 
     return out;
 }
@@ -1373,6 +1378,7 @@ SessionReader::load_unlabeled_candidates(std::string const& sequence_id,
             // distortion should be mild across a dot's own small streak extent regardless).
             cand.dir_x = c.dir_x;
             cand.dir_y = c.dir_y;
+            cand.tracklet_id = static_cast<int>(std::lround(c.tracklet_id));
             result.push_back(cand);
         }
     }

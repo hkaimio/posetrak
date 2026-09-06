@@ -24,8 +24,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 10
-SESSION_SCHEMA_VERSION: Final[int] = 51
+REGISTRY_SCHEMA_VERSION: Final[int] = 11
+SESSION_SCHEMA_VERSION: Final[int] = 52
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -313,6 +313,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 9
     if actual == 9:
         _migrate_registry_v9_to_v10(conn)
+        actual = 10
+    if actual == 10:
+        _migrate_registry_v10_to_v11(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -664,6 +667,27 @@ def _migrate_registry_v9_to_v10(conn: sqlite3.Connection) -> None:
             "ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_max_multiplier REAL"
         )
     _set_schema_version(conn, 10)
+    conn.commit()
+
+
+def _migrate_registry_v10_to_v11(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 10 to 11.
+
+    v11 adds the dot-candidate assignment gate and its tracklet-aware
+    relaxation to tracker_configs, mirroring the session schema v51->v52
+    change -- see docs/roadmap/features/marker-based-mocap/status.md
+    (Phase B, 2026-09-06). dot_assignment_gate_mahalanobis existed as a
+    TOML-only tunable before this migration; it had no DB column at all, so
+    a DB-driven tracker_config row could never actually override it -- fixed
+    here alongside the new tracklet multiplier since both touch the same
+    assignment gate.
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_assignment_gate_mahalanobis" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_assignment_gate_mahalanobis REAL")
+    if "dot_tracklet_gate_multiplier" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_tracklet_gate_multiplier REAL")
+    _set_schema_version(conn, 11)
     conn.commit()
 
 
@@ -1710,6 +1734,27 @@ def _migrate_session_v50_to_v51(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v51_to_v52(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 51 to 52.
+
+    v52 adds the dot-candidate assignment gate and its tracklet-aware
+    relaxation to tracker_configs, mirroring the registry schema v10->v11
+    change -- see docs/roadmap/features/marker-based-mocap/status.md
+    (Phase B, 2026-09-06). dot_assignment_gate_mahalanobis existed as a
+    TOML-only tunable before this migration; it had no DB column at all, so
+    a DB-driven tracker_config row could never actually override it -- fixed
+    here alongside the new tracklet multiplier since both touch the same
+    assignment gate.
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_assignment_gate_mahalanobis" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_assignment_gate_mahalanobis REAL")
+    if "dot_tracklet_gate_multiplier" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_tracklet_gate_multiplier REAL")
+    _set_schema_version(conn, 52)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1883,6 +1928,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 50
     if actual == 50:
         _migrate_session_v50_to_v51(conn)
+        actual = 51
+    if actual == 51:
+        _migrate_session_v51_to_v52(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

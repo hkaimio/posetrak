@@ -194,7 +194,16 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     -- Added in schema migration v51 (session)/v10 (registry): cap on the adaptive
     -- process noise (Mechanism A) variance-domain multiplier, previously a hardcoded
     -- UKF constant -- see UnscentedKalmanFilter::set_velocity_noise_max_multiplier().
-    process_noise_vel_max_multiplier REAL      -- Variance-domain cap; NULL/10.0 = prior hardcoded default
+    process_noise_vel_max_multiplier REAL,     -- Variance-domain cap; NULL/10.0 = prior hardcoded default
+    -- Added in schema migration v52 (session)/v11 (registry): dot-candidate
+    -- assignment gate and its tracklet-aware relaxation -- see
+    -- docs/roadmap/features/marker-based-mocap/status.md (Phase B, 2026-09-06).
+    -- dot_assignment_gate_mahalanobis existed as a TOML-only tunable before
+    -- this migration; it had no DB column at all, so a DB-driven tracker_config
+    -- row could never actually override it -- fixed here alongside the new
+    -- tracklet multiplier since both touch the same assignment gate.
+    dot_assignment_gate_mahalanobis  REAL,     -- Chi-square gate on assignment cost; NULL/9.21 = prior default
+    dot_tracklet_gate_multiplier     REAL      -- Divides cost for a same-tracklet pairing; NULL/1.0 = disabled
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

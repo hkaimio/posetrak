@@ -54,21 +54,65 @@ lower-resolution decode target when the dot search doesn't need full
 resolution) may matter more than parallelism; if per-frame CV work
 dominates, parallelism alone gets most of the win.
 
-**Parallelization**: cameras are fully independent (own `VideoCapture`,
-own background model, own `DotTrackletLinker`) — a `ProcessPoolExecutor`
-over `_process_camera()` calls, one process per camera, is the natural
-fit (not threads: OpenCV's own per-call GIL release is inconsistent
-enough not to rely on for this). `run()`'s current per-camera
-`on_progress`/`on_camera_done` callbacks cross a process boundary and need
-a queue-based relay; the per-camera `DotTrackletLinker`'s in-memory state
-already doesn't cross cameras, so no shared-state redesign is needed.
-Naive expectation: wall time drops toward `max(per-camera time)` rather
-than `sum(per-camera time)` — on this capture's 6 cameras that's a
-~6x ceiling, more than enough to reach "a few minutes" if the ~8 min/camera
-figure holds after removing the double-decode cost above. Real speedup
-depends on core count and whether the eliminated double-decode pass (background
-sampling could plausibly share the main decode pass on some frames rather
-than run as a fully separate pass) turns out to matter more than parallelism itself.
+**Parallelization, two independent axes, and they compose.**
+
+- **Across cameras**: fully independent (own `VideoCapture`, own
+  background model, own `DotTrackletLinker`) — a `ProcessPoolExecutor`
+  over `_process_camera()` calls, one process per camera, is the natural
+  fit (not threads: OpenCV's own per-call GIL release is inconsistent
+  enough not to rely on for this). Ceiling: `max(per-camera time)` rather
+  than `sum(per-camera time)` — 6x on this capture. Below that ceiling,
+  though, worker count is capped at the camera count regardless of how
+  many cores the machine actually has.
+- **Within a camera, across frames** (raised again — noted here rather
+  than dropped, since the reasoning changed since it was last raised):
+  per-frame blob *detection* itself has no cross-frame state and is
+  genuinely embarrassingly parallel — but `DotTrackletLinker.link_frame()`,
+  which currently runs immediately after each frame's detection, is
+  inherently sequential (each frame's linking decision depends on the
+  previous frame's still-open tracklets). So this can't be "run
+  `_process_camera()`'s whole per-frame loop across a pool" as-is; it
+  needs splitting into (a) a parallel map over frames that does decode +
+  `detect_blobs()` only, producing each frame's candidate list
+  independently, gathered back in frame order, then (b) a single cheap
+  sequential pass running `DotTrackletLinker` over the already-computed,
+  ordered candidate lists — linking itself is lightweight
+  nearest-neighbor matching, not the expensive CV work, so serializing
+  just that step costs little.
+  One more real wrinkle: video decode is not freely random-access for a
+  worker assigned "frame 500, 1500, 2500, ..." — most consumer codecs
+  decode forward from the nearest preceding keyframe, and this project
+  already has a documented aversion to arbitrary reseeking (the "1080
+  reseeks" trap noted elsewhere in this codebase). So the right unit of
+  parallel work is a **contiguous chunk of frames per worker** (each
+  worker decodes forward through its own chunk, no seeking within it),
+  not literally one task per frame. That still delivers the benefit
+  Harri's asking for — worker count is chunk count, not camera count, so
+  it can be sized to the machine's actual core count independent of how
+  many cameras a given trial has (6 cameras × 1 chunk each under-uses a
+  32-core machine; 6 cameras × 4 chunks each doesn't).
+  Combining both axes: total parallel units = cameras × chunks-per-camera,
+  scheduled onto one process pool sized to the core count, with each
+  camera's chunk results gathered in order before that camera's own
+  single-threaded tracklet-linking pass runs.
+
+**GPU**: worth splitting by algorithm, since the two detectors are not
+equally GPU-friendly. Dot detection's core operation (threshold a
+residual, find local blobs) is simple and local — plausibly portable to a
+GPU kernel (OpenCV's CUDA module accelerates thresholding but not
+`findContours` directly, so a real port likely means a custom connected-
+components or local-maxima kernel, not a drop-in `cv2.cuda` swap). ArUco
+detection (adaptive thresholding → contour finding → quad fitting →
+perspective correction → dictionary matching, all fairly branchy) is a
+worse GPU fit and has no standard turnkey GPU implementation to reach
+for — expect it to stay CPU-bound regardless. The more universally
+useful GPU win is likely **hardware-accelerated video decode** (NVDEC via
+ffmpeg) ahead of either detector — it helps both algorithms equally and
+doesn't require rewriting either one, and this development machine
+already has a CUDA toolkit installed, so it's a real option here, not a
+hypothetical. Worth a line item once profiling (above) shows how much of
+the ~8 min/camera is decode vs. CV work — if decode dominates, GPU decode
+alone could beat CPU parallelism on its own.
 
 ## 3. CLI-complete, GUI-minimal
 
@@ -106,7 +150,14 @@ way as pose keypoints," and they have different costs:
   assignment pick for this slot" (`tracking_obs_results`, or re-running
   `resolve_dot_assignment()` at review time) rather than raw
   `pose_observations` alone, since raw dot rows carry candidates, not
-  resolved markers.
+  resolved markers. This bucket also covers **manually placing a dot the
+  detector missed entirely** (Harri — e.g. too much motion blur for
+  `detect_blobs()` to find anything at all): writing a fresh value into an
+  empty slot and correcting a wrong value in an occupied one are the same
+  `pose_observation_edits` write, just starting from "nothing there"
+  instead of "something wrong there" — no separate mechanism needed, only
+  a UI affordance to click-and-place on empty space instead of dragging an
+  existing point.
 - **Relabel/add/remove raw candidates before assignment** ("this blob the
   detector found actually is `dot3`, don't discard it as noise") — a
   materially harder, separate feature: no fixed slot to drag, needs new UI
@@ -114,9 +165,26 @@ way as pose keypoints," and they have different costs:
   representation entirely. Valuable, but should be scoped as a follow-on
   after the merge bar, not blocking it.
 
-Recommend the first (resolved-slot editing) for the merge bar; note the
-second explicitly as future work in the same doc so it isn't silently
-dropped.
+Recommend the first (resolved-slot editing, including manual placement)
+for the merge bar; the second stays explicit future work so it isn't
+silently dropped. Harri confirms both are useful and this ordering is
+right.
+
+**Tracklet-assisted propagation** (Harri): when the user fixes one frame's
+assignment ("this is `dot3`"), and that frame's raw candidate carries a
+`tracklet_id`, the same label can be propagated automatically to every
+other candidate sharing that `tracklet_id` in the same camera — since a
+tracklet already represents one physically-continuous blob across a
+contiguous run of frames (per `DotTrackletLinker`), one correction could
+fix an entire mislabeled segment instead of one frame. Real value, but
+needs one safety check before it's trustworthy: tracklet linking can
+itself mis-link two different real dots into one tracklet (e.g. two
+streaks passing close together) — blindly propagating a label across the
+whole tracklet would then silently mislabel frames that were never
+actually the corrected dot. Recommend surfacing propagation as a
+previewed suggestion (highlight which frames/timerange would change,
+user confirms) rather than a silent blanket apply, at least until real
+usage shows mislinked tracklets are rare enough to trust by default.
 
 ### 3.3 Tracker config fields in the GUI
 
@@ -187,18 +255,41 @@ ground.
    subject and doesn't assume every subject has a comparable joint set.
    This is the schema/plumbing validation item from §1 condition 1 — do it
    as part of merge-bar work even though phase 3's UI/UX doesn't ship yet.
-2. **Grip anchor points**: the design doc calls for these as a new
+2. **Grip anchor points** — the design doc calls for these as a new
    concept (a marker or point on the object model representing "where a
-   hand grips it") distinct from ordinary markers — needs a schema/YAML
-   extension on the marker-body/skeleton side (where exactly grip points
-   live — a new marker role, or metadata on an existing one — is an open
-   question, not yet designed in detail).
+   hand grips it") distinct from ordinary markers. Harri's own pushback is
+   right: this needs real thinking and experimentation, not just a schema
+   field, because a grip isn't static — it can slide/change during
+   tracking (a two-handed regrip mid-swing), and the object itself can
+   leave one subject's coupling entirely (thrown, passed to a second
+   person, set down). Breaking that down:
+   - *Where a grip point lives in the data model* is still genuinely
+     open (a new marker role on the object, vs. metadata on an existing
+     marker) — no answer yet.
+   - *Whether the coupling itself needs to be dynamic* looks less novel
+     than it first appears, on a closer read of the existing code:
+     `update_contact_gate()` already re-evaluates the active contact set
+     every step from current FK marker positions, not from a fixed
+     binding decided once at init — so "gripped" vs. "not gripped" is
+     already a per-step gate, not a static relationship, which is the
+     right shape for a grip that changes or breaks. What that mechanism
+     has never been asked to handle is the two genuinely new cases a
+     prop introduces: **free flight** (thrown or set down — coupled to
+     *nobody* — does the object's own process model produce sane motion
+     with the grip constraint absent, or does it implicitly assume a
+     coupling always exists?) and **handoff ambiguity** (a brief window
+     where two subjects' grip gates could plausibly both be active, or
+     neither is, while the object changes hands). Both need real-data
+     experimentation against an actual throw/pass/regrip capture before
+     trusting the existing mechanism as "just reuse it."
 3. **Contact gating tuning for the prop case**: the existing contact-gate
    mechanism (`update_contact_gate()`) was built and tuned for
    person-person contact; whether its thresholds/timing generalize to a
    person-prop grip (very different contact geometry and duration
    profile — a held sword vs. a mutual grab) needs real-data tuning, not
-   just enabling the existing mechanism.
+   just enabling the existing mechanism. This is the same tuning work
+   point 2's free-flight/handoff cases will also need, not a separate
+   pass.
 4. **GUI**: `RunTrackerWidget`'s roster is hardcoded to `capture_persons`
    rows (`run_tracker.py`) — needs to accept an object row alongside
    person rows, or `ObjectRunTrackerDialog` needs to grow into (or be
@@ -280,6 +371,10 @@ each needs:**
    footage before this is used for anything stronger than a soft
    cost-relaxation term (never a hard reject).
 
+These two are a starting point, not the full answer — Harri expects other
+init signals will be needed too (not yet identified; add them here as
+they come up rather than treating this list as closed).
+
 **Re-initialization after full occlusion** (object leaves every camera's
 frame and returns) is a distinct, deeper problem this plan does not
 resolve: `Tracker::initialize()`/`initialize_with_fixed_root()` are
@@ -316,17 +411,47 @@ prop that stay in frame together).
    then the full authoring UI (marker-body definition/calibration,
    raw-candidate relabeling) before publishing the feature.
 
+**Parallel track, not sequenced against 1-4 above**: Harri already has
+real capture material for two future phases — (a) multiple objects with a
+person, (b) a person wearing markers to augment person tracking — and
+intends to start prototyping against both soon rather than waiting for
+the merge bar to close first. This doesn't conflict with the sequencing
+above: prototyping is investigative (following this project's own
+established "prototype script, never touching production code until
+validated" pattern), and for (a) specifically it's a natural way to
+actually perform the phase-3 mechanical-path validation §4 point 1 and
+condition 1 of the merge bar call for — real material, not synthetic,
+is a better validation than one built from scratch for the purpose. (b)
+is genuinely new ground this plan hasn't scoped at all (UC2, per
+`marker-mocap-design.md`'s own phasing — markers *on* a person rather
+than a standalone prop) and will need its own design pass once
+prototyping surfaces what it actually needs.
+
 ## 7. Open questions
 
 1. Where do "grip anchor points" live in the data model — a new marker
    role on the object's skeleton, or metadata attached to an existing
-   marker? Not designed yet (§4 point 2).
+   marker? Not designed yet (§4 point 2) — open to Harri too, not just
+   unresearched.
 2. Does the background-model computation in dot detection actually need
    its own full decode pass, or can it share the main pass (e.g. sample
    background frames lazily from the same decode loop rather than a
-   separate up-front pass)? Depends on §2's profiling result.
+   separate up-front pass)? Harri: the sampled frames likely need to
+   span a wide enough time range to be a representative background
+   (a handful of frames from early in the pass wouldn't be), which cuts
+   against simple lazy sharing — computing the background needs to have
+   *seen* the back of the range before any frame near the front can be
+   detected against it, so a true single-pass design has a real
+   chicken-and-egg problem, not just an implementation inconvenience.
+   Likely conclusion: keep two passes, but make the background pass
+   itself cheap (lower-resolution decode, or a coarser frame stride)
+   rather than try to eliminate it — still worth confirming against
+   §2's profiling result before committing to that.
 3. Should resolved-slot dot editing (§3.2) read from `tracking_obs_results`
    (requires a tracking run to already exist) or re-run
    `resolve_dot_assignment()` live at review time (works without a prior
    tracking run, but duplicates assignment logic into the review path)?
-   Needs a decision before building §3.2.
+   Related to the tracklet-propagation idea in §3.2 (both touch how much
+   assignment logic the review UI needs to know about) — needs real
+   experimentation against both approaches before deciding, not a desk
+   decision.

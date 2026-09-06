@@ -1,5 +1,113 @@
 # Marker-based mocap — status
 
+- **2026-09-06** — Dot detector improvements (background subtraction +
+  chroma filter + a real shape-classification bug fix) prototyped, iterated
+  with Harri against real footage, then integrated into production and
+  validated end-to-end on the real sword capture -- **91.4% tracked
+  (6057/6626)** vs. the prior best baseline's 83.5% (5526/6618), a real
+  +7.9pp production improvement, not just a promising-looking prototype.
+
+  **Investigation** (`python/tools/prototype_streak_detector.py`, never
+  touching production code until validated): continuing the 2026-09-05
+  finding that ArUco *and* dot detection both go completely dark for
+  ~400ms during the fastest part of a swing, checked whether a lower
+  brightness threshold could recover a dimmed streak -- it floods with the
+  room's own wall-texture noise long before any real signal emerges
+  cleanly. Background subtraction (per-camera median frame, subtract,
+  threshold the residual) works instead: it surfaces real streak signal a
+  fixed threshold misses, but also the swinger's own moving skin, a false
+  positive a **chroma (saturation) filter** cleanly rejects (dots are
+  white/near-neutral; skin isn't). A *third*, different false-positive
+  class survived both of those -- static residual leaks (light-fixture
+  flicker, high-contrast edges the background model doesn't fully cancel)
+  that pass every shape and chroma check but never move, unlike a real dot
+  on a swinging blade -- caught by a **tracklet/motion-consistency filter**
+  (nearest-neighbor linking + a minimum total displacement over a
+  minimum track length).
+
+  Two follow-up ideas Harri proposed were tested and came back **negative**,
+  worth recording so they aren't retried blind: **local contrast** (a
+  candidate's own brightness against a surrounding ring, on the
+  un-subtracted frame) doesn't discriminate real dots from the static-noise
+  class -- a light fixture is a genuinely strong local peak too, static or
+  not; only motion tells them apart. **Digital downsampling** (tried after
+  noticing one lower-resolution camera, pixel9, uniquely caught a streak
+  during the worst window) doesn't help either -- a resize just re-averages
+  already-dim captured pixels, it can't recover sensor sensitivity lost at
+  capture time. The likely real explanation for pixel9's own success:
+  retroreflective material throws its return preferentially back toward
+  the light source, so whichever camera sits closest to the illuminator's
+  own axis at a given blade orientation gets the strong hit -- angle-
+  dependent, not resolution-dependent, and not fixable in software (worth
+  remembering for future rig/light placement).
+
+  **Production integration (Phase A, built and validated this entry)**:
+  `dot_blob_detector.detect_blobs()` now shape-classifies (round vs. streak
+  vs. reject) *before* any area-based rejection -- the real bug: raw pixel
+  `contourArea` was checked unconditionally first, so a legitimately
+  dot-width streak whose area exceeds the round-dot-sized `max_area=400`
+  (area scales with length, not just width) was discarded before its shape
+  was ever considered, for round candidates too, not just streaks.
+  `max_streak_length_px` raised from an unvalidated 40px guess to a more
+  modest, evidence-based 60px (the only *confirmed* real streak found was
+  ~20-22px; several longer-looking candidates turned out to be skin or
+  noise on inspection, so this stays deliberately conservative). Background
+  subtraction (`background=`) and the chroma filter (`bgr=`/
+  `max_saturation=`) are new opt-in parameters on `detect_blobs()` itself
+  (`background=None`/`max_saturation=255.0` reproduce prior behavior
+  exactly) and wired into `MarkerDetectionPipeline` as
+  `dot_bg_subtract`/`dot_threshold`/`dot_max_saturation`/
+  `dot_bg_sample_count`, off by default so every existing/other capture is
+  unaffected until validated more broadly -- recorded into
+  `detection_runs.config_json["dot_detection"]` when used, the same
+  precedent already used for the ArUco side. No wire-format change in this
+  phase -- `BlobCandidate`'s existing 8 fields already cover it.
+
+  **Real-data validation**: fresh detection run
+  (`471dfa17-06a5-46e4-b71c-4516b6b4cf63`, ~49 minutes wall time for 6
+  cameras/47,729 frames -- background subtraction roughly doubles decode
+  for the 5 dot-enabled cameras, a real, accepted cost for an opt-in
+  feature) with `dot_bg_subtract=True, dot_threshold=60,
+  dot_max_saturation=45.0`, finalised to sequence
+  `72830564-8489-495c-81ec-93850e655ab4`, tracked with the same
+  streak-velocity + `outlier_threshold=20` config that produced the prior
+  83.5% baseline (`751aa5e3-...`) -- new run `648c76e0-0943-4572-bbf5-
+  48025b8ae8d2`, **91.4% (6057/6626)**. Sanity-checked before trusting it,
+  same two-sided check as every other tuning change this session: whole-run
+  reprojection error stayed essentially flat (median 7.95px -> 8.96px, p90
+  19.3px -> 21.0px, p99 and max both slightly *better*) despite inliers
+  growing 38,249 -> 46,107 (+21%) -- the outlier count also grew (39 ->
+  1,328) but proportionally to a much larger candidate pool (dot detection
+  now runs on 5 cameras instead of the original 2), not a quality
+  regression: the UKF's own outlier rejection scaling up to filter a bigger
+  pool is the mechanism working correctly, not contamination.
+
+  **Phase B (designed, not built this round)**: tracklet construction +
+  tracklet-aware assignment gating, so a candidate that's part of the same
+  moving tracklet as what resolved into a given (subject, camera, marker)
+  slot *last* frame can pass `resolve_dot_assignment()`'s gate more easily
+  than a genuinely new, unrelated candidate. Key design points, resolved
+  during planning: (1) the tracklet linker does **not** need to be causal --
+  this whole detection pipeline is an offline batch pass over already-
+  recorded video with the full frame sequence available before the tracker
+  ever runs, so it can look ahead across a camera's whole footage exactly
+  like `build_tracklets()` already does in the prototype, and exactly like
+  this project's own RTS smoother already does on the tracking side; (2)
+  the concrete gate-relaxation mechanism, confirmed against the real
+  `dot_assignment.cpp` cost-matrix code: rather than changing
+  `solve_assignment()`'s single global `gate_mahalanobis` scalar (a bigger,
+  more invasive change), divide a same-tracklet pair's own `mahal_sq` by a
+  new `dot_tracklet_gate_multiplier` before it goes into the cost matrix --
+  makes the *existing* gate implicitly looser for that one pairing only,
+  no `assignment.hpp` changes needed; (3) needs a 4th wire-format bump
+  (`float32[N,8]` -> `float32[N,9]`, adding `tracklet_id`) following the
+  established fail-loud-and-rerun convention, plus a new persistent
+  `prev_dot_tracklet_ids_` map in `Tracker` parallel to the existing
+  `prev_observations_`; (4) found in passing and worth fixing alongside it:
+  `dot_assignment_gate_mahalanobis` itself currently has **no DB wiring at
+  all** (TOML-only), so it isn't actually settable from a production
+  (DB-driven) `tracker_config` row today.
+
 - **2026-09-05** (even later still) — Multi-camera grid-video review of the
   sword capture (see the 2026-09-05 "later still" entry below for the
   render tool itself) surfaced two real findings, both from Harri's own

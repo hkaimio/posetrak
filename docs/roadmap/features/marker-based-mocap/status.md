@@ -1,5 +1,20 @@
 # Marker-based mocap — status
 
+- **2026-09-06** (later still) — Wrote
+  [marker-mocap-productization-plan.md](marker-mocap-productization-plan.md):
+  the merge-to-`main` bar (schema validated for multi-object/multi-person,
+  CLI-complete + GUI-minimal, detection performance in the few-minutes
+  range) plus a phase-3 (person+prop) design and an object-initialization
+  design (ArUco-anchored init stays primary; Cutie segmentation — reusing
+  the existing person-init infrastructure via manual click-seeding, no new
+  segmentation code needed — as a secondary init signal and as a new
+  dot-assignment cost-relaxation cue, mirroring `dot_tracklet_gate_multiplier`).
+  Grounded in a direct code read (not just design docs): `ObjectCropGridWidget`
+  only ever loads the `'markers'` (ArUco) source, never `'dots'`; no GUI
+  anywhere authors a `marker_body_definitions` row; `PersonSpec`/
+  `cross_person_*` look subject-kind-agnostic already (promising for phase
+  3) but have never actually been run with an object in the mix.
+
 - **2026-09-06** — Dot detector improvements (background subtraction +
   chroma filter + a real shape-classification bug fix) prototyped, iterated
   with Harri against real footage, then integrated into production and

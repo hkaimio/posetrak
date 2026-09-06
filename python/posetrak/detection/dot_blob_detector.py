@@ -107,6 +107,15 @@ class BlobCandidate:
     # streak axis exists to report.
     dir_x: float = 0.0
     dir_y: float = 0.0
+    # Per-camera tracklet id (2026-09-06, dot_tracklet.py) -- assigned by a
+    # separate, later linking pass over a whole camera's frame sequence, NOT
+    # by detect_blobs() itself (this is a per-frame function with no memory
+    # of earlier frames). -1 until that pass runs; every candidate that does
+    # get linked gets *some* id, including a length-1 "singleton" tracklet --
+    # detection no longer judges whether a candidate is real (that needs
+    # motion evidence this function doesn't have), only whether it looks
+    # like a dot in isolation. See dot_tracklet.py's own module docstring.
+    tracklet_id: int = -1
 
 
 def detect_blobs(

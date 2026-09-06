@@ -99,11 +99,11 @@ def _raw_dot_candidates(
         (sequence_id, camera_instance_id, video_frame),
     ).fetchone()
     if row is None:
-        return np.zeros((0, 8), dtype=np.float32)
+        return np.zeros((0, 9), dtype=np.float32)
     try:
         return decode_dot_candidates(bytes(row["kp_blob"]))
     except ValueError:
-        return np.zeros((0, 8), dtype=np.float32)
+        return np.zeros((0, 9), dtype=np.float32)
 
 
 def estimate(

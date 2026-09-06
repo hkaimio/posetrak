@@ -262,11 +262,11 @@ def test_dot_candidate_writer_round_trips_variable_candidate_counts(session):
 
     d0 = 2.0 * (12.5 / np.pi) ** 0.5
     d1 = 2.0 * (8.0 / np.pi) ** 0.5
-    assert candidates[0].shape == (2, 8)
-    assert np.allclose(candidates[0][0], [10.0, 20.0, 12.5, 0.9, d0, d0, 0.0, 0.0])
-    assert np.allclose(candidates[0][1], [30.0, 40.0, 8.0, 0.85, d1, d1, 0.0, 0.0])
+    assert candidates[0].shape == (2, 9)
+    assert np.allclose(candidates[0][0], [10.0, 20.0, 12.5, 0.9, d0, d0, 0.0, 0.0, -1.0])
+    assert np.allclose(candidates[0][1], [30.0, 40.0, 8.0, 0.85, d1, d1, 0.0, 0.0, -1.0])
 
-    assert candidates[1].shape == (0, 8)
+    assert candidates[1].shape == (0, 9)
 
 
 def test_dot_candidate_writer_uses_near_zero_noise_scale(session):
@@ -387,9 +387,29 @@ def test_pipeline_writes_dot_candidates_for_an_enabled_camera(session):
     candidates = read_dot_candidates_for_run(session, result.detection_run_id, ids["svid"])
     # Even frame: the drawn dot is detected. Odd frame: none seen, but the
     # frame was still processed -- an empty row, not a missing one.
-    assert candidates[0].shape == (1, 8)
+    assert candidates[0].shape == (1, 9)
     assert np.allclose(candidates[0][0, :2], [50.0, 60.0], atol=1.0)
-    assert candidates[1].shape == (0, 8)
+    assert candidates[1].shape == (0, 9)
+
+
+def test_pipeline_assigns_a_consistent_tracklet_id_to_a_stationary_dot(session):
+    """The same real dot detected on frame 0, 2, 4, ... (odd frames miss it
+    entirely -- see _synthetic_dot_frames) should keep the same tracklet_id
+    throughout -- a one-frame gap is well within DotTrackletLinker's own
+    default max_missed, so the track shouldn't age out between hits."""
+    ids = _TEST_IDS
+    with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_dot_frames):
+        pipeline = MarkerDetectionPipeline(
+            session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+            time_start_s=0.0, time_end_s=2.0, marker_ids=["3"],
+            detect_dots_for_cameras={ids["cam_id"]},
+        )
+        result = pipeline.run()
+
+    candidates = read_dot_candidates_for_run(session, result.detection_run_id, ids["svid"])
+    tracklet_ids = [candidates[f][0, 8] for f in range(0, 60, 2)]  # every even frame
+    assert len(set(tracklet_ids)) == 1
+    assert tracklet_ids[0] != -1
 
 
 def test_pipeline_writes_no_dot_candidates_when_camera_not_enabled(session):
@@ -453,7 +473,7 @@ def test_pipeline_bg_subtract_finds_a_dim_highlight_raw_threshold_misses(session
         )
         result_with = with_bg.run()
     candidates_with = read_dot_candidates_for_run(session, result_with.detection_run_id, ids["svid"])
-    assert candidates_with[104].shape == (1, 8)
+    assert candidates_with[104].shape == (1, 9)
     assert np.allclose(candidates_with[104][0, :2], [50.0, 60.0], atol=1.0)
 
     run_row = session.execute(

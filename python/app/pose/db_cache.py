@@ -449,22 +449,29 @@ DOT_REGION_TYPE = "dots"
 # detection error that doesn't apply here.
 _DOT_CROP_SCALE = 0.0
 
-# px, py, area, compactness, major_axis_px, minor_axis_px, dir_x, dir_y --
-# see encode_dot_candidates() for the blob layout these are packed into.
-_DOT_CANDIDATE_FLOATS = 8
+# px, py, area, compactness, major_axis_px, minor_axis_px, dir_x, dir_y,
+# tracklet_id -- see encode_dot_candidates() for the blob layout these are
+# packed into.
+_DOT_CANDIDATE_FLOATS = 9
 
 
 def encode_dot_candidates(candidates: list) -> bytes:
     """Encode one frame's dot_blob_detector.BlobCandidate list into the
     'dots' blob format: a little-endian int32 candidate count, followed by
-    float32[count, 8] (px, py, area, compactness, major_axis_px,
-    minor_axis_px, dir_x, dir_y). The major/minor axis pair
+    float32[count, 9] (px, py, area, compactness, major_axis_px,
+    minor_axis_px, dir_x, dir_y, tracklet_id). The major/minor axis pair
     `resolve_dot_assignment()` (dot_assignment.cpp) uses to inflate a
     motion-blur streak's measurement noise; dir_x/dir_y is the streak's own
     (canonicalized, direction-ambiguous) unit axis (dot_blob_detector.py's
     own docstring; status.md's 2026-09-04 and 2026-09-05 entries), feeding
     the streak-velocity design
-    (docs/roadmap/features/marker-based-mocap/streak-velocity-design.md).
+    (docs/roadmap/features/marker-based-mocap/streak-velocity-design.md);
+    tracklet_id (2026-09-06, dot_tracklet.py) is a per-camera frame-to-frame
+    identity `resolve_dot_assignment()` uses to relax its own assignment
+    gate for a candidate continuing an already-established track (status.md's
+    2026-09-06 Phase B entry) -- stored as a float (exact for any realistic
+    per-capture tracklet count, well under 2^24) to keep this one flat
+    float32 array rather than a mixed-type layout.
 
     Explicitly versioned via a leading count field, rather than inferring
     N from raw byte length the way the original float32[N,4] format did:
@@ -473,15 +480,16 @@ def encode_dot_candidates(candidates: list) -> bytes:
     length also land on an exact multiple of a new, wider stride, decoding
     as a different (wrong) N silently rather than failing loudly. A count
     prefix removes the ambiguity outright, at the cost of every earlier
-    format no longer being decodable -- this is now the third such width
-    (float32[N,4] originally, float32[N,6] from 2026-09-04, this
-    float32[N,8] from 2026-09-05); each bump has so far arrived exactly
-    when the one real detection run using the previous format needed
-    re-running anyway for an unrelated reason, so nothing real has yet been
-    lost by not migrating old blobs.
+    format no longer being decodable -- this is now the fourth such width
+    (float32[N,4] originally, float32[N,6] from 2026-09-04, float32[N,8]
+    from 2026-09-05, this float32[N,9] from 2026-09-06); each bump has so
+    far arrived exactly when the one real detection run using the previous
+    format needed re-running anyway for an unrelated reason, so nothing
+    real has yet been lost by not migrating old blobs.
     """
     arr = np.array(
-        [(c.cx, c.cy, c.area, c.compactness, c.major_axis_px, c.minor_axis_px, c.dir_x, c.dir_y)
+        [(c.cx, c.cy, c.area, c.compactness, c.major_axis_px, c.minor_axis_px,
+          c.dir_x, c.dir_y, c.tracklet_id)
          for c in candidates],
         dtype=np.float32,
     ).reshape(len(candidates), _DOT_CANDIDATE_FLOATS)
@@ -489,14 +497,14 @@ def encode_dot_candidates(candidates: list) -> bytes:
 
 
 def decode_dot_candidates(blob: bytes) -> np.ndarray:
-    """Decode a 'dots' blob (see encode_dot_candidates()) -> float32[N, 8]."""
+    """Decode a 'dots' blob (see encode_dot_candidates()) -> float32[N, 9]."""
     if len(blob) < 4:
         raise ValueError(f"dot candidate blob too short: {len(blob)} bytes")
     (n,) = struct.unpack_from("<i", blob, 0)
     expected_bytes = 4 + n * _DOT_CANDIDATE_FLOATS * 4
     if n < 0 or len(blob) != expected_bytes:
         raise ValueError(
-            f"dot candidate blob malformed, or written in an older (pre-2026-09-05) "
+            f"dot candidate blob malformed, or written in an older (pre-2026-09-06) "
             f"format: header says {n} candidates ({expected_bytes} "
             f"bytes expected), got {len(blob)} bytes -- re-run detection"
         )

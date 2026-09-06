@@ -55,6 +55,7 @@ from app.pose.db_cache import (
 from app.setup.db_context import SyncPoint, SyncTable
 from app.setup.fiducial_markers import ArucoDetector, MarkerRigConfig, MarkerRigDetector, load_marker_body_yaml
 from posetrak.detection.dot_blob_detector import compute_background, detect_blobs
+from posetrak.detection.dot_tracklet import DotTrackletLinker
 from posetrak.detection.frame_source import iter_frames
 from posetrak.db.manage_capture_object import get_capture_object
 
@@ -387,10 +388,12 @@ class MarkerDetectionPipeline:
         )
         dot_writer = None
         dot_background = None
+        dot_linker = None
         if cam.camera_instance_id in self._detect_dots_for_cameras:
             dot_writer = DotCandidateWriter(
                 self._session, detection_run_id=run_id, shot_video_id=cam.shot_video_id,
             )
+            dot_linker = DotTrackletLinker()
             if self._dot_bg_subtract:
                 dot_background = self._compute_dot_background(cam, first_frame, last_frame)
 
@@ -409,10 +412,12 @@ class MarkerDetectionPipeline:
 
                 if dot_writer is not None:
                     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                    dot_writer.add_frame(video_frame, detect_blobs(
+                    blobs = detect_blobs(
                         gray, threshold=self._dot_threshold, background=dot_background, bgr=img,
                         max_saturation=self._dot_max_saturation,
-                    ))
+                    )
+                    dot_linker.link_frame(blobs)
+                    dot_writer.add_frame(video_frame, blobs)
 
                 frames_done += 1
 

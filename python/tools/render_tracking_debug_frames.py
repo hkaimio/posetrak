@@ -327,17 +327,17 @@ def _nearest_state_row(
 def _raw_dot_candidates(
     conn: sqlite3.Connection, sequence_id: str, camera_instance_id: str, video_frame: int
 ) -> np.ndarray:
-    """Return float32[N,8] (px, py, area, compactness, major_axis_px,
-    minor_axis_px, dir_x, dir_y) -- see db_cache.decode_dot_candidates() --
-    for this camera's own frame, or an empty array if this run has no dot
-    source at all."""
+    """Return float32[N,9] (px, py, area, compactness, major_axis_px,
+    minor_axis_px, dir_x, dir_y, tracklet_id) -- see
+    db_cache.decode_dot_candidates() -- for this camera's own frame, or an
+    empty array if this run has no dot source at all."""
     row = conn.execute(
         "SELECT kp_blob FROM pose_observations WHERE sequence_id = ? "
         "AND camera_instance_id = ? AND source = 'dots' AND video_frame = ?",
         (sequence_id, camera_instance_id, video_frame),
     ).fetchone()
     if row is None:
-        return np.zeros((0, 8), dtype=np.float32)
+        return np.zeros((0, 9), dtype=np.float32)
     try:
         return decode_dot_candidates(bytes(row["kp_blob"]))
     except ValueError:
@@ -354,7 +354,7 @@ class _FrameData:
     def __init__(self) -> None:
         self.actual: dict[str, tuple[float, float, bool]] = {}   # name -> (x, y, is_outlier)
         self.predicted: dict[str, tuple[float, float]] = {}       # name -> (x, y), FK-projected
-        self.raw_dots: np.ndarray = np.zeros((0, 8), dtype=np.float32)
+        self.raw_dots: np.ndarray = np.zeros((0, 9), dtype=np.float32)
         self.status: str = ""
 
 
@@ -436,7 +436,7 @@ def _dot(img: np.ndarray, x: float, y: float, color, r: int) -> None:
 def _draw_overlay(img: np.ndarray, marker_names: list[str], fd: _FrameData) -> np.ndarray:
     out = img.copy()
 
-    for cx, cy, area, _compact, major, _minor, dir_x, dir_y in fd.raw_dots:
+    for cx, cy, area, _compact, major, _minor, dir_x, dir_y, _tracklet_id in fd.raw_dots:
         # Plain ring sized to the candidate's equivalent circular diameter.
         # No filled center: a solid gray dot disappears against a similarly
         # gray/textured background (concrete wall, mat); a ring stays

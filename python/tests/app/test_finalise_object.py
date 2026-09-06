@@ -219,11 +219,11 @@ def test_finalise_object_copies_dot_candidates_alongside_markers(session):
     assert all(r["person_id"] == 0 for r in dot_obs)
 
     blob0 = decode_dot_candidates(bytes(dot_obs[0]["kp_blob"]))
-    assert blob0.shape == (2, 8)
+    assert blob0.shape == (2, 9)
     assert np.allclose(blob0[:, :2], [[10.0, 20.0], [30.0, 40.0]])
 
     blob1 = decode_dot_candidates(bytes(dot_obs[1]["kp_blob"]))
-    assert blob1.shape == (0, 8)
+    assert blob1.shape == (0, 9)
 
     # No pose_sequence_keypoints entries for dots -- they're anonymous, not
     # named landmarks; the manifest stays exactly the coded-marker one.

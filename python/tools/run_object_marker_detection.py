@@ -48,6 +48,20 @@ def main() -> None:
                          "blob detection on (e.g. the ring-lit GoPros) -- resolved to "
                          "camera_instance_id internally. Omit to disable dot detection "
                          "entirely (coded-marker detection always runs for every camera).")
+    ap.add_argument("--dot-bg-subtract", action="store_true",
+                    help="Threshold the per-camera background-subtracted residual instead of "
+                         "raw brightness (recovers dim motion-blur streaks a fixed threshold "
+                         "misses). Only affects cameras named in --detect-dots-camera-label.")
+    ap.add_argument("--dot-threshold", type=int, default=235,
+                    help="Brightness threshold: raw pixel value if --dot-bg-subtract is off, "
+                         "residual value if it's on (default: %(default)s).")
+    ap.add_argument("--dot-max-saturation", type=float, default=255.0,
+                    help="Reject a candidate whose mean HSV saturation exceeds this (chroma "
+                         "filter -- real dots are near-neutral, skin isn't). 255.0 = off "
+                         "(default).")
+    ap.add_argument("--dot-bg-sample-count", type=int, default=40,
+                    help="Frames sampled to build each camera's background model when "
+                         "--dot-bg-subtract is on (default: %(default)s).")
     args = ap.parse_args()
 
     conn = sqlite3.connect(args.session)
@@ -69,6 +83,8 @@ def main() -> None:
         conn, args.capture_object_id, args.sync_config_id, args.time_start, args.time_end,
         min_marker_perimeter_rate=args.min_marker_perimeter_rate, frame_step=args.frame_step,
         detect_dots_for_cameras=detect_dots_for_cameras,
+        dot_bg_subtract=args.dot_bg_subtract, dot_threshold=args.dot_threshold,
+        dot_max_saturation=args.dot_max_saturation, dot_bg_sample_count=args.dot_bg_sample_count,
     )
     print(f"Cameras: {[c.label or c.camera_instance_id[:8] for c in pipeline.cameras]}")
 

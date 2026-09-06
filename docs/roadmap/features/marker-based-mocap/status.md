@@ -108,6 +108,66 @@
   all** (TOML-only), so it isn't actually settable from a production
   (DB-driven) `tracker_config` row today.
 
+- **2026-09-06** (later same day) — Phase B (tracklet-aware assignment gate
+  relaxation) built and validated end-to-end on the real sword capture.
+  Confirms the pattern from the original dot-detector prototype work: raw
+  detection recall alone wasn't the bottleneck once Phase A landed --
+  reviewing Phase A's own production tracking run showed "very few samples
+  accepted as inliers, especially during the interesting motions," matching
+  exactly what the prototype saw before tracklets were added there too.
+
+  **C++ side**: bumped the dot-candidate blob wire format to `float32[N,9]`
+  (adding `tracklet_id`, produced by the Python-side `DotTrackletLinker`,
+  Phase B's earlier Python-only commit); `resolve_dot_assignment()` now
+  divides a candidate's squared-Mahalanobis assignment cost by
+  `dot_tracklet_gate_multiplier` when its `tracklet_id` matches the one that
+  resolved into the same `(subject, camera, marker)` slot on the previous
+  frame (`Tracker::prev_dot_tracklet_ids()`, parallel to the existing
+  `prev_observations_`). `dot_assignment_gate_mahalanobis` (previously
+  TOML-only) and the new multiplier both got real DB columns this pass
+  (session schema v51->v52, registry v10->v11) -- the gap flagged in the
+  design entry above.
+
+  **Real-data validation**: fresh detection run on the sword capture (same
+  bg-subtract/chroma settings as the Phase A validation, tracklet linker now
+  live) -- `detection_run_id eae4abcd-2f0b-4990-a9aa-7cae46c6934b`,
+  finalised to sequence `ac055305-36ba-4da4-b4ce-33f9ee26982e`. Ran that
+  *same* sequence through tracking four times, varying only
+  `dot_tracklet_gate_multiplier` (cloned from the Phase A baseline config
+  `75299631-...`, `outlier_threshold=20` + streak velocity) -- confirming,
+  per Harri's question, that the multiplier can be swept without re-running
+  detection at all: `tracklet_id` lives in the detection-time blob,
+  the multiplier is purely a tracking-time `tracker_configs` field.
+
+  | `dot_tracklet_gate_multiplier` | tracked | dot median/p90/p99/max reproj. error |
+  |---|---|---|
+  | 1.0 (no relaxation, control) | 90.7% (6002/6617) | 8.97 / 20.64 / 36.52 / 144px |
+  | 2.0 | 93.3% (6172/6617) | 10.64 / 22.67 / 36.97 / 183px |
+  | **4.0** | **93.5% (6189/6617)** | 11.95 / 24.90 / 43.31 / 205px |
+  | 8.0 | 93.1% (6158/6617) | 12.07 / 25.24 / 45.97 / 204px |
+
+  4.0 is the best of this coarse sweep (8.0 is very slightly worse, so
+  higher isn't unconditionally better -- consistent with "relax only what
+  has independent identity evidence," not "widen the gate more"). The
+  control run's 90.7% closely reproduces Phase A's own 91.4% on the
+  original detection run, confirming the fresh run behaves consistently.
+  The real cost of the relaxation is visible in the error columns above --
+  more marginal correspondences now survive assignment, so the whole
+  distribution's error is measurably higher, not just its tail. Per this
+  project's own "never trust tracked% alone" precedent (an earlier gate
+  change made a known failure window worse while looking like a win),
+  checked real frames before accepting the number: extracted stills on
+  `gopro-11_mini_02` at the known 63.6-64.5s and 69.5-70.2s fast-swing
+  windows for the control vs. `mult=4.0` runs. At 69.6s the control
+  resolves *zero* dots (predicted markers just drift, candidates sit
+  unmatched nearby); `mult=4.0` correctly locks dot3/dot4/dot5/dot6 onto
+  the real, visible markers. At 64.2s, mid-swing, `mult=4.0` correctly
+  resolves `dot6` right at the moving blade tip -- the exact case this
+  feature was built for -- while the control only resolves the
+  slower-moving markers near the grip. No wrong-looking correspondence
+  found in any of the six checked frames. **Recommendation: `4.0`** for
+  this capture; not yet swept finer or validated on a second capture.
+
 - **2026-09-05** (even later still) — Multi-camera grid-video review of the
   sword capture (see the 2026-09-05 "later still" entry below for the
   render tool itself) surfaced two real findings, both from Harri's own

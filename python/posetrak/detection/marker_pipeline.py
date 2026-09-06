@@ -54,7 +54,7 @@ from app.pose.db_cache import (
 )
 from app.setup.db_context import SyncPoint, SyncTable
 from app.setup.fiducial_markers import ArucoDetector, MarkerRigConfig, MarkerRigDetector, load_marker_body_yaml
-from posetrak.detection.dot_blob_detector import detect_blobs
+from posetrak.detection.dot_blob_detector import compute_background, detect_blobs
 from posetrak.detection.frame_source import iter_frames
 from posetrak.db.manage_capture_object import get_capture_object
 
@@ -107,6 +107,10 @@ class MarkerDetectionPipeline:
         marker_body_definition_id: str | None = None,
         stop_event: threading.Event | None = None,
         detect_dots_for_cameras: set[str] | None = None,
+        dot_bg_subtract: bool = False,
+        dot_threshold: int = 235,
+        dot_max_saturation: float = 255.0,
+        dot_bg_sample_count: int = 40,
     ) -> None:
         """See the class docstring for the two ways to drive this pipeline.
 
@@ -120,6 +124,22 @@ class MarkerDetectionPipeline:
             GoPros used to validate this detector, not necessarily on every
             camera in the same capture) -- the caller decides which cameras
             actually have one, this pipeline doesn't guess from a label.
+        dot_bg_subtract, dot_threshold, dot_max_saturation, dot_bg_sample_count:
+            opt-in, off by default (2026-09-06, see dot_blob_detector.py's
+            own docstring for why) -- background-subtracted residual
+            detection plus a chroma (saturation) filter, validated on one
+            real fast-swing capture but not yet broadly enough to become the
+            default for every capture. dot_threshold defaults to
+            detect_blobs()'s own raw-brightness default (235) so passing
+            nothing changes nothing, but MUST be lowered (e.g. to somewhere
+            in the tens, not hundreds) when dot_bg_subtract=True -- it gates
+            the *residual* in that mode, a much smaller quantity than raw
+            brightness, and 235 is unreachable for any realistic residual.
+            When dot_bg_subtract is True, each dot-enabled camera gets one
+            extra full sequential decode pass (roughly doubling that
+            camera's decode time) to build its own median background frame
+            from dot_bg_sample_count frames spread across the camera's own
+            time range, before the real detection pass starts.
         """
         if rig_config is not None:
             if not rig_config.marker_corners:
@@ -150,6 +170,10 @@ class MarkerDetectionPipeline:
         self._marker_body_definition_id = marker_body_definition_id
         self._stop_event = stop_event or threading.Event()
         self._detect_dots_for_cameras = detect_dots_for_cameras or set()
+        self._dot_bg_subtract = dot_bg_subtract
+        self._dot_threshold = dot_threshold
+        self._dot_max_saturation = dot_max_saturation
+        self._dot_bg_sample_count = dot_bg_sample_count
         if rig_config is not None:
             self._detector = MarkerRigDetector(
                 rig_config, dictionary=dictionary, min_marker_perimeter_rate=min_marker_perimeter_rate,
@@ -174,6 +198,15 @@ class MarkerDetectionPipeline:
         on_progress: ProgressCallback | None = None,
         on_camera_done: Callable[[int, int], None] | None = None,
     ) -> MarkerPipelineResult:
+        dot_detection_config = None
+        if self._detect_dots_for_cameras:
+            dot_detection_config = {
+                "cameras": sorted(self._detect_dots_for_cameras),
+                "bg_subtract": self._dot_bg_subtract,
+                "threshold": self._dot_threshold,
+                "max_saturation": self._dot_max_saturation,
+                "bg_sample_count": self._dot_bg_sample_count,
+            }
         run_id = create_marker_detection_run(
             self._session,
             shot_id=self._shot_id,
@@ -187,6 +220,7 @@ class MarkerDetectionPipeline:
             trial_id=self._trial_id,
             capture_object_id=self._capture_object_id,
             marker_body_definition_id=self._marker_body_definition_id,
+            dot_detection_config=dot_detection_config,
         )
 
         result = MarkerPipelineResult(detection_run_id=run_id)
@@ -297,6 +331,40 @@ class MarkerDetectionPipeline:
         first = max(0, first)
         return first, last
 
+    def _compute_dot_background(
+        self, cam: MarkerCameraInfo, first_frame: int, last_frame: int,
+    ):
+        """Per-camera median background frame for `detect_blobs()`'s
+        `background` parameter (see dot_blob_detector.py's own docstring).
+
+        Decodes the camera's whole [first_frame, last_frame) range exactly
+        once, sequentially, keeping only every stride-th frame -- NOT one
+        `iter_frames()` call per sampled frame index. A fresh open-and-seek
+        per sampled frame was confirmed elsewhere in this project to make a
+        multi-camera render take far longer than a single sequential pass
+        over the same footage (see render_tracking_debug_frames.py's
+        `_sequential_frame_lookup()` docstring for that finding) -- the same
+        trap applies here, so this deliberately decodes (but discards) every
+        frame in between rather than seeking to each sample individually.
+        This doubles this camera's total decode time when dot_bg_subtract is
+        on (this pass, then the real one in `_process_camera`), the same
+        cost already noted in `__init__`'s docstring.
+        """
+        span = last_frame - first_frame
+        stride = max(1, span // self._dot_bg_sample_count)
+        frames = []
+        for video_frame, img in iter_frames(cam.file_path, first_frame, last_frame):
+            if (video_frame - first_frame) % stride == 0:
+                frames.append(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+        if not frames:
+            _log.warning(
+                "_compute_dot_background: %s -- no frames sampled, dot detection for this "
+                "camera will run without background subtraction",
+                cam.label or cam.camera_instance_id,
+            )
+            return None
+        return compute_background(frames)
+
     def _process_camera(
         self,
         run_id: str,
@@ -318,10 +386,13 @@ class MarkerDetectionPipeline:
             marker_ids=self._marker_ids,
         )
         dot_writer = None
+        dot_background = None
         if cam.camera_instance_id in self._detect_dots_for_cameras:
             dot_writer = DotCandidateWriter(
                 self._session, detection_run_id=run_id, shot_video_id=cam.shot_video_id,
             )
+            if self._dot_bg_subtract:
+                dot_background = self._compute_dot_background(cam, first_frame, last_frame)
 
         frames_done = 0
         try:
@@ -338,7 +409,10 @@ class MarkerDetectionPipeline:
 
                 if dot_writer is not None:
                     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                    dot_writer.add_frame(video_frame, detect_blobs(gray))
+                    dot_writer.add_frame(video_frame, detect_blobs(
+                        gray, threshold=self._dot_threshold, background=dot_background, bgr=img,
+                        max_saturation=self._dot_max_saturation,
+                    ))
 
                 frames_done += 1
 
@@ -367,6 +441,10 @@ def load_pipeline_for_capture_object(
     trial_id: str | None = None,
     stop_event: threading.Event | None = None,
     detect_dots_for_cameras: set[str] | None = None,
+    dot_bg_subtract: bool = False,
+    dot_threshold: int = 235,
+    dot_max_saturation: float = 255.0,
+    dot_bg_sample_count: int = 40,
 ) -> MarkerDetectionPipeline:
     """Build a ``MarkerDetectionPipeline`` for an existing ``capture_objects``
     row (design phase 1c) -- resolves its marker body definition, loads the
@@ -374,10 +452,12 @@ def load_pipeline_for_capture_object(
     mode. This is the path the GUI's run-detection dialog uses; sub-phase
     1a's plain constructor stays available for the standalone/scripted case.
 
-    detect_dots_for_cameras: forwarded to ``MarkerDetectionPipeline``
-        unchanged -- see its own docstring. The GUI's run-detection dialog
-        does not yet expose a way to set this (no UI wiring exists for it
-        yet); a caller building the pipeline directly can already use it.
+    detect_dots_for_cameras, dot_bg_subtract, dot_threshold,
+    dot_max_saturation, dot_bg_sample_count: forwarded to
+        ``MarkerDetectionPipeline`` unchanged -- see its own docstring. The
+        GUI's run-detection dialog does not yet expose a way to set any of
+        these (no UI wiring exists for it yet); a caller building the
+        pipeline directly can already use them.
 
     Raises
     ------
@@ -413,4 +493,8 @@ def load_pipeline_for_capture_object(
         marker_body_definition_id=body_id,
         stop_event=stop_event,
         detect_dots_for_cameras=detect_dots_for_cameras,
+        dot_bg_subtract=dot_bg_subtract,
+        dot_threshold=dot_threshold,
+        dot_max_saturation=dot_max_saturation,
+        dot_bg_sample_count=dot_bg_sample_count,
     )

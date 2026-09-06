@@ -412,6 +412,58 @@ def test_pipeline_writes_no_dot_candidates_when_camera_not_enabled(session):
     assert candidates == {}
 
 
+def _synthetic_dim_dot_frames(path, first_frame, last_frame):
+    """Dark background everywhere; a DIM dot (value=90, well below the
+    detector's default raw-brightness threshold of 235) drawn only in a
+    narrow frame window -- background sampling (spread across the whole
+    requested range, median of ~40 samples) mostly misses this window, so
+    the background frame stays close to plain background there, letting a
+    background-subtraction test tell "found via residual" apart from
+    "found via raw brightness" cleanly."""
+    for i in range(first_frame, last_frame):
+        frame = np.full((300, 300, 3), 20, dtype=np.uint8)
+        if 100 <= i < 110:
+            cv2.circle(frame, (50, 60), 6, (90, 90, 90), thickness=-1)
+        yield i, frame
+
+
+def test_pipeline_bg_subtract_finds_a_dim_highlight_raw_threshold_misses(session):
+    """dot_bg_subtract=True + a low dot_threshold recovers a dim highlight
+    that the default raw-brightness path (threshold=235) never sees at all
+    -- the real 2026-09-06 finding this pipeline wiring exists for."""
+    ids = _TEST_IDS
+    with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_dim_dot_frames):
+        without_bg = MarkerDetectionPipeline(
+            session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+            time_start_s=0.0, time_end_s=10.0, marker_ids=["3"],
+            detect_dots_for_cameras={ids["cam_id"]},
+        )
+        result_without = without_bg.run()
+    candidates_without = read_dot_candidates_for_run(
+        session, result_without.detection_run_id, ids["svid"]
+    )
+    assert all(c.shape[0] == 0 for c in candidates_without.values())
+
+    with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_dim_dot_frames):
+        with_bg = MarkerDetectionPipeline(
+            session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+            time_start_s=0.0, time_end_s=10.0, marker_ids=["3"],
+            detect_dots_for_cameras={ids["cam_id"]},
+            dot_bg_subtract=True, dot_threshold=40,
+        )
+        result_with = with_bg.run()
+    candidates_with = read_dot_candidates_for_run(session, result_with.detection_run_id, ids["svid"])
+    assert candidates_with[104].shape == (1, 8)
+    assert np.allclose(candidates_with[104][0, :2], [50.0, 60.0], atol=1.0)
+
+    run_row = session.execute(
+        "SELECT config_json FROM detection_runs WHERE id=?", (result_with.detection_run_id,)
+    ).fetchone()
+    dot_config = json.loads(run_row["config_json"])["dot_detection"]
+    assert dot_config["bg_subtract"] is True
+    assert dot_config["threshold"] == 40
+
+
 def test_pipeline_rejects_empty_marker_ids(session):
     ids = _TEST_IDS
     with pytest.raises(ValueError):

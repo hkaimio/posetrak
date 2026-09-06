@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 import pytest
 
-from posetrak.detection.dot_blob_detector import detect_blobs
+from posetrak.detection.dot_blob_detector import compute_background, detect_blobs
 
 
 def _blank_frame(size: int = 200, fill: int = 20) -> np.ndarray:
@@ -160,3 +160,78 @@ def test_detect_blobs_rejects_a_streak_too_long_to_be_realistic_blur() -> None:
     cv2.rectangle(frame, (20, 96), (180, 104), 250, thickness=-1)  # 160x8, dot-width but too long
 
     assert detect_blobs(frame) == []
+
+
+def test_detect_blobs_accepts_a_wide_area_streak_that_shape_alone_would_pass() -> None:
+    """The real 2026-09-06 bug: `area` used to be checked *before* shape, so
+    a legitimately dot-width streak whose raw pixel count happens to exceed
+    max_area=400 (its area scales with length, not just width) was
+    discarded before its shape was ever considered. This one is 55x8 --
+    area=440, over max_area, but a real streak by every shape criterion
+    (width in the round-dot range, length under max_streak_length_px)."""
+    frame = _blank_frame()
+    cv2.rectangle(frame, (60, 96), (115, 104), 250, thickness=-1)  # 55x8, area=440
+
+    blobs = detect_blobs(frame)
+
+    assert len(blobs) == 1
+    assert blobs[0].major_axis_px == pytest.approx(55.0, abs=2.0)
+    assert blobs[0].minor_axis_px == pytest.approx(8.0, abs=2.0)
+
+
+def test_detect_blobs_background_subtraction_finds_a_dim_moving_highlight() -> None:
+    """A streak dimmed by motion blur can fall below any fixed absolute
+    brightness threshold that also has to stay high enough to reject the
+    room's own bright static texture -- background subtraction thresholds
+    the *residual* (this frame minus the normal per-pixel background)
+    instead, which stays near zero for anything static regardless of how
+    low the threshold is set, so a real but dim highlight can be found."""
+    background = _blank_frame(fill=20)
+    frame = background.copy()
+    _draw_dot(frame, 100, 100, radius=6, value=90)  # dim: rejected by any threshold near 235
+
+    assert detect_blobs(frame, threshold=235) == []
+    assert detect_blobs(frame, threshold=235, background=background) == []  # residual ~70, still gated
+
+    blobs = detect_blobs(frame, threshold=50, background=background)
+    assert len(blobs) == 1
+    assert blobs[0].cx == pytest.approx(100.0, abs=1.0)
+
+
+def test_detect_blobs_background_subtraction_ignores_static_texture() -> None:
+    """The room's own static bright texture must NOT reappear as a false
+    detection just because background subtraction allows a much lower
+    threshold -- a pixel identical to its own background has ~zero
+    residual regardless of its absolute brightness."""
+    background = _blank_frame(fill=20)
+    background[40:60, 40:60] = 200  # a bright, but permanently-there, patch
+    frame = background.copy()  # nothing changed from the background this frame
+
+    assert detect_blobs(frame, threshold=10, background=background) == []
+
+
+def test_compute_background_is_the_per_pixel_median_of_the_samples() -> None:
+    frames = [_blank_frame(fill=v) for v in (10, 12, 200)]  # outlier shouldn't win
+    bg = compute_background(frames)
+    assert bg[0, 0] == 12
+
+
+def test_detect_blobs_max_saturation_rejects_a_skin_toned_highlight() -> None:
+    """A real reflective dot is white/near-neutral (low saturation); skin
+    in motion can also produce a bright, otherwise-dot-shaped residual --
+    max_saturation (with the original color frame) tells them apart by
+    color even when brightness/shape alone can't."""
+    bgr = np.full((200, 200, 3), 20, dtype=np.uint8)
+    skin_bgr = (90, 140, 220)  # a warm, saturated (skin-like) BGR color
+    white_bgr = (245, 245, 245)  # a near-neutral bright color
+    cv2.circle(bgr, (60, 60), 6, skin_bgr, thickness=-1)
+    cv2.circle(bgr, (140, 140), 6, white_bgr, thickness=-1)
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+    # Both clear a plain brightness threshold with no chroma check.
+    both = detect_blobs(gray, threshold=100)
+    assert len(both) == 2
+
+    filtered = detect_blobs(gray, threshold=100, bgr=bgr, max_saturation=60.0)
+    assert len(filtered) == 1
+    assert filtered[0].cx == pytest.approx(140.0, abs=1.0)

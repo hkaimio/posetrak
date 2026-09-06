@@ -44,6 +44,37 @@ fixed half-plane (dy >= 0, or dx >= 0 when dy == 0) rather than left
 arbitrary; resolving the resulting 180-degree sign ambiguity against a
 predicted velocity is left to the consumer. (0.0, 0.0) for a round dot,
 where no streak axis exists.
+
+Shape-before-area ordering fix + background subtraction + chroma filter
+(2026-09-06, ported from python/tools/prototype_streak_detector.py after a
+real investigation on a fast sword-swing capture -- see status.md's
+2026-09-06 entries for the full account): the shape (compactness/axes)
+computation used to run *after* an unconditional `area` bound, so a long,
+thin motion-blur streak whose raw pixel area exceeds the round-dot-sized
+`max_area` got discarded before its width was ever checked -- exactly the
+fastest, most violent swing instants this detector exists to help with
+most. Area is now only ever checked *within* each shape branch (round:
+`min_area <= area <= max_area`; streak: judged by width/length instead,
+independent of area) so a real streak's raw pixel count can no longer
+disqualify it before its shape is considered.
+
+Checking real detection data (not just contours) during that same
+investigation found something more fundamental first, though: during the
+most violent ~400ms of a real swing, every active camera showed a
+universal detection blackout -- a fixed absolute-brightness `threshold`
+simply never sees a streak dim enough (its light spread over more pixels).
+`background` (a per-camera median frame) enables residual-based detection
+instead: threshold how much brighter this frame is than *normal* at each
+pixel, which stays near zero for the room's own static texture/lighting
+regardless of how low `threshold` is set, so a real but dim streak can be
+found without flooding on scene texture. This alone also picks up the
+performer's own moving skin, a real false-positive class a fixed
+brightness threshold doesn't encounter -- `max_saturation` (needs `bgr`,
+the original color frame) rejects a candidate whose own color is skin-like
+rather than the white/near-neutral retroreflective material a real dot is.
+Both are opt-in (`background=None`, `max_saturation=255.0` by default) so
+a caller that doesn't pass them gets exactly today's brightness-threshold
+behavior, aside from the ordering fix above.
 """
 from __future__ import annotations
 
@@ -85,7 +116,10 @@ def detect_blobs(
     min_area: float = 4.0,
     max_area: float = 400.0,
     min_compactness: float = 0.5,
-    max_streak_length_px: float = 40.0,
+    max_streak_length_px: float = 60.0,
+    background: np.ndarray | None = None,
+    bgr: np.ndarray | None = None,
+    max_saturation: float = 255.0,
 ) -> list[BlobCandidate]:
     """Detect anonymous reflective-dot candidates in a grayscale frame.
 
@@ -98,36 +132,81 @@ def detect_blobs(
         Detector tuning -- see the module docstring for why the defaults
         aren't starting points to retune without a reason.
     max_streak_length_px:
-        Cap on a motion-blur streak's length (see module docstring) -- a
-        first cut, not yet validated against real footage.
+        Cap on a motion-blur streak's length (see module docstring). Raised
+        2026-09-06 from an initial, unvalidated 40px guess to 60px -- a
+        deliberately modest bump: the only *confirmed* real dot streak found
+        during that investigation (a sword-swing capture, background-
+        subtracted detection, checked frame-by-frame against the actual
+        video) was ~20-22px long; several longer candidates (70-170px) that
+        looked plausible in isolation turned out on inspection to be the
+        performer's own moving skin or ambiguous noise, not markers. Still a
+        first cut -- land on a capture-specific number the way every other
+        default here was validated rather than assume this one transfers
+        as-is, and don't raise it further without a similarly-confirmed
+        real example backing the new value.
+    background:
+        Per-camera median background frame (see `compute_background()` and
+        the module docstring's "background subtraction" section), same
+        shape/dtype as `gray`. When given, `threshold` gates the positive
+        residual (`gray` minus `background`) instead of raw brightness --
+        `cv2.subtract()` clips negative results to 0, so a pixel that got
+        *darker* than usual (e.g. occluded by the performer's own body)
+        never triggers detection, which is the right direction: that's not
+        a highlight. None (default) reproduces today's plain brightness
+        thresholding exactly.
+    bgr:
+        The original color frame (same frame `gray` was derived from,
+        before grayscale conversion), needed only for the `max_saturation`
+        chroma check below. None (default) disables that check regardless
+        of `max_saturation`.
+    max_saturation:
+        Reject an otherwise-accepted candidate whose mean HSV saturation
+        (0-255) exceeds this -- a real retroreflective dot is white/
+        near-neutral; skin in motion produces its own bright residual that
+        clears every shape check but is not one of our markers. 255.0
+        (default) disables this check. Requires `bgr`.
     """
-    _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+    mask_input = cv2.subtract(gray, background) if background is not None else gray
+    _, mask = cv2.threshold(mask_input, threshold, 255, cv2.THRESH_BINARY)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     min_diameter = 2.0 * np.sqrt(min_area / np.pi)
     max_diameter = 2.0 * np.sqrt(max_area / np.pi)
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV) if bgr is not None and max_saturation < 255.0 else None
     out = []
     for c in contours:
         area = cv2.contourArea(c)
-        if area < min_area or area > max_area:
+        if area < 1.0:
             continue
         perimeter = cv2.arcLength(c, True)
         if perimeter <= 0:
             continue
         compactness = 4 * np.pi * area / (perimeter * perimeter)
-        equiv_diameter = 2.0 * np.sqrt(area / np.pi)
-        major_axis_px = minor_axis_px = equiv_diameter
+        rect = cv2.minAreaRect(c)
+        rw, rh = rect[1]
+        rect_major, rect_minor = max(rw, rh), min(rw, rh)
+
+        # Shape-classify BEFORE any area-based rejection (2026-09-06 fix, see module
+        # docstring): a long, thin streak's raw pixel area scales with its length, so
+        # bounding it by the round-dot-sized max_area conflates "long" with "big" --
+        # area only ever gates the round-dot path below, never the streak path.
         dir_x = dir_y = 0.0
-        if compactness < min_compactness:
-            rect = cv2.minAreaRect(c)
-            (rw, rh) = rect[1]
-            major_axis_px, minor_axis_px = max(rw, rh), min(rw, rh)
-            is_streak = (
-                min_diameter <= minor_axis_px <= max_diameter
-                and major_axis_px <= max_streak_length_px
-            )
-            if not is_streak:
-                continue
+        if compactness >= min_compactness and min_area <= area <= max_area:
+            equiv_diameter = 2.0 * np.sqrt(area / np.pi)
+            major_axis_px = minor_axis_px = equiv_diameter
+        elif min_diameter <= rect_minor <= max_diameter and rect_major <= max_streak_length_px:
+            major_axis_px, minor_axis_px = rect_major, rect_minor
             dir_x, dir_y = _streak_direction(rect)
+        else:
+            continue
+
+        if hsv is not None and max_saturation < 255.0:
+            x, y, w, h = cv2.boundingRect(c)
+            local_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.drawContours(local_mask, [c - [x, y]], -1, 255, thickness=cv2.FILLED)
+            sel = local_mask == 255
+            if sel.any() and float(hsv[y:y + h, x:x + w, 1][sel].mean()) > max_saturation:
+                continue
+
         m = cv2.moments(c)
         if m["m00"] == 0:
             continue
@@ -136,6 +215,21 @@ def detect_blobs(
         out.append(BlobCandidate(cx, cy, area, compactness, (x, y, w, h),
                                   major_axis_px, minor_axis_px, dir_x, dir_y))
     return out
+
+
+def compute_background(
+    frames: list[np.ndarray],
+) -> np.ndarray:
+    """Per-camera median background frame from a list of sampled grayscale
+    frames -- pass `detect_blobs()`'s own `background` parameter. Sample
+    across a whole camera's frame range (not just the moments being
+    investigated), so a transiently-passing performer/sword gets outvoted
+    by the many samples where a given pixel is genuinely empty background.
+    Median (not mean): robust to the object actually being at a given pixel
+    in a minority of the samples, the standard reason a median is preferred
+    for background estimation.
+    """
+    return np.median(np.stack(frames, axis=0), axis=0).astype(np.uint8)
 
 
 def _streak_direction(rect: tuple) -> tuple[float, float]:

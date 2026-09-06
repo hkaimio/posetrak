@@ -98,6 +98,7 @@ def create_marker_detection_run(
     trial_id: str | None = None,
     capture_object_id: str | None = None,
     marker_body_definition_id: str | None = None,
+    dot_detection_config: dict | None = None,
 ) -> str:
     """Create a detection_runs row for an ArUco marker detection pass.
 
@@ -123,6 +124,13 @@ def create_marker_detection_run(
     definition (e.g. two physically-identical props in one capture),
     mirroring why `tracking_run_persons.capture_object_id` (design §4.2)
     is an explicit column rather than left as convention.
+
+    `dot_detection_config`, when given, is recorded verbatim under
+    `config_json["dot_detection"]` -- whatever dot-detection settings
+    (`MarkerDetectionPipeline`'s `dot_bg_subtract`/`dot_max_saturation`/
+    `dot_bg_sample_count`, 2026-09-06) were actually used for this run,
+    purely for later inspection/reproducibility, the same way every other
+    detector setting above is recorded.
     """
     config = {
         "dictionary": dictionary,
@@ -134,6 +142,11 @@ def create_marker_detection_run(
         config["marker_body_definition_id"] = marker_body_definition_id
     if capture_object_id is not None:
         config["capture_object_id"] = capture_object_id
+    if dot_detection_config is not None:
+        # Recorded here (not a separate table) for the same reason every other
+        # detector setting above is -- so a run can be inspected/reproduced later.
+        # See dot_blob_detector.py's docstring for what these settings mean.
+        config["dot_detection"] = dot_detection_config
     run_id = create_detection_run(
         session,
         shot_id=shot_id,

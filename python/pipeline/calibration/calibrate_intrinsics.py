@@ -753,6 +753,37 @@ def process_images_for_charuco(
     return results
 
 
+def _charuco_object_image_points(
+    all_corners: List[np.ndarray],
+    all_ids: List[np.ndarray],
+    board,
+) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    """Extract per-view 3D object / 2D image point correspondences from ChArUco
+    detections.
+
+    OpenCV 4.9+ removed `cv2.aruco.calibrateCameraCharuco()` (and the older
+    ChArUco free-function API generally) in favor of `Board.matchImagePoints()`
+    plus the plain `cv2.calibrateCamera()`/`cv2.fisheye.calibrate()` -- this is
+    the shared extraction step both calibration paths below need.
+    """
+    object_points: List[np.ndarray] = []
+    image_points: List[np.ndarray] = []
+    for corners, ids in zip(all_corners, all_ids):
+        try:
+            # OpenCV 4.7+ Board.matchImagePoints
+            obj_pts, img_pts = board.matchImagePoints(corners, ids)
+        except AttributeError:
+            # Older API: index chessboardCorners by detected id
+            flat_ids = ids.flatten()
+            obj_pts = board.chessboardCorners[flat_ids]          # (N, 3)
+            img_pts = corners.reshape(-1, 2)                      # (N, 2)
+        if obj_pts is None or len(obj_pts) < 4:
+            continue
+        object_points.append(obj_pts.reshape(-1, 3).astype(np.float64))
+        image_points.append(img_pts.reshape(-1, 2).astype(np.float64))
+    return object_points, image_points
+
+
 def calibrate_camera_charuco(
     all_corners: List[np.ndarray],
     all_ids: List[np.ndarray],
@@ -778,21 +809,7 @@ def calibrate_camera_charuco(
     if use_fisheye:
         # cv2.aruco.calibrateCameraCharuco doesn't support fisheye, so we extract
         # the 3D-2D correspondences manually and call cv2.fisheye.calibrate directly.
-        object_points: List[np.ndarray] = []
-        image_points: List[np.ndarray] = []
-        for corners, ids in zip(all_corners, all_ids):
-            try:
-                # OpenCV 4.7+ Board.matchImagePoints
-                obj_pts, img_pts = board.matchImagePoints(corners, ids)
-            except AttributeError:
-                # Older API: index chessboardCorners by detected id
-                flat_ids = ids.flatten()
-                obj_pts = board.chessboardCorners[flat_ids]          # (N, 3)
-                img_pts = corners.reshape(-1, 2)                      # (N, 2)
-            if obj_pts is None or len(obj_pts) < 4:
-                continue
-            object_points.append(obj_pts.reshape(-1, 3).astype(np.float64))
-            image_points.append(img_pts.reshape(-1, 2).astype(np.float64))
+        object_points, image_points = _charuco_object_image_points(all_corners, all_ids, board)
 
         if not object_points:
             raise RuntimeError("No valid ChArUco frames for fisheye calibration.")
@@ -887,8 +904,18 @@ def calibrate_camera_charuco(
         log(f"ChArUco fisheye calibration done: RMS error = {ret:.3f} px")
         return result, UndistortionMaps(mapx=mapx, mapy=mapy)
 
-    ret, K, dist, rvecs, tvecs = cv2.aruco.calibrateCameraCharuco(
-        all_corners, all_ids, board, image_size, None, None
+    # cv2.aruco.calibrateCameraCharuco() was removed in OpenCV 4.9+ (the whole
+    # ChArUco free-function API was replaced by CharucoDetector/matchImagePoints)
+    # -- extract correspondences the same way the fisheye branch above does, then
+    # calibrate with the plain (non-aruco-specific) cv2.calibrateCamera().
+    object_points, image_points = _charuco_object_image_points(all_corners, all_ids, board)
+    if not object_points:
+        raise RuntimeError("No valid ChArUco frames for calibration.")
+    obj_pts = [p.reshape(-1, 1, 3).astype(np.float32) for p in object_points]
+    img_pts = [p.reshape(-1, 1, 2).astype(np.float32) for p in image_points]
+
+    ret, K, dist, rvecs, tvecs = cv2.calibrateCamera(
+        obj_pts, img_pts, image_size, None, None
     )
 
     K_new, _ = cv2.getOptimalNewCameraMatrix(K, dist, image_size, 0, image_size)

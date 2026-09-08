@@ -1,5 +1,37 @@
 # Marker-based mocap — status
 
+- **2026-09-08** (later still) — Added `MarkerDetectionPipeline.run_parallel()`:
+  camera-level parallelism via `ProcessPoolExecutor`, one process per camera,
+  per the productization plan's own "profile before parallelizing, cameras
+  are the natural first axis" guidance (§2). Profiled first, on a real
+  camera: ArUco detection (~35ms/frame) is actually the single biggest
+  per-frame cost, ahead of video decode (~26ms/frame) and dot detection
+  (~13ms/frame) -- both genuinely per-camera-independent CPU work, exactly
+  what this parallelizes. Frame-chunk parallelism *within* one camera (the
+  plan's harder, second axis -- `DotTrackletLinker` is inherently
+  sequential) was deliberately not built this pass: with 6 cameras on a
+  24-core machine there's real headroom left on the table, but building
+  the more invasive axis speculatively, before measuring whether the
+  simpler one is actually insufficient, isn't worth it yet.
+
+  Real-data validation (not just the synthetic pipeline tests): an 8s/6-
+  camera window that took 456.5s sequentially took 163.0s with
+  `run_parallel()` -- a real 2.8x, not the full 6x camera-count ceiling,
+  most likely disk I/O contention decoding six separate 4K files
+  concurrently off one drive (a bottleneck already documented elsewhere in
+  this project) rather than CPU contention. Confirmed identical output
+  between the two runs (`frames_processed`, `detection_keypoints` row
+  counts for both region types all matched exactly).
+
+  Two real trade-offs against `run()`, both because a worker process can't
+  share the pipeline instance's live state: no live cancellation
+  (`stop_event` doesn't cross a process boundary) and coarser, per-camera-
+  not-per-frame progress reporting. Requires a file-backed session (each
+  worker opens its own connection to the same file; WAL mode -- already
+  set once by `create_session`, persisted in the file itself -- plus a
+  per-connection `busy_timeout` lets concurrent writers retry briefly on
+  lock contention instead of failing immediately).
+
 - **2026-09-08** (later) — Ported `background_mode='blacklist'` into
   production (`dot_blob_detector.detect_blobs()`, `MarkerDetectionPipeline`,
   `run_standalone_marker_detection.py`), following up the same day's earlier

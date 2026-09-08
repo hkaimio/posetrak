@@ -73,6 +73,13 @@ def main() -> None:
     ap.add_argument("--dot-blacklist-radius-px", type=int, default=6)
     ap.add_argument("--dot-max-saturation", type=float, default=255.0)
     ap.add_argument("--dot-bg-sample-count", type=int, default=40)
+    ap.add_argument("--parallel", action="store_true",
+                     help="Run cameras concurrently (MarkerDetectionPipeline.run_parallel(), one "
+                          "process per camera) instead of sequentially. No live Ctrl-C-style "
+                          "cancellation and coarser (per-camera, not per-frame) progress in this "
+                          "mode -- see run_parallel()'s own docstring.")
+    ap.add_argument("--max-workers", type=int, default=None,
+                     help="--parallel only: worker process cap (default: one per camera).")
     args = ap.parse_args()
 
     conn = sqlite3.connect(args.session)
@@ -125,7 +132,10 @@ def main() -> None:
     def on_camera_done(n_done, n_total):
         print(f"Camera {n_done}/{n_total} done", flush=True)
 
-    result = pipeline.run(on_progress=on_progress, on_camera_done=on_camera_done)
+    if args.parallel:
+        result = pipeline.run_parallel(max_workers=args.max_workers, on_camera_done=on_camera_done)
+    else:
+        result = pipeline.run(on_progress=on_progress, on_camera_done=on_camera_done)
     print(f"\ndetection_run_id: {result.detection_run_id}")
     print(f"status: {result.status}")
     print(f"cameras_processed: {result.cameras_processed}")

@@ -554,6 +554,42 @@ def test_pipeline_dot_threshold_by_camera_overrides_the_global_default(session):
     assert np.allclose(candidates[104][0, :2], [50.0, 60.0], atol=1.0)
 
 
+def test_run_parallel_matches_run_on_a_real_tiny_video_file(session, tmp_path):
+    """run_parallel() spawns a real subprocess (ProcessPoolExecutor, needed
+    to be picklable across Windows' spawn start method) -- unlike every
+    other test in this file, a mock.patch on iter_frames only patches this
+    *process's* copy of the module, not a freshly spawned worker's, so this
+    one needs a genuine small video file on disk rather than a patched
+    frame generator. Draws the same ArUco marker _render_marker_image()
+    already builds for the non-dot pipeline tests, confirming run_parallel()
+    finds it via a real subprocess exactly like run() does via the same
+    process."""
+    frame = _render_marker_image(3)
+    video_path = tmp_path / "tiny.mp4"
+    writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 30.0,
+                              (frame.shape[1], frame.shape[0]))
+    for _ in range(5):
+        writer.write(frame)
+    writer.release()
+
+    ids = _TEST_IDS
+    session.execute("UPDATE capture_videos SET file_path=? WHERE id=?", (str(video_path), ids["svid"]))
+    session.commit()
+
+    pipeline = MarkerDetectionPipeline(
+        session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+        time_start_s=0.0, time_end_s=10.0, marker_ids=["3"],
+    )
+    result = pipeline.run_parallel(max_workers=1)
+
+    assert result.status == "complete"
+    assert result.cameras_processed == [ids["cam_id"]]
+    assert result.frames_processed == 5
+    keypoints = read_marker_keypoints_for_run(session, result.detection_run_id, ids["svid"])
+    assert len(keypoints) == 5
+    assert any((kp[:, 2] > 0).any() for kp in keypoints.values())  # the marker was actually found
+
+
 def test_pipeline_rejects_empty_marker_ids(session):
     ids = _TEST_IDS
     with pytest.raises(ValueError):

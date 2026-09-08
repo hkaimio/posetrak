@@ -40,7 +40,9 @@ it proves fiddly" precedent, §5.3).
 from __future__ import annotations
 
 import logging
+import sqlite3
 import threading
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -81,6 +83,185 @@ class MarkerPipelineResult:
     cameras_processed: list[str] = field(default_factory=list)
     frames_processed: int = 0
     status: str = "complete"
+
+
+@dataclass
+class _DotDetectionConfig:
+    """Plain-data snapshot of MarkerDetectionPipeline's dot-detection
+    settings -- picklable, so a ProcessPoolExecutor worker (run_parallel(),
+    below) can carry it across the process boundary unchanged, unlike the
+    pipeline instance itself (holds a live sqlite3 connection and a
+    threading.Event, neither of which survive pickling)."""
+    threshold: int
+    threshold_by_camera: dict[str, int]
+    background_mode: str
+    blacklist_frac: float
+    blacklist_radius_px: int
+    max_saturation: float
+    bg_subtract: bool
+    bg_sample_count: int
+
+
+@dataclass
+class _DetectorSpec:
+    """Picklable recipe to reconstruct either coded-marker detector kind in
+    a fresh worker process -- see the class docstring's "Two ways to drive"
+    section for what each kind is. `rig_config` is None for the standalone
+    ArucoDetector kind."""
+    dictionary: str
+    min_marker_perimeter_rate: float | None
+    rig_config: MarkerRigConfig | None = None
+
+
+def _build_detector(spec: _DetectorSpec):
+    if spec.rig_config is not None:
+        return MarkerRigDetector(
+            spec.rig_config, dictionary=spec.dictionary, min_marker_perimeter_rate=spec.min_marker_perimeter_rate,
+        )
+    return ArucoDetector(dictionary=spec.dictionary, min_marker_perimeter_rate=spec.min_marker_perimeter_rate)
+
+
+def _compute_dot_background_for(file_path: str, first_frame: int, last_frame: int, bg_sample_count: int):
+    """Module-level twin of MarkerDetectionPipeline._compute_dot_background --
+    see that method's own docstring for the sequential-decode-not-per-sample-
+    seek reasoning. Free-standing (not a method) so a ProcessPoolExecutor
+    worker can call it without a pipeline instance."""
+    span = last_frame - first_frame
+    stride = max(1, span // bg_sample_count)
+    frames = []
+    for video_frame, img in iter_frames(file_path, first_frame, last_frame):
+        if (video_frame - first_frame) % stride == 0:
+            frames.append(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+    if not frames:
+        _log.warning("_compute_dot_background_for: %s -- no frames sampled, dot detection for "
+                     "this camera will run without a background", file_path)
+        return None
+    return compute_background(frames)
+
+
+def _process_camera_core(
+    conn,
+    detector,
+    run_id: str,
+    cam: "MarkerCameraInfo",
+    marker_ids: list[str],
+    frame_step: int,
+    stop_event: threading.Event,
+    detect_dots: bool,
+    dot_cfg: _DotDetectionConfig,
+    first_frame: int,
+    last_frame: int,
+    on_progress: ProgressCallback | None,
+) -> int:
+    """The actual per-camera decode+detect+write loop -- shared, unchanged
+    logic between MarkerDetectionPipeline._process_camera() (sequential,
+    one connection/detector reused across every camera) and run_parallel()'s
+    worker function (one fresh connection/detector per camera, run in its
+    own process). Takes every dependency as an explicit argument rather
+    than reading `self` so it works identically either way."""
+    total = max(1, (last_frame - first_frame + frame_step - 1) // frame_step)
+    _log.info(
+        "_process_camera_core: %s (%s)  file=%s  frames %d-%d (frame_step=%d)",
+        cam.label or cam.camera_instance_id, cam.camera_instance_id,
+        cam.file_path, first_frame, last_frame, frame_step,
+    )
+
+    writer = MarkerKeypointWriter(
+        conn, detection_run_id=run_id, shot_video_id=cam.shot_video_id, marker_ids=marker_ids,
+    )
+    dot_writer = None
+    dot_background = None
+    dot_linker = None
+    if detect_dots:
+        dot_writer = DotCandidateWriter(conn, detection_run_id=run_id, shot_video_id=cam.shot_video_id)
+        dot_linker = DotTrackletLinker()
+        # 'blacklist' mode needs a background image just as much as 'subtract' does
+        # (see detect_blobs()'s own docstring) -- gate on either, not bg_subtract
+        # alone, so choosing background_mode='blacklist' without separately setting
+        # bg_subtract=True doesn't silently run with background=None instead.
+        if dot_cfg.bg_subtract or dot_cfg.background_mode == "blacklist":
+            dot_background = _compute_dot_background_for(
+                cam.file_path, first_frame, last_frame, dot_cfg.bg_sample_count,
+            )
+
+    frames_done = 0
+    try:
+        for video_frame, img in iter_frames(cam.file_path, first_frame, last_frame):
+            if stop_event.is_set():
+                break
+            if (video_frame - first_frame) % frame_step != 0:
+                continue
+
+            detections = detector.detect(img, video_id=cam.camera_instance_id, frame_idx=video_frame)
+            writer.add_frame(video_frame, detections)
+
+            if dot_writer is not None:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                dot_threshold = dot_cfg.threshold_by_camera.get(cam.camera_instance_id, dot_cfg.threshold)
+                blobs = detect_blobs(
+                    gray, threshold=dot_threshold, background=dot_background,
+                    background_mode=dot_cfg.background_mode,
+                    blacklist_frac=dot_cfg.blacklist_frac,
+                    blacklist_radius_px=dot_cfg.blacklist_radius_px,
+                    bgr=img, max_saturation=dot_cfg.max_saturation,
+                )
+                dot_linker.link_frame(blobs)
+                dot_writer.add_frame(video_frame, blobs)
+
+            frames_done += 1
+
+            if on_progress:
+                on_progress(frames_done, total, cam.label or cam.camera_instance_id)
+    finally:
+        writer.finalise()
+        if dot_writer is not None:
+            dot_writer.finalise()
+
+    _log.info("_process_camera_core: %s done -- %d frames", cam.label or cam.camera_instance_id, frames_done)
+    return frames_done
+
+
+@dataclass
+class _CameraJob:
+    """Picklable unit of work for run_parallel()'s ProcessPoolExecutor --
+    everything _run_camera_job needs, carried across the process boundary
+    as plain data (no live connection, detector instance, or Event)."""
+    session_path: str
+    run_id: str
+    cam: "MarkerCameraInfo"
+    marker_ids: list[str]
+    frame_step: int
+    detector_spec: _DetectorSpec
+    detect_dots: bool
+    dot_cfg: _DotDetectionConfig
+    first_frame: int
+    last_frame: int
+
+
+def _run_camera_job(job: _CameraJob) -> tuple[str, int]:
+    """ProcessPoolExecutor worker entry point (must be module-level to be
+    picklable for Windows' spawn start method). Opens its own connection --
+    SQLite connections cannot cross a process boundary -- with a real
+    busy_timeout, since WAL mode (set once, persisted in the DB file itself
+    by create_session) allows concurrent writers but still briefly
+    serializes actual commits; the default 0 timeout would surface that as
+    an immediate "database is locked" error instead of a short, harmless
+    wait. No live stop_event or per-frame on_progress here -- see
+    run_parallel()'s own docstring for why those don't cross the boundary
+    in this first version."""
+    conn = sqlite3.connect(job.session_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
+    detector = _build_detector(job.detector_spec)
+    try:
+        frames_done = _process_camera_core(
+            conn, detector, job.run_id, job.cam, job.marker_ids, job.frame_step,
+            threading.Event(), job.detect_dots, job.dot_cfg, job.first_frame, job.last_frame,
+            on_progress=None,
+        )
+    finally:
+        conn.close()
+    return job.cam.camera_instance_id, frames_done
 
 
 class MarkerDetectionPipeline:
@@ -368,39 +549,36 @@ class MarkerDetectionPipeline:
         first = max(0, first)
         return first, last
 
-    def _compute_dot_background(
-        self, cam: MarkerCameraInfo, first_frame: int, last_frame: int,
-    ):
-        """Per-camera median background frame for `detect_blobs()`'s
-        `background` parameter (see dot_blob_detector.py's own docstring).
+    def _dot_config(self) -> _DotDetectionConfig:
+        return _DotDetectionConfig(
+            threshold=self._dot_threshold,
+            threshold_by_camera=self._dot_threshold_by_camera,
+            background_mode=self._dot_background_mode,
+            blacklist_frac=self._dot_blacklist_frac,
+            blacklist_radius_px=self._dot_blacklist_radius_px,
+            max_saturation=self._dot_max_saturation,
+            bg_subtract=self._dot_bg_subtract,
+            bg_sample_count=self._dot_bg_sample_count,
+        )
 
-        Decodes the camera's whole [first_frame, last_frame) range exactly
-        once, sequentially, keeping only every stride-th frame -- NOT one
-        `iter_frames()` call per sampled frame index. A fresh open-and-seek
-        per sampled frame was confirmed elsewhere in this project to make a
-        multi-camera render take far longer than a single sequential pass
-        over the same footage (see render_tracking_debug_frames.py's
-        `_sequential_frame_lookup()` docstring for that finding) -- the same
-        trap applies here, so this deliberately decodes (but discards) every
-        frame in between rather than seeking to each sample individually.
-        This doubles this camera's total decode time when dot_bg_subtract is
-        on (this pass, then the real one in `_process_camera`), the same
-        cost already noted in `__init__`'s docstring.
-        """
-        span = last_frame - first_frame
-        stride = max(1, span // self._dot_bg_sample_count)
-        frames = []
-        for video_frame, img in iter_frames(cam.file_path, first_frame, last_frame):
-            if (video_frame - first_frame) % stride == 0:
-                frames.append(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
-        if not frames:
-            _log.warning(
-                "_compute_dot_background: %s -- no frames sampled, dot detection for this "
-                "camera will run without background subtraction",
-                cam.label or cam.camera_instance_id,
+    def _detector_spec(self) -> _DetectorSpec:
+        rig_config = self._detector.config if isinstance(self._detector, MarkerRigDetector) else None
+        return _DetectorSpec(
+            dictionary=self._dictionary, min_marker_perimeter_rate=self._min_marker_perimeter_rate,
+            rig_config=rig_config,
+        )
+
+    def _resolve_session_path(self) -> str:
+        """The DB file backing `self._session`, needed because a
+        ProcessPoolExecutor worker can't share this connection across a
+        process boundary and must open its own (run_parallel())."""
+        row = self._session.execute("PRAGMA database_list").fetchone()
+        if row is None or not row[2]:
+            raise RuntimeError(
+                "run_parallel() needs a file-backed session (an in-memory or unnamed DB has no "
+                "path a worker process could reopen) -- use run() instead for such a session"
             )
-            return None
-        return compute_background(frames)
+        return row[2]
 
     def _process_camera(
         self,
@@ -409,74 +587,110 @@ class MarkerDetectionPipeline:
         on_progress: ProgressCallback | None,
     ) -> int:
         first_frame, last_frame = self._frame_range(cam)
-        total = max(1, (last_frame - first_frame + self._frame_step - 1) // self._frame_step)
-        _log.info(
-            "_process_camera: %s (%s)  file=%s  frames %d-%d (frame_step=%d)",
-            cam.label or cam.camera_instance_id, cam.camera_instance_id,
-            cam.file_path, first_frame, last_frame, self._frame_step,
+        return _process_camera_core(
+            self._session, self._detector, run_id, cam, self._marker_ids, self._frame_step,
+            self._stop_event, cam.camera_instance_id in self._detect_dots_for_cameras,
+            self._dot_config(), first_frame, last_frame, on_progress,
         )
 
-        writer = MarkerKeypointWriter(
+    def run_parallel(
+        self,
+        max_workers: int | None = None,
+        on_camera_done: Callable[[int, int], None] | None = None,
+    ) -> MarkerPipelineResult:
+        """Camera-level parallel variant of run() -- one process per camera
+        via ProcessPoolExecutor, cameras being the natural parallel unit
+        (each already has its own decoder, background model, and tracklet
+        linker state; see marker-mocap-productization-plan.md §2). Ceiling
+        is max(per-camera time) rather than sum(per-camera time) -- ~Nx on
+        an N-camera capture, up to however many the machine can run at once.
+
+        Profiled 2026-09-08 on a representative camera (status.md): ArUco
+        detection (~35ms/frame) and video decode (~26ms/frame) are the two
+        real costs, both genuinely per-camera-independent CPU work -- the
+        thing this parallelizes. A single camera's own frame sequence is
+        NOT parallelized here (DotTrackletLinker.link_frame() is inherently
+        sequential -- each frame's linking depends on the previous frame's
+        still-open tracklets), so a capture with fewer cameras than
+        available cores still leaves some idle; see the plan doc's own
+        "within a camera, across frames" section for that harder, not-yet-
+        built axis, worth reaching for only if this ceiling isn't enough in
+        practice, not speculatively.
+
+        Two real trade-offs against run(), both because a worker process
+        can't share this instance's live state:
+        - No live cancellation -- self._stop_event's a threading.Event,
+          meaningless across a process boundary, so a run already
+          submitted to the pool runs to completion regardless.
+        - No per-frame progress -- on_progress doesn't cross process
+          boundaries cheaply, so this reports per-CAMERA completion only
+          (on_camera_done), not the finer-grained on_progress run() offers.
+
+        Requires a file-backed session (see _resolve_session_path()) --
+        each worker opens its own connection to the same file (WAL mode,
+        set once by create_session and persisted in the file itself, plus
+        a per-connection busy_timeout here, so concurrent writers retry
+        briefly on lock contention rather than failing immediately).
+        """
+        session_path = self._resolve_session_path()
+        dot_detection_config = None
+        if self._detect_dots_for_cameras:
+            dot_detection_config = {
+                "cameras": sorted(self._detect_dots_for_cameras),
+                "bg_subtract": self._dot_bg_subtract,
+                "background_mode": self._dot_background_mode,
+                "threshold": self._dot_threshold,
+                "threshold_by_camera": dict(self._dot_threshold_by_camera),
+                "blacklist_frac": self._dot_blacklist_frac,
+                "blacklist_radius_px": self._dot_blacklist_radius_px,
+                "max_saturation": self._dot_max_saturation,
+                "bg_sample_count": self._dot_bg_sample_count,
+            }
+        run_id = create_marker_detection_run(
             self._session,
-            detection_run_id=run_id,
-            shot_video_id=cam.shot_video_id,
+            shot_id=self._shot_id,
+            sync_config_id=self._sync_config_id,
+            time_start_s=self._time_start_s,
+            time_end_s=self._time_end_s,
+            dictionary=self._dictionary,
             marker_ids=self._marker_ids,
+            min_marker_perimeter_rate=self._min_marker_perimeter_rate,
+            frame_step=self._frame_step,
+            trial_id=self._trial_id,
+            capture_object_id=self._capture_object_id,
+            marker_body_definition_id=self._marker_body_definition_id,
+            dot_detection_config=dot_detection_config,
         )
-        dot_writer = None
-        dot_background = None
-        dot_linker = None
-        if cam.camera_instance_id in self._detect_dots_for_cameras:
-            dot_writer = DotCandidateWriter(
-                self._session, detection_run_id=run_id, shot_video_id=cam.shot_video_id,
-            )
-            dot_linker = DotTrackletLinker()
-            # 'blacklist' mode needs a background image just as much as 'subtract' does
-            # (see detect_blobs()'s own docstring) -- gate on either, not dot_bg_subtract
-            # alone, so choosing background_mode='blacklist' without separately setting
-            # dot_bg_subtract=True doesn't silently run with background=None instead.
-            if self._dot_bg_subtract or self._dot_background_mode == "blacklist":
-                dot_background = self._compute_dot_background(cam, first_frame, last_frame)
 
-        frames_done = 0
+        detector_spec = self._detector_spec()
+        dot_cfg = self._dot_config()
+        jobs = []
+        for cam in self._cameras:
+            first_frame, last_frame = self._frame_range(cam)
+            jobs.append(_CameraJob(
+                session_path=session_path, run_id=run_id, cam=cam, marker_ids=self._marker_ids,
+                frame_step=self._frame_step, detector_spec=detector_spec,
+                detect_dots=cam.camera_instance_id in self._detect_dots_for_cameras,
+                dot_cfg=dot_cfg, first_frame=first_frame, last_frame=last_frame,
+            ))
+
+        result = MarkerPipelineResult(detection_run_id=run_id)
         try:
-            for video_frame, img in iter_frames(cam.file_path, first_frame, last_frame):
-                if self._stop_event.is_set():
-                    break
-                if (video_frame - first_frame) % self._frame_step != 0:
-                    continue
+            with ProcessPoolExecutor(max_workers=max_workers) as pool:
+                futures = [pool.submit(_run_camera_job, job) for job in jobs]
+                for future in as_completed(futures):
+                    cam_id, n = future.result()
+                    result.cameras_processed.append(cam_id)
+                    result.frames_processed += n
+                    if on_camera_done:
+                        on_camera_done(len(result.cameras_processed), len(jobs))
+            result.status = "complete"
+            mark_run_complete(self._session, run_id, result.status)
+        except Exception:
+            mark_run_complete(self._session, run_id, "failed")
+            raise
 
-                detections = self._detector.detect(
-                    img, video_id=cam.camera_instance_id, frame_idx=video_frame
-                )
-                writer.add_frame(video_frame, detections)
-
-                if dot_writer is not None:
-                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                    dot_threshold = self._dot_threshold_by_camera.get(cam.camera_instance_id, self._dot_threshold)
-                    blobs = detect_blobs(
-                        gray, threshold=dot_threshold, background=dot_background,
-                        background_mode=self._dot_background_mode,
-                        blacklist_frac=self._dot_blacklist_frac,
-                        blacklist_radius_px=self._dot_blacklist_radius_px,
-                        bgr=img, max_saturation=self._dot_max_saturation,
-                    )
-                    dot_linker.link_frame(blobs)
-                    dot_writer.add_frame(video_frame, blobs)
-
-                frames_done += 1
-
-                if on_progress:
-                    on_progress(frames_done, total, cam.label or cam.camera_instance_id)
-        finally:
-            writer.finalise()
-            if dot_writer is not None:
-                dot_writer.finalise()
-
-        _log.info(
-            "_process_camera: %s done -- %d frames",
-            cam.label or cam.camera_instance_id, frames_done,
-        )
-        return frames_done
+        return result
 
 
 def load_pipeline_for_capture_object(

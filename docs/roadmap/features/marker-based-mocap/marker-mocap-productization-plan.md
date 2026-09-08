@@ -54,6 +54,39 @@ lower-resolution decode target when the dot search doesn't need full
 resolution) may matter more than parallelism; if per-frame CV work
 dominates, parallelism alone gets most of the win.
 
+**Update, 2026-09-08 (see status.md's entries that day for the full
+account): both measurement and camera-level parallelism are done, and the
+decode-cost story turned out to have a real ceiling worth recording before
+this bar is called met.** Profiled: ArUco detection (~35ms/frame) is
+actually the single biggest per-frame cost, ahead of decode (~26ms/frame)
+and dot detection (~13ms/frame). `MarkerDetectionPipeline.run_parallel()`
+(camera-level, `ProcessPoolExecutor`) gave a real, validated 2.8x on real
+footage — good enough to unblock iteration now, but **not the productized
+answer**: `iter_frames()`'s video decode is deliberately single-threaded
+(`frame_source.py`'s `thread_type = "NONE"`) to avoid a real, previously
+live-diagnosed indefinite hang (commit `e1188ee`) in closing a
+multi-threaded FFmpeg decode context early — which `iter_frames()` always
+does, since every caller decodes a bounded sub-range, never to a file's
+true EOF. Confirmed directly (2026-09-08): re-enabling threaded decode
+measures ~4.3x faster per stream (24.7ms -> 5.7ms/frame) with the same
+early-close pattern, and did not reproduce the hang across several stress
+attempts -- but the original bug was explicitly documented as *timing-
+dependent and more likely to surface under sustained/repeated decode*,
+i.e. more likely under a real production run's load, not less; a handful
+of clean quick tests is not meaningful evidence it's fixed. Not reverted.
+Before this bar can be called met, decode throughput needs one of: (a) a
+real fix for safe early-close under threaded decode (e.g. a timeout-
+guarded container close that logs and abandons a hung close rather than
+blocking forever, tested hard before trusting it unattended), (b) always
+decoding to the file's true EOF to remove the early-close trigger
+entirely (simple, unambiguously safe, wasteful when the requested range is
+much shorter than the raw recording), or (c) a different decode backend/
+approach entirely. `"SLICE"` thread_type was tried as a possible safer
+middle ground and isn't viable as-is -- silently dropped frames on this
+project's real GoPro/phone footage (single-slice-per-frame encoding is
+common on consumer cameras, leaving nothing for slice-threading to
+parallelize).
+
 **Parallelization, two independent axes, and they compose.**
 
 - **Across cameras**: fully independent (own `VideoCapture`, own

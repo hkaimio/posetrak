@@ -1,5 +1,39 @@
 # Marker-based mocap — status
 
+- **2026-09-08** (later still, after the full re-run) — Full standalone
+  detection re-run on the person-worn-marker capture with the validated
+  `background_mode='blacklist'` + per-camera thresholds + `run_parallel()`:
+  `detection_run_id a6431d58...` (old, `subtract` mode) superseded by
+  `01c2e3c1...`, same 69,486 frames/6 cameras, well under an hour instead
+  of overnight. Average raw candidates/frame dropped sharply on every
+  camera (e.g. `oneplus9pro-01` 125.2 -> 1.1, `gopro13_01` 77.6 -> 5.9,
+  `gopro-11_mini_01` 33.2 -> 11.1) -- consistent with, though not a
+  substitute for, the ground-truth-measured precision gain, since this is
+  a raw-count comparison on fresh full-scale data, not a re-measured
+  precision figure on it specifically.
+
+  Re-checking `prototype_marker_person_filter.py`'s own person-marker
+  filter against this fresh data surfaced a second real bug in the
+  *filter*, not the detector: it gave each named leg keypoint its own
+  independent nearest-candidate search, with no check for whether another
+  keypoint had already claimed the same candidate. Quantified at scale
+  (386 sampled frames, one camera): **97.3% of frames with any match at
+  all had at least one candidate claimed by 2+ different keypoint names
+  simultaneously**, most commonly 2-4 -- this is the mechanism behind the
+  single-frame "false positive at every toe" Harri flagged earlier,
+  generalized. Fixed by replacing the independent per-keypoint search with
+  a real one-to-one match (`_assign_keypoints_to_dots`, scipy
+  `linear_sum_assignment` over the whole frame's keypoints x candidates
+  cost matrix, infeasible/too-far pairs cost-gated to never be proposed) --
+  a multi-claim is structurally impossible once assignment is solved
+  jointly rather than per-keypoint. Confirmed on the same sample: 0
+  multi-claims (by construction) once assigned jointly, average 3.88 of 10
+  leg keypoints matched per frame on this camera. Still deliberately crude
+  beyond that fix -- doesn't yet use the marker layout's own known
+  multiplicity (3 markers at the knee, 2 at the ankle; this only considers
+  one candidate per named keypoint) -- a real limitation, not this pass's
+  scope.
+
 - **2026-09-08** (later still) — Added `MarkerDetectionPipeline.run_parallel()`:
   camera-level parallelism via `ProcessPoolExecutor`, one process per camera,
   per the productization plan's own "profile before parallelizing, cameras

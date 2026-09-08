@@ -110,6 +110,10 @@ class MarkerDetectionPipeline:
         detect_dots_for_cameras: set[str] | None = None,
         dot_bg_subtract: bool = False,
         dot_threshold: int = 235,
+        dot_threshold_by_camera: dict[str, int] | None = None,
+        dot_background_mode: str = "subtract",
+        dot_blacklist_frac: float = 0.7,
+        dot_blacklist_radius_px: int = 6,
         dot_max_saturation: float = 255.0,
         dot_bg_sample_count: int = 40,
     ) -> None:
@@ -141,6 +145,30 @@ class MarkerDetectionPipeline:
             camera's decode time) to build its own median background frame
             from dot_bg_sample_count frames spread across the camera's own
             time range, before the real detection pass starts.
+        dot_threshold_by_camera, dot_background_mode, dot_blacklist_frac,
+        dot_blacklist_radius_px:
+            2026-09-08 (see dot_blob_detector.py's own docstring for the
+            full account, status.md for the investigation): 'subtract' (the
+            default, unchanged) has a real failure mode on a person-worn
+            marker capture -- a marker on a subject in a pose the
+            background samples didn't cover gets fused into one large,
+            non-round blob with the subject's own limb and shape-rejected
+            as a whole. dot_background_mode='blacklist' instead thresholds
+            each frame's own raw brightness (shape classification never
+            sees more than the marker's own local contour) and uses the
+            background only to veto a spot that's already nearly as bright
+            with no subject present -- validated on real data to raise both
+            recall and precision together, not trade one for the other.
+            dot_threshold still gates raw brightness in this mode (like its
+            un-subtracted default already implies), but two different
+            cameras' own sensors/tone-mapping can cap a real marker's peak
+            brightness at very different absolute levels even under
+            identical lighting -- dot_threshold_by_camera (camera_instance_id
+            -> threshold) overrides dot_threshold for specific cameras, so a
+            rig with mismatched cameras doesn't have to pick one global
+            value that's wrong for some of them. dot_blacklist_frac/
+            dot_blacklist_radius_px tune the veto itself; see
+            detect_blobs()'s own docstring.
         """
         if rig_config is not None:
             if not rig_config.marker_corners:
@@ -173,6 +201,10 @@ class MarkerDetectionPipeline:
         self._detect_dots_for_cameras = detect_dots_for_cameras or set()
         self._dot_bg_subtract = dot_bg_subtract
         self._dot_threshold = dot_threshold
+        self._dot_threshold_by_camera = dot_threshold_by_camera or {}
+        self._dot_background_mode = dot_background_mode
+        self._dot_blacklist_frac = dot_blacklist_frac
+        self._dot_blacklist_radius_px = dot_blacklist_radius_px
         self._dot_max_saturation = dot_max_saturation
         self._dot_bg_sample_count = dot_bg_sample_count
         if rig_config is not None:
@@ -204,7 +236,11 @@ class MarkerDetectionPipeline:
             dot_detection_config = {
                 "cameras": sorted(self._detect_dots_for_cameras),
                 "bg_subtract": self._dot_bg_subtract,
+                "background_mode": self._dot_background_mode,
                 "threshold": self._dot_threshold,
+                "threshold_by_camera": dict(self._dot_threshold_by_camera),
+                "blacklist_frac": self._dot_blacklist_frac,
+                "blacklist_radius_px": self._dot_blacklist_radius_px,
                 "max_saturation": self._dot_max_saturation,
                 "bg_sample_count": self._dot_bg_sample_count,
             }
@@ -394,7 +430,11 @@ class MarkerDetectionPipeline:
                 self._session, detection_run_id=run_id, shot_video_id=cam.shot_video_id,
             )
             dot_linker = DotTrackletLinker()
-            if self._dot_bg_subtract:
+            # 'blacklist' mode needs a background image just as much as 'subtract' does
+            # (see detect_blobs()'s own docstring) -- gate on either, not dot_bg_subtract
+            # alone, so choosing background_mode='blacklist' without separately setting
+            # dot_bg_subtract=True doesn't silently run with background=None instead.
+            if self._dot_bg_subtract or self._dot_background_mode == "blacklist":
                 dot_background = self._compute_dot_background(cam, first_frame, last_frame)
 
         frames_done = 0
@@ -412,9 +452,13 @@ class MarkerDetectionPipeline:
 
                 if dot_writer is not None:
                     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    dot_threshold = self._dot_threshold_by_camera.get(cam.camera_instance_id, self._dot_threshold)
                     blobs = detect_blobs(
-                        gray, threshold=self._dot_threshold, background=dot_background, bgr=img,
-                        max_saturation=self._dot_max_saturation,
+                        gray, threshold=dot_threshold, background=dot_background,
+                        background_mode=self._dot_background_mode,
+                        blacklist_frac=self._dot_blacklist_frac,
+                        blacklist_radius_px=self._dot_blacklist_radius_px,
+                        bgr=img, max_saturation=self._dot_max_saturation,
                     )
                     dot_linker.link_frame(blobs)
                     dot_writer.add_frame(video_frame, blobs)
@@ -448,6 +492,10 @@ def load_pipeline_for_capture_object(
     detect_dots_for_cameras: set[str] | None = None,
     dot_bg_subtract: bool = False,
     dot_threshold: int = 235,
+    dot_threshold_by_camera: dict[str, int] | None = None,
+    dot_background_mode: str = "subtract",
+    dot_blacklist_frac: float = 0.7,
+    dot_blacklist_radius_px: int = 6,
     dot_max_saturation: float = 255.0,
     dot_bg_sample_count: int = 40,
 ) -> MarkerDetectionPipeline:
@@ -458,11 +506,12 @@ def load_pipeline_for_capture_object(
     1a's plain constructor stays available for the standalone/scripted case.
 
     detect_dots_for_cameras, dot_bg_subtract, dot_threshold,
-    dot_max_saturation, dot_bg_sample_count: forwarded to
-        ``MarkerDetectionPipeline`` unchanged -- see its own docstring. The
-        GUI's run-detection dialog does not yet expose a way to set any of
-        these (no UI wiring exists for it yet); a caller building the
-        pipeline directly can already use them.
+    dot_threshold_by_camera, dot_background_mode, dot_blacklist_frac,
+    dot_blacklist_radius_px, dot_max_saturation, dot_bg_sample_count:
+        forwarded to ``MarkerDetectionPipeline`` unchanged -- see its own
+        docstring. The GUI's run-detection dialog does not yet expose a way
+        to set any of these (no UI wiring exists for it yet); a caller
+        building the pipeline directly can already use them.
 
     Raises
     ------
@@ -500,6 +549,10 @@ def load_pipeline_for_capture_object(
         detect_dots_for_cameras=detect_dots_for_cameras,
         dot_bg_subtract=dot_bg_subtract,
         dot_threshold=dot_threshold,
+        dot_threshold_by_camera=dot_threshold_by_camera,
+        dot_background_mode=dot_background_mode,
+        dot_blacklist_frac=dot_blacklist_frac,
+        dot_blacklist_radius_px=dot_blacklist_radius_px,
         dot_max_saturation=dot_max_saturation,
         dot_bg_sample_count=dot_bg_sample_count,
     )

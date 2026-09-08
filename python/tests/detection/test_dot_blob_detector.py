@@ -237,6 +237,46 @@ def test_detect_blobs_max_saturation_rejects_a_skin_toned_highlight() -> None:
     assert filtered[0].cx == pytest.approx(140.0, abs=1.0)
 
 
+def test_detect_blobs_blacklist_mode_recovers_a_marker_subtract_mode_fuses_away() -> None:
+    """The real 2026-09-08 bug: a marker sitting on a subject occupying a
+    pose the background model's samples didn't cover reads as one large,
+    connected, non-round blob under 'subtract' mode (the subject's own
+    limb + the marker fused together, both crossing the same residual
+    threshold) -- shape-rejected as a whole. 'blacklist' mode thresholds
+    the live frame directly, so the marker's own small round contour is
+    never fused with the surrounding limb in the first place."""
+    background = _blank_frame(fill=20)
+    frame = background.copy()
+    # A bright limb-sized region appears (a subject in an atypical pose) --
+    # itself well below `threshold`, but at exactly the level 'subtract'
+    # mode's residual would need to explain the marker's own presence too.
+    cv2.rectangle(frame, (40, 40), (160, 160), 90, thickness=-1)
+    _draw_dot(frame, 100, 100, radius=6, value=250)
+
+    subtract_result = detect_blobs(frame, threshold=60, background=background, background_mode="subtract")
+    assert subtract_result == []  # fused into one large non-round blob, correctly shape-rejected as a whole
+
+    blacklist_result = detect_blobs(frame, threshold=200, background=background, background_mode="blacklist")
+    assert len(blacklist_result) == 1
+    assert blacklist_result[0].cx == pytest.approx(100.0, abs=1.0)
+
+
+def test_detect_blobs_blacklist_mode_rejects_a_spot_thats_always_bright() -> None:
+    """A fixed light/glare source -- already nearly as bright in the
+    background with no subject present at all -- should still be vetoed
+    under 'blacklist' mode, the thing background subtraction was actually
+    trying to suppress in the first place."""
+    background = _blank_frame(fill=20)
+    _draw_dot(background, 60, 60, radius=6, value=240)  # a fixed bright spot, no subject involved
+    frame = background.copy()
+    _draw_dot(frame, 150, 150, radius=6, value=250)  # a real, new highlight elsewhere
+
+    result = detect_blobs(frame, threshold=200, background=background, background_mode="blacklist")
+
+    assert len(result) == 1
+    assert result[0].cx == pytest.approx(150.0, abs=1.0)
+
+
 def test_detect_blobs_max_saturation_survives_a_saturated_backdrops_edge_bleed() -> None:
     """The real 2026-09-08 bug: a genuinely white/near-neutral marker's own
     contour mask includes its anti-aliased boundary pixels, which blend

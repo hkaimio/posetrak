@@ -98,6 +98,41 @@ narrowing what still reads as "genuinely saturated". Falls back to the
 un-eroded mask when erosion empties it out entirely (a handful of
 very-small candidates, a handful of pixels across), rather than
 computing a mean over zero pixels.
+
+`background_mode='blacklist'` (2026-09-08, prototyped against a hand-
+labeled ground-truth set after Harri's own diagnosis that background
+subtraction was structurally the wrong tool here -- see status.md):
+`background_mode='subtract'` (the original mechanism, still the default)
+has a real failure mode distinct from the chroma-bleed one above -- a
+marker on a subject that's simply in a pose the background model's
+samples didn't cover (sitting where the samples mostly show an empty
+chair, say) makes a large connected swath of the subject read as
+"brighter than usual" at the very same residual threshold the marker
+itself needs, so `findContours` returns the marker fused into one large,
+obviously-not-round blob together with the subject's own limb -- shape-
+rejected as a whole, taking a real marker down with it every time. Ground
+truth confirmed this was the single largest recall loss on a real person-
+marker capture (roughly half of all misses). `'blacklist'` mode instead
+thresholds the live frame's raw brightness directly (so shape
+classification only ever sees the marker's own small local contour, never
+a blob that can span the whole subject) and uses `background` only to
+veto a candidate sitting on a spot that's *already* nearly as bright with
+no subject there at all -- a fixed light/glare source, the thing
+background subtraction was actually trying to suppress. Validated on the
+same real capture: recall 65.1% -> 75.9%, precision 50.0% -> 76.8%
+(threshold=200) -- both up together, not a trade-off. A per-camera
+`threshold` matters more here than under `'subtract'`: two different
+phone/action-camera sensors' own tone-mapping can cap a real marker's
+peak brightness at very different absolute levels even with identical
+markers and lighting (confirmed: one camera's real markers saturate the
+sensor at 251-254, another's cap out at 194-232) -- picking one global
+threshold against the dimmer camera's floor lets real markers on the
+brighter camera start fusing with nearby moderately-bright skin/fabric
+into non-round blobs (the same fusion failure as 'subtract' mode, just
+triggered by a threshold set too low rather than by subtraction);
+against the brighter camera's floor, the dimmer camera loses real
+markers outright. Calibrate `threshold` per camera from that camera's
+own real marker brightness floor, not once for a whole multi-camera rig.
 """
 from __future__ import annotations
 
@@ -150,6 +185,9 @@ def detect_blobs(
     min_compactness: float = 0.5,
     max_streak_length_px: float = 60.0,
     background: np.ndarray | None = None,
+    background_mode: str = "subtract",
+    blacklist_frac: float = 0.7,
+    blacklist_radius_px: int = 6,
     bgr: np.ndarray | None = None,
     max_saturation: float = 255.0,
 ) -> list[BlobCandidate]:
@@ -177,15 +215,38 @@ def detect_blobs(
         as-is, and don't raise it further without a similarly-confirmed
         real example backing the new value.
     background:
-        Per-camera median background frame (see `compute_background()` and
-        the module docstring's "background subtraction" section), same
-        shape/dtype as `gray`. When given, `threshold` gates the positive
-        residual (`gray` minus `background`) instead of raw brightness --
-        `cv2.subtract()` clips negative results to 0, so a pixel that got
-        *darker* than usual (e.g. occluded by the performer's own body)
-        never triggers detection, which is the right direction: that's not
-        a highlight. None (default) reproduces today's plain brightness
-        thresholding exactly.
+        Per-camera median background frame (see `compute_background()`),
+        same shape/dtype as `gray`. Meaning depends on `background_mode`.
+        None (default) reproduces plain brightness thresholding exactly,
+        regardless of `background_mode`.
+    background_mode:
+        'subtract' (default): `threshold` gates the positive residual
+        (`gray` minus `background`) instead of raw brightness -- see the
+        module docstring's "background subtraction" section. Confirmed
+        (2026-09-08 person-worn-marker capture, status.md) to have a real
+        structural failure mode: a marker sitting on a subject that's
+        merely in an atypical *position* (a normal pose the background
+        model's samples didn't cover -- e.g. sitting where the samples show
+        an empty chair) makes a large connected swath of the subject read
+        as "brighter than usual" at the *same* residual threshold as the
+        marker itself, so `cv2.findContours` returns the marker fused into
+        one large, obviously-non-round blob with the subject's own limb --
+        shape-rejected as a whole, taking the real marker down with it.
+        'blacklist': threshold raw `gray` directly, exactly like
+        `background=None` -- but then reject a candidate if `background`
+        is already at least `blacklist_frac` as bright, within
+        `blacklist_radius_px` px of the candidate's centroid, as the live
+        frame is at that same spot. This targets what background
+        subtraction was actually for (suppressing a fixed light/glare
+        source that's bright regardless of the subject) without the
+        subtract-then-classify step that causes the fusion failure above --
+        shape classification always runs on the live frame's own local
+        contour, never on a blob that can span the whole subject. Confirmed
+        on real footage (status.md's 2026-09-08 entry) to recover markers
+        'subtract' fuses away, at both better recall and better precision,
+        not a recall/precision trade-off dressed up as an improvement.
+    blacklist_frac, blacklist_radius_px:
+        Only used when `background_mode='blacklist'`. See above.
     bgr:
         The original color frame (same frame `gray` was derived from,
         before grayscale conversion), needed only for the `max_saturation`
@@ -198,7 +259,8 @@ def detect_blobs(
         clears every shape check but is not one of our markers. 255.0
         (default) disables this check. Requires `bgr`.
     """
-    mask_input = cv2.subtract(gray, background) if background is not None else gray
+    subtract_mode = background is not None and background_mode == "subtract"
+    mask_input = cv2.subtract(gray, background) if subtract_mode else gray
     _, mask = cv2.threshold(mask_input, threshold, 255, cv2.THRESH_BINARY)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     min_diameter = 2.0 * np.sqrt(min_area / np.pi)
@@ -254,6 +316,23 @@ def detect_blobs(
             continue
         cx, cy = m["m10"] / m["m00"], m["m01"] / m["m00"]
         x, y, w, h = cv2.boundingRect(c)
+
+        if background is not None and background_mode == "blacklist":
+            # "This exact spot is basically always this bright, subject or not" --
+            # a fixed glare/light source, not a marker. Compared against the live
+            # frame's OWN local peak (not a fixed absolute level): a dim streak's
+            # peak is dim too, so the bar for calling something "already this
+            # bright in the background" scales down with it rather than never
+            # tripping for anything darker than a full-brightness round dot.
+            r = blacklist_radius_px
+            cx_i, cy_i = int(round(cx)), int(round(cy))
+            by0, by1 = max(0, cy_i - r), min(gray.shape[0], cy_i + r + 1)
+            bx0, bx1 = max(0, cx_i - r), min(gray.shape[1], cx_i + r + 1)
+            bg_peak = int(background[by0:by1, bx0:bx1].max())
+            live_peak = int(gray[by0:by1, bx0:bx1].max())
+            if bg_peak >= blacklist_frac * live_peak:
+                continue
+
         out.append(BlobCandidate(cx, cy, area, compactness, (x, y, w, h),
                                   major_axis_px, minor_axis_px, dir_x, dir_y))
     return out

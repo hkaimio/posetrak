@@ -1,5 +1,37 @@
 # Marker-based mocap — status
 
+- **2026-09-08** (later) — Ported `background_mode='blacklist'` into
+  production (`dot_blob_detector.detect_blobs()`, `MarkerDetectionPipeline`,
+  `run_standalone_marker_detection.py`), following up the same day's earlier
+  entry's ground-truth-driven diagnosis that background subtraction is
+  structurally the wrong tool for a person-worn marker on a subject in an
+  atypical pose. Threshold raw brightness directly (shape classification
+  never sees more than a marker's own local contour) and use the
+  background only to veto a spot that's already nearly as bright with no
+  subject present -- the thing background subtraction was actually trying
+  to suppress. `'subtract'` stays the unchanged default; `'blacklist'` is
+  opt-in. Also added `dot_threshold_by_camera` (camera_instance_id ->
+  threshold, overriding `dot_threshold` for that camera): two cameras on
+  the same rig can cap a real marker's peak brightness at very different
+  absolute levels through their own sensor/tone-mapping (confirmed: one
+  camera's real markers saturate at 251-254, another's -- running local
+  tone-mapping that compresses highlights -- cap out at 194-232), and
+  picking one global threshold against the dimmer camera's floor lets real
+  markers on the brighter camera start fusing with nearby moderately-
+  bright skin/fabric into non-round blobs, the same fusion failure as
+  `'subtract'` mode just triggered by too low a threshold rather than
+  subtraction. Validated end-to-end against the same hand-labeled ground
+  truth: recall 65.1% -> 80.7%, precision 50.0% -> 75.3% (per-camera
+  threshold, `'blacklist'` mode) -- both metrics up together on the real
+  capture that motivated this, not a recall/precision trade-off.
+
+  New tests at both layers: `dot_blob_detector.py`'s own unit tests (a
+  synthetic fused-blob case 'subtract' loses and 'blacklist' recovers; a
+  fixed-glare-source case 'blacklist' correctly still vetoes) and
+  `MarkerDetectionPipeline`-level tests confirming `background_mode` and
+  `dot_threshold_by_camera` are actually threaded through the real pipeline
+  wiring, not just correct in the underlying function.
+
 - **2026-09-08** — Ran standalone (no `capture_objects`/`marker_body_definitions`
   registered yet) ArUco + dot detection overnight on a second real capture
   (`nelli-defaults` trial: person-worn leg markers -- hips, knees, ankles,

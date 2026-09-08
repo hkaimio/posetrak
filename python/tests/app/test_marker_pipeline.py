@@ -484,6 +484,76 @@ def test_pipeline_bg_subtract_finds_a_dim_highlight_raw_threshold_misses(session
     assert dot_config["threshold"] == 40
 
 
+def _synthetic_fused_blob_frames(path, first_frame, last_frame):
+    """Dark background everywhere; a bright rectangle (simulating a subject
+    in a pose the background samples mostly don't cover) plus a real,
+    brighter dot on top of it, in a narrow frame window."""
+    for i in range(first_frame, last_frame):
+        frame = np.full((300, 300, 3), 20, dtype=np.uint8)
+        if 100 <= i < 110:
+            cv2.rectangle(frame, (20, 20), (140, 140), (90, 90, 90), thickness=-1)
+            cv2.circle(frame, (50, 60), 6, (250, 250, 250), thickness=-1)
+        yield i, frame
+
+
+def test_pipeline_background_mode_blacklist_recovers_a_marker_subtract_fuses_away(session):
+    """The real 2026-09-08 pipeline-level wiring check: 'subtract' mode
+    fuses the marker into the surrounding atypical-pose blob and loses it
+    (same failure as dot_blob_detector.py's own unit test, checked here at
+    the pipeline level to confirm background_mode is actually threaded
+    through); 'blacklist' mode keeps the marker as its own small contour."""
+    ids = _TEST_IDS
+    with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_fused_blob_frames):
+        subtract = MarkerDetectionPipeline(
+            session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+            time_start_s=0.0, time_end_s=10.0, marker_ids=["3"],
+            detect_dots_for_cameras={ids["cam_id"]},
+            dot_bg_subtract=True, dot_threshold=40, dot_background_mode="subtract",
+        )
+        result_subtract = subtract.run()
+    candidates_subtract = read_dot_candidates_for_run(session, result_subtract.detection_run_id, ids["svid"])
+    assert candidates_subtract[104].shape == (0, 9)
+
+    with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_fused_blob_frames):
+        blacklist = MarkerDetectionPipeline(
+            session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+            time_start_s=0.0, time_end_s=10.0, marker_ids=["3"],
+            detect_dots_for_cameras={ids["cam_id"]},
+            dot_threshold=200, dot_background_mode="blacklist",
+        )
+        result_blacklist = blacklist.run()
+    candidates_blacklist = read_dot_candidates_for_run(session, result_blacklist.detection_run_id, ids["svid"])
+    assert candidates_blacklist[104].shape == (1, 9)
+    assert np.allclose(candidates_blacklist[104][0, :2], [50.0, 60.0], atol=1.0)
+
+    run_row = session.execute(
+        "SELECT config_json FROM detection_runs WHERE id=?", (result_blacklist.detection_run_id,)
+    ).fetchone()
+    dot_config = json.loads(run_row["config_json"])["dot_detection"]
+    assert dot_config["background_mode"] == "blacklist"
+
+
+def test_pipeline_dot_threshold_by_camera_overrides_the_global_default(session):
+    """A camera-specific threshold in dot_threshold_by_camera should win
+    over dot_threshold for that camera -- the real 2026-09-08 finding that
+    different cameras' sensors/tone-mapping cap real markers at very
+    different absolute brightness levels."""
+    ids = _TEST_IDS
+    with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_dim_dot_frames):
+        pipeline = MarkerDetectionPipeline(
+            session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+            time_start_s=0.0, time_end_s=10.0, marker_ids=["3"],
+            detect_dots_for_cameras={ids["cam_id"]},
+            dot_threshold=235,  # would miss the dim (value=90) dot on its own
+            dot_threshold_by_camera={ids["cam_id"]: 80},
+            dot_background_mode="blacklist",
+        )
+        result = pipeline.run()
+    candidates = read_dot_candidates_for_run(session, result.detection_run_id, ids["svid"])
+    assert candidates[104].shape == (1, 9)
+    assert np.allclose(candidates[104][0, :2], [50.0, 60.0], atol=1.0)
+
+
 def test_pipeline_rejects_empty_marker_ids(session):
     ids = _TEST_IDS
     with pytest.raises(ValueError):

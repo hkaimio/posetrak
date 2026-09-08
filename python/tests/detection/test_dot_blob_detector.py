@@ -235,3 +235,29 @@ def test_detect_blobs_max_saturation_rejects_a_skin_toned_highlight() -> None:
     filtered = detect_blobs(gray, threshold=100, bgr=bgr, max_saturation=60.0)
     assert len(filtered) == 1
     assert filtered[0].cx == pytest.approx(140.0, abs=1.0)
+
+
+def test_detect_blobs_max_saturation_survives_a_saturated_backdrops_edge_bleed() -> None:
+    """The real 2026-09-08 bug: a genuinely white/near-neutral marker's own
+    contour mask includes its anti-aliased boundary pixels, which blend
+    with whatever is directly behind it -- on a highly saturated backdrop
+    (e.g. a patterned fabric a person-worn marker is sewn onto) that alone
+    can push the *mean* saturation over max_saturation even though the
+    marker's own core color is neutral. Anti-aliased drawing (LINE_AA)
+    reproduces the same blended-boundary effect a real marker's video
+    compression does. A same-size, fully-saturated blob with no neutral
+    core must still be rejected -- this isn't just raising the cutoff."""
+    dim_backdrop = (0, 20, 90)  # dim and saturated, like a patterned legging in shadow
+    bgr = np.full((200, 200, 3), dim_backdrop, dtype=np.uint8)
+    white_bgr = (245, 245, 245)
+    cv2.circle(bgr, (60, 60), 6, white_bgr, thickness=-1, lineType=cv2.LINE_AA)
+    # A same-size, bright but fully-saturated orange highlight -- no neutral
+    # core at all, unlike the marker above -- must still be rejected.
+    bright_saturated = (0, 80, 250)
+    cv2.circle(bgr, (140, 140), 6, bright_saturated, thickness=-1)
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+    filtered = detect_blobs(gray, threshold=100, bgr=bgr, max_saturation=45.0)
+
+    assert len(filtered) == 1
+    assert filtered[0].cx == pytest.approx(60.0, abs=1.0)

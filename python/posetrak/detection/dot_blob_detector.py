@@ -75,6 +75,29 @@ rather than the white/near-neutral retroreflective material a real dot is.
 Both are opt-in (`background=None`, `max_saturation=255.0` by default) so
 a caller that doesn't pass them gets exactly today's brightness-threshold
 behavior, aside from the ordering fix above.
+
+Erode the chroma-check mask before averaging (2026-09-08, found on a
+person-worn-marker capture with markers sewn onto brightly patterned
+red/orange leggings -- see status.md's 2026-09-08 entry): a real,
+correctly round, otherwise-obviously-genuine marker (compactness 0.78,
+confirmed by eye against the source frame) was rejected at mean
+saturation 46.2 against `max_saturation=45.0` -- just barely over. The
+inflation traced to video compression's chroma subsampling: a small
+marker's own contour mask includes its anti-aliased/chroma-blended
+boundary pixels, which sample color from a mix of the marker and
+whatever's directly behind it, and a highly saturated backdrop (this
+capture's leggings; a neutral backdrop like skin or bare floor doesn't
+trigger this) pulls that boundary average up regardless of the marker's
+own true (near-neutral) color. Eroding the filled contour mask by one
+pixel before computing the mean strips exactly those boundary pixels,
+confirmed directly on this same real frame: the miss's mean dropped
+46.2 -> 28.0 (would now pass), while a genuine same-frame false positive
+(actual fabric-pattern texture, not a marker) stayed correctly rejected
+at 116.6 -> 105.1 -- eroding removes the compression-bleed bias without
+narrowing what still reads as "genuinely saturated". Falls back to the
+un-eroded mask when erosion empties it out entirely (a handful of
+very-small candidates, a handful of pixels across), rather than
+computing a mean over zero pixels.
 """
 from __future__ import annotations
 
@@ -212,7 +235,17 @@ def detect_blobs(
             x, y, w, h = cv2.boundingRect(c)
             local_mask = np.zeros((h, w), dtype=np.uint8)
             cv2.drawContours(local_mask, [c - [x, y]], -1, 255, thickness=cv2.FILLED)
-            sel = local_mask == 255
+            # Erode before averaging (module docstring's 2026-09-08 entry): a
+            # candidate's boundary pixels blend with whatever's directly behind
+            # it (anti-aliasing / video chroma subsampling), which inflates the
+            # mean when the backdrop is itself highly saturated -- a real,
+            # correctly-shaped marker was rejected this way on a leggings-print
+            # backdrop. Falls back to the un-eroded mask if erosion empties it
+            # (small candidates, a handful of pixels), rather than average zero.
+            eroded_mask = cv2.erode(local_mask, np.ones((3, 3), np.uint8))
+            sel = eroded_mask == 255
+            if not sel.any():
+                sel = local_mask == 255
             if sel.any() and float(hsv[y:y + h, x:x + w, 1][sel].mean()) > max_saturation:
                 continue
 

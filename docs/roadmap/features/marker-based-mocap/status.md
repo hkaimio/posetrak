@@ -1,5 +1,61 @@
 # Marker-based mocap — status
 
+- **2026-09-08** — Ran standalone (no `capture_objects`/`marker_body_definitions`
+  registered yet) ArUco + dot detection overnight on a second real capture
+  (`nelli-defaults` trial: person-worn leg markers -- hips, knees, ankles,
+  heels, big toes -- plus ArUco on both props and persons; detection_run
+  `a6431d58-...`, 69,486 frames across 6 cameras). ArUco yield: ids
+  `0`/`1`/`2`/`3`/`17`/`37` solidly seen (1.3-27.7% of frames); `16`/`34`
+  vanishingly rare (<0.05%), consistent with the sparse full-trial id scan
+  done before launching the run.
+
+  Prototyped (`python/tools/prototype_marker_person_filter.py`, scratch
+  tool, not production) filtering the huge raw dot-candidate pool (20-125
+  candidates/frame/camera, almost all background noise -- no
+  `capture_objects` exist yet to assign against) down to one specific
+  person's own markers, using that person's *already-finalized* vitpose
+  pose sequence as a spatial cue instead of segmentation: nearest raw
+  candidate within a radius of each leg keypoint (hip/knee/ankle/big-toe/
+  heel -- HALPE/COCO-WholeBody already carries foot keypoints at the same
+  locations two of these physical markers sit). Confirmed on real footage:
+  clean matches land within 4-30px of genuinely visible sewn-in reflective
+  markers on a "good" camera; the same technique on a camera with a
+  malfunctioning ring light instead surfaced background-wide false-positive
+  noise, and one sun-glared camera (`oneplus9pro-01`, 290 candidates/frame)
+  produced zero matches -- both camera-quality problems, not a filtering
+  logic problem.
+
+  **Real detector bug found and fixed**: a correctly round, visibly genuine
+  marker (compactness 0.78) was rejected by `max_saturation`'s chroma check
+  at a mean saturation of 46.2 against a 45.0 cutoff -- just over. Root
+  cause: a small candidate's filled contour mask includes its anti-aliased/
+  chroma-subsampled boundary pixels, which blend with whatever sits
+  directly behind it; on this capture's brightly patterned red/orange
+  leggings (unlike the sword capture's backdrop) that pulls the mean up
+  regardless of the marker's own true near-neutral color. Fixed in
+  `dot_blob_detector.detect_blobs()` by eroding the contour mask one pixel
+  before averaging saturation (falling back to the un-eroded mask if
+  erosion empties it) -- confirmed on the same real frame: the miss's mean
+  dropped 46.2 -> 28.0 (now passes) while a genuine same-frame false
+  positive (actual fabric-pattern texture) stayed rejected, 116.6 -> 105.1.
+  New regression test added (`test_detect_blobs_max_saturation_survives_a_
+  saturated_backdrops_edge_bleed`); real-footage before/after check on a
+  short window showed the fix recovers a small, real handful of near-
+  keypoint misses (35/60 -> matched at 80px after the fix, up from 30/60)
+  without measurably raising the false-candidate rate (50.8 -> 51.7
+  candidates/frame average) -- targeted, not a blanket loosening.
+
+  Most of the *remaining* gap after the fix is not a detector bug: hip
+  markers went unmatched on every checked frame from one camera with
+  steadily growing "nearest candidate" distance, and a directly-inspected
+  missed ankle marker turned out to render as a plain dark dot, not a
+  bright highlight, in that frame -- both consistent with the already-
+  documented (2026-09-06 entry below) angle-dependent retroreflection
+  limitation: a marker only throws a strong return toward a camera near
+  its own light source's axis, so per-camera misses on off-axis views are
+  expected and need multi-camera coverage to resolve, not a per-camera
+  detector fix.
+
 - **2026-09-06** (later still) — Wrote
   [marker-mocap-productization-plan.md](marker-mocap-productization-plan.md):
   the merge-to-`main` bar (schema validated for multi-object/multi-person,

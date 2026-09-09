@@ -1,5 +1,48 @@
 # Marker-based mocap — status
 
+- **2026-09-09** — Person-marker-assignment-design.md's phases P1-P7
+  prototyped and validated (real video review each step, not just
+  aggregate stats) against the real person-marker capture:
+  - **P1**: one-to-one (Hungarian) assignment of the full 16-marker leg
+    catalog against pose-keypoint anchors, single camera. Real limitation
+    quantified: full coverage of a multi-marker joint (3 at a knee, 2 at
+    an ankle) from one camera alone is rare (0-25% of frames).
+  - **P7** (promoted ahead of P2 per discussion): multi-camera
+    triangulation-consistency fusion (exactly the "epipolar-consistency
+    correspondence matching" `calibrate_rigid_marker_body.py`'s own
+    docstring names and defers). A pure 3D-primary assignment genuinely
+    improved multi-marker-joint coverage but collapsed single-marker-slot
+    coverage (hip: 53% -> under 2% of frames) -- requiring *both* anchor
+    keypoint and candidate to independently reach 2+-camera agreement is
+    much stricter than either alone. Fixed with a **hybrid**: 3D-primary
+    pass where possible, per-camera 2D fallback for the leftovers.
+  - **Real, diagnosed bug** (not fixed by the hybrid alone): `heel_L` and
+    `ankle_L`'s anchor keypoints came within 2.6cm of each other for a few
+    frames -- close enough, given the bootstrap-stage 15cm match radius,
+    that they briefly competed for the same candidates and the per-frame
+    Hungarian solver flipped which name got which candidate for 3 frames,
+    then flipped back. Root-caused with real per-frame anchor/fusion data,
+    not guessed -- the real vitpose keypoints were rock-stable throughout;
+    the instability was purely in per-frame-independent triangulation
+    competing for a shared candidate pool.
+  - **Tracklet-majority-vote smoothing** (prototype_tracklet_smoothed_
+    assignment.py): using `DotCandidateWriter`'s own already-computed
+    per-camera tracklet_id (previously ignored by every assignment
+    prototype this session, despite being stored on every candidate) to
+    overwrite a tracklet's minority-frame name flips with its majority
+    name across the whole tracklet. Fixed the diagnosed heel_L/ankle_L
+    case correctly: the wrongly-swapped frames now go unlabeled rather
+    than mislabeled ("drop, don't guess", R2.3) rather than either the
+    original wrong label or a guessed-correct one. ~73% of corrections
+    landed in the expected ambiguous (same-joint multi-marker) groups.
+  - Still open, by design, not yet built: marker-normal-based
+    disambiguation for same-joint markers (medial/lateral/front all
+    currently collapse to one anchor with no way to tell them apart) --
+    next up per discussion, needs the marker layout catalog extended with
+    rough per-marker geometric offset/normal info first (not every marker
+    sits exactly at its parent joint -- e.g. forearm-twist or torso
+    markers), which needs its own design pass before implementation.
+
 - **2026-09-08** (later still, after the full re-run) — Full standalone
   detection re-run on the person-worn-marker capture with the validated
   `background_mode='blacklist'` + per-camera thresholds + `run_parallel()`:

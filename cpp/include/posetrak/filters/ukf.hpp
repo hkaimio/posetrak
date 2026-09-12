@@ -512,17 +512,29 @@ class UnscentedKalmanFilter {
     }
 
     /**
-     * @brief General (articulated) MarkerPrediction for one named marker
-     * slot, via the same sigma-point machinery predict()/update() already
-     * use for labeled observations -- dot-assignment-architecture-
-     * design.md §6's deferred "general/articulated" implementation of the
-     * MarkerPrediction seam. Unlike predict_rigid_marker()'s closed form
-     * (exact, cheap, rigid-body only), this runs real FK across every
-     * sigma point via the existing predict_measurements(), so it is the
-     * correct predictor for any skeleton with articulation -- what a
-     * full marker-based-mocap slot (hip/knee/ankle/etc., each a
-     * different joint) needs, at the cost of an extra ~n_sigma FK
-     * evaluations per (marker, camera) pair per frame.
+     * @brief General (articulated) MarkerPrediction for a batch of named
+     * marker slots on one camera, via the same sigma-point machinery
+     * predict()/update() already use for labeled observations --
+     * dot-assignment-architecture-design.md §6's deferred "general/
+     * articulated" implementation of the MarkerPrediction seam. Unlike
+     * predict_rigid_marker()'s closed form (exact, cheap, rigid-body
+     * only), this runs real FK across every sigma point via the existing
+     * predict_measurements(), so it is the correct predictor for any
+     * skeleton with articulation -- what a full marker-based-mocap slot
+     * (hip/knee/ankle/etc., each a different joint) needs.
+     *
+     * Takes every marker to predict on this camera in one call rather
+     * than one marker at a time: predict_measurements() runs a full FK
+     * pass over the *entire* skeleton regardless of how many observations
+     * are in its list, so that cost depends only on n_sigma, not on how
+     * many markers are asked about. A first version called this once per
+     * marker (16 dot slots x 6 cameras = 96 calls/frame, each repeating
+     * ~437 sigma points' worth of full-skeleton FK -- ~42k FK evaluations/
+     * frame, measured at ~1.2 tracked-fps on the 2026-09-06 kare-tests
+     * capture). Batching every marker needing this camera into one
+     * observations list cuts that to ~437 FK evaluations per camera per
+     * frame, shared across every marker in the batch -- a ~16x reduction
+     * for this capture's marker count, with identical per-marker results.
      *
      * The returned covariance is *state uncertainty only*, with no
      * measurement noise R added -- matching predict_rigid_marker()'s own
@@ -532,8 +544,9 @@ class UnscentedKalmanFilter {
      * R here and not there would silently double-count it for rigid vs.
      * articulated subjects.
      *
-     * @param marker_id  Index into skeleton->markers() (same convention
-     *                   as Observation::marker_id).
+     * @param marker_ids Indices into skeleton->markers() (same convention
+     *                   as Observation::marker_id) to predict, all on the
+     *                   same camera.
      * @param camera_id  Camera to project into.
      * @param state      Distribution mean (e.g. a Tracker's own prior
      *                   state right after predict_step()).
@@ -543,19 +556,22 @@ class UnscentedKalmanFilter {
      * @param fk         ForwardKinematics instance (mutated per call --
      *                   same contract as predict_measurements()'s own
      *                   `fk` parameter).
-     * @return MarkerPrediction if the marker projects in front of the
-     *         camera at the central (zero-error) sigma point, std::nullopt
-     *         otherwise -- mirrors predict_rigid_marker()'s own "not
-     *         visible this frame" contract. A handful of *other* sigma
-     *         points landing behind the camera (plausible near a joint
-     *         limit or a fast-moving marker) don't invalidate the whole
-     *         prediction -- they're excluded from the weighted mean/
+     * @return One entry per marker_id whose central (zero-error) sigma
+     *         point projects in front of the camera -- mirrors
+     *         predict_rigid_marker()'s own "not visible this frame"
+     *         contract, applied per marker rather than to the whole
+     *         batch. A handful of *other* sigma points landing behind the
+     *         camera for a given marker (plausible near a joint limit or
+     *         a fast-moving marker) don't invalidate that marker's own
+     *         prediction -- they're excluded from its weighted mean/
      *         covariance individually, same NaN-safe convention
      *         update()'s own Step 3/4 already uses.
      */
-    std::optional<MarkerPrediction> predict_marker_slot(
-        int marker_id, int camera_id, State const& state, Eigen::MatrixXd const& covariance,
-        std::unordered_map<int, Camera> const& cameras, ForwardKinematics& fk) const;
+    std::unordered_map<int, MarkerPrediction>
+    predict_marker_slots(std::vector<int> const& marker_ids, int camera_id, State const& state,
+                         Eigen::MatrixXd const& covariance,
+                         std::unordered_map<int, Camera> const& cameras,
+                         ForwardKinematics& fk) const;
 
    private:
     /**

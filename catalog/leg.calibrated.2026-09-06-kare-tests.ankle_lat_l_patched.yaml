@@ -1,0 +1,272 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+module: leg
+skeleton_topology: reallusion-no-waist
+requires_joints:
+- foot
+- shin
+- thigh
+calibration:
+  method: 'hand-patched: ankle_lat_L mirrored from ankle_lat_R pending unbiased refit;
+    every other slot from refit_attachment_set_single_camera.py'
+  source_attachment_set: catalog/leg.calibrated.2026-09-06-kare-tests.refit-single-camera.yaml
+markers:
+- name: ankle_lat_L
+  parent_joint: shin.L
+  along: 0.8554
+  lateral: 0.0327
+  anterior: 0.0102
+  offset:
+  - 0.0327
+  - 0.3873538297902
+  - 0.0102
+  normal:
+  - 0.0
+  - -0.955
+  - 0.297
+  n_samples: 0
+  note: 'PATCHED, not fit: mirrored from ankle_lat_R (refit-single-camera) pending
+    an unbiased refit -- the previous B4/refit both converged on the wrong offset
+    via circular gating (status.md 2026-09-12).'
+- name: ankle_lat_R
+  parent_joint: shin.R
+  along: 0.8554
+  lateral: -0.0327
+  anterior: 0.0102
+  offset:
+  - -0.0327
+  - 0.3878
+  - 0.0102
+  normal:
+  - 0.0
+  - -0.955
+  - 0.297
+  n_samples: 17423
+  residual_median_px: 16.42
+  residual_p90_px: 68.87
+- name: ankle_med_L
+  parent_joint: shin.L
+  along: 0.8628
+  lateral: -0.017
+  anterior: -0.009
+  offset:
+  - -0.017
+  - 0.3907
+  - -0.009
+  normal:
+  - 0.0
+  - -0.883
+  - -0.469
+  n_samples: 18770
+  residual_median_px: 22.43
+  residual_p90_px: 77.81
+- name: ankle_med_R
+  parent_joint: shin.R
+  along: 0.8558
+  lateral: 0.0181
+  anterior: -0.0059
+  offset:
+  - 0.0181
+  - 0.388
+  - -0.0059
+  normal:
+  - 0.0
+  - 0.95
+  - -0.311
+  n_samples: 16230
+  residual_median_px: 34.87
+  residual_p90_px: 76.18
+- name: heel_L
+  parent_joint: foot.L
+  along: -0.1732
+  lateral: 0.0131
+  anterior: 0.0073
+  offset:
+  - 0.0131
+  - -0.0252
+  - 0.0073
+  normal:
+  - 0.0
+  - 0.874
+  - 0.485
+  n_samples: 15718
+  residual_median_px: 18.52
+  residual_p90_px: 50.93
+- name: heel_R
+  parent_joint: foot.R
+  along: -0.3603
+  lateral: -0.0081
+  anterior: 0.0182
+  offset:
+  - -0.0081
+  - -0.0524
+  - 0.0182
+  normal:
+  - 0.0
+  - -0.406
+  - 0.914
+  n_samples: 13101
+  residual_median_px: 15.53
+  residual_p90_px: 75.12
+- name: hip_L
+  parent_joint: thigh.L
+  along: 0.0164
+  lateral: 0.071
+  anterior: -0.0134
+  offset:
+  - 0.071
+  - 0.007
+  - -0.0134
+  normal:
+  - 0.0
+  - 0.983
+  - -0.186
+  n_samples: 6852
+  residual_median_px: 11.72
+  residual_p90_px: 43.93
+- name: hip_R
+  parent_joint: thigh.R
+  along: 0.0343
+  lateral: -0.0794
+  anterior: -0.0727
+  offset:
+  - -0.0794
+  - 0.0147
+  - -0.0727
+  normal:
+  - 0.0
+  - -0.738
+  - -0.675
+  n_samples: 9903
+  residual_median_px: 24.89
+  residual_p90_px: 57.94
+- name: knee_front_L
+  parent_joint: shin.L
+  along: -0.022
+  lateral: 0.0111
+  anterior: -0.057
+  offset:
+  - 0.0111
+  - -0.01
+  - -0.057
+  normal:
+  - 0.0
+  - 0.19
+  - -0.982
+  n_samples: 9615
+  residual_median_px: 30.91
+  residual_p90_px: 61.31
+- name: knee_front_R
+  parent_joint: shin.R
+  along: -0.0021
+  lateral: 0.0014
+  anterior: -0.05
+  offset:
+  - 0.0014
+  - -0.0009
+  - -0.05
+  normal:
+  - 0.0
+  - 0.028
+  - -1.0
+  n_samples: 9575
+  residual_median_px: 16.68
+  residual_p90_px: 64.41
+- name: knee_lat_L
+  parent_joint: shin.L
+  along: -0.0024
+  lateral: 0.0482
+  anterior: -0.0026
+  offset:
+  - 0.0482
+  - -0.0011
+  - -0.0026
+  normal:
+  - 0.0
+  - 0.999
+  - -0.054
+  n_samples: 12008
+  residual_median_px: 17.29
+  residual_p90_px: 62.41
+- name: knee_lat_R
+  parent_joint: shin.R
+  along: -0.0184
+  lateral: -0.0669
+  anterior: -0.0087
+  offset:
+  - -0.0669
+  - -0.0083
+  - -0.0087
+  normal:
+  - 0.0
+  - -0.992
+  - -0.129
+  n_samples: 10590
+  residual_median_px: 15.38
+  residual_p90_px: 60.84
+- name: knee_med_L
+  parent_joint: shin.L
+  along: 0.0344
+  lateral: -0.0768
+  anterior: 0.0205
+  offset:
+  - -0.0768
+  - 0.0156
+  - 0.0205
+  normal:
+  - 0.0
+  - -0.966
+  - 0.258
+  n_samples: 7576
+  residual_median_px: 23.27
+  residual_p90_px: 64.27
+- name: knee_med_R
+  parent_joint: shin.R
+  along: 0.036
+  lateral: 0.0468
+  anterior: 0.0307
+  offset:
+  - 0.0468
+  - 0.0163
+  - 0.0307
+  normal:
+  - 0.0
+  - 0.836
+  - 0.548
+  n_samples: 8155
+  residual_median_px: 29.65
+  residual_p90_px: 62.72
+- name: toe_L
+  parent_joint: foot.L
+  along: 0.8653
+  lateral: -0.0326
+  anterior: -0.0346
+  offset:
+  - -0.0326
+  - 0.1259
+  - -0.0346
+  normal:
+  - 0.0
+  - -0.685
+  - -0.728
+  n_samples: 17017
+  residual_median_px: 19.2
+  residual_p90_px: 65.34
+- name: toe_R
+  parent_joint: foot.R
+  along: 0.8637
+  lateral: 0.0226
+  anterior: -0.0456
+  offset:
+  - 0.0226
+  - 0.1255
+  - -0.0456
+  normal:
+  - 0.0
+  - 0.445
+  - -0.896
+  n_samples: 16973
+  residual_median_px: 23.87
+  residual_p90_px: 83.35

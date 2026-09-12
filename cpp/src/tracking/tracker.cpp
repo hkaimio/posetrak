@@ -936,10 +936,21 @@ Tracker::predict_dot_slot_predictions(int camera_id) const {
         // General/articulated (§6, built 2026-09-12 -- the precondition the
         // design doc deferred this on, "no articulated capture with dot
         // augmentation exists yet to design or test against", is now met):
-        // UnscentedKalmanFilter::predict_marker_slot() reuses the same
+        // UnscentedKalmanFilter::predict_marker_slots() reuses the same
         // sigma-point machinery predict()/update() already run for labeled
         // observations, real FK per sigma point rather than a closed form --
         // additive on top of the rigid path above, not a rewrite of it.
+        //
+        // Batched across every dot-track marker on this camera in one call
+        // (2026-09-12 perf fix): a first version called the single-marker
+        // predecessor once per marker here, each repeating a full-skeleton
+        // FK pass per sigma point -- 16 markers x 6 cameras x ~437 sigma
+        // points measured at ~1.2 tracked-fps on the kare-tests capture (a
+        // 2.6-hour run for a 97s capture). predict_marker_slots() runs that
+        // FK pass once per sigma point *total*, shared across every marker
+        // in the batch, since predict_measurements() below the surface
+        // never depended on how many observations it was asked to project.
+        std::vector<int> dot_marker_ids;
         for (size_t i = 0; i < markers.size(); ++i) {
             Marker const& marker = markers[i];
             if (marker.track.empty())
@@ -947,14 +958,10 @@ Tracker::predict_dot_slot_predictions(int camera_id) const {
             InputTrack const* track = skeleton_->get_input_track(marker.track);
             if (track == nullptr || track->type != "unlabeled_points")
                 continue;
-
-            auto prediction =
-                ukf_->predict_marker_slot(static_cast<int>(i), camera_id, *pending_prior_state_,
-                                          pending_prior_cov_, cameras_, *fk_);
-            if (prediction.has_value()) {
-                result.emplace(static_cast<int>(i), *prediction);
-            }
+            dot_marker_ids.push_back(static_cast<int>(i));
         }
+        result = ukf_->predict_marker_slots(dot_marker_ids, camera_id, *pending_prior_state_,
+                                            pending_prior_cov_, cameras_, *fk_);
     }
     return result;
 }

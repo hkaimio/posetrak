@@ -1,5 +1,91 @@
 # Marker-based mocap — status
 
+- **2026-09-12** (fixed `ankle_lat_L`'s calibration, and a real perf bug
+  along the way, latest) — Harri asked for a single-camera reprojection
+  refit of the calibrated attachment set (previous entry's B4 fit needed
+  2+ cameras simultaneously triangulating the same dot, which starved
+  `ankle_lat_L` to 28 usable samples). Built `refit_attachment_set_
+  single_camera.py`: uses a dot-augmented tracking run's own tracked
+  parent-joint transform `T(t)` (mostly driven by body/hand keypoints,
+  largely independent of the dot markers) plus every inlier single-
+  camera dot observation to solve each slot's local offset via nonlinear
+  least-squares reprojection -- no triangulation needed. 14/16 slots
+  refit cleanly with small, sensible corrections.
+
+  **`ankle_lat_L` did not fix itself, and the reason why is worth
+  recording.** The refit converged right back to the same wrong offset
+  (along 0.657, lateral +0.134) regardless of starting point -- verified
+  by re-running the least-squares from four very different initial
+  guesses (the wrong B4 value, a mirrored ankle_lat_R, zero, and a random
+  far-off point); all four landed on the identical answer, ruling out a
+  local-minimum artifact. Harri correctly diagnosed the real mechanism:
+  the assignment gate that selected which observations to refit against
+  used `predict_marker_slot()`'s covariance directly with **no added
+  measurement noise** (confirmed in `dot_assignment.cpp` -- gating uses
+  `pred.covariance` alone), so an observation only survives when either
+  the wrong offset's induced pixel bias happens to project small for
+  that camera/pose (a geometric coincidence, not confirmation), or the
+  predicted covariance is simply wide enough to absorb the bias -- both
+  situations select *for* agreement with the wrong offset, not against
+  it. The quantitative signature matched: even against the wrong offset,
+  median residual was 40px with a 80px p90 -- a wide spread consistent
+  with both mechanisms firing together, and large enough (this marker's
+  offset was off by ~10cm, an order of magnitude more than the other 15
+  slots' ~1-2cm B4 errors) to bias which candidates got assigned in the
+  first place. This is why the other 15 slots refit cleanly and this one
+  didn't: their B4 errors were small enough to stay within normal
+  detection noise, so gating on them barely affects which candidates
+  get accepted.
+
+  **Fix**: patch `ankle_lat_L` with a mirrored `ankle_lat_R` estimate
+  (along/lateral/anterior mirrored across the sagittal plane -- lateral
+  sign flips, along/anterior don't), rebuild the dot-augmented skeleton
+  (skeleton_id `5dbdd921f7e8b43f299d08ae8ac75aa23603cc96ecdcfc43dd0f45a5b96b3153`),
+  re-track, then refit again from that run's own (now much-less-biased)
+  observations. Verified the same four-starting-point robustness check
+  on the new run: all four (including the old wrong offset and a random
+  guess) converged to the *same* answer this time -- along 0.854,
+  lateral +0.041, anterior +0.006 -- which now sits right in the ~0.85-
+  0.87 along / 0.03-0.07 lateral cluster the other three independently-
+  fit ankle markers agree on, using 13,440 samples (vs. 28 originally).
+  Overall body tracking was unaffected either way (100% tracked, mean
+  NIS/dof 1.921 vs the unpatched run's 1.920) -- one marker's local
+  offset doesn't move the aggregate state-wide metric much, which is why
+  this needed the per-slot reprojection check rather than relying on
+  NIS alone.
+
+  **Real performance bug found and fixed along the way**: re-tracking
+  after the patch was needed to validate the fix, and it revealed that
+  the whole dot-augmented pipeline was running at ~1.2 tracked-fps (a
+  2.6-hour run for a 97s capture) -- never noticed before because the
+  first validation pass (previous entry) only checked correctness, not
+  timing. Root cause: `UnscentedKalmanFilter::predict_marker_slot()`
+  (previous entry) called `predict_measurements()` once per sigma point
+  *per dot marker* (16 markers x 6 cameras = 96 calls/frame), and
+  `predict_measurements()` runs a full-skeleton forward-kinematics pass
+  every single call regardless of how many observations it's given --
+  so the same ~437-sigma-point FK sweep was being redundantly repeated
+  16 times per camera per frame. Replaced it with `predict_marker_
+  slots()` (plural): batches every dot-track marker on one camera into
+  a single `predict_measurements()` call per sigma point, so the FK
+  sweep runs once per camera per frame and every marker's own mean/
+  covariance is read off its own 2x2 block of the shared result --
+  identical math, ~437 FK evaluations/frame instead of ~42,000. Measured
+  speedup: ~1.2 -> ~4.1 tracked-fps (a ~3.4x reduction in wall time, not
+  the ~16x the raw FK-call-count would suggest -- per-sigma-point camera
+  projection across 16 markers isn't free either, and wasn't reduced by
+  this change, so FK cost and projection cost are evidently closer in
+  magnitude than assumed; not profiled further). `./run_tests.sh`: all
+  370 cases still pass, confirming the batched result matches the
+  per-marker one exactly.
+
+  Deliberately not investigated further here: why FK-cost vs. projection-
+  cost split doesn't give the full theoretical speedup (would need real
+  profiling, not guesswork); whether a similar cross-camera batching
+  (one `predict_measurements()` call per frame instead of per camera)
+  is worth the larger API change to `Tracker::predict_dot_slot_
+  predictions()`'s per-camera signature.
+
 - **2026-09-12** (first real end-to-end dot-augmented tracking run, latest)
   — Completed the 3-step plan from the previous entry (build the
   articulated `MarkerPrediction` UKF path, convert the calibrated

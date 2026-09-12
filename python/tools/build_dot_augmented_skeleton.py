@@ -114,7 +114,8 @@ def main() -> None:
         conn, merged_yaml, name=name, parent_id=args.base_skeleton_id,
         source=f"build_dot_augmented_skeleton.py from {args.calibrated_attachment_set}",
         notes=f"Base skeleton {args.base_skeleton_id} + {len(calibrated_doc['markers'])} calibrated "
-              f"dot-slot markers (B4/B5, {calibrated_doc['calibration']['date']}).",
+              f"dot-slot markers ({calibrated_doc['calibration'].get('method', 'B4/B5')}, "
+              f"{calibrated_doc['calibration'].get('date', 'undated')}).",
     )
     conn.commit()
 

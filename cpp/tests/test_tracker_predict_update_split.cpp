@@ -346,15 +346,67 @@ TEST_CASE("predict_dot_slot_predictions() predicts an unlabeled_points marker on
     REQUIRE_NOTHROW(tracker.predict_dot_slot_predictions(0));
 }
 
-TEST_CASE("predict_dot_slot_predictions() throws for a non-rigid-body skeleton",
-          "[tracker][predict_dot_slot_predictions]") {
+TEST_CASE(
+    "predict_dot_slot_predictions() on a non-rigid-body skeleton uses the general/"
+    "articulated sigma-point path (dot-assignment-architecture-design.md §6, built "
+    "2026-09-12)",
+    "[tracker][predict_dot_slot_predictions]") {
     auto fx = make_articulated_fixture(2);
+
+    // Attach one unlabeled_points dot marker to a real, non-root joint --
+    // exercises actual FK-chain propagation through several joints, not
+    // just a root-only rigid body. simple_humanoid.yaml has no such marker
+    // of its own; added here rather than to the shared fixture file so no
+    // other test's marker count/indexing is disturbed.
+    fx.skeleton.add_input_track("dots", "unlabeled_points");
+    uint32_t wrist_joint_index = 0;
+    bool found_wrist = false;
+    for (size_t i = 0; i < fx.skeleton.joints().size(); ++i) {
+        if (fx.skeleton.joints()[i].name == "r_wrist") {
+            wrist_joint_index = static_cast<uint32_t>(i);
+            found_wrist = true;
+            break;
+        }
+    }
+    REQUIRE(found_wrist);
+    Eigen::Vector3d const dot_local_pos(0.02, 0.0, 0.01);
+    uint32_t const dot_marker_id = fx.skeleton.add_marker("dot0", wrist_joint_index, dot_local_pos,
+                                                          std::nullopt, "dots", "dot0");
+
     auto config = make_fixture_config();
     Tracker tracker(std::make_shared<const Skeleton>(fx.skeleton), fx.camera_map, config);
     REQUIRE(tracker.initialize(fx.observations[0], 0.0));
 
     tracker.predict_step(fx.dt);
-    REQUIRE_THROWS_AS(tracker.predict_dot_slot_predictions(0), std::runtime_error);
+    std::unordered_map<int, MarkerPrediction> predictions;
+    REQUIRE_NOTHROW(predictions = tracker.predict_dot_slot_predictions(0));
+
+    // Not every camera necessarily sees the wrist marker in-frame this
+    // particular frame/camera -- but camera_0 (make_semicircle_cameras'
+    // first camera) does for this fixture's own geometry, same as every
+    // openpose marker's own observations do (make_articulated_fixture()
+    // already confirms in-bounds projections exist for camera 0 across
+    // all its own markers at frame 0's ground truth).
+    REQUIRE(predictions.count(static_cast<int>(dot_marker_id)) == 1);
+    MarkerPrediction const& pred = predictions.at(static_cast<int>(dot_marker_id));
+    REQUIRE(std::isfinite(pred.position.x()));
+    REQUIRE(std::isfinite(pred.position.y()));
+    // Positive-definite (not just non-negative): a real, non-degenerate
+    // spread across sigma points, not e.g. every sigma point landing on
+    // an identical projection by some accident of the fixture's zero
+    // initial covariance in unrelated DOFs.
+    REQUIRE(pred.covariance(0, 0) > 0.0);
+    REQUIRE(pred.covariance(1, 1) > 0.0);
+    REQUIRE(pred.covariance.determinant() > 0.0);
+
+    // Cross-checked against the rigid-body test's own sanity bound just
+    // above: a real capture's own per-marker pixel std this session
+    // measured was single/low-double-digit pixels at typical process
+    // noise, not thousands -- catches a units/scaling error (e.g. a
+    // stray factor from skipping or double-applying a Jacobian) without
+    // needing bit-for-bit ground truth.
+    REQUIRE(pred.covariance(0, 0) < 1.0e6);
+    REQUIRE(pred.covariance(1, 1) < 1.0e6);
 }
 
 TEST_CASE("predict_dot_slot_predictions() throws for an unknown camera id",

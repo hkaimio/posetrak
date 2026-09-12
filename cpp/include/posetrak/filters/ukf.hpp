@@ -20,6 +20,7 @@
 #include "posetrak/filters/sigma_points.hpp"
 #include "posetrak/filters/update_result.hpp"
 #include "posetrak/kinematics/forward_kinematics.hpp"
+#include "posetrak/tracking/marker_prediction.hpp"
 #include <future>
 #include <memory>
 #include <optional>
@@ -509,6 +510,52 @@ class UnscentedKalmanFilter {
     Eigen::MatrixXd apply_near_limit_damping_for_testing(Eigen::MatrixXd const& scaled_in) const {
         return apply_near_limit_damping(scaled_in, state_);
     }
+
+    /**
+     * @brief General (articulated) MarkerPrediction for one named marker
+     * slot, via the same sigma-point machinery predict()/update() already
+     * use for labeled observations -- dot-assignment-architecture-
+     * design.md §6's deferred "general/articulated" implementation of the
+     * MarkerPrediction seam. Unlike predict_rigid_marker()'s closed form
+     * (exact, cheap, rigid-body only), this runs real FK across every
+     * sigma point via the existing predict_measurements(), so it is the
+     * correct predictor for any skeleton with articulation -- what a
+     * full marker-based-mocap slot (hip/knee/ankle/etc., each a
+     * different joint) needs, at the cost of an extra ~n_sigma FK
+     * evaluations per (marker, camera) pair per frame.
+     *
+     * The returned covariance is *state uncertainty only*, with no
+     * measurement noise R added -- matching predict_rigid_marker()'s own
+     * convention exactly (marker_prediction.cpp has no R term either),
+     * since dot_assignment.cpp's own gating uses MarkerPrediction::
+     * covariance directly with no separate R addition of its own; adding
+     * R here and not there would silently double-count it for rigid vs.
+     * articulated subjects.
+     *
+     * @param marker_id  Index into skeleton->markers() (same convention
+     *                   as Observation::marker_id).
+     * @param camera_id  Camera to project into.
+     * @param state      Distribution mean (e.g. a Tracker's own prior
+     *                   state right after predict_step()).
+     * @param covariance Distribution covariance (error-state, matching
+     *                   `state`; e.g. Tracker's own prior_cov).
+     * @param cameras    Camera map.
+     * @param fk         ForwardKinematics instance (mutated per call --
+     *                   same contract as predict_measurements()'s own
+     *                   `fk` parameter).
+     * @return MarkerPrediction if the marker projects in front of the
+     *         camera at the central (zero-error) sigma point, std::nullopt
+     *         otherwise -- mirrors predict_rigid_marker()'s own "not
+     *         visible this frame" contract. A handful of *other* sigma
+     *         points landing behind the camera (plausible near a joint
+     *         limit or a fast-moving marker) don't invalidate the whole
+     *         prediction -- they're excluded from the weighted mean/
+     *         covariance individually, same NaN-safe convention
+     *         update()'s own Step 3/4 already uses.
+     */
+    std::optional<MarkerPrediction> predict_marker_slot(
+        int marker_id, int camera_id, State const& state, Eigen::MatrixXd const& covariance,
+        std::unordered_map<int, Camera> const& cameras, ForwardKinematics& fk) const;
 
    private:
     /**

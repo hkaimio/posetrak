@@ -875,12 +875,6 @@ void Tracker::predict_step(double dt) {
 
 std::unordered_map<int, MarkerPrediction>
 Tracker::predict_dot_slot_predictions(int camera_id) const {
-    if (!skeleton_->is_rigid_body()) {
-        throw std::runtime_error(
-            "Tracker::predict_dot_slot_predictions: general/articulated MarkerPrediction is "
-            "not yet implemented (dot-assignment-architecture-design.md §6 -- deferred pending "
-            "a real articulated dot-augmented capture)");
-    }
     auto cam_it = cameras_.find(camera_id);
     if (cam_it == cameras_.end()) {
         throw std::runtime_error("Tracker::predict_dot_slot_predictions: unknown camera_id " +
@@ -892,42 +886,74 @@ Tracker::predict_dot_slot_predictions(int camera_id) const {
             "this frame");
     }
 
-    // Body-local marker positions from rest-pose FK (root at identity) -- same trick
-    // initialize_rigid_body() uses for its own Kabsch/Umeyama fit (see that function's
-    // doc comment): for a root-only skeleton this is exactly the geometry
-    // predict_rigid_marker()'s local_pos parameter wants. Recomputed fresh each call
-    // rather than cached -- cheap (no articulation to run FK over) and avoids tying
-    // this method's correctness to which of Tracker's several init paths happened to
-    // run (initialize_rigid_body() is only one of them; initialize_from_state() and
-    // initialize_with_fixed_root() also produce an initialized Tracker but never touch
-    // a rigid-body-specific cache).
-    Eigen::VectorXd q_rest = Eigen::VectorXd::Zero(model_->nq);
-    if (model_->nq >= 7) {
-        q_rest[6] = 1.0;  // identity quaternion w component (Pinocchio free-flyer q = [xyz, xyzw])
-    }
-    auto rest_markers = fk_->compute(q_rest);
-
     std::unordered_map<int, MarkerPrediction> result;
-    Eigen::Matrix<double, 6, 6> const pose_cov = pending_prior_cov_.topLeftCorner<6, 6>();
-    Eigen::Vector3d const root_position = pending_prior_state_->root_position();
-    Eigen::Quaterniond const root_orientation = pending_prior_state_->root_orientation();
-
     auto const& markers = skeleton_->markers();
-    for (size_t i = 0; i < markers.size(); ++i) {
-        Marker const& marker = markers[i];
-        if (marker.track.empty())
-            continue;
-        InputTrack const* track = skeleton_->get_input_track(marker.track);
-        if (track == nullptr || track->type != "unlabeled_points")
-            continue;
-        auto local_it = rest_markers.find(marker.name);
-        if (local_it == rest_markers.end())
-            continue;
 
-        auto prediction = predict_rigid_marker(local_it->second, root_position, root_orientation,
-                                               pose_cov, cam_it->second, marker.normal);
-        if (prediction.has_value()) {
-            result.emplace(static_cast<int>(i), *prediction);
+    if (skeleton_->is_rigid_body()) {
+        // Rigid closed form (dot-assignment-architecture-design.md §6.1) --
+        // cheap and exact, no FK, no Pinocchio call.
+        //
+        // Body-local marker positions from rest-pose FK (root at identity) -- same
+        // trick initialize_rigid_body() uses for its own Kabsch/Umeyama fit (see
+        // that function's doc comment): for a root-only skeleton this is exactly
+        // the geometry predict_rigid_marker()'s local_pos parameter wants.
+        // Recomputed fresh each call rather than cached -- cheap (no articulation
+        // to run FK over) and avoids tying this method's correctness to which of
+        // Tracker's several init paths happened to run (initialize_rigid_body()
+        // is only one of them; initialize_from_state() and
+        // initialize_with_fixed_root() also produce an initialized Tracker but
+        // never touch a rigid-body-specific cache).
+        Eigen::VectorXd q_rest = Eigen::VectorXd::Zero(model_->nq);
+        if (model_->nq >= 7) {
+            q_rest[6] =
+                1.0;  // identity quaternion w component (Pinocchio free-flyer q = [xyz, xyzw])
+        }
+        auto rest_markers = fk_->compute(q_rest);
+
+        Eigen::Matrix<double, 6, 6> const pose_cov = pending_prior_cov_.topLeftCorner<6, 6>();
+        Eigen::Vector3d const root_position = pending_prior_state_->root_position();
+        Eigen::Quaterniond const root_orientation = pending_prior_state_->root_orientation();
+
+        for (size_t i = 0; i < markers.size(); ++i) {
+            Marker const& marker = markers[i];
+            if (marker.track.empty())
+                continue;
+            InputTrack const* track = skeleton_->get_input_track(marker.track);
+            if (track == nullptr || track->type != "unlabeled_points")
+                continue;
+            auto local_it = rest_markers.find(marker.name);
+            if (local_it == rest_markers.end())
+                continue;
+
+            auto prediction =
+                predict_rigid_marker(local_it->second, root_position, root_orientation, pose_cov,
+                                     cam_it->second, marker.normal);
+            if (prediction.has_value()) {
+                result.emplace(static_cast<int>(i), *prediction);
+            }
+        }
+    } else {
+        // General/articulated (§6, built 2026-09-12 -- the precondition the
+        // design doc deferred this on, "no articulated capture with dot
+        // augmentation exists yet to design or test against", is now met):
+        // UnscentedKalmanFilter::predict_marker_slot() reuses the same
+        // sigma-point machinery predict()/update() already run for labeled
+        // observations, real FK per sigma point rather than a closed form --
+        // additive on top of the rigid path above, not a rewrite of it.
+        for (size_t i = 0; i < markers.size(); ++i) {
+            Marker const& marker = markers[i];
+            if (marker.track.empty())
+                continue;
+            InputTrack const* track = skeleton_->get_input_track(marker.track);
+            if (track == nullptr || track->type != "unlabeled_points")
+                continue;
+
+            auto prediction =
+                ukf_->predict_marker_slot(static_cast<int>(i), camera_id, *pending_prior_state_,
+                                          pending_prior_cov_, cameras_, *fk_);
+            if (prediction.has_value()) {
+                result.emplace(static_cast<int>(i), *prediction);
+            }
         }
     }
     return result;

@@ -1935,6 +1935,69 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
     return predictions;
 }
 
+std::optional<MarkerPrediction> UnscentedKalmanFilter::predict_marker_slot(
+    int marker_id, int camera_id, State const& state, Eigen::MatrixXd const& covariance,
+    std::unordered_map<int, Camera> const& cameras, ForwardKinematics& fk) const {
+    auto const sigma_points = sigma_gen_.generate_sigma_points(state, covariance);
+    int const n_sigma = static_cast<int>(sigma_points.size());
+
+    Observation obs;
+    obs.marker_id = marker_id;
+    obs.camera_id = camera_id;
+    // mode defaults to MeasurementMode::POSITION -- predict_measurements()
+    // then projects the marker fresh from each sigma point's own FK, with
+    // no dependence on any real observed position (there isn't one).
+    std::vector<Observation> const observations{obs};
+
+    Eigen::MatrixXd proj(2, n_sigma);
+    for (int i = 0; i < n_sigma; ++i) {
+        proj.col(i) = predict_measurements(sigma_points[i], observations, cameras, fk, {});
+    }
+
+    // Central (zero-error) sigma point is always index 0 (sigma_points.cpp) --
+    // if the marker isn't visible there, treat the whole slot as not
+    // predicted this frame, mirroring predict_rigid_marker()'s own
+    // "behind the camera" -> std::nullopt contract.
+    if (!proj.col(0).allFinite()) {
+        return std::nullopt;
+    }
+
+    Eigen::VectorXd const weights_mean = sigma_gen_.get_mean_weights();
+    Eigen::VectorXd const weights_cov = sigma_gen_.get_covariance_weights();
+
+    Eigen::Vector2d mean = Eigen::Vector2d::Zero();
+    for (int d = 0; d < 2; ++d) {
+        double sum = 0.0;
+        double weight_sum = 0.0;
+        for (int i = 0; i < n_sigma; ++i) {
+            double const val = proj(d, i);
+            if (std::isfinite(val)) {
+                sum += weights_mean(i) * val;
+                weight_sum += weights_mean(i);
+            }
+        }
+        // weight_sum > 0 is guaranteed here: the central sigma point (checked
+        // finite above) always carries a strictly positive mean weight.
+        mean(d) = sum / weight_sum;
+    }
+
+    // State-uncertainty-only covariance -- deliberately no measurement noise
+    // R added (see this method's own doc comment for why that must match
+    // predict_rigid_marker()'s convention). NaN (behind-camera) sigma points
+    // are zeroed after centering, same convention update()'s own Step 4
+    // uses for the multi-observation case.
+    Eigen::Matrix2d cov = Eigen::Matrix2d::Zero();
+    for (int i = 0; i < n_sigma; ++i) {
+        Eigen::Vector2d z = proj.col(i) - mean;
+        if (!z.allFinite()) {
+            z.setZero();
+        }
+        cov += weights_cov(i) * (z * z.transpose());
+    }
+
+    return MarkerPrediction{mean, cov};
+}
+
 Eigen::VectorXd
 UnscentedKalmanFilter::observations_to_vector(std::vector<Observation> const& observations) const {
     int const n_obs = static_cast<int>(observations.size());

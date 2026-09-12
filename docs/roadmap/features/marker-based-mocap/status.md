@@ -1,5 +1,132 @@
 # Marker-based mocap — status
 
+- **2026-09-12** (first real end-to-end dot-augmented tracking run, latest)
+  — Completed the 3-step plan from the previous entry (build the
+  articulated `MarkerPrediction` UKF path, convert the calibrated
+  attachment set into a real skeleton, run it end-to-end and compare
+  against baseline). All three done and verified with real data; this
+  is the first time this project has tracked a person using leg dot
+  slots through the full production tracker.
+
+  **Step 1 — skeleton conversion.** New `build_dot_augmented_skeleton.py`
+  merges `catalog/leg.calibrated.2026-09-06-kare-tests.yaml`'s 16 fitted
+  markers into a copy of the base `reallusion-no-waist` skeleton
+  (`track: dots` / `landmark: <name>` / `normal:`, plus an
+  `input_tracks: [{id: dots, type: unlabeled_points}]` entry) and
+  registers it via `import_skeleton_str()` with `parent_id` set to the
+  base skeleton for lineage. Every `parent_joint` resolved against a
+  real joint in the base skeleton (checked before writing); field names
+  (`track`/`landmark`/`normal`) were verified directly against
+  `skeleton_loader.cpp`'s parser and `cpp/tests/data/rigid_prop.yaml`
+  before use, not assumed. New skeleton_id:
+  `723cf161f2527cd89f94a25eaeaebe5291f33b32f95c54e32bf9c35ebc7c55d8`,
+  written to
+  `catalog/reallusion-no-waist.dot-augmented.2026-09-06-kare-tests.yaml`.
+
+  **Real gap found while wiring up validation**: the dot-detection run
+  (`75cbf678-2066-4a58-ab81-d27ea4c58d02`, ArUco+dots, `capture_object_id`
+  NULL) had no path into `pose_observations` at all — the only existing
+  finalisation function, `finalise_object_to_db()`, is scoped to rigid
+  capture-objects and refuses any run without one. Rather than
+  generalising that function to a person/no-object case (real design
+  work, not something to invent solo mid-validation), built a narrow
+  additive tool, `copy_dot_candidates_to_sequence.py`, that copies the
+  same `detection_keypoints` rows (`region_type='dots'`) into an
+  *existing* person sequence's `pose_observations` instead of minting a
+  new object sequence — `person_id` is already documented as an ignored
+  placeholder for `source='dots'` rows, so `sequence_id` is the only
+  thing that actually matters to `SessionReader::load_unlabeled_
+  candidates()`. Verified the 9-floats-per-candidate wire format
+  (Phase B's tracklet-id bump) matches on both the Python encode and
+  C++ decode side before trusting it, and that `sync_config_id`/
+  `shot_id`/time range all matched the target sequence. Copied all
+  69,486 rows into sequence `ec1b3e2f-1ef8-4e31-806c-33102a969ecd`
+  (the same sequence the `990fb01a` baseline run used) with zero skips.
+
+  **Step 2 — articulated `MarkerPrediction` (built the same day as the
+  previous entry, verified again here in a real run, not just unit
+  tests)**: `UnscentedKalmanFilter::predict_marker_slot()` (new,
+  `ukf.cpp`/`ukf.hpp`) projects sigma points through the existing
+  private `predict_measurements()` and reads off each dot slot's own
+  2×2 covariance block, exactly mirroring `dot-assignment-architecture-
+  design.md` §6's design and matching `predict_rigid_marker()`'s
+  state-uncertainty-only convention (no measurement noise added).
+  `Tracker::predict_dot_slot_predictions()` now branches on
+  `skeleton_->is_rigid_body()` instead of unconditionally throwing for
+  the articulated case. `./run_tests.sh`: all 370 cases pass, including
+  a rewritten `test_tracker_predict_update_split.cpp` case that
+  exercises the new path on a real articulated fixture with a dot
+  marker on a non-root joint.
+
+  **Step 3 — real end-to-end run.** Rebuilt `optbuild` (release) with
+  the new UKF code, then ran `posetrak-tracker track` against the
+  dot-augmented skeleton, reusing the exact same tracker_config as the
+  `990fb01a` baseline (factory defaults, untouched) so the comparison
+  isolates just the dot-tracking addition. New tracking_run:
+  `d096d14f-3e66-4875-a843-b3ddf9aab263`.
+
+  Overall body/hand tracking, compared to baseline:
+  | | baseline (`990fb01a`, no dots) | new (`d096d14f`, +16 dot slots) |
+  |---|---|---|
+  | tracked steps | 11587/11587 (100.0%) | 11587/11587 (100.0%) |
+  | mean NIS/dof | 1.959 | 1.920 |
+  | median NIS/dof | 1.814 | 1.778 |
+
+  No regression — essentially identical, if marginally better. One
+  thing worth noting honestly rather than glossing over: IK
+  initialization printed `IK residual 1.414 m > 0.50 m — using analytic
+  root estimate with zero joint angles` (RMS across the 61 openpose
+  markers, which is all IK ever fits — dots play no part in
+  initialization). Checked whether this hurt anything: NIS/dof for the
+  first 5 s (599 steps) averaged 1.830, *not* elevated relative to the
+  1.925 average over the rest of the run — the UKF's designed "refine
+  over first frames" recovery behaved exactly as intended, and this
+  reads as a property of this capture's frame-0 keypoints rather than
+  anything introduced by the dot-skeleton work (dots aren't in the IK
+  objective at all).
+
+  Dot-slot-specific results (the actual point of the exercise) — every
+  one of the 16 slots picked up real, low-outlier-rate observations
+  across the whole ~97 s capture via the new sigma-point assignment
+  path, using a tracker_config that was never tuned for dot markers
+  (still `measurement_noise_std=25`, factory default):
+
+  | slot | frame coverage | median reproj. error | inliers / outliers |
+  |---|---|---|---|
+  | ankle_lat_L | 53.7% | 40.4 px | 7658 / 0 |
+  | ankle_lat_R | 82.0% | 16.0 px | 17423 / 52 |
+  | ankle_med_L | 87.3% | 35.0 px | 18770 / 61 |
+  | ankle_med_R | 82.1% | 37.4 px | 16230 / 43 |
+  | heel_L | 78.9% | 23.5 px | 15718 / 26 |
+  | heel_R | 70.0% | 18.0 px | 13101 / 18 |
+  | hip_L | 46.8% | 11.8 px | 6852 / 1 |
+  | hip_R | 58.9% | 25.7 px | 9903 / 1 |
+  | knee_front_L | 64.5% | 29.6 px | 9615 / 15 |
+  | knee_front_R | 55.1% | 20.2 px | 9575 / 15 |
+  | knee_lat_L | 73.5% | 16.0 px | 12008 / 12 |
+  | knee_lat_R | 61.3% | 15.7 px | 10590 / 12 |
+  | knee_med_L | 49.0% | 23.8 px | 7576 / 12 |
+  | knee_med_R | 49.2% | 29.5 px | 8155 / 15 |
+  | toe_L | 82.1% | 19.9 px | 17017 / 47 |
+  | toe_R | 82.1% | 27.0 px | 16973 / 129 |
+
+  `ankle_lat_L` — flagged all session as the one low-confidence slot
+  (only 28 cross-camera calibration samples, from the reconciliation
+  entry above) — still tracks coherently with zero outliers, just at
+  lower frame coverage and higher median error than its peers, which is
+  consistent with a marker whose fitted offset came from thin data
+  rather than with anything actually broken.
+
+  Deliberately not done in this pass (real, open items for a follow-on):
+  tracker_config isn't tuned for dot markers at all yet (still using
+  the openpose-keypoint factory defaults); no dedicated GUI/finalize
+  path for a person-worn (non-rigid-object) dot-detection run —
+  `copy_dot_candidates_to_sequence.py` is a validation-scoped tool, not
+  a production pipeline entry point; normal-direction fitting still
+  defaults to radial-perpendicular rather than being fit against real
+  camera visibility; no BVH/visual review of the resulting dot-driven
+  joint angles has been done yet.
+
 - **2026-09-09** — Person-marker-assignment-design.md's phases P1-P7
   prototyped and validated (real video review each step, not just
   aggregate stats) against the real person-marker capture:

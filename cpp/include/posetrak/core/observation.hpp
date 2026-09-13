@@ -92,9 +92,15 @@ struct Observation {
 
 /// @brief Sequence of observations from a single camera
 struct ObservationSequence {
-    int camera_id;                          ///< Camera identifier
-    std::string camera_name;                ///< Camera name
-    std::vector<Observation> observations;  ///< All observations
+    int camera_id;            ///< Camera identifier
+    std::string camera_name;  ///< Camera name
+    /// All observations, sorted by timestamp (non-decreasing -- several
+    /// observations from the same frame legitimately share a timestamp).
+    /// get_in_range() binary-searches on this invariant; anything that
+    /// builds an ObservationSequence directly (bypassing the loaders in
+    /// session_reader.cpp / observation_loader.cpp, which already
+    /// guarantee it) must preserve it.
+    std::vector<Observation> observations;
 
     /// @brief Query observations in time range [t_start, t_end)
     /// @param t_start Start time (inclusive)

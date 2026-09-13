@@ -46,15 +46,23 @@ Observation Observation::from_json(nlohmann::json const& j) {
 // ObservationSequence implementation
 
 std::vector<Observation> ObservationSequence::get_in_range(double t_start, double t_end) const {
-    std::vector<Observation> result;
-
-    for (auto const& obs : observations) {
-        if (obs.timestamp >= t_start && obs.timestamp < t_end) {
-            result.push_back(obs);
-        }
-    }
-
-    return result;
+    // Binary search, not a linear scan (2026-09-13 perf fix -- found via
+    // frame_step_profile, status.md: 33.9 ms/frame, 18.5% of the whole
+    // per-frame budget, just to fetch one frame's real observations).
+    // Relies on `observations` being sorted by timestamp (non-decreasing --
+    // several observations from the same frame legitimately share one
+    // timestamp), which every populating path already guarantees: the DB
+    // loader's own query is `ORDER BY camera_instance_id, video_frame`
+    // (session_reader.cpp), and the legacy JSON loader explicitly sorts by
+    // frame number before appending (observation_loader.cpp). Nothing
+    // mutates an already-built sequence's `observations` afterward.
+    auto const lo =
+        std::lower_bound(observations.begin(), observations.end(), t_start,
+                         [](Observation const& obs, double t) { return obs.timestamp < t; });
+    auto const hi =
+        std::lower_bound(observations.begin(), observations.end(), t_end,
+                         [](Observation const& obs, double t) { return obs.timestamp < t; });
+    return std::vector<Observation>(lo, hi);
 }
 
 double ObservationSequence::min_time() const {

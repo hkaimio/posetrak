@@ -133,6 +133,63 @@ TEST_CASE("ObservationSequence time queries", "[observation]") {
     }
 }
 
+TEST_CASE(
+    "ObservationSequence::get_in_range() with duplicate timestamps (2026-09-13 binary-search fix)",
+    "[observation]") {
+    // Real usage always has several observations (one per keypoint) sharing
+    // one exact timestamp per frame -- get_in_range() went from a linear
+    // scan to a binary search (std::lower_bound) that relies on the
+    // sequence being sorted by timestamp, non-decreasing. This exercises
+    // exactly the tie-handling that change depends on: several equal
+    // timestamps in a row, queried at a boundary that lands inside a run of
+    // ties, not between two distinct values.
+    ObservationSequence seq;
+    seq.camera_id = 0;
+    seq.camera_name = "camera_1";
+
+    // Frame 0: t=0.0, 3 keypoints. Frame 1: t=0.1, 3 keypoints. Frame 2: t=0.2, 3 keypoints.
+    for (int frame = 0; frame < 3; ++frame) {
+        for (int kp = 0; kp < 3; ++kp) {
+            Observation obs;
+            obs.camera_id = 0;
+            obs.marker_id = frame * 3 + kp;
+            obs.timestamp = frame * 0.1;
+            obs.position = Eigen::Vector2d(obs.marker_id, obs.marker_id);
+            obs.position_distorted = obs.position;
+            obs.confidence = 0.8;
+            seq.observations.push_back(obs);
+        }
+    }
+
+    SECTION("Range starting exactly on a tied timestamp includes the whole run") {
+        auto obs = seq.get_in_range(0.1, 0.2);
+        REQUIRE(obs.size() == 3);
+        for (auto const& o : obs) {
+            REQUIRE_THAT(o.timestamp, Catch::Matchers::WithinAbs(0.1, 1e-10));
+        }
+    }
+
+    SECTION("Range covering all three frames") {
+        auto obs = seq.get_in_range(0.0, 0.3);
+        REQUIRE(obs.size() == 9);
+    }
+
+    SECTION(
+        "Range ending exactly on a tied timestamp excludes that run "
+        "([t_start, t_end) is half-open)") {
+        auto obs = seq.get_in_range(0.0, 0.1);
+        REQUIRE(obs.size() == 3);
+        for (auto const& o : obs) {
+            REQUIRE_THAT(o.timestamp, Catch::Matchers::WithinAbs(0.0, 1e-10));
+        }
+    }
+
+    SECTION("Range strictly between two tied-timestamp runs is empty") {
+        auto obs = seq.get_in_range(0.05, 0.1);
+        REQUIRE(obs.empty());
+    }
+}
+
 TEST_CASE("ObservationSequence JSON serialization", "[observation]") {
     ObservationSequence seq;
     seq.camera_id = 1;

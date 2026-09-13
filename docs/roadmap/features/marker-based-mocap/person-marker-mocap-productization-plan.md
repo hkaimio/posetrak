@@ -331,14 +331,13 @@ concept for both once §2.5's convergence is real:
       fixes (inside the shared body+hand `update()`) — needs its own
       profiling once a materially larger module (torso+arms, §4)
       exists, not extrapolation from here.
-   2. **`observations.get_all_in_range()` (18.5%, 33.9 ms/frame) was a
-      genuine surprise** — more than 8x today's whole dot-slot-
-      prediction fix target, just to fetch this frame's real pose-
-      keypoint observations before doing anything with them. Not
-      dot-marker-specific at all (every tracking run calls this), so a
-      fix would help every run in this project, not only marker-
-      augmented ones. Smells like a linear scan or unindexed lookup
-      against a large, session-wide observation collection, re-run
-      every frame — flagged as a real, likely easier and higher-value
-      target than anything left on the dot-prediction side, not
-      investigated further this pass.
+   2. **`observations.get_all_in_range()` (18.5%, 33.9 ms/frame) — found
+      and fixed same day.** It really was "something stupid visible by
+      inspection," per Harri's own guess: a full linear scan over the
+      *entire* per-camera observation history on every call, when
+      `observations` is already guaranteed sorted by timestamp (both
+      loaders verified to preserve this, not assumed). Replaced with
+      `std::lower_bound` binary search — dropped to 0.044 ms/frame
+      (770x), real throughput ~5.45 -> ~6.74 fps (+24%). Not dot-marker-
+      specific at all, so this benefits every tracking run in the
+      project, not only marker-augmented ones.

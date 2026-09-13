@@ -1,5 +1,38 @@
 # Marker-based mocap — status
 
+- **2026-09-13** (fixed `ObservationSequence::get_in_range()`, latest) —
+  Harri: "profile `observations.get_all_in_range()` next -- or maybe
+  worth a check of the code, this sounds like it is doing something
+  stupid that might be visible with just inspection." It was:
+  `ObservationSequence::get_in_range()` did a full linear scan over the
+  *entire* per-camera observation history on every single call, when
+  `observations` is already guaranteed sorted by timestamp (verified
+  before trusting it, not assumed -- the DB loader's own query is
+  `ORDER BY camera_instance_id, video_frame` (`session_reader.cpp`),
+  the legacy JSON loader explicitly sorts by frame number before
+  appending (`observation_loader.cpp`), and nothing anywhere mutates an
+  already-built sequence's `observations` afterward). Replaced the scan
+  with `std::lower_bound` binary search on that invariant. Added a
+  regression test specifically for the tie-handling this depends on
+  (several observations sharing one timestamp per frame, queried at
+  boundaries that land inside vs. between tied runs) -- the existing
+  `get_in_range()` tests already used strictly-increasing timestamps, so
+  wouldn't have caught a tie-handling bug in a naive rewrite.
+  `./run_tests.sh`: all 372 cases pass (371 + this one).
+
+  Re-profiled the same 2399-frame window: `observations.get_all_in_range()`
+  dropped **33.89 -> 0.044 ms/frame (770x)**, exactly the O(n) -> O(log n)
+  result predicted. Real observed throughput: **~5.45 -> ~6.74 fps
+  (+24%)**, precisely measured from file timestamps. (First wall-clock
+  sample during verification looked unchanged -- a noisy early read from
+  a 20-second partial window, not trusted once the full run's real
+  numbers came back; flagging the correction rather than the wrong
+  number.) Frame-time reconciliation still closes to ~2.5% residual.
+
+  This fix is not dot-marker-specific -- `get_in_range()` is called by
+  every tracking run in this project, marker-augmented or not, so this
+  benefits markerless tracking too, not just today's leg-module work.
+
 - **2026-09-13** (closed the frame-time accounting, latest) — Harri
   caught a real error in the previous entry's own numbers: "if update()
   is 61ms and predict_marker_slots() is 4.13 it does not add up" against

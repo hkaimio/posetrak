@@ -92,7 +92,7 @@ from app.setup.extrinsics_solver import (  # noqa: E402
     solve_marker_pose,
 )
 from app.setup.fiducial_markers import ArucoDetector  # noqa: E402
-from posetrak.detection.dot_blob_detector import detect_blobs  # noqa: E402
+from posetrak.detection.dot_blob_detector import compute_background, detect_blobs  # noqa: E402
 from posetrak.detection.frame_source import iter_frames  # noqa: E402
 
 
@@ -292,6 +292,24 @@ def triangulate_point_multi_view(
     return point
 
 
+def _point_in_dilated_quad(point: np.ndarray, quad: np.ndarray, scale: float) -> bool:
+    """True if *point* falls inside *quad* (a marker's own 4 detected corners,
+    any winding order) after dilating it by *scale* about its own centroid.
+
+    Used to explicitly exclude a marker's own footprint from dot-candidate
+    search: background subtraction against a median built from a short
+    window leaves the marker's own high-contrast edges as residual whenever
+    it moves even slightly between samples (confirmed 2026-09-13, pen+pad
+    capture -- see status.md), which a plain distance-from-centroid gate
+    can't tell apart from a real nearby dot since both are "close to the
+    marker." Dilating (rather than using the raw quad) gives a small margin
+    for the corner-detector's own sub-pixel jitter.
+    """
+    centroid = quad.mean(axis=0)
+    dilated = (centroid + (quad - centroid) * scale).astype(np.float32)
+    return cv2.pointPolygonTest(dilated.reshape(-1, 1, 2), (float(point[0]), float(point[1])), False) >= 0
+
+
 def cluster_dot_samples(samples: list[np.ndarray], tolerance_m: float = 0.02) -> list[list[np.ndarray]]:
     """Greedy incremental clustering of local-frame 3D dot samples into
     distinct physical dots.
@@ -360,6 +378,45 @@ def main() -> None:
                     help="Reject a triangulated dot sample if any contributing view's own "
                          "reprojection error exceeds this -- rejects cross-camera "
                          "coincidences (see triangulate_point_multi_view()'s doc comment)")
+    ap.add_argument("--dot-bg-subtract", action="store_true",
+                    help="Gate detect_blobs() on a per-camera median-background residual "
+                         "instead of raw brightness. Needed whenever the dot/band signal "
+                         "sits below the scene's own brightest features (e.g. a window or "
+                         "ceiling light) -- plain thresholding then finds only the unrelated "
+                         "bright feature and never the real marker, however low --dot-threshold "
+                         "goes. Costs a second decode pass per camera to sample the background.")
+    ap.add_argument("--dot-bg-samples", type=int, default=40,
+                    help="Frames sampled (evenly across the camera's own full frame range, "
+                         "not just [--time-start, --time-end)) to build the median background")
+    ap.add_argument("--dot-gate-radius-mult", type=float, default=0.0,
+                    help="If >0: in a given camera/frame, keep only dot candidates within "
+                         "this multiple of the largest visible --marker-ids marker's own "
+                         "on-screen diagonal (px) of that marker's centroid, and drop the "
+                         "frame's candidates entirely if no such marker is visible in that "
+                         "camera that frame. Scales with the marker's own apparent size, so "
+                         "it stays a sane ROI at any camera distance. Rejects scene clutter "
+                         "far from the rigid body (a window, a floor calibration target) "
+                         "that shape/brightness filtering alone doesn't catch. 0 (default) "
+                         "keeps the original global, ungated search.")
+    ap.add_argument("--dot-quad-exclude-scale", type=float, default=1.5,
+                    help="Exclude any dot candidate falling inside a visible pen marker's "
+                         "own quad, dilated by this factor about its centroid, before "
+                         "applying --dot-gate-radius-mult. Rejects the marker's own edges "
+                         "leaking through as background-subtraction residual when it moves "
+                         "slightly between the background sample frames (confirmed "
+                         "2026-09-13) -- a *closer*, more specific false positive than "
+                         "--dot-gate-radius-mult was ever meant to filter. Only applied "
+                         "when --dot-gate-radius-mult > 0 (no marker corners are otherwise "
+                         "collected for gating). Set to 0 to disable.")
+    ap.add_argument("--camera-labels", nargs="+", default=None,
+                    help="Restrict to these camera_instances.label values (e.g. "
+                         "'pixel9 oneplus9pro-01') instead of every camera with solved "
+                         "extrinsics. Needed when a marker ID is ambiguous across the rig "
+                         "-- e.g. a wrongly-printed tag on an unrelated static prop shares "
+                         "an ID with the real object in some camera's view (confirmed "
+                         "2026-09-13: the extrinsics calibration box has a same-ID ArUco "
+                         "tag on one face by mistake) -- and only a known-good subset of "
+                         "cameras' sightings should be trusted.")
     args = ap.parse_args()
 
     conn = sqlite3.connect(f"file:{args.session}?mode=ro", uri=True)
@@ -367,6 +424,21 @@ def main() -> None:
 
     print("Loading camera states + extrinsics...")
     states = load_camera_states(conn, args.shot_id)
+    if args.camera_labels:
+        label_by_cam_id = {
+            r["camera_instance_id"]: r["label"]
+            for r in conn.execute(
+                "SELECT DISTINCT cv.camera_instance_id, ci.label FROM capture_videos cv "
+                "JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
+                "WHERE cv.shot_id = ?", (args.shot_id,),
+            )
+        }
+        wanted = set(args.camera_labels)
+        states = {
+            cam_id: state for cam_id, state in states.items()
+            if label_by_cam_id.get(cam_id) in wanted
+        }
+        print(f"  restricted to {sorted(wanted)}: {len(states)} cameras matched")
     print(f"  {len(states)} cameras with solved extrinsics")
     sync_table, svid_by_cam = load_sync_table(conn, args.shot_id)
 
@@ -398,6 +470,28 @@ def main() -> None:
         if first is None or last is None:
             print(f"  SKIP {cam_id[:8]}: no sync coverage in [{args.time_start}, {args.time_end})")
             continue
+
+        background = None
+        if args.detect_dots and args.dot_bg_subtract:
+            # Sampled from [first, last) itself -- NOT state.first_frame/last_frame,
+            # which span this camera's whole participation in the *shot* (every
+            # experiment filmed in one continuous take can be minutes long) and
+            # would make iter_frames() sequentially decode the entire span just to
+            # keep a handful of frames (iter_frames has no random-access seek; it
+            # decodes every frame in its range and this loop's own subsampling only
+            # filters *after* decode). [first, last) is already only as wide as
+            # --time-start/--time-end, which is what the analysis itself needs
+            # regardless -- a real cost, but one already being paid, not a new one.
+            step = max(1, (last - first) // args.dot_bg_samples)
+            bg_frames = [
+                cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                for video_frame, img in iter_frames(state.file_path, first, last)
+                if (video_frame - first) % step == 0
+            ]
+            background = compute_background(bg_frames)
+            print(f"camera {cam_id[:8]}: background from {len(bg_frames)} frames "
+                  f"spanning {first}-{last}")
+
         print(f"camera {cam_id[:8]}: frames {first}-{last} ({state.file_path})")
         n_decoded = 0
         for video_frame, img in iter_frames(state.file_path, first, last):
@@ -409,9 +503,8 @@ def main() -> None:
             if gt is None:
                 continue
             bucket = round(gt / 0.05) * 0.05
-            for d in dets:
-                if d.marker_id not in marker_ids:
-                    continue
+            pen_dets = [d for d in dets if d.marker_id in marker_ids]
+            for d in pen_dets:
                 pts = np.array([(c.px, c.py) for c in d.corners], dtype=np.float64)
                 pts_undist = _undistort_pts(pts, state)
                 frame_obs[bucket][d.marker_id][cam_id] = pts_undist
@@ -421,7 +514,32 @@ def main() -> None:
                 blobs = detect_blobs(
                     gray, threshold=args.dot_threshold, min_area=args.dot_min_area,
                     max_area=args.dot_max_area, min_compactness=args.dot_min_compactness,
+                    background=background,
                 )
+                if args.dot_gate_radius_mult > 0:
+                    if not pen_dets:
+                        blobs = []
+                    else:
+                        anchors = []
+                        quads = []
+                        for d in pen_dets:
+                            corners = np.array([(c.px, c.py) for c in d.corners], dtype=np.float64)
+                            centroid = corners.mean(axis=0)
+                            diag = float(np.linalg.norm(corners[0] - corners[2]))
+                            anchors.append((centroid, diag))
+                            quads.append(corners)
+                        kept = []
+                        for b in blobs:
+                            p = np.array([b.cx, b.cy])
+                            if args.dot_quad_exclude_scale > 0 and any(
+                                _point_in_dilated_quad(p, q, args.dot_quad_exclude_scale)
+                                for q in quads
+                            ):
+                                continue
+                            if any(np.linalg.norm(p - c) <= args.dot_gate_radius_mult * diag
+                                   for c, diag in anchors):
+                                kept.append(b)
+                        blobs = kept
                 if blobs:
                     pts = np.array([(b.cx, b.cy) for b in blobs], dtype=np.float64)
                     pts_undist = _undistort_pts(pts, state)

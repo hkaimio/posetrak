@@ -1,6 +1,147 @@
 # Marker-based mocap — status
 
-- **2026-09-13** (fixed `ObservationSequence::get_in_range()`, latest) —
+- **2026-09-13** (validated real-capture pen+pad prop tracking end-to-end,
+  latest) — Continuation of the pen+pad prop-tracking pivot: resolved the
+  pen's calibration-video tag-3 failure by switching to the real multi-
+  camera capture's own cross-camera co-occurrence, then built a full
+  pen+pad trajectory across the actual 98-113s writing scene.
+
+  **Pen ArUco body, real capture vs. calibration video**: re-ran
+  `calibrate_rigid_marker_body.py --marker-ids 2 3 --reference-id 2`
+  directly against the real 6-camera writing-scene footage (not the
+  separate calibration video that had produced garbage tag-3 data,
+  175-1200px reprojection error) -- confirmed first that markers 2 and 3
+  are genuinely co-visible from different cameras at the same
+  synchronized instant in 268 of 451 time-bins (59%) across the window,
+  the actual precondition for this mechanism. Result: tag 3 solved from
+  26 co-occurrence samples, corners forming a near-perfect square
+  (9.476-9.478cm edges against a 9.5cm marker) and a normal 178.6° from
+  tag 2's own -- genuinely opposite-facing, matching the physical prop --
+  with **no twist ambiguity**, unlike the calibration-video's 2-point
+  Kabsch fit. This fully supersedes the earlier calibration-video tag-3
+  result.
+
+  **Reflective-band (dot) calibration attempt, `--detect-dots`**: failed
+  outright first try (0 usable samples, every bucket "ambiguous").
+  Diagnosed via direct visual inspection (not more parameter tuning):
+  the ~150-candidates-per-frame reading that first suggested "the whole
+  scene is this cluttered" was dominated by the two-person pen-handoff
+  transition at the very start of the window (98-99s); restricting to
+  the calm one-person writing period (101-111.5s) alone dropped per-frame
+  candidates from ~150 to a 14-30 plateau. A second fix -- explicitly
+  masking each visible marker's own (dilated) quad, since a marker's own
+  high-contrast edges leak through as background-subtraction residual
+  whenever it moves slightly between the background's own sample frames
+  -- didn't reach the "exactly 1 candidate" this script's correspondence
+  mechanism needs, but did clean up the *remaining* clutter enough that,
+  zoomed into one calm frame, the real band candidates were identifiable
+  among a short list rather than buried in generic noise. New
+  `--dot-quad-exclude-scale` and a `--camera-labels` filter (see pad
+  section below) added to `calibrate_rigid_marker_body.py`.
+
+  **Reflective-band tracking, `prototype_pen_band_tracking.py` (new)**:
+  since the script's own "exactly 1 unambiguous candidate per camera"
+  correspondence can't resolve a 14-30-candidate field, built a dedicated
+  temporal tracker instead -- bootstrap each band from one manually-
+  confirmed (camera, frame, pixel) seed (automatic bootstrap heuristics
+  were tried and shown unreliable in this cluttered scene), then track
+  forward frame-to-frame via nearest-candidate-within-gate_px (same
+  policy already validated for the calibration video's tag-2 dot),
+  independently per camera. Combined across cameras *and* time via a
+  "virtual projection" DLT triangulation: each tracked (camera, frame)
+  sighting's projection matrix is composed with that instant's own
+  already-solved marker-2 world pose, so sightings never need to be
+  simultaneous -- the same cross-time/cross-camera co-occurrence bridging
+  `calibrate_rigid_marker_body.py`'s own ArUco corner registration
+  already relies on, just applied to an unknown point instead of a known
+  corner offset. Tracked the pen-tip band (the one relevant to the
+  pen-tip-to-pad accuracy goal) across 395 frames on gopro13_02 and 118
+  on pixel9; 405 of 513 pooled sightings had a bucket with a solved
+  marker-2 pose. **Result: local-frame offset [0.306, 0.033, -0.005]m,
+  reprojection error median 2.33px / p90 8.53px** (381/405 rows under a
+  15px inlier threshold) -- comparable to the ArUco tag-2 fit's own
+  1.62px, nowhere near the broken tag-3-from-calibration-video attempt's
+  175-311px. The "top" band (near the tags) was not seeded this pass --
+  not cleanly separable from marker-edge residue in the one frame
+  checked, and the tip band was the priority.
+
+  **Full pen trajectory, `prototype_track_pen_trajectory.py` (new)**:
+  standalone per-instant 6-DOF trajectory across the whole 98-113s window
+  (NOT the production object-tracking path -- see caveat below), reusing
+  `solve_marker_pose()`: solves marker 2 directly when visible, falls
+  back to solving marker 3 and rigid-registering its already-known local
+  corners against marker 2's frame when only marker 3 is visible (roughly
+  doubling coverage since the two tags rarely both hide at once). **244
+  of 300 buckets solved (223 direct + 21 via the marker-3 fallback),
+  spanning the full window with only 9 gaps >0.15s (largest 0.80s)**.
+  Derived the tip's world trajectory from the calibrated local offset
+  above. Found (via a rolling-median outlier check, not by eye alone) 24
+  isolated single-bucket glitches -- classic single-frame bad-solve
+  artifacts a real outlier-rejecting tracker (Mahalanobis gating, RTS
+  smoothing) would filter automatically; this standalone script has none,
+  so they were removed by a simple rolling-median filter instead. The
+  cleaned trajectory is smooth and physically coherent end to end:
+  standing handoff (z~1.4m) -> drop to writing height (~101s,
+  z~0.6-0.9m) -> stable writing motion (101-110.5s) -> brief
+  repositioning (~111s) -> settled continuation.
+
+  **Pad calibration, real capture -- a second real ID-collision bug
+  found**: naively assumed markers 0/1 (the pad's own IDs, confirmed by
+  Harri) would calibrate the same way as the pen's 2/3. First attempt
+  against all 6 cameras gave a garbage marker-1 corner std of
+  [7,19,22]cm (vs. sub-1.3cm for every other marker calibrated this
+  session). Root cause (confirmed by Harri, not just inferred): **the
+  extrinsics calibration box mistakenly carries a same-ID (DICT_4X4_50,
+  id "0") ArUco tag on one of its faces** -- meant to be a DICT_5X5 tag,
+  wrong marker attached by mistake; also confirmed any marker ID >10 in
+  this capture's detection run is a false positive. Restricting to 3
+  cameras whose marker-"1" sightings showed clear real motion improved
+  but didn't fix it (std still [6,3,2]cm) -- direct inspection of
+  marker-0's own raw pixel trajectory per camera showed it's **frozen at
+  one fixed screen position for nearly the entire window in every camera
+  checked**, with only rare, isolated deviations -- the box's mistaken
+  tag dominates "0" sightings almost everywhere, not just occasionally.
+  Fix: dropped marker "0" from the real-capture solve entirely; used
+  marker "1" (no known ID conflict, confirmed clear real motion in every
+  camera) as the pad's sole real-capture anchor, reusing the
+  *already-validated* calibration-video pad geometry (median translation
+  36.93cm, rotation 4.04°, std <=2.7cm, from the earlier
+  `prototype_calibrate_pen_and_pad.py` run) for marker 0's known-but-
+  unneeded offset. Added `--camera-labels` to `calibrate_rigid_marker_
+  body.py` to support this kind of camera-subset restriction generically.
+
+  **Combined pen+pad trajectory**: extended `prototype_track_pen_
+  trajectory.py` to also solve the pad's pose (via marker 1 alone) in
+  the same per-frame pass -- zero extra decode cost, since ArUco
+  detection already finds every marker in frame regardless of which IDs
+  are used downstream. **Pad solved in 226 of 244 buckets (92.6%), zero
+  outliers** (vs. 24 for the pen) -- confirms the marker-1-only fix is
+  clean. Pad position is essentially static after ~100.5s (she sets it
+  on her lap and only the pen moves), matching physical expectation
+  exactly. **Tip-to-pad distance**: 61cm during the handoff -> drops
+  sharply as the pen approaches -> stable 10-20cm band throughout the
+  main writing period (101-110.5s, fluctuations matching real
+  stroke-to-stroke motion) -> rises to ~40cm and stays there from ~111s
+  (pen lifted away). This is the pen-tip-relative-to-pad motion Harri
+  asked for; caveat -- it's distance to marker 1's own mounting point,
+  not the paper surface itself, which would need its own (likely small,
+  fixed) offset calibration if exact contact timing matters.
+
+  **Explicit scope caveat**: everything in this entry is a standalone
+  Python trajectory-export prototype (`prototype_pen_band_tracking.py`,
+  `prototype_track_pen_trajectory.py`), not the production C++ UKF
+  tracker -- no smoothing, no Mahalanobis outlier gating beyond the
+  rolling-median bolt-on described above. The production single-object
+  tracking path (`ObjectPanel`/`ObjectRunTrackerDialog`, same UKF
+  pipeline used for people) already exists and works, but wiring this
+  specific pen/pad object into it needs the ArUco/dot observations
+  finalized into a `pose_observation_sequences` row and a
+  `capture_objects` entry, neither of which exist yet for this capture --
+  a real integration gap (`marker-mocap-productization-plan.md` §3.4/§4
+  already flags multi-subject/object-tracking-launch validation as "not
+  yet exercised"), not something this investigation closes.
+
+- **2026-09-13** (fixed `ObservationSequence::get_in_range()`) —
   Harri: "profile `observations.get_all_in_range()` next -- or maybe
   worth a check of the code, this sounds like it is doing something
   stupid that might be visible with just inspection." It was:

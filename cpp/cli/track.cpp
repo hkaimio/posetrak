@@ -20,6 +20,7 @@
 #include "posetrak/kinematics/forward_kinematics.hpp"
 #include "posetrak/kinematics/pinocchio_model_builder.hpp"
 #include "posetrak/kinematics/triangulation.hpp"
+#include "posetrak/tracking/dot_predict_profile.hpp"
 #include "posetrak/tracking/hierarchical_solver.hpp"
 #include "posetrak/tracking/multi_person_tracker.hpp"
 #include "posetrak/tracking/tracker.hpp"
@@ -1011,6 +1012,7 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
         }
 
         finalize_person_context(*ctx, smooth_output, quiet, verbose);
+        dot_predict_profile::print_summary();
 
         // Hierarchical solver child stages (existence-based toggle: a tracker_config_id
         // with tracker_config_stages rows runs hierarchically -- see

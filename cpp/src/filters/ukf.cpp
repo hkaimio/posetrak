@@ -14,6 +14,7 @@
 #include <omp.h>
 
 #include "posetrak/core/skeleton_layout.hpp"
+#include "posetrak/tracking/dot_predict_profile.hpp"
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -1940,14 +1941,20 @@ UnscentedKalmanFilter::predict_marker_slots(std::vector<int> const& marker_ids, 
                                             State const& state, Eigen::MatrixXd const& covariance,
                                             std::unordered_map<int, Camera> const& cameras,
                                             ForwardKinematics& fk) const {
+    using Clock = std::chrono::steady_clock;
+    using Ms = std::chrono::duration<double, std::milli>;
+
     std::unordered_map<int, MarkerPrediction> result;
     if (marker_ids.empty()) {
         return result;
     }
 
+    auto const t_sigma0 = Clock::now();
     auto const sigma_points = sigma_gen_.generate_sigma_points(state, covariance);
+    dot_predict_profile::add_sigma_gen_ms(Ms(Clock::now() - t_sigma0).count());
     int const n_sigma = static_cast<int>(sigma_points.size());
     int const n_mrk = static_cast<int>(marker_ids.size());
+    dot_predict_profile::add_call(n_sigma, n_mrk);
 
     // One observation per requested marker, all on the same camera --
     // mode defaults to MeasurementMode::POSITION -- predict_measurements()
@@ -1966,11 +1973,27 @@ UnscentedKalmanFilter::predict_marker_slots(std::vector<int> const& marker_ids, 
     // point total, not once per sigma point *per marker* -- see this
     // method's own doc comment (ukf.hpp) for the ~16x reduction this gave
     // on the 2026-09-06 kare-tests capture.
+    //
+    // Parallelized across sigma points (2026-09-13, Harri's own question
+    // prompted checking this): update()'s own equivalent loop (Step 2
+    // above) already does this via the same data_pool_/ensure_data_pool()
+    // machinery -- this loop hadn't been given the same treatment, and
+    // profiling (status.md 2026-09-13) found it costing ~49ms/frame
+    // sequential vs. update()'s ~2.8ms/frame for comparable per-sigma-
+    // point FK+projection work, consistent with running on one core
+    // instead of all of them.
+    auto const t_loop0 = Clock::now();
     Eigen::MatrixXd proj(2 * n_mrk, n_sigma);
+    ensure_data_pool(fk);
+#pragma omp parallel for schedule(static)
     for (int i = 0; i < n_sigma; ++i) {
-        proj.col(i) = predict_measurements(sigma_points[i], observations, cameras, fk, {});
+        ForwardKinematics fk_local(fk.model(), data_pool_[omp_get_thread_num()],
+                                   fk.marker_frame_map(), fk.fk_layout());
+        proj.col(i) = predict_measurements(sigma_points[i], observations, cameras, fk_local, {});
     }
+    dot_predict_profile::add_predict_loop_ms(Ms(Clock::now() - t_loop0).count());
 
+    auto const t_agg0 = Clock::now();
     Eigen::VectorXd const weights_mean = sigma_gen_.get_mean_weights();
     Eigen::VectorXd const weights_cov = sigma_gen_.get_covariance_weights();
 
@@ -2015,6 +2038,7 @@ UnscentedKalmanFilter::predict_marker_slots(std::vector<int> const& marker_ids, 
 
         result.emplace(marker_ids[static_cast<size_t>(m)], MarkerPrediction{mean, cov});
     }
+    dot_predict_profile::add_aggregate_ms(Ms(Clock::now() - t_agg0).count());
 
     return result;
 }

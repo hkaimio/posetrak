@@ -1,5 +1,112 @@
 # Marker-based mocap — status
 
+- **2026-09-13** (parallelized `predict_marker_slots()`, latest) —
+  Harri's own question after the profiling entry below ("we already
+  parallelize FK for markerless keypoints -- why not for marker slots
+  too?") was right: `update()`'s equivalent per-sigma-point loop
+  (`ukf.cpp` Step 2) already runs under `#pragma omp parallel for` with
+  a per-thread `ForwardKinematics` from the existing `data_pool_`;
+  `predict_marker_slots()`'s loop was plain sequential. Gave it the
+  identical treatment (same `ensure_data_pool()`/`data_pool_` machinery,
+  already `const`-compatible). `./run_tests.sh`: all 370 cases still
+  pass.
+
+  Re-profiled the same 2399-frame window: the `predict_measurements()`
+  loop (FK+projection) dropped **49.07 -> 6.79 ms/frame (7.2x)**;
+  `predict_marker_slots()`'s own total dropped **61.49 -> 19.66 ms/frame
+  (3.1x)**. `update()`'s own `u_kalman_ms` measured unchanged (58.68 ->
+  60.14 ms/frame, within run-to-run noise) -- confirms this fix didn't
+  touch that separate, larger cost center, and rules out a confound in
+  the comparison. Real observed throughput (from file birth/modify
+  timestamps, not estimated): **~4.1 -> ~4.96 fps (+21%)**, for a five-
+  line change reusing infrastructure that already existed.
+
+  **New bottleneck, and it points straight at the next fix.** With the
+  loop no longer dominant, sigma-point generation is now 61.7% of
+  `predict_marker_slots()`'s own cost (12.13 ms/frame) -- and it is
+  called once *per camera* (6x/frame) from identical inputs (the same
+  prior `state`/`covariance` every time, `camera_id` never enters sigma
+  generation at all). Same redundancy shape as the marker-batching fix
+  from the previous entry, one level up: cameras, not markers. Harri's
+  direct question ("why don't we batch all cameras... if we rerun FK
+  unnecessarily 6 times that sounds self-evident") is correct and not
+  yet built -- the per-camera API shape
+  (`Tracker::predict_dot_slot_predictions(int camera_id)`) was inherited
+  from the rigid-body path, where per-camera cost was genuinely
+  negligible (`predict_rigid_marker()` is closed-form, no sigma points
+  at all), not a deliberate choice for the articulated case. No
+  technical obstacle found to fixing it; scoped as the next concrete
+  piece of work, restructuring so sigma generation and FK both run once
+  per frame and only the (cheap) camera projection step repeats per
+  camera.
+
+- **2026-09-13** (dot-slot prediction profiled for real) — Per
+  Harri's own priority ("do the profiling first"), built real
+  instrumentation instead of guessing further: new
+  `dot_predict_profile` (env-var-gated, `POSETRAK_PROFILE_DOT_PREDICT`)
+  splits `UnscentedKalmanFilter::predict_marker_slots()`'s own cost into
+  sigma-point generation, the per-sigma-point `predict_measurements()`
+  loop (FK + projection combined), and mean/covariance aggregation.
+  Ran a 20 s / 2399-frame window (`--start-time 40 --end-time 60`) with
+  the final dot-augmented skeleton, and a matched dot-free baseline on
+  the same window for direct comparison. `./run_tests.sh`: all 370
+  cases still pass.
+
+  **Real numbers, not estimates:**
+  | | baseline (no dots) | dot-augmented (16 markers) |
+  |---|---|---|
+  | `predict()` + `update()` (shared UKF step) | 113.08 ms/frame | 117.52 ms/frame (+3.9%) |
+  | `predict_marker_slots()` (separate, dot-only) | n/a | 61.49 ms/frame |
+
+  **This overturns part of last night's own assumption.** The shared
+  UKF `update()` step's Kalman-gain computation (`u_kalman_ms`) is the
+  single largest cost in the whole frame (~58-62 ms/frame) — but it
+  barely changes with 16 dot markers added (58.68 -> 62.11 ms/frame).
+  It is a large, *pre-existing* cost of this skeleton's whole-body+hand
+  UKF (~366 pose observations across 6 cameras already, before any dot
+  markers), not something the dot-marker work introduced. All of the
+  real added cost from dot markers is isolated in the separate
+  `predict_marker_slots()` calls, which run *before* assignment, outside
+  `update()` entirely.
+
+  Within `predict_marker_slots()` itself (14385 calls over 2399 frames,
+  ~6/frame matching 6 cameras, 437 sigma points, 16 markers/call):
+  sigma-point generation is 19.2% (11.78 ms/frame), the
+  `predict_measurements()` loop (forward kinematics + camera projection,
+  combined — not split further since that function is also on the main
+  `update()` hot path and splitting it there would conflate the two
+  callers) is **79.8%** (49.07 ms/frame), and mean/covariance
+  aggregation is 1.0% (0.64 ms/frame).
+
+  Reconciling with the whole frame: baseline + `predict_marker_slots()`
+  sums to 179.0 ms/frame (5.6 fps) but the real, previously-measured
+  full-run throughput was ~4.1 fps (244 ms/frame) — leaving ~65 ms/frame
+  not accounted for by either measured piece. Honestly unattributed:
+  most likely `resolve_dot_assignment()`'s cost-matrix/Hungarian-solve
+  step and/or the larger CSV write volume (77 vs. 61 markers/frame
+  across `observations.csv`/`predicted_observations.csv`/
+  `marker_projections.csv`), neither profiled this pass.
+
+  **What this means for the productization plan's marker-count-scaling
+  open question**: two separate cost centers, not one, and they don't
+  necessarily scale the same way.
+  1. The `predict_measurements()` loop's 79.8% share is exactly what
+     the *already-identified* cross-camera batching idea (one call per
+     frame instead of once per camera — the redundant-FK-across-cameras
+     analogue of the redundant-FK-across-markers fix from the previous
+     entry) would target — real, well-scoped follow-on work.
+  2. The update()'s own Kalman-gain cost is large but *unaffected* by
+     today's 16 dot markers specifically because 16 is small next to
+     the ~366 pose observations already there — this should **not** be
+     read as "dot marker count doesn't affect update() cost." At a
+     Vicon-scale marker set (~53+24, more than doubling the observation
+     count), and with Kalman-gain computation typically scaling worse
+     than linearly in observation count, this could become a real,
+     separate bottleneck that today's 16-marker data point cannot
+     predict. Needs its own profiling once a materially larger module
+     (torso+arms, per the productization plan's own sequencing) exists
+     — not extrapolated from here.
+
 - **2026-09-13** (productization draft revised after Harri's review,
   latest) — Four corrections/additions from Harri's review of the
   productization plan draft: (1) `label_tracklet_groups_gui.py` isn't

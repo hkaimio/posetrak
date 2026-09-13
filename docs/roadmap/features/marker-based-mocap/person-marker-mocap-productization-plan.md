@@ -286,25 +286,33 @@ concept for both once §2.5's convergence is real:
    library both plans' scripts import) — not decided, deliberately
    deferred until there is a second real caller to design the interface
    against.
-5. **Performance scaling with marker count — important, and not yet
-   answered (Harri).** Markerless tracking on this capture runs at
-   roughly 10 fps; adding the 16-marker `leg` module — even after
-   tonight's ~3.4x batching fix — brought that down to ~4-5 fps, close
-   to the edge of acceptable already. A full-body-scale marker set (for
-   reference, Vicon-style rigs commonly run ~53 body + ~24 hand markers)
-   would push the dot-slot count several times higher than today's 16,
-   and tonight's fix only batches markers *within one camera's* call —
-   the deferred idea already on record in `status.md`'s 2026-09-12 perf
-   entry (batching *across cameras* too, one `predict_measurements()`
-   call per frame instead of per camera) would help, but there's no
-   measurement yet of whether it's enough at Vicon-scale marker counts,
-   or whether the sigma-point approach itself (437 sigma points per
-   call, regardless of batching) needs reconsidering for a much larger
-   marker set — e.g. a cheaper linearized/Jacobian-based approximation
-   for dot-slot prediction specifically, trading some of the UKF's
-   nonlinearity handling for a large constant-factor speedup, given the
-   returned covariance is already an approximation (state-uncertainty
-   only, no measurement noise term). Not answered here — needs real
-   profiling once a materially larger module (torso+arms, §4) exists to
-   measure against, rather than extrapolating from one 16-marker data
-   point.
+5. **Performance scaling with marker count — profiled for real
+   (`status.md`, 2026-09-13), and the answer has two parts.** Real
+   instrumentation (not estimates) on a 2399-frame window found **two
+   separate cost centers that don't necessarily scale the same way**:
+   - `predict_marker_slots()` (dot-slot prediction, runs before
+     assignment): 61.5 ms/frame at 16 markers, 79.8% of which is the
+     per-sigma-point forward-kinematics-plus-projection loop — this is
+     exactly what the already-identified cross-camera batching idea (one
+     `predict_measurements()` call per frame instead of once per camera)
+     would target next, a well-scoped, concrete follow-on.
+   - The shared UKF `update()` step's own Kalman-gain computation is the
+     single largest cost in the *whole* frame (~58-62 ms/frame) — but it
+     barely moved when 16 dot markers were added (58.68 -> 62.11
+     ms/frame, +3.4 ms). That's not evidence dot count doesn't matter
+     here — it's evidence that 16 is small next to the ~366 pose
+     observations (61 markers x 6 cameras) already feeding that same
+     update(). At a Vicon-scale marker set (~53+24, more than doubling
+     the total observation count) and with Kalman-gain computation
+     typically scaling worse than linearly in observation count, this
+     could become a real, separate bottleneck that today's 16-marker
+     data point cannot predict on its own.
+
+   Net: the cross-camera batching follow-on is justified and well-
+   targeted by real data now, but it only addresses the first cost
+   center — the update()-side risk needs its own profiling once a
+   materially larger module (torso+arms, §4) exists, not extrapolation
+   from here. (~65 ms/frame of the full per-frame budget also remains
+   unattributed to either measured piece — most likely dot-assignment's
+   own cost-matrix/Hungarian-solve step and/or CSV write volume, neither
+   profiled this pass.)

@@ -1,7 +1,52 @@
 # Marker-based mocap — status
 
-- **2026-09-13** (validated real-capture pen+pad prop tracking end-to-end,
-  latest) — Continuation of the pen+pad prop-tracking pivot: resolved the
+- **2026-09-13** (exported pen+pad trajectory into Blender, latest) —
+  Built a two-stage Blender export for the pen+pad trajectory (same
+  split as `blender_add_cameras.py`: a plain-Python stage does the real
+  work, a `bpy`-only stage consumes its JSON, since Blender's bundled
+  interpreter has none of this project's own dependencies). Exports
+  "pen" and "pad" as full animated rigid objects (position + rotation
+  keyframes from their own solved poses), with a static "pen_tip" empty
+  parented to "pen" at its calibrated local offset -- deliberately not a
+  pre-computed world-space tip trajectory: per Harri's own framing,
+  Blender's dynamic-paint system should be able to detect the pen-tip-
+  to-pad proximity itself once both real rigid objects are present, the
+  same way it would for any other brush/canvas pair, and Blender's own
+  parenting propagates the pen's full animated pose to the tip
+  automatically (verified algebraically before relying on it: a
+  *local*, parent-relative offset needs no Z-up/Y-up conversion at all,
+  only the parent's own world position/rotation do).
+
+  Reuses `posetrak.export.common`'s already-established coordinate
+  conversion (`_coord_matrices("yup")`, `quat_to_matrix`,
+  `matrix_to_quat_components`) rather than re-deriving axis conventions.
+
+  **Real bug found and fixed before trusting the result**: the first
+  version computed Blender frame numbers directly from the capture's own
+  global timestamp (`round(time_s * fps)`) -- since this clip is
+  98-113s into a much longer recording, every keyframe landed around
+  frame 1960-2260. It "worked" (Blender happily stored the keyframes)
+  but the object would render as completely frozen for the entire
+  default 1-250 timeline, silently. Fixed by normalizing to the clip's
+  own start (`(time_s - time_s.min()) * fps`) before trusting the
+  output.
+
+  **Verified in a real headless Blender 4.5 run**, not just by reading
+  the exporter's own code: queried the saved `.blend`'s evaluated
+  `matrix_world` (i.e. asked Blender itself to resolve the parented
+  transform, the same mechanism its dynamic-paint proximity detection
+  would use) at several frames. Tip-to-pad distance came back 59.9cm
+  (frame 0, handoff) -> 13.6-18.8cm (frames 100-200, writing) -> 40.1cm
+  (frame 300, pen lifted away) -- matches the earlier NumPy-only
+  analysis almost exactly. Harri independently confirmed the pen motion
+  "looks reasonable" opening the file directly.
+
+  New files: `export_pen_pad_to_blender.py` (plain Python),
+  `blender_add_pen_pad_animation.py` (`bpy`). The saved `.blend` itself
+  is a validation artifact only, not committed.
+
+- **2026-09-13** (validated real-capture pen+pad prop tracking end-to-end) —
+  Continuation of the pen+pad prop-tracking pivot: resolved the
   pen's calibration-video tag-3 failure by switching to the real multi-
   camera capture's own cross-camera co-occurrence, then built a full
   pen+pad trajectory across the actual 98-113s writing scene.

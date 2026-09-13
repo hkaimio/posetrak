@@ -10,6 +10,7 @@
 #include "posetrak/db/session_reader.hpp"
 #include "posetrak/filters/process_model.hpp"
 #include "posetrak/io/skeleton_loader.hpp"
+#include "posetrak/tracking/frame_step_profile.hpp"
 #include "posetrak/tracking/hierarchical_solver.hpp"
 #include <algorithm>
 #include <cmath>
@@ -662,6 +663,9 @@ void step_person_context_predict(PersonContext& ctx, int step) {
 
 void step_person_context_update(PersonContext& ctx, int step, bool verbose, bool quiet,
                                 std::vector<Observation> const& extra_observations) {
+    using Clock = std::chrono::steady_clock;
+    using Ms = std::chrono::duration<double, std::milli>;
+
     auto [t_start, t_end] = person_context_step_window(ctx, step);
 
     // Unlike step_person_context(), no early return when this is empty --
@@ -669,15 +673,19 @@ void step_person_context_update(PersonContext& ctx, int step, bool verbose, bool
     // but nothing to update with" safely (see its own doc comment), and
     // predict_step() (already called by our caller) has no equivalent
     // "undo" -- see step_person_context_predict()'s doc comment for why.
+    auto const t_obs0 = Clock::now();
     auto frame_obs = ctx.observations.get_all_in_range(t_start, t_end);
+    frame_step_profile::add_get_observations_ms(Ms(Clock::now() - t_obs0).count());
     frame_obs.insert(frame_obs.end(), extra_observations.begin(), extra_observations.end());
 
     double t_effective = t_start + ctx.dt / 2.0;
 
     if (ctx.pred_obs_file.is_open()) {
+        auto const t_pred_obs0 = Clock::now();
         export_predicted_observations(ctx.pred_obs_file, step + 1, t_effective, frame_obs,
                                       ctx.tracker->state(), ctx.fk, ctx.cameras_by_id,
                                       ctx.skeleton);
+        frame_step_profile::add_export_predicted_obs_ms(Ms(Clock::now() - t_pred_obs0).count());
     }
 
     auto result = ctx.tracker->update_step(frame_obs, t_effective);
@@ -696,15 +704,21 @@ void step_person_context_update(PersonContext& ctx, int step, bool verbose, bool
     }
 
     if (ctx.state_vec_file.is_open()) {
+        auto const t_sv0 = Clock::now();
         export_state_vector(ctx.state_vec_file, step, t_effective, result.state, *ctx.layout);
+        frame_step_profile::add_export_state_vector_ms(Ms(Clock::now() - t_sv0).count());
     }
 
     {
+        auto const t_fk0 = Clock::now();
         auto marker_positions_3d_map = ctx.fk->compute(result.state);
+        frame_step_profile::add_fk_compute_posterior_ms(Ms(Clock::now() - t_fk0).count());
         std::map<std::string, Eigen::Vector3d> marker_positions_3d(marker_positions_3d_map.begin(),
                                                                    marker_positions_3d_map.end());
+        auto const t_exp0 = Clock::now();
         ctx.exporter->write_frame(step, t_effective, result.state, marker_positions_3d, frame_obs,
                                   result.update_info);
+        frame_step_profile::add_exporter_write_frame_ms(Ms(Clock::now() - t_exp0).count());
     }
 
     double cov_cond = 0.0;
@@ -728,11 +742,13 @@ void step_person_context_update(PersonContext& ctx, int step, bool verbose, bool
                   ctx.tracker_config.init_joint_std * ctx.tracker_config.init_joint_std,
                   ctx.tracker_config.init_velocity_std * ctx.tracker_config.init_velocity_std))
             : result.covariance;
+    auto const t_rw0 = Clock::now();
     ctx.result_writer->write_frame(step, t_effective, state_vec, cov_for_write,
                                    result.tracking_lost, result.update_info.num_inliers, cov_cond,
                                    result.update_info.nis, result.update_info.nis_dof);
     if (!result.update_info.observations.empty())
         ctx.result_writer->write_obs_results(step, result.update_info.observations);
+    frame_step_profile::add_result_writer_write_ms(Ms(Clock::now() - t_rw0).count());
 
     ctx.stats_tracker->add_frame_stats(
         step, t_effective, result.update_info, result.covariance, result.tracking_lost,

@@ -1,5 +1,52 @@
 # Marker-based mocap — status
 
+- **2026-09-13** (closed the frame-time accounting, latest) — Harri
+  caught a real error in the previous entry's own numbers: "if update()
+  is 61ms and predict_marker_slots() is 4.13 it does not add up" against
+  the ~180ms/frame real total. Correct: `u_kalman_ms` (61ms) is a
+  *sub-step inside* `update_ms` (107ms total), not a sibling of
+  `predict_marker_slots()` -- and even `predict_ms + update_ms +
+  predict_marker_slots()` (123ms) left 64ms/frame, over a third of the
+  whole budget, completely unmeasured by anything.
+
+  Built `frame_step_profile` (env-var-gated,
+  `POSETRAK_PROFILE_FRAME_STEP`) instrumenting every previously-untimed
+  piece of a dot-augmented step in `track.cpp`/`multi_person_tracker.cpp`:
+  `bucket_candidates_by_camera()`, `resolve_shared_dot_assignment()`
+  (assignment-only, with the nested `predict_marker_slots()` cost
+  subtracted via a `dot_predict_profile::snapshot()` delta so it isn't
+  double-counted), `observations.get_all_in_range()`, predicted-
+  observations export, state-vector export, the posterior-state FK
+  call, and both output writers (CSV exporter, DB result writer).
+  `./run_tests.sh`: all 371 cases still pass (no behavior change, timing
+  only).
+
+  **Residual closed from 64ms/frame (35% unaccounted) to ~3.5ms/frame
+  (~2%)** on the same 2399-frame window:
+
+  | piece | ms/frame | % of real total |
+  |---|---|---|
+  | `update()` (incl. `u_kalman_ms` ~61ms) | 108.11 | 58.9% |
+  | `observations.get_all_in_range()` | 33.89 | 18.5% |
+  | `predict()` | 11.10 | 6.0% |
+  | `resolve_shared_dot_assignment()` (assignment only) | 10.93 | 6.0% |
+  | `bucket_candidates_by_camera()` | 5.17 | 2.8% |
+  | `predict_marker_slots()` | 4.05 | 2.2% |
+  | everything else (predicted-obs export, both writers, posterior FK) | 6.78 | 3.7% |
+  | **real observed** | **183.55** | (5.45 fps) |
+
+  **Real, surprising finding**: `observations.get_all_in_range()` --
+  just fetching this frame's real pose-keypoint observations, before
+  doing anything with them -- costs 33.9 ms/frame, **more than 8x**
+  today's whole `predict_marker_slots()` optimization target, and is
+  not dot-marker-specific at all (every tracking run calls this, dot-
+  augmented or not). Smells like a linear scan or unindexed lookup
+  against a large, session-wide observation collection, re-run every
+  frame. Flagged as the next concrete profiling/fix target -- likely
+  higher-value and easier than anything left on the dot-prediction
+  side, and its fix would help every tracking run, not just marker-
+  augmented ones. Not investigated further this pass.
+
 - **2026-09-13** (batched dot-slot prediction across cameras, latest) —
   Harri's direct question ("why don't we batch all cameras for marker
   slot matching -- rerunning FK 6 times sounds self-evident") had no

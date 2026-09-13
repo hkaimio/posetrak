@@ -299,22 +299,46 @@ concept for both once §2.5's convergence is real:
    (+30%), verified with a bit-for-bit regression test, not just
    "looks reasonable."
 
-   **One separate cost center remains, and it's now the dominant one.**
-   The shared UKF `update()` step's own Kalman-gain computation is
-   ~61 ms/frame — 15x the now-fixed dot-slot-prediction cost — and it
-   barely moved when 16 dot markers were added (measured unchanged
-   across all three profiling passes today). That's not evidence dot
-   count doesn't matter there — it's evidence that 16 is small next to
-   the ~366 pose observations (61 markers x 6 cameras) already feeding
-   that same update(). At a Vicon-scale marker set (~53+24, more than
-   doubling the total observation count) and with Kalman-gain
-   computation typically scaling worse than linearly in observation
-   count, this could become a real, separate bottleneck that today's
-   16-marker data point cannot predict on its own. This is a materially
-   different, bigger piece of work than what was fixed today (inside
-   the shared body+hand `update()`, not the dot-specific path) — needs
-   its own profiling once a materially larger module (torso+arms, §4)
-   exists, not extrapolation from here. (A residual ~60 ms/frame of the
-   full per-frame budget also remains unattributed to any measured
-   piece — most likely dot-assignment's own cost-matrix/Hungarian-solve
-   step and/or CSV write volume, neither profiled this pass.)
+   **The full per-frame budget is now accounted for (Harri caught a
+   real arithmetic gap in an earlier version of this entry — see
+   `status.md`, 2026-09-13 "closed the frame-time accounting").** On the
+   same 2399-frame window, real observed time is 183.6 ms/frame
+   (5.45 fps); every piece of that is now individually measured to
+   within ~2%:
+
+   | piece | ms/frame | % |
+   |---|---|---|
+   | `update()` (incl. Kalman-gain, ~61ms of it) | 108.1 | 58.9% |
+   | `observations.get_all_in_range()` | 33.9 | 18.5% |
+   | `predict()` | 11.1 | 6.0% |
+   | `resolve_shared_dot_assignment()` (assignment only) | 10.9 | 6.0% |
+   | `bucket_candidates_by_camera()` | 5.2 | 2.8% |
+   | `predict_marker_slots()` (today's whole fix target) | 4.0 | 2.2% |
+   | everything else (export/writer calls, posterior FK) | 6.8 | 3.7% |
+
+   Two real findings from closing this out:
+   1. **`update()`'s own Kalman-gain computation (~61 ms/frame) is
+      confirmed the single largest piece (58.9% of the whole frame)** —
+      and it barely moved when 16 dot markers were added (measured
+      unchanged across all profiling passes). That's not evidence dot
+      count doesn't matter here — 16 is small next to the ~366 pose
+      observations (61 markers x 6 cameras) already feeding that same
+      update(). At a Vicon-scale marker set (~53+24, more than doubling
+      the observation count) and with Kalman-gain computation typically
+      scaling worse than linearly in observation count, this could
+      become a real, separate bottleneck today's 16-marker data point
+      cannot predict. Materially bigger scope than today's dot-specific
+      fixes (inside the shared body+hand `update()`) — needs its own
+      profiling once a materially larger module (torso+arms, §4)
+      exists, not extrapolation from here.
+   2. **`observations.get_all_in_range()` (18.5%, 33.9 ms/frame) was a
+      genuine surprise** — more than 8x today's whole dot-slot-
+      prediction fix target, just to fetch this frame's real pose-
+      keypoint observations before doing anything with them. Not
+      dot-marker-specific at all (every tracking run calls this), so a
+      fix would help every run in this project, not only marker-
+      augmented ones. Smells like a linear scan or unindexed lookup
+      against a large, session-wide observation collection, re-run
+      every frame — flagged as a real, likely easier and higher-value
+      target than anything left on the dot-prediction side, not
+      investigated further this pass.

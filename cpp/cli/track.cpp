@@ -21,6 +21,7 @@
 #include "posetrak/kinematics/pinocchio_model_builder.hpp"
 #include "posetrak/kinematics/triangulation.hpp"
 #include "posetrak/tracking/dot_predict_profile.hpp"
+#include "posetrak/tracking/frame_step_profile.hpp"
 #include "posetrak/tracking/hierarchical_solver.hpp"
 #include "posetrak/tracking/multi_person_tracker.hpp"
 #include "posetrak/tracking/tracker.hpp"
@@ -990,16 +991,25 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
             // sequence, e.g. the sword's own ArUco corners) keeps calling the
             // untouched step_person_context() below.
             if (ctx->has_dot_track) {
+                using Clock = std::chrono::steady_clock;
+                using Ms = std::chrono::duration<double, std::milli>;
+
                 auto [t_start, t_end] = person_context_step_window(*ctx, step);
+                auto const t_bucket0 = Clock::now();
                 auto candidates_by_camera =
                     bucket_candidates_by_camera(ctx->unlabeled_candidates, t_start, t_end);
+                frame_step_profile::add_bucket_candidates_ms(Ms(Clock::now() - t_bucket0).count());
                 if (!candidates_by_camera.empty()) {
                     step_person_context_predict(*ctx, step);
                     std::vector<DotAssignmentSubject> subjects = {
                         DotAssignmentSubject{0, ctx->tracker.get()}};
                     double const t_effective = t_start + ctx->dt / 2.0;
+                    auto const t_assign0 = Clock::now();
                     auto assignment = resolve_shared_dot_assignment(
                         subjects, candidates_by_camera, ctx->tracker_config, step, t_effective);
+                    frame_step_profile::add_dot_assignment_total_ms(
+                        Ms(Clock::now() - t_assign0).count());
+                    frame_step_profile::add_step();
                     std::vector<Observation> resolved;
                     if (auto it = assignment.find(0); it != assignment.end()) {
                         resolved = it->second.resolved;
@@ -1013,6 +1023,9 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
 
         finalize_person_context(*ctx, smooth_output, quiet, verbose);
         dot_predict_profile::print_summary();
+        frame_step_profile::print_summary(dot_predict_profile::snapshot().sigma_gen_ms +
+                                          dot_predict_profile::snapshot().predict_loop_ms +
+                                          dot_predict_profile::snapshot().aggregate_ms);
 
         // Hierarchical solver child stages (existence-based toggle: a tracker_config_id
         // with tracker_config_stages rows runs hierarchically -- see

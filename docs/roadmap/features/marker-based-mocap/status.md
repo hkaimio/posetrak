@@ -1,5 +1,66 @@
 # Marker-based mocap — status
 
+- **2026-09-13** (productization draft revised after Harri's review,
+  latest) — Four corrections/additions from Harri's review of the
+  productization plan draft: (1) `label_tracklet_groups_gui.py` isn't
+  "already general" in a shippable sense — it needs main-GUI
+  integration, a real performance check at scale, and a DB-backed data
+  model instead of by-convention JSON files; folded into the
+  finalisation-path work item since they're the same underlying gap.
+  (2) Multi-person dot disambiguation has a concrete solution path
+  after all: Cutie segmentation masks (already built) combined with
+  tracklets, the same mechanism the prop-side plan already proposes for
+  object-init cueing — downgraded from "deepest, riskiest item" to "a
+  real integration task with a known shape." (3) The next module to
+  build is torso+arms, not hands — and hands specifically may end up
+  markerless entirely, seeded from a good wrist position, worth checking
+  before assuming finger markers are needed at all. (4) A real,
+  unanswered performance concern: markerless tracking runs ~10fps on
+  this capture; the 16-marker leg module (even after tonight's perf fix)
+  brought that to ~4-5fps — a full-body/hand marker set (Vicon-scale:
+  ~53+24 markers) may need real algorithmic work beyond today's
+  per-camera batching, not just more of the same fix. Flagged as an
+  open question needing real measurement against a larger module, not
+  answered here.
+
+- **2026-09-13** (skeleton-scaling draft revised after Harri's review,
+  latest) — Harri's review of the scaling design draft caught a real
+  error: a rigid marker-cluster fit gives a segment's own local marker
+  geometry, not bone length — that needs relating the segment's frame to
+  a neighbour's, which the doc's own §2.3 already required but §2.2 had
+  wrongly claimed wasn't necessary. Corrected, and reframed §2.1's real
+  benefit as jointly-fit, more robust marker offsets within a cluster
+  (which would plausibly have solved `ankle_lat_L` without the
+  mirrored-guess workaround). Also added, per Harri's two follow-on
+  questions: §2.5, a kinematic-chain calibration approach that can
+  recover an *uninstrumented* middle link's length and joint locations
+  from two solved neighbouring segments alone (the same problem as robot/
+  exoskeleton kinematic calibration from end-effector poses, needing only
+  a trusted joint type, not markers on every link); and §5, using
+  marker-derived joint ground truth to detect and correct systematic,
+  viewpoint-dependent bias in the markerless keypoint detector itself —
+  a payoff that would improve every future markerless-only run, not just
+  marker-augmented ones.
+
+- **2026-09-13** (two design drafts, overnight) — Per Harri's request
+  after the skeleton-scaling discussion and the productization ask,
+  wrote two first drafts (no implementation, no review from Harri yet):
+  [skeleton-scaling-and-marker-calibration-design.md](skeleton-scaling-and-marker-calibration-design.md)
+  (rigid marker-cluster fits per segment, functional joint-center
+  estimation, and an anchored small regional bundle adjustment for
+  under-instrumented segments — reusing `calibrate_rigid_marker_body.py`'s
+  already-solved rigid-geometry-from-capture math rather than a single
+  global joint optimization, which risks the same circularity the
+  `ankle_lat_L` fix diagnosed) and
+  [person-marker-mocap-productization-plan.md](person-marker-mocap-productization-plan.md)
+  (generalizing this session's one-off B1-B5/refit/skeleton-build script
+  chain into a real multi-module, multi-person-aware pipeline, with a
+  calibration-trial concept as the onboarding workflow for a new module
+  or subject). Both cross-reference each other and the existing
+  `marker-mocap-productization-plan.md` (prop case). Reviewed and
+  revised per Harri's own feedback (see the two entries above) before
+  committing.
+
 - **2026-09-12** (fixed `ankle_lat_L`'s calibration, and a real perf bug
   along the way, latest) — Harri asked for a single-camera reprojection
   refit of the calibrated attachment set (previous entry's B4 fit needed

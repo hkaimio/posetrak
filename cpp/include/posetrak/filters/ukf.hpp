@@ -573,6 +573,51 @@ class UnscentedKalmanFilter {
                          std::unordered_map<int, Camera> const& cameras,
                          ForwardKinematics& fk) const;
 
+    /**
+     * @brief Same computation as predict_marker_slots(), batched across
+     * every requested camera too (2026-09-13 perf fix, prompted by Harri's
+     * own question: "if we rerun FK unnecessarily [per camera] that sounds
+     * like a self-evident optimization").
+     *
+     * predict_measurements() runs one full-skeleton FK pass per sigma
+     * point regardless of how many observations -- or which cameras --
+     * are in its list; only the final per-observation projection step
+     * actually reads camera_id. predict_marker_slots() already batches
+     * every marker on ONE camera into a single predict_measurements() call
+     * per sigma point; this batches every (marker, camera) pair the caller
+     * needs into that same single call, so sigma-point generation and the
+     * FK sweep each run once per frame instead of once per camera.
+     * Measured on the 2026-09-06 kare-tests capture: with sigma generation
+     * and the per-sigma-point loop already parallelized (this file's own
+     * earlier 2026-09-13 fix), sigma generation was 61.7% of
+     * predict_marker_slots()'s own cost and ran identically 6 times a
+     * frame (once per camera) from the same state/covariance -- this
+     * removes that redundancy.
+     *
+     * @param marker_ids Indices into skeleton->markers() to predict.
+     * @param camera_ids Cameras to project into -- every marker is
+     *                   predicted for every camera in this list.
+     * @param state      Distribution mean (e.g. a Tracker's own prior
+     *                   state right after predict_step()).
+     * @param covariance Distribution covariance (error-state, matching
+     *                   `state`; e.g. Tracker's own prior_cov).
+     * @param cameras    Camera map.
+     * @param fk         ForwardKinematics instance (mutated per call --
+     *                   same contract as predict_measurements()'s own
+     *                   `fk` parameter).
+     * @return camera_id -> (marker_id -> MarkerPrediction), one inner map
+     *         per requested camera; a marker missing from a camera's inner
+     *         map means its central sigma point didn't project in front of
+     *         that camera, same "not visible this frame" contract as
+     *         predict_marker_slots().
+     */
+    std::unordered_map<int, std::unordered_map<int, MarkerPrediction>>
+    predict_marker_slots_all_cameras(std::vector<int> const& marker_ids,
+                                     std::vector<int> const& camera_ids, State const& state,
+                                     Eigen::MatrixXd const& covariance,
+                                     std::unordered_map<int, Camera> const& cameras,
+                                     ForwardKinematics& fk) const;
+
    private:
     /**
      * @brief Compute weighted mean of states (manifold-aware)

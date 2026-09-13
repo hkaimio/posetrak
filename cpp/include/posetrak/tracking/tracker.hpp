@@ -258,12 +258,37 @@ class Tracker {
      *         Empty if this skeleton declares no unlabeled_points input track.
      * @note Requires a predict_step() call this frame (i.e. call between
      *       predict_step() and update_step(), not before or after).
-     * @throws std::runtime_error if skeleton_->is_rigid_body() is false --
-     *         the general/articulated implementation is deferred (design doc
-     *         §6) pending a real articulated dot-augmented capture to design
-     *         it against -- or if camera_id is unknown.
+     * @throws std::runtime_error if camera_id is unknown.
      */
     std::unordered_map<int, MarkerPrediction> predict_dot_slot_predictions(int camera_id) const;
+
+    /**
+     * @brief Same query as predict_dot_slot_predictions(), batched across
+     * every requested camera in one call (2026-09-13 perf fix).
+     *
+     * For an articulated skeleton, calling predict_dot_slot_predictions()
+     * once per camera repeats sigma-point generation and the per-sigma-point
+     * forward-kinematics sweep once per camera, even though neither depends
+     * on camera_id at all -- only the final projection step does. This
+     * batches every (marker, camera) pair the caller needs into one
+     * UnscentedKalmanFilter::predict_marker_slots_all_cameras() call, so
+     * sigma generation and FK each run once per frame instead of once per
+     * camera. For a rigid-body skeleton (predict_rigid_marker()'s closed
+     * form, no sigma points) this is a thin per-camera loop over the
+     * existing single-camera path -- there is no redundant work to remove
+     * there, so no separate batched implementation exists for it.
+     *
+     * @param camera_ids Cameras to project into.
+     * @return camera_id -> (skeleton().markers() index -> MarkerPrediction),
+     *         one inner map per requested camera, same per-marker contents
+     *         predict_dot_slot_predictions(camera_id) would have returned
+     *         for that camera.
+     * @note Requires a predict_step() call this frame, same as
+     *       predict_dot_slot_predictions().
+     * @throws std::runtime_error if any camera_id is unknown.
+     */
+    std::unordered_map<int, std::unordered_map<int, MarkerPrediction>>
+    predict_dot_slot_predictions_all_cameras(std::vector<int> const& camera_ids) const;
 
     /**
      * @brief Previous-frame undistorted pixel per (camera, marker), as populated by

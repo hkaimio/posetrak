@@ -1,5 +1,47 @@
 # Marker-based mocap — status
 
+- **2026-09-13** (batched dot-slot prediction across cameras, latest) —
+  Harri's direct question ("why don't we batch all cameras for marker
+  slot matching -- rerunning FK 6 times sounds self-evident") had no
+  real answer beyond "not built yet": the per-camera API shape
+  (`Tracker::predict_dot_slot_predictions(camera_id)`) was inherited
+  from the rigid-body path, where per-camera cost is genuinely
+  negligible (closed-form, no sigma points) -- nothing about the
+  articulated case actually required it. Built
+  `predict_dot_slot_predictions_all_cameras()` (`Tracker`) and
+  `UnscentedKalmanFilter::predict_marker_slots_all_cameras()`: batch
+  every (marker, camera) pair the caller needs into one
+  `predict_measurements()` call per sigma point, so sigma-point
+  generation and the FK sweep each run once per *frame* instead of once
+  per camera -- `predict_measurements()` needed no change at all, since
+  it already reads `camera_id` independently off each observation.
+  `resolve_shared_dot_assignment()` (`dot_assignment.cpp`) now calls
+  this once per subject instead of looping per camera. Added a real
+  regression test asserting the batched result matches calling the old
+  per-camera path once per camera, bit-for-bit
+  (`isApprox(..., 1e-9)`), not just "looks reasonable" -- on a fixture
+  with 2 dot markers on different joints so the (marker, camera)
+  indexing this change introduced is actually exercised.
+  `./run_tests.sh`: all 371 cases pass (370 + this one).
+
+  Re-profiled the same 2399-frame window: `calls: 2399` confirms the
+  batching worked (was 14385 = once per camera). `predict_marker_slots()`'s
+  own total dropped **19.66 -> 4.13 ms/frame (4.8x further)** -- sigma
+  generation 12.13 -> 2.05 ms/frame, the FK+projection loop 6.79 -> 1.26
+  ms/frame. `update()`'s `u_kalman_ms` again measured unchanged (60.14
+  -> 61.28 ms/frame, within run-to-run noise across all three profiling
+  passes today). Real observed throughput: **~4.96 -> ~5.35 fps**.
+
+  Combined across both of today's dot-slot-prediction fixes:
+  `predict_marker_slots()` 61.49 -> 4.13 ms/frame (**14.9x**), real
+  throughput ~4.1 -> ~5.35 fps (+30%). `update()`'s own Kalman-gain
+  cost (~61 ms/frame) is now clearly the largest remaining piece of the
+  whole frame, well ahead of dot-slot prediction (~4 ms/frame) -- the
+  one still-open item from the productization plan's marker-count-
+  scaling question, and a materially different, bigger piece of work
+  (inside the shared body+hand update, not the dot-specific path),
+  not started here.
+
 - **2026-09-13** (parallelized `predict_marker_slots()`, latest) —
   Harri's own question after the profiling entry below ("we already
   parallelize FK for markerless keypoints -- why not for marker slots

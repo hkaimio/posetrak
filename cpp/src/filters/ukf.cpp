@@ -2043,6 +2043,98 @@ UnscentedKalmanFilter::predict_marker_slots(std::vector<int> const& marker_ids, 
     return result;
 }
 
+std::unordered_map<int, std::unordered_map<int, MarkerPrediction>>
+UnscentedKalmanFilter::predict_marker_slots_all_cameras(
+    std::vector<int> const& marker_ids, std::vector<int> const& camera_ids, State const& state,
+    Eigen::MatrixXd const& covariance, std::unordered_map<int, Camera> const& cameras,
+    ForwardKinematics& fk) const {
+    using Clock = std::chrono::steady_clock;
+    using Ms = std::chrono::duration<double, std::milli>;
+
+    std::unordered_map<int, std::unordered_map<int, MarkerPrediction>> result;
+    int const n_mrk = static_cast<int>(marker_ids.size());
+    int const n_cam = static_cast<int>(camera_ids.size());
+    if (n_mrk == 0 || n_cam == 0) {
+        return result;
+    }
+
+    auto const t_sigma0 = Clock::now();
+    auto const sigma_points = sigma_gen_.generate_sigma_points(state, covariance);
+    dot_predict_profile::add_sigma_gen_ms(Ms(Clock::now() - t_sigma0).count());
+    int const n_sigma = static_cast<int>(sigma_points.size());
+    dot_predict_profile::add_call(n_sigma, n_mrk * n_cam);
+
+    // One observation per (marker, camera) pair -- index c*n_mrk + m, so a
+    // given camera's n_mrk markers occupy one contiguous block of rows in
+    // `proj` below. predict_measurements() already reads camera_id off each
+    // observation independently (it has no notion of "the" camera for a
+    // call), so batching every camera's markers into one observations list
+    // needs no change to that function at all: the redundant FK sweep this
+    // removes was always purely an artefact of calling it once per camera,
+    // never a real dependency.
+    std::vector<Observation> observations(static_cast<size_t>(n_mrk) * static_cast<size_t>(n_cam));
+    for (int c = 0; c < n_cam; ++c) {
+        for (int m = 0; m < n_mrk; ++m) {
+            Observation& obs = observations[static_cast<size_t>(c * n_mrk + m)];
+            obs.marker_id = marker_ids[static_cast<size_t>(m)];
+            obs.camera_id = camera_ids[static_cast<size_t>(c)];
+        }
+    }
+
+    auto const t_loop0 = Clock::now();
+    Eigen::MatrixXd proj(2 * n_mrk * n_cam, n_sigma);
+    ensure_data_pool(fk);
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < n_sigma; ++i) {
+        ForwardKinematics fk_local(fk.model(), data_pool_[omp_get_thread_num()],
+                                   fk.marker_frame_map(), fk.fk_layout());
+        proj.col(i) = predict_measurements(sigma_points[i], observations, cameras, fk_local, {});
+    }
+    dot_predict_profile::add_predict_loop_ms(Ms(Clock::now() - t_loop0).count());
+
+    auto const t_agg0 = Clock::now();
+    Eigen::VectorXd const weights_mean = sigma_gen_.get_mean_weights();
+    Eigen::VectorXd const weights_cov = sigma_gen_.get_covariance_weights();
+
+    for (int c = 0; c < n_cam; ++c) {
+        auto& per_marker = result[camera_ids[static_cast<size_t>(c)]];
+        for (int m = 0; m < n_mrk; ++m) {
+            int const row0 = 2 * (c * n_mrk + m);
+            if (!std::isfinite(proj(row0, 0)) || !std::isfinite(proj(row0 + 1, 0))) {
+                continue;
+            }
+
+            Eigen::Vector2d mean = Eigen::Vector2d::Zero();
+            for (int d = 0; d < 2; ++d) {
+                double sum = 0.0;
+                double weight_sum = 0.0;
+                for (int i = 0; i < n_sigma; ++i) {
+                    double const val = proj(row0 + d, i);
+                    if (std::isfinite(val)) {
+                        sum += weights_mean(i) * val;
+                        weight_sum += weights_mean(i);
+                    }
+                }
+                mean(d) = sum / weight_sum;
+            }
+
+            Eigen::Matrix2d cov = Eigen::Matrix2d::Zero();
+            for (int i = 0; i < n_sigma; ++i) {
+                Eigen::Vector2d z = proj.block(row0, i, 2, 1) - mean;
+                if (!z.allFinite()) {
+                    z.setZero();
+                }
+                cov += weights_cov(i) * (z * z.transpose());
+            }
+
+            per_marker.emplace(marker_ids[static_cast<size_t>(m)], MarkerPrediction{mean, cov});
+        }
+    }
+    dot_predict_profile::add_aggregate_ms(Ms(Clock::now() - t_agg0).count());
+
+    return result;
+}
+
 Eigen::VectorXd
 UnscentedKalmanFilter::observations_to_vector(std::vector<Observation> const& observations) const {
     int const n_obs = static_cast<int>(observations.size());

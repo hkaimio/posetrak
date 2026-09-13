@@ -409,6 +409,77 @@ TEST_CASE(
     REQUIRE(pred.covariance(1, 1) < 1.0e6);
 }
 
+TEST_CASE(
+    "predict_dot_slot_predictions_all_cameras() matches calling predict_dot_slot_predictions() "
+    "once per camera (2026-09-13 cross-camera batching perf fix)",
+    "[tracker][predict_dot_slot_predictions]") {
+    auto fx = make_articulated_fixture(2);
+
+    fx.skeleton.add_input_track("dots", "unlabeled_points");
+    uint32_t wrist_joint_index = 0;
+    bool found_wrist = false;
+    for (size_t i = 0; i < fx.skeleton.joints().size(); ++i) {
+        if (fx.skeleton.joints()[i].name == "r_wrist") {
+            wrist_joint_index = static_cast<uint32_t>(i);
+            found_wrist = true;
+            break;
+        }
+    }
+    REQUIRE(found_wrist);
+    Eigen::Vector3d const dot_local_pos(0.02, 0.0, 0.01);
+    fx.skeleton.add_marker("dot0", wrist_joint_index, dot_local_pos, std::nullopt, "dots", "dot0");
+    // A second dot marker on a different joint -- the batched path stacks
+    // observations across both markers *and* cameras, so a single-marker
+    // fixture wouldn't exercise the (marker, camera) indexing this fix
+    // introduced.
+    uint32_t elbow_joint_index = 0;
+    bool found_elbow = false;
+    for (size_t i = 0; i < fx.skeleton.joints().size(); ++i) {
+        if (fx.skeleton.joints()[i].name == "r_elbow") {
+            elbow_joint_index = static_cast<uint32_t>(i);
+            found_elbow = true;
+            break;
+        }
+    }
+    REQUIRE(found_elbow);
+    fx.skeleton.add_marker("dot1", elbow_joint_index, Eigen::Vector3d(0.0, 0.03, 0.0), std::nullopt,
+                           "dots", "dot1");
+
+    auto config = make_fixture_config();
+    Tracker tracker(std::make_shared<const Skeleton>(fx.skeleton), fx.camera_map, config);
+    REQUIRE(tracker.initialize(fx.observations[0], 0.0));
+    tracker.predict_step(fx.dt);
+
+    std::vector<int> camera_ids;
+    for (auto const& [id, cam] : fx.camera_map) {
+        camera_ids.push_back(id);
+    }
+    REQUIRE(camera_ids.size() >= 2);  // make_semicircle_cameras() defaults to 3
+
+    std::unordered_map<int, std::unordered_map<int, MarkerPrediction>> per_camera_looped;
+    for (int camera_id : camera_ids) {
+        per_camera_looped[camera_id] = tracker.predict_dot_slot_predictions(camera_id);
+    }
+
+    std::unordered_map<int, std::unordered_map<int, MarkerPrediction>> const batched =
+        tracker.predict_dot_slot_predictions_all_cameras(camera_ids);
+
+    REQUIRE(batched.size() == per_camera_looped.size());
+    for (int camera_id : camera_ids) {
+        auto const& looped_markers = per_camera_looped.at(camera_id);
+        auto const& batched_markers = batched.at(camera_id);
+        REQUIRE(batched_markers.size() == looped_markers.size());
+        for (auto const& [marker_id, looped_pred] : looped_markers) {
+            REQUIRE(batched_markers.count(marker_id) == 1);
+            MarkerPrediction const& batched_pred = batched_markers.at(marker_id);
+            // Same math, same sigma points, same weights -- exact match up to
+            // floating-point non-associativity, not merely "close".
+            REQUIRE(batched_pred.position.isApprox(looped_pred.position, 1e-9));
+            REQUIRE(batched_pred.covariance.isApprox(looped_pred.covariance, 1e-9));
+        }
+    }
+}
+
 TEST_CASE("predict_dot_slot_predictions() throws for an unknown camera id",
           "[tracker][predict_dot_slot_predictions]") {
     Skeleton skeleton;

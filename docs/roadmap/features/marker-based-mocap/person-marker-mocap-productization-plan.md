@@ -286,33 +286,35 @@ concept for both once §2.5's convergence is real:
    library both plans' scripts import) — not decided, deliberately
    deferred until there is a second real caller to design the interface
    against.
-5. **Performance scaling with marker count — profiled for real
-   (`status.md`, 2026-09-13), and the answer has two parts.** Real
-   instrumentation (not estimates) on a 2399-frame window found **two
-   separate cost centers that don't necessarily scale the same way**:
-   - `predict_marker_slots()` (dot-slot prediction, runs before
-     assignment): 61.5 ms/frame at 16 markers, 79.8% of which is the
-     per-sigma-point forward-kinematics-plus-projection loop — this is
-     exactly what the already-identified cross-camera batching idea (one
-     `predict_measurements()` call per frame instead of once per camera)
-     would target next, a well-scoped, concrete follow-on.
-   - The shared UKF `update()` step's own Kalman-gain computation is the
-     single largest cost in the *whole* frame (~58-62 ms/frame) — but it
-     barely moved when 16 dot markers were added (58.68 -> 62.11
-     ms/frame, +3.4 ms). That's not evidence dot count doesn't matter
-     here — it's evidence that 16 is small next to the ~366 pose
-     observations (61 markers x 6 cameras) already feeding that same
-     update(). At a Vicon-scale marker set (~53+24, more than doubling
-     the total observation count) and with Kalman-gain computation
-     typically scaling worse than linearly in observation count, this
-     could become a real, separate bottleneck that today's 16-marker
-     data point cannot predict on its own.
+5. **Performance scaling with marker count — profiled and substantially
+   fixed for the dot-specific path (`status.md`, 2026-09-13); one real
+   risk remains, deliberately not started.** Real instrumentation (not
+   estimates) found `predict_marker_slots()`/`predict_dot_slot_
+   predictions()` sequential and called once per marker *and* once per
+   camera — both fixed same day (OpenMP parallelization matching
+   `update()`'s own existing pattern, then batching every (marker,
+   camera) pair into one `predict_measurements()` call per sigma point).
+   Combined effect on the 16-marker `leg` module: dot-slot prediction
+   61.5 -> 4.1 ms/frame (**14.9x**), real throughput ~4.1 -> ~5.35 fps
+   (+30%), verified with a bit-for-bit regression test, not just
+   "looks reasonable."
 
-   Net: the cross-camera batching follow-on is justified and well-
-   targeted by real data now, but it only addresses the first cost
-   center — the update()-side risk needs its own profiling once a
-   materially larger module (torso+arms, §4) exists, not extrapolation
-   from here. (~65 ms/frame of the full per-frame budget also remains
-   unattributed to either measured piece — most likely dot-assignment's
-   own cost-matrix/Hungarian-solve step and/or CSV write volume, neither
-   profiled this pass.)
+   **One separate cost center remains, and it's now the dominant one.**
+   The shared UKF `update()` step's own Kalman-gain computation is
+   ~61 ms/frame — 15x the now-fixed dot-slot-prediction cost — and it
+   barely moved when 16 dot markers were added (measured unchanged
+   across all three profiling passes today). That's not evidence dot
+   count doesn't matter there — it's evidence that 16 is small next to
+   the ~366 pose observations (61 markers x 6 cameras) already feeding
+   that same update(). At a Vicon-scale marker set (~53+24, more than
+   doubling the total observation count) and with Kalman-gain
+   computation typically scaling worse than linearly in observation
+   count, this could become a real, separate bottleneck that today's
+   16-marker data point cannot predict on its own. This is a materially
+   different, bigger piece of work than what was fixed today (inside
+   the shared body+hand `update()`, not the dot-specific path) — needs
+   its own profiling once a materially larger module (torso+arms, §4)
+   exists, not extrapolation from here. (A residual ~60 ms/frame of the
+   full per-frame budget also remains unattributed to any measured
+   piece — most likely dot-assignment's own cost-matrix/Hungarian-solve
+   step and/or CSV write volume, neither profiled this pass.)

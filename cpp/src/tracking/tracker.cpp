@@ -966,6 +966,52 @@ Tracker::predict_dot_slot_predictions(int camera_id) const {
     return result;
 }
 
+std::unordered_map<int, std::unordered_map<int, MarkerPrediction>>
+Tracker::predict_dot_slot_predictions_all_cameras(std::vector<int> const& camera_ids) const {
+    for (int camera_id : camera_ids) {
+        if (cameras_.find(camera_id) == cameras_.end()) {
+            throw std::runtime_error(
+                "Tracker::predict_dot_slot_predictions_all_cameras: unknown camera_id " +
+                std::to_string(camera_id));
+        }
+    }
+    if (!predict_pending_) {
+        throw std::runtime_error(
+            "Tracker::predict_dot_slot_predictions_all_cameras: called without a preceding "
+            "predict_step() this frame");
+    }
+
+    std::unordered_map<int, std::unordered_map<int, MarkerPrediction>> result;
+
+    if (skeleton_->is_rigid_body()) {
+        // Closed-form, no sigma points -- nothing redundant to remove across
+        // cameras, so just loop the existing single-camera path.
+        for (int camera_id : camera_ids) {
+            result[camera_id] = predict_dot_slot_predictions(camera_id);
+        }
+        return result;
+    }
+
+    // General/articulated: gather the dot-track markers once (identical to
+    // predict_dot_slot_predictions()'s own loop) and hand the whole
+    // (markers x cameras) batch to the UKF in one call, so sigma generation
+    // and the per-sigma-point FK sweep each run once per frame rather than
+    // once per camera -- see this method's own doc comment (tracker.hpp).
+    auto const& markers = skeleton_->markers();
+    std::vector<int> dot_marker_ids;
+    for (size_t i = 0; i < markers.size(); ++i) {
+        Marker const& marker = markers[i];
+        if (marker.track.empty())
+            continue;
+        InputTrack const* track = skeleton_->get_input_track(marker.track);
+        if (track == nullptr || track->type != "unlabeled_points")
+            continue;
+        dot_marker_ids.push_back(static_cast<int>(i));
+    }
+    return ukf_->predict_marker_slots_all_cameras(dot_marker_ids, camera_ids, *pending_prior_state_,
+                                                  pending_prior_cov_, cameras_, *fk_);
+}
+
 TrackingResult Tracker::update_step(std::vector<Observation> const& observations,
                                     double timestamp) {
     using Clock = std::chrono::steady_clock;

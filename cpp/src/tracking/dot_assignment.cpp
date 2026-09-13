@@ -197,15 +197,26 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     predictions.reserve(subjects.size());
     PrevDotPositions prev_positions;
     PrevDotTrackletIds prev_tracklet_ids;
+    // Cameras with at least one candidate this step -- computed once, shared
+    // by every subject, rather than re-filtered inside each subject's own
+    // loop.
+    std::vector<int> cameras_with_candidates;
+    for (auto const& [camera_id, candidates] : candidates_by_camera) {
+        if (!candidates.empty())
+            cameras_with_candidates.push_back(camera_id);
+    }
+
     for (auto const& subject : subjects) {
         SubjectDotPredictions sp;
         sp.subject_id = subject.subject_id;
-        for (auto const& [camera_id, candidates] : candidates_by_camera) {
-            if (candidates.empty())
-                continue;
-            sp.predictions_by_camera[camera_id] =
-                subject.tracker->predict_dot_slot_predictions(camera_id);
-        }
+        // Batched across every camera in one call (2026-09-13 perf fix):
+        // calling predict_dot_slot_predictions() once per camera repeated
+        // sigma-point generation and the per-sigma-point FK sweep once per
+        // camera, even though neither depends on camera_id at all -- see
+        // Tracker::predict_dot_slot_predictions_all_cameras()'s own doc
+        // comment.
+        sp.predictions_by_camera =
+            subject.tracker->predict_dot_slot_predictions_all_cameras(cameras_with_candidates);
         predictions.push_back(std::move(sp));
         prev_positions[subject.subject_id] = subject.tracker->prev_observations();
         prev_tracklet_ids[subject.subject_id] = subject.tracker->prev_dot_tracklet_ids();
